@@ -182,3 +182,11 @@ flutter:
     - family: SimpleIcons
       fonts:
         - asset: assets/fonts/SimpleIcons.ttf
+    # Bundled emoji fallback (used on Windows/Linux only): Windows 10's
+    # Segoe UI Emoji stops at Emoji ~12 and shows newer emoji as tofu
+    # boxes; bare Linux installs may have no color emoji font at all.
+    # Wired up via kEmojiFontFallback in hollow_typography.dart —
+    # macOS/iOS/Android keep their native emoji fonts.
+    - family: NotoColorEmoji
+      fonts:
+        - asset: assets/fonts/NotoColorEmoji.ttf

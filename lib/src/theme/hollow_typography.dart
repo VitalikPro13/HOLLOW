@@ -1,13 +1,29 @@
+import 'dart:io' show Platform;
+
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'hollow_colors.dart';
+
+/// Emoji font fallback for platforms with stale/absent system emoji fonts:
+/// Windows 10's Segoe UI Emoji stops at Emoji ~12 (newer emoji render as
+/// tofu boxes) and bare Linux installs may ship no color emoji font at all,
+/// so those platforms fall back to the bundled Noto Color Emoji (declared
+/// in pubspec.yaml). The primary font still wins for every glyph it has —
+/// only characters it lacks (i.e. emoji) reach Noto. macOS/iOS/Android keep
+/// their native, up-to-date emoji fonts. Null = engine default fallback.
+final List<String>? kEmojiFontFallback =
+    !kIsWeb && (Platform.isWindows || Platform.isLinux)
+        ? const ['NotoColorEmoji']
+        : null;
 
 /// Hollow typography scale.
 ///
 /// Uses the system font stack for native feel on each platform.
 /// All styles default to textPrimary color — override via copyWith where needed.
 abstract final class HollowTypography {
-  static const _base = TextStyle(
+  static final _base = TextStyle(
     fontFamily: null, // System default (Segoe UI on Windows, SF Pro on macOS, etc.)
+    fontFamilyFallback: kEmojiFontFallback,
     color: HollowColors.textPrimary,
     height: 1.4,
     letterSpacing: 0,

@@ -293,6 +293,14 @@ pub fn ffz_global() -> Result<Vec<FfzEmote>, String> {
     ffz_query(vec![("global", "1".to_string()), ("v", FFZ_SCHEMA_VER.to_string())])
 }
 
+/// Hand-curated popular emotes — the FFZ tab's default (empty-search) view.
+/// The list itself lives server-side in search.php; an older proxy without
+/// the mode answers `[]`, and the caller falls back to [ffz_global].
+#[frb]
+pub fn ffz_curated() -> Result<Vec<FfzEmote>, String> {
+    ffz_query(vec![("curated", "1".to_string()), ("v", FFZ_SCHEMA_VER.to_string())])
+}
+
 /// Download an FFZ emote image FROM OUR CDN (authoring-time only), process
 /// it into a Hollow emote blob, and cache it. The allowlist is the privacy
 /// boundary — this can never be abused as a generic fetcher.

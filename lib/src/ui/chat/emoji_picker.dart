@@ -100,6 +100,16 @@ void _recordRecentEmoji(String emoji) {
   recents.insert(0, emoji);
   if (recents.length > _recentsMax) recents.removeRange(_recentsMax, recents.length);
   _recentsCache = recents;
+  _saveRecents(recents);
+}
+
+void _removeRecentEmoji(String emoji) {
+  final recents = _recentsCache;
+  if (recents == null || !recents.remove(emoji)) return;
+  _saveRecents(recents);
+}
+
+void _saveRecents(List<String> recents) {
   // try/catch AND catchError: an uninitialized bridge throws SYNCHRONOUSLY
   // (before a Future exists), which .catchError alone can't intercept.
   try {
@@ -107,6 +117,120 @@ void _recordRecentEmoji(String emoji) {
         .saveSetting(key: _recentsKey, value: jsonEncode(recents))
         .catchError((_) {});
   } catch (_) {}
+}
+
+// ---------------------------------------------------------------------------
+// Emote cell context menu (right-click / long-press)
+// ---------------------------------------------------------------------------
+
+/// Small anchored menu for removing an emote from a personal collection.
+/// Deliberately a menu, not a dialog: the picker stays open behind it and
+/// the single destructive item doubles as the confirmation step.
+///
+/// Inserted as an OverlayEntry ON TOP of the root overlay — the picker
+/// itself is a raw OverlayEntry above the navigator's routes, so a dialog
+/// route would render BEHIND it.
+void _showEmoteContextMenu(
+  BuildContext context,
+  Offset position, {
+  required String header,
+  required String actionLabel,
+  required VoidCallback onAction,
+}) {
+  final hollow = HollowTheme.of(context);
+  const menuWidth = 200.0;
+  final screen = MediaQuery.of(context).size;
+  final left = position.dx.clamp(8.0, screen.width - menuWidth - 8);
+  final top = position.dy.clamp(8.0, screen.height - 96);
+
+  final overlay = Overlay.of(context);
+  late OverlayEntry entry;
+  // Same double-remove guard as the picker itself: a stray second dismiss
+  // before the removal frame builds out must not crash.
+  var removed = false;
+  void dismiss() {
+    if (removed) return;
+    removed = true;
+    entry.remove();
+    entry.dispose();
+  }
+
+  entry = OverlayEntry(
+    builder: (ctx) => Stack(
+      children: [
+        Positioned.fill(
+          child: GestureDetector(
+            onTap: dismiss,
+            onSecondaryTap: dismiss,
+            behavior: HitTestBehavior.opaque,
+            child: const SizedBox.expand(),
+          ),
+        ),
+        Positioned(
+          left: left,
+          top: top,
+          child: Material(
+            color: Colors.transparent,
+            child: Container(
+              width: menuWidth,
+              decoration: BoxDecoration(
+                color: hollow.surface,
+                borderRadius: BorderRadius.circular(hollow.radiusMd),
+                border: Border.all(color: hollow.border),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withValues(alpha: 0.3),
+                    blurRadius: 12,
+                  ),
+                ],
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(10, 8, 10, 6),
+                    child: Text(
+                      header,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: HollowTypography.caption
+                          .copyWith(color: hollow.textTertiary),
+                    ),
+                  ),
+                  Divider(height: 1, color: hollow.border),
+                  Padding(
+                    padding: const EdgeInsets.all(4),
+                    child: HollowPressable(
+                      onTap: () {
+                        dismiss();
+                        onAction();
+                      },
+                      borderRadius: BorderRadius.circular(hollow.radiusSm),
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 8, vertical: 6),
+                      child: Row(
+                        children: [
+                          Icon(LucideIcons.trash2, size: 14, color: hollow.error),
+                          const SizedBox(width: 8),
+                          Text(
+                            actionLabel,
+                            style: HollowTypography.label
+                                .copyWith(color: hollow.error),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ],
+    ),
+  );
+  overlay.insert(entry);
 }
 
 // ---------------------------------------------------------------------------
@@ -247,6 +371,11 @@ class _EmojiPickerBodyState extends ConsumerState<EmojiPickerBody> {
     widget.onSelect(emoji);
   }
 
+  void _removeRecent(String raw) {
+    _removeRecentEmoji(raw);
+    setState(() => _recents = List.of(_recentsCache ?? const []));
+  }
+
   void _runFfzSearch() {
     final q = _search;
     final seq = ++_ffzQuerySeq;
@@ -254,8 +383,11 @@ class _EmojiPickerBodyState extends ConsumerState<EmojiPickerBody> {
       _ffzLoading = true;
       _ffzError = null;
     });
+    // Empty search = the curated popular list; an older proxy without the
+    // curated mode answers [] — fall back to the FFZ global sets.
     final future = q.isEmpty
-        ? emotes_api.ffzGlobal()
+        ? emotes_api.ffzCurated().then((rows) async =>
+            rows.isNotEmpty ? rows : await emotes_api.ffzGlobal())
         : Future.delayed(const Duration(milliseconds: 350))
             .then((_) => emotes_api.ffzSearch(query: q));
     future.then((rows) {
@@ -355,6 +487,7 @@ class _EmojiPickerBodyState extends ConsumerState<EmojiPickerBody> {
           search: _search,
           recents: _recents,
           onSelect: _select,
+          onRemoveRecent: _removeRecent,
         );
       case _PickerTab.server:
         return _serverTab(hollow);
@@ -580,12 +713,9 @@ class _EmojiPickerBodyState extends ConsumerState<EmojiPickerBody> {
     Future<void> Function()? onRemove,
   }) {
     final hollow = HollowTheme.of(context);
-    return HollowPressable(
+    final cell = HollowPressable(
       onTap: () =>
           _select(emotes_api.emoteToken(name: name, hash: hash)),
-      onLongPress: onRemove == null
-          ? null
-          : () => _confirmRemove(name, onRemove),
       semanticLabel: 'Emote $name',
       borderRadius: BorderRadius.circular(hollow.radiusSm),
       padding: const EdgeInsets.all(4),
@@ -596,32 +726,19 @@ class _EmojiPickerBodyState extends ConsumerState<EmojiPickerBody> {
         ),
       ),
     );
-  }
-
-  Future<void> _confirmRemove(String name, Future<void> Function() remove) async {
-    final hollow = HollowTheme.of(context);
-    final confirmed = await showHollowDialog<bool>(
-      context: context,
-      builder: (ctx) => HollowDialog(
-        title: 'Remove :$name:?',
-        content: Text(
-          'This only removes it from your personal set — '
-          'messages that already use it keep working.',
-          style: HollowTypography.body.copyWith(color: hollow.textSecondary),
-        ),
-        actions: [
-          HollowButton.ghost(
-            onPressed: () => Navigator.of(ctx).pop(false),
-            child: const Text('Cancel'),
-          ),
-          HollowButton.filled(
-            onPressed: () => Navigator.of(ctx).pop(true),
-            child: const Text('Remove'),
-          ),
-        ],
-      ),
+    if (onRemove == null) return cell;
+    void menu(Offset position) => _showEmoteContextMenu(
+          context,
+          position,
+          header: ':$name:',
+          actionLabel: 'Remove from my emotes',
+          onAction: onRemove,
+        );
+    return GestureDetector(
+      onSecondaryTapUp: (d) => menu(d.globalPosition),
+      onLongPressStart: (d) => menu(d.globalPosition),
+      child: cell,
     );
-    if (confirmed == true) await remove();
   }
 
   Widget _emptyHint(HollowTheme hollow, String text) {
@@ -650,18 +767,21 @@ class _HeaderEntry extends _GridEntry {
 
 class _RowEntry extends _GridEntry {
   final List<UnicodeEmoji> emojis;
-  _RowEntry(this.emojis);
+  final bool recents;
+  _RowEntry(this.emojis, {this.recents = false});
 }
 
 class _UnicodeGrid extends StatelessWidget {
   final String search;
   final List<String> recents;
   final void Function(String emoji) onSelect;
+  final void Function(String emoji) onRemoveRecent;
 
   const _UnicodeGrid({
     required this.search,
     required this.recents,
     required this.onSelect,
+    required this.onRemoveRecent,
   });
 
   @override
@@ -683,8 +803,10 @@ class _UnicodeGrid extends StatelessWidget {
             })
             .toList();
         for (var i = 0; i < recentEmojis.length; i += _gridColumns) {
-          entries.add(_RowEntry(recentEmojis.sublist(
-              i, (i + _gridColumns).clamp(0, recentEmojis.length))));
+          entries.add(_RowEntry(
+              recentEmojis.sublist(
+                  i, (i + _gridColumns).clamp(0, recentEmojis.length)),
+              recents: true));
         }
       }
       for (final group in kUnicodeEmojiGroups.entries) {
@@ -740,7 +862,13 @@ class _UnicodeGrid extends StatelessWidget {
               children: [
                 for (final e in entry.emojis)
                   Expanded(
-                    child: _EmojiCell(emoji: e, onSelect: onSelect),
+                    child: _EmojiCell(
+                      emoji: e,
+                      onSelect: onSelect,
+                      onRemove: entry.recents
+                          ? () => onRemoveRecent(e.char)
+                          : null,
+                    ),
                   ),
                 for (var i = entry.emojis.length; i < _gridColumns; i++)
                   const Expanded(child: SizedBox()),
@@ -755,15 +883,21 @@ class _UnicodeGrid extends StatelessWidget {
 class _EmojiCell extends StatelessWidget {
   final UnicodeEmoji emoji;
   final void Function(String emoji) onSelect;
+  /// Recents cells only: remove this entry from the recently-used list.
+  final VoidCallback? onRemove;
 
-  const _EmojiCell({required this.emoji, required this.onSelect});
+  const _EmojiCell({
+    required this.emoji,
+    required this.onSelect,
+    this.onRemove,
+  });
 
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
     // A recents entry may be a custom-emote token; render it as an image.
     final emote = parseEmoteToken(emoji.char);
-    return HollowPressable(
+    final cell = HollowPressable(
       onTap: () => onSelect(emoji.char),
       semanticLabel: emoji.name.isEmpty ? 'Emoji ${emoji.char}' : emoji.name,
       borderRadius: BorderRadius.circular(hollow.radiusSm),
@@ -773,6 +907,19 @@ class _EmojiCell extends StatelessWidget {
             ? EmoteImage(name: emote.name, hash: emote.hash, size: 22)
             : Text(emoji.char, style: const TextStyle(fontSize: 21)),
       ),
+    );
+    if (onRemove == null) return cell;
+    void menu(Offset position) => _showEmoteContextMenu(
+          context,
+          position,
+          header: emote != null ? ':${emote.name}:' : emoji.char,
+          actionLabel: 'Remove from recents',
+          onAction: onRemove!,
+        );
+    return GestureDetector(
+      onSecondaryTapUp: (d) => menu(d.globalPosition),
+      onLongPressStart: (d) => menu(d.globalPosition),
+      child: cell,
     );
   }
 }

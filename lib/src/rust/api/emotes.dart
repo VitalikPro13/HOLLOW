@@ -90,6 +90,12 @@ Future<List<FfzEmote>> ffzSearch({required String query}) =>
 Future<List<FfzEmote>> ffzGlobal() =>
     RustLib.instance.api.crateApiEmotesFfzGlobal();
 
+/// Hand-curated popular emotes — the FFZ tab's default (empty-search) view.
+/// The list itself lives server-side in search.php; an older proxy without
+/// the mode answers `[]`, and the caller falls back to [ffz_global].
+Future<List<FfzEmote>> ffzCurated() =>
+    RustLib.instance.api.crateApiEmotesFfzCurated();
+
 /// Download an FFZ emote image FROM OUR CDN (authoring-time only), process
 /// it into a Hollow emote blob, and cache it. The allowlist is the privacy
 /// boundary — this can never be abused as a generic fetcher.

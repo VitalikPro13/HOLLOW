@@ -36,7 +36,9 @@ import 'package:hollow/src/ui/chat/channel_message_bubble.dart';
 import 'package:hollow/src/ui/chat/chat_drop_zone.dart';
 import 'package:hollow/src/ui/chat/chat_input_shortcuts.dart';
 import 'package:hollow/src/ui/chat/emoji_picker.dart';
+import 'package:hollow/src/ui/chat/emote_composer.dart';
 import 'package:hollow/src/ui/chat/emote_image.dart';
+import 'package:hollow/src/core/providers/emote_provider.dart';
 import 'package:hollow/src/ui/chat/chat_pane.dart';
 import 'package:hollow/src/ui/chat/message_action_bar.dart';
 import 'package:hollow/src/ui/dialogs/message_proof_dialog.dart';
@@ -91,7 +93,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
     }
   }
 
-  final _controller = TextEditingController();
+  final _controller = EmoteComposerController();
   final _itemScrollController = ItemScrollController();
   final _itemPositionsListener = ItemPositionsListener.create();
   final _scrollOffsetController = ScrollOffsetController();
@@ -133,6 +135,22 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
   List<_MentionCandidate> _mentionCandidates = [];
   int _mentionSelectedIndex = 0;
   int _mentionAtPosition = -1;
+
+  /// `:` shortcode autocomplete (emotes + Unicode emoji). Shares the mention
+  /// LayerLink — the two triggers are mutually exclusive.
+  late final EmoteAutocomplete _emoteAutocomplete = EmoteAutocomplete(
+    link: _mentionLayerLink,
+    controller: _controller,
+    emotesSource: _composerEmotes,
+  );
+
+  List<ComposerEmote> _composerEmotes() => [
+        for (final e in ref.read(serverEmotesProvider(widget.serverId)).valueOrNull ??
+            const [])
+          ComposerEmote(e.name, e.hash),
+        for (final e in ref.read(personalEmotesProvider).valueOrNull ?? const [])
+          ComposerEmote(e.name, e.hash),
+      ];
 
   String get _stateKey => '${widget.serverId}:${widget.channelId}';
 
@@ -249,6 +267,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
   @override
   void dispose() {
     _dismissMentionOverlay();
+    _emoteAutocomplete.dismiss();
     _urlDebounce?.cancel();
     _slowModeTimer?.cancel();
     _fileRequestDebounce?.cancel();
@@ -537,6 +556,8 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
 
     // @mention autocomplete detection.
     _updateMentionAutocomplete(text);
+    // `:` emote shortcode autocomplete.
+    _emoteAutocomplete.update(context, text);
 
     if (text.isEmpty) return;
     // Don't send typing indicators when invisible.
@@ -895,13 +916,15 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
 
   Future<void> _handleSend() async {
     _dismissMentionOverlay();
+    _emoteAutocomplete.dismiss();
     if (_blockedBySlowMode()) return;
     // If a file is staged, send it (with optional text).
     if (_stagedFilePath != null) {
       await _sendStagedFile();
       return;
     }
-    final text = _controller.text.trim();
+    // Expand inline-emote placeholders to [e:name:hash] wire tokens.
+    final text = _controller.expandedText().trim();
     if (text.isEmpty) return;
     if (_channelMediaOnly) {
       HollowToast.show(
@@ -1054,7 +1077,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
     final fileName = _stagedFileName;
     if (filePath == null || fileName == null) return;
 
-    final messageText = _controller.text.trim();
+    final messageText = _controller.expandedText().trim();
     final messageId = generateMessageId();
     final ext = fileName.contains('.')
         ? fileName.split('.').last.toLowerCase()
@@ -1414,6 +1437,9 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
   }
 
   void _insertEmojiAtCursor(String text) {
+    // Custom-emote tokens become a 1-char placeholder rendered inline as
+    // the actual emote image; Unicode emoji pass through unchanged.
+    text = _controller.displayTextFor(text);
     final sel = _controller.selection;
     final base = sel.isValid ? sel.baseOffset : _controller.text.length;
     final newText = _controller.text.replaceRange(
@@ -2575,6 +2601,11 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
                                 _dismissMentionOverlay();
                                 return KeyEventResult.handled;
                               }
+                            }
+                            final emoteResult =
+                                _emoteAutocomplete.handleKey(event);
+                            if (emoteResult == KeyEventResult.handled) {
+                              return emoteResult;
                             }
                             return handleChatInputKey(
                               event, _controller, _focusNode, _handleSend,

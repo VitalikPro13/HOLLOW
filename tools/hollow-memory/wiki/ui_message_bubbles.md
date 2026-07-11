@@ -798,7 +798,7 @@ Creates an `OverlayEntry` (360x440, anchor-clamped) with a dismiss barrier hosti
 `EmojiPickerBody({serverId, onSelect})` — the tabbed body, embedded directly by mobile bottom sheets (`MobileChatRoute._showEmojiSheet`, `mobile_message_actions.dart` reactions view).
 
 - **Search field** (HollowTextField, isDense, autofocus) filters the active tab; on the FFZ tab it drives a 350ms-debounced endpoint search.
-- **Tabs:** `Emoji` (Unicode) / `Server` (only when `serverId != null`; from `serverEmotesProvider`) / `Mine` (personal set + Upload emote button + long-press remove) / `FFZ` (browse via the website proxy; tap = `ffzImportEmote` → add to personal set → insert token).
+- **Tabs:** `Emoji` (Unicode; recents removable via right-click/long-press context menu) / `Server` (only when `serverId != null`; from `serverEmotesProvider`) / `Mine` (personal set + Upload emote button; remove via right-click/long-press context menu — a topmost OverlayEntry, NOT showDialog, which renders behind the picker) / `FFZ` (default = curated popular list via proxy `curated=1`, global-sets fallback; tap = `ffzImportEmote` → add to personal set → insert token).
 - Every selection routes through `_select` → `_recordRecentEmoji` (persisted in app_settings key `recent_emojis`, cap 24, cached in-memory).
 
 ### Unicode data

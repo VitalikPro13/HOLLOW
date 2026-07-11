@@ -35,7 +35,9 @@ import 'package:hollow/src/ui/chat/channel_message_bubble.dart';
 import 'package:hollow/src/ui/chat/staged_link_preview_card.dart';
 import 'package:hollow/src/ui/chat/staged_hollow_link_card.dart';
 import 'package:hollow/src/ui/chat/emoji_picker.dart';
+import 'package:hollow/src/ui/chat/emote_composer.dart';
 import 'package:hollow/src/ui/chat/emote_image.dart';
+import 'package:hollow/src/core/providers/emote_provider.dart';
 import 'package:hollow/src/ui/components/connection_progress.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
@@ -94,7 +96,7 @@ class MobileChatRoute extends ConsumerStatefulWidget {
 }
 
 class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
-  final _controller = TextEditingController();
+  final _controller = EmoteComposerController();
   final _focusNode = FocusNode();
   final _scrollController = ItemScrollController();
   final _positionsListener = ItemPositionsListener.create();
@@ -126,6 +128,11 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
   // compact panel ABOVE the input bar; tapping a candidate inserts the mention.
   List<_MobileMentionCandidate> _mentionCandidates = [];
   int _mentionAtPosition = -1;
+
+  // `:` emote shortcode autocomplete (emotes + Unicode emoji) — same panel
+  // pattern as mentions, works in DMs and channels.
+  List<EmoteSuggestion> _emoteCandidates = [];
+  int _emoteColonPos = -1;
 
   String get _channelKey => '${widget.serverId}:${widget.channelId}';
   final _searchController = TextEditingController();
@@ -416,6 +423,8 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
 
     // @mention autocomplete (channels only — DMs have a single recipient).
     if (!widget.isDm) _updateMentionAutocomplete(text);
+    // `:` emote shortcode autocomplete (DMs and channels).
+    _updateEmoteAutocomplete(text);
 
     if (text.isEmpty) return;
     final now = DateTime.now();
@@ -593,6 +602,117 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     );
   }
 
+  // ── `:` emote shortcode autocomplete ──────────────────────────────────
+
+  List<ComposerEmote> _composerEmotes() => [
+        if (widget.serverId != null)
+          for (final e in ref
+                  .read(serverEmotesProvider(widget.serverId!))
+                  .valueOrNull ??
+              const [])
+            ComposerEmote(e.name, e.hash),
+        for (final e in ref.read(personalEmotesProvider).valueOrNull ?? const [])
+          ComposerEmote(e.name, e.hash),
+      ];
+
+  void _updateEmoteAutocomplete(String text) {
+    final scan = scanEmoteShortcode(
+      text: text,
+      cursor: _controller.selection.baseOffset,
+      emotes: _composerEmotes(),
+    );
+    if (scan == null) {
+      _dismissEmotePanel();
+      return;
+    }
+    setState(() {
+      _emoteColonPos = scan.colonPos;
+      _emoteCandidates = scan.suggestions;
+    });
+  }
+
+  void _dismissEmotePanel() {
+    if (_emoteCandidates.isEmpty && _emoteColonPos < 0) return;
+    setState(() {
+      _emoteCandidates = [];
+      _emoteColonPos = -1;
+    });
+  }
+
+  void _acceptEmote(EmoteSuggestion suggestion) {
+    acceptEmoteSuggestion(
+      controller: _controller,
+      colonPos: _emoteColonPos,
+      suggestion: suggestion,
+    );
+    _dismissEmotePanel();
+  }
+
+  /// Compact emote-candidate panel above the input bar (mention pattern).
+  Widget _buildEmotePanel(HollowTheme hollow) {
+    return Container(
+      constraints: const BoxConstraints(maxHeight: 200),
+      margin: const EdgeInsets.fromLTRB(
+          HollowSpacing.sm, 0, HollowSpacing.sm, HollowSpacing.xs),
+      decoration: BoxDecoration(
+        color: hollow.elevated,
+        borderRadius: BorderRadius.circular(hollow.radiusMd),
+        border: Border.all(color: hollow.border),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.3),
+            blurRadius: 12,
+            offset: const Offset(0, -2),
+          ),
+        ],
+      ),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(hollow.radiusMd),
+        child: ListView.builder(
+          shrinkWrap: true,
+          padding: const EdgeInsets.symmetric(vertical: 4),
+          itemCount: _emoteCandidates.length,
+          itemBuilder: (ctx, i) {
+            final c = _emoteCandidates[i];
+            return HollowPressable(
+              onTap: () => _acceptEmote(c),
+              padding: const EdgeInsets.symmetric(
+                horizontal: HollowSpacing.sm,
+                vertical: HollowSpacing.xs + 2,
+              ),
+              child: Row(
+                children: [
+                  SizedBox(
+                    width: 26,
+                    height: 26,
+                    child: Center(
+                      child: c.hash != null
+                          ? EmoteImage(name: c.name, hash: c.hash!, size: 24)
+                          : Text(c.char!,
+                              style: const TextStyle(fontSize: 20)),
+                    ),
+                  ),
+                  const SizedBox(width: HollowSpacing.sm),
+                  Expanded(
+                    child: Text(
+                      c.hash != null ? ':${c.name}:' : c.name,
+                      style: HollowTypography.bodySmall.copyWith(
+                        color: hollow.textPrimary,
+                        fontWeight: FontWeight.w600,
+                      ),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                ],
+              ),
+            );
+          },
+        ),
+      ),
+    );
+  }
+
   /// The channel's slow-mode interval, or 0 when off / DM / Moderator+.
   int get _effectiveSlowModeSecs {
     if (widget.isDm) return 0;
@@ -657,7 +777,9 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
   }
 
   Future<void> _handleSend() async {
-    final text = _controller.text.trim();
+    _dismissEmotePanel();
+    // Expand inline-emote placeholders to [e:name:hash] wire tokens.
+    final text = _controller.expandedText().trim();
     final filePath = _stagedFilePath;
     final fileName = _stagedFileName;
     final fileIsImage = _stagedFileIsImage;
@@ -842,7 +964,8 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
             serverId: widget.serverId,
             onSelect: (emoji) {
               Navigator.pop(context);
-              _insertAtCursor(emoji);
+              // Emote tokens become 1-char placeholders rendered inline.
+              _insertAtCursor(_controller.displayTextFor(emoji));
             },
           ),
         ),
@@ -1270,6 +1393,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
                   : '${widget.serverId}:${widget.channelId}',
             ),
             if (_mentionCandidates.isNotEmpty) _buildMentionPanel(hollow),
+            if (_emoteCandidates.isNotEmpty) _buildEmotePanel(hollow),
             if (_replyToMessageId != null)
               _ReplyPreview(
                 senderName: _replyToSenderName ?? '',

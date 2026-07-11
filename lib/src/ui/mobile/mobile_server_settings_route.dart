@@ -30,6 +30,7 @@ import 'package:hollow/src/ui/dialogs/image_crop_dialog.dart';
 import 'package:hollow/src/ui/dialogs/invite_dialog.dart';
 import 'package:hollow/src/ui/mobile/mobile_members_route.dart';
 import 'package:hollow/src/ui/mobile/mobile_roles_route.dart';
+import 'package:hollow/src/ui/mobile/mobile_emotes_route.dart';
 import 'package:hollow/src/ui/mobile/mobile_labels_route.dart';
 import 'package:hollow/src/ui/mobile/mobile_twitch_settings_route.dart';
 import 'package:hollow/src/ui/settings/server_template.dart';
@@ -863,6 +864,18 @@ class _MobileServerSettingsRouteState
                       context,
                       hollowMobileRoute(
                         builder: (_) => MobileLabelsRoute(serverId: widget.serverId),
+                      ),
+                    ),
+                  ),
+                  // Everyone can view emotes (like the desktop tab);
+                  // add/remove is gated on MANAGE_EMOTES inside the route.
+                  _NavRow(
+                    icon: LucideIcons.smile,
+                    label: 'Emotes',
+                    onTap: () => Navigator.push(
+                      context,
+                      hollowMobileRoute(
+                        builder: (_) => MobileEmotesRoute(serverId: widget.serverId),
                       ),
                     ),
                   ),

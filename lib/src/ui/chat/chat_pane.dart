@@ -7,7 +7,9 @@ import 'package:hollow/src/core/shared_tickers.dart';
 import 'package:hollow/src/ui/chat/chat_drop_zone.dart';
 import 'package:hollow/src/ui/chat/chat_input_shortcuts.dart';
 import 'package:hollow/src/ui/chat/emoji_picker.dart';
+import 'package:hollow/src/ui/chat/emote_composer.dart';
 import 'package:hollow/src/ui/chat/emote_image.dart';
+import 'package:hollow/src/core/providers/emote_provider.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/models/chat_message.dart';
 import 'package:hollow/src/core/providers/banner_provider.dart';
@@ -195,11 +197,23 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     }
   }
 
-  final _controller = TextEditingController();
+  final _controller = EmoteComposerController();
   final _itemScrollController = ItemScrollController();
   final _itemPositionsListener = ItemPositionsListener.create();
   final _scrollOffsetController = ScrollOffsetController();
   final _focusNode = FocusNode();
+  // `:` shortcode autocomplete (emotes + Unicode emoji).
+  final _composerLayerLink = LayerLink();
+  late final EmoteAutocomplete _emoteAutocomplete = EmoteAutocomplete(
+    link: _composerLayerLink,
+    controller: _controller,
+    emotesSource: _composerEmotes,
+  );
+
+  List<ComposerEmote> _composerEmotes() =>
+      (ref.read(personalEmotesProvider).valueOrNull ?? const [])
+          .map((e) => ComposerEmote(e.name, e.hash))
+          .toList();
   bool _historyLoaded = false;
   bool _isPicking = false;
   String? _editingMessageId;
@@ -426,6 +440,7 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
   void dispose() {
     _overlayHideTimer?.cancel();
     _urlDebounce?.cancel();
+    _emoteAutocomplete.dismiss();
     _itemPositionsListener.itemPositions.removeListener(_onScrollPositionChanged);
     _controller.dispose();
     _focusNode.dispose();
@@ -502,6 +517,8 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     // Debounced URL detection for link previews (Phase 6.75).
     _urlDebounce?.cancel();
     _urlDebounce = Timer(const Duration(milliseconds: 600), _detectUrl);
+
+    _emoteAutocomplete.update(context, text);
 
     if (text.isEmpty) return;
     // Don't send typing indicators when invisible.
@@ -581,11 +598,13 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
   }
 
   Future<void> _handleSend() async {
+    _emoteAutocomplete.dismiss();
     if (_stagedFilePath != null) {
       await _sendStagedFile();
       return;
     }
-    final text = _controller.text.trim();
+    // Expand inline-emote placeholders to [e:name:hash] wire tokens.
+    final text = _controller.expandedText().trim();
     if (text.isEmpty) return;
     _controller.clear();
     _lastTypingSent = null;
@@ -717,7 +736,7 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     final fileName = _stagedFileName;
     if (filePath == null || fileName == null) return;
 
-    final messageText = _controller.text.trim();
+    final messageText = _controller.expandedText().trim();
     final messageId = generateMessageId();
     final ext = fileName.contains('.')
         ? fileName.split('.').last.toLowerCase()
@@ -1353,6 +1372,9 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
   }
 
   void _insertEmojiAtCursor(String text) {
+    // Custom-emote tokens become a 1-char placeholder rendered inline as
+    // the actual emote image; Unicode emoji pass through unchanged.
+    text = _controller.displayTextFor(text);
     final sel = _controller.selection;
     final base = sel.isValid ? sel.baseOffset : _controller.text.length;
     final newText = _controller.text.replaceRange(
@@ -2004,25 +2026,32 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
                   ),
                   const SizedBox(width: HollowSpacing.xs),
                   Expanded(
-                    child: Focus(
-                      onKeyEvent: (_, event) => handleChatInputKey(
-                        event, _controller, _focusNode, _handleSend,
-                        onPasteImage: _stageClipboardImage,
-                      ),
-                      child: HollowTextField(
-                        controller: _controller,
-                        focusNode: _focusNode,
-                        hintText: 'Type a message...',
-                        autofocus: true,
-                        maxLines: 5,
-                        minLines: 1,
-                        maxLength: 4000,
-                        showCounter: false,
-                        style: HollowTypography.body.copyWith(
-                          color: hollow.textPrimary,
+                    child: CompositedTransformTarget(
+                      link: _composerLayerLink,
+                      child: Focus(
+                        onKeyEvent: (_, event) {
+                          final r = _emoteAutocomplete.handleKey(event);
+                          if (r == KeyEventResult.handled) return r;
+                          return handleChatInputKey(
+                            event, _controller, _focusNode, _handleSend,
+                            onPasteImage: _stageClipboardImage,
+                          );
+                        },
+                        child: HollowTextField(
+                          controller: _controller,
+                          focusNode: _focusNode,
+                          hintText: 'Type a message...',
+                          autofocus: true,
+                          maxLines: 5,
+                          minLines: 1,
+                          maxLength: 4000,
+                          showCounter: false,
+                          style: HollowTypography.body.copyWith(
+                            color: hollow.textPrimary,
+                          ),
+                          borderRadius: hollow.radiusLg,
+                          onChanged: _onTextChanged,
                         ),
-                        borderRadius: hollow.radiusLg,
-                        onChanged: _onTextChanged,
                       ),
                     ),
                   ),
