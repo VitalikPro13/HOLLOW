@@ -45,6 +45,18 @@
 	<string>com.anonlisten.hollow.BroadcastExtension</string>
 	<key>RTCAppGroupIdentifier</key>
 	<string>group.com.anonlisten.hollow</string>
+	<!-- hollow:// deep links (server invites, shares, recovery links). -->
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>com.anonlisten.hollow</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>hollow</string>
+			</array>
+		</dict>
+	</array>
 	<key>NSCameraUsageDescription</key>
 	<string>Hollow needs camera access for video calls.</string>
 	<key>NSMicrophoneUsageDescription</key>

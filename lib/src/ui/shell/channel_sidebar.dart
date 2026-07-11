@@ -1,5 +1,7 @@
 ﻿import 'dart:convert';
 
+import 'package:hollow/src/ui/chat/hollow_link_utils.dart';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/models/channel_info.dart';
@@ -233,8 +235,10 @@ class ChannelSidebar extends StatelessWidget {
               child: HollowPressable(
                 semanticLabel: 'Invite people',
                 onTap: () {
+                  // Web form: clickable anywhere (browser bounces into the
+                  // app); new clients still render it as a Join card.
                   final link =
-                      'hollow://join?server=${selectedServer!.serverId}';
+                      webServerInviteLink(selectedServer!.serverId);
                   showInviteDialog(
                       context, link, selectedServer!.serverId);
                 },

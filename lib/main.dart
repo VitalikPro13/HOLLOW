@@ -13,6 +13,7 @@ import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/rust/api/identity.dart' as identity_api;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 import 'package:hollow/src/rust/frb_generated.dart';
+import 'package:hollow/src/core/services/deep_link_service.dart';
 import 'package:hollow/src/core/shared_tickers.dart';
 import 'package:hollow/src/core/reduce_motion.dart';
 import 'package:hollow/src/ui/app.dart';
@@ -210,6 +211,24 @@ Future<void> main() async {
   final container = ProviderContainer();
   _container = container;
 
+  // Deep links (hollow:// from browsers/other apps). Initialized before
+  // runApp so the cold-start protocol launch link is captured; handled links
+  // buffer until HollowShell mounts. On desktop, an incoming link restores
+  // the window first (it usually arrives while Hollow is hidden in tray).
+  await DeepLinkService.instance.init(container);
+  if (Platform.isWindows || Platform.isLinux || Platform.isMacOS) {
+    DeepLinkService.instance.bringToForeground = () async {
+      await _hideTrayIcon();
+      if (Platform.isLinux && await windowManager.isMinimized()) {
+        await windowManager.restore();
+      }
+      await windowManager.show();
+      await windowManager.focus();
+      _container.read(windowVisibleProvider.notifier).state = true;
+      SharedTickers.instance.resume();
+    };
+  }
+
   // Custom window chrome on desktop — hide native title bar.
   if (Platform.isWindows || Platform.isLinux || Platform.isMacOS) {
     await windowManager.ensureInitialized();
@@ -342,8 +361,10 @@ Future<void> _linuxQuit() async {
   await windowManager.destroy();
 }
 
-/// Install .desktop file and icon to XDG paths so the DE shows
-/// the correct name and icon in the taskbar. Only runs once.
+/// Install .desktop file and icon to XDG paths so the DE shows the correct
+/// name and icon in the taskbar, and register the hollow:// scheme handler.
+/// Re-writes the file whenever the desired content changes (exe moved, or an
+/// older install predates the MimeType/%u deep-link fields).
 Future<void> _installLinuxDesktopIntegration() async {
   if (!Platform.isLinux) return;
   final homeDir = Platform.environment['HOME'];
@@ -352,9 +373,6 @@ Future<void> _installLinuxDesktopIntegration() async {
   final appsDir = Directory('$homeDir/.local/share/applications');
   final iconsDir = Directory('$homeDir/.local/share/icons');
   final desktopFile = File('${appsDir.path}/com.anonlisten.hollow.desktop');
-
-  // Skip if already installed.
-  if (desktopFile.existsSync()) return;
 
   final exeDir = File(Platform.resolvedExecutable).parent.path;
   final bundledDesktop = File('$exeDir/com.anonlisten.hollow.desktop');
@@ -366,19 +384,37 @@ Future<void> _installLinuxDesktopIntegration() async {
     if (!appsDir.existsSync()) appsDir.createSync(recursive: true);
     if (!iconsDir.existsSync()) iconsDir.createSync(recursive: true);
 
-    // Write .desktop with absolute Exec and Icon paths.
+    // Write .desktop with absolute Exec and Icon paths. %u passes a clicked
+    // hollow:// URI as an argument; MimeType registers us as its handler.
     final iconDest = '${iconsDir.path}/com.anonlisten.hollow.png';
-    bundledIcon.copySync(iconDest);
     final content = '[Desktop Entry]\n'
         'Type=Application\n'
         'Name=Hollow\n'
         'Comment=Encrypted distributed messaging\n'
-        'Exec=${Platform.resolvedExecutable}\n'
+        'Exec=${Platform.resolvedExecutable} %u\n'
         'Icon=$iconDest\n'
         'Terminal=false\n'
         'Categories=Network;InstantMessaging;\n'
+        'MimeType=x-scheme-handler/hollow;\n'
         'StartupWMClass=com.anonlisten.hollow\n';
+
+    final upToDate = desktopFile.existsSync() &&
+        desktopFile.readAsStringSync() == content;
+    if (upToDate) return;
+
+    bundledIcon.copySync(iconDest);
     desktopFile.writeAsStringSync(content);
+
+    // Refresh the desktop database and claim the scheme so browsers resolve
+    // hollow:// immediately (best-effort — the MimeType line alone works on
+    // most DEs after the next cache refresh).
+    try {
+      await Process.run('update-desktop-database', [appsDir.path]);
+    } catch (_) {}
+    try {
+      await Process.run('xdg-mime',
+          ['default', 'com.anonlisten.hollow.desktop', 'x-scheme-handler/hollow']);
+    } catch (_) {}
   } catch (e) {
     debugPrint('[HOLLOW] Linux desktop integration failed: $e');
   }

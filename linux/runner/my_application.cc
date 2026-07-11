@@ -22,6 +22,17 @@ static void first_frame_cb(MyApplication* self, FlView* view) {
 // Implements GApplication::activate.
 static void my_application_activate(GApplication* application) {
   MyApplication* self = MY_APPLICATION(application);
+
+  // Single instance: a second launch (e.g. clicking a hollow:// link) forwards
+  // its command line to this primary instance via GApplication and re-fires
+  // activate — present the existing window instead of building a second one.
+  // The link itself reaches Dart through app_links (command-line/open signals).
+  GList* windows = gtk_application_get_windows(GTK_APPLICATION(application));
+  if (windows) {
+    gtk_window_present(GTK_WINDOW(windows->data));
+    return;
+  }
+
   GtkWindow* window =
       GTK_WINDOW(gtk_application_window_new(GTK_APPLICATION(application)));
 
@@ -114,7 +125,11 @@ static gboolean my_application_local_command_line(GApplication* application,
   g_application_activate(application);
   *exit_status = 0;
 
-  return TRUE;
+  // FALSE (was TRUE): let GApplication keep processing the command line so a
+  // hollow:// URI argument is forwarded to the primary instance and surfaced
+  // through the command-line/open signals app_links listens on. Returning TRUE
+  // here would swallow the arguments and deep links would never reach Dart.
+  return FALSE;
 }
 
 // Implements GApplication::startup.
@@ -161,7 +176,14 @@ MyApplication* my_application_new() {
   g_set_prgname(APPLICATION_ID);
   g_set_application_name("Hollow");
 
+  // HANDLES_COMMAND_LINE | HANDLES_OPEN (was NON_UNIQUE): required for
+  // hollow:// deep links. The app is now D-Bus-unique — a second launch hands
+  // its URI to the running instance (activate presents the existing window)
+  // and exits, instead of spawning a duplicate that the Dart PID lock kills
+  // with the link still unread.
   return MY_APPLICATION(g_object_new(my_application_get_type(),
                                      "application-id", APPLICATION_ID, "flags",
-                                     G_APPLICATION_NON_UNIQUE, nullptr));
+                                     G_APPLICATION_HANDLES_COMMAND_LINE |
+                                         G_APPLICATION_HANDLES_OPEN,
+                                     nullptr));
 }

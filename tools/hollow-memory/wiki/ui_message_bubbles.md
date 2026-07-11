@@ -722,9 +722,9 @@ Takes a `network_api.LinkPreviewRef preview` containing: `url`, `title`, `descri
 
 **File:** `lib/src/ui/chat/hollow_link_card.dart`
 **Class:** `HollowLinkCard extends ConsumerWidget`
-**Purpose:** Renders inline cards for `hollow://` protocol links detected in message text.
+**Purpose:** Renders inline cards for `hollow://` protocol links (and web-form `https://hollow.anonlisten.com/join#server=` invites, normalized by the extractor) detected in message text.
 
-Delegates to three sub-cards based on `link.type`:
+Delegates to four sub-cards based on `link.type`:
 
 #### _ShareLinkCard
 
@@ -746,6 +746,12 @@ Delegates to three sub-cards based on `link.type`:
 - Shows "Room Invite" title, room ID in mono, filled "Join" button.
 - Join calls `ref.read(roomProvider.notifier).join(link.fullUrl)`.
 
+#### _RecoveryLinkCard
+
+- Icon: `lifeBuoy` (20px, accent)
+- Shows "Recovery Pool Invite" title, server ID in mono, filled "Open" button.
+- Tap opens `showJoinRecoveryPoolDialog(context, prefillLink: link.fullUrl)` (recovery links were paste-only before 2026-07-11).
+
 **Shared card container:** `_cardContainer()` — maxWidth 400, `HollowPressable` wrapper, elevated background, `radiusMd` corners, 3px accent left border, standard border on other sides, `HollowSpacing.sm` padding.
 
 ### StagedHollowLinkCard
@@ -763,6 +769,7 @@ Delegates to three sub-cards based on `link.type`:
 - **Server invite (joined):** server name + member count + "Already joined" (success)
 - **Server invite (not joined):** "Server Invite" + "You haven't joined this server"
 - **Room invite:** "Room Invite" + "Room: {id}"
+- **Recovery:** "Recovery Pool Invite" + "Server: {id}"
 
 Layout: 48x48 icon box (accent or error colored) + title/subtitle + dismiss X button.
 
@@ -770,15 +777,24 @@ Layout: 48x48 icon box (accent or error colored) + title/subtitle + dismiss X bu
 
 **File:** `lib/src/ui/chat/hollow_link_utils.dart`
 
-`HollowLink` data class: `type` (share/serverInvite/roomInvite), `fullUrl`, `id`.
+`HollowLink` data class: `type` (share/serverInvite/roomInvite/recovery), `fullUrl` (always the CANONICAL `hollow://` form — web-form https links are normalized), `id`.
 
-`extractHollowLinks(text)`:
-- Regex: `hollow://[^\s<>"')\]}]+`
-- Deduplicates by URL.
-- Parses URI scheme: must be `hollow`.
+`classifyHollowLink(url)` — single-URL classifier (also used by `DeepLinkService` for OS-delivered links):
 - `hollow://share/{payload}` -- share link (payload is the root hash + encoded data).
 - `hollow://join?server={id}` -- server invite.
 - `hollow://join?room={code}` -- room invite.
+- `hollow://recovery?server={id}&token={t}` -- recovery pool invite (both params required).
+- `https://hollow.anonlisten.com/join#server={id}` (fragment canonical, `?server=` query tolerated; fragment wins) -- normalized to `hollow://join?server=` in `fullUrl`. Id validated `^[A-Za-z0-9_-]{1,128}$`. Same for `#room=`.
+
+`extractHollowLinks(text)`:
+- Two regexes: `hollow://[^\s<>"')\]}]+` + `https://hollow\.anonlisten\.com/join[^\s<>"')\]}]*`; each match through `classifyHollowLink`.
+- Deduplicates by canonical `fullUrl` (same invite in both forms → one card).
+
+`mightContainHollowLinks(text)` — cheap per-bubble gate (matches `hollow://` OR `hollow.anonlisten.com/join`); both message bubbles use it before running the extractor.
+
+`webServerInviteLink(serverId)` → `https://hollow.anonlisten.com/join#server={id}` — what all Invite buttons copy since 2026-07-11 (fragment keeps the id out of web-server logs; old clients degrade to a clickable https link → browser → /join redirect page → app). Deep-link ingestion itself (OS `hollow://` launches, `app_links`, per-platform registration) lives in `DeepLinkService` — see memory `project_deep_linking`.
+
+Unit tests: `test/hollow_link_utils_test.dart`.
 
 ---
 

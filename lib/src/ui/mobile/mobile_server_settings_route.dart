@@ -1,5 +1,7 @@
 ﻿import 'dart:io';
 
+import 'package:hollow/src/ui/chat/hollow_link_utils.dart';
+
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -894,7 +896,7 @@ class _MobileServerSettingsRouteState
                     icon: LucideIcons.link,
                     label: 'Invite',
                     onTap: () {
-                      final link = 'hollow://join?server=${widget.serverId}';
+                      final link = webServerInviteLink(widget.serverId);
                       showInviteDialog(context, link, widget.serverId);
                     },
                   ),

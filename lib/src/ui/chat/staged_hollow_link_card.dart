@@ -119,6 +119,11 @@ class _StagedHollowLinkCardState extends ConsumerState<StagedHollowLinkCard> {
         title = 'Room Invite';
         subtitle = 'Room: ${widget.link.id}';
         subtitleColor = hollow.textSecondary;
+      case HollowLinkType.recovery:
+        icon = LucideIcons.lifeBuoy;
+        title = 'Recovery Pool Invite';
+        subtitle = 'Server: ${widget.link.id}';
+        subtitleColor = hollow.textSecondary;
     }
 
     return Container(

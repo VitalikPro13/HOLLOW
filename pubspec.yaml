@@ -71,6 +71,10 @@ dependencies:
   super_clipboard: ^0.9.1
   desktop_drop: ^0.7.0
   path: ^1.9.0
+  # Deep links: receives hollow:// (and later https universal-link) URLs on all
+  # platforms — cold-start initial link + live stream. Windows single-instance
+  # forwarding rides SendAppLinkToInstance in windows/runner/main.cpp.
+  app_links: ^7.2.1
   video_player: ^2.11.1
   fvp: ^0.35.2
   visibility_detector: ^0.4.0+2

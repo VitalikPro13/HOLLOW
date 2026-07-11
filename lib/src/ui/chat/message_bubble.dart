@@ -178,7 +178,7 @@ class MessageBubble extends ConsumerWidget {
 
     // Cheap contains() gate + hoisted regex — no per-row RegExp compile or
     // full-text scan for the overwhelmingly common no-link case.
-    final hollowLinks = message.text.contains('hollow://')
+    final hollowLinks = mightContainHollowLinks(message.text)
         ? extractHollowLinks(message.text.replaceAll(codeBlockRegex, ''))
         : const <HollowLink>[];
     final hollowLinkWidgets = hollowLinks.isNotEmpty

@@ -79,7 +79,7 @@ Long-press on a server row opens `showModalBottomSheet` with:
 - Handle bar + server name header
 - **Server Settings** → pushes `MobileServerSettingsRoute`
 - **Create Channel** → `showCreateChannelDialog()` (gated by `Permission.manageChannels`)
-- **Invite** → `showInviteDialog()` with `hollow://join?server=` link
+- **Invite** → `showInviteDialog()` with the web-form invite `webServerInviteLink(serverId)` (`https://hollow.anonlisten.com/join#server=`)
 - **Copy Server ID** → clipboard + toast
 - **Leave/Delete Server** → confirmation dialog (`showHollowDialog`). Owner sees Delete, others see Leave. Post-action clears `selectedServerProvider`, `selectedChannelProvider`, `channelListProvider`.
 
@@ -223,7 +223,7 @@ Below the Channels section, a "Management" section with `_NavRow` widgets (icon 
 - **Roles** → pushes `MobileRolesRoute` (gated by `Permission.manageRoles`)
 - **Labels** → pushes `MobileLabelsRoute`
 - **Twitch Verification** → pushes `MobileTwitchSettingsRoute` (gated by `Permission.manageServer`)
-- **Invite** → opens `showInviteDialog` with `hollow://join?server=` link
+- **Invite** → opens `showInviteDialog` with the web-form invite `webServerInviteLink(serverId)`
 
 ---
 

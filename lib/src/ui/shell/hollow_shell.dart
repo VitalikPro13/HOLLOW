@@ -8,6 +8,7 @@ import 'package:hollow/src/core/services/android_version.dart';
 import 'package:hollow/src/core/hollow_data_dir.dart';
 import 'package:hollow/src/core/services/app_lock_service.dart';
 import 'package:hollow/src/core/services/channel_topic_service.dart';
+import 'package:hollow/src/core/services/deep_link_service.dart';
 import 'package:hollow/src/core/services/ios_data_dir_migration.dart';
 import 'package:hollow/src/core/models/channel_info.dart';
 import 'package:hollow/src/core/models/chat_message.dart';
@@ -260,6 +261,9 @@ class _HollowShellState extends ConsumerState<HollowShell>
     // Delay reveal until after the first frame so the window is visible.
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _revealController.forward();
+      // Shell is mounted — flush any deep link that arrived during startup
+      // (cold-start protocol launches buffer in the service until now).
+      DeepLinkService.instance.notifyShellReady();
     });
     _bootstrap();
     _listenForLicenseErrors();

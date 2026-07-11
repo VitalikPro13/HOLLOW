@@ -1,6 +1,7 @@
 ﻿import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/models/chat_message.dart';
+import 'package:hollow/src/ui/chat/hollow_link_utils.dart';
 import 'package:hollow/src/core/models/channel_info.dart';
 import 'package:hollow/src/core/models/channel_layout.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
@@ -1799,7 +1800,7 @@ class _ServerContextSheet extends ConsumerWidget {
             label: 'Invite',
             onTap: () {
               Navigator.pop(context);
-              final link = 'hollow://join?server=$serverId';
+              final link = webServerInviteLink(serverId);
               showInviteDialog(context, link, serverId);
             },
           ),

@@ -13,6 +13,7 @@ import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
+import 'package:hollow/src/ui/dialogs/recovery_pool_dialog.dart';
 import 'package:hollow/src/ui/share/paste_link_dialog.dart';
 import 'package:hollow/src/ui/share/share_card.dart';
 
@@ -29,6 +30,8 @@ class HollowLinkCard extends ConsumerWidget {
         return _ServerInviteCard(link: link);
       case HollowLinkType.roomInvite:
         return _RoomInviteCard(link: link);
+      case HollowLinkType.recovery:
+        return _RecoveryLinkCard(link: link);
     }
   }
 }
@@ -295,5 +298,58 @@ class _RoomInviteCard extends ConsumerWidget {
 
   void _handleJoin(WidgetRef ref) {
     ref.read(roomProvider.notifier).join(link.fullUrl);
+  }
+}
+
+class _RecoveryLinkCard extends ConsumerWidget {
+  final HollowLink link;
+  const _RecoveryLinkCard({required this.link});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final hollow = HollowTheme.of(context);
+
+    return _cardContainer(
+      hollow: hollow,
+      onTap: () => showJoinRecoveryPoolDialog(context, prefillLink: link.fullUrl),
+      child: Row(
+        children: [
+          Icon(LucideIcons.lifeBuoy, size: 20, color: hollow.accent),
+          const SizedBox(width: HollowSpacing.sm),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  'Recovery Pool Invite',
+                  style: HollowTypography.body.copyWith(
+                    color: hollow.textPrimary,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  link.id,
+                  style: HollowTypography.mono.copyWith(
+                    color: hollow.textSecondary,
+                    fontSize: 11,
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: HollowSpacing.sm),
+          HollowButton.filled(
+            compact: true,
+            onPressed: () =>
+                showJoinRecoveryPoolDialog(context, prefillLink: link.fullUrl),
+            child: const Text('Open'),
+          ),
+        ],
+      ),
+    );
   }
 }

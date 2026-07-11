@@ -55,7 +55,7 @@ Both the header and the content use `AnimatedSwitcher` for crossfade transitions
 1. `TypewriterText` (from reveal_widgets) showing either the server name or "Direct Messages". Uses `HollowTypography.subheading`, `FontWeight.w600`, with `TextOverflow.ellipsis`. The typewriter animation is driven by `headerTextReveal` from `StartupRevealScope.interval(context, 0.25, 0.40)`.
 
 2. **Server-only action icons** (conditionally rendered when `selectedServer != null`):
-   - **Invite people** -- `LucideIcons.userPlus` (16px). Tapping constructs a `hollow://join?server={serverId}` link and calls `showInviteDialog(context, link, serverId)`.
+   - **Invite people** -- `LucideIcons.userPlus` (16px). Tapping constructs the web-form invite `webServerInviteLink(serverId)` (`https://hollow.anonlisten.com/join#server={id}` — clickable anywhere, renders as a Join card in-app) and calls `showInviteDialog(context, link, serverId)`.
    - **Storage** -- `LucideIcons.hardDrive` (16px). Tapping calls `showStorageDashboardDialog(context, serverId)`.
    - **Server settings** -- `LucideIcons.settings` (16px). Tapping calls `onOpenSettings`.
 

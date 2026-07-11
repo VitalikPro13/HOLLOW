@@ -2,8 +2,9 @@
 Type=Application
 Name=Hollow
 Comment=Encrypted distributed messaging
-Exec=hollow
+Exec=hollow %u
 Icon=com.anonlisten.hollow
 Terminal=false
 Categories=Network;InstantMessaging;
+MimeType=x-scheme-handler/hollow;
 StartupWMClass=com.anonlisten.hollow

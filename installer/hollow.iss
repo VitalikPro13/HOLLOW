@@ -81,6 +81,17 @@ Source: "{#SourceDir}\*"; DestDir: "{app}"; \
     Excludes: "*.lib,*.exp,*.pdb,hollow_debug.log,hollow_crash.log,*.log"; \
     Flags: ignoreversion recursesubdirs createallsubdirs
 
+[Registry]
+; hollow:// URL protocol — per-user (HKCU, no admin needed). Lets browsers and
+; other apps open Hollow deep links (server invites, shares, recovery links).
+; The app also self-heals these keys at startup (deep_link_service.dart), which
+; covers portable-zip users; the installer entries make the handler exist before
+; first launch and get cleaned up on uninstall.
+Root: HKCU; Subkey: "Software\Classes\hollow"; ValueType: string; ValueData: "URL:Hollow Protocol"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\hollow"; ValueType: string; ValueName: "URL Protocol"; ValueData: ""
+Root: HKCU; Subkey: "Software\Classes\hollow\DefaultIcon"; ValueType: string; ValueData: """{app}\{#AppExeName}"",0"
+Root: HKCU; Subkey: "Software\Classes\hollow\shell\open\command"; ValueType: string; ValueData: """{app}\{#AppExeName}"" ""%1"""
+
 [Icons]
 Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExeName}"
 Name: "{group}\{cm:UninstallProgram,{#AppName}}"; Filename: "{uninstallexe}"
