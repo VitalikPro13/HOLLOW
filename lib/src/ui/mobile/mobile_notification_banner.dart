@@ -10,6 +10,7 @@ import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
+import 'package:hollow/src/ui/chat/emote_image.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/mobile/mobile_chat_route.dart';
 import 'package:hollow/src/ui/mobile/mobile_page_route.dart';
@@ -285,6 +286,10 @@ class _MobileInChatBannerState extends ConsumerState<MobileInChatBanner>
     final msgs = card.messages.length > 3
         ? card.messages.sublist(card.messages.length - 3)
         : card.messages;
+    final msgStyle = HollowTypography.body.copyWith(
+      color: hollow.textSecondary,
+      fontSize: 12,
+    );
 
     return Positioned(
       top: widget.topOffset,
@@ -328,7 +333,13 @@ class _MobileInChatBannerState extends ConsumerState<MobileInChatBanner>
                     HollowAvatar(peerId: card.avatarId, size: 28),
                     const SizedBox(width: HollowSpacing.sm),
                     Expanded(
-                      child: Column(
+                      // Emote pull context for the previews — a token from a
+                      // chat the user doesn't have open may not have its
+                      // bytes cached yet.
+                      child: EmoteScope(
+                        serverId: card.serverId,
+                        peerHint: card.peerId,
+                        child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         mainAxisSize: MainAxisSize.min,
                         children: [
@@ -346,19 +357,24 @@ class _MobileInChatBannerState extends ConsumerState<MobileInChatBanner>
                           for (final m in msgs)
                             Padding(
                               padding: const EdgeInsets.only(top: 1),
-                              child: Text(
-                                card.isDm
-                                    ? m.text
-                                    : '${m.senderName}: ${m.text}',
-                                style: HollowTypography.body.copyWith(
-                                  color: hollow.textSecondary,
-                                  fontSize: 12,
+                              // Text.rich so emote tokens render as inline
+                              // images instead of the raw [e:name:hash] form.
+                              child: Text.rich(
+                                TextSpan(
+                                  style: msgStyle,
+                                  children: [
+                                    if (!card.isDm)
+                                      TextSpan(
+                                          text: '${m.senderName}: '),
+                                    ...emotePreviewSpans(m.text, msgStyle),
+                                  ],
                                 ),
                                 maxLines: 1,
                                 overflow: TextOverflow.ellipsis,
                               ),
                             ),
                         ],
+                        ),
                       ),
                     ),
                     const SizedBox(width: HollowSpacing.sm),

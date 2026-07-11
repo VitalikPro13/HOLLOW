@@ -949,6 +949,9 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
   }
 
   void _showEmojiSheet() {
+    // Drop the composer focus first — the software keyboard otherwise stays
+    // up under the sheet and covers half the picker.
+    _focusNode.unfocus();
     final hollow = HollowTheme.of(context);
     showModalBottomSheet<void>(
       context: context,

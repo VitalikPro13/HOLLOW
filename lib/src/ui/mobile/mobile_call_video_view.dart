@@ -341,7 +341,7 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
             child: RepaintBoundary(
               child: RTCVideoView(
                 localRenderer!,
-                mirror: true,
+                mirror: call.isFrontCamera,
                 objectFit:
                     RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
               ),
@@ -390,7 +390,7 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
                   child: RepaintBoundary(
                     child: RTCVideoView(
                       localRenderer,
-                      mirror: true,
+                      mirror: call.isFrontCamera,
                       objectFit: RTCVideoViewObjectFit
                           .RTCVideoViewObjectFitCover,
                     ),
@@ -528,6 +528,20 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
                 ? () => _handleScreenShareToggle(call)
                 : null,
           ),
+          // Flip camera (front/back) — only while the camera is on. Same
+          // pattern as the voice channel screen.
+          if (call.isVideoEnabled)
+            MobileControlButton(
+              icon: LucideIcons.switchCamera,
+              iconSize: iconSize,
+              size: buttonSize,
+              color: hollow.textPrimary,
+              backgroundColor: hollow.elevated,
+              semanticLabel: 'Flip camera',
+              onTap: call.status == CallStatus.active
+                  ? () => ref.read(callProvider.notifier).switchCamera()
+                  : null,
+            ),
           MobileControlButton(
             icon: LucideIcons.phoneOff,
             iconSize: iconSize,

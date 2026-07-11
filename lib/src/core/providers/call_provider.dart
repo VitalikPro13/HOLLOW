@@ -46,6 +46,10 @@ class CallState {
   final bool isMuted;
   final DateTime? startedAt;
   final bool isVideoEnabled;
+
+  /// Local camera facing (true = front). Local previews mirror only the
+  /// front camera — a mirrored back camera shows text reversed.
+  final bool isFrontCamera;
   final bool remoteVideoEnabled;
   final bool isVideoCall;
   final bool isScreenSharing;
@@ -85,6 +89,7 @@ class CallState {
     this.isMuted = false,
     this.startedAt,
     this.isVideoEnabled = false,
+    this.isFrontCamera = true,
     this.remoteVideoEnabled = false,
     this.isVideoCall = false,
     this.isScreenSharing = false,
@@ -107,6 +112,7 @@ class CallState {
     bool? isMuted,
     DateTime? startedAt,
     bool? isVideoEnabled,
+    bool? isFrontCamera,
     bool? remoteVideoEnabled,
     bool? isVideoCall,
     bool? isScreenSharing,
@@ -130,6 +136,7 @@ class CallState {
         isMuted: isMuted ?? this.isMuted,
         startedAt: startedAt ?? this.startedAt,
         isVideoEnabled: isVideoEnabled ?? this.isVideoEnabled,
+        isFrontCamera: isFrontCamera ?? this.isFrontCamera,
         remoteVideoEnabled: remoteVideoEnabled ?? this.remoteVideoEnabled,
         isVideoCall: isVideoCall ?? this.isVideoCall,
         isScreenSharing: isScreenSharing ?? this.isScreenSharing,
@@ -626,7 +633,10 @@ class CallNotifier extends Notifier<CallState> {
 
     final wasEnabled = state.isVideoEnabled;
     final enabled = await _service.toggleVideo();
-    state = state.copyWith(isVideoEnabled: enabled);
+    state = state.copyWith(
+      isVideoEnabled: enabled,
+      isFrontCamera: _service.useFrontCamera,
+    );
 
     // Turning the camera on mid-call implies hands-off use — switch to the
     // loudspeaker (mobile). Turning it off keeps whatever route is active.
@@ -683,7 +693,8 @@ class CallNotifier extends Notifier<CallState> {
   /// Switch between front and back camera.
   Future<void> switchCamera() async {
     if (state.status != CallStatus.active || !state.isVideoEnabled) return;
-    await _service.switchCamera();
+    final front = await _service.switchCamera();
+    state = state.copyWith(isFrontCamera: front);
   }
 
   /// Start screen sharing via a dedicated RTCPeerConnection.

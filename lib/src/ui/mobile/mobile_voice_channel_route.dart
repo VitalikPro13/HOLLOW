@@ -276,7 +276,7 @@ class _MobileVoiceChannelRouteState
               child: RepaintBoundary(
                 child: RTCVideoView(
                   renderer,
-                  mirror: isLocal,
+                  mirror: isLocal && vcState.isFrontCamera,
                   objectFit:
                       RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
                 ),
@@ -369,7 +369,7 @@ class _MobileVoiceChannelRouteState
         return RepaintBoundary(
           child: RTCVideoView(
             localRenderer,
-            mirror: true,
+            mirror: vcState.isFrontCamera,
             objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
           ),
         );
@@ -424,7 +424,7 @@ class _MobileVoiceChannelRouteState
                       ? RepaintBoundary(
                           child: RTCVideoView(
                             renderer,
-                            mirror: isLocal,
+                            mirror: isLocal && vcState.isFrontCamera,
                             objectFit: RTCVideoViewObjectFit
                                 .RTCVideoViewObjectFitCover,
                           ),
@@ -474,7 +474,8 @@ class _MobileVoiceChannelRouteState
             child: RepaintBoundary(
               child: RTCVideoView(
                 renderer,
-                mirror: true,
+                mirror: ref.watch(voiceChannelProvider
+                    .select((s) => s.isFrontCamera)),
                 objectFit:
                     RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
               ),

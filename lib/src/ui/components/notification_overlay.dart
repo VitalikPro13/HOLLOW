@@ -13,6 +13,7 @@ import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
+import 'package:hollow/src/ui/chat/emote_image.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -229,7 +230,12 @@ class _NotificationCardWidgetState
           },
           child: GestureDetector(
             onTap: _onTap,
-            child: Container(
+            // Emote pull context for message previews — a token from a chat
+            // the user doesn't have open may not have its bytes cached yet.
+            child: EmoteScope(
+              serverId: card.serverId,
+              peerHint: card.peerId,
+              child: Container(
               width: 320,
               constraints: const BoxConstraints(maxHeight: 260),
               decoration: BoxDecoration(
@@ -327,6 +333,7 @@ class _NotificationCardWidgetState
                     ),
                   ),
                 ],
+                ),
               ),
             ),
           ),
@@ -349,15 +356,20 @@ class _MessageRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
+    final textStyle = HollowTypography.body.copyWith(
+      color: hollow.textSecondary,
+      fontSize: 12,
+    );
 
     // For DMs, don't repeat the sender name (it's in the header).
     // For channels, show sender name since multiple people can send.
+    // Text.rich so emote tokens render as inline images instead of the
+    // raw [e:name:hash] wire form.
     if (isDm) {
-      return Text(
-        message.text,
-        style: HollowTypography.body.copyWith(
-          color: hollow.textSecondary,
-          fontSize: 12,
+      return Text.rich(
+        TextSpan(
+          style: textStyle,
+          children: emotePreviewSpans(message.text, textStyle),
         ),
         maxLines: 2,
         overflow: TextOverflow.ellipsis,
@@ -376,11 +388,10 @@ class _MessageRow extends StatelessWidget {
           ),
         ),
         Expanded(
-          child: Text(
-            message.text,
-            style: HollowTypography.body.copyWith(
-              color: hollow.textSecondary,
-              fontSize: 12,
+          child: Text.rich(
+            TextSpan(
+              style: textStyle,
+              children: emotePreviewSpans(message.text, textStyle),
             ),
             maxLines: 2,
             overflow: TextOverflow.ellipsis,

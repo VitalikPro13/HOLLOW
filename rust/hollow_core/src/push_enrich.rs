@@ -351,7 +351,9 @@ fn fetch_and_decrypt(
         .into_iter()
         .map(|dm| {
             let mut obj = serde_json::json!({
-                "text": dm.text,
+                // Emote tokens are unreadable hashes in a plain-text banner —
+                // the NSE shows ':name:' instead.
+                "text": crate::node::emotes::emote_tokens_to_shortcodes(&dm.text),
                 "message_id": dm.message_id,
                 "timestamp": dm.timestamp,
                 "has_image": dm.image_path.is_some(),

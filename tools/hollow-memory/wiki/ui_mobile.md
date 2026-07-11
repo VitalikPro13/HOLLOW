@@ -777,6 +777,7 @@ Staggered entrance (400ms): message preview fades+slides in first, then each act
 - Slides down from top (~280ms easeOutCubic) + fade. Body wrapped in `Material(type: transparency)` (avoids the yellow debug double-underline on a Positioned-in-Stack `Text`).
 - **Accumulation:** adopts the FRESH card when the same source grows (the cached `_currentCard` is an immutable snapshot — must re-point to it). Shows the last **3** messages (provider caps the stack at 5).
 - **Countdown ring (`_CountdownRing`):** depleting `CircularProgressIndicator` + remaining seconds (5→1) in the banner's right space, driven by a 5s `AnimationController` that auto-dismisses on complete. Swipe-up or tap also dismiss; tap navigates to the source conversation.
+- **Emote tokens:** message lines render via `Text.rich` + `emotePreviewSpans` inside an `EmoteScope(serverId, peerHint)` (see wiki `emotes` > Notification Previews) — never raw text.
 
 ### Mobile @mention autocomplete (channels)
 `mobile_chat_route.dart`: `_updateMentionAutocomplete` (from `_onTextChanged`, channels only) scans back from the cursor for an `@` at word-start, builds candidates from `serverMembersProvider` + `@everyone` (`serverDisplayNameFor`/`serverNicknamesProvider`), and renders `_buildMentionPanel` ABOVE the input bar (a Column child after `_TypingBar`, NOT an OverlayEntry). `_acceptMention` replaces `@query` with `@DisplayName `. Cleared on send. Class `_MobileMentionCandidate`.

@@ -845,6 +845,9 @@ class VoiceChannelService {
           videoConstraints['optional'] = [
             {'sourceId': preferredCameraDeviceId}
           ];
+        } else {
+          videoConstraints['facingMode'] =
+              _useFrontCamera ? 'user' : 'environment';
         }
         _localVideoStream = await navigator.mediaDevices.getUserMedia({
           'audio': false,
@@ -967,14 +970,20 @@ class VoiceChannelService {
     }
   }
 
-  /// Switch front/back camera (mobile).
-  Future<void> switchCamera() async {
-    if (!_isCameraOn || _localVideoStream == null) return;
+  /// Local camera facing (true = front). UI reads this to mirror the local
+  /// preview only for the front camera.
+  bool get useFrontCamera => _useFrontCamera;
+
+  /// Switch front/back camera (mobile). Returns the new facing (true =
+  /// front) from the native side — devices with >2 cameras make a blind
+  /// toggle drift out of sync.
+  Future<bool> switchCamera() async {
+    if (!_isCameraOn || _localVideoStream == null) return _useFrontCamera;
     final videoTracks = _localVideoStream!.getVideoTracks();
-    if (videoTracks.isEmpty) return;
-    await Helper.switchCamera(videoTracks.first);
-    _useFrontCamera = !_useFrontCamera;
+    if (videoTracks.isEmpty) return _useFrontCamera;
+    _useFrontCamera = await Helper.switchCamera(videoTracks.first);
     _vcLog('[HOLLOW-VC] Camera switched, front=$_useFrontCamera');
+    return _useFrontCamera;
   }
 
   // ---------------------------------------------------------------

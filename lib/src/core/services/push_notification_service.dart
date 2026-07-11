@@ -7,6 +7,8 @@ import 'package:path_provider/path_provider.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:hollow/src/core/hollow_data_dir.dart';
+import 'package:hollow/src/ui/chat/emote_image.dart'
+    show emoteTokensToShortcodes;
 import 'package:hollow/src/rust/api/identity.dart' as identity_api;
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
@@ -821,6 +823,11 @@ Future<void> _showNotification({
   final plugin = FlutterLocalNotificationsPlugin();
   await _initNotificationPlugin(plugin);
 
+  // OS notifications can't render emote images — show ':name:' instead of
+  // the raw [e:name:hash] wire token.
+  body = emoteTokensToShortcodes(body);
+  lines = lines?.map(emoteTokensToShortcodes).toList();
+
   AndroidBitmap<Object>? largeIcon;
   if (avatarBytes != null && avatarBytes.isNotEmpty) {
     largeIcon = ByteArrayAndroidBitmap(avatarBytes);
@@ -937,6 +944,10 @@ Future<void> _showChannelNotification({
 }) async {
   final plugin = FlutterLocalNotificationsPlugin();
   await _initNotificationPlugin(plugin);
+
+  // Same shortcode conversion as _showNotification (see there).
+  body = emoteTokensToShortcodes(body);
+  lines = lines?.map(emoteTokensToShortcodes).toList();
 
   StyleInformation? style;
   if (lines != null && lines.length > 1) {

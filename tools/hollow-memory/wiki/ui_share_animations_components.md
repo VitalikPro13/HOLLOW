@@ -895,7 +895,7 @@ File: `lib/src/ui/components/notification_overlay.dart`
 
 ### _MessageRow
 
-`StatelessWidget`. For DMs: just the message text. For channels: sender name (bold) + message text. Both capped at 2 lines.
+`StatelessWidget`. For DMs: just the message text. For channels: sender name (bold) + message text. Both capped at 2 lines. Text renders via `Text.rich` with `emotePreviewSpans` (emote tokens → inline `EmoteImage`); the card body is wrapped in `EmoteScope(serverId, peerHint)` so uncached emote bytes pull (see wiki `emotes` > Notification Previews).
 
 
 ## DownloadIconButton

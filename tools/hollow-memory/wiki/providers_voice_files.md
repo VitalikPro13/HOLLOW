@@ -328,7 +328,7 @@ The `_service` getter lazily creates `VoiceService` with `localPeerId` and `iceC
 2. If state actually changed, sends `video_state` signal so remote UI updates.
 3. Creates SDP renegotiation offer (guarded by `_renegotiationInProgress`) so remote WebRTC stack picks up the new track. Without renegotiation, `replaceTrack` alone is silently ignored by the receiver.
 
-**`switchCamera()`** -- calls `_service.switchCamera()` (front/back camera swap).
+**`switchCamera()`** -- calls `_service.switchCamera()` (front/back camera swap) and writes the RETURNED facing into `CallState.isFrontCamera` (true = front; default true, reset on call end). VoiceChannelNotifier has the twin (`VoiceChannelState.isFrontCamera`, reset via clearCurrent; also synced from the service getter when the camera turns on). Mobile local previews use it as the mirror flag — mirror ONLY when front-facing (a mirrored back camera reads reversed); remote tiles never mirror. The in-place capturer swap keeps the same track/sender, so NO renegotiation and NO SFrame rebind. Flip buttons: VC route + DM call screen controls (conditional 7th button while the camera is on).
 
 **`setRemoteVolume(volume)`** -- adjusts remote peer's audio volume.
 

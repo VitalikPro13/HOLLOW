@@ -5,6 +5,8 @@ import 'package:flutter/services.dart' show rootBundle;
 import 'package:flutter_local_notifications_platform_interface/flutter_local_notifications_platform_interface.dart'
     show NotificationResponse;
 import 'package:flutter_local_notifications_windows/flutter_local_notifications_windows.dart';
+import 'package:hollow/src/ui/chat/emote_image.dart'
+    show emoteTokensToShortcodes;
 import 'package:local_notifier/local_notifier.dart';
 
 /// Desktop OS-level notifications (Windows / macOS / Linux).
@@ -172,6 +174,9 @@ class DesktopNotificationService {
   }) async {
     await init();
     if (!_initialized) return;
+    // OS toasts can't render emote images — show ':name:' instead of the
+    // raw [e:name:hash] wire token.
+    body = emoteTokensToShortcodes(body);
     if (Platform.isWindows) {
       await _showWindows(
         sourceHash: sourceKey.hashCode & 0x7fffffff,
@@ -197,6 +202,7 @@ class DesktopNotificationService {
   }) async {
     await init();
     if (!_initialized) return;
+    body = emoteTokensToShortcodes(body);
     final key = '$serverId:$channelId';
     if (Platform.isWindows) {
       await _showWindows(

@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io' show Platform;
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
@@ -420,7 +421,10 @@ class _EmojiPickerBodyState extends ConsumerState<EmojiPickerBody> {
                 : 'Search emoji…',
             isDense: true,
             prefixIcon: const Icon(LucideIcons.search, size: 14),
-            autofocus: true,
+            // Desktop only: type-to-search immediately. On mobile the
+            // autofocus summons the software keyboard right over the picker
+            // sheet — search focuses on tap instead.
+            autofocus: !(Platform.isAndroid || Platform.isIOS),
           ),
         ),
         Padding(

@@ -294,7 +294,7 @@ On **Linux**, `_toggleVideoInner` returns early into `_toggleVideoLinux()`, whic
 
 Caller (CallNotifier) triggers SDP renegotiation after toggleVideo returns (a no-op SDP for the Linux pause/resume case — harmless).
 
-`switchCamera()`: Mobile only. Calls `Helper.switchCamera()` on the video track, toggles `_useFrontCamera`.
+`switchCamera()`: Mobile only. Calls `Helper.switchCamera()` on the video track and sets `_useFrontCamera` from its RETURN value (true = front — never blind-toggle; >2-camera devices drift), returns it to the provider (`isFrontCamera` state → preview mirror). In-place capturer swap: same track/sender, so no renegotiation and no SFrame rebind. Both services (DM + VC) share this shape; when no explicit camera device is picked, capture passes `facingMode: _useFrontCamera ? 'user' : 'environment'` so a re-enable reopens on the last-used side.
 
 ### Live Device Switching (2026-07-10)
 

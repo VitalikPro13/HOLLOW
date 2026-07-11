@@ -95,3 +95,36 @@ final emoteTokenRegex = RegExp(r'\[e:([a-z0-9_]{2,24}):([0-9a-f]{64})\]');
   if (m == null || m.end != s.length) return null;
   return (name: m.group(1)!, hash: m.group(2)!);
 }
+
+/// Plain-text form for surfaces that can't render images (OS toasts, push
+/// notification bodies): every `[e:name:hash]` token becomes `:name:`.
+String emoteTokensToShortcodes(String text) =>
+    text.replaceAllMapped(emoteTokenRegex, (m) => ':${m.group(1)}:');
+
+/// Inline spans for one-line message previews (notification cards/banners):
+/// plain text with each emote token swapped for an [EmoteImage] sized to the
+/// line. Chat bubbles use the full message parser instead — this is for
+/// surfaces that would otherwise print the raw token.
+List<InlineSpan> emotePreviewSpans(String text, TextStyle style) {
+  final spans = <InlineSpan>[];
+  var last = 0;
+  for (final m in emoteTokenRegex.allMatches(text)) {
+    if (m.start > last) {
+      spans.add(TextSpan(text: text.substring(last, m.start)));
+    }
+    spans.add(WidgetSpan(
+      alignment: PlaceholderAlignment.middle,
+      child: EmoteImage(
+        name: m.group(1)!,
+        hash: m.group(2)!,
+        size: (style.fontSize ?? 14) * 1.35,
+        fallbackStyle: style,
+      ),
+    ));
+    last = m.end;
+  }
+  if (last < text.length) {
+    spans.add(TextSpan(text: text.substring(last)));
+  }
+  return spans;
+}

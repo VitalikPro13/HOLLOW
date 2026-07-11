@@ -47,6 +47,32 @@ pub(crate) fn valid_reaction_emoji(s: &str) -> bool {
     (!s.is_empty() && s.len() <= 10) || parse_emote_token(s).is_some()
 }
 
+/// Replace every well-formed `[e:name:hash]` token with `:name:` — for
+/// notification surfaces that can only render plain text (iOS NSE push
+/// bodies). Malformed near-tokens pass through untouched.
+pub(crate) fn emote_tokens_to_shortcodes(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find("[e:") {
+        out.push_str(&rest[..start]);
+        let tail = &rest[start..];
+        // "[e:" and "]" are ASCII, so these byte offsets are char boundaries.
+        if let Some(end) = tail.find(']') {
+            if let Some((name, _)) = parse_emote_token(&tail[..=end]) {
+                out.push(':');
+                out.push_str(name);
+                out.push(':');
+                rest = &tail[end + 1..];
+                continue;
+            }
+        }
+        out.push_str("[e:");
+        rest = &tail[3..];
+    }
+    out.push_str(rest);
+    out
+}
+
 fn is_webp(bytes: &[u8]) -> bool {
     bytes.len() > 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP"
 }
@@ -184,4 +210,28 @@ pub(crate) async fn handle_emote_assets(
     let _ = event_tx
         .send(NetworkEvent::EmoteAssetsReceived { hashes: stored })
         .await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::emote_tokens_to_shortcodes;
+
+    #[test]
+    fn emote_tokens_become_shortcodes() {
+        let hash = "a".repeat(64);
+        assert_eq!(
+            emote_tokens_to_shortcodes(&format!("hi [e:ayaya:{hash}] there")),
+            "hi :ayaya: there"
+        );
+        // Multiple tokens, including back-to-back.
+        assert_eq!(
+            emote_tokens_to_shortcodes(&format!("[e:a1:{hash}][e:b_2:{hash}]")),
+            ":a1::b_2:"
+        );
+        // Malformed near-tokens pass through untouched.
+        assert_eq!(emote_tokens_to_shortcodes("[e:bad"), "[e:bad");
+        assert_eq!(emote_tokens_to_shortcodes("[e:x:nothex]"), "[e:x:nothex]");
+        // Plain text untouched.
+        assert_eq!(emote_tokens_to_shortcodes("no emotes"), "no emotes");
+    }
 }

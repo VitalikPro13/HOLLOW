@@ -89,6 +89,10 @@ class VoiceChannelState {
   /// Whether the local user's camera is on.
   final bool isCameraOn;
 
+  /// Local camera facing (true = front). Local previews mirror only the
+  /// front camera — a mirrored back camera shows text reversed.
+  final bool isFrontCamera;
+
   /// Remote peers with camera on (peer_id -> true).
   final Map<String, bool> peerCameraOn;
 
@@ -114,6 +118,7 @@ class VoiceChannelState {
     this.focusedScreenSharePeerId,
     this.focusedSourceType = 'screen',
     this.isCameraOn = false,
+    this.isFrontCamera = true,
     this.peerCameraOn = const {},
     this.isSpeakerOn = false,
   });
@@ -166,6 +171,7 @@ class VoiceChannelState {
     bool clearCurrent = false,
     String? focusedSourceType,
     bool? isCameraOn,
+    bool? isFrontCamera,
     Map<String, bool>? peerCameraOn,
     bool? isSpeakerOn,
   }) {
@@ -215,6 +221,9 @@ class VoiceChannelState {
       isCameraOn: clearCurrent
           ? false
           : (isCameraOn ?? this.isCameraOn),
+      isFrontCamera: clearCurrent
+          ? true
+          : (isFrontCamera ?? this.isFrontCamera),
       peerCameraOn: clearCurrent
           ? const {}
           : (peerCameraOn ?? this.peerCameraOn),
@@ -943,7 +952,10 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       await _localCameraRenderer!.initialize();
       _localCameraRenderer!.srcObject = stream;
 
-      state = state.copyWith(isCameraOn: true);
+      state = state.copyWith(
+        isCameraOn: true,
+        isFrontCamera: _service!.useFrontCamera,
+      );
       _broadcastCameraState(true);
     } else {
       // Turn camera OFF.
@@ -964,7 +976,8 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
   /// Switch between front and back camera (mobile).
   Future<void> switchCamera() async {
     if (_service == null || !state.isCameraOn || _leaving) return;
-    await _service!.switchCamera();
+    final front = await _service!.switchCamera();
+    state = state.copyWith(isFrontCamera: front);
   }
 
   /// Broadcast our camera state to all peers in the current voice channel.

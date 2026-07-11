@@ -67,6 +67,14 @@ Offline-only holder → token renders as `:name:` text until they return.
 
 Tests: `test/emote_composer_test.dart` (expansion, placeholder mapping, trigger rules, acceptance).
 
+## Notification Previews (2026-07-11)
+
+Every notification surface must run message text through one of two `emote_image.dart` helpers — never print raw text (tokens show as `[e:name:<64-hex>]` garbage):
+- **In-app (renders images):** `emotePreviewSpans(text, style)` → `TextSpan` pieces + `WidgetSpan(EmoteImage)` sized to the line. Used by desktop `NotificationOverlay._MessageRow` + `MobileInChatBanner`, each wrapped in `EmoteScope(serverId: card.serverId, peerHint: card.peerId)` — the message is from a chat the user does NOT have open, so bytes are usually uncached; shows `:name:` and flips to the image when the pull lands.
+- **Plain text (OS toasts / push):** `emoteTokensToShortcodes(text)` → `:name:`. Choke points: `DesktopNotificationService.showDm/showChannel`; mobile `_showNotification`/`_showChannelNotification` in push_notification_service (covers lifecycle-background + FCM fetch paths). iOS killed-state NSE bodies come from Rust: `node/emotes.rs::emote_tokens_to_shortcodes` (manual scanner over `parse_emote_token`, unit-tested) applied in `push_enrich.rs` where the NSE JSON is built.
+
+**Picker keyboard (mobile):** the search field's autofocus is DESKTOP-ONLY (`autofocus: !(Platform.isAndroid || Platform.isIOS)`) — on mobile it summoned the software keyboard over the sheet (and defeated the composer's pre-open `unfocus()` in `_showEmojiSheet`). Search focuses on tap.
+
 ## Known Follow-ups
 
 Stickers (same stack, bigger caps, standalone render); personal-emote sibling sync.
