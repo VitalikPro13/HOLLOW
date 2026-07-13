@@ -536,6 +536,9 @@ async fn run_event_loop(
     // Track the current voice mode per channel: true = gossip, false = mesh.
     let mut voice_channel_gossip_mode: HashMap<String, bool> = HashMap::new();
 
+    // -- Conference host state (active meetings we host; node/conference.rs) --
+    let mut conference_host: HashMap<String, super::conference::ConferenceHostState> = HashMap::new();
+
     // -- WS stream transfer reassembly state (Phase 5.5) --
     let mut pending_ws_transfers: HashMap<String, super::ws_stream_transfer::WsTransferState> = HashMap::new();
 
@@ -2028,6 +2031,70 @@ async fn run_event_loop(
                         ).await;
                     }
 
+                    // -- Conference commands (node/conference.rs) --
+                    NodeCommand::ConferenceStart { conf_id, waiting_room, access_code_hash, host_display_name, host_avatar_hash } => {
+                        super::conference::handle_conference_start(
+                            &mut conference_host, &mut mls, &crypto_store, &ws_cmd_tx,
+                            &mut voice_channel_participants, &mut voice_channel_gossip_mode,
+                            conf_id, waiting_room, access_code_hash,
+                            host_display_name, host_avatar_hash,
+                        );
+                    }
+
+                    NodeCommand::ConferenceEnd { conf_id } => {
+                        super::conference::handle_conference_end(
+                            &mut conference_host, &mut mls, &crypto_store, &ws_cmd_tx,
+                            &mut voice_channel_participants, &mut voice_channel_gossip_mode,
+                            &conf_id,
+                        );
+                    }
+
+                    NodeCommand::ConferenceRequestJoin { conf_id, display_name, avatar_hash, access_code } => {
+                        super::conference::handle_conference_request_join(
+                            &mut mls, &ws_cmd_tx,
+                            conf_id, display_name, avatar_hash, access_code,
+                        );
+                    }
+
+                    NodeCommand::ConferenceAdmit { conf_id, peer_id } => {
+                        super::conference::handle_conference_admit(
+                            &mut conference_host, &mut mls, &crypto_store,
+                            &ws_cmd_tx, &event_tx,
+                            &conf_id, &peer_id,
+                        ).await;
+                    }
+
+                    NodeCommand::ConferenceDeny { conf_id, peer_id, reason } => {
+                        super::conference::handle_conference_deny(
+                            &mut conference_host, &ws_cmd_tx,
+                            &conf_id, &peer_id, reason,
+                        );
+                    }
+
+                    NodeCommand::ConferenceKick { conf_id, peer_id } => {
+                        super::conference::handle_conference_kick(
+                            &mut conference_host, &mut mls, &crypto_store,
+                            &ws_cmd_tx, &event_tx,
+                            &conf_id, &peer_id,
+                        ).await;
+                    }
+
+                    NodeCommand::ConferenceLeave { conf_id } => {
+                        super::conference::handle_conference_leave(
+                            &ws_cmd_tx,
+                            &mut voice_channel_participants, &mut voice_channel_gossip_mode,
+                            &conf_id,
+                        );
+                    }
+
+                    NodeCommand::ConferenceSendChat { conf_id, text, timestamp } => {
+                        last_message_traffic = std::time::Instant::now();
+                        super::conference::handle_conference_send_chat(
+                            &mut mls, &crypto_store, &ws_cmd_tx,
+                            &conf_id, text, timestamp,
+                        );
+                    }
+
                     // -- Server join timeout --
                     NodeCommand::CheckPendingJoinTimeout { server_id } => {
                         sync_handler::handle_check_pending_join_timeout(
@@ -2092,6 +2159,7 @@ async fn run_event_loop(
                                 &mut gossip_overlays,
                                 &mut voice_channel_participants,
                                 &mut voice_channel_gossip_mode,
+                                &mut conference_host,
                                 &mut vc_signal_rate_tokens,
                                 &mut mls_dirty,
                                 &guest_rooms,
@@ -2341,6 +2409,12 @@ async fn run_event_loop(
                             participants.retain(|p| *p == local_str);
                         }
                         voice_channel_participants.retain(|_, p| !p.is_empty());
+                        // Conference waiting rooms: knockers from the old socket can't
+                        // receive a Welcome anymore — they re-knock on reconnect. Host
+                        // meeting state itself survives (the conf room auto-rejoins).
+                        for host_state in conference_host.values_mut() {
+                            host_state.pending.clear();
+                        }
                         voice_channel_gossip_mode.clear();
                         for overlay in gossip_overlays.values_mut() {
                             overlay.known_peers.clear();
@@ -2352,6 +2426,11 @@ async fn run_event_loop(
                     WsEvent::PeerJoined { room, peer_id } => {
                         hollow_log!("[HOLLOW-WS] Peer {peer_id} joined room {room}");
                         ws_room_peers.entry(room.clone()).or_default().insert(peer_id.clone());
+
+                        // Conference: a peer appearing in a room we're still
+                        // knocking on may be the HOST starting the meeting —
+                        // re-send our join request (throttled, fresh KP).
+                        super::conference::reknock_if_pending(&mut mls, &ws_cmd_tx, &room);
 
                         // Recovery pool: when a peer joins our recovery room, send them our inventory.
                         if room.starts_with("recovery:") {
@@ -2778,6 +2857,16 @@ async fn run_event_loop(
                             super::share_handler::forget_peer(&mut share_registry, &peer_id);
                         }
 
+                        // Conference waiting room: a knocker who left is no
+                        // longer admittable (their Welcome would go nowhere).
+                        super::conference::handle_peer_left_room(&mut conference_host, &room, &peer_id);
+                        // Conference call roster: room presence is a prereq
+                        // for call presence — drop the tile live.
+                        super::conference::handle_conf_room_peer_gone(
+                            &mut voice_channel_participants, &mut voice_channel_gossip_mode,
+                            &event_tx, &room, &peer_id,
+                        ).await;
+
                         // Recovery pool: track member departure.
                         if room.starts_with("recovery:") {
                             if let Some(pool) = recovery_pool_state.as_mut() {
@@ -2891,8 +2980,25 @@ async fn run_event_loop(
                         let vanished: Vec<String> = ws_room_peers.get(&room)
                             .map(|old| old.difference(&room_set).cloned().collect())
                             .unwrap_or_default();
+
+                        // Conference waiting room: sweep pending knockers
+                        // against the authoritative snapshot (missed PeerLeft).
+                        super::conference::retain_pending_in_room(&mut conference_host, &room, &room_set);
+                        // Joiner side: peers already present when we (re)join a
+                        // conf room we're knocking on — covers reconnects and
+                        // "host already there" without waiting for a PeerJoined.
+                        if !room_set.is_empty() {
+                            super::conference::reknock_if_pending(&mut mls, &ws_cmd_tx, &room);
+                        }
                         ws_room_peers.insert(room.clone(), room_set);
                         for gone in vanished {
+                            // Conference call roster: gone from the conf room
+                            // (per the authoritative snapshot) = gone from the
+                            // call, even if they still share other rooms.
+                            super::conference::handle_conf_room_peer_gone(
+                                &mut voice_channel_participants, &mut voice_channel_gossip_mode,
+                                &event_tx, &room, &gone,
+                            ).await;
                             let still_ws = ws_room_peers.values().any(|ps| ps.contains(&gone));
                             if !still_ws {
                                 hollow_log!("[HOLLOW-WS] Stale peer {gone} purged via RoomMembers refresh of {room} — emitting disconnect");
@@ -3811,6 +3917,7 @@ async fn run_event_loop(
                                         &mut gossip_overlays,
                                         &mut voice_channel_participants,
                                         &mut voice_channel_gossip_mode,
+                                        &mut conference_host,
                                         &mut vc_signal_rate_tokens,
                                         &mut mls_dirty,
                                         &guest_rooms,
@@ -4847,6 +4954,7 @@ async fn handle_incoming_request(
     gossip_overlays: &mut HashMap<String, super::gossip::GossipOverlay>,
     voice_channel_participants: &mut HashMap<String, std::collections::HashSet<String>>,
     voice_channel_gossip_mode: &mut HashMap<String, bool>,
+    conference_host: &mut HashMap<String, super::conference::ConferenceHostState>,
     vc_signal_rate_tokens: &mut HashMap<String, (u32, std::time::Instant)>,
     mls_dirty: &mut bool,
     guest_rooms: &std::collections::HashSet<String>,
@@ -9332,7 +9440,7 @@ async fn handle_incoming_request(
                                 voice_handler::handle_envelope_voice_channel_join(
                                     server_states, voice_channel_participants,
                                     voice_channel_gossip_mode, gossip_overlays,
-                                    event_tx, local_peer_str, peer_str.to_string(), sid, cid,
+                                    ws_cmd_tx, event_tx, local_peer_str, peer_str.to_string(), sid, cid,
                                 ).await;
                             }
                             MessageEnvelope::VoiceChannelLeave { sid, cid } => {
@@ -9773,6 +9881,15 @@ async fn handle_incoming_request(
                         mls_bootstrap_requested.remove(&group_key);
                         mls_decrypt_failures.remove(&group_key);
                         hollow_log!("[HOLLOW-MLS] Joined MLS group {group_key}");
+
+                        // Conference Welcome = we were ADMITTED (waiting room
+                        // opened). Dart leaves the lobby and joins the call.
+                        if let Some(conf_id) = super::conference::conf_id_from_sid(&server_id) {
+                            super::conference::clear_pending_knock(conf_id);
+                            let _ = event_tx.send(NetworkEvent::ConferenceAdmitted {
+                                conf_id: conf_id.to_string(),
+                            }).await;
+                        }
 
                         // Emit the SFrame key for this group — if we joined a
                         // restricted VOICE channel's subgroup (e.g. via VC-join
@@ -11074,6 +11191,47 @@ async fn handle_incoming_request(
             }).await;
         }
 
+        // -- Conferences (node/conference.rs; reports/CONFERENCES_PLAN.md) --
+        HavenMessage::ConferenceJoinRequest { conf_id, display_name, avatar_hash, key_package, access_hash } => {
+            // Blocklist + access-code gating live inside the handler (host-only).
+            super::conference::handle_inbound_join_request(
+                conference_host, mls, crypto_store, ws_cmd_tx, event_tx,
+                peer_str, local_peer_str,
+                conf_id, display_name, avatar_hash, key_package, access_hash,
+            ).await;
+        }
+        HavenMessage::ConferenceJoinDenied { conf_id, reason } => {
+            super::conference::clear_pending_knock(&conf_id);
+            let _ = event_tx.send(NetworkEvent::ConferenceJoinDenied { conf_id, reason }).await;
+        }
+        HavenMessage::ConferenceLobbyInfo { conf_id, host_name, host_avatar_hash } => {
+            let _ = event_tx.send(NetworkEvent::ConferenceLobbyInfo {
+                conf_id, host_peer_id: peer_str.to_string(), host_name, host_avatar_hash,
+            }).await;
+        }
+        HavenMessage::ConferenceChat { conf_id, body } => {
+            super::conference::handle_inbound_chat(
+                mls, crypto_store, event_tx, peer_str, conf_id, body,
+            ).await;
+        }
+        HavenMessage::ConferenceEnded { conf_id } => {
+            // Anyone in the room could send this; Dart validates by_peer_id
+            // against the host it learned from LobbyInfo/meeting start.
+            super::conference::clear_pending_knock(&conf_id);
+            let _ = event_tx.send(NetworkEvent::ConferenceEnded {
+                conf_id, by_peer_id: peer_str.to_string(),
+            }).await;
+        }
+        HavenMessage::ConferenceKicked { conf_id } => {
+            // The MLS remove already cut us off; this is the courtesy signal.
+            // Dart validates by_peer_id against the known host before tearing
+            // down (a random member can't fake-kick us out of the UI).
+            super::conference::clear_pending_knock(&conf_id);
+            let _ = event_tx.send(NetworkEvent::ConferenceKicked {
+                conf_id, by_peer_id: peer_str.to_string(),
+            }).await;
+        }
+
         // -- Voice call signaling (Phase 5B) --
         HavenMessage::CallInvite { call_id, video, sframe_key } => {
             // BLOCK GUARD: a blocked identity can't ring us. Dropping the
@@ -11344,13 +11502,30 @@ async fn handle_incoming_request(
 
         HavenMessage::VoiceChannelJoin { server_id, channel_id } => {
             if peer_str == local_peer_str { return; }
-            let is_member = server_states.get(&server_id)
-                .map(|s| s.is_member(peer_str))
-                .unwrap_or(false);
-            let is_voice_channel = server_states.get(&server_id)
-                .and_then(|s| s.channels.get(&channel_id))
-                .map(|ch| ch.channel_type == crate::crdt::server_state::ChannelType::Voice)
-                .unwrap_or(false);
+            // Conferences have no CRDT membership — the equivalent check is
+            // MLS group membership (leaf credentials ARE device ids), which
+            // only an ADMITTED peer can hold. This is what lets the existing
+            // PeerJoined re-broadcast + the conference reply-on-join sync
+            // reach late joiners (their plaintext copies otherwise hit the
+            // server guard below and a new member never sees who's already
+            // in the call).
+            let is_conf = super::conference::is_conference_sid(&server_id);
+            let is_member = if is_conf {
+                mls.as_ref().is_some_and(|m|
+                    m.group_members(&server_id).iter().any(|c| c == peer_str))
+            } else {
+                server_states.get(&server_id)
+                    .map(|s| s.is_member(peer_str))
+                    .unwrap_or(false)
+            };
+            let is_voice_channel = if is_conf {
+                channel_id == super::conference::CONF_CHANNEL
+            } else {
+                server_states.get(&server_id)
+                    .and_then(|s| s.channels.get(&channel_id))
+                    .map(|ch| ch.channel_type == crate::crdt::server_state::ChannelType::Voice)
+                    .unwrap_or(false)
+            };
             if !is_member {
                 hollow_log!("[HOLLOW-SECURITY] BLOCKED plaintext VoiceChannelJoin from non-member {peer_str} in server {server_id}");
             } else if !is_voice_channel {

@@ -389,6 +389,23 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     state = state.copyWith(participants: updated, peerAudioStates: audioStates);
   }
 
+  /// Drop every REMOTE participant tracked under [serverId] (all channels).
+  /// Conferences call this on meeting start/end/leave: a previous meeting's
+  /// members linger otherwise — their VoiceChannelLeave broadcast raced the
+  /// host's room-leave/group-drop and never arrived, and restarting reuses
+  /// the same `conf:x:main` key.
+  void clearServerParticipants(String serverId) {
+    if (!state.participants.containsKey(serverId)) return;
+    final removed = state.participants[serverId]?.values
+            .expand((peers) => peers)
+            .toSet() ??
+        const <String>{};
+    final updated = _deepCopyParticipants()..remove(serverId);
+    final audioStates = Map.of(state.peerAudioStates)
+      ..removeWhere((peerId, _) => removed.contains(peerId));
+    state = state.copyWith(participants: updated, peerAudioStates: audioStates);
+  }
+
   /// Join a voice channel. If already in one, leave it first.
   Future<void> joinChannel(String serverId, String channelId) async {
     // Block if in a 1:1 call.

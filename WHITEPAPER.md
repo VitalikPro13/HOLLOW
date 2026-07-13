@@ -395,6 +395,16 @@ Server-context operations that target a specific peer — shard requests/respons
 
 After a WebSocket reconnection, a peer's MLS epoch may be stale. Messages that must work immediately after reconnection — sync requests, shard coordination, voice channel state changes — are sent as plaintext `HavenMessage` envelopes. This is a deliberate design choice: these messages are idempotent probes that carry no sensitive content.
 
+### 5.7 Conferences (Ad-Hoc MLS Groups)
+
+Conferences are meetings between peers who may share no server and no prior relationship. A conference is a *virtual server*: a single identifier (`conf:` followed by a random 128-bit value carried only in URL fragments, never in server-visible paths) serves as the relay room code, the MLS group key, and the voice-channel context. Because conferences have no CRDT state, none of the server synchronization machinery applies to them.
+
+**Admission is the cryptography.** The host of a meeting creates a fresh MLS group per session — attendees of a past meeting cannot decrypt a future one. A prospective joiner enters the relay room and broadcasts a join request carrying a fresh KeyPackage, a display name, an avatar *hash* (never image bytes), and optionally a salted hash of an access code. Until the host commits an MLS `add` for that KeyPackage, the joiner observes only ciphertext: the waiting room is not a UI convention but a key-distribution boundary. Removal from a meeting is an MLS `remove` commit — the SFrame media key rotates away from the removed member before any user-interface teardown occurs.
+
+Membership checks for conference voice signaling substitute the missing CRDT membership test with an MLS one: a plaintext voice-channel announcement is accepted only if its sender's device identifier appears in the conference group's leaf credential set, which only an admitted member can achieve.
+
+**Conference chat is ephemeral by construction.** Chat lines are MLS application messages attributed by the authenticated leaf credential (not the transport sender, which is unauthenticated framing). They are never written to the local database, never enter relay availability buffers, and receiving nodes drop any attempt to route persistent channel-message envelopes under a conference identifier. When the meeting ends, the group is discarded and no record of the conversation exists anywhere.
+
 ---
 
 ## 6. Voice, Video, and Screen Share Encryption (SFrame)

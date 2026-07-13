@@ -25,6 +25,7 @@ import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
 import 'package:hollow/src/core/providers/archive_provider.dart';
+import 'package:hollow/src/core/providers/conference_provider.dart';
 import 'package:hollow/src/core/providers/share_tab_provider.dart';
 import 'package:hollow/src/ui/components/download_icon_button.dart';
 import 'package:hollow/src/ui/components/server_folder_popup.dart';
@@ -411,6 +412,7 @@ class _BottomBarState extends ConsumerState<BottomBar> {
     ref.read(guestTabOpenProvider.notifier).state = false;
     ref.read(archiveTabOpenProvider.notifier).state = false;
     ref.read(shareTabOpenProvider.notifier).state = false;
+    ref.read(conferenceTabOpenProvider.notifier).state = false;
     ref.read(selectedServerProvider.notifier).state = null;
     ref.read(channelListProvider.notifier).clear();
     ref.read(selectedChannelProvider.notifier).state = null;
@@ -426,6 +428,7 @@ class _BottomBarState extends ConsumerState<BottomBar> {
     ref.read(shareTabOpenProvider.notifier).state = true;
     ref.read(guestTabOpenProvider.notifier).state = false;
     ref.read(archiveTabOpenProvider.notifier).state = false;
+    ref.read(conferenceTabOpenProvider.notifier).state = false;
     ref.read(selectedServerProvider.notifier).state = null;
     ref.read(channelListProvider.notifier).clear();
     ref.read(selectedChannelProvider.notifier).state = null;
@@ -445,6 +448,7 @@ class _BottomBarState extends ConsumerState<BottomBar> {
     ref.read(archiveTabOpenProvider.notifier).state = true;
     ref.read(guestTabOpenProvider.notifier).state = false;
     ref.read(shareTabOpenProvider.notifier).state = false;
+    ref.read(conferenceTabOpenProvider.notifier).state = false;
     ref.read(selectedServerProvider.notifier).state = null;
     ref.read(channelListProvider.notifier).clear();
     ref.read(selectedChannelProvider.notifier).state = null;
@@ -460,6 +464,7 @@ class _BottomBarState extends ConsumerState<BottomBar> {
     ref.read(guestTabOpenProvider.notifier).state = true;
     ref.read(shareTabOpenProvider.notifier).state = false;
     ref.read(archiveTabOpenProvider.notifier).state = false;
+    ref.read(conferenceTabOpenProvider.notifier).state = false;
     ref.read(selectedServerProvider.notifier).state = null;
     ref.read(channelListProvider.notifier).clear();
     ref.read(selectedChannelProvider.notifier).state = null;

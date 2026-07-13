@@ -189,6 +189,22 @@ pub(crate) enum NetworkEvent {
     /// Multi-device (Phase 6): a sibling device sent us our identity's friend
     /// list and we inserted `count` new friend rows. Dart reloads `friendsProvider`.
     FriendsBackfilled { count: u32 },
+    // -- Conference events (see node/conference.rs + reports/CONFERENCES_PLAN.md) --
+    /// (Host) a stranger is at the door — waiting-room panel entry. Blocklist
+    /// already applied at ingest; `avatar_hash` is a hash, never blob bytes.
+    ConferenceJoinRequestReceived { conf_id: String, peer_id: String, display_name: String, avatar_hash: String },
+    /// (Joiner) the host declined us / wrong access code / meeting gone.
+    ConferenceJoinDenied { conf_id: String, reason: String },
+    /// (Joiner) lobby banner: whose meeting we're waiting for.
+    ConferenceLobbyInfo { conf_id: String, host_peer_id: String, host_name: String, host_avatar_hash: String },
+    /// (Joiner) our MLS Welcome for the conf group landed — we're in.
+    ConferenceAdmitted { conf_id: String },
+    /// RAM-only conference chat line (never persisted, no unread machinery).
+    ConferenceChatMessage { conf_id: String, sender_peer_id: String, text: String, timestamp: i64 },
+    /// The meeting ended. Dart validates `by_peer_id` against the known host.
+    ConferenceEnded { conf_id: String, by_peer_id: String },
+    /// (Member) we were removed from the meeting by the host.
+    ConferenceKicked { conf_id: String, by_peer_id: String },
     // -- Temporary nickname events --
     NicknameClaimed { nickname: String },
     NicknameReleased,
@@ -719,6 +735,15 @@ pub(crate) enum NodeCommand {
     VoiceChannelJoin { server_id: String, channel_id: String },
     VoiceChannelLeave { server_id: String, channel_id: String },
     VoiceChannelSendSignal { server_id: String, channel_id: String, peer_id: String, signal_type: String, payload: String },
+    // -- Conference commands (node/conference.rs) --
+    ConferenceStart { conf_id: String, waiting_room: bool, access_code_hash: Option<String>, host_display_name: String, host_avatar_hash: String },
+    ConferenceEnd { conf_id: String },
+    ConferenceRequestJoin { conf_id: String, display_name: String, avatar_hash: String, access_code: Option<String> },
+    ConferenceAdmit { conf_id: String, peer_id: String },
+    ConferenceDeny { conf_id: String, peer_id: String, reason: String },
+    ConferenceKick { conf_id: String, peer_id: String },
+    ConferenceLeave { conf_id: String },
+    ConferenceSendChat { conf_id: String, text: String, timestamp: i64 },
     StoreShardOnPeer {
         server_id: String,
         content_id: String,
@@ -1003,6 +1028,60 @@ pub(crate) enum HavenMessage {
         server_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         channel_id: Option<String>,
+    },
+
+    // -- Conferences (node/conference.rs; reports/CONFERENCES_PLAN.md) --
+
+    /// Joiner → conf room broadcast: knock on the door. Carries a fresh MLS
+    /// KeyPackage so admission is a single host-side commit. `avatar_hash` is
+    /// a HASH (stranger surface = light announce, never blobs); `access_hash`
+    /// is `derive_access_hash(conf_id, code)` or empty.
+    #[serde(rename = "conf_join_req")]
+    ConferenceJoinRequest {
+        conf_id: String,
+        display_name: String,
+        #[serde(default)]
+        avatar_hash: String,
+        key_package: String,
+        #[serde(default)]
+        access_hash: String,
+    },
+
+    /// Host → joiner: not getting in (wrong_code / declined / ended).
+    #[serde(rename = "conf_join_denied")]
+    ConferenceJoinDenied {
+        conf_id: String,
+        reason: String,
+    },
+
+    /// Host → joiner: lobby banner ("waiting for X's meeting").
+    #[serde(rename = "conf_lobby")]
+    ConferenceLobbyInfo {
+        conf_id: String,
+        host_name: String,
+        #[serde(default)]
+        host_avatar_hash: String,
+    },
+
+    /// MLS-encrypted conference chat line — RAM-only on both ends, decrypted
+    /// under the `conf:{id}` group; NEVER persisted or ring-buffered.
+    #[serde(rename = "conf_chat")]
+    ConferenceChat {
+        conf_id: String,
+        body: String,
+    },
+
+    /// Host → conf room: the meeting is over.
+    #[serde(rename = "conf_ended")]
+    ConferenceEnded {
+        conf_id: String,
+    },
+
+    /// Host → kicked member: you were removed (the MLS remove commit already
+    /// cut them off cryptographically — this is the courtesy teardown signal).
+    #[serde(rename = "conf_kicked")]
+    ConferenceKicked {
+        conf_id: String,
     },
 
     // -- Profile sync (Phase 3.5) --

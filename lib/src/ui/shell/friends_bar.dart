@@ -1,6 +1,7 @@
 ﻿import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/archive_provider.dart';
+import 'package:hollow/src/core/providers/conference_provider.dart';
 import 'package:hollow/src/core/providers/guest_provider.dart';
 import 'package:hollow/src/core/providers/share_tab_provider.dart';
 import 'package:hollow/src/core/providers/favourite_friends_provider.dart';
@@ -199,6 +200,32 @@ class FriendsBar extends ConsumerWidget {
           }),
           const SizedBox(width: HollowSpacing.xs),
 
+          // Conferences button — opens the Conferences center tab.
+          Builder(builder: (context) {
+            final conferencesOpen = ref.watch(conferenceTabOpenProvider);
+            return HollowTooltip(
+              message: 'Conferences',
+              child: HollowPressable(
+                semanticLabel: 'Conferences',
+                onTap: () =>
+                    ref.read(conferenceProvider.notifier).openTab(),
+                borderRadius: BorderRadius.circular(hollow.radiusSm),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: HollowSpacing.sm,
+                  vertical: HollowSpacing.xs,
+                ),
+                child: Icon(
+                  LucideIcons.video,
+                  size: 18,
+                  color: conferencesOpen
+                      ? hollow.accent
+                      : hollow.textSecondary,
+                ),
+              ),
+            );
+          }),
+          const SizedBox(width: HollowSpacing.xs),
+
           // Help button (right side — symmetric with Add Friend on the left)
           Builder(builder: (context) {
             final helpOpen = ref.watch(helpPanelOpenProvider);
@@ -237,6 +264,7 @@ class FriendsBar extends ConsumerWidget {
       ref.read(guestTabOpenProvider.notifier).state = false;
       ref.read(archiveTabOpenProvider.notifier).state = false;
       ref.read(shareTabOpenProvider.notifier).state = false;
+      ref.read(conferenceTabOpenProvider.notifier).state = false;
       ref.read(selectedPeerProvider.notifier).state = peerId;
       ref.read(selectedServerProvider.notifier).state = null;
       ref.read(channelListProvider.notifier).clear();

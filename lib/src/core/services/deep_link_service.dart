@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:app_links/app_links.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/providers/conference_provider.dart';
 import 'package:hollow/src/core/providers/room_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
@@ -16,6 +17,8 @@ import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/dialogs/recovery_pool_dialog.dart';
+import 'package:hollow/src/ui/mobile/mobile_conferences_route.dart';
+import 'package:hollow/src/ui/mobile/mobile_page_route.dart';
 import 'package:hollow/src/ui/share/paste_link_dialog.dart';
 
 /// Receives hollow:// deep links from the OS (browser clicks, other apps) on
@@ -126,6 +129,8 @@ class DeepLinkService {
         );
       case HollowLinkType.recovery:
         showJoinRecoveryPoolDialog(context, prefillLink: link.fullUrl);
+      case HollowLinkType.conference:
+        await _confirmJoinConference(context, link);
     }
   }
 
@@ -151,6 +156,34 @@ class DeepLinkService {
     } catch (e) {
       _toast('Failed to join server: $e', HollowToastType.error);
     }
+  }
+
+  Future<void> _confirmJoinConference(
+      BuildContext context, HollowLink link) async {
+    final confirmed = await _confirmDialog(
+      context,
+      title: 'Join Conference?',
+      body: 'You opened a conference invite link. Ask to join this meeting?',
+      detail: link.id,
+      confirmLabel: 'Join',
+    );
+    if (confirmed != true) return;
+
+    final container = _container;
+    if (container == null) return;
+    if (Platform.isAndroid || Platform.isIOS) {
+      // Mobile: the lobby lives in the Conferences screen — push it first.
+      hollowNavigatorKey.currentState?.push(hollowMobileRoute(
+        builder: (_) => const MobileConferencesRoute(),
+      ));
+    } else {
+      // Desktop: show the lobby in the Conferences center tab.
+      container.read(conferenceProvider.notifier).openTab();
+    }
+    unawaited(container
+        .read(conferenceProvider.notifier)
+        .requestJoin(link.id)
+        .catchError((_) {}));
   }
 
   Future<void> _confirmJoinRoom(BuildContext context, HollowLink link) async {

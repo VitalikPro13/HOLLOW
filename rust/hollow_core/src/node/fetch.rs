@@ -379,6 +379,11 @@ fn try_process_channel_msg(
                     let ChannelMessagePayload {
                         sid, cid, text, ts, sig, pk, mid, reply_to, file_id, ..
                     } = *inner;
+                    // Conference chat is live-only — it must never be persisted
+                    // by a push-fetch either (mirrors the live-ingest guard).
+                    if crate::node::conference::is_conference_sid(&sid) {
+                        return None;
+                    }
                     // The MLS leaf credential is the sender's DEVICE id, but the
                     // message is signed by — and attributed to — the MASTER. Resolve
                     // so the fetched row is master-keyed, mirroring the live MLS

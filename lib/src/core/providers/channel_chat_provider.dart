@@ -7,6 +7,7 @@ import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/service_providers.dart';
 import 'package:hollow/src/core/providers/file_transfer_provider.dart';
 import 'package:hollow/src/core/providers/peers_provider.dart';
+import 'package:hollow/src/rust/api/conference.dart' as conference_api;
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 
@@ -23,6 +24,30 @@ class ChannelChatNotifier
       {String? replyToMid, network_api.LinkPreviewRef? linkPreview}) async {
     final networkService = ref.read(networkServiceProvider);
     final localPeerId = ref.read(identityProvider).peerId ?? 'unknown';
+
+    // Conference chat ('conf:<id>' virtual servers) is RAM-ONLY: it rides the
+    // conference MLS pipeline, never the channel send path (which persists to
+    // SQLCipher and fans through channel machinery). Same pane, different
+    // backend — the message id is derived from the Rust Lamport stamp so an
+    // improbable relay echo dedups by message_id like everything else.
+    if (serverId.startsWith('conf:')) {
+      final confId = serverId.substring('conf:'.length);
+      final ts = await conference_api.conferenceSendChat(
+          confId: confId, text: text);
+      _addMessage(
+        serverId,
+        channelId,
+        ChannelChatMessage(
+          senderId: localPeerId,
+          text: text,
+          isMe: true,
+          timestamp: DateTime.fromMillisecondsSinceEpoch(ts.toInt()),
+          messageId: 'conf-$localPeerId-$ts',
+        ),
+      );
+      return;
+    }
+
     final messageId = generateMessageId();
 
     // Rust will generate the timestamp and persist to DB.
@@ -262,6 +287,9 @@ class ChannelChatNotifier
   /// Load history for a channel from SQLCipher.
   /// Also requests a background sync from connected peers.
   Future<void> loadHistory(String serverId, String channelId) async {
+    // Conference chat is RAM-only: nothing in the DB, no sync to request —
+    // whatever is in memory IS the meeting's chat.
+    if (serverId.startsWith('conf:')) return;
     // Always request sync from connected peers when opening a channel.
     // New messages arrive via MessageSyncCompleted → cache clear → reload.
     // .catchError, not try/catch: fire-and-forget — an async rejection (e.g.

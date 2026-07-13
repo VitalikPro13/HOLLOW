@@ -29,11 +29,17 @@ class VoiceChannelPane extends ConsumerStatefulWidget {
   final String channelId;
   final String channelName;
 
+  /// Hide the floating bottom controls pill. The conference surface embeds
+  /// this pane with its own STATIC controls bar below (the pill's Disconnect
+  /// tears down only the voice leg, stranding the meeting state).
+  final bool hideControlsPill;
+
   const VoiceChannelPane({
     super.key,
     required this.serverId,
     required this.channelId,
     required this.channelName,
+    this.hideControlsPill = false,
   });
 
   @override
@@ -223,26 +229,27 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
           ),
 
           // Layer 2 (bottom center): floating controls pill
-          Positioned(
-            bottom: HollowSpacing.lg,
-            left: 0,
-            right: 0,
-            child: AnimatedOpacity(
-              opacity: _overlaysVisible ? 1.0 : 0.0,
-              duration: HollowDurations.normal,
-              child: IgnorePointer(
-                ignoring: !_overlaysVisible,
-                child: Center(
-                  child: _VoiceControlsPill(
-                    serverId: widget.serverId,
-                    channelId: widget.channelId,
-                    onHoverEnter: _pinOverlays,
-                    onHoverExit: _resetOverlayTimer,
+          if (!widget.hideControlsPill)
+            Positioned(
+              bottom: HollowSpacing.lg,
+              left: 0,
+              right: 0,
+              child: AnimatedOpacity(
+                opacity: _overlaysVisible ? 1.0 : 0.0,
+                duration: HollowDurations.normal,
+                child: IgnorePointer(
+                  ignoring: !_overlaysVisible,
+                  child: Center(
+                    child: _VoiceControlsPill(
+                      serverId: widget.serverId,
+                      channelId: widget.channelId,
+                      onHoverEnter: _pinOverlays,
+                      onHoverExit: _resetOverlayTimer,
+                    ),
                   ),
                 ),
               ),
             ),
-          ),
         ],
       ),
     );
@@ -715,26 +722,27 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
           ),
 
           // Layer 3 (bottom center): floating controls pill
-          Positioned(
-            bottom: HollowSpacing.lg,
-            left: 0,
-            right: 0,
-            child: AnimatedOpacity(
-              opacity: _overlaysVisible ? 1.0 : 0.0,
-              duration: HollowDurations.normal,
-              child: IgnorePointer(
-                ignoring: !_overlaysVisible,
-                child: Center(
-                  child: _VoiceControlsPill(
-                    serverId: widget.serverId,
-                    channelId: widget.channelId,
-                    onHoverEnter: _pinOverlays,
-                    onHoverExit: _resetOverlayTimer,
+          if (!widget.hideControlsPill)
+            Positioned(
+              bottom: HollowSpacing.lg,
+              left: 0,
+              right: 0,
+              child: AnimatedOpacity(
+                opacity: _overlaysVisible ? 1.0 : 0.0,
+                duration: HollowDurations.normal,
+                child: IgnorePointer(
+                  ignoring: !_overlaysVisible,
+                  child: Center(
+                    child: _VoiceControlsPill(
+                      serverId: widget.serverId,
+                      channelId: widget.channelId,
+                      onHoverEnter: _pinOverlays,
+                      onHoverExit: _resetOverlayTimer,
+                    ),
                   ),
                 ),
               ),
             ),
-          ),
         ],
       ),
     );
@@ -1284,6 +1292,98 @@ class _VoiceControlsPillState extends ConsumerState<_VoiceControlsPill> {
 // ---------------------------------------------------------------------------
 // Overlay slider — animated slide-in/out panel for screen share chat overlay.
 // ---------------------------------------------------------------------------
+
+/// The screen-share-style right-side chat drawer — chevron toggle + slide-in
+/// 360px [ChannelChatPane] — packaged for reuse OUTSIDE VoiceChannelPane. The
+/// conference call surface embeds it so meetings get the exact same chat as
+/// screen share (same slider, same pane). Pinned state is self-contained and
+/// hover pinning is a no-op (static hosts have no auto-hiding overlays).
+class VcChatOverlay extends StatefulWidget {
+  final String serverId;
+  final String channelId;
+  final String channelName;
+  final bool initiallyOpen;
+
+  const VcChatOverlay({
+    super.key,
+    required this.serverId,
+    required this.channelId,
+    required this.channelName,
+    this.initiallyOpen = false,
+  });
+
+  @override
+  State<VcChatOverlay> createState() => _VcChatOverlayState();
+}
+
+class _VcChatOverlayState extends State<VcChatOverlay> {
+  late bool _pinned = widget.initiallyOpen;
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.center,
+      children: [
+        GestureDetector(
+          onTap: () => setState(() => _pinned = !_pinned),
+          child: Semantics(
+            label: _pinned ? 'Hide chat' : 'Show chat',
+            button: true,
+            child: Container(
+              width: 24,
+              height: 48,
+              decoration: BoxDecoration(
+                color: hollow.surface.withValues(alpha: 0.88),
+                borderRadius: const BorderRadius.horizontal(
+                  left: Radius.circular(8),
+                ),
+                border: Border(
+                  left: BorderSide(
+                    color: hollow.border.withValues(alpha: 0.5),
+                  ),
+                  top: BorderSide(
+                    color: hollow.border.withValues(alpha: 0.5),
+                  ),
+                  bottom: BorderSide(
+                    color: hollow.border.withValues(alpha: 0.5),
+                  ),
+                ),
+              ),
+              child: Icon(
+                _pinned ? LucideIcons.chevronRight : LucideIcons.chevronLeft,
+                size: 14,
+                color: hollow.textSecondary,
+              ),
+            ),
+          ),
+        ),
+        _OverlaySlider(
+          visible: _pinned,
+          onHoverEnter: () {},
+          onHoverExit: () {},
+          child: Container(
+            width: 360,
+            decoration: BoxDecoration(
+              color: hollow.surface.withValues(alpha: 0.88),
+              border: Border(
+                left: BorderSide(
+                  color: hollow.border.withValues(alpha: 0.5),
+                ),
+              ),
+            ),
+            child: ChannelChatPane(
+              serverId: widget.serverId,
+              channelId: widget.channelId,
+              channelName: widget.channelName,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
 
 class _OverlaySlider extends StatefulWidget {
   final bool visible;

@@ -88,8 +88,10 @@ import 'package:hollow/src/ui/shell/friends_bar.dart';
 import 'package:hollow/src/ui/shell/system_status_banner.dart';
 import 'package:hollow/src/core/providers/app_lifecycle_provider.dart';
 import 'package:hollow/src/core/providers/archive_provider.dart';
+import 'package:hollow/src/core/providers/conference_provider.dart';
 import 'package:hollow/src/core/providers/share_tab_provider.dart';
 import 'package:hollow/src/ui/shell/archive_dashboard.dart';
+import 'package:hollow/src/ui/shell/conference_dashboard.dart';
 import 'package:hollow/src/ui/share/share_dashboard.dart';
 import 'package:hollow/src/ui/shell/home_dashboard.dart';
 import 'package:hollow/src/ui/shell/member_panel.dart';
@@ -190,6 +192,7 @@ class _HollowShellState extends ConsumerState<HollowShell>
   void _openDmFromNotification(String peerId) {
     ref.read(archiveTabOpenProvider.notifier).state = false;
     ref.read(shareTabOpenProvider.notifier).state = false;
+    ref.read(conferenceTabOpenProvider.notifier).state = false;
     ref.read(selectedPeerProvider.notifier).state = peerId;
     ref.read(selectedServerProvider.notifier).state = null;
     ref.read(channelListProvider.notifier).clear();
@@ -205,6 +208,7 @@ class _HollowShellState extends ConsumerState<HollowShell>
     if (!mounted) return;
     ref.read(archiveTabOpenProvider.notifier).state = false;
     ref.read(shareTabOpenProvider.notifier).state = false;
+    ref.read(conferenceTabOpenProvider.notifier).state = false;
     ref.read(selectedPeerProvider.notifier).state = null;
     ref.read(serverSettingsOpenProvider.notifier).state = false;
     ref.read(channelListProvider.notifier).setChannels(channels);
@@ -1366,6 +1370,12 @@ class _HollowShellState extends ConsumerState<HollowShell>
       return const ArchiveDashboard();
     }
 
+    // Conferences tab view
+    final conferenceOpen = ref.watch(conferenceTabOpenProvider);
+    if (conferenceOpen) {
+      return const ConferenceDashboard();
+    }
+
     // Server channel view
     if (selectedChannelId != null) {
       final channel = channels[selectedChannelId];
@@ -1671,6 +1681,7 @@ class _HollowShellState extends ConsumerState<HollowShell>
                                 ref.watch(guestTabOpenProvider) ? 'guest'
                                     : ref.watch(shareTabOpenProvider) ? 'share'
                                     : ref.watch(archiveTabOpenProvider) ? 'archive'
+                                    : ref.watch(conferenceTabOpenProvider) ? 'conference'
                                     : settingsOpen && selectedServer != null
                                     ? 'settings-${selectedServer.serverId}'
                                     : selectedChannelId ?? selectedPeerId ?? 'empty'),
@@ -1874,6 +1885,8 @@ class _HollowShellState extends ConsumerState<HollowShell>
                                         ? 'share'
                                         : ref.watch(archiveTabOpenProvider)
                                         ? 'archive'
+                                        : ref.watch(conferenceTabOpenProvider)
+                                        ? 'conference'
                                         : settingsOpen &&
                                             selectedServer != null
                                         ? 'settings-${selectedServer.serverId}'

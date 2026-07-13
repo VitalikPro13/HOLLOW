@@ -12,6 +12,7 @@ import 'package:hollow/src/core/providers/connection_status_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/device_link_sync_provider.dart';
 import 'package:hollow/src/core/providers/channel_chat_provider.dart';
+import 'package:hollow/src/core/providers/conference_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 
 import 'package:hollow/src/core/providers/channel_provider.dart';
@@ -1294,12 +1295,20 @@ class EventStreamNotifier extends Notifier<bool> {
         final vcNotifier = ref.read(voiceChannelProvider.notifier);
         vcNotifier.onPeerJoined(serverId, channelId, peerId);
         final localPeerId = ref.read(identityProvider).peerId ?? '';
+        // Conferences are virtual servers ('conf:...') with no channel list —
+        // their call renders in the Conferences tab, so never touch the
+        // selected-channel providers for them.
+        final isConferenceJoin = serverId.startsWith('conf:');
         if (peerId == localPeerId) {
-          // Cache the currently selected channel so we can restore it on leave.
-          vcNotifier.preVcChannelId = ref.read(selectedChannelProvider);
+          if (!isConferenceJoin) {
+            // Cache the currently selected channel so we can restore it on leave.
+            vcNotifier.preVcChannelId = ref.read(selectedChannelProvider);
+          }
           vcNotifier.onLocalJoined(serverId, channelId);
-          // Auto-select the voice channel for the main pane.
-          ref.read(selectedChannelProvider.notifier).state = channelId;
+          if (!isConferenceJoin) {
+            // Auto-select the voice channel for the main pane.
+            ref.read(selectedChannelProvider.notifier).state = channelId;
+          }
         } else {
           // Remote peer joined — initiate WebRTC if we're in the same channel.
           final vcState = ref.read(voiceChannelProvider);
@@ -1317,7 +1326,10 @@ class EventStreamNotifier extends Notifier<bool> {
         if (peerId == localPeerId) {
           // Restore the channel that was selected before joining the VC.
           // Fall back to first text channel if the cached one is gone.
-          if (ref.read(selectedChannelProvider) == channelId) {
+          // Conference leaves never touched channel selection on join, so
+          // there's nothing to restore ('conf:...' virtual servers).
+          if (!serverId.startsWith('conf:') &&
+              ref.read(selectedChannelProvider) == channelId) {
             final cached = vcNotifier.preVcChannelId;
             final channels = ref.read(channelListProvider);
             if (cached != null && channels.containsKey(cached)) {
@@ -1339,6 +1351,52 @@ class EventStreamNotifier extends Notifier<bool> {
             :final signalType, :final payload):
         ref.read(voiceChannelProvider.notifier).handleSignal(
               peerId, signalType, payload, serverId, channelId);
+
+      // -- Conference events (Zoom-style rooms) --
+      case NetworkEvent_ConferenceJoinRequestReceived(
+            :final confId, :final peerId, :final displayName,
+            :final avatarHash):
+        ref.read(conferenceProvider.notifier).onJoinRequest(
+              confId, peerId, displayName, avatarHash);
+
+      case NetworkEvent_ConferenceJoinDenied(:final confId, :final reason):
+        ref.read(conferenceProvider.notifier).onDenied(confId, reason);
+
+      case NetworkEvent_ConferenceLobbyInfo(
+            :final confId, :final hostPeerId, :final hostName,
+            :final hostAvatarHash):
+        ref.read(conferenceProvider.notifier).onLobbyInfo(
+              confId, hostPeerId, hostName, hostAvatarHash);
+
+      case NetworkEvent_ConferenceAdmitted(:final confId):
+        unawaited(ref.read(conferenceProvider.notifier).onAdmitted(confId));
+
+      case NetworkEvent_ConferenceChatMessage(
+            :final confId, :final senderPeerId, :final text,
+            :final timestamp):
+        // Conference chat renders in the SAME ChannelChatPane as screen-share
+        // chat, under the RAM-only 'conf:<id>:main' key — never persisted,
+        // never touches unread machinery. senderPeerId is the authenticated
+        // MLS leaf credential (a device id); the pane collapses it to master
+        // for display. Message id derives from sender+stamp so an echo of an
+        // optimistic send dedups by message_id like every other chat surface.
+        ref.read(channelChatProvider.notifier).receiveMessage(
+              conferenceServerId(confId),
+              kConferenceChannelId,
+              senderPeerId,
+              text,
+              timestamp.toInt(),
+              'conf-$senderPeerId-$timestamp',
+              '',
+            );
+
+      case NetworkEvent_ConferenceEnded(:final confId, :final byPeerId):
+        unawaited(
+            ref.read(conferenceProvider.notifier).onEnded(confId, byPeerId));
+
+      case NetworkEvent_ConferenceKicked(:final confId, :final byPeerId):
+        unawaited(
+            ref.read(conferenceProvider.notifier).onKicked(confId, byPeerId));
 
       // -- Gossip relay tree events (Phase 5D) --
       case NetworkEvent_GossipConnect(:final peerId):

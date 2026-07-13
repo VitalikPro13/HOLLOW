@@ -10,6 +10,11 @@ const String hollowWebJoinBase = 'https://hollow.anonlisten.com/join';
 String webServerInviteLink(String serverId) =>
     '$hollowWebJoinBase#server=$serverId';
 
+/// Canonical shareable conference invite. Same fragment rule as server
+/// invites: the conf id never reaches any server log.
+String webConferenceInviteLink(String confId) =>
+    '$hollowWebJoinBase#conf=$confId';
+
 final _hollowLinkRegex = RegExp(r'hollow://[^\s<>"' "'" r')\]}]+');
 final _webJoinRegex =
     RegExp(r'https://hollow\.anonlisten\.com/join[^\s<>"' "'" r')\]}]*');
@@ -20,7 +25,7 @@ final _inviteIdRegex = RegExp(r'^[A-Za-z0-9_-]{1,128}$');
 bool mightContainHollowLinks(String text) =>
     text.contains('hollow://') || text.contains('hollow.anonlisten.com/join');
 
-enum HollowLinkType { share, serverInvite, roomInvite, recovery }
+enum HollowLinkType { share, serverInvite, roomInvite, recovery, conference }
 
 class HollowLink {
   final HollowLinkType type;
@@ -61,6 +66,12 @@ HollowLink? classifyHollowLink(String url) {
         return HollowLink(
             type: HollowLinkType.roomInvite, fullUrl: url, id: roomCode);
       }
+    } else if (uri.host == 'conference') {
+      final confId = uri.path.length > 1 ? uri.path.substring(1) : '';
+      if (confId.isNotEmpty && _inviteIdRegex.hasMatch(confId)) {
+        return HollowLink(
+            type: HollowLinkType.conference, fullUrl: url, id: confId);
+      }
     } else if (uri.host == 'recovery') {
       final server = uri.queryParameters['server'];
       final token = uri.queryParameters['token'];
@@ -99,6 +110,14 @@ HollowLink? classifyHollowLink(String url) {
         type: HollowLinkType.roomInvite,
         fullUrl: 'hollow://join?room=$roomCode',
         id: roomCode,
+      );
+    }
+    final confId = params['conf'];
+    if (confId != null && _inviteIdRegex.hasMatch(confId)) {
+      return HollowLink(
+        type: HollowLinkType.conference,
+        fullUrl: 'hollow://conference/$confId',
+        id: confId,
       );
     }
   }

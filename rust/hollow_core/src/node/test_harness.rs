@@ -6843,3 +6843,228 @@ async fn server_emote_replicates_and_bytes_pull_on_demand() {
     drop(o);
     drop(j);
 }
+
+// ---------------------------------------------------------------------------
+// Conferences (reports/CONFERENCES_PLAN.md): the waiting room IS an MLS add.
+// Host starts a meeting (fresh conf group + relay room `conf:{id}`), a knocker
+// broadcasts a join request carrying its KeyPackage, the host admits (MLS add
+// → direct Welcome → room-broadcast commit) or denies. Chat is an MLS
+// application message attributed by the authenticated leaf credential, and the
+// voice-channel machinery runs on the virtual server id (envelope join guard's
+// conference branch). Also covers the wrong-access-code rejection.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
+async fn conference_waiting_room_admits_denies_and_chats() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    // Host + two strangers (all keystone: device == master). No friendships —
+    // a conference works between peers who share NOTHING.
+    let mut host = spawn_node_on(&relay, 140, 140).await;
+    let mut bee = spawn_node_on(&relay, 141, 141).await;
+    let mut mallory = spawn_node_on(&relay, 142, 142).await;
+    sleep_ms(1500).await;
+    drain_events(&mut host);
+    drain_events(&mut bee);
+    drain_events(&mut mallory);
+
+    let conf_id = "harnessconf1".to_string();
+    let conf_sid = super::conference::conf_server_id(&conf_id);
+
+    // --- 1. Host starts the meeting (waiting room ON, no code). ---
+    host.cmd_tx
+        .send(NodeCommand::ConferenceStart {
+            conf_id: conf_id.clone(),
+            waiting_room: true,
+            access_code_hash: None,
+            host_display_name: "Hosty".to_string(),
+            host_avatar_hash: String::new(),
+        })
+        .await
+        .unwrap();
+    sleep_ms(800).await;
+
+    // --- 2. Bee knocks: host sees the waiting-room entry, Bee sees the lobby. ---
+    bee.cmd_tx
+        .send(NodeCommand::ConferenceRequestJoin {
+            conf_id: conf_id.clone(),
+            display_name: "Bee".to_string(),
+            avatar_hash: String::new(),
+            access_code: None,
+        })
+        .await
+        .unwrap();
+    let bee_dev = bee.device_id.clone();
+    let knocked = wait_event(&mut host, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::ConferenceJoinRequestReceived { conf_id: c, peer_id, display_name, .. }
+            if *c == conf_id && *peer_id == bee_dev && display_name == "Bee")
+    })
+    .await;
+    assert!(knocked, "host must surface Bee's waiting-room entry");
+    let lobby = wait_event(&mut bee, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::ConferenceLobbyInfo { conf_id: c, host_name, .. }
+            if *c == conf_id && host_name == "Hosty")
+    })
+    .await;
+    assert!(lobby, "Bee must see whose meeting it's waiting for");
+
+    // --- 3. Host admits: Bee gets the Welcome (=ConferenceAdmitted) and the
+    // conf-group SFrame key. ---
+    host.cmd_tx
+        .send(NodeCommand::ConferenceAdmit {
+            conf_id: conf_id.clone(),
+            peer_id: bee.device_id.clone(),
+        })
+        .await
+        .unwrap();
+    let admitted = wait_event(&mut bee, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::ConferenceAdmitted { conf_id: c } if *c == conf_id)
+    })
+    .await;
+    assert!(admitted, "Bee must be admitted after the host's MLS add");
+    drain_events(&mut bee);
+
+    // --- 4. Chat rides the conf MLS group, attributed by leaf credential. ---
+    bee.cmd_tx
+        .send(NodeCommand::ConferenceSendChat {
+            conf_id: conf_id.clone(),
+            text: "hi from bee".to_string(),
+            timestamp: 1111,
+        })
+        .await
+        .unwrap();
+    let bee_dev2 = bee.device_id.clone();
+    let chat = wait_event(&mut host, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::ConferenceChatMessage { conf_id: c, sender_peer_id, text, .. }
+            if *c == conf_id && *sender_peer_id == bee_dev2 && text == "hi from bee")
+    })
+    .await;
+    assert!(chat, "host must decrypt Bee's chat line with authenticated attribution");
+
+    // --- 5. Voice machinery on the virtual server id: both sides join the
+    // synthetic "main" channel; the MLS envelope join must pass the conference
+    // membership branch and cross-arrive. ---
+    host.cmd_tx
+        .send(NodeCommand::VoiceChannelJoin {
+            server_id: conf_sid.clone(),
+            channel_id: "main".to_string(),
+        })
+        .await
+        .unwrap();
+    sleep_ms(500).await;
+    drain_events(&mut host);
+    bee.cmd_tx
+        .send(NodeCommand::VoiceChannelJoin {
+            server_id: conf_sid.clone(),
+            channel_id: "main".to_string(),
+        })
+        .await
+        .unwrap();
+    let bee_dev3 = bee.device_id.clone();
+    let vc_seen = wait_event(&mut host, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::VoiceChannelJoined { server_id, peer_id, .. }
+            if *server_id == conf_sid && *peer_id == bee_dev3)
+    })
+    .await;
+    assert!(vc_seen, "host must see Bee join the conference voice channel (envelope guard)");
+
+    // Reply-on-join participant sync: the host joined the call BEFORE Bee was
+    // admitted, so Bee never saw that broadcast — the host's direct plaintext
+    // reply (accepted through the conf MLS-membership guard) must deliver it.
+    let host_dev = host.device_id.clone();
+    let host_seen = wait_event(&mut bee, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::VoiceChannelJoined { server_id, peer_id, .. }
+            if *server_id == conf_sid && *peer_id == host_dev)
+    })
+    .await;
+    assert!(host_seen, "Bee must learn the host was ALREADY in the call (reply-on-join sync)");
+
+    // --- 5b. Kick: MLS remove + courtesy signal reach the removed member. ---
+    host.cmd_tx
+        .send(NodeCommand::ConferenceKick {
+            conf_id: conf_id.clone(),
+            peer_id: bee.device_id.clone(),
+        })
+        .await
+        .unwrap();
+    let kicked = wait_event(&mut bee, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::ConferenceKicked { conf_id: c, .. } if *c == conf_id)
+    })
+    .await;
+    assert!(kicked, "the removed member must receive ConferenceKicked");
+
+    // --- 6. Deny path: Mallory knocks, host declines, Mallory learns why. ---
+    mallory.cmd_tx
+        .send(NodeCommand::ConferenceRequestJoin {
+            conf_id: conf_id.clone(),
+            display_name: "Mallory".to_string(),
+            avatar_hash: String::new(),
+            access_code: None,
+        })
+        .await
+        .unwrap();
+    let mal_dev = mallory.device_id.clone();
+    let mal_knock = wait_event(&mut host, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::ConferenceJoinRequestReceived { peer_id, .. } if *peer_id == mal_dev)
+    })
+    .await;
+    assert!(mal_knock, "host must surface Mallory's request");
+    host.cmd_tx
+        .send(NodeCommand::ConferenceDeny {
+            conf_id: conf_id.clone(),
+            peer_id: mallory.device_id.clone(),
+            reason: "declined".to_string(),
+        })
+        .await
+        .unwrap();
+    let denied = wait_event(&mut mallory, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::ConferenceJoinDenied { conf_id: c, reason }
+            if *c == conf_id && reason == "declined")
+    })
+    .await;
+    assert!(denied, "Mallory must receive the decline");
+
+    // --- 7. Wrong access code is rejected BEFORE the waiting room. ---
+    let coded_id = "harnessconf2".to_string();
+    host.cmd_tx
+        .send(NodeCommand::ConferenceStart {
+            conf_id: coded_id.clone(),
+            waiting_room: true,
+            access_code_hash: Some(super::conference::derive_access_hash(&coded_id, "tiger")),
+            host_display_name: "Hosty".to_string(),
+            host_avatar_hash: String::new(),
+        })
+        .await
+        .unwrap();
+    sleep_ms(800).await;
+    drain_events(&mut host);
+    mallory.cmd_tx
+        .send(NodeCommand::ConferenceRequestJoin {
+            conf_id: coded_id.clone(),
+            display_name: "Mallory".to_string(),
+            avatar_hash: String::new(),
+            access_code: Some("wrong".to_string()),
+        })
+        .await
+        .unwrap();
+    let code_denied = wait_event(&mut mallory, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::ConferenceJoinDenied { conf_id: c, reason }
+            if *c == coded_id && reason == "wrong_code")
+    })
+    .await;
+    assert!(code_denied, "a wrong access code must be rejected");
+    let ghost_knock = wait_event(&mut host, std::time::Duration::from_secs(3), |ev| {
+        matches!(ev, NetworkEvent::ConferenceJoinRequestReceived { conf_id: c, .. } if *c == coded_id)
+    })
+    .await;
+    assert!(!ghost_knock, "a wrong-code knock must never reach the host's waiting room");
+
+    drop(host);
+    drop(bee);
+    drop(mallory);
+}

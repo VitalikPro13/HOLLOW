@@ -1752,6 +1752,16 @@ pub(crate) async fn handle_envelope_channel_message(
     db_path: &str,
     db_passphrase: &str,
 ) {
+    // SECURITY: conference chat NEVER rides the channel pipeline — it has its
+    // own RAM-only HavenMessage::ConferenceChat path. A modified client
+    // sending a ChannelMessage envelope under a conf group would otherwise
+    // PERSIST into channel_messages (violating the live-only invariant), so
+    // drop it here regardless of signature.
+    if super::conference::is_conference_sid(&sid) {
+        hollow_log!("[HOLLOW-SECURITY] Dropped ChannelMessage envelope for conference sid {sid}");
+        return;
+    }
+
     // SECURITY: a present-but-invalid signature is rejected — mirrors the
     // direct (non-MLS) twin in swarm.rs; unsigned legacy messages are
     // tolerated. This verify's result was previously discarded.

@@ -36,6 +36,7 @@ import 'package:hollow/src/ui/dialogs/create_channel_dialog.dart';
 import 'package:hollow/src/ui/mobile/mobile_channel_actions.dart';
 import 'package:hollow/src/ui/mobile/mobile_page_route.dart';
 import 'package:hollow/src/ui/mobile/mobile_chat_route.dart';
+import 'package:hollow/src/ui/mobile/mobile_conferences_route.dart';
 import 'package:hollow/src/ui/mobile/mobile_voice_channel_route.dart';
 import 'package:hollow/src/ui/mobile/mobile_server_settings_route.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
@@ -431,6 +432,24 @@ class _MobileChatsTabState extends ConsumerState<MobileChatsTab> {
                 ),
                 const SizedBox(width: HollowSpacing.md),
                 Expanded(child: _HeaderShimmerLine(hollow: hollow)),
+                const SizedBox(width: HollowSpacing.sm),
+                HollowPressable(
+                  semanticLabel: 'Conferences',
+                  onTap: () {
+                    Navigator.of(context, rootNavigator: true).push(
+                      hollowMobileRoute(
+                        builder: (_) => const MobileConferencesRoute(),
+                      ),
+                    );
+                  },
+                  borderRadius: BorderRadius.circular(hollow.radiusSm),
+                  padding: const EdgeInsets.all(HollowSpacing.xs),
+                  child: Icon(
+                    LucideIcons.video,
+                    size: 20,
+                    color: hollow.textSecondary,
+                  ),
+                ),
               ],
             ),
           ),

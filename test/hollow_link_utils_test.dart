@@ -72,6 +72,27 @@ void main() {
       expect(classifyHollowLink('hollow://recovery?server=abc'), isNull);
     });
 
+    test('conference link both forms', () {
+      final native = classifyHollowLink('hollow://conference/abcdef0123456789');
+      expect(native!.type, HollowLinkType.conference);
+      expect(native.id, 'abcdef0123456789');
+      final web = classifyHollowLink(
+          'https://hollow.anonlisten.com/join#conf=abcdef0123456789');
+      expect(web!.type, HollowLinkType.conference);
+      expect(web.fullUrl, 'hollow://conference/abcdef0123456789');
+      // Round-trip: the generated invite classifies back to the same id.
+      final generated = webConferenceInviteLink('abcdef0123456789');
+      expect(classifyHollowLink(generated)!.id, 'abcdef0123456789');
+    });
+
+    test('conference id validation', () {
+      expect(classifyHollowLink('hollow://conference/'), isNull);
+      expect(
+          classifyHollowLink(
+              'https://hollow.anonlisten.com/join#conf=../etc/passwd'),
+          isNull);
+    });
+
     test('garbage rejected', () {
       expect(classifyHollowLink('hollow://unknown?x=1'), isNull);
       expect(classifyHollowLink('not a url'), isNull);

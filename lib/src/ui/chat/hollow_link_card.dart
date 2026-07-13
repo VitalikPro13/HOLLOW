@@ -1,6 +1,10 @@
-﻿import 'package:flutter/material.dart';
+﻿import 'dart:async';
+import 'dart:io';
+
+import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:hollow/src/core/providers/conference_provider.dart';
 import 'package:hollow/src/core/providers/room_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/share_tab_provider.dart';
@@ -14,6 +18,8 @@ import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/dialogs/recovery_pool_dialog.dart';
+import 'package:hollow/src/ui/mobile/mobile_conferences_route.dart';
+import 'package:hollow/src/ui/mobile/mobile_page_route.dart';
 import 'package:hollow/src/ui/share/paste_link_dialog.dart';
 import 'package:hollow/src/ui/share/share_card.dart';
 
@@ -32,6 +38,8 @@ class HollowLinkCard extends ConsumerWidget {
         return _RoomInviteCard(link: link);
       case HollowLinkType.recovery:
         return _RecoveryLinkCard(link: link);
+      case HollowLinkType.conference:
+        return _ConferenceInviteCard(link: link);
     }
   }
 }
@@ -298,6 +306,74 @@ class _RoomInviteCard extends ConsumerWidget {
 
   void _handleJoin(WidgetRef ref) {
     ref.read(roomProvider.notifier).join(link.fullUrl);
+  }
+}
+
+class _ConferenceInviteCard extends ConsumerWidget {
+  final HollowLink link;
+  const _ConferenceInviteCard({required this.link});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final hollow = HollowTheme.of(context);
+
+    return _cardContainer(
+      hollow: hollow,
+      onTap: () => _handleJoin(context, ref),
+      child: Row(
+        children: [
+          Icon(LucideIcons.video, size: 20, color: hollow.accent),
+          const SizedBox(width: HollowSpacing.sm),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  'Conference Invite',
+                  style: HollowTypography.body.copyWith(
+                    color: hollow.textPrimary,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  link.id,
+                  style: HollowTypography.mono.copyWith(
+                    color: hollow.textSecondary,
+                    fontSize: 11,
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: HollowSpacing.sm),
+          HollowButton.filled(
+            compact: true,
+            onPressed: () => _handleJoin(context, ref),
+            child: const Text('Join'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _handleJoin(BuildContext context, WidgetRef ref) {
+    if (Platform.isAndroid || Platform.isIOS) {
+      // Mobile: the lobby lives in the Conferences screen — push it first.
+      Navigator.of(context, rootNavigator: true).push(hollowMobileRoute(
+        builder: (_) => const MobileConferencesRoute(),
+      ));
+    } else {
+      // Desktop: show the lobby in the Conferences center tab.
+      ref.read(conferenceProvider.notifier).openTab();
+    }
+    unawaited(ref
+        .read(conferenceProvider.notifier)
+        .requestJoin(link.id)
+        .catchError((_) {}));
   }
 }
 

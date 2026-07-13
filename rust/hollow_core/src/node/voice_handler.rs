@@ -857,6 +857,7 @@ pub(crate) async fn handle_envelope_voice_channel_join(
     voice_channel_participants: &mut HashMap<String, std::collections::HashSet<String>>,
     voice_channel_gossip_mode: &mut HashMap<String, bool>,
     gossip_overlays: &HashMap<String, super::gossip::GossipOverlay>,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     event_tx: &mpsc::Sender<NetworkEvent>,
     local_peer_str: &str,
     sender_peer_id: String,
@@ -864,13 +865,23 @@ pub(crate) async fn handle_envelope_voice_channel_join(
     cid: String,
 ) {
     if sender_peer_id == local_peer_str { return; }
-    let is_member = server_states.get(&sid)
-        .map(|s| s.is_member(&sender_peer_id))
-        .unwrap_or(false);
-    let is_voice_channel = server_states.get(&sid)
-        .and_then(|s| s.channels.get(&cid))
-        .map(|ch| ch.channel_type == crate::crdt::server_state::ChannelType::Voice)
-        .unwrap_or(false);
+    // Conferences are virtual servers with no CRDT state: this envelope arrived
+    // MLS-DECRYPTED under the `conf:{id}` group, so the sender provably holds
+    // the group — that IS the membership check (admission = the MLS add). The
+    // plaintext HavenMessage::VoiceChannelJoin path keeps its strict CRDT guard
+    // and conferences never ride it. Channel is always the synthetic "main".
+    let is_conf = super::conference::is_conference_sid(&sid);
+    let is_member = if is_conf { true } else {
+        server_states.get(&sid)
+            .map(|s| s.is_member(&sender_peer_id))
+            .unwrap_or(false)
+    };
+    let is_voice_channel = if is_conf { cid == super::conference::CONF_CHANNEL } else {
+        server_states.get(&sid)
+            .and_then(|s| s.channels.get(&cid))
+            .map(|ch| ch.channel_type == crate::crdt::server_state::ChannelType::Voice)
+            .unwrap_or(false)
+    };
     if !is_member {
         hollow_log!("[HOLLOW-SECURITY] BLOCKED VoiceChannelJoin from non-member {sender_peer_id} in server {sid}");
         return;
@@ -881,6 +892,25 @@ pub(crate) async fn handle_envelope_voice_channel_join(
     }
     hollow_log!("[HOLLOW-VC] {sender_peer_id} joined voice channel {cid} in {sid}");
     let vc_key = format!("{sid}:{cid}");
+    // Conference participant sync: a freshly-admitted member's join is the
+    // FIRST thing existing participants hear from them — there is no CRDT/
+    // room history to learn the pre-existing call roster from (a server
+    // member watches every join live; a conference joiner was locked out
+    // until admission). Reply with our own join, DIRECT, so the new member's
+    // grid shows us. Plaintext (their MLS just minted — no epoch concerns);
+    // their receive guard verifies us against the conf group's leaf set.
+    if super::conference::is_conference_sid(&sid)
+        && voice_channel_participants
+            .get(&vc_key)
+            .is_some_and(|p| p.contains(local_peer_str))
+    {
+        super::crypto_handler::send_message_to_peer_in_room(
+            ws_cmd_tx, &sid, &sender_peer_id,
+            HavenMessage::VoiceChannelJoin {
+                server_id: sid.clone(), channel_id: cid.clone(),
+            },
+        );
+    }
     voice_channel_participants.entry(vc_key.clone()).or_default()
         .insert(sender_peer_id.clone());
     let _ = event_tx.send(NetworkEvent::VoiceChannelJoined {

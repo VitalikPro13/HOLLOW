@@ -1612,6 +1612,53 @@ sealed class NetworkEvent with _$NetworkEvent {
     required Uint8List sframeKey,
     String? channelId,
   }) = NetworkEvent_MlsEpochChanged;
+
+  /// (Host) someone is in the waiting room. `avatar_hash` is a hash, never
+  /// blob bytes; Dart computes the friend badge locally.
+  const factory NetworkEvent.conferenceJoinRequestReceived({
+    required String confId,
+    required String peerId,
+    required String displayName,
+    required String avatarHash,
+  }) = NetworkEvent_ConferenceJoinRequestReceived;
+
+  /// (Joiner) declined / wrong code / meeting gone.
+  const factory NetworkEvent.conferenceJoinDenied({
+    required String confId,
+    required String reason,
+  }) = NetworkEvent_ConferenceJoinDenied;
+
+  /// (Joiner) lobby banner: whose meeting we're waiting for.
+  const factory NetworkEvent.conferenceLobbyInfo({
+    required String confId,
+    required String hostPeerId,
+    required String hostName,
+    required String hostAvatarHash,
+  }) = NetworkEvent_ConferenceLobbyInfo;
+
+  /// (Joiner) admitted — the conf MLS Welcome landed; join the call now.
+  const factory NetworkEvent.conferenceAdmitted({required String confId}) =
+      NetworkEvent_ConferenceAdmitted;
+
+  /// RAM-only conference chat line (no persistence, no unread machinery).
+  const factory NetworkEvent.conferenceChatMessage({
+    required String confId,
+    required String senderPeerId,
+    required String text,
+    required PlatformInt64 timestamp,
+  }) = NetworkEvent_ConferenceChatMessage;
+
+  /// Meeting over. Dart validates `by_peer_id` against the known host.
+  const factory NetworkEvent.conferenceEnded({
+    required String confId,
+    required String byPeerId,
+  }) = NetworkEvent_ConferenceEnded;
+
+  /// We were removed from the meeting (host-validated in Dart).
+  const factory NetworkEvent.conferenceKicked({
+    required String confId,
+    required String byPeerId,
+  }) = NetworkEvent_ConferenceKicked;
   const factory NetworkEvent.recoveryPoolCreated({
     required String serverId,
     required String inviteLink,

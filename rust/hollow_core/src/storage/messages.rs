@@ -781,6 +781,24 @@ impl MessageStore {
         )
         .map_err(|e| format!("Failed to create share_chunks table: {e}"))?;
 
+        // -- Conference rooms (host-local; reports/CONFERENCES_PLAN.md) --
+        // Durable "my meeting room" objects. access_code_hash is the
+        // conf-scoped sha256 derivation, never the plaintext code. co_hosts
+        // is a JSON array of master ids (enforced at ingest, phase 2).
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS conferences (
+                conf_id          TEXT PRIMARY KEY,
+                name             TEXT NOT NULL,
+                waiting_room     INTEGER NOT NULL DEFAULT 1,
+                access_code_hash TEXT,
+                co_hosts         TEXT NOT NULL DEFAULT '[]',
+                broadcast_mode   INTEGER NOT NULL DEFAULT 0,
+                created_at       INTEGER NOT NULL
+            )",
+            [],
+        )
+        .map_err(|e| format!("Failed to create conferences table: {e}"))?;
+
         // -- FTS5 full-text search indexes (L4 QA fix) --
         // Content-sync FTS: the FTS table reads from the main table on demand,
         // triggers keep the index in sync on INSERT/DELETE/UPDATE.
@@ -3775,6 +3793,62 @@ impl MessageStore {
         Ok(result)
     }
 
+    // ── Conference rooms (host-local; reports/CONFERENCES_PLAN.md) ───
+
+    pub fn upsert_conference(&self, row: &ConferenceRow) -> Result<(), String> {
+        self.conn.execute(
+            "INSERT INTO conferences (conf_id, name, waiting_room, access_code_hash, co_hosts, broadcast_mode, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(conf_id) DO UPDATE SET
+                name = excluded.name,
+                waiting_room = excluded.waiting_room,
+                access_code_hash = excluded.access_code_hash,
+                co_hosts = excluded.co_hosts,
+                broadcast_mode = excluded.broadcast_mode",
+            rusqlite::params![
+                row.conf_id, row.name, row.waiting_room as i64,
+                row.access_code_hash, row.co_hosts, row.broadcast_mode as i64,
+                row.created_at,
+            ],
+        ).map_err(|e| format!("Failed to upsert conference: {e}"))?;
+        Ok(())
+    }
+
+    pub fn list_conferences(&self) -> Result<Vec<ConferenceRow>, String> {
+        let mut stmt = self.conn.prepare(
+            "SELECT conf_id, name, waiting_room, access_code_hash, co_hosts, broadcast_mode, created_at
+             FROM conferences ORDER BY created_at DESC",
+        ).map_err(|e| format!("Failed to prepare conference query: {e}"))?;
+        let rows = stmt.query_map([], |row| {
+            Ok(ConferenceRow {
+                conf_id: row.get(0)?,
+                name: row.get(1)?,
+                waiting_room: row.get::<_, i64>(2)? != 0,
+                access_code_hash: row.get(3)?,
+                co_hosts: row.get(4)?,
+                broadcast_mode: row.get::<_, i64>(5)? != 0,
+                created_at: row.get(6)?,
+            })
+        }).map_err(|e| format!("Failed to query conferences: {e}"))?;
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row.map_err(|e| format!("Failed to read conference row: {e}"))?);
+        }
+        Ok(result)
+    }
+
+    pub fn get_conference(&self, conf_id: &str) -> Result<Option<ConferenceRow>, String> {
+        Ok(self.list_conferences()?.into_iter().find(|c| c.conf_id == conf_id))
+    }
+
+    pub fn delete_conference(&self, conf_id: &str) -> Result<(), String> {
+        self.conn.execute(
+            "DELETE FROM conferences WHERE conf_id = ?1",
+            rusqlite::params![conf_id],
+        ).map_err(|e| format!("Failed to delete conference: {e}"))?;
+        Ok(())
+    }
+
     // ── Custom emotes (content-addressed blobs + personal set) ───
 
     pub fn save_emote_blob(&self, hash: &str, bytes: &[u8], animated: bool) -> Result<(), String> {
@@ -4920,6 +4994,19 @@ impl MessageStore {
                 other => Err(format!("Failed to load chunk bitmap: {other}")),
             })
     }
+}
+
+/// Persisted conference room (host-local; reports/CONFERENCES_PLAN.md).
+pub struct ConferenceRow {
+    pub conf_id: String,
+    pub name: String,
+    pub waiting_room: bool,
+    /// Conf-scoped sha256 derivation of the access code (never plaintext).
+    pub access_code_hash: Option<String>,
+    /// JSON array of co-host master ids (phase 2 enforcement).
+    pub co_hosts: String,
+    pub broadcast_mode: bool,
+    pub created_at: i64,
 }
 
 /// Persisted share row.

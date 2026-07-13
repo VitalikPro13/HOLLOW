@@ -154,6 +154,11 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
 
   String get _stateKey => '${widget.serverId}:${widget.channelId}';
 
+  /// Conference chat ('conf:' virtual servers) is a RAM-only text surface:
+  /// no server members/split view, no CRDT-backed reactions/pins/edits, no
+  /// Ed25519 proof affordance (MLS authenticates each line instead).
+  bool get _isConference => widget.serverId.startsWith('conf:');
+
 
   @override
   void initState() {
@@ -1569,7 +1574,8 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
           ),
           child: Row(
             children: [
-              Icon(LucideIcons.hash, size: 20, color: hollow.textSecondary),
+              Icon(_isConference ? LucideIcons.video : LucideIcons.hash,
+                  size: 20, color: hollow.textSecondary),
               const SizedBox(width: HollowSpacing.sm),
               Expanded(
                 child: Text(
@@ -1582,6 +1588,30 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
                   overflow: TextOverflow.ellipsis,
                 ),
               ),
+              if (_isConference) ...[
+                const SizedBox(width: HollowSpacing.sm),
+                HollowTooltip(
+                  message:
+                      "Meeting chat isn't stored — it disappears when the meeting ends",
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: HollowSpacing.sm,
+                      vertical: 2,
+                    ),
+                    decoration: BoxDecoration(
+                      color: hollow.accent.withValues(alpha: 0.12),
+                      borderRadius: BorderRadius.circular(hollow.radiusSm),
+                    ),
+                    child: Text(
+                      'Ephemeral',
+                      style: HollowTypography.caption.copyWith(
+                        color: hollow.accentText,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                ),
+              ],
               if (ref.watch(serverIsNsfwProvider(widget.serverId)).valueOrNull ??
                   false) ...[
                 const SizedBox(width: HollowSpacing.sm),
@@ -1645,26 +1675,31 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
                   ),
                 ),
               ),
-              const SizedBox(width: HollowSpacing.sm),
-              HollowTooltip(
-                message: 'Toggle member panel',
-                child: HollowPressable(
-                  semanticLabel: 'Toggle member panel',
-                  onTap: () => ref.read(memberPanelProvider.notifier).state =
-                      !ref.read(memberPanelProvider),
-                  borderRadius: BorderRadius.circular(hollow.radiusSm),
-                  padding: const EdgeInsets.all(HollowSpacing.xs),
-                  child: Icon(
-                    LucideIcons.users,
-                    size: 20,
-                    color: ref.watch(memberPanelProvider)
-                        ? hollow.accent
-                        : hollow.textSecondary,
+              // Members + split view are server concepts — a conference has
+              // neither (participants show in the call area).
+              if (!_isConference) ...[
+                const SizedBox(width: HollowSpacing.sm),
+                HollowTooltip(
+                  message: 'Toggle member panel',
+                  child: HollowPressable(
+                    semanticLabel: 'Toggle member panel',
+                    onTap: () => ref.read(memberPanelProvider.notifier).state =
+                        !ref.read(memberPanelProvider),
+                    borderRadius: BorderRadius.circular(hollow.radiusSm),
+                    padding: const EdgeInsets.all(HollowSpacing.xs),
+                    child: Icon(
+                      LucideIcons.users,
+                      size: 20,
+                      color: ref.watch(memberPanelProvider)
+                          ? hollow.accent
+                          : hollow.textSecondary,
+                    ),
                   ),
                 ),
-              ),
+              ],
               // Split view toggle (dock mode only)
-              if ((ref.watch(layoutModeProvider).valueOrNull ?? LayoutMode.dock) == LayoutMode.dock) ...[
+              if (!_isConference &&
+                  (ref.watch(layoutModeProvider).valueOrNull ?? LayoutMode.dock) == LayoutMode.dock) ...[
                 const SizedBox(width: HollowSpacing.sm),
                 HollowTooltip(
                   message: ref.watch(splitViewProvider).isSplit
@@ -1943,7 +1978,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
                         currentText: msg.text,
                         isEditing: _editingMessageId != null &&
                             _editingMessageId == msg.messageId,
-                        onEditStart: msg.messageId != null && msg.isMe && msg.fileAttachment == null
+                        onEditStart: !_isConference && msg.messageId != null && msg.isMe && msg.fileAttachment == null
                             ? () {
                                 // Positions + jumpTo are in the REVERSED
                                 // index space.
@@ -1976,13 +2011,13 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
                         },
                         onEditCancel: () =>
                             setState(() => _editingMessageId = null),
-                        onDelete: msg.messageId != null && msg.isMe
+                        onDelete: !_isConference && msg.messageId != null && msg.isMe
                             ? () => ref
                                 .read(channelChatProvider.notifier)
                                 .deleteMessage(widget.serverId,
                                     widget.channelId, msg.messageId!)
                             : null,
-                        onReply: msg.messageId != null
+                        onReply: !_isConference && msg.messageId != null
                             ? () {
                                 // Collapse device→master so the reply banner shows
                                 // the person's name, not a raw device id.
@@ -2005,7 +2040,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
                                 _focusNode.requestFocus();
                               }
                             : null,
-                        onReaction: msg.messageId != null
+                        onReaction: !_isConference && msg.messageId != null
                             ? (emoji) {
                                 final localPeerId =
                                     ref.read(identityProvider).peerId ?? '';
@@ -2021,7 +2056,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
                                 }
                               }
                             : null,
-                        onPin: msg.messageId != null &&
+                        onPin: !_isConference && msg.messageId != null &&
                                 (ref.watch(myPermissionsProvider(widget.serverId)).whenOrNull(
                                     data: (perms) => (perms & Permission.manageChannels) != 0) ?? false)
                             ? () {
@@ -2091,7 +2126,9 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
                                 }
                               }
                             : null,
-                        onInfo: () {
+                        // MLS authenticates conference lines per message — the
+                        // Ed25519 proof dialog would just read "UNSIGNED".
+                        onInfo: _isConference ? null : () {
                           final localPeerId =
                               ref.read(identityProvider).peerId ?? '';
                           // The signature is computed over the sender's MASTER id
@@ -2517,47 +2554,52 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
                 )
               : Row(
                   children: [
-                    // File attachment button
-                    HollowPressable(
-                      semanticLabel: 'Attach file',
-                      onTap: _pickAndStageFile,
-                      borderRadius: BorderRadius.circular(hollow.radiusMd),
-                      padding: const EdgeInsets.all(HollowSpacing.sm),
-                      child: Icon(
-                        LucideIcons.paperclip,
-                        color: hollow.textSecondary,
-                        size: 20,
+                    // Conference chat ('conf:' virtual servers) is RAM-only
+                    // text — no file/voice sends (they'd ride the persisting
+                    // channel pipeline). Buttons hidden, not disabled.
+                    if (!widget.serverId.startsWith('conf:')) ...[
+                      // File attachment button
+                      HollowPressable(
+                        semanticLabel: 'Attach file',
+                        onTap: _pickAndStageFile,
+                        borderRadius: BorderRadius.circular(hollow.radiusMd),
+                        padding: const EdgeInsets.all(HollowSpacing.sm),
+                        child: Icon(
+                          LucideIcons.paperclip,
+                          color: hollow.textSecondary,
+                          size: 20,
+                        ),
                       ),
-                    ),
-                    const SizedBox(width: HollowSpacing.xs),
-                    HollowPressable(
-                      semanticLabel: 'Record voice message',
-                      onTap: _stagedFilePath != null
-                          ? null
-                          : () {
-                              // Voice notes are audio, not media — blocked in
-                              // media-only channels (toast, don't record).
-                              if (_channelMediaOnly) {
-                                HollowToast.show(
-                                  context,
-                                  'This is a media-only channel — voice messages can\'t be posted here',
-                                  type: HollowToastType.info,
-                                );
-                                return;
-                              }
-                              setState(() => _isRecordingVoice = true);
-                            },
-                      borderRadius: BorderRadius.circular(hollow.radiusMd),
-                      padding: const EdgeInsets.all(HollowSpacing.sm),
-                      child: Icon(
-                        LucideIcons.mic,
-                        color: _stagedFilePath != null
-                            ? hollow.textSecondary.withValues(alpha: 0.4)
-                            : hollow.textSecondary,
-                        size: 20,
+                      const SizedBox(width: HollowSpacing.xs),
+                      HollowPressable(
+                        semanticLabel: 'Record voice message',
+                        onTap: _stagedFilePath != null
+                            ? null
+                            : () {
+                                // Voice notes are audio, not media — blocked in
+                                // media-only channels (toast, don't record).
+                                if (_channelMediaOnly) {
+                                  HollowToast.show(
+                                    context,
+                                    'This is a media-only channel — voice messages can\'t be posted here',
+                                    type: HollowToastType.info,
+                                  );
+                                  return;
+                                }
+                                setState(() => _isRecordingVoice = true);
+                              },
+                        borderRadius: BorderRadius.circular(hollow.radiusMd),
+                        padding: const EdgeInsets.all(HollowSpacing.sm),
+                        child: Icon(
+                          LucideIcons.mic,
+                          color: _stagedFilePath != null
+                              ? hollow.textSecondary.withValues(alpha: 0.4)
+                              : hollow.textSecondary,
+                          size: 20,
+                        ),
                       ),
-                    ),
-                    const SizedBox(width: HollowSpacing.xs),
+                      const SizedBox(width: HollowSpacing.xs),
+                    ],
                     Expanded(
                       child: CompositedTransformTarget(
                         link: _mentionLayerLink,

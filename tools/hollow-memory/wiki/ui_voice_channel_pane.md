@@ -219,6 +219,12 @@ From `lib/src/core/providers/voice_channel_provider.dart`:
 - `speakingPeers` -- `Set<String>` for speaking indicators.
 - `joinedAt` -- `DateTime` for call duration calculation.
 
+## Conference Reuse (VcChatOverlay + hideControlsPill)
+
+Two conference-driven additions (2026-07-13, see wiki conferences):
+- **VcChatOverlay** (public widget in this file): packages the screen-share chat drawer -- chevron toggle + _OverlaySlider + 360px ChannelChatPane -- for reuse OUTSIDE VoiceChannelPane. Self-contained pinned state, no-op hover callbacks (static hosts have no auto-hiding overlays). The conference audio-only view embeds it so meetings get the exact same chat as screen share.
+- **VoiceChannelPane.hideControlsPill** (default false): hides the floating bottom controls pill in BOTH video views. The conference surface sets it true and shows its own static controls bar below -- the pill Disconnect tears down only the voice leg, which stranded/crashed an active meeting. Server voice channels are unaffected.
+
 ## External Widget Dependencies
 
 - `ChannelChatPane` -- `lib/src/ui/chat/channel_chat_pane.dart` (used in all four modes for text chat)

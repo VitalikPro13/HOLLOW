@@ -347,6 +347,22 @@ pub enum NetworkEvent {
         sframe_key: Vec<u8>,
         channel_id: Option<String>,
     },
+    // -- Conference events (reports/CONFERENCES_PLAN.md) --
+    /// (Host) someone is in the waiting room. `avatar_hash` is a hash, never
+    /// blob bytes; Dart computes the friend badge locally.
+    ConferenceJoinRequestReceived { conf_id: String, peer_id: String, display_name: String, avatar_hash: String },
+    /// (Joiner) declined / wrong code / meeting gone.
+    ConferenceJoinDenied { conf_id: String, reason: String },
+    /// (Joiner) lobby banner: whose meeting we're waiting for.
+    ConferenceLobbyInfo { conf_id: String, host_peer_id: String, host_name: String, host_avatar_hash: String },
+    /// (Joiner) admitted — the conf MLS Welcome landed; join the call now.
+    ConferenceAdmitted { conf_id: String },
+    /// RAM-only conference chat line (no persistence, no unread machinery).
+    ConferenceChatMessage { conf_id: String, sender_peer_id: String, text: String, timestamp: i64 },
+    /// Meeting over. Dart validates `by_peer_id` against the known host.
+    ConferenceEnded { conf_id: String, by_peer_id: String },
+    /// We were removed from the meeting (host-validated in Dart).
+    ConferenceKicked { conf_id: String, by_peer_id: String },
     // -- Recovery pool events (Evidence Recovery) --
     RecoveryPoolCreated { server_id: String, invite_link: String },
     RecoveryPoolJoined { server_id: String },
@@ -1047,6 +1063,28 @@ fn to_ffi_event(event: node::NetworkEvent) -> NetworkEvent {
         }
         node::NetworkEvent::MlsEpochChanged { server_id, epoch, sframe_key, channel_id } => {
             NetworkEvent::MlsEpochChanged { server_id, epoch, sframe_key, channel_id }
+        }
+        // -- Conference events --
+        node::NetworkEvent::ConferenceJoinRequestReceived { conf_id, peer_id, display_name, avatar_hash } => {
+            NetworkEvent::ConferenceJoinRequestReceived { conf_id, peer_id, display_name, avatar_hash }
+        }
+        node::NetworkEvent::ConferenceJoinDenied { conf_id, reason } => {
+            NetworkEvent::ConferenceJoinDenied { conf_id, reason }
+        }
+        node::NetworkEvent::ConferenceLobbyInfo { conf_id, host_peer_id, host_name, host_avatar_hash } => {
+            NetworkEvent::ConferenceLobbyInfo { conf_id, host_peer_id, host_name, host_avatar_hash }
+        }
+        node::NetworkEvent::ConferenceAdmitted { conf_id } => {
+            NetworkEvent::ConferenceAdmitted { conf_id }
+        }
+        node::NetworkEvent::ConferenceChatMessage { conf_id, sender_peer_id, text, timestamp } => {
+            NetworkEvent::ConferenceChatMessage { conf_id, sender_peer_id, text, timestamp }
+        }
+        node::NetworkEvent::ConferenceEnded { conf_id, by_peer_id } => {
+            NetworkEvent::ConferenceEnded { conf_id, by_peer_id }
+        }
+        node::NetworkEvent::ConferenceKicked { conf_id, by_peer_id } => {
+            NetworkEvent::ConferenceKicked { conf_id, by_peer_id }
         }
         // -- Recovery pool events --
         node::NetworkEvent::RecoveryPoolCreated { server_id, invite_link } => {

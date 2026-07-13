@@ -1,4 +1,5 @@
 pub(crate) mod blocklist;
+pub(crate) mod conference;
 pub(crate) mod crdt_store;
 pub(crate) mod crypto_handler;
 pub(crate) mod emotes;
