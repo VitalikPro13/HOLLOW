@@ -1,8 +1,10 @@
 # SQLCipher Database and Identity System
 
-Source files: `rust/hollow_core/src/storage/messages.rs` (3154 lines), `rust/hollow_core/src/identity/native_identity.rs`, `rust/hollow_core/src/identity/keys.rs`
+Source files: `rust/hollow_core/src/storage/messages.rs` (~4700 lines), `rust/hollow_core/src/identity/native_identity.rs`, `rust/hollow_core/src/identity/keys.rs`
 
-The `MessageStore` is the sole local persistence layer. It wraps a single `rusqlite::Connection` to an encrypted SQLCipher database. The `PRAGMA key` is set as hex before any table creation. All schema DDL lives in `MessageStore::init_schema()` with incremental `ALTER TABLE ADD COLUMN` migrations that silently ignore already-existing columns via `.unwrap_or(())`.
+The `MessageStore` is the sole local persistence layer. It wraps a single `rusqlite::Connection` to an encrypted SQLCipher database. The `PRAGMA key` is set as hex before any table creation. All schema DDL lives in `MessageStore::init_schema()`, routed through two shared helpers (Sonar dedup 2026-07-14): `ddl(conn, what, sql)` for CREATE statements (labeled error, fail-fast) and `migrate(conn, sql)` for incremental `ALTER TABLE ADD COLUMN` migrations, each in its OWN swallowed batch (never combine — the first already-applied statement would abort the rest). Both are `pub(crate)` and also used by `vault/content_store.rs`.
+
+**Shared row mappers (dedup 2026-07-14):** every query selecting a full message/file/profile row goes through one mapper + column-list const pair — `DM_MSG_COLS`/`dm_message_from_row`, `CHANNEL_MSG_COLS`/`channel_message_from_row`, `FILE_COLS`/`stored_file_from_row`, `profile_from_row`/`profile_light_from_row` — plus `collect_rows()` for the drain loop. DM-vs-channel twins delegate to table-parameterized privates: `edit_message_in`, `hide_message_in`, `set_message_hidden_in`, `update_link_preview_in`, `load_grouped_by_message_id` (reactions/edits/deletions/removals batch loaders), `per_sender_where`, `query_opt_ts`, `filter_ids_not_on_disk`. New columns on message rows: extend the const + mapper ONCE and every query site picks it up.
 
 ## MessageStore Initialization and Encryption
 

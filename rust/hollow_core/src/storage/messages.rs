@@ -111,6 +111,149 @@ pub(crate) struct MessageStore {
     conn: Connection,
 }
 
+/// Run one idempotent DDL statement (CREATE TABLE/INDEX …), mapping failure
+/// to a labeled error. Shared with the vault ContentStore schema setup.
+pub(crate) fn ddl(conn: &Connection, what: &str, sql: &str) -> Result<(), String> {
+    conn.execute(sql, [])
+        .map(|_| ())
+        .map_err(|e| format!("Failed to create {what}: {e}"))
+}
+
+/// Run one idempotent migration statement (ALTER TABLE ADD COLUMN & friends)
+/// in its own batch, silently ignoring the "already exists" error a re-run
+/// produces. Never batch multiple migrations into one call — the first
+/// already-applied statement would abort the rest of the batch.
+pub(crate) fn migrate(conn: &Connection, sql: &str) {
+    conn.execute_batch(sql).unwrap_or(());
+}
+
+/// Drain a mapped-row iterator into a Vec, labeling the first read error.
+fn collect_rows<T>(
+    rows: impl Iterator<Item = rusqlite::Result<T>>,
+    what: &str,
+) -> Result<Vec<T>, String> {
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row.map_err(|e| format!("Failed to read {what} row: {e}"))?);
+    }
+    Ok(out)
+}
+
+/// Column list every DM-message query selects, in [`dm_message_from_row`] order.
+const DM_MSG_COLS: &str = "id, peer_id, text, is_mine, timestamp, signature, public_key, message_id, edited_at, hidden_at, reply_to_mid, file_id, link_preview_json, order_us";
+
+/// Column list every channel-message query selects, in [`channel_message_from_row`] order.
+const CHANNEL_MSG_COLS: &str = "id, server_id, channel_id, sender_id, text, is_mine, timestamp, signature, public_key, message_id, edited_at, hidden_at, reply_to_mid, file_id, link_preview_json, order_us";
+
+/// Map one row selected via [`DM_MSG_COLS`] to a StoredMessage.
+fn dm_message_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredMessage> {
+    Ok(StoredMessage {
+        id: row.get(0)?,
+        peer_id: row.get(1)?,
+        text: row.get(2)?,
+        is_mine: row.get::<_, i32>(3)? != 0,
+        timestamp: row.get(4)?,
+        signature: row.get(5)?,
+        public_key: row.get(6)?,
+        message_id: row.get(7)?,
+        edited_at: row.get(8)?,
+        hidden_at: row.get(9)?,
+        reply_to_mid: row.get(10)?,
+        file_id: row.get(11)?,
+        link_preview: row.get::<_, Option<String>>(12)?
+            .and_then(|s| serde_json::from_str(&s).ok()),
+        order_us: row.get(13)?,
+    })
+}
+
+/// Column list every files query selects, in [`stored_file_from_row`] order.
+const FILE_COLS: &str = "file_id, file_name, file_ext, mime_type, size_bytes, chunk_count, chunks_received, is_image, width, height, message_id, context_type, context_id, sender_id, is_mine, created_at, completed_at, disk_path, hidden_at, video_thumb_json, expired_at";
+
+/// Map one row selected via [`FILE_COLS`] to a StoredFile.
+fn stored_file_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredFile> {
+    Ok(StoredFile {
+        file_id: row.get(0)?,
+        file_name: row.get(1)?,
+        file_ext: row.get(2)?,
+        mime_type: row.get(3)?,
+        size_bytes: row.get::<_, i64>(4)? as u64,
+        chunk_count: row.get::<_, u32>(5)?,
+        chunks_received: row.get::<_, u32>(6)?,
+        is_image: row.get::<_, i32>(7)? != 0,
+        width: row.get::<_, Option<i64>>(8)?.map(|v| v as u32),
+        height: row.get::<_, Option<i64>>(9)?.map(|v| v as u32),
+        message_id: row.get(10)?,
+        context_type: row.get(11)?,
+        context_id: row.get(12)?,
+        sender_id: row.get(13)?,
+        is_mine: row.get::<_, i32>(14)? != 0,
+        created_at: row.get(15)?,
+        completed_at: row.get(16)?,
+        disk_path: row.get(17)?,
+        hidden_at: row.get(18)?,
+        expired_at: row.get(20)?,
+        video_thumb: MessageStore::parse_video_thumb_json(row.get::<_, Option<String>>(19)?),
+    })
+}
+
+/// Map one full profile row (peer_id, display_name, status, about_me,
+/// updated_at, avatar, banner, twitch_username, showcase_board,
+/// showcase_assets) to a StoredProfile.
+fn profile_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredProfile> {
+    Ok(StoredProfile {
+        peer_id: row.get(0)?,
+        display_name: row.get(1)?,
+        status: row.get(2)?,
+        about_me: row.get(3)?,
+        updated_at: row.get(4)?,
+        avatar_bytes: row.get(5)?,
+        banner_bytes: row.get(6)?,
+        twitch_username: row.get::<_, String>(7).unwrap_or_default(),
+        showcase_board: row.get::<_, String>(8).unwrap_or_default(),
+        showcase_assets: row.get(9).unwrap_or(None),
+    })
+}
+
+/// Map one light profile row (peer_id, display_name, status, about_me,
+/// updated_at, twitch_username, showcase_board — no blobs) to a StoredProfile.
+fn profile_light_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredProfile> {
+    Ok(StoredProfile {
+        peer_id: row.get(0)?,
+        display_name: row.get(1)?,
+        status: row.get(2)?,
+        about_me: row.get(3)?,
+        updated_at: row.get(4)?,
+        avatar_bytes: None,
+        banner_bytes: None,
+        twitch_username: row.get::<_, String>(5).unwrap_or_default(),
+        showcase_board: row.get::<_, String>(6).unwrap_or_default(),
+        showcase_assets: None,
+    })
+}
+
+/// Map one row selected via [`CHANNEL_MSG_COLS`] to a StoredChannelMessage.
+fn channel_message_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredChannelMessage> {
+    Ok(StoredChannelMessage {
+        id: row.get(0)?,
+        server_id: row.get(1)?,
+        channel_id: row.get(2)?,
+        sender_id: row.get(3)?,
+        text: row.get(4)?,
+        is_mine: row.get::<_, i32>(5)? != 0,
+        timestamp: row.get(6)?,
+        signature: row.get(7)?,
+        public_key: row.get(8)?,
+        message_id: row.get(9)?,
+        edited_at: row.get(10)?,
+        hidden_at: row.get(11)?,
+        reply_to_mid: row.get(12)?,
+        file_id: row.get(13)?,
+        link_preview: row.get::<_, Option<String>>(14)?
+            .and_then(|s| serde_json::from_str(&s).ok()),
+        order_us: row.get(15)?,
+    })
+}
+
 impl MessageStore {
     /// Open (or create) an encrypted database at `path` using `passphrase`.
     pub fn open(path: &str, passphrase: &str) -> Result<Self, String> {
@@ -198,47 +341,35 @@ impl MessageStore {
     /// `open()`. Runs once per process per DB path — see the gate in `open()`.
     fn init_schema(conn: &Connection) -> Result<(), String> {
         // Create messages table if it doesn't exist.
-        conn.execute(
+        ddl(conn, "messages table",
             "CREATE TABLE IF NOT EXISTS messages (
                 id        INTEGER PRIMARY KEY AUTOINCREMENT,
                 peer_id   TEXT    NOT NULL,
                 text      TEXT    NOT NULL,
                 is_mine   INTEGER NOT NULL,
                 timestamp INTEGER NOT NULL
-            )",
-            [],
-        )
-        .map_err(|e| format!("Failed to create messages table: {e}"))?;
+            )")?;
 
         // Index for fast per-peer lookups.
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_messages_peer_ts ON messages (peer_id, timestamp)",
-            [],
-        )
-        .map_err(|e| format!("Failed to create index: {e}"))?;
+        ddl(conn, "index",
+            "CREATE INDEX IF NOT EXISTS idx_messages_peer_ts ON messages (peer_id, timestamp)")?;
 
         // Olm account pickle (singleton row, id=1).
-        conn.execute(
+        ddl(conn, "olm_account table",
             "CREATE TABLE IF NOT EXISTS olm_account (
                 id     INTEGER PRIMARY KEY CHECK (id = 1),
                 pickle TEXT NOT NULL
-            )",
-            [],
-        )
-        .map_err(|e| format!("Failed to create olm_account table: {e}"))?;
+            )")?;
 
         // Olm sessions, one per peer.
-        conn.execute(
+        ddl(conn, "olm_sessions table",
             "CREATE TABLE IF NOT EXISTS olm_sessions (
                 peer_id TEXT PRIMARY KEY,
                 pickle  TEXT NOT NULL
-            )",
-            [],
-        )
-        .map_err(|e| format!("Failed to create olm_sessions table: {e}"))?;
+            )")?;
 
         // Channel messages table.
-        conn.execute(
+        ddl(conn, "channel_messages table",
             "CREATE TABLE IF NOT EXISTS channel_messages (
                 id         INTEGER PRIMARY KEY AUTOINCREMENT,
                 server_id  TEXT    NOT NULL,
@@ -248,16 +379,10 @@ impl MessageStore {
                 is_mine    INTEGER NOT NULL,
                 timestamp  INTEGER NOT NULL,
                 UNIQUE(server_id, channel_id, sender_id, timestamp, text)
-            )",
-            [],
-        )
-        .map_err(|e| format!("Failed to create channel_messages table: {e}"))?;
+            )")?;
 
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_channel_msgs ON channel_messages (server_id, channel_id, timestamp)",
-            [],
-        )
-        .map_err(|e| format!("Failed to create channel_messages index: {e}"))?;
+        ddl(conn, "channel_messages index",
+            "CREATE INDEX IF NOT EXISTS idx_channel_msgs ON channel_messages (server_id, channel_id, timestamp)")?;
 
         // Migration: add UNIQUE constraint to existing channel_messages tables.
         // SQLite can't ALTER constraints, so we create a unique index instead.
@@ -269,9 +394,7 @@ impl MessageStore {
         // message_id dedup by channel_message_exists() at every insert site;
         // the content index (and the cleanup DELETE) apply only to legacy
         // rows without one — the DELETE must NEVER eat distinct mid rows.
-        conn.execute_batch(
-            "DROP INDEX IF EXISTS idx_channel_msgs_unique;"
-        ).unwrap_or(());
+        migrate(conn, "DROP INDEX IF EXISTS idx_channel_msgs_unique;");
         conn.execute_batch(
             "DELETE FROM channel_messages WHERE message_id IS NULL AND id NOT IN (
                 SELECT MIN(id) FROM channel_messages WHERE message_id IS NULL
@@ -286,17 +409,14 @@ impl MessageStore {
 
         // -- CRDT tables (Phase 3) --
 
-        conn.execute(
+        ddl(conn, "servers table",
             "CREATE TABLE IF NOT EXISTS servers (
                 server_id  TEXT PRIMARY KEY,
                 state_json TEXT NOT NULL,
                 updated_at INTEGER NOT NULL
-            )",
-            [],
-        )
-        .map_err(|e| format!("Failed to create servers table: {e}"))?;
+            )")?;
 
-        conn.execute(
+        ddl(conn, "crdt_ops table",
             "CREATE TABLE IF NOT EXISTS crdt_ops (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
                 server_id   TEXT NOT NULL,
@@ -305,43 +425,26 @@ impl MessageStore {
                 author      TEXT NOT NULL,
                 op_json     TEXT NOT NULL,
                 UNIQUE(server_id, hlc_ms, hlc_counter, author)
-            )",
-            [],
-        )
-        .map_err(|e| format!("Failed to create crdt_ops table: {e}"))?;
+            )")?;
 
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_crdt_ops_server ON crdt_ops (server_id, hlc_ms)",
-            [],
-        )
-        .map_err(|e| format!("Failed to create crdt_ops index: {e}"))?;
+        ddl(conn, "crdt_ops index",
+            "CREATE INDEX IF NOT EXISTS idx_crdt_ops_server ON crdt_ops (server_id, hlc_ms)")?;
 
-        conn.execute(
+        ddl(conn, "hlc_state table",
             "CREATE TABLE IF NOT EXISTS hlc_state (
                 id          INTEGER PRIMARY KEY CHECK (id = 1),
                 physical_ms INTEGER NOT NULL,
                 counter     INTEGER NOT NULL,
                 actor       TEXT NOT NULL
-            )",
-            [],
-        )
-        .map_err(|e| format!("Failed to create hlc_state table: {e}"))?;
+            )")?;
 
         // -- Migration: Ed25519 signature columns --
         // ALTER TABLE ADD COLUMN is safe for nullable columns in SQLite.
         // Silently ignore if columns already exist.
-        conn.execute_batch(
-            "ALTER TABLE channel_messages ADD COLUMN signature TEXT;"
-        ).unwrap_or(());
-        conn.execute_batch(
-            "ALTER TABLE channel_messages ADD COLUMN public_key TEXT;"
-        ).unwrap_or(());
-        conn.execute_batch(
-            "ALTER TABLE messages ADD COLUMN signature TEXT;"
-        ).unwrap_or(());
-        conn.execute_batch(
-            "ALTER TABLE messages ADD COLUMN public_key TEXT;"
-        ).unwrap_or(());
+        migrate(conn, "ALTER TABLE channel_messages ADD COLUMN signature TEXT;");
+        migrate(conn, "ALTER TABLE channel_messages ADD COLUMN public_key TEXT;");
+        migrate(conn, "ALTER TABLE messages ADD COLUMN signature TEXT;");
+        migrate(conn, "ALTER TABLE messages ADD COLUMN public_key TEXT;");
 
         // -- Migration: DM deduplication unique index --
         // Allows INSERT OR IGNORE for DM sync (like channel_messages).
@@ -353,52 +456,34 @@ impl MessageStore {
         // identical-text spam lost messages. Rows carrying a message_id dedup
         // by dm_message_exists() at every insert site instead; the content
         // index survives only as a backstop for legacy rows without one.
-        conn.execute_batch(
-            "DROP INDEX IF EXISTS idx_messages_dedup;"
-        ).unwrap_or(());
-        conn.execute_batch(
+        migrate(conn, "DROP INDEX IF EXISTS idx_messages_dedup;");
+        migrate(conn,
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_dedup_legacy
              ON messages (peer_id, timestamp, text, is_mine)
-             WHERE message_id IS NULL;"
-        ).unwrap_or(());
+             WHERE message_id IS NULL;");
 
         // -- User profiles (Phase 3.5) --
-        conn.execute(
+        ddl(conn, "user_profiles table",
             "CREATE TABLE IF NOT EXISTS user_profiles (
                 peer_id      TEXT PRIMARY KEY,
                 display_name TEXT NOT NULL DEFAULT '',
                 status       TEXT NOT NULL DEFAULT '',
                 about_me     TEXT NOT NULL DEFAULT '',
                 updated_at   INTEGER NOT NULL DEFAULT 0
-            )",
-            [],
-        )
-        .map_err(|e| format!("Failed to create user_profiles table: {e}"))?;
+            )")?;
 
         // -- Migration: message_id + edited_at columns (Phase 3.5 editing) --
-        conn.execute_batch(
-            "ALTER TABLE messages ADD COLUMN message_id TEXT;"
-        ).unwrap_or(());
-        conn.execute_batch(
-            "ALTER TABLE messages ADD COLUMN edited_at INTEGER;"
-        ).unwrap_or(());
-        conn.execute_batch(
-            "ALTER TABLE channel_messages ADD COLUMN message_id TEXT;"
-        ).unwrap_or(());
-        conn.execute_batch(
-            "ALTER TABLE channel_messages ADD COLUMN edited_at INTEGER;"
-        ).unwrap_or(());
+        migrate(conn, "ALTER TABLE messages ADD COLUMN message_id TEXT;");
+        migrate(conn, "ALTER TABLE messages ADD COLUMN edited_at INTEGER;");
+        migrate(conn, "ALTER TABLE channel_messages ADD COLUMN message_id TEXT;");
+        migrate(conn, "ALTER TABLE channel_messages ADD COLUMN edited_at INTEGER;");
 
         // Index on message_id for fast edit lookups.
-        conn.execute_batch(
-            "CREATE INDEX IF NOT EXISTS idx_messages_msg_id ON messages (message_id);"
-        ).unwrap_or(());
-        conn.execute_batch(
-            "CREATE INDEX IF NOT EXISTS idx_channel_msgs_msg_id ON channel_messages (message_id);"
-        ).unwrap_or(());
+        migrate(conn, "CREATE INDEX IF NOT EXISTS idx_messages_msg_id ON messages (message_id);");
+        migrate(conn, "CREATE INDEX IF NOT EXISTS idx_channel_msgs_msg_id ON channel_messages (message_id);");
 
         // Edit history table — preserves previous text for Rat Files evidence.
-        conn.execute(
+        ddl(conn, "message_edits table",
             "CREATE TABLE IF NOT EXISTS message_edits (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
                 message_id  TEXT    NOT NULL,
@@ -407,38 +492,22 @@ impl MessageStore {
                 edited_at   INTEGER NOT NULL,
                 signature   TEXT,
                 public_key  TEXT
-            )",
-            [],
-        )
-        .map_err(|e| format!("Failed to create message_edits table: {e}"))?;
+            )")?;
 
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_edits_msg_id ON message_edits (message_id)",
-            [],
-        )
-        .map_err(|e| format!("Failed to create message_edits index: {e}"))?;
+        ddl(conn, "message_edits index",
+            "CREATE INDEX IF NOT EXISTS idx_edits_msg_id ON message_edits (message_id)")?;
 
         // -- Migration: prev_signature/prev_public_key/prev_timestamp for edit chain provenance --
-        conn.execute_batch(
-            "ALTER TABLE message_edits ADD COLUMN prev_signature TEXT;"
-        ).unwrap_or(());
-        conn.execute_batch(
-            "ALTER TABLE message_edits ADD COLUMN prev_public_key TEXT;"
-        ).unwrap_or(());
-        conn.execute_batch(
-            "ALTER TABLE message_edits ADD COLUMN prev_timestamp INTEGER;"
-        ).unwrap_or(());
+        migrate(conn, "ALTER TABLE message_edits ADD COLUMN prev_signature TEXT;");
+        migrate(conn, "ALTER TABLE message_edits ADD COLUMN prev_public_key TEXT;");
+        migrate(conn, "ALTER TABLE message_edits ADD COLUMN prev_timestamp INTEGER;");
 
         // -- Migration: hidden_at column for message deletion/hiding (Phase 3.5) --
-        conn.execute_batch(
-            "ALTER TABLE messages ADD COLUMN hidden_at INTEGER;"
-        ).unwrap_or(());
-        conn.execute_batch(
-            "ALTER TABLE channel_messages ADD COLUMN hidden_at INTEGER;"
-        ).unwrap_or(());
+        migrate(conn, "ALTER TABLE messages ADD COLUMN hidden_at INTEGER;");
+        migrate(conn, "ALTER TABLE channel_messages ADD COLUMN hidden_at INTEGER;");
 
         // Deletion evidence table — preserves text at time of deletion for Rat Files.
-        conn.execute(
+        ddl(conn, "message_deletions table",
             "CREATE TABLE IF NOT EXISTS message_deletions (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
                 message_id  TEXT    NOT NULL,
@@ -446,27 +515,17 @@ impl MessageStore {
                 deleted_at  INTEGER NOT NULL,
                 signature   TEXT,
                 public_key  TEXT
-            )",
-            [],
-        )
-        .map_err(|e| format!("Failed to create message_deletions table: {e}"))?;
+            )")?;
 
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_deletions_msg_id ON message_deletions (message_id)",
-            [],
-        )
-        .map_err(|e| format!("Failed to create message_deletions index: {e}"))?;
+        ddl(conn, "message_deletions index",
+            "CREATE INDEX IF NOT EXISTS idx_deletions_msg_id ON message_deletions (message_id)")?;
 
         // -- Migration: reply_to_mid column for reply chains (Phase 3.5) --
-        conn.execute_batch(
-            "ALTER TABLE messages ADD COLUMN reply_to_mid TEXT;"
-        ).unwrap_or(());
-        conn.execute_batch(
-            "ALTER TABLE channel_messages ADD COLUMN reply_to_mid TEXT;"
-        ).unwrap_or(());
+        migrate(conn, "ALTER TABLE messages ADD COLUMN reply_to_mid TEXT;");
+        migrate(conn, "ALTER TABLE channel_messages ADD COLUMN reply_to_mid TEXT;");
 
         // -- Emoji reactions (Phase 3.5) --
-        conn.execute(
+        ddl(conn, "message_reactions table",
             "CREATE TABLE IF NOT EXISTS message_reactions (
                 id         INTEGER PRIMARY KEY AUTOINCREMENT,
                 message_id TEXT    NOT NULL,
@@ -476,19 +535,13 @@ impl MessageStore {
                 signature  TEXT,
                 public_key TEXT,
                 UNIQUE(message_id, emoji, peer_id)
-            )",
-            [],
-        )
-        .map_err(|e| format!("Failed to create message_reactions table: {e}"))?;
+            )")?;
 
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_reactions_msg_id ON message_reactions (message_id)",
-            [],
-        )
-        .map_err(|e| format!("Failed to create reactions index: {e}"))?;
+        ddl(conn, "reactions index",
+            "CREATE INDEX IF NOT EXISTS idx_reactions_msg_id ON message_reactions (message_id)")?;
 
         // Reaction removal history (Rat Files evidence).
-        conn.execute(
+        ddl(conn, "reaction_removals table",
             "CREATE TABLE IF NOT EXISTS reaction_removals (
                 id         INTEGER PRIMARY KEY AUTOINCREMENT,
                 message_id TEXT    NOT NULL,
@@ -497,82 +550,61 @@ impl MessageStore {
                 removed_at INTEGER NOT NULL,
                 signature  TEXT,
                 public_key TEXT
-            )",
-            [],
-        )
-        .map_err(|e| format!("Failed to create reaction_removals table: {e}"))?;
+            )")?;
 
         // -- App settings (key-value, general purpose) --
-        conn.execute(
+        ddl(conn, "friends table",
             "CREATE TABLE IF NOT EXISTS friends (
                 peer_id      TEXT PRIMARY KEY,
                 status       TEXT NOT NULL,
                 direction    TEXT NOT NULL DEFAULT '',
                 requested_at INTEGER NOT NULL DEFAULT 0,
                 updated_at   INTEGER NOT NULL DEFAULT 0
-            )",
-            [],
-        )
-        .map_err(|e| format!("Failed to create friends table: {e}"))?;
+            )")?;
 
-        conn.execute(
+        ddl(conn, "app_settings table",
             "CREATE TABLE IF NOT EXISTS app_settings (
                 key   TEXT PRIMARY KEY,
                 value TEXT NOT NULL
-            )",
-            [],
-        )
-        .map_err(|e| format!("Failed to create app_settings table: {e}"))?;
+            )")?;
 
         // -- Blocked peers (local block list, MASTER-keyed) --
-        conn.execute(
+        ddl(conn, "blocked_peers table",
             "CREATE TABLE IF NOT EXISTS blocked_peers (
                 peer_id    TEXT PRIMARY KEY,
                 blocked_at INTEGER NOT NULL DEFAULT 0
-            )",
-            [],
-        )
-        .map_err(|e| format!("Failed to create blocked_peers table: {e}"))?;
+            )")?;
 
         // -- Custom emotes: content-addressed blob cache (shared across
         //    servers/DMs — the same hash is stored once) + the user's own
         //    personal emote set (names are local; hashes are global) --
-        conn.execute(
+        ddl(conn, "emote_blobs table",
             "CREATE TABLE IF NOT EXISTS emote_blobs (
                 hash     TEXT PRIMARY KEY,
                 bytes    BLOB NOT NULL,
                 animated INTEGER NOT NULL DEFAULT 0,
                 added_at INTEGER NOT NULL DEFAULT 0
-            )",
-            [],
-        )
-        .map_err(|e| format!("Failed to create emote_blobs table: {e}"))?;
-        conn.execute(
+            )")?;
+        ddl(conn, "personal_emotes table",
             "CREATE TABLE IF NOT EXISTS personal_emotes (
                 name     TEXT PRIMARY KEY,
                 hash     TEXT NOT NULL,
                 animated INTEGER NOT NULL DEFAULT 0,
                 source   TEXT NOT NULL DEFAULT '',
                 added_at INTEGER NOT NULL DEFAULT 0
-            )",
-            [],
-        )
-        .map_err(|e| format!("Failed to create personal_emotes table: {e}"))?;
+            )")?;
 
         // -- MLS identity (singleton row, id=1) --
-        conn.execute(
+        ddl(conn, "mls_identity table",
             "CREATE TABLE IF NOT EXISTS mls_identity (
                 id              INTEGER PRIMARY KEY CHECK (id = 1),
                 signer_data     BLOB NOT NULL,
                 credential_data BLOB NOT NULL,
                 storage_data    BLOB
-            )",
-            [],
-        )
-        .map_err(|e| format!("Failed to create mls_identity table: {e}"))?;
+            )")?;
 
         // -- File sharing (Phase 3.5) --
-        conn.execute(
+        ddl(conn, "files table",
             "CREATE TABLE IF NOT EXISTS files (
                 file_id         TEXT PRIMARY KEY,
                 file_name       TEXT NOT NULL,
@@ -593,65 +625,41 @@ impl MessageStore {
                 completed_at    INTEGER,
                 disk_path       TEXT,
                 hidden_at       INTEGER
-            )",
-            [],
-        )
-        .map_err(|e| format!("Failed to create files table: {e}"))?;
+            )")?;
 
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_files_message ON files (message_id)",
-            [],
-        )
-        .map_err(|e| format!("Failed to create files message_id index: {e}"))?;
+        ddl(conn, "files message_id index",
+            "CREATE INDEX IF NOT EXISTS idx_files_message ON files (message_id)")?;
 
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_files_context ON files (context_type, context_id)",
-            [],
-        )
-        .map_err(|e| format!("Failed to create files context index: {e}"))?;
+        ddl(conn, "files context index",
+            "CREATE INDEX IF NOT EXISTS idx_files_context ON files (context_type, context_id)")?;
 
         // -- Migration: video_thumb_json column (Phase 6.75 video preview).
         // Stores a JSON-encoded VideoThumbRef when this file is a thumbnail
-        // for a vault-stored video. Wrapped in unwrap_or to handle re-runs.
-        conn.execute_batch(
-            "ALTER TABLE files ADD COLUMN video_thumb_json TEXT;"
-        ).unwrap_or(());
+        // for a vault-stored video.
+        migrate(conn, "ALTER TABLE files ADD COLUMN video_thumb_json TEXT;");
 
         // Timestamp when the file was expired by the retention timer.
         // NULL = not expired. Non-null = file data deleted from disk, row kept as placeholder.
-        conn.execute_batch(
-            "ALTER TABLE files ADD COLUMN expired_at INTEGER;"
-        ).unwrap_or(());
+        migrate(conn, "ALTER TABLE files ADD COLUMN expired_at INTEGER;");
 
-        conn.execute(
+        ddl(conn, "file_chunks table",
             "CREATE TABLE IF NOT EXISTS file_chunks (
                 file_id     TEXT    NOT NULL,
                 chunk_index INTEGER NOT NULL,
                 received_at INTEGER NOT NULL,
                 PRIMARY KEY (file_id, chunk_index)
-            )",
-            [],
-        )
-        .map_err(|e| format!("Failed to create file_chunks table: {e}"))?;
+            )")?;
 
         // -- Migration: file_id column on messages --
-        conn.execute_batch(
-            "ALTER TABLE messages ADD COLUMN file_id TEXT;"
-        ).unwrap_or(());
-        conn.execute_batch(
-            "ALTER TABLE channel_messages ADD COLUMN file_id TEXT;"
-        ).unwrap_or(());
+        migrate(conn, "ALTER TABLE messages ADD COLUMN file_id TEXT;");
+        migrate(conn, "ALTER TABLE channel_messages ADD COLUMN file_id TEXT;");
 
         // -- Migration: link_preview_json column (Phase 6.75 link previews).
         // Stores a JSON-encoded LinkPreviewRef for messages that previewed a URL.
         // Populated by update_link_preview / update_channel_link_preview after
         // the message row is inserted.
-        conn.execute_batch(
-            "ALTER TABLE messages ADD COLUMN link_preview_json TEXT;"
-        ).unwrap_or(());
-        conn.execute_batch(
-            "ALTER TABLE channel_messages ADD COLUMN link_preview_json TEXT;"
-        ).unwrap_or(());
+        migrate(conn, "ALTER TABLE messages ADD COLUMN link_preview_json TEXT;");
+        migrate(conn, "ALTER TABLE channel_messages ADD COLUMN link_preview_json TEXT;");
 
         // -- Migration: order_us — microsecond send timestamp for stable ordering --
         // (Step 9C/C4). The display ORDER BY uses this BEFORE sender_id, so a
@@ -660,68 +668,41 @@ impl MessageStore {
         // "ping-pong" bug). Set by the SENDER (microsecond wall clock), carried over
         // the wire untouched, and NULL for legacy rows / pre-9C peers — those fall
         // back to the old (timestamp, sender_id, id) order.
-        conn.execute_batch(
-            "ALTER TABLE messages ADD COLUMN order_us INTEGER;"
-        ).unwrap_or(());
-        conn.execute_batch(
-            "ALTER TABLE channel_messages ADD COLUMN order_us INTEGER;"
-        ).unwrap_or(());
+        migrate(conn, "ALTER TABLE messages ADD COLUMN order_us INTEGER;");
+        migrate(conn, "ALTER TABLE channel_messages ADD COLUMN order_us INTEGER;");
 
         // -- Migration: updated_at column for edit/delete sync (H12+H13 QA fix) --
         // Tracks when a message was last modified (edit or delete) so sync queries
         // can catch edits/deletes to old messages that would otherwise be missed.
-        conn.execute_batch(
-            "ALTER TABLE messages ADD COLUMN updated_at INTEGER;"
-        ).unwrap_or(());
-        conn.execute_batch(
-            "ALTER TABLE channel_messages ADD COLUMN updated_at INTEGER;"
-        ).unwrap_or(());
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_messages_peer_updated ON messages (peer_id, updated_at)",
-            [],
-        ).map_err(|e| format!("Failed to create idx_messages_peer_updated: {e}"))?;
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_channel_msgs_updated ON channel_messages (server_id, channel_id, updated_at)",
-            [],
-        ).map_err(|e| format!("Failed to create idx_channel_msgs_updated: {e}"))?;
+        migrate(conn, "ALTER TABLE messages ADD COLUMN updated_at INTEGER;");
+        migrate(conn, "ALTER TABLE channel_messages ADD COLUMN updated_at INTEGER;");
+        ddl(conn, "idx_messages_peer_updated",
+            "CREATE INDEX IF NOT EXISTS idx_messages_peer_updated ON messages (peer_id, updated_at)")?;
+        ddl(conn, "idx_channel_msgs_updated",
+            "CREATE INDEX IF NOT EXISTS idx_channel_msgs_updated ON channel_messages (server_id, channel_id, updated_at)")?;
 
         // -- Migration: avatar/banner BLOB columns on user_profiles --
-        conn.execute_batch(
-            "ALTER TABLE user_profiles ADD COLUMN avatar BLOB;"
-        ).unwrap_or(());
-        conn.execute_batch(
-            "ALTER TABLE user_profiles ADD COLUMN banner BLOB;"
-        ).unwrap_or(());
-        conn.execute_batch(
-            "ALTER TABLE user_profiles ADD COLUMN twitch_username TEXT NOT NULL DEFAULT '';"
-        ).unwrap_or(());
-        conn.execute_batch(
-            "ALTER TABLE user_profiles ADD COLUMN showcase_board TEXT NOT NULL DEFAULT '';"
-        ).unwrap_or(());
-        conn.execute_batch(
-            "ALTER TABLE user_profiles ADD COLUMN showcase_assets BLOB;"
-        ).unwrap_or(());
+        migrate(conn, "ALTER TABLE user_profiles ADD COLUMN avatar BLOB;");
+        migrate(conn, "ALTER TABLE user_profiles ADD COLUMN banner BLOB;");
+        migrate(conn, "ALTER TABLE user_profiles ADD COLUMN twitch_username TEXT NOT NULL DEFAULT '';");
+        migrate(conn, "ALTER TABLE user_profiles ADD COLUMN showcase_board TEXT NOT NULL DEFAULT '';");
+        migrate(conn, "ALTER TABLE user_profiles ADD COLUMN showcase_assets BLOB;");
 
         // -- Migration: content_id column on files (vault ↔ file_id link) --
-        conn.execute_batch(
-            "ALTER TABLE files ADD COLUMN content_id TEXT;"
-        ).unwrap_or(());
+        migrate(conn, "ALTER TABLE files ADD COLUMN content_id TEXT;");
 
         // -- Verified peers (RAT Files — peer identity verification) --
-        conn.execute(
+        ddl(conn, "verified_peers table",
             "CREATE TABLE IF NOT EXISTS verified_peers (
                 peer_id     TEXT PRIMARY KEY,
                 verified_at INTEGER NOT NULL
-            )",
-            [],
-        )
-        .map_err(|e| format!("Failed to create verified_peers table: {e}"))?;
+            )")?;
 
         // -- Hollow Share (Phase 7A) --
         // One row per share we've created, opened, or downloaded. The encryption_key
         // is the AES-256-GCM key from the share link; if the user loses the link
         // and the row is gone, the file is unrecoverable (which is the point).
-        conn.execute(
+        ddl(conn, "shares table",
             "CREATE TABLE IF NOT EXISTS shares (
                 root_hash       TEXT PRIMARY KEY,
                 file_name       TEXT NOT NULL,
@@ -740,52 +721,39 @@ impl MessageStore {
                 bytes_uploaded  INTEGER NOT NULL DEFAULT 0,
                 created_at      INTEGER NOT NULL,
                 completed_at    INTEGER
-            )",
-            [],
-        )
-        .map_err(|e| format!("Failed to create shares table: {e}"))?;
+            )")?;
         // Idempotent migrations for existing dbs.
-        conn.execute_batch("ALTER TABLE shares ADD COLUMN save_dir TEXT;").unwrap_or(());
-        conn.execute_batch("ALTER TABLE shares ADD COLUMN server_id TEXT;").unwrap_or(());
-        conn.execute_batch("ALTER TABLE shares ADD COLUMN context_type TEXT;").unwrap_or(());
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_shares_state ON shares(state)",
-            [],
-        ).map_err(|e| format!("Failed to create idx_shares_state: {e}"))?;
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_shares_seeding ON shares(seeding)",
-            [],
-        ).map_err(|e| format!("Failed to create idx_shares_seeding: {e}"))?;
+        migrate(conn, "ALTER TABLE shares ADD COLUMN save_dir TEXT;");
+        migrate(conn, "ALTER TABLE shares ADD COLUMN server_id TEXT;");
+        migrate(conn, "ALTER TABLE shares ADD COLUMN context_type TEXT;");
+        ddl(conn, "idx_shares_state",
+            "CREATE INDEX IF NOT EXISTS idx_shares_state ON shares(state)")?;
+        ddl(conn, "idx_shares_seeding",
+            "CREATE INDEX IF NOT EXISTS idx_shares_seeding ON shares(seeding)")?;
 
         // -- Server blobs (CrdtStore: large settings like server_avatar) --
-        conn.execute(
+        ddl(conn, "server_blobs table",
             "CREATE TABLE IF NOT EXISTS server_blobs (
                 server_id TEXT NOT NULL,
                 key       TEXT NOT NULL,
                 value     TEXT NOT NULL,
                 PRIMARY KEY (server_id, key)
-            )",
-            [],
-        )
-        .map_err(|e| format!("Failed to create server_blobs table: {e}"))?;
+            )")?;
 
         // Have-bitmap per share, persisted so paused/restarted downloads resume
         // without re-fetching. bitmap_blob is little-endian-packed bits.
-        conn.execute(
+        ddl(conn, "share_chunks table",
             "CREATE TABLE IF NOT EXISTS share_chunks (
                 root_hash    TEXT PRIMARY KEY,
                 bitmap_blob  BLOB NOT NULL,
                 updated_at   INTEGER NOT NULL
-            )",
-            [],
-        )
-        .map_err(|e| format!("Failed to create share_chunks table: {e}"))?;
+            )")?;
 
         // -- Conference rooms (host-local; reports/CONFERENCES_PLAN.md) --
         // Durable "my meeting room" objects. access_code_hash is the
         // conf-scoped sha256 derivation, never the plaintext code. co_hosts
         // is a JSON array of master ids (enforced at ingest, phase 2).
-        conn.execute(
+        ddl(conn, "conferences table",
             "CREATE TABLE IF NOT EXISTS conferences (
                 conf_id          TEXT PRIMARY KEY,
                 name             TEXT NOT NULL,
@@ -794,10 +762,7 @@ impl MessageStore {
                 co_hosts         TEXT NOT NULL DEFAULT '[]',
                 broadcast_mode   INTEGER NOT NULL DEFAULT 0,
                 created_at       INTEGER NOT NULL
-            )",
-            [],
-        )
-        .map_err(|e| format!("Failed to create conferences table: {e}"))?;
+            )")?;
 
         // -- FTS5 full-text search indexes (L4 QA fix) --
         // Content-sync FTS: the FTS table reads from the main table on demand,
@@ -859,42 +824,30 @@ impl MessageStore {
         // One row per master identity holding its full signed device list JSON +
         // monotonic version (replay protection). `device_links` is the fast
         // reverse index used by the device→master resolver.
-        conn.execute(
+        ddl(conn, "device_lists table",
             "CREATE TABLE IF NOT EXISTS device_lists (
                 master_peer_id TEXT PRIMARY KEY,
                 json           TEXT    NOT NULL,
                 version        INTEGER NOT NULL DEFAULT 0,
                 updated_at     INTEGER NOT NULL DEFAULT 0
-            )",
-            [],
-        )
-        .map_err(|e| format!("Failed to create device_lists table: {e}"))?;
+            )")?;
 
-        conn.execute(
+        ddl(conn, "device_links table",
             "CREATE TABLE IF NOT EXISTS device_links (
                 device_peer_id TEXT PRIMARY KEY,
                 master_peer_id TEXT NOT NULL
-            )",
-            [],
-        )
-        .map_err(|e| format!("Failed to create device_links table: {e}"))?;
+            )")?;
 
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_device_links_master ON device_links (master_peer_id)",
-            [],
-        )
-        .map_err(|e| format!("Failed to create device_links index: {e}"))?;
+        ddl(conn, "device_links index",
+            "CREATE INDEX IF NOT EXISTS idx_device_links_master ON device_links (master_peer_id)")?;
 
         // Local-only, unsigned human labels for devices (Step 8 Devices panel). NOT
         // synced or master-signed — each device names its own view of the device set.
-        conn.execute(
+        ddl(conn, "device_labels table",
             "CREATE TABLE IF NOT EXISTS device_labels (
                 device_peer_id TEXT PRIMARY KEY,
                 label          TEXT NOT NULL DEFAULT ''
-            )",
-            [],
-        )
-        .map_err(|e| format!("Failed to create device_labels table: {e}"))?;
+            )")?;
 
         Ok(())
     }
@@ -1096,24 +1049,23 @@ impl MessageStore {
     /// Set the link preview JSON for a DM row identified by `message_id`.
     /// No-op if no row matches. Phase 6.75.
     pub fn update_link_preview(&self, message_id: &str, link_preview_json: &str) -> Result<(), String> {
-        self.conn
-            .execute(
-                "UPDATE messages SET link_preview_json = ?1 WHERE message_id = ?2",
-                params![link_preview_json, message_id],
-            )
-            .map_err(|e| format!("Failed to update link preview: {e}"))?;
-        Ok(())
+        self.update_link_preview_in("messages", message_id, link_preview_json)
     }
 
     /// Set the link preview JSON for a channel message row identified by `message_id`.
     /// No-op if no row matches. Phase 6.75.
     pub fn update_channel_link_preview(&self, message_id: &str, link_preview_json: &str) -> Result<(), String> {
+        self.update_link_preview_in("channel_messages", message_id, link_preview_json)
+    }
+
+    /// Shared link-preview setter. `table` is a fixed table name, never user input.
+    fn update_link_preview_in(&self, table: &str, message_id: &str, link_preview_json: &str) -> Result<(), String> {
         self.conn
             .execute(
-                "UPDATE channel_messages SET link_preview_json = ?1 WHERE message_id = ?2",
+                &format!("UPDATE {table} SET link_preview_json = ?1 WHERE message_id = ?2"),
                 params![link_preview_json, message_id],
             )
-            .map_err(|e| format!("Failed to update channel link preview: {e}"))?;
+            .map_err(|e| format!("Failed to update {table} link preview: {e}"))?;
         Ok(())
     }
 
@@ -1194,11 +1146,7 @@ impl MessageStore {
         let rows = stmt
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
             .map_err(|e| format!("Failed to query olm_sessions: {e}"))?;
-        let mut result = Vec::new();
-        for row in rows {
-            result.push(row.map_err(|e| format!("Failed to read olm_sessions row: {e}"))?);
-        }
-        Ok(result)
+        collect_rows(rows, "olm_sessions")
     }
 
     /// Load recent messages for a peer, ordered oldest-first.
@@ -1210,43 +1158,43 @@ impl MessageStore {
     ) -> Result<Vec<StoredMessage>, String> {
         let mut stmt = self
             .conn
-            .prepare(
-                "SELECT id, peer_id, text, is_mine, timestamp, signature, public_key, message_id, edited_at, hidden_at, reply_to_mid, file_id, link_preview_json, order_us
+            .prepare(&format!(
+                "SELECT {DM_MSG_COLS}
                  FROM messages
                  WHERE peer_id = ?1 AND hidden_at IS NULL
                  ORDER BY timestamp DESC, COALESCE(order_us, timestamp * 1000) DESC, id DESC
                  LIMIT ?2",
-            )
+            ))
             .map_err(|e| format!("Failed to prepare query: {e}"))?;
 
         let rows = stmt
-            .query_map(params![peer_id, limit], |row| {
-                Ok(StoredMessage {
-                    id: row.get(0)?,
-                    peer_id: row.get(1)?,
-                    text: row.get(2)?,
-                    is_mine: row.get::<_, i32>(3)? != 0,
-                    timestamp: row.get(4)?,
-                    signature: row.get(5)?,
-                    public_key: row.get(6)?,
-                    message_id: row.get(7)?,
-                    edited_at: row.get(8)?,
-                    hidden_at: row.get(9)?,
-                    reply_to_mid: row.get(10)?,
-                    file_id: row.get(11)?,
-                    link_preview: row.get::<_, Option<String>>(12)?
-                        .and_then(|s| serde_json::from_str(&s).ok()),
-                    order_us: row.get(13)?,
-                })
-            })
+            .query_map(params![peer_id, limit], dm_message_from_row)
             .map_err(|e| format!("Failed to query messages: {e}"))?;
 
-        let mut messages = Vec::new();
-        for row in rows {
-            messages.push(row.map_err(|e| format!("Failed to read row: {e}"))?);
-        }
+        let mut messages = collect_rows(rows, "messages")?;
         messages.reverse(); // Oldest first for display.
         Ok(messages)
+    }
+
+    /// Single-value `MAX(timestamp)`-style query; no row or NULL → Ok(None).
+    fn query_opt_ts(
+        &self,
+        sql: &str,
+        params: &[&dyn rusqlite::types::ToSql],
+        what: &str,
+    ) -> Result<Option<i64>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(sql)
+            .map_err(|e| format!("Failed to prepare {what} query: {e}"))?;
+        let mut rows = stmt
+            .query_map(params, |row| row.get::<_, Option<i64>>(0))
+            .map_err(|e| format!("Failed to query {what}: {e}"))?;
+        match rows.next() {
+            Some(Ok(ts)) => Ok(ts),
+            Some(Err(e)) => Err(format!("Failed to read {what}: {e}")),
+            None => Ok(None),
+        }
     }
 
     /// Get the latest DM timestamp for a peer (for DM sync requests).
@@ -1256,20 +1204,11 @@ impl MessageStore {
         &self,
         peer_id: &str,
     ) -> Result<Option<i64>, String> {
-        let mut stmt = self
-            .conn
-            .prepare(
-                "SELECT MAX(timestamp) FROM messages WHERE peer_id = ?1 AND is_mine = 0",
-            )
-            .map_err(|e| format!("Failed to prepare dm latest timestamp query: {e}"))?;
-        let mut rows = stmt
-            .query_map(params![peer_id], |row| row.get::<_, Option<i64>>(0))
-            .map_err(|e| format!("Failed to query dm latest timestamp: {e}"))?;
-        match rows.next() {
-            Some(Ok(ts)) => Ok(ts),
-            Some(Err(e)) => Err(format!("Failed to read dm latest timestamp: {e}")),
-            None => Ok(None),
-        }
+        self.query_opt_ts(
+            "SELECT MAX(timestamp) FROM messages WHERE peer_id = ?1 AND is_mine = 0",
+            &[&peer_id],
+            "dm latest timestamp",
+        )
     }
 
     /// Get DM messages **we sent** newer than or equal to a given timestamp (for DM sync responses).
@@ -1284,42 +1223,20 @@ impl MessageStore {
     ) -> Result<Vec<StoredMessage>, String> {
         let mut stmt = self
             .conn
-            .prepare(
-                "SELECT id, peer_id, text, is_mine, timestamp, signature, public_key, message_id, edited_at, hidden_at, reply_to_mid, file_id, link_preview_json, order_us
+            .prepare(&format!(
+                "SELECT {DM_MSG_COLS}
                  FROM messages
                  WHERE peer_id = ?1 AND is_mine = 1 AND (timestamp >= ?2 OR updated_at >= ?2)
                  ORDER BY timestamp ASC, COALESCE(order_us, timestamp * 1000) ASC
                  LIMIT ?3",
-            )
+            ))
             .map_err(|e| format!("Failed to prepare dm_messages_since query: {e}"))?;
 
         let rows = stmt
-            .query_map(params![peer_id, since_timestamp, limit], |row| {
-                Ok(StoredMessage {
-                    id: row.get(0)?,
-                    peer_id: row.get(1)?,
-                    text: row.get(2)?,
-                    is_mine: row.get::<_, i32>(3)? != 0,
-                    timestamp: row.get(4)?,
-                    signature: row.get(5)?,
-                    public_key: row.get(6)?,
-                    message_id: row.get(7)?,
-                    edited_at: row.get(8)?,
-                    hidden_at: row.get(9)?,
-                    reply_to_mid: row.get(10)?,
-                    file_id: row.get(11)?,
-                    link_preview: row.get::<_, Option<String>>(12)?
-                        .and_then(|s| serde_json::from_str(&s).ok()),
-                    order_us: row.get(13)?,
-                })
-            })
+            .query_map(params![peer_id, since_timestamp, limit], dm_message_from_row)
             .map_err(|e| format!("Failed to query dm_messages_since: {e}"))?;
 
-        let mut messages = Vec::new();
-        for row in rows {
-            messages.push(row.map_err(|e| format!("Failed to read dm_messages_since row: {e}"))?);
-        }
-        Ok(messages)
+        collect_rows(rows, "dm_messages_since")
     }
 
     /// Latest DM timestamp in a conversation **regardless of direction** (for
@@ -1331,18 +1248,11 @@ impl MessageStore {
         &self,
         peer_id: &str,
     ) -> Result<Option<i64>, String> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT MAX(timestamp) FROM messages WHERE peer_id = ?1")
-            .map_err(|e| format!("Failed to prepare dm latest-any timestamp query: {e}"))?;
-        let mut rows = stmt
-            .query_map(params![peer_id], |row| row.get::<_, Option<i64>>(0))
-            .map_err(|e| format!("Failed to query dm latest-any timestamp: {e}"))?;
-        match rows.next() {
-            Some(Ok(ts)) => Ok(ts),
-            Some(Err(e)) => Err(format!("Failed to read dm latest-any timestamp: {e}")),
-            None => Ok(None),
-        }
+        self.query_opt_ts(
+            "SELECT MAX(timestamp) FROM messages WHERE peer_id = ?1",
+            &[&peer_id],
+            "dm latest-any timestamp",
+        )
     }
 
     /// Get DM messages in a conversation newer than a timestamp, **in BOTH
@@ -1365,42 +1275,20 @@ impl MessageStore {
     ) -> Result<Vec<StoredMessage>, String> {
         let mut stmt = self
             .conn
-            .prepare(
-                "SELECT id, peer_id, text, is_mine, timestamp, signature, public_key, message_id, edited_at, hidden_at, reply_to_mid, file_id, link_preview_json, order_us
+            .prepare(&format!(
+                "SELECT {DM_MSG_COLS}
                  FROM messages
                  WHERE peer_id = ?1 AND (timestamp > ?2 OR updated_at >= ?2)
                  ORDER BY timestamp ASC, COALESCE(order_us, timestamp * 1000) ASC
                  LIMIT ?3",
-            )
+            ))
             .map_err(|e| format!("Failed to prepare dm_messages_for_sibling query: {e}"))?;
 
         let rows = stmt
-            .query_map(params![peer_id, since_timestamp, limit], |row| {
-                Ok(StoredMessage {
-                    id: row.get(0)?,
-                    peer_id: row.get(1)?,
-                    text: row.get(2)?,
-                    is_mine: row.get::<_, i32>(3)? != 0,
-                    timestamp: row.get(4)?,
-                    signature: row.get(5)?,
-                    public_key: row.get(6)?,
-                    message_id: row.get(7)?,
-                    edited_at: row.get(8)?,
-                    hidden_at: row.get(9)?,
-                    reply_to_mid: row.get(10)?,
-                    file_id: row.get(11)?,
-                    link_preview: row.get::<_, Option<String>>(12)?
-                        .and_then(|s| serde_json::from_str(&s).ok()),
-                    order_us: row.get(13)?,
-                })
-            })
+            .query_map(params![peer_id, since_timestamp, limit], dm_message_from_row)
             .map_err(|e| format!("Failed to query dm_messages_for_sibling: {e}"))?;
 
-        let mut messages = Vec::new();
-        for row in rows {
-            messages.push(row.map_err(|e| format!("Failed to read dm_messages_for_sibling row: {e}"))?);
-        }
-        Ok(messages)
+        collect_rows(rows, "dm_messages_for_sibling")
     }
 
     // -- CRDT persistence methods --
@@ -1446,11 +1334,7 @@ impl MessageStore {
         let rows = stmt
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
             .map_err(|e| format!("Failed to query servers: {e}"))?;
-        let mut result = Vec::new();
-        for row in rows {
-            result.push(row.map_err(|e| format!("Failed to read servers row: {e}"))?);
-        }
-        Ok(result)
+        collect_rows(rows, "servers")
     }
 
     /// Delete a server's CRDT state and all its CRDT ops from the database.
@@ -1630,43 +1514,20 @@ impl MessageStore {
     ) -> Result<Vec<StoredChannelMessage>, String> {
         let mut stmt = self
             .conn
-            .prepare(
-                "SELECT id, server_id, channel_id, sender_id, text, is_mine, timestamp, signature, public_key, message_id, edited_at, hidden_at, reply_to_mid, file_id, link_preview_json, order_us
+            .prepare(&format!(
+                "SELECT {CHANNEL_MSG_COLS}
                  FROM channel_messages
                  WHERE server_id = ?1 AND channel_id = ?2 AND hidden_at IS NULL
                  ORDER BY timestamp DESC, COALESCE(order_us, timestamp * 1000) DESC, sender_id DESC, id DESC
                  LIMIT ?3",
-            )
+            ))
             .map_err(|e| format!("Failed to prepare channel_messages query: {e}"))?;
 
         let rows = stmt
-            .query_map(params![server_id, channel_id, limit], |row| {
-                Ok(StoredChannelMessage {
-                    id: row.get(0)?,
-                    server_id: row.get(1)?,
-                    channel_id: row.get(2)?,
-                    sender_id: row.get(3)?,
-                    text: row.get(4)?,
-                    is_mine: row.get::<_, i32>(5)? != 0,
-                    timestamp: row.get(6)?,
-                    signature: row.get(7)?,
-                    public_key: row.get(8)?,
-                    message_id: row.get(9)?,
-                    edited_at: row.get(10)?,
-                    hidden_at: row.get(11)?,
-                    reply_to_mid: row.get(12)?,
-                    file_id: row.get(13)?,
-                    link_preview: row.get::<_, Option<String>>(14)?
-                        .and_then(|s| serde_json::from_str(&s).ok()),
-                    order_us: row.get(15)?,
-                })
-            })
+            .query_map(params![server_id, channel_id, limit], channel_message_from_row)
             .map_err(|e| format!("Failed to query channel_messages: {e}"))?;
 
-        let mut messages = Vec::new();
-        for row in rows {
-            messages.push(row.map_err(|e| format!("Failed to read channel_messages row: {e}"))?);
-        }
+        let mut messages = collect_rows(rows, "channel_messages")?;
         messages.reverse(); // Oldest first for display.
         Ok(messages)
     }
@@ -1677,23 +1538,12 @@ impl MessageStore {
         server_id: &str,
         channel_id: &str,
     ) -> Result<Option<i64>, String> {
-        let mut stmt = self
-            .conn
-            .prepare(
-                "SELECT MAX(timestamp) FROM channel_messages
-                 WHERE server_id = ?1 AND channel_id = ?2",
-            )
-            .map_err(|e| format!("Failed to prepare latest timestamp query: {e}"))?;
-        let mut rows = stmt
-            .query_map(params![server_id, channel_id], |row| {
-                row.get::<_, Option<i64>>(0)
-            })
-            .map_err(|e| format!("Failed to query latest timestamp: {e}"))?;
-        match rows.next() {
-            Some(Ok(ts)) => Ok(ts),
-            Some(Err(e)) => Err(format!("Failed to read latest timestamp: {e}")),
-            None => Ok(None),
-        }
+        self.query_opt_ts(
+            "SELECT MAX(timestamp) FROM channel_messages
+             WHERE server_id = ?1 AND channel_id = ?2",
+            &[&server_id, &channel_id],
+            "latest timestamp",
+        )
     }
 
     /// Latest timestamp of the LOCAL user's own messages in a channel
@@ -1765,49 +1615,23 @@ impl MessageStore {
     ) -> Result<Vec<StoredChannelMessage>, String> {
         let mut stmt = self
             .conn
-            .prepare(
-                "SELECT id, server_id, channel_id, sender_id, text, is_mine, timestamp, signature, public_key, message_id, edited_at, hidden_at, reply_to_mid, file_id, link_preview_json, order_us
+            .prepare(&format!(
+                "SELECT {CHANNEL_MSG_COLS}
                  FROM channel_messages
                  WHERE server_id = ?1 AND channel_id = ?2 AND (timestamp > ?3 OR updated_at > ?3)
                  ORDER BY timestamp ASC
                  LIMIT ?4",
-            )
+            ))
             .map_err(|e| format!("Failed to prepare messages_since query: {e}"))?;
 
         let rows = stmt
             .query_map(
                 params![server_id, channel_id, since_timestamp, limit],
-                |row| {
-                    Ok(StoredChannelMessage {
-                        id: row.get(0)?,
-                        server_id: row.get(1)?,
-                        channel_id: row.get(2)?,
-                        sender_id: row.get(3)?,
-                        text: row.get(4)?,
-                        is_mine: row.get::<_, i32>(5)? != 0,
-                        timestamp: row.get(6)?,
-                        signature: row.get(7)?,
-                        public_key: row.get(8)?,
-                        message_id: row.get(9)?,
-                        edited_at: row.get(10)?,
-                        hidden_at: row.get(11)?,
-                        reply_to_mid: row.get(12)?,
-                        file_id: row.get(13)?,
-                        link_preview: row.get::<_, Option<String>>(14)?
-                            .and_then(|s| serde_json::from_str(&s).ok()),
-                        order_us: row.get(15)?,
-                    })
-                },
+                channel_message_from_row,
             )
             .map_err(|e| format!("Failed to query messages_since: {e}"))?;
 
-        let mut messages = Vec::new();
-        for row in rows {
-            messages.push(
-                row.map_err(|e| format!("Failed to read messages_since row: {e}"))?,
-            );
-        }
-        Ok(messages)
+        collect_rows(rows, "messages_since")
     }
 
     pub fn get_channel_messages_before(
@@ -1819,48 +1643,23 @@ impl MessageStore {
     ) -> Result<Vec<StoredChannelMessage>, String> {
         let mut stmt = self
             .conn
-            .prepare(
-                "SELECT id, server_id, channel_id, sender_id, text, is_mine, timestamp, signature, public_key, message_id, edited_at, hidden_at, reply_to_mid, file_id, link_preview_json, order_us
+            .prepare(&format!(
+                "SELECT {CHANNEL_MSG_COLS}
                  FROM channel_messages
                  WHERE server_id = ?1 AND channel_id = ?2 AND timestamp < ?3
                  ORDER BY timestamp DESC
                  LIMIT ?4",
-            )
+            ))
             .map_err(|e| format!("Failed to prepare messages_before query: {e}"))?;
 
         let rows = stmt
             .query_map(
                 params![server_id, channel_id, before_timestamp, limit],
-                |row| {
-                    Ok(StoredChannelMessage {
-                        id: row.get(0)?,
-                        server_id: row.get(1)?,
-                        channel_id: row.get(2)?,
-                        sender_id: row.get(3)?,
-                        text: row.get(4)?,
-                        is_mine: row.get::<_, i32>(5)? != 0,
-                        timestamp: row.get(6)?,
-                        signature: row.get(7)?,
-                        public_key: row.get(8)?,
-                        message_id: row.get(9)?,
-                        edited_at: row.get(10)?,
-                        hidden_at: row.get(11)?,
-                        reply_to_mid: row.get(12)?,
-                        file_id: row.get(13)?,
-                        link_preview: row.get::<_, Option<String>>(14)?
-                            .and_then(|s| serde_json::from_str(&s).ok()),
-                        order_us: row.get(15)?,
-                    })
-                },
+                channel_message_from_row,
             )
             .map_err(|e| format!("Failed to query messages_before: {e}"))?;
 
-        let mut messages = Vec::new();
-        for row in rows {
-            messages.push(
-                row.map_err(|e| format!("Failed to read messages_before row: {e}"))?,
-            );
-        }
+        let mut messages = collect_rows(rows, "messages_before")?;
         messages.reverse();
         Ok(messages)
     }
@@ -2157,9 +1956,41 @@ impl MessageStore {
             return self.get_channel_messages_since(server_id, channel_id, 0, limit);
         }
 
-        // Build dynamic SQL: for each known sender, filter by their timestamp.
-        // Unknown senders get all messages.
-        // Uses `>=` (inclusive) to catch same-millisecond messages; INSERT OR IGNORE dedup handles overlap.
+        let (where_clause, mut param_values) =
+            Self::per_sender_where(server_id, channel_id, sender_timestamps);
+        let sql = format!(
+            "SELECT {CHANNEL_MSG_COLS}
+             FROM channel_messages
+             WHERE server_id = ?1 AND channel_id = ?2 AND ({where_clause})
+             ORDER BY timestamp ASC, COALESCE(order_us, timestamp * 1000) ASC
+             LIMIT ?{}",
+            param_values.len() + 1,
+        );
+        param_values.push(Box::new(limit));
+
+        let params_ref: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
+
+        let mut stmt = self.conn.prepare(&sql)
+            .map_err(|e| format!("Failed to prepare per_sender_since query: {e}"))?;
+        let rows = stmt
+            .query_map(params_ref.as_slice(), channel_message_from_row)
+            .map_err(|e| format!("Failed to query per_sender_since: {e}"))?;
+
+        collect_rows(rows, "per_sender")
+    }
+
+    /// Build the dynamic per-sender WHERE fragment + parameter list shared by
+    /// [`Self::get_channel_messages_since_per_sender`] and
+    /// [`Self::count_channel_messages_since_per_sender`]: for each known sender,
+    /// messages with `timestamp >= their latest` (inclusive — catches
+    /// same-millisecond messages; INSERT OR IGNORE dedup handles overlap);
+    /// unknown senders match ALL their messages. Params ?1/?2 are
+    /// server_id/channel_id.
+    fn per_sender_where(
+        server_id: &str,
+        channel_id: &str,
+        sender_timestamps: &HashMap<String, i64>,
+    ) -> (String, Vec<Box<dyn rusqlite::types::ToSql>>) {
         let mut conditions = Vec::new();
         let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
         param_values.push(Box::new(server_id.to_string()));
@@ -2188,50 +2019,7 @@ impl MessageStore {
             }
         }
 
-        let where_clause = conditions.join(" OR ");
-        let sql = format!(
-            "SELECT id, server_id, channel_id, sender_id, text, is_mine, timestamp, signature, public_key, message_id, edited_at, hidden_at, reply_to_mid, file_id, link_preview_json, order_us
-             FROM channel_messages
-             WHERE server_id = ?1 AND channel_id = ?2 AND ({where_clause})
-             ORDER BY timestamp ASC, COALESCE(order_us, timestamp * 1000) ASC
-             LIMIT ?{}",
-            param_values.len() + 1,
-        );
-        param_values.push(Box::new(limit));
-
-        let params_ref: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
-
-        let mut stmt = self.conn.prepare(&sql)
-            .map_err(|e| format!("Failed to prepare per_sender_since query: {e}"))?;
-        let rows = stmt
-            .query_map(params_ref.as_slice(), |row| {
-                Ok(StoredChannelMessage {
-                    id: row.get(0)?,
-                    server_id: row.get(1)?,
-                    channel_id: row.get(2)?,
-                    sender_id: row.get(3)?,
-                    text: row.get(4)?,
-                    is_mine: row.get::<_, i32>(5)? != 0,
-                    timestamp: row.get(6)?,
-                    signature: row.get(7)?,
-                    public_key: row.get(8)?,
-                    message_id: row.get(9)?,
-                    edited_at: row.get(10)?,
-                    hidden_at: row.get(11)?,
-                    reply_to_mid: row.get(12)?,
-                    file_id: row.get(13)?,
-                    link_preview: row.get::<_, Option<String>>(14)?
-                        .and_then(|s| serde_json::from_str(&s).ok()),
-                    order_us: row.get(15)?,
-                })
-            })
-            .map_err(|e| format!("Failed to query per_sender_since: {e}"))?;
-
-        let mut messages = Vec::new();
-        for row in rows {
-            messages.push(row.map_err(|e| format!("Failed to read per_sender row: {e}"))?);
-        }
-        Ok(messages)
+        (conditions.join(" OR "), param_values)
     }
 
     /// Count channel messages that would be returned by per-sender sync.
@@ -2245,33 +2033,8 @@ impl MessageStore {
             return self.count_channel_messages_since(server_id, channel_id, 0);
         }
 
-        let mut conditions = Vec::new();
-        let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
-        param_values.push(Box::new(server_id.to_string()));
-        param_values.push(Box::new(channel_id.to_string()));
-
-        let known_senders: Vec<&String> = sender_timestamps.keys().collect();
-        let mut param_idx = 3;
-
-        for (sender, ts) in sender_timestamps {
-            conditions.push(format!("(sender_id = ?{} AND timestamp >= ?{})", param_idx, param_idx + 1));
-            param_values.push(Box::new(sender.clone()));
-            param_values.push(Box::new(*ts));
-            param_idx += 2;
-        }
-
-        if !known_senders.is_empty() {
-            let placeholders: Vec<String> = known_senders.iter().enumerate().map(|(i, _)| {
-                let idx = param_idx + i;
-                format!("?{idx}")
-            }).collect();
-            conditions.push(format!("(sender_id NOT IN ({}))", placeholders.join(",")));
-            for s in &known_senders {
-                param_values.push(Box::new(s.to_string()));
-            }
-        }
-
-        let where_clause = conditions.join(" OR ");
+        let (where_clause, param_values) =
+            Self::per_sender_where(server_id, channel_id, sender_timestamps);
         let sql = format!(
             "SELECT COUNT(*) FROM channel_messages
              WHERE server_id = ?1 AND channel_id = ?2 AND ({where_clause})",
@@ -2461,11 +2224,7 @@ impl MessageStore {
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
             })
             .map_err(|e| format!("Failed to query device_links: {e}"))?;
-        let mut out = Vec::new();
-        for r in rows {
-            out.push(r.map_err(|e| format!("Failed to read device_link row: {e}"))?);
-        }
-        Ok(out)
+        collect_rows(rows, "device_link")
     }
 
     /// Wipe ALL persisted device lists + reverse-index links (multi-device,
@@ -2515,11 +2274,7 @@ impl MessageStore {
         let rows = stmt
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
             .map_err(|e| format!("Failed to query device_labels: {e}"))?;
-        let mut result = Vec::new();
-        for r in rows {
-            result.push(r.map_err(|e| format!("Failed to read device_labels row: {e}"))?);
-        }
-        Ok(result)
+        collect_rows(rows, "device_labels")
     }
 
     // ── User Profile Persistence (Phase 3.5) ──
@@ -2604,20 +2359,7 @@ impl MessageStore {
             )
             .map_err(|e| format!("Failed to prepare profile query: {e}"))?;
         let mut rows = stmt
-            .query_map(params![peer_id], |row| {
-                Ok(StoredProfile {
-                    peer_id: row.get(0)?,
-                    display_name: row.get(1)?,
-                    status: row.get(2)?,
-                    about_me: row.get(3)?,
-                    updated_at: row.get(4)?,
-                    avatar_bytes: row.get(5)?,
-                    banner_bytes: row.get(6)?,
-                    twitch_username: row.get::<_, String>(7).unwrap_or_default(),
-                    showcase_board: row.get::<_, String>(8).unwrap_or_default(),
-                    showcase_assets: row.get(9).unwrap_or(None),
-                })
-            })
+            .query_map(params![peer_id], profile_from_row)
             .map_err(|e| format!("Failed to query profile: {e}"))?;
         match rows.next() {
             Some(Ok(profile)) => Ok(Some(profile)),
@@ -2636,26 +2378,9 @@ impl MessageStore {
             )
             .map_err(|e| format!("Failed to prepare all profiles query: {e}"))?;
         let rows = stmt
-            .query_map([], |row| {
-                Ok(StoredProfile {
-                    peer_id: row.get(0)?,
-                    display_name: row.get(1)?,
-                    status: row.get(2)?,
-                    about_me: row.get(3)?,
-                    updated_at: row.get(4)?,
-                    avatar_bytes: row.get(5)?,
-                    banner_bytes: row.get(6)?,
-                    twitch_username: row.get::<_, String>(7).unwrap_or_default(),
-                    showcase_board: row.get::<_, String>(8).unwrap_or_default(),
-                    showcase_assets: row.get(9).unwrap_or(None),
-                })
-            })
+            .query_map([], profile_from_row)
             .map_err(|e| format!("Failed to query all profiles: {e}"))?;
-        let mut profiles = Vec::new();
-        for row in rows {
-            profiles.push(row.map_err(|e| format!("Failed to read profile row: {e}"))?);
-        }
-        Ok(profiles)
+        collect_rows(rows, "profile")
     }
 
     /// Load all stored profiles WITHOUT avatar/banner blobs (light load for startup).
@@ -2668,26 +2393,9 @@ impl MessageStore {
             )
             .map_err(|e| format!("Failed to prepare light profiles query: {e}"))?;
         let rows = stmt
-            .query_map([], |row| {
-                Ok(StoredProfile {
-                    peer_id: row.get(0)?,
-                    display_name: row.get(1)?,
-                    status: row.get(2)?,
-                    about_me: row.get(3)?,
-                    updated_at: row.get(4)?,
-                    avatar_bytes: None,
-                    banner_bytes: None,
-                    twitch_username: row.get::<_, String>(5).unwrap_or_default(),
-                    showcase_board: row.get::<_, String>(6).unwrap_or_default(),
-                    showcase_assets: None,
-                })
-            })
+            .query_map([], profile_light_from_row)
             .map_err(|e| format!("Failed to query light profiles: {e}"))?;
-        let mut profiles = Vec::new();
-        for row in rows {
-            profiles.push(row.map_err(|e| format!("Failed to read profile row: {e}"))?);
-        }
-        Ok(profiles)
+        collect_rows(rows, "profile")
     }
 
     /// Load a single profile WITHOUT avatar/banner blobs (light load).
@@ -2700,20 +2408,7 @@ impl MessageStore {
             )
             .map_err(|e| format!("Failed to prepare light profile query: {e}"))?;
         let mut rows = stmt
-            .query_map(params![peer_id], |row| {
-                Ok(StoredProfile {
-                    peer_id: row.get(0)?,
-                    display_name: row.get(1)?,
-                    status: row.get(2)?,
-                    about_me: row.get(3)?,
-                    updated_at: row.get(4)?,
-                    avatar_bytes: None,
-                    banner_bytes: None,
-                    twitch_username: row.get::<_, String>(5).unwrap_or_default(),
-                    showcase_board: row.get::<_, String>(6).unwrap_or_default(),
-                    showcase_assets: None,
-                })
-            })
+            .query_map(params![peer_id], profile_light_from_row)
             .map_err(|e| format!("Failed to query light profile: {e}"))?;
         match rows.next() {
             Some(Ok(profile)) => Ok(Some(profile)),
@@ -2847,11 +2542,28 @@ impl MessageStore {
         signature: Option<&str>,
         public_key: Option<&str>,
     ) -> Result<bool, String> {
+        self.edit_message_in("channel_messages", message_id, new_text, edited_at, signature, public_key)
+    }
+
+    /// Shared implementation of [`Self::edit_channel_message`] /
+    /// [`Self::edit_dm_message`]. `table` is a fixed table name ("messages" /
+    /// "channel_messages"), never user input. Preserves the previous text (and
+    /// signature provenance) in message_edits before overwriting, in one
+    /// transaction.
+    fn edit_message_in(
+        &self,
+        table: &str,
+        message_id: &str,
+        new_text: &str,
+        edited_at: i64,
+        signature: Option<&str>,
+        public_key: Option<&str>,
+    ) -> Result<bool, String> {
         // 1. Read the current text + signature/public_key/timestamp before overwriting.
         let row: Option<(String, Option<String>, Option<String>, i64)> = self
             .conn
             .query_row(
-                "SELECT text, signature, public_key, COALESCE(edited_at, timestamp) FROM channel_messages WHERE message_id = ?1",
+                &format!("SELECT text, signature, public_key, COALESCE(edited_at, timestamp) FROM {table} WHERE message_id = ?1"),
                 params![message_id],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
@@ -2877,7 +2589,7 @@ impl MessageStore {
         }
 
         let result = self.conn.execute(
-            "UPDATE channel_messages SET text = ?1, edited_at = ?2, signature = ?3, public_key = ?4, updated_at = ?2 WHERE message_id = ?5",
+            &format!("UPDATE {table} SET text = ?1, edited_at = ?2, signature = ?3, public_key = ?4, updated_at = ?2 WHERE message_id = ?5"),
             params![new_text, edited_at, signature, public_key, message_id],
         );
 
@@ -2888,7 +2600,7 @@ impl MessageStore {
             }
             Err(e) => {
                 let _ = self.conn.execute_batch("ROLLBACK");
-                Err(format!("Failed to update channel message: {e}"))
+                Err(format!("Failed to update {table} row: {e}"))
             }
         }
     }
@@ -2937,50 +2649,7 @@ impl MessageStore {
         signature: Option<&str>,
         public_key: Option<&str>,
     ) -> Result<bool, String> {
-        // 1. Read the current text + signature/public_key/timestamp before overwriting.
-        let row: Option<(String, Option<String>, Option<String>, i64)> = self
-            .conn
-            .query_row(
-                "SELECT text, signature, public_key, COALESCE(edited_at, timestamp) FROM messages WHERE message_id = ?1",
-                params![message_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-            )
-            .ok();
-
-        let Some((old_text, prev_sig, prev_pk, prev_ts)) = row else {
-            return Ok(false);
-        };
-
-        if old_text == new_text {
-            return Ok(false);
-        }
-
-        self.conn.execute_batch("BEGIN").map_err(|e| format!("BEGIN: {e}"))?;
-
-        if let Err(e) = self.conn.execute(
-            "INSERT INTO message_edits (message_id, old_text, new_text, edited_at, signature, public_key, prev_signature, prev_public_key, prev_timestamp)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            params![message_id, old_text, new_text, edited_at, signature, public_key, prev_sig, prev_pk, prev_ts],
-        ) {
-            let _ = self.conn.execute_batch("ROLLBACK");
-            return Err(format!("Failed to insert edit history: {e}"));
-        }
-
-        let result = self.conn.execute(
-            "UPDATE messages SET text = ?1, edited_at = ?2, signature = ?3, public_key = ?4, updated_at = ?2 WHERE message_id = ?5",
-            params![new_text, edited_at, signature, public_key, message_id],
-        );
-
-        match result {
-            Ok(rows) => {
-                let _ = self.conn.execute_batch("COMMIT");
-                Ok(rows > 0)
-            }
-            Err(e) => {
-                let _ = self.conn.execute_batch("ROLLBACK");
-                Err(format!("Failed to update DM message: {e}"))
-            }
-        }
+        self.edit_message_in("messages", message_id, new_text, edited_at, signature, public_key)
     }
 
     // ── Message Deletion / Hiding (Phase 3.5) ──
@@ -2995,11 +2664,37 @@ impl MessageStore {
         signature: Option<&str>,
         public_key: Option<&str>,
     ) -> Result<bool, String> {
+        self.hide_message_in("channel_messages", message_id, deleted_at, signature, public_key)
+    }
+
+    /// Hide a DM message by message_id. Preserves text in message_deletions table.
+    /// Returns true if the message was found and hidden.
+    pub fn hide_dm_message(
+        &self,
+        message_id: &str,
+        deleted_at: i64,
+        signature: Option<&str>,
+        public_key: Option<&str>,
+    ) -> Result<bool, String> {
+        self.hide_message_in("messages", message_id, deleted_at, signature, public_key)
+    }
+
+    /// Shared implementation of [`Self::hide_channel_message`] /
+    /// [`Self::hide_dm_message`]. `table` is a fixed table name ("messages" /
+    /// "channel_messages"), never user input.
+    fn hide_message_in(
+        &self,
+        table: &str,
+        message_id: &str,
+        deleted_at: i64,
+        signature: Option<&str>,
+        public_key: Option<&str>,
+    ) -> Result<bool, String> {
         // 1. Read the current text for evidence preservation.
         let text: Option<String> = self
             .conn
             .query_row(
-                "SELECT text FROM channel_messages WHERE message_id = ?1",
+                &format!("SELECT text FROM {table} WHERE message_id = ?1"),
                 params![message_id],
                 |row| row.get(0),
             )
@@ -3022,54 +2717,10 @@ impl MessageStore {
         let rows = self
             .conn
             .execute(
-                "UPDATE channel_messages SET hidden_at = ?1, updated_at = ?1 WHERE message_id = ?2",
+                &format!("UPDATE {table} SET hidden_at = ?1, updated_at = ?1 WHERE message_id = ?2"),
                 params![deleted_at, message_id],
             )
-            .map_err(|e| format!("Failed to hide channel message: {e}"))?;
-
-        Ok(rows > 0)
-    }
-
-    /// Hide a DM message by message_id. Preserves text in message_deletions table.
-    /// Returns true if the message was found and hidden.
-    pub fn hide_dm_message(
-        &self,
-        message_id: &str,
-        deleted_at: i64,
-        signature: Option<&str>,
-        public_key: Option<&str>,
-    ) -> Result<bool, String> {
-        // 1. Read the current text.
-        let text: Option<String> = self
-            .conn
-            .query_row(
-                "SELECT text FROM messages WHERE message_id = ?1",
-                params![message_id],
-                |row| row.get(0),
-            )
-            .ok();
-
-        let Some(text) = text else {
-            return Ok(false);
-        };
-
-        // 2. Preserve evidence.
-        self.conn
-            .execute(
-                "INSERT INTO message_deletions (message_id, deleted_text, deleted_at, signature, public_key)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![message_id, text, deleted_at, signature, public_key],
-            )
-            .map_err(|e| format!("Failed to insert deletion record: {e}"))?;
-
-        // 3. Hide it.
-        let rows = self
-            .conn
-            .execute(
-                "UPDATE messages SET hidden_at = ?1, updated_at = ?1 WHERE message_id = ?2",
-                params![deleted_at, message_id],
-            )
-            .map_err(|e| format!("Failed to hide DM message: {e}"))?;
+            .map_err(|e| format!("Failed to hide {table} row: {e}"))?;
 
         Ok(rows > 0)
     }
@@ -3078,23 +2729,22 @@ impl MessageStore {
     /// Unlike hide_channel_message(), this does NOT preserve evidence in message_deletions
     /// (the original deleter already did that). Used when syncing deleted messages to late joiners.
     pub fn set_channel_message_hidden(&self, message_id: &str, hidden_at: i64) -> Result<(), String> {
-        self.conn
-            .execute(
-                "UPDATE channel_messages SET hidden_at = ?1, updated_at = ?1 WHERE message_id = ?2",
-                params![hidden_at, message_id],
-            )
-            .map_err(|e| format!("Failed to set channel message hidden_at: {e}"))?;
-        Ok(())
+        self.set_message_hidden_in("channel_messages", message_id, hidden_at)
     }
 
     /// Lightweight hidden_at setter for DM messages during sync.
     pub fn set_dm_message_hidden(&self, message_id: &str, hidden_at: i64) -> Result<(), String> {
+        self.set_message_hidden_in("messages", message_id, hidden_at)
+    }
+
+    /// Shared hidden_at setter. `table` is a fixed table name, never user input.
+    fn set_message_hidden_in(&self, table: &str, message_id: &str, hidden_at: i64) -> Result<(), String> {
         self.conn
             .execute(
-                "UPDATE messages SET hidden_at = ?1, updated_at = ?1 WHERE message_id = ?2",
+                &format!("UPDATE {table} SET hidden_at = ?1, updated_at = ?1 WHERE message_id = ?2"),
                 params![hidden_at, message_id],
             )
-            .map_err(|e| format!("Failed to set DM message hidden_at: {e}"))?;
+            .map_err(|e| format!("Failed to set {table} hidden_at: {e}"))?;
         Ok(())
     }
 
@@ -3170,12 +2820,20 @@ impl MessageStore {
         Ok(rows > 0)
     }
 
-    /// Load all reactions for a set of message IDs.
-    /// Returns a map: message_id → Vec<(emoji, peer_id, added_at)>.
-    pub fn load_reactions_for_messages(
+    /// Shared batch loader for the per-message evidence tables (reactions,
+    /// edits, deletions, removals): runs
+    /// `SELECT message_id, <cols> FROM <table> WHERE message_id IN (…) ORDER BY <order_col> ASC`
+    /// and groups the mapped rows by message_id. `table`/`cols`/`order_col` are
+    /// fixed identifiers, never user input; `map` reads the row STARTING AT
+    /// INDEX 1 (index 0 is the message_id).
+    fn load_grouped_by_message_id<T>(
         &self,
+        table: &str,
+        cols: &str,
+        order_col: &str,
         message_ids: &[String],
-    ) -> Result<HashMap<String, Vec<(String, String, i64)>>, String> {
+        map: impl Fn(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
+    ) -> Result<HashMap<String, Vec<T>>, String> {
         if message_ids.is_empty() {
             return Ok(HashMap::new());
         }
@@ -3183,30 +2841,40 @@ impl MessageStore {
         // Build placeholder list for IN clause.
         let placeholders: Vec<String> = message_ids.iter().enumerate().map(|(i, _)| format!("?{}", i + 1)).collect();
         let sql = format!(
-            "SELECT message_id, emoji, peer_id, added_at FROM message_reactions WHERE message_id IN ({}) ORDER BY added_at ASC",
+            "SELECT message_id, {cols} FROM {table} WHERE message_id IN ({}) ORDER BY {order_col} ASC",
             placeholders.join(", ")
         );
 
-        let mut stmt = self.conn.prepare(&sql).map_err(|e| format!("Failed to prepare reactions query: {e}"))?;
-
+        let mut stmt = self.conn.prepare(&sql)
+            .map_err(|e| format!("Failed to prepare {table} batch query: {e}"))?;
         let params_vec: Vec<&dyn rusqlite::types::ToSql> = message_ids.iter().map(|s| s as &dyn rusqlite::types::ToSql).collect();
         let rows = stmt
             .query_map(params_vec.as_slice(), |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, i64>(3)?,
-                ))
+                Ok((row.get::<_, String>(0)?, map(row)?))
             })
-            .map_err(|e| format!("Failed to query reactions: {e}"))?;
+            .map_err(|e| format!("Failed to query {table}: {e}"))?;
 
-        let mut result: HashMap<String, Vec<(String, String, i64)>> = HashMap::new();
+        let mut result: HashMap<String, Vec<T>> = HashMap::new();
         for row in rows {
-            let (mid, emoji, peer_id, added_at) = row.map_err(|e| format!("Failed to read reaction row: {e}"))?;
-            result.entry(mid).or_default().push((emoji, peer_id, added_at));
+            let (mid, item) = row.map_err(|e| format!("Failed to read {table} row: {e}"))?;
+            result.entry(mid).or_default().push(item);
         }
         Ok(result)
+    }
+
+    /// Load all reactions for a set of message IDs.
+    /// Returns a map: message_id → Vec<(emoji, peer_id, added_at)>.
+    pub fn load_reactions_for_messages(
+        &self,
+        message_ids: &[String],
+    ) -> Result<HashMap<String, Vec<(String, String, i64)>>, String> {
+        self.load_grouped_by_message_id(
+            "message_reactions",
+            "emoji, peer_id, added_at",
+            "added_at",
+            message_ids,
+            |row| Ok((row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
     }
 
     /// Load all reactions with signatures for sync.
@@ -3215,37 +2883,13 @@ impl MessageStore {
         &self,
         message_ids: &[String],
     ) -> Result<HashMap<String, Vec<(String, String, i64, Option<String>, Option<String>)>>, String> {
-        if message_ids.is_empty() {
-            return Ok(HashMap::new());
-        }
-
-        let placeholders: Vec<String> = message_ids.iter().enumerate().map(|(i, _)| format!("?{}", i + 1)).collect();
-        let sql = format!(
-            "SELECT message_id, emoji, peer_id, added_at, signature, public_key FROM message_reactions WHERE message_id IN ({}) ORDER BY added_at ASC",
-            placeholders.join(", ")
-        );
-
-        let mut stmt = self.conn.prepare(&sql).map_err(|e| format!("Failed to prepare reactions sync query: {e}"))?;
-        let params_vec: Vec<&dyn rusqlite::types::ToSql> = message_ids.iter().map(|s| s as &dyn rusqlite::types::ToSql).collect();
-        let rows = stmt
-            .query_map(params_vec.as_slice(), |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, i64>(3)?,
-                    row.get::<_, Option<String>>(4)?,
-                    row.get::<_, Option<String>>(5)?,
-                ))
-            })
-            .map_err(|e| format!("Failed to query reactions for sync: {e}"))?;
-
-        let mut result: HashMap<String, Vec<(String, String, i64, Option<String>, Option<String>)>> = HashMap::new();
-        for row in rows {
-            let (mid, emoji, peer_id, added_at, sig, pk) = row.map_err(|e| format!("Failed to read reaction sync row: {e}"))?;
-            result.entry(mid).or_default().push((emoji, peer_id, added_at, sig, pk));
-        }
-        Ok(result)
+        self.load_grouped_by_message_id(
+            "message_reactions",
+            "emoji, peer_id, added_at, signature, public_key",
+            "added_at",
+            message_ids,
+            |row| Ok((row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
+        )
     }
 
     // ── Archive queries ─────────────────────────────────────────
@@ -3258,41 +2902,19 @@ impl MessageStore {
     ) -> Result<Vec<StoredMessage>, String> {
         let mut stmt = self
             .conn
-            .prepare(
-                "SELECT id, peer_id, text, is_mine, timestamp, signature, public_key, message_id, edited_at, hidden_at, reply_to_mid, file_id, link_preview_json, order_us
+            .prepare(&format!(
+                "SELECT {DM_MSG_COLS}
                  FROM messages
                  WHERE peer_id = ?1
                  ORDER BY timestamp ASC, id ASC",
-            )
+            ))
             .map_err(|e| format!("Failed to prepare load_all_dm_messages query: {e}"))?;
 
         let rows = stmt
-            .query_map(params![peer_id], |row| {
-                Ok(StoredMessage {
-                    id: row.get(0)?,
-                    peer_id: row.get(1)?,
-                    text: row.get(2)?,
-                    is_mine: row.get::<_, i32>(3)? != 0,
-                    timestamp: row.get(4)?,
-                    signature: row.get(5)?,
-                    public_key: row.get(6)?,
-                    message_id: row.get(7)?,
-                    edited_at: row.get(8)?,
-                    hidden_at: row.get(9)?,
-                    reply_to_mid: row.get(10)?,
-                    file_id: row.get(11)?,
-                    link_preview: row.get::<_, Option<String>>(12)?
-                        .and_then(|s| serde_json::from_str(&s).ok()),
-                    order_us: row.get(13)?,
-                })
-            })
+            .query_map(params![peer_id], dm_message_from_row)
             .map_err(|e| format!("Failed to query all DM messages: {e}"))?;
 
-        let mut messages = Vec::new();
-        for row in rows {
-            messages.push(row.map_err(|e| format!("Failed to read DM message row: {e}"))?);
-        }
-        Ok(messages)
+        collect_rows(rows, "DM message")
     }
 
     /// Load ALL channel messages, including soft-deleted (hidden_at set).
@@ -3304,43 +2926,19 @@ impl MessageStore {
     ) -> Result<Vec<StoredChannelMessage>, String> {
         let mut stmt = self
             .conn
-            .prepare(
-                "SELECT id, server_id, channel_id, sender_id, text, is_mine, timestamp, signature, public_key, message_id, edited_at, hidden_at, reply_to_mid, file_id, link_preview_json, order_us
+            .prepare(&format!(
+                "SELECT {CHANNEL_MSG_COLS}
                  FROM channel_messages
                  WHERE server_id = ?1 AND channel_id = ?2
                  ORDER BY timestamp ASC, id ASC",
-            )
+            ))
             .map_err(|e| format!("Failed to prepare load_all_channel_messages query: {e}"))?;
 
         let rows = stmt
-            .query_map(params![server_id, channel_id], |row| {
-                Ok(StoredChannelMessage {
-                    id: row.get(0)?,
-                    server_id: row.get(1)?,
-                    channel_id: row.get(2)?,
-                    sender_id: row.get(3)?,
-                    text: row.get(4)?,
-                    is_mine: row.get::<_, i32>(5)? != 0,
-                    timestamp: row.get(6)?,
-                    signature: row.get(7)?,
-                    public_key: row.get(8)?,
-                    message_id: row.get(9)?,
-                    edited_at: row.get(10)?,
-                    hidden_at: row.get(11)?,
-                    reply_to_mid: row.get(12)?,
-                    file_id: row.get(13)?,
-                    link_preview: row.get::<_, Option<String>>(14)?
-                        .and_then(|s| serde_json::from_str(&s).ok()),
-                    order_us: row.get(15)?,
-                })
-            })
+            .query_map(params![server_id, channel_id], channel_message_from_row)
             .map_err(|e| format!("Failed to query all channel messages: {e}"))?;
 
-        let mut messages = Vec::new();
-        for row in rows {
-            messages.push(row.map_err(|e| format!("Failed to read channel message row: {e}"))?);
-        }
-        Ok(messages)
+        collect_rows(rows, "channel message")
     }
 
     /// Load edit history for a batch of message IDs.
@@ -3349,40 +2947,22 @@ impl MessageStore {
         &self,
         message_ids: &[String],
     ) -> Result<HashMap<String, Vec<(String, String, i64, Option<String>, Option<String>, Option<String>, Option<String>, Option<i64>)>>, String> {
-        if message_ids.is_empty() {
-            return Ok(HashMap::new());
-        }
-
-        let placeholders: Vec<String> = message_ids.iter().enumerate().map(|(i, _)| format!("?{}", i + 1)).collect();
-        let sql = format!(
-            "SELECT message_id, old_text, new_text, edited_at, signature, public_key, prev_signature, prev_public_key, prev_timestamp FROM message_edits WHERE message_id IN ({}) ORDER BY edited_at ASC",
-            placeholders.join(", ")
-        );
-
-        let mut stmt = self.conn.prepare(&sql).map_err(|e| format!("Failed to prepare edits query: {e}"))?;
-        let params_vec: Vec<&dyn rusqlite::types::ToSql> = message_ids.iter().map(|s| s as &dyn rusqlite::types::ToSql).collect();
-        let rows = stmt
-            .query_map(params_vec.as_slice(), |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, i64>(3)?,
-                    row.get::<_, Option<String>>(4)?,
-                    row.get::<_, Option<String>>(5)?,
-                    row.get::<_, Option<String>>(6)?,
-                    row.get::<_, Option<String>>(7)?,
-                    row.get::<_, Option<i64>>(8)?,
-                ))
-            })
-            .map_err(|e| format!("Failed to query edits: {e}"))?;
-
-        let mut result: HashMap<String, Vec<(String, String, i64, Option<String>, Option<String>, Option<String>, Option<String>, Option<i64>)>> = HashMap::new();
-        for row in rows {
-            let (mid, old_text, new_text, edited_at, sig, pk, prev_sig, prev_pk, prev_ts) = row.map_err(|e| format!("Failed to read edit row: {e}"))?;
-            result.entry(mid).or_default().push((old_text, new_text, edited_at, sig, pk, prev_sig, prev_pk, prev_ts));
-        }
-        Ok(result)
+        self.load_grouped_by_message_id(
+            "message_edits",
+            "old_text, new_text, edited_at, signature, public_key, prev_signature, prev_public_key, prev_timestamp",
+            "edited_at",
+            message_ids,
+            |row| Ok((
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+                row.get(6)?,
+                row.get(7)?,
+                row.get(8)?,
+            )),
+        )
     }
 
     /// Load deletion evidence for a batch of message IDs.
@@ -3391,36 +2971,13 @@ impl MessageStore {
         &self,
         message_ids: &[String],
     ) -> Result<HashMap<String, Vec<(String, i64, Option<String>, Option<String>)>>, String> {
-        if message_ids.is_empty() {
-            return Ok(HashMap::new());
-        }
-
-        let placeholders: Vec<String> = message_ids.iter().enumerate().map(|(i, _)| format!("?{}", i + 1)).collect();
-        let sql = format!(
-            "SELECT message_id, deleted_text, deleted_at, signature, public_key FROM message_deletions WHERE message_id IN ({}) ORDER BY deleted_at ASC",
-            placeholders.join(", ")
-        );
-
-        let mut stmt = self.conn.prepare(&sql).map_err(|e| format!("Failed to prepare deletions query: {e}"))?;
-        let params_vec: Vec<&dyn rusqlite::types::ToSql> = message_ids.iter().map(|s| s as &dyn rusqlite::types::ToSql).collect();
-        let rows = stmt
-            .query_map(params_vec.as_slice(), |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, i64>(2)?,
-                    row.get::<_, Option<String>>(3)?,
-                    row.get::<_, Option<String>>(4)?,
-                ))
-            })
-            .map_err(|e| format!("Failed to query deletions: {e}"))?;
-
-        let mut result: HashMap<String, Vec<(String, i64, Option<String>, Option<String>)>> = HashMap::new();
-        for row in rows {
-            let (mid, deleted_text, deleted_at, sig, pk) = row.map_err(|e| format!("Failed to read deletion row: {e}"))?;
-            result.entry(mid).or_default().push((deleted_text, deleted_at, sig, pk));
-        }
-        Ok(result)
+        self.load_grouped_by_message_id(
+            "message_deletions",
+            "deleted_text, deleted_at, signature, public_key",
+            "deleted_at",
+            message_ids,
+            |row| Ok((row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+        )
     }
 
     /// Load reaction removal evidence for a batch of message IDs.
@@ -3429,37 +2986,13 @@ impl MessageStore {
         &self,
         message_ids: &[String],
     ) -> Result<HashMap<String, Vec<(String, String, i64, Option<String>, Option<String>)>>, String> {
-        if message_ids.is_empty() {
-            return Ok(HashMap::new());
-        }
-
-        let placeholders: Vec<String> = message_ids.iter().enumerate().map(|(i, _)| format!("?{}", i + 1)).collect();
-        let sql = format!(
-            "SELECT message_id, emoji, peer_id, removed_at, signature, public_key FROM reaction_removals WHERE message_id IN ({}) ORDER BY removed_at ASC",
-            placeholders.join(", ")
-        );
-
-        let mut stmt = self.conn.prepare(&sql).map_err(|e| format!("Failed to prepare reaction removals query: {e}"))?;
-        let params_vec: Vec<&dyn rusqlite::types::ToSql> = message_ids.iter().map(|s| s as &dyn rusqlite::types::ToSql).collect();
-        let rows = stmt
-            .query_map(params_vec.as_slice(), |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, i64>(3)?,
-                    row.get::<_, Option<String>>(4)?,
-                    row.get::<_, Option<String>>(5)?,
-                ))
-            })
-            .map_err(|e| format!("Failed to query reaction removals: {e}"))?;
-
-        let mut result: HashMap<String, Vec<(String, String, i64, Option<String>, Option<String>)>> = HashMap::new();
-        for row in rows {
-            let (mid, emoji, peer_id, removed_at, sig, pk) = row.map_err(|e| format!("Failed to read reaction removal row: {e}"))?;
-            result.entry(mid).or_default().push((emoji, peer_id, removed_at, sig, pk));
-        }
-        Ok(result)
+        self.load_grouped_by_message_id(
+            "reaction_removals",
+            "emoji, peer_id, removed_at, signature, public_key",
+            "removed_at",
+            message_ids,
+            |row| Ok((row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
+        )
     }
 
     // ── App Settings ──────────────────────────────────────────────
@@ -3491,33 +3024,10 @@ impl MessageStore {
             .map_err(|e| format!("Failed to prepare FTS search query: {e}"))?;
 
         let rows = stmt
-            .query_map(params![server_id, channel_id, fts_pattern, limit], |row| {
-                Ok(StoredChannelMessage {
-                    id: row.get(0)?,
-                    server_id: row.get(1)?,
-                    channel_id: row.get(2)?,
-                    sender_id: row.get(3)?,
-                    text: row.get(4)?,
-                    is_mine: row.get::<_, i32>(5)? != 0,
-                    timestamp: row.get(6)?,
-                    signature: row.get(7)?,
-                    public_key: row.get(8)?,
-                    message_id: row.get(9)?,
-                    edited_at: row.get(10)?,
-                    hidden_at: row.get(11)?,
-                    reply_to_mid: row.get(12)?,
-                    file_id: row.get(13)?,
-                    link_preview: row.get::<_, Option<String>>(14)?
-                        .and_then(|s| serde_json::from_str(&s).ok()),
-                    order_us: row.get(15)?,
-                })
-            })
+            .query_map(params![server_id, channel_id, fts_pattern, limit], channel_message_from_row)
             .map_err(|e| format!("Failed to search messages: {e}"))?;
 
-        let mut messages = Vec::new();
-        for row in rows {
-            messages.push(row.map_err(|e| format!("Failed to read search row: {e}"))?);
-        }
+        let mut messages = collect_rows(rows, "search")?;
         messages.reverse();
         Ok(messages)
     }
@@ -3544,31 +3054,10 @@ impl MessageStore {
             .map_err(|e| format!("Failed to prepare FTS DM search query: {e}"))?;
 
         let rows = stmt
-            .query_map(params![peer_id, fts_pattern, limit], |row| {
-                Ok(StoredMessage {
-                    id: row.get(0)?,
-                    peer_id: row.get(1)?,
-                    text: row.get(2)?,
-                    is_mine: row.get::<_, i32>(3)? != 0,
-                    timestamp: row.get(4)?,
-                    signature: row.get(5)?,
-                    public_key: row.get(6)?,
-                    message_id: row.get(7)?,
-                    edited_at: row.get(8)?,
-                    hidden_at: row.get(9)?,
-                    reply_to_mid: row.get(10)?,
-                    file_id: row.get(11)?,
-                    link_preview: row.get::<_, Option<String>>(12)?
-                        .and_then(|s| serde_json::from_str(&s).ok()),
-                    order_us: row.get(13)?,
-                })
-            })
+            .query_map(params![peer_id, fts_pattern, limit], dm_message_from_row)
             .map_err(|e| format!("Failed to search DM messages: {e}"))?;
 
-        let mut messages = Vec::new();
-        for row in rows {
-            messages.push(row.map_err(|e| format!("Failed to read DM search row: {e}"))?);
-        }
+        let mut messages = collect_rows(rows, "DM search")?;
         messages.reverse();
         Ok(messages)
     }
@@ -3709,11 +3198,7 @@ impl MessageStore {
             })
             .map_err(|e| format!("Failed to query friends: {e}"))?;
 
-        let mut result = Vec::new();
-        for row in rows {
-            result.push(row.map_err(|e| format!("Failed to read friend row: {e}"))?);
-        }
-        Ok(result)
+        collect_rows(rows, "friend")
     }
 
     /// Check if a peer is a friend (any status).
@@ -3786,11 +3271,7 @@ impl MessageStore {
         let rows = stmt
             .query_map([], |row| row.get::<_, String>(0))
             .map_err(|e| format!("Failed to query blocked peers: {e}"))?;
-        let mut result = Vec::new();
-        for row in rows {
-            result.push(row.map_err(|e| format!("Failed to read blocked row: {e}"))?);
-        }
-        Ok(result)
+        collect_rows(rows, "blocked")
     }
 
     // ── Conference rooms (host-local; reports/CONFERENCES_PLAN.md) ───
@@ -3830,11 +3311,7 @@ impl MessageStore {
                 created_at: row.get(6)?,
             })
         }).map_err(|e| format!("Failed to query conferences: {e}"))?;
-        let mut result = Vec::new();
-        for row in rows {
-            result.push(row.map_err(|e| format!("Failed to read conference row: {e}"))?);
-        }
-        Ok(result)
+        collect_rows(rows, "conference")
     }
 
     pub fn get_conference(&self, conf_id: &str) -> Result<Option<ConferenceRow>, String> {
@@ -3943,11 +3420,7 @@ impl MessageStore {
                 ))
             })
             .map_err(|e| format!("Failed to query personal emotes: {e}"))?;
-        let mut result = Vec::new();
-        for row in rows {
-            result.push(row.map_err(|e| format!("Failed to read personal emote row: {e}"))?);
-        }
-        Ok(result)
+        collect_rows(rows, "personal emote")
     }
 
     // ── App Settings ──────────────────────────────────────────────
@@ -4227,42 +3700,11 @@ impl MessageStore {
     pub fn get_file_metadata(&self, file_id: &str) -> Result<Option<StoredFile>, String> {
         let mut stmt = self
             .conn
-            .prepare(
-                "SELECT file_id, file_name, file_ext, mime_type, size_bytes,
-                        chunk_count, chunks_received, is_image, width, height,
-                        message_id, context_type, context_id, sender_id, is_mine,
-                        created_at, completed_at, disk_path, hidden_at,
-                        video_thumb_json, expired_at
-                 FROM files WHERE file_id = ?1",
-            )
+            .prepare(&format!("SELECT {FILE_COLS} FROM files WHERE file_id = ?1"))
             .map_err(|e| format!("Failed to prepare file query: {e}"))?;
 
         let result = stmt
-            .query_row(params![file_id], |row| {
-                Ok(StoredFile {
-                    file_id: row.get(0)?,
-                    file_name: row.get(1)?,
-                    file_ext: row.get(2)?,
-                    mime_type: row.get(3)?,
-                    size_bytes: row.get::<_, i64>(4)? as u64,
-                    chunk_count: row.get::<_, u32>(5)?,
-                    chunks_received: row.get::<_, u32>(6)?,
-                    is_image: row.get::<_, i32>(7)? != 0,
-                    width: row.get::<_, Option<i64>>(8)?.map(|v| v as u32),
-                    height: row.get::<_, Option<i64>>(9)?.map(|v| v as u32),
-                    message_id: row.get(10)?,
-                    context_type: row.get(11)?,
-                    context_id: row.get(12)?,
-                    sender_id: row.get(13)?,
-                    is_mine: row.get::<_, i32>(14)? != 0,
-                    created_at: row.get(15)?,
-                    completed_at: row.get(16)?,
-                    disk_path: row.get(17)?,
-                    hidden_at: row.get(18)?,
-                    expired_at: row.get(20)?,
-                    video_thumb: Self::parse_video_thumb_json(row.get::<_, Option<String>>(19)?),
-                })
-            })
+            .query_row(params![file_id], stored_file_from_row)
             .ok();
 
         let result = result.map(|mut f| {
@@ -4277,43 +3719,13 @@ impl MessageStore {
         use std::collections::HashMap;
         if file_ids.is_empty() { return Ok(HashMap::new()); }
         let placeholders: String = file_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-        let sql = format!(
-            "SELECT file_id, file_name, file_ext, mime_type, size_bytes,
-                    chunk_count, chunks_received, is_image, width, height,
-                    message_id, context_type, context_id, sender_id, is_mine,
-                    created_at, completed_at, disk_path, hidden_at,
-                    video_thumb_json, expired_at
-             FROM files WHERE file_id IN ({})", placeholders
-        );
+        let sql = format!("SELECT {FILE_COLS} FROM files WHERE file_id IN ({placeholders})");
         let mut stmt = self.conn.prepare(&sql)
             .map_err(|e| format!("Failed to prepare batch file query: {e}"))?;
         let params: Vec<&dyn rusqlite::types::ToSql> = file_ids.iter()
             .map(|id| id as &dyn rusqlite::types::ToSql).collect();
-        let rows = stmt.query_map(params.as_slice(), |row| {
-            Ok(StoredFile {
-                file_id: row.get(0)?,
-                file_name: row.get(1)?,
-                file_ext: row.get(2)?,
-                mime_type: row.get(3)?,
-                size_bytes: row.get::<_, i64>(4)? as u64,
-                chunk_count: row.get::<_, u32>(5)?,
-                chunks_received: row.get::<_, u32>(6)?,
-                is_image: row.get::<_, i32>(7)? != 0,
-                width: row.get::<_, Option<i64>>(8)?.map(|v| v as u32),
-                height: row.get::<_, Option<i64>>(9)?.map(|v| v as u32),
-                message_id: row.get(10)?,
-                context_type: row.get(11)?,
-                context_id: row.get(12)?,
-                sender_id: row.get(13)?,
-                is_mine: row.get::<_, i32>(14)? != 0,
-                created_at: row.get(15)?,
-                completed_at: row.get(16)?,
-                disk_path: row.get(17)?,
-                hidden_at: row.get(18)?,
-                expired_at: row.get(20)?,
-                video_thumb: Self::parse_video_thumb_json(row.get::<_, Option<String>>(19)?),
-            })
-        }).map_err(|e| format!("Failed to query batch file metadata: {e}"))?;
+        let rows = stmt.query_map(params.as_slice(), stored_file_from_row)
+            .map_err(|e| format!("Failed to query batch file metadata: {e}"))?;
         let mut map = HashMap::new();
         for mut row in rows.flatten() {
             Self::resolve_disk_path(&mut row);
@@ -4326,49 +3738,16 @@ impl MessageStore {
     pub fn get_files_for_message(&self, message_id: &str) -> Result<Vec<StoredFile>, String> {
         let mut stmt = self
             .conn
-            .prepare(
-                "SELECT file_id, file_name, file_ext, mime_type, size_bytes,
-                        chunk_count, chunks_received, is_image, width, height,
-                        message_id, context_type, context_id, sender_id, is_mine,
-                        created_at, completed_at, disk_path, hidden_at,
-                        video_thumb_json, expired_at
-                 FROM files WHERE message_id = ?1",
-            )
+            .prepare(&format!("SELECT {FILE_COLS} FROM files WHERE message_id = ?1"))
             .map_err(|e| format!("Failed to prepare files query: {e}"))?;
 
         let rows = stmt
-            .query_map(params![message_id], |row| {
-                Ok(StoredFile {
-                    file_id: row.get(0)?,
-                    file_name: row.get(1)?,
-                    file_ext: row.get(2)?,
-                    mime_type: row.get::<_, String>(3)?,
-                    size_bytes: row.get::<_, i64>(4)? as u64,
-                    chunk_count: row.get::<_, u32>(5)?,
-                    chunks_received: row.get::<_, u32>(6)?,
-                    is_image: row.get::<_, i32>(7)? != 0,
-                    width: row.get::<_, Option<i64>>(8)?.map(|v| v as u32),
-                    height: row.get::<_, Option<i64>>(9)?.map(|v| v as u32),
-                    message_id: row.get(10)?,
-                    context_type: row.get(11)?,
-                    context_id: row.get(12)?,
-                    sender_id: row.get(13)?,
-                    is_mine: row.get::<_, i32>(14)? != 0,
-                    created_at: row.get(15)?,
-                    completed_at: row.get(16)?,
-                    disk_path: row.get(17)?,
-                    hidden_at: row.get(18)?,
-                    expired_at: row.get(20)?,
-                    video_thumb: Self::parse_video_thumb_json(row.get::<_, Option<String>>(19)?),
-                })
-            })
+            .query_map(params![message_id], stored_file_from_row)
             .map_err(|e| format!("Failed to query files: {e}"))?;
 
-        let mut files = Vec::new();
-        for row in rows {
-            let mut f = row.map_err(|e| format!("Failed to read file row: {e}"))?;
-            Self::resolve_disk_path(&mut f);
-            files.push(f);
+        let mut files = collect_rows(rows, "file")?;
+        for f in &mut files {
+            Self::resolve_disk_path(f);
         }
         Ok(files)
     }
@@ -4377,49 +3756,16 @@ impl MessageStore {
     pub fn get_incomplete_files(&self) -> Result<Vec<StoredFile>, String> {
         let mut stmt = self
             .conn
-            .prepare(
-                "SELECT file_id, file_name, file_ext, mime_type, size_bytes,
-                        chunk_count, chunks_received, is_image, width, height,
-                        message_id, context_type, context_id, sender_id, is_mine,
-                        created_at, completed_at, disk_path, hidden_at,
-                        video_thumb_json, expired_at
-                 FROM files WHERE completed_at IS NULL AND hidden_at IS NULL",
-            )
+            .prepare(&format!(
+                "SELECT {FILE_COLS} FROM files WHERE completed_at IS NULL AND hidden_at IS NULL"
+            ))
             .map_err(|e| format!("Failed to prepare incomplete files query: {e}"))?;
 
         let rows = stmt
-            .query_map([], |row| {
-                Ok(StoredFile {
-                    file_id: row.get(0)?,
-                    file_name: row.get(1)?,
-                    file_ext: row.get(2)?,
-                    mime_type: row.get::<_, String>(3)?,
-                    size_bytes: row.get::<_, i64>(4)? as u64,
-                    chunk_count: row.get::<_, u32>(5)?,
-                    chunks_received: row.get::<_, u32>(6)?,
-                    is_image: row.get::<_, i32>(7)? != 0,
-                    width: row.get::<_, Option<i64>>(8)?.map(|v| v as u32),
-                    height: row.get::<_, Option<i64>>(9)?.map(|v| v as u32),
-                    message_id: row.get(10)?,
-                    context_type: row.get(11)?,
-                    context_id: row.get(12)?,
-                    sender_id: row.get(13)?,
-                    is_mine: row.get::<_, i32>(14)? != 0,
-                    created_at: row.get(15)?,
-                    completed_at: row.get(16)?,
-                    disk_path: row.get(17)?,
-                    hidden_at: row.get(18)?,
-                    expired_at: row.get(20)?,
-                    video_thumb: Self::parse_video_thumb_json(row.get::<_, Option<String>>(19)?),
-                })
-            })
+            .query_map([], stored_file_from_row)
             .map_err(|e| format!("Failed to query incomplete files: {e}"))?;
 
-        let mut files = Vec::new();
-        for row in rows {
-            files.push(row.map_err(|e| format!("Failed to read file row: {e}"))?);
-        }
-        Ok(files)
+        collect_rows(rows, "file")
     }
 
     /// Get total file storage used for a server (sum of size_bytes for completed files).
@@ -4501,16 +3847,17 @@ impl MessageStore {
             .query_map([], |row| row.get::<_, String>(0))
             .map_err(|e| format!("Failed to query missing files: {e}"))?;
 
+        Ok(Self::filter_ids_not_on_disk(rows))
+    }
+
+    /// Drop file ids whose bytes already exist in the files dir (a stem hit
+    /// means the bytes exist regardless of the DB `completed_at` state).
+    /// Unreadable rows are silently skipped.
+    fn filter_ids_not_on_disk(rows: impl Iterator<Item = rusqlite::Result<String>>) -> Vec<String> {
         let disk_file_ids = Self::disk_file_stems();
-        let mut ids = Vec::new();
-        for row in rows {
-            if let Ok(id) = row {
-                if !disk_file_ids.contains(&id) {
-                    ids.push(id);
-                }
-            }
-        }
-        Ok(ids)
+        rows.filter_map(|r| r.ok())
+            .filter(|id| !disk_file_ids.contains(id))
+            .collect()
     }
 
     /// File-id stems present in the files dir (read dir once). Files are stored
@@ -4550,16 +3897,7 @@ impl MessageStore {
             .query_map([peer_id], |row| row.get::<_, String>(0))
             .map_err(|e| format!("Failed to query missing DM files: {e}"))?;
 
-        let disk_file_ids = Self::disk_file_stems();
-        let mut ids = Vec::new();
-        for row in rows {
-            if let Ok(id) = row {
-                if !disk_file_ids.contains(&id) {
-                    ids.push(id);
-                }
-            }
-        }
-        Ok(ids)
+        Ok(Self::filter_ids_not_on_disk(rows))
     }
 
     /// Like `get_missing_file_ids`, but scoped to ONE server's channels.
@@ -4578,16 +3916,7 @@ impl MessageStore {
             .query_map([server_id], |row| row.get::<_, String>(0))
             .map_err(|e| format!("Failed to query missing server files: {e}"))?;
 
-        let disk_file_ids = Self::disk_file_stems();
-        let mut ids = Vec::new();
-        for row in rows {
-            if let Ok(id) = row {
-                if !disk_file_ids.contains(&id) {
-                    ids.push(id);
-                }
-            }
-        }
-        Ok(ids)
+        Ok(Self::filter_ids_not_on_disk(rows))
     }
 
     /// Scan completed files for stale disk_paths (file no longer exists on disk).

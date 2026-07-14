@@ -109,7 +109,9 @@ impl ContentStore {
         conn.execute_batch(&format!("PRAGMA key = \"x'{passphrase}'\";"))
             .map_err(|e| format!("Failed to set encryption key: {e}"))?;
 
-        conn.execute(
+        use crate::storage::messages::ddl;
+
+        ddl(&conn, "vault_shards table",
             "CREATE TABLE IF NOT EXISTS vault_shards (
                 shard_key       TEXT    PRIMARY KEY,
                 server_id       TEXT    NOT NULL,
@@ -123,26 +125,17 @@ impl ContentStore {
                 last_verified   INTEGER,
                 storage_tier    TEXT    NOT NULL DEFAULT 'standard',
                 data_hash       TEXT    NOT NULL
-            )",
-            [],
-        )
-        .map_err(|e| format!("Failed to create vault_shards table: {e}"))?;
+            )")?;
 
-        conn.execute(
+        ddl(&conn, "server_content index",
             "CREATE INDEX IF NOT EXISTS idx_vault_shards_server_content
-             ON vault_shards (server_id, content_id)",
-            [],
-        )
-        .map_err(|e| format!("Failed to create server_content index: {e}"))?;
+             ON vault_shards (server_id, content_id)")?;
 
-        conn.execute(
+        ddl(&conn, "server_tier index",
             "CREATE INDEX IF NOT EXISTS idx_vault_shards_server_tier
-             ON vault_shards (server_id, storage_tier)",
-            [],
-        )
-        .map_err(|e| format!("Failed to create server_tier index: {e}"))?;
+             ON vault_shards (server_id, storage_tier)")?;
 
-        conn.execute(
+        ddl(&conn, "vault_placement table",
             "CREATE TABLE IF NOT EXISTS vault_placement (
                 content_id   TEXT    NOT NULL,
                 shard_index  INTEGER NOT NULL,
@@ -152,26 +145,17 @@ impl ContentStore {
                 stored_at    INTEGER NOT NULL,
                 confirmed    INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (content_id, shard_index)
-            )",
-            [],
-        )
-        .map_err(|e| format!("Failed to create vault_placement table: {e}"))?;
+            )")?;
 
-        conn.execute(
+        ddl(&conn, "placement server index",
             "CREATE INDEX IF NOT EXISTS idx_vault_placement_server
-             ON vault_placement (server_id)",
-            [],
-        )
-        .map_err(|e| format!("Failed to create placement server index: {e}"))?;
+             ON vault_placement (server_id)")?;
 
-        conn.execute(
+        ddl(&conn, "placement peer index",
             "CREATE INDEX IF NOT EXISTS idx_vault_placement_peer
-             ON vault_placement (target_peer)",
-            [],
-        )
-        .map_err(|e| format!("Failed to create placement peer index: {e}"))?;
+             ON vault_placement (target_peer)")?;
 
-        conn.execute(
+        ddl(&conn, "vault_manifests table",
             "CREATE TABLE IF NOT EXISTS vault_manifests (
                 content_id      TEXT    PRIMARY KEY,
                 server_id       TEXT    NOT NULL,
@@ -183,35 +167,23 @@ impl ContentStore {
                 storage_tier    TEXT    NOT NULL DEFAULT 'standard',
                 created_at      INTEGER NOT NULL,
                 creator_peer_id TEXT    NOT NULL
-            )",
-            [],
-        )
-        .map_err(|e| format!("Failed to create vault_manifests table: {e}"))?;
+            )")?;
 
-        conn.execute(
+        ddl(&conn, "manifests server index",
             "CREATE INDEX IF NOT EXISTS idx_vault_manifests_server
-             ON vault_manifests (server_id)",
-            [],
-        )
-        .map_err(|e| format!("Failed to create manifests server index: {e}"))?;
+             ON vault_manifests (server_id)")?;
 
-        conn.execute(
+        ddl(&conn, "manifests created index",
             "CREATE INDEX IF NOT EXISTS idx_vault_manifests_server_created
-             ON vault_manifests (server_id, created_at)",
-            [],
-        )
-        .map_err(|e| format!("Failed to create manifests created index: {e}"))?;
+             ON vault_manifests (server_id, created_at)")?;
 
-        conn.execute(
+        ddl(&conn, "vault_member_status table",
             "CREATE TABLE IF NOT EXISTS vault_member_status (
                 peer_id     TEXT    NOT NULL,
                 server_id   TEXT    NOT NULL,
                 last_seen   INTEGER NOT NULL,
                 PRIMARY KEY (peer_id, server_id)
-            )",
-            [],
-        )
-        .map_err(|e| format!("Failed to create vault_member_status table: {e}"))?;
+            )")?;
 
         std::fs::create_dir_all(base_dir)
             .map_err(|e| format!("Failed to create vault base dir: {e}"))?;
