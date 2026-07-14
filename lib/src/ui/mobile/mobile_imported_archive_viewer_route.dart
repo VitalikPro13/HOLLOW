@@ -19,7 +19,7 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/archive/shared/archive_message_list.dart';
 import 'package:hollow/src/ui/archive/shared/archive_sender_filter.dart';
-import 'package:hollow/src/ui/archive/shared/archive_shared_widgets.dart';
+import 'package:hollow/src/ui/components/long_press_message.dart';
 import 'package:hollow/src/ui/archive/shared/archive_toolbar.dart';
 import 'package:hollow/src/ui/archive/shared/archive_verification_banner.dart';
 import 'package:hollow/src/ui/archive/shared/imported_archive_prep.dart';
@@ -303,7 +303,7 @@ class _MobileImportedArchiveViewerRouteState
       actionWrapper: (context, msg, child) {
         final senderPeerId =
             msg.isMe ? localPeerId : (data.peerId ?? '');
-        return ArchiveLongPressMessage(
+        return LongPressMessage(
           onLongPress: () => _showActions(
             msg.text,
             displayNameFor(profiles, senderPeerId),
@@ -341,7 +341,7 @@ class _MobileImportedArchiveViewerRouteState
       proofMsgType: proofMsgType,
       controller: _listController,
       scrollDuration: _scrollDuration,
-      actionWrapper: (context, msg, child) => ArchiveLongPressMessage(
+      actionWrapper: (context, msg, child) => LongPressMessage(
         onLongPress: () => _showActions(
           msg.text,
           displayNameFor(profiles, msg.senderId),

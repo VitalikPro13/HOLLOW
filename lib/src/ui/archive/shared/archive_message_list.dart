@@ -16,7 +16,7 @@ import 'package:hollow/src/ui/chat/message_bubble.dart';
 import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 
 /// Wraps a rendered message with platform actions (desktop: MessageHoverWrapper,
-/// mobile: ArchiveLongPressMessage). `context` is the itemBuilder's element —
+/// mobile: LongPressMessage). `context` is the itemBuilder's element —
 /// callbacks that show toasts/dialogs must guard THIS context, not the State's.
 typedef ArchiveActionWrapper<T> = Widget Function(
     BuildContext context, T message, Widget child);

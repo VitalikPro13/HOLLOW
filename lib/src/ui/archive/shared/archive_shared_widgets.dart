@@ -179,52 +179,6 @@ class ArchiveDeletedOverlay extends StatelessWidget {
   }
 }
 
-// ── Long-press wrapper ─────────────────────────────────────────
-
-class ArchiveLongPressMessage extends StatefulWidget {
-  final Widget child;
-  final VoidCallback onLongPress;
-
-  const ArchiveLongPressMessage({
-    super.key,
-    required this.child,
-    required this.onLongPress,
-  });
-
-  @override
-  State<ArchiveLongPressMessage> createState() =>
-      _ArchiveLongPressMessageState();
-}
-
-class _ArchiveLongPressMessageState extends State<ArchiveLongPressMessage> {
-  bool _pressing = false;
-
-  @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-    return GestureDetector(
-      behavior: HitTestBehavior.opaque,
-      onLongPressStart: (_) => setState(() => _pressing = true),
-      onLongPress: () {
-        setState(() => _pressing = false);
-        widget.onLongPress();
-      },
-      onLongPressCancel: () => setState(() => _pressing = false),
-      onLongPressEnd: (_) => setState(() => _pressing = false),
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 150),
-        curve: Curves.easeOut,
-        decoration: BoxDecoration(
-          color:
-              _pressing ? hollow.accent.withValues(alpha: 0.08) : null,
-          borderRadius: BorderRadius.circular(hollow.radiusSm),
-        ),
-        child: widget.child,
-      ),
-    );
-  }
-}
-
 // ── Edit history indicator ──────────────────────────────────────
 
 /// Shows "Edited N times -> view history" below a message bubble.

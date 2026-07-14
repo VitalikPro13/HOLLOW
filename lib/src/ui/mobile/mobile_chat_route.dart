@@ -41,6 +41,7 @@ import 'package:hollow/src/core/providers/emote_provider.dart';
 import 'package:hollow/src/ui/components/connection_progress.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/components/long_press_message.dart';
 import 'package:hollow/src/ui/components/saved_messages_avatar.dart';
 import 'package:hollow/src/ui/chat/voice_recorder_bar.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
@@ -1774,7 +1775,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
           }
         }
 
-        final bubble = _LongPressMessage(
+        final bubble = LongPressMessage(
           onLongPress: () => _showDmActions(msg, senderName, localPeerId),
           child: MessageBubble(
             message: msg,
@@ -1942,7 +1943,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
           }
         }
 
-        final bubble = _LongPressMessage(
+        final bubble = LongPressMessage(
           onLongPress: () => _showChannelActions(msg, senderName, localPeerId),
           child: ChannelMessageBubble(
             message: msg,
@@ -3227,51 +3228,6 @@ class _StagedFilePreview extends StatelessWidget {
             child: Icon(LucideIcons.x, size: 18, color: hollow.textSecondary),
           ),
         ],
-      ),
-    );
-  }
-}
-
-// ─────────────────────────────────────────────────
-// Long-press wrapper with teal highlight + full-width hit target
-// ─────────────────────────────────────────────────
-
-class _LongPressMessage extends StatefulWidget {
-  final Widget child;
-  final VoidCallback onLongPress;
-
-  const _LongPressMessage({
-    required this.child,
-    required this.onLongPress,
-  });
-
-  @override
-  State<_LongPressMessage> createState() => _LongPressMessageState();
-}
-
-class _LongPressMessageState extends State<_LongPressMessage> {
-  bool _pressing = false;
-
-  @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-    return GestureDetector(
-      behavior: HitTestBehavior.opaque,
-      onLongPressStart: (_) => setState(() => _pressing = true),
-      onLongPress: () {
-        setState(() => _pressing = false);
-        widget.onLongPress();
-      },
-      onLongPressCancel: () => setState(() => _pressing = false),
-      onLongPressEnd: (_) => setState(() => _pressing = false),
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 150),
-        curve: Curves.easeOut,
-        decoration: BoxDecoration(
-          color: _pressing ? hollow.accent.withValues(alpha: 0.08) : null,
-          borderRadius: BorderRadius.circular(hollow.radiusSm),
-        ),
-        child: widget.child,
       ),
     );
   }

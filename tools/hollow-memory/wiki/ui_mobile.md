@@ -694,7 +694,7 @@ Watches `mobileTabProvider` — returns `SizedBox.shrink()` when `activeTab != 2
 Back button, avatar (DM) or # icon (channel), title, subtitle "in serverName" (channel), icon buttons: filter (channels, >1 sender), calendar (jump-to-date), search toggle, export, "read-only" badge. From `lib/src/ui/archive/shared/archive_toolbar.dart`.
 
 ### Message List (shared core)
-Renders `ArchiveDmMessageList` / `ArchiveChannelMessageList` from `lib/src/ui/archive/shared/archive_message_list.dart` (`desktopChrome: false`, ReduceMotionController-aware `scrollDuration`), with `ArchiveLongPressMessage` action wrapper → `showMobileArchiveMessageActions()`. `AnimatedSwitcher` crossfade from loading spinner to content stays in the route. See wiki `ui_archive` "Shared Viewer Core" for the full rendering stack.
+Renders `ArchiveDmMessageList` / `ArchiveChannelMessageList` from `lib/src/ui/archive/shared/archive_message_list.dart` (`desktopChrome: false`, ReduceMotionController-aware `scrollDuration`), with `LongPressMessage` action wrapper → `showMobileArchiveMessageActions()`. `AnimatedSwitcher` crossfade from loading spinner to content stays in the route. See wiki `ui_archive` "Shared Viewer Core" for the full rendering stack.
 
 ### Search
 `ArchiveListSearchBar` (shared) rendered OUTSIDE the list, above loading/empty states; drives scroll-to-match via `ArchiveMessageListController` (1.5s highlight).

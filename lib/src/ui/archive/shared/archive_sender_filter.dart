@@ -7,6 +7,179 @@ import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
+// ── Shared searchable participant list ──────────────────────────
+
+/// Size preset — desktop dialog vs mobile bottom sheet keep their exact
+/// pre-dedup dimensions.
+class _FilterListStyle {
+  final EdgeInsets searchPadding;
+  final double searchIconSize;
+  final EdgeInsets allRowPadding;
+  final double allIconSize;
+  final EdgeInsets rowPadding;
+  final double avatarSize;
+  final double checkIconSize;
+  final double fontSize;
+
+  const _FilterListStyle({
+    required this.searchPadding,
+    required this.searchIconSize,
+    required this.allRowPadding,
+    required this.allIconSize,
+    required this.rowPadding,
+    required this.avatarSize,
+    required this.checkIconSize,
+    required this.fontSize,
+  });
+}
+
+const _desktopStyle = _FilterListStyle(
+  searchPadding: EdgeInsets.all(HollowSpacing.sm),
+  searchIconSize: 12,
+  allRowPadding:
+      EdgeInsets.symmetric(horizontal: HollowSpacing.md, vertical: 6),
+  allIconSize: 14,
+  rowPadding: EdgeInsets.symmetric(horizontal: HollowSpacing.md, vertical: 5),
+  avatarSize: 20,
+  checkIconSize: 14,
+  fontSize: 13,
+);
+
+const _mobileStyle = _FilterListStyle(
+  searchPadding: EdgeInsets.all(HollowSpacing.md),
+  searchIconSize: 14,
+  allRowPadding:
+      EdgeInsets.symmetric(horizontal: HollowSpacing.lg, vertical: 10),
+  allIconSize: 16,
+  rowPadding: EdgeInsets.symmetric(horizontal: HollowSpacing.lg, vertical: 8),
+  avatarSize: 24,
+  checkIconSize: 16,
+  fontSize: 14,
+);
+
+/// Search field + "All participants" row + sender rows. [onPick] receives
+/// null for "All participants". [wrapList] bounds the ListView (dialog:
+/// Flexible within the 360px container; sheet: 40%-screen ConstrainedBox).
+class _SenderFilterList extends StatefulWidget {
+  final List<String> senderIds;
+  final String? selectedSender;
+  final Map<String, String> senderNames;
+  final _FilterListStyle style;
+  final void Function(String? id) onPick;
+  final Widget Function(Widget list) wrapList;
+
+  const _SenderFilterList({
+    required this.senderIds,
+    required this.selectedSender,
+    required this.senderNames,
+    required this.style,
+    required this.onPick,
+    required this.wrapList,
+  });
+
+  @override
+  State<_SenderFilterList> createState() => _SenderFilterListState();
+}
+
+class _SenderFilterListState extends State<_SenderFilterList> {
+  String _query = '';
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+    final style = widget.style;
+
+    final filtered = _query.isEmpty
+        ? widget.senderIds
+        : widget.senderIds.where((id) {
+            final name = (widget.senderNames[id] ?? id).toLowerCase();
+            return name.contains(_query.toLowerCase());
+          }).toList();
+
+    final allActive = widget.selectedSender == null;
+
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Padding(
+          padding: style.searchPadding,
+          child: HollowTextField(
+            hintText: 'Search participants...',
+            isDense: true,
+            autofocus: true,
+            prefixIcon: Icon(LucideIcons.search,
+                size: style.searchIconSize, color: hollow.textSecondary),
+            onChanged: (val) => setState(() => _query = val),
+          ),
+        ),
+        HollowPressable(
+          onTap: () => widget.onPick(null),
+          padding: style.allRowPadding,
+          child: Row(
+            children: [
+              Icon(LucideIcons.users,
+                  size: style.allIconSize,
+                  color: allActive ? hollow.accent : hollow.textSecondary),
+              const SizedBox(width: HollowSpacing.sm),
+              Text(
+                'All participants',
+                style: HollowTypography.body.copyWith(
+                  color: allActive ? hollow.accent : hollow.textPrimary,
+                  fontWeight:
+                      allActive ? FontWeight.w600 : FontWeight.normal,
+                  fontSize: style.fontSize,
+                ),
+              ),
+            ],
+          ),
+        ),
+        Divider(height: 1, color: hollow.border),
+        widget.wrapList(
+          ListView.builder(
+            padding: const EdgeInsets.symmetric(vertical: HollowSpacing.xs),
+            shrinkWrap: true,
+            itemCount: filtered.length,
+            itemBuilder: (_, index) {
+              final id = filtered[index];
+              final name = widget.senderNames[id] ?? id.substring(0, 8);
+              final isActive = widget.selectedSender == id;
+
+              return HollowPressable(
+                onTap: () => widget.onPick(id),
+                padding: style.rowPadding,
+                child: Row(
+                  children: [
+                    HollowAvatar(peerId: id, size: style.avatarSize),
+                    const SizedBox(width: HollowSpacing.sm),
+                    Expanded(
+                      child: Text(
+                        name,
+                        style: HollowTypography.body.copyWith(
+                          color:
+                              isActive ? hollow.accent : hollow.textPrimary,
+                          fontWeight: isActive
+                              ? FontWeight.w600
+                              : FontWeight.normal,
+                          fontSize: style.fontSize,
+                        ),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                    if (isActive)
+                      Icon(LucideIcons.check,
+                          size: style.checkIconSize, color: hollow.accent),
+                  ],
+                ),
+              );
+            },
+          ),
+        ),
+      ],
+    );
+  }
+}
+
 // ── Peer filter button (opens showDialog) — desktop ─────────────
 
 class ArchiveFilterButton extends StatelessWidget {
@@ -59,7 +232,7 @@ class ArchiveFilterButton extends StatelessWidget {
   }
 }
 
-class ArchiveFilterDialog extends StatefulWidget {
+class ArchiveFilterDialog extends StatelessWidget {
   final List<String> senderIds;
   final String? selectedSender;
   final Map<String, String> senderDisplayNames;
@@ -74,23 +247,8 @@ class ArchiveFilterDialog extends StatefulWidget {
   });
 
   @override
-  State<ArchiveFilterDialog> createState() => _ArchiveFilterDialogState();
-}
-
-class _ArchiveFilterDialogState extends State<ArchiveFilterDialog> {
-  String _query = '';
-
-  @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
-
-    final filtered = _query.isEmpty
-        ? widget.senderIds
-        : widget.senderIds.where((id) {
-            final name =
-                (widget.senderDisplayNames[id] ?? id).toLowerCase();
-            return name.contains(_query.toLowerCase());
-          }).toList();
 
     return Align(
       alignment: Alignment.topRight,
@@ -113,93 +271,13 @@ class _ArchiveFilterDialogState extends State<ArchiveFilterDialog> {
                 ),
               ],
             ),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Padding(
-                  padding: const EdgeInsets.all(HollowSpacing.sm),
-                  child: HollowTextField(
-                    hintText: 'Search participants...',
-                    isDense: true,
-                    autofocus: true,
-                    prefixIcon: Icon(LucideIcons.search,
-                        size: 12, color: hollow.textSecondary),
-                    onChanged: (val) => setState(() => _query = val),
-                  ),
-                ),
-                HollowPressable(
-                  onTap: () => Navigator.of(context).pop('_clear_'),
-                  padding: const EdgeInsets.symmetric(
-                      horizontal: HollowSpacing.md, vertical: 6),
-                  child: Row(
-                    children: [
-                      Icon(LucideIcons.users, size: 14,
-                          color: widget.selectedSender == null
-                              ? hollow.accent
-                              : hollow.textSecondary),
-                      const SizedBox(width: HollowSpacing.sm),
-                      Text(
-                        'All participants',
-                        style: HollowTypography.body.copyWith(
-                          color: widget.selectedSender == null
-                              ? hollow.accent
-                              : hollow.textPrimary,
-                          fontWeight: widget.selectedSender == null
-                              ? FontWeight.w600
-                              : FontWeight.normal,
-                          fontSize: 13,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-                Divider(height: 1, color: hollow.border),
-                Flexible(
-                  child: ListView.builder(
-                    padding: const EdgeInsets.symmetric(
-                        vertical: HollowSpacing.xs),
-                    shrinkWrap: true,
-                    itemCount: filtered.length,
-                    itemBuilder: (_, index) {
-                      final id = filtered[index];
-                      final name =
-                          widget.senderDisplayNames[id] ?? id.substring(0, 8);
-                      final isActive = widget.selectedSender == id;
-
-                      return HollowPressable(
-                        onTap: () => Navigator.of(context).pop(id),
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: HollowSpacing.md, vertical: 5),
-                        child: Row(
-                          children: [
-                            HollowAvatar(peerId: id, size: 20),
-                            const SizedBox(width: HollowSpacing.sm),
-                            Expanded(
-                              child: Text(
-                                name,
-                                style: HollowTypography.body.copyWith(
-                                  color: isActive
-                                      ? hollow.accent
-                                      : hollow.textPrimary,
-                                  fontWeight: isActive
-                                      ? FontWeight.w600
-                                      : FontWeight.normal,
-                                  fontSize: 13,
-                                ),
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                            ),
-                            if (isActive)
-                              Icon(LucideIcons.check,
-                                  size: 14, color: hollow.accent),
-                          ],
-                        ),
-                      );
-                    },
-                  ),
-                ),
-              ],
+            child: _SenderFilterList(
+              senderIds: senderIds,
+              selectedSender: selectedSender,
+              senderNames: senderDisplayNames,
+              style: _desktopStyle,
+              onPick: (id) => Navigator.of(context).pop(id ?? '_clear_'),
+              wrapList: (list) => Flexible(child: list),
             ),
           ),
         ),
@@ -235,7 +313,7 @@ void showArchiveFilterSheet(
   );
 }
 
-class ArchiveFilterSheet extends StatefulWidget {
+class ArchiveFilterSheet extends StatelessWidget {
   final List<String> senderIds;
   final String? selectedSender;
   final Map<String, String> senderNames;
@@ -250,23 +328,8 @@ class ArchiveFilterSheet extends StatefulWidget {
   });
 
   @override
-  State<ArchiveFilterSheet> createState() => _ArchiveFilterSheetState();
-}
-
-class _ArchiveFilterSheetState extends State<ArchiveFilterSheet> {
-  String _query = '';
-
-  @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
-
-    final filtered = _query.isEmpty
-        ? widget.senderIds
-        : widget.senderIds.where((id) {
-            final name =
-                (widget.senderNames[id] ?? id).toLowerCase();
-            return name.contains(_query.toLowerCase());
-          }).toList();
 
     return SafeArea(
       child: Column(
@@ -283,105 +346,20 @@ class _ArchiveFilterSheetState extends State<ArchiveFilterSheet> {
               ),
             ),
           ),
-          Padding(
-            padding: const EdgeInsets.all(HollowSpacing.md),
-            child: HollowTextField(
-              hintText: 'Search participants...',
-              isDense: true,
-              autofocus: true,
-              prefixIcon: Icon(LucideIcons.search,
-                  size: 14, color: hollow.textSecondary),
-              onChanged: (val) => setState(() => _query = val),
-            ),
-          ),
-          HollowPressable(
-            onTap: () {
+          _SenderFilterList(
+            senderIds: senderIds,
+            selectedSender: selectedSender,
+            senderNames: senderNames,
+            style: _mobileStyle,
+            onPick: (id) {
               Navigator.pop(context);
-              widget.onSelected(null);
+              onSelected(id);
             },
-            child: Container(
-              width: double.infinity,
-              padding: const EdgeInsets.symmetric(
-                  horizontal: HollowSpacing.lg, vertical: 10),
-              child: Row(
-                children: [
-                  Icon(LucideIcons.users,
-                      size: 16,
-                      color: widget.selectedSender == null
-                          ? hollow.accent
-                          : hollow.textSecondary),
-                  const SizedBox(width: HollowSpacing.sm),
-                  Text(
-                    'All participants',
-                    style: HollowTypography.body.copyWith(
-                      color: widget.selectedSender == null
-                          ? hollow.accent
-                          : hollow.textPrimary,
-                      fontWeight: widget.selectedSender == null
-                          ? FontWeight.w600
-                          : FontWeight.normal,
-                      fontSize: 14,
-                    ),
-                  ),
-                ],
+            wrapList: (list) => ConstrainedBox(
+              constraints: BoxConstraints(
+                maxHeight: MediaQuery.of(context).size.height * 0.4,
               ),
-            ),
-          ),
-          Divider(height: 1, color: hollow.border),
-          ConstrainedBox(
-            constraints: BoxConstraints(
-              maxHeight: MediaQuery.of(context).size.height * 0.4,
-            ),
-            child: ListView.builder(
-              shrinkWrap: true,
-              padding: const EdgeInsets.symmetric(
-                  vertical: HollowSpacing.xs),
-              itemCount: filtered.length,
-              itemBuilder: (_, index) {
-                final id = filtered[index];
-                final name = widget.senderNames[id] ??
-                    id.substring(0, 8);
-                final isActive = widget.selectedSender == id;
-
-                return HollowPressable(
-                  onTap: () {
-                    Navigator.pop(context);
-                    widget.onSelected(id);
-                  },
-                  child: Container(
-                    width: double.infinity,
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: HollowSpacing.lg,
-                      vertical: 8,
-                    ),
-                    child: Row(
-                      children: [
-                        HollowAvatar(peerId: id, size: 24),
-                        const SizedBox(width: HollowSpacing.sm),
-                        Expanded(
-                          child: Text(
-                            name,
-                            style: HollowTypography.body.copyWith(
-                              color: isActive
-                                  ? hollow.accent
-                                  : hollow.textPrimary,
-                              fontWeight: isActive
-                                  ? FontWeight.w600
-                                  : FontWeight.normal,
-                              fontSize: 14,
-                            ),
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ),
-                        if (isActive)
-                          Icon(LucideIcons.check,
-                              size: 16, color: hollow.accent),
-                      ],
-                    ),
-                  ),
-                );
-              },
+              child: list,
             ),
           ),
           const SizedBox(height: HollowSpacing.sm),

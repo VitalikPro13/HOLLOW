@@ -16,7 +16,7 @@ import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/ui/archive/shared/archive_message_list.dart';
 import 'package:hollow/src/ui/archive/shared/archive_sender_filter.dart';
-import 'package:hollow/src/ui/archive/shared/archive_shared_widgets.dart';
+import 'package:hollow/src/ui/components/long_press_message.dart';
 import 'package:hollow/src/ui/archive/shared/archive_toolbar.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
@@ -155,7 +155,7 @@ class _MobileArchiveViewerRouteState
       proofMsgType: 'dm',
       controller: _listController,
       scrollDuration: _scrollDuration,
-      actionWrapper: (context, msg, child) => ArchiveLongPressMessage(
+      actionWrapper: (context, msg, child) => LongPressMessage(
         onLongPress: () => _showDmMessageActions(
           msg, msg.isMe ? localPeerId : peerId, profiles, localPeerId, peerId,
         ),
@@ -339,7 +339,7 @@ class _MobileArchiveViewerRouteState
       proofMsgType: 'ch',
       controller: _listController,
       scrollDuration: _scrollDuration,
-      actionWrapper: (context, msg, child) => ArchiveLongPressMessage(
+      actionWrapper: (context, msg, child) => LongPressMessage(
         onLongPress: () => _showChannelMessageActions(msg, profiles),
         child: child,
       ),
