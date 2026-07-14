@@ -92,26 +92,26 @@ class HollowShaderWarmUp extends ShaderWarmUp {
       const Offset(100, 100),
       100,
       Paint()
-        ..shader = RadialGradient(
+        ..shader = const RadialGradient(
           colors: [
-            const Color(0x0A00BFA6),
-            const Color(0x0A00BFA6),
-            const Color(0x0000BFA6),
+            Color(0x0A00BFA6),
+            Color(0x0A00BFA6),
+            Color(0x0000BFA6),
           ],
-          stops: const [0.0, 0.35, 1.0],
+          stops: [0.0, 0.35, 1.0],
         ).createShader(Rect.fromCircle(center: const Offset(100, 100), radius: 100)),
     );
     canvas.drawCircle(
       const Offset(100, 100),
       100,
       Paint()
-        ..shader = RadialGradient(
+        ..shader = const RadialGradient(
           colors: [
-            const Color(0x0A6366F1),
-            const Color(0x0A6366F1),
-            const Color(0x006366F1),
+            Color(0x0A6366F1),
+            Color(0x0A6366F1),
+            Color(0x006366F1),
           ],
-          stops: const [0.0, 0.35, 1.0],
+          stops: [0.0, 0.35, 1.0],
         ).createShader(Rect.fromCircle(center: const Offset(100, 100), radius: 100)),
     );
 

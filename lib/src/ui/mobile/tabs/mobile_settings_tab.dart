@@ -1097,7 +1097,7 @@ class _TwitchRowState extends ConsumerState<_TwitchRow> {
       ),
       child: Row(
         children: [
-          Icon(BrandIcons.twitch, size: 20, color: const Color(0xFF9146FF)),
+          const Icon(BrandIcons.twitch, size: 20, color: Color(0xFF9146FF)),
           const SizedBox(width: HollowSpacing.md),
           Expanded(
             child: Column(
@@ -1177,7 +1177,7 @@ class _NetworkTabState extends ConsumerState<_NetworkTab> {
       padding: const EdgeInsets.all(HollowSpacing.lg),
       children: [
         // ── Peer ID ──
-        _SectionLabel(label: 'Peer ID'),
+        const _SectionLabel(label: 'Peer ID'),
         const SizedBox(height: HollowSpacing.sm),
         HollowPressable(
           onTap: () {
@@ -1212,21 +1212,21 @@ class _NetworkTabState extends ConsumerState<_NetworkTab> {
         const SizedBox(height: HollowSpacing.xl),
 
         // ── Network ──
-        _SectionLabel(label: 'Network'),
+        const _SectionLabel(label: 'Network'),
         const SizedBox(height: HollowSpacing.sm),
         _buildRelaySection(hollow),
 
         const SizedBox(height: HollowSpacing.xl),
 
         // ── Offline delivery (relay message-availability cache) ──
-        _SectionLabel(label: 'Offline Delivery'),
+        const _SectionLabel(label: 'Offline Delivery'),
         const SizedBox(height: HollowSpacing.sm),
         const _OfflineInboxSection(),
 
         const SizedBox(height: HollowSpacing.xl),
 
         // ── Anti-censorship (desktop-only for now → disabled toggle) ──
-        _SectionLabel(label: 'Anti-Censorship'),
+        const _SectionLabel(label: 'Anti-Censorship'),
         const SizedBox(height: HollowSpacing.sm),
         Container(
           width: double.infinity,
@@ -1517,7 +1517,7 @@ class _AudioTab extends StatelessWidget {
     return ListView(
       padding: const EdgeInsets.all(HollowSpacing.lg),
       children: [
-        _SectionLabel(label: 'Voice & Audio'),
+        const _SectionLabel(label: 'Voice & Audio'),
         const SizedBox(height: HollowSpacing.sm),
         _AudioQualityPicker(),
         const SizedBox(height: HollowSpacing.md),
@@ -1527,7 +1527,7 @@ class _AudioTab extends StatelessWidget {
         const SizedBox(height: HollowSpacing.md),
         _AudioProcessingInfo(),
         const SizedBox(height: HollowSpacing.xl),
-        _SectionLabel(label: 'Ringtone'),
+        const _SectionLabel(label: 'Ringtone'),
         const SizedBox(height: HollowSpacing.sm),
         _RingtonePicker(),
         const SizedBox(height: HollowSpacing.md),
@@ -1576,11 +1576,11 @@ class _DevicesTab extends ConsumerWidget {
     return ListView(
       padding: const EdgeInsets.all(HollowSpacing.lg),
       children: [
-        _SectionLabel(label: 'Your Devices'),
+        const _SectionLabel(label: 'Your Devices'),
         const SizedBox(height: HollowSpacing.sm),
         const _DevicesSectionMobile(),
         const SizedBox(height: HollowSpacing.xl),
-        _SectionLabel(label: 'Link a Device'),
+        const _SectionLabel(label: 'Link a Device'),
         const SizedBox(height: HollowSpacing.sm),
         Text(
           'Link another device to this identity. Show a code here, then enter it '
@@ -1616,7 +1616,7 @@ class _BackupTab extends StatelessWidget {
     return ListView(
       padding: const EdgeInsets.all(HollowSpacing.lg),
       children: [
-        _SectionLabel(label: 'Identity Backup'),
+        const _SectionLabel(label: 'Identity Backup'),
         const SizedBox(height: HollowSpacing.sm),
         Text(
           'Export an encrypted backup of your identity and messages. '
@@ -1629,7 +1629,7 @@ class _BackupTab extends StatelessWidget {
         const _BackupExportButton(),
         if (Platform.isIOS) ...[
           const SizedBox(height: HollowSpacing.xl),
-          _SectionLabel(label: 'Diagnostics'),
+          const _SectionLabel(label: 'Diagnostics'),
           const SizedBox(height: HollowSpacing.sm),
           const _ExportDiagnosticsButton(),
         ],
@@ -2927,7 +2927,7 @@ class _SecurityTabState extends ConsumerState<_SecurityTab> {
       padding: const EdgeInsets.all(HollowSpacing.lg),
       children: [
         // App Lock section
-        _SectionLabel(label: 'App Lock'),
+        const _SectionLabel(label: 'App Lock'),
         const SizedBox(height: HollowSpacing.sm),
         Container(
           padding: const EdgeInsets.all(HollowSpacing.md),
@@ -3070,13 +3070,13 @@ class _SecurityTabState extends ConsumerState<_SecurityTab> {
         const SizedBox(height: HollowSpacing.xl),
 
         // Recovery phrase
-        _SectionLabel(label: 'Recovery'),
+        const _SectionLabel(label: 'Recovery'),
         const SizedBox(height: HollowSpacing.sm),
         _RecoveryPhraseButton(),
         const SizedBox(height: HollowSpacing.xl),
 
         // Verify a Proof — same placement as the desktop Security tab.
-        _SectionLabel(label: 'Verify a Proof'),
+        const _SectionLabel(label: 'Verify a Proof'),
         const SizedBox(height: HollowSpacing.sm),
         const _VerifyProofSection(),
         const SizedBox(height: HollowSpacing.xl),
@@ -4460,16 +4460,16 @@ class _AboutTab extends ConsumerWidget {
 
         const SizedBox(height: HollowSpacing.xl),
 
-        _SectionLabel(label: 'Info'),
+        const _SectionLabel(label: 'Info'),
         const SizedBox(height: HollowSpacing.sm),
         _InfoRow(label: 'Version', value: appVersion.isNotEmpty ? appVersion : 'unknown'),
         _InfoRow(label: 'Platform', value: Platform.operatingSystem),
-        _InfoRow(label: 'License', value: 'AGPL-3.0'),
+        const _InfoRow(label: 'License', value: 'AGPL-3.0'),
 
         const SizedBox(height: HollowSpacing.xl),
 
         // Relay stats
-        _SectionLabel(label: 'Relay'),
+        const _SectionLabel(label: 'Relay'),
         const SizedBox(height: HollowSpacing.sm),
         Container(
           padding: const EdgeInsets.all(HollowSpacing.md),
@@ -4530,7 +4530,7 @@ class _AboutTab extends ConsumerWidget {
         const SizedBox(height: HollowSpacing.xl),
 
         // News
-        _SectionLabel(label: 'News'),
+        const _SectionLabel(label: 'News'),
         const SizedBox(height: HollowSpacing.sm),
         if (!newsState.hasFetched)
           Padding(
@@ -4588,7 +4588,7 @@ class _AboutTab extends ConsumerWidget {
         const SizedBox(height: HollowSpacing.xl),
 
         // Contact
-        _SectionLabel(label: 'Contact'),
+        const _SectionLabel(label: 'Contact'),
         const SizedBox(height: HollowSpacing.sm),
         Align(
           alignment: Alignment.centerLeft,
@@ -4599,7 +4599,7 @@ class _AboutTab extends ConsumerWidget {
               HollowToast.show(context, 'Email copied to clipboard',
                   type: HollowToastType.success);
             },
-            icon: Icon(LucideIcons.mail, size: 16),
+            icon: const Icon(LucideIcons.mail, size: 16),
             child: const Text('feedback@anonlisten.com'),
           ),
         ),
@@ -4611,7 +4611,7 @@ class _AboutTab extends ConsumerWidget {
               Uri.parse('https://anonlisten.com'),
               mode: LaunchMode.externalApplication,
             ),
-            icon: Icon(LucideIcons.globe, size: 16),
+            icon: const Icon(LucideIcons.globe, size: 16),
             child: const Text('anonlisten.com'),
           ),
         ),
@@ -4623,7 +4623,7 @@ class _AboutTab extends ConsumerWidget {
               Uri.parse('https://github.com/VitalikPro13/HOLLOW'),
               mode: LaunchMode.externalApplication,
             ),
-            icon: Icon(BrandIcons.github, size: 16),
+            icon: const Icon(BrandIcons.github, size: 16),
             child: const Text('GitHub'),
           ),
         ),
@@ -4651,7 +4651,7 @@ class _AboutTab extends ConsumerWidget {
         const SizedBox(height: HollowSpacing.md),
         Row(
           children: [
-            _MobileBrandIcon(
+            const _MobileBrandIcon(
               icon: BrandIcons.youtube,
               color: BrandIconColors.youtube,
               url: 'https://youtube.com/@Anon_Listen',
@@ -4663,13 +4663,13 @@ class _AboutTab extends ConsumerWidget {
               url: 'https://x.com/Anon_Listen',
             ),
             const SizedBox(width: HollowSpacing.sm),
-            _MobileBrandIcon(
+            const _MobileBrandIcon(
               icon: BrandIcons.twitch,
               color: BrandIconColors.twitch,
               url: 'https://twitch.tv/AnonListen',
             ),
             const SizedBox(width: HollowSpacing.sm),
-            _MobileBrandIcon(
+            const _MobileBrandIcon(
               icon: BrandIcons.kick,
               color: BrandIconColors.kick,
               url: 'https://kick.com/AnonListen',
@@ -4683,7 +4683,7 @@ class _AboutTab extends ConsumerWidget {
               url: 'https://patreon.com/AnonListen',
             ),
             const SizedBox(width: HollowSpacing.sm),
-            _MobileBrandIcon(
+            const _MobileBrandIcon(
               icon: BrandIcons.kofi,
               color: BrandIconColors.kofi,
               url: 'https://ko-fi.com/AnonListen',
@@ -4694,13 +4694,13 @@ class _AboutTab extends ConsumerWidget {
         const SizedBox(height: HollowSpacing.xl),
 
         // Legal
-        _SectionLabel(label: 'Legal'),
+        const _SectionLabel(label: 'Legal'),
         const SizedBox(height: HollowSpacing.sm),
         Align(
           alignment: Alignment.centerLeft,
           child: HollowButton.ghost(
             onPressed: () => _showLegalSheet(context, 'Privacy Policy', 'legal/PRIVACY_POLICY.md'),
-            icon: Icon(LucideIcons.shield, size: 16),
+            icon: const Icon(LucideIcons.shield, size: 16),
             child: const Text('Privacy Policy'),
           ),
         ),
@@ -4709,7 +4709,7 @@ class _AboutTab extends ConsumerWidget {
           alignment: Alignment.centerLeft,
           child: HollowButton.ghost(
             onPressed: () => _showLegalSheet(context, 'Terms of Use', 'legal/TERMS_OF_USE.md'),
-            icon: Icon(LucideIcons.scroll, size: 16),
+            icon: const Icon(LucideIcons.scroll, size: 16),
             child: const Text('Terms of Use'),
           ),
         ),
@@ -4735,7 +4735,7 @@ class _AboutTab extends ConsumerWidget {
                 ),
               );
             },
-            icon: Icon(LucideIcons.fileText, size: 16),
+            icon: const Icon(LucideIcons.fileText, size: 16),
             child: const Text('Open-Source Licenses'),
           ),
         ),

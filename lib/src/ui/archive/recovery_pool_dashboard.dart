@@ -1,4 +1,4 @@
-﻿import 'package:flutter/material.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/recovery_pool_provider.dart';
@@ -216,8 +216,8 @@ class RecoveryPoolDashboard extends ConsumerWidget {
                           ),
                         ),
                       ),
-                      StatusDot(
-                        color: const Color(0xFF4CAF50),
+                      const StatusDot(
+                        color: Color(0xFF4CAF50),
                         size: 6,
                       ),
                     ],

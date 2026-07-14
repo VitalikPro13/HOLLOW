@@ -390,7 +390,7 @@ class _MemberTile extends ConsumerWidget {
                       child: Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          Icon(BrandIcons.twitch, size: 12, color: const Color(0xFF9146FF)),
+                          const Icon(BrandIcons.twitch, size: 12, color: Color(0xFF9146FF)),
                           const SizedBox(width: HollowSpacing.xs),
                           Text(
                             effectiveTwitch,

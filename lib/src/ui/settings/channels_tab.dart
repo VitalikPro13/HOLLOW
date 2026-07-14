@@ -1,4 +1,4 @@
-﻿import 'package:flutter/material.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/models/channel_info.dart';
 import 'package:hollow/src/core/models/channel_layout.dart';
@@ -411,21 +411,21 @@ class _ChannelsTabState extends ConsumerState<ChannelsTab> {
                                      });
                 },
                 compact: true,
-                icon: Icon(LucideIcons.minus, size: 14),
+                icon: const Icon(LucideIcons.minus, size: 14),
                 child: const Text('Break'),
               ),
               const SizedBox(width: HollowSpacing.sm),
               HollowButton.ghost(
                 onPressed: _addCategory,
                 compact: true,
-                icon: Icon(LucideIcons.folderPlus, size: 14),
+                icon: const Icon(LucideIcons.folderPlus, size: 14),
                 child: const Text('Category'),
               ),
               const SizedBox(width: HollowSpacing.sm),
               HollowButton.ghost(
                 onPressed: _addChannel,
                 compact: true,
-                icon: Icon(LucideIcons.plus, size: 14),
+                icon: const Icon(LucideIcons.plus, size: 14),
                 child: const Text('Channel'),
               ),
             ],
@@ -613,7 +613,7 @@ class _ChannelsTabState extends ConsumerState<ChannelsTab> {
                       _loadLayout();
                     },
                     expand: true,
-                    icon: Icon(LucideIcons.x, size: 16),
+                    icon: const Icon(LucideIcons.x, size: 16),
                     child: const Text('Discard'),
                   ),
                 ),
@@ -622,7 +622,7 @@ class _ChannelsTabState extends ConsumerState<ChannelsTab> {
                   child: HollowButton.filled(
                     onPressed: _save,
                     expand: true,
-                    icon: Icon(LucideIcons.save, size: 16),
+                    icon: const Icon(LucideIcons.save, size: 16),
                     child: const Text('Save Layout'),
                   ),
                 ),
@@ -943,7 +943,7 @@ class _TreeConnectorPainter extends CustomPainter {
     // Vertical line from top to middle (or full height if not last).
     final midY = size.height / 2;
     canvas.drawLine(
-      Offset(0, 0),
+      const Offset(0, 0),
       Offset(0, isLast ? midY : size.height),
       paint,
     );

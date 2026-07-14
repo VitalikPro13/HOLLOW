@@ -690,27 +690,20 @@ Watches `mobileTabProvider` — returns `SizedBox.shrink()` when `activeTab != 2
 
 `isDm` getter: `peerId != null`.
 
-### Header (_MobileArchiveHeader)
-Back button, avatar (DM) or # icon (channel), title, subtitle "in serverName" (channel), icon buttons: filter (channels, >1 sender), calendar (jump-to-date), search toggle, export, "read-only" badge.
+### Header (ArchiveMobileToolbar, shared)
+Back button, avatar (DM) or # icon (channel), title, subtitle "in serverName" (channel), icon buttons: filter (channels, >1 sender), calendar (jump-to-date), search toggle, export, "read-only" badge. From `lib/src/ui/archive/shared/archive_toolbar.dart`.
 
-### Message List
-- `ScrollablePositionedList.builder` with `ItemScrollController`
-- `DateSeparator` + `shouldGroup` / `shouldShowDateSeparator` (reused from `chat_pane.dart`)
-- `MessageBubble` (DM) or `ChannelMessageBubble` (channel)
-- `_DeletedOverlay` for `hiddenAt != null`
-- `EditHistoryIndicator` (reused from `archive_message_viewer.dart`)
-- `_LongPressMessage` wrapper → `showMobileArchiveMessageActions()`
-- Reply lookups from same message list (channels: from unfiltered `allMessages`)
-- `AnimatedSwitcher` crossfade from loading spinner to content
+### Message List (shared core)
+Renders `ArchiveDmMessageList` / `ArchiveChannelMessageList` from `lib/src/ui/archive/shared/archive_message_list.dart` (`desktopChrome: false`, ReduceMotionController-aware `scrollDuration`), with `ArchiveLongPressMessage` action wrapper → `showMobileArchiveMessageActions()`. `AnimatedSwitcher` crossfade from loading spinner to content stays in the route. See wiki `ui_archive` "Shared Viewer Core" for the full rendering stack.
 
 ### Search
-Reuses `ArchiveSearchBar` from `archive_message_viewer.dart`. Match indices computed inline, prev/next cycle with `_scrollToIndex()` + 1.5s highlight.
+`ArchiveListSearchBar` (shared) rendered OUTSIDE the list, above loading/empty states; drives scroll-to-match via `ArchiveMessageListController` (1.5s highlight).
 
 ### Sender Filter (Channel only)
-`_FilterSheet` bottom sheet with searchable participant list. Sets `archiveFilterSenderProvider`.
+`showArchiveFilterSheet()` (shared) — bottom sheet with searchable participant list. Sets `archiveFilterSenderProvider`.
 
 ### Jump-to-Date
-`showDatePicker()` → `archiveJumpToDateProvider` → binary search scroll.
+`showDatePicker()` → `archiveJumpToDateProvider` → the shared core's `ref.listen` (in build) does the binary-search scroll.
 
 ### File Save
 Same pattern as `mobile_chat_route.dart:_saveFile()` — WebP→PNG conversion, `FilePicker.platform.saveFile(bytes:)`.
@@ -734,19 +727,8 @@ Resets `archiveFilterSenderProvider`, search/jump providers in `dispose()` via `
 ### Data Loading
 Uses `importedArchiveDataProvider(path)` with `AnimatedSwitcher` crossfade from spinner to content.
 
-### Verification Banner
-- Archive signature status: shield icon + text (signed by exporter or invalid)
-- Message signature counts: valid/invalid/unsigned
-- Color-coded: accent (valid), amber (warnings), error (invalid)
-
-### Channel Selector (Server Archives)
-Horizontal scrolling pill tabs for multi-channel server archives. Uses `importedArchiveSelectedChannelProvider`. Resets filter/search on channel switch.
-
-### Message List
-Same pattern as `MobileArchiveViewerRoute`: `ScrollablePositionedList`, date separators, grouping, reply lookups, edit history, deleted overlay, long-press actions, search bar.
-
-### Message Conversion
-Uses `convertArchiveDmMessages()` / `convertArchiveChannelMessages()` from `archive_provider.dart`.
+### Derivation + Rendering (shared)
+All conversion/filtering/banner derivation happens in one `prepareImportedArchive(..., mobile: true)` call (`lib/src/ui/archive/shared/imported_archive_prep.dart`); the route renders `ArchiveVerificationBanner` (`dense: true`) → `ArchiveChannelSelector` (server archives; resets filter/search on switch, uses `importedArchiveSelectedChannelProvider`) → `ArchiveMobileToolbar` → the shared message lists, same as `MobileArchiveViewerRoute` but with exporter-relative DM proof contexts from prep.
 
 ---
 

@@ -86,7 +86,7 @@ All UI uses custom Hollow widgets — no Material defaults: **HollowPressable** 
 - **CRITICAL — custom emotes:** content-addressed WebP, wire token `[e:name:hash]` (grammar dual-defined: `node/emotes.rs` + `emote_image.dart`); bytes NEVER ride CRDT/envelopes/relay — pull via verified `EmoteRequest`→`EmoteAssets`. FFZ = AUTHORING-ONLY (`ffz/` proxy). Composer: 1 PUA ↔ 1 WidgetSpan; send sites read `expandedText()`, NEVER `.text`; notif previews via `emotePreviewSpans`/`emoteTokensToShortcodes`. See `project_custom_emotes_ffz`, wiki `emotes`.
 - **Emoji rendering:** Windows/Linux use bundled NotoColorEmoji (`kEmojiFontFallback`); MUST stay emoji-only subset (`scripts/subset_emoji_font.py`) — unsubset hijacks space/digits app-wide. See wiki `emotes`.
 - **CRITICAL — CRDT sync batches parse tolerantly:** always `parse_ops_tolerant`, never `from_str::<Vec<CrdtOp>>` — one unknown NEWER-client payload variant otherwise poisons the whole batch and permanently wedges older clients' server sync. See `project_custom_emotes_ffz`.
-- **CRITICAL — `CrossAxisAlignment.stretch` Row needs bounded height**: the subtree dies INVISIBLY (still occupies space) — wrap in `IntrinsicHeight`. srcIn tints need TRANSPARENT ink. See `feedback_dart_patterns`.
+- **CRITICAL — `CrossAxisAlignment.stretch` Row needs bounded height**: the subtree dies INVISIBLY (still occupies space) — wrap in `IntrinsicHeight`. srcIn tints need TRANSPARENT ink. `ref.listen` ONLY in build() (initState registration silently no-ops). Never `Flexible` beside `Expanded` (splits free space 50/50). See `feedback_dart_patterns`.
 - **CRITICAL — blocking & Saved messages:** block list = MASTER-keyed, process-global (`node/blocklist.rs`, warmed at startup) — new inbound DM-surface handlers drop via `blocklist::is_blocked(sender)` BEFORE store+emit (harness caveat: shared set). Relay `reports.json` = the relay's ONE persisted peer artifact (hashed, anonymous). Saved messages = self-DM (fan-out skips the recipient branch on self). See `project_saved_messages_block_report`.
 - **Navigation shell:** two persisted layout modes (`layoutModeProvider`): Dock (default — FriendsBar + BottomBar) and Classic (Discord-like 4-panel); mobile = single-panel bottom nav. Vitalik uses Dock — put new UI in `bottom_bar.dart`.
 - **Window chrome:** `window_manager ^0.5.1`, `setAsFrameless()`, 32px title bar.
@@ -189,10 +189,10 @@ All UI uses custom Hollow widgets — no Material defaults: **HollowPressable** 
 - **CRITICAL — Windows annotation mode:** `window_manager` maximize/unmaximize only — never raw Win32 or `setFullScreen`. See `feedback_annotation_window_management`.
 
 ## Semantic Memory Search (hollow-memory MCP)
-- **Tool:** `memory_search(query, limit=5)` — semantic vector search across all memory files, the wiki, HOLLOW_PLAN.md, WHITEPAPER.md, CLAUDE.md. Use it proactively — recall is by meaning, not filename. ALWAYS search before arguing, designing, or re-investigating.
-- **Wiki:** `tools/hollow-memory/wiki/` — ~40 machine-optimized files covering every UI panel, data flow, provider, and Rust module (chunked by `## ` heading). Queries like "voice channel WebRTC flow" return precise sections with file paths. Keep wiki files in sync with code during `/compush`.
-- **Reindex:** run `memory_reindex()` after modifying memory files, wiki, HOLLOW_PLAN.md, WHITEPAPER.md, or CLAUDE.md (automatic during `/compush`).
-- **Save liberally:** granular patterns, decision rationale, subtle bug causes — threshold is "would finding this by meaning help a future session?". Location: `tools/hollow-memory/` (local ONNX embeddings, sqlite-vec, zero API cost).
+- **Tool:** `memory_search(query, limit=5)` — semantic search across memory files, wiki, HOLLOW_PLAN.md, WHITEPAPER.md, CLAUDE.md. ALWAYS search before arguing, designing, or re-investigating.
+- **Wiki:** `tools/hollow-memory/wiki/` — ~40 machine-optimized files covering every UI panel, data flow, provider, and Rust module. Keep in sync with code during `/compush`.
+- **Reindex:** run `memory_reindex()` after modifying any indexed file.
+- **Save liberally:** granular patterns, decision rationale, subtle bug causes — threshold is "would finding this by meaning help a future session?". Location: `tools/hollow-memory/`.
 
 ## Rules
 - Never commit secrets, keys, or credentials.

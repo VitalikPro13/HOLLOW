@@ -1,4 +1,4 @@
-﻿import 'dart:io';
+import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
@@ -856,7 +856,7 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
           // Enable toggle
           Row(
             children: [
-              Icon(BrandIcons.twitch, size: 16, color: const Color(0xFF9146FF)),
+              const Icon(BrandIcons.twitch, size: 16, color: Color(0xFF9146FF)),
               const SizedBox(width: HollowSpacing.sm),
               Expanded(
                 child: Text(

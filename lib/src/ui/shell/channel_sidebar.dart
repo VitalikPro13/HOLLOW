@@ -1,4 +1,4 @@
-﻿import 'dart:convert';
+import 'dart:convert';
 
 import 'package:hollow/src/ui/chat/hollow_link_utils.dart';
 
@@ -633,7 +633,7 @@ class _HomeContent extends ConsumerWidget {
           child: HollowButton.outline(
             onPressed: () => _showAddFriendDialog(innerContext, ref),
             expand: true,
-            icon: Icon(LucideIcons.userPlus, size: 14),
+            icon: const Icon(LucideIcons.userPlus, size: 14),
             child: const Text('Add Friend'),
           ),
         ),
@@ -1409,8 +1409,8 @@ class _VoiceParticipantRow extends ConsumerWidget {
             _SpeakingDot(visible: speaking),
             // Screen sharing indicator — green monitor icon.
             if (isScreenSharing)
-              Padding(
-                padding: const EdgeInsets.only(left: 2),
+              const Padding(
+                padding: EdgeInsets.only(left: 2),
                 child: Icon(LucideIcons.monitor,
                     size: 12, color: Colors.green),
               ),

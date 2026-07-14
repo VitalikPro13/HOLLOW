@@ -1,4 +1,4 @@
-﻿import 'package:flutter/material.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/shared_tickers.dart';
@@ -293,8 +293,8 @@ class _ProfileColumn extends ConsumerWidget {
                   child: Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      Icon(BrandIcons.twitch,
-                          size: 11, color: const Color(0xFF9146FF)),
+                      const Icon(BrandIcons.twitch,
+                          size: 11, color: Color(0xFF9146FF)),
                       const SizedBox(width: 4),
                       Text(
                         username,

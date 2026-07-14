@@ -1,4 +1,4 @@
-﻿import 'dart:async';
+import 'dart:async';
 import 'dart:io';
 
 import 'package:audioplayers/audioplayers.dart';
@@ -215,7 +215,7 @@ class _IncomingCallOverlayState extends ConsumerState<IncomingCallOverlay>
                         onPressed: () {
                           ref.read(callProvider.notifier).rejectCall();
                         },
-                        icon: Icon(LucideIcons.phoneOff, size: 16),
+                        icon: const Icon(LucideIcons.phoneOff, size: 16),
                         child: const Text('Decline'),
                       ),
                       const SizedBox(width: HollowSpacing.md),

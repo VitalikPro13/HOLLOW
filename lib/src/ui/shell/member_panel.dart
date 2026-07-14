@@ -1,4 +1,4 @@
-﻿import 'package:flutter/material.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
@@ -56,8 +56,8 @@ class MemberPanel extends ConsumerWidget {
                 key: ValueKey('server-members-$selectedServerId'),
                 serverId: selectedServerId,
               )
-            : _PeerMemberContent(
-                key: const ValueKey('peer-members'),
+            : const _PeerMemberContent(
+                key: ValueKey('peer-members'),
               ),
       ),
     );
@@ -687,8 +687,8 @@ class _ServerMemberTile extends ConsumerWidget {
                   if (effectiveTwitch.isNotEmpty)
                     Row(
                       children: [
-                        Icon(BrandIcons.twitch,
-                            size: 10, color: const Color(0xFF9146FF)),
+                        const Icon(BrandIcons.twitch,
+                            size: 10, color: Color(0xFF9146FF)),
                         const SizedBox(width: 3),
                         Text(
                           effectiveTwitch,

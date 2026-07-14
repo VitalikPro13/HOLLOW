@@ -1,4 +1,4 @@
-﻿import 'dart:async';
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -644,7 +644,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
 
     // Also add @everyone.
     if (query.isEmpty || 'everyone'.startsWith(query)) {
-      candidates.insert(0, _MentionCandidate(
+      candidates.insert(0, const _MentionCandidate(
         peerId: '',
         displayName: 'everyone',
         subtitle: 'Notify all members',
@@ -1746,7 +1746,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
                   hintText: 'Search in #${widget.channelName}...',
                   autofocus: true,
                   isDense: true,
-                  prefixIcon: Icon(LucideIcons.search, size: 16),
+                  prefixIcon: const Icon(LucideIcons.search, size: 16),
                   onChanged: _onSearch,
                   style: HollowTypography.body.copyWith(
                     color: hollow.textPrimary,

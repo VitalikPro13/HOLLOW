@@ -31,13 +31,13 @@ const testNodeConnected = NodeState(status: NodeStatus.connected);
 
 /// Test servers.
 final testServers = <String, ServerInfo>{
-  kServerId1: ServerInfo(
+  kServerId1: const ServerInfo(
     serverId: kServerId1,
     name: 'Test Server',
     memberCount: 5,
     channelCount: 3,
   ),
-  kServerId2: ServerInfo(
+  kServerId2: const ServerInfo(
     serverId: kServerId2,
     name: 'Dev Hangout',
     memberCount: 12,
@@ -47,21 +47,21 @@ final testServers = <String, ServerInfo>{
 
 /// Test channels for server 1.
 final testChannels = <String, ChannelInfo>{
-  kChannelId1: ChannelInfo(
+  kChannelId1: const ChannelInfo(
     channelId: kChannelId1,
     name: 'general',
     channelType: ChannelType.text,
     visibility: 'everyone',
     posting: 'everyone',
   ),
-  kChannelId2: ChannelInfo(
+  kChannelId2: const ChannelInfo(
     channelId: kChannelId2,
     name: 'random',
     channelType: ChannelType.text,
     visibility: 'everyone',
     posting: 'everyone',
   ),
-  kVoiceChannelId: ChannelInfo(
+  kVoiceChannelId: const ChannelInfo(
     channelId: kVoiceChannelId,
     name: 'Voice',
     channelType: ChannelType.voice,
@@ -72,21 +72,21 @@ final testChannels = <String, ChannelInfo>{
 
 /// Test friends (2 accepted, 1 pending incoming).
 final testFriends = <String, FriendInfo>{
-  kFriendPeerId1: FriendInfo(
+  kFriendPeerId1: const FriendInfo(
     peerId: kFriendPeerId1,
     status: 'accepted',
     direction: '',
     requestedAt: 1700000000,
     updatedAt: 1700000100,
   ),
-  kFriendPeerId2: FriendInfo(
+  kFriendPeerId2: const FriendInfo(
     peerId: kFriendPeerId2,
     status: 'accepted',
     direction: '',
     requestedAt: 1700000200,
     updatedAt: 1700000300,
   ),
-  kFriendPeerId3: FriendInfo(
+  kFriendPeerId3: const FriendInfo(
     peerId: kFriendPeerId3,
     status: 'pending',
     direction: 'incoming',

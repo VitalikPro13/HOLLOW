@@ -1,4 +1,4 @@
-﻿import 'package:flutter/material.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
@@ -56,7 +56,7 @@ void showMnemonicDialog(BuildContext context, String mnemonic) {
                   type: HollowToastType.success,
                 );
               },
-              icon: Icon(LucideIcons.copy, size: 16),
+              icon: const Icon(LucideIcons.copy, size: 16),
               child: const Text('Copy'),
             ),
           ],

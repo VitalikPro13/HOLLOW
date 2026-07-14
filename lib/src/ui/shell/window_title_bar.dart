@@ -1,4 +1,4 @@
-﻿import 'dart:io';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
@@ -114,12 +114,12 @@ class WindowTitleBar extends StatelessWidget {
       );
     }
 
-    Widget buttons = Row(
+    Widget buttons = const Row(
       mainAxisSize: MainAxisSize.min,
       children: [
-        const AnnotationToggleButton(),
-        const SizedBox(width: 4),
-        const _MinimizeButton(),
+        AnnotationToggleButton(),
+        SizedBox(width: 4),
+        _MinimizeButton(),
         _MaximizeButton(),
         _CloseButton(),
       ],

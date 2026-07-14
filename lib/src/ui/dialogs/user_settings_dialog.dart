@@ -1,4 +1,4 @@
-﻿import 'dart:async';
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
@@ -891,9 +891,9 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
           _buildCacheCapSlider(hollow),
         ],
       ),
-      _SettingsCard(
+      const _SettingsCard(
         title: 'Media',
-        children: const [_ImageQualitySelector()],
+        children: [_ImageQualitySelector()],
       ),
       _SettingsCard(
         title: 'Data Location',
@@ -915,9 +915,9 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
   // ── Shortcuts category ───────────────────────────────────────────
   List<Widget> _shortcutCards(HollowTheme hollow) {
     return [
-      _SettingsCard(
+      const _SettingsCard(
         title: 'General',
-        children: const [
+        children: [
           _ShortcutRow(label: 'Open Settings', shortcut: 'Ctrl + ,'),
           _ShortcutRow(label: 'Toggle Member Panel', shortcut: 'Ctrl + Shift + M'),
           _ShortcutRow(label: 'Quick Search', shortcut: 'Ctrl + K'),
@@ -926,9 +926,9 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
           _ShortcutRow(label: 'Focus Right Pane', shortcut: 'Ctrl + 2'),
         ],
       ),
-      _SettingsCard(
+      const _SettingsCard(
         title: 'Chat Input',
-        children: const [
+        children: [
           _ShortcutRow(label: 'Send Message', shortcut: 'Enter'),
           _ShortcutRow(label: 'New Line', shortcut: 'Shift + Enter'),
           _ShortcutRow(label: 'Bold', shortcut: 'Ctrl + B'),
@@ -1173,7 +1173,7 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                _FieldLabel(label: 'DISPLAY NAME'),
+                const _FieldLabel(label: 'DISPLAY NAME'),
                 const SizedBox(height: HollowSpacing.xs),
                 HollowTextField(
                   controller: widget.displayNameController,
@@ -1184,7 +1184,7 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
 
                 const SizedBox(height: HollowSpacing.lg),
 
-                _FieldLabel(label: 'STATUS'),
+                const _FieldLabel(label: 'STATUS'),
                 const SizedBox(height: HollowSpacing.xs),
                 HollowTextField(
                   controller: widget.statusController,
@@ -1194,7 +1194,7 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
 
                 const SizedBox(height: HollowSpacing.lg),
 
-                _FieldLabel(label: 'ABOUT ME'),
+                const _FieldLabel(label: 'ABOUT ME'),
                 const SizedBox(height: HollowSpacing.xs),
                 HollowTextField(
                   controller: widget.aboutMeController,
@@ -1215,7 +1215,7 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
       const SizedBox(height: HollowSpacing.xl),
 
       // ── Connections ──
-      _FieldLabel(label: 'CONNECTIONS'),
+      const _FieldLabel(label: 'CONNECTIONS'),
       const SizedBox(height: HollowSpacing.sm),
       _TwitchConnectionRow(hollow: hollow),
 
@@ -1900,7 +1900,7 @@ class _SecurityTabState extends State<_SecurityTab> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           // ── App Lock ──
-          _SectionLabel(label: 'APP LOCK'),
+          const _SectionLabel(label: 'APP LOCK'),
           const SizedBox(height: HollowSpacing.sm),
 
           if (_protectionLoading)
@@ -1974,13 +1974,13 @@ class _SecurityTabState extends State<_SecurityTab> {
                 children: [
                   HollowButton.ghost(
                     onPressed: _changePassword,
-                    icon: Icon(LucideIcons.keyRound, size: 16),
+                    icon: const Icon(LucideIcons.keyRound, size: 16),
                     child: const Text('Change Password'),
                   ),
                   const SizedBox(width: HollowSpacing.sm),
                   HollowButton.ghost(
                     onPressed: _removePassword,
-                    icon: Icon(LucideIcons.shieldOff, size: 16),
+                    icon: const Icon(LucideIcons.shieldOff, size: 16),
                     child: const Text('Remove Password'),
                   ),
                 ],
@@ -1988,14 +1988,14 @@ class _SecurityTabState extends State<_SecurityTab> {
             ] else ...[
               HollowButton.filled(
                 onPressed: _enablePassword,
-                icon: Icon(LucideIcons.lock, size: 16),
+                icon: const Icon(LucideIcons.lock, size: 16),
                 child: const Text('Set Password'),
               ),
             ],
 
             if (!_hasPassword && _osKeychainAvailable) ...[
               const SizedBox(height: HollowSpacing.xl),
-              _SectionLabel(label: 'DEVICE PROTECTION'),
+              const _SectionLabel(label: 'DEVICE PROTECTION'),
               const SizedBox(height: HollowSpacing.sm),
               Text(
                 _hasOsKeychain
@@ -2022,13 +2022,13 @@ class _SecurityTabState extends State<_SecurityTab> {
                 const SizedBox(height: HollowSpacing.md),
                 HollowButton.ghost(
                   onPressed: _disableOsKeychain,
-                  icon: Icon(LucideIcons.shieldOff, size: 16),
+                  icon: const Icon(LucideIcons.shieldOff, size: 16),
                   child: const Text('Remove Device Protection'),
                 ),
               ] else ...[
                 HollowButton.outline(
                   onPressed: _enableOsKeychain,
-                  icon: Icon(LucideIcons.monitor, size: 16),
+                  icon: const Icon(LucideIcons.monitor, size: 16),
                   child: const Text('Enable Device Protection'),
                 ),
               ],
@@ -2079,7 +2079,7 @@ class _SecurityTabState extends State<_SecurityTab> {
           const SizedBox(height: HollowSpacing.xl),
 
           // ── Recovery Phrase ──
-          _SectionLabel(label: 'RECOVERY PHRASE'),
+          const _SectionLabel(label: 'RECOVERY PHRASE'),
           const SizedBox(height: HollowSpacing.sm),
 
           if (_loading)
@@ -2191,7 +2191,7 @@ class _SecurityTabState extends State<_SecurityTab> {
                         type: HollowToastType.success,
                       );
                     },
-                    icon: Icon(LucideIcons.copy, size: 16),
+                    icon: const Icon(LucideIcons.copy, size: 16),
                     child: const Text('Copy'),
                   ),
                 ],
@@ -2458,9 +2458,9 @@ class _DevicesCategoryState extends ConsumerState<_DevicesCategory> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          _SettingsCard(
+          const _SettingsCard(
             title: 'Your Devices',
-            children: const [_DevicesSection()],
+            children: [_DevicesSection()],
           ),
           const SizedBox(height: HollowSpacing.lg),
           _SettingsCard(
@@ -2983,7 +2983,7 @@ class _VerifyProofSectionState extends State<_VerifyProofSection> {
       if (message == null || sender == null || sig == null) {
         setState(() {
           _verifying = false;
-          _result = _ProofResult(
+          _result = const _ProofResult(
             valid: false,
             error: 'Invalid proof format — missing required fields.',
           );
@@ -3044,7 +3044,7 @@ class _VerifyProofSectionState extends State<_VerifyProofSection> {
       if (peerId.isEmpty || publicKeyB64.isEmpty || signatureB64.isEmpty || canonicalPayload.isEmpty) {
         setState(() {
           _verifying = false;
-          _result = _ProofResult(
+          _result = const _ProofResult(
             valid: false,
             error: 'Proof is missing signature or public key data.',
           );
@@ -3106,7 +3106,7 @@ class _VerifyProofSectionState extends State<_VerifyProofSection> {
       if (!mounted) return;
       setState(() {
         _verifying = false;
-        _result = _ProofResult(
+        _result = const _ProofResult(
           valid: false,
           error: 'Invalid JSON format.',
         );
@@ -3675,7 +3675,7 @@ class _DeviceRow extends ConsumerWidget {
             compact: true,
             onPressed: () => _rename(context, ref),
             semanticLabel: 'Rename device',
-            icon: Icon(LucideIcons.pencil, size: 15),
+            icon: const Icon(LucideIcons.pencil, size: 15),
             child: const SizedBox.shrink(),
           ),
           // Remove — hidden for the device we're running on (can't revoke self).
@@ -5320,7 +5320,7 @@ class _UpdatesTabState extends ConsumerState<_UpdatesTab> {
                   const SizedBox(height: HollowSpacing.md),
                   HollowButton.filled(
                     onPressed: () => notifier.installAndRestart(),
-                    icon: Icon(LucideIcons.rotateCcw, size: 16),
+                    icon: const Icon(LucideIcons.rotateCcw, size: 16),
                     child: const Text('Install & Restart'),
                   ),
                   const SizedBox(height: HollowSpacing.sm),
@@ -5585,7 +5585,7 @@ class _AboutTab extends StatelessWidget {
                 HollowToast.show(context, 'Email copied to clipboard',
                     type: HollowToastType.success);
               },
-              icon: Icon(LucideIcons.mail, size: 16),
+              icon: const Icon(LucideIcons.mail, size: 16),
               child: const Text('feedback@anonlisten.com'),
             ),
           ),
@@ -5597,7 +5597,7 @@ class _AboutTab extends StatelessWidget {
                 Uri.parse('https://anonlisten.com'),
                 mode: LaunchMode.externalApplication,
               ),
-              icon: Icon(LucideIcons.globe, size: 16),
+              icon: const Icon(LucideIcons.globe, size: 16),
               child: const Text('anonlisten.com'),
             ),
           ),
@@ -5613,7 +5613,7 @@ class _AboutTab extends StatelessWidget {
           // Follow & Support — icons with shimmer separator
           Row(
             children: [
-              _BrandIcon(
+              const _BrandIcon(
                 icon: BrandIcons.youtube,
                 color: BrandIconColors.youtube,
                 tooltip: 'YouTube',
@@ -5627,20 +5627,20 @@ class _AboutTab extends StatelessWidget {
                 url: 'https://x.com/Anon_Listen',
               ),
               const SizedBox(width: HollowSpacing.sm),
-              _SvgBrandIcon(
+              const _SvgBrandIcon(
                 asset: 'assets/tiktok-solo-icon.svg',
                 tooltip: 'TikTok',
                 url: 'https://tiktok.com/@AnonListen',
               ),
               const SizedBox(width: HollowSpacing.sm),
-              _BrandIcon(
+              const _BrandIcon(
                 icon: BrandIcons.twitch,
                 color: BrandIconColors.twitch,
                 tooltip: 'Twitch',
                 url: 'https://twitch.tv/AnonListen',
               ),
               const SizedBox(width: HollowSpacing.sm),
-              _BrandIcon(
+              const _BrandIcon(
                 icon: BrandIcons.kick,
                 color: BrandIconColors.kick,
                 tooltip: 'Kick',
@@ -5658,7 +5658,7 @@ class _AboutTab extends StatelessWidget {
                 url: 'https://patreon.com/AnonListen',
               ),
               const SizedBox(width: HollowSpacing.sm),
-              _BrandIcon(
+              const _BrandIcon(
                 icon: BrandIcons.kofi,
                 color: BrandIconColors.kofi,
                 tooltip: 'Ko-Fi',
@@ -5682,7 +5682,7 @@ class _AboutTab extends StatelessWidget {
                 title: 'Privacy Policy',
                 assetPath: 'legal/PRIVACY_POLICY.md',
               ),
-              icon: Icon(LucideIcons.shield, size: 16),
+              icon: const Icon(LucideIcons.shield, size: 16),
               child: const Text('Privacy Policy'),
             ),
           ),
@@ -5695,7 +5695,7 @@ class _AboutTab extends StatelessWidget {
                 title: 'Terms of Use',
                 assetPath: 'legal/TERMS_OF_USE.md',
               ),
-              icon: Icon(LucideIcons.scroll, size: 16),
+              icon: const Icon(LucideIcons.scroll, size: 16),
               child: const Text('Terms of Use'),
             ),
           ),
@@ -5721,7 +5721,7 @@ class _AboutTab extends StatelessWidget {
                   ),
                 );
               },
-              icon: Icon(LucideIcons.fileText, size: 16),
+              icon: const Icon(LucideIcons.fileText, size: 16),
               child: const Text('Open-Source Licenses'),
             ),
           ),
@@ -6146,7 +6146,7 @@ class _TwitchConnectionRowState extends ConsumerState<_TwitchConnectionRow> {
 
     return Row(
       children: [
-        Icon(BrandIcons.twitch, size: 18, color: const Color(0xFF9146FF)),
+        const Icon(BrandIcons.twitch, size: 18, color: Color(0xFF9146FF)),
         const SizedBox(width: HollowSpacing.sm),
         Expanded(
           child: Column(

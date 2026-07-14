@@ -18,21 +18,17 @@ import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
-import 'package:hollow/src/ui/chat/channel_message_bubble.dart';
 import 'package:hollow/src/ui/chat/chat_input_shortcuts.dart';
-import 'package:hollow/src/ui/chat/chat_pane.dart'
-    show shouldGroup, shouldShowDateSeparator, DateSeparator;
 import 'package:hollow/src/ui/chat/message_action_bar.dart';
-import 'package:hollow/src/ui/chat/message_bubble.dart';
-import 'package:hollow/src/ui/archive/archive_message_viewer.dart'
-    show ArchiveSearchBar, EditHistoryIndicator;
+import 'package:hollow/src/ui/archive/shared/archive_message_list.dart';
+import 'package:hollow/src/ui/archive/shared/archive_toolbar.dart';
+import 'package:hollow/src/ui/archive/shared/archive_verification_banner.dart';
+import 'package:hollow/src/ui/archive/shared/imported_archive_prep.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
-import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/dialogs/message_proof_dialog.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
-import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 
 /// Two-panel layout for "Imported Archives" sub-tab.
 class ImportedArchivesView extends ConsumerWidget {
@@ -547,279 +543,69 @@ class _ArchivePovViewerState extends ConsumerState<_ArchivePovViewer> {
     final hollow = HollowTheme.of(context);
     final data = widget.data;
     final localPeerId = ref.watch(identityProvider).peerId ?? '';
-    final v = data.verification;
     final profiles = ref.watch(profileProvider);
     final filterSender = ref.watch(archiveFilterSenderProvider);
     final searchOpen = ref.watch(archiveMessageSearchOpenProvider);
-
-    // Determine verification banner state.
-    final exportDate =
-        DateTime.fromMillisecondsSinceEpoch(v.exportTimestamp);
-    final dateStr =
-        '${exportDate.year}-${exportDate.month.toString().padLeft(2, '0')}-${exportDate.day.toString().padLeft(2, '0')}';
-    final exporterName = displayNameFor(profiles, v.exporterPeerId);
-
-    // Archive-level signature (file integrity).
-    final archiveColor =
-        v.archiveSignatureValid ? hollow.accent : hollow.error;
-    final archiveIcon = v.archiveSignatureValid
-        ? LucideIcons.shieldCheck
-        : LucideIcons.shieldOff;
-    final archiveText = v.archiveSignatureValid
-        ? 'Archive signed by $exporterName on $dateStr'
-        : 'Archive signature invalid — may have been tampered with';
-
-    // Per-message signatures.
-    final hasWarning = v.messagesWithInvalidSig > 0;
-    final msgColor = hasWarning ? Colors.amber.shade700 : hollow.accent;
-    final msgIcon = hasWarning
-        ? LucideIcons.alertTriangle
-        : LucideIcons.shieldCheck;
-    final String msgText;
-    if (hasWarning) {
-      msgText =
-          '${v.messagesWithInvalidSig} of ${v.messageCount} messages failed signature verification';
-    } else if (v.messagesWithValidSig > 0) {
-      msgText =
-          '${v.messagesWithValidSig} messages verified from original senders';
-    } else {
-      msgText = '${v.messageCount} messages (no signatures)';
-    }
-
-    final isDm = data.archiveType == 'dm';
-    final isServer = data.archiveType == 'server';
-
-    // For server archives, handle channel selection.
     final selectedChannelId = ref.watch(importedArchiveSelectedChannelProvider);
-    String? activeChannelId;
-    String? activeChannelName;
-    if (isServer && data.channels.isNotEmpty) {
-      activeChannelId = selectedChannelId ?? data.channels.first.channelId;
-      activeChannelName = data.channels
-          .where((c) => c.channelId == activeChannelId)
-          .firstOrNull
-          ?.channelName ?? activeChannelId;
-    }
 
-    // Convert archive messages (filter by channel for server archives).
-    List<ChatMessage>? dmMessages;
-    List<ChannelChatMessage>? allChannelMessages;
-    List<ChannelChatMessage>? channelMessages;
+    final prep = prepareImportedArchive(
+      data: data,
+      localPeerId: localPeerId,
+      filterSender: filterSender,
+      selectedChannelId: selectedChannelId,
+      displayNameOf: (id) => displayNameFor(profiles, id),
+      avatarOf: (id) => profiles[id]?.avatarBytes,
+      mobile: false,
+    );
+    final isDm = prep.isDm;
 
-    if (isDm) {
-      dmMessages = convertArchiveDmMessages(data, localPeerId);
-    } else {
-      allChannelMessages = convertArchiveChannelMessages(data, localPeerId);
-      if (isServer && activeChannelId != null) {
-        // Filter messages by selected channel using the raw FFI data's channel_id.
-        final channelMsgIds = <String>{};
-        for (final m in data.messages) {
-          if (m.channelId == activeChannelId) {
-            channelMsgIds.add(m.messageId);
-          }
-        }
-        channelMessages = allChannelMessages
-            .where((m) => channelMsgIds.contains(m.messageId))
-            .toList();
-      } else {
-        channelMessages = allChannelMessages;
-      }
-    }
+    final Widget headerLeading = isDm
+        ? HollowAvatar(
+            peerId: data.peerId ?? '',
+            size: 24,
+          )
+        : Text('#', style: TextStyle(
+            color: hollow.textSecondary, fontWeight: FontWeight.w700, fontSize: 18));
 
-    // Apply sender filter.
-    if (filterSender != null && channelMessages != null) {
-      channelMessages = channelMessages
-          .where((m) => m.senderId == filterSender)
-          .toList();
-    }
-
-    // Collect unique senders for filter (channel archives only).
-    final unfilteredChannelMessages = isDm ? null : (isServer && activeChannelId != null
-        ? allChannelMessages!.where((m) {
-            final channelMsgIds = <String>{};
-            for (final raw in data.messages) {
-              if (raw.channelId == activeChannelId) channelMsgIds.add(raw.messageId);
-            }
-            return channelMsgIds.contains(m.messageId);
-          }).toList()
-        : allChannelMessages);
-    final uniqueSenders = unfilteredChannelMessages?.map((m) => m.senderId).toSet().toList()?..sort();
-    final senderNames = uniqueSenders != null
-        ? {for (final id in uniqueSenders) id: displayNameFor(profiles, id)}
-        : <String, String>{};
-    final senderAvatars = uniqueSenders != null
-        ? {for (final id in uniqueSenders) id: profiles[id]?.avatarBytes}
-        : <String, dynamic>{};
-
-    // Build edits map from archive data.
-    final editsMap = <String, List<ArchiveEditEntry>>{};
-    for (final e in data.edits) {
-      editsMap.putIfAbsent(e.messageId, () => []).add(ArchiveEditEntry(
-        messageId: e.messageId,
-        oldText: e.oldText,
-        newText: e.newText,
-        editedAt: DateTime.fromMillisecondsSinceEpoch(e.editedAt),
-        signature: e.signature,
-        publicKey: e.publicKey,
-        prevSignature: e.prevSignature,
-        prevPublicKey: e.prevPublicKey,
-        prevTimestampMs: e.prevTimestamp,
-      ));
-    }
-
-    // Context for Message Proof.
-    final proofContext = isDm
-        ? (data.peerId ?? '')
-        : '${data.serverId ?? ''}:${activeChannelId ?? data.channelId ?? ''}';
-    final proofMsgType = isDm ? 'dm' : 'ch';
-
-    // Header title/subtitle.
-    String headerTitle;
-    String? headerSubtitle;
-    Widget headerLeading;
-    if (isDm) {
-      headerTitle = displayNameFor(profiles, data.peerId ?? '');
-      headerLeading = HollowAvatar(
-        peerId: data.peerId ?? '',
-        size: 24,
-      );
-    } else if (isServer) {
-      headerTitle = activeChannelName ?? 'Channel';
-      headerSubtitle = 'in ${data.serverName ?? 'Server'}';
-      headerLeading = Text('#', style: TextStyle(
-        color: hollow.textSecondary, fontWeight: FontWeight.w700, fontSize: 18));
-    } else {
-      headerTitle = data.channelName ?? 'Channel';
-      headerSubtitle = data.serverId != null ? 'in ${data.serverId}' : null;
-      headerLeading = Text('#', style: TextStyle(
-        color: hollow.textSecondary, fontWeight: FontWeight.w700, fontSize: 18));
-    }
-
-    final visibleMessages = isDm ? dmMessages! : channelMessages!;
-    final totalForFilter = isDm ? null : unfilteredChannelMessages?.length;
+    final visibleMessages = isDm ? prep.dmMessages! : prep.channelMessages!;
+    final totalForFilter = isDm ? null : prep.unfilteredChannelMessages?.length;
 
     return Column(
       children: [
         // ── Verification banner ──
-        Container(
-          padding: const EdgeInsets.symmetric(
-              horizontal: HollowSpacing.lg, vertical: 10),
-          decoration: BoxDecoration(
-            color: archiveColor.withValues(alpha: 0.08),
-            border: Border(
-                bottom: BorderSide(
-                    color: hollow.border.withValues(alpha: 0.3))),
-          ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Row(
-                children: [
-                  Icon(archiveIcon, size: 14, color: archiveColor),
-                  const SizedBox(width: HollowSpacing.sm),
-                  Expanded(
-                    child: Text(
-                      archiveText,
-                      style: HollowTypography.caption.copyWith(
-                        color: archiveColor,
-                        fontWeight: FontWeight.w600,
-                        fontSize: 12,
-                      ),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 4),
-              Row(
-                children: [
-                  Icon(msgIcon, size: 14, color: msgColor),
-                  const SizedBox(width: HollowSpacing.sm),
-                  Expanded(
-                    child: Text(
-                      msgText,
-                      style: HollowTypography.caption.copyWith(
-                        color: msgColor,
-                        fontSize: 11,
-                      ),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  ),
-                ],
-              ),
-            ],
-          ),
+        ArchiveVerificationBanner(
+          archiveSigValid: prep.archiveSigValid,
+          archiveSigText: prep.archiveSigText,
+          msgSigWarning: prep.msgSigWarning,
+          msgSigText: prep.msgSigText,
         ),
 
         // ── Channel selector for server archives ──
-        if (isServer && data.channels.length > 1)
-          Container(
-            height: 36,
-            padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.md),
-            decoration: BoxDecoration(
-              color: hollow.surface,
-              border: Border(bottom: BorderSide(color: hollow.border)),
-            ),
-            child: ListView(
-              scrollDirection: Axis.horizontal,
-              children: data.channels.map((ch) {
-                final isActive = ch.channelId == activeChannelId;
-                return Padding(
-                  padding: const EdgeInsets.only(right: HollowSpacing.xs),
-                  child: Center(
-                    child: HollowPressable(
-                      onTap: () {
-                        ref.read(importedArchiveSelectedChannelProvider.notifier).state =
-                            ch.channelId;
-                        // Reset filter/search when switching channels.
-                        ref.read(archiveFilterSenderProvider.notifier).state = null;
-                        ref.read(archiveMessageSearchQueryProvider.notifier).state = '';
-                        ref.read(archiveSearchMatchIndexProvider.notifier).state = 0;
-                      },
-                      borderRadius: BorderRadius.circular(hollow.radiusSm),
-                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                      child: Container(
-                        decoration: BoxDecoration(
-                          color: isActive
-                              ? hollow.accent.withValues(alpha: 0.15)
-                              : Colors.transparent,
-                          borderRadius: BorderRadius.circular(hollow.radiusSm),
-                          border: Border.all(
-                            color: isActive
-                                ? hollow.accent.withValues(alpha: 0.3)
-                                : hollow.border,
-                          ),
-                        ),
-                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                        child: Text(
-                          '# ${ch.channelName}',
-                          style: HollowTypography.caption.copyWith(
-                            color: isActive ? hollow.accent : hollow.textSecondary,
-                            fontWeight: isActive ? FontWeight.w600 : FontWeight.normal,
-                            fontSize: 12,
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-                );
-              }).toList(),
-            ),
+        if (prep.isServer && data.channels.length > 1)
+          ArchiveChannelSelector(
+            channels: data.channels,
+            activeChannelId: prep.activeChannelId,
+            onChannelSelected: (channelId) {
+              ref.read(importedArchiveSelectedChannelProvider.notifier).state =
+                  channelId;
+              // Reset filter/search when switching channels.
+              ref.read(archiveFilterSenderProvider.notifier).state = null;
+              ref.read(archiveMessageSearchQueryProvider.notifier).state = '';
+              ref.read(archiveSearchMatchIndexProvider.notifier).state = 0;
+            },
           ),
 
         // ── Header with toolbar ──
-        _ImportedArchiveHeader(
+        ArchiveToolbar(
           leading: headerLeading,
-          title: headerTitle,
-          subtitle: headerSubtitle,
+          title: prep.headerTitle,
+          subtitle: prep.headerSubtitle,
           messageCount: visibleMessages.length,
           totalMessageCount: filterSender != null ? totalForFilter : null,
-          senderIds: uniqueSenders,
+          senderIds: prep.uniqueSenders,
           selectedSender: filterSender,
-          senderDisplayNames: senderNames,
-          senderAvatars: senderAvatars,
+          senderDisplayNames: prep.senderNames,
+          senderAvatars: prep.senderAvatars,
           onSenderFilterChanged: (sender) {
             ref.read(archiveFilterSenderProvider.notifier).state = sender;
             ref.read(archiveMessageSearchQueryProvider.notifier).state = '';
@@ -866,269 +652,24 @@ class _ArchivePovViewerState extends ConsumerState<_ArchivePovViewer> {
         Expanded(
           child: isDm
               ? _ImportedDmMessageList(
-                  messages: dmMessages!,
+                  messages: prep.dmMessages!,
                   peerId: data.peerId ?? '',
-                  editsMap: editsMap,
-                  proofContext: proofContext,
-                  proofMsgType: proofMsgType,
+                  editsMap: prep.editsMap,
+                  proofContext: prep.proofContext,
+                  proofMsgType: prep.proofMsgType,
                   exporterPeerId: data.exporterPeerId,
                 )
               : _ImportedChannelMessageList(
-                  messages: channelMessages!,
-                  allMessages: unfilteredChannelMessages ?? channelMessages!,
+                  messages: prep.channelMessages!,
+                  allMessages: prep.unfilteredChannelMessages ?? prep.channelMessages!,
                   serverId: data.serverId ?? '',
-                  channelId: activeChannelId ?? data.channelId ?? '',
-                  editsMap: editsMap,
-                  proofContext: proofContext,
-                  proofMsgType: proofMsgType,
+                  channelId: prep.activeChannelId ?? data.channelId ?? '',
+                  editsMap: prep.editsMap,
+                  proofContext: prep.proofContext,
+                  proofMsgType: prep.proofMsgType,
                 ),
         ),
       ],
-    );
-  }
-}
-
-// ── Imported Archive Header ────────────────────────────────────
-
-class _ImportedArchiveHeader extends StatelessWidget {
-  final Widget leading;
-  final String title;
-  final String? subtitle;
-  final int? messageCount;
-  final int? totalMessageCount;
-  final VoidCallback? onJumpToDate;
-  final VoidCallback? onToggleSearch;
-  final bool searchOpen;
-  final List<String>? senderIds;
-  final String? selectedSender;
-  final ValueChanged<String?>? onSenderFilterChanged;
-  final Map<String, String>? senderDisplayNames;
-  final Map<String, dynamic>? senderAvatars;
-
-  const _ImportedArchiveHeader({
-    required this.leading,
-    required this.title,
-    this.subtitle,
-    this.messageCount,
-    this.totalMessageCount,
-    this.onJumpToDate,
-    this.onToggleSearch,
-    this.searchOpen = false,
-    this.senderIds,
-    this.selectedSender,
-    this.onSenderFilterChanged,
-    this.senderDisplayNames,
-    this.senderAvatars,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-    final countText = selectedSender != null && totalMessageCount != null
-        ? '$messageCount of $totalMessageCount'
-        : '${messageCount ?? 0}';
-
-    return Container(
-      height: 48,
-      padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.lg),
-      decoration: BoxDecoration(
-        border: Border(bottom: BorderSide(color: hollow.border)),
-      ),
-      child: Row(
-        children: [
-          leading,
-          const SizedBox(width: HollowSpacing.sm),
-          Expanded(
-            child: subtitle != null
-                ? Text.rich(
-                    TextSpan(children: [
-                      TextSpan(text: title, style: HollowTypography.body.copyWith(
-                        color: hollow.textPrimary, fontWeight: FontWeight.w600)),
-                      TextSpan(text: '  $subtitle', style: HollowTypography.caption.copyWith(
-                        color: hollow.textSecondary, fontSize: 12)),
-                    ]),
-                    maxLines: 1, overflow: TextOverflow.ellipsis,
-                  )
-                : Text(title, style: HollowTypography.body.copyWith(
-                    color: hollow.textPrimary, fontWeight: FontWeight.w600),
-                    maxLines: 1, overflow: TextOverflow.ellipsis),
-          ),
-          if (messageCount != null)
-            Text('$countText messages', style: HollowTypography.caption.copyWith(
-              color: hollow.textSecondary, fontSize: 11)),
-          if (senderIds != null && senderIds!.length > 1) ...[
-            const SizedBox(width: HollowSpacing.xs),
-            _ImportedFilterButton(
-              senderIds: senderIds!,
-              selectedSender: selectedSender,
-              senderDisplayNames: senderDisplayNames ?? {},
-              senderAvatars: senderAvatars ?? {},
-              onSenderFilterChanged: onSenderFilterChanged,
-            ),
-          ],
-          if (onJumpToDate != null) ...[
-            const SizedBox(width: HollowSpacing.xs),
-            HollowPressable(
-              onTap: onJumpToDate,
-              semanticLabel: 'Jump to date',
-              borderRadius: BorderRadius.circular(hollow.radiusSm),
-              padding: const EdgeInsets.all(6),
-              child: Icon(LucideIcons.calendar, size: 16, color: hollow.textSecondary),
-            ),
-          ],
-          if (onToggleSearch != null) ...[
-            const SizedBox(width: HollowSpacing.xs),
-            HollowPressable(
-              onTap: onToggleSearch,
-              semanticLabel: 'Search messages',
-              borderRadius: BorderRadius.circular(hollow.radiusSm),
-              padding: const EdgeInsets.all(6),
-              child: Icon(LucideIcons.search, size: 16,
-                  color: searchOpen ? hollow.accent : hollow.textSecondary),
-            ),
-          ],
-          const SizedBox(width: HollowSpacing.sm),
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-            decoration: BoxDecoration(
-              color: hollow.elevated,
-              borderRadius: BorderRadius.circular(hollow.radiusSm),
-            ),
-            child: Text('read-only', style: HollowTypography.caption.copyWith(
-              color: hollow.textSecondary, fontSize: 10)),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-/// Searchable filter button for imported archive headers.
-class _ImportedFilterButton extends StatelessWidget {
-  final List<String> senderIds;
-  final String? selectedSender;
-  final Map<String, String> senderDisplayNames;
-  final Map<String, dynamic> senderAvatars;
-  final ValueChanged<String?>? onSenderFilterChanged;
-
-  const _ImportedFilterButton({
-    required this.senderIds,
-    this.selectedSender,
-    required this.senderDisplayNames,
-    this.senderAvatars = const {},
-    this.onSenderFilterChanged,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-    return HollowPressable(
-      onTap: () async {
-        final picked = await showDialog<String?>(
-          context: context,
-          barrierColor: Colors.transparent,
-          builder: (ctx) => _ImportedFilterDialog(
-            senderIds: senderIds,
-            selectedSender: selectedSender,
-            senderDisplayNames: senderDisplayNames,
-            senderAvatars: senderAvatars,
-          ),
-        );
-        if (picked != null) {
-          onSenderFilterChanged?.call(picked == '_clear_' ? null : picked);
-        }
-      },
-      semanticLabel: 'Filter by sender',
-      borderRadius: BorderRadius.circular(hollow.radiusSm),
-      padding: const EdgeInsets.all(6),
-      child: Icon(LucideIcons.filter, size: 16,
-          color: selectedSender != null ? hollow.accent : hollow.textSecondary),
-    );
-  }
-}
-
-class _ImportedFilterDialog extends StatefulWidget {
-  final List<String> senderIds;
-  final String? selectedSender;
-  final Map<String, String> senderDisplayNames;
-  final Map<String, dynamic> senderAvatars;
-
-  const _ImportedFilterDialog({
-    required this.senderIds,
-    this.selectedSender,
-    required this.senderDisplayNames,
-    this.senderAvatars = const {},
-  });
-
-  @override
-  State<_ImportedFilterDialog> createState() => _ImportedFilterDialogState();
-}
-
-class _ImportedFilterDialogState extends State<_ImportedFilterDialog> {
-  String _query = '';
-
-  @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-    final filtered = _query.isEmpty ? widget.senderIds
-        : widget.senderIds.where((id) =>
-            (widget.senderDisplayNames[id] ?? id).toLowerCase().contains(_query.toLowerCase())).toList();
-
-    return Align(
-      alignment: Alignment.topRight,
-      child: Padding(
-        padding: const EdgeInsets.only(top: 100, right: 80),
-        child: Material(type: MaterialType.transparency, child: Container(
-          width: 240, constraints: const BoxConstraints(maxHeight: 360),
-          decoration: BoxDecoration(
-            color: hollow.elevated, borderRadius: BorderRadius.circular(hollow.radiusSm),
-            border: Border.all(color: hollow.border),
-            boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.3), blurRadius: 12, offset: const Offset(0, 4))],
-          ),
-          child: Column(mainAxisSize: MainAxisSize.min, children: [
-            Padding(padding: const EdgeInsets.all(HollowSpacing.sm), child: HollowTextField(
-              hintText: 'Search participants...', isDense: true, autofocus: true,
-              prefixIcon: Icon(LucideIcons.search, size: 12, color: hollow.textSecondary),
-              onChanged: (val) => setState(() => _query = val),
-            )),
-            HollowPressable(
-              onTap: () => Navigator.of(context).pop('_clear_'),
-              padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.md, vertical: 6),
-              child: Row(children: [
-                Icon(LucideIcons.users, size: 14,
-                    color: widget.selectedSender == null ? hollow.accent : hollow.textSecondary),
-                const SizedBox(width: HollowSpacing.sm),
-                Text('All participants', style: HollowTypography.body.copyWith(
-                  color: widget.selectedSender == null ? hollow.accent : hollow.textPrimary,
-                  fontWeight: widget.selectedSender == null ? FontWeight.w600 : FontWeight.normal, fontSize: 13)),
-              ]),
-            ),
-            Divider(height: 1, color: hollow.border),
-            Flexible(child: ListView.builder(
-              padding: const EdgeInsets.symmetric(vertical: HollowSpacing.xs),
-              shrinkWrap: true, itemCount: filtered.length,
-              itemBuilder: (_, index) {
-                final id = filtered[index];
-                final name = widget.senderDisplayNames[id] ?? id.substring(0, 8);
-                final isActive = widget.selectedSender == id;
-                return HollowPressable(
-                  onTap: () => Navigator.of(context).pop(id),
-                  padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.md, vertical: 5),
-                  child: Row(children: [
-                    HollowAvatar(peerId: id, size: 20),
-                    const SizedBox(width: HollowSpacing.sm),
-                    Expanded(child: Text(name, style: HollowTypography.body.copyWith(
-                      color: isActive ? hollow.accent : hollow.textPrimary,
-                      fontWeight: isActive ? FontWeight.w600 : FontWeight.normal, fontSize: 13),
-                      maxLines: 1, overflow: TextOverflow.ellipsis)),
-                    if (isActive) Icon(LucideIcons.check, size: 14, color: hollow.accent),
-                  ]),
-                );
-              },
-            )),
-          ]),
-        )),
-      ),
     );
   }
 }
@@ -1160,265 +701,82 @@ class _ImportedDmMessageList extends ConsumerStatefulWidget {
 class _ImportedDmMessageListState
     extends ConsumerState<_ImportedDmMessageList> {
   bool _isPicking = false;
-  final _itemScrollController = ItemScrollController();
-  final _itemPositionsListener = ItemPositionsListener.create();
-  int? _highlightIndex;
-
-  @override
-  void initState() {
-    super.initState();
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      ref.listen(archiveJumpToDateProvider, (_, date) {
-        if (date != null && widget.messages.isNotEmpty) {
-          _jumpToDate(date);
-          ref.read(archiveJumpToDateProvider.notifier).state = null;
-        }
-      });
-    });
-  }
-
-  void _jumpToDate(DateTime target) {
-    final targetStart = DateTime(target.year, target.month, target.day);
-    int lo = 0, hi = widget.messages.length;
-    while (lo < hi) {
-      final mid = (lo + hi) ~/ 2;
-      if (widget.messages[mid].timestamp.isBefore(targetStart)) lo = mid + 1;
-      else hi = mid;
-    }
-    if (lo < widget.messages.length && _itemScrollController.isAttached) {
-      _itemScrollController.scrollTo(
-        index: lo, duration: const Duration(milliseconds: 300),
-        curve: Curves.easeOutCubic, alignment: 0.1);
-    }
-  }
-
-  void _scrollToIndex(int index) {
-    if (!_itemScrollController.isAttached) return;
-    setState(() => _highlightIndex = index);
-    _itemScrollController.scrollTo(
-      index: index, duration: const Duration(milliseconds: 300),
-      curve: Curves.easeOutCubic, alignment: 0.3);
-    Future.delayed(const Duration(milliseconds: 1500), () {
-      if (mounted) setState(() => _highlightIndex = null);
-    });
-  }
 
   @override
   Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-    final messages = widget.messages;
-    final searchOpen = ref.watch(archiveMessageSearchOpenProvider);
-    final searchQuery = ref.watch(archiveMessageSearchQueryProvider);
-    final matchIdx = ref.watch(archiveSearchMatchIndexProvider);
-
-    final matchIndices = <int>[];
-    if (searchQuery.isNotEmpty) {
-      final q = searchQuery.toLowerCase();
-      for (int i = 0; i < messages.length; i++) {
-        if (messages[i].text.toLowerCase().contains(q)) matchIndices.add(i);
-      }
-    }
-
-    if (messages.isEmpty) {
-      return Center(
-        child: Text('No messages',
-            style:
-                HollowTypography.body.copyWith(color: hollow.textSecondary)),
-      );
-    }
-
     final localPeerId = ref.watch(identityProvider).peerId ?? '';
     final profiles = ref.watch(profileProvider);
 
-    return Column(
-      children: [
-        if (searchOpen)
-          ArchiveSearchBar(
-            matchCount: matchIndices.length, currentMatch: matchIdx,
-            onQueryChanged: (q) {
-              ref.read(archiveMessageSearchQueryProvider.notifier).state = q;
-              ref.read(archiveSearchMatchIndexProvider.notifier).state = 0;
-            },
-            onNext: matchIndices.isNotEmpty ? () {
-              final next = (matchIdx + 1) % matchIndices.length;
-              ref.read(archiveSearchMatchIndexProvider.notifier).state = next;
-              _scrollToIndex(matchIndices[next]);
-            } : null,
-            onPrev: matchIndices.isNotEmpty ? () {
-              final prev = (matchIdx - 1 + matchIndices.length) % matchIndices.length;
-              ref.read(archiveSearchMatchIndexProvider.notifier).state = prev;
-              _scrollToIndex(matchIndices[prev]);
-            } : null,
-            onClose: () {
-              ref.read(archiveMessageSearchOpenProvider.notifier).state = false;
-              ref.read(archiveMessageSearchQueryProvider.notifier).state = '';
-              ref.read(archiveSearchMatchIndexProvider.notifier).state = 0;
-            },
-          ),
-        Expanded(child: MessageActionBarScope(
-      child: Builder(
-        builder: (scopeContext) =>
-            NotificationListener<ScrollNotification>(
-          onNotification: (notification) {
-            if (notification is ScrollUpdateNotification) {
-              MessageActionBarScope.of(scopeContext)?.dismissAll();
-            }
-            return false;
-          },
-          child: SelectionArea(
-            contextMenuBuilder: (_, __) => const SizedBox.shrink(),
-            child: ScrollablePositionedList.builder(
-              itemScrollController: _itemScrollController,
-              itemPositionsListener: _itemPositionsListener,
-              padding:
-                  const EdgeInsets.symmetric(vertical: HollowSpacing.sm),
-              itemCount: messages.length,
-              itemBuilder: (context, index) {
-                final msg = messages[index];
-                final prev = index > 0 ? messages[index - 1] : null;
-
-                final showDate = shouldShowDateSeparator(
-                    msg.timestamp, prev?.timestamp);
-                final showHeader = prev == null ||
-                    showDate ||
-                    !shouldGroup(
-                      currentIsMe: msg.isMe,
-                      previousIsMe: prev.isMe,
-                      currentTime: msg.timestamp,
-                      previousTime: prev.timestamp,
-                    );
-
-                String? replyToText;
-                String? replyToSenderName;
-                if (msg.replyToMid != null) {
-                  final r = messages
-                      .where((m) => m.messageId == msg.replyToMid)
-                      .firstOrNull;
-                  if (r != null) {
-                    replyToText = r.text;
-                    replyToSenderName = r.isMe
-                        ? displayNameFor(profiles, localPeerId)
-                        : displayNameFor(profiles, widget.peerId);
+    return ArchiveDmMessageList(
+      messages: widget.messages,
+      peerId: widget.peerId,
+      localPeerId: localPeerId,
+      editsMap: widget.editsMap,
+      proofContextFor: (_) => widget.proofContext,
+      proofMsgType: widget.proofMsgType,
+      desktopChrome: true,
+      actionWrapper: (context, msg, child) {
+        final senderPeerId = msg.isMe ? localPeerId : widget.peerId;
+        return MessageHoverWrapper(
+          isMe: msg.isMe,
+          messageId: msg.messageId,
+          currentText: msg.text,
+          onDownload: msg.fileAttachment?.diskPath != null
+              ? () => _saveFile(msg.fileAttachment!)
+              : null,
+          onCopy: msg.text.isNotEmpty &&
+                  !msg.text.startsWith('[file:')
+              ? () {
+                  Clipboard.setData(
+                      ClipboardData(text: msg.text));
+                  HollowToast.show(
+                      context, 'Copied to clipboard',
+                      type: HollowToastType.success);
+                }
+              : null,
+          onCopyImage: msg.fileAttachment != null &&
+                  msg.fileAttachment!.diskPath != null &&
+                  msg.fileAttachment!.isImage
+              ? () async {
+                  final ok = await copyImageToClipboard(
+                      msg.fileAttachment!.diskPath!);
+                  // itemBuilder shadows the State's context — check THIS element.
+                  if (context.mounted) {
+                    HollowToast.show(
+                        context,
+                        ok
+                            ? 'Image copied'
+                            : 'Failed to copy image',
+                        type: ok
+                            ? HollowToastType.success
+                            : HollowToastType.error);
                   }
                 }
-
-                final isCurrentMatch = matchIndices.isNotEmpty &&
-                    matchIdx < matchIndices.length &&
-                    matchIndices[matchIdx] == index;
-
-                Widget bubble = MessageBubble(
-                  message: msg,
-                  peerId: widget.peerId,
-                  showHeader: showHeader,
-                  replyToText: replyToText,
-                  replyToSenderName: replyToSenderName,
-                  isHighlighted: _highlightIndex == index || isCurrentMatch,
-                  onReplyTap: null,
-                  onToggleReaction: null,
-                );
-
-                if (msg.hiddenAt != null) {
-                  bubble = _DeletedOverlay(
-                      hiddenAt: msg.hiddenAt!, child: bubble);
-                }
-
-                // Edit history indicator.
-                final msgEdits = msg.messageId != null
-                    ? widget.editsMap[msg.messageId]
-                    : null;
-                final senderPeerId =
-                    msg.isMe ? localPeerId : widget.peerId;
-                if (msgEdits != null && msgEdits.isNotEmpty) {
-                  bubble = Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      bubble,
-                      EditHistoryIndicator(
-                        edits: msgEdits,
-                        senderPeerId: senderPeerId,
-                        proofContext: widget.proofContext,
-                        proofMsgType: widget.proofMsgType,
-                        messageId: msg.messageId,
-                      ),
-                    ],
-                  );
-                }
-
-                bubble = MessageHoverWrapper(
-                  isMe: msg.isMe,
-                  messageId: msg.messageId,
-                  currentText: msg.text,
-                  onDownload: msg.fileAttachment?.diskPath != null
-                      ? () => _saveFile(msg.fileAttachment!)
-                      : null,
-                  onCopy: msg.text.isNotEmpty &&
-                          !msg.text.startsWith('[file:')
-                      ? () {
-                          Clipboard.setData(
-                              ClipboardData(text: msg.text));
-                          HollowToast.show(
-                              context, 'Copied to clipboard',
-                              type: HollowToastType.success);
-                        }
-                      : null,
-                  onCopyImage: msg.fileAttachment != null &&
-                          msg.fileAttachment!.diskPath != null &&
-                          msg.fileAttachment!.isImage
-                      ? () async {
-                          final ok = await copyImageToClipboard(
-                              msg.fileAttachment!.diskPath!);
-                          // itemBuilder shadows the State's context — check THIS element.
-                          if (context.mounted) {
-                            HollowToast.show(
-                                context,
-                                ok
-                                    ? 'Image copied'
-                                    : 'Failed to copy image',
-                                type: ok
-                                    ? HollowToastType.success
-                                    : HollowToastType.error);
-                          }
-                        }
-                      : null,
-                  onInfo: () {
-                    showMessageProofDialog(
-                      context,
-                      MessageProofData(
-                        senderPeerId: senderPeerId,
-                        senderDisplayName:
-                            displayNameFor(profiles, senderPeerId),
-                        text: msg.text,
-                        timestampMs: (msg.editedAt ?? msg.timestamp)
-                            .millisecondsSinceEpoch,
-                        signature: msg.signature,
-                        publicKey: msg.publicKey,
-                        messageId: msg.messageId,
-                        context: widget.proofMsgType == 'dm' && widget.exporterPeerId != null
-                            ? (senderPeerId == widget.exporterPeerId ? widget.proofContext : widget.exporterPeerId!)
-                            : widget.proofContext,
-                        msgType: widget.proofMsgType,
-                        fileAttachment: msg.fileAttachment,
-                      ),
-                    );
-                  },
-                  child: bubble,
-                );
-
-                return Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    if (showDate) DateSeparator(date: msg.timestamp),
-                    bubble,
-                  ],
-                );
-              },
-            ),
-          ),
-        ),
-      ),
-      ),
-      ),
-      ],
+              : null,
+          onInfo: () {
+            showMessageProofDialog(
+              context,
+              MessageProofData(
+                senderPeerId: senderPeerId,
+                senderDisplayName:
+                    displayNameFor(profiles, senderPeerId),
+                text: msg.text,
+                timestampMs: (msg.editedAt ?? msg.timestamp)
+                    .millisecondsSinceEpoch,
+                signature: msg.signature,
+                publicKey: msg.publicKey,
+                messageId: msg.messageId,
+                context: widget.proofMsgType == 'dm' && widget.exporterPeerId != null
+                    ? (senderPeerId == widget.exporterPeerId ? widget.proofContext : widget.exporterPeerId!)
+                    : widget.proofContext,
+                msgType: widget.proofMsgType,
+                fileAttachment: msg.fileAttachment,
+              ),
+            );
+          },
+          child: child,
+        );
+      },
     );
   }
 
@@ -1500,263 +858,76 @@ class _ImportedChannelMessageList extends ConsumerStatefulWidget {
 class _ImportedChannelMessageListState
     extends ConsumerState<_ImportedChannelMessageList> {
   bool _isPicking = false;
-  final _itemScrollController = ItemScrollController();
-  final _itemPositionsListener = ItemPositionsListener.create();
-  int? _highlightIndex;
-
-  @override
-  void initState() {
-    super.initState();
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      ref.listen(archiveJumpToDateProvider, (_, date) {
-        if (date != null && widget.messages.isNotEmpty) {
-          _jumpToDate(date);
-          ref.read(archiveJumpToDateProvider.notifier).state = null;
-        }
-      });
-    });
-  }
-
-  void _jumpToDate(DateTime target) {
-    final targetStart = DateTime(target.year, target.month, target.day);
-    int lo = 0, hi = widget.messages.length;
-    while (lo < hi) {
-      final mid = (lo + hi) ~/ 2;
-      if (widget.messages[mid].timestamp.isBefore(targetStart)) lo = mid + 1;
-      else hi = mid;
-    }
-    if (lo < widget.messages.length && _itemScrollController.isAttached) {
-      _itemScrollController.scrollTo(
-        index: lo, duration: const Duration(milliseconds: 300),
-        curve: Curves.easeOutCubic, alignment: 0.1);
-    }
-  }
-
-  void _scrollToIndex(int index) {
-    if (!_itemScrollController.isAttached) return;
-    setState(() => _highlightIndex = index);
-    _itemScrollController.scrollTo(
-      index: index, duration: const Duration(milliseconds: 300),
-      curve: Curves.easeOutCubic, alignment: 0.3);
-    Future.delayed(const Duration(milliseconds: 1500), () {
-      if (mounted) setState(() => _highlightIndex = null);
-    });
-  }
 
   @override
   Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-    final messages = widget.messages;
-    final searchOpen = ref.watch(archiveMessageSearchOpenProvider);
-    final searchQuery = ref.watch(archiveMessageSearchQueryProvider);
-    final matchIdx = ref.watch(archiveSearchMatchIndexProvider);
-
-    final matchIndices = <int>[];
-    if (searchQuery.isNotEmpty) {
-      final q = searchQuery.toLowerCase();
-      for (int i = 0; i < messages.length; i++) {
-        if (messages[i].text.toLowerCase().contains(q)) matchIndices.add(i);
-      }
-    }
-
-    if (messages.isEmpty) {
-      return Center(
-        child: Text('No messages',
-            style:
-                HollowTypography.body.copyWith(color: hollow.textSecondary)),
-      );
-    }
-
     final profiles = ref.watch(profileProvider);
 
-    return Column(
-      children: [
-        if (searchOpen)
-          ArchiveSearchBar(
-            matchCount: matchIndices.length, currentMatch: matchIdx,
-            onQueryChanged: (q) {
-              ref.read(archiveMessageSearchQueryProvider.notifier).state = q;
-              ref.read(archiveSearchMatchIndexProvider.notifier).state = 0;
-            },
-            onNext: matchIndices.isNotEmpty ? () {
-              final next = (matchIdx + 1) % matchIndices.length;
-              ref.read(archiveSearchMatchIndexProvider.notifier).state = next;
-              _scrollToIndex(matchIndices[next]);
-            } : null,
-            onPrev: matchIndices.isNotEmpty ? () {
-              final prev = (matchIdx - 1 + matchIndices.length) % matchIndices.length;
-              ref.read(archiveSearchMatchIndexProvider.notifier).state = prev;
-              _scrollToIndex(matchIndices[prev]);
-            } : null,
-            onClose: () {
-              ref.read(archiveMessageSearchOpenProvider.notifier).state = false;
-              ref.read(archiveMessageSearchQueryProvider.notifier).state = '';
-              ref.read(archiveSearchMatchIndexProvider.notifier).state = 0;
-            },
-          ),
-        Expanded(child: MessageActionBarScope(
-      child: Builder(
-        builder: (scopeContext) =>
-            NotificationListener<ScrollNotification>(
-          onNotification: (notification) {
-            if (notification is ScrollUpdateNotification) {
-              MessageActionBarScope.of(scopeContext)?.dismissAll();
-            }
-            return false;
-          },
-          child: SelectionArea(
-            contextMenuBuilder: (_, __) => const SizedBox.shrink(),
-            child: ScrollablePositionedList.builder(
-              itemScrollController: _itemScrollController,
-              itemPositionsListener: _itemPositionsListener,
-              padding:
-                  const EdgeInsets.symmetric(vertical: HollowSpacing.sm),
-              itemCount: messages.length,
-              itemBuilder: (context, index) {
-                final msg = messages[index];
-                final prev = index > 0 ? messages[index - 1] : null;
-
-                final showDate = shouldShowDateSeparator(
-                    msg.timestamp, prev?.timestamp);
-                final showHeader = prev == null ||
-                    showDate ||
-                    !shouldGroup(
-                      currentIsMe: msg.isMe,
-                      previousIsMe: prev.isMe,
-                      currentTime: msg.timestamp,
-                      previousTime: prev.timestamp,
-                      currentSenderId: msg.senderId,
-                      previousSenderId: prev.senderId,
-                    );
-
-                String? replyToText;
-                String? replyToSenderName;
-                if (msg.replyToMid != null) {
-                  final r = widget.allMessages
-                      .where((m) => m.messageId == msg.replyToMid)
-                      .firstOrNull;
-                  if (r != null) {
-                    replyToText = r.text;
-                    replyToSenderName =
-                        displayNameFor(profiles, r.senderId);
-                  }
-                }
-
-                final isCurrentMatch = matchIndices.isNotEmpty &&
-                    matchIdx < matchIndices.length &&
-                    matchIndices[matchIdx] == index;
-
-                Widget bubble = ChannelMessageBubble(
-                  message: msg,
-                  serverId: widget.serverId,
-                  showHeader: showHeader,
-                  replyToText: replyToText,
-                  replyToSenderName: replyToSenderName,
-                  isHighlighted: _highlightIndex == index || isCurrentMatch,
-                  onReplyTap: null,
-                  onToggleReaction: null,
-                );
-
-                if (msg.hiddenAt != null) {
-                  bubble = _DeletedOverlay(
-                      hiddenAt: msg.hiddenAt!, child: bubble);
-                }
-
-                // Edit history indicator.
-                final msgEdits = msg.messageId != null
-                    ? widget.editsMap[msg.messageId]
-                    : null;
-                if (msgEdits != null && msgEdits.isNotEmpty) {
-                  bubble = Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      bubble,
-                      EditHistoryIndicator(
-                        edits: msgEdits,
-                        senderPeerId: msg.senderId,
-                        proofContext: widget.proofContext,
-                        proofMsgType: widget.proofMsgType,
-                        messageId: msg.messageId,
-                      ),
-                    ],
-                  );
-                }
-
-                bubble = MessageHoverWrapper(
-                  isMe: msg.isMe,
-                  messageId: msg.messageId,
-                  currentText: msg.text,
-                  onDownload: msg.fileAttachment?.diskPath != null
-                      ? () => _saveFile(msg.fileAttachment!)
-                      : null,
-                  onCopy: msg.text.isNotEmpty &&
-                          !msg.text.startsWith('[file:')
-                      ? () {
-                          Clipboard.setData(
-                              ClipboardData(text: msg.text));
-                          HollowToast.show(
-                              context, 'Copied to clipboard',
-                              type: HollowToastType.success);
-                        }
-                      : null,
-                  onCopyImage: msg.fileAttachment != null &&
-                          msg.fileAttachment!.diskPath != null &&
-                          msg.fileAttachment!.isImage
-                      ? () async {
-                          final ok = await copyImageToClipboard(
-                              msg.fileAttachment!.diskPath!);
-                          // itemBuilder shadows the State's context — check THIS element.
-                          if (context.mounted) {
-                            HollowToast.show(
-                                context,
-                                ok
-                                    ? 'Image copied'
-                                    : 'Failed to copy image',
-                                type: ok
-                                    ? HollowToastType.success
-                                    : HollowToastType.error);
-                          }
-                        }
-                      : null,
-                  onInfo: () {
-                    showMessageProofDialog(
+    return ArchiveChannelMessageList(
+      messages: widget.messages,
+      allMessages: widget.allMessages,
+      serverId: widget.serverId,
+      editsMap: widget.editsMap,
+      proofContext: widget.proofContext,
+      proofMsgType: widget.proofMsgType,
+      desktopChrome: true,
+      actionWrapper: (context, msg, child) => MessageHoverWrapper(
+        isMe: msg.isMe,
+        messageId: msg.messageId,
+        currentText: msg.text,
+        onDownload: msg.fileAttachment?.diskPath != null
+            ? () => _saveFile(msg.fileAttachment!)
+            : null,
+        onCopy: msg.text.isNotEmpty &&
+                !msg.text.startsWith('[file:')
+            ? () {
+                Clipboard.setData(
+                    ClipboardData(text: msg.text));
+                HollowToast.show(
+                    context, 'Copied to clipboard',
+                    type: HollowToastType.success);
+              }
+            : null,
+        onCopyImage: msg.fileAttachment != null &&
+                msg.fileAttachment!.diskPath != null &&
+                msg.fileAttachment!.isImage
+            ? () async {
+                final ok = await copyImageToClipboard(
+                    msg.fileAttachment!.diskPath!);
+                // itemBuilder shadows the State's context — check THIS element.
+                if (context.mounted) {
+                  HollowToast.show(
                       context,
-                      MessageProofData(
-                        senderPeerId: msg.senderId,
-                        senderDisplayName:
-                            displayNameFor(profiles, msg.senderId),
-
-
-                        text: msg.text,
-                        timestampMs: (msg.editedAt ?? msg.timestamp)
-                            .millisecondsSinceEpoch,
-                        signature: msg.signature,
-                        publicKey: msg.publicKey,
-                        messageId: msg.messageId,
-                        context: widget.proofContext,
-                        msgType: widget.proofMsgType,
-                        fileAttachment: msg.fileAttachment,
-                      ),
-                    );
-                  },
-                  child: bubble,
-                );
-
-                return Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    if (showDate) DateSeparator(date: msg.timestamp),
-                    bubble,
-                  ],
-                );
-              },
+                      ok
+                          ? 'Image copied'
+                          : 'Failed to copy image',
+                      type: ok
+                          ? HollowToastType.success
+                          : HollowToastType.error);
+                }
+              }
+            : null,
+        onInfo: () {
+          showMessageProofDialog(
+            context,
+            MessageProofData(
+              senderPeerId: msg.senderId,
+              senderDisplayName:
+                  displayNameFor(profiles, msg.senderId),
+              text: msg.text,
+              timestampMs: (msg.editedAt ?? msg.timestamp)
+                  .millisecondsSinceEpoch,
+              signature: msg.signature,
+              publicKey: msg.publicKey,
+              messageId: msg.messageId,
+              context: widget.proofContext,
+              msgType: widget.proofMsgType,
+              fileAttachment: msg.fileAttachment,
             ),
-          ),
-        ),
+          );
+        },
+        child: child,
       ),
-      ),
-      ),
-      ],
     );
   }
 
@@ -1806,52 +977,5 @@ class _ImportedChannelMessageListState
     } finally {
       _isPicking = false;
     }
-  }
-}
-
-// ── Deleted message overlay ─────────────────────────────────────
-
-class _DeletedOverlay extends StatelessWidget {
-  final DateTime hiddenAt;
-  final Widget child;
-
-  const _DeletedOverlay({required this.hiddenAt, required this.child});
-
-  @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-    final time =
-        '${hiddenAt.hour.toString().padLeft(2, '0')}:${hiddenAt.minute.toString().padLeft(2, '0')}';
-
-    return AnimatedOpacity(
-      opacity: 0.4,
-      duration: Duration.zero,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          child,
-          Padding(
-            padding: const EdgeInsets.only(left: 42, top: 2),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(LucideIcons.trash2,
-                    size: 11,
-                    color: hollow.error.withValues(alpha: 0.7)),
-                const SizedBox(width: 4),
-                Text(
-                  'Deleted at $time',
-                  style: HollowTypography.caption.copyWith(
-                    color: hollow.error.withValues(alpha: 0.7),
-                    fontSize: 10,
-                    fontStyle: FontStyle.italic,
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
   }
 }

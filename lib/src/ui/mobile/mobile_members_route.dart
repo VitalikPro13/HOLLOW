@@ -399,9 +399,9 @@ class _MemberRow extends ConsumerWidget {
                   Uri.parse('https://twitch.tv/${member.twitchUsername}'),
                   mode: LaunchMode.externalApplication,
                 ),
-                child: Padding(
-                  padding: const EdgeInsets.only(left: HollowSpacing.sm),
-                  child: Icon(BrandIcons.twitch, size: 14, color: const Color(0xFF9146FF)),
+                child: const Padding(
+                  padding: EdgeInsets.only(left: HollowSpacing.sm),
+                  child: Icon(BrandIcons.twitch, size: 14, color: Color(0xFF9146FF)),
                 ),
               ),
             if (canManageThis)

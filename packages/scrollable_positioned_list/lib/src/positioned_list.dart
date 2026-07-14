@@ -315,7 +315,7 @@ class _PositionedListState extends State<PositionedList> {
           : widget.reverse
               ? widget.padding?.copyWith(left: 0)
               : widget.padding?.copyWith(right: 0)) ??
-      EdgeInsets.all(0);
+      const EdgeInsets.all(0);
 
   EdgeInsets get _centerSliverPadding => widget.scrollDirection == Axis.vertical
       ? widget.reverse
@@ -326,13 +326,13 @@ class _PositionedListState extends State<PositionedList> {
                   bottom: widget.positionedIndex == 0
                       ? widget.padding!.bottom
                       : 0) ??
-              EdgeInsets.all(0)
+              const EdgeInsets.all(0)
           : widget.padding?.copyWith(
                   top: widget.positionedIndex == 0 ? widget.padding!.top : 0,
                   bottom: widget.positionedIndex == widget.itemCount - 1
                       ? widget.padding!.bottom
                       : 0) ??
-              EdgeInsets.all(0)
+              const EdgeInsets.all(0)
       : widget.reverse
           ? widget.padding?.copyWith(
                   left: widget.positionedIndex == widget.itemCount - 1
@@ -341,23 +341,23 @@ class _PositionedListState extends State<PositionedList> {
                   right: widget.positionedIndex == 0
                       ? widget.padding!.right
                       : 0) ??
-              EdgeInsets.all(0)
+              const EdgeInsets.all(0)
           : widget.padding?.copyWith(
                 left: widget.positionedIndex == 0 ? widget.padding!.left : 0,
                 right: widget.positionedIndex == widget.itemCount - 1
                     ? widget.padding!.right
                     : 0,
               ) ??
-              EdgeInsets.all(0);
+              const EdgeInsets.all(0);
 
   EdgeInsets get _trailingSliverPadding =>
       widget.scrollDirection == Axis.vertical
           ? widget.reverse
-              ? widget.padding?.copyWith(bottom: 0) ?? EdgeInsets.all(0)
-              : widget.padding?.copyWith(top: 0) ?? EdgeInsets.all(0)
+              ? widget.padding?.copyWith(bottom: 0) ?? const EdgeInsets.all(0)
+              : widget.padding?.copyWith(top: 0) ?? const EdgeInsets.all(0)
           : widget.reverse
-              ? widget.padding?.copyWith(right: 0) ?? EdgeInsets.all(0)
-              : widget.padding?.copyWith(left: 0) ?? EdgeInsets.all(0);
+              ? widget.padding?.copyWith(right: 0) ?? const EdgeInsets.all(0)
+              : widget.padding?.copyWith(left: 0) ?? const EdgeInsets.all(0);
 
   void _schedulePositionNotificationUpdate() {
     if (!updateScheduled) {

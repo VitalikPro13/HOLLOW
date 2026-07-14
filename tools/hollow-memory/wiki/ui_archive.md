@@ -139,6 +139,33 @@ Simple text message: "Vault file details are shown in the right panel."
 
 ---
 
+## Archive Shared Viewer Core — lib/src/ui/archive/shared/
+
+All four archive message viewers (desktop My Data, desktop Imported Archives, and the two mobile routes `mobile_archive_viewer_route.dart` / `mobile_imported_archive_viewer_route.dart`) render through one shared core (extracted 2026-07-14; removed the 34-52% duplication and the five worst complexity findings). Six files:
+
+### archive_message_list.dart
+- `ArchiveDmMessageList` / `ArchiveChannelMessageList` (public ConsumerWidgets) over a private generic `_ArchiveMessageListCore<T>`.
+- The core owns: `ItemScrollController`/`ItemPositionsListener`, `_highlightIndex` (1500ms auto-clear), jump-to-date (listens `archiveJumpToDateProvider`; the `ref.listen` MUST be registered in `build()` — an initState registration is rejected by Riverpod and silently no-ops), binary-search `_jumpToDate` (scroll alignment 0.1), `_scrollToIndex` (alignment 0.3), search-match computation, and the per-item frame: `DateSeparator` → `shouldGroup` header → reply preview (emoji variant: 📷 Image / 📎 filename) → bubble → `ArchiveDeletedOverlay` → `EditHistoryIndicator` → action wrapper.
+- Parameterized per surface: `ArchiveActionWrapper<T>` builder (desktop passes `MessageHoverWrapper` closures — copy/save/proof logic stays at call sites; mobile passes `ArchiveLongPressMessage` + `showMobileArchiveMessageActions`); `desktopChrome` bool (adds `MessageActionBarScope` → `NotificationListener` → `SelectionArea` + the inline search-bar row); `scrollDuration` callback (mobile: ReduceMotionController-aware, desktop: fixed 300ms); `editsMap` + `editProofContextOf` closures — proof context is direction- and source-dependent (live DM: `isMe ? peerId : localPeerId`; imported: exporter-relative) and is ALWAYS computed at call sites, never in the core.
+- `ArchiveMessageListController` + `ArchiveListSearchBar`: mobile renders the search bar OUTSIDE the list (above loading/empty states) and drives scroll-to-match through the controller.
+
+### archive_shared_widgets.dart
+`ArchiveSearchBar` (find-in-page bar: text field, "N of M" counter, prev/next/close; the counter is a plain non-flex Row child — wrapping it in `Flexible` halves the `Expanded` text field), `EditHistoryIndicator` (expandable edit timeline; proof chain: edit i=0 verifies via `prevSignature`/original signature, i>0 via `edits[i-1].signature` since the previous edit signed the current oldText), `ArchiveDeletedOverlay` (40% opacity + "Deleted at HH:MM"), `ArchiveLongPressMessage` (mobile long-press accent-tint wrapper).
+
+### archive_sender_filter.dart
+Desktop: `ArchiveFilterButton` + `ArchiveFilterDialog` (top-right anchored, transparent-barrier dialog, searchable participant list, `_clear_` sentinel → null filter). Mobile: `ArchiveFilterSheet` via `showArchiveFilterSheet()` (modal bottom sheet). Presentation deliberately separate per form factor.
+
+### archive_toolbar.dart
+`ArchiveToolbar` (desktop header: leading/title/subtitle/count, optional export/jump-to-date/search/filter callbacks, "read-only" badge) and `ArchiveMobileToolbar` (back button, two-line title, smaller badge). Desktop/mobile deliberately NOT merged.
+
+### archive_verification_banner.dart
+`ArchiveVerificationBanner` (two-row archive-sig + per-message-sig status; strings passed in from prep; `dense` flag for mobile sizes) and `ArchiveChannelSelector` (horizontal chip row for multi-channel server archives).
+
+### imported_archive_prep.dart
+Pure helper `prepareImportedArchive({data, localPeerId, filterSender, selectedChannelId, displayNameOf, avatarOf, mobile})` — no Flutter/Riverpod imports; callers pass display-name closures. Converts + filters an FFI `ArchiveData` into everything the imported viewers render: dm/channel messages (sender-filtered), `unfilteredChannelMessages` (for reply lookups), `uniqueSenders`, `senderNames`/`senderAvatars`, `editsMap`, `proofContext`/`proofMsgType`, `headerTitle`/`headerSubtitle` (channel subtitle uses `serverName` on both form factors), and banner data (`mobile` flag keeps each form factor's existing wording).
+
+---
+
 ## ArchiveMessageViewer — Read-Only Message Viewer
 
 **File:** `lib/src/ui/archive/archive_message_viewer.dart`
@@ -175,50 +202,18 @@ Renders a DM conversation in read-only mode.
 - `archiveMessageSearchOpenProvider` — whether search bar is visible.
 
 **Layout (Column):**
-1. `_ArchiveHeader` — shows avatar, display name, message count, jump-to-date button, search toggle, export button.
+1. `ArchiveToolbar` (shared) — shows avatar, display name, message count, jump-to-date button, search toggle, export button.
 2. Expanded async content: loading spinner, error text, or `_DmMessageList`.
 
 **Export:** Calls `showExportArchiveDialog()` with `isDm: true`.
 
 ### _DmMessageList (ConsumerStatefulWidget)
-Core DM message renderer with search, jump-to-date, and hover actions.
-
-**Props:** `messages` (List\<ChatMessage\>), `peerId`.
-
-**State:**
+Thin wrapper: watches `archiveDmEditsProvider(peerId)` and renders `ArchiveDmMessageList` (shared core, `desktopChrome: true`) with a `MessageHoverWrapper` action wrapper. Keeps in this file:
 - `_isPicking` (bool) — guards concurrent file save dialogs.
-- `_itemScrollController` / `_itemPositionsListener` — `scrollable_positioned_list` controllers.
-- `_highlightIndex` (int?) — temporarily highlighted message index (1500ms fade).
+- Hover callbacks: **Save** (`_saveFile()` when `fileAttachment.diskPath != null`), **Copy** (non-empty non-placeholder text), **Copy Image** (`copyImageToClipboard()`), **Message Proof** (`showMessageProofDialog()` with context = peerId for received / localPeerId for own, msgType "dm").
+- `proofContextFor: (msg) => msg.isMe ? peerId : localPeerId` (direction-dependent — never simplify).
 
-**Provider reads:**
-- `archiveMessageSearchOpenProvider`, `archiveMessageSearchQueryProvider`, `archiveSearchMatchIndexProvider` — search state.
-- `identityProvider` — local peer ID for isMe detection.
-- `profileProvider` — display names.
-- `archiveDmEditsProvider(peerId)` — async map of messageId -> List\<ArchiveEditEntry\> for edit history.
-- `archiveJumpToDateProvider` — listened (not watched) via `ref.listen` in `initState` post-frame callback.
-
-**Search:** Builds `matchIndices` list by scanning all messages for case-insensitive text match against `searchQuery`. Search bar (when open) shows match count, current index, prev/next navigation. Navigation wraps cyclically.
-
-**Jump-to-date (`_jumpToDate`):** Binary search for the first message on or after the target date. Scrolls with 300ms easeOutCubic animation, alignment 0.1.
-
-**Scroll-to-index (`_scrollToIndex`):** Scrolls to index with alignment 0.3, sets `_highlightIndex`, auto-clears after 1500ms.
-
-**Message list structure:** `ScrollablePositionedList.builder` wrapped in `MessageActionBarScope` -> `Builder` -> `NotificationListener<ScrollNotification>` (dismisses action bars on scroll) -> `SelectionArea` (custom empty context menu).
-
-**Per-message rendering:**
-1. Date separator: `shouldShowDateSeparator()` from `chat_pane.dart`.
-2. Message grouping: `shouldGroup()` for header visibility (avatar + name).
-3. Reply lookup: Scans messages list for `replyToMid` match, builds reply text (image/file/text).
-4. `MessageBubble` widget with `isHighlighted` for search match or jump highlight. `onReplyTap: null`, `onToggleReaction: null` (read-only).
-5. Deleted overlay: If `msg.hiddenAt != null`, wraps in `_DeletedOverlay`.
-6. Edit history: If `editsMap[messageId]` is non-empty, appends `EditHistoryIndicator` below the bubble.
-7. Hover actions via `MessageHoverWrapper`:
-   - **Save (onDownload):** Available when `fileAttachment.diskPath != null`. Calls `_saveFile()`.
-   - **Copy (onCopy):** Available when text is non-empty and not a file placeholder. Copies to clipboard.
-   - **Copy Image (onCopyImage):** Available for image attachments with disk path. Calls `copyImageToClipboard()`.
-   - **Message Proof (onInfo):** Always available. Opens `showMessageProofDialog()` with sender info, text, timestamp, signature, public key, message ID, context (peerId for DMs), and msgType "dm".
-
-**_saveFile() method:**
+**_saveFile() method (desktop):**
 - Guards with `_isPicking` flag.
 - Opens `FilePicker.platform.saveFile()` with type-appropriate extensions.
 - For WebP images saved as non-WebP: calls `network_api.convertImageFormat()` FFI.
@@ -240,88 +235,16 @@ Renders a channel conversation in read-only mode with sender filtering.
 
 **Sender filter:** Collects unique sender IDs from all messages. When `filterSender != null`, filters messages to only that sender. Header shows "X of Y messages" when filtered.
 
-**Layout:** Same as DM viewer but with `_ArchiveHeader` configured for channel mode: `#` leading, channel name, "in serverName" subtitle, sender filter controls, export button.
+**Layout:** Same as DM viewer but with `ArchiveToolbar` configured for channel mode: `#` leading, channel name, "in serverName" subtitle, sender filter controls (`ArchiveFilterButton`), export button.
 
 ### _ChannelMessageList (ConsumerStatefulWidget)
-Core channel message renderer. Nearly identical to `_DmMessageList` but for `ChannelChatMessage`.
+Thin wrapper over `ArchiveChannelMessageList` (shared core, `desktopChrome: true`), channel twin of `_DmMessageList`:
+- Passes `allMessages` (unfiltered) so replies to filtered-out messages still resolve.
+- Edit history from `archiveChannelEditsProvider('serverId:channelId')`.
+- Proof context `serverId:channelId`, msgType "ch".
+- Same `_isPicking` + hover callbacks + `_saveFile` as the DM wrapper.
 
-**Props:** `messages` (filtered list), `allMessages` (unfiltered, for reply lookups), `serverId`, `channelId`.
-
-**Key differences from DM list:**
-- Uses `ChannelMessageBubble` instead of `MessageBubble`.
-- `shouldGroup()` includes `currentSenderId`/`previousSenderId` params.
-- Reply lookup searches `allMessages` (unfiltered) so replies to filtered-out messages still resolve.
-- Edit history uses `archiveChannelEditsProvider('serverId:channelId')`.
-- Message proof context is `serverId:channelId`, msgType is "ch".
-
-### _ArchiveHeader (StatelessWidget)
-Shared header bar for both DM and channel archive viewers.
-
-**Props:**
-- `leading` (Widget) — avatar or # symbol.
-- `title`, `subtitle` (optional) — conversation name, server name.
-- `messageCount`, `totalMessageCount` (optional) — for filtered vs total display.
-- `onExport`, `onJumpToDate`, `onToggleSearch`, `searchOpen` — action callbacks.
-- `senderIds`, `selectedSender`, `onSenderFilterChanged`, `senderDisplayNames`, `senderAvatars` — channel-only filter controls.
-
-**Layout (48px height, Row):**
-1. Leading widget + title/subtitle text.
-2. Message count text (shows "X of Y" when sender filtered).
-3. Filter button (`_FilterButton`) — only when `senderIds.length > 1`.
-4. Calendar button (jump-to-date) — opens native date picker.
-5. Search toggle button — accent color when search is open.
-6. Export button (fileOutput icon, accent color).
-7. "read-only" badge in elevated container.
-
-### _FilterButton / _FilterDialog
-Sender filter for channel archives. Button shows filter icon (accent when active). Opens a `showDialog` with `barrierColor: Colors.transparent`.
-
-**_FilterDialog (StatefulWidget):**
-- State: `_query` (search text for participant names).
-- Layout: Aligned top-right (padding top:100, right:80), 240px wide, max 360px tall.
-- Container with elevated background, border, drop shadow.
-- Search field at top (autofocus).
-- "All participants" option with users icon — returns `'_clear_'` sentinel.
-- Divider.
-- Scrollable list of sender IDs with avatar, name, check icon when active.
-- Tapping a sender pops the dialog with the peer ID. `_clear_` sentinel maps to null filter.
-
-### ArchiveSearchBar (StatefulWidget, public)
-Reusable search bar for both archive viewers and imported archive viewers.
-
-**Props:** `matchCount`, `currentMatch`, `onQueryChanged`, `onNext`, `onPrev`, `onClose`.
-
-**State:** `_controller` (TextEditingController), `_focusNode` (auto-focused on init).
-
-**Layout (40px height, surface background, bottom border):**
-- `HollowTextField` with search prefix icon.
-- Match counter text: "X of Y" or "0 results" (only shown when text is non-empty).
-- Prev/next chevron buttons (disabled appearance when no matches).
-- Close (X) button.
-
-**Keyboard:** Pressing Enter (onSubmitted) triggers `onNext`.
-
-### _DeletedOverlay (StatelessWidget)
-Wraps a message bubble with 40% opacity and a "Deleted at HH:MM" label below (trash icon + italic red text). Uses `AnimatedOpacity` with `Duration.zero` (instant, GPU-composited).
-
-### EditHistoryIndicator (StatefulWidget, public)
-Shows edit count below a message, expandable to show each prior version.
-
-**Props:** `edits` (List\<ArchiveEditEntry\>), `senderPeerId`, `proofContext`, `proofMsgType`, `originalSignature`, `originalPublicKey`, `originalTimestampMs`, `messageId`.
-
-**State:** `_expanded` (bool).
-
-**Collapsed:** Row with pencil icon + "Edited N time(s)" + chevron (right or up).
-
-**Expanded:** For each edit entry:
-- Container with surface background, border, sm radius.
-- Date/time header + shield icon button (shieldCheck if signature available, shieldOff otherwise).
-- Old text displayed with line-through decoration.
-- Shield button opens `showMessageProofDialog()` with the proof data for that specific edit version.
-
-**Proof chain logic:**
-- For edit i=0: uses `e.prevSignature`/`e.prevPublicKey`/`e.prevTimestampMs` (falling back to `originalSignature`/etc.).
-- For edit i>0: uses `widget.edits[i-1].signature`/`publicKey`/`editedAt` (previous edit's sig covers its newText, which equals current edit's oldText).
+The header (`ArchiveToolbar`), sender filter (`ArchiveFilterButton`/`ArchiveFilterDialog`), search bar, deleted overlay, and `EditHistoryIndicator` all live in `lib/src/ui/archive/shared/` — see the Shared Viewer Core section above.
 
 ---
 
@@ -401,7 +324,7 @@ Right panel router. Shows empty state when no archive is selected, loading/error
 - `importedArchiveDataProvider(path)` (FutureProvider) — calls `archive_api.readArchiveData()` and returns `ArchiveData` with messages, edits, verification, channel list, type info.
 
 ### _ArchivePovViewer (ConsumerStatefulWidget)
-Core imported archive message viewer with verification banner, channel selector, sender filter, and message list.
+Imported archive message viewer. All derivation now happens in one `prepareImportedArchive()` call (shared pure helper — see Shared Viewer Core); the widget only reads providers, calls prep, and renders.
 
 **Props:** `data` (archive_api.ArchiveData).
 
@@ -409,59 +332,14 @@ Core imported archive message viewer with verification banner, channel selector,
 
 **Provider reads:**
 - `identityProvider` — local peer ID.
-- `profileProvider` — display names/avatars.
+- `profileProvider` — display names/avatars (passed to prep as closures).
 - `archiveFilterSenderProvider` — sender filter.
 - `archiveMessageSearchOpenProvider` — search bar visibility.
 - `importedArchiveSelectedChannelProvider` — selected channel within server archives.
 
-**Verification banner:**
-Two rows:
-1. Archive-level: shield icon + "Archive signed by {name} on {date}" (accent) or "Archive signature invalid" (red).
-2. Message-level: shield/warning icon + "N messages verified" or "N of M failed verification" or "N messages (no signatures)".
+**Rendering (all shared widgets):** `ArchiveVerificationBanner` (banner strings from prep) → `ArchiveChannelSelector` (server archives with >1 channel; switching resets filter/search) → `ArchiveToolbar` (no export button) → `ArchiveDmMessageList` / `ArchiveChannelMessageList` (`desktopChrome: true`, edits map from prep, `MessageHoverWrapper` action wrapper).
 
-**Channel selector (server archives only):** Horizontal scrollable pill bar (36px height) when `data.channels.length > 1`. Each pill shows `# channelName`. Tapping switches `importedArchiveSelectedChannelProvider` and resets filter/search.
-
-**Message conversion:**
-- DM archives: `convertArchiveDmMessages(data, localPeerId)` -> List\<ChatMessage\>.
-- Channel/server archives: `convertArchiveChannelMessages(data, localPeerId)` -> List\<ChannelChatMessage\>. For server archives, further filtered by `activeChannelId`.
-
-**Sender filter:** Same pattern as `_ArchiveChannelViewer` — unique senders collected from unfiltered channel messages.
-
-**Edits map:** Built from `data.edits` list, keyed by messageId, each entry converted to `ArchiveEditEntry` with full signature chain data (prevSignature, prevPublicKey, prevTimestamp).
-
-**Proof context:** DM -> `data.peerId`, channel -> `serverId:channelId`.
-
-**Header:** `_ImportedArchiveHeader` with same toolbar controls as `_ArchiveHeader` (filter, jump-to-date, search, read-only badge) but without export button.
-
-**Message list:** Routes to `_ImportedDmMessageList` or `_ImportedChannelMessageList` based on archive type.
-
-### _ImportedArchiveHeader (StatelessWidget)
-Nearly identical to `_ArchiveHeader` but without `onExport`. Uses `_ImportedFilterButton` instead of `_FilterButton`.
-
-### _ImportedFilterButton / _ImportedFilterDialog
-Exact same behavior as `_FilterButton`/`_FilterDialog` — independent copies to avoid cross-file dependency on private widgets. Searchable sender list, `_clear_` sentinel, transparent barrier dialog.
-
-### _ImportedDmMessageList (ConsumerStatefulWidget)
-Imported DM message renderer. Same structure as `_DmMessageList` but receives `editsMap`, `proofContext`, and `proofMsgType` as props instead of fetching from providers.
-
-**Props:** `messages`, `peerId`, `editsMap`, `proofContext`, `proofMsgType`.
-
-**Differences from _DmMessageList:**
-- Edit map comes from props (built from archive data) rather than `archiveDmEditsProvider`.
-- All other behavior (search, jump-to-date, hover actions, message proof, file save) is identical.
-
-### _ImportedChannelMessageList (ConsumerStatefulWidget)
-Imported channel message renderer. Same structure as `_ChannelMessageList` but with prop-based edits map.
-
-**Props:** `messages`, `allMessages`, `serverId`, `channelId`, `editsMap`, `proofContext`, `proofMsgType`.
-
-**Differences from _ChannelMessageList:**
-- Edit map from props.
-- Reply lookups use `widget.allMessages` (full unfiltered list).
-- All other behavior identical.
-
-### _DeletedOverlay (StatelessWidget, duplicated)
-Identical to the version in `archive_message_viewer.dart`. Shows deleted message with 40% opacity and "Deleted at HH:MM" label.
+**Proof context:** DM -> exporter-relative (from prep), channel -> `serverId:channelId`. `_isPicking` + `_saveFile` + hover callbacks stay in this file, same as the My Data viewer.
 
 ---
 
@@ -655,17 +533,8 @@ Additional providers from other files:
 
 ## Shared Patterns Across Archive Views
 
-**Message rendering stack (all four message list widgets):**
-`ScrollablePositionedList.builder` -> `MessageActionBarScope` -> `Builder` -> `NotificationListener<ScrollNotification>` (dismiss action bars) -> `SelectionArea` (empty context menu) -> per-item Column with DateSeparator + bubble chain.
+Since 2026-07-14 these are no longer copy-paste patterns — the rendering stack, bubble composition chain, search, jump-to-date, and scroll-highlight logic are LITERAL shared code in `lib/src/ui/archive/shared/` (see the Shared Viewer Core section). What each viewer still owns:
 
-**Bubble composition chain:**
-1. Base bubble (MessageBubble or ChannelMessageBubble).
-2. `_DeletedOverlay` if `hiddenAt != null`.
-3. `EditHistoryIndicator` column if edits exist.
-4. `MessageHoverWrapper` with Save/Copy/CopyImage/MessageProof actions.
+**Per-viewer:** data acquisition (live providers vs `importedArchiveDataProvider`), action callbacks (copy/save/proof), `_saveFile()` (desktop: FilePicker path + `downloadManagerStateProvider` record; mobile: bytes-based save, no download-manager record), and proof-context computation (direction/source-dependent — never centralize).
 
-**File save pattern:** All four message lists share identical `_saveFile()` logic: FilePicker save dialog -> WebP conversion if needed -> copy -> record in download manager -> toast.
-
-**Search pattern:** All four message lists share identical search logic: build matchIndices from case-insensitive text scan, cyclic prev/next navigation, scroll-to-index with 1500ms highlight.
-
-**Jump-to-date pattern:** All four use binary search + scroll with 300ms easeOutCubic.
+**Desktop vs mobile:** desktop passes `desktopChrome: true` (SelectionArea, hover actions, inline search bar); mobile uses `ArchiveListSearchBar` + `ArchiveMessageListController` outside the list, long-press actions, ReduceMotionController-aware scroll durations, and `ArchiveMobileToolbar`/`showArchiveFilterSheet` instead of the desktop toolbar/dialog.

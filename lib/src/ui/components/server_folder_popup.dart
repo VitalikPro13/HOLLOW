@@ -1,4 +1,4 @@
-﻿import 'package:flutter/material.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/color_utils.dart';
@@ -400,7 +400,7 @@ class _FolderPopupOverlayState extends ConsumerState<_FolderPopupOverlay>
 
                         // Server grid
                         Padding(
-                          padding: EdgeInsets.all(cardPadding),
+                          padding: const EdgeInsets.all(cardPadding),
                           child: Wrap(
                             spacing: iconSpacing,
                             runSpacing: iconSpacing + 4,

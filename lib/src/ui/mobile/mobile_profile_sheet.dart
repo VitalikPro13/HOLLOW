@@ -281,7 +281,7 @@ class MobileProfileSheet extends ConsumerWidget {
                   child: Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      Icon(BrandIcons.twitch, size: 14, color: const Color(0xFF9146FF)),
+                      const Icon(BrandIcons.twitch, size: 14, color: Color(0xFF9146FF)),
                       const SizedBox(width: HollowSpacing.xs),
                       Text(
                         effectiveTwitch,
@@ -570,11 +570,11 @@ class _FriendActionRow extends ConsumerWidget {
     }
 
     if (friendInfo.status == 'pending') {
-      return HollowButton.ghost(
+      return const HollowButton.ghost(
         onPressed: null,
-        icon: const Icon(LucideIcons.clock, size: 16),
+        icon: Icon(LucideIcons.clock, size: 16),
         expand: true,
-        child: const Text('Request Sent'),
+        child: Text('Request Sent'),
       );
     }
 

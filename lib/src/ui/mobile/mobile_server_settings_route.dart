@@ -1,4 +1,4 @@
-﻿import 'dart:io';
+import 'dart:io';
 
 import 'package:hollow/src/ui/chat/hollow_link_utils.dart';
 
@@ -606,7 +606,7 @@ class _MobileServerSettingsRouteState
 
                   // Server Name (admin only)
                   if (canManage) ...[
-                    _SectionDivider(label: 'Server Name'),
+                    const _SectionDivider(label: 'Server Name'),
                     const SizedBox(height: HollowSpacing.sm),
                     Row(
                       children: [
@@ -630,7 +630,7 @@ class _MobileServerSettingsRouteState
 
                   // Description (admin only)
                   if (canManage) ...[
-                    _SectionDivider(label: 'Description'),
+                    const _SectionDivider(label: 'Description'),
                     const SizedBox(height: HollowSpacing.sm),
                     HollowTextField(
                       controller: _descController,
@@ -653,7 +653,7 @@ class _MobileServerSettingsRouteState
 
                   // Access (admin only) — private / NSFW / member cap
                   if (canManage) ...[
-                    _SectionDivider(label: 'Access'),
+                    const _SectionDivider(label: 'Access'),
                     const SizedBox(height: HollowSpacing.sm),
                     Row(
                       children: [
@@ -757,7 +757,7 @@ class _MobileServerSettingsRouteState
                     const SizedBox(height: HollowSpacing.xl),
 
                     // ── Offline catch-up (relay availability cache) ──
-                    _SectionDivider(label: 'Offline Catch-Up'),
+                    const _SectionDivider(label: 'Offline Catch-Up'),
                     const SizedBox(height: HollowSpacing.sm),
                     Row(
                       children: [
@@ -829,14 +829,14 @@ class _MobileServerSettingsRouteState
 
                   // Channels (admin only)
                   if (canManageChannels) ...[
-                    _SectionDivider(label: 'Channels'),
+                    const _SectionDivider(label: 'Channels'),
                     const SizedBox(height: HollowSpacing.sm),
                     _ChannelLayoutEditor(serverId: widget.serverId),
                     const SizedBox(height: HollowSpacing.xl),
                   ],
 
                   // Management rows
-                  _SectionDivider(label: 'Management'),
+                  const _SectionDivider(label: 'Management'),
                   const SizedBox(height: HollowSpacing.sm),
                   _NavRow(
                     icon: LucideIcons.users,
@@ -913,13 +913,13 @@ class _MobileServerSettingsRouteState
                   const SizedBox(height: HollowSpacing.xl),
 
                   // Notifications
-                  _SectionDivider(label: 'Notifications'),
+                  const _SectionDivider(label: 'Notifications'),
                   const SizedBox(height: HollowSpacing.sm),
                   _NotificationSection(serverId: widget.serverId),
                   const SizedBox(height: HollowSpacing.xl),
 
                   // Server ID
-                  _SectionDivider(label: 'Server ID'),
+                  const _SectionDivider(label: 'Server ID'),
                   const SizedBox(height: HollowSpacing.sm),
                   Container(
                     padding: const EdgeInsets.all(HollowSpacing.md),
@@ -959,7 +959,7 @@ class _MobileServerSettingsRouteState
                   const SizedBox(height: HollowSpacing.xl),
 
                   // Your Nickname
-                  _SectionDivider(label: 'Your Nickname'),
+                  const _SectionDivider(label: 'Your Nickname'),
                   const SizedBox(height: HollowSpacing.sm),
                   Row(
                     children: [
@@ -980,7 +980,7 @@ class _MobileServerSettingsRouteState
                   ),
                   if (canManage) ...[
                     const SizedBox(height: HollowSpacing.xl),
-                    _SectionDivider(label: 'Server Template'),
+                    const _SectionDivider(label: 'Server Template'),
                     const SizedBox(height: HollowSpacing.sm),
                     Text(
                       'Export your server structure as a template, or import one to reconfigure this server.',
@@ -1014,7 +1014,7 @@ class _MobileServerSettingsRouteState
                   const SizedBox(height: HollowSpacing.xl + HollowSpacing.lg),
 
                   // Danger zone
-                  _SectionDivider(label: 'Danger Zone', danger: true),
+                  const _SectionDivider(label: 'Danger Zone', danger: true),
                   const SizedBox(height: HollowSpacing.md),
                   if (isOwner)
                     HollowButton.danger(

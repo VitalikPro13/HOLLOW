@@ -389,7 +389,7 @@ class _MobileImageCropRouteState extends State<MobileImageCropRoute> {
                 children: [
                   HollowButton.ghost(
                     onPressed: () => Navigator.of(context).pop(null),
-                    child: Text('Cancel',
+                    child: const Text('Cancel',
                         style: TextStyle(color: Colors.white70)),
                   ),
                   const SizedBox(width: HollowSpacing.sm),

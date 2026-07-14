@@ -1,4 +1,4 @@
-﻿import 'package:flutter/material.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/models/chat_message.dart';
 import 'package:hollow/src/ui/chat/hollow_link_utils.dart';
@@ -1237,7 +1237,7 @@ class _CategoryHeaderRow extends StatelessWidget {
     return HollowPressable(
       onTap: onToggle,
       subtle: true,
-      padding: EdgeInsets.only(
+      padding: const EdgeInsets.only(
         left: 44 + HollowSpacing.lg + HollowSpacing.md,
         right: HollowSpacing.lg,
         top: HollowSpacing.sm,
@@ -1375,7 +1375,7 @@ class _CreateChannelRow extends StatelessWidget {
         HollowPressable(
           onTap: onTap,
           subtle: true,
-          padding: EdgeInsets.only(
+          padding: const EdgeInsets.only(
             left: 44 + HollowSpacing.lg + HollowSpacing.md,
             right: HollowSpacing.lg,
             top: HollowSpacing.sm,
@@ -1428,7 +1428,7 @@ class _ChannelRow extends StatelessWidget {
       onTap: onTap,
       onLongPress: onLongPress,
       subtle: true,
-      padding: EdgeInsets.only(
+      padding: const EdgeInsets.only(
         left: 44 + HollowSpacing.lg + HollowSpacing.md,
         right: HollowSpacing.lg,
         top: HollowSpacing.sm,
@@ -1619,7 +1619,7 @@ class _NewConversationDialogState
                   const SizedBox(height: HollowSpacing.xl),
 
                   // Join Server
-                  _SectionLabel(
+                  const _SectionLabel(
                     icon: LucideIcons.logIn,
                     label: 'Join a Server',
                   ),
@@ -1635,7 +1635,7 @@ class _NewConversationDialogState
                   const SizedBox(height: HollowSpacing.xl),
 
                   // Create Server
-                  _SectionLabel(
+                  const _SectionLabel(
                     icon: LucideIcons.plusCircle,
                     label: 'Create a Server',
                   ),
