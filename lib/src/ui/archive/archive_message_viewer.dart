@@ -436,7 +436,8 @@ class _DmMessageListState extends ConsumerState<_DmMessageList> {
                 ? () async {
                     final ok = await copyImageToClipboard(
                         msg.fileAttachment!.diskPath!);
-                    if (mounted) {
+                    // itemBuilder shadows the State's context — check THIS element.
+                    if (context.mounted) {
                       HollowToast.show(
                         context,
                         ok
@@ -946,7 +947,8 @@ class _ChannelMessageListState extends ConsumerState<_ChannelMessageList> {
                 ? () async {
                     final ok = await copyImageToClipboard(
                         msg.fileAttachment!.diskPath!);
-                    if (mounted) {
+                    // itemBuilder shadows the State's context — check THIS element.
+                    if (context.mounted) {
                       HollowToast.show(
                         context,
                         ok

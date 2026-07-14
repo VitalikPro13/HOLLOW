@@ -1789,6 +1789,7 @@ class _SecurityTabState extends State<_SecurityTab> {
       await identity_api.enablePasswordProtection(password: passphrase, requireOnLaunch: true);
       if (!mounted) return;
       await _loadProtectionStatus();
+      if (!mounted) return;
       HollowToast.show(context, 'Password protection enabled', type: HollowToastType.success);
     } catch (e) {
       if (!mounted) return;
@@ -1832,6 +1833,7 @@ class _SecurityTabState extends State<_SecurityTab> {
       await identity_api.removePasswordProtection(password: pass);
       if (!mounted) return;
       await _loadProtectionStatus();
+      if (!mounted) return;
       HollowToast.show(context, 'App password removed', type: HollowToastType.success);
     } catch (e) {
       if (!mounted) return;
@@ -1844,6 +1846,7 @@ class _SecurityTabState extends State<_SecurityTab> {
       await identity_api.enableOsKeychainProtection();
       if (!mounted) return;
       await _loadProtectionStatus();
+      if (!mounted) return;
       HollowToast.show(context, 'Device protection enabled', type: HollowToastType.success);
     } catch (e) {
       if (!mounted) return;
@@ -1856,6 +1859,7 @@ class _SecurityTabState extends State<_SecurityTab> {
       await identity_api.disableOsKeychainProtection();
       if (!mounted) return;
       await _loadProtectionStatus();
+      if (!mounted) return;
       HollowToast.show(context, 'Device protection removed', type: HollowToastType.success);
     } catch (e) {
       if (!mounted) return;
@@ -2122,12 +2126,12 @@ class _SecurityTabState extends State<_SecurityTab> {
                       }
                       try {
                         await storage_api.saveMnemonic(mnemonic: val.trim());
-                        if (mounted) {
+                        if (context.mounted) {
                           setState(() => _mnemonic = val.trim());
                           HollowToast.show(context, 'Recovery phrase saved', type: HollowToastType.success);
                         }
                       } catch (e) {
-                        if (mounted) HollowToast.show(context, 'Failed to save: $e', type: HollowToastType.error);
+                        if (context.mounted) HollowToast.show(context, 'Failed to save: $e', type: HollowToastType.error);
                       }
                     },
                   ),

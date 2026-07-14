@@ -17,6 +17,17 @@
   <img src="https://img.shields.io/badge/status-alpha-orange" alt="Status">
 </p>
 
+<p align="center">
+  <a href="https://sonarcloud.io/summary/overall?id=VitalikPro13_HOLLOW">
+  <img src="https://sonarcloud.io/api/project_badges/measure?project=VitalikPro13_HOLLOW&metric=alert_status" alt="Quality Gate"></a>
+  <a href="https://sonarcloud.io/summary/overall?id=VitalikPro13_HOLLOW">
+  <img src="https://sonarcloud.io/api/project_badges/measure?project=VitalikPro13_HOLLOW&metric=security_rating" alt="Security Rating"></a>
+  <a href="https://sonarcloud.io/summary/overall?id=VitalikPro13_HOLLOW">
+  <img src="https://sonarcloud.io/api/project_badges/measure?project=VitalikPro13_HOLLOW&metric=reliability_rating" alt="Reliability Rating"></a>
+  <a href="https://sonarcloud.io/summary/overall?id=VitalikPro13_HOLLOW">
+  <img src="https://sonarcloud.io/api/project_badges/measure?project=VitalikPro13_HOLLOW&metric=sqale_rating" alt="Maintainability Rating"></a>
+</p>
+
 <br>
 
 <p align="center">

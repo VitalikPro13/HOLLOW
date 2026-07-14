@@ -1367,7 +1367,8 @@ class _ImportedDmMessageListState
                       ? () async {
                           final ok = await copyImageToClipboard(
                               msg.fileAttachment!.diskPath!);
-                          if (mounted) {
+                          // itemBuilder shadows the State's context — check THIS element.
+                          if (context.mounted) {
                             HollowToast.show(
                                 context,
                                 ok
@@ -1704,7 +1705,8 @@ class _ImportedChannelMessageListState
                       ? () async {
                           final ok = await copyImageToClipboard(
                               msg.fileAttachment!.diskPath!);
-                          if (mounted) {
+                          // itemBuilder shadows the State's context — check THIS element.
+                          if (context.mounted) {
                             HollowToast.show(
                                 context,
                                 ok

@@ -289,11 +289,15 @@ class _JoinDialogState extends ConsumerState<_JoinDialog> {
         // No one responded — pool may be dead. Clean up.
         final pool = ref.read(recoveryPoolProvider);
         if (pool != null) {
+          // Grab the notifier before the await — ref is unusable if the
+          // dialog is disposed mid-flight, but the cleanup must still run.
+          final poolNotifier = ref.read(recoveryPoolProvider.notifier);
           try {
             await crdt_api.stopRecoveryPool(serverId: pool.serverId);
           } catch (_) {}
-          ref.read(recoveryPoolProvider.notifier).clear();
+          poolNotifier.clear();
         }
+        if (!mounted) return;
         setState(() => _joining = false);
         HollowToast.show(
           context,

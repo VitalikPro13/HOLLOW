@@ -490,7 +490,10 @@ class _HollowShellState extends ConsumerState<HollowShell>
     final secretLabel = isPin ? 'PIN' : 'password';
     final controller = TextEditingController();
     var attempts = 0;
-    while (mounted) {
+    while (true) {
+      // Statement-level guard (not just the loop condition) so the gap
+      // between the previous iteration's awaits and this use is covered.
+      if (!mounted) return false;
       final result = await showHollowDialog<String>(
         context: context,
         barrierDismissible: false,

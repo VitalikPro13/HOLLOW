@@ -192,7 +192,7 @@ class _ChannelActionsSheetState extends State<_ChannelActionsSheet> {
                   newName: name,
                 );
                 widget.onChanged?.call();
-                if (context.mounted) {
+                if (mounted) {
                   HollowToast.show(context, 'Channel renamed',
                       type: HollowToastType.success);
                 }
@@ -332,7 +332,7 @@ class _ChannelActionsSheetState extends State<_ChannelActionsSheet> {
       channelId: widget.channel.channelId,
     );
     widget.onChanged?.call();
-    if (context.mounted) {
+    if (mounted) {
       HollowToast.show(context, 'Channel deleted', type: HollowToastType.success);
     }
   }

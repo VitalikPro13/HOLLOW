@@ -2117,7 +2117,9 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
                                 msg.fileAttachment!.isImage)
                             ? () async {
                                 final ok = await copyImageToClipboard(msg.fileAttachment!.diskPath!);
-                                if (mounted) {
+                                // itemBuilder shadows the State's context — list items
+                                // dispose when scrolled away, so check THIS element.
+                                if (context.mounted) {
                                   HollowToast.show(
                                     context,
                                     ok ? 'Image copied to clipboard' : 'Failed to copy image',

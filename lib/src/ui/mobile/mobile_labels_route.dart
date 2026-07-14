@@ -217,12 +217,14 @@ class _MobileLabelsRouteState extends ConsumerState<MobileLabelsRoute> {
                       serverId: widget.serverId, name: name, color: hex,
                     );
                     await _reload();
-                    if (mounted) {
+                    // `context` is the helper's parameter, not this State's —
+                    // guard the element actually used for the toast.
+                    if (context.mounted) {
                       HollowToast.show(context, 'Label created',
                           type: HollowToastType.success);
                     }
                   } catch (e) {
-                    if (mounted) {
+                    if (context.mounted) {
                       HollowToast.show(context, 'Failed to create label',
                           type: HollowToastType.error);
                     }
