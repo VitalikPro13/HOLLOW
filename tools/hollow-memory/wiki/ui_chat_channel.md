@@ -1,11 +1,13 @@
 # ChannelChatPane -- Server Channel Chat View
 
-Primary chat view for server text channels. Located at `lib/src/ui/chat/channel_chat_pane.dart` (~2500 lines). Handles message display, input, file attachments, voice messages, @mention autocomplete, in-channel search, pinned messages, link previews, reply threading, reactions, permission-gated posting, sync/connection status, vault file downloads, and unread tracking.
+Primary chat view for server text channels. Located at `lib/src/ui/chat/channel_chat_pane.dart` (~3100 lines). Handles message display, input, file attachments, voice messages, @mention autocomplete, in-channel search, pinned messages, link previews, reply threading, reactions, permission-gated posting, sync/connection status, vault file downloads, and unread tracking.
+
+**Decomposed structure (2026-07-14 Sonar refactor, behavior unchanged):** `build()` is a slim skeleton; each Column section is a private builder on the State: `_buildHeader` (+ `_buildPinnedHeaderButton`/`_buildSearchToggleButton`/`_buildSplitToggleButton`), `_buildSearchBar` (+ `_buildSearchResultTile`/`_jumpToSearchResult`), `_buildMessageArea` → `_buildMessageListLayer` → `_buildMessageList` → per-row `_buildMessageRow` → `_buildBubble`, `_buildUnreadPillOverlay`, `_buildTypingBar`, `_buildReplyPreviewBar`, `_buildStagedFilePreview`, `_buildInputBar` → `_buildComposerRow` (+ `_buildSlowModePill`). The four `ref.listen` blocks live in `_registerBuildListeners()` — invoked from `build()` every frame (Riverpod requires build-time registration) — with bodies in `_onMessageListGrowth`/`_onWindowFocusChanged`/`_onSearchOpenChanged`. Row action callbacks are nullable factory methods (`_editStartFor`, `_deleteFor`, `_replyFor`, `_pinFor`, `_downloadFor`, `_copyFor`, `_copyImageFor`, `_infoFor`) — null hides the affordance; gate order preserved (`_pinFor` short-circuits on conference/messageId BEFORE the `myPermissionsProvider` watch). Shared small helpers: `_toggleReaction` (wrapper onReaction + bubble onToggleReaction), `_messagePreviewText`, `_gifAwareImage`, `_hhmm`, `_saveAttachmentAs`, `_vaultFetchToCache`. When decomposing `chat_pane.dart` / `mobile_chat_route.dart`, reuse this exact shape.
 
 ## Widget Class Hierarchy
 
 - `ChannelChatPane` -- `ConsumerStatefulWidget`, the top-level widget. Constructor params: `serverId`, `channelId`, `channelName`, `splitPaneIndex` (nullable int for split view: null=not split, 0=left, 1=right).
-- `_ChannelChatPaneState` -- main state class (~1200 lines of logic + ~800 lines of build).
+- `_ChannelChatPaneState` -- main state class (slim `build()` + per-section `_build*` methods, see Decomposed structure above).
 - `_ChannelConnectionStatus` -- `ConsumerWidget`, inline connection/encryption status in the header bar.
 - `_SyncIndicator` -- `ConsumerStatefulWidget`, sync progress display (Syncing/Synced/Failed/Retrying).
 - `_SpinningRefreshIcon` -- `StatefulWidget`, continuously rotating `LucideIcons.refreshCw` for sync-in-progress.
@@ -84,18 +86,17 @@ Note: Riverpod `ref` usage is forbidden in `dispose()`, which is why search bar 
 
 ## Scroll Management
 
-Uses `scrollable_positioned_list` package with sentinel pattern: `itemCount: messages.length + 1` where the last item is `SizedBox.shrink()` used for bottom anchoring.
+Reversed-list model (2026-07-03 overhaul — see the "Reversed message list" section at the bottom and ui_chat_dm.md for the full mechanics): `reverse: true`, newest message = builder index 0 pinned to the bottom, no sentinel row.
 
-- `_isNearBottom` -- getter checking if any visible item has `index >= messages.length - 1`. Used for the unread pill.
-- `_isInAutoScrollZone` -- getter checking if any visible item has `index >= messages.length - 3`. More forgiving than `_isNearBottom`; treats user as "following along" if within the last 3 messages.
-- `_jumpToBottom()` -- post-frame callback, calls `_itemScrollController.jumpTo(index: messages.length, alignment: 1.0)`. Instant, no animation.
-- `_scrollToBottom()` -- post-frame callback, calls `_scrollOffsetController.animateScroll(offset: 100000, duration: 150ms, curve: easeOut)`. Smooth animated scroll.
-- `_scrollToMessage(index)` -- sets `_highlightIndex = index`, calls `_itemScrollController.scrollTo()` with 300ms duration, easeOutCubic curve, alignment 0.3. Clears highlight after 1500ms.
-- `_onScrollPositionChanged()` -- updates `_showScrollPill`, sets `chatAtBottomProvider`, auto-marks channel as read when user scrolls back to bottom.
+- `_isNearBottom` -- getter: any visible position has `index <= 0` (length-independent, burst-immune). Used for the unread pill and freeze transitions.
+- `_frozenLen` -- non-null while the user is scrolled up; `_displayMessages()` caps the display list there so arrivals never shift the reading position.
+- `_jumpToBottom()` / `_scrollToBottom()` -- release the freeze + post-frame instant `jumpTo(index: 0, alignment: 0)`. NEVER animated.
+- `_scrollToMessage(index)` -- takes a CHRONOLOGICAL index, converts to reversed at the boundary, animated `scrollTo` (300ms, easeOutCubic, alignment 0.6 = measured from the bottom edge), highlights for 1500ms.
+- `_onScrollPositionChanged()` -- updates `_showScrollPill`, sets `chatAtBottomProvider`; edge-triggered: on bottom re-entry releases the freeze + marks seen, on leaving the bottom freezes at the current raw length. Debounce-calls `_requestViewportFiles()`.
 
-**Auto-scroll on new messages**: In `build()`, `ref.listen(channelChatProvider)` compares previous and next message counts. If new messages arrived and `_isInAutoScrollZone`, calls `_scrollToBottom()`.
+**New-message growth** (`_onMessageListGrowth`, registered via `_registerBuildListeners()`): raw-list growth while at bottom → instant `_jumpToBottom()`; while scrolled up (or already frozen) → freeze at the pre-growth length so the pill takes over.
 
-**Focus-return mark-seen (2026-07-10)**: `ref.listen(windowFocusedProvider)` in `build()` — on the unfocused→focused edge, if at bottom and not frozen, `markChannelSeen` with the newest message. Same ghost-unread fix as ChatPane (see ui_chat_dm.md §Focus-return mark-seen).
+**Focus-return mark-seen (2026-07-10)**: `_onWindowFocusChanged` (windowFocusedProvider listener) — on the unfocused→focused edge, if at bottom and not frozen, `markChannelSeen` with the newest message. Same ghost-unread fix as ChatPane (see ui_chat_dm.md §Focus-return mark-seen).
 
 ## Channel Header Bar
 
@@ -137,7 +138,7 @@ The dialog is a `Dialog` with `hollow.elevated` background, rounded rectangle sh
 
 Activated by tapping the search icon in the header bar or via Ctrl+K shortcut (handled in `hollow_shell.dart` which toggles `channelSearchOpenProvider`).
 
-**Provider listening**: `ref.listen(channelSearchOpenProvider)` in `build()`: when opened, focuses `_searchFocusNode` in post-frame callback. When closed, clears search controller and results.
+**Provider listening**: `_onSearchOpenChanged` (channelSearchOpenProvider listener via `_registerBuildListeners()`): when opened, focuses `_searchFocusNode` in post-frame callback. When closed, clears search controller and results.
 
 **Search bar UI**: Conditionally rendered below the header when `channelSearchOpenProvider` is true. Contains a `HollowTextField` with search icon prefix, hint "Search in #channelName...", autofocus, dense mode. `onChanged` calls `_onSearch()`.
 
@@ -147,15 +148,15 @@ Activated by tapping the search icon in the header bar or via Ctrl+K shortcut (h
 
 Triggered by typing `@` preceded by a space, newline, or at position 0 in the input text.
 
-**`_updateMentionAutocomplete(text)`**: Called from `_onTextChanged()`. Scans backward from cursor to find `@`. Extracts query string after `@`. Reads `serverMembersProvider(serverId)`, `profileProvider`, `serverNicknamesProvider(serverId)`. For each member, checks if display name, server nickname, or profile name starts with the query (case-insensitive). Also adds `@everyone` candidate (inserted at index 0) with subtitle "Notify all members". Limits to first 6 candidates. Calls `_showMentionOverlay()`.
+**`_updateMentionAutocomplete(text)`**: Called from `_onTextChanged()`. `_mentionTriggerIndex()` scans backward from cursor for an `@` preceded by start/space/newline. `_mentionCandidatesFor(query)` reads `serverMembersProvider(serverId)`, `profileProvider`, `serverNicknamesProvider(serverId)` and per member (`_mentionCandidateFor`) checks if display name, server nickname, or profile name starts with the query (case-insensitive); adds `@everyone` candidate (inserted at index 0) with subtitle "Notify all members". Limits to first 6 candidates. Calls `_showMentionOverlay()`.
 
 **`_showMentionOverlay()`**: Removes any existing overlay, creates new `OverlayEntry` with `_buildMentionOverlay()`, inserts into `Overlay.of(context)`.
 
 **Overlay UI (`_buildMentionOverlay()`)**: Uses `CompositedTransformFollower` linked to `_mentionLayerLink` (target anchored to the text field). Positioned above the input (followerAnchor: bottomLeft, targetAnchor: topLeft, offset (0, -4)). Width 260px, max height 220px. Elevated background with border and shadow. Contains a `ListView.builder` with candidates. Each candidate row: `HollowPressable` with avatar (or `@` icon for `@everyone`), display name in bold, optional subtitle. Selected candidate has accent background tint.
 
-**Keyboard navigation**: The `Focus` widget wrapping the input field intercepts key events when `_mentionOverlay != null`:
-- ArrowDown: increments `_mentionSelectedIndex`, rebuilds overlay.
-- ArrowUp: decrements `_mentionSelectedIndex`, rebuilds overlay.
+**Keyboard navigation**: The `Focus` widget's `onKeyEvent` routes to `_handleComposerKey` → `_handleMentionOverlayKey` (returns null when the overlay is closed or the key isn't a mention key — falls through to the emote autocomplete then `handleChatInputKey`). While `_mentionOverlay != null`:
+- ArrowDown: increments `_mentionSelectedIndex` (`_moveMentionSelection(1)`), rebuilds overlay.
+- ArrowUp: decrements `_mentionSelectedIndex` (`_moveMentionSelection(-1)`), rebuilds overlay.
 - Enter/Tab: accepts the selected candidate via `_acceptMention()`.
 - Escape: dismisses overlay via `_dismissMentionOverlay()`.
 - Other keys: fall through to `handleChatInputKey()`.
@@ -276,9 +277,9 @@ The `onDownload` callback in `MessageHoverWrapper` handles three scenarios:
 2. **File already on disk**: If `fileAttachment.diskPath != null`, calls `_saveFile()` which opens Save As dialog with appropriate extensions and optional WebP conversion for images.
 3. **File not on disk**: Checks member count. For 6+ members, calls `_vaultDownloadAndSave()` (vault shard reconstruction). For <6 members, calls `_requestFileFromPeer()` (P2P stream request via `network_api.requestFileFromPeer()`).
 
-**`_saveFile(attachment)`**: Opens `FilePicker.platform.saveFile()`. If saving WebP image as non-WebP, converts via `network_api.convertImageFormat()`. Records save in `downloadManagerStateProvider`. Shows toast on success/failure.
+**`_saveAttachmentAs(sourcePath, attachment)`** (shared by `_saveFile` — which passes `attachment.diskPath` — and the vault flow): Opens `FilePicker.platform.saveFile()`. If saving WebP image as non-WebP, converts via `network_api.convertImageFormat()`. Records save in `downloadManagerStateProvider`. Shows toast on success/failure.
 
-**`_vaultDownloadAndSave(attachment)`**: Looks up content ID via `storage_api.getContentIdForFile()`. Triggers vault download. If cache hit (immediate return), opens Save As. Otherwise polls `fileTransferProvider` every 500ms for up to 60 seconds waiting for `VaultDownloadComplete` event.
+**`_vaultDownloadAndSave(attachment)`**: Looks up content ID via `storage_api.getContentIdForFile()`, then `_vaultFetchToCache(contentId)` (shared with the video flow) triggers vault download — immediate path on cache hit, else polls `fileTransferProvider` every 500ms for up to 60 seconds waiting for `VaultDownloadComplete` — then `_saveAttachmentAs()` from the cache path.
 
 ## File Dropping and Clipboard Paste
 

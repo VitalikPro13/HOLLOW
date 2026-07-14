@@ -82,7 +82,7 @@ class ChannelChatPane extends ConsumerStatefulWidget {
 }
 
 class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
-  void _handleSplitToggle(WidgetRef ref) {
+  void _handleSplitToggle() {
     final split = ref.read(splitViewProvider);
     if (split.isSplit) {
       ref.read(splitViewProvider.notifier).closePane(
@@ -353,6 +353,26 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
     });
   }
 
+  /// HH:MM (24h, zero-padded) — shared by the search results and pin dialog.
+  static String _hhmm(DateTime t) =>
+      '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
+
+  /// The chat's standard inline thumbnail: [GifFileImage] for .gif paths
+  /// (animated), [Image.file] otherwise.
+  Widget _gifAwareImage(String path, {double? width, double? height}) =>
+      path.toLowerCase().endsWith('.gif')
+          ? GifFileImage(
+              diskPath: path, width: width, height: height, fit: BoxFit.cover)
+          : Image.file(File(path),
+              width: width, height: height, fit: BoxFit.cover);
+
+  /// '📷 Image' / '📎 name' for attachments, else the message text.
+  String _messagePreviewText(ChannelChatMessage msg) {
+    final f = msg.fileAttachment;
+    if (f == null) return msg.text;
+    return f.isImage ? '📷 Image' : '📎 ${f.fileName}';
+  }
+
   void _showPinnedMessages(
     BuildContext context,
     HollowTheme hollow,
@@ -361,9 +381,9 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
     final messages = ref.read(channelChatProvider)[_stateKey] ?? [];
     final pinnedMessages = pinnedIds
         .map((id) => messages.where((m) => m.messageId == id).firstOrNull)
-        .where((m) => m != null)
+        .whereType<ChannelChatMessage>()
         .toList()
-      ..sort((a, b) => b!.timestamp.compareTo(a!.timestamp));
+      ..sort((a, b) => b.timestamp.compareTo(a.timestamp));
 
     showDialog(
       context: context,
@@ -418,116 +438,8 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
                     child: ListView.builder(
                       shrinkWrap: true,
                       itemCount: pinnedMessages.length,
-                      itemBuilder: (_, index) {
-                        final msg = pinnedMessages[index]!;
-                        final profiles = ref.read(profileProvider);
-                        final nicknames =
-                            ref.read(serverNicknamesProvider(widget.serverId));
-                        // Collapse device→master so pinned rows show the person's
-                        // name (not a raw device id). Single-device → no-op.
-                        final pinnedMaster = ref
-                            .read(deviceLinkProvider)
-                            .identityOf(msg.senderId);
-                        final name = serverDisplayNameFor(
-                          profiles,
-                          pinnedMaster,
-                          nickname: nicknames[pinnedMaster] ?? '',
-                        );
-                        final time =
-                            '${msg.timestamp.hour.toString().padLeft(2, '0')}:${msg.timestamp.minute.toString().padLeft(2, '0')}';
-
-                        // Date separator between pinned messages on different days.
-                        final showDate = shouldShowDateSeparator(
-                          msg.timestamp,
-                          index > 0 ? pinnedMessages[index - 1]!.timestamp : null,
-                        );
-
-                        final msgWidget = Padding(
-                          padding: const EdgeInsets.symmetric(
-                              vertical: HollowSpacing.xs),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Row(
-                                children: [
-                                  Text(
-                                    name,
-                                    style: HollowTypography.body.copyWith(
-                                      color: hollow.accent,
-                                      fontWeight: FontWeight.w600,
-                                      fontSize: 12,
-                                    ),
-                                  ),
-                                  const SizedBox(width: HollowSpacing.sm),
-                                  Text(
-                                    time,
-                                    style: HollowTypography.caption.copyWith(
-                                      color: hollow.textSecondary
-                                          .withValues(alpha: 0.5),
-                                      fontSize: 10,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                              const SizedBox(height: 2),
-                              if (msg.fileAttachment != null) ...[
-                                if (msg.fileAttachment!.isImage &&
-                                    msg.fileAttachment!.diskPath != null &&
-                                    File(msg.fileAttachment!.diskPath!).existsSync())
-                                  ClipRRect(
-                                    borderRadius: BorderRadius.circular(hollow.radiusSm),
-                                    child: msg.fileAttachment!.diskPath!.toLowerCase().endsWith('.gif')
-                                        ? GifFileImage(
-                                            diskPath: msg.fileAttachment!.diskPath!,
-                                            height: 80,
-                                            fit: BoxFit.cover,
-                                          )
-                                        : Image.file(
-                                            File(msg.fileAttachment!.diskPath!),
-                                            height: 80,
-                                            fit: BoxFit.cover,
-                                          ),
-                                  )
-                                else
-                                  Text(
-                                    msg.fileAttachment!.isImage ? '📷 Image' : '📎 ${msg.fileAttachment!.fileName}',
-                                    style: HollowTypography.body.copyWith(
-                                      color: hollow.textSecondary,
-                                    ),
-                                  ),
-                              ] else
-                              Text(
-                                msg.text.startsWith('[file:') ? '📎 File' : msg.text,
-                                style: HollowTypography.body.copyWith(
-                                  color: hollow.textPrimary,
-                                ),
-                                maxLines: 3,
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                            ],
-                          ),
-                        );
-
-                        if (showDate) {
-                          return Column(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              DateSeparator(date: msg.timestamp),
-                              msgWidget,
-                            ],
-                          );
-                        }
-                        if (index > 0) {
-                          return Column(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Divider(color: hollow.border, height: HollowSpacing.sm),
-                              msgWidget,
-                            ],
-                          );
-                        }
-                        return msgWidget;
-                      },
+                      itemBuilder: (_, index) =>
+                          _buildPinnedItem(hollow, pinnedMessages, index),
                     ),
                   ),
               ],
@@ -535,6 +447,112 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
           ),
         ),
       ),
+    );
+  }
+
+  /// One row of the pinned-messages dialog: sender + time header, then the
+  /// attachment thumbnail or text, with date/divider separators between rows.
+  Widget _buildPinnedItem(
+    HollowTheme hollow,
+    List<ChannelChatMessage> pinnedMessages,
+    int index,
+  ) {
+    final msg = pinnedMessages[index];
+    final profiles = ref.read(profileProvider);
+    final nicknames = ref.read(serverNicknamesProvider(widget.serverId));
+    // Collapse device→master so pinned rows show the person's
+    // name (not a raw device id). Single-device → no-op.
+    final pinnedMaster =
+        ref.read(deviceLinkProvider).identityOf(msg.senderId);
+    final name = serverDisplayNameFor(
+      profiles,
+      pinnedMaster,
+      nickname: nicknames[pinnedMaster] ?? '',
+    );
+
+    // Date separator between pinned messages on different days.
+    final showDate = shouldShowDateSeparator(
+      msg.timestamp,
+      index > 0 ? pinnedMessages[index - 1].timestamp : null,
+    );
+
+    final msgWidget = Padding(
+      padding: const EdgeInsets.symmetric(vertical: HollowSpacing.xs),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Text(
+                name,
+                style: HollowTypography.body.copyWith(
+                  color: hollow.accent,
+                  fontWeight: FontWeight.w600,
+                  fontSize: 12,
+                ),
+              ),
+              const SizedBox(width: HollowSpacing.sm),
+              Text(
+                _hhmm(msg.timestamp),
+                style: HollowTypography.caption.copyWith(
+                  color: hollow.textSecondary.withValues(alpha: 0.5),
+                  fontSize: 10,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 2),
+          _buildPinnedItemBody(hollow, msg),
+        ],
+      ),
+    );
+
+    if (showDate) {
+      return Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          DateSeparator(date: msg.timestamp),
+          msgWidget,
+        ],
+      );
+    }
+    if (index > 0) {
+      return Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Divider(color: hollow.border, height: HollowSpacing.sm),
+          msgWidget,
+        ],
+      );
+    }
+    return msgWidget;
+  }
+
+  Widget _buildPinnedItemBody(HollowTheme hollow, ChannelChatMessage msg) {
+    final attachment = msg.fileAttachment;
+    if (attachment != null) {
+      if (attachment.isImage &&
+          attachment.diskPath != null &&
+          File(attachment.diskPath!).existsSync()) {
+        return ClipRRect(
+          borderRadius: BorderRadius.circular(hollow.radiusSm),
+          child: _gifAwareImage(attachment.diskPath!, height: 80),
+        );
+      }
+      return Text(
+        _messagePreviewText(msg),
+        style: HollowTypography.body.copyWith(
+          color: hollow.textSecondary,
+        ),
+      );
+    }
+    return Text(
+      msg.text.startsWith('[file:') ? '📎 File' : msg.text,
+      style: HollowTypography.body.copyWith(
+        color: hollow.textPrimary,
+      ),
+      maxLines: 3,
+      overflow: TextOverflow.ellipsis,
     );
   }
 
@@ -583,24 +601,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
 
   void _updateMentionAutocomplete(String text) {
     final cursor = _controller.selection.baseOffset;
-    if (cursor < 0) {
-      _dismissMentionOverlay();
-      return;
-    }
-
-    // Scan backward from cursor to find '@' preceded by space/newline/start.
-    int atPos = -1;
-    for (int i = cursor - 1; i >= 0; i--) {
-      final c = text[i];
-      if (c == '@') {
-        if (i == 0 || text[i - 1] == ' ' || text[i - 1] == '\n') {
-          atPos = i;
-        }
-        break;
-      }
-      if (c == ' ' || c == '\n') break;
-    }
-
+    final atPos = cursor < 0 ? -1 : _mentionTriggerIndex(text, cursor);
     if (atPos < 0) {
       _dismissMentionOverlay();
       return;
@@ -609,7 +610,35 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
     final query = text.substring(atPos + 1, cursor).toLowerCase();
     _mentionAtPosition = atPos;
 
-    // Build candidates from server members.
+    final candidates = _mentionCandidatesFor(query);
+    if (candidates.isEmpty) {
+      _dismissMentionOverlay();
+      return;
+    }
+
+    _mentionCandidates = candidates.take(6).toList();
+    _mentionSelectedIndex = _mentionSelectedIndex.clamp(
+        0, _mentionCandidates.length - 1);
+    _showMentionOverlay();
+  }
+
+  /// Scan backward from [cursor] for an '@' that starts a mention (preceded
+  /// by start-of-text, space, or newline). -1 = no active mention trigger.
+  int _mentionTriggerIndex(String text, int cursor) {
+    for (int i = cursor - 1; i >= 0; i--) {
+      final c = text[i];
+      if (c == '@') {
+        final startsWord = i == 0 || text[i - 1] == ' ' || text[i - 1] == '\n';
+        return startsWord ? i : -1;
+      }
+      if (c == ' ' || c == '\n') return -1;
+    }
+    return -1;
+  }
+
+  /// Candidates for the mention query: matching server members (by display
+  /// name, server nickname, or profile name) plus @everyone.
+  List<_MentionCandidate> _mentionCandidatesFor(String query) {
     final membersAsync = ref.read(serverMembersProvider(widget.serverId));
     final profiles = ref.read(profileProvider);
     final nicknames = ref.read(serverNicknamesProvider(widget.serverId));
@@ -617,28 +646,8 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
 
     membersAsync.whenData((members) {
       for (final m in members) {
-        final displayName = serverDisplayNameFor(
-          profiles, m.peerId, nickname: nicknames[m.peerId] ?? '',
-        );
-        final serverNick = nicknames[m.peerId] ?? '';
-        final profileName = profiles[m.peerId]?.displayName ?? '';
-
-        final matchesDisplay =
-            displayName.toLowerCase().startsWith(query);
-        final matchesNick = serverNick.isNotEmpty &&
-            serverNick.toLowerCase().startsWith(query);
-        final matchesProfile = profileName.isNotEmpty &&
-            profileName.toLowerCase().startsWith(query);
-
-        if (query.isEmpty || matchesDisplay || matchesNick || matchesProfile) {
-          candidates.add(_MentionCandidate(
-            peerId: m.peerId,
-            displayName: displayName,
-            subtitle: serverNick.isNotEmpty && serverNick != displayName
-                ? profileName.isNotEmpty ? profileName : null
-                : serverNick.isNotEmpty ? serverNick : null,
-          ));
-        }
+        final candidate = _mentionCandidateFor(m, query, profiles, nicknames);
+        if (candidate != null) candidates.add(candidate);
       }
     });
 
@@ -650,16 +659,38 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
         subtitle: 'Notify all members',
       ));
     }
+    return candidates;
+  }
 
-    if (candidates.isEmpty) {
-      _dismissMentionOverlay();
-      return;
+  _MentionCandidate? _mentionCandidateFor(
+    crdt_api.MemberFfi m,
+    String query,
+    Map<String, storage_api.UserProfile> profiles,
+    Map<String, String> nicknames,
+  ) {
+    final displayName = serverDisplayNameFor(
+      profiles, m.peerId, nickname: nicknames[m.peerId] ?? '',
+    );
+    final serverNick = nicknames[m.peerId] ?? '';
+    final profileName = profiles[m.peerId]?.displayName ?? '';
+
+    final matches = query.isEmpty ||
+        displayName.toLowerCase().startsWith(query) ||
+        (serverNick.isNotEmpty && serverNick.toLowerCase().startsWith(query)) ||
+        (profileName.isNotEmpty && profileName.toLowerCase().startsWith(query));
+    if (!matches) return null;
+
+    final String? subtitle;
+    if (serverNick.isNotEmpty && serverNick != displayName) {
+      subtitle = profileName.isNotEmpty ? profileName : null;
+    } else {
+      subtitle = serverNick.isNotEmpty ? serverNick : null;
     }
-
-    _mentionCandidates = candidates.take(6).toList();
-    _mentionSelectedIndex = _mentionSelectedIndex.clamp(
-        0, _mentionCandidates.length - 1);
-    _showMentionOverlay();
+    return _MentionCandidate(
+      peerId: m.peerId,
+      displayName: displayName,
+      subtitle: subtitle,
+    );
   }
 
   void _showMentionOverlay() {
@@ -1137,57 +1168,8 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
   }
 
   Future<void> _saveFile(FileAttachment attachment) async {
-    if (_isPicking) return;
-    _isPicking = true;
-    try {
-      final isImage = attachment.isImage;
-      final isGif = attachment.fileExt.toLowerCase() == 'gif';
-      final allowedExtensions = isImage
-          ? ['png', 'jpg', 'jpeg', 'webp', 'gif']
-          : [attachment.fileExt];
-
-      final baseName = attachment.fileName.contains('.')
-          ? attachment.fileName.substring(0, attachment.fileName.lastIndexOf('.'))
-          : attachment.fileName;
-
-      final savePath = await FilePicker.platform.saveFile(
-        dialogTitle: 'Save file',
-        fileName: isImage ? (isGif ? '$baseName.gif' : '$baseName.png') : attachment.fileName,
-        type: FileType.custom,
-        allowedExtensions: allowedExtensions,
-      );
-      if (savePath == null || attachment.diskPath == null) return;
-
-      final targetExt = savePath.contains('.')
-          ? savePath.split('.').last.toLowerCase()
-          : attachment.fileExt;
-
-      if (isImage && targetExt != 'webp' && attachment.fileExt == 'webp') {
-        final converted = await network_api.convertImageFormat(
-          sourcePath: attachment.diskPath!,
-          targetFormat: targetExt,
-        );
-        await File(savePath).writeAsBytes(converted);
-      } else {
-        await File(attachment.diskPath!).copy(savePath);
-      }
-
-      ref.read(downloadManagerStateProvider.notifier).recordSavedFile(
-            savedPath: savePath,
-            isImage: isImage,
-            isVideo: attachment.videoThumb != null,
-          );
-
-      if (mounted) {
-        HollowToast.show(context, 'File saved', type: HollowToastType.success);
-      }
-    } catch (e) {
-      if (mounted) {
-        HollowToast.show(context, 'Save failed: $e', type: HollowToastType.error);
-      }
-    } finally {
-      _isPicking = false;
-    }
+    if (attachment.diskPath == null) return;
+    await _saveAttachmentAs(attachment.diskPath!, attachment);
   }
 
   /// Request a file from the original sender via P2P stream (for <6 member servers).
@@ -1227,53 +1209,51 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
         HollowToast.show(context, 'Reconstructing video from shards...',
             type: HollowToastType.info);
       }
-
-      // 1. Trigger vault download for the underlying video.
-      final cachedPath = await crdt_api.vaultDownloadFile(
-        serverId: widget.serverId,
-        contentId: vthumb.cid,
+      final cachePath = await _vaultFetchToCache(vthumb.cid);
+      if (cachePath == null || !mounted) return;
+      await _saveCacheFileWithName(
+        cachePath: cachePath,
+        saveFileName: vthumb.name,
+        fileExt: vthumb.ext,
       );
-
-      if (cachedPath.isNotEmpty) {
-        // Cache hit — open Save As immediately.
-        if (mounted) {
-          await _saveCacheFileWithName(
-            cachePath: cachedPath,
-            saveFileName: vthumb.name,
-            fileExt: vthumb.ext,
-          );
-        }
-        return;
-      }
-
-      // 2. Async reconstruction in flight — wait up to 60 seconds for
-      // VaultDownloadComplete (lands in fileTransferProvider keyed by contentId).
-      for (int i = 0; i < 120; i++) {
-        await Future.delayed(const Duration(milliseconds: 500));
-        if (!mounted) return;
-        final transfers = ref.read(fileTransferProvider);
-        final match = transfers.values.where(
-          (t) => t.contentId == vthumb.cid && t.diskPath != null && t.diskPath!.isNotEmpty,
-        );
-        if (match.isNotEmpty) {
-          await _saveCacheFileWithName(
-            cachePath: match.first.diskPath!,
-            saveFileName: vthumb.name,
-            fileExt: vthumb.ext,
-          );
-          return;
-        }
-      }
-      if (mounted) {
-        HollowToast.show(context, 'Download timed out — not enough peers online',
-            type: HollowToastType.error);
-      }
     } catch (e) {
       if (mounted) {
         HollowToast.show(context, 'Download failed: $e',
             type: HollowToastType.error);
       }
     }
+  }
+
+  /// Reconstruct vault content into the local cache and return its path —
+  /// immediate on cache hit, else polls the async shard reconstruction
+  /// (VaultDownloadComplete lands in fileTransferProvider keyed by contentId)
+  /// for up to 60 seconds. Null = timed out (toasted here) or unmounted.
+  Future<String?> _vaultFetchToCache(String contentId) async {
+    // Trigger vault download (shard reconstruction).
+    final cachedPath = await crdt_api.vaultDownloadFile(
+      serverId: widget.serverId,
+      contentId: contentId,
+    );
+    if (cachedPath.isNotEmpty) return cachedPath;
+
+    // Async reconstruction in flight — poll for completion.
+    for (int i = 0; i < 120; i++) {
+      await Future.delayed(const Duration(milliseconds: 500));
+      if (!mounted) return null;
+      final transfers = ref.read(fileTransferProvider);
+      final match = transfers.values.where(
+        (t) =>
+            t.contentId == contentId &&
+            t.diskPath != null &&
+            t.diskPath!.isNotEmpty,
+      );
+      if (match.isNotEmpty) return match.first.diskPath!;
+    }
+    if (mounted) {
+      HollowToast.show(context, 'Download timed out — not enough peers online',
+          type: HollowToastType.error);
+    }
+    return null;
   }
 
   /// Open Save As dialog with the supplied default filename + extension,
@@ -1318,8 +1298,9 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
   Future<void> _vaultDownloadAndSave(FileAttachment attachment) async {
     if (_isPicking) return;
     try {
-      // 1. Look up vault content_id for this file.
-      final contentId = await storage_api.getContentIdForFile(fileId: attachment.fileId);
+      // Look up vault content_id for this file.
+      final contentId =
+          await storage_api.getContentIdForFile(fileId: attachment.fileId);
       if (contentId == null || contentId.isEmpty) {
         if (mounted) {
           HollowToast.show(context, 'File not available for vault download',
@@ -1333,38 +1314,9 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
             type: HollowToastType.info);
       }
 
-      // 2. Trigger vault download (shard reconstruction).
-      final cachedPath = await crdt_api.vaultDownloadFile(
-        serverId: widget.serverId,
-        contentId: contentId,
-      );
-
-      if (cachedPath.isNotEmpty) {
-        // Cache hit — file already reconstructed. Open Save As immediately.
-        if (mounted) {
-          _saveFileFromCachePath(cachedPath, attachment);
-        }
-      } else {
-        // Async reconstruction started — wait for VaultDownloadComplete event.
-        // Poll fileTransferProvider for completion (up to 60 seconds).
-        for (int i = 0; i < 120; i++) {
-          await Future.delayed(const Duration(milliseconds: 500));
-          if (!mounted) return;
-          final transfers = ref.read(fileTransferProvider);
-          // Find any transfer with matching contentId and a diskPath.
-          final match = transfers.values.where(
-            (t) => t.contentId == contentId && t.diskPath != null && t.diskPath!.isNotEmpty,
-          );
-          if (match.isNotEmpty) {
-            _saveFileFromCachePath(match.first.diskPath!, attachment);
-            return;
-          }
-        }
-        if (mounted) {
-          HollowToast.show(context, 'Download timed out — not enough peers online',
-              type: HollowToastType.error);
-        }
-      }
+      final cachePath = await _vaultFetchToCache(contentId);
+      if (cachePath == null || !mounted) return;
+      await _saveAttachmentAs(cachePath, attachment);
     } catch (e) {
       if (mounted) {
         HollowToast.show(context, 'Download failed: $e',
@@ -1373,8 +1325,10 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
     }
   }
 
-  /// Open Save As dialog for a file at the given cache path.
-  Future<void> _saveFileFromCachePath(String cachePath, FileAttachment attachment) async {
+  /// Open Save As for [attachment], copying (or format-converting) from
+  /// [sourcePath] — the attachment's own disk path or a vault cache path.
+  Future<void> _saveAttachmentAs(
+      String sourcePath, FileAttachment attachment) async {
     if (_isPicking) return;
     _isPicking = true;
     try {
@@ -1402,12 +1356,12 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
 
       if (isImage && targetExt != 'webp' && attachment.fileExt == 'webp') {
         final converted = await network_api.convertImageFormat(
-          sourcePath: cachePath,
+          sourcePath: sourcePath,
           targetFormat: targetExt,
         );
         await File(savePath).writeAsBytes(converted);
       } else {
-        await File(cachePath).copy(savePath);
+        await File(sourcePath).copy(savePath);
       }
 
       ref.read(downloadManagerStateProvider.notifier).recordSavedFile(
@@ -1464,11 +1418,6 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
     // rebuild this whole pane (the map is replaced wholesale per insert).
     final allMessages =
         ref.watch(channelChatProvider.select((m) => m[_stateKey])) ?? [];
-    // Slow mode: the cooldown is derived from my newest message in this list
-    // (history load, my optimistic send, sibling-device sends all count).
-    ref.listen<List<ChannelChatMessage>?>(
-        channelChatProvider.select((m) => m[_stateKey]),
-        (_, __) => _recomputeSlowMode());
     // While the user reads history the display is frozen — arrivals are held
     // back (see the reversed-list scroll model above).
     // Rebuild when the block list (or device→master links) change so
@@ -1476,6 +1425,8 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
     ref.watch(blockedUsersProvider);
     ref.watch(deviceLinkProvider);
     final messages = _displayMessages(allMessages);
+
+    _registerBuildListeners();
 
     // If cache was cleared by sync (clearServerCache) and we have no messages,
     // reload from DB. This catches the case where sync completed while we
@@ -1487,60 +1438,516 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
       });
     }
 
+    final typingPeers =
+        ref.watch(typingProvider.select((t) => t[_stateKey])) ?? {};
+
+    // Custom-emote pull source for every token/reaction in this channel:
+    // ask one online member of the server room.
+    return EmoteScope(
+      serverId: widget.serverId,
+      child: ChatDropZone(
+        onFileDropped: _handleDroppedFile,
+        child: Column(
+          children: [
+            _buildHeader(hollow),
+
+            if (ref.watch(channelSearchOpenProvider)) _buildSearchBar(hollow),
+
+            _buildMessageArea(hollow, messages, allMessages),
+
+            if (typingPeers.isNotEmpty) _buildTypingBar(typingPeers),
+
+            if (_replyToMessageId != null) _buildReplyPreviewBar(hollow),
+            if (_stagedFilePath != null) _buildStagedFilePreview(hollow),
+            if (_stagedHollowLink != null)
+              StagedHollowLinkCard(
+                link: _stagedHollowLink!,
+                onDismiss: () {
+                  _urlDebounce?.cancel();
+                  setState(() {
+                    _stagedPreviewUrl = null;
+                    _stagedHollowLink = null;
+                  });
+                },
+              )
+            else if (_stagedPreviewUrl != null)
+              StagedLinkPreviewCard(
+                url: _stagedPreviewUrl!,
+                preview: _stagedPreview,
+                loading: _stagedPreviewLoading,
+                onDismiss: () {
+                  _urlDebounce?.cancel();
+                  setState(() {
+                    _stagedPreviewUrl = null;
+                    _stagedPreview = null;
+                    _stagedPreviewLoading = false;
+                  });
+                },
+              ),
+
+            _buildInputBar(hollow),
+          ],
+        ),
+      ),
+    ); // EmoteScope
+  }
+
+  /// All build-time ref.listen registrations. Must be invoked from build()
+  /// every frame — Riverpod re-registers listeners per build and silently
+  /// no-ops registrations made anywhere else (e.g. initState).
+  void _registerBuildListeners() {
+    // Slow mode: the cooldown is derived from my newest message in this list
+    // (history load, my optimistic send, sibling-device sends all count).
+    ref.listen<List<ChannelChatMessage>?>(
+        channelChatProvider.select((m) => m[_stateKey]),
+        (_, _) => _recomputeSlowMode());
     // New-message handling under the reversed list: following (at bottom) →
     // instant re-pin to the newest row; reading history → freeze the display
     // (the unread pill takes over) so the view never shifts mid-read.
-    ref.listen<Map<String, List<ChannelChatMessage>>>(channelChatProvider,
-        (prev, next) {
-      final prevLen = (prev?[_stateKey] ?? const []).length;
-      final nextLen = (next[_stateKey] ?? const []).length;
-      if (nextLen <= prevLen) return;
-      if (_frozenLen != null) return; // already frozen — held back + pill
-      if (!_isNearBottom) {
-        // Scroll-away raced the freeze transition — freeze at the pre-growth
-        // length so this arrival is held back too.
-        _frozenLen = prevLen;
-        return;
-      }
-      _jumpToBottom();
-    });
-
+    ref.listen<Map<String, List<ChannelChatMessage>>>(
+        channelChatProvider, _onMessageListGrowth);
     // Focus-return mark-seen: a message arriving while the window is
     // unfocused counts as unread (the isViewingChannel gate requires focus),
     // and if this channel was ALREADY open at the bottom nothing else clears
     // it — the scroll handler only marks seen on a bottom re-ENTRY. See the
     // matching listener in chat_pane.dart.
-    ref.listen<bool>(windowFocusedProvider, (prev, focused) {
-      if (!focused || prev == true) return;
-      if (!_isNearBottom || _frozenLen != null) return;
-      final msgs = ref.read(channelChatProvider)[_stateKey];
-      if (msgs == null || msgs.isEmpty) return;
-      ref.read(unreadProvider.notifier).markChannelSeen(
-          widget.serverId, widget.channelId, msgs.last.messageId);
-    });
-
+    ref.listen<bool>(windowFocusedProvider, _onWindowFocusChanged);
     // Focus search field when opened via global shortcut (Ctrl+K).
-    ref.listen(channelSearchOpenProvider, (prev, next) {
-      if (next && !(prev ?? false)) {
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          _searchFocusNode.requestFocus();
-        });
-      }
-      if (!next && (prev ?? false)) {
-        // Closing — clear search state.
-        _searchController.clear();
-        setState(() => _searchResults = []);
-      }
+    ref.listen<bool>(channelSearchOpenProvider, _onSearchOpenChanged);
+  }
+
+  void _onMessageListGrowth(Map<String, List<ChannelChatMessage>>? prev,
+      Map<String, List<ChannelChatMessage>> next) {
+    final prevLen = (prev?[_stateKey] ?? const []).length;
+    final nextLen = (next[_stateKey] ?? const []).length;
+    if (nextLen <= prevLen) return;
+    if (_frozenLen != null) return; // already frozen — held back + pill
+    if (!_isNearBottom) {
+      // Scroll-away raced the freeze transition — freeze at the pre-growth
+      // length so this arrival is held back too.
+      _frozenLen = prevLen;
+      return;
+    }
+    _jumpToBottom();
+  }
+
+  void _onWindowFocusChanged(bool? prev, bool focused) {
+    if (!focused || prev == true) return;
+    if (!_isNearBottom || _frozenLen != null) return;
+    final msgs = ref.read(channelChatProvider)[_stateKey];
+    if (msgs == null || msgs.isEmpty) return;
+    ref.read(unreadProvider.notifier).markChannelSeen(
+        widget.serverId, widget.channelId, msgs.last.messageId);
+  }
+
+  void _onSearchOpenChanged(bool? prev, bool next) {
+    if (next && !(prev ?? false)) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _searchFocusNode.requestFocus();
+      });
+    }
+    if (!next && (prev ?? false)) {
+      // Closing — clear search state.
+      _searchController.clear();
+      setState(() => _searchResults = []);
+    }
+  }
+
+  /// Channel header: name, badges, connection status, and pane actions.
+  Widget _buildHeader(HollowTheme hollow) {
+    return Container(
+      padding: const EdgeInsets.symmetric(
+        horizontal: HollowSpacing.lg,
+        vertical: HollowSpacing.sm + 2,
+      ),
+      decoration: BoxDecoration(
+        color: hollow.surface,
+        border: Border(bottom: BorderSide(color: hollow.border)),
+      ),
+      child: Row(
+        children: [
+          Icon(_isConference ? LucideIcons.video : LucideIcons.hash,
+              size: 20, color: hollow.textSecondary),
+          const SizedBox(width: HollowSpacing.sm),
+          Expanded(
+            child: Text(
+              widget.channelName,
+              style: HollowTypography.subheading.copyWith(
+                color: hollow.textPrimary,
+                fontWeight: FontWeight.w600,
+              ),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+          if (_isConference) ...[
+            const SizedBox(width: HollowSpacing.sm),
+            HollowTooltip(
+              message:
+                  "Meeting chat isn't stored — it disappears when the meeting ends",
+              child: Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: HollowSpacing.sm,
+                  vertical: 2,
+                ),
+                decoration: BoxDecoration(
+                  color: hollow.accent.withValues(alpha: 0.12),
+                  borderRadius: BorderRadius.circular(hollow.radiusSm),
+                ),
+                child: Text(
+                  'Ephemeral',
+                  style: HollowTypography.caption.copyWith(
+                    color: hollow.accentText,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+            ),
+          ],
+          if (ref.watch(serverIsNsfwProvider(widget.serverId)).valueOrNull ??
+              false) ...[
+            const SizedBox(width: HollowSpacing.sm),
+            const _NsfwBadge(),
+          ],
+          const SizedBox(width: HollowSpacing.md),
+          _ChannelConnectionStatus(
+            serverId: widget.serverId,
+            channelId: widget.channelId,
+          ),
+          _buildPinnedHeaderButton(hollow),
+          const SizedBox(width: HollowSpacing.sm),
+          _buildSearchToggleButton(hollow),
+          // Members + split view are server concepts — a conference has
+          // neither (participants show in the call area).
+          if (!_isConference) ...[
+            const SizedBox(width: HollowSpacing.sm),
+            HollowTooltip(
+              message: 'Toggle member panel',
+              child: HollowPressable(
+                semanticLabel: 'Toggle member panel',
+                onTap: () => ref.read(memberPanelProvider.notifier).state =
+                    !ref.read(memberPanelProvider),
+                borderRadius: BorderRadius.circular(hollow.radiusSm),
+                padding: const EdgeInsets.all(HollowSpacing.xs),
+                child: Icon(
+                  LucideIcons.users,
+                  size: 20,
+                  color: ref.watch(memberPanelProvider)
+                      ? hollow.accent
+                      : hollow.textSecondary,
+                ),
+              ),
+            ),
+          ],
+          // Split view toggle (dock mode only)
+          if (!_isConference &&
+              (ref.watch(layoutModeProvider).valueOrNull ?? LayoutMode.dock) ==
+                  LayoutMode.dock) ...[
+            const SizedBox(width: HollowSpacing.sm),
+            _buildSplitToggleButton(hollow),
+          ],
+        ],
+      ),
+    );
+  }
+
+  /// Pin-count button — hidden while nothing is pinned in this channel.
+  Widget _buildPinnedHeaderButton(HollowTheme hollow) {
+    final pinKey = '${widget.serverId}:${widget.channelId}';
+    final pinnedIds = ref.watch(pinnedProvider)[pinKey] ?? [];
+    if (pinnedIds.isEmpty) return const SizedBox.shrink();
+    final label =
+        '${pinnedIds.length} pinned message${pinnedIds.length == 1 ? '' : 's'}';
+    return HollowTooltip(
+      message: label,
+      child: HollowPressable(
+        semanticLabel: label,
+        onTap: () => _showPinnedMessages(context, hollow, pinnedIds),
+        borderRadius: BorderRadius.circular(hollow.radiusSm),
+        padding: const EdgeInsets.all(HollowSpacing.xs),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(LucideIcons.pin, size: 16, color: hollow.accent),
+            const SizedBox(width: 2),
+            Text(
+              '${pinnedIds.length}',
+              style: HollowTypography.caption.copyWith(
+                color: hollow.accent,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildSearchToggleButton(HollowTheme hollow) {
+    return HollowTooltip(
+      message: 'Search messages',
+      child: HollowPressable(
+        semanticLabel: 'Search messages',
+        onTap: () {
+          final current = ref.read(channelSearchOpenProvider);
+          ref.read(channelSearchOpenProvider.notifier).state = !current;
+          if (!current) {
+            // Opening — focus the search field after build.
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              _searchFocusNode.requestFocus();
+            });
+          }
+        },
+        borderRadius: BorderRadius.circular(hollow.radiusSm),
+        padding: const EdgeInsets.all(HollowSpacing.xs),
+        child: Icon(
+          LucideIcons.search,
+          size: 18,
+          color: ref.watch(channelSearchOpenProvider)
+              ? hollow.accent
+              : hollow.textSecondary,
+        ),
+      ),
+    );
+  }
+
+  Widget _buildSplitToggleButton(HollowTheme hollow) {
+    final isSplit = ref.watch(splitViewProvider).isSplit;
+    final label = isSplit ? 'Close this pane' : 'Split view';
+    return HollowTooltip(
+      message: label,
+      child: HollowPressable(
+        semanticLabel: label,
+        onTap: _handleSplitToggle,
+        borderRadius: BorderRadius.circular(hollow.radiusSm),
+        padding: const EdgeInsets.all(HollowSpacing.xs),
+        child: Icon(
+          LucideIcons.columns,
+          size: 18,
+          color: isSplit ? hollow.accent : hollow.textSecondary,
+        ),
+      ),
+    );
+  }
+
+  /// In-channel message search: query field + up to 20 tappable results.
+  Widget _buildSearchBar(HollowTheme hollow) {
+    return Container(
+      padding: const EdgeInsets.symmetric(
+        horizontal: HollowSpacing.md,
+        vertical: HollowSpacing.sm,
+      ),
+      decoration: BoxDecoration(
+        color: hollow.surface,
+        border: Border(bottom: BorderSide(color: hollow.border)),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          HollowTextField(
+            controller: _searchController,
+            focusNode: _searchFocusNode,
+            hintText: 'Search in #${widget.channelName}...',
+            autofocus: true,
+            isDense: true,
+            prefixIcon: const Icon(LucideIcons.search, size: 16),
+            onChanged: _onSearch,
+            style: HollowTypography.body.copyWith(
+              color: hollow.textPrimary,
+              fontSize: 13,
+            ),
+          ),
+          if (_searchResults.isNotEmpty)
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxHeight: 200),
+              child: ListView.builder(
+                shrinkWrap: true,
+                itemCount: _searchResults.length,
+                itemBuilder: (_, index) =>
+                    _buildSearchResultTile(hollow, _searchResults[index]),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSearchResultTile(HollowTheme hollow, dynamic msg) {
+    // Collapse device→master so search results show the person's
+    // name (not a raw device id). Single-device → no-op.
+    final searchMaster =
+        ref.watch(deviceLinkProvider).identityOf(msg.senderId);
+    final senderProfile =
+        ref.watch(profileProvider.select((p) => p[searchMaster]));
+    final senderNickname = ref.watch(serverNicknamesProvider(widget.serverId)
+        .select((n) => n[searchMaster]));
+    final name = serverDisplayNameForPeer(
+      senderProfile,
+      searchMaster,
+      nickname: senderNickname ?? '',
+    );
+    final time = DateTime.fromMillisecondsSinceEpoch(msg.timestamp);
+    return Padding(
+      padding: const EdgeInsets.only(top: HollowSpacing.xs),
+      child: HollowPressable(
+        subtle: true,
+        onTap: () => _jumpToSearchResult(msg),
+        borderRadius: BorderRadius.circular(hollow.radiusSm),
+        hoverColor: hollow.elevated,
+        padding: const EdgeInsets.symmetric(
+          horizontal: HollowSpacing.sm,
+          vertical: HollowSpacing.xs,
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Text(
+                  name,
+                  style: HollowTypography.caption.copyWith(
+                    color: hollow.accent,
+                    fontWeight: FontWeight.w600,
+                    fontSize: 11,
+                  ),
+                ),
+                const SizedBox(width: HollowSpacing.sm),
+                Text(
+                  _hhmm(time),
+                  style: HollowTypography.caption.copyWith(
+                    color: hollow.textSecondary.withValues(alpha: 0.5),
+                    fontSize: 10,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 2),
+            Text(
+              msg.text,
+              style: HollowTypography.body.copyWith(
+                color: hollow.textPrimary,
+                fontSize: 12,
+              ),
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// Close search and scroll the list to the tapped result — index against
+  /// the DISPLAY (possibly frozen) list, which _scrollToMessage also uses.
+  void _jumpToSearchResult(dynamic msg) {
+    final messages =
+        _displayMessages(ref.read(channelChatProvider)[_stateKey] ?? []);
+    final idx = messages.indexWhere((m) => m.messageId == msg.messageId);
+    ref.read(channelSearchOpenProvider.notifier).state = false;
+    setState(() {
+      _searchController.clear();
+      _searchResults = [];
     });
+    if (idx != -1) _scrollToMessage(idx);
+  }
 
-    final typingPeers =
-        ref.watch(typingProvider.select((t) => t[_stateKey])) ?? {};
-    final profiles = ref.watch(profileProvider);
-    final nicknames = ref.watch(serverNicknamesProvider(widget.serverId));
+  /// Message list area: permission gate, empty state, the reversed list, and
+  /// the unread-pill overlay.
+  Widget _buildMessageArea(
+    HollowTheme hollow,
+    List<ChannelChatMessage> messages,
+    List<ChannelChatMessage> allMessages,
+  ) {
+    final perms =
+        ref.watch(myPermissionsProvider(widget.serverId)).valueOrNull ??
+            Permission.all;
+    if (perms & Permission.readMessages == 0) {
+      return Expanded(
+        child: Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(LucideIcons.eyeOff,
+                  size: 48, color: hollow.textSecondary.withValues(alpha: 0.3)),
+              const SizedBox(height: HollowSpacing.md),
+              Text(
+                'You don\'t have permission to read messages in this channel',
+                style:
+                    HollowTypography.body.copyWith(color: hollow.textSecondary),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+    return Expanded(
+      child: Stack(
+        children: [
+          _buildMessageListLayer(hollow, messages),
+          _buildUnreadPillOverlay(allMessages),
+        ],
+      ),
+    );
+  }
 
+  Widget _buildMessageListLayer(
+      HollowTheme hollow, List<ChannelChatMessage> messages) {
+    return MessageActionBarScope(
+      child: Builder(
+        builder: (scopeContext) => NotificationListener<ScrollNotification>(
+          onNotification: (notification) {
+            if (notification is ScrollUpdateNotification) {
+              MessageActionBarScope.of(scopeContext)?.dismissAll();
+            }
+            return false;
+          },
+          child: Container(
+            color: hollow.background,
+            child: messages.isEmpty
+                ? (_historyLoaded
+                    ? _buildEmptyChannelState(hollow)
+                    : const SizedBox.shrink())
+                : _buildMessageList(hollow, messages),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildEmptyChannelState(HollowTheme hollow) {
+    return Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(
+            LucideIcons.hash,
+            size: 64,
+            color: hollow.textSecondary.withValues(alpha: 0.3),
+          ),
+          const SizedBox(height: HollowSpacing.lg),
+          Text(
+            'Welcome to #${widget.channelName}',
+            style: HollowTypography.heading.copyWith(color: hollow.textPrimary),
+          ),
+          const SizedBox(height: HollowSpacing.sm),
+          Text(
+            'This is the beginning of the channel.',
+            style: HollowTypography.body.copyWith(color: hollow.textSecondary),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// The reversed message list (see the scroll-model comment above
+  /// [_frozenLen]) plus the per-build row precomputes.
+  Widget _buildMessageList(
+      HollowTheme hollow, List<ChannelChatMessage> messages) {
     // Precomputed once per build instead of per ROW per rebuild:
     // reply-target index (was an O(n) indexWhere scan per reply row) and the
     // local mention needles (was a profile+nickname provider read per row).
+    final profiles = ref.watch(profileProvider);
+    final nicknames = ref.watch(serverNicknamesProvider(widget.serverId));
     final replyIndexById = <String, int>{
       for (var i = 0; i < messages.length; i++)
         if (messages[i].messageId != null) messages[i].messageId!: i,
@@ -1553,1186 +1960,813 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
         (localNickRaw != null && localNickRaw.isNotEmpty)
             ? '@$localNickRaw'
             : null;
-
-    // Custom-emote pull source for every token/reaction in this channel:
-    // ask one online member of the server room.
-    return EmoteScope(
-      serverId: widget.serverId,
-      child: ChatDropZone(
-      onFileDropped: _handleDroppedFile,
-      child: Column(
-      children: [
-        // Channel header
-        Container(
+    return SelectionArea(
+      contextMenuBuilder: (_, _) => const SizedBox.shrink(),
+      child: ScrollConfiguration(
+        behavior: ScrollConfiguration.of(context).copyWith(scrollbars: false),
+        child: ScrollablePositionedList.builder(
+          key: ValueKey('ch-list-${widget.serverId}-${widget.channelId}'),
+          itemScrollController: _itemScrollController,
+          itemPositionsListener: _itemPositionsListener,
+          scrollOffsetController: _scrollOffsetController,
+          // reverse:true — the NEWEST message is builder index 0,
+          // pinned to the bottom edge. No sentinel row; appends
+          // while following never move the viewport.
+          reverse: true,
+          initialScrollIndex: 0,
+          initialAlignment: 0.0,
           padding: const EdgeInsets.symmetric(
-            horizontal: HollowSpacing.lg,
-            vertical: HollowSpacing.sm + 2,
-          ),
-          decoration: BoxDecoration(
-            color: hollow.surface,
-            border: Border(bottom: BorderSide(color: hollow.border)),
-          ),
-          child: Row(
-            children: [
-              Icon(_isConference ? LucideIcons.video : LucideIcons.hash,
-                  size: 20, color: hollow.textSecondary),
-              const SizedBox(width: HollowSpacing.sm),
-              Expanded(
-                child: Text(
-                  widget.channelName,
-                  style: HollowTypography.subheading.copyWith(
-                    color: hollow.textPrimary,
-                    fontWeight: FontWeight.w600,
-                  ),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ),
-              if (_isConference) ...[
-                const SizedBox(width: HollowSpacing.sm),
-                HollowTooltip(
-                  message:
-                      "Meeting chat isn't stored — it disappears when the meeting ends",
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: HollowSpacing.sm,
-                      vertical: 2,
-                    ),
-                    decoration: BoxDecoration(
-                      color: hollow.accent.withValues(alpha: 0.12),
-                      borderRadius: BorderRadius.circular(hollow.radiusSm),
-                    ),
-                    child: Text(
-                      'Ephemeral',
-                      style: HollowTypography.caption.copyWith(
-                        color: hollow.accentText,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                  ),
-                ),
-              ],
-              if (ref.watch(serverIsNsfwProvider(widget.serverId)).valueOrNull ??
-                  false) ...[
-                const SizedBox(width: HollowSpacing.sm),
-                const _NsfwBadge(),
-              ],
-              const SizedBox(width: HollowSpacing.md),
-              _ChannelConnectionStatus(
-                serverId: widget.serverId,
-                channelId: widget.channelId,
-              ),
-              Builder(builder: (context) {
-                final pinKey = '${widget.serverId}:${widget.channelId}';
-                final pinnedIds = ref.watch(pinnedProvider)[pinKey] ?? [];
-                if (pinnedIds.isEmpty) return const SizedBox.shrink();
-                return HollowTooltip(
-                  message: '${pinnedIds.length} pinned message${pinnedIds.length == 1 ? '' : 's'}',
-                  child: HollowPressable(
-                    semanticLabel:
-                        '${pinnedIds.length} pinned message${pinnedIds.length == 1 ? '' : 's'}',
-                    onTap: () => _showPinnedMessages(context, hollow, pinnedIds),
-                    borderRadius: BorderRadius.circular(hollow.radiusSm),
-                    padding: const EdgeInsets.all(HollowSpacing.xs),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(LucideIcons.pin, size: 16, color: hollow.accent),
-                        const SizedBox(width: 2),
-                        Text(
-                          '${pinnedIds.length}',
-                          style: HollowTypography.caption.copyWith(
-                            color: hollow.accent,
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                );
-              }),
-              const SizedBox(width: HollowSpacing.sm),
-              HollowTooltip(
-                message: 'Search messages',
-                child: HollowPressable(
-                  semanticLabel: 'Search messages',
-                  onTap: () {
-                    final current = ref.read(channelSearchOpenProvider);
-                    ref.read(channelSearchOpenProvider.notifier).state = !current;
-                    if (!current) {
-                      // Opening — focus the search field after build.
-                      WidgetsBinding.instance.addPostFrameCallback((_) {
-                        _searchFocusNode.requestFocus();
-                      });
-                    }
-                  },
-                  borderRadius: BorderRadius.circular(hollow.radiusSm),
-                  padding: const EdgeInsets.all(HollowSpacing.xs),
-                  child: Icon(
-                    LucideIcons.search,
-                    size: 18,
-                    color: ref.watch(channelSearchOpenProvider) ? hollow.accent : hollow.textSecondary,
-                  ),
-                ),
-              ),
-              // Members + split view are server concepts — a conference has
-              // neither (participants show in the call area).
-              if (!_isConference) ...[
-                const SizedBox(width: HollowSpacing.sm),
-                HollowTooltip(
-                  message: 'Toggle member panel',
-                  child: HollowPressable(
-                    semanticLabel: 'Toggle member panel',
-                    onTap: () => ref.read(memberPanelProvider.notifier).state =
-                        !ref.read(memberPanelProvider),
-                    borderRadius: BorderRadius.circular(hollow.radiusSm),
-                    padding: const EdgeInsets.all(HollowSpacing.xs),
-                    child: Icon(
-                      LucideIcons.users,
-                      size: 20,
-                      color: ref.watch(memberPanelProvider)
-                          ? hollow.accent
-                          : hollow.textSecondary,
-                    ),
-                  ),
-                ),
-              ],
-              // Split view toggle (dock mode only)
-              if (!_isConference &&
-                  (ref.watch(layoutModeProvider).valueOrNull ?? LayoutMode.dock) == LayoutMode.dock) ...[
-                const SizedBox(width: HollowSpacing.sm),
-                HollowTooltip(
-                  message: ref.watch(splitViewProvider).isSplit
-                      ? 'Close this pane'
-                      : 'Split view',
-                  child: HollowPressable(
-                    semanticLabel: ref.watch(splitViewProvider).isSplit
-                        ? 'Close this pane'
-                        : 'Split view',
-                    onTap: () => _handleSplitToggle(ref),
-                    borderRadius: BorderRadius.circular(hollow.radiusSm),
-                    padding: const EdgeInsets.all(HollowSpacing.xs),
-                    child: Icon(
-                      LucideIcons.columns,
-                      size: 18,
-                      color: ref.watch(splitViewProvider).isSplit
-                          ? hollow.accent
-                          : hollow.textSecondary,
-                    ),
-                  ),
-                ),
-              ],
-            ],
-          ),
-        ),
-
-        // Search bar
-        if (ref.watch(channelSearchOpenProvider))
-          Container(
-            padding: const EdgeInsets.symmetric(
-              horizontal: HollowSpacing.md,
-              vertical: HollowSpacing.sm,
-            ),
-            decoration: BoxDecoration(
-              color: hollow.surface,
-              border: Border(bottom: BorderSide(color: hollow.border)),
-            ),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                HollowTextField(
-                  controller: _searchController,
-                  focusNode: _searchFocusNode,
-                  hintText: 'Search in #${widget.channelName}...',
-                  autofocus: true,
-                  isDense: true,
-                  prefixIcon: const Icon(LucideIcons.search, size: 16),
-                  onChanged: _onSearch,
-                  style: HollowTypography.body.copyWith(
-                    color: hollow.textPrimary,
-                    fontSize: 13,
-                  ),
-                ),
-                if (_searchResults.isNotEmpty)
-                  ConstrainedBox(
-                    constraints: const BoxConstraints(maxHeight: 200),
-                    child: ListView.builder(
-                      shrinkWrap: true,
-                      itemCount: _searchResults.length,
-                      itemBuilder: (_, index) {
-                        final msg = _searchResults[index];
-                        // Collapse device→master so search results show the person's
-                        // name (not a raw device id). Single-device → no-op.
-                        final searchMaster = ref
-                            .watch(deviceLinkProvider)
-                            .identityOf(msg.senderId);
-                        final senderProfile = ref.watch(
-                            profileProvider.select((p) => p[searchMaster]));
-                        final senderNickname = ref.watch(
-                            serverNicknamesProvider(widget.serverId)
-                                .select((n) => n[searchMaster]));
-                        final name = serverDisplayNameForPeer(
-                          senderProfile,
-                          searchMaster,
-                          nickname: senderNickname ?? '',
-                        );
-                        final time = DateTime.fromMillisecondsSinceEpoch(
-                            msg.timestamp);
-                        final timeStr =
-                            '${time.hour.toString().padLeft(2, '0')}:${time.minute.toString().padLeft(2, '0')}';
-                        return Padding(
-                          padding: const EdgeInsets.only(
-                              top: HollowSpacing.xs),
-                          child: HollowPressable(
-                            subtle: true,
-                            onTap: () {
-                              // Scroll to the matched message in the list —
-                              // index against the DISPLAY (possibly frozen)
-                              // list, which _scrollToMessage also uses.
-                              final messages = _displayMessages(
-                                  ref.read(channelChatProvider)[_stateKey] ??
-                                      []);
-                              final idx = messages.indexWhere(
-                                  (m) => m.messageId == msg.messageId);
-                              ref.read(channelSearchOpenProvider.notifier).state = false;
-                              setState(() {
-                                _searchController.clear();
-                                _searchResults = [];
-                              });
-                              if (idx != -1) _scrollToMessage(idx);
-                            },
-                            borderRadius:
-                                BorderRadius.circular(hollow.radiusSm),
-                            hoverColor: hollow.elevated,
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: HollowSpacing.sm,
-                              vertical: HollowSpacing.xs,
-                            ),
-                            child: Column(
-                              crossAxisAlignment:
-                                  CrossAxisAlignment.start,
-                              children: [
-                                Row(
-                                  children: [
-                                    Text(
-                                      name,
-                                      style: HollowTypography.caption
-                                          .copyWith(
-                                        color: hollow.accent,
-                                        fontWeight: FontWeight.w600,
-                                        fontSize: 11,
-                                      ),
-                                    ),
-                                    const SizedBox(
-                                        width: HollowSpacing.sm),
-                                    Text(
-                                      timeStr,
-                                      style: HollowTypography.caption
-                                          .copyWith(
-                                        color: hollow.textSecondary
-                                            .withValues(alpha: 0.5),
-                                        fontSize: 10,
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                                const SizedBox(height: 2),
-                                Text(
-                                  msg.text,
-                                  style: HollowTypography.body.copyWith(
-                                    color: hollow.textPrimary,
-                                    fontSize: 12,
-                                  ),
-                                  maxLines: 2,
-                                  overflow: TextOverflow.ellipsis,
-                                ),
-                              ],
-                            ),
-                          ),
-                        );
-                      },
-                    ),
-                  ),
-              ],
-            ),
-          ),
-
-        // Messages list + unread pill overlay
-        if ((ref.watch(myPermissionsProvider(widget.serverId)).valueOrNull ?? Permission.all) & Permission.readMessages == 0)
-          Expanded(
-            child: Center(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(LucideIcons.eyeOff, size: 48, color: hollow.textSecondary.withValues(alpha: 0.3)),
-                  const SizedBox(height: HollowSpacing.md),
-                  Text(
-                    'You don\'t have permission to read messages in this channel',
-                    style: HollowTypography.body.copyWith(color: hollow.textSecondary),
-                  ),
-                ],
-              ),
-            ),
-          )
-        else
-        Expanded(
-          child: Stack(
-            children: [
-          MessageActionBarScope(
-          child: Builder(builder: (scopeContext) =>
-          NotificationListener<ScrollNotification>(
-            onNotification: (notification) {
-              if (notification is ScrollUpdateNotification) {
-                MessageActionBarScope.of(scopeContext)?.dismissAll();
-              }
-              return false;
-            },
-            child: Container(
-            color: hollow.background,
-            child: messages.isEmpty
-                ? (_historyLoaded
-                    ? Center(
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Icon(
-                              LucideIcons.hash,
-                              size: 64,
-                              color:
-                                  hollow.textSecondary.withValues(alpha: 0.3),
-                            ),
-                            const SizedBox(height: HollowSpacing.lg),
-                            Text(
-                              'Welcome to #${widget.channelName}',
-                              style: HollowTypography.heading
-                                  .copyWith(color: hollow.textPrimary),
-                            ),
-                            const SizedBox(height: HollowSpacing.sm),
-                            Text(
-                              'This is the beginning of the channel.',
-                              style: HollowTypography.body
-                                  .copyWith(color: hollow.textSecondary),
-                            ),
-                          ],
-                        ),
-                      )
-                    : const SizedBox.shrink())
-                : SelectionArea(
-                  contextMenuBuilder: (_, __) => const SizedBox.shrink(),
-                  child: ScrollConfiguration(
-                    behavior: ScrollConfiguration.of(context)
-                        .copyWith(scrollbars: false),
-                    child: ScrollablePositionedList.builder(
-                    key: ValueKey('ch-list-${widget.serverId}-${widget.channelId}'),
-                    itemScrollController: _itemScrollController,
-                    itemPositionsListener: _itemPositionsListener,
-                    scrollOffsetController: _scrollOffsetController,
-                    // reverse:true — the NEWEST message is builder index 0,
-                    // pinned to the bottom edge. No sentinel row; appends
-                    // while following never move the viewport.
-                    reverse: true,
-                    initialScrollIndex: 0,
-                    initialAlignment: 0.0,
-                    padding: const EdgeInsets.symmetric(
-                      vertical: HollowSpacing.sm,
-                    ),
-                    itemCount: messages.length,
-                    // Let the list MOVE row elements across index slots when
-                    // a new message shifts every revIndex by one — without
-                    // this each shift remounted every visible row (full-list
-                    // blink on every message).
-                    findChildIndexCallback: (key) {
-                      if (key is! ValueKey<Object>) return null;
-                      final id = key.value;
-                      if (id is! String) return null;
-                      final i = replyIndexById[id];
-                      if (i == null) return null;
-                      return messages.length - 1 - i;
-                    },
-                    itemBuilder: (context, revIndex) {
-                      // Map the reversed builder index back to chronological
-                      // order — all row logic below stays chronological.
-                      final index = messages.length - 1 - revIndex;
-                      final msg = messages[index];
-                      // Grouping: compare with the previous message in chronological
-                      // order. Multi-device: collapse each sender to its MASTER so a
-                      // person's messages from different devices (e.g. our own master
-                      // + sibling) group as ONE sender — otherwise a subdevice sees
-                      // two "Pixel" blocks for the same identity. `isMe` is folded
-                      // into the same-master test (own master == own sibling = us).
-                      final links = ref.watch(deviceLinkProvider);
-                      final curSender = links.identityOf(msg.senderId);
-                      final showHeader = index == 0 ||
-                          !shouldGroup(
-                            currentIsMe: false,
-                            previousIsMe: false,
-                            currentTime: msg.timestamp,
-                            previousTime: messages[index - 1].timestamp,
-                            currentSenderId: curSender,
-                            previousSenderId:
-                                links.identityOf(messages[index - 1].senderId),
-                          );
-                      final wrapper = MessageHoverWrapper(
-                        isMe: msg.isMe,
-                        messageId: msg.messageId,
-                        currentText: msg.text,
-                        isEditing: _editingMessageId != null &&
-                            _editingMessageId == msg.messageId,
-                        onEditStart: !_isConference && msg.messageId != null && msg.isMe && msg.fileAttachment == null
-                            ? () {
-                                // Positions + jumpTo are in the REVERSED
-                                // index space.
-                                final positions = _itemPositionsListener
-                                    .itemPositions.value;
-                                final current = positions
-                                    .where((p) => p.index == revIndex)
-                                    .firstOrNull;
-                                final alignment =
-                                    current?.itemLeadingEdge ?? 0.3;
-                                setState(() =>
-                                    _editingMessageId = msg.messageId);
-                                WidgetsBinding.instance
-                                    .addPostFrameCallback((_) {
-                                  if (!mounted ||
-                                      !_itemScrollController.isAttached) return;
-                                  _itemScrollController.jumpTo(
-                                    index: revIndex,
-                                    alignment: alignment,
-                                  );
-                                });
-                              }
-                            : null,
-                        onEditSubmit: (newText) {
-                          setState(() => _editingMessageId = null);
-                          ref
-                              .read(channelChatProvider.notifier)
-                              .editMessage(widget.serverId, widget.channelId,
-                                  msg.messageId!, newText);
-                        },
-                        onEditCancel: () =>
-                            setState(() => _editingMessageId = null),
-                        onDelete: !_isConference && msg.messageId != null && msg.isMe
-                            ? () => ref
-                                .read(channelChatProvider.notifier)
-                                .deleteMessage(widget.serverId,
-                                    widget.channelId, msg.messageId!)
-                            : null,
-                        onReply: !_isConference && msg.messageId != null
-                            ? () {
-                                // Collapse device→master so the reply banner shows
-                                // the person's name, not a raw device id.
-                                final replyMaster = links.identityOf(msg.senderId);
-                                final senderName = serverDisplayNameFor(
-                                  profiles,
-                                  replyMaster,
-                                  nickname: nicknames[replyMaster] ?? '',
-                                );
-                                setState(() {
-                                  _replyToMessageId = msg.messageId;
-                                  _replyToText = msg.fileAttachment != null
-                                      ? (msg.fileAttachment!.isImage ? '📷 Image' : '📎 ${msg.fileAttachment!.fileName}')
-                                      : msg.text;
-                                  _replyToSenderName = senderName;
-                                  _replyToImagePath = msg.fileAttachment?.isImage == true
-                                      ? msg.fileAttachment?.diskPath
-                                      : null;
-                                });
-                                _focusNode.requestFocus();
-                              }
-                            : null,
-                        onReaction: !_isConference && msg.messageId != null
-                            ? (emoji) {
-                                final localPeerId =
-                                    ref.read(identityProvider).peerId ?? '';
-                                final hasReacted =
-                                    msg.reactions[emoji]?.contains(localPeerId) ?? false;
-                                final notifier = ref.read(channelChatProvider.notifier);
-                                if (hasReacted) {
-                                  notifier.removeReaction(widget.serverId,
-                                      widget.channelId, msg.messageId!, emoji);
-                                } else {
-                                  notifier.addReaction(widget.serverId,
-                                      widget.channelId, msg.messageId!, emoji);
-                                }
-                              }
-                            : null,
-                        onPin: !_isConference && msg.messageId != null &&
-                                (ref.watch(myPermissionsProvider(widget.serverId)).whenOrNull(
-                                    data: (perms) => (perms & Permission.manageChannels) != 0) ?? false)
-                            ? () {
-                                final pins = ref.read(pinnedProvider)[
-                                    '${widget.serverId}:${widget.channelId}'] ?? [];
-                                if (pins.contains(msg.messageId)) {
-                                  crdt_api.unpinMessage(
-                                    serverId: widget.serverId,
-                                    channelId: widget.channelId,
-                                    messageId: msg.messageId!,
-                                  );
-                                } else {
-                                  crdt_api.pinMessage(
-                                    serverId: widget.serverId,
-                                    channelId: widget.channelId,
-                                    messageId: msg.messageId!,
-                                  );
-                                }
-                              }
-                            : null,
-                        onDownload: msg.fileAttachment != null
-                            ? () {
-                                // Don't trigger duplicate downloads during active transfer.
-                                final transfer = ref.read(fileTransferProvider)[msg.fileAttachment!.fileId];
-                                if (transfer != null && transfer.isDownloading) {
-                                  HollowToast.show(context, 'File is already downloading...', type: HollowToastType.info);
-                                  return;
-                                }
-
-                                // Phase 6.75 video preview: if this is a vault video
-                                // thumbnail, save the underlying VIDEO (not the thumbnail
-                                // .webp). The link lives in `videoThumb.cid` — fetch from
-                                // the vault and save with the original video filename.
-                                if (msg.fileAttachment!.videoThumb != null) {
-                                  _vaultDownloadAndSaveVideo(msg.fileAttachment!);
-                                } else if (msg.fileAttachment!.diskPath != null) {
-                                  _saveFile(msg.fileAttachment!);
-                                } else {
-                                  // For <6 member servers (full replication), request file from
-                                  // the sender via P2P stream. For 6+ members, use vault download.
-                                  final memberCount = ref.read(serverMembersProvider(widget.serverId)).valueOrNull?.length ?? 0;
-                                  if (memberCount >= 6) {
-                                    _vaultDownloadAndSave(msg.fileAttachment!);
-                                  } else {
-                                    _requestFileFromPeer(msg.fileAttachment!, msg.senderId);
-                                  }
-                                }
-                              }
-                            : null,
-                        onCopy: (msg.text.isNotEmpty && !msg.text.startsWith('[file:'))
-                            ? () {
-                                Clipboard.setData(ClipboardData(text: msg.text));
-                                HollowToast.show(context, 'Copied to clipboard', type: HollowToastType.success);
-                              }
-                            : null,
-                        onCopyImage: (msg.fileAttachment != null &&
-                                msg.fileAttachment!.diskPath != null &&
-                                msg.fileAttachment!.isImage)
-                            ? () async {
-                                final ok = await copyImageToClipboard(msg.fileAttachment!.diskPath!);
-                                // itemBuilder shadows the State's context — list items
-                                // dispose when scrolled away, so check THIS element.
-                                if (context.mounted) {
-                                  HollowToast.show(
-                                    context,
-                                    ok ? 'Image copied to clipboard' : 'Failed to copy image',
-                                    type: ok ? HollowToastType.success : HollowToastType.error,
-                                  );
-                                }
-                              }
-                            : null,
-                        // MLS authenticates conference lines per message — the
-                        // Ed25519 proof dialog would just read "UNSIGNED".
-                        onInfo: _isConference ? null : () {
-                          final localPeerId =
-                              ref.read(identityProvider).peerId ?? '';
-                          // The signature is computed over the sender's MASTER id
-                          // (the send side signs with the master), so the proof must
-                          // verify against the master — resolve device→master here or
-                          // a multi-device sender's signature reads as invalid.
-                          final senderPeerId = msg.isMe
-                              ? localPeerId
-                              : links.identityOf(msg.senderId);
-                          showMessageProofDialog(
-                            context,
-                            MessageProofData(
-                              senderPeerId: senderPeerId,
-                              senderDisplayName: serverDisplayNameFor(
-                                profiles,
-                                senderPeerId,
-                                nickname: nicknames[senderPeerId] ?? '',
-                              ),
-                              text: msg.text,
-                              // If the message has been edited, the signature
-                              // was computed over the edit timestamp + new text
-                              // — use editedAt to reconstruct the canonical
-                              // payload.
-                              timestampMs: (msg.editedAt ?? msg.timestamp)
-                                  .millisecondsSinceEpoch,
-                              signature: msg.signature,
-                              publicKey: msg.publicKey,
-                              messageId: msg.messageId,
-                              context:
-                                  '${widget.serverId}:${widget.channelId}',
-                              msgType: 'ch',
-                              fileAttachment: msg.fileAttachment,
-                            ),
-                          );
-                        },
-                        child: Builder(builder: (_) {
-                          final localPeerId =
-                              ref.watch(identityProvider).peerId ?? '';
-                          String? replySender;
-                          String? replyText;
-                          String? replyImagePath;
-                          int? replyIndex;
-                          if (msg.replyToMid != null) {
-                            final idx =
-                                replyIndexById[msg.replyToMid] ?? -1;
-                            if (idx != -1) {
-                              replyIndex = idx;
-                              final original = messages[idx];
-                              replyText = original.fileAttachment != null
-                                  ? (original.fileAttachment!.isImage ? '📷 Image' : '📎 ${original.fileAttachment!.fileName}')
-                                  : original.text;
-                              // Collapse device→master so the reply-preview header
-                              // shows the original sender's name, not a device id.
-                              final origMaster =
-                                  links.identityOf(original.senderId);
-                              replySender = serverDisplayNameFor(
-                                profiles,
-                                origMaster,
-                                nickname: nicknames[origMaster] ?? '',
-                              );
-                              if (original.fileAttachment?.isImage == true) {
-                                replyImagePath = original.fileAttachment?.diskPath;
-                              }
-                            }
-                          }
-                          // Check if this message mentions the local user
-                          // (needles precomputed once per build above).
-                          final msgMentioned = msg.text.contains('@everyone') ||
-                              msg.text.contains(localMentionName) ||
-                              (localMentionNick != null &&
-                                  msg.text.contains(localMentionNick));
-                          return ChannelMessageBubble(
-                            message: msg,
-                            serverId: widget.serverId,
-                            showHeader: showHeader,
-                            replyToSenderName: replySender,
-                            replyToText: replyText,
-                            replyToImagePath: replyImagePath,
-                            isHighlighted: _highlightIndex == index,
-                            isMentioned: msgMentioned,
-                            onReplyTap: replyIndex != null
-                                ? () => _scrollToMessage(replyIndex!)
-                                : null,
-                            onToggleReaction: msg.messageId != null
-                                ? (emoji) {
-                                    final hasReacted =
-                                        msg.reactions[emoji]?.contains(localPeerId) ?? false;
-                                    final notifier = ref.read(channelChatProvider.notifier);
-                                    if (hasReacted) {
-                                      notifier.removeReaction(widget.serverId,
-                                          widget.channelId, msg.messageId!, emoji);
-                                    } else {
-                                      notifier.addReaction(widget.serverId,
-                                          widget.channelId, msg.messageId!, emoji);
-                                    }
-                                  }
-                                : null,
-                          );
-                        }),
-                      );
-                      final showDate = shouldShowDateSeparator(
-                        msg.timestamp,
-                        index > 0 ? messages[index - 1].timestamp : null,
-                      );
-
-                      final messageWidget = showHeader
-                          ? Padding(
-                              padding: const EdgeInsets.only(top: HollowSpacing.sm + 2),
-                              child: wrapper,
-                            )
-                          : wrapper;
-
-                      // ValueKey(messageId): rows hold per-item state
-                      // (spoiler reveal, hover, decoded frames) that must not
-                      // shift onto a different message on delete/trim.
-                      return KeyedSubtree(
-                        key: ValueKey<Object>(msg.messageId ?? index),
-                        child: showDate
-                            ? Column(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  DateSeparator(date: msg.timestamp),
-                                  messageWidget,
-                                ],
-                              )
-                            : messageWidget,
-                      );
-                    },
-                  ),
-                  ),
-                  ),
-          ),
-          ),
-          ),
-          ),
-              // Unread pill — only when new messages arrived while scrolled up
-              Builder(builder: (context) {
-                final unreadCount = ref.watch(unreadProvider.select((s) => s.channelUnreadCounts['${widget.serverId}:${widget.channelId}'] ?? 0));
-                if (unreadCount > 0 && _showScrollPill) {
-                  return Positioned(
-                    bottom: HollowSpacing.md,
-                    left: 0,
-                    right: 0,
-                    child: Center(
-                      child: _UnreadPill(
-                        count: unreadCount,
-                        onTap: () {
-                          _scrollToBottom();
-                          // The display list may be frozen — mark seen against
-                          // the TRUE newest message.
-                          ref.read(unreadProvider.notifier).markChannelSeen(
-                                widget.serverId,
-                                widget.channelId,
-                                allMessages.last.messageId,
-                              );
-                        },
-                      ),
-                    ),
-                  );
-                }
-                return const SizedBox.shrink();
-              }),
-            ],
-          ),
-        ),
-
-        // Typing indicator. Multi-device: typing peers are DEVICE ids; collapse
-        // each to its master so the profile/nickname lookup (master-keyed) hits
-        // and two devices of one person show as a single name. Also EXCLUDE our
-        // OWN identity — a sibling device (e.g. the master) typing must not show
-        // "you are typing" to its other device (the "Pixel sees Pixel typing" leak).
-        if (typingPeers.isNotEmpty)
-          Builder(builder: (context) {
-            final links = ref.watch(deviceLinkProvider);
-            final myMaster =
-                links.identityOf(ref.watch(identityProvider).peerId ?? '');
-            // Robust self-filter (Step 9C/C1): a sibling device typing must never
-            // render as "you are typing" on our OTHER device. The typist id reaching
-            // here is collapsed to master in Rust ONLY IF the sibling's device id is
-            // warm in the resolver; if it isn't, it arrives as a raw DEVICE id and a
-            // bare `master != myMaster` check misses it. So exclude a typist that
-            // resolves to our master OR is one of OUR OWN known device ids OR is this
-            // running device — i.e. anything `sameIdentity` to us by any path.
-            final myDeviceIds = ref
-                .watch(myDevicesProvider)
-                .map((d) => d.peerId)
-                .toSet();
-            final myRunningDevice =
-                ref.watch(localDevicePeerIdProvider).valueOrNull;
-            bool isMe(String pid) =>
-                links.identityOf(pid) == myMaster ||
-                links.sameIdentity(pid, myMaster) ||
-                myDeviceIds.contains(pid) ||
-                (myRunningDevice != null && pid == myRunningDevice);
-            final nicknames =
-                ref.watch(serverNicknamesProvider(widget.serverId));
-            final profiles = ref.watch(profileProvider);
-            final masters = typingPeers
-                .where((pid) => !isMe(pid))
-                .map((pid) => links.identityOf(pid))
-                .toSet();
-            if (masters.isEmpty) return const SizedBox.shrink();
-            return TypingIndicatorBar(
-              names: masters
-                  .map((master) => serverDisplayNameFor(
-                        profiles,
-                        master,
-                        nickname: nicknames[master] ?? '',
-                      ))
-                  .toList(),
-            );
-          }),
-
-        // Reply preview bar
-        if (_replyToMessageId != null)
-          Container(
-            padding: const EdgeInsets.symmetric(
-              horizontal: HollowSpacing.md,
-              vertical: HollowSpacing.xs + 2,
-            ),
-            decoration: BoxDecoration(
-              color: hollow.surface,
-              border: Border(
-                top: BorderSide(color: hollow.border),
-                left: BorderSide(color: hollow.accent, width: 3),
-              ),
-            ),
-            child: Row(
-              children: [
-                Icon(LucideIcons.reply, size: 14, color: hollow.accent),
-                const SizedBox(width: HollowSpacing.sm),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text(
-                        'Replying to ${_replyToSenderName ?? ''}',
-                        style: HollowTypography.caption.copyWith(
-                          color: hollow.accent,
-                          fontWeight: FontWeight.w600,
-                          fontSize: 11,
-                        ),
-                      ),
-                      Row(
-                        children: [
-                          if (_replyToImagePath != null && File(_replyToImagePath!).existsSync()) ...[
-                            ClipRRect(
-                              borderRadius: BorderRadius.circular(4),
-                              child: _replyToImagePath!.toLowerCase().endsWith('.gif')
-                                  ? GifFileImage(
-                                      diskPath: _replyToImagePath!,
-                                      width: 32,
-                                      height: 32,
-                                      fit: BoxFit.cover,
-                                    )
-                                  : Image.file(
-                                      File(_replyToImagePath!),
-                                      width: 32,
-                                      height: 32,
-                                      fit: BoxFit.cover,
-                                    ),
-                            ),
-                            const SizedBox(width: HollowSpacing.xs),
-                          ],
-                          Expanded(
-                            child: Text(
-                              _replyToText ?? '',
-                              style: HollowTypography.body.copyWith(
-                                color: hollow.textSecondary,
-                                fontSize: 12,
-                              ),
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ],
-                  ),
-                ),
-                HollowPressable(
-                  semanticLabel: 'Cancel reply',
-                  onTap: () => setState(() {
-                    _replyToMessageId = null;
-                    _replyToText = null;
-                    _replyToSenderName = null;
-      _replyToImagePath = null;
-                  }),
-                  padding: const EdgeInsets.all(HollowSpacing.xs),
-                  child: Icon(LucideIcons.x,
-                      size: 16, color: hollow.textSecondary),
-                ),
-              ],
-            ),
-          ),
-
-        // Staged file preview
-        if (_stagedFilePath != null)
-          Container(
-            padding: const EdgeInsets.fromLTRB(
-              HollowSpacing.md, HollowSpacing.sm, HollowSpacing.md, 0),
-            decoration: BoxDecoration(
-              color: hollow.surface,
-              border: Border(top: BorderSide(color: hollow.border)),
-            ),
-            child: Row(
-              children: [
-                if (_stagedFileIsImage)
-                  ClipRRect(
-                    borderRadius: BorderRadius.circular(6),
-                    child: _stagedFilePath!.toLowerCase().endsWith('.gif')
-                        ? GifFileImage(
-                            diskPath: _stagedFilePath!,
-                            width: 48, height: 48, fit: BoxFit.cover,
-                          )
-                        : Image.file(
-                            File(_stagedFilePath!),
-                            width: 48, height: 48, fit: BoxFit.cover,
-                          ),
-                  )
-                else
-                  Container(
-                    width: 48, height: 48,
-                    decoration: BoxDecoration(
-                      color: hollow.elevated,
-                      borderRadius: BorderRadius.circular(6),
-                    ),
-                    child: Icon(LucideIcons.file, color: hollow.textSecondary, size: 20),
-                  ),
-                const SizedBox(width: HollowSpacing.sm),
-                Expanded(
-                  child: Text(
-                    _stagedFileName ?? '',
-                    style: HollowTypography.caption.copyWith(color: hollow.textPrimary),
-                    maxLines: 1, overflow: TextOverflow.ellipsis,
-                  ),
-                ),
-                HollowPressable(
-                  semanticLabel: 'Remove attachment',
-                  onTap: () => setState(() {
-                    _stagedFilePath = null;
-                    _stagedFileName = null;
-                    _stagedFileIsImage = false;
-                  }),
-                  padding: const EdgeInsets.all(HollowSpacing.xs),
-                  child: Icon(LucideIcons.x, size: 16, color: hollow.textSecondary),
-                ),
-              ],
-            ),
-          ),
-
-        if (_stagedHollowLink != null)
-          StagedHollowLinkCard(
-            link: _stagedHollowLink!,
-            onDismiss: () {
-              _urlDebounce?.cancel();
-              setState(() {
-                _stagedPreviewUrl = null;
-                _stagedHollowLink = null;
-              });
-            },
-          )
-        else if (_stagedPreviewUrl != null)
-          StagedLinkPreviewCard(
-            url: _stagedPreviewUrl!,
-            preview: _stagedPreview,
-            loading: _stagedPreviewLoading,
-            onDismiss: () {
-              _urlDebounce?.cancel();
-              setState(() {
-                _stagedPreviewUrl = null;
-                _stagedPreview = null;
-                _stagedPreviewLoading = false;
-              });
-            },
-          ),
-
-        // Input bar — hidden if no posting permission or when muted
-        if (!ref.watch(canPostInChannelProvider((serverId: widget.serverId, channelId: widget.channelId))) ||
-            ref.watch(myMuteStatusProvider(widget.serverId)).valueOrNull != null)
-          Container(
-            padding: const EdgeInsets.symmetric(
-              horizontal: HollowSpacing.md,
-              vertical: HollowSpacing.lg,
-            ),
-            decoration: BoxDecoration(
-              color: hollow.surface,
-              border: Border(top: BorderSide(color: hollow.border)),
-            ),
-            child: Center(
-              child: Text(
-                _muteBannerText(
-                    ref.watch(myMuteStatusProvider(widget.serverId)).valueOrNull) ??
-                    'You don\'t have permission to send messages in this channel',
-                style: HollowTypography.bodySmall.copyWith(
-                  color: hollow.textSecondary,
-                ),
-              ),
-            ),
-          )
-        else
-        Container(
-          padding: const EdgeInsets.symmetric(
-            horizontal: HollowSpacing.md,
             vertical: HollowSpacing.sm,
           ),
-          decoration: BoxDecoration(
-            color: hollow.surface,
-            border: Border(
-              top: (_replyToMessageId != null ||
-                      _stagedFilePath != null ||
-                      _stagedPreviewUrl != null)
-                  ? BorderSide.none
-                  : BorderSide(color: hollow.border),
-            ),
+          itemCount: messages.length,
+          // Let the list MOVE row elements across index slots when
+          // a new message shifts every revIndex by one — without
+          // this each shift remounted every visible row (full-list
+          // blink on every message).
+          findChildIndexCallback: (key) {
+            if (key is! ValueKey<Object>) return null;
+            final id = key.value;
+            if (id is! String) return null;
+            final i = replyIndexById[id];
+            if (i == null) return null;
+            return messages.length - 1 - i;
+          },
+          itemBuilder: (context, revIndex) => _buildMessageRow(
+            context,
+            revIndex,
+            messages,
+            replyIndexById,
+            localMentionName,
+            localMentionNick,
           ),
-          child: _isRecordingVoice
-              ? VoiceRecorderBar(
-                  onFinished: _stageVoiceMessage,
-                  onCancelled: () =>
-                      setState(() => _isRecordingVoice = false),
-                )
-              : Row(
+        ),
+      ),
+    );
+  }
+
+  /// One chat row: grouping-header decision, hover-action wrapper, bubble,
+  /// and date separator — [revIndex] is the reversed builder index.
+  Widget _buildMessageRow(
+    BuildContext context,
+    int revIndex,
+    List<ChannelChatMessage> messages,
+    Map<String, int> replyIndexById,
+    String localMentionName,
+    String? localMentionNick,
+  ) {
+    // Map the reversed builder index back to chronological
+    // order — all row logic below stays chronological.
+    final index = messages.length - 1 - revIndex;
+    final msg = messages[index];
+    // Grouping: compare with the previous message in chronological
+    // order. Multi-device: collapse each sender to its MASTER so a
+    // person's messages from different devices (e.g. our own master
+    // + sibling) group as ONE sender — otherwise a subdevice sees
+    // two "Pixel" blocks for the same identity. `isMe` is folded
+    // into the same-master test (own master == own sibling = us).
+    final links = ref.watch(deviceLinkProvider);
+    final showHeader = index == 0 ||
+        !shouldGroup(
+          currentIsMe: false,
+          previousIsMe: false,
+          currentTime: msg.timestamp,
+          previousTime: messages[index - 1].timestamp,
+          currentSenderId: links.identityOf(msg.senderId),
+          previousSenderId: links.identityOf(messages[index - 1].senderId),
+        );
+    final wrapper = MessageHoverWrapper(
+      isMe: msg.isMe,
+      messageId: msg.messageId,
+      currentText: msg.text,
+      isEditing:
+          _editingMessageId != null && _editingMessageId == msg.messageId,
+      onEditStart: _editStartFor(msg, revIndex),
+      onEditSubmit: (newText) {
+        setState(() => _editingMessageId = null);
+        ref.read(channelChatProvider.notifier).editMessage(
+            widget.serverId, widget.channelId, msg.messageId!, newText);
+      },
+      onEditCancel: () => setState(() => _editingMessageId = null),
+      onDelete: _deleteFor(msg),
+      onReply: _replyFor(msg),
+      onReaction: !_isConference && msg.messageId != null
+          ? (emoji) => _toggleReaction(msg, emoji)
+          : null,
+      onPin: _pinFor(msg),
+      onDownload: _downloadFor(context, msg),
+      onCopy: _copyFor(context, msg),
+      onCopyImage: _copyImageFor(context, msg),
+      onInfo: _infoFor(context, msg),
+      child: _buildBubble(msg, index, showHeader, messages, replyIndexById,
+          localMentionName, localMentionNick),
+    );
+    final showDate = shouldShowDateSeparator(
+      msg.timestamp,
+      index > 0 ? messages[index - 1].timestamp : null,
+    );
+
+    final messageWidget = showHeader
+        ? Padding(
+            padding: const EdgeInsets.only(top: HollowSpacing.sm + 2),
+            child: wrapper,
+          )
+        : wrapper;
+
+    // ValueKey(messageId): rows hold per-item state
+    // (spoiler reveal, hover, decoded frames) that must not
+    // shift onto a different message on delete/trim.
+    return KeyedSubtree(
+      key: ValueKey<Object>(msg.messageId ?? index),
+      child: showDate
+          ? Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                DateSeparator(date: msg.timestamp),
+                messageWidget,
+              ],
+            )
+          : messageWidget,
+    );
+  }
+
+  Widget _buildBubble(
+    ChannelChatMessage msg,
+    int index,
+    bool showHeader,
+    List<ChannelChatMessage> messages,
+    Map<String, int> replyIndexById,
+    String localMentionName,
+    String? localMentionNick,
+  ) {
+    String? replySender;
+    String? replyText;
+    String? replyImagePath;
+    int? replyIndex;
+    if (msg.replyToMid != null) {
+      final idx = replyIndexById[msg.replyToMid] ?? -1;
+      if (idx != -1) {
+        replyIndex = idx;
+        final original = messages[idx];
+        replyText = _messagePreviewText(original);
+        // Collapse device→master so the reply-preview header
+        // shows the original sender's name, not a device id.
+        final origMaster =
+            ref.watch(deviceLinkProvider).identityOf(original.senderId);
+        replySender = serverDisplayNameFor(
+          ref.watch(profileProvider),
+          origMaster,
+          nickname:
+              ref.watch(serverNicknamesProvider(widget.serverId))[origMaster] ??
+                  '',
+        );
+        if (original.fileAttachment?.isImage == true) {
+          replyImagePath = original.fileAttachment?.diskPath;
+        }
+      }
+    }
+    // Check if this message mentions the local user
+    // (needles precomputed once per build above).
+    final msgMentioned = msg.text.contains('@everyone') ||
+        msg.text.contains(localMentionName) ||
+        (localMentionNick != null && msg.text.contains(localMentionNick));
+    return ChannelMessageBubble(
+      message: msg,
+      serverId: widget.serverId,
+      showHeader: showHeader,
+      replyToSenderName: replySender,
+      replyToText: replyText,
+      replyToImagePath: replyImagePath,
+      isHighlighted: _highlightIndex == index,
+      isMentioned: msgMentioned,
+      onReplyTap:
+          replyIndex != null ? () => _scrollToMessage(replyIndex!) : null,
+      onToggleReaction: msg.messageId != null
+          ? (emoji) => _toggleReaction(msg, emoji)
+          : null,
+    );
+  }
+
+  // ── Row action callbacks ──────────────────────────────────────────────
+  // Null hides the affordance for this message. Conference chat is RAM-only
+  // MLS text: no CRDT-backed edit/delete/reply/pin and no Ed25519 proof.
+
+  VoidCallback? _editStartFor(ChannelChatMessage msg, int revIndex) {
+    final canEdit = !_isConference &&
+        msg.messageId != null &&
+        msg.isMe &&
+        msg.fileAttachment == null;
+    if (!canEdit) return null;
+    return () {
+      // Positions + jumpTo are in the REVERSED index space.
+      final positions = _itemPositionsListener.itemPositions.value;
+      final current = positions.where((p) => p.index == revIndex).firstOrNull;
+      final alignment = current?.itemLeadingEdge ?? 0.3;
+      setState(() => _editingMessageId = msg.messageId);
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted || !_itemScrollController.isAttached) return;
+        _itemScrollController.jumpTo(
+          index: revIndex,
+          alignment: alignment,
+        );
+      });
+    };
+  }
+
+  VoidCallback? _deleteFor(ChannelChatMessage msg) {
+    if (_isConference || msg.messageId == null || !msg.isMe) return null;
+    return () => ref.read(channelChatProvider.notifier).deleteMessage(
+        widget.serverId, widget.channelId, msg.messageId!);
+  }
+
+  VoidCallback? _replyFor(ChannelChatMessage msg) {
+    if (_isConference || msg.messageId == null) return null;
+    return () {
+      // Collapse device→master so the reply banner shows
+      // the person's name, not a raw device id.
+      final replyMaster =
+          ref.read(deviceLinkProvider).identityOf(msg.senderId);
+      final senderName = serverDisplayNameFor(
+        ref.read(profileProvider),
+        replyMaster,
+        nickname:
+            ref.read(serverNicknamesProvider(widget.serverId))[replyMaster] ??
+                '',
+      );
+      setState(() {
+        _replyToMessageId = msg.messageId;
+        _replyToText = _messagePreviewText(msg);
+        _replyToSenderName = senderName;
+        _replyToImagePath = msg.fileAttachment?.isImage == true
+            ? msg.fileAttachment?.diskPath
+            : null;
+      });
+      _focusNode.requestFocus();
+    };
+  }
+
+  void _toggleReaction(ChannelChatMessage msg, String emoji) {
+    final localPeerId = ref.read(identityProvider).peerId ?? '';
+    final hasReacted = msg.reactions[emoji]?.contains(localPeerId) ?? false;
+    final notifier = ref.read(channelChatProvider.notifier);
+    if (hasReacted) {
+      notifier.removeReaction(
+          widget.serverId, widget.channelId, msg.messageId!, emoji);
+    } else {
+      notifier.addReaction(
+          widget.serverId, widget.channelId, msg.messageId!, emoji);
+    }
+  }
+
+  VoidCallback? _pinFor(ChannelChatMessage msg) {
+    if (_isConference || msg.messageId == null) return null;
+    final canPin = ref.watch(myPermissionsProvider(widget.serverId)).whenOrNull(
+            data: (perms) => (perms & Permission.manageChannels) != 0) ??
+        false;
+    if (!canPin) return null;
+    return () {
+      final pins = ref.read(
+              pinnedProvider)['${widget.serverId}:${widget.channelId}'] ??
+          [];
+      if (pins.contains(msg.messageId)) {
+        crdt_api.unpinMessage(
+          serverId: widget.serverId,
+          channelId: widget.channelId,
+          messageId: msg.messageId!,
+        );
+      } else {
+        crdt_api.pinMessage(
+          serverId: widget.serverId,
+          channelId: widget.channelId,
+          messageId: msg.messageId!,
+        );
+      }
+    };
+  }
+
+  VoidCallback? _downloadFor(BuildContext context, ChannelChatMessage msg) {
+    final attachment = msg.fileAttachment;
+    if (attachment == null) return null;
+    return () {
+      // Don't trigger duplicate downloads during active transfer.
+      final transfer = ref.read(fileTransferProvider)[attachment.fileId];
+      if (transfer != null && transfer.isDownloading) {
+        HollowToast.show(context, 'File is already downloading...',
+            type: HollowToastType.info);
+        return;
+      }
+
+      // Phase 6.75 video preview: if this is a vault video
+      // thumbnail, save the underlying VIDEO (not the thumbnail
+      // .webp). The link lives in `videoThumb.cid` — fetch from
+      // the vault and save with the original video filename.
+      if (attachment.videoThumb != null) {
+        _vaultDownloadAndSaveVideo(attachment);
+      } else if (attachment.diskPath != null) {
+        _saveFile(attachment);
+      } else {
+        // For <6 member servers (full replication), request file from
+        // the sender via P2P stream. For 6+ members, use vault download.
+        final memberCount = ref
+                .read(serverMembersProvider(widget.serverId))
+                .valueOrNull
+                ?.length ??
+            0;
+        if (memberCount >= 6) {
+          _vaultDownloadAndSave(attachment);
+        } else {
+          _requestFileFromPeer(attachment, msg.senderId);
+        }
+      }
+    };
+  }
+
+  VoidCallback? _copyFor(BuildContext context, ChannelChatMessage msg) {
+    if (msg.text.isEmpty || msg.text.startsWith('[file:')) return null;
+    return () {
+      Clipboard.setData(ClipboardData(text: msg.text));
+      HollowToast.show(context, 'Copied to clipboard',
+          type: HollowToastType.success);
+    };
+  }
+
+  VoidCallback? _copyImageFor(BuildContext context, ChannelChatMessage msg) {
+    final attachment = msg.fileAttachment;
+    if (attachment == null || attachment.diskPath == null || !attachment.isImage) {
+      return null;
+    }
+    return () async {
+      final ok = await copyImageToClipboard(attachment.diskPath!);
+      // itemBuilder shadows the State's context — list items
+      // dispose when scrolled away, so check THIS element.
+      if (context.mounted) {
+        HollowToast.show(
+          context,
+          ok ? 'Image copied to clipboard' : 'Failed to copy image',
+          type: ok ? HollowToastType.success : HollowToastType.error,
+        );
+      }
+    };
+  }
+
+  // MLS authenticates conference lines per message — the
+  // Ed25519 proof dialog would just read "UNSIGNED".
+  VoidCallback? _infoFor(BuildContext context, ChannelChatMessage msg) {
+    if (_isConference) return null;
+    return () {
+      final localPeerId = ref.read(identityProvider).peerId ?? '';
+      // The signature is computed over the sender's MASTER id
+      // (the send side signs with the master), so the proof must
+      // verify against the master — resolve device→master here or
+      // a multi-device sender's signature reads as invalid.
+      final senderPeerId = msg.isMe
+          ? localPeerId
+          : ref.read(deviceLinkProvider).identityOf(msg.senderId);
+      showMessageProofDialog(
+        context,
+        MessageProofData(
+          senderPeerId: senderPeerId,
+          senderDisplayName: serverDisplayNameFor(
+            ref.read(profileProvider),
+            senderPeerId,
+            nickname: ref.read(
+                    serverNicknamesProvider(widget.serverId))[senderPeerId] ??
+                '',
+          ),
+          text: msg.text,
+          // If the message has been edited, the signature
+          // was computed over the edit timestamp + new text
+          // — use editedAt to reconstruct the canonical
+          // payload.
+          timestampMs: (msg.editedAt ?? msg.timestamp).millisecondsSinceEpoch,
+          signature: msg.signature,
+          publicKey: msg.publicKey,
+          messageId: msg.messageId,
+          context: '${widget.serverId}:${widget.channelId}',
+          msgType: 'ch',
+          fileAttachment: msg.fileAttachment,
+        ),
+      );
+    };
+  }
+
+  /// Unread pill — only when new messages arrived while scrolled up.
+  Widget _buildUnreadPillOverlay(List<ChannelChatMessage> allMessages) {
+    final unreadCount = ref.watch(unreadProvider.select((s) =>
+        s.channelUnreadCounts['${widget.serverId}:${widget.channelId}'] ?? 0));
+    if (unreadCount <= 0 || !_showScrollPill) return const SizedBox.shrink();
+    return Positioned(
+      bottom: HollowSpacing.md,
+      left: 0,
+      right: 0,
+      child: Center(
+        child: _UnreadPill(
+          count: unreadCount,
+          onTap: () {
+            _scrollToBottom();
+            // The display list may be frozen — mark seen against
+            // the TRUE newest message.
+            ref.read(unreadProvider.notifier).markChannelSeen(
+                  widget.serverId,
+                  widget.channelId,
+                  allMessages.last.messageId,
+                );
+          },
+        ),
+      ),
+    );
+  }
+
+  /// Typing indicator. Multi-device: typing peers are DEVICE ids; collapse
+  /// each to its master so the profile/nickname lookup (master-keyed) hits
+  /// and two devices of one person show as a single name. Also EXCLUDE our
+  /// OWN identity — a sibling device (e.g. the master) typing must not show
+  /// "you are typing" to its other device (the "Pixel sees Pixel typing" leak).
+  Widget _buildTypingBar(Set<String> typingPeers) {
+    final links = ref.watch(deviceLinkProvider);
+    final myMaster =
+        links.identityOf(ref.watch(identityProvider).peerId ?? '');
+    // Robust self-filter (Step 9C/C1): a sibling device typing must never
+    // render as "you are typing" on our OTHER device. The typist id reaching
+    // here is collapsed to master in Rust ONLY IF the sibling's device id is
+    // warm in the resolver; if it isn't, it arrives as a raw DEVICE id and a
+    // bare `master != myMaster` check misses it. So exclude a typist that
+    // resolves to our master OR is one of OUR OWN known device ids OR is this
+    // running device — i.e. anything `sameIdentity` to us by any path.
+    final myDeviceIds =
+        ref.watch(myDevicesProvider).map((d) => d.peerId).toSet();
+    final myRunningDevice = ref.watch(localDevicePeerIdProvider).valueOrNull;
+    bool isMe(String pid) =>
+        links.identityOf(pid) == myMaster ||
+        links.sameIdentity(pid, myMaster) ||
+        myDeviceIds.contains(pid) ||
+        (myRunningDevice != null && pid == myRunningDevice);
+    final nicknames = ref.watch(serverNicknamesProvider(widget.serverId));
+    final profiles = ref.watch(profileProvider);
+    final masters = typingPeers
+        .where((pid) => !isMe(pid))
+        .map((pid) => links.identityOf(pid))
+        .toSet();
+    if (masters.isEmpty) return const SizedBox.shrink();
+    return TypingIndicatorBar(
+      names: masters
+          .map((master) => serverDisplayNameFor(
+                profiles,
+                master,
+                nickname: nicknames[master] ?? '',
+              ))
+          .toList(),
+    );
+  }
+
+  Widget _buildReplyPreviewBar(HollowTheme hollow) {
+    return Container(
+      padding: const EdgeInsets.symmetric(
+        horizontal: HollowSpacing.md,
+        vertical: HollowSpacing.xs + 2,
+      ),
+      decoration: BoxDecoration(
+        color: hollow.surface,
+        border: Border(
+          top: BorderSide(color: hollow.border),
+          left: BorderSide(color: hollow.accent, width: 3),
+        ),
+      ),
+      child: Row(
+        children: [
+          Icon(LucideIcons.reply, size: 14, color: hollow.accent),
+          const SizedBox(width: HollowSpacing.sm),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  'Replying to ${_replyToSenderName ?? ''}',
+                  style: HollowTypography.caption.copyWith(
+                    color: hollow.accent,
+                    fontWeight: FontWeight.w600,
+                    fontSize: 11,
+                  ),
+                ),
+                Row(
                   children: [
-                    // Conference chat ('conf:' virtual servers) is RAM-only
-                    // text — no file/voice sends (they'd ride the persisting
-                    // channel pipeline). Buttons hidden, not disabled.
-                    if (!widget.serverId.startsWith('conf:')) ...[
-                      // File attachment button
-                      HollowPressable(
-                        semanticLabel: 'Attach file',
-                        onTap: _pickAndStageFile,
-                        borderRadius: BorderRadius.circular(hollow.radiusMd),
-                        padding: const EdgeInsets.all(HollowSpacing.sm),
-                        child: Icon(
-                          LucideIcons.paperclip,
-                          color: hollow.textSecondary,
-                          size: 20,
-                        ),
-                      ),
-                      const SizedBox(width: HollowSpacing.xs),
-                      HollowPressable(
-                        semanticLabel: 'Record voice message',
-                        onTap: _stagedFilePath != null
-                            ? null
-                            : () {
-                                // Voice notes are audio, not media — blocked in
-                                // media-only channels (toast, don't record).
-                                if (_channelMediaOnly) {
-                                  HollowToast.show(
-                                    context,
-                                    'This is a media-only channel — voice messages can\'t be posted here',
-                                    type: HollowToastType.info,
-                                  );
-                                  return;
-                                }
-                                setState(() => _isRecordingVoice = true);
-                              },
-                        borderRadius: BorderRadius.circular(hollow.radiusMd),
-                        padding: const EdgeInsets.all(HollowSpacing.sm),
-                        child: Icon(
-                          LucideIcons.mic,
-                          color: _stagedFilePath != null
-                              ? hollow.textSecondary.withValues(alpha: 0.4)
-                              : hollow.textSecondary,
-                          size: 20,
-                        ),
+                    if (_replyToImagePath != null &&
+                        File(_replyToImagePath!).existsSync()) ...[
+                      ClipRRect(
+                        borderRadius: BorderRadius.circular(4),
+                        child: _gifAwareImage(_replyToImagePath!,
+                            width: 32, height: 32),
                       ),
                       const SizedBox(width: HollowSpacing.xs),
                     ],
                     Expanded(
-                      child: CompositedTransformTarget(
-                        link: _mentionLayerLink,
-                        child: Focus(
-                          onKeyEvent: (_, event) {
-                            if (_mentionOverlay != null &&
-                                (event is KeyDownEvent ||
-                                    event is KeyRepeatEvent)) {
-                              if (event.logicalKey ==
-                                  LogicalKeyboardKey.arrowDown) {
-                                setState(() {
-                                  _mentionSelectedIndex =
-                                      (_mentionSelectedIndex + 1)
-                                          .clamp(0,
-                                              _mentionCandidates.length - 1);
-                                });
-                                _showMentionOverlay();
-                                return KeyEventResult.handled;
-                              }
-                              if (event.logicalKey ==
-                                  LogicalKeyboardKey.arrowUp) {
-                                setState(() {
-                                  _mentionSelectedIndex =
-                                      (_mentionSelectedIndex - 1)
-                                          .clamp(0,
-                                              _mentionCandidates.length - 1);
-                                });
-                                _showMentionOverlay();
-                                return KeyEventResult.handled;
-                              }
-                              if (event.logicalKey ==
-                                      LogicalKeyboardKey.enter ||
-                                  event.logicalKey ==
-                                      LogicalKeyboardKey.tab) {
-                                _acceptMention(
-                                    _mentionCandidates[_mentionSelectedIndex]);
-                                return KeyEventResult.handled;
-                              }
-                              if (event.logicalKey ==
-                                  LogicalKeyboardKey.escape) {
-                                _dismissMentionOverlay();
-                                return KeyEventResult.handled;
-                              }
-                            }
-                            final emoteResult =
-                                _emoteAutocomplete.handleKey(event);
-                            if (emoteResult == KeyEventResult.handled) {
-                              return emoteResult;
-                            }
-                            return handleChatInputKey(
-                              event, _controller, _focusNode, _handleSend,
-                              onPasteImage: _stageClipboardImage,
-                            );
-                          },
-                          child: HollowTextField(
-                            controller: _controller,
-                            focusNode: _focusNode,
-                            hintText: 'Message #${widget.channelName}',
-                            autofocus: true,
-                            maxLines: 5,
-                            minLines: 1,
-                            maxLength: 4000,
-                            showCounter: false,
-                            style: HollowTypography.body
-                                .copyWith(color: hollow.textPrimary),
-                            borderRadius: hollow.radiusLg,
-                            onChanged: _onTextChanged,
-                          ),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: HollowSpacing.xs),
-                    Builder(
-                      builder: (btnCtx) => HollowPressable(
-                        semanticLabel: 'Insert emoji',
-                        onTap: () => _openComposerEmojiPicker(btnCtx),
-                        borderRadius: BorderRadius.circular(hollow.radiusMd),
-                        padding: const EdgeInsets.all(HollowSpacing.sm),
-                        child: Icon(
-                          LucideIcons.smile,
+                      child: Text(
+                        _replyToText ?? '',
+                        style: HollowTypography.body.copyWith(
                           color: hollow.textSecondary,
-                          size: 20,
+                          fontSize: 12,
                         ),
-                      ),
-                    ),
-                    const SizedBox(width: HollowSpacing.sm),
-                    if (_slowModeReadyAt != null) ...[
-                      Container(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 6, vertical: 3),
-                        decoration: BoxDecoration(
-                          color: hollow.warning.withValues(alpha: 0.15),
-                          borderRadius: BorderRadius.circular(hollow.radiusSm),
-                        ),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Icon(LucideIcons.timer,
-                                size: 12, color: hollow.warning),
-                            const SizedBox(width: 3),
-                            Text(
-                              '${(_slowModeReadyAt!.difference(DateTime.now()).inSeconds + 1).clamp(1, 3600)}s',
-                              style: HollowTypography.caption.copyWith(
-                                color: hollow.warning,
-                                fontWeight: FontWeight.w600,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                      const SizedBox(width: HollowSpacing.xs),
-                    ],
-                    HollowPressable(
-                      semanticLabel: 'Send message',
-                      onTap: _handleSend,
-                      borderRadius: BorderRadius.circular(hollow.radiusMd),
-                      backgroundColor: hollow.accent,
-                      padding: const EdgeInsets.all(HollowSpacing.sm),
-                      child: Icon(
-                        LucideIcons.send,
-                        color: hollow.textOnAccent,
-                        size: 20,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
                       ),
                     ),
                   ],
                 ),
+              ],
+            ),
+          ),
+          HollowPressable(
+            semanticLabel: 'Cancel reply',
+            onTap: () => setState(() {
+              _replyToMessageId = null;
+              _replyToText = null;
+              _replyToSenderName = null;
+              _replyToImagePath = null;
+            }),
+            padding: const EdgeInsets.all(HollowSpacing.xs),
+            child: Icon(LucideIcons.x, size: 16, color: hollow.textSecondary),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildStagedFilePreview(HollowTheme hollow) {
+    return Container(
+      padding: const EdgeInsets.fromLTRB(
+          HollowSpacing.md, HollowSpacing.sm, HollowSpacing.md, 0),
+      decoration: BoxDecoration(
+        color: hollow.surface,
+        border: Border(top: BorderSide(color: hollow.border)),
+      ),
+      child: Row(
+        children: [
+          if (_stagedFileIsImage)
+            ClipRRect(
+              borderRadius: BorderRadius.circular(6),
+              child: _gifAwareImage(_stagedFilePath!, width: 48, height: 48),
+            )
+          else
+            Container(
+              width: 48,
+              height: 48,
+              decoration: BoxDecoration(
+                color: hollow.elevated,
+                borderRadius: BorderRadius.circular(6),
+              ),
+              child:
+                  Icon(LucideIcons.file, color: hollow.textSecondary, size: 20),
+            ),
+          const SizedBox(width: HollowSpacing.sm),
+          Expanded(
+            child: Text(
+              _stagedFileName ?? '',
+              style:
+                  HollowTypography.caption.copyWith(color: hollow.textPrimary),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+          HollowPressable(
+            semanticLabel: 'Remove attachment',
+            onTap: () => setState(() {
+              _stagedFilePath = null;
+              _stagedFileName = null;
+              _stagedFileIsImage = false;
+            }),
+            padding: const EdgeInsets.all(HollowSpacing.xs),
+            child: Icon(LucideIcons.x, size: 16, color: hollow.textSecondary),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Input bar — a blocked banner when posting isn't allowed (no permission
+  /// or muted), else the voice recorder or the composer row.
+  Widget _buildInputBar(HollowTheme hollow) {
+    final mute = ref.watch(myMuteStatusProvider(widget.serverId)).valueOrNull;
+    final canPost = ref.watch(canPostInChannelProvider(
+        (serverId: widget.serverId, channelId: widget.channelId)));
+    if (!canPost || mute != null) {
+      return Container(
+        padding: const EdgeInsets.symmetric(
+          horizontal: HollowSpacing.md,
+          vertical: HollowSpacing.lg,
+        ),
+        decoration: BoxDecoration(
+          color: hollow.surface,
+          border: Border(top: BorderSide(color: hollow.border)),
+        ),
+        child: Center(
+          child: Text(
+            _muteBannerText(mute) ??
+                'You don\'t have permission to send messages in this channel',
+            style: HollowTypography.bodySmall.copyWith(
+              color: hollow.textSecondary,
+            ),
+          ),
+        ),
+      );
+    }
+    return Container(
+      padding: const EdgeInsets.symmetric(
+        horizontal: HollowSpacing.md,
+        vertical: HollowSpacing.sm,
+      ),
+      decoration: BoxDecoration(
+        color: hollow.surface,
+        border: Border(
+          top: (_replyToMessageId != null ||
+                  _stagedFilePath != null ||
+                  _stagedPreviewUrl != null)
+              ? BorderSide.none
+              : BorderSide(color: hollow.border),
+        ),
+      ),
+      child: _isRecordingVoice
+          ? VoiceRecorderBar(
+              onFinished: _stageVoiceMessage,
+              onCancelled: () => setState(() => _isRecordingVoice = false),
+            )
+          : _buildComposerRow(hollow),
+    );
+  }
+
+  Widget _buildComposerRow(HollowTheme hollow) {
+    return Row(
+      children: [
+        // Conference chat ('conf:' virtual servers) is RAM-only
+        // text — no file/voice sends (they'd ride the persisting
+        // channel pipeline). Buttons hidden, not disabled.
+        if (!_isConference) ...[
+          // File attachment button
+          HollowPressable(
+            semanticLabel: 'Attach file',
+            onTap: _pickAndStageFile,
+            borderRadius: BorderRadius.circular(hollow.radiusMd),
+            padding: const EdgeInsets.all(HollowSpacing.sm),
+            child: Icon(
+              LucideIcons.paperclip,
+              color: hollow.textSecondary,
+              size: 20,
+            ),
+          ),
+          const SizedBox(width: HollowSpacing.xs),
+          HollowPressable(
+            semanticLabel: 'Record voice message',
+            onTap: _stagedFilePath != null ? null : _startVoiceRecording,
+            borderRadius: BorderRadius.circular(hollow.radiusMd),
+            padding: const EdgeInsets.all(HollowSpacing.sm),
+            child: Icon(
+              LucideIcons.mic,
+              color: _stagedFilePath != null
+                  ? hollow.textSecondary.withValues(alpha: 0.4)
+                  : hollow.textSecondary,
+              size: 20,
+            ),
+          ),
+          const SizedBox(width: HollowSpacing.xs),
+        ],
+        Expanded(
+          child: CompositedTransformTarget(
+            link: _mentionLayerLink,
+            child: Focus(
+              onKeyEvent: (_, event) => _handleComposerKey(event),
+              child: HollowTextField(
+                controller: _controller,
+                focusNode: _focusNode,
+                hintText: 'Message #${widget.channelName}',
+                autofocus: true,
+                maxLines: 5,
+                minLines: 1,
+                maxLength: 4000,
+                showCounter: false,
+                style:
+                    HollowTypography.body.copyWith(color: hollow.textPrimary),
+                borderRadius: hollow.radiusLg,
+                onChanged: _onTextChanged,
+              ),
+            ),
+          ),
+        ),
+        const SizedBox(width: HollowSpacing.xs),
+        Builder(
+          builder: (btnCtx) => HollowPressable(
+            semanticLabel: 'Insert emoji',
+            onTap: () => _openComposerEmojiPicker(btnCtx),
+            borderRadius: BorderRadius.circular(hollow.radiusMd),
+            padding: const EdgeInsets.all(HollowSpacing.sm),
+            child: Icon(
+              LucideIcons.smile,
+              color: hollow.textSecondary,
+              size: 20,
+            ),
+          ),
+        ),
+        const SizedBox(width: HollowSpacing.sm),
+        if (_slowModeReadyAt != null) ...[
+          _buildSlowModePill(hollow),
+          const SizedBox(width: HollowSpacing.xs),
+        ],
+        HollowPressable(
+          semanticLabel: 'Send message',
+          onTap: _handleSend,
+          borderRadius: BorderRadius.circular(hollow.radiusMd),
+          backgroundColor: hollow.accent,
+          padding: const EdgeInsets.all(HollowSpacing.sm),
+          child: Icon(
+            LucideIcons.send,
+            color: hollow.textOnAccent,
+            size: 20,
+          ),
         ),
       ],
+    );
+  }
+
+  void _startVoiceRecording() {
+    // Voice notes are audio, not media — blocked in
+    // media-only channels (toast, don't record).
+    if (_channelMediaOnly) {
+      HollowToast.show(
+        context,
+        'This is a media-only channel — voice messages can\'t be posted here',
+        type: HollowToastType.info,
+      );
+      return;
+    }
+    setState(() => _isRecordingVoice = true);
+  }
+
+  Widget _buildSlowModePill(HollowTheme hollow) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+      decoration: BoxDecoration(
+        color: hollow.warning.withValues(alpha: 0.15),
+        borderRadius: BorderRadius.circular(hollow.radiusSm),
       ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(LucideIcons.timer, size: 12, color: hollow.warning),
+          const SizedBox(width: 3),
+          Text(
+            '${(_slowModeReadyAt!.difference(DateTime.now()).inSeconds + 1).clamp(1, 3600)}s',
+            style: HollowTypography.caption.copyWith(
+              color: hollow.warning,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ],
       ),
-    ); // EmoteScope
+    );
+  }
+
+  KeyEventResult _handleComposerKey(KeyEvent event) {
+    final mentionResult = _handleMentionOverlayKey(event);
+    if (mentionResult != null) return mentionResult;
+    final emoteResult = _emoteAutocomplete.handleKey(event);
+    if (emoteResult == KeyEventResult.handled) return emoteResult;
+    return handleChatInputKey(
+      event, _controller, _focusNode, _handleSend,
+      onPasteImage: _stageClipboardImage,
+    );
+  }
+
+  /// Arrow/enter/tab/escape navigation while the @mention overlay is open.
+  /// Null = not a mention-overlay key — fall through to the next handler.
+  KeyEventResult? _handleMentionOverlayKey(KeyEvent event) {
+    if (_mentionOverlay == null ||
+        (event is! KeyDownEvent && event is! KeyRepeatEvent)) {
+      return null;
+    }
+    if (event.logicalKey == LogicalKeyboardKey.arrowDown) {
+      _moveMentionSelection(1);
+      return KeyEventResult.handled;
+    }
+    if (event.logicalKey == LogicalKeyboardKey.arrowUp) {
+      _moveMentionSelection(-1);
+      return KeyEventResult.handled;
+    }
+    if (event.logicalKey == LogicalKeyboardKey.enter ||
+        event.logicalKey == LogicalKeyboardKey.tab) {
+      _acceptMention(_mentionCandidates[_mentionSelectedIndex]);
+      return KeyEventResult.handled;
+    }
+    if (event.logicalKey == LogicalKeyboardKey.escape) {
+      _dismissMentionOverlay();
+      return KeyEventResult.handled;
+    }
+    return null;
+  }
+
+  void _moveMentionSelection(int delta) {
+    setState(() {
+      _mentionSelectedIndex = (_mentionSelectedIndex + delta)
+          .clamp(0, _mentionCandidates.length - 1);
+    });
+    _showMentionOverlay();
   }
 }
 
