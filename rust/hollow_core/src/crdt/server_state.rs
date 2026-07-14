@@ -1282,6 +1282,135 @@ fn short_name(peer_id: &str) -> String {
 mod tests {
     use super::*;
 
+    /// Build an op authored by `author` (create_op stamps the local actor;
+    /// ingest validation only reads `op.author`, so overriding it simulates a
+    /// remote peer's op).
+    fn op_by(state: &mut ServerState, author: &str, payload: CrdtPayload) -> CrdtOp {
+        let mut op = state.create_op(payload);
+        op.author = author.to_string();
+        op
+    }
+
+    /// The shared ingest permission matrix (`op_allowed`) — one allowed and
+    /// one denied probe per payload arm, driven as a pure function. This is
+    /// the regression guard for BOTH remote-op ingest paths (plaintext
+    /// CrdtOpBroadcast in swarm.rs and the MLS CrdtOp envelope in
+    /// sync_handler.rs), which call this exact method.
+    #[test]
+    fn op_allowed_ingest_matrix() {
+        let mut s = ServerState::new("s1".into(), "S".into(), "owner".into());
+        for id in ["admin", "moder", "alice", "bob"] {
+            let op = s.create_op(CrdtPayload::MemberAdded {
+                peer_id: id.into(),
+                display_name: id.into(),
+            });
+            let _ = s.apply_op(&op);
+        }
+        for (id, role) in [("admin", MemberRole::Admin), ("moder", MemberRole::Moderator)] {
+            let op = s.create_op(CrdtPayload::RoleChanged {
+                peer_id: id.into(),
+                role,
+                priority: 3,
+            });
+            let _ = s.apply_op(&op);
+        }
+
+        let ch = |cid: &str| CrdtPayload::ChannelRenamed {
+            channel_id: cid.into(),
+            new_name: "n".into(),
+        };
+        let cases: Vec<(&str, CrdtPayload, bool)> = vec![
+            // Channel management (MANAGE_CHANNELS): admin yes, moderator/member no.
+            ("admin", ch("c1"), true),
+            ("moder", ch("c1"), false),
+            ("alice", CrdtPayload::ChannelLayoutUpdated { layout_json: "[]".into() }, false),
+            // RoleChanged goes through can_change_role (tier-gated).
+            ("owner", CrdtPayload::RoleChanged { peer_id: "alice".into(), role: MemberRole::Moderator, priority: 3 }, true),
+            ("alice", CrdtPayload::RoleChanged { peer_id: "bob".into(), role: MemberRole::Admin, priority: 0 }, false),
+            // Server rename/settings: Owner or Admin only.
+            ("admin", CrdtPayload::ServerRenamed { new_name: "X".into() }, true),
+            ("moder", CrdtPayload::ServerSettingChanged { key: "k".into(), value: "v".into() }, false),
+            // MemberRemoved: voluntary self-leave always; kicks need KICK_MEMBERS + outrank.
+            ("alice", CrdtPayload::MemberRemoved { peer_id: "alice".into() }, true),
+            ("alice", CrdtPayload::MemberRemoved { peer_id: "bob".into() }, false),
+            ("moder", CrdtPayload::MemberRemoved { peer_id: "bob".into() }, true),
+            ("moder", CrdtPayload::MemberRemoved { peer_id: "admin".into() }, false),
+            // MemberAdded: any current member (invite), stranger no.
+            ("alice", CrdtPayload::MemberAdded { peer_id: "carol".into(), display_name: "c".into() }, true),
+            ("stranger", CrdtPayload::MemberAdded { peer_id: "dave".into(), display_name: "d".into() }, false),
+            // Nickname / Twitch / pledge: self or Owner/Admin.
+            ("alice", CrdtPayload::NicknameChanged { peer_id: "alice".into(), nickname: "a".into() }, true),
+            ("alice", CrdtPayload::NicknameChanged { peer_id: "bob".into(), nickname: "x".into() }, false),
+            ("alice", CrdtPayload::TwitchUsernameChanged { peer_id: "alice".into(), twitch_username: "tv".into() }, true),
+            ("alice", CrdtPayload::TwitchUsernameChanged { peer_id: "bob".into(), twitch_username: "tv".into() }, false),
+            ("admin", CrdtPayload::StoragePledgeChanged { peer_id: "bob".into(), pledge_bytes: 1 }, true),
+            ("alice", CrdtPayload::StoragePledgeChanged { peer_id: "bob".into(), pledge_bytes: 1 }, false),
+            // Pins need MANAGE_CHANNELS (moderator lacks it).
+            ("admin", CrdtPayload::MessagePinned { channel_id: "c".into(), message_id: "m".into() }, true),
+            ("moder", CrdtPayload::MessageUnpinned { channel_id: "c".into(), message_id: "m".into() }, false),
+            // Role-permission edits: MANAGE_ROLES + must OUTRANK the target role.
+            ("admin", CrdtPayload::RolePermissionsChanged { role: "moderator".into(), permissions: 0 }, true),
+            ("admin", CrdtPayload::RolePermissionsChanged { role: "admin".into(), permissions: 0 }, false),
+            ("moder", CrdtPayload::RolePermissionsChanged { role: "member".into(), permissions: 0 }, false),
+            // Ban / unban / mute / unmute: KICK_MEMBERS (+outrank for targeted ones).
+            ("moder", CrdtPayload::MemberBanned { peer_id: "bob".into() }, true),
+            ("moder", CrdtPayload::MemberBanned { peer_id: "admin".into() }, false),
+            ("alice", CrdtPayload::MemberBanned { peer_id: "bob".into() }, false),
+            ("moder", CrdtPayload::MemberUnbanned { peer_id: "bob".into() }, true),
+            ("alice", CrdtPayload::MemberUnbanned { peer_id: "bob".into() }, false),
+            ("moder", CrdtPayload::MemberMuted { peer_id: "bob".into(), expires_at: u64::MAX }, true),
+            ("alice", CrdtPayload::MemberMuted { peer_id: "bob".into(), expires_at: u64::MAX }, false),
+            ("moder", CrdtPayload::MemberUnmuted { peer_id: "bob".into() }, true),
+            // Channel access / moderation settings: MANAGE_CHANNELS.
+            ("admin", CrdtPayload::ChannelVisibilityChanged { channel_id: "c".into(), visibility: "everyone".into() }, true),
+            ("alice", CrdtPayload::ChannelPostingChanged { channel_id: "c".into(), posting: "everyone".into() }, false),
+            ("admin", CrdtPayload::ChannelPublicChanged { channel_id: "c".into(), is_public: true }, true),
+            ("alice", CrdtPayload::ChannelSlowModeChanged { channel_id: "c".into(), seconds: 5 }, false),
+            ("admin", CrdtPayload::ChannelMediaOnlyChanged { channel_id: "c".into(), media_only: true }, true),
+            // Labels: create/delete/update need MANAGE_ROLES; assign is self-or-MANAGE_ROLES.
+            ("admin", CrdtPayload::LabelCreated { label_id: "l1".into(), name: "L".into(), color: "#fff".into() }, true),
+            ("alice", CrdtPayload::LabelUpdated { label_id: "l1".into(), name: "L".into(), color: "#fff".into() }, false),
+            ("alice", CrdtPayload::LabelDeleted { label_id: "l1".into() }, false),
+            ("alice", CrdtPayload::LabelAssigned { label_id: "l1".into(), peer_id: "alice".into() }, true),
+            ("alice", CrdtPayload::LabelAssigned { label_id: "l1".into(), peer_id: "bob".into() }, false),
+            ("admin", CrdtPayload::LabelUnassigned { label_id: "l1".into(), peer_id: "bob".into() }, true),
+            // Emotes: MANAGE_EMOTES + grammar validation at ingest.
+            ("admin", CrdtPayload::EmojiAdded { name: "pog".into(), hash: "a".repeat(64), animated: false }, true),
+            ("admin", CrdtPayload::EmojiAdded { name: "Bad Name".into(), hash: "a".repeat(64), animated: false }, false),
+            ("admin", CrdtPayload::EmojiAdded { name: "pog".into(), hash: "zz".into(), animated: false }, false),
+            ("alice", CrdtPayload::EmojiAdded { name: "pog".into(), hash: "a".repeat(64), animated: false }, false),
+            ("admin", CrdtPayload::EmojiRemoved { name: "pog".into() }, true),
+            ("alice", CrdtPayload::EmojiRemoved { name: "pog".into() }, false),
+            // Tombstone: Owner only. ServerCreated: always.
+            ("owner", CrdtPayload::ServerDeleted { deleted_at: 1 }, true),
+            ("admin", CrdtPayload::ServerDeleted { deleted_at: 1 }, false),
+            ("stranger", CrdtPayload::ServerCreated { name: "S".into(), owner_peer_id: "stranger".into() }, true),
+        ];
+        for (author, payload, expect) in cases {
+            let op = op_by(&mut s, author, payload);
+            assert_eq!(
+                s.op_allowed(&op),
+                expect,
+                "author={author} payload={:?}",
+                op.payload
+            );
+        }
+
+        // Override-awareness: granting MANAGE_CHANNELS to Member via
+        // RolePermissionsChanged must open channel ops at ingest too
+        // (get_permissions, not default_permissions).
+        let grant = s.create_op(CrdtPayload::RolePermissionsChanged {
+            role: "member".into(),
+            permissions: MemberRole::Member.default_permissions() | Permission::MANAGE_CHANNELS,
+        });
+        let _ = s.apply_op(&grant);
+        let op = op_by(&mut s, "alice", CrdtPayload::ChannelRenamed {
+            channel_id: "c1".into(),
+            new_name: "renamed".into(),
+        });
+        assert!(s.op_allowed(&op), "override-granted MANAGE_CHANNELS must pass ingest");
+    }
+
     #[test]
     fn canonicalize_folds_device_keyed_member_to_master() {
         // Owner is master-keyed; a joiner was recorded under a DEVICE id (legacy).
