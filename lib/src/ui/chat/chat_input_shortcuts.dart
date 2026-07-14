@@ -31,21 +31,7 @@ KeyEventResult handleChatInputKey(
 
   // Enter to send, Shift+Enter for newline.
   if (event.logicalKey == LogicalKeyboardKey.enter && !isCtrl) {
-    if (isShift) {
-      // Insert newline at cursor position.
-      final sel = controller.selection;
-      final text = controller.text;
-      final newText =
-          text.replaceRange(sel.start, sel.end, '\n');
-      controller.value = TextEditingValue(
-        text: newText,
-        selection: TextSelection.collapsed(offset: sel.start + 1),
-      );
-      return KeyEventResult.handled;
-    }
-    // Plain Enter → send.
-    onSend();
-    return KeyEventResult.handled;
+    return _handleEnterKey(controller, onSend, isShift);
   }
 
   // Formatting shortcuts (Ctrl required).
@@ -61,6 +47,38 @@ KeyEventResult handleChatInputKey(
     return KeyEventResult.ignored;
   }
 
+  return _handleFormattingKey(event, controller, isShift);
+}
+
+/// Enter → send, Shift+Enter → newline.
+KeyEventResult _handleEnterKey(
+  TextEditingController controller,
+  VoidCallback onSend,
+  bool isShift,
+) {
+  if (isShift) {
+    // Insert newline at cursor position.
+    final sel = controller.selection;
+    final text = controller.text;
+    final newText =
+        text.replaceRange(sel.start, sel.end, '\n');
+    controller.value = TextEditingValue(
+      text: newText,
+      selection: TextSelection.collapsed(offset: sel.start + 1),
+    );
+    return KeyEventResult.handled;
+  }
+  // Plain Enter → send.
+  onSend();
+  return KeyEventResult.handled;
+}
+
+/// Ctrl-based markdown formatting shortcuts (Ctrl is already held here).
+KeyEventResult _handleFormattingKey(
+  KeyEvent event,
+  TextEditingController controller,
+  bool isShift,
+) {
   if (event.logicalKey == LogicalKeyboardKey.keyB && !isShift) {
     _wrapSelection(controller, '**', '**');
     return KeyEventResult.handled;
@@ -99,40 +117,59 @@ Future<void> _tryPasteImage(
 
   // Check for image formats in priority order.
   for (final format in [Formats.png, Formats.jpeg, Formats.gif, Formats.bmp, Formats.webp]) {
-    if (reader.canProvide(format)) {
-      final completer = Completer<Uint8List?>();
-      reader.getFile(format, (file) async {
-        final bytes = await file.readAll();
-        completer.complete(bytes);
-      }, onError: (_) {
-        if (!completer.isCompleted) completer.complete(null);
-      });
-
-      final bytes = await completer.future;
-      if (bytes == null || bytes.isEmpty) continue;
-
-      // Determine extension from format.
-      final ext = format == Formats.png
-          ? 'png'
-          : format == Formats.jpeg
-              ? 'jpg'
-              : format == Formats.gif
-                  ? 'gif'
-                  : format == Formats.bmp
-                      ? 'bmp'
-                      : 'webp';
-
-      // Save to temp file.
-      final tempDir = Directory.systemTemp;
-      final timestamp = DateTime.now().millisecondsSinceEpoch;
-      final fileName = 'clipboard_$timestamp.$ext';
-      final tempFile = File('${tempDir.path}${Platform.pathSeparator}$fileName');
-      await tempFile.writeAsBytes(bytes);
-
-      onPasteImage(tempFile.path, fileName);
-      return;
-    }
+    if (!reader.canProvide(format)) continue;
+    if (await _pasteImageForFormat(reader, format, onPasteImage)) return;
   }
+}
+
+/// Reads clipboard bytes for [format]; if present, saves them to a temp file
+/// and calls [onPasteImage]. Returns true when an image was pasted.
+Future<bool> _pasteImageForFormat(
+  ClipboardReader reader,
+  SimpleFileFormat format,
+  void Function(String path, String name) onPasteImage,
+) async {
+  final bytes = await _readClipboardImageBytes(reader, format);
+  if (bytes == null || bytes.isEmpty) return false;
+
+  // Determine extension from format.
+  final ext = _extensionForFormat(format);
+
+  // Save to temp file.
+  final tempDir = Directory.systemTemp;
+  final timestamp = DateTime.now().millisecondsSinceEpoch;
+  final fileName = 'clipboard_$timestamp.$ext';
+  final tempFile = File('${tempDir.path}${Platform.pathSeparator}$fileName');
+  await tempFile.writeAsBytes(bytes);
+
+  onPasteImage(tempFile.path, fileName);
+  return true;
+}
+
+Future<Uint8List?> _readClipboardImageBytes(
+  ClipboardReader reader,
+  SimpleFileFormat format,
+) {
+  final completer = Completer<Uint8List?>();
+  reader.getFile(format, (file) async {
+    final bytes = await file.readAll();
+    completer.complete(bytes);
+  }, onError: (_) {
+    if (!completer.isCompleted) completer.complete(null);
+  });
+  return completer.future;
+}
+
+String _extensionForFormat(SimpleFileFormat format) {
+  return format == Formats.png
+      ? 'png'
+      : format == Formats.jpeg
+          ? 'jpg'
+          : format == Formats.gif
+              ? 'gif'
+              : format == Formats.bmp
+                  ? 'bmp'
+                  : 'webp';
 }
 
 /// Copies image bytes to system clipboard.

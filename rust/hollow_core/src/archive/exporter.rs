@@ -9,6 +9,12 @@ use crate::archive::types::*;
 use crate::identity::native_identity::NativeKeypair;
 use crate::storage::MessageStore;
 
+// Row tuple shapes returned by the batch loaders in `MessageStore`.
+type ReactionRows = HashMap<String, Vec<(String, String, i64, Option<String>, Option<String>)>>;
+type EditRows = HashMap<String, Vec<(String, String, i64, Option<String>, Option<String>, Option<String>, Option<String>, Option<i64>)>>;
+type DeletionRows = HashMap<String, Vec<(String, i64, Option<String>, Option<String>)>>;
+type RemovalRows = HashMap<String, Vec<(String, String, i64, Option<String>, Option<String>)>>;
+
 /// Export a conversation as a `.hollow-archive` zip (returned as in-memory bytes).
 pub(crate) fn export_archive(
     store: &MessageStore,
@@ -24,137 +30,28 @@ pub(crate) fn export_archive(
         .as_millis() as i64;
 
     // ── 1. Load all messages (including hidden/deleted) ─────────
-    let (archive_type, _context_str, peer_id_opt, server_id_opt, channel_id_opt, channel_name_opt, server_name_opt, channel_infos, messages) =
-        match &target {
-            ArchiveTarget::Dm { peer_id } => {
-                let msgs = store.load_all_dm_messages(peer_id)?;
-                let archive_msgs: Vec<ArchiveMessage> = msgs
-                    .into_iter()
-                    .map(|m| {
-                        let sender = if m.is_mine {
-                            exporter_peer_id.clone()
-                        } else {
-                            m.peer_id.clone()
-                        };
-                        let mid = m.message_id.clone().unwrap_or_else(|| {
-                            format!("legacy-{}-{}", sender, m.timestamp)
-                        });
-                        ArchiveMessage {
-                            message_id: mid,
-                            sender_id: sender,
-                            text: m.text,
-                            timestamp: m.timestamp,
-                            signature: m.signature,
-                            public_key: m.public_key,
-                            edited_at: m.edited_at,
-                            hidden_at: m.hidden_at,
-                            reply_to_mid: m.reply_to_mid,
-                            file_id: m.file_id,
-                            channel_id: None,
-                            reactions: Vec::new(),
-                        }
-                    })
-                    .collect();
-                (
-                    "dm".to_string(),
-                    peer_id.clone(),
-                    Some(peer_id.clone()),
-                    None,
-                    None,
-                    None,
-                    None,
-                    Vec::new(),
-                    archive_msgs,
-                )
-            }
-            ArchiveTarget::Channel {
-                server_id,
-                channel_id,
-                channel_name,
-            } => {
-                let msgs = store.load_all_channel_messages(server_id, channel_id)?;
-                let archive_msgs: Vec<ArchiveMessage> = msgs
-                    .into_iter()
-                    .map(|m| {
-                        let mid = m.message_id.clone().unwrap_or_else(|| {
-                            format!("legacy-{}-{}", m.sender_id, m.timestamp)
-                        });
-                        ArchiveMessage {
-                            message_id: mid,
-                            sender_id: m.sender_id,
-                            text: m.text,
-                            timestamp: m.timestamp,
-                            signature: m.signature,
-                            public_key: m.public_key,
-                            edited_at: m.edited_at,
-                            hidden_at: m.hidden_at,
-                            reply_to_mid: m.reply_to_mid,
-                            file_id: m.file_id,
-                            channel_id: None,
-                            reactions: Vec::new(),
-                        }
-                    })
-                    .collect();
-                (
-                    "channel".to_string(),
-                    format!("{}:{}", server_id, channel_id),
-                    None,
-                    Some(server_id.clone()),
-                    Some(channel_id.clone()),
-                    channel_name.clone(),
-                    None,
-                    Vec::new(),
-                    archive_msgs,
-                )
-            }
-            ArchiveTarget::Server {
-                server_id,
-                server_name,
-                channels,
-            } => {
-                let mut archive_msgs: Vec<ArchiveMessage> = Vec::new();
-                let mut channel_infos: Vec<ArchiveChannelInfo> = Vec::new();
-                for (ch_id, ch_name) in channels {
-                    let msgs = store.load_all_channel_messages(server_id, ch_id)?;
-                    let count = msgs.len() as u32;
-                    for m in msgs {
-                        let mid = m.message_id.clone().unwrap_or_else(|| {
-                            format!("legacy-{}-{}", m.sender_id, m.timestamp)
-                        });
-                        archive_msgs.push(ArchiveMessage {
-                            message_id: mid,
-                            sender_id: m.sender_id,
-                            text: m.text,
-                            timestamp: m.timestamp,
-                            signature: m.signature,
-                            public_key: m.public_key,
-                            edited_at: m.edited_at,
-                            hidden_at: m.hidden_at,
-                            reply_to_mid: m.reply_to_mid,
-                            file_id: m.file_id,
-                            channel_id: Some(ch_id.clone()),
-                            reactions: Vec::new(),
-                        });
-                    }
-                    channel_infos.push(ArchiveChannelInfo {
-                        channel_id: ch_id.clone(),
-                        channel_name: ch_name.clone(),
-                        message_count: count,
-                    });
-                }
-                (
-                    "server".to_string(),
-                    server_id.clone(),
-                    None,
-                    Some(server_id.clone()),
-                    None,
-                    None,
-                    Some(server_name.clone()),
-                    channel_infos,
-                    archive_msgs,
-                )
-            }
-        };
+    let TargetData {
+        archive_type,
+        peer_id: peer_id_opt,
+        server_id: server_id_opt,
+        channel_id: channel_id_opt,
+        channel_name: channel_name_opt,
+        server_name: server_name_opt,
+        channels: channel_infos,
+        messages,
+    } = match &target {
+        ArchiveTarget::Dm { peer_id } => dm_target_data(store, &exporter_peer_id, peer_id)?,
+        ArchiveTarget::Channel {
+            server_id,
+            channel_id,
+            channel_name,
+        } => channel_target_data(store, server_id, channel_id, channel_name)?,
+        ArchiveTarget::Server {
+            server_id,
+            server_name,
+            channels,
+        } => server_target_data(store, server_id, server_name, channels)?,
+    };
 
     // ── 2. Collect message IDs for batch queries ────────────────
     let message_ids: Vec<String> = messages.iter().map(|m| m.message_id.clone()).collect();
@@ -167,182 +64,25 @@ pub(crate) fn export_archive(
 
     // ── 4. Attach reactions inline ──────────────────────────────
     let mut messages = messages;
-    for msg in &mut messages {
-        if let Some(rxns) = reactions_map.get(&msg.message_id) {
-            msg.reactions = rxns
-                .iter()
-                .map(|(emoji, peer_id, added_at, sig, pk)| ArchiveReaction {
-                    emoji: emoji.clone(),
-                    peer_id: peer_id.clone(),
-                    added_at: *added_at,
-                    signature: sig.clone(),
-                    public_key: pk.clone(),
-                })
-                .collect();
-        }
-    }
+    attach_reactions(&mut messages, &reactions_map);
 
     // ── 5. Build edits list ─────────────────────────────────────
-    let mut all_edits: Vec<ArchiveEdit> = Vec::new();
-    let mut edits_by_mid: BTreeMap<String, Vec<ArchiveEdit>> = BTreeMap::new();
-    for (mid, rows) in &edits_map {
-        let entries: Vec<ArchiveEdit> = rows
-            .iter()
-            .map(|(old_text, new_text, edited_at, sig, pk, prev_sig, prev_pk, prev_ts)| ArchiveEdit {
-                message_id: mid.clone(),
-                old_text: old_text.clone(),
-                new_text: new_text.clone(),
-                edited_at: *edited_at,
-                signature: sig.clone(),
-                public_key: pk.clone(),
-                prev_signature: prev_sig.clone(),
-                prev_public_key: prev_pk.clone(),
-                prev_timestamp: *prev_ts,
-            })
-            .collect();
-        all_edits.extend(entries.iter().cloned());
-        edits_by_mid.insert(mid.clone(), entries);
-    }
+    let (all_edits, edits_by_mid) = build_edits(&edits_map);
 
     // ── 6. Build deletions list ─────────────────────────────────
-    let mut all_deletions: Vec<ArchiveDeletion> = Vec::new();
-    let mut deletions_by_mid: BTreeMap<String, Vec<ArchiveDeletion>> = BTreeMap::new();
-    for (mid, rows) in &deletions_map {
-        let entries: Vec<ArchiveDeletion> = rows
-            .iter()
-            .map(|(deleted_text, deleted_at, sig, pk)| ArchiveDeletion {
-                message_id: mid.clone(),
-                deleted_text: deleted_text.clone(),
-                deleted_at: *deleted_at,
-                signature: sig.clone(),
-                public_key: pk.clone(),
-            })
-            .collect();
-        all_deletions.extend(entries.iter().cloned());
-        deletions_by_mid.insert(mid.clone(), entries);
-    }
+    let (all_deletions, deletions_by_mid) = build_deletions(&deletions_map);
 
     // ── 7. Build reaction removals list ─────────────────────────
-    let mut all_removals: Vec<ArchiveReactionRemoval> = Vec::new();
-    let mut removals_by_mid: BTreeMap<String, Vec<ArchiveReactionRemoval>> = BTreeMap::new();
-    for (mid, rows) in &removals_map {
-        let entries: Vec<ArchiveReactionRemoval> = rows
-            .iter()
-            .map(|(emoji, peer_id, removed_at, sig, pk)| ArchiveReactionRemoval {
-                message_id: mid.clone(),
-                emoji: emoji.clone(),
-                peer_id: peer_id.clone(),
-                removed_at: *removed_at,
-                signature: sig.clone(),
-                public_key: pk.clone(),
-            })
-            .collect();
-        all_removals.extend(entries.iter().cloned());
-        removals_by_mid.insert(mid.clone(), entries);
-    }
+    let (all_removals, removals_by_mid) = build_removals(&removals_map);
 
     // ── 8. Collect unique public keys ───────────────────────────
-    let mut pubkey_map: HashMap<String, String> = HashMap::new(); // peer_id -> pk_b64
-    for msg in &messages {
-        if let Some(pk) = &msg.public_key {
-            // Derive peer_id from the public key to verify it matches sender_id.
-            pubkey_map.entry(msg.sender_id.clone()).or_insert_with(|| pk.clone());
-        }
-        for rxn in &msg.reactions {
-            if let Some(pk) = &rxn.public_key {
-                pubkey_map.entry(rxn.peer_id.clone()).or_insert_with(|| pk.clone());
-            }
-        }
-    }
-    for edit in &all_edits {
-        if let (Some(pk), Some(msg)) = (
-            &edit.public_key,
-            messages.iter().find(|m| m.message_id == edit.message_id),
-        ) {
-            pubkey_map.entry(msg.sender_id.clone()).or_insert_with(|| pk.clone());
-        }
-    }
-    for del in &all_deletions {
-        if let (Some(pk), Some(msg)) = (
-            &del.public_key,
-            messages.iter().find(|m| m.message_id == del.message_id),
-        ) {
-            pubkey_map.entry(msg.sender_id.clone()).or_insert_with(|| pk.clone());
-        }
-    }
-    for rem in &all_removals {
-        if let Some(pk) = &rem.public_key {
-            pubkey_map.entry(rem.peer_id.clone()).or_insert_with(|| pk.clone());
-        }
-    }
-
-    let pubkeys: Vec<ArchivePubKey> = pubkey_map
-        .iter()
-        .map(|(pid, pk)| ArchivePubKey {
-            peer_id: pid.clone(),
-            public_key_b64: pk.clone(),
-        })
-        .collect();
+    let pubkeys = collect_pubkeys(&messages, &all_edits, &all_deletions, &all_removals);
 
     // ── 9. Handle files ─────────────────────────────────────────
-    let files_dir = data_dir.join("files");
-    let mut file_metadata: Vec<ArchiveFileMetadata> = Vec::new();
-    let mut file_bytes_map: BTreeMap<String, Vec<u8>> = BTreeMap::new(); // file_id.ext -> bytes
-
-    let file_ids: HashSet<String> = messages
-        .iter()
-        .filter_map(|m| m.file_id.clone())
-        .collect();
-
-    for fid in &file_ids {
-        if let Ok(Some(sf)) = store.get_file_metadata(fid) {
-            let should_include = match file_mode {
-                FileMode::Full => true,
-                FileMode::ImagesOnly => sf.is_image,
-                FileMode::Placeholder => false,
-            };
-
-            let file_path = files_dir.join(format!("{}.{}", sf.file_id, sf.file_ext));
-            let (sha256, included) = if should_include && file_path.exists() {
-                match std::fs::read(&file_path) {
-                    Ok(bytes) => {
-                        let hash = Sha256::digest(&bytes);
-                        let hash_hex = hex::encode(hash);
-                        let key = format!("{}.{}", sf.file_id, sf.file_ext);
-                        file_bytes_map.insert(key, bytes);
-                        (Some(hash_hex), true)
-                    }
-                    Err(_) => (None, false),
-                }
-            } else {
-                (None, false)
-            };
-
-            file_metadata.push(ArchiveFileMetadata {
-                file_id: sf.file_id,
-                file_name: sf.file_name,
-                file_ext: sf.file_ext,
-                mime_type: sf.mime_type,
-                size_bytes: sf.size_bytes,
-                is_image: sf.is_image,
-                width: sf.width,
-                height: sf.height,
-                sha256,
-                included,
-            });
-        }
-    }
+    let (file_metadata, file_bytes_map) = collect_files(store, data_dir, &messages, file_mode);
 
     // ── 10. Build participants list ─────────────────────────────
-    let participants: Vec<String> = {
-        let mut set: HashSet<String> = HashSet::new();
-        for msg in &messages {
-            set.insert(msg.sender_id.clone());
-        }
-        let mut v: Vec<String> = set.into_iter().collect();
-        v.sort();
-        v
-    };
+    let participants = collect_participants(&messages);
 
     // ── 11. Build manifest ──────────────────────────────────────
     let manifest = ArchiveManifest {
@@ -372,26 +112,9 @@ pub(crate) fn export_archive(
         message_jsons.insert(msg.message_id.clone(), json);
     }
 
-    let mut edit_jsons: BTreeMap<String, Vec<u8>> = BTreeMap::new();
-    for (mid, entries) in &edits_by_mid {
-        let json = serde_json::to_vec_pretty(entries)
-            .map_err(|e| format!("Failed to serialize edits for {mid}: {e}"))?;
-        edit_jsons.insert(mid.clone(), json);
-    }
-
-    let mut deletion_jsons: BTreeMap<String, Vec<u8>> = BTreeMap::new();
-    for (mid, entries) in &deletions_by_mid {
-        let json = serde_json::to_vec_pretty(entries)
-            .map_err(|e| format!("Failed to serialize deletions for {mid}: {e}"))?;
-        deletion_jsons.insert(mid.clone(), json);
-    }
-
-    let mut removal_jsons: BTreeMap<String, Vec<u8>> = BTreeMap::new();
-    for (mid, entries) in &removals_by_mid {
-        let json = serde_json::to_vec_pretty(entries)
-            .map_err(|e| format!("Failed to serialize reaction removals for {mid}: {e}"))?;
-        removal_jsons.insert(mid.clone(), json);
-    }
+    let edit_jsons = serialize_entries_by_mid(&edits_by_mid, "edits")?;
+    let deletion_jsons = serialize_entries_by_mid(&deletions_by_mid, "deletions")?;
+    let removal_jsons = serialize_entries_by_mid(&removals_by_mid, "reaction removals")?;
 
     let pubkeys_json = serde_json::to_vec_pretty(&pubkeys)
         .map_err(|e| format!("Failed to serialize pubkeys: {e}"))?;
@@ -404,15 +127,7 @@ pub(crate) fn export_archive(
     }
 
     // ── 13. Compute archive-level hash ──────────────────────────
-    let mut file_hashes: BTreeMap<String, String> = BTreeMap::new();
-    for fm in &file_metadata {
-        let hash = if let Some(h) = &fm.sha256 {
-            h.clone()
-        } else {
-            "placeholder".to_string()
-        };
-        file_hashes.insert(fm.file_id.clone(), hash);
-    }
+    let file_hashes = build_file_hashes(&file_metadata);
 
     let content_hash = compute_archive_hash(
         &manifest_json,
@@ -447,75 +162,463 @@ pub(crate) fn export_archive(
             .compression_method(zip::CompressionMethod::Deflated);
 
         // manifest.json
-        zip.start_file("manifest.json", options)
-            .map_err(|e| format!("Zip error: {e}"))?;
-        zip.write_all(&manifest_json)
-            .map_err(|e| format!("Zip write error: {e}"))?;
+        zip_entry(&mut zip, "manifest.json", &manifest_json, options)?;
 
         // messages/{message_id}.json
         for (mid, json) in &message_jsons {
-            zip.start_file(format!("messages/{mid}.json"), options)
-                .map_err(|e| format!("Zip error: {e}"))?;
-            zip.write_all(json)
-                .map_err(|e| format!("Zip write error: {e}"))?;
+            zip_entry(&mut zip, &format!("messages/{mid}.json"), json, options)?;
         }
 
         // edits/{message_id}.json
         for (mid, json) in &edit_jsons {
-            zip.start_file(format!("edits/{mid}.json"), options)
-                .map_err(|e| format!("Zip error: {e}"))?;
-            zip.write_all(json)
-                .map_err(|e| format!("Zip write error: {e}"))?;
+            zip_entry(&mut zip, &format!("edits/{mid}.json"), json, options)?;
         }
 
         // deletions/{message_id}.json
         for (mid, json) in &deletion_jsons {
-            zip.start_file(format!("deletions/{mid}.json"), options)
-                .map_err(|e| format!("Zip error: {e}"))?;
-            zip.write_all(json)
-                .map_err(|e| format!("Zip write error: {e}"))?;
+            zip_entry(&mut zip, &format!("deletions/{mid}.json"), json, options)?;
         }
 
         // reaction_removals/{message_id}.json
         for (mid, json) in &removal_jsons {
-            zip.start_file(format!("reaction_removals/{mid}.json"), options)
-                .map_err(|e| format!("Zip error: {e}"))?;
-            zip.write_all(json)
-                .map_err(|e| format!("Zip write error: {e}"))?;
+            zip_entry(&mut zip, &format!("reaction_removals/{mid}.json"), json, options)?;
         }
 
         // pubkeys.json
-        zip.start_file("pubkeys.json", options)
-            .map_err(|e| format!("Zip error: {e}"))?;
-        zip.write_all(&pubkeys_json)
-            .map_err(|e| format!("Zip write error: {e}"))?;
+        zip_entry(&mut zip, "pubkeys.json", &pubkeys_json, options)?;
 
         // files/{file_id}.meta.json
         for (fid, json) in &file_meta_jsons {
-            zip.start_file(format!("files/{fid}.meta.json"), options)
-                .map_err(|e| format!("Zip error: {e}"))?;
-            zip.write_all(json)
-                .map_err(|e| format!("Zip write error: {e}"))?;
+            zip_entry(&mut zip, &format!("files/{fid}.meta.json"), json, options)?;
         }
 
         // files/{file_id}.{ext} (actual bytes)
         for (key, bytes) in &file_bytes_map {
-            zip.start_file(format!("files/{key}"), options)
-                .map_err(|e| format!("Zip error: {e}"))?;
-            zip.write_all(bytes)
-                .map_err(|e| format!("Zip write error: {e}"))?;
+            zip_entry(&mut zip, &format!("files/{key}"), bytes, options)?;
         }
 
         // archive_signature.json
-        zip.start_file("archive_signature.json", options)
-            .map_err(|e| format!("Zip error: {e}"))?;
-        zip.write_all(&archive_sig_json)
-            .map_err(|e| format!("Zip write error: {e}"))?;
+        zip_entry(&mut zip, "archive_signature.json", &archive_sig_json, options)?;
 
         zip.finish().map_err(|e| format!("Failed to finalize zip: {e}"))?;
     }
 
     Ok(zip_buf.into_inner())
+}
+
+/// Per-target manifest fields + flattened message list (step 1 of export).
+struct TargetData {
+    archive_type: String,
+    peer_id: Option<String>,
+    server_id: Option<String>,
+    channel_id: Option<String>,
+    channel_name: Option<String>,
+    server_name: Option<String>,
+    channels: Vec<ArchiveChannelInfo>,
+    messages: Vec<ArchiveMessage>,
+}
+
+/// Load all DM messages with a peer (including hidden/deleted).
+fn dm_target_data(
+    store: &MessageStore,
+    exporter_peer_id: &str,
+    peer_id: &str,
+) -> Result<TargetData, String> {
+    let msgs = store.load_all_dm_messages(peer_id)?;
+    let archive_msgs: Vec<ArchiveMessage> = msgs
+        .into_iter()
+        .map(|m| {
+            let sender = if m.is_mine {
+                exporter_peer_id.to_string()
+            } else {
+                m.peer_id.clone()
+            };
+            let mid = m.message_id.clone().unwrap_or_else(|| {
+                format!("legacy-{}-{}", sender, m.timestamp)
+            });
+            ArchiveMessage {
+                message_id: mid,
+                sender_id: sender,
+                text: m.text,
+                timestamp: m.timestamp,
+                signature: m.signature,
+                public_key: m.public_key,
+                edited_at: m.edited_at,
+                hidden_at: m.hidden_at,
+                reply_to_mid: m.reply_to_mid,
+                file_id: m.file_id,
+                channel_id: None,
+                reactions: Vec::new(),
+            }
+        })
+        .collect();
+    Ok(TargetData {
+        archive_type: "dm".to_string(),
+        peer_id: Some(peer_id.to_string()),
+        server_id: None,
+        channel_id: None,
+        channel_name: None,
+        server_name: None,
+        channels: Vec::new(),
+        messages: archive_msgs,
+    })
+}
+
+/// Load all messages of a single channel (including hidden/deleted).
+fn channel_target_data(
+    store: &MessageStore,
+    server_id: &str,
+    channel_id: &str,
+    channel_name: &Option<String>,
+) -> Result<TargetData, String> {
+    let msgs = store.load_all_channel_messages(server_id, channel_id)?;
+    let archive_msgs: Vec<ArchiveMessage> = msgs
+        .into_iter()
+        .map(|m| {
+            let mid = m.message_id.clone().unwrap_or_else(|| {
+                format!("legacy-{}-{}", m.sender_id, m.timestamp)
+            });
+            ArchiveMessage {
+                message_id: mid,
+                sender_id: m.sender_id,
+                text: m.text,
+                timestamp: m.timestamp,
+                signature: m.signature,
+                public_key: m.public_key,
+                edited_at: m.edited_at,
+                hidden_at: m.hidden_at,
+                reply_to_mid: m.reply_to_mid,
+                file_id: m.file_id,
+                channel_id: None,
+                reactions: Vec::new(),
+            }
+        })
+        .collect();
+    Ok(TargetData {
+        archive_type: "channel".to_string(),
+        peer_id: None,
+        server_id: Some(server_id.to_string()),
+        channel_id: Some(channel_id.to_string()),
+        channel_name: channel_name.clone(),
+        server_name: None,
+        channels: Vec::new(),
+        messages: archive_msgs,
+    })
+}
+
+/// Load all messages of every channel in a server (including hidden/deleted).
+fn server_target_data(
+    store: &MessageStore,
+    server_id: &str,
+    server_name: &str,
+    channels: &[(String, String)],
+) -> Result<TargetData, String> {
+    let mut archive_msgs: Vec<ArchiveMessage> = Vec::new();
+    let mut channel_infos: Vec<ArchiveChannelInfo> = Vec::new();
+    for (ch_id, ch_name) in channels {
+        let msgs = store.load_all_channel_messages(server_id, ch_id)?;
+        let count = msgs.len() as u32;
+        for m in msgs {
+            let mid = m.message_id.clone().unwrap_or_else(|| {
+                format!("legacy-{}-{}", m.sender_id, m.timestamp)
+            });
+            archive_msgs.push(ArchiveMessage {
+                message_id: mid,
+                sender_id: m.sender_id,
+                text: m.text,
+                timestamp: m.timestamp,
+                signature: m.signature,
+                public_key: m.public_key,
+                edited_at: m.edited_at,
+                hidden_at: m.hidden_at,
+                reply_to_mid: m.reply_to_mid,
+                file_id: m.file_id,
+                channel_id: Some(ch_id.clone()),
+                reactions: Vec::new(),
+            });
+        }
+        channel_infos.push(ArchiveChannelInfo {
+            channel_id: ch_id.clone(),
+            channel_name: ch_name.clone(),
+            message_count: count,
+        });
+    }
+    Ok(TargetData {
+        archive_type: "server".to_string(),
+        peer_id: None,
+        server_id: Some(server_id.to_string()),
+        channel_id: None,
+        channel_name: None,
+        server_name: Some(server_name.to_string()),
+        channels: channel_infos,
+        messages: archive_msgs,
+    })
+}
+
+/// Attach each message's reactions inline (step 4).
+fn attach_reactions(messages: &mut [ArchiveMessage], reactions_map: &ReactionRows) {
+    for msg in messages.iter_mut() {
+        if let Some(rxns) = reactions_map.get(&msg.message_id) {
+            msg.reactions = rxns
+                .iter()
+                .map(|(emoji, peer_id, added_at, sig, pk)| ArchiveReaction {
+                    emoji: emoji.clone(),
+                    peer_id: peer_id.clone(),
+                    added_at: *added_at,
+                    signature: sig.clone(),
+                    public_key: pk.clone(),
+                })
+                .collect();
+        }
+    }
+}
+
+/// Build the flat + per-message edit lists (step 5).
+fn build_edits(edits_map: &EditRows) -> (Vec<ArchiveEdit>, BTreeMap<String, Vec<ArchiveEdit>>) {
+    let mut all_edits: Vec<ArchiveEdit> = Vec::new();
+    let mut edits_by_mid: BTreeMap<String, Vec<ArchiveEdit>> = BTreeMap::new();
+    for (mid, rows) in edits_map {
+        let entries: Vec<ArchiveEdit> = rows
+            .iter()
+            .map(|(old_text, new_text, edited_at, sig, pk, prev_sig, prev_pk, prev_ts)| ArchiveEdit {
+                message_id: mid.clone(),
+                old_text: old_text.clone(),
+                new_text: new_text.clone(),
+                edited_at: *edited_at,
+                signature: sig.clone(),
+                public_key: pk.clone(),
+                prev_signature: prev_sig.clone(),
+                prev_public_key: prev_pk.clone(),
+                prev_timestamp: *prev_ts,
+            })
+            .collect();
+        all_edits.extend(entries.iter().cloned());
+        edits_by_mid.insert(mid.clone(), entries);
+    }
+    (all_edits, edits_by_mid)
+}
+
+/// Build the flat + per-message deletion lists (step 6).
+fn build_deletions(
+    deletions_map: &DeletionRows,
+) -> (Vec<ArchiveDeletion>, BTreeMap<String, Vec<ArchiveDeletion>>) {
+    let mut all_deletions: Vec<ArchiveDeletion> = Vec::new();
+    let mut deletions_by_mid: BTreeMap<String, Vec<ArchiveDeletion>> = BTreeMap::new();
+    for (mid, rows) in deletions_map {
+        let entries: Vec<ArchiveDeletion> = rows
+            .iter()
+            .map(|(deleted_text, deleted_at, sig, pk)| ArchiveDeletion {
+                message_id: mid.clone(),
+                deleted_text: deleted_text.clone(),
+                deleted_at: *deleted_at,
+                signature: sig.clone(),
+                public_key: pk.clone(),
+            })
+            .collect();
+        all_deletions.extend(entries.iter().cloned());
+        deletions_by_mid.insert(mid.clone(), entries);
+    }
+    (all_deletions, deletions_by_mid)
+}
+
+/// Build the flat + per-message reaction-removal lists (step 7).
+fn build_removals(
+    removals_map: &RemovalRows,
+) -> (Vec<ArchiveReactionRemoval>, BTreeMap<String, Vec<ArchiveReactionRemoval>>) {
+    let mut all_removals: Vec<ArchiveReactionRemoval> = Vec::new();
+    let mut removals_by_mid: BTreeMap<String, Vec<ArchiveReactionRemoval>> = BTreeMap::new();
+    for (mid, rows) in removals_map {
+        let entries: Vec<ArchiveReactionRemoval> = rows
+            .iter()
+            .map(|(emoji, peer_id, removed_at, sig, pk)| ArchiveReactionRemoval {
+                message_id: mid.clone(),
+                emoji: emoji.clone(),
+                peer_id: peer_id.clone(),
+                removed_at: *removed_at,
+                signature: sig.clone(),
+                public_key: pk.clone(),
+            })
+            .collect();
+        all_removals.extend(entries.iter().cloned());
+        removals_by_mid.insert(mid.clone(), entries);
+    }
+    (all_removals, removals_by_mid)
+}
+
+/// Collect unique public keys from messages and their reactions (step 8).
+fn collect_message_pubkeys(messages: &[ArchiveMessage], pubkey_map: &mut HashMap<String, String>) {
+    for msg in messages {
+        if let Some(pk) = &msg.public_key {
+            // Derive peer_id from the public key to verify it matches sender_id.
+            pubkey_map.entry(msg.sender_id.clone()).or_insert_with(|| pk.clone());
+        }
+        for rxn in &msg.reactions {
+            if let Some(pk) = &rxn.public_key {
+                pubkey_map.entry(rxn.peer_id.clone()).or_insert_with(|| pk.clone());
+            }
+        }
+    }
+}
+
+/// Collect unique public keys across all archive entry kinds (step 8).
+fn collect_pubkeys(
+    messages: &[ArchiveMessage],
+    all_edits: &[ArchiveEdit],
+    all_deletions: &[ArchiveDeletion],
+    all_removals: &[ArchiveReactionRemoval],
+) -> Vec<ArchivePubKey> {
+    let mut pubkey_map: HashMap<String, String> = HashMap::new(); // peer_id -> pk_b64
+    collect_message_pubkeys(messages, &mut pubkey_map);
+    for edit in all_edits {
+        if let (Some(pk), Some(msg)) = (
+            &edit.public_key,
+            messages.iter().find(|m| m.message_id == edit.message_id),
+        ) {
+            pubkey_map.entry(msg.sender_id.clone()).or_insert_with(|| pk.clone());
+        }
+    }
+    for del in all_deletions {
+        if let (Some(pk), Some(msg)) = (
+            &del.public_key,
+            messages.iter().find(|m| m.message_id == del.message_id),
+        ) {
+            pubkey_map.entry(msg.sender_id.clone()).or_insert_with(|| pk.clone());
+        }
+    }
+    for rem in all_removals {
+        if let Some(pk) = &rem.public_key {
+            pubkey_map.entry(rem.peer_id.clone()).or_insert_with(|| pk.clone());
+        }
+    }
+
+    pubkey_map
+        .iter()
+        .map(|(pid, pk)| ArchivePubKey {
+            peer_id: pid.clone(),
+            public_key_b64: pk.clone(),
+        })
+        .collect()
+}
+
+/// Gather file metadata and (mode permitting) file bytes for the zip (step 9).
+fn collect_files(
+    store: &MessageStore,
+    data_dir: &Path,
+    messages: &[ArchiveMessage],
+    file_mode: FileMode,
+) -> (Vec<ArchiveFileMetadata>, BTreeMap<String, Vec<u8>>) {
+    let files_dir = data_dir.join("files");
+    let mut file_metadata: Vec<ArchiveFileMetadata> = Vec::new();
+    let mut file_bytes_map: BTreeMap<String, Vec<u8>> = BTreeMap::new(); // file_id.ext -> bytes
+
+    let file_ids: HashSet<String> = messages
+        .iter()
+        .filter_map(|m| m.file_id.clone())
+        .collect();
+
+    for fid in &file_ids {
+        if let Ok(Some(sf)) = store.get_file_metadata(fid) {
+            let should_include = match file_mode {
+                FileMode::Full => true,
+                FileMode::ImagesOnly => sf.is_image,
+                FileMode::Placeholder => false,
+            };
+
+            let file_path = files_dir.join(format!("{}.{}", sf.file_id, sf.file_ext));
+            let (sha256, included) = if should_include && file_path.exists() {
+                read_file_for_archive(&file_path, &sf.file_id, &sf.file_ext, &mut file_bytes_map)
+            } else {
+                (None, false)
+            };
+
+            file_metadata.push(ArchiveFileMetadata {
+                file_id: sf.file_id,
+                file_name: sf.file_name,
+                file_ext: sf.file_ext,
+                mime_type: sf.mime_type,
+                size_bytes: sf.size_bytes,
+                is_image: sf.is_image,
+                width: sf.width,
+                height: sf.height,
+                sha256,
+                included,
+            });
+        }
+    }
+
+    (file_metadata, file_bytes_map)
+}
+
+/// Read file bytes from disk, hash them, and stash them for the zip.
+/// Returns `(sha256_hex, included)`.
+fn read_file_for_archive(
+    file_path: &Path,
+    file_id: &str,
+    file_ext: &str,
+    file_bytes_map: &mut BTreeMap<String, Vec<u8>>,
+) -> (Option<String>, bool) {
+    match std::fs::read(file_path) {
+        Ok(bytes) => {
+            let hash = Sha256::digest(&bytes);
+            let hash_hex = hex::encode(hash);
+            let key = format!("{}.{}", file_id, file_ext);
+            file_bytes_map.insert(key, bytes);
+            (Some(hash_hex), true)
+        }
+        Err(_) => (None, false),
+    }
+}
+
+/// Build the sorted participant list (step 10).
+fn collect_participants(messages: &[ArchiveMessage]) -> Vec<String> {
+    let mut set: HashSet<String> = HashSet::new();
+    for msg in messages {
+        set.insert(msg.sender_id.clone());
+    }
+    let mut v: Vec<String> = set.into_iter().collect();
+    v.sort();
+    v
+}
+
+/// Serialize per-message entry lists to pretty JSON, keyed by message id (step 12).
+fn serialize_entries_by_mid<T: serde::Serialize>(
+    by_mid: &BTreeMap<String, Vec<T>>,
+    kind: &str,
+) -> Result<BTreeMap<String, Vec<u8>>, String> {
+    let mut jsons: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    for (mid, entries) in by_mid {
+        let json = serde_json::to_vec_pretty(entries)
+            .map_err(|e| format!("Failed to serialize {kind} for {mid}: {e}"))?;
+        jsons.insert(mid.clone(), json);
+    }
+    Ok(jsons)
+}
+
+/// Map file_id → sha256 (or "placeholder") for the archive hash (step 13).
+fn build_file_hashes(file_metadata: &[ArchiveFileMetadata]) -> BTreeMap<String, String> {
+    let mut file_hashes: BTreeMap<String, String> = BTreeMap::new();
+    for fm in file_metadata {
+        let hash = if let Some(h) = &fm.sha256 {
+            h.clone()
+        } else {
+            "placeholder".to_string()
+        };
+        file_hashes.insert(fm.file_id.clone(), hash);
+    }
+    file_hashes
+}
+
+/// Write one file entry into the zip (step 15).
+fn zip_entry<W: Write + std::io::Seek>(
+    zip: &mut zip::ZipWriter<W>,
+    name: &str,
+    bytes: &[u8],
+    options: zip::write::SimpleFileOptions,
+) -> Result<(), String> {
+    zip.start_file(name, options)
+        .map_err(|e| format!("Zip error: {e}"))?;
+    zip.write_all(bytes)
+        .map_err(|e| format!("Zip write error: {e}"))
 }
 
 /// Compute a deterministic SHA-256 hash over the entire archive content.

@@ -70,47 +70,43 @@ class _VoiceRecorderBarState extends ConsumerState<VoiceRecorderBar>
     try {
       await _recorder.start(preferredDeviceId: deviceId);
       _started = true;
-      _ampSub = _recorder.amplitudes.listen((level) {
-        if (!mounted) return;
-        setState(() {
-          _waveform.addLast(level);
-          while (_waveform.length > _waveformSamples) {
-            _waveform.removeFirst();
-          }
-        });
-      });
-      _elapsedSub = _recorder.elapsed.listen((d) {
-        if (!mounted) return;
-        setState(() => _elapsed = d);
-        if (d >= kVoiceMessageMaxDuration) {
-          _send();
-        }
-      });
+      _ampSub = _recorder.amplitudes.listen(_onAmplitude);
+      _elapsedSub = _recorder.elapsed.listen(_onElapsed);
     } on RecorderPermissionException {
-      if (!mounted) return;
-      HollowToast.show(
-        context,
-        'Microphone permission denied',
-        type: HollowToastType.error,
-      );
-      widget.onCancelled();
+      _failStart('Microphone permission denied');
     } on RecorderFfmpegMissingException {
-      if (!mounted) return;
-      HollowToast.show(
-        context,
-        'Voice encoder unavailable',
-        type: HollowToastType.error,
-      );
-      widget.onCancelled();
+      _failStart('Voice encoder unavailable');
     } catch (e) {
-      if (!mounted) return;
-      HollowToast.show(
-        context,
-        'Failed to start recording: $e',
-        type: HollowToastType.error,
-      );
-      widget.onCancelled();
+      _failStart('Failed to start recording: $e');
     }
+  }
+
+  void _onAmplitude(double level) {
+    if (!mounted) return;
+    setState(() {
+      _waveform.addLast(level);
+      while (_waveform.length > _waveformSamples) {
+        _waveform.removeFirst();
+      }
+    });
+  }
+
+  void _onElapsed(Duration d) {
+    if (!mounted) return;
+    setState(() => _elapsed = d);
+    if (d >= kVoiceMessageMaxDuration) {
+      _send();
+    }
+  }
+
+  void _failStart(String message) {
+    if (!mounted) return;
+    HollowToast.show(
+      context,
+      message,
+      type: HollowToastType.error,
+    );
+    widget.onCancelled();
   }
 
   @override

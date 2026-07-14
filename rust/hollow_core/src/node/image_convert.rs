@@ -133,98 +133,13 @@ pub fn strip_gif_metadata(data: &[u8]) -> Vec<u8> {
             }
             0x2C => {
                 // Image Descriptor — always keep.
-                // Copy: Image Descriptor (10 bytes) + optional LCT + image data.
-                if i + 10 > data.len() { break; }
-                out.extend_from_slice(&data[i..i + 10]);
-                let img_packed = data[i + 9];
-                let has_lct = (img_packed & 0x80) != 0;
-                i += 10;
-                if has_lct {
-                    let lct_size = 3 * (1 << ((img_packed & 0x07) + 1));
-                    let lct_end = i + lct_size as usize;
-                    if lct_end > data.len() { break; }
-                    out.extend_from_slice(&data[i..lct_end]);
-                    i = lct_end;
-                }
-                // LZW Minimum Code Size byte.
-                if i >= data.len() { break; }
-                out.push(data[i]);
-                i += 1;
-                // Sub-blocks until block terminator (0x00).
-                while i < data.len() {
-                    let block_size = data[i] as usize;
-                    out.push(data[i]);
-                    i += 1;
-                    if block_size == 0 { break; }
-                    if i + block_size > data.len() { break; }
-                    out.extend_from_slice(&data[i..i + block_size]);
-                    i += block_size;
-                }
+                let Some(next) = copy_gif_image_descriptor(data, i, &mut out) else { break; };
+                i = next;
             }
             0x21 => {
                 // Extension block.
-                if i + 2 > data.len() { break; }
-                let label = data[i + 1];
-                match label {
-                    0xF9 => {
-                        // Graphic Control Extension — always keep (animation timing).
-                        // Fixed size: 2 (introducer+label) + 1 (block size=4) + 4 + 1 (terminator) = 8
-                        let block_end = i + 8;
-                        if block_end > data.len() { break; }
-                        out.extend_from_slice(&data[i..block_end]);
-                        i = block_end;
-                    }
-                    0xFF => {
-                        // Application Extension — keep only NETSCAPE2.0 (animation loop).
-                        // Read past: introducer(1) + label(1) + block_size(1) + app_id(block_size) + sub-blocks
-                        if i + 3 > data.len() { break; }
-                        let app_block_size = data[i + 2] as usize;
-                        let app_id_end = i + 3 + app_block_size;
-                        if app_id_end > data.len() { break; }
-
-                        let is_netscape = app_block_size >= 11
-                            && &data[i + 3..i + 3 + 8] == b"NETSCAPE";
-
-                        // Collect the full extension (header + all sub-blocks).
-                        let ext_start = i;
-                        i = app_id_end;
-                        // Skip sub-blocks.
-                        while i < data.len() {
-                            let sb = data[i] as usize;
-                            i += 1;
-                            if sb == 0 { break; }
-                            i += sb;
-                        }
-
-                        if is_netscape {
-                            out.extend_from_slice(&data[ext_start..i]);
-                        }
-                        // Otherwise: skip (strips EXIF, XMP, ICC, etc.)
-                    }
-                    0xFE => {
-                        // Comment Extension — skip entirely.
-                        i += 2;
-                        while i < data.len() {
-                            let sb = data[i] as usize;
-                            i += 1;
-                            if sb == 0 { break; }
-                            i += sb;
-                        }
-                    }
-                    _ => {
-                        // Unknown extension — keep it (could be essential).
-                        let ext_start = i;
-                        i += 2;
-                        // Skip sub-blocks.
-                        while i < data.len() {
-                            let sb = data[i] as usize;
-                            i += 1;
-                            if sb == 0 { break; }
-                            i += sb;
-                        }
-                        out.extend_from_slice(&data[ext_start..i]);
-                    }
-                }
+                let Some(next) = copy_gif_extension(data, i, &mut out) else { break; };
+                i = next;
             }
             _ => {
                 // Unknown block type — just copy byte and advance.
@@ -235,6 +150,105 @@ pub fn strip_gif_metadata(data: &[u8]) -> Vec<u8> {
     }
 
     out
+}
+
+/// Copy a GIF Image Descriptor block (0x2C) into `out`.
+/// Copy: Image Descriptor (10 bytes) + optional LCT + image data.
+/// Returns the new cursor position, or `None` when the data is truncated
+/// and block processing should stop.
+fn copy_gif_image_descriptor(data: &[u8], mut i: usize, out: &mut Vec<u8>) -> Option<usize> {
+    if i + 10 > data.len() { return None; }
+    out.extend_from_slice(&data[i..i + 10]);
+    let img_packed = data[i + 9];
+    let has_lct = (img_packed & 0x80) != 0;
+    i += 10;
+    if has_lct {
+        let lct_size = 3 * (1 << ((img_packed & 0x07) + 1));
+        let lct_end = i + lct_size as usize;
+        if lct_end > data.len() { return None; }
+        out.extend_from_slice(&data[i..lct_end]);
+        i = lct_end;
+    }
+    // LZW Minimum Code Size byte.
+    if i >= data.len() { return None; }
+    out.push(data[i]);
+    i += 1;
+    // Sub-blocks until block terminator (0x00).
+    while i < data.len() {
+        let block_size = data[i] as usize;
+        out.push(data[i]);
+        i += 1;
+        if block_size == 0 { break; }
+        if i + block_size > data.len() { break; }
+        out.extend_from_slice(&data[i..i + block_size]);
+        i += block_size;
+    }
+    Some(i)
+}
+
+/// Copy or strip a GIF extension block (0x21) depending on its label.
+/// Returns the new cursor position, or `None` when the data is truncated
+/// and block processing should stop.
+fn copy_gif_extension(data: &[u8], i: usize, out: &mut Vec<u8>) -> Option<usize> {
+    if i + 2 > data.len() { return None; }
+    let label = data[i + 1];
+    match label {
+        0xF9 => {
+            // Graphic Control Extension — always keep (animation timing).
+            // Fixed size: 2 (introducer+label) + 1 (block size=4) + 4 + 1 (terminator) = 8
+            let block_end = i + 8;
+            if block_end > data.len() { return None; }
+            out.extend_from_slice(&data[i..block_end]);
+            Some(block_end)
+        }
+        0xFF => copy_gif_application_extension(data, i, out),
+        0xFE => {
+            // Comment Extension — skip entirely.
+            Some(skip_gif_sub_blocks(data, i + 2))
+        }
+        _ => {
+            // Unknown extension — keep it (could be essential).
+            let ext_start = i;
+            // Skip sub-blocks.
+            let end = skip_gif_sub_blocks(data, i + 2);
+            out.extend_from_slice(&data[ext_start..end]);
+            Some(end)
+        }
+    }
+}
+
+/// Application Extension (0xFF) — keep only NETSCAPE2.0 (animation loop).
+/// Read past: introducer(1) + label(1) + block_size(1) + app_id(block_size) + sub-blocks
+fn copy_gif_application_extension(data: &[u8], i: usize, out: &mut Vec<u8>) -> Option<usize> {
+    if i + 3 > data.len() { return None; }
+    let app_block_size = data[i + 2] as usize;
+    let app_id_end = i + 3 + app_block_size;
+    if app_id_end > data.len() { return None; }
+
+    let is_netscape = app_block_size >= 11
+        && &data[i + 3..i + 3 + 8] == b"NETSCAPE";
+
+    // Collect the full extension (header + all sub-blocks).
+    let ext_start = i;
+    let end = skip_gif_sub_blocks(data, app_id_end);
+
+    if is_netscape {
+        out.extend_from_slice(&data[ext_start..end]);
+    }
+    // Otherwise: skip (strips EXIF, XMP, ICC, etc.)
+    Some(end)
+}
+
+/// Advance past GIF data sub-blocks until the 0x00 terminator (or end of data).
+/// Returns the position just past the terminator.
+fn skip_gif_sub_blocks(data: &[u8], mut i: usize) -> usize {
+    while i < data.len() {
+        let sb = data[i] as usize;
+        i += 1;
+        if sb == 0 { break; }
+        i += sb;
+    }
+    i
 }
 
 /// Convert an animated GIF to animated WebP at the given quality tier.

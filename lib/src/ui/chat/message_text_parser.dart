@@ -100,6 +100,14 @@ List<_Token> _cachedTokenize(String text, {Set<String>? memberNames}) {
 // Tokenizer — pure string parsing, produces _Token tree
 // ---------------------------------------------------------------------------
 
+/// One successfully matched token plus the index just past its markup.
+class _TokenMatch {
+  final _Token token;
+  final int end;
+
+  const _TokenMatch(this.token, this.end);
+}
+
 List<_Token> _tokenize(
   String text, {
   int depth = 0,
@@ -120,141 +128,12 @@ List<_Token> _tokenize(
 
   int i = 0;
   while (i < text.length) {
-    // --- URL ---
-    if ((text[i] == 'h' || text[i] == 'H') && _looksLikeUrlStart(text, i)) {
-      final match = _inlineUrlRegex.matchAsPrefix(text, i);
-      if (match != null) {
-        flushBuffer();
-        tokens.add(_Token(_TokenKind.url, match.group(0)!));
-        i = match.end;
-        continue;
-      }
-    }
-
-    // --- [e:name:hash] custom emote ---
-    if (text[i] == '[') {
-      final match = emoteTokenRegex.matchAsPrefix(text, i);
-      if (match != null) {
-        flushBuffer();
-        tokens.add(_Token(
-          _TokenKind.customEmote,
-          match.group(1)!,
-          null,
-          match.group(2)!,
-        ));
-        i = match.end;
-        continue;
-      }
-    }
-
-    // --- @mention ---
-    if (text[i] == '@') {
-      final rest = text.substring(i + 1);
-      String? matched;
-      if (rest.startsWith('everyone')) {
-        matched = 'everyone';
-      } else if (memberNames != null) {
-        for (final name in memberNames) {
-          if (rest.startsWith(name) &&
-              (matched == null || name.length > matched.length)) {
-            matched = name;
-          }
-        }
-      }
-      if (matched != null) {
-        flushBuffer();
-        tokens.add(_Token(_TokenKind.mention, matched));
-        i += 1 + matched.length;
-        continue;
-      }
-    }
-
-    // --- **bold** ---
-    if (i + 1 < text.length && text[i] == '*' && text[i + 1] == '*') {
-      final end = text.indexOf('**', i + 2);
-      if (end != -1) {
-        flushBuffer();
-        final inner = text.substring(i + 2, end);
-        tokens.add(_Token(
-          _TokenKind.bold,
-          inner,
-          _tokenize(inner, depth: depth + 1),
-        ));
-        i = end + 2;
-        continue;
-      }
-    }
-
-    // --- ~~strikethrough~~ ---
-    if (i + 1 < text.length && text[i] == '~' && text[i + 1] == '~') {
-      final end = text.indexOf('~~', i + 2);
-      if (end != -1) {
-        flushBuffer();
-        final inner = text.substring(i + 2, end);
-        tokens.add(_Token(
-          _TokenKind.strikethrough,
-          inner,
-          _tokenize(inner, depth: depth + 1),
-        ));
-        i = end + 2;
-        continue;
-      }
-    }
-
-    // --- ||spoiler|| ---
-    if (i + 1 < text.length && text[i] == '|' && text[i + 1] == '|') {
-      final end = text.indexOf('||', i + 2);
-      if (end != -1) {
-        flushBuffer();
-        tokens.add(_Token(_TokenKind.spoiler, text.substring(i + 2, end)));
-        i = end + 2;
-        continue;
-      }
-    }
-
-    // --- `inline code` ---
-    if (text[i] == '`') {
-      final end = text.indexOf('`', i + 1);
-      if (end != -1) {
-        flushBuffer();
-        tokens.add(_Token(_TokenKind.code, text.substring(i + 1, end)));
-        i = end + 1;
-        continue;
-      }
-    }
-
-    // --- *italic* ---
-    if (text[i] == '*' && (i + 1 >= text.length || text[i + 1] != '*')) {
-      final end = _findClosing(text, '*', i + 1);
-      if (end != -1) {
-        flushBuffer();
-        final inner = text.substring(i + 1, end);
-        tokens.add(_Token(
-          _TokenKind.italic,
-          inner,
-          _tokenize(inner, depth: depth + 1),
-        ));
-        i = end + 1;
-        continue;
-      }
-    }
-
-    // --- _italic_ (word-boundary) ---
-    if (text[i] == '_' &&
-        (i + 1 >= text.length || text[i + 1] != '_') &&
-        (i == 0 || text[i - 1] == ' ')) {
-      final end = _findClosing(text, '_', i + 1);
-      if (end != -1 && (end + 1 >= text.length || text[end + 1] == ' ')) {
-        flushBuffer();
-        final inner = text.substring(i + 1, end);
-        tokens.add(_Token(
-          _TokenKind.italic,
-          inner,
-          _tokenize(inner, depth: depth + 1),
-        ));
-        i = end + 1;
-        continue;
-      }
+    final match = _matchTokenAt(text, i, depth, memberNames);
+    if (match != null) {
+      flushBuffer();
+      tokens.add(match.token);
+      i = match.end;
+      continue;
     }
 
     buffer.write(text[i]);
@@ -263,6 +142,182 @@ List<_Token> _tokenize(
 
   flushBuffer();
   return tokens;
+}
+
+/// Tries each token grammar at position [i], in the original priority order.
+_TokenMatch? _matchTokenAt(
+  String text,
+  int i,
+  int depth,
+  Set<String>? memberNames,
+) {
+  return _matchUrl(text, i) ??
+      _matchCustomEmote(text, i) ??
+      _matchMention(text, i, memberNames) ??
+      // --- **bold** ---
+      _matchDoubleMarker(text, i, '**', _TokenKind.bold, depth) ??
+      // --- ~~strikethrough~~ ---
+      _matchDoubleMarker(text, i, '~~', _TokenKind.strikethrough, depth) ??
+      _matchSpoiler(text, i) ??
+      _matchInlineCode(text, i) ??
+      _matchStarItalic(text, i, depth) ??
+      _matchUnderscoreItalic(text, i, depth);
+}
+
+// --- URL ---
+_TokenMatch? _matchUrl(String text, int i) {
+  if ((text[i] == 'h' || text[i] == 'H') && _looksLikeUrlStart(text, i)) {
+    final match = _inlineUrlRegex.matchAsPrefix(text, i);
+    if (match != null) {
+      return _TokenMatch(_Token(_TokenKind.url, match.group(0)!), match.end);
+    }
+  }
+  return null;
+}
+
+// --- [e:name:hash] custom emote ---
+_TokenMatch? _matchCustomEmote(String text, int i) {
+  if (text[i] == '[') {
+    final match = emoteTokenRegex.matchAsPrefix(text, i);
+    if (match != null) {
+      return _TokenMatch(
+        _Token(
+          _TokenKind.customEmote,
+          match.group(1)!,
+          null,
+          match.group(2)!,
+        ),
+        match.end,
+      );
+    }
+  }
+  return null;
+}
+
+// --- @mention ---
+_TokenMatch? _matchMention(String text, int i, Set<String>? memberNames) {
+  if (text[i] == '@') {
+    final rest = text.substring(i + 1);
+    final matched = _longestMentionName(rest, memberNames);
+    if (matched != null) {
+      return _TokenMatch(
+        _Token(_TokenKind.mention, matched),
+        i + 1 + matched.length,
+      );
+    }
+  }
+  return null;
+}
+
+String? _longestMentionName(String rest, Set<String>? memberNames) {
+  String? matched;
+  if (rest.startsWith('everyone')) {
+    matched = 'everyone';
+  } else if (memberNames != null) {
+    for (final name in memberNames) {
+      if (rest.startsWith(name) &&
+          (matched == null || name.length > matched.length)) {
+        matched = name;
+      }
+    }
+  }
+  return matched;
+}
+
+/// Shared **bold** / ~~strikethrough~~ handling: a two-char [marker] pair
+/// whose inner text is recursively tokenized.
+_TokenMatch? _matchDoubleMarker(
+  String text,
+  int i,
+  String marker,
+  _TokenKind kind,
+  int depth,
+) {
+  if (i + 1 < text.length &&
+      text[i] == marker[0] &&
+      text[i + 1] == marker[1]) {
+    final end = text.indexOf(marker, i + 2);
+    if (end != -1) {
+      final inner = text.substring(i + 2, end);
+      return _TokenMatch(
+        _Token(
+          kind,
+          inner,
+          _tokenize(inner, depth: depth + 1),
+        ),
+        end + 2,
+      );
+    }
+  }
+  return null;
+}
+
+// --- ||spoiler|| ---
+_TokenMatch? _matchSpoiler(String text, int i) {
+  if (i + 1 < text.length && text[i] == '|' && text[i + 1] == '|') {
+    final end = text.indexOf('||', i + 2);
+    if (end != -1) {
+      return _TokenMatch(
+        _Token(_TokenKind.spoiler, text.substring(i + 2, end)),
+        end + 2,
+      );
+    }
+  }
+  return null;
+}
+
+// --- `inline code` ---
+_TokenMatch? _matchInlineCode(String text, int i) {
+  if (text[i] == '`') {
+    final end = text.indexOf('`', i + 1);
+    if (end != -1) {
+      return _TokenMatch(
+        _Token(_TokenKind.code, text.substring(i + 1, end)),
+        end + 1,
+      );
+    }
+  }
+  return null;
+}
+
+// --- *italic* ---
+_TokenMatch? _matchStarItalic(String text, int i, int depth) {
+  if (text[i] == '*' && (i + 1 >= text.length || text[i + 1] != '*')) {
+    final end = _findClosing(text, '*', i + 1);
+    if (end != -1) {
+      final inner = text.substring(i + 1, end);
+      return _TokenMatch(
+        _Token(
+          _TokenKind.italic,
+          inner,
+          _tokenize(inner, depth: depth + 1),
+        ),
+        end + 1,
+      );
+    }
+  }
+  return null;
+}
+
+// --- _italic_ (word-boundary) ---
+_TokenMatch? _matchUnderscoreItalic(String text, int i, int depth) {
+  if (text[i] == '_' &&
+      (i + 1 >= text.length || text[i + 1] != '_') &&
+      (i == 0 || text[i - 1] == ' ')) {
+    final end = _findClosing(text, '_', i + 1);
+    if (end != -1 && (end + 1 >= text.length || text[end + 1] == ' ')) {
+      final inner = text.substring(i + 1, end);
+      return _TokenMatch(
+        _Token(
+          _TokenKind.italic,
+          inner,
+          _tokenize(inner, depth: depth + 1),
+        ),
+        end + 1,
+      );
+    }
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -430,46 +485,28 @@ class MessageText extends StatelessWidget {
 
     for (final match in _codeBlockPattern.allMatches(text)) {
       if (match.start > lastEnd) {
-        final before = text.substring(lastEnd, match.start).trimRight();
-        if (before.isNotEmpty) {
-          final tokens = _cachedTokenize(before);
-          children.add(Text.rich(
-            TextSpan(children: _tokensToSpans(tokens, style, hollow)),
-          ));
-        }
+        _addSegmentBeforeBlock(
+          children,
+          text.substring(lastEnd, match.start),
+          style,
+          hollow,
+        );
       }
 
       final code = match.group(2) ?? '';
-      children.add(Container(
-        width: double.infinity,
-        margin: const EdgeInsets.symmetric(vertical: 4),
-        padding: const EdgeInsets.all(8),
-        decoration: BoxDecoration(
-          color: hollow.background,
-          borderRadius: BorderRadius.circular(6),
-          border: Border.all(color: hollow.border),
-        ),
-        child: Text(
-          code.endsWith('\n') ? code.substring(0, code.length - 1) : code,
-          style: HollowTypography.mono.copyWith(
-            color: hollow.textPrimary,
-            fontSize: 13,
-          ),
-        ),
-      ));
+      children.add(_codeBlockContainer(code, hollow));
 
       lastEnd = match.end;
     }
 
     if (lastEnd < text.length) {
-      final after = text.substring(lastEnd).trimLeft();
-      if (after.isNotEmpty) {
-        final tokens = _cachedTokenize(after);
-        final spans = _tokensToSpans(tokens, style, hollow);
-        if (suffixSpans != null) spans.addAll(suffixSpans);
-        children.add(Text.rich(TextSpan(children: spans)));
-        suffixSpans = null;
-      }
+      suffixSpans = _addSegmentAfterBlocks(
+        children,
+        text.substring(lastEnd),
+        style,
+        hollow,
+        suffixSpans,
+      );
     }
 
     if (suffixSpans != null && suffixSpans.isNotEmpty) {
@@ -482,6 +519,61 @@ class MessageText extends StatelessWidget {
       mainAxisSize: MainAxisSize.min,
       children: children,
     );
+  }
+
+  void _addSegmentBeforeBlock(
+    List<Widget> children,
+    String raw,
+    TextStyle style,
+    HollowTheme hollow,
+  ) {
+    final before = raw.trimRight();
+    if (before.isNotEmpty) {
+      final tokens = _cachedTokenize(before);
+      children.add(Text.rich(
+        TextSpan(children: _tokensToSpans(tokens, style, hollow)),
+      ));
+    }
+  }
+
+  Widget _codeBlockContainer(String code, HollowTheme hollow) {
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.symmetric(vertical: 4),
+      padding: const EdgeInsets.all(8),
+      decoration: BoxDecoration(
+        color: hollow.background,
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(color: hollow.border),
+      ),
+      child: Text(
+        code.endsWith('\n') ? code.substring(0, code.length - 1) : code,
+        style: HollowTypography.mono.copyWith(
+          color: hollow.textPrimary,
+          fontSize: 13,
+        ),
+      ),
+    );
+  }
+
+  /// Adds the text after the last code block; returns the suffixSpans that
+  /// were NOT consumed (null once they were appended to the trailing segment).
+  List<InlineSpan>? _addSegmentAfterBlocks(
+    List<Widget> children,
+    String raw,
+    TextStyle style,
+    HollowTheme hollow,
+    List<InlineSpan>? suffixSpans,
+  ) {
+    final after = raw.trimLeft();
+    if (after.isNotEmpty) {
+      final tokens = _cachedTokenize(after);
+      final spans = _tokensToSpans(tokens, style, hollow);
+      if (suffixSpans != null) spans.addAll(suffixSpans);
+      children.add(Text.rich(TextSpan(children: spans)));
+      return null;
+    }
+    return suffixSpans;
   }
 }
 

@@ -48,6 +48,21 @@ jobs:
         working-directory: rust/hollow_core
         run: cargo clippy --lib --message-format=json > ../../clippy-report.json
 
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Rust coverage (runs the full test suite)
+        working-directory: rust/hollow_core
+        run: >-
+          cargo llvm-cov --lib --lcov --output-path lcov.info
+          --ignore-filename-regex "frb_generated"
+
+      # Coverage generation must not block the scan itself — a flaky test
+      # should surface in the dashboard as missing coverage, not kill CI.
+      - name: Dart coverage
+        run: flutter test --coverage test/
+        continue-on-error: true
+
       - name: SonarQube scan
         uses: SonarSource/sonarqube-scan-action@v6
         env:

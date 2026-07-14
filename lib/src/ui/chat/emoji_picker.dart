@@ -791,46 +791,12 @@ class _UnicodeGrid extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
-    final entries = <_GridEntry>[];
+    final List<_GridEntry> entries;
 
     if (search.isEmpty) {
-      if (recents.isNotEmpty) {
-        entries.add(_HeaderEntry('Recently used'));
-        // Recents may contain custom-emote tokens; keep only Unicode here
-        // (tokens still render fine, but the emoji tab is the Unicode home).
-        final recentEmojis = recents
-            .map((r) {
-              final emote = parseEmoteToken(r);
-              return emote == null
-                  ? UnicodeEmoji(r, '')
-                  : UnicodeEmoji(r, emote.name);
-            })
-            .toList();
-        for (var i = 0; i < recentEmojis.length; i += _gridColumns) {
-          entries.add(_RowEntry(
-              recentEmojis.sublist(
-                  i, (i + _gridColumns).clamp(0, recentEmojis.length)),
-              recents: true));
-        }
-      }
-      for (final group in kUnicodeEmojiGroups.entries) {
-        entries.add(_HeaderEntry(group.key));
-        for (var i = 0; i < group.value.length; i += _gridColumns) {
-          entries.add(_RowEntry(group.value.sublist(
-              i, (i + _gridColumns).clamp(0, group.value.length))));
-        }
-      }
+      entries = _browseEntries();
     } else {
-      final matches = <UnicodeEmoji>[];
-      outer:
-      for (final group in kUnicodeEmojiGroups.values) {
-        for (final e in group) {
-          if (e.name.contains(search)) {
-            matches.add(e);
-            if (matches.length >= 160) break outer;
-          }
-        }
-      }
+      final matches = _searchMatches();
       if (matches.isEmpty) {
         return Center(
           child: Text('No matches',
@@ -838,10 +804,8 @@ class _UnicodeGrid extends StatelessWidget {
                   .copyWith(color: hollow.textTertiary)),
         );
       }
-      for (var i = 0; i < matches.length; i += _gridColumns) {
-        entries.add(_RowEntry(
-            matches.sublist(i, (i + _gridColumns).clamp(0, matches.length))));
-      }
+      entries = <_GridEntry>[];
+      _addEmojiRows(entries, matches);
     }
 
     return ListView.builder(
@@ -851,35 +815,93 @@ class _UnicodeGrid extends StatelessWidget {
         final entry = entries[index];
         switch (entry) {
           case _HeaderEntry():
-            return Padding(
-              padding: const EdgeInsets.only(top: 8, bottom: 4, left: 2),
-              child: Text(
-                entry.title,
-                style: HollowTypography.caption.copyWith(
-                  color: hollow.textTertiary,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-            );
+            return _headerTile(hollow, entry);
           case _RowEntry():
-            return Row(
-              children: [
-                for (final e in entry.emojis)
-                  Expanded(
-                    child: _EmojiCell(
-                      emoji: e,
-                      onSelect: onSelect,
-                      onRemove: entry.recents
-                          ? () => onRemoveRecent(e.char)
-                          : null,
-                    ),
-                  ),
-                for (var i = entry.emojis.length; i < _gridColumns; i++)
-                  const Expanded(child: SizedBox()),
-              ],
-            );
+            return _rowTile(entry);
         }
       },
+    );
+  }
+
+  /// Splits [emojis] into fixed-width rows and appends them to [entries].
+  void _addEmojiRows(
+      List<_GridEntry> entries, List<UnicodeEmoji> emojis,
+      {bool recents = false}) {
+    for (var i = 0; i < emojis.length; i += _gridColumns) {
+      entries.add(_RowEntry(
+          emojis.sublist(i, (i + _gridColumns).clamp(0, emojis.length)),
+          recents: recents));
+    }
+  }
+
+  /// Entries for the no-search browse view: recents (if any) + all groups.
+  List<_GridEntry> _browseEntries() {
+    final entries = <_GridEntry>[];
+    if (recents.isNotEmpty) {
+      entries.add(_HeaderEntry('Recently used'));
+      // Recents may contain custom-emote tokens; keep only Unicode here
+      // (tokens still render fine, but the emoji tab is the Unicode home).
+      final recentEmojis = recents
+          .map((r) {
+            final emote = parseEmoteToken(r);
+            return emote == null
+                ? UnicodeEmoji(r, '')
+                : UnicodeEmoji(r, emote.name);
+          })
+          .toList();
+      _addEmojiRows(entries, recentEmojis, recents: true);
+    }
+    for (final group in kUnicodeEmojiGroups.entries) {
+      entries.add(_HeaderEntry(group.key));
+      _addEmojiRows(entries, group.value);
+    }
+    return entries;
+  }
+
+  /// Emojis whose name contains [search], capped at 160 matches.
+  List<UnicodeEmoji> _searchMatches() {
+    final matches = <UnicodeEmoji>[];
+    outer:
+    for (final group in kUnicodeEmojiGroups.values) {
+      for (final e in group) {
+        if (e.name.contains(search)) {
+          matches.add(e);
+          if (matches.length >= 160) break outer;
+        }
+      }
+    }
+    return matches;
+  }
+
+  Widget _headerTile(HollowTheme hollow, _HeaderEntry entry) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 8, bottom: 4, left: 2),
+      child: Text(
+        entry.title,
+        style: HollowTypography.caption.copyWith(
+          color: hollow.textTertiary,
+          fontWeight: FontWeight.w600,
+        ),
+      ),
+    );
+  }
+
+  Widget _rowTile(_RowEntry entry) {
+    return Row(
+      children: [
+        for (final e in entry.emojis)
+          Expanded(
+            child: _EmojiCell(
+              emoji: e,
+              onSelect: onSelect,
+              onRemove: entry.recents
+                  ? () => onRemoveRecent(e.char)
+                  : null,
+            ),
+          ),
+        for (var i = entry.emojis.length; i < _gridColumns; i++)
+          const Expanded(child: SizedBox()),
+      ],
     );
   }
 }
