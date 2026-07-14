@@ -109,10 +109,10 @@ impl ContentStore {
         conn.execute_batch(&format!("PRAGMA key = \"x'{passphrase}'\";"))
             .map_err(|e| format!("Failed to set encryption key: {e}"))?;
 
-        use crate::storage::messages::ddl;
-
-        ddl(&conn, "vault_shards table",
-            "CREATE TABLE IF NOT EXISTS vault_shards (
+        // Vault schema, in dependency order — (error label, idempotent DDL).
+        const VAULT_SCHEMA: &[(&str, &str)] = &[
+            ("vault_shards table",
+             "CREATE TABLE IF NOT EXISTS vault_shards (
                 shard_key       TEXT    PRIMARY KEY,
                 server_id       TEXT    NOT NULL,
                 content_id      TEXT    NOT NULL,
@@ -125,18 +125,15 @@ impl ContentStore {
                 last_verified   INTEGER,
                 storage_tier    TEXT    NOT NULL DEFAULT 'standard',
                 data_hash       TEXT    NOT NULL
-            )")?;
-
-        ddl(&conn, "server_content index",
-            "CREATE INDEX IF NOT EXISTS idx_vault_shards_server_content
-             ON vault_shards (server_id, content_id)")?;
-
-        ddl(&conn, "server_tier index",
-            "CREATE INDEX IF NOT EXISTS idx_vault_shards_server_tier
-             ON vault_shards (server_id, storage_tier)")?;
-
-        ddl(&conn, "vault_placement table",
-            "CREATE TABLE IF NOT EXISTS vault_placement (
+            )"),
+            ("server_content index",
+             "CREATE INDEX IF NOT EXISTS idx_vault_shards_server_content
+              ON vault_shards (server_id, content_id)"),
+            ("server_tier index",
+             "CREATE INDEX IF NOT EXISTS idx_vault_shards_server_tier
+              ON vault_shards (server_id, storage_tier)"),
+            ("vault_placement table",
+             "CREATE TABLE IF NOT EXISTS vault_placement (
                 content_id   TEXT    NOT NULL,
                 shard_index  INTEGER NOT NULL,
                 target_peer  TEXT    NOT NULL,
@@ -145,18 +142,15 @@ impl ContentStore {
                 stored_at    INTEGER NOT NULL,
                 confirmed    INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (content_id, shard_index)
-            )")?;
-
-        ddl(&conn, "placement server index",
-            "CREATE INDEX IF NOT EXISTS idx_vault_placement_server
-             ON vault_placement (server_id)")?;
-
-        ddl(&conn, "placement peer index",
-            "CREATE INDEX IF NOT EXISTS idx_vault_placement_peer
-             ON vault_placement (target_peer)")?;
-
-        ddl(&conn, "vault_manifests table",
-            "CREATE TABLE IF NOT EXISTS vault_manifests (
+            )"),
+            ("placement server index",
+             "CREATE INDEX IF NOT EXISTS idx_vault_placement_server
+              ON vault_placement (server_id)"),
+            ("placement peer index",
+             "CREATE INDEX IF NOT EXISTS idx_vault_placement_peer
+              ON vault_placement (target_peer)"),
+            ("vault_manifests table",
+             "CREATE TABLE IF NOT EXISTS vault_manifests (
                 content_id      TEXT    PRIMARY KEY,
                 server_id       TEXT    NOT NULL,
                 channel_id      TEXT    NOT NULL,
@@ -167,23 +161,24 @@ impl ContentStore {
                 storage_tier    TEXT    NOT NULL DEFAULT 'standard',
                 created_at      INTEGER NOT NULL,
                 creator_peer_id TEXT    NOT NULL
-            )")?;
-
-        ddl(&conn, "manifests server index",
-            "CREATE INDEX IF NOT EXISTS idx_vault_manifests_server
-             ON vault_manifests (server_id)")?;
-
-        ddl(&conn, "manifests created index",
-            "CREATE INDEX IF NOT EXISTS idx_vault_manifests_server_created
-             ON vault_manifests (server_id, created_at)")?;
-
-        ddl(&conn, "vault_member_status table",
-            "CREATE TABLE IF NOT EXISTS vault_member_status (
+            )"),
+            ("manifests server index",
+             "CREATE INDEX IF NOT EXISTS idx_vault_manifests_server
+              ON vault_manifests (server_id)"),
+            ("manifests created index",
+             "CREATE INDEX IF NOT EXISTS idx_vault_manifests_server_created
+              ON vault_manifests (server_id, created_at)"),
+            ("vault_member_status table",
+             "CREATE TABLE IF NOT EXISTS vault_member_status (
                 peer_id     TEXT    NOT NULL,
                 server_id   TEXT    NOT NULL,
                 last_seen   INTEGER NOT NULL,
                 PRIMARY KEY (peer_id, server_id)
-            )")?;
+            )"),
+        ];
+        for (what, sql) in VAULT_SCHEMA {
+            crate::storage::messages::ddl(&conn, what, sql)?;
+        }
 
         std::fs::create_dir_all(base_dir)
             .map_err(|e| format!("Failed to create vault base dir: {e}"))?;

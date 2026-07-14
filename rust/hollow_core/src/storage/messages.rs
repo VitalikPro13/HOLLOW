@@ -139,30 +139,73 @@ fn collect_rows<T>(
     Ok(out)
 }
 
+/// A signed per-message evidence row: (emoji, peer_id, at_ms, signature,
+/// public_key) — shape shared by reaction sync rows and reaction removals.
+pub(crate) type SignedEmojiRow = (String, String, i64, Option<String>, Option<String>);
+
 /// Column list every DM-message query selects, in [`dm_message_from_row`] order.
 const DM_MSG_COLS: &str = "id, peer_id, text, is_mine, timestamp, signature, public_key, message_id, edited_at, hidden_at, reply_to_mid, file_id, link_preview_json, order_us";
 
 /// Column list every channel-message query selects, in [`channel_message_from_row`] order.
 const CHANNEL_MSG_COLS: &str = "id, server_id, channel_id, sender_id, text, is_mine, timestamp, signature, public_key, message_id, edited_at, hidden_at, reply_to_mid, file_id, link_preview_json, order_us";
 
+/// The column tail shared by DM and channel message rows, in select order:
+/// text, is_mine, timestamp, signature, public_key, message_id, edited_at,
+/// hidden_at, reply_to_mid, file_id, link_preview, order_us.
+struct MsgTail {
+    text: String,
+    is_mine: bool,
+    timestamp: i64,
+    signature: Option<String>,
+    public_key: Option<String>,
+    message_id: Option<String>,
+    edited_at: Option<i64>,
+    hidden_at: Option<i64>,
+    reply_to_mid: Option<String>,
+    file_id: Option<String>,
+    link_preview: Option<crate::node::LinkPreviewRef>,
+    order_us: Option<i64>,
+}
+
+/// Read the shared message-column tail starting at column index `base`
+/// (2 for DM rows after id/peer_id, 4 for channel rows after
+/// id/server_id/channel_id/sender_id).
+fn msg_tail_from_row(row: &rusqlite::Row<'_>, base: usize) -> rusqlite::Result<MsgTail> {
+    Ok(MsgTail {
+        text: row.get(base)?,
+        is_mine: row.get::<_, i32>(base + 1)? != 0,
+        timestamp: row.get(base + 2)?,
+        signature: row.get(base + 3)?,
+        public_key: row.get(base + 4)?,
+        message_id: row.get(base + 5)?,
+        edited_at: row.get(base + 6)?,
+        hidden_at: row.get(base + 7)?,
+        reply_to_mid: row.get(base + 8)?,
+        file_id: row.get(base + 9)?,
+        link_preview: row.get::<_, Option<String>>(base + 10)?
+            .and_then(|s| serde_json::from_str(&s).ok()),
+        order_us: row.get(base + 11)?,
+    })
+}
+
 /// Map one row selected via [`DM_MSG_COLS`] to a StoredMessage.
 fn dm_message_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredMessage> {
+    let t = msg_tail_from_row(row, 2)?;
     Ok(StoredMessage {
         id: row.get(0)?,
         peer_id: row.get(1)?,
-        text: row.get(2)?,
-        is_mine: row.get::<_, i32>(3)? != 0,
-        timestamp: row.get(4)?,
-        signature: row.get(5)?,
-        public_key: row.get(6)?,
-        message_id: row.get(7)?,
-        edited_at: row.get(8)?,
-        hidden_at: row.get(9)?,
-        reply_to_mid: row.get(10)?,
-        file_id: row.get(11)?,
-        link_preview: row.get::<_, Option<String>>(12)?
-            .and_then(|s| serde_json::from_str(&s).ok()),
-        order_us: row.get(13)?,
+        text: t.text,
+        is_mine: t.is_mine,
+        timestamp: t.timestamp,
+        signature: t.signature,
+        public_key: t.public_key,
+        message_id: t.message_id,
+        edited_at: t.edited_at,
+        hidden_at: t.hidden_at,
+        reply_to_mid: t.reply_to_mid,
+        file_id: t.file_id,
+        link_preview: t.link_preview,
+        order_us: t.order_us,
     })
 }
 
@@ -233,24 +276,24 @@ fn profile_light_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredPro
 
 /// Map one row selected via [`CHANNEL_MSG_COLS`] to a StoredChannelMessage.
 fn channel_message_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredChannelMessage> {
+    let t = msg_tail_from_row(row, 4)?;
     Ok(StoredChannelMessage {
         id: row.get(0)?,
         server_id: row.get(1)?,
         channel_id: row.get(2)?,
         sender_id: row.get(3)?,
-        text: row.get(4)?,
-        is_mine: row.get::<_, i32>(5)? != 0,
-        timestamp: row.get(6)?,
-        signature: row.get(7)?,
-        public_key: row.get(8)?,
-        message_id: row.get(9)?,
-        edited_at: row.get(10)?,
-        hidden_at: row.get(11)?,
-        reply_to_mid: row.get(12)?,
-        file_id: row.get(13)?,
-        link_preview: row.get::<_, Option<String>>(14)?
-            .and_then(|s| serde_json::from_str(&s).ok()),
-        order_us: row.get(15)?,
+        text: t.text,
+        is_mine: t.is_mine,
+        timestamp: t.timestamp,
+        signature: t.signature,
+        public_key: t.public_key,
+        message_id: t.message_id,
+        edited_at: t.edited_at,
+        hidden_at: t.hidden_at,
+        reply_to_mid: t.reply_to_mid,
+        file_id: t.file_id,
+        link_preview: t.link_preview,
+        order_us: t.order_us,
     })
 }
 
@@ -472,19 +515,25 @@ impl MessageStore {
                 updated_at   INTEGER NOT NULL DEFAULT 0
             )")?;
 
-        // -- Migration: message_id + edited_at columns (Phase 3.5 editing) --
-        migrate(conn, "ALTER TABLE messages ADD COLUMN message_id TEXT;");
-        migrate(conn, "ALTER TABLE messages ADD COLUMN edited_at INTEGER;");
-        migrate(conn, "ALTER TABLE channel_messages ADD COLUMN message_id TEXT;");
-        migrate(conn, "ALTER TABLE channel_messages ADD COLUMN edited_at INTEGER;");
-
-        // Index on message_id for fast edit lookups.
-        migrate(conn, "CREATE INDEX IF NOT EXISTS idx_messages_msg_id ON messages (message_id);");
-        migrate(conn, "CREATE INDEX IF NOT EXISTS idx_channel_msgs_msg_id ON channel_messages (message_id);");
-
-        // Edit history table — preserves previous text for Rat Files evidence.
-        ddl(conn, "message_edits table",
-            "CREATE TABLE IF NOT EXISTS message_edits (
+        // Phase 3.5 block — editing, deletion/hiding, reactions, friends,
+        // settings, emotes, MLS identity, file sharing. ORDERED mixed list:
+        // an EMPTY label marks a swallowed idempotent migration (own batch,
+        // "already exists" ignored — the migrate() contract); a non-empty
+        // label is fail-fast DDL. One loop instead of a periodic call run
+        // (Sonar CPD self-matches periodic token streams).
+        const PHASE35_SCHEMA: &[(&str, &str)] = &[
+            // message_id + edited_at columns (Phase 3.5 editing), then the
+            // message_id indexes for fast edit lookups.
+            ("", "ALTER TABLE messages ADD COLUMN message_id TEXT;"),
+            ("", "ALTER TABLE messages ADD COLUMN edited_at INTEGER;"),
+            ("", "ALTER TABLE channel_messages ADD COLUMN message_id TEXT;"),
+            ("", "ALTER TABLE channel_messages ADD COLUMN edited_at INTEGER;"),
+            ("", "CREATE INDEX IF NOT EXISTS idx_messages_msg_id ON messages (message_id);"),
+            ("", "CREATE INDEX IF NOT EXISTS idx_channel_msgs_msg_id ON channel_messages (message_id);"),
+            // Edit history table — preserves previous text for Rat Files
+            // evidence — plus prev_* columns for edit chain provenance.
+            ("message_edits table",
+             "CREATE TABLE IF NOT EXISTS message_edits (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
                 message_id  TEXT    NOT NULL,
                 old_text    TEXT    NOT NULL,
@@ -492,41 +541,33 @@ impl MessageStore {
                 edited_at   INTEGER NOT NULL,
                 signature   TEXT,
                 public_key  TEXT
-            )")?;
-
-        ddl(conn, "message_edits index",
-            "CREATE INDEX IF NOT EXISTS idx_edits_msg_id ON message_edits (message_id)")?;
-
-        // -- Migration: prev_signature/prev_public_key/prev_timestamp for edit chain provenance --
-        migrate(conn, "ALTER TABLE message_edits ADD COLUMN prev_signature TEXT;");
-        migrate(conn, "ALTER TABLE message_edits ADD COLUMN prev_public_key TEXT;");
-        migrate(conn, "ALTER TABLE message_edits ADD COLUMN prev_timestamp INTEGER;");
-
-        // -- Migration: hidden_at column for message deletion/hiding (Phase 3.5) --
-        migrate(conn, "ALTER TABLE messages ADD COLUMN hidden_at INTEGER;");
-        migrate(conn, "ALTER TABLE channel_messages ADD COLUMN hidden_at INTEGER;");
-
-        // Deletion evidence table — preserves text at time of deletion for Rat Files.
-        ddl(conn, "message_deletions table",
-            "CREATE TABLE IF NOT EXISTS message_deletions (
+            )"),
+            ("message_edits index",
+             "CREATE INDEX IF NOT EXISTS idx_edits_msg_id ON message_edits (message_id)"),
+            ("", "ALTER TABLE message_edits ADD COLUMN prev_signature TEXT;"),
+            ("", "ALTER TABLE message_edits ADD COLUMN prev_public_key TEXT;"),
+            ("", "ALTER TABLE message_edits ADD COLUMN prev_timestamp INTEGER;"),
+            // hidden_at column for message deletion/hiding (Phase 3.5) +
+            // deletion evidence table (text at deletion time, Rat Files).
+            ("", "ALTER TABLE messages ADD COLUMN hidden_at INTEGER;"),
+            ("", "ALTER TABLE channel_messages ADD COLUMN hidden_at INTEGER;"),
+            ("message_deletions table",
+             "CREATE TABLE IF NOT EXISTS message_deletions (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
                 message_id  TEXT    NOT NULL,
                 deleted_text TEXT   NOT NULL,
                 deleted_at  INTEGER NOT NULL,
                 signature   TEXT,
                 public_key  TEXT
-            )")?;
-
-        ddl(conn, "message_deletions index",
-            "CREATE INDEX IF NOT EXISTS idx_deletions_msg_id ON message_deletions (message_id)")?;
-
-        // -- Migration: reply_to_mid column for reply chains (Phase 3.5) --
-        migrate(conn, "ALTER TABLE messages ADD COLUMN reply_to_mid TEXT;");
-        migrate(conn, "ALTER TABLE channel_messages ADD COLUMN reply_to_mid TEXT;");
-
-        // -- Emoji reactions (Phase 3.5) --
-        ddl(conn, "message_reactions table",
-            "CREATE TABLE IF NOT EXISTS message_reactions (
+            )"),
+            ("message_deletions index",
+             "CREATE INDEX IF NOT EXISTS idx_deletions_msg_id ON message_deletions (message_id)"),
+            // reply_to_mid column for reply chains (Phase 3.5).
+            ("", "ALTER TABLE messages ADD COLUMN reply_to_mid TEXT;"),
+            ("", "ALTER TABLE channel_messages ADD COLUMN reply_to_mid TEXT;"),
+            // Emoji reactions + removal history (Rat Files evidence).
+            ("message_reactions table",
+             "CREATE TABLE IF NOT EXISTS message_reactions (
                 id         INTEGER PRIMARY KEY AUTOINCREMENT,
                 message_id TEXT    NOT NULL,
                 emoji      TEXT    NOT NULL,
@@ -535,14 +576,11 @@ impl MessageStore {
                 signature  TEXT,
                 public_key TEXT,
                 UNIQUE(message_id, emoji, peer_id)
-            )")?;
-
-        ddl(conn, "reactions index",
-            "CREATE INDEX IF NOT EXISTS idx_reactions_msg_id ON message_reactions (message_id)")?;
-
-        // Reaction removal history (Rat Files evidence).
-        ddl(conn, "reaction_removals table",
-            "CREATE TABLE IF NOT EXISTS reaction_removals (
+            )"),
+            ("reactions index",
+             "CREATE INDEX IF NOT EXISTS idx_reactions_msg_id ON message_reactions (message_id)"),
+            ("reaction_removals table",
+             "CREATE TABLE IF NOT EXISTS reaction_removals (
                 id         INTEGER PRIMARY KEY AUTOINCREMENT,
                 message_id TEXT    NOT NULL,
                 emoji      TEXT    NOT NULL,
@@ -550,62 +588,56 @@ impl MessageStore {
                 removed_at INTEGER NOT NULL,
                 signature  TEXT,
                 public_key TEXT
-            )")?;
-
-        // -- App settings (key-value, general purpose) --
-        ddl(conn, "friends table",
-            "CREATE TABLE IF NOT EXISTS friends (
+            )"),
+            // Friends + app settings (key-value, general purpose).
+            ("friends table",
+             "CREATE TABLE IF NOT EXISTS friends (
                 peer_id      TEXT PRIMARY KEY,
                 status       TEXT NOT NULL,
                 direction    TEXT NOT NULL DEFAULT '',
                 requested_at INTEGER NOT NULL DEFAULT 0,
                 updated_at   INTEGER NOT NULL DEFAULT 0
-            )")?;
-
-        ddl(conn, "app_settings table",
-            "CREATE TABLE IF NOT EXISTS app_settings (
+            )"),
+            ("app_settings table",
+             "CREATE TABLE IF NOT EXISTS app_settings (
                 key   TEXT PRIMARY KEY,
                 value TEXT NOT NULL
-            )")?;
-
-        // -- Blocked peers (local block list, MASTER-keyed) --
-        ddl(conn, "blocked_peers table",
-            "CREATE TABLE IF NOT EXISTS blocked_peers (
+            )"),
+            // Blocked peers (local block list, MASTER-keyed).
+            ("blocked_peers table",
+             "CREATE TABLE IF NOT EXISTS blocked_peers (
                 peer_id    TEXT PRIMARY KEY,
                 blocked_at INTEGER NOT NULL DEFAULT 0
-            )")?;
-
-        // -- Custom emotes: content-addressed blob cache (shared across
-        //    servers/DMs — the same hash is stored once) + the user's own
-        //    personal emote set (names are local; hashes are global) --
-        ddl(conn, "emote_blobs table",
-            "CREATE TABLE IF NOT EXISTS emote_blobs (
+            )"),
+            // Custom emotes: content-addressed blob cache (shared across
+            // servers/DMs — the same hash is stored once) + the user's own
+            // personal emote set (names are local; hashes are global).
+            ("emote_blobs table",
+             "CREATE TABLE IF NOT EXISTS emote_blobs (
                 hash     TEXT PRIMARY KEY,
                 bytes    BLOB NOT NULL,
                 animated INTEGER NOT NULL DEFAULT 0,
                 added_at INTEGER NOT NULL DEFAULT 0
-            )")?;
-        ddl(conn, "personal_emotes table",
-            "CREATE TABLE IF NOT EXISTS personal_emotes (
+            )"),
+            ("personal_emotes table",
+             "CREATE TABLE IF NOT EXISTS personal_emotes (
                 name     TEXT PRIMARY KEY,
                 hash     TEXT NOT NULL,
                 animated INTEGER NOT NULL DEFAULT 0,
                 source   TEXT NOT NULL DEFAULT '',
                 added_at INTEGER NOT NULL DEFAULT 0
-            )")?;
-
-        // -- MLS identity (singleton row, id=1) --
-        ddl(conn, "mls_identity table",
-            "CREATE TABLE IF NOT EXISTS mls_identity (
+            )"),
+            // MLS identity (singleton row, id=1).
+            ("mls_identity table",
+             "CREATE TABLE IF NOT EXISTS mls_identity (
                 id              INTEGER PRIMARY KEY CHECK (id = 1),
                 signer_data     BLOB NOT NULL,
                 credential_data BLOB NOT NULL,
                 storage_data    BLOB
-            )")?;
-
-        // -- File sharing (Phase 3.5) --
-        ddl(conn, "files table",
-            "CREATE TABLE IF NOT EXISTS files (
+            )"),
+            // File sharing (Phase 3.5).
+            ("files table",
+             "CREATE TABLE IF NOT EXISTS files (
                 file_id         TEXT PRIMARY KEY,
                 file_name       TEXT NOT NULL,
                 file_ext        TEXT NOT NULL,
@@ -625,13 +657,19 @@ impl MessageStore {
                 completed_at    INTEGER,
                 disk_path       TEXT,
                 hidden_at       INTEGER
-            )")?;
-
-        ddl(conn, "files message_id index",
-            "CREATE INDEX IF NOT EXISTS idx_files_message ON files (message_id)")?;
-
-        ddl(conn, "files context index",
-            "CREATE INDEX IF NOT EXISTS idx_files_context ON files (context_type, context_id)")?;
+            )"),
+            ("files message_id index",
+             "CREATE INDEX IF NOT EXISTS idx_files_message ON files (message_id)"),
+            ("files context index",
+             "CREATE INDEX IF NOT EXISTS idx_files_context ON files (context_type, context_id)"),
+        ];
+        for (what, sql) in PHASE35_SCHEMA {
+            if what.is_empty() {
+                migrate(conn, sql);
+            } else {
+                ddl(conn, what, sql)?;
+            }
+        }
 
         // -- Migration: video_thumb_json column (Phase 6.75 video preview).
         // Stores a JSON-encoded VideoThumbRef when this file is a thumbnail
@@ -1221,22 +1259,34 @@ impl MessageStore {
         since_timestamp: i64,
         limit: i32,
     ) -> Result<Vec<StoredMessage>, String> {
-        let mut stmt = self
-            .conn
-            .prepare(&format!(
+        self.query_dm_messages(
+            &format!(
                 "SELECT {DM_MSG_COLS}
                  FROM messages
                  WHERE peer_id = ?1 AND is_mine = 1 AND (timestamp >= ?2 OR updated_at >= ?2)
                  ORDER BY timestamp ASC, COALESCE(order_us, timestamp * 1000) ASC
                  LIMIT ?3",
-            ))
-            .map_err(|e| format!("Failed to prepare dm_messages_since query: {e}"))?;
+            ),
+            &[&peer_id, &since_timestamp, &limit],
+            "dm_messages_since",
+        )
+    }
 
+    /// Run any DM-message query selecting [`DM_MSG_COLS`] and collect the rows.
+    fn query_dm_messages(
+        &self,
+        sql: &str,
+        params: &[&dyn rusqlite::types::ToSql],
+        what: &str,
+    ) -> Result<Vec<StoredMessage>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(sql)
+            .map_err(|e| format!("Failed to prepare {what} query: {e}"))?;
         let rows = stmt
-            .query_map(params![peer_id, since_timestamp, limit], dm_message_from_row)
-            .map_err(|e| format!("Failed to query dm_messages_since: {e}"))?;
-
-        collect_rows(rows, "dm_messages_since")
+            .query_map(params, dm_message_from_row)
+            .map_err(|e| format!("Failed to query {what}: {e}"))?;
+        collect_rows(rows, what)
     }
 
     /// Latest DM timestamp in a conversation **regardless of direction** (for
@@ -1273,22 +1323,17 @@ impl MessageStore {
         since_timestamp: i64,
         limit: i32,
     ) -> Result<Vec<StoredMessage>, String> {
-        let mut stmt = self
-            .conn
-            .prepare(&format!(
+        self.query_dm_messages(
+            &format!(
                 "SELECT {DM_MSG_COLS}
                  FROM messages
                  WHERE peer_id = ?1 AND (timestamp > ?2 OR updated_at >= ?2)
                  ORDER BY timestamp ASC, COALESCE(order_us, timestamp * 1000) ASC
                  LIMIT ?3",
-            ))
-            .map_err(|e| format!("Failed to prepare dm_messages_for_sibling query: {e}"))?;
-
-        let rows = stmt
-            .query_map(params![peer_id, since_timestamp, limit], dm_message_from_row)
-            .map_err(|e| format!("Failed to query dm_messages_for_sibling: {e}"))?;
-
-        collect_rows(rows, "dm_messages_for_sibling")
+            ),
+            &[&peer_id, &since_timestamp, &limit],
+            "dm_messages_for_sibling",
+        )
     }
 
     // -- CRDT persistence methods --
@@ -2882,7 +2927,7 @@ impl MessageStore {
     pub fn load_reactions_for_sync(
         &self,
         message_ids: &[String],
-    ) -> Result<HashMap<String, Vec<(String, String, i64, Option<String>, Option<String>)>>, String> {
+    ) -> Result<HashMap<String, Vec<SignedEmojiRow>>, String> {
         self.load_grouped_by_message_id(
             "message_reactions",
             "emoji, peer_id, added_at, signature, public_key",
@@ -2985,7 +3030,7 @@ impl MessageStore {
     pub fn load_reaction_removals_for_messages(
         &self,
         message_ids: &[String],
-    ) -> Result<HashMap<String, Vec<(String, String, i64, Option<String>, Option<String>)>>, String> {
+    ) -> Result<HashMap<String, Vec<SignedEmojiRow>>, String> {
         self.load_grouped_by_message_id(
             "reaction_removals",
             "emoji, peer_id, removed_at, signature, public_key",
