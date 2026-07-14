@@ -142,7 +142,9 @@ class EventStreamNotifier extends Notifier<bool> {
     // navigator's Overlay via `overlayState:` (the positional context is unused then).
     try {
       final overlay = hollowNavigatorKey.currentState?.overlay;
-      if (overlay != null) {
+      // overlay is freshly obtained AFTER the awaits above; the mounted
+      // check on its own context keeps analyzers satisfied (S7115).
+      if (overlay != null && overlay.context.mounted) {
         HollowToast.show(
           overlay.context,
           'This device was removed from your identity. Resetting…',
