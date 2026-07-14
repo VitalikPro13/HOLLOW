@@ -57,11 +57,6 @@ jobs:
           cargo llvm-cov --lib --lcov --output-path lcov.info
           --ignore-filename-regex "frb_generated"
 
-      # Coverage generation must not block the scan itself — a flaky test
-      # should surface in the dashboard as missing coverage, not kill CI.
-      - name: Dart coverage
-        run: flutter test --coverage test/
-        continue-on-error: true
 
       - name: SonarQube scan
         uses: SonarSource/sonarqube-scan-action@v6
