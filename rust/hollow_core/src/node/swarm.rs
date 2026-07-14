@@ -7760,119 +7760,14 @@ async fn handle_incoming_request(
                 }
 
                 // SECURITY: Verify the AUTHOR has permission for this operation type.
-                // Use op.author (the original creator) for role lookup, not the sender
-                // (who may be relaying the op).
+                // Shared ingest matrix (ServerState::op_allowed): uses op.author (the
+                // original creator) for the role lookup, not the sender (who may be
+                // relaying the op), and is override-aware — the same matrix the local
+                // send handlers gate on.
                 {
                     let state = server_states.get(&server_id).unwrap();
-                    let sender_role = state.get_role(&op.author);
-                    // Override-aware (`role_permissions` from RolePermissionsChanged ops),
-                    // NOT `default_permissions()`: local send handlers gate on
-                    // `has_permission`, so ingest must apply the SAME matrix — otherwise
-                    // an override-granted permission authors ops the whole network
-                    // rejects (the actor's devices fork), and an override-REVOKED
-                    // permission still passes ingest (unenforced remotely).
-                    let sender_perms = state.get_permissions(&op.author);
-                    use crate::crdt::operations::{CrdtPayload, Permission, MemberRole};
-
-                    let allowed = match &op.payload {
-                        // Only admins+ can manage channels
-                        CrdtPayload::ChannelAdded { .. }
-                        | CrdtPayload::ChannelRemoved { .. }
-                        | CrdtPayload::ChannelRenamed { .. }
-                        | CrdtPayload::ChannelLayoutUpdated { .. } => {
-                            (sender_perms & Permission::MANAGE_CHANNELS) != 0
-                        }
-                        // Only admins+ can change roles
-                        CrdtPayload::RoleChanged { peer_id, role, .. } => {
-                            state.can_change_role(&op.author, peer_id, role)
-                        }
-                        // Only admins+ can change server settings/rename
-                        CrdtPayload::ServerRenamed { .. }
-                        | CrdtPayload::ServerSettingChanged { .. } => {
-                            sender_role == MemberRole::Owner || sender_role == MemberRole::Admin
-                        }
-                        // Self-removal (voluntary leave) is always allowed;
-                        // kicking someone ELSE needs moderator+ and outranking.
-                        CrdtPayload::MemberRemoved { peer_id } => {
-                            let target_role = state.get_role(peer_id);
-                            peer_id == &op.author
-                                || ((sender_perms & Permission::KICK_MEMBERS) != 0
-                                    && sender_role.outranks(&target_role))
-                        }
-                        // Members can add other members (via invite), change own nickname,
-                        // pin/unpin messages (if they have MANAGE_CHANNELS), create servers
-                        CrdtPayload::MemberAdded { .. } => {
-                            // is_member (resolver-aware), not raw contains_key: a legacy
-                            // op authored under a DEVICE id must still validate.
-                            state.is_member(&op.author)
-                        }
-                        CrdtPayload::NicknameChanged { peer_id, .. } => {
-                            // Members can only change their own nickname
-                            peer_id == &op.author || sender_role == MemberRole::Owner || sender_role == MemberRole::Admin
-                        }
-                        CrdtPayload::MessagePinned { .. }
-                        | CrdtPayload::MessageUnpinned { .. } => {
-                            (sender_perms & Permission::MANAGE_CHANNELS) != 0
-                        }
-                        CrdtPayload::StoragePledgeChanged { peer_id, .. } => {
-                            // Members can change own pledge, admins can change anyone's
-                            peer_id == &op.author || sender_role == MemberRole::Owner || sender_role == MemberRole::Admin
-                        }
-                        CrdtPayload::TwitchUsernameChanged { peer_id, .. } => {
-                            peer_id == &op.author || sender_role == MemberRole::Owner || sender_role == MemberRole::Admin
-                        }
-                        CrdtPayload::RolePermissionsChanged { role, .. } => {
-                            let target = MemberRole::from_str(role);
-                            (sender_perms & Permission::MANAGE_ROLES) != 0
-                                && sender_role.outranks(&target)
-                        }
-                        CrdtPayload::MemberBanned { peer_id } => {
-                            let target_role = state.get_role(peer_id);
-                            (sender_perms & Permission::KICK_MEMBERS) != 0
-                                && sender_role.outranks(&target_role)
-                        }
-                        CrdtPayload::MemberUnbanned { .. } => {
-                            (sender_perms & Permission::KICK_MEMBERS) != 0
-                        }
-                        CrdtPayload::MemberMuted { peer_id, .. } => {
-                            let target_role = state.get_role(peer_id);
-                            (sender_perms & Permission::KICK_MEMBERS) != 0
-                                && sender_role.outranks(&target_role)
-                        }
-                        CrdtPayload::MemberUnmuted { .. } => {
-                            (sender_perms & Permission::KICK_MEMBERS) != 0
-                        }
-                        CrdtPayload::ChannelVisibilityChanged { .. }
-                        | CrdtPayload::ChannelPostingChanged { .. }
-                        | CrdtPayload::ChannelPublicChanged { .. }
-                        | CrdtPayload::ChannelSlowModeChanged { .. }
-                        | CrdtPayload::ChannelMediaOnlyChanged { .. } => {
-                            (sender_perms & Permission::MANAGE_CHANNELS) != 0
-                        }
-                        CrdtPayload::LabelCreated { .. }
-                        | CrdtPayload::LabelDeleted { .. }
-                        | CrdtPayload::LabelUpdated { .. } => {
-                            (sender_perms & Permission::MANAGE_ROLES) != 0
-                        }
-                        CrdtPayload::LabelAssigned { peer_id, .. }
-                        | CrdtPayload::LabelUnassigned { peer_id, .. } => {
-                            peer_id == &op.author || (sender_perms & Permission::MANAGE_ROLES) != 0
-                        }
-                        CrdtPayload::EmojiAdded { name, hash, .. } => {
-                            (sender_perms & Permission::MANAGE_EMOTES) != 0
-                                && crate::crdt::valid_emote_name(name)
-                                && crate::crdt::valid_emote_hash(hash)
-                        }
-                        CrdtPayload::EmojiRemoved { .. } => {
-                            (sender_perms & Permission::MANAGE_EMOTES) != 0
-                        }
-                        // Only the Owner can delete a server (tombstone).
-                        CrdtPayload::ServerDeleted { .. } => sender_role == MemberRole::Owner,
-                        CrdtPayload::ServerCreated { .. } => true,
-                    };
-
-                    if !allowed {
-                        hollow_log!("[HOLLOW-SECURITY] REJECTED CrdtOpBroadcast from {peer_str} — insufficient permission for {:?} (role: {:?})", op.payload, sender_role);
+                    if !state.op_allowed(&op) {
+                        hollow_log!("[HOLLOW-SECURITY] REJECTED CrdtOpBroadcast from {peer_str} — insufficient permission for {:?} (role: {:?})", op.payload, state.get_role(&op.author));
                         return;
                     }
                 }
@@ -8533,98 +8428,22 @@ async fn handle_incoming_request(
             hollow_log!("[HOLLOW-SYNC] ChannelSyncRequest from {peer_str} for {channel_id} in {server_id} since {since_timestamp} (per-sender: {} entries)", sender_timestamps.len());
 
             if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
-                // Use per-sender sync if available, fall back to legacy single-timestamp.
-                let messages_result = if !sender_timestamps.is_empty() {
-                    store.get_channel_messages_since_per_sender(
-                        &server_id, &channel_id, &sender_timestamps, 200,
-                    )
-                } else {
-                    store.get_channel_messages_since(
-                        &server_id, &channel_id, since_timestamp, 200,
-                    )
-                };
-                    if let Ok(messages) = messages_result {
-                        hollow_log!("[HOLLOW-SYNC] Sending {} sync messages for {channel_id}", messages.len());
-                        // Load reactions for all messages in the batch.
-                        let msg_ids: Vec<String> = messages.iter().filter_map(|m| m.message_id.clone()).collect();
-                        let reactions_map = store.load_reactions_for_sync(&msg_ids).unwrap_or_default();
-                        let file_ids: Vec<&str> = messages.iter().filter_map(|m| m.file_id.as_deref()).collect();
-                        let file_meta_map = store.get_file_metadata_batch(&file_ids).unwrap_or_default();
-
-                        let items: Vec<SyncMessageItem> = messages.iter().map(|m| {
-                            let reactions = m.message_id.as_ref()
-                                .and_then(|mid| reactions_map.get(mid))
-                                .map(|rs| rs.iter().map(|(e, p, ts, sig, pk)| SyncReactionItem {
-                                    e: e.clone(), p: p.clone(), ts: *ts, sig: sig.clone(), pk: pk.clone(),
-                                }).collect())
-                                .unwrap_or_default();
-                            let file_meta = m.file_id.as_ref().and_then(|fid| {
-                                file_meta_map.get(fid.as_str()).map(|f| SyncFileMetaItem {
-                                    fid: f.file_id.clone(),
-                                    name: f.file_name.clone(),
-                                    ext: f.file_ext.clone(),
-                                    mime: f.mime_type.clone(),
-                                    size: f.size_bytes,
-                                    img: f.is_image,
-                                    w: f.width,
-                                    h: f.height,
-                                    mid: f.message_id.clone(),
-                                    ts: f.created_at,
-                                    sender: f.sender_id.clone(),
-                                    vthumb: f.video_thumb.clone(),
-                                })
-                            });
-                            SyncMessageItem {
-                                s: m.sender_id.clone(),
-                                t: m.text.clone(),
-                                ts: m.timestamp,
-                                sig: m.signature.clone(),
-                                pk: m.public_key.clone(),
-                                mid: m.message_id.clone(),
-                                edited_at: m.edited_at,
-                                reply_to: m.reply_to_mid.clone(),
-                                file_id: m.file_id.clone(),
-                                file_meta,
-                                hidden_at: m.hidden_at,
-                                order_us: m.order_us,
-                                reactions,
-                            }
-                        }).collect();
-
-                        let total = if !sender_timestamps.is_empty() {
-                            store.count_channel_messages_since_per_sender(
-                                &server_id, &channel_id, &sender_timestamps,
-                            ).unwrap_or(items.len() as u32)
-                        } else {
-                            store.count_channel_messages_since(
-                                &server_id, &channel_id, since_timestamp,
-                            ).unwrap_or(items.len() as u32)
-                        };
-
-                        let has_more = if items.len() >= 200 && total > 200 {
-                            Some(true)
-                        } else {
-                            None
-                        };
-                        let envelope = MessageEnvelope::ChannelSyncBatch {
-                            sid: server_id.clone(),
-                            cid: channel_id,
-                            messages: items,
-                            total,
-                            has_more,
-                            target: None,
-                        };
-
-                        // Send via MLS if peer is in the group, otherwise Olm fallback.
-                        // Don't use MLS if peer hasn't joined yet (they sent plaintext request
-                        // before receiving Welcome) — they can't decrypt the MLS response.
-                        let envelope_json = serde_json::to_string(&envelope).unwrap_or_default();
-                        send_encrypted_message(
-                            olm, crypto_store,
-                            peer_str, &envelope_json, event_tx,
-                            ws_cmd_tx, ws_room_peers,
-                        ).await;
-                    }
+                // Per-sender sync when watermarks were sent, legacy single-timestamp
+                // fallback otherwise — shared with the MLS/Olm responders.
+                if let Ok((envelope, count)) = super::sync_handler::build_channel_sync_batch(
+                    &store, &server_id, &channel_id, since_timestamp, &sender_timestamps,
+                ) {
+                    hollow_log!("[HOLLOW-SYNC] Sending {count} sync messages for {channel_id}");
+                    // Send via MLS if peer is in the group, otherwise Olm fallback.
+                    // Don't use MLS if peer hasn't joined yet (they sent plaintext request
+                    // before receiving Welcome) — they can't decrypt the MLS response.
+                    let envelope_json = serde_json::to_string(&envelope).unwrap_or_default();
+                    send_encrypted_message(
+                        olm, crypto_store,
+                        peer_str, &envelope_json, event_tx,
+                        ws_cmd_tx, ws_room_peers,
+                    ).await;
+                }
             }
         }
 

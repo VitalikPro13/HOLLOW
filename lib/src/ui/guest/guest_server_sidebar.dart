@@ -10,6 +10,7 @@ import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
+import 'package:hollow/src/ui/chat/hollow_link_utils.dart';
 import 'package:hollow/src/ui/animations/selection_shimmer.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
@@ -38,12 +39,16 @@ class _GuestServerSidebarState extends ConsumerState<GuestServerSidebar> {
     final input = _addController.text.trim();
     if (input.isEmpty) return;
 
-    String serverId = input;
-    final serverParam = Uri.tryParse(input)?.queryParameters['server'];
-    if (serverParam != null && serverParam.isNotEmpty) {
-      serverId = serverParam;
-    } else if (input.contains('/')) {
-      serverId = input.split('/').last;
+    // Invite link (hollow:// or web /join#server=), raw ID, or legacy
+    // fallbacks (any URL with a ?server= query, else the last path segment).
+    String serverId = inviteIdFromInput(input, HollowLinkType.serverInvite);
+    if (serverId == input) {
+      final serverParam = Uri.tryParse(input)?.queryParameters['server'];
+      if (serverParam != null && serverParam.isNotEmpty) {
+        serverId = serverParam;
+      } else if (input.contains('/')) {
+        serverId = input.split('/').last;
+      }
     }
 
     final notifier = ref.read(savedGuestServersProvider.notifier);

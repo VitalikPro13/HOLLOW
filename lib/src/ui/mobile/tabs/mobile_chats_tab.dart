@@ -1539,15 +1539,8 @@ class _NewConversationDialogState
     final input = _joinController.text.trim();
     if (input.isEmpty) return;
 
-    String serverId;
-    final uri = Uri.tryParse(input);
-    if (uri != null &&
-        uri.scheme == 'hollow' &&
-        uri.queryParameters.containsKey('server')) {
-      serverId = uri.queryParameters['server']!;
-    } else {
-      serverId = input;
-    }
+    // Invite link (hollow:// or web /join#server=) or raw server ID.
+    final serverId = inviteIdFromInput(input, HollowLinkType.serverInvite);
 
     Navigator.of(context).pop();
     crdt_api.joinServer(serverId: serverId, nsfwConfirmed: false);

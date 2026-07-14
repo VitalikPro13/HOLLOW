@@ -124,6 +124,21 @@ HollowLink? classifyHollowLink(String url) {
   return null;
 }
 
+/// Resolve a pasted invite input — canonical `hollow://` link, web-form
+/// `https://hollow.anonlisten.com/join` link (`#fragment` canonical, `?query`
+/// tolerated), or a raw id — to the id it carries. Only a link of the wanted
+/// [type] is unwrapped (a conference link pasted into a server-join field is
+/// not silently treated as a server id); anything unrecognized falls back to
+/// the trimmed input so plain ids keep working. Every join/browse input bar
+/// must go through this instead of hand-parsing `Uri.queryParameters` — the
+/// web form carries its id in the FRAGMENT, which query parsing never sees.
+String inviteIdFromInput(String input, HollowLinkType type) {
+  final trimmed = input.trim();
+  final link = classifyHollowLink(trimmed);
+  if (link != null && link.type == type) return link.id;
+  return trimmed;
+}
+
 List<HollowLink> extractHollowLinks(String text) {
   final results = <HollowLink>[];
   final seen = <String>{};

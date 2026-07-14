@@ -80,7 +80,7 @@ Every modal dialog in the project. All files live under `lib/src/ui/dialogs/`. M
 **Left panel: Join a Server**
 - `LucideIcons.logIn` + "Join a Server" heading
 - "Paste an invite link or server ID." caption
-- `HollowTextField` with autofocus, mono font, hint "hollow://join?server=... or ID"
+- `HollowTextField` with autofocus, mono font, hint "Invite link or server ID"
 - `HollowButton.filled` "Join" (expand: true)
 - `onSubmitted` on the text field also triggers join
 
@@ -94,8 +94,7 @@ Every modal dialog in the project. All files live under `lib/src/ui/dialogs/`. M
 ### Top-level functions
 
 **`_handleJoin(context, controller)`**
-- Parses input as URI; extracts `server` query param if scheme is `hollow://`
-- Falls back to treating raw input as server ID
+- Parses input via `inviteIdFromInput(input, HollowLinkType.serverInvite)` (`hollow_link_utils.dart`) — accepts `hollow://join?server=`, web `https://hollow.anonlisten.com/join#server=` (fragment or query), or raw ID. ALL join/browse input bars use this helper; hand-parsing `Uri.queryParameters` misses the fragment form (2026-07-14 fix)
 - Calls `crdt_api.joinServer(serverId:)`
 - Shows info toast "Joining server..."
 

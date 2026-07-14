@@ -1,25 +1,36 @@
 # Sync Handler — CRDT Operations and Server Management
 
-Source: `rust/hollow_core/src/node/sync_handler.rs` (2576 lines)
+Source: `rust/hollow_core/src/node/sync_handler.rs` (~2740 lines after the 2026-07-14 dedup refactor)
 
-This module contains all server-side CRDT operation handlers for server lifecycle, channel management, member management, roles, labels, permissions, nicknames, storage pledges, message pinning, channel layout, and message sync. Every handler follows a consistent pattern: permission check, create CRDT op, apply locally, persist to SQLCipher, emit NetworkEvent to Dart, broadcast to peers (MLS preferred, plaintext fallback).
+This module contains all server-side CRDT operation handlers for server lifecycle, channel management, member management, roles, labels, permissions, nicknames, storage pledges, message pinning, channel layout, and message sync. The shared shape (gate → author → persist → emit → broadcast) lives ONCE in a driver + chunk helpers; each handler keeps only its own gate, payload, event, and side effects.
 
-## Common Handler Pattern
+## Common Handler Pattern (the driver + chunk helpers)
 
-Nearly every handler in this file follows this sequence:
+Most simple handlers are one-call wrappers around the shared driver:
 
-1. Look up `ServerState` in `server_states` HashMap by `server_id`
-2. Check permissions via `state.has_permission()`, `state.can_change_role()`, `state.can_kick()`, or `state.can_ban()`
-3. Create a CRDT op via `state.create_op(CrdtPayload::Variant { ... })`
-4. Apply locally via `state.apply_op(&op)`
-5. Persist via `CrdtStore` actor: `crdt_store.insert_op(op)` + `crdt_store.save_state(server_id, json)`. The actor batches writes — burst of 20 ops = one DB write per server. No direct `MessageStore::open()` calls.
-6. Emit a `NetworkEvent` via `event_tx` (Dart StreamSink)
-7. Broadcast: serialize op to JSON, then either:
-   - MLS path: wrap in `MessageEnvelope::CrdtOp { sid, op_json }` and call `send_mls_broadcast()`
-   - Plaintext fallback: iterate `state.members`, skip self, check `peer_is_reachable()`, send `HavenMessage::CrdtOpBroadcast`
-8. **Multi-device sibling fan-out (Step 9D):** the member broadcast is MASTER-keyed and EXCLUDES the actor's own identity, so the actor's OTHER device (sibling) wouldn't see the change in real-time unless another member relays it (the `CrdtOpBroadcast` ingest re-gossips to all members incl. our master's devices). MLS-first ops converge siblings for free (`SendToRoom` hits sibling sockets). **Plaintext-only handlers** (kick/ban/role/leave + pin/unpin/layout/pledge/nickname/twitch) additionally call `fan_to_own_siblings(ws_cmd_tx, ws_room_peers, local_peer_str, local_device_id, data)` — fans the `CrdtOpBroadcast` bytes to our online siblings EXCLUDING the acting device (`local_device_id`; re-feeding it its own MLS commit would self-drop the group). These handlers therefore take a `local_device_id: &str` param. `fan_to_own_siblings` lives near the top of `sync_handler.rs` (alongside `broadcast_raw_to_members`).
+```rust
+author_broadcast_op(
+    server_states, event_tx, ws_cmd_tx, ws_room_peers, gossip_overlays, local_peer_str,
+    &server_id,
+    OpGate::Perm(Permission::MANAGE_CHANNELS),      // or OwnerOrAdmin / CanMute / ManageRolesOutranking / SelfOrPerm / Always
+    Some("Permission denied: cannot manage channels"), // None = log-only silent deny (nickname/twitch/layout/pin/unpin)
+    CrdtPayload::ChannelPostingChanged { .. },
+    &format!("Setting channel {channel_id} posting to {posting}"),  // log label
+    NetworkEvent::ServerUpdated { server_id: server_id.clone() },   // prebuilt event
+    OpBroadcast::MlsFirst { mls, crypto_store },    // or OpBroadcast::PlaintextWithFan { local_device_id }
+    crdt_store,
+).await
+```
 
-All handlers receive `crdt_store: &CrdtStore` as a parameter. State serialization uses `serialize_state_lean(&state)` helper.
+Driver sequence (identical to the old per-handler bodies): (1) `server_states.get_mut` (missing server → `false`, no event), (2) `gate_allows()` — deny returns `true` and emits the `Error` event unless silent, (3) `author_op()` = `create_op` → `apply_op` → `crdt_store.insert_op` + `save_state_snapshot` (CrdtStore actor batches writes; no `MessageStore::open()` for CRDT persistence), (4) send the prebuilt `NetworkEvent`, (5) broadcast.
+
+Broadcast modes:
+- **`OpBroadcast::MlsFirst`** → `broadcast_op_mls_first()`: MLS `MessageEnvelope::CrdtOp` via `send_mls_broadcast` when the group exists, then ALWAYS also the plaintext `CrdtOpBroadcast` twin via `broadcast_crdt_op_to_members` (idempotent — op_log dedups, receivers re-validate; a skewed-epoch MLS receiver silently drops ciphertext with no recovery, the plaintext copy guarantees convergence). Siblings converge for free (room broadcast hits their sockets).
+- **`OpBroadcast::PlaintextWithFan`** → `broadcast_op_plaintext_with_fan()`: plaintext member broadcast + `fan_to_own_siblings` (the master-keyed member broadcast excludes the actor's identity, so plaintext-only ops must fan to our OWN online siblings, EXCLUDING the acting device `local_device_id`). Used by role/nickname/twitch/layout/pin/unpin/pledge.
+
+Handlers with extra duties stay custom but use the chunk helpers directly: `deny()`, `author_op()`, `broadcast_op_mls_first()` (create_server, create_channel, change_role, emote_op, delete_server) — and kick/ban/leave use `other_member_targets()` (collect BEFORE apply_op removes the member), `broadcast_removal_op(targets, skip)` (skip = the kicked/banned identity, which gets `MemberKickBroadcast` instead; `None` for leave so siblings apply the self-removal), and `mls_remove_identity_and_broadcast()` (all leaves of an identity + `broadcast_mls_commit`; kick/ban emit the SFrame epoch event, leave drops the group on failure).
+
+Handler signatures use the `pub(crate)` type aliases from `types.rs` (`ServerStates`, `WsCmdTx`, `WsRoomPeers`, `GossipOverlays`, `EventTx`) — added both for readability and to keep the thin wrappers under Sonar's CPD 100-token window (see memory `sonar-cpd-dedup-technique`).
 
 Server tombstone: `CrdtPayload::ServerDeleted` (Step 9D) marks `ServerState.deleted` + drains membership but keeps the shell/op_log; see `handle_delete_server`. Owner-authorship of a `ServerDeleted` op is validated at every ingest (the `allowed` matches + a pre-merge filter in both sync-response paths).
 
@@ -358,7 +369,7 @@ Enforcement: send-side in `message_ops::handle_send_channel_message` + `file_han
 
 ## handle_set_channel_slow_mode() / handle_set_channel_media_only()
 
-`sync_handler.rs` — Both delegate to the shared `handle_channel_moderation_change()` body (MANAGE_CHANNELS gate → op → persist → ServerUpdated → broadcast).
+`sync_handler.rs` — Both are one-call wrappers over `author_broadcast_op` (MANAGE_CHANNELS gate → op → persist → ServerUpdated → MLS-first broadcast); the old shared `handle_channel_moderation_change()` body was absorbed into the driver.
 
 CrdtPayload: `ChannelSlowModeChanged { channel_id, seconds }` (u32, 0 = off) / `ChannelMediaOnlyChanged { channel_id, media_only }` — stored as `ChannelInfo.slow_mode` / `ChannelInfo.media_only`.
 
@@ -476,14 +487,9 @@ Called when an Olm session is established with a peer who had pending sync reque
 Flow per entry:
 1. Emit `NetworkEvent::MessageSyncStarted { server_id, peer_id }`
 2. Re-query per-sender timestamps at flush time (DB may have changed since original request)
-3. Query messages: `get_channel_messages_since_per_sender()` or `get_channel_messages_since()` (limit 200)
-4. Build `SyncMessageItem` list with: sender, text, timestamp, signature, public_key, message_id, edited_at, reply_to, file_id, file_meta, hidden_at, reactions
-5. Load reactions via `store.load_reactions_for_sync(&msg_ids)`
-6. Load file metadata via `store.get_file_metadata_batch(&file_ids)` — single `IN (...)` query for all files in batch
-7. Count total messages to determine `has_more` flag (true if items >= 200 and total > 200)
-8. Wrap in `MessageEnvelope::ChannelSyncBatch { sid, cid, messages, total, has_more, target: None }`
-9. Send via `send_encrypted_message()` (Olm)
-10. If send fails again, emit `NetworkEvent::MessageSyncFailed { server_id, error: "Retry after re-key also failed" }`
+3. `build_channel_sync_batch(&store, sid, cid, since, &sender_ts)` — the SHARED responder helper (also used by `handle_envelope_channel_sync_req` and swarm.rs's plaintext `ChannelSyncRequest` arm): per-sender query when watermarks exist else legacy single-timestamp (limit 200), `channel_sync_items()` packs `SyncMessageItem`s with reactions (`load_reactions_for_sync`) + file metadata (`get_file_metadata_batch`, one `IN (...)` query), stamps `total` + `has_more` (items >= 200 and total > 200), returns the ready `MessageEnvelope::ChannelSyncBatch` + item count. `channel_sync_items` is the channel twin of swarm's `build_dm_sync_items`.
+4. Send via `send_encrypted_message()` (Olm)
+5. If send fails again, emit `NetworkEvent::MessageSyncFailed { server_id, error: "Retry after re-key also failed" }`
 
 ## handle_envelope_crdt_op()
 
@@ -495,34 +501,30 @@ Parameters: `server_states`, `bundle_keypair`, `event_tx`, `sid`, `op_json`
 
 Flow:
 1. Deserialize `CrdtOp` from `op_json`
-2. Look up sender's role in server state: `state.get_role(&op.author)`
-3. Get sender's permissions: `sender_role.default_permissions()`
-4. Permission validation per payload type:
+2. **`state.op_allowed(&op)`** — the ingest permission matrix now lives ONCE as a method on `ServerState` (`crdt/server_state.rs`), shared verbatim with the plaintext `CrdtOpBroadcast` ingest in swarm.rs so the two can never drift. Override-aware (`get_permissions`, honoring `RolePermissionsChanged`), validates `op.author` (the creator), never the transport sender.
 
-| CrdtPayload variant | Permission required |
+| CrdtPayload variant | Permission required (in `op_allowed`) |
 |---|---|
 | `ChannelAdded`, `ChannelRemoved`, `ChannelRenamed`, `ChannelLayoutUpdated` | `MANAGE_CHANNELS` |
 | `RoleChanged { peer_id, role }` | `state.can_change_role(&op.author, peer_id, role)` |
 | `ServerRenamed`, `ServerSettingChanged` | Owner or Admin |
 | `MemberRemoved { peer_id }` | Self-removal (`peer_id == op.author`, voluntary leave) always allowed; otherwise `KICK_MEMBERS` + must outrank target |
-| `MemberAdded` | Must be a current member |
-| `NicknameChanged { peer_id }` | Self or Owner/Admin |
-| `TwitchUsernameChanged { peer_id }` | Self or Owner/Admin |
+| `MemberAdded` | Must be a current member (`is_member`, resolver-aware) |
+| `NicknameChanged` / `TwitchUsernameChanged` / `StoragePledgeChanged { peer_id }` | Self or Owner/Admin |
 | `MessagePinned`, `MessageUnpinned` | `MANAGE_CHANNELS` |
-| `StoragePledgeChanged { peer_id }` | Self or Owner/Admin |
 | `RolePermissionsChanged { role }` | `MANAGE_ROLES` + must outrank target role |
-| `MemberBanned { peer_id }` | `KICK_MEMBERS` + must outrank target |
-| `MemberUnbanned` | `KICK_MEMBERS` |
-| `ChannelVisibilityChanged`, `ChannelPostingChanged`, `ChannelPublicChanged` | `MANAGE_CHANNELS` |
+| `MemberBanned` / `MemberMuted { peer_id }` | `KICK_MEMBERS` + must outrank target |
+| `MemberUnbanned` / `MemberUnmuted` | `KICK_MEMBERS` |
+| `ChannelVisibilityChanged`, `ChannelPostingChanged`, `ChannelPublicChanged`, `ChannelSlowModeChanged`, `ChannelMediaOnlyChanged` | `MANAGE_CHANNELS` |
 | `LabelCreated`, `LabelDeleted`, `LabelUpdated` | `MANAGE_ROLES` |
 | `LabelAssigned { peer_id }`, `LabelUnassigned { peer_id }` | Self or `MANAGE_ROLES` |
+| `EmojiAdded` (+ name/hash validation) / `EmojiRemoved` | `MANAGE_EMOTES` |
+| `ServerDeleted` | Owner only (tombstone) |
 | `ServerCreated` | Always allowed |
 
-5. If not allowed: log `[HOLLOW-SECURITY] REJECTED MLS CrdtOp from {author}` and return
-6. Apply op: `state.apply_op(&op)`
-7. Check if op was actually new (compare op_log length before/after)
-8. If new: persist state + op to SQLCipher
-9. Emit appropriate NetworkEvent per payload type:
+3. If not allowed: log `[HOLLOW-SECURITY] REJECTED MLS CrdtOp from {author}` and return
+4. Apply op: `state.apply_op(&op)`; check if actually new (op_log length before/after)
+5. If new: persist state + op via CrdtStore, then `emit_crdt_apply_event()` emits the NetworkEvent per payload type (extracted helper; the plaintext twin in swarm.rs keeps its own richer match — self-eviction teardown, MLS teardown on delete):
 
 **CRITICAL**: Specific payload variants are explicitly listed to emit `NetworkEvent::ServerUpdated` (not the `_ =>` wildcard which emits `SyncCompleted`). The `ServerUpdated` Dart handler invalidates `myPermissionsProvider`, `myRoleProvider`, and `serverMembersProvider`. New CrdtPayload variants that affect permissions/channels/labels MUST be added to the explicit match arms, not left to fall into `_ =>`.
 
@@ -604,11 +606,8 @@ Parameters: `sid`, `cid`, `since_timestamp`, `sender_timestamps: HashMap<String,
 
 Flow:
 1. Guard: server must exist in `server_states`
-2. Query messages from DB: uses per-sender timestamps if available, otherwise global `since_timestamp` (limit 200)
-3. Build `SyncMessageItem` list with reactions and file metadata
-4. Calculate `has_more` flag (items >= 200 and total > 200)
-5. Wrap in `MessageEnvelope::ChannelSyncBatch { sid, cid, messages, total, has_more, target: None }`
-6. Send via MLS to the requesting peer
+2. `build_channel_sync_batch()` (shared responder helper — see `flush_pending_sync_requests`)
+3. Skip if the batch is empty; else send via `send_encrypted_message` to the requesting peer
 
 ## handle_envelope_channel_probe()
 
@@ -636,7 +635,9 @@ Flow:
 
 `sync_handler.rs:handle_envelope_channel_sync_batch()` — Processes incoming `MessageEnvelope::ChannelSyncBatch` via MLS. Inserts received messages into local DB.
 
-The entire batch is wrapped in a SQLite transaction (`begin_transaction()`/`commit_transaction()`) for 10-50x faster ingest vs individual autocommits. Signature verification uses `verify_message_signature_cached()` with a `HashMap<String, Vec<u8>>` pk cache to avoid redundant PeerId derivation across messages from the same sender.
+The entire batch is wrapped in a SQLite transaction (`begin_transaction()`/`commit_transaction()`) for 10-50x faster ingest vs individual autocommits. Signature verification (`verify_sync_item_sig`, skips edited items) uses `verify_message_signature_cached()` with a `HashMap<String, Vec<u8>>` pk cache to avoid redundant PeerId derivation across messages from the same sender.
+
+The per-item work is split into helpers: `upsert_synced_channel_message()` (insert / edit / `repair_wedged_sender`) and `apply_sync_item_extras()` (hidden flag, file metadata, reactions). Both are deliberately **synchronous and RETURN the `NetworkEvent`s to emit** — an async helper taking `&MessageStore` would hold the reference across an await and un-Send the event-loop future (rusqlite `Connection` is `!Sync`; see memory `rusqlite Connection is !Sync`).
 
 Flow per message in batch:
 1. Insert via `store.insert_channel_message()` — returns 1 if new (deduplication by message_id). `is_mine = resolver::same_identity(&msg.s, local_peer)` (multi-device: any of our own devices is ours).
@@ -692,17 +693,10 @@ Tier-gated operations (require outranking the target):
 
 ## Broadcast Strategy
 
-Two broadcast paths exist throughout the module, with mandatory fallback:
+Both routes live in two shared helpers — never hand-roll a broadcast:
 
-**MLS path** (preferred when MLS group exists): Wrap the CRDT op in `MessageEnvelope::CrdtOp { sid, op_json }` and call `send_mls_broadcast()` — encrypts for the entire MLS group in one operation.
+**`broadcast_op_mls_first()`** (default, `OpBroadcast::MlsFirst`): MLS `MessageEnvelope::CrdtOp` via `send_mls_broadcast()` when the group exists, then ALWAYS ALSO the plaintext `HavenMessage::CrdtOpBroadcast` twin via `broadcast_crdt_op_to_members()`. The plaintext copy is unconditional — NOT an on-error fallback — because a receiver at a skewed MLS epoch silently drops the ciphertext with no recovery (common after mobile micro-disconnects); it's idempotent (op_log dedups, receivers re-validate via `op_allowed`). `broadcast_crdt_op_to_members` prefers the gossip mesh (`flood_crdt_op`) and falls back to the per-identity relay fan-out.
 
-**Plaintext fallback** (when no MLS group OR MLS encryption fails): Iterate `state.members.keys()`, skip self, check `peer_is_reachable(ws_room_peers, peer)`, send `HavenMessage::CrdtOpBroadcast { server_id, op_json }` via `send_message_to_peer()`.
+**`broadcast_op_plaintext_with_fan()`** (`OpBroadcast::PlaintextWithFan`): plaintext member broadcast + `fan_to_own_siblings` for ops with no MLS path — `handle_change_role`, nickname, twitch, layout, pin/unpin, storage pledge.
 
-**CRITICAL pattern:** All MLS broadcast sites use `let mut sent_via_mls = false; match send_mls_broadcast(...) { Ok(()) => sent_via_mls = true, Err(e) => log }; if !sent_via_mls { plaintext fallback }`. This ensures CRDT ops are ALWAYS delivered even when MLS epoch is stale (common after mobile micro-disconnects). Never use `if mls_ok { mls } else { plaintext }` — that silently drops ops on MLS encryption failure.
-
-Notable exceptions:
-- `handle_change_role()` — always uses plaintext broadcast (no MLS wrapper)
-- `handle_set_nickname()` / `handle_set_twitch_username()` — always uses plaintext broadcast
-- `handle_set_storage_pledge()` — always uses plaintext broadcast
-- `handle_update_channel_layout()` / `handle_pin_message()` / `handle_unpin_message()` — always uses plaintext broadcast
-- `handle_create_server()` — no broadcast (single member)
+`handle_create_server()` — no broadcast (single member at creation; siblings get `SiblingServerAnnounce`).

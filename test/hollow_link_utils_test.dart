@@ -133,4 +133,48 @@ void main() {
     expect(webServerInviteLink('abc'),
         'https://hollow.anonlisten.com/join#server=abc');
   });
+
+  group('inviteIdFromInput', () {
+    test('unwraps hollow:// server invite', () {
+      expect(
+          inviteIdFromInput(
+              'hollow://join?server=abc123', HollowLinkType.serverInvite),
+          'abc123');
+    });
+
+    test('unwraps web fragment-form server invite', () {
+      expect(
+          inviteIdFromInput('https://hollow.anonlisten.com/join#server=abc123',
+              HollowLinkType.serverInvite),
+          'abc123');
+    });
+
+    test('unwraps web query-form server invite', () {
+      expect(
+          inviteIdFromInput('https://hollow.anonlisten.com/join?server=abc123',
+              HollowLinkType.serverInvite),
+          'abc123');
+    });
+
+    test('unwraps room invites for the room type', () {
+      expect(
+          inviteIdFromInput(
+              'hollow://join?room=r0om1234', HollowLinkType.roomInvite),
+          'r0om1234');
+      expect(
+          inviteIdFromInput('https://hollow.anonlisten.com/join#room=r0om1234',
+              HollowLinkType.roomInvite),
+          'r0om1234');
+    });
+
+    test('raw id passes through trimmed', () {
+      expect(inviteIdFromInput('  abc123  ', HollowLinkType.serverInvite),
+          'abc123');
+    });
+
+    test('mismatched link type is not unwrapped', () {
+      const conf = 'https://hollow.anonlisten.com/join#conf=abc123';
+      expect(inviteIdFromInput(conf, HollowLinkType.serverInvite), conf);
+    });
+  });
 }

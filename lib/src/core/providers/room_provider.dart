@@ -7,6 +7,7 @@ import 'package:hollow/src/core/providers/node_provider.dart';
 import 'package:hollow/src/core/providers/peers_provider.dart';
 import 'package:hollow/src/core/providers/selected_peer_provider.dart';
 import 'package:hollow/src/core/providers/service_providers.dart';
+import 'package:hollow/src/ui/chat/hollow_link_utils.dart';
 
 class RoomNotifier extends Notifier<String?> {
   @override
@@ -52,15 +53,8 @@ class RoomNotifier extends Notifier<String?> {
     return List.generate(8, (_) => chars[random.nextInt(chars.length)]).join();
   }
 
-  static String _extractRoomCode(String input) {
-    final trimmed = input.trim();
-    final uri = Uri.tryParse(trimmed);
-    if (uri != null && uri.scheme == 'hollow' && uri.host == 'join') {
-      final room = uri.queryParameters['room'];
-      if (room != null && room.isNotEmpty) return room;
-    }
-    return trimmed;
-  }
+  static String _extractRoomCode(String input) =>
+      inviteIdFromInput(input, HollowLinkType.roomInvite);
 }
 
 final roomProvider =

@@ -1,6 +1,7 @@
 ﻿import 'package:flutter/material.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
+import 'package:hollow/src/ui/chat/hollow_link_utils.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
@@ -51,7 +52,7 @@ void showCreateServerDialog(BuildContext context) {
           const SizedBox(height: HollowSpacing.lg),
           HollowTextField(
             controller: joinController,
-            hintText: 'hollow://join?server=... or ID',
+            hintText: 'Invite link or server ID',
             autofocus: !isCompact,
             style: HollowTypography.mono.copyWith(
               color: hollow.textPrimary,
@@ -197,16 +198,8 @@ void _handleJoin(BuildContext context, TextEditingController controller) {
   final input = controller.text.trim();
   if (input.isEmpty) return;
 
-  // Parse invite link or raw server ID.
-  String serverId;
-  final uri = Uri.tryParse(input);
-  if (uri != null &&
-      uri.scheme == 'hollow' &&
-      uri.queryParameters.containsKey('server')) {
-    serverId = uri.queryParameters['server']!;
-  } else {
-    serverId = input;
-  }
+  // Parse invite link (hollow:// or web /join#server=) or raw server ID.
+  final serverId = inviteIdFromInput(input, HollowLinkType.serverInvite);
 
   final overlayContext = Navigator.of(context).context;
   Navigator.of(context).pop();

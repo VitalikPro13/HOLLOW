@@ -3,6 +3,20 @@ use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
+// -- Shared handler-parameter shorthands --
+//
+// The node modules pass event-loop state as individual parameters (no
+// SwarmContext struct — the borrow checker needs disjoint borrows), which makes
+// every handler signature repeat the same long generic types. These aliases
+// keep those signatures short; call sites are unaffected (aliases are
+// transparent).
+
+pub(crate) type ServerStates = HashMap<String, crate::crdt::server_state::ServerState>;
+pub(crate) type WsCmdTx = tokio::sync::mpsc::UnboundedSender<crate::node::ws_client::WsCommand>;
+pub(crate) type WsRoomPeers = HashMap<String, HashSet<String>>;
+pub(crate) type GossipOverlays = HashMap<String, crate::node::gossip::GossipOverlay>;
+pub(crate) type EventTx = tokio::sync::mpsc::Sender<NetworkEvent>;
+
 // -- Security constants (Phase 6.25) --
 
 /// Maximum SDP payload size (64 KB). Realistic SDP is ~2-10 KB.

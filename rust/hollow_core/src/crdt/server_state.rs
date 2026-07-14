@@ -1032,6 +1032,109 @@ impl ServerState {
         self.can_kick(actor, target)
     }
 
+    /// The ingest permission matrix: may `op.author` apply this op to this
+    /// server? Shared by BOTH remote-op ingest paths (plaintext
+    /// `CrdtOpBroadcast` in swarm.rs and the MLS `CrdtOp` envelope in
+    /// sync_handler.rs) so the matrices can never drift apart again.
+    ///
+    /// Validates the AUTHOR (the op's original creator), never the transport
+    /// sender — ops are legitimately relayed by other peers during join/sync
+    /// fan-out. Override-aware (`get_permissions`, honoring
+    /// `RolePermissionsChanged`), NOT `default_permissions()`: local send
+    /// handlers gate on `has_permission`, so ingest must apply the SAME matrix
+    /// — otherwise an override-granted permission authors ops the whole
+    /// network rejects (the actor's devices fork), and an override-REVOKED
+    /// permission still passes ingest (unenforced remotely).
+    pub fn op_allowed(&self, op: &CrdtOp) -> bool {
+        let sender_role = self.get_role(&op.author);
+        let sender_perms = self.get_permissions(&op.author);
+        match &op.payload {
+            CrdtPayload::ChannelAdded { .. }
+            | CrdtPayload::ChannelRemoved { .. }
+            | CrdtPayload::ChannelRenamed { .. }
+            | CrdtPayload::ChannelLayoutUpdated { .. } => {
+                (sender_perms & Permission::MANAGE_CHANNELS) != 0
+            }
+            CrdtPayload::RoleChanged { peer_id, role, .. } => {
+                self.can_change_role(&op.author, peer_id, role)
+            }
+            CrdtPayload::ServerRenamed { .. }
+            | CrdtPayload::ServerSettingChanged { .. } => {
+                sender_role == MemberRole::Owner || sender_role == MemberRole::Admin
+            }
+            // Self-removal (voluntary leave) is always allowed; kicking
+            // someone ELSE needs moderator+ and outranking.
+            CrdtPayload::MemberRemoved { peer_id } => {
+                let target_role = self.get_role(peer_id);
+                peer_id == &op.author
+                    || ((sender_perms & Permission::KICK_MEMBERS) != 0
+                        && sender_role.outranks(&target_role))
+            }
+            CrdtPayload::MemberAdded { .. } => {
+                // is_member (resolver-aware), not raw contains_key: a legacy op
+                // authored under a DEVICE id must still validate.
+                self.is_member(&op.author)
+            }
+            CrdtPayload::NicknameChanged { peer_id, .. }
+            | CrdtPayload::TwitchUsernameChanged { peer_id, .. }
+            | CrdtPayload::StoragePledgeChanged { peer_id, .. } => {
+                peer_id == &op.author || sender_role == MemberRole::Owner || sender_role == MemberRole::Admin
+            }
+            CrdtPayload::MessagePinned { .. }
+            | CrdtPayload::MessageUnpinned { .. } => {
+                (sender_perms & Permission::MANAGE_CHANNELS) != 0
+            }
+            CrdtPayload::RolePermissionsChanged { role, .. } => {
+                let target = MemberRole::from_str(role);
+                (sender_perms & Permission::MANAGE_ROLES) != 0
+                    && sender_role.outranks(&target)
+            }
+            CrdtPayload::MemberBanned { peer_id } => {
+                let target_role = self.get_role(peer_id);
+                (sender_perms & Permission::KICK_MEMBERS) != 0
+                    && sender_role.outranks(&target_role)
+            }
+            CrdtPayload::MemberUnbanned { .. } => {
+                (sender_perms & Permission::KICK_MEMBERS) != 0
+            }
+            CrdtPayload::MemberMuted { peer_id, .. } => {
+                let target_role = self.get_role(peer_id);
+                (sender_perms & Permission::KICK_MEMBERS) != 0
+                    && sender_role.outranks(&target_role)
+            }
+            CrdtPayload::MemberUnmuted { .. } => {
+                (sender_perms & Permission::KICK_MEMBERS) != 0
+            }
+            CrdtPayload::ChannelVisibilityChanged { .. }
+            | CrdtPayload::ChannelPostingChanged { .. }
+            | CrdtPayload::ChannelPublicChanged { .. }
+            | CrdtPayload::ChannelSlowModeChanged { .. }
+            | CrdtPayload::ChannelMediaOnlyChanged { .. } => {
+                (sender_perms & Permission::MANAGE_CHANNELS) != 0
+            }
+            CrdtPayload::LabelCreated { .. }
+            | CrdtPayload::LabelDeleted { .. }
+            | CrdtPayload::LabelUpdated { .. } => {
+                (sender_perms & Permission::MANAGE_ROLES) != 0
+            }
+            CrdtPayload::LabelAssigned { peer_id, .. }
+            | CrdtPayload::LabelUnassigned { peer_id, .. } => {
+                peer_id == &op.author || (sender_perms & Permission::MANAGE_ROLES) != 0
+            }
+            CrdtPayload::EmojiAdded { name, hash, .. } => {
+                (sender_perms & Permission::MANAGE_EMOTES) != 0
+                    && super::valid_emote_name(name)
+                    && super::valid_emote_hash(hash)
+            }
+            CrdtPayload::EmojiRemoved { .. } => {
+                (sender_perms & Permission::MANAGE_EMOTES) != 0
+            }
+            // Only the Owner can delete a server (tombstone).
+            CrdtPayload::ServerDeleted { .. } => sender_role == MemberRole::Owner,
+            CrdtPayload::ServerCreated { .. } => true,
+        }
+    }
+
     /// Check if a peer is muted at `now_ms` (epoch ms). Expired mutes read as
     /// unmuted; `u64::MAX` = permanent.
     pub fn is_muted(&self, peer_id: &str, now_ms: u64) -> bool {

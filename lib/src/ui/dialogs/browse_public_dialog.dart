@@ -9,6 +9,7 @@ import 'package:hollow/src/core/providers/share_tab_provider.dart';
 import 'package:hollow/src/core/providers/split_view_provider.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
+import 'package:hollow/src/ui/chat/hollow_link_utils.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
@@ -94,12 +95,16 @@ void _browse(
   final input = controller.text.trim();
   if (input.isEmpty) return;
 
-  String serverId = input;
-  final serverParam = Uri.tryParse(input)?.queryParameters['server'];
-  if (serverParam != null && serverParam.isNotEmpty) {
-    serverId = serverParam;
-  } else if (input.contains('/')) {
-    serverId = input.split('/').last;
+  // Invite link (hollow:// or web /join#server=), raw ID, or legacy fallbacks
+  // (any URL with a ?server= query, else the last path segment).
+  String serverId = inviteIdFromInput(input, HollowLinkType.serverInvite);
+  if (serverId == input) {
+    final serverParam = Uri.tryParse(input)?.queryParameters['server'];
+    if (serverParam != null && serverParam.isNotEmpty) {
+      serverId = serverParam;
+    } else if (input.contains('/')) {
+      serverId = input.split('/').last;
+    }
   }
 
   // Add to saved servers (default realtime, or manual if cap reached).
