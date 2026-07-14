@@ -33,6 +33,17 @@ jobs:
           key: ${{ runner.os }}-cargo-clippy-${{ hashFiles('rust/hollow_core/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-clippy-
 
+      - name: Install Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      # Resolve package imports so the Dart analyzer doesn't emit
+      # phantom "URI doesn't exist" issues for every dependency.
+      - name: Flutter pub get
+        run: flutter pub get
+
       - name: Generate Clippy report for Sonar
         working-directory: rust/hollow_core
         run: cargo clippy --lib --message-format=json > ../../clippy-report.json
