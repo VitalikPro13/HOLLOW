@@ -39,15 +39,13 @@ import 'package:hollow/src/ui/chat/emoji_picker.dart';
 import 'package:hollow/src/ui/chat/emote_composer.dart';
 import 'package:hollow/src/ui/chat/emote_image.dart';
 import 'package:hollow/src/core/providers/emote_provider.dart';
-import 'package:hollow/src/ui/chat/chat_pane.dart';
+import 'package:hollow/src/ui/chat/chat_pane_shared.dart';
 import 'package:hollow/src/ui/chat/message_action_bar.dart';
 import 'package:hollow/src/ui/dialogs/message_proof_dialog.dart';
 import 'package:hollow/src/ui/components/animated_gif_image.dart';
 import 'package:hollow/src/ui/components/connection_progress.dart';
 import 'package:hollow/src/core/providers/relay_domain_provider.dart';
 import 'package:hollow/src/ui/chat/hollow_link_utils.dart';
-import 'package:hollow/src/ui/chat/staged_hollow_link_card.dart';
-import 'package:hollow/src/ui/chat/staged_link_preview_card.dart';
 import 'package:hollow/src/ui/chat/voice_recorder_bar.dart';
 import 'package:hollow/src/core/services/voice_message_recorder.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
@@ -359,13 +357,6 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
 
   /// The chat's standard inline thumbnail: [GifFileImage] for .gif paths
   /// (animated), [Image.file] otherwise.
-  Widget _gifAwareImage(String path, {double? width, double? height}) =>
-      path.toLowerCase().endsWith('.gif')
-          ? GifFileImage(
-              diskPath: path, width: width, height: height, fit: BoxFit.cover)
-          : Image.file(File(path),
-              width: width, height: height, fit: BoxFit.cover);
-
   /// '📷 Image' / '📎 name' for attachments, else the message text.
   String _messagePreviewText(ChannelChatMessage msg) {
     final f = msg.fileAttachment;
@@ -536,7 +527,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
           File(attachment.diskPath!).existsSync()) {
         return ClipRRect(
           borderRadius: BorderRadius.circular(hollow.radiusSm),
-          child: _gifAwareImage(attachment.diskPath!, height: 80),
+          child: gifAwareImage(attachment.diskPath!, height: 80),
         );
       }
       return Text(
@@ -1457,33 +1448,17 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
 
             if (typingPeers.isNotEmpty) _buildTypingBar(typingPeers),
 
-            if (_replyToMessageId != null) _buildReplyPreviewBar(hollow),
-            if (_stagedFilePath != null) _buildStagedFilePreview(hollow),
-            if (_stagedHollowLink != null)
-              StagedHollowLinkCard(
-                link: _stagedHollowLink!,
-                onDismiss: () {
-                  _urlDebounce?.cancel();
-                  setState(() {
-                    _stagedPreviewUrl = null;
-                    _stagedHollowLink = null;
-                  });
-                },
-              )
-            else if (_stagedPreviewUrl != null)
-              StagedLinkPreviewCard(
-                url: _stagedPreviewUrl!,
-                preview: _stagedPreview,
-                loading: _stagedPreviewLoading,
-                onDismiss: () {
-                  _urlDebounce?.cancel();
-                  setState(() {
-                    _stagedPreviewUrl = null;
-                    _stagedPreview = null;
-                    _stagedPreviewLoading = false;
-                  });
-                },
-              ),
+            if (_replyToMessageId != null) _buildReplyPreviewBar(),
+            if (_stagedFilePath != null) _buildStagedFilePreview(),
+            // Staged link card (hollow invite or OG preview)
+            StagedLinkArea(
+              hollowLink: _stagedHollowLink,
+              previewUrl: _stagedPreviewUrl,
+              preview: _stagedPreview,
+              previewLoading: _stagedPreviewLoading,
+              onDismissHollowLink: _dismissStagedHollowLink,
+              onDismissPreview: _dismissStagedPreview,
+            ),
 
             _buildInputBar(hollow),
           ],
@@ -1960,46 +1935,21 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
         (localNickRaw != null && localNickRaw.isNotEmpty)
             ? '@$localNickRaw'
             : null;
-    return SelectionArea(
-      contextMenuBuilder: (_, _) => const SizedBox.shrink(),
-      child: ScrollConfiguration(
-        behavior: ScrollConfiguration.of(context).copyWith(scrollbars: false),
-        child: ScrollablePositionedList.builder(
-          key: ValueKey('ch-list-${widget.serverId}-${widget.channelId}'),
-          itemScrollController: _itemScrollController,
-          itemPositionsListener: _itemPositionsListener,
-          scrollOffsetController: _scrollOffsetController,
-          // reverse:true — the NEWEST message is builder index 0,
-          // pinned to the bottom edge. No sentinel row; appends
-          // while following never move the viewport.
-          reverse: true,
-          initialScrollIndex: 0,
-          initialAlignment: 0.0,
-          padding: const EdgeInsets.symmetric(
-            vertical: HollowSpacing.sm,
-          ),
-          itemCount: messages.length,
-          // Let the list MOVE row elements across index slots when
-          // a new message shifts every revIndex by one — without
-          // this each shift remounted every visible row (full-list
-          // blink on every message).
-          findChildIndexCallback: (key) {
-            if (key is! ValueKey<Object>) return null;
-            final id = key.value;
-            if (id is! String) return null;
-            final i = replyIndexById[id];
-            if (i == null) return null;
-            return messages.length - 1 - i;
-          },
-          itemBuilder: (context, revIndex) => _buildMessageRow(
-            context,
-            revIndex,
-            messages,
-            replyIndexById,
-            localMentionName,
-            localMentionNick,
-          ),
-        ),
+    return reversedChatList(
+      context: context,
+      listKey: ValueKey('ch-list-${widget.serverId}-${widget.channelId}'),
+      itemScrollController: _itemScrollController,
+      itemPositionsListener: _itemPositionsListener,
+      scrollOffsetController: _scrollOffsetController,
+      itemCount: messages.length,
+      indexByMessageId: replyIndexById,
+      itemBuilder: (context, revIndex) => _buildMessageRow(
+        context,
+        revIndex,
+        messages,
+        replyIndexById,
+        localMentionName,
+        localMentionNick,
       ),
     );
   }
@@ -2060,32 +2010,12 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
       child: _buildBubble(msg, index, showHeader, messages, replyIndexById,
           localMentionName, localMentionNick),
     );
-    final showDate = shouldShowDateSeparator(
-      msg.timestamp,
-      index > 0 ? messages[index - 1].timestamp : null,
-    );
-
-    final messageWidget = showHeader
-        ? Padding(
-            padding: const EdgeInsets.only(top: HollowSpacing.sm + 2),
-            child: wrapper,
-          )
-        : wrapper;
-
-    // ValueKey(messageId): rows hold per-item state
-    // (spoiler reveal, hover, decoded frames) that must not
-    // shift onto a different message on delete/trim.
-    return KeyedSubtree(
-      key: ValueKey<Object>(msg.messageId ?? index),
-      child: showDate
-          ? Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                DateSeparator(date: msg.timestamp),
-                messageWidget,
-              ],
-            )
-          : messageWidget,
+    return dateSeparatedChatRow(
+      rowKey: msg.messageId ?? index,
+      timestamp: msg.timestamp,
+      prevTimestamp: index > 0 ? messages[index - 1].timestamp : null,
+      showHeader: showHeader,
+      child: wrapper,
     );
   }
 
@@ -2359,7 +2289,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
       left: 0,
       right: 0,
       child: Center(
-        child: _UnreadPill(
+        child: UnreadJumpPill(
           count: unreadCount,
           onTap: () {
             _scrollToBottom();
@@ -2418,128 +2348,56 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
     );
   }
 
-  Widget _buildReplyPreviewBar(HollowTheme hollow) {
-    return Container(
-      padding: const EdgeInsets.symmetric(
-        horizontal: HollowSpacing.md,
-        vertical: HollowSpacing.xs + 2,
-      ),
-      decoration: BoxDecoration(
-        color: hollow.surface,
-        border: Border(
-          top: BorderSide(color: hollow.border),
-          left: BorderSide(color: hollow.accent, width: 3),
-        ),
-      ),
-      child: Row(
-        children: [
-          Icon(LucideIcons.reply, size: 14, color: hollow.accent),
-          const SizedBox(width: HollowSpacing.sm),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
-                  'Replying to ${_replyToSenderName ?? ''}',
-                  style: HollowTypography.caption.copyWith(
-                    color: hollow.accent,
-                    fontWeight: FontWeight.w600,
-                    fontSize: 11,
-                  ),
-                ),
-                Row(
-                  children: [
-                    if (_replyToImagePath != null &&
-                        File(_replyToImagePath!).existsSync()) ...[
-                      ClipRRect(
-                        borderRadius: BorderRadius.circular(4),
-                        child: _gifAwareImage(_replyToImagePath!,
-                            width: 32, height: 32),
-                      ),
-                      const SizedBox(width: HollowSpacing.xs),
-                    ],
-                    Expanded(
-                      child: Text(
-                        _replyToText ?? '',
-                        style: HollowTypography.body.copyWith(
-                          color: hollow.textSecondary,
-                          fontSize: 12,
-                        ),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                  ],
-                ),
-              ],
-            ),
-          ),
-          HollowPressable(
-            semanticLabel: 'Cancel reply',
-            onTap: () => setState(() {
-              _replyToMessageId = null;
-              _replyToText = null;
-              _replyToSenderName = null;
-              _replyToImagePath = null;
-            }),
-            padding: const EdgeInsets.all(HollowSpacing.xs),
-            child: Icon(LucideIcons.x, size: 16, color: hollow.textSecondary),
-          ),
-        ],
-      ),
+  Widget _buildReplyPreviewBar() {
+    return ChatReplyPreviewBar(
+      senderName: _replyToSenderName,
+      text: _replyToText,
+      imagePath: _replyToImagePath,
+      onCancel: _cancelReply,
     );
   }
 
-  Widget _buildStagedFilePreview(HollowTheme hollow) {
-    return Container(
-      padding: const EdgeInsets.fromLTRB(
-          HollowSpacing.md, HollowSpacing.sm, HollowSpacing.md, 0),
-      decoration: BoxDecoration(
-        color: hollow.surface,
-        border: Border(top: BorderSide(color: hollow.border)),
-      ),
-      child: Row(
-        children: [
-          if (_stagedFileIsImage)
-            ClipRRect(
-              borderRadius: BorderRadius.circular(6),
-              child: _gifAwareImage(_stagedFilePath!, width: 48, height: 48),
-            )
-          else
-            Container(
-              width: 48,
-              height: 48,
-              decoration: BoxDecoration(
-                color: hollow.elevated,
-                borderRadius: BorderRadius.circular(6),
-              ),
-              child:
-                  Icon(LucideIcons.file, color: hollow.textSecondary, size: 20),
-            ),
-          const SizedBox(width: HollowSpacing.sm),
-          Expanded(
-            child: Text(
-              _stagedFileName ?? '',
-              style:
-                  HollowTypography.caption.copyWith(color: hollow.textPrimary),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-            ),
-          ),
-          HollowPressable(
-            semanticLabel: 'Remove attachment',
-            onTap: () => setState(() {
-              _stagedFilePath = null;
-              _stagedFileName = null;
-              _stagedFileIsImage = false;
-            }),
-            padding: const EdgeInsets.all(HollowSpacing.xs),
-            child: Icon(LucideIcons.x, size: 16, color: hollow.textSecondary),
-          ),
-        ],
-      ),
+  void _cancelReply() {
+    setState(() {
+      _replyToMessageId = null;
+      _replyToText = null;
+      _replyToSenderName = null;
+      _replyToImagePath = null;
+    });
+  }
+
+  Widget _buildStagedFilePreview() {
+    return StagedFilePreviewBar(
+      filePath: _stagedFilePath!,
+      fileName: _stagedFileName,
+      isImage: _stagedFileIsImage,
+      onRemove: _removeStagedFile,
     );
+  }
+
+  void _removeStagedFile() {
+    setState(() {
+      _stagedFilePath = null;
+      _stagedFileName = null;
+      _stagedFileIsImage = false;
+    });
+  }
+
+  void _dismissStagedHollowLink() {
+    _urlDebounce?.cancel();
+    setState(() {
+      _stagedPreviewUrl = null;
+      _stagedHollowLink = null;
+    });
+  }
+
+  void _dismissStagedPreview() {
+    _urlDebounce?.cancel();
+    setState(() {
+      _stagedPreviewUrl = null;
+      _stagedPreview = null;
+      _stagedPreviewLoading = false;
+    });
   }
 
   /// Input bar — a blocked banner when posting isn't allowed (no permission
@@ -2569,21 +2427,11 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
         ),
       );
     }
-    return Container(
-      padding: const EdgeInsets.symmetric(
-        horizontal: HollowSpacing.md,
-        vertical: HollowSpacing.sm,
-      ),
-      decoration: BoxDecoration(
-        color: hollow.surface,
-        border: Border(
-          top: (_replyToMessageId != null ||
-                  _stagedFilePath != null ||
-                  _stagedPreviewUrl != null)
-              ? BorderSide.none
-              : BorderSide(color: hollow.border),
-        ),
-      ),
+    return chatInputBarShell(
+      hollow,
+      flushTop: _replyToMessageId != null ||
+          _stagedFilePath != null ||
+          _stagedPreviewUrl != null,
       child: _isRecordingVoice
           ? VoiceRecorderBar(
               onFinished: _stageVoiceMessage,
@@ -2633,37 +2481,18 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
             link: _mentionLayerLink,
             child: Focus(
               onKeyEvent: (_, event) => _handleComposerKey(event),
-              child: HollowTextField(
+              child: chatComposerField(
+                hollow,
                 controller: _controller,
                 focusNode: _focusNode,
                 hintText: 'Message #${widget.channelName}',
-                autofocus: true,
-                maxLines: 5,
-                minLines: 1,
-                maxLength: 4000,
-                showCounter: false,
-                style:
-                    HollowTypography.body.copyWith(color: hollow.textPrimary),
-                borderRadius: hollow.radiusLg,
                 onChanged: _onTextChanged,
               ),
             ),
           ),
         ),
         const SizedBox(width: HollowSpacing.xs),
-        Builder(
-          builder: (btnCtx) => HollowPressable(
-            semanticLabel: 'Insert emoji',
-            onTap: () => _openComposerEmojiPicker(btnCtx),
-            borderRadius: BorderRadius.circular(hollow.radiusMd),
-            padding: const EdgeInsets.all(HollowSpacing.sm),
-            child: Icon(
-              LucideIcons.smile,
-              color: hollow.textSecondary,
-              size: 20,
-            ),
-          ),
-        ),
+        composerEmojiButton(hollow, onOpen: _openComposerEmojiPicker),
         const SizedBox(width: HollowSpacing.sm),
         if (_slowModeReadyAt != null) ...[
           _buildSlowModePill(hollow),
@@ -3043,44 +2872,6 @@ class _VaultHealthIndicator extends ConsumerWidget {
       child: Padding(
         padding: const EdgeInsets.only(left: HollowSpacing.sm),
         child: Icon(LucideIcons.database, size: 13, color: hollow.accent),
-      ),
-    );
-  }
-}
-
-/// Floating pill that appears when scrolled away from the bottom.
-/// Tap to jump to newest messages.
-class _UnreadPill extends StatelessWidget {
-  final int count;
-  final VoidCallback onTap;
-  const _UnreadPill({required this.count, required this.onTap});
-
-  @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-    final label = count == 1 ? '1 new message' : '$count new messages';
-    return HollowPressable(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(20),
-      backgroundColor: hollow.accent,
-      padding: const EdgeInsets.symmetric(
-        horizontal: HollowSpacing.md,
-        vertical: HollowSpacing.xs + 2,
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(LucideIcons.arrowDown, size: 14, color: hollow.textOnAccent),
-          const SizedBox(width: HollowSpacing.xs),
-          Text(
-            label,
-            style: HollowTypography.caption.copyWith(
-              color: hollow.textOnAccent,
-              fontWeight: FontWeight.w600,
-              fontSize: 12,
-            ),
-          ),
-        ],
       ),
     );
   }

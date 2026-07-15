@@ -1,6 +1,8 @@
 # ChatPane -- DM Conversation View
 
-Primary file: `lib/src/ui/chat/chat_pane.dart` (~3978 lines). The ChatPane is the main one-to-one direct message view. It handles the message list, input bar, file attachments, voice recording, inline call panel (audio/video/screen share), a DM profile panel, reply/quote flow, link previews, typing indicators, and unread tracking. Supporting files: `lib/src/ui/chat/chat_drop_zone.dart` (drag-and-drop file attachment wrapper) and `lib/src/ui/chat/chat_input_shortcuts.dart` (keyboard shortcuts and clipboard image paste).
+Primary file: `lib/src/ui/chat/chat_pane.dart` (~4500 lines). The ChatPane is the main one-to-one direct message view. It handles the message list, input bar, file attachments, voice recording, inline call panel (audio/video/screen share), a DM profile panel, reply/quote flow, link previews, typing indicators, and unread tracking. Supporting files: `lib/src/ui/chat/chat_drop_zone.dart` (drag-and-drop file attachment wrapper), `lib/src/ui/chat/chat_input_shortcuts.dart` (keyboard shortcuts and clipboard image paste), and `lib/src/ui/chat/chat_pane_shared.dart` (see wiki ui_chat_pane_shared -- shared twins' building blocks, re-exported from this file).
+
+**2026-07-15 S3776 decomposition:** every class in this file now follows the slim-build + section-builder shape (memory s3776-build-method-decomposition). `_ChatPaneState`: `build()` -> `_registerBuildListeners()` (chatProvider growth + windowFocused listeners as named methods) + `_buildHeader` (-> `_buildHeaderTitle`/`_buildConnectionStatus`/`_buildVoiceCallButton`/`_buildVideoCallButton`/`_buildProfileToggleButton`/`_buildMuteToggleButton`/`_buildSplitToggleButton`) + `_buildScreenShareLayout` (-> `_buildSourcePillOverlay`/`_buildChatOverlay`/`_buildControlsPillOverlay`) or `_InlineCallPanelSlider` + `_buildMessageArea`. Row actions are nullable callback factories (`_editStartFor`/`_deleteFor`/`_replyFor`/`_downloadFor`/`_copyFor`/`_copyImageFor`/`_infoFor`; `_toggleReaction` shared by wrapper + bubble). Top-level shared DM-call helpers in this file: `_countActiveDmSources`, `_dmActiveSources`, `_dmSourcePill` (pill shell used by the full-bleed pill AND the inline panel switcher), `_shareLabelChip`, `_toggleScreenShare`, `_muteCallButton`/`_cameraCallButton`/`_screenShareCallButton`/`_endCallButton` (used by `_InlineCallPanel` and `_ScreenShareControlsOverlay`).
 
 ## Top-Level Providers Defined in This File
 
@@ -8,15 +10,7 @@ Primary file: `lib/src/ui/chat/chat_pane.dart` (~3978 lines). The ChatPane is th
 
 ## Top-Level Helper Functions
 
-### shouldGroup()
-Determines whether two consecutive messages should be visually grouped (same sender, within 5 minutes). For DMs it compares `isMe` flags; for channels it additionally checks `senderId`. Returns `true` if both messages are from the same sender and their timestamps differ by less than 5 minutes.
-
-### shouldShowDateSeparator()
-Returns `true` when a date separator should be rendered between two messages. Always shows for the first message. Shows when the calendar day changes between `current` and `previous` timestamps.
-
-## DateSeparator Widget
-
-`StatelessWidget`. Renders a horizontal rule with a centered date label: "Today", "Yesterday", or "Month Day, Year" (e.g., "February 16, 2026"). The line uses `hollow.border` color; the label uses `HollowTypography.caption` at font size 11, weight w600, 0.6 alpha. Padding: `md+2` top, `sm` bottom, `lg` horizontal.
+`shouldGroup()`, `shouldShowDateSeparator()`, and the `DateSeparator` widget MOVED to `chat_pane_shared.dart` (2026-07-15) and are re-exported from this file -- see wiki ui_chat_pane_shared for their behavior. `TypingIndicatorBar`, `TypingDots`, and the unread pill (`UnreadJumpPill`, was private `_UnreadPill`) moved there too.
 
 ## ChatPane Widget
 
@@ -210,87 +204,51 @@ Returns a `List<Widget>` used by both the normal layout and the screen-share ove
 
 ### Message List
 
-`Expanded` containing a `Stack`:
+`Expanded` containing a `Stack` of `_buildMessageListLayer` + `_buildUnreadPillOverlay`.
 
-**Layer 0: The message list** -- `MessageActionBarScope` wrapping a `NotificationListener<ScrollNotification>` that dismisses all action bars on scroll. Contains either:
-- Empty state (if `messages.isEmpty`): After history loaded, shows a centered `LucideIcons.messageCircle` (size 48, 0.3 alpha) + "No messages yet. Say hello!" text. Before history loaded, shows `SizedBox.shrink()`.
-- Message list: `SelectionArea` with empty context menu, wrapped in `ScrollConfiguration` (scrollbars disabled), containing `ScrollablePositionedList.builder`.
+**_buildMessageListLayer** -- `MessageActionBarScope` wrapping a `NotificationListener<ScrollNotification>` that dismisses all action bars on scroll. Contains either:
+- `_buildEmptyDmState` (if `messages.isEmpty` after history loaded): centered `LucideIcons.messageCircle` (size 48, 0.3 alpha) + "No messages yet. Say hello!". Before history loaded: `SizedBox.shrink()`.
+- `_buildMessageList`: precomputes `replyIndexById` (one pass per build), then calls the shared `reversedChatList()` shell (see wiki ui_chat_pane_shared) with `listKey: ValueKey('dm-list-${peerId}')`, the instance scroll controllers, and `itemBuilder: _buildMessageRow`. The shell owns `reverse: true`, index-0-bottom pinning, and `findChildIndexCallback` keyed-row reuse.
 
-**ScrollablePositionedList configuration**:
-- `key: ValueKey('dm-list-${peerId}')` -- ensures list recreates when switching DM peers
-- `itemScrollController`, `itemPositionsListener`, `scrollOffsetController` -- connected to instance variables
-- `initialScrollIndex: messages.length` -- starts at the sentinel
-- `initialAlignment: 1.0` -- bottom-aligned
-- `padding: EdgeInsets.symmetric(vertical: sm)`
-- `itemCount: messages.length + 1` -- sentinel pattern (extra invisible item at the end for bottom anchoring)
+**_buildMessageRow(context, revIndex, messages, replyIndexById, profiles, localPeerId)** -- maps the reversed index back to chronological, determines `showHeader` via `shouldGroup()`, and builds a `MessageHoverWrapper` whose action callbacks come from nullable factories (null hides the affordance; tap-time reads use `ref.read` for freshness):
+  - `_editStartFor(msg, revIndex)`: Only own text messages (no file attachment). Captures the item's current `itemLeadingEdge` from `_itemPositionsListener`, sets `_editingMessageId`, then in a post-frame callback uses `_itemScrollController.jumpTo()` at the same alignment to preserve scroll position
+  - `onEditSubmit` (inline): Clears edit state, calls `chatProvider.notifier.editMessage()`; `onEditCancel` clears edit state
+  - `_deleteFor(msg)`: Only own messages. Calls `chatProvider.notifier.deleteMessage()`
+  - `_replyFor(msg)`: Sets `_replyToMessageId`, `_replyToText` via `_messagePreviewText()` (image/paperclip placeholders), `_replyToSenderName`, `_replyToImagePath`. Requests focus on input
+  - `onReaction` / bubble `onToggleReaction`: both delegate to `_toggleReaction(msg, emoji)` -- checks if local peer already reacted, calls `addReaction()` or `removeReaction()`
+  - `_downloadFor(context, msg)`: If file has `diskPath`, opens save dialog via `_saveFile()` (split into `_saveDialogFileName` + `_writeSavedFile`). Otherwise requests from peer via `_requestFileFromPeer()`. Guards against duplicate downloads by checking `fileTransferProvider`
+  - `_copyFor(context, msg)`: Copies message text to clipboard (excludes `[file:` messages)
+  - `_copyImageFor(context, msg)`: For image attachments with disk path, calls `copyImageToClipboard()`; guards the itemBuilder's own context
+  - `_infoFor(context, msg)`: Opens `MessageProofDialog` with signature verification data
 
-**Item builder** (for each index):
-- If `index >= messages.length`: returns `SizedBox.shrink()` (sentinel)
-- Determines `showHeader` via `shouldGroup()` (first message always shows header)
-- Builds a `MessageHoverWrapper` with all action callbacks:
-  - `onEditStart`: Only for own text messages (no file attachment). Captures the item's current `itemLeadingEdge` from `_itemPositionsListener`, sets `_editingMessageId`, then in a post-frame callback uses `_itemScrollController.jumpTo()` at the same alignment to preserve scroll position (prevents the edit view's height change from shifting the message behind the input bar)
-  - `onEditSubmit`: Clears edit state, calls `chatProvider.notifier.editMessage()`
-  - `onEditCancel`: Clears edit state
-  - `onDelete`: Only for own messages. Calls `chatProvider.notifier.deleteMessage()`
-  - `onReply`: Sets `_replyToMessageId`, `_replyToText` (image icon for image attachments, paperclip for files), `_replyToSenderName`, `_replyToImagePath`. Requests focus on input
-  - `onReaction(emoji)`: Toggles reaction -- checks if local peer already reacted, calls `addReaction()` or `removeReaction()` on `chatProvider.notifier`
-  - `onDownload`: If file has `diskPath`, opens save dialog via `_saveFile()`. Otherwise requests from peer via `_requestFileFromPeer()`. Guards against duplicate downloads by checking `fileTransferProvider`
-  - `onCopy`: Copies message text to clipboard (excludes file-only messages starting with `[file:`)
-  - `onCopyImage`: For image attachments with disk path, calls `copyImageToClipboard()` from `chat_input_shortcuts.dart`
-  - `onInfo`: Opens `MessageProofDialog` with signature verification data (sender, text, timestamp, signature, public key, message ID, context)
+The wrapper's child is `_buildBubble(...)`: resolves reply preview via `replyIndexById` + `_messagePreviewText`, then returns `MessageBubble` with `onReplyTap: _scrollToMessage(replyIndex)`. The row returns through the shared `dateSeparatedChatRow()` (keyed subtree, optional DateSeparator, group-header padding).
 
-**Reply resolution**: For messages with `replyToMid`, looks up the original message by scanning the messages list. Resolves `replySender`, `replyText` (image/file placeholder or text), `replyImagePath`, and `replyIndex`. The `MessageBubble` receives these plus an `onReplyTap` callback that calls `_scrollToMessage(replyIndex)` for navigation.
-
-**Date separators**: After building the wrapper, checks `shouldShowDateSeparator()`. If true, wraps the message in a `Column` with a `DateSeparator` above it. Messages with `showHeader` get extra top padding (`sm + 2`).
-
-**Layer 1: Unread pill** -- `Builder` reading `unreadProvider.dmUnreadCounts[peerId]`. Shown only when count > 0 AND `_showScrollPill` is true. Positioned at bottom center. Tapping calls `_scrollToBottom()` and `markDmSeen()`.
+**_buildUnreadPillOverlay** -- reads `unreadProvider.dmUnreadCounts[peerId]`. Shown only when count > 0 AND `_showScrollPill`. Bottom-center `UnreadJumpPill`; tapping calls `_scrollToBottom()` and `markDmSeen()` against the TRUE newest message.
 
 ### Typing Indicator
 
-`TypingIndicatorBar` shown when `typingPeers.isNotEmpty`. Displays peer names resolved via `displayNameFor()` from `profileProvider`.
+`_buildTypingBar` -> shared `TypingIndicatorBar` when `typingPeers.isNotEmpty`. Names resolved via `displayNameForPeer()` per-pid profile selects.
 
 ### Reply Preview Bar
 
-Shown when `_replyToMessageId != null`. A `Container` with accent left border (3px) and top border. Contains:
-- Reply icon (`LucideIcons.reply`, accent color)
-- "Replying to {name}" label in accent, bold
-- Reply text preview (single line, ellipsis) with optional 32x32 image thumbnail (supports GIF via `GifFileImage`)
-- Close button (X icon) that clears all reply state
+Shown when `_replyToMessageId != null` -- the shared `ChatReplyPreviewBar` widget (accent left border, "Replying to {name}", single-line preview, optional 32x32 gif-aware thumb, cancel X -> `_cancelReply()`).
 
 ### Staged File Preview
 
-Shown when `_stagedFilePath != null`. A `Container` with top border. Contains:
-- For images: 48x48 `ClipRRect` image preview (GIF-aware via `GifFileImage`)
-- For non-images: 48x48 container with `LucideIcons.file` icon
-- Filename text (single line, ellipsis)
-- Close button that clears staged file state
+Shown when `_stagedFilePath != null` -- the shared `StagedFilePreviewBar` (48x48 gif-aware thumb or file icon, filename, remove X -> `_removeStagedFile()`).
 
 ### Staged Link Preview
 
-Two variants, shown mutually exclusively when `_stagedPreviewUrl != null`:
-1. `StagedHollowLinkCard` -- for `hollow://` protocol links. Shows when `_stagedHollowLink != null`. Has an `onDismiss` callback that clears staged URL and hollow link state.
-2. `StagedLinkPreviewCard` -- for regular http/https URLs. Receives `url`, `preview` (nullable), and `loading` flag. Has an `onDismiss` callback that clears all staged preview state.
-
-Both cancel `_urlDebounce` on dismiss.
+The shared `StagedLinkArea` widget: `StagedHollowLinkCard` for `hollow://` links, else `StagedLinkPreviewCard` for http/https while `_stagedPreviewUrl != null`, else nothing. Dismiss callbacks `_dismissStagedHollowLink()` / `_dismissStagedPreview()` cancel `_urlDebounce` and clear the staged state.
 
 ### Input Bar
 
-`Container` with `hollow.surface` background. Top border is `BorderSide.none` when reply bar, staged file, or staged preview is visible (prevents double borders), otherwise normal border.
-
-When `_isRecordingVoice` is true: renders `VoiceRecorderBar(onFinished: _stageVoiceMessage, onCancelled: ...)` instead of the normal input row.
-
-Normal input row is a `Row` containing:
-1. **Paperclip button**: `LucideIcons.paperclip`, size 20. Tapping calls `_pickAndStageFile()`
-2. **Microphone button**: `LucideIcons.mic`, size 20. Disabled (0.4 alpha) when a file is staged. Tapping sets `_isRecordingVoice = true`
-3. **Text field**: `Expanded` with `Focus` wrapper for keyboard shortcuts. `HollowTextField` with:
-   - Hint: "Type a message..."
-   - `autofocus: true`
-   - `maxLines: 5`, `minLines: 1` (expands up to 5 lines)
-   - `maxLength: 4000`, `showCounter: false`
-   - `borderRadius: hollow.radiusLg`
-   - `onChanged: _onTextChanged`
-   - The `Focus.onKeyEvent` delegates to `handleChatInputKey()` with `onPasteImage: _stageClipboardImage`
-4. **Send button**: `LucideIcons.send` with `hollow.accent` background and `hollow.textOnAccent` icon color. Tapping calls `_handleSend()`
+`_buildInputBar` -> shared `chatInputBarShell(hollow, flushTop: reply/staged/preview visible, child: ...)` (flushTop drops the top border to prevent double borders). When `_isRecordingVoice`: `VoiceRecorderBar(onFinished: _stageVoiceMessage, ...)`; otherwise `_buildComposerRow`:
+1. **Paperclip button**: `_pickAndStageFile()`
+2. **Microphone button**: disabled (0.4 alpha) when a file is staged; sets `_isRecordingVoice = true`
+3. **Text field**: `Expanded` > `CompositedTransformTarget(_composerLayerLink)` > `Focus` (emote autocomplete keys, then `handleChatInputKey()` with `onPasteImage: _stageClipboardImage`) > shared `chatComposerField(hollow, hintText: 'Type a message...', onChanged: _onTextChanged)`
+4. **Emoji button**: shared `composerEmojiButton(hollow, onOpen: _openComposerEmojiPicker)`
+5. **Send button**: `LucideIcons.send` on `hollow.accent`; calls `_handleSend()`
 
 ## Providers Read by ChatPane
 

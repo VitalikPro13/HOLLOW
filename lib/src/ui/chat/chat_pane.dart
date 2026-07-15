@@ -3,7 +3,6 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:hollow/src/core/shared_tickers.dart';
 import 'package:hollow/src/ui/chat/chat_drop_zone.dart';
 import 'package:hollow/src/ui/chat/chat_input_shortcuts.dart';
 import 'package:hollow/src/ui/chat/emoji_picker.dart';
@@ -51,15 +50,12 @@ import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/speaking_border.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/chat/hollow_link_utils.dart';
-import 'package:hollow/src/ui/chat/staged_hollow_link_card.dart';
-import 'package:hollow/src/ui/chat/staged_link_preview_card.dart';
 import 'package:hollow/src/ui/chat/voice_recorder_bar.dart';
 import 'package:hollow/src/core/services/voice_message_recorder.dart';
 import 'package:hollow/src/core/services/macos_version.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/profile_card_popup.dart';
 import 'package:hollow/src/ui/components/saved_messages_avatar.dart';
-import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/large_file_share_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
@@ -76,99 +72,260 @@ import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 import 'package:hollow/src/core/brand_icons.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import 'package:hollow/src/ui/chat/chat_pane_shared.dart';
+
+// The twins' shared building blocks (grouping/date helpers, DateSeparator,
+// typing bar, unread pill, reply/staged bars, reversed-list shell) live in
+// chat_pane_shared.dart; re-exported here for the existing consumers
+// (mobile routes, archive viewers).
+export 'package:hollow/src/ui/chat/chat_pane_shared.dart'
+    show
+        shouldGroup,
+        shouldShowDateSeparator,
+        DateSeparator,
+        TypingIndicatorBar,
+        TypingDots;
+
 /// Whether the DM profile panel is visible.
 final dmProfilePanelProvider = StateProvider<bool>((ref) => true);
 
-/// Whether two consecutive messages should be grouped (same sender, within 5 min).
-bool shouldGroup({
-  required bool currentIsMe,
-  required bool previousIsMe,
-  required DateTime currentTime,
-  required DateTime previousTime,
-  String? currentSenderId,
-  String? previousSenderId,
+// ---------------------------------------------------------------------------
+// Shared DM call helpers — used by the pane, the inline call panel, and the
+// screen-share overlays. Kept top-level so the former per-class twins can't
+// drift apart again.
+// ---------------------------------------------------------------------------
+
+/// Count active video sources (cameras + screens, both sides) in a DM call.
+/// Used to decide whether to show the source-switcher pill (2+ sources).
+int _countActiveDmSources(CallState call) {
+  int count = 0;
+  if (call.isVideoEnabled) count++;
+  if (call.remoteVideoEnabled) count++;
+  if (call.isScreenSharing) count++;
+  if (call.remoteScreenSharing) count++;
+  return count;
+}
+
+/// Ordered source list for the switcher pills: screens first, then cameras —
+/// matches voice_channel_pane's _buildSharerSwitcher order.
+List<({String peerId, String type})> _dmActiveSources(
+    CallState call, String localPeerId, String remotePeerId) {
+  return [
+    if (call.isScreenSharing) (peerId: localPeerId, type: 'screen'),
+    if (call.remoteScreenSharing) (peerId: remotePeerId, type: 'screen'),
+    if (call.isVideoEnabled) (peerId: localPeerId, type: 'camera'),
+    if (call.remoteVideoEnabled) (peerId: remotePeerId, type: 'camera'),
+  ];
+}
+
+/// The source-switcher pill shell: one tab per active source (icon + avatar +
+/// name) with focus highlighting. Shared by the full-bleed screen-share pill
+/// and the inline call panel pill — only focus derivation and tap handling
+/// differ between the two.
+Widget _dmSourcePill({
+  required HollowTheme hollow,
+  required Map<String, storage_api.UserProfile> profiles,
+  required List<({String peerId, String type})> sources,
+  required String localPeerId,
+  required String? focusedPeerId,
+  required String? focusedType,
+  required void Function(String peerId, String type) onTapSource,
 }) {
-  // For DMs: just check isMe flag.
-  // For channels: also check senderId.
-  if (currentIsMe != previousIsMe) return false;
-  if (currentSenderId != null &&
-      previousSenderId != null &&
-      currentSenderId != previousSenderId) {
-    return false;
-  }
-  return currentTime.difference(previousTime).inMinutes.abs() < 5;
+  return Container(
+    padding: const EdgeInsets.symmetric(
+      horizontal: HollowSpacing.sm,
+      vertical: HollowSpacing.xs,
+    ),
+    decoration: BoxDecoration(
+      color: hollow.surface.withValues(alpha: 0.9),
+      borderRadius: BorderRadius.circular(HollowRadius.pill),
+      border: Border.all(color: hollow.border.withValues(alpha: 0.5)),
+    ),
+    child: Row(
+      mainAxisSize: MainAxisSize.min,
+      children: sources.map((source) {
+        final name = displayNameFor(profiles, source.peerId);
+        final isFocused =
+            source.peerId == focusedPeerId && source.type == focusedType;
+        return Padding(
+          padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.xs),
+          child: HollowPressable(
+            onTap: () => onTapSource(source.peerId, source.type),
+            borderRadius: BorderRadius.circular(hollow.radiusSm),
+            backgroundColor: isFocused ? hollow.accentMuted : null,
+            padding: const EdgeInsets.symmetric(
+              horizontal: HollowSpacing.sm,
+              vertical: HollowSpacing.xs,
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  source.type == 'screen'
+                      ? LucideIcons.monitor
+                      : LucideIcons.video,
+                  size: 12,
+                  color: isFocused ? hollow.accent : hollow.textSecondary,
+                ),
+                const SizedBox(width: HollowSpacing.xs),
+                HollowAvatar(
+                  peerId: source.peerId,
+                  size: 18,
+                ),
+                const SizedBox(width: HollowSpacing.xs),
+                Text(
+                  source.peerId == localPeerId ? 'You' : name,
+                  style: HollowTypography.caption.copyWith(
+                    color: isFocused ? hollow.textPrimary : hollow.textSecondary,
+                    fontWeight: isFocused ? FontWeight.w600 : FontWeight.w400,
+                    fontSize: 12,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      }).toList(),
+    ),
+  );
 }
 
-/// Whether a date separator should be shown between two timestamps.
-bool shouldShowDateSeparator(DateTime current, DateTime? previous) {
-  if (previous == null) return true; // First message always gets a date header.
-  return current.year != previous.year ||
-      current.month != previous.month ||
-      current.day != previous.day;
+/// Screen-share quality/source label chip shown on the corner of share tiles.
+Widget _shareLabelChip(HollowTheme hollow, String label) {
+  return Container(
+    padding: const EdgeInsets.symmetric(
+      horizontal: HollowSpacing.sm,
+      vertical: HollowSpacing.xs,
+    ),
+    decoration: BoxDecoration(
+      color: hollow.surface.withValues(alpha: 0.85),
+      borderRadius: BorderRadius.circular(hollow.radiusSm),
+      border: Border.all(color: hollow.border),
+    ),
+    child: Text(
+      label,
+      style: HollowTypography.caption.copyWith(
+        color: hollow.textSecondary,
+        fontSize: 11,
+        fontWeight: FontWeight.w600,
+      ),
+    ),
+  );
 }
 
-/// ASOT-style date separator: ——— February 16, 2026 ———
-class DateSeparator extends StatelessWidget {
-  final DateTime date;
-  const DateSeparator({super.key, required this.date});
-
-  @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-    final now = DateTime.now();
-    final today = DateTime(now.year, now.month, now.day);
-    final messageDay = DateTime(date.year, date.month, date.day);
-    final diff = today.difference(messageDay).inDays;
-
-    final String label;
-    if (diff == 0) {
-      label = 'Today';
-    } else if (diff == 1) {
-      label = 'Yesterday';
-    } else {
-      const months = [
-        'January', 'February', 'March', 'April', 'May', 'June',
-        'July', 'August', 'September', 'October', 'November', 'December',
-      ];
-      label = '${months[date.month - 1]} ${date.day}, ${date.year}';
+/// Toggle screen share: stop if sharing, else pick a source and start.
+/// Shared by the inline call panel and the screen-share controls overlay.
+Future<void> _toggleScreenShare(
+    BuildContext context, WidgetRef ref, CallState call) async {
+  if (call.isScreenSharing) {
+    ref.read(callProvider.notifier).stopScreenShare();
+  } else {
+    final selection = await showScreenShareDialog(context);
+    if (selection != null && context.mounted) {
+      ref.read(callProvider.notifier).startScreenShare(
+            sourceId: selection.sourceId,
+            width: selection.width,
+            height: selection.height,
+            fps: selection.fps,
+            shareAudio: selection.shareAudio,
+            pid: selection.pid,
+            windowHwnd: selection.windowHwnd,
+          );
     }
-
-    return Padding(
-      padding: const EdgeInsets.only(
-        top: HollowSpacing.md + 2,
-        bottom: HollowSpacing.sm,
-        left: HollowSpacing.lg,
-        right: HollowSpacing.lg,
-      ),
-      child: Row(
-        children: [
-          Expanded(
-            child: Container(
-              height: 1,
-              color: hollow.border,
-            ),
-          ),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.md),
-            child: Text(
-              label,
-              style: HollowTypography.caption.copyWith(
-                color: hollow.textSecondary.withValues(alpha: 0.6),
-                fontSize: 11,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-          ),
-          Expanded(
-            child: Container(
-              height: 1,
-              color: hollow.border,
-            ),
-          ),
-        ],
-      ),
-    );
   }
+}
+
+// Call-control buttons shared by the inline call panel (20px icons, sm
+// padding) and the screen-share controls overlay (smaller icons, xs padding).
+
+Widget _muteCallButton(WidgetRef ref, HollowTheme hollow, CallState call,
+    {required double iconSize, required EdgeInsetsGeometry padding}) {
+  final label = call.isMuted ? 'Unmute' : 'Mute';
+  return HollowTooltip(
+    message: label,
+    child: HollowPressable(
+      semanticLabel: label,
+      onTap: () => ref.read(callProvider.notifier).toggleMute(),
+      borderRadius: BorderRadius.circular(hollow.radiusSm),
+      padding: padding,
+      child: Icon(
+        call.isMuted ? LucideIcons.micOff : LucideIcons.mic,
+        size: iconSize,
+        color: call.isMuted ? hollow.error : hollow.textSecondary,
+      ),
+    ),
+  );
+}
+
+Widget _cameraCallButton(WidgetRef ref, HollowTheme hollow, CallState call,
+    {required double iconSize, required EdgeInsetsGeometry padding}) {
+  final label = call.isVideoEnabled ? 'Turn off camera' : 'Turn on camera';
+  return HollowTooltip(
+    message: label,
+    child: HollowPressable(
+      semanticLabel: label,
+      onTap: call.status == CallStatus.active
+          ? () => ref.read(callProvider.notifier).toggleVideo()
+          : null,
+      borderRadius: BorderRadius.circular(hollow.radiusSm),
+      padding: padding,
+      child: Icon(
+        call.isVideoEnabled ? LucideIcons.video : LucideIcons.videoOff,
+        size: iconSize,
+        color: call.isVideoEnabled ? hollow.accent : hollow.textSecondary,
+      ),
+    ),
+  );
+}
+
+Widget _screenShareCallButton(
+    BuildContext context, WidgetRef ref, HollowTheme hollow, CallState call,
+    {required double iconSize, required EdgeInsetsGeometry padding}) {
+  return HollowTooltip(
+    message: call.isScreenSharing ? 'Stop sharing' : 'Share screen',
+    child: HollowPressable(
+      semanticLabel:
+          call.isScreenSharing ? 'Stop sharing screen' : 'Share screen',
+      onTap: call.status == CallStatus.active
+          ? () => _toggleScreenShare(context, ref, call)
+          : null,
+      borderRadius: BorderRadius.circular(hollow.radiusSm),
+      padding: padding,
+      child: Icon(
+        call.isScreenSharing ? LucideIcons.monitorOff : LucideIcons.monitor,
+        size: iconSize,
+        color: call.isScreenSharing ? hollow.accent : hollow.textSecondary,
+      ),
+    ),
+  );
+}
+
+Widget _endCallButton(WidgetRef ref, HollowTheme hollow,
+    {required double iconSize, required EdgeInsetsGeometry innerPadding}) {
+  return HollowTooltip(
+    message: 'End call',
+    child: HollowPressable(
+      semanticLabel: 'End call',
+      onTap: () => ref.read(callProvider.notifier).endCall(),
+      borderRadius: BorderRadius.circular(hollow.radiusSm),
+      padding: const EdgeInsets.symmetric(
+        horizontal: HollowSpacing.sm,
+        vertical: HollowSpacing.xs,
+      ),
+      child: Container(
+        padding: innerPadding,
+        decoration: BoxDecoration(
+          color: hollow.error.withValues(alpha: 0.15),
+          borderRadius: BorderRadius.circular(hollow.radiusSm),
+        ),
+        child: Icon(
+          LucideIcons.phoneOff,
+          size: iconSize,
+          color: hollow.error,
+        ),
+      ),
+    ),
+  );
 }
 
 class ChatPane extends ConsumerStatefulWidget {
@@ -325,23 +482,11 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     }
   }
 
-  /// Count active video sources for the screen-share-view source switcher
-  /// pill. Mirrors `_InlineCallPanelState._countActiveDmSources`.
-  int _countActiveDmSources(CallState call) {
-    int count = 0;
-    if (call.isVideoEnabled) count++;
-    if (call.remoteVideoEnabled) count++;
-    if (call.isScreenSharing) count++;
-    if (call.remoteScreenSharing) count++;
-    return count;
-  }
-
-  /// Build the source-switcher pill for the full-bleed screen-share view.
   /// Source switcher pill for the full-bleed screen share view. Shows one
   /// tab per active source (camera or screen, local or remote). ALL tabs
   /// are clickable — tapping a tab sets [focusedDmSourceProvider] to that
   /// (peerId, type) pair, and the screen-share view's big tile updates to
-  /// show that source. Modeled after voice_channel_pane's _buildSharerSwitcher.
+  /// show that source.
   Widget _buildScreenShareSourcePill(
     HollowTheme hollow,
     CallState call,
@@ -350,88 +495,20 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
   ) {
     final profiles = ref.watch(profileProvider);
     final focused = ref.watch(focusedDmSourceProvider);
-
-    final sources = <({String peerId, String type})>[];
-    // Screens first, then cameras — matches voice channel pill order.
-    if (call.isScreenSharing) {
-      sources.add((peerId: localPeerId, type: 'screen'));
-    }
-    if (call.remoteScreenSharing) {
-      sources.add((peerId: remotePeerId, type: 'screen'));
-    }
-    if (call.isVideoEnabled) {
-      sources.add((peerId: localPeerId, type: 'camera'));
-    }
-    if (call.remoteVideoEnabled) {
-      sources.add((peerId: remotePeerId, type: 'camera'));
-    }
-
     return MouseRegion(
       onEnter: (_) => _pinOverlays(),
       onExit: (_) => _resetOverlayTimer(),
-      child: Container(
-        padding: const EdgeInsets.symmetric(
-          horizontal: HollowSpacing.sm,
-          vertical: HollowSpacing.xs,
-        ),
-        decoration: BoxDecoration(
-          color: hollow.surface.withValues(alpha: 0.9),
-          borderRadius: BorderRadius.circular(HollowRadius.pill),
-          border: Border.all(color: hollow.border.withValues(alpha: 0.5)),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: sources.map((source) {
-            final name = displayNameFor(profiles, source.peerId);
-            final isScreen = source.type == 'screen';
-            final isFocused = focused.peerId == source.peerId &&
-                focused.type == source.type;
-
-            return Padding(
-              padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.xs),
-              child: HollowPressable(
-                onTap: () {
-                  ref.read(focusedDmSourceProvider.notifier).state =
-                      DmFocusedSource(
-                          peerId: source.peerId, type: source.type);
-                },
-                borderRadius: BorderRadius.circular(hollow.radiusSm),
-                backgroundColor: isFocused ? hollow.accentMuted : null,
-                padding: const EdgeInsets.symmetric(
-                  horizontal: HollowSpacing.sm,
-                  vertical: HollowSpacing.xs,
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(
-                      isScreen ? LucideIcons.monitor : LucideIcons.video,
-                      size: 12,
-                      color: isFocused ? hollow.accent : hollow.textSecondary,
-                    ),
-                    const SizedBox(width: HollowSpacing.xs),
-                    HollowAvatar(
-                      peerId: source.peerId,
-                      size: 18,
-                    ),
-                    const SizedBox(width: HollowSpacing.xs),
-                    Text(
-                      source.peerId == localPeerId ? 'You' : name,
-                      style: HollowTypography.caption.copyWith(
-                        color: isFocused
-                            ? hollow.textPrimary
-                            : hollow.textSecondary,
-                        fontWeight:
-                            isFocused ? FontWeight.w600 : FontWeight.w400,
-                        fontSize: 12,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            );
-          }).toList(),
-        ),
+      child: _dmSourcePill(
+        hollow: hollow,
+        profiles: profiles,
+        sources: _dmActiveSources(call, localPeerId, remotePeerId),
+        localPeerId: localPeerId,
+        focusedPeerId: focused.peerId,
+        focusedType: focused.type,
+        onTapSource: (peerId, type) {
+          ref.read(focusedDmSourceProvider.notifier).state =
+              DmFocusedSource(peerId: peerId, type: type);
+        },
       ),
     );
   }
@@ -779,42 +856,17 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     if (_isPicking) return;
     _isPicking = true;
     try {
-      // Determine allowed extensions for save dialog.
       final isImage = attachment.isImage;
-      final isGif = attachment.fileExt.toLowerCase() == 'gif';
-      final allowedExtensions = isImage
-          ? ['png', 'jpg', 'jpeg', 'webp', 'gif']
-          : [attachment.fileExt];
-
-      // Strip extension from filename for the dialog.
-      final baseName = attachment.fileName.contains('.')
-          ? attachment.fileName.substring(0, attachment.fileName.lastIndexOf('.'))
-          : attachment.fileName;
-
       final savePath = await FilePicker.platform.saveFile(
         dialogTitle: 'Save file',
-        fileName: isImage ? (isGif ? '$baseName.gif' : '$baseName.png') : attachment.fileName,
+        fileName: _saveDialogFileName(attachment),
         type: FileType.custom,
-        allowedExtensions: allowedExtensions,
+        allowedExtensions:
+            isImage ? ['png', 'jpg', 'jpeg', 'webp', 'gif'] : [attachment.fileExt],
       );
       if (savePath == null || attachment.diskPath == null) return;
 
-      // Determine target format from chosen extension.
-      final targetExt = savePath.contains('.')
-          ? savePath.split('.').last.toLowerCase()
-          : attachment.fileExt;
-
-      if (isImage && targetExt != 'webp' && attachment.fileExt == 'webp') {
-        // Convert WebP to target format via Rust.
-        final converted = await network_api.convertImageFormat(
-          sourcePath: attachment.diskPath!,
-          targetFormat: targetExt,
-        );
-        await File(savePath).writeAsBytes(converted);
-      } else {
-        // Direct copy.
-        await File(attachment.diskPath!).copy(savePath);
-      }
+      await _writeSavedFile(savePath, attachment);
 
       ref.read(downloadManagerStateProvider.notifier).recordSavedFile(
             savedPath: savePath,
@@ -831,6 +883,40 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
       }
     } finally {
       _isPicking = false;
+    }
+  }
+
+  /// Default filename for the save dialog: images normalize to .png
+  /// (gifs stay .gif); everything else keeps its original name.
+  String _saveDialogFileName(FileAttachment attachment) {
+    if (!attachment.isImage) return attachment.fileName;
+    // Strip extension from filename for the dialog.
+    final baseName = attachment.fileName.contains('.')
+        ? attachment.fileName.substring(0, attachment.fileName.lastIndexOf('.'))
+        : attachment.fileName;
+    return attachment.fileExt.toLowerCase() == 'gif'
+        ? '$baseName.gif'
+        : '$baseName.png';
+  }
+
+  /// Write the attachment to [savePath], converting stored WebP images when
+  /// the user chose a different format.
+  Future<void> _writeSavedFile(String savePath, FileAttachment attachment) async {
+    // Determine target format from chosen extension.
+    final targetExt = savePath.contains('.')
+        ? savePath.split('.').last.toLowerCase()
+        : attachment.fileExt;
+
+    if (attachment.isImage && targetExt != 'webp' && attachment.fileExt == 'webp') {
+      // Convert WebP to target format via Rust.
+      final converted = await network_api.convertImageFormat(
+        sourcePath: attachment.diskPath!,
+        targetFormat: targetExt,
+      );
+      await File(savePath).writeAsBytes(converted);
+    } else {
+      // Direct copy.
+      await File(attachment.diskPath!).copy(savePath);
     }
   }
 
@@ -867,37 +953,7 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     final messages =
         ref.watch(chatProvider.select((m) => m[widget.peerId])) ?? [];
 
-    // New-message handling under the reversed list: following (at bottom) →
-    // instant re-pin to the newest row; reading history → freeze the display
-    // (the unread pill takes over) so the view never shifts mid-read.
-    ref.listen<Map<String, List<ChatMessage>>>(chatProvider, (prev, next) {
-      final prevLen = (prev?[widget.peerId] ?? const []).length;
-      final nextLen = (next[widget.peerId] ?? const []).length;
-      if (nextLen <= prevLen) return;
-      if (_frozenLen != null) return; // already frozen — held back + pill
-      if (!_isNearBottom) {
-        // Scroll-away raced the freeze transition — freeze at the pre-growth
-        // length so this arrival is held back too.
-        _frozenLen = prevLen;
-        return;
-      }
-      _jumpToBottom();
-    });
-
-    // Focus-return mark-seen: a message arriving while the window is
-    // unfocused counts as unread (the isViewingDm gate requires focus), and
-    // if this chat was ALREADY open at the bottom nothing else clears it —
-    // the scroll handler only marks seen on a bottom re-ENTRY transition.
-    // The user is now looking straight at the message; retire the unread.
-    ref.listen<bool>(windowFocusedProvider, (prev, focused) {
-      if (!focused || prev == true) return;
-      if (!_isNearBottom || _frozenLen != null) return;
-      final msgs = ref.read(chatProvider)[widget.peerId];
-      if (msgs == null || msgs.isEmpty) return;
-      ref
-          .read(unreadProvider.notifier)
-          .markDmSeen(widget.peerId, msgs.last.messageId);
-    });
+    _registerBuildListeners();
 
     final typingPeers =
         ref.watch(typingProvider.select((t) => t[widget.peerId])) ?? {};
@@ -944,408 +1000,17 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
             onFileDropped: _handleDroppedFile,
             child: Column(
       children: [
-        // Peer ID header
-        Container(
-          padding: const EdgeInsets.symmetric(
-            horizontal: HollowSpacing.lg,
-            vertical: HollowSpacing.sm + 2,
-          ),
-          decoration: BoxDecoration(
-            color: hollow.surface,
-            border: Border(
-              bottom: BorderSide(color: hollow.border),
-            ),
-          ),
-          child: Row(
-            children: [
-              if (isSavedMessages)
-                const SavedMessagesAvatar(size: 28)
-              else
-                HollowAvatar(peerId: widget.peerId, size: 28),
-              const SizedBox(width: HollowSpacing.sm),
-              Expanded(
-                child: Builder(builder: (_) {
-                  if (isSavedMessages) {
-                    return Text(
-                      'Saved messages',
-                      style: HollowTypography.body.copyWith(
-                        color: hollow.textPrimary,
-                        fontWeight: FontWeight.w600,
-                        fontSize: 13,
-                      ),
-                      overflow: TextOverflow.ellipsis,
-                    );
-                  }
-                  // Header names (status dot dropped — the ConnectionProgress on
-                  // the right already conveys online/offline):
-                  //  • local nickname set  → local nickname on top, the friend's
-                  //    own profile name (their "real nickname") below — falling
-                  //    back to the short peer ID if they set no profile name.
-                  //  • no local nickname   → just the profile name (or short peer
-                  //    ID), no subline.
-                  final profile =
-                      ref.watch(profileProvider.select((p) => p[widget.peerId]));
-                  final localNick =
-                      ref.watch(localNicknameProvider.select((m) => m[widget.peerId]));
-                  final shortId = widget.peerId.length > 16
-                      ? '${widget.peerId.substring(0, 16)}...'
-                      : widget.peerId;
-                  final realName =
-                      (profile != null && profile.displayName.isNotEmpty)
-                          ? profile.displayName
-                          : shortId;
-                  final hasLocalNick = localNick != null && localNick.isNotEmpty;
-                  final topLine = hasLocalNick ? localNick : realName;
-                  final subLine = hasLocalNick ? realName : null;
-                  return Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text(
-                        topLine,
-                        style: HollowTypography.body.copyWith(
-                          color: hollow.textPrimary,
-                          fontWeight: FontWeight.w600,
-                          fontSize: 13,
-                        ),
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                      if (subLine != null)
-                        Text(
-                          subLine,
-                          style: HollowTypography.caption.copyWith(
-                            color: hollow.textSecondary,
-                            fontSize: 10,
-                          ),
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                    ],
-                  );
-                }),
-              ),
-              if (!isSavedMessages)
-              Builder(builder: (_) {
-                // Multi-device: `widget.peerId` is the friend's MASTER id, but
-                // `peersProvider` is keyed by the DEVICE peer_ids the relay
-                // reports. A direct `peers[master]` lookup is always null for a
-                // multi-device / keystone-rotated friend, so the header showed
-                // Offline while the dots/call-buttons (which collapse by master)
-                // showed online. Scan for ANY device of this master with an
-                // encrypted session (same pattern as the Home network column).
-                // Single-device: the device id IS the master → direct lookup.
-                final links = ref.watch(deviceLinkProvider);
-                final peers = ref.watch(peersProvider);
-                final isEncryptedViaAnyDevice = peers.entries.any((e) =>
-                    links.identityOf(e.key) == widget.peerId && e.value.isEncrypted);
-                final isInvisible = ref.watch(invisiblePeersProvider).contains(widget.peerId);
-                final isCustomRelay = ref.watch(relayDomainProvider) != kDefaultRelayDomain;
-                final ConnectionStage stage;
-                if (isEncryptedViaAnyDevice && !isInvisible) {
-                  stage = ConnectionStage.encrypted;
-                } else if (isCustomRelay) {
-                  stage = ConnectionStage.customNetwork;
-                } else {
-                  stage = ConnectionStage.offline;
-                }
-                return ConnectionProgress(
-                  key: ValueKey('dm-conn-${widget.peerId}-${stage.index}'),
-                  stage: stage,
-                );
-              }),
-              const SizedBox(width: HollowSpacing.sm),
-              // Voice + video call buttons (hidden for Saved messages — you
-              // can't call yourself).
-              if (!isSavedMessages) ...[
-              Builder(builder: (_) {
-                final call = ref.watch(callProvider);
-                final isOnline = identityIsOnline(ref, widget.peerId);
-                final isInCall = call.status != CallStatus.idle;
-                final isCallWithThisPeer = call.peerId == widget.peerId && isInCall;
-
-                return HollowTooltip(
-                  message: isCallWithThisPeer
-                      ? 'In call'
-                      : (isOnline && !isInCall ? 'Start voice call' : 'Voice call'),
-                  child: HollowPressable(
-                    semanticLabel: isCallWithThisPeer
-                        ? 'In call'
-                        : 'Start voice call',
-                    onTap: isOnline && !isInCall
-                        ? () => ref.read(callProvider.notifier).startCall(widget.peerId)
-                        : null,
-                    borderRadius: BorderRadius.circular(hollow.radiusSm),
-                    padding: const EdgeInsets.all(HollowSpacing.xs),
-                    child: Icon(
-                      isCallWithThisPeer ? LucideIcons.phoneCall : LucideIcons.phone,
-                      size: 16,
-                      color: isCallWithThisPeer
-                          ? hollow.success
-                          : (isOnline && !isInCall
-                              ? hollow.textSecondary
-                              : hollow.textSecondary.withValues(alpha: 0.3)),
-                    ),
-                  ),
-                );
-              }),
-              const SizedBox(width: HollowSpacing.xs),
-              // Video call button
-              Builder(builder: (_) {
-                final call = ref.watch(callProvider);
-                final isOnline = identityIsOnline(ref, widget.peerId);
-                final isInCall = call.status != CallStatus.idle;
-
-                return HollowTooltip(
-                  message: 'Start video call',
-                  child: HollowPressable(
-                    semanticLabel: 'Start video call',
-                    onTap: isOnline && !isInCall
-                        ? () => ref.read(callProvider.notifier).startCall(widget.peerId, withVideo: true)
-                        : null,
-                    borderRadius: BorderRadius.circular(hollow.radiusSm),
-                    padding: const EdgeInsets.all(HollowSpacing.xs),
-                    child: Icon(
-                      LucideIcons.video,
-                      size: 16,
-                      color: isOnline && !isInCall
-                          ? hollow.textSecondary
-                          : hollow.textSecondary.withValues(alpha: 0.3),
-                    ),
-                  ),
-                );
-              }),
-              ],
-              const SizedBox(width: HollowSpacing.xs),
-              HollowTooltip(
-                message: showProfilePanel ? 'Hide profile' : 'Show profile',
-                child: HollowPressable(
-                  semanticLabel: showProfilePanel ? 'Hide profile' : 'Show profile',
-                  onTap: () {
-                    ref.read(dmProfilePanelProvider.notifier).state = !showProfilePanel;
-                  },
-                  borderRadius: BorderRadius.circular(hollow.radiusSm),
-                  padding: const EdgeInsets.all(HollowSpacing.xs),
-                  child: Icon(LucideIcons.user,
-                      size: 16, color: showProfilePanel ? hollow.accent : hollow.textSecondary),
-                ),
-              ),
-              // Notification mute toggle — hidden for Saved Messages (you
-              // never get notified about your own self-DM).
-              if (!isSavedMessages) ...[
-                const SizedBox(width: HollowSpacing.xs),
-                HollowTooltip(
-                  message: ref.watch(notificationSettingsProvider
-                          .select((s) => s.dmEnabled[widget.peerId] ?? true))
-                      ? 'Mute notifications'
-                      : 'Unmute notifications',
-                  child: HollowPressable(
-                    semanticLabel: ref.watch(notificationSettingsProvider
-                            .select((s) => s.dmEnabled[widget.peerId] ?? true))
-                        ? 'Mute notifications'
-                        : 'Unmute notifications',
-                    onTap: () {
-                      final current = ref
-                          .read(notificationSettingsProvider.notifier)
-                          .isDmEnabled(widget.peerId);
-                      ref
-                          .read(notificationSettingsProvider.notifier)
-                          .setDmEnabled(widget.peerId, !current);
-                    },
-                    borderRadius: BorderRadius.circular(hollow.radiusSm),
-                    padding: const EdgeInsets.all(HollowSpacing.xs),
-                    child: Icon(
-                      ref.watch(notificationSettingsProvider
-                              .select((s) => s.dmEnabled[widget.peerId] ?? true))
-                          ? LucideIcons.bell
-                          : LucideIcons.bellOff,
-                      size: 18,
-                      color: ref.watch(notificationSettingsProvider
-                              .select((s) => s.dmEnabled[widget.peerId] ?? true))
-                          ? hollow.textSecondary
-                          : hollow.textSecondary.withValues(alpha: 0.4),
-                    ),
-                  ),
-                ),
-              ],
-              // Split view button (dock mode only)
-              if ((ref.watch(layoutModeProvider).valueOrNull ?? LayoutMode.dock) == LayoutMode.dock) ...[
-                const SizedBox(width: HollowSpacing.xs),
-                HollowTooltip(
-                  message: ref.watch(splitViewProvider).isSplit
-                      ? 'Close this pane'
-                      : 'Split view',
-                  child: HollowPressable(
-                    semanticLabel: ref.watch(splitViewProvider).isSplit
-                        ? 'Close this pane'
-                        : 'Split view',
-                    onTap: () => _handleSplitToggle(ref),
-                    borderRadius: BorderRadius.circular(hollow.radiusSm),
-                    padding: const EdgeInsets.all(HollowSpacing.xs),
-                    child: Icon(
-                      LucideIcons.columns,
-                      size: 16,
-                      color: ref.watch(splitViewProvider).isSplit
-                          ? hollow.accent
-                          : hollow.textSecondary,
-                    ),
-                  ),
-                ),
-              ],
-            ],
-          ),
-        ),
+        _buildHeader(hollow,
+            isSavedMessages: isSavedMessages,
+            showProfilePanel: showProfilePanel),
 
         // Screen share: full-bleed layout with overlay chat + controls.
         // Normal call / no call: standard column layout.
         if (isScreenShareActive)
-          Expanded(
-            child: MouseRegion(
-              onHover: (_) => _resetOverlayTimer(),
-              onEnter: (_) => _resetOverlayTimer(),
-              child: Stack(
-                children: [
-                  // Layer 0: full-bleed screen share
-                  Positioned.fill(
-                    child: _ScreenShareFullView(peerId: widget.peerId),
-                  ),
-
-                  // Layer 0.5: source switcher pill (top-center)
-                  // Shows only when at least one screen share is active AND
-                  // there are 2+ sources to switch between. Camera-only DMs
-                  // don't need a switcher (cameras live side-by-side).
-                  // Scoped Consumer: the pill needs the FULL call state
-                  // (video-enabled fields) — watch it here, not pane-wide.
-                  if (call.isScreenSharing || call.remoteScreenSharing)
-                    Consumer(builder: (context, ref, _) {
-                      final fullCall = ref.watch(callProvider);
-                      if (_countActiveDmSources(fullCall) < 2) {
-                        // MUST stay Positioned: a bare (non-positioned) child
-                        // makes the Stack size to IT (0x0) instead of
-                        // expanding — which blanked the whole share view.
-                        return const Positioned(
-                            left: 0, top: 0, child: SizedBox.shrink());
-                      }
-                      return Positioned(
-                        top: HollowSpacing.md,
-                        left: 0,
-                        right: 0,
-                        child: AnimatedOpacity(
-                          opacity: _overlaysVisible ? 1.0 : 0.0,
-                          duration: HollowDurations.normal,
-                          child: IgnorePointer(
-                            ignoring: !_overlaysVisible,
-                            child: Center(
-                              child: _buildScreenShareSourcePill(
-                                hollow,
-                                fullCall,
-                                ref.read(identityProvider).peerId ?? '',
-                                widget.peerId,
-                              ),
-                            ),
-                          ),
-                        ),
-                      );
-                    }),
-
-                  // Layer 1: chat overlay (right side) + toggle button
-                  Positioned(
-                    right: 0,
-                    top: 0,
-                    bottom: 0,
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      crossAxisAlignment: CrossAxisAlignment.center,
-                      children: [
-                        // Toggle button — always visible when overlays are
-                        AnimatedOpacity(
-                          opacity: _overlaysVisible ? 1.0 : 0.0,
-                          duration: HollowDurations.normal,
-                          child: IgnorePointer(
-                            ignoring: !_overlaysVisible,
-                            child: MouseRegion(
-                              onEnter: (_) => _pinOverlays(),
-                              onExit: (_) => _resetOverlayTimer(),
-                              child: GestureDetector(
-                                onTap: () => setState(() =>
-                                    _chatOverlayPinned = !_chatOverlayPinned),
-                                child: Container(
-                                  width: 24,
-                                  height: 48,
-                                  decoration: BoxDecoration(
-                                    color: hollow.surface.withValues(alpha: 0.88),
-                                    borderRadius: const BorderRadius.horizontal(
-                                      left: Radius.circular(8),
-                                    ),
-                                    border: Border(
-                                      left: BorderSide(
-                                        color: hollow.border.withValues(alpha: 0.5),
-                                      ),
-                                      top: BorderSide(
-                                        color: hollow.border.withValues(alpha: 0.5),
-                                      ),
-                                      bottom: BorderSide(
-                                        color: hollow.border.withValues(alpha: 0.5),
-                                      ),
-                                    ),
-                                  ),
-                                  child: Icon(
-                                    _chatOverlayPinned
-                                        ? LucideIcons.chevronRight
-                                        : LucideIcons.chevronLeft,
-                                    size: 14,
-                                    color: hollow.textSecondary,
-                                  ),
-                                ),
-                              ),
-                            ),
-                          ),
-                        ),
-                        // Chat panel — slides in/out
-                        _ChatOverlaySlider(
-                          visible: _chatOverlayPinned,
-                          onHoverEnter: _pinOverlays,
-                          onHoverExit: _resetOverlayTimer,
-                          child: Container(
-                            width: 360,
-                            decoration: BoxDecoration(
-                              color: hollow.surface.withValues(alpha: 0.88),
-                              border: Border(
-                                left: BorderSide(
-                                  color: hollow.border.withValues(alpha: 0.5),
-                                ),
-                              ),
-                            ),
-                            child: Column(
-                              children: _buildMessageArea(
-                                hollow, messages, typingPeers, profiles, localPeerId),
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-
-                  // Layer 2: floating controls pill (bottom center)
-                  Positioned(
-                    bottom: HollowSpacing.lg,
-                    left: 0,
-                    right: 0,
-                    child: AnimatedOpacity(
-                      opacity: _overlaysVisible ? 1.0 : 0.0,
-                      duration: HollowDurations.normal,
-                      child: IgnorePointer(
-                        ignoring: !_overlaysVisible,
-                        child: Center(
-                          child: _ScreenShareControlsOverlay(
-                            peerId: widget.peerId,
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          )
+          _buildScreenShareLayout(
+              hollow, messages, typingPeers, profiles, localPeerId,
+              anyScreenSharing:
+                  call.isScreenSharing || call.remoteScreenSharing)
         else ...[
           _InlineCallPanelSlider(peerId: widget.peerId),
           ..._buildMessageArea(hollow, messages, typingPeers, profiles, localPeerId),
@@ -1357,6 +1022,450 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
       ],
       ), // Row
     ); // EmoteScope
+  }
+
+  /// All build-time ref.listen registrations. Must be invoked from build()
+  /// every frame — Riverpod re-registers listeners per build and silently
+  /// no-ops registrations made anywhere else (e.g. initState).
+  void _registerBuildListeners() {
+    // New-message handling under the reversed list: following (at bottom) →
+    // instant re-pin to the newest row; reading history → freeze the display
+    // (the unread pill takes over) so the view never shifts mid-read.
+    ref.listen<Map<String, List<ChatMessage>>>(
+        chatProvider, _onMessageListGrowth);
+    // Focus-return mark-seen: a message arriving while the window is
+    // unfocused counts as unread (the isViewingDm gate requires focus), and
+    // if this chat was ALREADY open at the bottom nothing else clears it —
+    // the scroll handler only marks seen on a bottom re-ENTRY transition.
+    // The user is now looking straight at the message; retire the unread.
+    ref.listen<bool>(windowFocusedProvider, _onWindowFocusChanged);
+  }
+
+  void _onMessageListGrowth(Map<String, List<ChatMessage>>? prev,
+      Map<String, List<ChatMessage>> next) {
+    final prevLen = (prev?[widget.peerId] ?? const []).length;
+    final nextLen = (next[widget.peerId] ?? const []).length;
+    if (nextLen <= prevLen) return;
+    if (_frozenLen != null) return; // already frozen — held back + pill
+    if (!_isNearBottom) {
+      // Scroll-away raced the freeze transition — freeze at the pre-growth
+      // length so this arrival is held back too.
+      _frozenLen = prevLen;
+      return;
+    }
+    _jumpToBottom();
+  }
+
+  void _onWindowFocusChanged(bool? prev, bool focused) {
+    if (!focused || prev == true) return;
+    if (!_isNearBottom || _frozenLen != null) return;
+    final msgs = ref.read(chatProvider)[widget.peerId];
+    if (msgs == null || msgs.isEmpty) return;
+    ref
+        .read(unreadProvider.notifier)
+        .markDmSeen(widget.peerId, msgs.last.messageId);
+  }
+
+  /// DM header: avatar, name(s), connection status, and pane actions.
+  Widget _buildHeader(HollowTheme hollow,
+      {required bool isSavedMessages, required bool showProfilePanel}) {
+    return Container(
+      padding: const EdgeInsets.symmetric(
+        horizontal: HollowSpacing.lg,
+        vertical: HollowSpacing.sm + 2,
+      ),
+      decoration: BoxDecoration(
+        color: hollow.surface,
+        border: Border(
+          bottom: BorderSide(color: hollow.border),
+        ),
+      ),
+      child: Row(
+        children: [
+          if (isSavedMessages)
+            const SavedMessagesAvatar(size: 28)
+          else
+            HollowAvatar(peerId: widget.peerId, size: 28),
+          const SizedBox(width: HollowSpacing.sm),
+          Expanded(child: _buildHeaderTitle(hollow, isSavedMessages)),
+          if (!isSavedMessages) _buildConnectionStatus(),
+          const SizedBox(width: HollowSpacing.sm),
+          // Voice + video call buttons (hidden for Saved messages — you
+          // can't call yourself).
+          if (!isSavedMessages) ...[
+            _buildVoiceCallButton(hollow),
+            const SizedBox(width: HollowSpacing.xs),
+            _buildVideoCallButton(hollow),
+          ],
+          const SizedBox(width: HollowSpacing.xs),
+          _buildProfileToggleButton(hollow, showProfilePanel),
+          // Notification mute toggle — hidden for Saved Messages (you
+          // never get notified about your own self-DM).
+          if (!isSavedMessages) ...[
+            const SizedBox(width: HollowSpacing.xs),
+            _buildMuteToggleButton(hollow),
+          ],
+          // Split view button (dock mode only)
+          if ((ref.watch(layoutModeProvider).valueOrNull ?? LayoutMode.dock) ==
+              LayoutMode.dock) ...[
+            const SizedBox(width: HollowSpacing.xs),
+            _buildSplitToggleButton(hollow),
+          ],
+        ],
+      ),
+    );
+  }
+
+  /// Header names (status dot dropped — the ConnectionProgress on the right
+  /// already conveys online/offline):
+  ///  • local nickname set  → local nickname on top, the friend's own profile
+  ///    name (their "real nickname") below — falling back to the short peer
+  ///    ID if they set no profile name.
+  ///  • no local nickname   → just the profile name (or short peer ID), no
+  ///    subline.
+  Widget _buildHeaderTitle(HollowTheme hollow, bool isSavedMessages) {
+    if (isSavedMessages) {
+      return Text(
+        'Saved messages',
+        style: HollowTypography.body.copyWith(
+          color: hollow.textPrimary,
+          fontWeight: FontWeight.w600,
+          fontSize: 13,
+        ),
+        overflow: TextOverflow.ellipsis,
+      );
+    }
+    final profile =
+        ref.watch(profileProvider.select((p) => p[widget.peerId]));
+    final localNick =
+        ref.watch(localNicknameProvider.select((m) => m[widget.peerId]));
+    final shortId = widget.peerId.length > 16
+        ? '${widget.peerId.substring(0, 16)}...'
+        : widget.peerId;
+    final realName = (profile != null && profile.displayName.isNotEmpty)
+        ? profile.displayName
+        : shortId;
+    final hasLocalNick = localNick != null && localNick.isNotEmpty;
+    final topLine = hasLocalNick ? localNick : realName;
+    final subLine = hasLocalNick ? realName : null;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text(
+          topLine,
+          style: HollowTypography.body.copyWith(
+            color: hollow.textPrimary,
+            fontWeight: FontWeight.w600,
+            fontSize: 13,
+          ),
+          overflow: TextOverflow.ellipsis,
+        ),
+        if (subLine != null)
+          Text(
+            subLine,
+            style: HollowTypography.caption.copyWith(
+              color: hollow.textSecondary,
+              fontSize: 10,
+            ),
+            overflow: TextOverflow.ellipsis,
+          ),
+      ],
+    );
+  }
+
+  /// Multi-device: `widget.peerId` is the friend's MASTER id, but
+  /// `peersProvider` is keyed by the DEVICE peer_ids the relay reports. A
+  /// direct `peers[master]` lookup is always null for a multi-device /
+  /// keystone-rotated friend, so the header showed Offline while the
+  /// dots/call-buttons (which collapse by master) showed online. Scan for ANY
+  /// device of this master with an encrypted session (same pattern as the
+  /// Home network column). Single-device: the device id IS the master →
+  /// direct lookup.
+  Widget _buildConnectionStatus() {
+    final links = ref.watch(deviceLinkProvider);
+    final peers = ref.watch(peersProvider);
+    final isEncryptedViaAnyDevice = peers.entries.any((e) =>
+        links.identityOf(e.key) == widget.peerId && e.value.isEncrypted);
+    final isInvisible =
+        ref.watch(invisiblePeersProvider).contains(widget.peerId);
+    final isCustomRelay =
+        ref.watch(relayDomainProvider) != kDefaultRelayDomain;
+    final ConnectionStage stage;
+    if (isEncryptedViaAnyDevice && !isInvisible) {
+      stage = ConnectionStage.encrypted;
+    } else if (isCustomRelay) {
+      stage = ConnectionStage.customNetwork;
+    } else {
+      stage = ConnectionStage.offline;
+    }
+    return ConnectionProgress(
+      key: ValueKey('dm-conn-${widget.peerId}-${stage.index}'),
+      stage: stage,
+    );
+  }
+
+  Widget _buildVoiceCallButton(HollowTheme hollow) {
+    final call = ref.watch(callProvider);
+    final isOnline = identityIsOnline(ref, widget.peerId);
+    final isInCall = call.status != CallStatus.idle;
+    final isCallWithThisPeer = call.peerId == widget.peerId && isInCall;
+
+    return HollowTooltip(
+      message: isCallWithThisPeer
+          ? 'In call'
+          : (isOnline && !isInCall ? 'Start voice call' : 'Voice call'),
+      child: HollowPressable(
+        semanticLabel: isCallWithThisPeer ? 'In call' : 'Start voice call',
+        onTap: isOnline && !isInCall
+            ? () => ref.read(callProvider.notifier).startCall(widget.peerId)
+            : null,
+        borderRadius: BorderRadius.circular(hollow.radiusSm),
+        padding: const EdgeInsets.all(HollowSpacing.xs),
+        child: Icon(
+          isCallWithThisPeer ? LucideIcons.phoneCall : LucideIcons.phone,
+          size: 16,
+          color: isCallWithThisPeer
+              ? hollow.success
+              : (isOnline && !isInCall
+                  ? hollow.textSecondary
+                  : hollow.textSecondary.withValues(alpha: 0.3)),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildVideoCallButton(HollowTheme hollow) {
+    final call = ref.watch(callProvider);
+    final isOnline = identityIsOnline(ref, widget.peerId);
+    final isInCall = call.status != CallStatus.idle;
+
+    return HollowTooltip(
+      message: 'Start video call',
+      child: HollowPressable(
+        semanticLabel: 'Start video call',
+        onTap: isOnline && !isInCall
+            ? () => ref
+                .read(callProvider.notifier)
+                .startCall(widget.peerId, withVideo: true)
+            : null,
+        borderRadius: BorderRadius.circular(hollow.radiusSm),
+        padding: const EdgeInsets.all(HollowSpacing.xs),
+        child: Icon(
+          LucideIcons.video,
+          size: 16,
+          color: isOnline && !isInCall
+              ? hollow.textSecondary
+              : hollow.textSecondary.withValues(alpha: 0.3),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildProfileToggleButton(HollowTheme hollow, bool showProfilePanel) {
+    final label = showProfilePanel ? 'Hide profile' : 'Show profile';
+    return HollowTooltip(
+      message: label,
+      child: HollowPressable(
+        semanticLabel: label,
+        onTap: () {
+          ref.read(dmProfilePanelProvider.notifier).state = !showProfilePanel;
+        },
+        borderRadius: BorderRadius.circular(hollow.radiusSm),
+        padding: const EdgeInsets.all(HollowSpacing.xs),
+        child: Icon(LucideIcons.user,
+            size: 16,
+            color: showProfilePanel ? hollow.accent : hollow.textSecondary),
+      ),
+    );
+  }
+
+  Widget _buildMuteToggleButton(HollowTheme hollow) {
+    final dmNotifEnabled = ref.watch(notificationSettingsProvider
+        .select((s) => s.dmEnabled[widget.peerId] ?? true));
+    final label = dmNotifEnabled ? 'Mute notifications' : 'Unmute notifications';
+    return HollowTooltip(
+      message: label,
+      child: HollowPressable(
+        semanticLabel: label,
+        onTap: () {
+          final current = ref
+              .read(notificationSettingsProvider.notifier)
+              .isDmEnabled(widget.peerId);
+          ref
+              .read(notificationSettingsProvider.notifier)
+              .setDmEnabled(widget.peerId, !current);
+        },
+        borderRadius: BorderRadius.circular(hollow.radiusSm),
+        padding: const EdgeInsets.all(HollowSpacing.xs),
+        child: Icon(
+          dmNotifEnabled ? LucideIcons.bell : LucideIcons.bellOff,
+          size: 18,
+          color: dmNotifEnabled
+              ? hollow.textSecondary
+              : hollow.textSecondary.withValues(alpha: 0.4),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildSplitToggleButton(HollowTheme hollow) {
+    final isSplit = ref.watch(splitViewProvider).isSplit;
+    final label = isSplit ? 'Close this pane' : 'Split view';
+    return HollowTooltip(
+      message: label,
+      child: HollowPressable(
+        semanticLabel: label,
+        onTap: () => _handleSplitToggle(ref),
+        borderRadius: BorderRadius.circular(hollow.radiusSm),
+        padding: const EdgeInsets.all(HollowSpacing.xs),
+        child: Icon(
+          LucideIcons.columns,
+          size: 16,
+          color: isSplit ? hollow.accent : hollow.textSecondary,
+        ),
+      ),
+    );
+  }
+
+  /// Full-bleed screen-share layout: the share view fills the pane, with the
+  /// source pill (top), chat overlay (right), and controls pill (bottom)
+  /// floating above it — all auto-hiding via [_overlaysVisible].
+  Widget _buildScreenShareLayout(
+    HollowTheme hollow,
+    List<ChatMessage> messages,
+    Set<String> typingPeers,
+    Map<String, storage_api.UserProfile> profiles,
+    String localPeerId, {
+    required bool anyScreenSharing,
+  }) {
+    return Expanded(
+      child: MouseRegion(
+        onHover: (_) => _resetOverlayTimer(),
+        onEnter: (_) => _resetOverlayTimer(),
+        child: Stack(
+          children: [
+            // Layer 0: full-bleed screen share
+            Positioned.fill(
+              child: _ScreenShareFullView(peerId: widget.peerId),
+            ),
+            // Layer 0.5: source switcher pill (top-center) — only when at
+            // least one screen share is active AND there are 2+ sources to
+            // switch between. Camera-only DMs don't need a switcher.
+            if (anyScreenSharing) _buildSourcePillOverlay(hollow),
+            // Layer 1: chat overlay (right side) + toggle button
+            _buildChatOverlay(
+                hollow, messages, typingPeers, profiles, localPeerId),
+            // Layer 2: floating controls pill (bottom center)
+            _buildControlsPillOverlay(),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// Scoped Consumer: the pill needs the FULL call state (video-enabled
+  /// fields) — watch it here, not pane-wide.
+  Widget _buildSourcePillOverlay(HollowTheme hollow) {
+    return Consumer(builder: (context, ref, _) {
+      final fullCall = ref.watch(callProvider);
+      if (_countActiveDmSources(fullCall) < 2) {
+        // MUST stay Positioned: a bare (non-positioned) child
+        // makes the Stack size to IT (0x0) instead of
+        // expanding — which blanked the whole share view.
+        return const Positioned(left: 0, top: 0, child: SizedBox.shrink());
+      }
+      return Positioned(
+        top: HollowSpacing.md,
+        left: 0,
+        right: 0,
+        child: AnimatedOpacity(
+          opacity: _overlaysVisible ? 1.0 : 0.0,
+          duration: HollowDurations.normal,
+          child: IgnorePointer(
+            ignoring: !_overlaysVisible,
+            child: Center(
+              child: _buildScreenShareSourcePill(
+                hollow,
+                fullCall,
+                ref.read(identityProvider).peerId ?? '',
+                widget.peerId,
+              ),
+            ),
+          ),
+        ),
+      );
+    });
+  }
+
+  Widget _buildChatOverlay(
+    HollowTheme hollow,
+    List<ChatMessage> messages,
+    Set<String> typingPeers,
+    Map<String, storage_api.UserProfile> profiles,
+    String localPeerId,
+  ) {
+    return Positioned(
+      right: 0,
+      top: 0,
+      bottom: 0,
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          // Pin toggle — always visible while overlays are.
+          ChatOverlayToggleButton(
+            overlaysVisible: _overlaysVisible,
+            pinned: _chatOverlayPinned,
+            onTap: () =>
+                setState(() => _chatOverlayPinned = !_chatOverlayPinned),
+            onHoverEnter: _pinOverlays,
+            onHoverExit: _resetOverlayTimer,
+          ),
+          // Chat panel — slides in/out
+          _ChatOverlaySlider(
+            visible: _chatOverlayPinned,
+            onHoverEnter: _pinOverlays,
+            onHoverExit: _resetOverlayTimer,
+            child: Container(
+              width: 360,
+              decoration: BoxDecoration(
+                color: hollow.surface.withValues(alpha: 0.88),
+                border: Border(
+                  left: BorderSide(
+                    color: hollow.border.withValues(alpha: 0.5),
+                  ),
+                ),
+              ),
+              child: Column(
+                children: _buildMessageArea(
+                    hollow, messages, typingPeers, profiles, localPeerId),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildControlsPillOverlay() {
+    return Positioned(
+      bottom: HollowSpacing.lg,
+      left: 0,
+      right: 0,
+      child: AnimatedOpacity(
+        opacity: _overlaysVisible ? 1.0 : 0.0,
+        duration: HollowDurations.normal,
+        child: IgnorePointer(
+          ignoring: !_overlaysVisible,
+          child: Center(
+            child: _ScreenShareControlsOverlay(
+              peerId: widget.peerId,
+            ),
+          ),
+        ),
+      ),
+    );
   }
 
   /// Open the unified emoji/emote picker anchored to the composer button and
@@ -1399,695 +1508,534 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     // While the user reads history the display is frozen — arrivals are held
     // back (see _frozenLen). `allMessages` keeps the true list for mark-seen.
     final messages = _displayMessages(allMessages);
-    // Reply-target lookup: one pass per build instead of an O(n) indexWhere
-    // scan per reply row per rebuild.
-    final replyIndexById = <String, int>{
-      for (var i = 0; i < messages.length; i++)
-        if (messages[i].messageId != null) messages[i].messageId! as String: i,
-    };
     return [
       // Messages list + unread pill overlay
       Expanded(
         child: Stack(
           children: [
-            MessageActionBarScope(
-              child: Builder(
-                builder: (scopeContext) => NotificationListener<ScrollNotification>(
-                  onNotification: (notification) {
-                    if (notification is ScrollUpdateNotification) {
-                      MessageActionBarScope.of(scopeContext)?.dismissAll();
-                    }
-                    return false;
-                  },
-                  child: Container(
-                    color: hollow.background,
-                    child: messages.isEmpty
-                        ? (_historyLoaded
-                            ? Center(
-                                child: Column(
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: [
-                                    Icon(
-                                      LucideIcons.messageCircle,
-                                      size: 48,
-                                      color: hollow.textSecondary
-                                          .withValues(alpha: 0.3),
-                                    ),
-                                    const SizedBox(height: HollowSpacing.md),
-                                    Text(
-                                      'No messages yet. Say hello!',
-                                      style: HollowTypography.body.copyWith(
-                                        color: hollow.textSecondary,
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              )
-                            : const SizedBox.shrink())
-                        : SelectionArea(
-                          contextMenuBuilder: (_, __) => const SizedBox.shrink(),
-                          child: ScrollConfiguration(
-                            behavior: ScrollConfiguration.of(context)
-                                .copyWith(scrollbars: false),
-                            child: ScrollablePositionedList.builder(
-                              key: ValueKey('dm-list-${widget.peerId}'),
-                              itemScrollController: _itemScrollController,
-                              itemPositionsListener: _itemPositionsListener,
-                              scrollOffsetController: _scrollOffsetController,
-                              // reverse:true — the NEWEST message is builder
-                              // index 0, pinned to the bottom edge. No
-                              // sentinel row, no index-based initial scroll,
-                              // and appends while following never move the
-                              // viewport.
-                              reverse: true,
-                              initialScrollIndex: 0,
-                              initialAlignment: 0.0,
-                              padding: const EdgeInsets.symmetric(
-                                vertical: HollowSpacing.sm,
-                              ),
-                              itemCount: messages.length,
-                              // Let the list MOVE row elements across index
-                              // slots when a new message shifts every
-                              // revIndex by one — without this each shift
-                              // remounted every visible row (full-list
-                              // blink on every message).
-                              findChildIndexCallback: (key) {
-                                if (key is! ValueKey<Object>) return null;
-                                final id = key.value;
-                                if (id is! String) return null;
-                                final i = replyIndexById[id];
-                                if (i == null) return null;
-                                return messages.length - 1 - i;
-                              },
-                              itemBuilder: (context, revIndex) {
-                                // Map the reversed builder index back to
-                                // chronological order — all row logic below
-                                // (grouping, separators, highlight, reply)
-                                // stays in chronological terms.
-                                final index = messages.length - 1 - revIndex;
-                                final msg = messages[index];
-                                // Grouping: compare with the previous message in chronological order.
-                                final showHeader = index == 0 ||
-                                    !shouldGroup(
-                                      currentIsMe: msg.isMe,
-                                      previousIsMe: messages[index - 1].isMe,
-                                      currentTime: msg.timestamp,
-                                      previousTime:
-                                          messages[index - 1].timestamp,
-                                    );
-                                final wrapper = MessageHoverWrapper(
-                                  isMe: msg.isMe,
-                                  messageId: msg.messageId,
-                                  currentText: msg.text,
-                                  isEditing: _editingMessageId != null &&
-                                      _editingMessageId == msg.messageId,
-                                  onEditStart: msg.messageId != null &&
-                                          msg.isMe &&
-                                          msg.fileAttachment == null
-                                      ? () {
-                                          // Positions + jumpTo live in the
-                                          // REVERSED index space.
-                                          final positions = _itemPositionsListener
-                                              .itemPositions.value;
-                                          final current = positions
-                                              .where((p) => p.index == revIndex)
-                                              .firstOrNull;
-                                          final alignment =
-                                              current?.itemLeadingEdge ?? 0.3;
-                                          setState(() =>
-                                              _editingMessageId = msg.messageId);
-                                          WidgetsBinding.instance
-                                              .addPostFrameCallback((_) {
-                                            if (!mounted ||
-                                                !_itemScrollController
-                                                    .isAttached) return;
-                                            _itemScrollController.jumpTo(
-                                              index: revIndex,
-                                              alignment: alignment,
-                                            );
-                                          });
-                                        }
-                                      : null,
-                                  onEditSubmit: (newText) {
-                                    setState(
-                                        () => _editingMessageId = null);
-                                    ref
-                                        .read(chatProvider.notifier)
-                                        .editMessage(widget.peerId,
-                                            msg.messageId!, newText);
-                                  },
-                                  onEditCancel: () => setState(
-                                      () => _editingMessageId = null),
-                                  onDelete: msg.messageId != null && msg.isMe
-                                      ? () => ref
-                                          .read(chatProvider.notifier)
-                                          .deleteMessage(
-                                              widget.peerId, msg.messageId!)
-                                      : null,
-                                  onReply: msg.messageId != null
-                                      ? () {
-                                          final senderId = msg.isMe
-                                              ? localPeerId
-                                              : widget.peerId;
-                                          setState(() {
-                                            _replyToMessageId = msg.messageId;
-                                            _replyToText = msg
-                                                        .fileAttachment !=
-                                                    null
-                                                ? (msg.fileAttachment!.isImage
-                                                    ? '📷 Image'
-                                                    : '📎 ${msg.fileAttachment!.fileName}')
-                                                : msg.text;
-                                            _replyToSenderName =
-                                                displayNameFor(
-                                                    profiles, senderId);
-                                            _replyToImagePath =
-                                                msg.fileAttachment?.isImage ==
-                                                        true
-                                                    ? msg.fileAttachment
-                                                        ?.diskPath
-                                                    : null;
-                                          });
-                                          _focusNode.requestFocus();
-                                        }
-                                      : null,
-                                  onReaction: msg.messageId != null
-                                      ? (emoji) {
-                                          final hasReacted = msg
-                                                  .reactions[emoji]
-                                                  ?.contains(localPeerId) ??
-                                              false;
-                                          final notifier =
-                                              ref.read(chatProvider.notifier);
-                                          if (hasReacted) {
-                                            notifier.removeReaction(
-                                                widget.peerId,
-                                                msg.messageId!,
-                                                emoji);
-                                          } else {
-                                            notifier.addReaction(
-                                                widget.peerId,
-                                                msg.messageId!,
-                                                emoji);
-                                          }
-                                        }
-                                      : null,
-                                  onDownload: msg.fileAttachment != null
-                                      ? () {
-                                          final att = msg.fileAttachment!;
-                                          // Guard against duplicate downloads.
-                                          final transfer = ref.read(fileTransferProvider)[att.fileId];
-                                          if (transfer != null && transfer.isDownloading) {
-                                            HollowToast.show(context, 'File is already downloading...', type: HollowToastType.info);
-                                            return;
-                                          }
-                                          if (att.diskPath != null) {
-                                            _saveFile(att);
-                                          } else {
-                                            // DM: request from the peer we're chatting with.
-                                            _requestFileFromPeer(att, widget.peerId);
-                                          }
-                                        }
-                                      : null,
-                                  onCopy: (msg.text.isNotEmpty && !msg.text.startsWith('[file:'))
-                                      ? () {
-                                          Clipboard.setData(ClipboardData(text: msg.text));
-                                          HollowToast.show(context, 'Copied to clipboard', type: HollowToastType.success);
-                                        }
-                                      : null,
-                                  onCopyImage: (msg.fileAttachment != null &&
-                                          msg.fileAttachment!.diskPath != null &&
-                                          msg.fileAttachment!.isImage)
-                                      ? () async {
-                                          final ok = await copyImageToClipboard(msg.fileAttachment!.diskPath!);
-                                          // itemBuilder shadows the State's context — list items
-                                          // dispose when scrolled away, so check THIS element.
-                                          if (context.mounted) {
-                                            HollowToast.show(
-                                              context,
-                                              ok ? 'Image copied to clipboard' : 'Failed to copy image',
-                                              type: ok ? HollowToastType.success : HollowToastType.error,
-                                            );
-                                          }
-                                        }
-                                      : null,
-                                  onInfo: () {
-                                    final senderPeerId = msg.isMe
-                                        ? localPeerId
-                                        : widget.peerId;
-                                    showMessageProofDialog(
-                                      context,
-                                      MessageProofData(
-                                        senderPeerId: senderPeerId,
-                                        senderDisplayName: displayNameFor(
-                                            profiles, senderPeerId),
-                                        text: msg.text,
-                                        // If the message has been edited, the
-                                        // signature was computed over the edit
-                                        // timestamp + new text — use editedAt
-                                        // to reconstruct the canonical payload.
-                                        timestampMs: (msg.editedAt ??
-                                                msg.timestamp)
-                                            .millisecondsSinceEpoch,
-                                        signature: msg.signature,
-                                        publicKey: msg.publicKey,
-                                        messageId: msg.messageId,
-                                        context: msg.isMe
-                                            ? widget.peerId
-                                            : localPeerId,
-                                        msgType: 'dm',
-                                        fileAttachment: msg.fileAttachment,
-                                      ),
-                                    );
-                                  },
-                                  child: Builder(builder: (_) {
-                                    String? replySender;
-                                    String? replyText;
-                                    String? replyImagePath;
-                                    int? replyIndex;
-                                    if (msg.replyToMid != null) {
-                                      final idx =
-                                          replyIndexById[msg.replyToMid] ??
-                                              -1;
-                                      if (idx != -1) {
-                                        replyIndex = idx;
-                                        final original = messages[idx];
-                                        replyText =
-                                            original.fileAttachment != null
-                                                ? (original.fileAttachment!
-                                                        .isImage
-                                                    ? '📷 Image'
-                                                    : '📎 ${original.fileAttachment!.fileName}')
-                                                : original.text;
-                                        final origSenderId = original.isMe
-                                            ? localPeerId
-                                            : widget.peerId;
-                                        replySender = displayNameFor(
-                                            profiles, origSenderId);
-                                        if (original
-                                                .fileAttachment?.isImage ==
-                                            true) {
-                                          replyImagePath = original
-                                              .fileAttachment?.diskPath;
-                                        }
-                                      }
-                                    }
-                                    return MessageBubble(
-                                      message: msg,
-                                      peerId: widget.peerId,
-                                      showHeader: showHeader,
-                                      replyToSenderName: replySender,
-                                      replyToText: replyText,
-                                      replyToImagePath: replyImagePath,
-                                      isHighlighted:
-                                          _highlightIndex == index,
-                                      onReplyTap: replyIndex != null
-                                          ? () =>
-                                              _scrollToMessage(replyIndex!)
-                                          : null,
-                                      onToggleReaction:
-                                          msg.messageId != null
-                                              ? (emoji) {
-                                                  final hasReacted = msg
-                                                          .reactions[emoji]
-                                                          ?.contains(
-                                                              localPeerId) ??
-                                                      false;
-                                                  final notifier = ref.read(
-                                                      chatProvider.notifier);
-                                                  if (hasReacted) {
-                                                    notifier.removeReaction(
-                                                        widget.peerId,
-                                                        msg.messageId!,
-                                                        emoji);
-                                                  } else {
-                                                    notifier.addReaction(
-                                                        widget.peerId,
-                                                        msg.messageId!,
-                                                        emoji);
-                                                  }
-                                                }
-                                              : null,
-                                    );
-                                  }),
-                                );
-                                final showDate = shouldShowDateSeparator(
-                                  msg.timestamp,
-                                  index > 0
-                                      ? messages[index - 1].timestamp
-                                      : null,
-                                );
-                                final messageWidget = showHeader
-                                    ? Padding(
-                                        padding: const EdgeInsets.only(
-                                            top: HollowSpacing.sm + 2),
-                                        child: wrapper,
-                                      )
-                                    : wrapper;
-                                // ValueKey(messageId): rows hold per-item
-                                // state (spoiler reveal, hover, decoded
-                                // frames) that must not shift onto a
-                                // different message on delete/trim.
-                                return KeyedSubtree(
-                                  key: ValueKey<Object>(
-                                      msg.messageId ?? index),
-                                  child: showDate
-                                      ? Column(
-                                          mainAxisSize: MainAxisSize.min,
-                                          children: [
-                                            DateSeparator(
-                                                date: msg.timestamp),
-                                            messageWidget,
-                                          ],
-                                        )
-                                      : messageWidget,
-                                );
-                              },
-                            ),
-                          ),
-                          ),
-                  ),
-                ),
-              ),
-            ),
-            // Unread pill
-            Builder(builder: (context) {
-              final unreadCount = ref.watch(unreadProvider.select((s) => s.dmUnreadCounts[widget.peerId] ?? 0));
-              if (unreadCount > 0 && _showScrollPill) {
-                return Positioned(
-                  bottom: HollowSpacing.md,
-                  left: 0,
-                  right: 0,
-                  child: Center(
-                    child: _UnreadPill(
-                      count: unreadCount,
-                      onTap: () {
-                        _scrollToBottom();
-                        // The display list may be frozen — mark seen against
-                        // the TRUE newest message.
-                        ref.read(unreadProvider.notifier).markDmSeen(
-                              widget.peerId,
-                              allMessages.last.messageId,
-                            );
-                      },
-                    ),
-                  ),
-                );
-              }
-              return const SizedBox.shrink();
-            }),
+            _buildMessageListLayer(hollow, messages, profiles, localPeerId),
+            _buildUnreadPillOverlay(allMessages),
           ],
         ),
       ),
 
       // Typing indicator
-      if (typingPeers.isNotEmpty)
-        TypingIndicatorBar(
-          names: typingPeers
-              .map((pid) => displayNameForPeer(
-                  ref.watch(profileProvider.select((p) => p[pid])), pid))
-              .toList(),
-        ),
+      if (typingPeers.isNotEmpty) _buildTypingBar(typingPeers),
 
       // Reply preview bar
       if (_replyToMessageId != null)
-        Container(
-          padding: const EdgeInsets.symmetric(
-            horizontal: HollowSpacing.md,
-            vertical: HollowSpacing.xs + 2,
-          ),
-          decoration: BoxDecoration(
-            color: hollow.surface,
-            border: Border(
-              top: BorderSide(color: hollow.border),
-              left: BorderSide(color: hollow.accent, width: 3),
-            ),
-          ),
-          child: Row(
-            children: [
-              Icon(LucideIcons.reply, size: 14, color: hollow.accent),
-              const SizedBox(width: HollowSpacing.sm),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(
-                      'Replying to ${_replyToSenderName ?? ''}',
-                      style: HollowTypography.caption.copyWith(
-                        color: hollow.accent,
-                        fontWeight: FontWeight.w600,
-                        fontSize: 11,
-                      ),
-                    ),
-                    Row(
-                      children: [
-                        if (_replyToImagePath != null &&
-                            File(_replyToImagePath!).existsSync()) ...[
-                          ClipRRect(
-                            borderRadius: BorderRadius.circular(4),
-                            child: _replyToImagePath!.toLowerCase().endsWith('.gif')
-                                ? GifFileImage(
-                                    diskPath: _replyToImagePath!,
-                                    width: 32,
-                                    height: 32,
-                                    fit: BoxFit.cover,
-                                  )
-                                : Image.file(
-                                    File(_replyToImagePath!),
-                                    width: 32,
-                                    height: 32,
-                                    fit: BoxFit.cover,
-                                  ),
-                          ),
-                          const SizedBox(width: HollowSpacing.xs),
-                        ],
-                        Expanded(
-                          child: Text(
-                            _replyToText ?? '',
-                            style: HollowTypography.body.copyWith(
-                              color: hollow.textSecondary,
-                              fontSize: 12,
-                            ),
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
-              ),
-              HollowPressable(
-                semanticLabel: 'Cancel reply',
-                onTap: () => setState(() {
-                  _replyToMessageId = null;
-                  _replyToText = null;
-                  _replyToSenderName = null;
-                  _replyToImagePath = null;
-                }),
-                padding: const EdgeInsets.all(HollowSpacing.xs),
-                child: Icon(LucideIcons.x,
-                    size: 16, color: hollow.textSecondary),
-              ),
-            ],
-          ),
+        ChatReplyPreviewBar(
+          senderName: _replyToSenderName,
+          text: _replyToText,
+          imagePath: _replyToImagePath,
+          onCancel: _cancelReply,
         ),
 
       // Staged file preview
       if (_stagedFilePath != null)
-        Container(
-          padding: const EdgeInsets.fromLTRB(
-            HollowSpacing.md, HollowSpacing.sm, HollowSpacing.md, 0),
-          decoration: BoxDecoration(
-            color: hollow.surface,
-            border: Border(top: BorderSide(color: hollow.border)),
-          ),
-          child: Row(
-            children: [
-              if (_stagedFileIsImage)
-                ClipRRect(
-                  borderRadius: BorderRadius.circular(6),
-                  child: _stagedFilePath!.toLowerCase().endsWith('.gif')
-                      ? GifFileImage(
-                          diskPath: _stagedFilePath!,
-                          width: 48, height: 48, fit: BoxFit.cover,
-                        )
-                      : Image.file(
-                          File(_stagedFilePath!),
-                          width: 48, height: 48, fit: BoxFit.cover,
-                        ),
-                )
-              else
-                Container(
-                  width: 48, height: 48,
-                  decoration: BoxDecoration(
-                    color: hollow.elevated,
-                    borderRadius: BorderRadius.circular(6),
-                  ),
-                  child: Icon(LucideIcons.file, color: hollow.textSecondary, size: 20),
-                ),
-              const SizedBox(width: HollowSpacing.sm),
-              Expanded(
-                child: Text(
-                  _stagedFileName ?? '',
-                  style: HollowTypography.caption.copyWith(color: hollow.textPrimary),
-                  maxLines: 1, overflow: TextOverflow.ellipsis,
-                ),
-              ),
-              HollowPressable(
-                semanticLabel: 'Remove attachment',
-                onTap: () => setState(() {
-                  _stagedFilePath = null;
-                  _stagedFileName = null;
-                  _stagedFileIsImage = false;
-                }),
-                padding: const EdgeInsets.all(HollowSpacing.xs),
-                child: Icon(LucideIcons.x, size: 16, color: hollow.textSecondary),
-              ),
-            ],
-          ),
+        StagedFilePreviewBar(
+          filePath: _stagedFilePath!,
+          fileName: _stagedFileName,
+          isImage: _stagedFileIsImage,
+          onRemove: _removeStagedFile,
         ),
 
-      if (_stagedHollowLink != null)
-        StagedHollowLinkCard(
-          link: _stagedHollowLink!,
-          onDismiss: () {
-            _urlDebounce?.cancel();
-            setState(() {
-              _stagedPreviewUrl = null;
-              _stagedHollowLink = null;
-            });
-          },
-        )
-      else if (_stagedPreviewUrl != null)
-        StagedLinkPreviewCard(
-          url: _stagedPreviewUrl!,
-          preview: _stagedPreview,
-          loading: _stagedPreviewLoading,
-          onDismiss: () {
-            _urlDebounce?.cancel();
-            setState(() {
-              _stagedPreviewUrl = null;
-              _stagedPreview = null;
-              _stagedPreviewLoading = false;
-            });
-          },
-        ),
+      // Staged link card (hollow invite or OG preview)
+      StagedLinkArea(
+        hollowLink: _stagedHollowLink,
+        previewUrl: _stagedPreviewUrl,
+        preview: _stagedPreview,
+        previewLoading: _stagedPreviewLoading,
+        onDismissHollowLink: _dismissStagedHollowLink,
+        onDismissPreview: _dismissStagedPreview,
+      ),
 
       // Input bar
-      Container(
-        padding: const EdgeInsets.symmetric(
-          horizontal: HollowSpacing.md,
-          vertical: HollowSpacing.sm,
-        ),
-        decoration: BoxDecoration(
-          color: hollow.surface,
-          border: Border(
-            top: (_replyToMessageId != null ||
-                    _stagedFilePath != null ||
-                    _stagedPreviewUrl != null)
-                ? BorderSide.none
-                : BorderSide(color: hollow.border),
+      _buildInputBar(hollow),
+    ];
+  }
+
+  void _cancelReply() {
+    setState(() {
+      _replyToMessageId = null;
+      _replyToText = null;
+      _replyToSenderName = null;
+      _replyToImagePath = null;
+    });
+  }
+
+  void _removeStagedFile() {
+    setState(() {
+      _stagedFilePath = null;
+      _stagedFileName = null;
+      _stagedFileIsImage = false;
+    });
+  }
+
+  void _dismissStagedHollowLink() {
+    _urlDebounce?.cancel();
+    setState(() {
+      _stagedPreviewUrl = null;
+      _stagedHollowLink = null;
+    });
+  }
+
+  void _dismissStagedPreview() {
+    _urlDebounce?.cancel();
+    setState(() {
+      _stagedPreviewUrl = null;
+      _stagedPreview = null;
+      _stagedPreviewLoading = false;
+    });
+  }
+
+  Widget _buildMessageListLayer(
+    HollowTheme hollow,
+    List<ChatMessage> messages,
+    Map<String, storage_api.UserProfile> profiles,
+    String localPeerId,
+  ) {
+    return MessageActionBarScope(
+      child: Builder(
+        builder: (scopeContext) => NotificationListener<ScrollNotification>(
+          onNotification: (notification) {
+            if (notification is ScrollUpdateNotification) {
+              MessageActionBarScope.of(scopeContext)?.dismissAll();
+            }
+            return false;
+          },
+          child: Container(
+            color: hollow.background,
+            child: messages.isEmpty
+                ? (_historyLoaded
+                    ? _buildEmptyDmState(hollow)
+                    : const SizedBox.shrink())
+                : _buildMessageList(hollow, messages, profiles, localPeerId),
           ),
         ),
-        child: _isRecordingVoice
-            ? VoiceRecorderBar(
-                onFinished: _stageVoiceMessage,
-                onCancelled: () =>
-                    setState(() => _isRecordingVoice = false),
-              )
-            : Row(
-                children: [
-                  HollowPressable(
-                    semanticLabel: 'Attach file',
-                    onTap: _pickAndStageFile,
-                    borderRadius: BorderRadius.circular(hollow.radiusMd),
-                    padding: const EdgeInsets.all(HollowSpacing.sm),
-                    child: Icon(
-                      LucideIcons.paperclip,
-                      color: hollow.textSecondary,
-                      size: 20,
-                    ),
-                  ),
-                  const SizedBox(width: HollowSpacing.xs),
-                  HollowPressable(
-                    semanticLabel: 'Record voice message',
-                    onTap: _stagedFilePath != null
-                        ? null
-                        : () => setState(() => _isRecordingVoice = true),
-                    borderRadius: BorderRadius.circular(hollow.radiusMd),
-                    padding: const EdgeInsets.all(HollowSpacing.sm),
-                    child: Icon(
-                      LucideIcons.mic,
-                      color: _stagedFilePath != null
-                          ? hollow.textSecondary.withValues(alpha: 0.4)
-                          : hollow.textSecondary,
-                      size: 20,
-                    ),
-                  ),
-                  const SizedBox(width: HollowSpacing.xs),
-                  Expanded(
-                    child: CompositedTransformTarget(
-                      link: _composerLayerLink,
-                      child: Focus(
-                        onKeyEvent: (_, event) {
-                          final r = _emoteAutocomplete.handleKey(event);
-                          if (r == KeyEventResult.handled) return r;
-                          return handleChatInputKey(
-                            event, _controller, _focusNode, _handleSend,
-                            onPasteImage: _stageClipboardImage,
-                          );
-                        },
-                        child: HollowTextField(
-                          controller: _controller,
-                          focusNode: _focusNode,
-                          hintText: 'Type a message...',
-                          autofocus: true,
-                          maxLines: 5,
-                          minLines: 1,
-                          maxLength: 4000,
-                          showCounter: false,
-                          style: HollowTypography.body.copyWith(
-                            color: hollow.textPrimary,
-                          ),
-                          borderRadius: hollow.radiusLg,
-                          onChanged: _onTextChanged,
-                        ),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: HollowSpacing.xs),
-                  Builder(
-                    builder: (btnCtx) => HollowPressable(
-                      semanticLabel: 'Insert emoji',
-                      onTap: () => _openComposerEmojiPicker(btnCtx),
-                      borderRadius: BorderRadius.circular(hollow.radiusMd),
-                      padding: const EdgeInsets.all(HollowSpacing.sm),
-                      child: Icon(
-                        LucideIcons.smile,
-                        color: hollow.textSecondary,
-                        size: 20,
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: HollowSpacing.sm),
-                  HollowPressable(
-                    semanticLabel: 'Send message',
-                    onTap: _handleSend,
-                    borderRadius: BorderRadius.circular(hollow.radiusMd),
-                    backgroundColor: hollow.accent,
-                    padding: const EdgeInsets.all(HollowSpacing.sm),
-                    child: Icon(
-                      LucideIcons.send,
-                      color: hollow.textOnAccent,
-                      size: 20,
-                    ),
-                  ),
-                ],
-              ),
       ),
-    ];
+    );
+  }
+
+  Widget _buildEmptyDmState(HollowTheme hollow) {
+    return Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(
+            LucideIcons.messageCircle,
+            size: 48,
+            color: hollow.textSecondary.withValues(alpha: 0.3),
+          ),
+          const SizedBox(height: HollowSpacing.md),
+          Text(
+            'No messages yet. Say hello!',
+            style: HollowTypography.body.copyWith(
+              color: hollow.textSecondary,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// The reversed message list (see the scroll-model comment above
+  /// [_frozenLen]) plus the per-build row precomputes.
+  Widget _buildMessageList(
+    HollowTheme hollow,
+    List<ChatMessage> messages,
+    Map<String, storage_api.UserProfile> profiles,
+    String localPeerId,
+  ) {
+    // Reply-target lookup: one pass per build instead of an O(n) indexWhere
+    // scan per reply row per rebuild.
+    final replyIndexById = <String, int>{
+      for (var i = 0; i < messages.length; i++)
+        if (messages[i].messageId != null) messages[i].messageId!: i,
+    };
+    return reversedChatList(
+      context: context,
+      listKey: ValueKey('dm-list-${widget.peerId}'),
+      itemScrollController: _itemScrollController,
+      itemPositionsListener: _itemPositionsListener,
+      scrollOffsetController: _scrollOffsetController,
+      itemCount: messages.length,
+      indexByMessageId: replyIndexById,
+      itemBuilder: (context, revIndex) => _buildMessageRow(
+        context,
+        revIndex,
+        messages,
+        replyIndexById,
+        profiles,
+        localPeerId,
+      ),
+    );
+  }
+
+  /// One chat row: grouping-header decision, hover-action wrapper, bubble,
+  /// and date separator — [revIndex] is the reversed builder index.
+  Widget _buildMessageRow(
+    BuildContext context,
+    int revIndex,
+    List<ChatMessage> messages,
+    Map<String, int> replyIndexById,
+    Map<String, storage_api.UserProfile> profiles,
+    String localPeerId,
+  ) {
+    // Map the reversed builder index back to chronological order — all row
+    // logic below (grouping, separators, highlight, reply) stays in
+    // chronological terms.
+    final index = messages.length - 1 - revIndex;
+    final msg = messages[index];
+    // Grouping: compare with the previous message in chronological order.
+    final showHeader = index == 0 ||
+        !shouldGroup(
+          currentIsMe: msg.isMe,
+          previousIsMe: messages[index - 1].isMe,
+          currentTime: msg.timestamp,
+          previousTime: messages[index - 1].timestamp,
+        );
+    final wrapper = MessageHoverWrapper(
+      isMe: msg.isMe,
+      messageId: msg.messageId,
+      currentText: msg.text,
+      isEditing:
+          _editingMessageId != null && _editingMessageId == msg.messageId,
+      onEditStart: _editStartFor(msg, revIndex),
+      onEditSubmit: (newText) {
+        setState(() => _editingMessageId = null);
+        ref
+            .read(chatProvider.notifier)
+            .editMessage(widget.peerId, msg.messageId!, newText);
+      },
+      onEditCancel: () => setState(() => _editingMessageId = null),
+      onDelete: _deleteFor(msg),
+      onReply: _replyFor(msg),
+      onReaction: msg.messageId != null
+          ? (emoji) => _toggleReaction(msg, emoji)
+          : null,
+      onDownload: _downloadFor(context, msg),
+      onCopy: _copyFor(context, msg),
+      onCopyImage: _copyImageFor(context, msg),
+      onInfo: _infoFor(context, msg),
+      child: _buildBubble(
+          msg, index, showHeader, messages, replyIndexById, profiles,
+          localPeerId),
+    );
+    return dateSeparatedChatRow(
+      rowKey: msg.messageId ?? index,
+      timestamp: msg.timestamp,
+      prevTimestamp: index > 0 ? messages[index - 1].timestamp : null,
+      showHeader: showHeader,
+      child: wrapper,
+    );
+  }
+
+  Widget _buildBubble(
+    ChatMessage msg,
+    int index,
+    bool showHeader,
+    List<ChatMessage> messages,
+    Map<String, int> replyIndexById,
+    Map<String, storage_api.UserProfile> profiles,
+    String localPeerId,
+  ) {
+    String? replySender;
+    String? replyText;
+    String? replyImagePath;
+    int? replyIndex;
+    if (msg.replyToMid != null) {
+      final idx = replyIndexById[msg.replyToMid] ?? -1;
+      if (idx != -1) {
+        replyIndex = idx;
+        final original = messages[idx];
+        replyText = _messagePreviewText(original);
+        final origSenderId = original.isMe ? localPeerId : widget.peerId;
+        replySender = displayNameFor(profiles, origSenderId);
+        if (original.fileAttachment?.isImage == true) {
+          replyImagePath = original.fileAttachment?.diskPath;
+        }
+      }
+    }
+    return MessageBubble(
+      message: msg,
+      peerId: widget.peerId,
+      showHeader: showHeader,
+      replyToSenderName: replySender,
+      replyToText: replyText,
+      replyToImagePath: replyImagePath,
+      isHighlighted: _highlightIndex == index,
+      onReplyTap:
+          replyIndex != null ? () => _scrollToMessage(replyIndex!) : null,
+      onToggleReaction: msg.messageId != null
+          ? (emoji) => _toggleReaction(msg, emoji)
+          : null,
+    );
+  }
+
+  // ── Row action callbacks ──────────────────────────────────────────────
+  // Null hides the affordance for this message. Tap-time reads use ref.read
+  // (equal or fresher than the build-captured watch values at tap time).
+
+  VoidCallback? _editStartFor(ChatMessage msg, int revIndex) {
+    final canEdit =
+        msg.messageId != null && msg.isMe && msg.fileAttachment == null;
+    if (!canEdit) return null;
+    return () {
+      // Positions + jumpTo live in the REVERSED index space.
+      final positions = _itemPositionsListener.itemPositions.value;
+      final current = positions.where((p) => p.index == revIndex).firstOrNull;
+      final alignment = current?.itemLeadingEdge ?? 0.3;
+      setState(() => _editingMessageId = msg.messageId);
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted || !_itemScrollController.isAttached) return;
+        _itemScrollController.jumpTo(
+          index: revIndex,
+          alignment: alignment,
+        );
+      });
+    };
+  }
+
+  VoidCallback? _deleteFor(ChatMessage msg) {
+    if (msg.messageId == null || !msg.isMe) return null;
+    return () => ref
+        .read(chatProvider.notifier)
+        .deleteMessage(widget.peerId, msg.messageId!);
+  }
+
+  VoidCallback? _replyFor(ChatMessage msg) {
+    if (msg.messageId == null) return null;
+    return () {
+      final localPeerId = ref.read(identityProvider).peerId ?? '';
+      final senderId = msg.isMe ? localPeerId : widget.peerId;
+      setState(() {
+        _replyToMessageId = msg.messageId;
+        _replyToText = _messagePreviewText(msg);
+        _replyToSenderName =
+            displayNameFor(ref.read(profileProvider), senderId);
+        _replyToImagePath = msg.fileAttachment?.isImage == true
+            ? msg.fileAttachment?.diskPath
+            : null;
+      });
+      _focusNode.requestFocus();
+    };
+  }
+
+  void _toggleReaction(ChatMessage msg, String emoji) {
+    final localPeerId = ref.read(identityProvider).peerId ?? '';
+    final hasReacted = msg.reactions[emoji]?.contains(localPeerId) ?? false;
+    final notifier = ref.read(chatProvider.notifier);
+    if (hasReacted) {
+      notifier.removeReaction(widget.peerId, msg.messageId!, emoji);
+    } else {
+      notifier.addReaction(widget.peerId, msg.messageId!, emoji);
+    }
+  }
+
+  VoidCallback? _downloadFor(BuildContext context, ChatMessage msg) {
+    final attachment = msg.fileAttachment;
+    if (attachment == null) return null;
+    return () {
+      // Guard against duplicate downloads.
+      final transfer = ref.read(fileTransferProvider)[attachment.fileId];
+      if (transfer != null && transfer.isDownloading) {
+        HollowToast.show(context, 'File is already downloading...',
+            type: HollowToastType.info);
+        return;
+      }
+      if (attachment.diskPath != null) {
+        _saveFile(attachment);
+      } else {
+        // DM: request from the peer we're chatting with.
+        _requestFileFromPeer(attachment, widget.peerId);
+      }
+    };
+  }
+
+  VoidCallback? _copyFor(BuildContext context, ChatMessage msg) {
+    if (msg.text.isEmpty || msg.text.startsWith('[file:')) return null;
+    return () {
+      Clipboard.setData(ClipboardData(text: msg.text));
+      HollowToast.show(context, 'Copied to clipboard',
+          type: HollowToastType.success);
+    };
+  }
+
+  VoidCallback? _copyImageFor(BuildContext context, ChatMessage msg) {
+    final attachment = msg.fileAttachment;
+    if (attachment == null ||
+        attachment.diskPath == null ||
+        !attachment.isImage) {
+      return null;
+    }
+    return () async {
+      final ok = await copyImageToClipboard(attachment.diskPath!);
+      // itemBuilder shadows the State's context — list items
+      // dispose when scrolled away, so check THIS element.
+      if (context.mounted) {
+        HollowToast.show(
+          context,
+          ok ? 'Image copied to clipboard' : 'Failed to copy image',
+          type: ok ? HollowToastType.success : HollowToastType.error,
+        );
+      }
+    };
+  }
+
+  VoidCallback _infoFor(BuildContext context, ChatMessage msg) {
+    return () {
+      final localPeerId = ref.read(identityProvider).peerId ?? '';
+      final senderPeerId = msg.isMe ? localPeerId : widget.peerId;
+      showMessageProofDialog(
+        context,
+        MessageProofData(
+          senderPeerId: senderPeerId,
+          senderDisplayName:
+              displayNameFor(ref.read(profileProvider), senderPeerId),
+          text: msg.text,
+          // If the message has been edited, the signature was computed over
+          // the edit timestamp + new text — use editedAt to reconstruct the
+          // canonical payload.
+          timestampMs: (msg.editedAt ?? msg.timestamp).millisecondsSinceEpoch,
+          signature: msg.signature,
+          publicKey: msg.publicKey,
+          messageId: msg.messageId,
+          context: msg.isMe ? widget.peerId : localPeerId,
+          msgType: 'dm',
+          fileAttachment: msg.fileAttachment,
+        ),
+      );
+    };
+  }
+
+  /// '📷 Image' / '📎 name' for attachments, else the message text.
+  String _messagePreviewText(ChatMessage msg) {
+    final att = msg.fileAttachment;
+    if (att == null) return msg.text;
+    return att.isImage ? '📷 Image' : '📎 ${att.fileName}';
+  }
+
+  /// Unread pill — only when new messages arrived while scrolled up.
+  Widget _buildUnreadPillOverlay(List<ChatMessage> allMessages) {
+    final unreadCount = ref.watch(
+        unreadProvider.select((s) => s.dmUnreadCounts[widget.peerId] ?? 0));
+    if (unreadCount <= 0 || !_showScrollPill) return const SizedBox.shrink();
+    return Positioned(
+      bottom: HollowSpacing.md,
+      left: 0,
+      right: 0,
+      child: Center(
+        child: UnreadJumpPill(
+          count: unreadCount,
+          onTap: () {
+            _scrollToBottom();
+            // The display list may be frozen — mark seen against
+            // the TRUE newest message.
+            ref.read(unreadProvider.notifier).markDmSeen(
+                  widget.peerId,
+                  allMessages.last.messageId,
+                );
+          },
+        ),
+      ),
+    );
+  }
+
+  Widget _buildTypingBar(Set<String> typingPeers) {
+    return TypingIndicatorBar(
+      names: typingPeers
+          .map((pid) => displayNameForPeer(
+              ref.watch(profileProvider.select((p) => p[pid])), pid))
+          .toList(),
+    );
+  }
+
+  Widget _buildInputBar(HollowTheme hollow) {
+    return chatInputBarShell(
+      hollow,
+      flushTop: _replyToMessageId != null ||
+          _stagedFilePath != null ||
+          _stagedPreviewUrl != null,
+      child: _isRecordingVoice
+          ? VoiceRecorderBar(
+              onFinished: _stageVoiceMessage,
+              onCancelled: () => setState(() => _isRecordingVoice = false),
+            )
+          : _buildComposerRow(hollow),
+    );
+  }
+
+  Widget _buildComposerRow(HollowTheme hollow) {
+    return Row(
+      children: [
+        HollowPressable(
+          semanticLabel: 'Attach file',
+          onTap: _pickAndStageFile,
+          borderRadius: BorderRadius.circular(hollow.radiusMd),
+          padding: const EdgeInsets.all(HollowSpacing.sm),
+          child: Icon(
+            LucideIcons.paperclip,
+            color: hollow.textSecondary,
+            size: 20,
+          ),
+        ),
+        const SizedBox(width: HollowSpacing.xs),
+        HollowPressable(
+          semanticLabel: 'Record voice message',
+          onTap: _stagedFilePath != null
+              ? null
+              : () => setState(() => _isRecordingVoice = true),
+          borderRadius: BorderRadius.circular(hollow.radiusMd),
+          padding: const EdgeInsets.all(HollowSpacing.sm),
+          child: Icon(
+            LucideIcons.mic,
+            color: _stagedFilePath != null
+                ? hollow.textSecondary.withValues(alpha: 0.4)
+                : hollow.textSecondary,
+            size: 20,
+          ),
+        ),
+        const SizedBox(width: HollowSpacing.xs),
+        Expanded(
+          child: CompositedTransformTarget(
+            link: _composerLayerLink,
+            child: Focus(
+              onKeyEvent: (_, event) {
+                final r = _emoteAutocomplete.handleKey(event);
+                if (r == KeyEventResult.handled) return r;
+                return handleChatInputKey(
+                  event, _controller, _focusNode, _handleSend,
+                  onPasteImage: _stageClipboardImage,
+                );
+              },
+              child: chatComposerField(
+                hollow,
+                controller: _controller,
+                focusNode: _focusNode,
+                hintText: 'Type a message...',
+                onChanged: _onTextChanged,
+              ),
+            ),
+          ),
+        ),
+        const SizedBox(width: HollowSpacing.xs),
+        composerEmojiButton(hollow, onOpen: _openComposerEmojiPicker),
+        const SizedBox(width: HollowSpacing.sm),
+        HollowPressable(
+          semanticLabel: 'Send message',
+          onTap: _handleSend,
+          borderRadius: BorderRadius.circular(hollow.radiusMd),
+          backgroundColor: hollow.accent,
+          padding: const EdgeInsets.all(HollowSpacing.sm),
+          child: Icon(
+            LucideIcons.send,
+            color: hollow.textOnAccent,
+            size: 20,
+          ),
+        ),
+      ],
+    );
   }
 }
 
@@ -2184,40 +2132,6 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
   static const _maxVideoHeight = 2000.0;
   String? _expandedRenderer; // null = side-by-side, 'local' or 'remote' = fullscreen
 
-  /// Count active video sources in a DM call. Used to decide whether to
-  /// show the source-switcher pill (only shown when >= 2 sources exist).
-  int _countActiveDmSources(CallState call) {
-    int count = 0;
-    if (call.isVideoEnabled) count++;
-    if (call.remoteVideoEnabled) count++;
-    if (call.isScreenSharing) count++;
-    if (call.remoteScreenSharing) count++;
-    return count;
-  }
-
-  /// Build the ordered list of active sources for the switcher pill.
-  /// Order: screens first, then cameras (matches voice channel pill).
-  List<({String peerId, String type})> _buildDmSources(
-    CallState call,
-    String localPeerId,
-    String remotePeerId,
-  ) {
-    final sources = <({String peerId, String type})>[];
-    if (call.isScreenSharing) {
-      sources.add((peerId: localPeerId, type: 'screen'));
-    }
-    if (call.remoteScreenSharing) {
-      sources.add((peerId: remotePeerId, type: 'screen'));
-    }
-    if (call.isVideoEnabled) {
-      sources.add((peerId: localPeerId, type: 'camera'));
-    }
-    if (call.remoteVideoEnabled) {
-      sources.add((peerId: remotePeerId, type: 'camera'));
-    }
-    return sources;
-  }
-
   /// Handle a tap on a source switcher tab. For cameras, this sets
   /// _expandedRenderer to show the camera fullscreen with the other
   /// side as PiP. For screens, this is a no-op in the inline panel
@@ -2230,10 +2144,10 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
     });
   }
 
-  /// Build the source switcher pill for DM calls. Shows one tab per
-  /// active video source (camera or screen) with highlighting on the
-  /// currently focused one. Visual design mirrors the voice channel
-  /// pill in voice_channel_pane.dart `_buildSharerSwitcher`.
+  /// Source switcher pill for DM calls. Shows one tab per active video
+  /// source (camera or screen) with highlighting on the currently focused
+  /// one. Focus highlight: cameras via [_expandedRenderer]; screens are not
+  /// interactive in the inline panel, so nothing is highlighted for them.
   Widget _buildDmSourceSwitcher(
     HollowTheme hollow,
     CallState call,
@@ -2241,83 +2155,21 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
     String remotePeerId,
   ) {
     final profiles = ref.watch(profileProvider);
-    final sources = _buildDmSources(call, localPeerId, remotePeerId);
-
-    // Derive the "focused" source for highlight purposes. For cameras,
-    // _expandedRenderer drives it. For screens, the pill is not
-    // interactive in the inline panel, so nothing is highlighted.
     String? focusedPeerId;
-    String? focusedType;
     if (_expandedRenderer == 'local') {
       focusedPeerId = localPeerId;
-      focusedType = 'camera';
     } else if (_expandedRenderer == 'remote') {
       focusedPeerId = remotePeerId;
-      focusedType = 'camera';
     }
-
-    return Container(
-      padding: const EdgeInsets.symmetric(
-        horizontal: HollowSpacing.sm,
-        vertical: HollowSpacing.xs,
-      ),
-      decoration: BoxDecoration(
-        color: hollow.surface.withValues(alpha: 0.9),
-        borderRadius: BorderRadius.circular(HollowRadius.pill),
-        border: Border.all(color: hollow.border.withValues(alpha: 0.5)),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: sources.map((source) {
-          final isFocused =
-              source.peerId == focusedPeerId && source.type == focusedType;
-          final name = displayNameFor(profiles, source.peerId);
-
-          return Padding(
-            padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.xs),
-            child: HollowPressable(
-              onTap: () =>
-                  _onDmSourceTapped(source.peerId, source.type, localPeerId),
-              borderRadius: BorderRadius.circular(hollow.radiusSm),
-              backgroundColor: isFocused ? hollow.accentMuted : null,
-              padding: const EdgeInsets.symmetric(
-                horizontal: HollowSpacing.sm,
-                vertical: HollowSpacing.xs,
-              ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(
-                    source.type == 'screen'
-                        ? LucideIcons.monitor
-                        : LucideIcons.video,
-                    size: 12,
-                    color:
-                        isFocused ? hollow.accent : hollow.textSecondary,
-                  ),
-                  const SizedBox(width: HollowSpacing.xs),
-                  HollowAvatar(
-                    peerId: source.peerId,
-                    size: 18,
-                  ),
-                  const SizedBox(width: HollowSpacing.xs),
-                  Text(
-                    source.peerId == localPeerId ? 'You' : name,
-                    style: HollowTypography.caption.copyWith(
-                      color: isFocused
-                          ? hollow.textPrimary
-                          : hollow.textSecondary,
-                      fontWeight:
-                          isFocused ? FontWeight.w600 : FontWeight.w400,
-                      fontSize: 12,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          );
-        }).toList(),
-      ),
+    return _dmSourcePill(
+      hollow: hollow,
+      profiles: profiles,
+      sources: _dmActiveSources(call, localPeerId, remotePeerId),
+      localPeerId: localPeerId,
+      focusedPeerId: focusedPeerId,
+      focusedType: focusedPeerId != null ? 'camera' : null,
+      onTapSource: (peerId, type) =>
+          _onDmSourceTapped(peerId, type, localPeerId),
     );
   }
 
@@ -2368,149 +2220,170 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
         ),
         child: Column(
           mainAxisSize: isScreenShare ? MainAxisSize.max : MainAxisSize.min,
-        children: [
-          // Video / screen share area
-          if (hasVideoArea) ...[
-            // Screen share fills available space; camera uses fixed height.
-            if (isScreenShare)
-              Expanded(
-                child: _buildScreenShareView(call, hollow, remoteRenderer),
-              )
-            else
-              SizedBox(
-                height: _videoHeight,
-                child: Stack(
-                  children: [
-                    Positioned.fill(
-                      child: _expandedRenderer != null
-                          ? _buildFullscreenVideo(
-                              hollow, displayName,
-                              remoteRenderer, localRenderer,
-                              hasRemoteVideo, hasLocalVideo)
-                          : _buildSideBySideVideo(
-                              hollow, displayName,
-                              remoteRenderer, localRenderer,
-                              hasRemoteVideo, hasLocalVideo),
-                    ),
-                    // Source switcher pill (top-center) — only when at
-                    // least one screen share is active AND there are 2+
-                    // sources. Camera-only DMs don't need a switcher.
-                    if ((call.isScreenSharing || call.remoteScreenSharing) &&
-                        _countActiveDmSources(call) >= 2)
-                      Positioned(
-                        top: HollowSpacing.sm,
-                        left: 0,
-                        right: 0,
-                        child: Center(
-                          child: _buildDmSourceSwitcher(
-                            hollow, call, localPeerId, widget.peerId),
-                        ),
-                      ),
-                  ],
-                ),
-              ),
-            // Resize handle for video (not needed during screen share — it fills Expanded)
-            if (!isScreenShare)
-            MouseRegion(
-              cursor: SystemMouseCursors.resizeRow,
-              child: GestureDetector(
-                onVerticalDragUpdate: (details) {
-                  setState(() {
-                    _videoHeight = (_videoHeight + details.delta.dy)
-                        .clamp(_minVideoHeight, maxH);
-                  });
-                },
-                child: Container(
-                  height: 8,
-                  color: Colors.transparent,
-                  child: Center(
-                    child: Container(
-                      width: 32,
-                      height: 3,
-                      decoration: BoxDecoration(
-                        color: hollow.border,
-                        borderRadius: BorderRadius.circular(2),
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-            ),
+          children: [
+            // Video / screen share area — screen share fills available
+            // space; camera uses fixed (drag-resizable) height.
+            if (hasVideoArea) ...[
+              if (isScreenShare)
+                Expanded(
+                  child: _buildScreenShareView(call, hollow, remoteRenderer),
+                )
+              else
+                _buildCameraArea(call, hollow, displayName, remoteRenderer,
+                    localRenderer, hasRemoteVideo, hasLocalVideo, localPeerId),
+              // Resize handle (not needed during screen share — it fills
+              // Expanded).
+              if (!isScreenShare) _buildResizeHandle(hollow, maxH),
+            ],
+            _buildControlBar(call, hollow, hasAnyVideo, localPeerId),
           ],
-
-          // Control bar: timer (left), avatars (center, audio-only), controls (right)
-          Padding(
-            padding: EdgeInsets.symmetric(
-              horizontal: HollowSpacing.lg,
-              vertical: hasAnyVideo ? HollowSpacing.sm : HollowSpacing.md,
-            ),
-            child: Row(
-              children: [
-                // Left: timer + status
-                StatusDot(color: hollow.success, size: 8, pulse: true),
-                const SizedBox(width: HollowSpacing.sm),
-                if (call.status == CallStatus.connecting ||
-                    call.startedAt == null)
-                  Text(
-                    'Connecting...',
-                    style: HollowTypography.caption.copyWith(
-                      color: hollow.textSecondary,
-                      fontSize: 12,
-                    ),
-                  )
-                else
-                  CallDurationText(
-                    startedAt: call.startedAt!,
-                    style: HollowTypography.caption.copyWith(
-                      color: hollow.textSecondary,
-                      fontSize: 12,
-                      fontFeatures: [const FontFeature.tabularFigures()],
-                    ),
-                  ),
-
-                // Center: avatars (audio-only — when video is on, they're in the rectangles)
-                // Speaking state comes from callSpeakingProvider via a scoped
-                // Consumer so VAD flips rebuild ONLY these two avatars, not
-                // the whole inline call panel.
-                if (!hasAnyVideo) ...[
-                  const Spacer(),
-                  Consumer(builder: (context, ref, _) {
-                    final speaking = ref.watch(callSpeakingProvider);
-                    return Row(children: [
-                      SpeakingBorder(
-                        isSpeaking: speaking.local,
-                        child: _badgedCallAvatar(
-                          hollow: hollow,
-                          peerId: localPeerId,
-                          muted: call.isMuted,
-                          deafened: call.isDeafened,
-                        ),
-                      ),
-                      const SizedBox(width: HollowSpacing.sm),
-                      SpeakingBorder(
-                        isSpeaking: speaking.remote,
-                        child: _badgedCallAvatar(
-                          hollow: hollow,
-                          peerId: widget.peerId,
-                          muted: call.remoteMuted,
-                          deafened: call.remoteDeafened,
-                        ),
-                      ),
-                    ]);
-                  }),
-                ],
-
-                const Spacer(),
-                // Right: controls
-                _buildControls(call, hollow),
-              ],
-            ),
-          ),
-
-        ],
-      ),
+        ),
       ),
     );
+  }
+
+  Widget _buildCameraArea(
+    CallState call,
+    HollowTheme hollow,
+    String displayName,
+    RTCVideoRenderer? remoteRenderer,
+    RTCVideoRenderer? localRenderer,
+    bool hasRemoteVideo,
+    bool hasLocalVideo,
+    String localPeerId,
+  ) {
+    return SizedBox(
+      height: _videoHeight,
+      child: Stack(
+        children: [
+          Positioned.fill(
+            child: _expandedRenderer != null
+                ? _buildFullscreenVideo(hollow, displayName, remoteRenderer,
+                    localRenderer, hasRemoteVideo, hasLocalVideo)
+                : _buildSideBySideVideo(hollow, displayName, remoteRenderer,
+                    localRenderer, hasRemoteVideo, hasLocalVideo),
+          ),
+          // Source switcher pill (top-center) — only when at least one
+          // screen share is active AND there are 2+ sources. Camera-only
+          // DMs don't need a switcher.
+          if ((call.isScreenSharing || call.remoteScreenSharing) &&
+              _countActiveDmSources(call) >= 2)
+            Positioned(
+              top: HollowSpacing.sm,
+              left: 0,
+              right: 0,
+              child: Center(
+                child: _buildDmSourceSwitcher(
+                    hollow, call, localPeerId, widget.peerId),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildResizeHandle(HollowTheme hollow, double maxH) {
+    return MouseRegion(
+      cursor: SystemMouseCursors.resizeRow,
+      child: GestureDetector(
+        onVerticalDragUpdate: (details) {
+          setState(() {
+            _videoHeight =
+                (_videoHeight + details.delta.dy).clamp(_minVideoHeight, maxH);
+          });
+        },
+        child: Container(
+          height: 8,
+          color: Colors.transparent,
+          child: Center(
+            child: Container(
+              width: 32,
+              height: 3,
+              decoration: BoxDecoration(
+                color: hollow.border,
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// Control bar: timer (left), avatars (center, audio-only), controls
+  /// (right).
+  Widget _buildControlBar(
+      CallState call, HollowTheme hollow, bool hasAnyVideo, String localPeerId) {
+    return Padding(
+      padding: EdgeInsets.symmetric(
+        horizontal: HollowSpacing.lg,
+        vertical: hasAnyVideo ? HollowSpacing.sm : HollowSpacing.md,
+      ),
+      child: Row(
+        children: [
+          // Left: timer + status
+          StatusDot(color: hollow.success, size: 8, pulse: true),
+          const SizedBox(width: HollowSpacing.sm),
+          if (call.status == CallStatus.connecting || call.startedAt == null)
+            Text(
+              'Connecting...',
+              style: HollowTypography.caption.copyWith(
+                color: hollow.textSecondary,
+                fontSize: 12,
+              ),
+            )
+          else
+            CallDurationText(
+              startedAt: call.startedAt!,
+              style: HollowTypography.caption.copyWith(
+                color: hollow.textSecondary,
+                fontSize: 12,
+                fontFeatures: [const FontFeature.tabularFigures()],
+              ),
+            ),
+          // Center: avatars (audio-only — when video is on, they're in the
+          // rectangles).
+          if (!hasAnyVideo) ...[
+            const Spacer(),
+            _buildAudioAvatars(call, hollow, localPeerId),
+          ],
+          const Spacer(),
+          // Right: controls
+          _buildControls(call, hollow),
+        ],
+      ),
+    );
+  }
+
+  /// Speaking state comes from callSpeakingProvider via a scoped Consumer so
+  /// VAD flips rebuild ONLY these two avatars, not the whole inline call
+  /// panel.
+  Widget _buildAudioAvatars(
+      CallState call, HollowTheme hollow, String localPeerId) {
+    return Consumer(builder: (context, ref, _) {
+      final speaking = ref.watch(callSpeakingProvider);
+      return Row(children: [
+        SpeakingBorder(
+          isSpeaking: speaking.local,
+          child: _badgedCallAvatar(
+            hollow: hollow,
+            peerId: localPeerId,
+            muted: call.isMuted,
+            deafened: call.isDeafened,
+          ),
+        ),
+        const SizedBox(width: HollowSpacing.sm),
+        SpeakingBorder(
+          isSpeaking: speaking.remote,
+          child: _badgedCallAvatar(
+            hollow: hollow,
+            peerId: widget.peerId,
+            muted: call.remoteMuted,
+            deafened: call.remoteDeafened,
+          ),
+        ),
+      ]);
+    });
   }
 
   void _showVolumePopup(BuildContext context, Offset position) {
@@ -2807,238 +2680,159 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
   /// Screen share view: handles local sharing, remote sharing, and both sharing.
   Widget _buildScreenShareView(
       CallState call, HollowTheme hollow, RTCVideoRenderer? remoteRenderer) {
-    final bothSharing = call.isScreenSharing && call.remoteScreenSharing;
+    if (call.isScreenSharing && call.remoteScreenSharing) {
+      return _buildBothSharingView(call, hollow, remoteRenderer);
+    }
+    if (call.isScreenSharing) {
+      return _buildLocalShareBanner(call, hollow);
+    }
+    return _buildRemoteShareView(call, hollow, remoteRenderer);
+  }
 
-    if (bothSharing) {
-      // Both sharing — stacked: remote top, local banner bottom.
-      return Column(
-        children: [
-          // Remote screen (top, takes most space)
-          Expanded(
-            flex: 3,
-            child: Stack(
-              children: [
-                Positioned.fill(
-                  child: Container(
-                    color: Colors.black,
-                    child: remoteRenderer != null
-                        ? RepaintBoundary(
-                            child: RTCVideoView(
-                              remoteRenderer,
-                              mirror: false,
-                              objectFit:
-                                  RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
-                            ),
-                          )
-                        : const SizedBox.shrink(),
-                  ),
-                ),
-                if (call.remoteScreenShareLabel != null)
-                  Positioned(
-                    top: HollowSpacing.md,
-                    right: HollowSpacing.md,
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: HollowSpacing.sm,
-                        vertical: HollowSpacing.xs,
-                      ),
-                      decoration: BoxDecoration(
-                        color: hollow.surface.withValues(alpha: 0.85),
-                        borderRadius: BorderRadius.circular(hollow.radiusSm),
-                        border: Border.all(color: hollow.border),
-                      ),
-                      child: Text(
-                        call.remoteScreenShareLabel!,
-                        style: HollowTypography.caption.copyWith(
-                          color: hollow.textSecondary,
-                          fontSize: 11,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                    ),
-                  ),
-              ],
-            ),
-          ),
-          // Local banner (bottom, compact)
-          Container(
-            padding: const EdgeInsets.symmetric(vertical: HollowSpacing.sm),
-            color: hollow.elevated,
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Icon(LucideIcons.monitor,
-                    size: 16, color: hollow.accent.withValues(alpha: 0.6)),
-                const SizedBox(width: HollowSpacing.sm),
-                Text(
-                  'You are also sharing',
-                  style: HollowTypography.caption.copyWith(
-                    color: hollow.textSecondary,
-                    fontSize: 12,
-                  ),
-                ),
-                if (call.screenShareLabel != null) ...[
-                  const SizedBox(width: HollowSpacing.sm),
-                  Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: HollowSpacing.sm,
-                      vertical: HollowSpacing.xs,
-                    ),
-                    decoration: BoxDecoration(
-                      color: hollow.surface.withValues(alpha: 0.85),
-                      borderRadius: BorderRadius.circular(hollow.radiusSm),
-                      border: Border.all(color: hollow.border),
-                    ),
-                    child: Text(
-                      call.screenShareLabel!,
-                      style: HollowTypography.caption.copyWith(
-                        color: hollow.textSecondary,
-                        fontSize: 11,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                  ),
-                ],
-                const SizedBox(width: HollowSpacing.md),
-                HollowButton.danger(
-                  onPressed: () =>
-                      ref.read(callProvider.notifier).stopScreenShare(),
-                  compact: true,
-                  child: const Text('Stop'),
-                ),
-              ],
-            ),
-          ),
-        ],
-      );
-    } else if (call.isScreenSharing) {
-      // Only local sharing — show banner.
-      return Container(
-        color: hollow.elevated,
-        child: Center(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
+  /// Both sharing — stacked: remote top, local banner bottom.
+  Widget _buildBothSharingView(
+      CallState call, HollowTheme hollow, RTCVideoRenderer? remoteRenderer) {
+    return Column(
+      children: [
+        // Remote screen (top, takes most space)
+        Expanded(
+          flex: 3,
+          child: Stack(
             children: [
-              Icon(
-                LucideIcons.monitor,
-                size: 40,
-                color: hollow.accent.withValues(alpha: 0.6),
+              Positioned.fill(
+                child: Container(
+                  color: Colors.black,
+                  child: remoteRenderer != null
+                      ? RepaintBoundary(
+                          child: RTCVideoView(
+                            remoteRenderer,
+                            mirror: false,
+                            objectFit: RTCVideoViewObjectFit
+                                .RTCVideoViewObjectFitContain,
+                          ),
+                        )
+                      : const SizedBox.shrink(),
+                ),
               ),
-              const SizedBox(height: HollowSpacing.md),
+              if (call.remoteScreenShareLabel != null)
+                Positioned(
+                  top: HollowSpacing.md,
+                  right: HollowSpacing.md,
+                  child: _shareLabelChip(hollow, call.remoteScreenShareLabel!),
+                ),
+            ],
+          ),
+        ),
+        // Local banner (bottom, compact)
+        Container(
+          padding: const EdgeInsets.symmetric(vertical: HollowSpacing.sm),
+          color: hollow.elevated,
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(LucideIcons.monitor,
+                  size: 16, color: hollow.accent.withValues(alpha: 0.6)),
+              const SizedBox(width: HollowSpacing.sm),
               Text(
-                'You are sharing your screen',
-                style: HollowTypography.body.copyWith(
-                  color: hollow.textPrimary,
-                  fontWeight: FontWeight.w600,
+                'You are also sharing',
+                style: HollowTypography.caption.copyWith(
+                  color: hollow.textSecondary,
+                  fontSize: 12,
                 ),
               ),
               if (call.screenShareLabel != null) ...[
-                const SizedBox(height: HollowSpacing.sm),
-                Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: HollowSpacing.sm,
-                    vertical: HollowSpacing.xs,
-                  ),
-                  decoration: BoxDecoration(
-                    color: hollow.surface.withValues(alpha: 0.85),
-                    borderRadius: BorderRadius.circular(hollow.radiusSm),
-                    border: Border.all(color: hollow.border),
-                  ),
-                  child: Text(
-                    call.screenShareLabel!,
-                    style: HollowTypography.caption.copyWith(
-                      color: hollow.textSecondary,
-                      fontSize: 11,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                ),
+                const SizedBox(width: HollowSpacing.sm),
+                _shareLabelChip(hollow, call.screenShareLabel!),
               ],
-              const SizedBox(height: HollowSpacing.md),
+              const SizedBox(width: HollowSpacing.md),
               HollowButton.danger(
                 onPressed: () =>
                     ref.read(callProvider.notifier).stopScreenShare(),
                 compact: true,
-                child: const Text('Stop Sharing'),
+                child: const Text('Stop'),
               ),
             ],
           ),
         ),
-      );
-    } else {
-      // Only remote sharing — show their screen (Contain, never mirror).
-      return Stack(
-        children: [
-          Positioned.fill(
-            child: Container(
-              color: Colors.black,
-              child: remoteRenderer != null
-                  ? RepaintBoundary(
-                      child: RTCVideoView(
-                        remoteRenderer,
-                        mirror: false,
-                        objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
-                      ),
-                    )
-                  : Center(
-                      child: Text(
-                        'Waiting for screen share...',
-                        style: HollowTypography.caption.copyWith(
-                          color: hollow.textSecondary,
-                        ),
-                      ),
-                    ),
+      ],
+    );
+  }
+
+  /// Only local sharing — show banner.
+  Widget _buildLocalShareBanner(CallState call, HollowTheme hollow) {
+    return Container(
+      color: hollow.elevated,
+      child: Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              LucideIcons.monitor,
+              size: 40,
+              color: hollow.accent.withValues(alpha: 0.6),
             ),
-          ),
-          if (call.remoteScreenShareLabel != null)
-            Positioned(
-              top: HollowSpacing.md,
-              right: HollowSpacing.md,
-              child: Container(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: HollowSpacing.sm,
-                  vertical: HollowSpacing.xs,
-                ),
-                decoration: BoxDecoration(
-                  color: hollow.surface.withValues(alpha: 0.85),
-                  borderRadius: BorderRadius.circular(hollow.radiusSm),
-                  border: Border.all(color: hollow.border),
-                ),
-                child: Text(
-                  call.remoteScreenShareLabel!,
-                  style: HollowTypography.caption.copyWith(
-                    color: hollow.textSecondary,
-                    fontSize: 11,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
+            const SizedBox(height: HollowSpacing.md),
+            Text(
+              'You are sharing your screen',
+              style: HollowTypography.body.copyWith(
+                color: hollow.textPrimary,
+                fontWeight: FontWeight.w600,
               ),
             ),
-        ],
-      );
-    }
+            if (call.screenShareLabel != null) ...[
+              const SizedBox(height: HollowSpacing.sm),
+              _shareLabelChip(hollow, call.screenShareLabel!),
+            ],
+            const SizedBox(height: HollowSpacing.md),
+            HollowButton.danger(
+              onPressed: () =>
+                  ref.read(callProvider.notifier).stopScreenShare(),
+              compact: true,
+              child: const Text('Stop Sharing'),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
-  Future<void> _handleScreenShareToggle(CallState call) async {
-    if (call.isScreenSharing) {
-      ref.read(callProvider.notifier).stopScreenShare();
-    } else {
-      final selection = await showScreenShareDialog(context);
-      if (selection != null && mounted) {
-        ref.read(callProvider.notifier).startScreenShare(
-              sourceId: selection.sourceId,
-              width: selection.width,
-              height: selection.height,
-              fps: selection.fps,
-              shareAudio: selection.shareAudio,
-              pid: selection.pid,
-              windowHwnd: selection.windowHwnd,
-            );
-      }
-    }
+  /// Only remote sharing — show their screen (Contain, never mirror).
+  Widget _buildRemoteShareView(
+      CallState call, HollowTheme hollow, RTCVideoRenderer? remoteRenderer) {
+    return Stack(
+      children: [
+        Positioned.fill(
+          child: Container(
+            color: Colors.black,
+            child: remoteRenderer != null
+                ? RepaintBoundary(
+                    child: RTCVideoView(
+                      remoteRenderer,
+                      mirror: false,
+                      objectFit:
+                          RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
+                    ),
+                  )
+                : Center(
+                    child: Text(
+                      'Waiting for screen share...',
+                      style: HollowTypography.caption.copyWith(
+                        color: hollow.textSecondary,
+                      ),
+                    ),
+                  ),
+          ),
+        ),
+        if (call.remoteScreenShareLabel != null)
+          Positioned(
+            top: HollowSpacing.md,
+            right: HollowSpacing.md,
+            child: _shareLabelChip(hollow, call.remoteScreenShareLabel!),
+          ),
+      ],
+    );
   }
 
-  /// Shared row of call controls: mute, camera, screen share, record, end call.
   /// Call avatar with muted (bottom-left) / deafened (bottom-right) badges —
   /// same convention as the mobile voice avatars.
   Widget _badgedCallAvatar({
@@ -3069,6 +2863,8 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
     );
   }
 
+  /// Shared row of call controls: mute, deafen, camera, screen share,
+  /// record, end call.
   Widget _buildControls(CallState call, HollowTheme hollow) {
     final rec = ref.watch(recordingProvider);
     const iconSize = 20.0;
@@ -3083,154 +2879,85 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
           const RecordingIndicator(),
           const SizedBox(width: HollowSpacing.sm),
         ],
-        HollowTooltip(
-          message: call.isMuted ? 'Unmute' : 'Mute',
-          child: HollowPressable(
-            semanticLabel: call.isMuted ? 'Unmute' : 'Mute',
-            onTap: () => ref.read(callProvider.notifier).toggleMute(),
-            borderRadius: BorderRadius.circular(hollow.radiusSm),
-            padding: buttonPadding,
-            child: Icon(
-              call.isMuted ? LucideIcons.micOff : LucideIcons.mic,
-              size: iconSize,
-              color: call.isMuted ? hollow.error : hollow.textSecondary,
-            ),
-          ),
-        ),
+        _muteCallButton(ref, hollow, call,
+            iconSize: iconSize, padding: buttonPadding),
         const SizedBox(width: HollowSpacing.xs),
-        HollowTooltip(
-          message: call.isDeafened ? 'Undeafen' : 'Deafen',
-          child: HollowPressable(
-            semanticLabel: call.isDeafened ? 'Undeafen' : 'Deafen',
-            onTap: call.status == CallStatus.active
-                ? () => ref.read(callProvider.notifier).toggleDeafen()
-                : null,
-            borderRadius: BorderRadius.circular(hollow.radiusSm),
-            padding: buttonPadding,
-            child: Icon(
-              LucideIcons.headphones,
-              size: iconSize,
-              color: call.isDeafened ? hollow.error : hollow.textSecondary,
-            ),
-          ),
-        ),
+        _buildDeafenButton(call, hollow, iconSize, buttonPadding),
         const SizedBox(width: HollowSpacing.xs),
-        HollowTooltip(
-          message: call.isVideoEnabled
-              ? 'Turn off camera'
-              : 'Turn on camera',
-          child: HollowPressable(
-            semanticLabel: call.isVideoEnabled
-                ? 'Turn off camera'
-                : 'Turn on camera',
-            onTap: call.status == CallStatus.active
-                ? () => ref.read(callProvider.notifier).toggleVideo()
-                : null,
-            borderRadius: BorderRadius.circular(hollow.radiusSm),
-            padding: buttonPadding,
-            child: Icon(
-              call.isVideoEnabled
-                  ? LucideIcons.video
-                  : LucideIcons.videoOff,
-              size: iconSize,
-              color: (call.isVideoEnabled
-                      ? hollow.accent
-                      : hollow.textSecondary),
-            ),
-          ),
-        ),
+        _cameraCallButton(ref, hollow, call,
+            iconSize: iconSize, padding: buttonPadding),
         // Screen share (desktop only)
         if (Platform.isWindows || Platform.isLinux || Platform.isMacOS) ...[
           const SizedBox(width: HollowSpacing.xs),
-          HollowTooltip(
-            message: call.isScreenSharing
-                ? 'Stop sharing'
-                : 'Share screen',
-            child: HollowPressable(
-              semanticLabel: call.isScreenSharing
-                  ? 'Stop sharing screen'
-                  : 'Share screen',
-              onTap: call.status == CallStatus.active
-                  ? () => _handleScreenShareToggle(call)
-                  : null,
-              borderRadius: BorderRadius.circular(hollow.radiusSm),
-              padding: buttonPadding,
-              child: Icon(
-                call.isScreenSharing
-                    ? LucideIcons.monitorOff
-                    : LucideIcons.monitor,
-                size: iconSize,
-                color: call.isScreenSharing
-                    ? hollow.accent
-                    : hollow.textSecondary,
-              ),
-            ),
-          ),
+          _screenShareCallButton(context, ref, hollow, call,
+              iconSize: iconSize, padding: buttonPadding),
         ],
         // Record (Windows + macOS only). On macOS < 13.0 the native recorder
         // doesn't exist, so the button is disabled with an explanatory tooltip.
         // Hidden on Linux — no working native recorder there yet.
         if (Platform.isWindows || Platform.isMacOS) ...[
           const SizedBox(width: HollowSpacing.xs),
-          HollowTooltip(
-            message: MacOsScreenAudioSupport.recordBlockedByOldOs
-                ? 'Recording needs macOS 13.0 or later'
-                : (rec.isMyRecording ? 'Stop recording' : 'Record this call'),
-            child: HollowPressable(
-              disabled: MacOsScreenAudioSupport.recordBlockedByOldOs,
-              semanticLabel:
-                  rec.isMyRecording ? 'Stop recording' : 'Record this call',
-              onTap: () {
-                final notifier = ref.read(recordingProvider.notifier);
-                if (rec.isMyRecording) {
-                  notifier.stopRecording();
-                } else {
-                  notifier.startRecording();
-                }
-              },
-              borderRadius: BorderRadius.circular(hollow.radiusSm),
-              padding: buttonPadding,
-              child: Icon(
-                rec.isMyRecording
-                    ? LucideIcons.stopCircle
-                    : LucideIcons.circle,
-                size: iconSize,
-                color: rec.isMyRecording
-                    ? const Color(0xFFE53935)
-                    : hollow.textSecondary,
-              ),
-            ),
-          ),
+          _buildRecordButton(rec, hollow, iconSize, buttonPadding),
         ],
         const SizedBox(width: HollowSpacing.sm),
-        HollowTooltip(
-          message: 'End call',
-          child: HollowPressable(
-            semanticLabel: 'End call',
-            onTap: () => ref.read(callProvider.notifier).endCall(),
-            borderRadius: BorderRadius.circular(hollow.radiusSm),
-            padding: const EdgeInsets.symmetric(
-              horizontal: HollowSpacing.sm,
-              vertical: HollowSpacing.xs,
-            ),
-            child: Container(
-              padding: const EdgeInsets.symmetric(
-                horizontal: HollowSpacing.md,
-                vertical: HollowSpacing.sm,
-              ),
-              decoration: BoxDecoration(
-                color: hollow.error.withValues(alpha: 0.15),
-                borderRadius: BorderRadius.circular(hollow.radiusSm),
-              ),
-              child: Icon(
-                LucideIcons.phoneOff,
-                size: iconSize,
-                color: hollow.error,
-              ),
-            ),
-          ),
-        ),
+        _endCallButton(ref, hollow,
+            iconSize: iconSize,
+            innerPadding: const EdgeInsets.symmetric(
+              horizontal: HollowSpacing.md,
+              vertical: HollowSpacing.sm,
+            )),
       ],
+    );
+  }
+
+  Widget _buildDeafenButton(CallState call, HollowTheme hollow,
+      double iconSize, EdgeInsetsGeometry padding) {
+    final label = call.isDeafened ? 'Undeafen' : 'Deafen';
+    return HollowTooltip(
+      message: label,
+      child: HollowPressable(
+        semanticLabel: label,
+        onTap: call.status == CallStatus.active
+            ? () => ref.read(callProvider.notifier).toggleDeafen()
+            : null,
+        borderRadius: BorderRadius.circular(hollow.radiusSm),
+        padding: padding,
+        child: Icon(
+          LucideIcons.headphones,
+          size: iconSize,
+          color: call.isDeafened ? hollow.error : hollow.textSecondary,
+        ),
+      ),
+    );
+  }
+
+  Widget _buildRecordButton(RecordingState rec, HollowTheme hollow,
+      double iconSize, EdgeInsetsGeometry padding) {
+    return HollowTooltip(
+      message: MacOsScreenAudioSupport.recordBlockedByOldOs
+          ? 'Recording needs macOS 13.0 or later'
+          : (rec.isMyRecording ? 'Stop recording' : 'Record this call'),
+      child: HollowPressable(
+        disabled: MacOsScreenAudioSupport.recordBlockedByOldOs,
+        semanticLabel:
+            rec.isMyRecording ? 'Stop recording' : 'Record this call',
+        onTap: () {
+          final notifier = ref.read(recordingProvider.notifier);
+          if (rec.isMyRecording) {
+            notifier.stopRecording();
+          } else {
+            notifier.startRecording();
+          }
+        },
+        borderRadius: BorderRadius.circular(hollow.radiusSm),
+        padding: padding,
+        child: Icon(
+          rec.isMyRecording ? LucideIcons.stopCircle : LucideIcons.circle,
+          size: iconSize,
+          color:
+              rec.isMyRecording ? const Color(0xFFE53935) : hollow.textSecondary,
+        ),
+      ),
     );
   }
 }
@@ -3378,234 +3105,210 @@ class _ScreenShareFullView extends ConsumerWidget {
     // _resolveBig's fallback so it shows the right thing.)
 
     if (bothSharing) {
-      // PiP shows the OTHER screen (the one that isn't the big tile).
-      final isLocalBig = bigChoice.isLocal && !bigChoice.isCamera;
-      final pipRenderer = isLocalBig ? remoteScreen : localScreen;
-      final pipOwnerLabel = isLocalBig ? 'Them' : 'You';
-      final pipIsLocal = !isLocalBig;
+      return _buildBothSharingStack(
+          ref, call, hollow, bigChoice, remoteScreen, localScreen, localPeerId);
+    }
+    return _buildSingleSourceStack(call, hollow, notifier, bigChoice);
+  }
 
-      return Stack(
-        children: [
-          // Big tile — focused source (could be a camera or a screen).
-          Positioned.fill(
-            child: Container(
-              color: Colors.black,
-              child: _renderTile(
-                bigChoice.renderer,
-                isCamera: bigChoice.isCamera,
-                isLocal: bigChoice.isLocal,
-              ),
+  /// Both sharing: big tile = focused source, PiP = the OTHER screen.
+  Widget _buildBothSharingStack(
+    WidgetRef ref,
+    CallState call,
+    HollowTheme hollow,
+    ({RTCVideoRenderer? renderer, bool isCamera, bool isLocal}) bigChoice,
+    RTCVideoRenderer? remoteScreen,
+    RTCVideoRenderer? localScreen,
+    String localPeerId,
+  ) {
+    // PiP shows the OTHER screen (the one that isn't the big tile).
+    final isLocalBig = bigChoice.isLocal && !bigChoice.isCamera;
+    final pipRenderer = isLocalBig ? remoteScreen : localScreen;
+    final bigLabel = bigChoice.isLocal
+        ? call.screenShareLabel
+        : call.remoteScreenShareLabel;
+
+    return Stack(
+      children: [
+        // Big tile — focused source (could be a camera or a screen).
+        Positioned.fill(
+          child: Container(
+            color: Colors.black,
+            child: _renderTile(
+              bigChoice.renderer,
+              isCamera: bigChoice.isCamera,
+              isLocal: bigChoice.isLocal,
             ),
           ),
-          // PiP tile — the other screen. Tap to swap focus.
+        ),
+        // PiP tile — the other screen. Tap to swap focus.
+        Positioned(
+          right: HollowSpacing.md,
+          bottom: HollowSpacing.md,
+          child: _buildPipTile(ref, hollow, pipRenderer,
+              pipIsLocal: !isLocalBig, localPeerId: localPeerId),
+        ),
+        // Quality label for the big tile (top-left).
+        if (!bigChoice.isCamera && bigLabel != null)
           Positioned(
-            right: HollowSpacing.md,
-            bottom: HollowSpacing.md,
-            child: GestureDetector(
-              onTap: () {
-                ref.read(focusedDmSourceProvider.notifier).state =
-                    DmFocusedSource(
-                  peerId: pipIsLocal ? localPeerId : peerId,
-                  type: 'screen',
-                );
-              },
-              child: ClipRRect(
-                borderRadius: BorderRadius.circular(HollowRadius.md),
-                child: Container(
-                  width: 220,
-                  height: 132,
-                  decoration: BoxDecoration(
-                    color: Colors.black,
-                    border: Border.all(
-                      color: hollow.border.withValues(alpha: 0.6),
-                      width: 1,
-                    ),
-                  ),
-                  child: Stack(
-                    children: [
-                      Positioned.fill(
-                        child: _renderTile(
-                          pipRenderer,
-                          isCamera: false,
-                          isLocal: pipIsLocal,
-                        ),
-                      ),
-                      // Small label so the user knows which screen this is.
-                      Positioned(
-                        left: HollowSpacing.xs,
-                        bottom: HollowSpacing.xs,
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: HollowSpacing.xs,
-                            vertical: 2,
-                          ),
-                          decoration: BoxDecoration(
-                            color: Colors.black.withValues(alpha: 0.55),
-                            borderRadius: BorderRadius.circular(4),
-                          ),
-                          child: Text(
-                            pipOwnerLabel,
-                            style: HollowTypography.caption.copyWith(
-                              color: Colors.white,
-                              fontSize: 10,
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
+            top: HollowSpacing.md,
+            left: HollowSpacing.md,
+            child: _shareLabelChip(hollow, bigLabel),
+          ),
+        // Small "Stop sharing" affordance, top-right.
+        Positioned(
+          top: HollowSpacing.md,
+          right: HollowSpacing.md,
+          child: HollowButton.danger(
+            onPressed: () => ref.read(callProvider.notifier).stopScreenShare(),
+            compact: true,
+            icon: const Icon(LucideIcons.monitorOff, size: 14),
+            child: const Text('Stop sharing'),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildPipTile(
+    WidgetRef ref,
+    HollowTheme hollow,
+    RTCVideoRenderer? pipRenderer, {
+    required bool pipIsLocal,
+    required String localPeerId,
+  }) {
+    return GestureDetector(
+      onTap: () {
+        ref.read(focusedDmSourceProvider.notifier).state = DmFocusedSource(
+          peerId: pipIsLocal ? localPeerId : peerId,
+          type: 'screen',
+        );
+      },
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(HollowRadius.md),
+        child: Container(
+          width: 220,
+          height: 132,
+          decoration: BoxDecoration(
+            color: Colors.black,
+            border: Border.all(
+              color: hollow.border.withValues(alpha: 0.6),
+              width: 1,
+            ),
+          ),
+          child: Stack(
+            children: [
+              Positioned.fill(
+                child: _renderTile(
+                  pipRenderer,
+                  isCamera: false,
+                  isLocal: pipIsLocal,
                 ),
               ),
-            ),
-          ),
-          // Quality label for the big tile (top-left).
-          if (!bigChoice.isCamera) ...[
-            if (bigChoice.isLocal && call.screenShareLabel != null ||
-                !bigChoice.isLocal && call.remoteScreenShareLabel != null)
+              // Small label so the user knows which screen this is.
               Positioned(
-                top: HollowSpacing.md,
-                left: HollowSpacing.md,
+                left: HollowSpacing.xs,
+                bottom: HollowSpacing.xs,
                 child: Container(
                   padding: const EdgeInsets.symmetric(
-                    horizontal: HollowSpacing.sm,
-                    vertical: HollowSpacing.xs,
+                    horizontal: HollowSpacing.xs,
+                    vertical: 2,
                   ),
                   decoration: BoxDecoration(
-                    color: hollow.surface.withValues(alpha: 0.85),
-                    borderRadius: BorderRadius.circular(hollow.radiusSm),
-                    border: Border.all(color: hollow.border),
+                    color: Colors.black.withValues(alpha: 0.55),
+                    borderRadius: BorderRadius.circular(4),
                   ),
                   child: Text(
-                    bigChoice.isLocal
-                        ? call.screenShareLabel!
-                        : call.remoteScreenShareLabel!,
+                    pipIsLocal ? 'You' : 'Them',
                     style: HollowTypography.caption.copyWith(
-                      color: hollow.textSecondary,
-                      fontSize: 11,
+                      color: Colors.white,
+                      fontSize: 10,
                       fontWeight: FontWeight.w600,
                     ),
                   ),
                 ),
               ),
-          ],
-          // Small "Stop sharing" affordance, top-right.
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// Only one peer is sharing a screen (or only cameras are present because
+  /// we got opened in this view from a camera focus tap). Show whatever the
+  /// focus resolved to in the big tile.
+  Widget _buildSingleSourceStack(
+    CallState call,
+    HollowTheme hollow,
+    CallNotifier notifier,
+    ({RTCVideoRenderer? renderer, bool isCamera, bool isLocal}) bigChoice,
+  ) {
+    return Stack(
+      children: [
+        Positioned.fill(
+          child: Container(
+            color: Colors.black,
+            child: bigChoice.renderer != null
+                ? _renderTile(
+                    bigChoice.renderer,
+                    isCamera: bigChoice.isCamera,
+                    isLocal: bigChoice.isLocal,
+                  )
+                : Center(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          LucideIcons.monitor,
+                          size: 48,
+                          color: hollow.textSecondary.withValues(alpha: 0.3),
+                        ),
+                        const SizedBox(height: HollowSpacing.md),
+                        Text(
+                          call.isScreenSharing
+                              ? 'You are sharing your screen'
+                              : 'Waiting for screen share...',
+                          style: HollowTypography.caption.copyWith(
+                            color: hollow.textSecondary,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+          ),
+        ),
+        // Quality label + stop button (local sharing) or just quality label
+        // (remote sharing).
+        if (call.isScreenSharing)
           Positioned(
             top: HollowSpacing.md,
             right: HollowSpacing.md,
-            child: HollowButton.danger(
-              onPressed: () => notifier.stopScreenShare(),
-              compact: true,
-              icon: const Icon(LucideIcons.monitorOff, size: 14),
-              child: const Text('Stop sharing'),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (call.screenShareLabel != null)
+                  _shareLabelChip(hollow, call.screenShareLabel!),
+                if (call.screenShareLabel != null)
+                  const SizedBox(width: HollowSpacing.sm),
+                HollowButton.danger(
+                  onPressed: () => notifier.stopScreenShare(),
+                  compact: true,
+                  icon: const Icon(LucideIcons.monitorOff, size: 14),
+                  child: const Text('Stop sharing'),
+                ),
+              ],
             ),
+          )
+        else if (call.remoteScreenSharing &&
+            call.remoteScreenShareLabel != null)
+          Positioned(
+            top: HollowSpacing.md,
+            right: HollowSpacing.md,
+            child: _shareLabelChip(hollow, call.remoteScreenShareLabel!),
           ),
-        ],
-      );
-    } else {
-      // Only one peer is sharing a screen (or only cameras are present
-      // because we got opened in this view from a camera focus tap).
-      // Show whatever the focus resolved to in the big tile.
-      return Stack(
-        children: [
-          Positioned.fill(
-            child: Container(
-              color: Colors.black,
-              child: bigChoice.renderer != null
-                  ? _renderTile(
-                      bigChoice.renderer,
-                      isCamera: bigChoice.isCamera,
-                      isLocal: bigChoice.isLocal,
-                    )
-                  : Center(
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(
-                            LucideIcons.monitor,
-                            size: 48,
-                            color: hollow.textSecondary.withValues(alpha: 0.3),
-                          ),
-                          const SizedBox(height: HollowSpacing.md),
-                          Text(
-                            call.isScreenSharing
-                                ? 'You are sharing your screen'
-                                : 'Waiting for screen share...',
-                            style: HollowTypography.caption.copyWith(
-                              color: hollow.textSecondary,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-            ),
-          ),
-          // Quality label + stop button (local sharing) or just quality label (remote sharing).
-          if (call.isScreenSharing)
-            Positioned(
-              top: HollowSpacing.md,
-              right: HollowSpacing.md,
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  if (call.screenShareLabel != null)
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: HollowSpacing.sm,
-                        vertical: HollowSpacing.xs,
-                      ),
-                      decoration: BoxDecoration(
-                        color: hollow.surface.withValues(alpha: 0.85),
-                        borderRadius: BorderRadius.circular(hollow.radiusSm),
-                        border: Border.all(color: hollow.border),
-                      ),
-                      child: Text(
-                        call.screenShareLabel!,
-                        style: HollowTypography.caption.copyWith(
-                          color: hollow.textSecondary,
-                          fontSize: 11,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                    ),
-                  if (call.screenShareLabel != null)
-                    const SizedBox(width: HollowSpacing.sm),
-                  HollowButton.danger(
-                    onPressed: () => notifier.stopScreenShare(),
-                    compact: true,
-                    icon: const Icon(LucideIcons.monitorOff, size: 14),
-                    child: const Text('Stop sharing'),
-                  ),
-                ],
-              ),
-            )
-          else if (call.remoteScreenSharing && call.remoteScreenShareLabel != null)
-            Positioned(
-              top: HollowSpacing.md,
-              right: HollowSpacing.md,
-              child: Container(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: HollowSpacing.sm,
-                  vertical: HollowSpacing.xs,
-                ),
-                decoration: BoxDecoration(
-                  color: hollow.surface.withValues(alpha: 0.85),
-                  borderRadius: BorderRadius.circular(hollow.radiusSm),
-                  border: Border.all(color: hollow.border),
-                ),
-                child: Text(
-                  call.remoteScreenShareLabel!,
-                  style: HollowTypography.caption.copyWith(
-                    color: hollow.textSecondary,
-                    fontSize: 11,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-              ),
-            ),
-        ],
-      );
-    }
+      ],
+    );
   }
 
   /// Resolve which renderer to show in the big tile based on the focus state
@@ -3621,23 +3324,16 @@ class _ScreenShareFullView extends ConsumerWidget {
     required RTCVideoRenderer? remoteCamera,
     required RTCVideoRenderer? localCamera,
   }) {
-    // Try focused source first.
-    if (focused.peerId != null && focused.type != null) {
-      final isLocal = focused.peerId == localPeerId;
-      if (focused.type == 'screen') {
-        final r = isLocal ? localScreen : remoteScreen;
-        final active = isLocal ? call.isScreenSharing : call.remoteScreenSharing;
-        if (active && r != null) {
-          return (renderer: r, isCamera: false, isLocal: isLocal);
-        }
-      } else if (focused.type == 'camera') {
-        final r = isLocal ? localCamera : remoteCamera;
-        final active = isLocal ? call.isVideoEnabled : call.remoteVideoEnabled;
-        if (active && r != null) {
-          return (renderer: r, isCamera: true, isLocal: isLocal);
-        }
-      }
-    }
+    final fromFocus = _resolveFocusedSource(
+      focused: focused,
+      call: call,
+      localPeerId: localPeerId,
+      remoteScreen: remoteScreen,
+      localScreen: localScreen,
+      remoteCamera: remoteCamera,
+      localCamera: localCamera,
+    );
+    if (fromFocus != null) return fromFocus;
 
     // Fallback priority: remote screen → local screen → remote camera → local camera.
     if (call.remoteScreenSharing && remoteScreen != null) {
@@ -3653,6 +3349,36 @@ class _ScreenShareFullView extends ConsumerWidget {
       return (renderer: localCamera, isCamera: true, isLocal: true);
     }
     return (renderer: null, isCamera: false, isLocal: false);
+  }
+
+  /// The focused source, or null when nothing is focused / the focused
+  /// source isn't currently active.
+  ({RTCVideoRenderer? renderer, bool isCamera, bool isLocal})?
+      _resolveFocusedSource({
+    required DmFocusedSource focused,
+    required CallState call,
+    required String localPeerId,
+    required RTCVideoRenderer? remoteScreen,
+    required RTCVideoRenderer? localScreen,
+    required RTCVideoRenderer? remoteCamera,
+    required RTCVideoRenderer? localCamera,
+  }) {
+    if (focused.peerId == null || focused.type == null) return null;
+    final isLocal = focused.peerId == localPeerId;
+    if (focused.type == 'screen') {
+      final r = isLocal ? localScreen : remoteScreen;
+      final active = isLocal ? call.isScreenSharing : call.remoteScreenSharing;
+      if (active && r != null) {
+        return (renderer: r, isCamera: false, isLocal: isLocal);
+      }
+    } else if (focused.type == 'camera') {
+      final r = isLocal ? localCamera : remoteCamera;
+      final active = isLocal ? call.isVideoEnabled : call.remoteVideoEnabled;
+      if (active && r != null) {
+        return (renderer: r, isCamera: true, isLocal: isLocal);
+      }
+    }
+    return null;
   }
 }
 
@@ -3673,25 +3399,6 @@ class _ScreenShareControlsOverlayState
     extends ConsumerState<_ScreenShareControlsOverlay> {
   // Duration rendered by CallDurationText — the old per-second setState
   // rebuilt the whole controls overlay (over a live screen-share video).
-
-  Future<void> _handleScreenShareToggle(CallState call) async {
-    if (call.isScreenSharing) {
-      ref.read(callProvider.notifier).stopScreenShare();
-    } else {
-      final selection = await showScreenShareDialog(context);
-      if (selection != null && mounted) {
-        ref.read(callProvider.notifier).startScreenShare(
-              sourceId: selection.sourceId,
-              width: selection.width,
-              height: selection.height,
-              fps: selection.fps,
-              shareAudio: selection.shareAudio,
-              pid: selection.pid,
-              windowHwnd: selection.windowHwnd,
-            );
-      }
-    }
-  }
 
   @override
   Widget build(BuildContext context) {
@@ -3754,102 +3461,26 @@ class _ScreenShareControlsOverlayState
           ],
           const SizedBox(width: HollowSpacing.lg),
           // Mute
-          HollowTooltip(
-            message: call.isMuted ? 'Unmute' : 'Mute',
-            child: HollowPressable(
-              semanticLabel: call.isMuted ? 'Unmute' : 'Mute',
-              onTap: () => ref.read(callProvider.notifier).toggleMute(),
-              borderRadius: BorderRadius.circular(hollow.radiusSm),
-              padding: const EdgeInsets.all(HollowSpacing.xs),
-              child: Icon(
-                call.isMuted ? LucideIcons.micOff : LucideIcons.mic,
-                size: 16,
-                color: call.isMuted ? hollow.error : hollow.textSecondary,
-              ),
-            ),
-          ),
+          _muteCallButton(ref, hollow, call,
+              iconSize: 16, padding: const EdgeInsets.all(HollowSpacing.xs)),
           const SizedBox(width: HollowSpacing.xs),
           // Camera toggle (independent of screen share — separate PCs)
-          HollowTooltip(
-            message: call.isVideoEnabled
-                ? 'Turn off camera'
-                : 'Turn on camera',
-            child: HollowPressable(
-              semanticLabel: call.isVideoEnabled
-                  ? 'Turn off camera'
-                  : 'Turn on camera',
-              onTap: call.status == CallStatus.active
-                  ? () => ref.read(callProvider.notifier).toggleVideo()
-                  : null,
-              borderRadius: BorderRadius.circular(hollow.radiusSm),
-              padding: const EdgeInsets.all(HollowSpacing.xs),
-              child: Icon(
-                call.isVideoEnabled
-                    ? LucideIcons.video
-                    : LucideIcons.videoOff,
-                size: 16,
-                color: call.isVideoEnabled
-                    ? hollow.accent
-                    : hollow.textSecondary,
-              ),
-            ),
-          ),
+          _cameraCallButton(ref, hollow, call,
+              iconSize: 16, padding: const EdgeInsets.all(HollowSpacing.xs)),
           // Screen share toggle (desktop only)
           if (Platform.isWindows || Platform.isLinux || Platform.isMacOS) ...[
             const SizedBox(width: HollowSpacing.xs),
-            HollowTooltip(
-              message:
-                  call.isScreenSharing ? 'Stop sharing' : 'Share screen',
-              child: HollowPressable(
-                semanticLabel: call.isScreenSharing
-                    ? 'Stop sharing screen'
-                    : 'Share screen',
-                onTap: call.status == CallStatus.active
-                    ? () => _handleScreenShareToggle(call)
-                    : null,
-                borderRadius: BorderRadius.circular(hollow.radiusSm),
-                padding: const EdgeInsets.all(HollowSpacing.xs),
-                child: Icon(
-                  call.isScreenSharing
-                      ? LucideIcons.monitorOff
-                      : LucideIcons.monitor,
-                  size: 16,
-                  color: call.isScreenSharing
-                      ? hollow.accent
-                      : hollow.textSecondary,
-                ),
-              ),
-            ),
+            _screenShareCallButton(context, ref, hollow, call,
+                iconSize: 16, padding: const EdgeInsets.all(HollowSpacing.xs)),
           ],
           const SizedBox(width: HollowSpacing.sm),
           // End call
-          HollowTooltip(
-            message: 'End call',
-            child: HollowPressable(
-              semanticLabel: 'End call',
-              onTap: () => ref.read(callProvider.notifier).endCall(),
-              borderRadius: BorderRadius.circular(hollow.radiusSm),
-              padding: const EdgeInsets.symmetric(
+          _endCallButton(ref, hollow,
+              iconSize: 14,
+              innerPadding: const EdgeInsets.symmetric(
                 horizontal: HollowSpacing.sm,
-                vertical: HollowSpacing.xs,
-              ),
-              child: Container(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: HollowSpacing.sm,
-                  vertical: 4,
-                ),
-                decoration: BoxDecoration(
-                  color: hollow.error.withValues(alpha: 0.15),
-                  borderRadius: BorderRadius.circular(hollow.radiusSm),
-                ),
-                child: Icon(
-                  LucideIcons.phoneOff,
-                  size: 14,
-                  color: hollow.error,
-                ),
-              ),
-            ),
-          ),
+                vertical: 4,
+              )),
         ],
       ),
     );
@@ -3985,79 +3616,9 @@ class _DmProfilePanel extends ConsumerWidget {
               padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.md),
               child: Column(
                 children: [
-                  // Avatar with status dot
-                  Stack(
-                    clipBehavior: Clip.none,
-                    children: [
-                      Container(
-                        decoration: BoxDecoration(
-                          borderRadius: BorderRadius.circular(hollow.radiusMd + 2),
-                          border: Border.all(color: hollow.surface, width: 3),
-                        ),
-                        child: HollowAvatar(
-                          peerId: peerId,
-                          size: 64,
-                          animate: true,
-                        ),
-                      ),
-                      Positioned(
-                        right: 0,
-                        bottom: 0,
-                        child: Container(
-                          decoration: BoxDecoration(
-                            color: hollow.surface,
-                            shape: BoxShape.circle,
-                          ),
-                          padding: const EdgeInsets.all(2),
-                          child: StatusDot(
-                            color: isOnline ? hollow.success : hollow.textSecondary,
-                            size: 10,
-                            pulse: isOnline,
-                            filled: isOnline,
-                            semanticLabel: isOnline ? 'Online' : 'Offline',
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
+                  _buildAvatarWithStatus(hollow, isOnline),
                   const SizedBox(height: HollowSpacing.sm),
-
-                  // Name(s)
-                  if (localNick != null && localNick.isNotEmpty) ...[
-                    Text(
-                      localNick,
-                      style: HollowTypography.subheading.copyWith(
-                        color: hollow.textPrimary,
-                        fontWeight: FontWeight.w700,
-                        fontSize: 15,
-                      ),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      textAlign: TextAlign.center,
-                    ),
-                    Text(
-                      shownName,
-                      style: HollowTypography.caption.copyWith(
-                        color: hollow.textSecondary,
-                        fontSize: 11,
-                      ),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      textAlign: TextAlign.center,
-                    ),
-                  ] else
-                    Text(
-                      shownName,
-                      style: HollowTypography.subheading.copyWith(
-                        color: hollow.textPrimary,
-                        fontWeight: FontWeight.w700,
-                        fontSize: 15,
-                      ),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      textAlign: TextAlign.center,
-                    ),
-
+                  ..._buildNameLines(hollow, localNick, shownName),
                   // Status
                   if (status.isNotEmpty) ...[
                     const SizedBox(height: HollowSpacing.xxs),
@@ -4073,42 +3634,10 @@ class _DmProfilePanel extends ConsumerWidget {
                       textAlign: TextAlign.center,
                     ),
                   ],
-
                   // Twitch badge
                   if (profile != null && profile.twitchUsername.isNotEmpty) ...[
                     const SizedBox(height: HollowSpacing.xs),
-                    GestureDetector(
-                      onTap: () => launchUrl(
-                        Uri.parse('https://twitch.tv/${profile.twitchUsername}'),
-                        mode: LaunchMode.externalApplication,
-                      ),
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: HollowSpacing.sm,
-                          vertical: 3,
-                        ),
-                        decoration: BoxDecoration(
-                          color: const Color(0xFF9146FF).withValues(alpha: 0.12),
-                          borderRadius: BorderRadius.circular(hollow.radiusSm),
-                        ),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            const Icon(BrandIcons.twitch,
-                                size: 11, color: Color(0xFF9146FF)),
-                            const SizedBox(width: 4),
-                            Text(
-                              profile.twitchUsername,
-                              style: HollowTypography.caption.copyWith(
-                                color: const Color(0xFF9146FF),
-                                fontSize: 11,
-                                fontWeight: FontWeight.w500,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
+                    _buildTwitchBadge(hollow, profile.twitchUsername),
                   ],
                 ],
               ),
@@ -4148,71 +3677,12 @@ class _DmProfilePanel extends ConsumerWidget {
                     // (like Edit Profile); Block/Report use the red outline
                     // (danger tint). Blocking and reporting key on the MASTER
                     // identity, not the device.
-                    if (!isSavedMessages) ...[
-                      SizedBox(
-                        width: double.infinity,
-                        child: HollowButton.outline(
-                          onPressed: () {
-                            showLocalNicknameDialog(
-                              context, ref, peerId,
-                              currentNickname: localNick ?? '',
-                            );
-                          },
-                          compact: true,
-                          icon: Icon(
-                            localNick != null && localNick.isNotEmpty
-                                ? LucideIcons.pencil
-                                : LucideIcons.tag,
-                          ),
-                          child: Text(
-                            localNick != null && localNick.isNotEmpty
-                                ? 'Edit Nickname'
-                                : 'Set Nickname',
-                          ),
-                        ),
-                      ),
-
-                      const SizedBox(height: HollowSpacing.xs),
-
-                      // Block + Report share one row (each half), red outline.
-                      Row(
-                        children: [
-                          Expanded(
-                            child: HollowButton.outline(
-                              danger: true,
-                              onPressed: isBlocked
-                                  ? () => unblockUser(context, masterId: master)
-                                  : () => confirmAndBlockUser(
-                                        context,
-                                        masterId: master,
-                                        displayName: shownName,
-                                      ),
-                              compact: true,
-                              expand: true,
-                              icon: const Icon(LucideIcons.ban),
-                              child: Text(isBlocked ? 'Unblock' : 'Block'),
-                            ),
-                          ),
-                          const SizedBox(width: HollowSpacing.xs),
-                          Expanded(
-                            child: HollowButton.outline(
-                              danger: true,
-                              onPressed: () => showReportUserDialog(
-                                context,
-                                masterId: master,
-                                displayName: shownName,
-                              ),
-                              compact: true,
-                              expand: true,
-                              icon: const Icon(LucideIcons.flag),
-                              child: const Text('Report'),
-                            ),
-                          ),
-                        ],
-                      ),
-
-                      const SizedBox(height: HollowSpacing.sm),
-                    ],
+                    if (!isSavedMessages)
+                      ..._buildDmActions(context, ref, hollow,
+                          master: master,
+                          isBlocked: isBlocked,
+                          shownName: shownName,
+                          localNick: localNick),
 
                     // Friend status — shown at the end.
                     if (friendInfo != null && friendInfo.status == 'accepted') ...[
@@ -4235,46 +3705,228 @@ class _DmProfilePanel extends ConsumerWidget {
                     Container(height: 1, color: hollow.border),
                     const SizedBox(height: HollowSpacing.sm),
 
-                    // Peer ID (copy on tap)
-                    HollowPressable(
-                      onTap: () {
-                        Clipboard.setData(ClipboardData(text: peerId));
-                        HollowToast.show(
-                          context,
-                          'Peer ID copied',
-                          type: HollowToastType.success,
-                          duration: const Duration(seconds: 1),
-                        );
-                      },
-                      subtle: true,
-                      borderRadius: BorderRadius.circular(hollow.radiusSm),
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: HollowSpacing.sm,
-                        vertical: HollowSpacing.xs,
-                      ),
-                      child: Row(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          Icon(LucideIcons.copy, size: 10,
-                              color: hollow.textSecondary.withValues(alpha: 0.5)),
-                          const SizedBox(width: HollowSpacing.xs),
-                          Flexible(
-                            child: Text(
-                              peerId,
-                              style: HollowTypography.mono.copyWith(
-                                color: hollow.textSecondary.withValues(alpha: 0.5),
-                                fontSize: 8,
-                              ),
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
+                    _buildPeerIdChip(context, hollow),
                   ],
                 ),
               ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildAvatarWithStatus(HollowTheme hollow, bool isOnline) {
+    return Stack(
+      clipBehavior: Clip.none,
+      children: [
+        Container(
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(hollow.radiusMd + 2),
+            border: Border.all(color: hollow.surface, width: 3),
+          ),
+          child: HollowAvatar(
+            peerId: peerId,
+            size: 64,
+            animate: true,
+          ),
+        ),
+        Positioned(
+          right: 0,
+          bottom: 0,
+          child: Container(
+            decoration: BoxDecoration(
+              color: hollow.surface,
+              shape: BoxShape.circle,
+            ),
+            padding: const EdgeInsets.all(2),
+            child: StatusDot(
+              color: isOnline ? hollow.success : hollow.textSecondary,
+              size: 10,
+              pulse: isOnline,
+              filled: isOnline,
+              semanticLabel: isOnline ? 'Online' : 'Offline',
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  /// Local nickname on top with the profile name below, or just the profile
+  /// name when no local nickname is set.
+  List<Widget> _buildNameLines(
+      HollowTheme hollow, String? localNick, String shownName) {
+    final nameStyle = HollowTypography.subheading.copyWith(
+      color: hollow.textPrimary,
+      fontWeight: FontWeight.w700,
+      fontSize: 15,
+    );
+    if (localNick != null && localNick.isNotEmpty) {
+      return [
+        Text(
+          localNick,
+          style: nameStyle,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          textAlign: TextAlign.center,
+        ),
+        Text(
+          shownName,
+          style: HollowTypography.caption.copyWith(
+            color: hollow.textSecondary,
+            fontSize: 11,
+          ),
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          textAlign: TextAlign.center,
+        ),
+      ];
+    }
+    return [
+      Text(
+        shownName,
+        style: nameStyle,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        textAlign: TextAlign.center,
+      ),
+    ];
+  }
+
+  Widget _buildTwitchBadge(HollowTheme hollow, String twitchUsername) {
+    return GestureDetector(
+      onTap: () => launchUrl(
+        Uri.parse('https://twitch.tv/$twitchUsername'),
+        mode: LaunchMode.externalApplication,
+      ),
+      child: Container(
+        padding: const EdgeInsets.symmetric(
+          horizontal: HollowSpacing.sm,
+          vertical: 3,
+        ),
+        decoration: BoxDecoration(
+          color: const Color(0xFF9146FF).withValues(alpha: 0.12),
+          borderRadius: BorderRadius.circular(hollow.radiusSm),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(BrandIcons.twitch, size: 11, color: Color(0xFF9146FF)),
+            const SizedBox(width: 4),
+            Text(
+              twitchUsername,
+              style: HollowTypography.caption.copyWith(
+                color: const Color(0xFF9146FF),
+                fontSize: 11,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// Nickname button + Block/Report row (each half, red outline).
+  List<Widget> _buildDmActions(
+    BuildContext context,
+    WidgetRef ref,
+    HollowTheme hollow, {
+    required String master,
+    required bool isBlocked,
+    required String shownName,
+    required String? localNick,
+  }) {
+    final hasNick = localNick != null && localNick.isNotEmpty;
+    return [
+      SizedBox(
+        width: double.infinity,
+        child: HollowButton.outline(
+          onPressed: () {
+            showLocalNicknameDialog(
+              context, ref, peerId,
+              currentNickname: localNick ?? '',
+            );
+          },
+          compact: true,
+          icon: Icon(hasNick ? LucideIcons.pencil : LucideIcons.tag),
+          child: Text(hasNick ? 'Edit Nickname' : 'Set Nickname'),
+        ),
+      ),
+      const SizedBox(height: HollowSpacing.xs),
+      Row(
+        children: [
+          Expanded(
+            child: HollowButton.outline(
+              danger: true,
+              onPressed: isBlocked
+                  ? () => unblockUser(context, masterId: master)
+                  : () => confirmAndBlockUser(
+                        context,
+                        masterId: master,
+                        displayName: shownName,
+                      ),
+              compact: true,
+              expand: true,
+              icon: const Icon(LucideIcons.ban),
+              child: Text(isBlocked ? 'Unblock' : 'Block'),
+            ),
+          ),
+          const SizedBox(width: HollowSpacing.xs),
+          Expanded(
+            child: HollowButton.outline(
+              danger: true,
+              onPressed: () => showReportUserDialog(
+                context,
+                masterId: master,
+                displayName: shownName,
+              ),
+              compact: true,
+              expand: true,
+              icon: const Icon(LucideIcons.flag),
+              child: const Text('Report'),
+            ),
+          ),
+        ],
+      ),
+      const SizedBox(height: HollowSpacing.sm),
+    ];
+  }
+
+  /// Peer ID (copy on tap).
+  Widget _buildPeerIdChip(BuildContext context, HollowTheme hollow) {
+    return HollowPressable(
+      onTap: () {
+        Clipboard.setData(ClipboardData(text: peerId));
+        HollowToast.show(
+          context,
+          'Peer ID copied',
+          type: HollowToastType.success,
+          duration: const Duration(seconds: 1),
+        );
+      },
+      subtle: true,
+      borderRadius: BorderRadius.circular(hollow.radiusSm),
+      padding: const EdgeInsets.symmetric(
+        horizontal: HollowSpacing.sm,
+        vertical: HollowSpacing.xs,
+      ),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(LucideIcons.copy, size: 10,
+              color: hollow.textSecondary.withValues(alpha: 0.5)),
+          const SizedBox(width: HollowSpacing.xs),
+          Flexible(
+            child: Text(
+              peerId,
+              style: HollowTypography.mono.copyWith(
+                color: hollow.textSecondary.withValues(alpha: 0.5),
+                fontSize: 8,
+              ),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
             ),
           ),
         ],
@@ -4302,124 +3954,3 @@ Color _bannerColorFromId(String id) {
   return HSLColor.fromAHSL(1.0, hue.toDouble(), 0.45, 0.35).toColor();
 }
 
-/// Typing indicator bar shown above the input area.
-/// Displays up to 3 names, or "Several people are typing..." for 4+.
-class TypingIndicatorBar extends StatelessWidget {
-  final List<String> names;
-
-  const TypingIndicatorBar({super.key, required this.names});
-
-  @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-
-    final String text;
-    if (names.length == 1) {
-      text = '${names[0]} is typing';
-    } else if (names.length == 2) {
-      text = '${names[0]} and ${names[1]} are typing';
-    } else if (names.length == 3) {
-      text = '${names[0]}, ${names[1]}, and ${names[2]} are typing';
-    } else {
-      text = 'Several people are typing';
-    }
-
-    return Container(
-      constraints: const BoxConstraints(minHeight: 24),
-      padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.md),
-      alignment: Alignment.centerLeft,
-      color: hollow.surface,
-      child: Row(
-        children: [
-          Flexible(
-            child: Text(
-              text,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: HollowTypography.caption.copyWith(
-                color: hollow.textSecondary,
-                fontStyle: FontStyle.italic,
-                fontSize: 11,
-              ),
-            ),
-          ),
-          const SizedBox(width: HollowSpacing.xs),
-          TypingDots(color: hollow.textSecondary),
-        ],
-      ),
-    );
-  }
-}
-
-/// Animated bouncing dots for typing indicators.
-/// Uses [SharedTickers.typingDots] instead of per-instance controller.
-class TypingDots extends StatelessWidget {
-  final Color color;
-
-  const TypingDots({super.key, required this.color});
-
-  @override
-  Widget build(BuildContext context) {
-    return ValueListenableBuilder<double>(
-      valueListenable: SharedTickers.instance.typingDots,
-      builder: (context, value, _) {
-        return Row(
-          mainAxisSize: MainAxisSize.min,
-          children: List.generate(3, (i) {
-            final delay = i * 0.2;
-            final t = (value - delay).clamp(0.0, 1.0);
-            final bounce = t < 0.5
-                ? (t * 2) // 0→1
-                : (1 - (t - 0.5) * 2); // 1→0
-            return Container(
-              margin: const EdgeInsets.symmetric(horizontal: 1),
-              width: 4,
-              height: 4,
-              decoration: BoxDecoration(
-                color: color.withValues(alpha: 0.4 + bounce * 0.6),
-                shape: BoxShape.circle,
-              ),
-            );
-          }),
-        );
-      },
-    );
-  }
-}
-
-/// Floating pill that appears when scrolled away from the bottom.
-class _UnreadPill extends StatelessWidget {
-  final int count;
-  final VoidCallback onTap;
-  const _UnreadPill({required this.count, required this.onTap});
-
-  @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-    final label = count == 1 ? '1 new message' : '$count new messages';
-    return HollowPressable(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(20),
-      backgroundColor: hollow.accent,
-      padding: const EdgeInsets.symmetric(
-        horizontal: HollowSpacing.md,
-        vertical: HollowSpacing.xs + 2,
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(LucideIcons.arrowDown, size: 14, color: hollow.textOnAccent),
-          const SizedBox(width: HollowSpacing.xs),
-          Text(
-            label,
-            style: HollowTypography.caption.copyWith(
-              color: hollow.textOnAccent,
-              fontWeight: FontWeight.w600,
-              fontSize: 12,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
