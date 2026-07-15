@@ -465,7 +465,17 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     _setSpeakerRoute(true);
 
     // Initialize the WebRTC service.
-    final localPeerId = ref.read(identityProvider).peerId ?? '';
+    //
+    // CRITICAL: the service's localPeerId is compared against ROUTABLE ids
+    // (VC participants + signal senders are WS-device-keyed). On a linked
+    // multi-device install identityProvider.peerId is the MASTER id — a
+    // different keyspace — which made BOTH sides of a VC elect themselves
+    // offerer ("lower peer_id offers" ran master-vs-device on one side and
+    // device-vs-device on the other): deterministic offer glare, crossed
+    // answers, mismatched DTLS, dead mic until the first camera reneg
+    // re-synced SDP. Single-device installs never hit it (master == device).
+    final localPeerId = await network_api.getLocalDevicePeerId() ??
+        (ref.read(identityProvider).peerId ?? '');
     final iceConfig = ref.read(iceConfigProvider);
 
     _service = VoiceChannelService(

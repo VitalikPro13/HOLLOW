@@ -73,8 +73,12 @@ CRITICAL: All `dispose()`, `close()`, `stop()` calls are awaited. Unawaited disp
 
 `VoiceChannelService.onPeerJoinedMyChannel(peerId)` determines who creates the offer:
 - In gossip mode, skips non-neighbors
-- Skips if already connected
+- Skips if already connected OR mid-connect (`_connecting` reservation Set, added 2026-07-15: the join announcement arrives twice by design — MLS broadcast + plaintext fan — and `_peerConnections[peerId]` is only written after the native `createPeerConnection` await, so a bare containsKey check raced and tore down the first PC mid-negotiation)
 - Lower `localPeerId` (lexicographic comparison) creates the offer; higher waits for incoming offer
+
+**CRITICAL — `localPeerId` is the ROUTABLE DEVICE id** (`getLocalDevicePeerId()`, passed by `voice_channel_provider.onLocalJoined` since 2026-07-15), NOT `identityProvider.peerId` (master). Participant sets and signal senders are device-keyed; on a linked multi-device install a master-vs-device comparison made BOTH sides elect themselves offerer (deterministic glare → crossed answers → mismatched DTLS → dead mic until the first camera reneg). Contrast with `WebRtcService`'s data-channel tiebreaker below, which collapses to MASTER ids — there the relay shows each side a DIFFERENT device id for the same logical peer, so master collapse is what restores antisymmetry. The invariant in both cases: the two sides must compare the SAME pair of strings. See memory `feedback_vc_join_double_announce_race`.
+
+`_handleSdpAnswer()` skips (logged, no throw) when the PC's `signalingState` is already stable — a duplicate/late answer previously surfaced as an unhandled "Called in wrong state: stable" platform error.
 
 This same pattern applies to renegotiation glare in `_handleRenegOffer()`: if both sides sent a renegotiation offer simultaneously, the lower peerId wins (other peer rolls back via `setLocalDescription(RTCSessionDescription(null, 'rollback'))`).
 
