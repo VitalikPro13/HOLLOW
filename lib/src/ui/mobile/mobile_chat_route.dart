@@ -2568,11 +2568,8 @@ class _MobileChatHeader extends ConsumerWidget {
       title = '# ${channelName ?? 'Channel'}';
     }
 
-    // For a channel, show the server name as a subtitle so the user knows
-    // which server this channel belongs to (mirrors the DM Online/Offline line).
-    final serverName = (!isDm && serverId != null)
-        ? ref.watch(serverListProvider.select((m) => m[serverId]?.name))
-        : null;
+    final subtitle = _subtitleText(ref, hollow,
+        isDm: isDm, isSaved: isSaved, isOnline: isOnline);
 
     return HollowPressable(
       onTap: isDm ? () => _showProfileSheet(context, ref, peerId!) : null,
@@ -2605,24 +2602,35 @@ class _MobileChatHeader extends ConsumerWidget {
               ],
             ],
           ),
-          if (isDm && !isSaved)
-            Text(
-              isOnline ? 'Online' : 'Offline',
-              style: HollowTypography.caption.copyWith(
-                color: isOnline ? hollow.success : hollow.textSecondary,
-              ),
-            )
-          else if (serverName != null && serverName.isNotEmpty)
-            Text(
-              serverName,
-              style: HollowTypography.caption.copyWith(
-                color: hollow.textSecondary,
-              ),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-            ),
+          ?subtitle,
         ],
       ),
+    );
+  }
+
+  /// Header subtitle: DM presence line, or the channel's server name (so the
+  /// user knows which server the channel belongs to). Null when neither.
+  Widget? _subtitleText(WidgetRef ref, HollowTheme hollow,
+      {required bool isDm, required bool isSaved, required bool isOnline}) {
+    if (isDm && !isSaved) {
+      return Text(
+        isOnline ? 'Online' : 'Offline',
+        style: HollowTypography.caption.copyWith(
+          color: isOnline ? hollow.success : hollow.textSecondary,
+        ),
+      );
+    }
+    final serverName = (!isDm && serverId != null)
+        ? ref.watch(serverListProvider.select((m) => m[serverId]?.name))
+        : null;
+    if (serverName == null || serverName.isEmpty) return null;
+    return Text(
+      serverName,
+      style: HollowTypography.caption.copyWith(
+        color: hollow.textSecondary,
+      ),
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
     );
   }
 
