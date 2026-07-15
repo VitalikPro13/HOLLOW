@@ -344,81 +344,96 @@ class VoiceService {
     try {
       final receivers = await pc.getReceivers();
       for (final receiver in receivers) {
-        final track = receiver.track;
-        if (track == null || track.kind != 'video') continue;
-        // Capture the id once so a later null on the native side doesn't
-        // crash logging or string interpolation.
-        final trackId = track.id;
-        if (trackId == null) continue;
-
-        _log('[HOLLOW-VOICE] _checkRemoteVideoTrack: found video track '
-            '$trackId without renderer — creating manually');
-
-        // Stash old state for post-build dispose (same pattern as
-        // _handleRemoteVideoTrack — never dispose the old stream BEFORE
-        // the new renderer is committed).
-        final oldRenderer = _remoteRenderer;
-        final oldStream = _remoteStream;
-        final oldWasSynthetic = _remoteStreamIsSynthetic;
-
-        // Re-fetch the track right before addTrack — between awaits the
-        // native track may have been GC'd / detached.
-        final liveTrack = receiver.track;
-        if (liveTrack == null) {
-          _log('[HOLLOW-VOICE] _checkRemoteVideoTrack: track went away '
-              'before addTrack, skipping');
-          continue;
-        }
-        final newStream =
-            await createLocalMediaStream('remote-video-$trackId');
-        try {
-          await newStream.addTrack(liveTrack);
-        } catch (e) {
-          _log('[HOLLOW-VOICE] _checkRemoteVideoTrack: addTrack failed '
-              '($e), disposing partial stream');
-          try {
-            await newStream.dispose();
-          } catch (_) {}
-          continue;
-        }
-
-        final newRenderer = RTCVideoRenderer();
-        await newRenderer.initialize();
-        newRenderer.srcObject = newStream;
-
-        // Commit new state first.
-        _remoteRenderer = newRenderer;
-        _remoteStream = newStream;
-        _remoteStreamIsSynthetic = true;
-
-        // Best-effort dispose of the old.
-        if (oldRenderer != null) {
-          try {
-            oldRenderer.srcObject = null;
-            await oldRenderer.dispose();
-          } catch (_) {}
-        }
-        if (oldStream != null && oldWasSynthetic) {
-          try {
-            await oldStream.dispose();
-          } catch (_) {}
-        }
-
-        _log('[HOLLOW-VOICE] _checkRemoteVideoTrack: renderer created for '
-            'track=$trackId, stream=${_remoteStream?.id}');
-
-        // Give the renderer a moment to settle before notifying UI.
-        await Future.delayed(const Duration(milliseconds: 100));
-
-        // Notify UI via the same callback that _handleRemoteVideoTrack uses.
-        final activePeerId = _activePeerId;
-        if (activePeerId != null) {
-          onRemoteVideoTrack?.call(activePeerId);
-        }
-        return;
+        if (await _adoptOrphanRemoteVideoReceiver(receiver)) return;
       }
     } catch (e) {
       _log('[HOLLOW-VOICE] _checkRemoteVideoTrack error: $e');
+    }
+  }
+
+  /// Per-receiver body of [_checkRemoteVideoTrack]: if [receiver] carries a
+  /// video track with no renderer, build one manually. Returns true when a
+  /// renderer was committed (the caller stops scanning receivers).
+  Future<bool> _adoptOrphanRemoteVideoReceiver(RTCRtpReceiver receiver) async {
+    final track = receiver.track;
+    if (track == null || track.kind != 'video') return false;
+    // Capture the id once so a later null on the native side doesn't
+    // crash logging or string interpolation.
+    final trackId = track.id;
+    if (trackId == null) return false;
+
+    _log('[HOLLOW-VOICE] _checkRemoteVideoTrack: found video track '
+        '$trackId without renderer — creating manually');
+
+    // Stash old state for post-build dispose (same pattern as
+    // _handleRemoteVideoTrack — never dispose the old stream BEFORE
+    // the new renderer is committed).
+    final oldRenderer = _remoteRenderer;
+    final oldStream = _remoteStream;
+    final oldWasSynthetic = _remoteStreamIsSynthetic;
+
+    // Re-fetch the track right before addTrack — between awaits the
+    // native track may have been GC'd / detached.
+    final liveTrack = receiver.track;
+    if (liveTrack == null) {
+      _log('[HOLLOW-VOICE] _checkRemoteVideoTrack: track went away '
+          'before addTrack, skipping');
+      return false;
+    }
+    final newStream =
+        await createLocalMediaStream('remote-video-$trackId');
+    try {
+      await newStream.addTrack(liveTrack);
+    } catch (e) {
+      _log('[HOLLOW-VOICE] _checkRemoteVideoTrack: addTrack failed '
+          '($e), disposing partial stream');
+      try {
+        await newStream.dispose();
+      } catch (_) {}
+      return false;
+    }
+
+    final newRenderer = RTCVideoRenderer();
+    await newRenderer.initialize();
+    newRenderer.srcObject = newStream;
+
+    // Commit new state first.
+    _remoteRenderer = newRenderer;
+    _remoteStream = newStream;
+    _remoteStreamIsSynthetic = true;
+
+    // Best-effort dispose of the old.
+    await _disposeStaleRemoteMedia(oldRenderer, oldStream, oldWasSynthetic);
+
+    _log('[HOLLOW-VOICE] _checkRemoteVideoTrack: renderer created for '
+        'track=$trackId, stream=${_remoteStream?.id}');
+
+    // Give the renderer a moment to settle before notifying UI.
+    await Future.delayed(const Duration(milliseconds: 100));
+
+    // Notify UI via the same callback that _handleRemoteVideoTrack uses.
+    final activePeerId = _activePeerId;
+    if (activePeerId != null) {
+      onRemoteVideoTrack?.call(activePeerId);
+    }
+    return true;
+  }
+
+  /// Silent best-effort dispose of a superseded remote renderer/stream
+  /// (safety-net path — failures here are expected and stay unlogged, same
+  /// as the original inline code).
+  Future<void> _disposeStaleRemoteMedia(RTCVideoRenderer? oldRenderer,
+      MediaStream? oldStream, bool oldWasSynthetic) async {
+    if (oldRenderer != null) {
+      try {
+        oldRenderer.srcObject = null;
+        await oldRenderer.dispose();
+      } catch (_) {}
+    }
+    if (oldStream != null && oldWasSynthetic) {
+      try {
+        await oldStream.dispose();
+      } catch (_) {}
     }
   }
 
@@ -552,108 +567,97 @@ class VoiceService {
     }
 
     if (_isVideoEnabled) {
-      // Turn off: remove video sender from the PC entirely (not just
-      // replaceTrack(null)). removeTrack causes the next renegotiation
-      // to drop the video m-line, which the remote peer interprets as
-      // "no more video" and tears down the receive side cleanly.
-      try {
-        final senders = await _pc!.getSenders();
-        for (final s in senders) {
-          if (s.track?.kind == 'video') {
-            await _pc!.removeTrack(s);
-            _log('[HOLLOW-VOICE] toggleVideo: removed video sender');
-            break;
-          }
-        }
-      } catch (e) {
-        _log('[HOLLOW-VOICE] toggleVideo: removeTrack failed: $e');
-      }
-
-      // Stop & dispose the camera stream (turns off the camera light).
-      if (_localVideoStream != null) {
-        for (final t in _localVideoStream!.getTracks()) {
-          await t.stop();
-        }
-        await _localVideoStream!.dispose();
-        _localVideoStream = null;
-      }
-
-      // Dispose local self-preview renderer.
-      if (_localRenderer != null) {
-        _localRenderer!.srcObject = null;
-        await _localRenderer!.dispose();
-        _localRenderer = null;
-      }
-
-      _isVideoEnabled = false;
-      _log('[HOLLOW-VOICE] Video disabled, camera released');
-    } else {
-      // Turn on: capture camera and addTrack a brand new sender. This
-      // creates a fresh transceiver with a fresh ssrc — the remote peer
-      // gets a new onTrack event and builds a new renderer.
-      _log('[HOLLOW-VOICE] Capturing camera for video enable');
-      try {
-        final videoConstraints = <String, dynamic>{
-          'width': {'ideal': 640},
-          'height': {'ideal': 480},
-          'frameRate': {'ideal': 30},
-        };
-        // flutter_webrtc native (Windows/macOS/Linux) uses 'sourceId' in
-        // optional array — 'deviceId' is ignored by GetUserVideo().
-        if (preferredCameraDeviceId != null) {
-          videoConstraints['optional'] = [
-            {'sourceId': preferredCameraDeviceId}
-          ];
-        } else {
-          videoConstraints['facingMode'] =
-              _useFrontCamera ? 'user' : 'environment';
-        }
-        final constraints = {
-          'audio': false,
-          'video': videoConstraints,
-        };
-        // Belt-and-suspenders cleanup of any leaked stream from a
-        // previous failed enable.
-        if (_localVideoStream != null) {
-          for (final t in _localVideoStream!.getTracks()) {
-            await t.stop();
-          }
-          await _localVideoStream!.dispose();
-          _localVideoStream = null;
-        }
-        _localVideoStream =
-            await navigator.mediaDevices.getUserMedia(constraints);
-        _capturedCameraDeviceId = preferredCameraDeviceId;
-        final videoTracks = _localVideoStream!.getVideoTracks();
-        if (videoTracks.isEmpty) {
-          _log('[HOLLOW-VOICE] No camera available');
-          await _localVideoStream!.dispose();
-          _localVideoStream = null;
-          return false;
-        }
-        final videoTrack = videoTracks.first;
-
-        await _pc!.addTrack(videoTrack, _localVideoStream!);
-        _log('[HOLLOW-VOICE] toggleVideo: added new video track via addTrack');
-
-        // All platforms: constrain the offer to universal codecs (VP8 first).
-        // Desktop builds otherwise advertise H.265/AV1 payload types that
-        // break the iOS answerer; macOS additionally needs VP8-first because
-        // its H.264 hw profile doesn't decode on Windows libwebrtc.
-        if (videoTrack.id != null) {
-          await _constrainCameraCodecs(videoTrack.id!);
-        }
-
-        _isVideoEnabled = true;
-        await _initLocalRenderer();
-        _log('[HOLLOW-VOICE] Video enabled, camera active');
-        _scheduleVideoStatsProbes('send');
-      } catch (e) {
-        _log('[HOLLOW-VOICE] Failed to capture camera: $e');
-        return false;
-      }
+      await _disableVideoDesktop();
+    } else if (!await _enableVideoDesktop()) {
+      return false;
     }
     return _isVideoEnabled;
+  }
+
+  /// Desktop (Windows/macOS) video disable branch of [toggleVideo]:
+  /// remove the video sender, release the camera, drop the self-preview.
+  Future<void> _disableVideoDesktop() async {
+    // Turn off: remove video sender from the PC entirely (not just
+    // replaceTrack(null)). removeTrack causes the next renegotiation
+    // to drop the video m-line, which the remote peer interprets as
+    // "no more video" and tears down the receive side cleanly.
+    try {
+      final senders = await _pc!.getSenders();
+      for (final s in senders) {
+        if (s.track?.kind == 'video') {
+          await _pc!.removeTrack(s);
+          _log('[HOLLOW-VOICE] toggleVideo: removed video sender');
+          break;
+        }
+      }
+    } catch (e) {
+      _log('[HOLLOW-VOICE] toggleVideo: removeTrack failed: $e');
+    }
+
+    // Stop & dispose the camera stream (turns off the camera light).
+    if (_localVideoStream != null) {
+      await _stopTracksAndDispose(_localVideoStream!);
+      _localVideoStream = null;
+    }
+
+    // Dispose local self-preview renderer.
+    if (_localRenderer != null) {
+      _localRenderer!.srcObject = null;
+      await _localRenderer!.dispose();
+      _localRenderer = null;
+    }
+
+    _isVideoEnabled = false;
+    _log('[HOLLOW-VOICE] Video disabled, camera released');
+  }
+
+  /// Desktop (Windows/macOS) video enable branch of [toggleVideo]. Returns
+  /// false when capture fails or no camera is available.
+  Future<bool> _enableVideoDesktop() async {
+    // Turn on: capture camera and addTrack a brand new sender. This
+    // creates a fresh transceiver with a fresh ssrc — the remote peer
+    // gets a new onTrack event and builds a new renderer.
+    _log('[HOLLOW-VOICE] Capturing camera for video enable');
+    try {
+      final constraints = _videoCaptureConstraints(preferredCameraDeviceId);
+      // Belt-and-suspenders cleanup of any leaked stream from a
+      // previous failed enable.
+      if (_localVideoStream != null) {
+        await _stopTracksAndDispose(_localVideoStream!);
+        _localVideoStream = null;
+      }
+      _localVideoStream =
+          await navigator.mediaDevices.getUserMedia(constraints);
+      _capturedCameraDeviceId = preferredCameraDeviceId;
+      final videoTracks = _localVideoStream!.getVideoTracks();
+      if (videoTracks.isEmpty) {
+        _log('[HOLLOW-VOICE] No camera available');
+        await _localVideoStream!.dispose();
+        _localVideoStream = null;
+        return false;
+      }
+      final videoTrack = videoTracks.first;
+
+      await _pc!.addTrack(videoTrack, _localVideoStream!);
+      _log('[HOLLOW-VOICE] toggleVideo: added new video track via addTrack');
+
+      // All platforms: constrain the offer to universal codecs (VP8 first).
+      // Desktop builds otherwise advertise H.265/AV1 payload types that
+      // break the iOS answerer; macOS additionally needs VP8-first because
+      // its H.264 hw profile doesn't decode on Windows libwebrtc.
+      if (videoTrack.id != null) {
+        await _constrainCameraCodecs(videoTrack.id!);
+      }
+
+      _isVideoEnabled = true;
+      await _initLocalRenderer();
+      _log('[HOLLOW-VOICE] Video enabled, camera active');
+      _scheduleVideoStatsProbes('send');
+      return true;
+    } catch (e) {
+      _log('[HOLLOW-VOICE] Failed to capture camera: $e');
+      return false;
+    }
   }
 
   /// Linux video toggle that NEVER closes/reopens the V4L2 device (which would
@@ -699,17 +703,8 @@ class VoiceService {
       }
 
       // First enable of the call: open the device ONCE.
-      final videoConstraints = <String, dynamic>{
-        'width': {'ideal': 640},
-        'height': {'ideal': 480},
-        'frameRate': {'ideal': 30},
-      };
-      if (preferredCameraDeviceId != null) {
-        videoConstraints['optional'] = [
-          {'sourceId': preferredCameraDeviceId}
-        ];
-      }
-      final constraints = {'audio': false, 'video': videoConstraints};
+      final constraints = _videoCaptureConstraints(preferredCameraDeviceId,
+          useFacingFallback: false);
       _localVideoStream =
           await navigator.mediaDevices.getUserMedia(constraints);
       _capturedCameraDeviceId = preferredCameraDeviceId;
@@ -735,6 +730,39 @@ class VoiceService {
       _log('[HOLLOW-VOICE] Failed to capture camera (Linux): $e');
       return false;
     }
+  }
+
+  /// Stop every track on [stream], then dispose it. Shared teardown shape
+  /// for mic/camera streams — callers wrap the call in their own try/catch
+  /// where failures must be swallowed or logged.
+  Future<void> _stopTracksAndDispose(MediaStream stream) async {
+    for (final t in stream.getTracks()) {
+      await t.stop();
+    }
+    await stream.dispose();
+  }
+
+  /// Build getUserMedia constraints for a camera capture. flutter_webrtc
+  /// native (Windows/macOS/Linux) uses 'sourceId' in the optional array —
+  /// 'deviceId' is ignored by GetUserVideo(). When [useFacingFallback] is
+  /// true and no device id is given, facingMode picks front/back (mobile);
+  /// the Linux toggle path omits it entirely.
+  Map<String, dynamic> _videoCaptureConstraints(String? deviceId,
+      {bool useFacingFallback = true}) {
+    final videoConstraints = <String, dynamic>{
+      'width': {'ideal': 640},
+      'height': {'ideal': 480},
+      'frameRate': {'ideal': 30},
+    };
+    if (deviceId != null) {
+      videoConstraints['optional'] = [
+        {'sourceId': deviceId}
+      ];
+    } else if (useFacingFallback) {
+      videoConstraints['facingMode'] =
+          _useFrontCamera ? 'user' : 'environment';
+    }
+    return {'audio': false, 'video': videoConstraints};
   }
 
   /// Local camera facing (true = front). UI reads this to mirror the local
@@ -775,6 +803,44 @@ class VoiceService {
     if (_capturedAudioInputDeviceId == deviceId) return false; // already live
 
     // Capture the NEW mic first — if it fails, keep the old one working.
+    final newStream = await _captureSwitchMicStream(deviceId);
+    if (newStream == null) return false;
+    final newTrack = newStream.getAudioTracks().first;
+    newTrack.enabled = !_isMuted; // preserve mute state across the swap
+
+    // Swap the PC's audio sender.
+    if (!await _swapAudioSender(newTrack, newStream)) return false;
+
+    final oldStream = _localStream;
+    _localStream = newStream;
+    _capturedAudioInputDeviceId = deviceId;
+
+    // Re-assert the capture chain (process-global, but defensive).
+    try {
+      await Helper.setCaptureGain(micGain);
+      await Helper.setVoiceEnhance(voiceEnhance,
+          makeupDb: enhanceMakeupDb, dynamicMode: enhanceDynamic);
+    } catch (_) {}
+
+    await _rebindSframeSenderTo(newTrack);
+
+    // Release the old mic.
+    if (oldStream != null) {
+      try {
+        for (final t in oldStream.getAudioTracks()) {
+          await t.stop();
+        }
+        await oldStream.dispose();
+      } catch (_) {}
+    }
+    _log('[HOLLOW-VOICE] Mic switched live to ${deviceId ?? "default"}');
+    return true;
+  }
+
+  /// Capture a fresh mic stream for a live device switch. Returns null
+  /// (after cleanup) when getUserMedia fails or yields no audio track —
+  /// the caller keeps the old mic working.
+  Future<MediaStream?> _captureSwitchMicStream(String? deviceId) async {
     final audioConstraints = <String, dynamic>{
       'echoCancellation': true,
       'noiseSuppression': true,
@@ -793,17 +859,20 @@ class VoiceService {
           .getUserMedia({'audio': audioConstraints, 'video': false});
     } catch (e) {
       _log('[HOLLOW-VOICE] Mic switch: getUserMedia failed: $e');
-      return false;
+      return null;
     }
-    final audioTracks = newStream.getAudioTracks();
-    if (audioTracks.isEmpty) {
+    if (newStream.getAudioTracks().isEmpty) {
       await newStream.dispose();
-      return false;
+      return null;
     }
-    final newTrack = audioTracks.first;
-    newTrack.enabled = !_isMuted; // preserve mute state across the swap
+    return newStream;
+  }
 
-    // Swap the PC's audio sender.
+  /// Swap the PC's audio sender to [newTrack] via removeTrack + addTrack
+  /// (NEVER replaceTrack — silently fails on Windows libwebrtc). On failure
+  /// the new capture is released and false is returned.
+  Future<bool> _swapAudioSender(
+      MediaStreamTrack newTrack, MediaStream newStream) async {
     try {
       final senders = await _pc!.getSenders();
       for (final s in senders) {
@@ -813,6 +882,7 @@ class VoiceService {
         }
       }
       await _pc!.addTrack(newTrack, newStream);
+      return true;
     } catch (e) {
       _log('[HOLLOW-VOICE] Mic switch: sender swap failed: $e');
       try {
@@ -821,49 +891,29 @@ class VoiceService {
       } catch (_) {}
       return false;
     }
+  }
 
-    final oldStream = _localStream;
-    _localStream = newStream;
-    _capturedAudioInputDeviceId = deviceId;
-
-    // Re-assert the capture chain (process-global, but defensive).
+  /// Re-bind SFrame to the NEW audio sender — enableForSender is idempotent
+  /// per (peer, kind), so the cryptor bound to the removed sender must be
+  /// dropped first or the new track is never encrypted.
+  Future<void> _rebindSframeSenderTo(MediaStreamTrack newTrack) async {
+    if (_frameCryptor == null ||
+        !_frameCryptor!.isEnabled ||
+        _activePeerId == null) {
+      return;
+    }
     try {
-      await Helper.setCaptureGain(micGain);
-      await Helper.setVoiceEnhance(voiceEnhance,
-          makeupDb: enhanceMakeupDb, dynamicMode: enhanceDynamic);
-    } catch (_) {}
-
-    // Re-bind SFrame to the NEW audio sender — enableForSender is idempotent
-    // per (peer, kind), so the cryptor bound to the removed sender must be
-    // dropped first or the new track is never encrypted.
-    if (_frameCryptor != null &&
-        _frameCryptor!.isEnabled &&
-        _activePeerId != null) {
-      try {
-        await _frameCryptor!.disableSender(_activePeerId!);
-        final senders = await _pc!.getSenders();
-        for (final sender in senders) {
-          if (sender.track?.id == newTrack.id) {
-            await _frameCryptor!.enableForSender(_activePeerId!, sender);
-            break;
-          }
+      await _frameCryptor!.disableSender(_activePeerId!);
+      final senders = await _pc!.getSenders();
+      for (final sender in senders) {
+        if (sender.track?.id == newTrack.id) {
+          await _frameCryptor!.enableForSender(_activePeerId!, sender);
+          break;
         }
-      } catch (e) {
-        _log('[HOLLOW-VOICE] Mic switch: SFrame re-bind failed: $e');
       }
+    } catch (e) {
+      _log('[HOLLOW-VOICE] Mic switch: SFrame re-bind failed: $e');
     }
-
-    // Release the old mic.
-    if (oldStream != null) {
-      try {
-        for (final t in oldStream.getAudioTracks()) {
-          await t.stop();
-        }
-        await oldStream.dispose();
-      } catch (_) {}
-    }
-    _log('[HOLLOW-VOICE] Mic switched live to ${deviceId ?? "default"}');
-    return true;
   }
 
   /// Live mid-call camera device switch (desktop picker). NO-OP on Linux —
@@ -883,78 +933,76 @@ class VoiceService {
       try {
         await prev;
       } catch (_) {}
-      if (_pc == null || !_isVideoEnabled) return false;
-
-      // Capture the NEW camera first — on failure keep the old one.
-      final videoConstraints = <String, dynamic>{
-        'width': {'ideal': 640},
-        'height': {'ideal': 480},
-        'frameRate': {'ideal': 30},
-      };
-      if (deviceId != null) {
-        videoConstraints['optional'] = [
-          {'sourceId': deviceId}
-        ];
-      } else {
-        videoConstraints['facingMode'] =
-            _useFrontCamera ? 'user' : 'environment';
-      }
-      MediaStream newStream;
-      try {
-        newStream = await navigator.mediaDevices
-            .getUserMedia({'audio': false, 'video': videoConstraints});
-      } catch (e) {
-        _log('[HOLLOW-VOICE] Camera switch: getUserMedia failed: $e');
-        return false;
-      }
-      final videoTracks = newStream.getVideoTracks();
-      if (videoTracks.isEmpty) {
-        await newStream.dispose();
-        return false;
-      }
-      final newTrack = videoTracks.first;
-
-      try {
-        final senders = await _pc!.getSenders();
-        for (final s in senders) {
-          if (s.track?.kind == 'video') {
-            await _pc!.removeTrack(s);
-            break;
-          }
-        }
-        await _pc!.addTrack(newTrack, newStream);
-        // Same VP8-first constraint as every camera enable (iOS answerer).
-        if (newTrack.id != null) {
-          await _constrainCameraCodecs(newTrack.id!);
-        }
-      } catch (e) {
-        _log('[HOLLOW-VOICE] Camera switch: sender swap failed: $e');
-        try {
-          await newTrack.stop();
-          await newStream.dispose();
-        } catch (_) {}
-        return false;
-      }
-
-      final oldStream = _localVideoStream;
-      _localVideoStream = newStream;
-      _capturedCameraDeviceId = deviceId;
-
-      // Rebind the self-preview to the new camera.
-      await _initLocalRenderer();
-
-      if (oldStream != null) {
-        try {
-          for (final t in oldStream.getTracks()) {
-            await t.stop();
-          }
-          await oldStream.dispose();
-        } catch (_) {}
-      }
-      _log('[HOLLOW-VOICE] Camera switched live to ${deviceId ?? "default"}');
-      return true;
+      return await _switchCameraDeviceLocked(deviceId);
     } finally {
       completer.complete();
+    }
+  }
+
+  /// Body of [setCameraDevice], run under [_videoToggleLock].
+  Future<bool> _switchCameraDeviceLocked(String? deviceId) async {
+    if (_pc == null || !_isVideoEnabled) return false;
+
+    // Capture the NEW camera first — on failure keep the old one.
+    MediaStream newStream;
+    try {
+      newStream = await navigator.mediaDevices
+          .getUserMedia(_videoCaptureConstraints(deviceId));
+    } catch (e) {
+      _log('[HOLLOW-VOICE] Camera switch: getUserMedia failed: $e');
+      return false;
+    }
+    final videoTracks = newStream.getVideoTracks();
+    if (videoTracks.isEmpty) {
+      await newStream.dispose();
+      return false;
+    }
+    final newTrack = videoTracks.first;
+
+    if (!await _swapVideoSender(newTrack, newStream)) return false;
+
+    final oldStream = _localVideoStream;
+    _localVideoStream = newStream;
+    _capturedCameraDeviceId = deviceId;
+
+    // Rebind the self-preview to the new camera.
+    await _initLocalRenderer();
+
+    if (oldStream != null) {
+      try {
+        await _stopTracksAndDispose(oldStream);
+      } catch (_) {}
+    }
+    _log('[HOLLOW-VOICE] Camera switched live to ${deviceId ?? "default"}');
+    return true;
+  }
+
+  /// Swap the PC's video sender to [newTrack] via removeTrack + addTrack,
+  /// then re-apply the codec constraint. On failure the new capture is
+  /// released and false is returned.
+  Future<bool> _swapVideoSender(
+      MediaStreamTrack newTrack, MediaStream newStream) async {
+    try {
+      final senders = await _pc!.getSenders();
+      for (final sender in senders) {
+        if (sender.track?.kind == 'video') {
+          await _pc!.removeTrack(sender);
+          break;
+        }
+      }
+      await _pc!.addTrack(newTrack, newStream);
+      // Same VP8-first constraint as every camera enable (iOS answerer).
+      if (newTrack.id != null) {
+        await _constrainCameraCodecs(newTrack.id!);
+      }
+      return true;
+    } catch (e) {
+      _log('[HOLLOW-VOICE] Camera switch: sender swap failed: $e');
+      try {
+        await newTrack.stop();
+        await newStream.dispose();
+      } catch (_) {}
+      return false;
     }
   }
 
@@ -1050,13 +1098,23 @@ class VoiceService {
   /// [createOffer]/[handleOffer] so a re-entrant call (e.g. a second inbound
   /// offer during the capture window) can't orphan the prior session's streams.
   Future<void> _teardownMedia() async {
+    await _teardownLocalStreams();
+    await _teardownRenderersAndRemoteStream();
+    await _teardownPeerConnection();
+    await _teardownFrameCryptor();
+
+    _pendingCandidates.clear();
+    _isVideoEnabled = false;
+    _remoteDescriptionSet = false;
+  }
+
+  /// Stop + dispose the local mic and camera streams (each individually
+  /// guarded so one failure can't strand the other).
+  Future<void> _teardownLocalStreams() async {
     // Stop local audio.
     if (_localStream != null) {
       try {
-        for (final track in _localStream!.getTracks()) {
-          await track.stop();
-        }
-        await _localStream!.dispose();
+        await _stopTracksAndDispose(_localStream!);
       } catch (e) {
         _log('[HOLLOW-VOICE] local audio dispose failed (ignored): $e');
       }
@@ -1066,18 +1124,19 @@ class VoiceService {
     // Stop local video.
     if (_localVideoStream != null) {
       try {
-        for (final track in _localVideoStream!.getTracks()) {
-          await track.stop();
-        }
-        await _localVideoStream!.dispose();
+        await _stopTracksAndDispose(_localVideoStream!);
       } catch (e) {
         _log('[HOLLOW-VOICE] local video dispose failed (ignored): $e');
       }
       _localVideoStream = null;
     }
+  }
 
-    // Dispose renderers (null BEFORE awaiting so a Linux "texture not found!"
-    // throw can't leave a stale half-disposed renderer).
+  /// Dispose both renderers (nulled BEFORE awaiting so a Linux "texture not
+  /// found!" throw can't leave a stale half-disposed renderer), then the
+  /// remote stream — but only if we synthesized it (libwebrtc owns the
+  /// event-provided ones).
+  Future<void> _teardownRenderersAndRemoteStream() async {
     final localRenderer = _localRenderer;
     _localRenderer = null;
     if (localRenderer != null) {
@@ -1098,8 +1157,6 @@ class VoiceService {
         _log('[HOLLOW-VOICE] remote renderer dispose failed (ignored): $e');
       }
     }
-    // Dispose the remote stream only if we synthesized it (libwebrtc owns the
-    // event-provided ones).
     final remoteStream = _remoteStream;
     final remoteSynthetic = _remoteStreamIsSynthetic;
     _remoteStream = null;
@@ -1111,36 +1168,35 @@ class VoiceService {
         _log('[HOLLOW-VOICE] remote stream dispose failed (ignored): $e');
       }
     }
+  }
 
-    // Close the dedicated voice peer connection. close() and dispose() get
-    // SEPARATE guards so a close() throw can't skip the thread-set-freeing
-    // dispose().
+  /// Close the dedicated voice peer connection. close() and dispose() get
+  /// SEPARATE guards so a close() throw can't skip the thread-set-freeing
+  /// dispose().
+  Future<void> _teardownPeerConnection() async {
     final pc = _pc;
     _pc = null;
-    if (pc != null) {
-      try {
-        await pc.close();
-      } catch (e) {
-        _log('[HOLLOW-VOICE] pc close failed (ignored): $e');
-      }
-      try {
-        await pc.dispose();
-      } catch (e) {
-        _log('[HOLLOW-VOICE] pc dispose failed (ignored): $e');
-      }
+    if (pc == null) return;
+    try {
+      await pc.close();
+    } catch (e) {
+      _log('[HOLLOW-VOICE] pc close failed (ignored): $e');
     }
+    try {
+      await pc.dispose();
+    } catch (e) {
+      _log('[HOLLOW-VOICE] pc dispose failed (ignored): $e');
+    }
+  }
 
-    // Dispose SFrame encryption.
+  /// Dispose SFrame encryption.
+  Future<void> _teardownFrameCryptor() async {
     try {
       await _frameCryptor?.dispose();
     } catch (e) {
       _log('[HOLLOW-VOICE] frame cryptor dispose failed (ignored): $e');
     }
     _frameCryptor = null;
-
-    _pendingCandidates.clear();
-    _isVideoEnabled = false;
-    _remoteDescriptionSet = false;
   }
 
   Future<void> endCall() async {
@@ -1242,60 +1298,17 @@ class VoiceService {
     _pendingCandidates.clear();
     _remoteDescriptionSet = false;
 
-    // Log ICE config for diagnostics.
-    final servers = (iceServers['iceServers'] as List?) ?? [];
-    final hasTurn = servers.any((s) {
-      final urls = s['urls'];
-      if (urls is String) return urls.startsWith('turn');
-      if (urls is List) return urls.any((u) => u.toString().startsWith('turn'));
-      return false;
-    });
-    _log('[HOLLOW-VOICE] Creating PC with ${servers.length} ICE server groups, TURN=$hasTurn');
+    _logIceServerConfig();
 
     final pc = await createPeerConnection(iceServers);
     _pc = pc;
 
     // ICE candidate handler — send to peer via call signaling.
-    pc.onIceCandidate = (candidate) {
-      if (candidate.candidate == null || candidate.candidate!.isEmpty) return;
-      // Log candidate type for diagnostics (host/srflx/relay).
-      final c = candidate.candidate!;
-      final type = c.contains('typ host')
-          ? 'host'
-          : c.contains('typ srflx')
-              ? 'srflx'
-              : c.contains('typ relay')
-                  ? 'relay'
-                  : 'unknown';
-      _log('[HOLLOW-VOICE] ICE candidate: $type mid=${candidate.sdpMid}');
-      final payload = jsonEncode({
-        'call_id': callId,
-        'candidate': candidate.candidate,
-        'sdpMid': candidate.sdpMid,
-        'sdpMLineIndex': candidate.sdpMLineIndex,
-      });
-      network_api.callSendSignal(
-        peerId: peerId,
-        signalType: 'ice',
-        payload: payload,
-      );
-    };
+    pc.onIceCandidate =
+        (candidate) => _sendLocalIceCandidate(peerId, callId, candidate);
 
     // Remote track handler — audio auto-plays, video needs renderer.
-    pc.onTrack = (event) {
-      _log('[HOLLOW-VOICE] Remote track: ${event.track.kind} '
-          'id=${event.track.id} streams=${event.streams.length}');
-
-      if (event.track.kind == 'video') {
-        _handleRemoteVideoTrack(peerId, event);
-      } else if (event.track.kind == 'audio') {
-        // Audio auto-plays (no renderer), but a remote mid-call mic switch
-        // lands as a NEW transceiver — the SFrame decryptor is still bound
-        // to the dead receiver, so without a rebind the fresh track plays
-        // as ciphertext gibberish. No-op before the key exchange.
-        unawaited(_rebindSframeAudioReceiver(event.receiver));
-      }
-    };
+    pc.onTrack = (event) => _onRemoteTrack(peerId, event);
 
     // ICE connection state handler (ICE layer — checking/connected/failed/disconnected).
     pc.onIceConnectionState = (iceState) {
@@ -1308,53 +1321,133 @@ class VoiceService {
     };
 
     // Connection state handler.
-    pc.onConnectionState = (state) {
-      _log('[HOLLOW-VOICE] Connection state: $state');
-      switch (state) {
-        case RTCPeerConnectionState.RTCPeerConnectionStateConnected:
-          onConnected?.call(peerId);
-          Future.delayed(const Duration(seconds: 1), () async {
-            try {
-              final stats = await pc.getStats();
-              for (final report in stats) {
-                if (report.type == 'candidate-pair' && report.values['state'] == 'succeeded') {
-                  final localId = report.values['localCandidateId'] as String?;
-                  final remoteId = report.values['remoteCandidateId'] as String?;
-                  String localType = '?', remoteType = '?', proto = '';
-                  for (final r in stats) {
-                    if (r.type == 'local-candidate' && r.id == localId) {
-                      localType = (r.values['candidateType'] as String?) ?? '?';
-                      proto = (r.values['protocol'] as String?) ?? '';
-                    }
-                    if (r.type == 'remote-candidate' && r.id == remoteId) {
-                      remoteType = (r.values['candidateType'] as String?) ?? '?';
-                    }
-                  }
-                  final route = localType == 'relay' || remoteType == 'relay'
-                      ? 'TURN (relayed)'
-                      : localType == 'srflx' || remoteType == 'srflx'
-                          ? 'STUN (direct P2P)'
-                          : localType == 'host' && remoteType == 'host'
-                              ? 'LAN (direct)'
-                              : 'P2P ($localType/$remoteType)';
-                  _log('[HOLLOW-VOICE] ICE route to $peerId: $route (local=$localType remote=$remoteType proto=$proto)');
-                  return;
-                }
-              }
-              _log('[HOLLOW-VOICE] ICE route to $peerId: no succeeded candidate pair found');
-            } catch (e) {
-              _log('[HOLLOW-VOICE] ICE route check failed: $e');
-            }
-          });
-        case RTCPeerConnectionState.RTCPeerConnectionStateFailed:
-        case RTCPeerConnectionState.RTCPeerConnectionStateClosed:
-        case RTCPeerConnectionState.RTCPeerConnectionStateDisconnected:
-          onDisconnected?.call(peerId);
-        default:
-          break;
-      }
-    };
+    pc.onConnectionState =
+        (state) => _onConnectionStateChanged(pc, peerId, state);
   }
+
+  /// Log ICE config for diagnostics.
+  void _logIceServerConfig() {
+    final servers = (iceServers['iceServers'] as List?) ?? [];
+    final hasTurn = servers.any((s) {
+      final urls = s['urls'];
+      if (urls is String) return urls.startsWith('turn');
+      if (urls is List) return urls.any((u) => u.toString().startsWith('turn'));
+      return false;
+    });
+    _log('[HOLLOW-VOICE] Creating PC with ${servers.length} ICE server groups, TURN=$hasTurn');
+  }
+
+  /// Body of pc.onIceCandidate — forward a freshly gathered local candidate
+  /// to the peer via call signaling.
+  void _sendLocalIceCandidate(
+      String peerId, String callId, RTCIceCandidate candidate) {
+    if (candidate.candidate == null || candidate.candidate!.isEmpty) return;
+    // Log candidate type for diagnostics (host/srflx/relay).
+    final c = candidate.candidate!;
+    final type = c.contains('typ host')
+        ? 'host'
+        : c.contains('typ srflx')
+            ? 'srflx'
+            : c.contains('typ relay')
+                ? 'relay'
+                : 'unknown';
+    _log('[HOLLOW-VOICE] ICE candidate: $type mid=${candidate.sdpMid}');
+    final payload = jsonEncode({
+      'call_id': callId,
+      'candidate': candidate.candidate,
+      'sdpMid': candidate.sdpMid,
+      'sdpMLineIndex': candidate.sdpMLineIndex,
+    });
+    network_api.callSendSignal(
+      peerId: peerId,
+      signalType: 'ice',
+      payload: payload,
+    );
+  }
+
+  /// Body of pc.onTrack — audio auto-plays, video needs a renderer.
+  void _onRemoteTrack(String peerId, RTCTrackEvent event) {
+    _log('[HOLLOW-VOICE] Remote track: ${event.track.kind} '
+        'id=${event.track.id} streams=${event.streams.length}');
+
+    if (event.track.kind == 'video') {
+      _handleRemoteVideoTrack(peerId, event);
+    } else if (event.track.kind == 'audio') {
+      // Audio auto-plays (no renderer), but a remote mid-call mic switch
+      // lands as a NEW transceiver — the SFrame decryptor is still bound
+      // to the dead receiver, so without a rebind the fresh track plays
+      // as ciphertext gibberish. No-op before the key exchange.
+      unawaited(_rebindSframeAudioReceiver(event.receiver));
+    }
+  }
+
+  /// Body of pc.onConnectionState.
+  void _onConnectionStateChanged(RTCPeerConnection pc, String peerId,
+      RTCPeerConnectionState state) {
+    _log('[HOLLOW-VOICE] Connection state: $state');
+    switch (state) {
+      case RTCPeerConnectionState.RTCPeerConnectionStateConnected:
+        onConnected?.call(peerId);
+        Future.delayed(
+            const Duration(seconds: 1), () => _logIceRoute(pc, peerId));
+      case RTCPeerConnectionState.RTCPeerConnectionStateFailed:
+      case RTCPeerConnectionState.RTCPeerConnectionStateClosed:
+      case RTCPeerConnectionState.RTCPeerConnectionStateDisconnected:
+        onDisconnected?.call(peerId);
+      default:
+        break;
+    }
+  }
+
+  /// One-second-post-connect diagnostic: log which ICE route (TURN / STUN /
+  /// LAN / P2P) the succeeded candidate pair took.
+  Future<void> _logIceRoute(RTCPeerConnection pc, String peerId) async {
+    try {
+      final stats = await pc.getStats();
+      for (final report in stats) {
+        if (report.type == 'candidate-pair' &&
+            report.values['state'] == 'succeeded') {
+          final types = _candidatePairTypes(
+              stats,
+              report.values['localCandidateId'] as String?,
+              report.values['remoteCandidateId'] as String?);
+          final localType = types[0], remoteType = types[1], proto = types[2];
+          final route = _describeIceRoute(localType, remoteType);
+          _log('[HOLLOW-VOICE] ICE route to $peerId: $route (local=$localType remote=$remoteType proto=$proto)');
+          return;
+        }
+      }
+      _log('[HOLLOW-VOICE] ICE route to $peerId: no succeeded candidate pair found');
+    } catch (e) {
+      _log('[HOLLOW-VOICE] ICE route check failed: $e');
+    }
+  }
+
+  /// Resolve [localType, remoteType, proto] for a succeeded candidate pair
+  /// from the full stats list.
+  List<String> _candidatePairTypes(
+      List<StatsReport> stats, String? localId, String? remoteId) {
+    String localType = '?', remoteType = '?', proto = '';
+    for (final r in stats) {
+      if (r.type == 'local-candidate' && r.id == localId) {
+        localType = (r.values['candidateType'] as String?) ?? '?';
+        proto = (r.values['protocol'] as String?) ?? '';
+      }
+      if (r.type == 'remote-candidate' && r.id == remoteId) {
+        remoteType = (r.values['candidateType'] as String?) ?? '?';
+      }
+    }
+    return [localType, remoteType, proto];
+  }
+
+  String _describeIceRoute(String localType, String remoteType) =>
+      localType == 'relay' || remoteType == 'relay'
+          ? 'TURN (relayed)'
+          : localType == 'srflx' || remoteType == 'srflx'
+              ? 'STUN (direct P2P)'
+              : localType == 'host' && remoteType == 'host'
+                  ? 'LAN (direct)'
+                  : 'P2P ($localType/$remoteType)';
 
   // ---------------------------------------------------------------------------
   // Private — Audio
@@ -1487,25 +1580,7 @@ class VoiceService {
   Future<void> _captureLocalVideo() async {
     _log('[HOLLOW-VOICE] Capturing camera (front=$_useFrontCamera, '
         'preferred=${preferredCameraDeviceId ?? "default"})');
-    final videoConstraints = <String, dynamic>{
-      'width': {'ideal': 640},
-      'height': {'ideal': 480},
-      'frameRate': {'ideal': 30},
-    };
-    // flutter_webrtc native (Windows/macOS/Linux) uses 'sourceId' in
-    // optional array — 'deviceId' is ignored by GetUserVideo().
-    if (preferredCameraDeviceId != null) {
-      videoConstraints['optional'] = [
-        {'sourceId': preferredCameraDeviceId}
-      ];
-    } else {
-      videoConstraints['facingMode'] =
-          _useFrontCamera ? 'user' : 'environment';
-    }
-    final constraints = {
-      'audio': false,
-      'video': videoConstraints,
-    };
+    final constraints = _videoCaptureConstraints(preferredCameraDeviceId);
 
     try {
       _localVideoStream = await navigator.mediaDevices.getUserMedia(constraints);
@@ -1581,27 +1656,9 @@ class VoiceService {
       _remoteStream = newStream;
       _remoteStreamIsSynthetic = newIsSynthetic;
 
-      // Best-effort dispose of the old renderer/stream. Wrapped in try/catch
-      // because libwebrtc may have already cleaned up the underlying
-      // MediaStream during renegotiation.
-      if (oldRenderer != null) {
-        try {
-          oldRenderer.srcObject = null;
-          await oldRenderer.dispose();
-        } catch (e) {
-          _log('[HOLLOW-VOICE] Old renderer dispose failed (non-fatal): $e');
-        }
-      }
-      // Only dispose streams we actually own. Streams from onTrack events
-      // are owned by libwebrtc and disposing them throws "not found".
-      if (oldStream != null && oldWasSynthetic) {
-        try {
-          await oldStream.dispose();
-        } catch (e) {
-          _log('[HOLLOW-VOICE] Old synthetic stream dispose failed '
-              '(non-fatal): $e');
-        }
-      }
+      // Best-effort dispose of the old renderer/stream.
+      await _disposeReplacedRemoteMedia(
+          oldRenderer, oldStream, oldWasSynthetic);
 
       // Slight delay to ensure renderer is ready for RTCVideoView, then
       // notify the UI.
@@ -1609,35 +1666,65 @@ class VoiceService {
       onRemoteVideoTrack?.call(peerId);
       _scheduleVideoStatsProbes('recv');
 
-      // Re-assert the native track binding: on iOS the first srcObject bind
-      // can race the native stream's track-list population — Dart-side
-      // srcObject is set and frames decode, but videoRendererSetSrcObject
-      // found videoTracks empty and the renderer silently stays trackless
-      // (black) until a NEW renderer binds on the next toggle. Re-setting
-      // srcObject re-runs the native lookup; it's idempotent when the first
-      // bind worked. renderer.value tells us whether frames ever reached the
-      // texture (width/height stay 0 + renderVideo=false when they didn't).
-      for (final d in const [
-        Duration(milliseconds: 400),
-        Duration(milliseconds: 1200),
-      ]) {
-        Future.delayed(d, () {
-          if (_remoteRenderer != newRenderer || _remoteStream != newStream) {
-            return; // superseded by a newer track
-          }
-          _log('[HOLLOW-VOICE] Remote renderer value before re-assert: '
-              '${newRenderer.value}');
-          try {
-            newRenderer.srcObject = newStream;
-          } catch (e) {
-            _log('[HOLLOW-VOICE] Renderer binding re-assert failed: $e');
-          }
-        });
-      }
+      _scheduleRendererReassert(newRenderer, newStream);
     } catch (e) {
       _log('[HOLLOW-VOICE] ERROR handling remote video track: $e');
       // Don't trash existing state on error — the previous renderer may
       // still be usable. Just log and bail.
+    }
+  }
+
+  /// Best-effort dispose of the previous remote renderer/stream AFTER the
+  /// new one is committed. Wrapped in try/catch because libwebrtc may have
+  /// already cleaned up the underlying MediaStream during renegotiation.
+  /// Only synthetic streams are disposed — streams from onTrack events are
+  /// owned by libwebrtc and disposing them throws "not found".
+  Future<void> _disposeReplacedRemoteMedia(RTCVideoRenderer? oldRenderer,
+      MediaStream? oldStream, bool oldWasSynthetic) async {
+    if (oldRenderer != null) {
+      try {
+        oldRenderer.srcObject = null;
+        await oldRenderer.dispose();
+      } catch (e) {
+        _log('[HOLLOW-VOICE] Old renderer dispose failed (non-fatal): $e');
+      }
+    }
+    if (oldStream != null && oldWasSynthetic) {
+      try {
+        await oldStream.dispose();
+      } catch (e) {
+        _log('[HOLLOW-VOICE] Old synthetic stream dispose failed '
+            '(non-fatal): $e');
+      }
+    }
+  }
+
+  /// Re-assert the native track binding: on iOS the first srcObject bind
+  /// can race the native stream's track-list population — Dart-side
+  /// srcObject is set and frames decode, but videoRendererSetSrcObject
+  /// found videoTracks empty and the renderer silently stays trackless
+  /// (black) until a NEW renderer binds on the next toggle. Re-setting
+  /// srcObject re-runs the native lookup; it's idempotent when the first
+  /// bind worked. renderer.value tells us whether frames ever reached the
+  /// texture (width/height stay 0 + renderVideo=false when they didn't).
+  void _scheduleRendererReassert(
+      RTCVideoRenderer newRenderer, MediaStream newStream) {
+    for (final d in const [
+      Duration(milliseconds: 400),
+      Duration(milliseconds: 1200),
+    ]) {
+      Future.delayed(d, () {
+        if (_remoteRenderer != newRenderer || _remoteStream != newStream) {
+          return; // superseded by a newer track
+        }
+        _log('[HOLLOW-VOICE] Remote renderer value before re-assert: '
+            '${newRenderer.value}');
+        try {
+          newRenderer.srcObject = newStream;
+        } catch (e) {
+          _log('[HOLLOW-VOICE] Renderer binding re-assert failed: $e');
+        }
+      });
     }
   }
 
@@ -1676,15 +1763,7 @@ class VoiceService {
   /// This controls the actual audio quality sent over the wire.
   String _mungeOpusParams(String sdp) {
     // Find the Opus payload type from a=rtpmap lines.
-    String? opusPt;
-    for (final line in sdp.split('\r\n')) {
-      final match = RegExp(r'a=rtpmap:(\d+)\s+opus/48000', caseSensitive: false)
-          .firstMatch(line);
-      if (match != null) {
-        opusPt = match.group(1);
-        break;
-      }
-    }
+    final opusPt = _findOpusPayloadType(sdp);
     if (opusPt == null) return sdp; // No Opus found, return as-is.
 
     // Build the desired fmtp params.
@@ -1714,17 +1793,37 @@ class VoiceService {
     }
     // If no existing fmtp line, insert after rtpmap.
     if (!replaced) {
-      final rtpmapLine = 'a=rtpmap:$opusPt ';
-      final insertResult = <String>[];
-      for (final line in result) {
-        insertResult.add(line);
-        if (line.startsWith(rtpmapLine)) {
-          insertResult.add('$fmtpPrefix${params.join(';')}');
-        }
-      }
-      return insertResult.join('\r\n');
+      return _insertFmtpAfterRtpmap(
+          result, opusPt, '$fmtpPrefix${params.join(';')}');
     }
     return result.join('\r\n');
+  }
+
+  /// Extract the Opus payload type from the SDP's a=rtpmap lines.
+  String? _findOpusPayloadType(String sdp) {
+    for (final line in sdp.split('\r\n')) {
+      final match = RegExp(r'a=rtpmap:(\d+)\s+opus/48000', caseSensitive: false)
+          .firstMatch(line);
+      if (match != null) {
+        return match.group(1);
+      }
+    }
+    return null;
+  }
+
+  /// Insert [fmtpLine] directly after the Opus a=rtpmap line and rejoin the
+  /// SDP (used when the offer/answer had no fmtp line to replace).
+  String _insertFmtpAfterRtpmap(
+      List<String> lines, String opusPt, String fmtpLine) {
+    final rtpmapLine = 'a=rtpmap:$opusPt ';
+    final insertResult = <String>[];
+    for (final line in lines) {
+      insertResult.add(line);
+      if (line.startsWith(rtpmapLine)) {
+        insertResult.add(fmtpLine);
+      }
+    }
+    return insertResult.join('\r\n');
   }
 
   /// Dump video RTP stats — diagnostics for the remote-camera black screen
@@ -1737,42 +1836,53 @@ class VoiceService {
     try {
       final reports = await pc.getStats();
       for (final r in reports) {
-        final v = r.values;
         if (r.type == 'codec') {
-          final mime = (v['mimeType'] ?? '').toString().toLowerCase();
-          if (!mime.startsWith('video')) continue;
-          _log('[HOLLOW-VIDEO-STATS] $label codec id=${r.id}: '
-              '${v['mimeType']} payloadType=${v['payloadType']} '
-              'fmtp=${v['sdpFmtpLine']}');
+          _logVideoCodecStat(label, r);
         } else if (r.type == 'inbound-rtp' || r.type == 'outbound-rtp') {
-          final kind = (v['kind'] ?? v['mediaType'] ?? '').toString();
-          if (kind != 'video') continue;
-          if (r.type == 'inbound-rtp') {
-            _log('[HOLLOW-VIDEO-STATS] $label inbound: '
-                'bytes=${v['bytesReceived']} packets=${v['packetsReceived']} '
-                'framesReceived=${v['framesReceived']} '
-                'framesDecoded=${v['framesDecoded']} '
-                'framesDropped=${v['framesDropped']} '
-                'keyFramesDecoded=${v['keyFramesDecoded']} '
-                'pli=${v['pliCount']} nack=${v['nackCount']} '
-                'size=${v['frameWidth']}x${v['frameHeight']} '
-                'decoder=${v['decoderImplementation']} '
-                'codecId=${v['codecId']}');
-          } else {
-            _log('[HOLLOW-VIDEO-STATS] $label outbound: '
-                'bytes=${v['bytesSent']} packets=${v['packetsSent']} '
-                'framesEncoded=${v['framesEncoded']} '
-                'framesSent=${v['framesSent']} '
-                'keyFramesEncoded=${v['keyFramesEncoded']} '
-                'size=${v['frameWidth']}x${v['frameHeight']} '
-                'encoder=${v['encoderImplementation']} '
-                'qualityLimitation=${v['qualityLimitationReason']} '
-                'codecId=${v['codecId']}');
-          }
+          _logVideoRtpStat(label, r);
         }
       }
     } catch (e) {
       _log('[HOLLOW-VIDEO-STATS] $label probe failed: $e');
+    }
+  }
+
+  /// Log a video codec stats report (skips non-video codecs).
+  void _logVideoCodecStat(String label, StatsReport r) {
+    final v = r.values;
+    final mime = (v['mimeType'] ?? '').toString().toLowerCase();
+    if (!mime.startsWith('video')) return;
+    _log('[HOLLOW-VIDEO-STATS] $label codec id=${r.id}: '
+        '${v['mimeType']} payloadType=${v['payloadType']} '
+        'fmtp=${v['sdpFmtpLine']}');
+  }
+
+  /// Log an inbound-rtp / outbound-rtp video stats report (skips audio).
+  void _logVideoRtpStat(String label, StatsReport r) {
+    final v = r.values;
+    final kind = (v['kind'] ?? v['mediaType'] ?? '').toString();
+    if (kind != 'video') return;
+    if (r.type == 'inbound-rtp') {
+      _log('[HOLLOW-VIDEO-STATS] $label inbound: '
+          'bytes=${v['bytesReceived']} packets=${v['packetsReceived']} '
+          'framesReceived=${v['framesReceived']} '
+          'framesDecoded=${v['framesDecoded']} '
+          'framesDropped=${v['framesDropped']} '
+          'keyFramesDecoded=${v['keyFramesDecoded']} '
+          'pli=${v['pliCount']} nack=${v['nackCount']} '
+          'size=${v['frameWidth']}x${v['frameHeight']} '
+          'decoder=${v['decoderImplementation']} '
+          'codecId=${v['codecId']}');
+    } else {
+      _log('[HOLLOW-VIDEO-STATS] $label outbound: '
+          'bytes=${v['bytesSent']} packets=${v['packetsSent']} '
+          'framesEncoded=${v['framesEncoded']} '
+          'framesSent=${v['framesSent']} '
+          'keyFramesEncoded=${v['keyFramesEncoded']} '
+          'size=${v['frameWidth']}x${v['frameHeight']} '
+          'encoder=${v['encoderImplementation']} '
+          'qualityLimitation=${v['qualityLimitationReason']} '
+          'codecId=${v['codecId']}');
     }
   }
 

@@ -259,35 +259,14 @@ fn collect_target_devices(
         .into_iter()
         .filter(|d| super::crypto_handler::ws_room_for_peer(ws_room_peers, d).is_some())
         .collect();
-    // Offline-but-real devices (Step 9A): a known device of this master that is
-    // NOT in a room but we DO hold an Olm session with. The resolver's
-    // `devices_for` reflects the signed device list MINUS revoked tombstones
-    // (Step 7 `forget`s a revoked device), so it's the authoritative "real
-    // devices" set; intersecting with `has_session` drops never-contacted ghosts
-    // (a real offline phone we've messaged has a session; a ghost we never
-    // established one with does not). These hit `send_dm_to_device`'s
-    // session+offline branch → relay buffers under the device id + pushes its
-    // token → the quit phone's background fetch (which now auths as that device)
-    // decrypts the preview. Without this a fully-quit phone was never targeted at
-    // all → no push (the Step 9A break). Self fan-out passes None to skip this.
+    // Offline-but-real devices (Step 9A) — see `offline_session_devices`. Self
+    // fan-out passes None to skip this (never push our own phone).
     if let Some(olm) = olm {
-        for d in super::resolver::devices_for(master) {
-            if super::crypto_handler::ws_room_for_peer(ws_room_peers, &d).is_none()
-                && olm.has_session(&d)
-            {
-                set.insert(d);
-            }
-        }
+        set.extend(offline_session_devices(olm, ws_room_peers, master));
     }
     // Union: peers physically in the DM room that resolve to this master (always
     // included — live presence trumps the stored list, and is reachable by definition).
-    if let Some(peers) = ws_room_peers.get(dm_room) {
-        for p in peers {
-            if super::resolver::resolve(p) == master {
-                set.insert(p.clone());
-            }
-        }
-    }
+    set.extend(room_peers_of_master(ws_room_peers, dm_room, master));
     if let Some(ex) = exclude {
         set.remove(ex);
     }
@@ -298,6 +277,48 @@ fn collect_target_devices(
         return vec![fallback_self.to_string()];
     }
     set.into_iter().collect()
+}
+
+/// Offline-but-real devices of one master (Step 9A push): a known device of
+/// this master that is NOT in a room but we DO hold an Olm session with. The
+/// resolver's `devices_for` reflects the signed device list MINUS revoked
+/// tombstones (Step 7 `forget`s a revoked device), so it's the authoritative
+/// "real devices" set; intersecting with `has_session` drops never-contacted
+/// ghosts (a real offline phone we've messaged has a session; a ghost we never
+/// established one with does not). These hit `send_dm_to_device`'s
+/// session+offline branch → relay buffers under the device id + pushes its
+/// token → the quit phone's background fetch (which now auths as that device)
+/// decrypts the preview. Without this a fully-quit phone was never targeted at
+/// all → no push (the Step 9A break). Also the target predicate for the
+/// channel-push offline fan-out (same "real offline device" definition).
+fn offline_session_devices(
+    olm: &OlmManager,
+    ws_room_peers: &HashMap<String, HashSet<String>>,
+    master: &str,
+) -> Vec<String> {
+    super::resolver::devices_for(master)
+        .into_iter()
+        .filter(|d| {
+            super::crypto_handler::ws_room_for_peer(ws_room_peers, d).is_none()
+                && olm.has_session(d)
+        })
+        .collect()
+}
+
+/// Peers currently present in `room` whose identity resolves to `master`.
+fn room_peers_of_master(
+    ws_room_peers: &HashMap<String, HashSet<String>>,
+    room: &str,
+    master: &str,
+) -> Vec<String> {
+    let Some(peers) = ws_room_peers.get(room) else {
+        return Vec::new();
+    };
+    peers
+        .iter()
+        .filter(|p| super::resolver::resolve(p) == master)
+        .cloned()
+        .collect()
 }
 
 /// Send one already-signed DM envelope to ONE concrete device peer_id (Phase 6
@@ -341,160 +362,207 @@ async fn send_dm_to_device(
     // offline-but-sibling-online device into the offline-buffer branch correctly.
     let device_online = super::crypto_handler::ws_room_for_peer(ws_room_peers, device_peer).is_some();
 
-    if olm.has_session(device_peer) {
-        if device_online && !is_sibling {
-            // Genuine recipient device, online — encrypt and send into the
-            // DETERMINISTIC DM room (the master-pair `dm_room_code` the caller
-            // computed), NOT a `ws_room_for_peer` lookup. When the recipient's
-            // device is co-present in more than one of our rooms (its DM room
-            // PLUS an inbox/server room during friend-handshake churn), the
-            // first-match lookup inside send_encrypted_message can pick a room
-            // the recipient has since left → the relay buffers the frame against
-            // a room they never rejoin and it's silently lost (the one-way DM
-            // bug: sends "succeed" but never arrive). The offline branch below
-            // already routes by dm_room for this exact reason; the online branch
-            // must too. Every device of the FRIEND is a member of dm_room.
-            // NOTE: siblings are handled by the branch below — they meet in
-            // inbox:{our_master}, NOT dm_room_code(M,M), so dm_room is wrong for
-            // them; keep the flexible lookup for the sibling self-echo path.
-            match olm.encrypt(device_peer, envelope_json.as_bytes()) {
-                Ok((msg_type, ciphertext)) => {
-                    super::crypto_handler::persist_olm_session(olm, crypto_store, device_peer);
-                    if msg_type == 0 {
-                        hollow_log!("[HOLLOW-CRYPTO] Sending PreKey (type 0) to {device_peer}");
-                    }
-                    let identity_key = if msg_type == 0 {
-                        Some(olm.identity_key_base64())
-                    } else {
-                        None
-                    };
-                    let haven_msg = HavenMessage::Encrypted {
-                        message_type: msg_type,
-                        body: OlmManager::encode_base64(&ciphertext),
-                        identity_key,
-                    };
-                    let json = serde_json::to_string(&haven_msg).unwrap_or_default();
-                    let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendDirect {
-                        room_code: dm_room.to_string(),
-                        target_peer: device_peer.to_string(),
-                        data: json.into_bytes(),
-                    });
-                }
-                Err(e) => {
-                    let _ = event_tx
-                        .send(NetworkEvent::MessageSendFailed {
-                            to_peer: device_peer.to_string(),
-                            error: format!("Encryption failed: {e}"),
-                        })
-                        .await;
-                }
-            }
-            // ALSO queue for re-delivery on the next session (re)establishment.
-            // The relay never ACKs a direct message, and a session we believe is
-            // confirmed bidirectional can be silently dead on the PEER's side —
-            // the classic "KeyRequest while we hold a session — peer lost theirs"
-            // desync, which is acute right after a device link (the freshly-linked
-            // sibling and its source churn their ratchet during the snapshot
-            // handshake). A DM encrypted on that doomed ratchet is undecryptable and,
-            // without this queue, lost forever (it was the "first sibling DM never
-            // mirrors, every later one does" bug). The re-key/decrypt-fail path
-            // (swarm.rs), PeerJoined, and KeyBundle all `.remove()`-drain this queue
-            // on a FRESH session, re-delivering the envelope; the receiver dedups by
-            // `message_id`, so the redundant copy on a healthy session is harmless.
-            // Cap per-device so a long-lived healthy session (no reconnect to drain
-            // it) can't grow the queue unbounded.
-            const RETRY_QUEUE_CAP: usize = 20;
-            let q = pending_messages.entry(device_peer.to_string()).or_default();
-            q.push(envelope_json.to_string());
-            if q.len() > RETRY_QUEUE_CAP {
-                let overflow = q.len() - RETRY_QUEUE_CAP;
-                q.drain(0..overflow);
-            }
-        } else if is_sibling && device_online {
-            // Our OWN sibling device, online — send the self-echo NOW. Siblings meet
-            // in inbox:{our_master}, NOT dm_room_code(M,M), so route via the flexible
-            // ws_room_for_peer lookup (which finds the inbox room), NOT the DM room.
-            // The multi-room one-way risk doesn't apply here: a sibling shares only
-            // the inbox room with us, so the lookup is unambiguous.
-            send_encrypted_message(
-                olm, crypto_store, device_peer, envelope_json,
-                event_tx, ws_cmd_tx, ws_room_peers,
-            ).await;
-            pending_messages
-                .entry(device_peer.to_string())
-                .or_default()
-                .push(envelope_json.to_string());
-        } else if is_sibling {
-            // Session exists but our OWN sibling device is offline. Do NOT room-send
-            // (that would trigger a push — Pixel buzzing for VM's own message). Just
-            // queue for silent delivery when the sibling reconnects; Step 5 backfill
-            // also closes the gap on next inbox-join.
-            pending_messages
-                .entry(device_peer.to_string())
-                .or_default()
-                .push(envelope_json.to_string());
-        } else {
-            // Session exists but device is offline — encrypt and send to DM room
-            // anyway. The relay sees the target isn't in the room and triggers a
-            // push notification.
-            match olm.encrypt(device_peer, envelope_json.as_bytes()) {
-                Ok((msg_type, ciphertext)) => {
-                    super::crypto_handler::persist_olm_session(olm, crypto_store, device_peer);
-                    let identity_key = if msg_type == 0 {
-                        Some(olm.identity_key_base64())
-                    } else {
-                        None
-                    };
-                    let haven_msg = HavenMessage::Encrypted {
-                        message_type: msg_type,
-                        body: OlmManager::encode_base64(&ciphertext),
-                        identity_key,
-                    };
-                    // The DM room is the MASTER-pair room (computed once by the
-                    // caller from the recipient's master) — every device of the
-                    // recipient is a member of it. `dm_room_code` is pure now, so
-                    // we must NOT recompute it from `device_peer` here (that would
-                    // key the room on the device id, not the identity).
-                    let json = serde_json::to_string(&haven_msg).unwrap_or_default();
-                    let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendDirect {
-                        room_code: dm_room.to_string(),
-                        target_peer: device_peer.to_string(),
-                        data: json.into_bytes(),
-                    });
-                    hollow_log!("[HOLLOW-PUSH] Sent encrypted DM to offline {device_peer} via DM room (push trigger)");
-                }
-                Err(e) => {
-                    hollow_log!("[HOLLOW-PUSH] Encrypt for offline {device_peer} failed: {e}");
-                }
-            }
-            // Also queue for when this device comes back online (push may fail).
-            pending_messages
-                .entry(device_peer.to_string())
-                .or_default()
-                .push(envelope_json.to_string());
-        }
-    } else {
+    if !olm.has_session(device_peer) {
         // No session with this device — queue the signed envelope. Drained when
         // the device reconnects (PeerJoined/RoomMembers/KeyBundle).
-        pending_messages
-            .entry(device_peer.to_string())
-            .or_default()
-            .push(envelope_json.to_string());
+        queue_dm_key_request(
+            ws_cmd_tx, ws_room_peers, pending_messages, key_request_in_flight,
+            device_peer, envelope_json, device_online,
+        );
+        return;
+    }
+    if device_online && !is_sibling {
+        send_dm_online_recipient(
+            olm, crypto_store, event_tx, ws_cmd_tx, pending_messages,
+            device_peer, envelope_json, dm_room,
+        ).await;
+    } else if is_sibling && device_online {
+        // Our OWN sibling device, online — send the self-echo NOW. Siblings meet
+        // in inbox:{our_master}, NOT dm_room_code(M,M), so route via the flexible
+        // ws_room_for_peer lookup (which finds the inbox room), NOT the DM room.
+        // The multi-room one-way risk doesn't apply here: a sibling shares only
+        // the inbox room with us, so the lookup is unambiguous.
+        send_encrypted_message(
+            olm, crypto_store, device_peer, envelope_json,
+            event_tx, ws_cmd_tx, ws_room_peers,
+        ).await;
+        queue_pending_envelope(pending_messages, device_peer, envelope_json);
+    } else if is_sibling {
+        // Session exists but our OWN sibling device is offline. Do NOT room-send
+        // (that would trigger a push — Pixel buzzing for VM's own message). Just
+        // queue for silent delivery when the sibling reconnects; Step 5 backfill
+        // also closes the gap on next inbox-join.
+        queue_pending_envelope(pending_messages, device_peer, envelope_json);
+    } else {
+        send_dm_offline_recipient(olm, crypto_store, ws_cmd_tx, device_peer, envelope_json, dm_room);
+        // Also queue for when this device comes back online (push may fail).
+        queue_pending_envelope(pending_messages, device_peer, envelope_json);
+    }
+}
 
-        let req_fresh = key_request_in_flight
-            .get(device_peer)
-            .is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(10));
-        if !req_fresh {
-            hollow_log!("[HOLLOW-SWARM] No session for {device_peer}, sending KeyRequest");
-            // Only mark in-flight if we actually sent it — exact-device presence
-            // gates the send, so don't strand the timestamp on an offline device.
-            if device_online {
-                send_message_to_peer(
-                    ws_cmd_tx, ws_room_peers,
-                    device_peer, HavenMessage::KeyRequest,
-                );
-                key_request_in_flight.insert(device_peer.to_string(), std::time::Instant::now());
-            }
+/// Genuine recipient device, online — encrypt and send into the DETERMINISTIC
+/// DM room (the master-pair `dm_room_code` the caller computed), NOT a
+/// `ws_room_for_peer` lookup. When the recipient's device is co-present in more
+/// than one of our rooms (its DM room PLUS an inbox/server room during
+/// friend-handshake churn), the first-match lookup inside
+/// send_encrypted_message can pick a room the recipient has since left → the
+/// relay buffers the frame against a room they never rejoin and it's silently
+/// lost (the one-way DM bug: sends "succeed" but never arrive). The offline
+/// path (`send_dm_offline_recipient`) already routes by dm_room for this exact
+/// reason; the online path must too. Every device of the FRIEND is a member of
+/// dm_room. NOTE: siblings never take this path — they meet in
+/// inbox:{our_master}, NOT dm_room_code(M,M), so dm_room is wrong for them;
+/// the sibling self-echo path keeps the flexible lookup.
+#[allow(clippy::too_many_arguments)]
+async fn send_dm_online_recipient(
+    olm: &mut OlmManager,
+    crypto_store: &CryptoStore,
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    pending_messages: &mut HashMap<String, Vec<String>>,
+    device_peer: &str,
+    envelope_json: &str,
+    dm_room: &str,
+) {
+    match encrypt_dm_wire(olm, crypto_store, device_peer, envelope_json, /*log_prekey*/ true) {
+        Ok(json) => {
+            let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendDirect {
+                room_code: dm_room.to_string(),
+                target_peer: device_peer.to_string(),
+                data: json.into_bytes(),
+            });
+        }
+        Err(e) => {
+            let _ = event_tx
+                .send(NetworkEvent::MessageSendFailed {
+                    to_peer: device_peer.to_string(),
+                    error: format!("Encryption failed: {e}"),
+                })
+                .await;
+        }
+    }
+    // ALSO queue for re-delivery on the next session (re)establishment.
+    // The relay never ACKs a direct message, and a session we believe is
+    // confirmed bidirectional can be silently dead on the PEER's side —
+    // the classic "KeyRequest while we hold a session — peer lost theirs"
+    // desync, which is acute right after a device link (the freshly-linked
+    // sibling and its source churn their ratchet during the snapshot
+    // handshake). A DM encrypted on that doomed ratchet is undecryptable and,
+    // without this queue, lost forever (it was the "first sibling DM never
+    // mirrors, every later one does" bug). The re-key/decrypt-fail path
+    // (swarm.rs), PeerJoined, and KeyBundle all `.remove()`-drain this queue
+    // on a FRESH session, re-delivering the envelope; the receiver dedups by
+    // `message_id`, so the redundant copy on a healthy session is harmless.
+    // Cap per-device so a long-lived healthy session (no reconnect to drain
+    // it) can't grow the queue unbounded.
+    const RETRY_QUEUE_CAP: usize = 20;
+    let q = pending_messages.entry(device_peer.to_string()).or_default();
+    q.push(envelope_json.to_string());
+    if q.len() > RETRY_QUEUE_CAP {
+        let overflow = q.len() - RETRY_QUEUE_CAP;
+        q.drain(0..overflow);
+    }
+}
+
+/// Session exists but the recipient device is offline — encrypt and send to the
+/// DM room anyway. The relay sees the target isn't in the room and triggers a
+/// push notification. The DM room is the MASTER-pair room (computed once by the
+/// caller from the recipient's master) — every device of the recipient is a
+/// member of it. `dm_room_code` is pure now, so we must NOT recompute it from
+/// `device_peer` here (that would key the room on the device id, not the
+/// identity).
+fn send_dm_offline_recipient(
+    olm: &mut OlmManager,
+    crypto_store: &CryptoStore,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    device_peer: &str,
+    envelope_json: &str,
+    dm_room: &str,
+) {
+    match encrypt_dm_wire(olm, crypto_store, device_peer, envelope_json, /*log_prekey*/ false) {
+        Ok(json) => {
+            let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendDirect {
+                room_code: dm_room.to_string(),
+                target_peer: device_peer.to_string(),
+                data: json.into_bytes(),
+            });
+            hollow_log!("[HOLLOW-PUSH] Sent encrypted DM to offline {device_peer} via DM room (push trigger)");
+        }
+        Err(e) => {
+            hollow_log!("[HOLLOW-PUSH] Encrypt for offline {device_peer} failed: {e}");
+        }
+    }
+}
+
+/// Encrypt one signed DM envelope to one device's Olm session and wrap it as
+/// `HavenMessage::Encrypted` wire JSON. Persists the ratcheted session on
+/// success only (encrypt failure leaves the stored session untouched).
+fn encrypt_dm_wire(
+    olm: &mut OlmManager,
+    crypto_store: &CryptoStore,
+    device_peer: &str,
+    envelope_json: &str,
+    log_prekey: bool,
+) -> Result<String, String> {
+    let (msg_type, ciphertext) = olm
+        .encrypt(device_peer, envelope_json.as_bytes())
+        .map_err(|e| e.to_string())?;
+    super::crypto_handler::persist_olm_session(olm, crypto_store, device_peer);
+    if log_prekey && msg_type == 0 {
+        hollow_log!("[HOLLOW-CRYPTO] Sending PreKey (type 0) to {device_peer}");
+    }
+    let identity_key = if msg_type == 0 {
+        Some(olm.identity_key_base64())
+    } else {
+        None
+    };
+    let haven_msg = HavenMessage::Encrypted {
+        message_type: msg_type,
+        body: OlmManager::encode_base64(&ciphertext),
+        identity_key,
+    };
+    Ok(serde_json::to_string(&haven_msg).unwrap_or_default())
+}
+
+/// Queue one signed envelope under a DEVICE id for silent re-delivery on that
+/// device's next session (re)establishment / reconnect drain.
+fn queue_pending_envelope(
+    pending_messages: &mut HashMap<String, Vec<String>>,
+    device_peer: &str,
+    envelope_json: &str,
+) {
+    pending_messages
+        .entry(device_peer.to_string())
+        .or_default()
+        .push(envelope_json.to_string());
+}
+
+/// No Olm session with this device — queue the signed envelope (drained on
+/// PeerJoined/RoomMembers/KeyBundle) and fire a throttled KeyRequest.
+fn queue_dm_key_request(
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, HashSet<String>>,
+    pending_messages: &mut HashMap<String, Vec<String>>,
+    key_request_in_flight: &mut HashMap<String, std::time::Instant>,
+    device_peer: &str,
+    envelope_json: &str,
+    device_online: bool,
+) {
+    queue_pending_envelope(pending_messages, device_peer, envelope_json);
+
+    let req_fresh = key_request_in_flight
+        .get(device_peer)
+        .is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(10));
+    if !req_fresh {
+        hollow_log!("[HOLLOW-SWARM] No session for {device_peer}, sending KeyRequest");
+        // Only mark in-flight if we actually sent it — exact-device presence
+        // gates the send, so don't strand the timestamp on an offline device.
+        if device_online {
+            send_message_to_peer(
+                ws_cmd_tx, ws_room_peers,
+                device_peer, HavenMessage::KeyRequest,
+            );
+            key_request_in_flight.insert(device_peer.to_string(), std::time::Instant::now());
         }
     }
 }
@@ -533,49 +601,16 @@ pub(crate) async fn handle_send_channel_message(
         }
     };
 
-    if !server.can_post_in_channel(local_peer_str, &channel_id) {
-        let _ = event_tx.send(NetworkEvent::Error {
-            message: "You don't have permission to post in this channel".to_string(),
-        }).await;
+    // Posting permission + moderation trio gates (mute / media-only / slow mode).
+    // Receivers drop violations too — these are the cooperative-client fast-fail path.
+    if let Some(message) = channel_send_gate_error(
+        server, local_peer_str, &server_id, &channel_id, db_path, db_passphrase,
+    ) {
+        let _ = event_tx.send(NetworkEvent::Error { message }).await;
         return;
     }
 
     let local_peer = local_peer_str.to_string();
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-
-    // Moderation trio gates (mute / media-only / slow mode). Receivers drop
-    // violations too — these are the cooperative-client fast-fail path.
-    if server.is_muted(local_peer_str, now.as_millis() as u64) {
-        let _ = event_tx.send(NetworkEvent::Error {
-            message: "You are muted on this server".to_string(),
-        }).await;
-        return;
-    }
-    if server.is_channel_media_only(&channel_id) {
-        // Standalone text is rejected; captions ride the file send path.
-        let _ = event_tx.send(NetworkEvent::Error {
-            message: "This is a media-only channel — attach an image, GIF, or video".to_string(),
-        }).await;
-        return;
-    }
-    let slow = server.channel_slow_mode(&channel_id);
-    if slow > 0 && !server.bypasses_slow_mode(local_peer_str) {
-        if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
-            if let Some(last_ts) = store.latest_own_channel_ts(&server_id, &channel_id) {
-                let next_allowed = last_ts + (slow as i64) * 1000;
-                let now_ms = now.as_millis() as i64;
-                if now_ms < next_allowed {
-                    let wait_s = ((next_allowed - now_ms) + 999) / 1000;
-                    let _ = event_tx.send(NetworkEvent::Error {
-                        message: format!("Slow mode is on — wait {wait_s}s before sending again"),
-                    }).await;
-                    return;
-                }
-            }
-        }
-    }
 
     // Lamport-bumped send stamp — see the DM send / chat_clock.rs.
     let order_us = crate::chat_clock::next_send_stamp_us();
@@ -588,35 +623,9 @@ pub(crate) async fn handle_send_channel_message(
     );
     let (sig, pk) = sign_message(bundle_keypair, pub_key_b64, &signing_payload);
 
-    let envelope = MessageEnvelope::ChannelMessage {
-        inner: Box::new(ChannelMessagePayload {
-            sid: server_id.clone(),
-            cid: channel_id.clone(),
-            text: text.clone(),
-            ts: timestamp,
-            sig: sig.clone(),
-            pk: pk.clone(),
-            mid: Some(message_id.clone()),
-            reply_to: reply_to_mid.clone(),
-            file_id: None,
-            link_preview: link_preview.clone(),
-            order_us: Some(order_us),
-        }),
-    };
     // Mention metadata — shared by the notification hint and the offline push
     // fan-out below.
-    let has_at = text.contains('@');
-    let has_everyone = has_at && text.contains("@everyone");
-    let mut mentioned_names: Vec<String> = Vec::new();
-    if has_at {
-        for word in text.split_whitespace() {
-            if let Some(name) = word.strip_prefix('@') {
-                if !name.is_empty() && name != "everyone" {
-                    mentioned_names.push(name.to_string());
-                }
-            }
-        }
-    }
+    let (has_everyone, mentioned_names) = channel_mention_meta(&text);
 
     // Wire bytes of the message as broadcast to the room — re-delivered to
     // OFFLINE members via targeted 0x09 frames (relay offline buffer). The MLS
@@ -624,10 +633,8 @@ pub(crate) async fn handle_send_channel_message(
     // so one encryption serves both paths. None on the legacy Olm fan-out path
     // (pairwise sessions can't pre-encrypt for offline peers without burning
     // ratchet slots) — those members still get a content-free wake push.
-    let mut offline_wire_bytes: Option<Vec<u8>> = None;
-
-    // Public channels: plaintext broadcast (no MLS/Olm). Guests receive it too.
-    if server.is_channel_public(&channel_id) {
+    let offline_wire_bytes: Option<Vec<u8>> = if server.is_channel_public(&channel_id) {
+        // Public channels: plaintext broadcast (no MLS/Olm). Guests receive it too.
         let msg = HavenMessage::PublicChannelMessage {
             server_id: server_id.clone(),
             channel_id: channel_id.clone(),
@@ -640,75 +647,29 @@ pub(crate) async fn handle_send_channel_message(
             file_id: None,
             link_preview: link_preview.clone(),
         };
-        if let Ok(data) = serde_json::to_vec(&msg) {
-            offline_wire_bytes = Some(data.clone());
-            let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendToRoom {
-                room_code: server_id.clone(),
-                data,
-            });
-        }
+        send_public_channel_msg(ws_cmd_tx, &server_id, &msg)
     } else {
-        // MLS path: encrypt once → single WS broadcast to room.
-        // Restricted channels (Option B) encrypt under their per-channel subgroup
-        // instead of the server-wide group.
-        let use_subgroup = server.channel_uses_subgroup(&channel_id);
-        let group_key = if use_subgroup {
-            crate::crypto::subgroup_id(&server_id, &channel_id)
-        } else {
-            server_id.clone()
+        let envelope = MessageEnvelope::ChannelMessage {
+            inner: Box::new(ChannelMessagePayload {
+                sid: server_id.clone(),
+                cid: channel_id.clone(),
+                text: text.clone(),
+                ts: timestamp,
+                sig: sig.clone(),
+                pk: pk.clone(),
+                mid: Some(message_id.clone()),
+                reply_to: reply_to_mid.clone(),
+                file_id: None,
+                link_preview: link_preview.clone(),
+                order_us: Some(order_us),
+            }),
         };
-        let use_mls = mls.as_ref().is_some_and(|m| m.has_group(&group_key));
-        if use_mls {
-            match send_mls_broadcast_topic(mls.as_mut().unwrap(), ws_cmd_tx, &server_id, &channel_id, use_subgroup, &envelope, crypto_store) {
-                Ok(wire_bytes) => { offline_wire_bytes = Some(wire_bytes); }
-                Err(e) => {
-                    hollow_log!("[HOLLOW-MLS] Encrypt failed, falling back to Olm: {e}");
-                    let envelope_json = serde_json::to_string(&envelope).unwrap_or_default();
-                    for member_peer_str in server.members.keys() {
-                        if super::resolver::same_identity(member_peer_str, local_peer_str) { continue; }
-                        // Subgroup: only fan to members who qualify for the channel.
-                        if use_subgroup && !server.can_see_channel(member_peer_str, &channel_id) { continue; }
-                        // Olm is per-device: encrypt to EACH online device of the member.
-                        for dev in crate::node::crypto_handler::online_devices_for(ws_room_peers, member_peer_str) {
-                            send_encrypted_message(
-                                olm, crypto_store,
-                                &dev, &envelope_json,
-                                event_tx,
-                                ws_cmd_tx, ws_room_peers,
-                            ).await;
-                        }
-                    }
-                }
-            }
-        } else {
-            // Subgroup not yet bootstrapped (or legacy server with no MLS group):
-            // Olm fan-out to qualifying members, and (for a restricted channel)
-            // kick off subgroup bootstrap by sending our KeyPackage to the subgroup
-            // coordinator so future messages can use the subgroup.
-            if use_subgroup {
-                if let Some(mls_mgr) = mls.as_mut() {
-                    super::crypto_handler::request_subgroup_bootstrap(
-                        mls_mgr, ws_cmd_tx, ws_room_peers, server,
-                        &server_id, &channel_id, local_peer_str,
-                    );
-                }
-            }
-            let envelope_json = serde_json::to_string(&envelope).unwrap_or_default();
-            for member_peer_str in server.members.keys() {
-                        if super::resolver::same_identity(member_peer_str, local_peer_str) { continue; }
-                        if use_subgroup && !server.can_see_channel(member_peer_str, &channel_id) { continue; }
-                        // Olm is per-device: encrypt to EACH online device of the member.
-                        for dev in crate::node::crypto_handler::online_devices_for(ws_room_peers, member_peer_str) {
-                            send_encrypted_message(
-                                olm, crypto_store,
-                                &dev, &envelope_json,
-                                event_tx,
-                                ws_cmd_tx, ws_room_peers,
-                            ).await;
-                        }
-                    }
-        }
-    }
+        broadcast_channel_envelope(
+            olm, crypto_store, mls, event_tx, ws_cmd_tx, ws_room_peers,
+            server, local_peer_str, &server_id, &channel_id, &envelope,
+            "Encrypt failed, falling back to Olm", /*bootstrap_subgroup*/ true,
+        ).await
+    };
 
     // Broadcast notification hint via SendToRoom (reaches all room members, even unsubscribed).
     {
@@ -729,95 +690,20 @@ pub(crate) async fn handle_send_channel_message(
     }
 
     // ── Offline-member push fan-out (channel push notifications) ─────────
-    // Room/topic broadcasts only reach ONLINE peers; offline members get the
-    // message later via channel sync. To make their phones light up NOW, hand
-    // the relay one targeted 0x09 frame per offline member: the same wire bytes
-    // the room just received (buffered + replayed to that member's background
-    // fetch node) plus push metadata (channel + per-target mention flag) the
-    // relay filters against the member's registered push prefs. The relay never
-    // learns server membership — the SENDER picks the targets from its CRDT.
-    {
-        // `server.members` is MASTER-keyed (Step 6). Pick masters who are NOT
-        // reachable by ANY of their devices, and who aren't us.
-        let offline_members: Vec<&String> = server.members.keys()
-            .filter(|p| {
-                !super::resolver::same_identity(p, local_peer_str)
-                    && !peer_is_reachable(ws_room_peers, p)
-                    // Restricted channel (Option B): only members who can see the
-                    // channel get the ciphertext + push (others can't decrypt it).
-                    && server.can_see_channel(p, &channel_id)
-            })
-            .collect();
-        if !offline_members.is_empty() {
-            // A reply mentions the replied-to message's author.
-            let reply_author: Option<String> = reply_to_mid.as_deref().and_then(|mid| {
-                crate::storage::MessageStore::open(db_path, db_passphrase)
-                    .ok()
-                    .and_then(|s| s.get_channel_message_sender(mid))
-            });
-            hollow_log!(
-                "[HOLLOW-PUSH] Channel push fan-out: {} offline member(s) for {}/{}",
-                offline_members.len(), server_id, channel_id
-            );
-            for member in offline_members {
-                // Mention flag is per MEMBER (master): @everyone, a reply to their
-                // message, or their display name / nickname mentioned.
-                let mentioned = has_everyone
-                    || reply_author.as_deref() == Some(member.as_str())
-                    || (!mentioned_names.is_empty() && {
-                        let display = server.members.get(member)
-                            .map(|m| m.display_name.as_str())
-                            .unwrap_or("");
-                        let nick = server.nicknames.get(member).map(|n| n.read().as_str());
-                        mentioned_names.iter().any(|n| {
-                            (!display.is_empty() && n.eq_ignore_ascii_case(display))
-                                || nick.is_some_and(|nk| n.eq_ignore_ascii_case(nk))
-                        })
-                    });
-                // Expand the offline MASTER member into its real DEVICE ids — the
-                // relay keys the push token + offline buffer by DEVICE id (Step 9A).
-                // Targeting the bare master buffers under an id no device authenticates
-                // as → no push reaches any device. Real-device predicate mirrors the
-                // DM fan-out: a known device of this master, offline (not in a room),
-                // that we hold an Olm session with (drops never-contacted ghosts). A
-                // single-device member (no device links) → fall back to the master id,
-                // which IS that member's device id = pre-multi-device behavior.
-                let mut targets: Vec<String> = super::resolver::devices_for(member)
-                    .into_iter()
-                    .filter(|d| {
-                        super::crypto_handler::ws_room_for_peer(ws_room_peers, d).is_none()
-                            && olm.has_session(d)
-                    })
-                    .collect();
-                if targets.is_empty() {
-                    targets.push(member.clone());
-                }
-                for target in targets {
-                    let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendChannelDirect {
-                        room_code: server_id.clone(),
-                        target_peer: target,
-                        channel_id: channel_id.clone(),
-                        mention: mentioned,
-                        data: offline_wire_bytes.clone().unwrap_or_default(),
-                    });
-                }
-            }
-        }
-    }
+    queue_offline_channel_push(
+        olm, ws_cmd_tx, ws_room_peers, server, local_peer_str,
+        &server_id, &channel_id, reply_to_mid.as_deref(),
+        has_everyone, &mentioned_names, &offline_wire_bytes,
+        db_path, db_passphrase,
+    );
 
     // Persist locally with same timestamp as sent.
-    if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
-        let _ = store.insert_channel_message(
-            &server_id, &channel_id, &local_peer, &text, true, timestamp,
-            sig.as_deref(), pk.as_deref(), Some(&message_id),
-            reply_to_mid.as_deref(), None, Some(order_us),
-        );
-        if let Some(lp) = &link_preview {
-            if let Ok(lp_json) = serde_json::to_string(lp) {
-                let _ = store.update_channel_link_preview(&message_id, &lp_json);
-            }
-        }
-    }
+    persist_sent_channel_message(
+        &server_id, &channel_id, &local_peer, &text, timestamp,
+        sig.as_deref(), pk.as_deref(), &message_id,
+        reply_to_mid.as_deref(), order_us, &link_preview,
+        db_path, db_passphrase,
+    );
 
     // Hydrate the optimistic Dart entry with sig/pk so the
     // Message Proof dialog shows VERIFIED without a restart.
@@ -829,6 +715,327 @@ pub(crate) async fn handle_send_channel_message(
         signature: sig.clone(),
         public_key: pk.clone(),
     }).await;
+}
+
+/// Cooperative-client fast-fail gates for a channel send: posting permission +
+/// the moderation trio (mute / media-only / slow mode). Receivers drop
+/// violations too. Returns the user-facing error for the FIRST failed gate,
+/// `None` when the send may proceed. Sync — may open the `MessageStore`.
+fn channel_send_gate_error(
+    server: &ServerState,
+    local_peer_str: &str,
+    server_id: &str,
+    channel_id: &str,
+    db_path: &str,
+    db_passphrase: &str,
+) -> Option<String> {
+    if !server.can_post_in_channel(local_peer_str, channel_id) {
+        return Some("You don't have permission to post in this channel".to_string());
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    if server.is_muted(local_peer_str, now.as_millis() as u64) {
+        return Some("You are muted on this server".to_string());
+    }
+    if server.is_channel_media_only(channel_id) {
+        // Standalone text is rejected; captions ride the file send path.
+        return Some("This is a media-only channel — attach an image, GIF, or video".to_string());
+    }
+    slow_mode_wait_error(
+        server, local_peer_str, server_id, channel_id,
+        now.as_millis() as i64, db_path, db_passphrase,
+    )
+}
+
+/// Slow-mode half of the send gates: error when our own latest message in the
+/// channel is still inside the slow-mode window (Mod+ are exempt).
+fn slow_mode_wait_error(
+    server: &ServerState,
+    local_peer_str: &str,
+    server_id: &str,
+    channel_id: &str,
+    now_ms: i64,
+    db_path: &str,
+    db_passphrase: &str,
+) -> Option<String> {
+    let slow = server.channel_slow_mode(channel_id);
+    if slow == 0 || server.bypasses_slow_mode(local_peer_str) {
+        return None;
+    }
+    let store = crate::storage::MessageStore::open(db_path, db_passphrase).ok()?;
+    let last_ts = store.latest_own_channel_ts(server_id, channel_id)?;
+    let next_allowed = last_ts + (slow as i64) * 1000;
+    if now_ms < next_allowed {
+        let wait_s = ((next_allowed - now_ms) + 999) / 1000;
+        return Some(format!("Slow mode is on — wait {wait_s}s before sending again"));
+    }
+    None
+}
+
+/// Mention metadata for one outgoing channel message: (`has_everyone`,
+/// mentioned @names minus "everyone").
+fn channel_mention_meta(text: &str) -> (bool, Vec<String>) {
+    let has_at = text.contains('@');
+    let has_everyone = has_at && text.contains("@everyone");
+    let mut mentioned_names: Vec<String> = Vec::new();
+    if has_at {
+        for word in text.split_whitespace() {
+            if let Some(name) = word.strip_prefix('@') {
+                if !name.is_empty() && name != "everyone" {
+                    mentioned_names.push(name.to_string());
+                }
+            }
+        }
+    }
+    (has_everyone, mentioned_names)
+}
+
+/// Serialize + broadcast one public-channel `HavenMessage` to the server room
+/// (plaintext — no MLS/Olm; guests receive it too, still Ed25519-signed).
+/// Returns the wire bytes for the offline 0x09 push fan-out.
+fn send_public_channel_msg(
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    server_id: &str,
+    msg: &HavenMessage,
+) -> Option<Vec<u8>> {
+    let data = serde_json::to_vec(msg).ok()?;
+    let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendToRoom {
+        room_code: server_id.to_string(),
+        data: data.clone(),
+    });
+    Some(data)
+}
+
+/// Broadcast one non-public channel envelope to the server. MLS path: encrypt
+/// once → single WS topic broadcast to the room; restricted channels (Option B)
+/// encrypt under their per-channel subgroup instead of the server-wide group.
+/// Olm per-device fan-out is the fallback (MLS encrypt failure) and the
+/// pre-bootstrap path (no group yet). Returns the MLS wire bytes for the
+/// offline 0x09 push fan-out when the MLS broadcast succeeded, `None`
+/// otherwise. `bootstrap_subgroup` additionally kicks off subgroup bootstrap on
+/// the no-group path (new-message sends only — edits/deletes/reactions don't).
+/// Shared driver for send/edit/delete/add-reaction/remove-reaction.
+#[allow(clippy::too_many_arguments)]
+async fn broadcast_channel_envelope(
+    olm: &mut OlmManager,
+    crypto_store: &CryptoStore,
+    mls: &mut Option<MlsManager>,
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, HashSet<String>>,
+    server: &ServerState,
+    local_peer_str: &str,
+    server_id: &str,
+    channel_id: &str,
+    envelope: &MessageEnvelope,
+    mls_fail_log: &str,
+    bootstrap_subgroup: bool,
+) -> Option<Vec<u8>> {
+    let use_subgroup = server.channel_uses_subgroup(channel_id);
+    let group_key = if use_subgroup {
+        crate::crypto::subgroup_id(server_id, channel_id)
+    } else {
+        server_id.to_string()
+    };
+    let use_mls = mls.as_ref().is_some_and(|m| m.has_group(&group_key));
+    if use_mls {
+        match send_mls_broadcast_topic(mls.as_mut().unwrap(), ws_cmd_tx, server_id, channel_id, use_subgroup, envelope, crypto_store) {
+            Ok(wire_bytes) => return Some(wire_bytes),
+            Err(e) => {
+                hollow_log!("[HOLLOW-MLS] {mls_fail_log}: {e}");
+                let envelope_json = serde_json::to_string(envelope).unwrap_or_default();
+                olm_fanout_channel_envelope(
+                    olm, crypto_store, event_tx, ws_cmd_tx, ws_room_peers,
+                    server, local_peer_str, channel_id, use_subgroup, &envelope_json,
+                ).await;
+            }
+        }
+        return None;
+    }
+    // Subgroup not yet bootstrapped (or legacy server with no MLS group):
+    // Olm fan-out to qualifying members, and (for a restricted channel on a
+    // new-message send) kick off subgroup bootstrap by sending our KeyPackage
+    // to the subgroup coordinator so future messages can use the subgroup.
+    if bootstrap_subgroup && use_subgroup {
+        if let Some(mls_mgr) = mls.as_mut() {
+            super::crypto_handler::request_subgroup_bootstrap(
+                mls_mgr, ws_cmd_tx, ws_room_peers, server,
+                server_id, channel_id, local_peer_str,
+            );
+        }
+    }
+    let envelope_json = serde_json::to_string(envelope).unwrap_or_default();
+    olm_fanout_channel_envelope(
+        olm, crypto_store, event_tx, ws_cmd_tx, ws_room_peers,
+        server, local_peer_str, channel_id, use_subgroup, &envelope_json,
+    ).await;
+    None
+}
+
+/// Olm fan-out of one channel envelope JSON to every qualifying server member.
+/// Olm is per-device: encrypt to EACH online device of the member. Subgroup
+/// channels only fan to members who can see the channel.
+#[allow(clippy::too_many_arguments)]
+async fn olm_fanout_channel_envelope(
+    olm: &mut OlmManager,
+    crypto_store: &CryptoStore,
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, HashSet<String>>,
+    server: &ServerState,
+    local_peer_str: &str,
+    channel_id: &str,
+    use_subgroup: bool,
+    envelope_json: &str,
+) {
+    for member_peer_str in server.members.keys() {
+        if super::resolver::same_identity(member_peer_str, local_peer_str) { continue; }
+        // Subgroup: only fan to members who qualify for the channel.
+        if use_subgroup && !server.can_see_channel(member_peer_str, channel_id) { continue; }
+        for dev in crate::node::crypto_handler::online_devices_for(ws_room_peers, member_peer_str) {
+            send_encrypted_message(
+                olm, crypto_store,
+                &dev, envelope_json,
+                event_tx,
+                ws_cmd_tx, ws_room_peers,
+            ).await;
+        }
+    }
+}
+
+/// Offline-member push fan-out (channel push notifications). Room/topic
+/// broadcasts only reach ONLINE peers; offline members get the message later
+/// via channel sync. To make their phones light up NOW, hand the relay one
+/// targeted 0x09 frame per offline member: the same wire bytes the room just
+/// received (buffered + replayed to that member's background fetch node) plus
+/// push metadata (channel + per-target mention flag) the relay filters against
+/// the member's registered push prefs. The relay never learns server
+/// membership — the SENDER picks the targets from its CRDT. Sync — may open
+/// the `MessageStore` (reply-author lookup).
+#[allow(clippy::too_many_arguments)]
+fn queue_offline_channel_push(
+    olm: &OlmManager,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, HashSet<String>>,
+    server: &ServerState,
+    local_peer_str: &str,
+    server_id: &str,
+    channel_id: &str,
+    reply_to_mid: Option<&str>,
+    has_everyone: bool,
+    mentioned_names: &[String],
+    offline_wire_bytes: &Option<Vec<u8>>,
+    db_path: &str,
+    db_passphrase: &str,
+) {
+    // `server.members` is MASTER-keyed (Step 6). Pick masters who are NOT
+    // reachable by ANY of their devices, and who aren't us.
+    let offline_members: Vec<&String> = server.members.keys()
+        .filter(|p| {
+            !super::resolver::same_identity(p, local_peer_str)
+                && !peer_is_reachable(ws_room_peers, p)
+                // Restricted channel (Option B): only members who can see the
+                // channel get the ciphertext + push (others can't decrypt it).
+                && server.can_see_channel(p, channel_id)
+        })
+        .collect();
+    if offline_members.is_empty() {
+        return;
+    }
+    // A reply mentions the replied-to message's author.
+    let reply_author: Option<String> = reply_to_mid.and_then(|mid| {
+        crate::storage::MessageStore::open(db_path, db_passphrase)
+            .ok()
+            .and_then(|s| s.get_channel_message_sender(mid))
+    });
+    hollow_log!(
+        "[HOLLOW-PUSH] Channel push fan-out: {} offline member(s) for {}/{}",
+        offline_members.len(), server_id, channel_id
+    );
+    for member in offline_members {
+        let mentioned = member_is_mentioned(
+            server, member, has_everyone, reply_author.as_deref(), mentioned_names,
+        );
+        // Expand the offline MASTER member into its real DEVICE ids — the
+        // relay keys the push token + offline buffer by DEVICE id (Step 9A).
+        // Targeting the bare master buffers under an id no device authenticates
+        // as → no push reaches any device. Real-device predicate mirrors the
+        // DM fan-out (`offline_session_devices`): a known device of this master,
+        // offline (not in a room), that we hold an Olm session with (drops
+        // never-contacted ghosts). A single-device member (no device links) →
+        // fall back to the master id, which IS that member's device id =
+        // pre-multi-device behavior.
+        let mut targets = offline_session_devices(olm, ws_room_peers, member);
+        if targets.is_empty() {
+            targets.push(member.clone());
+        }
+        for target in targets {
+            let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendChannelDirect {
+                room_code: server_id.to_string(),
+                target_peer: target,
+                channel_id: channel_id.to_string(),
+                mention: mentioned,
+                data: offline_wire_bytes.clone().unwrap_or_default(),
+            });
+        }
+    }
+}
+
+/// Mention flag per MEMBER (master) for the channel push: @everyone, a reply to
+/// their message, or their display name / nickname mentioned.
+fn member_is_mentioned(
+    server: &ServerState,
+    member: &str,
+    has_everyone: bool,
+    reply_author: Option<&str>,
+    mentioned_names: &[String],
+) -> bool {
+    has_everyone
+        || reply_author == Some(member)
+        || (!mentioned_names.is_empty() && {
+            let display = server.members.get(member)
+                .map(|m| m.display_name.as_str())
+                .unwrap_or("");
+            let nick = server.nicknames.get(member).map(|n| n.read().as_str());
+            mentioned_names.iter().any(|n| {
+                (!display.is_empty() && n.eq_ignore_ascii_case(display))
+                    || nick.is_some_and(|nk| n.eq_ignore_ascii_case(nk))
+            })
+        })
+}
+
+/// Persist our own outgoing channel message locally with the same signed
+/// timestamp we sent (no Dart DateTime.now() mismatch). Sync — owns the store.
+#[allow(clippy::too_many_arguments)]
+fn persist_sent_channel_message(
+    server_id: &str,
+    channel_id: &str,
+    local_peer: &str,
+    text: &str,
+    timestamp: i64,
+    sig: Option<&str>,
+    pk: Option<&str>,
+    message_id: &str,
+    reply_to_mid: Option<&str>,
+    order_us: i64,
+    link_preview: &Option<LinkPreviewRef>,
+    db_path: &str,
+    db_passphrase: &str,
+) {
+    let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) else {
+        return;
+    };
+    let _ = store.insert_channel_message(
+        server_id, channel_id, local_peer, text, true, timestamp,
+        sig, pk, Some(message_id),
+        reply_to_mid, None, Some(order_us),
+    );
+    if let Some(lp) = link_preview {
+        if let Ok(lp_json) = serde_json::to_string(lp) {
+            let _ = store.update_channel_link_preview(message_id, &lp_json);
+        }
+    }
 }
 
 // ── 3. EditChannelMessage ────────────────────────────────────────────
@@ -898,11 +1105,7 @@ pub(crate) async fn handle_edit_channel_message(
             mid: message_id.clone(), text: new_text.clone(),
             ts: edit_timestamp, sig: sig.clone(), pk: pk.clone(),
         };
-        if let Ok(data) = serde_json::to_vec(&msg) {
-            let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendToRoom {
-                room_code: server_id.clone(), data,
-            });
-        }
+        send_public_channel_msg(ws_cmd_tx, &server_id, &msg);
     } else {
         let envelope = MessageEnvelope::EditMessage {
             mid: message_id.clone(),
@@ -913,51 +1116,11 @@ pub(crate) async fn handle_edit_channel_message(
             sid: Some(server_id.clone()),
             cid: Some(channel_id.clone()),
         };
-
-        let use_subgroup = server.channel_uses_subgroup(&channel_id);
-        let group_key = if use_subgroup {
-            crate::crypto::subgroup_id(&server_id, &channel_id)
-        } else {
-            server_id.clone()
-        };
-        let use_mls = mls.as_ref().is_some_and(|m| m.has_group(&group_key));
-        if use_mls {
-            match send_mls_broadcast_topic(mls.as_mut().unwrap(), ws_cmd_tx, &server_id, &channel_id, use_subgroup, &envelope, crypto_store) {
-                Ok(_) => {}
-                Err(e) => {
-                    hollow_log!("[HOLLOW-MLS] Edit encrypt failed, falling back to Olm: {e}");
-                    let envelope_json = serde_json::to_string(&envelope).unwrap_or_default();
-                    for member_peer_str in server.members.keys() {
-                        if super::resolver::same_identity(member_peer_str, local_peer_str) { continue; }
-                        if use_subgroup && !server.can_see_channel(member_peer_str, &channel_id) { continue; }
-                        // Olm is per-device: encrypt to EACH online device of the member.
-                        for dev in crate::node::crypto_handler::online_devices_for(ws_room_peers, member_peer_str) {
-                            send_encrypted_message(
-                                olm, crypto_store,
-                                &dev, &envelope_json,
-                                event_tx,
-                                ws_cmd_tx, ws_room_peers,
-                            ).await;
-                        }
-                    }
-                }
-            }
-        } else {
-            let envelope_json = serde_json::to_string(&envelope).unwrap_or_default();
-            for member_peer_str in server.members.keys() {
-                        if super::resolver::same_identity(member_peer_str, local_peer_str) { continue; }
-                        if use_subgroup && !server.can_see_channel(member_peer_str, &channel_id) { continue; }
-                        // Olm is per-device: encrypt to EACH online device of the member.
-                        for dev in crate::node::crypto_handler::online_devices_for(ws_room_peers, member_peer_str) {
-                            send_encrypted_message(
-                                olm, crypto_store,
-                                &dev, &envelope_json,
-                                event_tx,
-                                ws_cmd_tx, ws_room_peers,
-                            ).await;
-                        }
-                    }
-        }
+        broadcast_channel_envelope(
+            olm, crypto_store, mls, event_tx, ws_cmd_tx, ws_room_peers,
+            server, local_peer_str, &server_id, &channel_id, &envelope,
+            "Edit encrypt failed, falling back to Olm", /*bootstrap_subgroup*/ false,
+        ).await;
     }
 
     let _ = event_tx.send(NetworkEvent::ChannelMessageEdited {
@@ -1026,34 +1189,7 @@ pub(crate) async fn handle_edit_dm_message(
     // PeerJoined drain sends the edited text, not the stale original. Multi-device:
     // the original message was queued PER DEVICE (under device ids, not the master),
     // so scan every queue rather than only the master's.
-    for queued in pending_messages.values_mut() {
-        for entry in queued.iter_mut() {
-            if let Ok(env) = serde_json::from_str::<MessageEnvelope>(entry) {
-                if let MessageEnvelope::DirectMessage { ref inner } = env {
-                    if inner.mid.as_deref() == Some(&message_id) {
-                        let updated = MessageEnvelope::DirectMessage {
-                            inner: Box::new(DirectMessagePayload {
-                                text: new_text.clone(),
-                                ts: edit_timestamp,
-                                sig: sig.clone(),
-                                pk: pk.clone(),
-                                mid: inner.mid.clone(),
-                                reply_to: inner.reply_to.clone(),
-                                file_id: inner.file_id.clone(),
-                                link_preview: inner.link_preview.clone(),
-                                convo: inner.convo.clone(),
-                                order_us: inner.order_us, // preserve original ordering on edit
-                            }),
-                        };
-                        if let Ok(json) = serde_json::to_string(&updated) {
-                            *entry = json;
-                            hollow_log!("[HOLLOW-SWARM] Updated pending message {message_id} with edited text");
-                        }
-                    }
-                }
-            }
-        }
-    }
+    rewrite_pending_dm_edits(pending_messages, &message_id, &new_text, edit_timestamp, &sig, &pk);
 
     // Send edit to the DM peer.
     let envelope = MessageEnvelope::EditMessage {
@@ -1089,6 +1225,63 @@ pub(crate) async fn handle_edit_dm_message(
         signature: sig,
         public_key: pk,
     }).await;
+}
+
+/// Rewrite every queued copy of an edited DM (pre-edit text → edited text)
+/// across ALL per-device pending queues, so a later PeerJoined drain sends the
+/// edited text, not the stale original.
+fn rewrite_pending_dm_edits(
+    pending_messages: &mut HashMap<String, Vec<String>>,
+    message_id: &str,
+    new_text: &str,
+    edit_timestamp: i64,
+    sig: &Option<String>,
+    pk: &Option<String>,
+) {
+    for queued in pending_messages.values_mut() {
+        for entry in queued.iter_mut() {
+            rewrite_pending_entry_if_edited(entry, message_id, new_text, edit_timestamp, sig, pk);
+        }
+    }
+}
+
+/// Replace ONE queued envelope's text in place when it is the DirectMessage
+/// being edited. Preserves the original `order_us` (ordering unchanged on edit).
+fn rewrite_pending_entry_if_edited(
+    entry: &mut String,
+    message_id: &str,
+    new_text: &str,
+    edit_timestamp: i64,
+    sig: &Option<String>,
+    pk: &Option<String>,
+) {
+    let Ok(env) = serde_json::from_str::<MessageEnvelope>(entry) else {
+        return;
+    };
+    let MessageEnvelope::DirectMessage { inner } = env else {
+        return;
+    };
+    if inner.mid.as_deref() != Some(message_id) {
+        return;
+    }
+    let updated = MessageEnvelope::DirectMessage {
+        inner: Box::new(DirectMessagePayload {
+            text: new_text.to_string(),
+            ts: edit_timestamp,
+            sig: sig.clone(),
+            pk: pk.clone(),
+            mid: inner.mid.clone(),
+            reply_to: inner.reply_to.clone(),
+            file_id: inner.file_id.clone(),
+            link_preview: inner.link_preview.clone(),
+            convo: inner.convo.clone(),
+            order_us: inner.order_us, // preserve original ordering on edit
+        }),
+    };
+    if let Ok(json) = serde_json::to_string(&updated) {
+        *entry = json;
+        hollow_log!("[HOLLOW-SWARM] Updated pending message {message_id} with edited text");
+    }
 }
 
 // ── 5. DeleteChannelMessage ──────────────────────────────────────────
@@ -1165,11 +1358,7 @@ pub(crate) async fn handle_delete_channel_message(
             mid: message_id.clone(), ts: delete_timestamp,
             sig: sig.clone(), pk: pk.clone(),
         };
-        if let Ok(data) = serde_json::to_vec(&msg) {
-            let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendToRoom {
-                room_code: server_id.clone(), data,
-            });
-        }
+        send_public_channel_msg(ws_cmd_tx, &server_id, &msg);
     } else {
         let envelope = MessageEnvelope::DeleteMessage {
             mid: message_id.clone(),
@@ -1179,51 +1368,11 @@ pub(crate) async fn handle_delete_channel_message(
             sid: Some(server_id.clone()),
             cid: Some(channel_id.clone()),
         };
-
-        let use_subgroup = server.channel_uses_subgroup(&channel_id);
-        let group_key = if use_subgroup {
-            crate::crypto::subgroup_id(&server_id, &channel_id)
-        } else {
-            server_id.clone()
-        };
-        let use_mls = mls.as_ref().is_some_and(|m| m.has_group(&group_key));
-        if use_mls {
-            match send_mls_broadcast_topic(mls.as_mut().unwrap(), ws_cmd_tx, &server_id, &channel_id, use_subgroup, &envelope, crypto_store) {
-                Ok(_) => {}
-                Err(e) => {
-                    hollow_log!("[HOLLOW-MLS] Delete encrypt failed, falling back to Olm: {e}");
-                    let envelope_json = serde_json::to_string(&envelope).unwrap_or_default();
-                    for member_peer_str in server.members.keys() {
-                        if super::resolver::same_identity(member_peer_str, local_peer_str) { continue; }
-                        if use_subgroup && !server.can_see_channel(member_peer_str, &channel_id) { continue; }
-                        // Olm is per-device: encrypt to EACH online device of the member.
-                        for dev in crate::node::crypto_handler::online_devices_for(ws_room_peers, member_peer_str) {
-                            send_encrypted_message(
-                                olm, crypto_store,
-                                &dev, &envelope_json,
-                                event_tx,
-                                ws_cmd_tx, ws_room_peers,
-                            ).await;
-                        }
-                    }
-                }
-            }
-        } else {
-            let envelope_json = serde_json::to_string(&envelope).unwrap_or_default();
-            for member_peer_str in server.members.keys() {
-                        if super::resolver::same_identity(member_peer_str, local_peer_str) { continue; }
-                        if use_subgroup && !server.can_see_channel(member_peer_str, &channel_id) { continue; }
-                        // Olm is per-device: encrypt to EACH online device of the member.
-                        for dev in crate::node::crypto_handler::online_devices_for(ws_room_peers, member_peer_str) {
-                            send_encrypted_message(
-                                olm, crypto_store,
-                                &dev, &envelope_json,
-                                event_tx,
-                                ws_cmd_tx, ws_room_peers,
-                            ).await;
-                        }
-                    }
-        }
+        broadcast_channel_envelope(
+            olm, crypto_store, mls, event_tx, ws_cmd_tx, ws_room_peers,
+            server, local_peer_str, &server_id, &channel_id, &envelope,
+            "Delete encrypt failed, falling back to Olm", /*bootstrap_subgroup*/ false,
+        ).await;
     }
 
     let _ = event_tx.send(NetworkEvent::ChannelMessageDeleted {
@@ -1377,11 +1526,7 @@ pub(crate) async fn handle_add_channel_reaction(
             mid: message_id.clone(), emoji: emoji.clone(),
             ts: reaction_ts, sig: sig.clone(), pk: pk.clone(),
         };
-        if let Ok(data) = serde_json::to_vec(&msg) {
-            let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendToRoom {
-                room_code: server_id.clone(), data,
-            });
-        }
+        send_public_channel_msg(ws_cmd_tx, &server_id, &msg);
     } else {
         let envelope = MessageEnvelope::AddReaction {
             mid: message_id.clone(),
@@ -1392,51 +1537,11 @@ pub(crate) async fn handle_add_channel_reaction(
             sid: Some(server_id.clone()),
             cid: Some(channel_id.clone()),
         };
-
-        let use_subgroup = server.channel_uses_subgroup(&channel_id);
-        let group_key = if use_subgroup {
-            crate::crypto::subgroup_id(&server_id, &channel_id)
-        } else {
-            server_id.clone()
-        };
-        let use_mls = mls.as_ref().is_some_and(|m| m.has_group(&group_key));
-        if use_mls {
-            match send_mls_broadcast_topic(mls.as_mut().unwrap(), ws_cmd_tx, &server_id, &channel_id, use_subgroup, &envelope, crypto_store) {
-                Ok(_) => {}
-                Err(e) => {
-                    hollow_log!("[HOLLOW-MLS] Reaction encrypt failed, falling back to Olm: {e}");
-                    let envelope_json = serde_json::to_string(&envelope).unwrap_or_default();
-                    for member_peer_str in server.members.keys() {
-                        if super::resolver::same_identity(member_peer_str, local_peer_str) { continue; }
-                        if use_subgroup && !server.can_see_channel(member_peer_str, &channel_id) { continue; }
-                        // Olm is per-device: encrypt to EACH online device of the member.
-                        for dev in crate::node::crypto_handler::online_devices_for(ws_room_peers, member_peer_str) {
-                            send_encrypted_message(
-                                olm, crypto_store,
-                                &dev, &envelope_json,
-                                event_tx,
-                                ws_cmd_tx, ws_room_peers,
-                            ).await;
-                        }
-                    }
-                }
-            }
-        } else {
-            let envelope_json = serde_json::to_string(&envelope).unwrap_or_default();
-            for member_peer_str in server.members.keys() {
-                        if super::resolver::same_identity(member_peer_str, local_peer_str) { continue; }
-                        if use_subgroup && !server.can_see_channel(member_peer_str, &channel_id) { continue; }
-                        // Olm is per-device: encrypt to EACH online device of the member.
-                        for dev in crate::node::crypto_handler::online_devices_for(ws_room_peers, member_peer_str) {
-                            send_encrypted_message(
-                                olm, crypto_store,
-                                &dev, &envelope_json,
-                                event_tx,
-                                ws_cmd_tx, ws_room_peers,
-                            ).await;
-                        }
-                    }
-        }
+        broadcast_channel_envelope(
+            olm, crypto_store, mls, event_tx, ws_cmd_tx, ws_room_peers,
+            server, local_peer_str, &server_id, &channel_id, &envelope,
+            "Reaction encrypt failed, falling back to Olm", /*bootstrap_subgroup*/ false,
+        ).await;
     }
 
     let _ = event_tx.send(NetworkEvent::ChannelReactionAdded {
@@ -1583,11 +1688,7 @@ pub(crate) async fn handle_remove_channel_reaction(
             mid: message_id.clone(), emoji: emoji.clone(),
             ts: remove_ts, sig: sig.clone(), pk: pk.clone(),
         };
-        if let Ok(data) = serde_json::to_vec(&msg) {
-            let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendToRoom {
-                room_code: server_id.clone(), data,
-            });
-        }
+        send_public_channel_msg(ws_cmd_tx, &server_id, &msg);
     } else {
         let envelope = MessageEnvelope::RemoveReaction {
             mid: message_id.clone(),
@@ -1598,51 +1699,11 @@ pub(crate) async fn handle_remove_channel_reaction(
             sid: Some(server_id.clone()),
             cid: Some(channel_id.clone()),
         };
-
-        let use_subgroup = server.channel_uses_subgroup(&channel_id);
-        let group_key = if use_subgroup {
-            crate::crypto::subgroup_id(&server_id, &channel_id)
-        } else {
-            server_id.clone()
-        };
-        let use_mls = mls.as_ref().is_some_and(|m| m.has_group(&group_key));
-        if use_mls {
-            match send_mls_broadcast_topic(mls.as_mut().unwrap(), ws_cmd_tx, &server_id, &channel_id, use_subgroup, &envelope, crypto_store) {
-                Ok(_) => {}
-                Err(e) => {
-                    hollow_log!("[HOLLOW-MLS] Remove reaction encrypt failed, Olm fallback: {e}");
-                    let envelope_json = serde_json::to_string(&envelope).unwrap_or_default();
-                    for member_peer_str in server.members.keys() {
-                        if super::resolver::same_identity(member_peer_str, local_peer_str) { continue; }
-                        if use_subgroup && !server.can_see_channel(member_peer_str, &channel_id) { continue; }
-                        // Olm is per-device: encrypt to EACH online device of the member.
-                        for dev in crate::node::crypto_handler::online_devices_for(ws_room_peers, member_peer_str) {
-                            send_encrypted_message(
-                                olm, crypto_store,
-                                &dev, &envelope_json,
-                                event_tx,
-                                ws_cmd_tx, ws_room_peers,
-                            ).await;
-                        }
-                    }
-                }
-            }
-        } else {
-            let envelope_json = serde_json::to_string(&envelope).unwrap_or_default();
-            for member_peer_str in server.members.keys() {
-                        if super::resolver::same_identity(member_peer_str, local_peer_str) { continue; }
-                        if use_subgroup && !server.can_see_channel(member_peer_str, &channel_id) { continue; }
-                        // Olm is per-device: encrypt to EACH online device of the member.
-                        for dev in crate::node::crypto_handler::online_devices_for(ws_room_peers, member_peer_str) {
-                            send_encrypted_message(
-                                olm, crypto_store,
-                                &dev, &envelope_json,
-                                event_tx,
-                                ws_cmd_tx, ws_room_peers,
-                            ).await;
-                        }
-                    }
-        }
+        broadcast_channel_envelope(
+            olm, crypto_store, mls, event_tx, ws_cmd_tx, ws_room_peers,
+            server, local_peer_str, &server_id, &channel_id, &envelope,
+            "Remove reaction encrypt failed, Olm fallback", /*bootstrap_subgroup*/ false,
+        ).await;
     }
 
     let _ = event_tx.send(NetworkEvent::ChannelReactionRemoved {
@@ -1765,98 +1826,163 @@ pub(crate) async fn handle_envelope_channel_message(
     // SECURITY: a present-but-invalid signature is rejected — mirrors the
     // direct (non-MLS) twin in swarm.rs; unsigned legacy messages are
     // tolerated. This verify's result was previously discarded.
-    if sig.is_some() {
-        let signing_payload = message_signing_payload(
-            "ch", &format!("{}:{}", sid, cid),
-            &sender_peer_id, ts, &text,
-        );
-        if !verify_message_signature(
-            &sender_peer_id,
-            sig.as_deref(),
-            pk.as_deref(),
-            &signing_payload,
-        ) {
-            hollow_log!(
-                "[HOLLOW-SECURITY] REJECTED ChannelMessage (MLS) from {sender_peer_id} — signature verification FAILED"
-            );
-            return;
-        }
+    if channel_sig_rejected(&sender_peer_id, &sid, &cid, ts, &text, sig.as_deref(), pk.as_deref()) {
+        return;
     }
 
     // Multi-device: a message from ANY of our own devices is ours.
     let is_mine = super::resolver::same_identity(&sender_peer_id, local_peer);
 
     // Moderation trio (receive-side): drop LIVE messages that violate the
-    // channel's rules so a modified client can't bypass what receivers
-    // refuse to store. Sync backfill intentionally skips these gates —
-    // history may legitimately predate a mute / slow-mode / media-only
-    // change, and dropping it there would diverge stored history.
+    // channel's rules — see `live_channel_moderation_drop`.
     if let Some(state) = server_state {
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
-        if state.is_muted(&sender_peer_id, now_ms) {
-            hollow_log!("[HOLLOW-MOD] DROPPED channel message from muted member {sender_peer_id} in {sid}");
+        if live_channel_moderation_drop(
+            state, &sender_peer_id, &sid, &cid, file_id.is_some(), ts, db_path, db_passphrase,
+        ) {
             return;
-        }
-        if state.is_channel_media_only(&cid) && file_id.is_none() {
-            hollow_log!("[HOLLOW-MOD] DROPPED text-only message from {sender_peer_id} in media-only channel {cid}");
-            return;
-        }
-        let slow = state.channel_slow_mode(&cid);
-        if slow > 0 && !state.bypasses_slow_mode(&sender_peer_id) {
-            if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
-                let window_start = ts - (slow as i64) * 1000;
-                if store.channel_sender_has_msg_in_range(&sid, &cid, &sender_peer_id, window_start, ts) {
-                    hollow_log!("[HOLLOW-MOD] DROPPED slow-mode violation from {sender_peer_id} in {cid} (window {slow}s)");
-                    return;
-                }
-            }
         }
     }
 
-    if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
-        // Dedup by message_id (replays); the content UNIQUE index is
-        // legacy-only (WHERE message_id IS NULL) so identical-text spam
-        // in the same millisecond persists as distinct messages.
-        let already = mid.as_deref()
-            .map(|m| store.channel_message_exists(m))
-            .unwrap_or(false);
-        let is_new = if already {
-            false
-        } else {
-            store.insert_channel_message(
-                &sid, &cid, &sender_peer_id, &text, is_mine, ts,
-                sig.as_deref(), pk.as_deref(), mid.as_deref(),
-                reply_to.as_deref(), file_id.as_deref(), order_us,
-            ).map(|r| r > 0).unwrap_or(false)
-        };
-        if is_new {
-            if let (Some(lp), Some(message_id)) = (link_preview.as_ref(), mid.as_ref()) {
-                if let Ok(lp_json) = serde_json::to_string(lp) {
-                    let _ = store.update_channel_link_preview(message_id, &lp_json);
-                }
+    let Some(is_new) = persist_incoming_channel_message(
+        &sid, &cid, &sender_peer_id, &text, is_mine, ts,
+        sig.as_deref(), pk.as_deref(), mid.as_deref(),
+        reply_to.as_deref(), file_id.as_deref(), order_us,
+        &link_preview, db_path, db_passphrase,
+    ) else {
+        return;
+    };
+    // ALWAYS emit — a ChannelSyncBatch racing this live message inserts
+    // the row first without emitting; suppressing the live event too left
+    // the open pane stale until re-entry. Dart dedups by message_id and
+    // skips unread/notifications when `duplicate`.
+    let _ = event_tx.send(NetworkEvent::ChannelMessageReceived {
+        server_id: sid,
+        channel_id: cid,
+        from_peer: sender_peer_id,
+        text,
+        timestamp: ts,
+        message_id: mid.unwrap_or_default(),
+        reply_to_mid: reply_to.unwrap_or_default(),
+        link_preview,
+        signature: sig,
+        public_key: pk,
+        duplicate: !is_new,
+    }).await;
+}
+
+/// True when a PRESENT channel-message signature fails verification (logged and
+/// the message must be dropped); unsigned legacy messages pass (returns false).
+fn channel_sig_rejected(
+    sender_peer_id: &str,
+    sid: &str,
+    cid: &str,
+    ts: i64,
+    text: &str,
+    sig: Option<&str>,
+    pk: Option<&str>,
+) -> bool {
+    if sig.is_none() {
+        return false;
+    }
+    let signing_payload = message_signing_payload(
+        "ch", &format!("{}:{}", sid, cid),
+        sender_peer_id, ts, text,
+    );
+    if !verify_message_signature(sender_peer_id, sig, pk, &signing_payload) {
+        hollow_log!(
+            "[HOLLOW-SECURITY] REJECTED ChannelMessage (MLS) from {sender_peer_id} — signature verification FAILED"
+        );
+        return true;
+    }
+    false
+}
+
+/// Receive-side moderation trio for one LIVE channel message: true = drop
+/// (mute / media-only / slow-mode violation), so a modified client can't bypass
+/// what receivers refuse to store. Sync backfill intentionally skips these
+/// gates — history may legitimately predate a mute / slow-mode / media-only
+/// change, and dropping it there would diverge stored history. Sync — may open
+/// the `MessageStore` (slow-mode window check).
+#[allow(clippy::too_many_arguments)]
+fn live_channel_moderation_drop(
+    state: &ServerState,
+    sender_peer_id: &str,
+    sid: &str,
+    cid: &str,
+    has_file: bool,
+    ts: i64,
+    db_path: &str,
+    db_passphrase: &str,
+) -> bool {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    if state.is_muted(sender_peer_id, now_ms) {
+        hollow_log!("[HOLLOW-MOD] DROPPED channel message from muted member {sender_peer_id} in {sid}");
+        return true;
+    }
+    if state.is_channel_media_only(cid) && !has_file {
+        hollow_log!("[HOLLOW-MOD] DROPPED text-only message from {sender_peer_id} in media-only channel {cid}");
+        return true;
+    }
+    let slow = state.channel_slow_mode(cid);
+    if slow > 0 && !state.bypasses_slow_mode(sender_peer_id) {
+        if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+            let window_start = ts - (slow as i64) * 1000;
+            if store.channel_sender_has_msg_in_range(sid, cid, sender_peer_id, window_start, ts) {
+                hollow_log!("[HOLLOW-MOD] DROPPED slow-mode violation from {sender_peer_id} in {cid} (window {slow}s)");
+                return true;
             }
         }
-        // ALWAYS emit — a ChannelSyncBatch racing this live message inserts
-        // the row first without emitting; suppressing the live event too left
-        // the open pane stale until re-entry. Dart dedups by message_id and
-        // skips unread/notifications when `duplicate`.
-        let _ = event_tx.send(NetworkEvent::ChannelMessageReceived {
-            server_id: sid,
-            channel_id: cid,
-            from_peer: sender_peer_id,
-            text,
-            timestamp: ts,
-            message_id: mid.unwrap_or_default(),
-            reply_to_mid: reply_to.unwrap_or_default(),
-            link_preview,
-            signature: sig,
-            public_key: pk,
-            duplicate: !is_new,
-        }).await;
     }
+    false
+}
+
+/// Persist one incoming channel message with message-id dedup (replays); the
+/// content UNIQUE index is legacy-only (WHERE message_id IS NULL) so
+/// identical-text spam in the same millisecond persists as distinct messages.
+/// Returns `Some(is_new)`, or `None` when the store could not be opened (the
+/// caller then emits nothing, matching the pre-split behavior). Sync — owns
+/// the store.
+#[allow(clippy::too_many_arguments)]
+fn persist_incoming_channel_message(
+    sid: &str,
+    cid: &str,
+    sender_peer_id: &str,
+    text: &str,
+    is_mine: bool,
+    ts: i64,
+    sig: Option<&str>,
+    pk: Option<&str>,
+    mid: Option<&str>,
+    reply_to: Option<&str>,
+    file_id: Option<&str>,
+    order_us: Option<i64>,
+    link_preview: &Option<LinkPreviewRef>,
+    db_path: &str,
+    db_passphrase: &str,
+) -> Option<bool> {
+    let store = crate::storage::MessageStore::open(db_path, db_passphrase).ok()?;
+    let already = mid
+        .map(|m| store.channel_message_exists(m))
+        .unwrap_or(false);
+    let is_new = if already {
+        false
+    } else {
+        store.insert_channel_message(
+            sid, cid, sender_peer_id, text, is_mine, ts,
+            sig, pk, mid, reply_to, file_id, order_us,
+        ).map(|r| r > 0).unwrap_or(false)
+    };
+    if is_new {
+        if let (Some(lp), Some(message_id)) = (link_preview.as_ref(), mid) {
+            if let Ok(lp_json) = serde_json::to_string(lp) {
+                let _ = store.update_channel_link_preview(message_id, &lp_json);
+            }
+        }
+    }
+    Some(is_new)
 }
 
 /// Handle `MessageEnvelope::EditMessage` (MLS-decrypted path).

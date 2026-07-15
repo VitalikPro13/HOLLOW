@@ -109,52 +109,68 @@ class ScreenShareService {
             RTCDegradationPreference.MAINTAIN_FRAMERATE;
 
         for (final encoding in params.encodings!) {
-          final settings = sender.track!.getSettings();
-          final captureWidth = settings['width'] as int? ?? 1920;
-          final captureHeight = settings['height'] as int? ?? 1080;
-
-          // Downscale if the capture is larger than the target.
-          if (captureWidth > maxWidth || captureHeight > maxHeight) {
-            final scaleW = captureWidth / maxWidth;
-            final scaleH = captureHeight / maxHeight;
-            final scale = scaleW > scaleH ? scaleW : scaleH;
-            encoding.scaleResolutionDownBy = scale;
-            _log('[HOLLOW-SCREEN] Set scaleResolutionDownBy=$scale '
-                '(${captureWidth}x$captureHeight -> ${maxWidth}x$maxHeight)');
-          }
-
-          encoding.maxFramerate = fps;
-
-          // Bitrate tiers (screen share — higher than camera because
-          // screen content has sharp edges/text that compress poorly):
-          //   360p  →  800 kbps
-          //   480p  → 1500 kbps
-          //   720p  → 3000 kbps
-          //  1080p  → 6000 kbps
-          //  1440p  → 9000 kbps
-          //  4K     → 15000 kbps
-          final pixels = maxWidth * maxHeight;
-          final int maxBitrateKbps;
-          if (pixels <= 640 * 360) {
-            maxBitrateKbps = 800;
-          } else if (pixels <= 854 * 480) {
-            maxBitrateKbps = 1500;
-          } else if (pixels <= 1280 * 720) {
-            maxBitrateKbps = 3000;
-          } else if (pixels <= 1920 * 1080) {
-            maxBitrateKbps = 6000;
-          } else if (pixels <= 2560 * 1440) {
-            maxBitrateKbps = 9000;
-          } else {
-            maxBitrateKbps = 15000;
-          }
-          encoding.maxBitrate = maxBitrateKbps * 1000; // bps
-          _log('[HOLLOW-SCREEN] Set maxBitrate=${maxBitrateKbps}kbps '
-              'maxFramerate=${fps}fps for ${maxWidth}x$maxHeight');
+          _configureVideoEncoding(
+              encoding, sender.track!, maxWidth, maxHeight, fps);
         }
         await sender.setParameters(params);
         break;
       }
+    }
+  }
+
+  /// Configure one video encoding: downscale to the cap if the capture is
+  /// larger, pin the framerate, and set the bitrate tier for the target size.
+  void _configureVideoEncoding(
+    RTCRtpEncoding encoding,
+    MediaStreamTrack track,
+    int maxWidth,
+    int maxHeight,
+    int fps,
+  ) {
+    final settings = track.getSettings();
+    final captureWidth = settings['width'] as int? ?? 1920;
+    final captureHeight = settings['height'] as int? ?? 1080;
+
+    // Downscale if the capture is larger than the target.
+    if (captureWidth > maxWidth || captureHeight > maxHeight) {
+      final scaleW = captureWidth / maxWidth;
+      final scaleH = captureHeight / maxHeight;
+      final scale = scaleW > scaleH ? scaleW : scaleH;
+      encoding.scaleResolutionDownBy = scale;
+      _log('[HOLLOW-SCREEN] Set scaleResolutionDownBy=$scale '
+          '(${captureWidth}x$captureHeight -> ${maxWidth}x$maxHeight)');
+    }
+
+    encoding.maxFramerate = fps;
+
+    final maxBitrateKbps = _maxBitrateKbpsFor(maxWidth, maxHeight);
+    encoding.maxBitrate = maxBitrateKbps * 1000; // bps
+    _log('[HOLLOW-SCREEN] Set maxBitrate=${maxBitrateKbps}kbps '
+        'maxFramerate=${fps}fps for ${maxWidth}x$maxHeight');
+  }
+
+  /// Bitrate tiers (screen share — higher than camera because
+  /// screen content has sharp edges/text that compress poorly):
+  ///   360p  →  800 kbps
+  ///   480p  → 1500 kbps
+  ///   720p  → 3000 kbps
+  ///  1080p  → 6000 kbps
+  ///  1440p  → 9000 kbps
+  ///  4K     → 15000 kbps
+  int _maxBitrateKbpsFor(int maxWidth, int maxHeight) {
+    final pixels = maxWidth * maxHeight;
+    if (pixels <= 640 * 360) {
+      return 800;
+    } else if (pixels <= 854 * 480) {
+      return 1500;
+    } else if (pixels <= 1280 * 720) {
+      return 3000;
+    } else if (pixels <= 1920 * 1080) {
+      return 6000;
+    } else if (pixels <= 2560 * 1440) {
+      return 9000;
+    } else {
+      return 15000;
     }
   }
 
@@ -181,25 +197,7 @@ class ScreenShareService {
       await close();
     }
 
-    // macOS / Android need explicit screen-capture permission before any
-    // source enumeration. On macOS this triggers the System Settings →
-    // Privacy & Security → Screen & System Audio Recording prompt; the
-    // first attempt always returns false, the user grants access in
-    // Settings, and the next launch reads granted. Web/Windows/Linux just
-    // return true.
-    if (Platform.isMacOS) {
-      try {
-        final granted = await Helper.requestCapturePermission();
-        _log('[HOLLOW-SCREEN] macOS screen recording permission: $granted');
-        // Debug builds are ad-hoc signed and every rebuild gets a fresh
-        // signature, so TCC reports `granted=false` until the user re-grants.
-        // We still try the capture: ScreenCaptureKit will surface its own
-        // error (and possibly show the system prompt the first time) if
-        // access is truly denied — much friendlier than hard-aborting here.
-      } catch (e) {
-        _log('[HOLLOW-SCREEN] permission probe failed: $e');
-      }
-    }
+    await _requestMacCapturePermissionIfNeeded();
 
     // Capture screen (+ optional system audio). Source enumeration is
     // desktop-only; mobile captures THE screen (MediaProjection / ReplayKit).
@@ -231,6 +229,81 @@ class ScreenShareService {
             (Platform.isMacOS && MacOsScreenAudioSupport.hasSckAudio));
     final getDisplayAudio = shareAudio && !useDataChannelAudio;
 
+    await _captureScreenStream(sourceId, width, height, fps, getDisplayAudio);
+
+    // SECURITY (Phase 6.25): Validate stream has video tracks.
+    final videoTracks = _screenStream!.getVideoTracks();
+    if (videoTracks.isEmpty) {
+      _log('[HOLLOW-SCREEN] getDisplayMedia returned no video tracks — aborting');
+      await _screenStream!.dispose();
+      _screenStream = null;
+      throw StateError('Screen capture returned no video tracks');
+    }
+    final screenTrack = videoTracks.first;
+    _log('[HOLLOW-SCREEN] Got screen track: ${screenTrack.id}');
+
+    // Build a local self-preview renderer so the UI can show what we're
+    // sharing in the screen share view.
+    _localRenderer = RTCVideoRenderer();
+    await _localRenderer!.initialize();
+    _localRenderer!.srcObject = _screenStream;
+
+    // Create PC.
+    _pc = await createPeerConnection(iceServers);
+    _setupCallbacks();
+
+    // Add screen video track.
+    await _pc!.addTrack(screenTrack, _screenStream!);
+    _log('[HOLLOW-SCREEN] Added screen video track to PC');
+
+    await _preferVp8OnMacOS(screenTrack);
+
+    // Apply resolution cap on the encoder (getDisplayMedia captures at native res).
+    await _applyResolutionCap(width, height, fps);
+
+    await _addCapturedAudioTracks(shareAudio);
+
+    // Generate offer.
+    final offer = await _pc!.createOffer();
+    await _pc!.setLocalDescription(offer);
+
+    _log('[HOLLOW-SCREEN] Offer created, SDP length=${offer.sdp?.length}');
+
+    // Poll for track ending (onEnded not wired on native desktop).
+    _startTrackPoller();
+
+    return offer.sdp!;
+  }
+
+  /// macOS / Android need explicit screen-capture permission before any
+  /// source enumeration. On macOS this triggers the System Settings →
+  /// Privacy & Security → Screen & System Audio Recording prompt; the
+  /// first attempt always returns false, the user grants access in
+  /// Settings, and the next launch reads granted. Web/Windows/Linux just
+  /// return true.
+  Future<void> _requestMacCapturePermissionIfNeeded() async {
+    if (!Platform.isMacOS) return;
+    try {
+      final granted = await Helper.requestCapturePermission();
+      _log('[HOLLOW-SCREEN] macOS screen recording permission: $granted');
+      // Debug builds are ad-hoc signed and every rebuild gets a fresh
+      // signature, so TCC reports `granted=false` until the user re-grants.
+      // We still try the capture: ScreenCaptureKit will surface its own
+      // error (and possibly show the system prompt the first time) if
+      // access is truly denied — much friendlier than hard-aborting here.
+    } catch (e) {
+      _log('[HOLLOW-SCREEN] permission probe failed: $e');
+    }
+  }
+
+  /// Platform-branched getDisplayMedia into [_screenStream].
+  Future<void> _captureScreenStream(
+    String sourceId,
+    int width,
+    int height,
+    int fps,
+    bool getDisplayAudio,
+  ) async {
     if (Platform.isAndroid) {
       // Constraints are ignored by the Android plugin (MediaProjection
       // captures the display at native size; the consent dialog handles
@@ -260,68 +333,45 @@ class ScreenShareService {
         'audio': getDisplayAudio,
       });
     }
+  }
 
-    // SECURITY (Phase 6.25): Validate stream has video tracks.
-    final videoTracks = _screenStream!.getVideoTracks();
-    if (videoTracks.isEmpty) {
-      _log('[HOLLOW-SCREEN] getDisplayMedia returned no video tracks — aborting');
-      await _screenStream!.dispose();
-      _screenStream = null;
-      throw StateError('Screen capture returned no video tracks');
-    }
-    final screenTrack = videoTracks.first;
-    _log('[HOLLOW-SCREEN] Got screen track: ${screenTrack.id}');
-
-    // Build a local self-preview renderer so the UI can show what we're
-    // sharing in the screen share view.
-    _localRenderer = RTCVideoRenderer();
-    await _localRenderer!.initialize();
-    _localRenderer!.srcObject = _screenStream;
-
-    // Create PC.
-    _pc = await createPeerConnection(iceServers);
-    _setupCallbacks();
-
-    // Add screen video track.
-    await _pc!.addTrack(screenTrack, _screenStream!);
-    _log('[HOLLOW-SCREEN] Added screen video track to PC');
-
-    // On macOS prefer VP8 for screen share. Apple's H.264 hardware encoder
-    // can emit a profile (e.g. high) that Windows libwebrtc's software
-    // decoder fails to render — frames decode to a black image with no
-    // error. VP8 has no profile axis and works identically on both ends.
-    if (Platform.isMacOS) {
-      try {
-        final caps = await getRtpSenderCapabilities('video');
-        final vp8 = caps.codecs
-                ?.where((c) => c.mimeType.toLowerCase().endsWith('vp8'))
-                .toList() ??
-            [];
-        if (vp8.isNotEmpty) {
-          final transceivers = await _pc!.getTransceivers();
-          for (final t in transceivers) {
-            if (t.sender.track?.id == screenTrack.id) {
-              // Put VP8 first; keep other codecs as fallback in case the
-              // remote peer can't negotiate VP8 for some reason.
-              final ordered = [
-                ...vp8,
-                ...(caps.codecs ?? []).where(
-                    (c) => !c.mimeType.toLowerCase().endsWith('vp8')),
-              ];
-              await t.setCodecPreferences(ordered);
-              _log('[HOLLOW-SCREEN] Forced VP8 codec preference on macOS');
-              break;
-            }
+  /// On macOS prefer VP8 for screen share. Apple's H.264 hardware encoder
+  /// can emit a profile (e.g. high) that Windows libwebrtc's software
+  /// decoder fails to render — frames decode to a black image with no
+  /// error. VP8 has no profile axis and works identically on both ends.
+  Future<void> _preferVp8OnMacOS(MediaStreamTrack screenTrack) async {
+    if (!Platform.isMacOS) return;
+    try {
+      final caps = await getRtpSenderCapabilities('video');
+      final vp8 = caps.codecs
+              ?.where((c) => c.mimeType.toLowerCase().endsWith('vp8'))
+              .toList() ??
+          [];
+      if (vp8.isNotEmpty) {
+        final transceivers = await _pc!.getTransceivers();
+        for (final t in transceivers) {
+          if (t.sender.track?.id == screenTrack.id) {
+            // Put VP8 first; keep other codecs as fallback in case the
+            // remote peer can't negotiate VP8 for some reason.
+            final ordered = [
+              ...vp8,
+              ...(caps.codecs ?? []).where(
+                  (c) => !c.mimeType.toLowerCase().endsWith('vp8')),
+            ];
+            await t.setCodecPreferences(ordered);
+            _log('[HOLLOW-SCREEN] Forced VP8 codec preference on macOS');
+            break;
           }
         }
-      } catch (e) {
-        _log('[HOLLOW-SCREEN] codec preference set failed: $e');
       }
+    } catch (e) {
+      _log('[HOLLOW-SCREEN] codec preference set failed: $e');
     }
+  }
 
-    // Apply resolution cap on the encoder (getDisplayMedia captures at native res).
-    await _applyResolutionCap(width, height, fps);
-
+  /// Add any audio tracks getDisplayMedia delivered to the PC (macOS Process
+  /// Tap path). Logs when audio was requested but no track is available.
+  Future<void> _addCapturedAudioTracks(bool shareAudio) async {
     final audioTracks = _screenStream!.getAudioTracks();
     _log('[HOLLOW-SCREEN] getDisplayMedia audio tracks: ${audioTracks.length}');
     if (audioTracks.isNotEmpty) {
@@ -333,17 +383,6 @@ class ScreenShareService {
       _log('[HOLLOW-SCREEN] Audio sharing requested but not available '
           'on this platform');
     }
-
-    // Generate offer.
-    final offer = await _pc!.createOffer();
-    await _pc!.setLocalDescription(offer);
-
-    _log('[HOLLOW-SCREEN] Offer created, SDP length=${offer.sdp?.length}');
-
-    // Poll for track ending (onEnded not wired on native desktop).
-    _startTrackPoller();
-
-    return offer.sdp!;
   }
 
   /// Create an offer using a pre-captured screen stream (for voice channels
@@ -529,47 +568,70 @@ class ScreenShareService {
     required void Function(Uint8List packet) onPacket,
   }) async {
     if (Platform.isWindows || Platform.isLinux) {
-      if (_screenAudioCapturer?.isActive == true) return;
-      _log('[HOLLOW-AU-SCREEN] Starting system audio capture '
-          '(pid=$pid hwnd=$windowHwnd excludePid=$excludePid)');
-      _screenAudioCapturer = ScreenAudioCapturer();
-      final ok = await _screenAudioCapturer!.start(
+      await _startDesktopAudioCapturer(
           pid: pid,
           windowHwnd: windowHwnd,
           excludePid: excludePid,
           onPacket: onPacket);
-      if (!ok) {
-        _log('[HOLLOW-AU-SCREEN] Failed to start system audio capturer');
-        _screenAudioCapturer = null;
-      }
       return;
     }
 
     // macOS 13.0+: ScreenCaptureKit audio path (Process Tap retired).
     if (Platform.isMacOS && MacOsScreenAudioSupport.hasSckAudio) {
-      if (_macSckAudioCapturer?.isActive == true) return;
-      _log('[HOLLOW-AU-SCREEN] Starting ScreenCaptureKit audio capture');
-      _macSckAudioCapturer = MacSckScreenAudioCapturer();
-      final ok = await _macSckAudioCapturer!.start(onPacket: onPacket);
-      if (!ok) {
-        _log('[HOLLOW-AU-SCREEN] Failed to start SCK audio capturer');
-        _macSckAudioCapturer = null;
-      }
+      await _startMacSckAudioCapturer(onPacket);
       return;
     }
 
     // Mobile: native capture (Android AudioPlaybackCapture / iOS broadcast
     // extension audio) -> PCM to Dart -> Rust Opus encode -> onPacket.
     if (Platform.isAndroid || Platform.isIOS) {
-      if (_mobileAudioCapturer?.isActive == true) return;
-      _log('[HOLLOW-AU-SCREEN] Starting mobile screen-audio capture');
-      _mobileAudioCapturer = MobileScreenAudioCapturer();
-      final ok = await _mobileAudioCapturer!.start(onPacket: onPacket);
-      if (!ok) {
-        _log('[HOLLOW-AU-SCREEN] Failed to start mobile audio capturer');
-        _mobileAudioCapturer = null;
-      }
+      await _startMobileAudioCapturer(onPacket);
       return;
+    }
+  }
+
+  Future<void> _startDesktopAudioCapturer({
+    required int pid,
+    required int windowHwnd,
+    required int excludePid,
+    required void Function(Uint8List packet) onPacket,
+  }) async {
+    if (_screenAudioCapturer?.isActive == true) return;
+    _log('[HOLLOW-AU-SCREEN] Starting system audio capture '
+        '(pid=$pid hwnd=$windowHwnd excludePid=$excludePid)');
+    _screenAudioCapturer = ScreenAudioCapturer();
+    final ok = await _screenAudioCapturer!.start(
+        pid: pid,
+        windowHwnd: windowHwnd,
+        excludePid: excludePid,
+        onPacket: onPacket);
+    if (!ok) {
+      _log('[HOLLOW-AU-SCREEN] Failed to start system audio capturer');
+      _screenAudioCapturer = null;
+    }
+  }
+
+  Future<void> _startMacSckAudioCapturer(
+      void Function(Uint8List packet) onPacket) async {
+    if (_macSckAudioCapturer?.isActive == true) return;
+    _log('[HOLLOW-AU-SCREEN] Starting ScreenCaptureKit audio capture');
+    _macSckAudioCapturer = MacSckScreenAudioCapturer();
+    final ok = await _macSckAudioCapturer!.start(onPacket: onPacket);
+    if (!ok) {
+      _log('[HOLLOW-AU-SCREEN] Failed to start SCK audio capturer');
+      _macSckAudioCapturer = null;
+    }
+  }
+
+  Future<void> _startMobileAudioCapturer(
+      void Function(Uint8List packet) onPacket) async {
+    if (_mobileAudioCapturer?.isActive == true) return;
+    _log('[HOLLOW-AU-SCREEN] Starting mobile screen-audio capture');
+    _mobileAudioCapturer = MobileScreenAudioCapturer();
+    final ok = await _mobileAudioCapturer!.start(onPacket: onPacket);
+    if (!ok) {
+      _log('[HOLLOW-AU-SCREEN] Failed to start mobile audio capturer');
+      _mobileAudioCapturer = null;
     }
   }
 
@@ -599,18 +661,7 @@ class ScreenShareService {
     // Stop screen audio capture before tearing down PC.
     await _stopScreenAudioCapture();
 
-    // Tear down macOS system audio tap first so the system default input
-    // reverts before we stop the streams.
-    if (_macSystemAudioActive) {
-      try {
-        await _kFlutterWebRTCChannel
-            .invokeMethod<bool>('disableScreenShareSystemAudio');
-        _log('[HOLLOW-SCREEN] macOS Process Tap disabled');
-      } catch (e) {
-        _log('[HOLLOW-SCREEN] disableScreenShareSystemAudio failed: $e');
-      }
-      _macSystemAudioActive = false;
-    }
+    await _disableMacSystemAudioTap();
 
     _screenTrackPoller?.cancel();
     _screenTrackPoller = null;
@@ -625,19 +676,59 @@ class ScreenShareService {
     // Dispose local self-preview renderer first (before stream goes away).
     final localRenderer = _localRenderer;
     _localRenderer = null;
-    if (localRenderer != null) {
-      try {
-        localRenderer.srcObject = null;
-        await localRenderer.dispose();
-      } catch (e) {
-        _log('[HOLLOW-SCREEN] local renderer dispose failed (ignored): $e');
-      }
-    }
+    await _disposeRendererSafely(localRenderer, 'local renderer');
 
-    // Stop local screen capture — ONLY if we own it. For createOfferFromStream
-    // the capture is shared across many per-peer services and owned by the
-    // provider; disposing it here kills every other peer's share AND double-frees
-    // it (the provider disposes it too) → `corrupted size vs prev_size` abort.
+    await _disposeOwnedScreenStream();
+
+    // Dispose remote renderer.
+    final remoteRenderer = _remoteRenderer;
+    _remoteRenderer = null;
+    await _disposeRendererSafely(remoteRenderer, 'remote renderer');
+
+    await _disposeSyntheticRemoteStream();
+
+    await _closeAndDisposePc();
+
+    // Restore ownership defaults so the next use of this instance starts clean
+    // (createOffer captures+owns; createOfferFromStream re-sets false).
+    _ownsScreenStream = true;
+    _remoteStreamIsSynthetic = false;
+
+    _pendingCandidates.clear();
+    _remoteDescriptionSet = false;
+  }
+
+  /// Tear down the macOS system audio tap first so the system default input
+  /// reverts before we stop the streams.
+  Future<void> _disableMacSystemAudioTap() async {
+    if (!_macSystemAudioActive) return;
+    try {
+      await _kFlutterWebRTCChannel
+          .invokeMethod<bool>('disableScreenShareSystemAudio');
+      _log('[HOLLOW-SCREEN] macOS Process Tap disabled');
+    } catch (e) {
+      _log('[HOLLOW-SCREEN] disableScreenShareSystemAudio failed: $e');
+    }
+    _macSystemAudioActive = false;
+  }
+
+  /// Defensive renderer disposal: the caller has already nulled the field.
+  Future<void> _disposeRendererSafely(
+      RTCVideoRenderer? renderer, String label) async {
+    if (renderer == null) return;
+    try {
+      renderer.srcObject = null;
+      await renderer.dispose();
+    } catch (e) {
+      _log('[HOLLOW-SCREEN] $label dispose failed (ignored): $e');
+    }
+  }
+
+  /// Stop local screen capture — ONLY if we own it. For createOfferFromStream
+  /// the capture is shared across many per-peer services and owned by the
+  /// provider; disposing it here kills every other peer's share AND double-frees
+  /// it (the provider disposes it too) → `corrupted size vs prev_size` abort.
+  Future<void> _disposeOwnedScreenStream() async {
     final screenStream = _screenStream;
     final ownsScreenStream = _ownsScreenStream;
     _screenStream = null;
@@ -651,21 +742,12 @@ class ScreenShareService {
         _log('[HOLLOW-SCREEN] screen stream dispose failed (ignored): $e');
       }
     }
+  }
 
-    // Dispose remote renderer.
-    final remoteRenderer = _remoteRenderer;
-    _remoteRenderer = null;
-    if (remoteRenderer != null) {
-      try {
-        remoteRenderer.srcObject = null;
-        await remoteRenderer.dispose();
-      } catch (e) {
-        _log('[HOLLOW-SCREEN] remote renderer dispose failed (ignored): $e');
-      }
-    }
-    // Dispose the remote stream ONLY if we synthesized it (createLocalMediaStream
-    // fallback). libwebrtc owns the event-provided streams — disposing those
-    // double-frees. We null the reference either way.
+  /// Dispose the remote stream ONLY if we synthesized it (createLocalMediaStream
+  /// fallback). libwebrtc owns the event-provided streams — disposing those
+  /// double-frees. We null the reference either way.
+  Future<void> _disposeSyntheticRemoteStream() async {
     final remoteStream = _remoteStream;
     final remoteSynthetic = _remoteStreamIsSynthetic;
     _remoteStream = null;
@@ -676,32 +758,25 @@ class ScreenShareService {
         _log('[HOLLOW-SCREEN] remote stream dispose failed (ignored): $e');
       }
     }
+  }
 
-    // Close PC. close() and dispose() get SEPARATE guards — if close() throws on
-    // an already-failing native PC, dispose() (which frees the thread-set) must
-    // still run, or the libwebrtc threads leak.
+  /// Close PC. close() and dispose() get SEPARATE guards — if close() throws on
+  /// an already-failing native PC, dispose() (which frees the thread-set) must
+  /// still run, or the libwebrtc threads leak.
+  Future<void> _closeAndDisposePc() async {
     final pc = _pc;
     _pc = null;
-    if (pc != null) {
-      try {
-        await pc.close();
-      } catch (e) {
-        _log('[HOLLOW-SCREEN] pc close failed (ignored): $e');
-      }
-      try {
-        await pc.dispose();
-      } catch (e) {
-        _log('[HOLLOW-SCREEN] pc dispose failed (ignored): $e');
-      }
+    if (pc == null) return;
+    try {
+      await pc.close();
+    } catch (e) {
+      _log('[HOLLOW-SCREEN] pc close failed (ignored): $e');
     }
-
-    // Restore ownership defaults so the next use of this instance starts clean
-    // (createOffer captures+owns; createOfferFromStream re-sets false).
-    _ownsScreenStream = true;
-    _remoteStreamIsSynthetic = false;
-
-    _pendingCandidates.clear();
-    _remoteDescriptionSet = false;
+    try {
+      await pc.dispose();
+    } catch (e) {
+      _log('[HOLLOW-SCREEN] pc dispose failed (ignored): $e');
+    }
   }
 
   /// Get available screen/window sources for the picker dialog.
@@ -723,53 +798,81 @@ class ScreenShareService {
 
     _pc!.onConnectionState = (state) {
       _log('[HOLLOW-SCREEN] Connection state: $state');
-      switch (state) {
-        case RTCPeerConnectionState.RTCPeerConnectionStateConnected:
-          onConnected?.call();
-          final screenPc = _pc;
-          if (screenPc != null) {
-            Future.delayed(const Duration(seconds: 1), () async {
-              try {
-                final stats = await screenPc.getStats();
-                for (final report in stats) {
-                  if (report.type == 'candidate-pair' && report.values['state'] == 'succeeded') {
-                    final localId = report.values['localCandidateId'] as String?;
-                    final remoteId = report.values['remoteCandidateId'] as String?;
-                    String localType = '?', remoteType = '?', proto = '';
-                    for (final r in stats) {
-                      if (r.type == 'local-candidate' && r.id == localId) {
-                        localType = (r.values['candidateType'] as String?) ?? '?';
-                        proto = (r.values['protocol'] as String?) ?? '';
-                      }
-                      if (r.type == 'remote-candidate' && r.id == remoteId) {
-                        remoteType = (r.values['candidateType'] as String?) ?? '?';
-                      }
-                    }
-                    final route = localType == 'relay' || remoteType == 'relay'
-                        ? 'TURN (relayed)'
-                        : localType == 'srflx' || remoteType == 'srflx'
-                            ? 'STUN (direct P2P)'
-                            : localType == 'host' && remoteType == 'host'
-                                ? 'LAN (direct)'
-                                : 'P2P ($localType/$remoteType)';
-                    _log('[HOLLOW-SCREEN] ICE route: $route (local=$localType remote=$remoteType proto=$proto)');
-                    return;
-                  }
-                }
-                _log('[HOLLOW-SCREEN] ICE route: no succeeded candidate pair found');
-              } catch (e) {
-                _log('[HOLLOW-SCREEN] ICE route check failed: $e');
-              }
-            });
-          }
-        case RTCPeerConnectionState.RTCPeerConnectionStateFailed:
-        case RTCPeerConnectionState.RTCPeerConnectionStateClosed:
-        case RTCPeerConnectionState.RTCPeerConnectionStateDisconnected:
-          onDisconnected?.call();
-        default:
-          break;
-      }
+      _onConnectionStateChanged(state);
     };
+  }
+
+  void _onConnectionStateChanged(RTCPeerConnectionState state) {
+    switch (state) {
+      case RTCPeerConnectionState.RTCPeerConnectionStateConnected:
+        onConnected?.call();
+        _scheduleIceRouteLog();
+      case RTCPeerConnectionState.RTCPeerConnectionStateFailed:
+      case RTCPeerConnectionState.RTCPeerConnectionStateClosed:
+      case RTCPeerConnectionState.RTCPeerConnectionStateDisconnected:
+        onDisconnected?.call();
+      default:
+        break;
+    }
+  }
+
+  /// Log which ICE route (TURN/STUN/LAN) the connected PC ended up on, one
+  /// second after connect. Diagnostic only.
+  void _scheduleIceRouteLog() {
+    final screenPc = _pc;
+    if (screenPc == null) return;
+    Future.delayed(const Duration(seconds: 1), () async {
+      await _logIceRoute(screenPc);
+    });
+  }
+
+  Future<void> _logIceRoute(RTCPeerConnection screenPc) async {
+    try {
+      final stats = await screenPc.getStats();
+      for (final report in stats) {
+        if (report.type == 'candidate-pair' && report.values['state'] == 'succeeded') {
+          final localId = report.values['localCandidateId'] as String?;
+          final remoteId = report.values['remoteCandidateId'] as String?;
+          final (localType, remoteType, proto) =
+              _candidateTypesFor(stats, localId, remoteId);
+          final route = _describeIceRoute(localType, remoteType);
+          _log('[HOLLOW-SCREEN] ICE route: $route (local=$localType remote=$remoteType proto=$proto)');
+          return;
+        }
+      }
+      _log('[HOLLOW-SCREEN] ICE route: no succeeded candidate pair found');
+    } catch (e) {
+      _log('[HOLLOW-SCREEN] ICE route check failed: $e');
+    }
+  }
+
+  /// Resolve (localType, remoteType, proto) for a succeeded candidate pair.
+  (String, String, String) _candidateTypesFor(
+    List<StatsReport> stats,
+    String? localId,
+    String? remoteId,
+  ) {
+    String localType = '?', remoteType = '?', proto = '';
+    for (final r in stats) {
+      if (r.type == 'local-candidate' && r.id == localId) {
+        localType = (r.values['candidateType'] as String?) ?? '?';
+        proto = (r.values['protocol'] as String?) ?? '';
+      }
+      if (r.type == 'remote-candidate' && r.id == remoteId) {
+        remoteType = (r.values['candidateType'] as String?) ?? '?';
+      }
+    }
+    return (localType, remoteType, proto);
+  }
+
+  String _describeIceRoute(String localType, String remoteType) {
+    return localType == 'relay' || remoteType == 'relay'
+        ? 'TURN (relayed)'
+        : localType == 'srflx' || remoteType == 'srflx'
+            ? 'STUN (direct P2P)'
+            : localType == 'host' && remoteType == 'host'
+                ? 'LAN (direct)'
+                : 'P2P ($localType/$remoteType)';
   }
 
   Future<void> _handleRemoteVideoTrack(RTCTrackEvent event) async {
@@ -780,47 +883,9 @@ class ScreenShareService {
     final priorSynthetic = _remoteStreamIsSynthetic;
     _remoteStreamIsSynthetic = false;
 
-    if (event.streams.isNotEmpty) {
-      _remoteStream = event.streams.first;
-      _log('[HOLLOW-SCREEN] Using stream from onTrack '
-          '(streams=${event.streams.length})');
-    } else {
-      // Windows/libwebrtc may fire onTrack with streams=0.
-      // Try to find the stream from the PC's remote streams.
-      _log('[HOLLOW-SCREEN] onTrack streams=0, checking PC remote streams');
-      MediaStream? found;
-      if (_pc != null) {
-        final remoteStreams = _pc!.getRemoteStreams();
-        for (final s in remoteStreams) {
-          if (s == null) continue;
-          if (s.getVideoTracks().isNotEmpty) {
-            found = s;
-            _log('[HOLLOW-SCREEN] Found remote stream ${s.id}');
-            break;
-          }
-        }
-      }
-      if (found != null) {
-        _remoteStream = found;
-      } else {
-        // Last resort: create synthetic stream (we own this one).
-        _remoteStream = await createLocalMediaStream(
-          'screen-remote-${event.track.id}',
-        );
-        _remoteStream!.addTrack(event.track);
-        _remoteStreamIsSynthetic = true;
-        _log('[HOLLOW-SCREEN] Created synthetic stream (last resort)');
-      }
-    }
+    await _resolveRemoteStream(event);
 
-    // Dispose the prior synthetic stream now that it's been replaced.
-    if (priorStream != null && priorSynthetic && !identical(priorStream, _remoteStream)) {
-      try {
-        await priorStream.dispose();
-      } catch (e) {
-        _log('[HOLLOW-SCREEN] prior synthetic remote stream dispose failed (ignored): $e');
-      }
-    }
+    await _disposePriorSyntheticStream(priorStream, priorSynthetic);
 
     // Create renderer. Null the field BEFORE awaiting dispose so a Linux
     // "texture not found!" throw can't leave a stale half-disposed renderer
@@ -844,6 +909,57 @@ class ScreenShareService {
 
     await Future.delayed(const Duration(milliseconds: 100));
     onRemoteTrackReady?.call();
+  }
+
+  /// Pick the remote stream for the incoming video track: the event's stream,
+  /// a PC remote stream with video, or (last resort) a synthetic stream we own.
+  Future<void> _resolveRemoteStream(RTCTrackEvent event) async {
+    if (event.streams.isNotEmpty) {
+      _remoteStream = event.streams.first;
+      _log('[HOLLOW-SCREEN] Using stream from onTrack '
+          '(streams=${event.streams.length})');
+    } else {
+      // Windows/libwebrtc may fire onTrack with streams=0.
+      // Try to find the stream from the PC's remote streams.
+      _log('[HOLLOW-SCREEN] onTrack streams=0, checking PC remote streams');
+      final found = _findRemoteVideoStream();
+      if (found != null) {
+        _remoteStream = found;
+      } else {
+        // Last resort: create synthetic stream (we own this one).
+        _remoteStream = await createLocalMediaStream(
+          'screen-remote-${event.track.id}',
+        );
+        _remoteStream!.addTrack(event.track);
+        _remoteStreamIsSynthetic = true;
+        _log('[HOLLOW-SCREEN] Created synthetic stream (last resort)');
+      }
+    }
+  }
+
+  MediaStream? _findRemoteVideoStream() {
+    if (_pc == null) return null;
+    final remoteStreams = _pc!.getRemoteStreams();
+    for (final s in remoteStreams) {
+      if (s == null) continue;
+      if (s.getVideoTracks().isNotEmpty) {
+        _log('[HOLLOW-SCREEN] Found remote stream ${s.id}');
+        return s;
+      }
+    }
+    return null;
+  }
+
+  /// Dispose the prior synthetic stream now that it's been replaced.
+  Future<void> _disposePriorSyntheticStream(
+      MediaStream? priorStream, bool priorSynthetic) async {
+    if (priorStream != null && priorSynthetic && !identical(priorStream, _remoteStream)) {
+      try {
+        await priorStream.dispose();
+      } catch (e) {
+        _log('[HOLLOW-SCREEN] prior synthetic remote stream dispose failed (ignored): $e');
+      }
+    }
   }
 
   Future<void> _flushPendingCandidates() async {

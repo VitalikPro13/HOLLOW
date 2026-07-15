@@ -90,50 +90,15 @@ pub(crate) async fn handle_send_file(
     // 2b. Channel moderation gates (posting permission + mute + media-only +
     // slow mode). Posting permission was historically only enforced on the
     // text send path — file sends bypassed it; this closes that gap too.
-    if let (Some(sid), Some(cid)) = (&server_id, &channel_id) {
-        if let Some(server) = server_states.get(sid) {
-            let now_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis();
-            let reject = |msg: &str| NetworkEvent::FileFailed {
-                file_id: message_id.clone(),
-                error: msg.to_string(),
-            };
-            if !server.can_post_in_channel(local_peer_str, cid) {
-                let _ = event_tx.send(reject("You don't have permission to post in this channel")).await;
-                return;
-            }
-            if server.is_muted(local_peer_str, now_ms as u64) {
-                let _ = event_tx.send(reject("You are muted on this server")).await;
-                return;
-            }
-            if server.is_channel_media_only(cid) {
-                let mime = file_transfer::mime_from_ext(&original_ext);
-                let is_media = file_transfer::is_image_mime(&mime) || mime.starts_with("video/");
-                if !is_media {
-                    let _ = event_tx.send(reject(
-                        "This is a media-only channel — only images, GIFs, and videos can be posted",
-                    )).await;
-                    return;
-                }
-            }
-            let slow = server.channel_slow_mode(cid);
-            if slow > 0 && !server.bypasses_slow_mode(local_peer_str) {
-                if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
-                    if let Some(last_ts) = store.latest_own_channel_ts(sid, cid) {
-                        let next_allowed = last_ts + (slow as i64) * 1000;
-                        if (now_ms as i64) < next_allowed {
-                            let wait_s = ((next_allowed - now_ms as i64) + 999) / 1000;
-                            let _ = event_tx.send(reject(
-                                &format!("Slow mode is on — wait {wait_s}s before sending again"),
-                            )).await;
-                            return;
-                        }
-                    }
-                }
-            }
-        }
+    if let Some(reason) = channel_file_send_rejection(
+        server_states, &server_id, &channel_id, local_peer_str, &original_ext,
+        db_path, db_passphrase,
+    ) {
+        let _ = event_tx.send(NetworkEvent::FileFailed {
+            file_id: message_id.clone(),
+            error: reason,
+        }).await;
+        return;
     }
 
     // 3. Check size limit (34MB default, hard cap on default relay).
@@ -178,39 +143,12 @@ pub(crate) async fn handle_send_file(
         // CPU-heavy conversion: hop off the event loop and re-enter via
         // SendFileConverted when done. The event loop keeps dispatching
         // messages/CRDT/call signaling in the meantime.
-        let webp_quality = {
-            crate::storage::MessageStore::open(db_path, db_passphrase)
-                .ok()
-                .and_then(|s| s.load_setting("image_quality").ok().flatten())
-                .map(|s| image_convert::WebpQuality::from_setting(&s))
-                .unwrap_or_default()
-        };
-        let cmd_tx = cmd_tx.clone();
-        let ext = original_ext.clone();
-        tokio::spawn(async move {
-            let converted = tokio::task::spawn_blocking(move || {
-                convert_image_for_send(file_data, &ext, webp_quality, override_width, override_height)
-            })
-            .await;
-            let (final_data, final_ext, width, height) = match converted {
-                Ok(t) => t,
-                Err(e) => {
-                    // spawn_blocking join failure (panic in codec) — surface as a
-                    // failed send via the resume handler's empty-data guard.
-                    hollow_log!("[HOLLOW-FILE] Conversion task panicked: {e}");
-                    (Vec::new(), String::new(), None, None)
-                }
-            };
-            let _ = cmd_tx
-                .send(super::types::NodeCommand::SendFileConverted(Box::new(
-                    super::types::SendFileConvertedPayload {
-                        peer_id, server_id, channel_id, message_id, message_text,
-                        vthumb, share_ref, original_name, is_image,
-                        final_data, final_ext, width, height,
-                    },
-                )))
-                .await;
-        });
+        spawn_image_conversion(
+            peer_id, server_id, channel_id, message_id, message_text,
+            vthumb, share_ref, original_name, is_image,
+            file_data, original_ext, override_width, override_height,
+            cmd_tx.clone(), db_path, db_passphrase,
+        );
         return;
     }
 
@@ -282,6 +220,126 @@ fn convert_image_for_send(
     } else {
         (file_data, original_ext.to_string(), override_width, override_height)
     }
+}
+
+/// Channel moderation gates for a file send (posting permission + mute +
+/// media-only + slow mode). Returns Some(reason) when the send must be
+/// rejected with FileFailed. Sync on purpose — the slow-mode check opens the
+/// MessageStore and must never be held across an .await (Connection is !Sync).
+fn channel_file_send_rejection(
+    server_states: &HashMap<String, ServerState>,
+    server_id: &Option<String>,
+    channel_id: &Option<String>,
+    local_peer_str: &str,
+    original_ext: &str,
+    db_path: &str,
+    db_passphrase: &str,
+) -> Option<String> {
+    let (Some(sid), Some(cid)) = (server_id, channel_id) else { return None; };
+    let server = server_states.get(sid)?;
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    if !server.can_post_in_channel(local_peer_str, cid) {
+        return Some("You don't have permission to post in this channel".to_string());
+    }
+    if server.is_muted(local_peer_str, now_ms as u64) {
+        return Some("You are muted on this server".to_string());
+    }
+    if server.is_channel_media_only(cid) {
+        let mime = file_transfer::mime_from_ext(original_ext);
+        let is_media = file_transfer::is_image_mime(&mime) || mime.starts_with("video/");
+        if !is_media {
+            return Some(
+                "This is a media-only channel — only images, GIFs, and videos can be posted"
+                    .to_string(),
+            );
+        }
+    }
+    slow_mode_rejection(server, sid, cid, local_peer_str, now_ms, db_path, db_passphrase)
+}
+
+/// Slow-mode gate for a channel file send (Mod+ exempt). Reads the sender's
+/// own latest channel ts from the store; store-open failure = allow (mirrors
+/// the original inline behavior).
+fn slow_mode_rejection(
+    server: &ServerState,
+    sid: &str,
+    cid: &str,
+    local_peer_str: &str,
+    now_ms: u128,
+    db_path: &str,
+    db_passphrase: &str,
+) -> Option<String> {
+    let slow = server.channel_slow_mode(cid);
+    if slow == 0 || server.bypasses_slow_mode(local_peer_str) {
+        return None;
+    }
+    let store = crate::storage::MessageStore::open(db_path, db_passphrase).ok()?;
+    let last_ts = store.latest_own_channel_ts(sid, cid)?;
+    let next_allowed = last_ts + (slow as i64) * 1000;
+    if (now_ms as i64) < next_allowed {
+        let wait_s = ((next_allowed - now_ms as i64) + 999) / 1000;
+        return Some(format!("Slow mode is on — wait {wait_s}s before sending again"));
+    }
+    None
+}
+
+/// The step-4 conversion dispatch: read the user's quality tier (a single
+/// SQLite KV lookup — negligible cost), hop the CPU-heavy image conversion
+/// onto the blocking pool, and re-enter the event loop via
+/// NodeCommand::SendFileConverted when done.
+#[allow(clippy::too_many_arguments)]
+fn spawn_image_conversion(
+    peer_id: Option<String>,
+    server_id: Option<String>,
+    channel_id: Option<String>,
+    message_id: String,
+    message_text: String,
+    vthumb: Option<VideoThumbRef>,
+    share_ref: Option<super::types::ShareRef>,
+    original_name: String,
+    is_image: bool,
+    file_data: Vec<u8>,
+    original_ext: String,
+    override_width: Option<u32>,
+    override_height: Option<u32>,
+    cmd_tx: mpsc::Sender<super::types::NodeCommand>,
+    db_path: &str,
+    db_passphrase: &str,
+) {
+    let webp_quality = {
+        crate::storage::MessageStore::open(db_path, db_passphrase)
+            .ok()
+            .and_then(|s| s.load_setting("image_quality").ok().flatten())
+            .map(|s| image_convert::WebpQuality::from_setting(&s))
+            .unwrap_or_default()
+    };
+    tokio::spawn(async move {
+        let converted = tokio::task::spawn_blocking(move || {
+            convert_image_for_send(file_data, &original_ext, webp_quality, override_width, override_height)
+        })
+        .await;
+        let (final_data, final_ext, width, height) = match converted {
+            Ok(t) => t,
+            Err(e) => {
+                // spawn_blocking join failure (panic in codec) — surface as a
+                // failed send via the resume handler's empty-data guard.
+                hollow_log!("[HOLLOW-FILE] Conversion task panicked: {e}");
+                (Vec::new(), String::new(), None, None)
+            }
+        };
+        let _ = cmd_tx
+            .send(super::types::NodeCommand::SendFileConverted(Box::new(
+                super::types::SendFileConvertedPayload {
+                    peer_id, server_id, channel_id, message_id, message_text,
+                    vthumb, share_ref, original_name, is_image,
+                    final_data, final_ext, width, height,
+                },
+            )))
+            .await;
+    });
 }
 
 /// Steps 5+ of the original SendFile flow (file id, local store, metadata,
@@ -369,24 +427,13 @@ pub(crate) async fn finish_send_file(
         ctx_id = peer_id.clone().unwrap_or_default();
     }
 
-    {
-        if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
-            let _ = store.insert_file_metadata(
-                &file_id, &original_name, &final_ext, &final_mime,
-                file_size, total_chunks, is_image,
-                width, height,
-                Some(&message_id), ctx_type, &ctx_id,
-                &local_peer, true, timestamp,
-                vthumb.as_ref(),
-            );
-            if store_full_file {
-                let _ = store.mark_file_complete(
-                    &file_id,
-                    &final_path.to_string_lossy(),
-                );
-            }
-        }
-    }
+    persist_sent_file_row(
+        db_path, db_passphrase,
+        &file_id, &original_name, &final_ext, &final_mime,
+        file_size, total_chunks, is_image, width, height,
+        &message_id, ctx_type, &ctx_id, &local_peer, timestamp,
+        vthumb.as_ref(), store_full_file, &final_path,
+    );
 
     // Emit FileCompleted on the sender side too, so the
     // sender's UI reloads the chat from the DB and picks
@@ -414,603 +461,994 @@ pub(crate) async fn finish_send_file(
     // verify_message_signature on the receive path).
     // Previously this called sign_message with raw text,
     // causing every file-message signature to fail verification.
-    let (sig, pk) = if let Some(ref peer_str) = peer_id {
-        // DM: context = recipient, sender = local
-        let payload = message_signing_payload(
-            "dm", peer_str, &local_peer, timestamp, &signing_payload_text,
-        );
-        sign_message(bundle_keypair, pub_key_b64, &payload)
-    } else if let (Some(sid), Some(cid)) = (&server_id, &channel_id) {
-        // Channel: context = server_id:channel_id, sender = local
-        let payload = message_signing_payload(
-            "ch", &format!("{sid}:{cid}"), &local_peer, timestamp, &signing_payload_text,
-        );
-        sign_message(bundle_keypair, pub_key_b64, &payload)
-    } else {
-        (None, None)
-    };
+    let (sig, pk) = sign_file_message(
+        &peer_id, &server_id, &channel_id, &local_peer, timestamp,
+        &signing_payload_text, bundle_keypair, pub_key_b64,
+    );
 
     if let Some(peer_str) = peer_id {
         // DM path. The companion caption / "[file:...]" DM is a DirectMessage; for
         // a sibling self-echo it must carry `convo` = the recipient master so our
         // other device files it under the right thread (see message_ops fan-out).
-        let build_file_dm = |convo: Option<String>| MessageEnvelope::DirectMessage {
-            inner: Box::new(DirectMessagePayload {
-                text: signing_payload_text.clone(),
-                ts: timestamp,
-                sig: sig.clone(),
-                pk: pk.clone(),
-                mid: Some(message_id.clone()),
-                reply_to: None,
-                file_id: Some(file_id.clone()),
-                link_preview: None,
-                convo,
-                order_us: Some(order_us),
-            }),
-        };
-
+        //
         // Store the text message (keyed by the recipient MASTER id — same as the
         // DM-thread key the UI/receive path uses).
-        {
-            if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
-                let _ = store.insert(
-                    &peer_str, &signing_payload_text, true, timestamp,
-                    sig.as_deref(), pk.as_deref(), Some(&message_id),
-                    None, Some(&file_id), Some(order_us),
-                );
-            }
-        }
-
-        // ── Multi-device fan-out (Phase 6, Step 3) ──────────────────────
-        // `peer_str` is the recipient's MASTER id. The companion DM caption,
-        // FileHeader, and (online) WebRTC stream all key on per-DEVICE Olm
-        // sessions / room membership, so we must deliver to each of the
-        // recipient's devices AND our own siblings (so a file sent from one of
-        // our devices mirrors live to the other). Single-device recipients
-        // resolve to an empty device set → fall back to the master id = exact
-        // pre-multi-device behavior. The DELICATE offline-image caption ratchet
-        // rule (send exactly once via send_encrypted_text_to_peer, never
-        // send_encrypted_message) holds PER DEVICE — each device has its own Olm
-        // ratchet, so "exactly once per device" is the correct generalization.
-        // Target set = persisted device list UNION devices currently in the DM
-        // room (live presence is authoritative — see message_ops::collect_target_devices;
-        // a stale/polluted stored list must not hide the connected device).
-        let recipient_master = crate::node::resolver::resolve(&peer_str);
-        // Self-DM ("Saved messages"): local store + FileCompleted already
-        // happened above; fan-out is siblings-only (no recipient push, no
-        // bare-master fallback target).
-        let self_dm = crate::node::resolver::same_identity(&peer_str, local_peer_str);
-        let dm_room_f = crate::node::types::dm_room_code(local_peer_str, &recipient_master);
-        // LIVENESS-FILTERED (Step 7 ghost fix, mirrors message_ops::collect_target_devices):
-        // only target stored devices CURRENTLY IN A ROOM. A dead ghost id (from a
-        // re-link cycle) has a stale session but is in no room, so without this it
-        // would hit the offline room-send path → spurious push + unread on a phantom
-        // device. The live-room union below still catches any real online device the
-        // stored list missed; the single-device fallback preserves offline push.
-        let mut file_set: std::collections::HashSet<String> =
-            crate::node::resolver::devices_for(&recipient_master)
-                .into_iter()
-                .filter(|d| ws_room_for_peer(&ws_room_peers, d).is_some())
-                .collect();
-        // Offline-but-real RECIPIENT devices (Step 9A push): a real device of the
-        // recipient that's offline but we hold an Olm session with → the offline
-        // image path buffers under it + pushes its token so a fully-quit phone gets
-        // the image preview. Mirrors message_ops::collect_target_devices. Only the
-        // recipient (not our own siblings — never push our own phone for our send).
-        if !self_dm {
-            for d in crate::node::resolver::devices_for(&recipient_master) {
-                if ws_room_for_peer(&ws_room_peers, &d).is_none() && olm.has_session(&d) {
-                    file_set.insert(d);
-                }
-            }
-        }
-        let own_master_f = crate::node::resolver::resolve(local_peer_str);
-        for sib in crate::node::resolver::devices_for(&own_master_f) {
-            if ws_room_for_peer(&ws_room_peers, &sib).is_some() {
-                file_set.insert(sib);
-            }
-        }
-        if let Some(peers) = ws_room_peers.get(&dm_room_f) {
-            for p in peers {
-                let m = crate::node::resolver::resolve(p);
-                if m == recipient_master || m == own_master_f {
-                    file_set.insert(p.clone());
-                }
-            }
-        }
-        file_set.remove(device_peer_id);      // never send to ourselves
-        file_set.remove(&recipient_master);   // never the bare master
-        file_set.remove(&own_master_f);
-        let mut file_targets: Vec<String> = file_set.into_iter().collect();
-        if file_targets.is_empty() && !self_dm {
-            // Single-device recipient with no live device → master id as-is.
-            file_targets.push(peer_str.clone());
-        }
-        hollow_log!(
-            "[HOLLOW-MULTIDEV] DM file fan-out for master {peer_str}: {} target device(s)",
-            file_targets.len()
+        persist_sent_dm_row(
+            db_path, db_passphrase, &peer_str, &signing_payload_text,
+            timestamp, sig.as_deref(), pk.as_deref(), &message_id, &file_id, order_us,
         );
 
-        for peer_str in &file_targets {
-        let peer_str = peer_str.as_str();
-        // Per-device companion DM envelope: a sibling self-echo carries `convo`
-        // (recipient master) so it files under the right thread; the recipient's
-        // own devices get the plain envelope (convo=None).
-        let is_sibling_target = crate::node::resolver::same_identity(peer_str, local_peer_str);
-        let envelope_json = serde_json::to_string(&build_file_dm(
-            if is_sibling_target { Some(recipient_master.clone()) } else { None },
-        )).unwrap_or_else(|_| signing_payload_text.clone());
-        // Encrypt and send the message + FileHeader + FileChunks via Olm.
-        if olm.has_session(peer_str) {
-            // EXACT-device reachability (not identity-wide): in a fan-out one
-            // device may be online while a sibling is offline. ws_room_for_peer
-            // = exact membership.
-            let reachable = ws_room_for_peer(&ws_room_peers, peer_str).is_some();
-
-            // Send the message (caption / "[file:...]") envelope.
-            //
-            // CRITICAL — Olm ratchet ordering: `send_encrypted_message` ALWAYS
-            // calls olm.encrypt() (advancing + persisting the ratchet) BEFORE it
-            // checks reachability, and DISCARDS the ciphertext if the peer is
-            // offline. For an OFFLINE IMAGE that wasted encryption burns a ratchet
-            // slot the receiver never sees — a permanent gap that breaks decrypt
-            // of the FileHeader/caption that follow. So when offline-and-image we
-            // must NOT call it here; the caption is sent exactly once below via
-            // the DM-room-direct path (which also actually delivers to the buffer).
-            // The online path and the non-image offline path are unchanged.
-            if reachable {
-                send_encrypted_message(
-                                olm, crypto_store,
-                                peer_str, &envelope_json, event_tx,
-                                            &ws_cmd_tx, &ws_room_peers,
-                ).await;
-            } else if !is_image {
-                // OFFLINE non-image: target the MASTER-pair DM room directly
-                // (0x04, text cap) so the relay's offline buffer holds the
-                // caption/"[file:...]" message. `send_encrypted_message` would
-                // encrypt and then DISCARD for a peer in no known room — a
-                // wasted ratchet slot and nothing buffered. Mirrors
-                // message_ops' offline text-DM path.
-                crate::node::crypto_handler::send_encrypted_text_to_peer(
-                    olm, crypto_store,
-                    peer_str, dm_room_f.clone(), &envelope_json, event_tx,
-                    &ws_cmd_tx,
-                ).await;
-            }
-            // offline_image: caption deliberately deferred — sent exactly once
-            // below, AFTER the inlined FileHeader (see that block).
-
-            // Only send file data if peer is reachable right now.
-            // If offline, the file_id is in the message — sync will request it later.
-            if reachable {
-
-            // AES-encrypt the file, write ciphertext to temp file.
-            let encrypted = crate::vault::pipeline::aes_encrypt(&final_data);
-            if let Ok(enc) = encrypted {
-                // Per-device temp file: sibling devices may stream the same
-                // file_id concurrently, so the ciphertext temp must not collide.
-                let temp_path = file_transfer::files_dir().join(format!(".stream_send_{file_id}_{peer_str}.tmp"));
-                if let Ok(()) = tokio::fs::write(&temp_path, &enc.ciphertext).await {
-                    let aes_key_hex = hex::encode(enc.key);
-                    let aes_nonce_hex = hex::encode(enc.nonce);
-
-                    // Send FileHeader via Olm (carries AES key — tiny, secure).
-                    let header = MessageEnvelope::FileHeader {
-                        inner: Box::new(FileHeaderPayload {
-                            fid: file_id.clone(),
-                            name: original_name.clone(),
-                            ext: final_ext.clone(),
-                            mime: final_mime.clone(),
-                            size: file_size,
-                            chunks: 0,
-                            img: is_image,
-                            w: width,
-                            h: height,
-                            mid: Some(message_id.clone()),
-                            sid: None,
-                            cid: None,
-                            ts: timestamp,
-                            sig: None,
-                            pk: None,
-                            aes_key: Some(aes_key_hex),
-                            aes_nonce: Some(aes_nonce_hex),
-                            target: None,
-                            vthumb: vthumb.clone(),
-                            share_ref: None,
-                            inline_bytes: None,
-                        }),
-                    };
-                    let header_json = serde_json::to_string(&header).unwrap_or_default();
-                    send_encrypted_message(
-                                olm, crypto_store,
-                                peer_str, &header_json, event_tx,
-                                                            &ws_cmd_tx, &ws_room_peers,
-                    ).await;
-
-                    // Stream encrypted file bytes via WebRTC or WS relay.
-                    stream_to_peer(
-                        &ws_cmd_tx, &ws_room_peers,
-                        &webrtc_peers, pending_webrtc_sends, &event_tx,
-                        peer_str, &ws_stream_transfer::StreamKind::File,
-                        &file_id, &temp_path, enc.ciphertext.len() as u64,
-                    ).await;
-                    hollow_log!("[HOLLOW-FILE] Streaming {file_id} ({} bytes) to DM {peer_str}", enc.ciphertext.len());
-                    // Clean up the sender-side ciphertext temp once the WS-relay
-                    // stream is queued (awaited). A WebRTC send still in flight owns
-                    // the temp and removes it on WebRtcTransferComplete, so only
-                    // delete when no such send is pending — mirrors the channel path.
-                    if !pending_webrtc_sends.contains_key(&file_id) {
-                        let _ = tokio::fs::remove_file(&temp_path).await;
-                    }
-                }
-            }
-            } else if is_image {
-                // Peer is OFFLINE and this is an image: inline the AES-encrypted
-                // bytes INTO the FileHeader and send it via SendDirectImage (0x08)
-                // so the relay buffers it under the per-peer image cap. The FCM
-                // fetch node then writes the file to disk and renders a real image
-                // preview in the push notification — no live stream needed. Larger
-                // non-image files still fall back to request-on-open via DM-sync.
-                if let Ok(enc) = crate::vault::pipeline::aes_encrypt(&final_data) {
-                    let header = MessageEnvelope::FileHeader {
-                        inner: Box::new(FileHeaderPayload {
-                            fid: file_id.clone(),
-                            name: original_name.clone(),
-                            ext: final_ext.clone(),
-                            mime: final_mime.clone(),
-                            size: file_size,
-                            chunks: 0,
-                            img: is_image,
-                            w: width,
-                            h: height,
-                            mid: Some(message_id.clone()),
-                            sid: None,
-                            cid: None,
-                            ts: timestamp,
-                            // Carry the signature on the offline-image FileHeader.
-                            // For a CAPTIONLESS image this is the ONLY transmitted
-                            // signature (the "[file:...]" companion DM is dropped
-                            // to offline peers), and it's signed over the same
-                            // "[file:<id>]" text the fetch node stores — so the
-                            // row verifies instead of showing "Unsigned". For a
-                            // CAPTIONED image the caption DM carries its own sig
-                            // over the caption text and overwrites this via
-                            // promote_file_sentinel_to_caption; harmless here.
-                            sig: sig.clone(),
-                            pk: pk.clone(),
-                            aes_key: Some(hex::encode(enc.key)),
-                            aes_nonce: Some(hex::encode(enc.nonce)),
-                            target: None,
-                            vthumb: vthumb.clone(),
-                            share_ref: None,
-                            inline_bytes: Some(
-                                base64::engine::general_purpose::STANDARD
-                                    .encode(&enc.ciphertext),
-                            ),
-                        }),
-                    };
-                    let header_json = serde_json::to_string(&header).unwrap_or_default();
-                    // Target the MASTER-pair DM room directly (computed once above
-                    // as `dm_room_f`) — the offline peer is not a member of any
-                    // known room, so a lookup would drop the message, and
-                    // `dm_room_code` is pure now so it must NOT be recomputed from
-                    // the per-device `peer_str` (that keys the room on the device,
-                    // not the identity → the offline buffer/replay room mismatches).
-                    // The relay buffers it under the image cap (mirrors offline text-DM).
-                    crate::node::crypto_handler::send_encrypted_image_to_peer(
-                        olm, crypto_store,
-                        peer_str, dm_room_f.clone(), &header_json, event_tx,
-                        &ws_cmd_tx,
-                    ).await;
-                    hollow_log!("[HOLLOW-FILE] Inlined offline image {file_id} ({} enc bytes) to DM {peer_str}", enc.ciphertext.len());
-
-                    // If this image has a CAPTION, send it now — exactly once,
-                    // AFTER the FileHeader — straight to the DM room (0x04, text
-                    // cap). We deliberately skipped the caption's normal send
-                    // above (offline_image guard) to avoid a wasted Olm
-                    // encryption that would corrupt the ratchet. The caption
-                    // shares the FileHeader's message_id, so the fetch node merges
-                    // them (real caption wins over the "[file:...]" sentinel) and
-                    // the offline peer sees the captioned image. Encryption order
-                    // on the wire is FileHeader (#N) then caption (#N+1) — no gap.
-                    if !message_text.is_empty() {
-                        crate::node::crypto_handler::send_encrypted_text_to_peer(
-                            olm, crypto_store,
-                            peer_str, dm_room_f.clone(), &envelope_json, event_tx,
-                            &ws_cmd_tx,
-                        ).await;
-                        hollow_log!("[HOLLOW-FILE] Buffered offline image caption for DM {peer_str}");
-                    }
-                }
-            } else {
-                // OFFLINE non-image file: send a METADATA-ONLY FileHeader to
-                // the DM room (0x04, text cap) so the relay's offline buffer
-                // carries the file card — never the bytes (RAM/bandwidth
-                // bomb). No aes_key/nonce → the receiver inserts metadata
-                // without registering a pending stream (same semantics as a
-                // DM-sync `file_meta` card) and fetches the bytes via the
-                // normal request-on-open path once both peers are online.
-                let header = MessageEnvelope::FileHeader {
-                    inner: Box::new(FileHeaderPayload {
-                        fid: file_id.clone(),
-                        name: original_name.clone(),
-                        ext: final_ext.clone(),
-                        mime: final_mime.clone(),
-                        size: file_size,
-                        chunks: 0,
-                        img: is_image,
-                        w: width,
-                        h: height,
-                        mid: Some(message_id.clone()),
-                        sid: None,
-                        cid: None,
-                        ts: timestamp,
-                        // Carry the signature so a captionless file row
-                        // verifies instead of showing "Unsigned" (mirrors the
-                        // offline-image header).
-                        sig: sig.clone(),
-                        pk: pk.clone(),
-                        aes_key: None,
-                        aes_nonce: None,
-                        target: None,
-                        vthumb: vthumb.clone(),
-                        share_ref: None,
-                        inline_bytes: None,
-                    }),
-                };
-                let header_json = serde_json::to_string(&header).unwrap_or_default();
-                crate::node::crypto_handler::send_encrypted_text_to_peer(
-                    olm, crypto_store,
-                    peer_str, dm_room_f.clone(), &header_json, event_tx,
-                    &ws_cmd_tx,
-                ).await;
-                hollow_log!("[HOLLOW-FILE] Buffered metadata-only FileHeader {file_id} for offline DM {peer_str}");
-            } // if peer reachable (live stream) / offline image (inline) / offline file (metadata-only)
-        } else {
-            // No Olm session with this device yet (a freshly-appeared device before
-            // key exchange completes). The text-DM path queues + KeyRequests here
-            // (send_dm_to_device); a FILE can't ride the pending-envelope queue, so
-            // kick off the session (KeyRequest to a LIVE device) and let the normal
-            // heal paths deliver the content later (DM-sync backfill re-serves the
-            // message; the file re-serves on request/open). Without this the target
-            // device got NOTHING — no queue, no key exchange — until some other
-            // traffic happened to establish the session.
-            if ws_room_for_peer(&ws_room_peers, peer_str).is_some() {
-                hollow_log!("[HOLLOW-FILE] No session for DM file target {peer_str} — sending KeyRequest");
-                send_message_to_peer(
-                    &ws_cmd_tx, &ws_room_peers,
-                    peer_str, HavenMessage::KeyRequest,
-                );
-            }
-        }
-
-        hollow_log!("[HOLLOW-FILE] Sent {total_chunks} chunks for {file_id} to DM {peer_str}");
-        } // for peer_str in &file_targets
-
+        let msg = DmFileMsg {
+            signing_payload_text: &signing_payload_text,
+            timestamp,
+            sig: &sig,
+            pk: &pk,
+            message_id: &message_id,
+            file_id: &file_id,
+            order_us,
+            final_data: &final_data,
+            original_name: &original_name,
+            final_ext: &final_ext,
+            final_mime: &final_mime,
+            file_size,
+            is_image,
+            width,
+            height,
+            vthumb: &vthumb,
+            message_text: &message_text,
+            local_peer_str,
+            total_chunks,
+        };
+        send_dm_file_fanout(
+            &peer_str, &msg, device_peer_id,
+            olm, crypto_store, event_tx, ws_cmd_tx, ws_room_peers,
+            webrtc_peers, pending_webrtc_sends,
+        ).await;
     } else if let (Some(sid), Some(cid)) = (server_id, channel_id) {
         // Channel path — broadcast via MLS.
-        let envelope = MessageEnvelope::ChannelMessage {
-            inner: Box::new(ChannelMessagePayload {
-                sid: sid.clone(),
-                cid: cid.clone(),
-                text: signing_payload_text.clone(),
-                ts: timestamp,
-                sig: sig.clone(),
-                pk: pk.clone(),
-                mid: Some(message_id.clone()),
-                reply_to: None,
-                file_id: Some(file_id.clone()),
-                link_preview: None,
-                order_us: Some(order_us),
-            }),
-        };
-        let envelope_json = serde_json::to_string(&envelope)
-            .unwrap_or_else(|_| signing_payload_text.clone());
+        send_channel_file(
+            &sid, &cid, &signing_payload_text, timestamp, &sig, &pk,
+            &message_id, &file_id, order_us, &final_data,
+            &original_name, &final_ext, &final_mime, file_size,
+            is_image, width, height, &vthumb, &share_ref, &local_peer,
+            event_tx, server_states, olm, crypto_store, mls,
+            ws_cmd_tx, ws_room_peers, webrtc_peers, pending_webrtc_sends,
+            gossip_overlays, db_path, db_passphrase,
+        ).await;
+    }
+}
 
-        // Store the text message.
-        {
-            if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
-                let _ = store.insert_channel_message(
-                    &sid, &cid, &local_peer, &signing_payload_text, true, timestamp,
-                    sig.as_deref(), pk.as_deref(), Some(&message_id),
-                    None, Some(&file_id), Some(order_us),
-                );
+/// Sign the file message with the canonical `message_signing_payload` for its
+/// context (DM = recipient, channel = "sid:cid"); no context → unsigned.
+#[allow(clippy::too_many_arguments)]
+fn sign_file_message(
+    peer_id: &Option<String>,
+    server_id: &Option<String>,
+    channel_id: &Option<String>,
+    local_peer: &str,
+    timestamp: i64,
+    signing_payload_text: &str,
+    bundle_keypair: &crate::identity::native_identity::NativeKeypair,
+    pub_key_b64: &str,
+) -> (Option<String>, Option<String>) {
+    if let Some(peer_str) = peer_id {
+        // DM: context = recipient, sender = local
+        let payload = message_signing_payload(
+            "dm", peer_str, local_peer, timestamp, signing_payload_text,
+        );
+        sign_message(bundle_keypair, pub_key_b64, &payload)
+    } else if let (Some(sid), Some(cid)) = (server_id, channel_id) {
+        // Channel: context = server_id:channel_id, sender = local
+        let payload = message_signing_payload(
+            "ch", &format!("{sid}:{cid}"), local_peer, timestamp, signing_payload_text,
+        );
+        sign_message(bundle_keypair, pub_key_b64, &payload)
+    } else {
+        (None, None)
+    }
+}
+
+/// Sync DB write for the sender's own file metadata row (+ completion when the
+/// full file is stored locally). Sync on purpose — the store is never held
+/// across an .await (Connection is !Sync).
+#[allow(clippy::too_many_arguments)]
+fn persist_sent_file_row(
+    db_path: &str,
+    db_passphrase: &str,
+    file_id: &str,
+    original_name: &str,
+    final_ext: &str,
+    final_mime: &str,
+    file_size: u64,
+    total_chunks: u32,
+    is_image: bool,
+    width: Option<u32>,
+    height: Option<u32>,
+    message_id: &str,
+    ctx_type: &str,
+    ctx_id: &str,
+    local_peer: &str,
+    timestamp: i64,
+    vthumb: Option<&VideoThumbRef>,
+    store_full_file: bool,
+    final_path: &std::path::Path,
+) {
+    if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+        let _ = store.insert_file_metadata(
+            file_id, original_name, final_ext, final_mime,
+            file_size, total_chunks, is_image,
+            width, height,
+            Some(message_id), ctx_type, ctx_id,
+            local_peer, true, timestamp,
+            vthumb,
+        );
+        if store_full_file {
+            let _ = store.mark_file_complete(
+                file_id,
+                &final_path.to_string_lossy(),
+            );
+        }
+    }
+}
+
+/// Sync DB write for the sender's own DM text row (caption / "[file:...]").
+#[allow(clippy::too_many_arguments)]
+fn persist_sent_dm_row(
+    db_path: &str,
+    db_passphrase: &str,
+    peer_str: &str,
+    text: &str,
+    timestamp: i64,
+    sig: Option<&str>,
+    pk: Option<&str>,
+    message_id: &str,
+    file_id: &str,
+    order_us: i64,
+) {
+    if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+        let _ = store.insert(
+            peer_str, text, true, timestamp,
+            sig, pk, Some(message_id),
+            None, Some(file_id), Some(order_us),
+        );
+    }
+}
+
+/// Immutable per-message data shared by every DM file fan-out target. Carries
+/// NO node state and NO &mut borrows (see feedback_swarmcontext_borrow) — the
+/// mutable state (olm, pending maps) is passed to each helper individually.
+struct DmFileMsg<'a> {
+    signing_payload_text: &'a str,
+    timestamp: i64,
+    sig: &'a Option<String>,
+    pk: &'a Option<String>,
+    message_id: &'a str,
+    file_id: &'a str,
+    order_us: i64,
+    final_data: &'a [u8],
+    original_name: &'a str,
+    final_ext: &'a str,
+    final_mime: &'a str,
+    file_size: u64,
+    is_image: bool,
+    width: Option<u32>,
+    height: Option<u32>,
+    vthumb: &'a Option<VideoThumbRef>,
+    message_text: &'a str,
+    local_peer_str: &'a str,
+    total_chunks: u32,
+}
+
+/// Shared DM FileHeader builder — every DM header uses chunks=0 (streamed),
+/// sid/cid=None, target=None, share_ref=None; the varying fields (signature,
+/// AES material, inline bytes) are parameterized per branch.
+fn build_dm_file_header(
+    msg: &DmFileMsg<'_>,
+    sig: Option<String>,
+    pk: Option<String>,
+    aes_key: Option<String>,
+    aes_nonce: Option<String>,
+    inline_bytes: Option<String>,
+) -> MessageEnvelope {
+    MessageEnvelope::FileHeader {
+        inner: Box::new(FileHeaderPayload {
+            fid: msg.file_id.to_string(),
+            name: msg.original_name.to_string(),
+            ext: msg.final_ext.to_string(),
+            mime: msg.final_mime.to_string(),
+            size: msg.file_size,
+            chunks: 0,
+            img: msg.is_image,
+            w: msg.width,
+            h: msg.height,
+            mid: Some(msg.message_id.to_string()),
+            sid: None,
+            cid: None,
+            ts: msg.timestamp,
+            sig,
+            pk,
+            aes_key,
+            aes_nonce,
+            target: None,
+            vthumb: msg.vthumb.clone(),
+            share_ref: None,
+            inline_bytes,
+        }),
+    }
+}
+
+/// ── Multi-device fan-out (Phase 6, Step 3) ──────────────────────
+/// `peer_str` is the recipient's MASTER id. The companion DM caption,
+/// FileHeader, and (online) WebRTC stream all key on per-DEVICE Olm
+/// sessions / room membership, so we must deliver to each of the
+/// recipient's devices AND our own siblings (so a file sent from one of
+/// our devices mirrors live to the other). Single-device recipients
+/// resolve to an empty device set → fall back to the master id = exact
+/// pre-multi-device behavior. The DELICATE offline-image caption ratchet
+/// rule (send exactly once via send_encrypted_text_to_peer, never
+/// send_encrypted_message) holds PER DEVICE — each device has its own Olm
+/// ratchet, so "exactly once per device" is the correct generalization.
+#[allow(clippy::too_many_arguments)]
+async fn send_dm_file_fanout(
+    peer_str: &str,
+    msg: &DmFileMsg<'_>,
+    device_peer_id: &str,
+    olm: &mut OlmManager,
+    crypto_store: &CryptoStore,
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    webrtc_peers: &std::collections::HashSet<String>,
+    pending_webrtc_sends: &mut HashMap<String, (String, ws_stream_transfer::StreamKind, String, PathBuf, u64)>,
+) {
+    let recipient_master = crate::node::resolver::resolve(peer_str);
+    // Self-DM ("Saved messages"): local store + FileCompleted already
+    // happened above; fan-out is siblings-only (no recipient push, no
+    // bare-master fallback target).
+    let self_dm = crate::node::resolver::same_identity(peer_str, msg.local_peer_str);
+    let dm_room_f = crate::node::types::dm_room_code(msg.local_peer_str, &recipient_master);
+    let file_targets = collect_dm_file_targets(
+        peer_str, device_peer_id, &recipient_master, self_dm, &dm_room_f,
+        msg.local_peer_str, ws_room_peers, olm,
+    );
+    hollow_log!(
+        "[HOLLOW-MULTIDEV] DM file fan-out for master {peer_str}: {} target device(s)",
+        file_targets.len()
+    );
+
+    for target in &file_targets {
+        send_dm_file_to_device(
+            target, &recipient_master, &dm_room_f, msg,
+            olm, crypto_store, event_tx, ws_cmd_tx, ws_room_peers,
+            webrtc_peers, pending_webrtc_sends,
+        ).await;
+    }
+}
+
+/// Compute the per-device target set for a DM file send.
+/// Target set = persisted device list UNION devices currently in the DM
+/// room (live presence is authoritative — see message_ops::collect_target_devices;
+/// a stale/polluted stored list must not hide the connected device).
+#[allow(clippy::too_many_arguments)]
+fn collect_dm_file_targets(
+    peer_str: &str,
+    device_peer_id: &str,
+    recipient_master: &str,
+    self_dm: bool,
+    dm_room_f: &str,
+    local_peer_str: &str,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    olm: &OlmManager,
+) -> Vec<String> {
+    // LIVENESS-FILTERED (Step 7 ghost fix, mirrors message_ops::collect_target_devices):
+    // only target stored devices CURRENTLY IN A ROOM. A dead ghost id (from a
+    // re-link cycle) has a stale session but is in no room, so without this it
+    // would hit the offline room-send path → spurious push + unread on a phantom
+    // device. The live-room union below still catches any real online device the
+    // stored list missed; the single-device fallback preserves offline push.
+    let mut file_set: std::collections::HashSet<String> =
+        crate::node::resolver::devices_for(recipient_master)
+            .into_iter()
+            .filter(|d| ws_room_for_peer(ws_room_peers, d).is_some())
+            .collect();
+    // Offline-but-real RECIPIENT devices (Step 9A push): a real device of the
+    // recipient that's offline but we hold an Olm session with → the offline
+    // image path buffers under it + pushes its token so a fully-quit phone gets
+    // the image preview. Mirrors message_ops::collect_target_devices. Only the
+    // recipient (not our own siblings — never push our own phone for our send).
+    if !self_dm {
+        for d in crate::node::resolver::devices_for(recipient_master) {
+            if ws_room_for_peer(ws_room_peers, &d).is_none() && olm.has_session(&d) {
+                file_set.insert(d);
             }
         }
+    }
+    let own_master_f = crate::node::resolver::resolve(local_peer_str);
+    for sib in crate::node::resolver::devices_for(&own_master_f) {
+        if ws_room_for_peer(ws_room_peers, &sib).is_some() {
+            file_set.insert(sib);
+        }
+    }
+    insert_dm_room_live_members(&mut file_set, ws_room_peers, dm_room_f, recipient_master, &own_master_f);
+    file_set.remove(device_peer_id);      // never send to ourselves
+    file_set.remove(recipient_master);    // never the bare master
+    file_set.remove(&own_master_f);
+    let mut file_targets: Vec<String> = file_set.into_iter().collect();
+    if file_targets.is_empty() && !self_dm {
+        // Single-device recipient with no live device → master id as-is.
+        file_targets.push(peer_str.to_string());
+    }
+    file_targets
+}
 
-        // Send the TEXT MESSAGE ("[file:...]" / caption) via the MLS TOPIC
-        // broadcast — the SAME path normal channel text takes. It used to fan
-        // targeted per-member direct sends, which (a) silently skipped every
-        // OFFLINE member (no queue, no relay copy — the file card's message
-        // row only healed via channel sync) and (b) never entered the relay's
-        // per-channel offline ring, so catch-up replayed the FileHeader with
-        // no message row to hang it on and the chat showed NOTHING.
-        // Restricted channels (Option B) encrypt under the per-channel
-        // subgroup — the room sees ciphertext either way, identical to
-        // message_ops' text sends.
-        if let Some(mls_mgr) = mls {
-            let use_subgroup = server_states.get(&sid)
-                .is_some_and(|s| s.channel_uses_subgroup(&cid));
-            let group_key = if use_subgroup {
-                crate::crypto::subgroup_id(&sid, &cid)
-            } else {
-                sid.clone()
-            };
-            if mls_mgr.has_group(&group_key) {
-                if let Err(e) = send_mls_broadcast_topic(mls_mgr, &ws_cmd_tx, &sid, &cid, use_subgroup, &envelope, crypto_store) {
-                    hollow_log!("[HOLLOW-MLS] Channel file message broadcast failed: {e}");
-                }
+/// Union in the live DM-room members that belong to either side of the
+/// conversation (recipient's devices or our own siblings).
+fn insert_dm_room_live_members(
+    file_set: &mut std::collections::HashSet<String>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    dm_room_f: &str,
+    recipient_master: &str,
+    own_master_f: &str,
+) {
+    if let Some(peers) = ws_room_peers.get(dm_room_f) {
+        for p in peers {
+            let m = crate::node::resolver::resolve(p);
+            if m == recipient_master || m == own_master_f {
+                file_set.insert(p.clone());
             }
         }
+    }
+}
 
-        // Send FileHeader + file bytes via stream to connected peers.
-        // Skip full-file streaming in erasure coding mode (6+ members) —
-        // vault shards are distributed separately via VaultUploadFile.
-        let member_count = server_states.get(&sid)
-            .map(|s| s.members.len())
-            .unwrap_or(0);
-        // Stream images to online peers even in vault mode (instant display).
-        // Non-image files in 6+ servers use vault shards only.
-        let use_vault_only = member_count >= 6 && !is_image;
+/// Deliver one DM file send to a single target DEVICE: the companion caption /
+/// "[file:...]" DirectMessage, the FileHeader, and the encrypted bytes —
+/// branching on live stream vs offline image (inline 0x08) vs offline file
+/// (metadata-only card) vs no-Olm-session.
+#[allow(clippy::too_many_arguments)]
+async fn send_dm_file_to_device(
+    peer_str: &str,
+    recipient_master: &str,
+    dm_room_f: &str,
+    msg: &DmFileMsg<'_>,
+    olm: &mut OlmManager,
+    crypto_store: &CryptoStore,
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    webrtc_peers: &std::collections::HashSet<String>,
+    pending_webrtc_sends: &mut HashMap<String, (String, ws_stream_transfer::StreamKind, String, PathBuf, u64)>,
+) {
+    // Per-device companion DM envelope: a sibling self-echo carries `convo`
+    // (recipient master) so it files under the right thread; the recipient's
+    // own devices get the plain envelope (convo=None).
+    let is_sibling_target = crate::node::resolver::same_identity(peer_str, msg.local_peer_str);
+    let envelope = MessageEnvelope::DirectMessage {
+        inner: Box::new(DirectMessagePayload {
+            text: msg.signing_payload_text.to_string(),
+            ts: msg.timestamp,
+            sig: msg.sig.clone(),
+            pk: msg.pk.clone(),
+            mid: Some(msg.message_id.to_string()),
+            reply_to: None,
+            file_id: Some(msg.file_id.to_string()),
+            link_preview: None,
+            convo: if is_sibling_target { Some(recipient_master.to_string()) } else { None },
+            order_us: Some(msg.order_us),
+        }),
+    };
+    let envelope_json = serde_json::to_string(&envelope)
+        .unwrap_or_else(|_| msg.signing_payload_text.to_string());
+    // Encrypt and send the message + FileHeader + FileChunks via Olm.
+    if olm.has_session(peer_str) {
+        // EXACT-device reachability (not identity-wide): in a fan-out one
+        // device may be online while a sibling is offline. ws_room_for_peer
+        // = exact membership.
+        let reachable = ws_room_for_peer(ws_room_peers, peer_str).is_some();
 
-        let has_share_ref = share_ref.is_some();
+        // Send the message (caption / "[file:...]") envelope.
+        //
+        // CRITICAL — Olm ratchet ordering: `send_encrypted_message` ALWAYS
+        // calls olm.encrypt() (advancing + persisting the ratchet) BEFORE it
+        // checks reachability, and DISCARDS the ciphertext if the peer is
+        // offline. For an OFFLINE IMAGE that wasted encryption burns a ratchet
+        // slot the receiver never sees — a permanent gap that breaks decrypt
+        // of the FileHeader/caption that follow. So when offline-and-image we
+        // must NOT call it here; the caption is sent exactly once inside
+        // send_offline_dm_image (which also actually delivers to the buffer),
+        // AFTER the inlined FileHeader. The online path and the non-image
+        // offline path are unchanged.
+        if reachable {
+            send_encrypted_message(
+                olm, crypto_store,
+                peer_str, &envelope_json, event_tx,
+                ws_cmd_tx, ws_room_peers,
+            ).await;
+        } else if !msg.is_image {
+            // OFFLINE non-image: target the MASTER-pair DM room directly
+            // (0x04, text cap) so the relay's offline buffer holds the
+            // caption/"[file:...]" message. `send_encrypted_message` would
+            // encrypt and then DISCARD for a peer in no known room — a
+            // wasted ratchet slot and nothing buffered. Mirrors
+            // message_ops' offline text-DM path.
+            crate::node::crypto_handler::send_encrypted_text_to_peer(
+                olm, crypto_store,
+                peer_str, dm_room_f.to_string(), &envelope_json, event_tx,
+                ws_cmd_tx,
+            ).await;
+        }
 
-        // Vault-only: generate key+nonce for the FileHeader without encrypting.
-        // The vault upload path (crdt.rs) does its own AES encryption.
-        let (aes_key_hex, aes_nonce_hex, temp_path, ct_size) = if use_vault_only {
-            match crate::vault::pipeline::aes_generate_key_nonce() {
-                Ok((key, nonce)) => {
-                    let temp_path = file_transfer::files_dir().join(format!(".stream_send_{file_id}.tmp"));
-                    (hex::encode(key), hex::encode(nonce), temp_path, 0u64)
-                }
-                Err(e) => {
-                    hollow_log!("[HOLLOW-FILE] AES key generation failed: {e}");
-                    return;
-                }
-            }
+        // Only send file data if peer is reachable right now.
+        // If offline, the file_id is in the message — sync will request it later.
+        if reachable {
+            stream_dm_file_live(
+                peer_str, msg, olm, crypto_store, event_tx,
+                ws_cmd_tx, ws_room_peers, webrtc_peers, pending_webrtc_sends,
+            ).await;
+        } else if msg.is_image {
+            send_offline_dm_image(
+                peer_str, dm_room_f, &envelope_json, msg,
+                olm, crypto_store, event_tx, ws_cmd_tx,
+            ).await;
         } else {
-            match crate::vault::pipeline::aes_encrypt(&final_data) {
-                Ok(enc) => {
-                    let key_hex = hex::encode(&enc.key);
-                    let nonce_hex = hex::encode(&enc.nonce);
-                    let temp_path = file_transfer::files_dir().join(format!(".stream_send_{file_id}.tmp"));
-                    if !has_share_ref {
-                        let _ = tokio::fs::write(&temp_path, &enc.ciphertext).await;
-                    }
-                    let ct_size = if has_share_ref { 0 } else { enc.ciphertext.len() as u64 };
-                    (key_hex, nonce_hex, temp_path, ct_size)
-                }
-                Err(e) => {
-                    hollow_log!("[HOLLOW-FILE] AES encryption failed: {e}");
-                    return;
-                }
-            }
-        };
+            send_offline_dm_file_meta(
+                peer_str, dm_room_f, msg,
+                olm, crypto_store, event_tx, ws_cmd_tx,
+            ).await;
+        }
+    } else if ws_room_for_peer(ws_room_peers, peer_str).is_some() {
+        // No Olm session with this device yet (a freshly-appeared device before
+        // key exchange completes). The text-DM path queues + KeyRequests here
+        // (send_dm_to_device); a FILE can't ride the pending-envelope queue, so
+        // kick off the session (KeyRequest to a LIVE device) and let the normal
+        // heal paths deliver the content later (DM-sync backfill re-serves the
+        // message; the file re-serves on request/open). Without this the target
+        // device got NOTHING — no queue, no key exchange — until some other
+        // traffic happened to establish the session.
+        hollow_log!("[HOLLOW-FILE] No session for DM file target {peer_str} — sending KeyRequest");
+        send_message_to_peer(
+            ws_cmd_tx, ws_room_peers,
+            peer_str, HavenMessage::KeyRequest,
+        );
+    }
 
-        {
-            let header = MessageEnvelope::FileHeader {
-                inner: Box::new(FileHeaderPayload {
-                    fid: file_id.clone(),
-                    name: original_name.clone(),
-                    ext: final_ext.clone(),
-                    mime: final_mime.clone(),
-                    size: file_size,
-                    chunks: 0,
-                    img: is_image,
-                    w: width,
-                    h: height,
-                    mid: Some(message_id.clone()),
-                    sid: Some(sid.clone()),
-                    cid: Some(cid.clone()),
-                    ts: timestamp,
-                    sig: None,
-                    pk: None,
-                    aes_key: Some(aes_key_hex),
-                    aes_nonce: Some(aes_nonce_hex),
-                    target: None,
-                    vthumb: vthumb.clone(),
-                    share_ref: share_ref.clone(),
-                    inline_bytes: None,
-                }),
-            };
+    hollow_log!("[HOLLOW-FILE] Sent {} chunks for {} to DM {peer_str}", msg.total_chunks, msg.file_id);
+}
+
+/// Live DM branch: AES-encrypt to a per-device temp, Olm-send the FileHeader
+/// (carries the AES key — tiny, secure), then stream the ciphertext via
+/// WebRTC data channel or WS relay.
+#[allow(clippy::too_many_arguments)]
+async fn stream_dm_file_live(
+    peer_str: &str,
+    msg: &DmFileMsg<'_>,
+    olm: &mut OlmManager,
+    crypto_store: &CryptoStore,
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    webrtc_peers: &std::collections::HashSet<String>,
+    pending_webrtc_sends: &mut HashMap<String, (String, ws_stream_transfer::StreamKind, String, PathBuf, u64)>,
+) {
+    // AES-encrypt the file, write ciphertext to temp file.
+    let encrypted = crate::vault::pipeline::aes_encrypt(msg.final_data);
+    if let Ok(enc) = encrypted {
+        // Per-device temp file: sibling devices may stream the same
+        // file_id concurrently, so the ciphertext temp must not collide.
+        let temp_path = file_transfer::files_dir().join(format!(".stream_send_{}_{peer_str}.tmp", msg.file_id));
+        if let Ok(()) = tokio::fs::write(&temp_path, &enc.ciphertext).await {
+            let header = build_dm_file_header(
+                msg, None, None,
+                Some(hex::encode(enc.key)), Some(hex::encode(enc.nonce)),
+                None,
+            );
             let header_json = serde_json::to_string(&header).unwrap_or_default();
+            send_encrypted_message(
+                olm, crypto_store,
+                peer_str, &header_json, event_tx,
+                ws_cmd_tx, ws_room_peers,
+            ).await;
 
-            if let Some(state) = server_states.get(&sid) {
-                // Broadcast FileHeader via MLS over the CHANNEL TOPIC (0x07),
-                // mirroring the channel text path: subgroup-aware, and the
-                // relay tees topic frames into the per-channel offline ring —
-                // a 0x03 room broadcast never reached offline members' catch-up,
-                // so buffered channel images/files rendered captions with no
-                // file card. Live delivery semantics match text (subscribed
-                // members get it now; others via channel sync / catch-up).
-                let use_subgroup = state.channel_uses_subgroup(&cid);
-                let group_key = if use_subgroup {
-                    crate::crypto::subgroup_id(&sid, &cid)
-                } else {
-                    sid.clone()
-                };
-                let mls_ok = mls.as_ref().is_some_and(|m| m.has_group(&group_key));
-                if mls_ok {
-                    if let Err(e) = send_mls_broadcast_topic(mls.as_mut().unwrap(), &ws_cmd_tx, &sid, &cid, use_subgroup, &header, crypto_store) {
-                        hollow_log!("[HOLLOW-MLS] FileHeader broadcast failed: {e}");
-                    }
-                } else {
-                    // Olm fallback: send FileHeader to each ONLINE DEVICE of each member.
-                    for member_peer_str in state.members.keys() {
-                        if super::resolver::same_identity(member_peer_str, &local_peer) { continue; }
-                        for dev in super::crypto_handler::online_devices_for(&ws_room_peers, member_peer_str) {
-                            if olm.has_session(&dev) {
-                                send_encrypted_message(
-                                    olm, crypto_store,
-                                    &dev, &header_json, event_tx,
-                                    &ws_cmd_tx, &ws_room_peers,
-                                ).await;
-                            }
-                        }
-                    }
-                }
-
-                if has_share_ref {
-                    hollow_log!("[HOLLOW-FILE] Share-backed file {file_id} — skipping binary streaming");
-                } else if use_vault_only {
-                    hollow_log!("[HOLLOW-FILE] Erasure coding active ({member_count} members) — skipping full-file streaming, vault handles shard distribution");
-                } else if let Some(overlay) = gossip_overlays.get_mut(&sid) {
-                    // Gossip broadcast: send to gossip neighbors only (they relay further).
-                    let broadcast_id = gossip::generate_broadcast_id();
-                    overlay.mark_broadcast_seen(&broadcast_id);
-
-                    // MLS-broadcast BroadcastMeta so all peers know this file is coming.
-                    let meta_envelope = MessageEnvelope::BroadcastMeta {
-                        broadcast_id: broadcast_id.clone(),
-                        origin: local_peer.clone(),
-                        sid: sid.clone(),
-                        cid: cid.clone(),
-                        file_id: file_id.clone(),
-                        ttl: gossip::DEFAULT_BROADCAST_TTL,
-                    };
-                    if let Some(mls_mgr) = mls {
-                        if mls_mgr.has_group(&sid) {
-                            let _ = send_mls_broadcast(mls_mgr, &ws_cmd_tx, &sid, &meta_envelope, crypto_store);
-                        }
-                    }
-
-                    broadcast_to_gossip_neighbors(
-                        overlay, &webrtc_peers, &event_tx,
-                        &broadcast_id, gossip::DEFAULT_BROADCAST_TTL,
-                        &local_peer, &temp_path.to_string_lossy(),
-                        ct_size, "file", 0, None, &cid,
-                    ).await;
-
-                    hollow_log!("[HOLLOW-GOSSIP] File {file_id} broadcast initiated (bid={broadcast_id})");
-                } else {
-                    // Small server (<6 members, no gossip overlay): full replication
-                    // to each ONLINE DEVICE of each member.
-                    for member_peer_str in state.members.keys() {
-                        if super::resolver::same_identity(member_peer_str, &local_peer) { continue; }
-                        for dev in super::crypto_handler::online_devices_for(&ws_room_peers, member_peer_str) {
-                            stream_to_peer(
-                                &ws_cmd_tx, &ws_room_peers,
-                                &webrtc_peers, pending_webrtc_sends, &event_tx,
-                                &dev, &ws_stream_transfer::StreamKind::File,
-                                &file_id, &temp_path, ct_size,
-                            ).await;
-                        }
-                    }
-                    // Clean up the sender-side ciphertext temp once all WS-relay
-                    // streams have been fully queued (ws_stream_send is awaited, so
-                    // by here the bytes are read). If a WebRTC send is still in
-                    // flight (entry present in pending_webrtc_sends), the temp is
-                    // owned by that path and removed on WebRtcTransferComplete —
-                    // don't delete it here. Without this the encrypted temp leaked
-                    // forever, doubling on-disk usage for every server file send.
-                    if !pending_webrtc_sends.contains_key(&file_id) {
-                        let _ = tokio::fs::remove_file(&temp_path).await;
-                    }
-                }
+            // Stream encrypted file bytes via WebRTC or WS relay.
+            stream_to_peer(
+                ws_cmd_tx, ws_room_peers,
+                webrtc_peers, pending_webrtc_sends, event_tx,
+                peer_str, &ws_stream_transfer::StreamKind::File,
+                msg.file_id, &temp_path, enc.ciphertext.len() as u64,
+            ).await;
+            hollow_log!("[HOLLOW-FILE] Streaming {} ({} bytes) to DM {peer_str}", msg.file_id, enc.ciphertext.len());
+            // Clean up the sender-side ciphertext temp once the WS-relay
+            // stream is queued (awaited). A WebRTC send still in flight owns
+            // the temp and removes it on WebRtcTransferComplete, so only
+            // delete when no such send is pending — mirrors the channel path.
+            if !pending_webrtc_sends.contains_key(msg.file_id) {
+                let _ = tokio::fs::remove_file(&temp_path).await;
             }
         }
+    }
+}
 
-        hollow_log!("[HOLLOW-FILE] Streamed {file_id} to channel {cid}");
+/// Peer is OFFLINE and this is an image: inline the AES-encrypted bytes INTO
+/// the FileHeader and send it via SendDirectImage (0x08) so the relay buffers
+/// it under the per-peer image cap. The FCM fetch node then writes the file
+/// to disk and renders a real image preview in the push notification — no
+/// live stream needed. Larger non-image files still fall back to
+/// request-on-open via DM-sync.
+#[allow(clippy::too_many_arguments)]
+async fn send_offline_dm_image(
+    peer_str: &str,
+    dm_room_f: &str,
+    envelope_json: &str,
+    msg: &DmFileMsg<'_>,
+    olm: &mut OlmManager,
+    crypto_store: &CryptoStore,
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+) {
+    if let Ok(enc) = crate::vault::pipeline::aes_encrypt(msg.final_data) {
+        // Carry the signature on the offline-image FileHeader.
+        // For a CAPTIONLESS image this is the ONLY transmitted
+        // signature (the "[file:...]" companion DM is dropped
+        // to offline peers), and it's signed over the same
+        // "[file:<id>]" text the fetch node stores — so the
+        // row verifies instead of showing "Unsigned". For a
+        // CAPTIONED image the caption DM carries its own sig
+        // over the caption text and overwrites this via
+        // promote_file_sentinel_to_caption; harmless here.
+        let header = build_dm_file_header(
+            msg, msg.sig.clone(), msg.pk.clone(),
+            Some(hex::encode(enc.key)), Some(hex::encode(enc.nonce)),
+            Some(
+                base64::engine::general_purpose::STANDARD
+                    .encode(&enc.ciphertext),
+            ),
+        );
+        let header_json = serde_json::to_string(&header).unwrap_or_default();
+        // Target the MASTER-pair DM room directly (computed once by the
+        // fan-out as `dm_room_f`) — the offline peer is not a member of any
+        // known room, so a lookup would drop the message, and
+        // `dm_room_code` is pure now so it must NOT be recomputed from
+        // the per-device `peer_str` (that keys the room on the device,
+        // not the identity → the offline buffer/replay room mismatches).
+        // The relay buffers it under the image cap (mirrors offline text-DM).
+        crate::node::crypto_handler::send_encrypted_image_to_peer(
+            olm, crypto_store,
+            peer_str, dm_room_f.to_string(), &header_json, event_tx,
+            ws_cmd_tx,
+        ).await;
+        hollow_log!("[HOLLOW-FILE] Inlined offline image {} ({} enc bytes) to DM {peer_str}", msg.file_id, enc.ciphertext.len());
+
+        // If this image has a CAPTION, send it now — exactly once,
+        // AFTER the FileHeader — straight to the DM room (0x04, text
+        // cap). We deliberately skipped the caption's normal send
+        // in send_dm_file_to_device (offline_image guard) to avoid a
+        // wasted Olm encryption that would corrupt the ratchet. The caption
+        // shares the FileHeader's message_id, so the fetch node merges
+        // them (real caption wins over the "[file:...]" sentinel) and
+        // the offline peer sees the captioned image. Encryption order
+        // on the wire is FileHeader (#N) then caption (#N+1) — no gap.
+        if !msg.message_text.is_empty() {
+            crate::node::crypto_handler::send_encrypted_text_to_peer(
+                olm, crypto_store,
+                peer_str, dm_room_f.to_string(), envelope_json, event_tx,
+                ws_cmd_tx,
+            ).await;
+            hollow_log!("[HOLLOW-FILE] Buffered offline image caption for DM {peer_str}");
+        }
+    }
+}
+
+/// OFFLINE non-image file: send a METADATA-ONLY FileHeader to the DM room
+/// (0x04, text cap) so the relay's offline buffer carries the file card —
+/// never the bytes (RAM/bandwidth bomb). No aes_key/nonce → the receiver
+/// inserts metadata without registering a pending stream (same semantics as
+/// a DM-sync `file_meta` card) and fetches the bytes via the normal
+/// request-on-open path once both peers are online.
+async fn send_offline_dm_file_meta(
+    peer_str: &str,
+    dm_room_f: &str,
+    msg: &DmFileMsg<'_>,
+    olm: &mut OlmManager,
+    crypto_store: &CryptoStore,
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+) {
+    // Carry the signature so a captionless file row verifies instead of
+    // showing "Unsigned" (mirrors the offline-image header).
+    let header = build_dm_file_header(
+        msg, msg.sig.clone(), msg.pk.clone(),
+        None, None, None,
+    );
+    let header_json = serde_json::to_string(&header).unwrap_or_default();
+    crate::node::crypto_handler::send_encrypted_text_to_peer(
+        olm, crypto_store,
+        peer_str, dm_room_f.to_string(), &header_json, event_tx,
+        ws_cmd_tx,
+    ).await;
+    hollow_log!("[HOLLOW-FILE] Buffered metadata-only FileHeader {} for offline DM {peer_str}", msg.file_id);
+}
+
+/// Sync DB write for the sender's own channel text row (caption / "[file:...]").
+#[allow(clippy::too_many_arguments)]
+fn persist_sent_channel_row(
+    db_path: &str,
+    db_passphrase: &str,
+    sid: &str,
+    cid: &str,
+    local_peer: &str,
+    text: &str,
+    timestamp: i64,
+    sig: Option<&str>,
+    pk: Option<&str>,
+    message_id: &str,
+    file_id: &str,
+    order_us: i64,
+) {
+    if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+        let _ = store.insert_channel_message(
+            sid, cid, local_peer, text, true, timestamp,
+            sig, pk, Some(message_id),
+            None, Some(file_id), Some(order_us),
+        );
+    }
+}
+
+/// Channel file send: persist the caption row, MLS-broadcast the text message
+/// and FileHeader over the channel topic, then distribute the encrypted bytes
+/// (share-backed skip / vault shards / gossip tree / small-server full
+/// replication).
+#[allow(clippy::too_many_arguments)]
+async fn send_channel_file(
+    sid: &str,
+    cid: &str,
+    signing_payload_text: &str,
+    timestamp: i64,
+    sig: &Option<String>,
+    pk: &Option<String>,
+    message_id: &str,
+    file_id: &str,
+    order_us: i64,
+    final_data: &[u8],
+    original_name: &str,
+    final_ext: &str,
+    final_mime: &str,
+    file_size: u64,
+    is_image: bool,
+    width: Option<u32>,
+    height: Option<u32>,
+    vthumb: &Option<VideoThumbRef>,
+    share_ref: &Option<super::types::ShareRef>,
+    local_peer: &str,
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    server_states: &HashMap<String, ServerState>,
+    olm: &mut OlmManager,
+    crypto_store: &CryptoStore,
+    mls: &mut Option<MlsManager>,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    webrtc_peers: &std::collections::HashSet<String>,
+    pending_webrtc_sends: &mut HashMap<String, (String, ws_stream_transfer::StreamKind, String, PathBuf, u64)>,
+    gossip_overlays: &mut HashMap<String, gossip::GossipOverlay>,
+    db_path: &str,
+    db_passphrase: &str,
+) {
+    let envelope = MessageEnvelope::ChannelMessage {
+        inner: Box::new(ChannelMessagePayload {
+            sid: sid.to_string(),
+            cid: cid.to_string(),
+            text: signing_payload_text.to_string(),
+            ts: timestamp,
+            sig: sig.clone(),
+            pk: pk.clone(),
+            mid: Some(message_id.to_string()),
+            reply_to: None,
+            file_id: Some(file_id.to_string()),
+            link_preview: None,
+            order_us: Some(order_us),
+        }),
+    };
+
+    // Store the text message.
+    persist_sent_channel_row(
+        db_path, db_passphrase, sid, cid, local_peer, signing_payload_text,
+        timestamp, sig.as_deref(), pk.as_deref(), message_id, file_id, order_us,
+    );
+
+    // Send the TEXT MESSAGE ("[file:...]" / caption) via the MLS TOPIC
+    // broadcast — the SAME path normal channel text takes. It used to fan
+    // targeted per-member direct sends, which (a) silently skipped every
+    // OFFLINE member (no queue, no relay copy — the file card's message
+    // row only healed via channel sync) and (b) never entered the relay's
+    // per-channel offline ring, so catch-up replayed the FileHeader with
+    // no message row to hang it on and the chat showed NOTHING.
+    // Restricted channels (Option B) encrypt under the per-channel
+    // subgroup — the room sees ciphertext either way, identical to
+    // message_ops' text sends.
+    broadcast_channel_caption_mls(mls, server_states, ws_cmd_tx, crypto_store, sid, cid, &envelope);
+
+    // Send FileHeader + file bytes via stream to connected peers.
+    // Skip full-file streaming in erasure coding mode (6+ members) —
+    // vault shards are distributed separately via VaultUploadFile.
+    let member_count = server_states.get(sid)
+        .map(|s| s.members.len())
+        .unwrap_or(0);
+    // Stream images to online peers even in vault mode (instant display).
+    // Non-image files in 6+ servers use vault shards only.
+    let use_vault_only = member_count >= 6 && !is_image;
+
+    let has_share_ref = share_ref.is_some();
+
+    let Some((aes_key_hex, aes_nonce_hex, temp_path, ct_size)) =
+        prepare_channel_file_ciphertext(use_vault_only, has_share_ref, final_data, file_id).await
+    else {
+        return;
+    };
+
+    let header = MessageEnvelope::FileHeader {
+        inner: Box::new(FileHeaderPayload {
+            fid: file_id.to_string(),
+            name: original_name.to_string(),
+            ext: final_ext.to_string(),
+            mime: final_mime.to_string(),
+            size: file_size,
+            chunks: 0,
+            img: is_image,
+            w: width,
+            h: height,
+            mid: Some(message_id.to_string()),
+            sid: Some(sid.to_string()),
+            cid: Some(cid.to_string()),
+            ts: timestamp,
+            sig: None,
+            pk: None,
+            aes_key: Some(aes_key_hex),
+            aes_nonce: Some(aes_nonce_hex),
+            target: None,
+            vthumb: vthumb.clone(),
+            share_ref: share_ref.clone(),
+            inline_bytes: None,
+        }),
+    };
+    let header_json = serde_json::to_string(&header).unwrap_or_default();
+
+    if let Some(state) = server_states.get(sid) {
+        broadcast_channel_file_header(
+            state, mls, olm, crypto_store, ws_cmd_tx, ws_room_peers, event_tx,
+            sid, cid, &header, &header_json, local_peer,
+        ).await;
+
+        if has_share_ref {
+            hollow_log!("[HOLLOW-FILE] Share-backed file {file_id} — skipping binary streaming");
+        } else if use_vault_only {
+            hollow_log!("[HOLLOW-FILE] Erasure coding active ({member_count} members) — skipping full-file streaming, vault handles shard distribution");
+        } else if let Some(overlay) = gossip_overlays.get_mut(sid) {
+            gossip_broadcast_channel_file(
+                overlay, mls, crypto_store, ws_cmd_tx, webrtc_peers, event_tx,
+                sid, cid, file_id, local_peer, &temp_path, ct_size,
+            ).await;
+        } else {
+            replicate_channel_file_full(
+                state, ws_cmd_tx, ws_room_peers, webrtc_peers,
+                pending_webrtc_sends, event_tx, local_peer, file_id,
+                &temp_path, ct_size,
+            ).await;
+        }
+    }
+
+    hollow_log!("[HOLLOW-FILE] Streamed {file_id} to channel {cid}");
+}
+
+/// MLS topic broadcast for the channel caption/text message; subgroup-aware,
+/// mirroring message_ops' channel text sends.
+fn broadcast_channel_caption_mls(
+    mls: &mut Option<MlsManager>,
+    server_states: &HashMap<String, ServerState>,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    crypto_store: &CryptoStore,
+    sid: &str,
+    cid: &str,
+    envelope: &MessageEnvelope,
+) {
+    if let Some(mls_mgr) = mls {
+        let use_subgroup = server_states.get(sid)
+            .is_some_and(|s| s.channel_uses_subgroup(cid));
+        let group_key = if use_subgroup {
+            crate::crypto::subgroup_id(sid, cid)
+        } else {
+            sid.to_string()
+        };
+        if mls_mgr.has_group(&group_key) {
+            if let Err(e) = send_mls_broadcast_topic(mls_mgr, ws_cmd_tx, sid, cid, use_subgroup, envelope, crypto_store) {
+                hollow_log!("[HOLLOW-MLS] Channel file message broadcast failed: {e}");
+            }
+        }
+    }
+}
+
+/// AES material + sender-side ciphertext temp for a channel file send.
+/// Vault-only mode generates key+nonce WITHOUT encrypting (the vault upload
+/// path in crdt.rs does its own AES); share-backed sends skip writing the
+/// temp. Returns None after logging when AES setup fails (caller aborts).
+async fn prepare_channel_file_ciphertext(
+    use_vault_only: bool,
+    has_share_ref: bool,
+    final_data: &[u8],
+    file_id: &str,
+) -> Option<(String, String, PathBuf, u64)> {
+    if use_vault_only {
+        match crate::vault::pipeline::aes_generate_key_nonce() {
+            Ok((key, nonce)) => {
+                let temp_path = file_transfer::files_dir().join(format!(".stream_send_{file_id}.tmp"));
+                Some((hex::encode(key), hex::encode(nonce), temp_path, 0u64))
+            }
+            Err(e) => {
+                hollow_log!("[HOLLOW-FILE] AES key generation failed: {e}");
+                None
+            }
+        }
+    } else {
+        match crate::vault::pipeline::aes_encrypt(final_data) {
+            Ok(enc) => {
+                let key_hex = hex::encode(&enc.key);
+                let nonce_hex = hex::encode(&enc.nonce);
+                let temp_path = file_transfer::files_dir().join(format!(".stream_send_{file_id}.tmp"));
+                if !has_share_ref {
+                    let _ = tokio::fs::write(&temp_path, &enc.ciphertext).await;
+                }
+                let ct_size = if has_share_ref { 0 } else { enc.ciphertext.len() as u64 };
+                Some((key_hex, nonce_hex, temp_path, ct_size))
+            }
+            Err(e) => {
+                hollow_log!("[HOLLOW-FILE] AES encryption failed: {e}");
+                None
+            }
+        }
+    }
+}
+
+/// Broadcast the channel FileHeader via MLS over the CHANNEL TOPIC (0x07),
+/// mirroring the channel text path: subgroup-aware, and the relay tees topic
+/// frames into the per-channel offline ring — a 0x03 room broadcast never
+/// reached offline members' catch-up, so buffered channel images/files
+/// rendered captions with no file card. Live delivery semantics match text
+/// (subscribed members get it now; others via channel sync / catch-up).
+#[allow(clippy::too_many_arguments)]
+async fn broadcast_channel_file_header(
+    state: &ServerState,
+    mls: &mut Option<MlsManager>,
+    olm: &mut OlmManager,
+    crypto_store: &CryptoStore,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    sid: &str,
+    cid: &str,
+    header: &MessageEnvelope,
+    header_json: &str,
+    local_peer: &str,
+) {
+    let use_subgroup = state.channel_uses_subgroup(cid);
+    let group_key = if use_subgroup {
+        crate::crypto::subgroup_id(sid, cid)
+    } else {
+        sid.to_string()
+    };
+    let mls_ok = mls.as_ref().is_some_and(|m| m.has_group(&group_key));
+    if mls_ok {
+        if let Err(e) = send_mls_broadcast_topic(mls.as_mut().unwrap(), ws_cmd_tx, sid, cid, use_subgroup, header, crypto_store) {
+            hollow_log!("[HOLLOW-MLS] FileHeader broadcast failed: {e}");
+        }
+    } else {
+        olm_fallback_channel_file_header(
+            state, olm, crypto_store, ws_cmd_tx, ws_room_peers, event_tx,
+            header_json, local_peer,
+        ).await;
+    }
+}
+
+/// Olm fallback: send the FileHeader to each ONLINE DEVICE of each member.
+#[allow(clippy::too_many_arguments)]
+async fn olm_fallback_channel_file_header(
+    state: &ServerState,
+    olm: &mut OlmManager,
+    crypto_store: &CryptoStore,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    header_json: &str,
+    local_peer: &str,
+) {
+    for member_peer_str in state.members.keys() {
+        if super::resolver::same_identity(member_peer_str, local_peer) { continue; }
+        for dev in super::crypto_handler::online_devices_for(ws_room_peers, member_peer_str) {
+            if olm.has_session(&dev) {
+                send_encrypted_message(
+                    olm, crypto_store,
+                    &dev, header_json, event_tx,
+                    ws_cmd_tx, ws_room_peers,
+                ).await;
+            }
+        }
+    }
+}
+
+/// Gossip broadcast: MLS-announce BroadcastMeta so all peers know this file
+/// is coming, then send to gossip neighbors only (they relay further).
+#[allow(clippy::too_many_arguments)]
+async fn gossip_broadcast_channel_file(
+    overlay: &mut gossip::GossipOverlay,
+    mls: &mut Option<MlsManager>,
+    crypto_store: &CryptoStore,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    webrtc_peers: &std::collections::HashSet<String>,
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    sid: &str,
+    cid: &str,
+    file_id: &str,
+    local_peer: &str,
+    temp_path: &std::path::Path,
+    ct_size: u64,
+) {
+    let broadcast_id = gossip::generate_broadcast_id();
+    overlay.mark_broadcast_seen(&broadcast_id);
+
+    let meta_envelope = MessageEnvelope::BroadcastMeta {
+        broadcast_id: broadcast_id.clone(),
+        origin: local_peer.to_string(),
+        sid: sid.to_string(),
+        cid: cid.to_string(),
+        file_id: file_id.to_string(),
+        ttl: gossip::DEFAULT_BROADCAST_TTL,
+    };
+    if let Some(mls_mgr) = mls {
+        if mls_mgr.has_group(sid) {
+            let _ = send_mls_broadcast(mls_mgr, ws_cmd_tx, sid, &meta_envelope, crypto_store);
+        }
+    }
+
+    broadcast_to_gossip_neighbors(
+        overlay, webrtc_peers, event_tx,
+        &broadcast_id, gossip::DEFAULT_BROADCAST_TTL,
+        local_peer, &temp_path.to_string_lossy(),
+        ct_size, "file", 0, None, cid,
+    ).await;
+
+    hollow_log!("[HOLLOW-GOSSIP] File {file_id} broadcast initiated (bid={broadcast_id})");
+}
+
+/// Small server (<6 members, no gossip overlay): full replication to each
+/// ONLINE DEVICE of each member, then clean up the sender-side ciphertext
+/// temp once all WS-relay streams have been fully queued (ws_stream_send is
+/// awaited, so by here the bytes are read). If a WebRTC send is still in
+/// flight (entry present in pending_webrtc_sends), the temp is owned by that
+/// path and removed on WebRtcTransferComplete — don't delete it here. Without
+/// this the encrypted temp leaked forever, doubling on-disk usage for every
+/// server file send.
+#[allow(clippy::too_many_arguments)]
+async fn replicate_channel_file_full(
+    state: &ServerState,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    webrtc_peers: &std::collections::HashSet<String>,
+    pending_webrtc_sends: &mut HashMap<String, (String, ws_stream_transfer::StreamKind, String, PathBuf, u64)>,
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    local_peer: &str,
+    file_id: &str,
+    temp_path: &std::path::Path,
+    ct_size: u64,
+) {
+    for member_peer_str in state.members.keys() {
+        if super::resolver::same_identity(member_peer_str, local_peer) { continue; }
+        for dev in super::crypto_handler::online_devices_for(ws_room_peers, member_peer_str) {
+            stream_to_peer(
+                ws_cmd_tx, ws_room_peers,
+                webrtc_peers, pending_webrtc_sends, event_tx,
+                &dev, &ws_stream_transfer::StreamKind::File,
+                file_id, temp_path, ct_size,
+            ).await;
+        }
+    }
+    if !pending_webrtc_sends.contains_key(file_id) {
+        let _ = tokio::fs::remove_file(temp_path).await;
     }
 }
 
@@ -1249,231 +1687,326 @@ pub(crate) async fn handle_completed_stream(
     match request.kind {
         StreamKind::ShareChunk { .. } => unreachable!(),
         StreamKind::LinkSnapshot => {
-            let link_id = request.id.clone();
-            // Events use the bare session id (no "link_" transport prefix) so Dart
-            // sees a consistent id across LinkProgress/LinkComplete/LinkFailed.
-            let bare_id = link_id.strip_prefix("link_").unwrap_or(&link_id).to_string();
-            hollow_log!("[HOLLOW-LINK] Inbound link snapshot: {link_id} ({} bytes)", request.size);
-
-            let Some(state) = pending_link_snapshots.remove(&link_id) else {
-                // No decryption material registered for this link session — drop it.
-                hollow_log!("[HOLLOW-LINK] No pending link state for {link_id} — dropping snapshot");
-                let _ = std::fs::remove_file(&request.temp_path);
-                let _ = event_tx.send(NetworkEvent::LinkFailed {
-                    link_id: bare_id,
-                    error: "no pending link session".to_string(),
-                }).await;
-                return;
-            };
-
-            // The inbound bytes are a full `.hollow` backup blob encrypted with the
-            // link CODE. We DON'T import in-place (that path was fragile). Instead we
-            // STASH the blob + code and signal a restart; on next launch the bootstrap
-            // imports it via the exact same `import_backup` pipeline as a manual
-            // restore (the known-good, pre-node-start window).
-            let outcome: Result<(), String> = (|| {
-                let blob = std::fs::read(&request.temp_path)
-                    .map_err(|e| format!("read link blob: {e}"))?;
-                crate::api::storage::stash_pending_link(&blob, &state.code)
-                    .map_err(|e| format!("stash failed: {e}"))
-            })();
-
-            let _ = std::fs::remove_file(&request.temp_path);
-
-            match outcome {
-                Ok(()) => {
-                    hollow_log!("[HOLLOW-LINK] Snapshot {link_id} stashed ({} bytes) — restart to import", request.size);
-                    // Tell the SENDER we truly have everything, so its spinner flips to
-                    // "Data sent" only now (not when it merely finished queuing bytes).
-                    super::crypto_handler::send_message_to_peer(
-                        ws_cmd_tx, ws_room_peers, sender_peer,
-                        super::types::HavenMessage::LinkSnapshotAck { link_id: link_id.clone() },
-                    );
-                    hollow_log!("[HOLLOW-LINK] Sent LinkSnapshotAck for {link_id} to {sender_peer}");
-                    let _ = event_tx.send(NetworkEvent::LinkComplete {
-                        link_id: bare_id,
-                        msg_count: 0,
-                        friend_count: 0,
-                        server_count: 0,
-                    }).await;
-                }
-                Err(e) => {
-                    hollow_log!("[HOLLOW-LINK] Snapshot {link_id} stash failed: {e}");
-                    let _ = event_tx.send(NetworkEvent::LinkFailed { link_id: bare_id, error: e }).await;
-                }
-            }
+            handle_link_snapshot_stream(
+                &request, sender_peer, pending_link_snapshots,
+                event_tx, ws_cmd_tx, ws_room_peers,
+            ).await;
         }
         StreamKind::File => {
-            let file_id = request.id.clone();
-            hollow_log!("[HOLLOW-STREAM] Inbound file stream: {file_id} ({} bytes)", request.size);
-
-            if let Some(pfs) = pending_file_streams.remove(&file_id) {
-                // Outcome of the decrypt attempt: Some(disk_path) on success, None on
-                // any failure (read error, bad key length, or GCM auth failure). A GCM
-                // failure here is usually a transient assembly/truncation race under
-                // concurrent transfers — the bytes on the source are fine — so we
-                // auto re-request rather than give up (see FILE_DECRYPT_MAX_RETRIES).
-                let mut decrypted_path: Option<String> = None;
-                let mut fail_reason = String::from("unreadable stream");
-                if let Ok(ciphertext) = tokio::fs::read(&request.temp_path).await {
-                    let key_bytes = hex::decode(&pfs.aes_key).unwrap_or_default();
-                    let nonce_bytes = hex::decode(&pfs.aes_nonce).unwrap_or_default();
-                    if key_bytes.len() == 32 && nonce_bytes.len() == 12 {
-                        let key: [u8; 32] = key_bytes.try_into().unwrap();
-                        let nonce: [u8; 12] = nonce_bytes.try_into().unwrap();
-                        match crate::vault::pipeline::aes_decrypt(&ciphertext, &key, &nonce) {
-                            Ok(plaintext) => {
-                                let final_path = file_transfer::final_file_path(&file_id, &pfs.ext);
-                                if let Ok(()) = tokio::fs::write(&final_path, &plaintext).await {
-                                    let disk_path = final_path.to_string_lossy().to_string();
-                                    if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
-                                        let _ = store.mark_file_complete(&file_id, &disk_path);
-                                    }
-                                    hollow_log!("[HOLLOW-STREAM] File {file_id} complete: {disk_path}");
-                                    decrypted_path = Some(disk_path);
-                                } else {
-                                    fail_reason = "failed to write decrypted file".to_string();
-                                }
-                            }
-                            Err(e) => { fail_reason = format!("decrypt failed: {e}"); }
-                        }
-                    } else {
-                        fail_reason = "invalid AES key/nonce length".to_string();
-                    }
-                }
-                match decrypted_path {
-                    Some(disk_path) => {
-                        // Success — consume the assembled stream.
-                        let _ = std::fs::remove_file(&request.temp_path);
-                        let _ = event_tx.send(NetworkEvent::FileCompleted { file_id, disk_path }).await;
-                    }
-                    None => {
-                        // The ciphertext is intact (right size) but didn't decrypt
-                        // against THIS pending stream's key. ROOT CAUSE: the bytes
-                        // (fast WebRTC P2P) routinely BEAT the FileHeader (slower
-                        // Olm/relay) — the logs show `FileHeader received` the line
-                        // AFTER `decrypt failed`. So these bytes belong to a header
-                        // that hasn't landed yet; the `pfs` we just popped was a STALE
-                        // pending stream from a prior request (wrong key). Previously
-                        // we deleted the bytes + immediately re-requested, which spawned
-                        // ANOTHER crossed header/stream pair → an endless decrypt-fail
-                        // loop that only a restart (serializing one clean pair) fixed.
-                        //
-                        // FIX: PRESERVE the bytes as an early-arrival (keyed by file_id)
-                        // and DO NOT re-request. The header that was already in flight
-                        // arrives a moment later and its early-arrival path reprocesses
-                        // these exact bytes against the CORRECT key → success, no loop.
-                        // (`request.temp_path` is intentionally NOT removed here.)
-                        hollow_log!(
-                            "[HOLLOW-STREAM] File {file_id} {fail_reason} — bytes arrived before their header; holding as early-arrival for the matching key"
-                        );
-                        early_file_streams.insert(
-                            file_id.clone(),
-                            (request.temp_path.clone(), request.size, sender_peer.to_string()),
-                        );
-                        // Safety net: if NO matching header ever arrives (e.g. the Olm
-                        // header was genuinely lost, not just late), one bounded
-                        // re-request recovers it. Gated on retry_count so it can't loop.
-                        if pfs.retry_count < FILE_DECRYPT_MAX_RETRIES
-                            && peer_is_reachable(ws_room_peers, &pfs.sender)
-                        {
-                            let next = pfs.retry_count + 1;
-                            let sender = pfs.sender.clone();
-                            let mut retry_pfs = pfs;
-                            retry_pfs.retry_count = next;
-                            // Keep the pending stream so a late header preserves the count.
-                            pending_file_streams.insert(file_id.clone(), retry_pfs);
-                            send_message_to_peer(
-                                ws_cmd_tx, ws_room_peers,
-                                &sender, HavenMessage::FileRequest {
-                                    file_id: file_id.clone(),
-                                    chunks: vec![],
-                                    offset: 0,
-                                },
-                            );
-                            hollow_log!("[HOLLOW-STREAM] File {file_id} — safety re-request {next}/{FILE_DECRYPT_MAX_RETRIES} from {sender}");
-                        }
-                    }
-                }
-            } else {
-                // WebRTC race: bytes arrived before FileHeader. Save for later.
-                hollow_log!("[HOLLOW-STREAM] No pending FileHeader for stream {file_id} — saving as early arrival");
-                early_file_streams.insert(file_id, (request.temp_path.clone(), request.size, sender_peer.to_string()));
-                // Don't delete the temp file — FileHeader handler will pick it up.
-            }
+            handle_file_stream_complete(
+                &request, sender_peer, pending_file_streams, early_file_streams,
+                event_tx, ws_cmd_tx, ws_room_peers, db_path, db_passphrase,
+            ).await;
         }
         StreamKind::Shard { shard_index } => {
-            let content_id = request.id.clone();
-            let key = format!("{content_id}:{shard_index}");
-            hollow_log!("[HOLLOW-STREAM] Inbound shard stream: cid={content_id} si={shard_index} ({} bytes)", request.size);
+            handle_shard_stream_complete(
+                &request, shard_index, sender_peer, pending_shard_streams,
+                pending_vault_downloads, event_tx, db_path, db_passphrase,
+            ).await;
+        }
+    }
+}
 
-            if let Some(pss) = pending_shard_streams.remove(&key) {
-                if let Ok(shard_bytes) = tokio::fs::read(&request.temp_path).await {
-                    let data_dir = crate::identity::data_dir().unwrap_or_default();
-                    let vault_dir = data_dir.join("vault");
-                    if let Ok(content_store) = crate::vault::content_store::ContentStore::open(db_path, db_passphrase, &vault_dir) {
-                        let tier = crate::vault::content_store::StorageTier::from_str(&pss.tier);
-                        let _ = content_store.store_shard(
-                            &pss.server_id, &pss.content_id, pss.shard_index,
-                            pss.k, pss.m, pss.total_size, tier, &shard_bytes,
-                        );
-                        hollow_log!("[HOLLOW-STREAM] Shard stored: cid={content_id} si={shard_index}");
-                        let _ = event_tx.send(NetworkEvent::ShardStored {
-                            server_id: pss.server_id.clone(),
-                            content_id: content_id.clone(),
-                            shard_index,
-                            from_peer: sender_peer.to_string(),
-                        }).await;
+/// LinkSnapshot arm of handle_completed_stream: stash the encrypted `.hollow`
+/// blob + link code for a next-launch import via the proven `import_backup`
+/// pipeline (NOT an in-place import), then ack the sender.
+async fn handle_link_snapshot_stream(
+    request: &ws_stream_transfer::StreamRequest,
+    sender_peer: &str,
+    pending_link_snapshots: &mut HashMap<String, LinkSnapshotState>,
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+) {
+    let link_id = request.id.clone();
+    // Events use the bare session id (no "link_" transport prefix) so Dart
+    // sees a consistent id across LinkProgress/LinkComplete/LinkFailed.
+    let bare_id = link_id.strip_prefix("link_").unwrap_or(&link_id).to_string();
+    hollow_log!("[HOLLOW-LINK] Inbound link snapshot: {link_id} ({} bytes)", request.size);
 
-                        if let Some((dl_server_id, dl_k, _)) = pending_vault_downloads.remove(&content_id) {
-                            hollow_log!("[HOLLOW-VAULT] Shard arrived for pending download — attempting reconstruction: {content_id}");
-                            if let Ok(manifest) = content_store.load_manifest(&content_id) {
-                                if let Some(manifest) = manifest {
-                                    let n = dl_k + manifest.m as usize;
-                                    let local_shards = content_store.list_content_shards(&dl_server_id, &content_id).unwrap_or_default();
-                                    let mut packed: Vec<Option<Vec<u8>>> = vec![None; n];
-                                    for record in &local_shards {
-                                        let idx = record.shard_index as usize;
-                                        if idx < n {
-                                            if let Ok(data) = content_store.read_shard_unchecked(&dl_server_id, &record.shard_key) {
-                                                packed[idx] = Some(data);
-                                            }
-                                        }
-                                    }
-                                    let avail = packed.iter().filter(|s| s.is_some()).count();
-                                    if avail >= dl_k {
-                                        let ext = crate::vault::pipeline::ext_from_filename(&manifest.file_name);
-                                        match crate::vault::pipeline::reconstruct_file(&manifest, &packed) {
-                                            Ok(plaintext) => {
-                                                if let Ok(path) = crate::vault::pipeline::write_to_cache(&content_id, &ext, &plaintext) {
-                                                    let disk_path = path.to_string_lossy().to_string();
-                                                    hollow_log!("[HOLLOW-VAULT] Download reconstructed: {disk_path}");
-                                                    let _ = event_tx.send(NetworkEvent::VaultDownloadComplete {
-                                                        server_id: dl_server_id, content_id: content_id.clone(), disk_path,
-                                                    }).await;
-                                                }
-                                            }
-                                            Err(e) => {
-                                                hollow_log!("[HOLLOW-VAULT] Reconstruction failed: {e}");
-                                                let _ = event_tx.send(NetworkEvent::VaultDownloadFailed {
-                                                    server_id: dl_server_id, content_id: content_id.clone(), error: e,
-                                                }).await;
-                                            }
-                                        }
-                                    } else {
-                                        pending_vault_downloads.insert(content_id.clone(), (dl_server_id, dl_k, 0));
-                                        hollow_log!("[HOLLOW-VAULT] Still need more shards: have {avail}, need {dl_k}");
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                let _ = std::fs::remove_file(&request.temp_path);
-            } else {
-                hollow_log!("[HOLLOW-STREAM] No pending ShardStore for stream {key} — ignoring");
-                let _ = std::fs::remove_file(&request.temp_path);
+    let Some(state) = pending_link_snapshots.remove(&link_id) else {
+        // No decryption material registered for this link session — drop it.
+        hollow_log!("[HOLLOW-LINK] No pending link state for {link_id} — dropping snapshot");
+        let _ = std::fs::remove_file(&request.temp_path);
+        let _ = event_tx.send(NetworkEvent::LinkFailed {
+            link_id: bare_id,
+            error: "no pending link session".to_string(),
+        }).await;
+        return;
+    };
+
+    // The inbound bytes are a full `.hollow` backup blob encrypted with the
+    // link CODE. We DON'T import in-place (that path was fragile). Instead we
+    // STASH the blob + code and signal a restart; on next launch the bootstrap
+    // imports it via the exact same `import_backup` pipeline as a manual
+    // restore (the known-good, pre-node-start window).
+    let outcome: Result<(), String> = (|| {
+        let blob = std::fs::read(&request.temp_path)
+            .map_err(|e| format!("read link blob: {e}"))?;
+        crate::api::storage::stash_pending_link(&blob, &state.code)
+            .map_err(|e| format!("stash failed: {e}"))
+    })();
+
+    let _ = std::fs::remove_file(&request.temp_path);
+
+    match outcome {
+        Ok(()) => {
+            hollow_log!("[HOLLOW-LINK] Snapshot {link_id} stashed ({} bytes) — restart to import", request.size);
+            // Tell the SENDER we truly have everything, so its spinner flips to
+            // "Data sent" only now (not when it merely finished queuing bytes).
+            super::crypto_handler::send_message_to_peer(
+                ws_cmd_tx, ws_room_peers, sender_peer,
+                super::types::HavenMessage::LinkSnapshotAck { link_id: link_id.clone() },
+            );
+            hollow_log!("[HOLLOW-LINK] Sent LinkSnapshotAck for {link_id} to {sender_peer}");
+            let _ = event_tx.send(NetworkEvent::LinkComplete {
+                link_id: bare_id,
+                msg_count: 0,
+                friend_count: 0,
+                server_count: 0,
+            }).await;
+        }
+        Err(e) => {
+            hollow_log!("[HOLLOW-LINK] Snapshot {link_id} stash failed: {e}");
+            let _ = event_tx.send(NetworkEvent::LinkFailed { link_id: bare_id, error: e }).await;
+        }
+    }
+}
+
+/// StreamKind::File arm of handle_completed_stream.
+#[allow(clippy::too_many_arguments)]
+async fn handle_file_stream_complete(
+    request: &ws_stream_transfer::StreamRequest,
+    sender_peer: &str,
+    pending_file_streams: &mut HashMap<String, PendingFileStream>,
+    early_file_streams: &mut HashMap<String, (PathBuf, u64, String)>,
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    db_path: &str,
+    db_passphrase: &str,
+) {
+    let file_id = request.id.clone();
+    hollow_log!("[HOLLOW-STREAM] Inbound file stream: {file_id} ({} bytes)", request.size);
+
+    let Some(pfs) = pending_file_streams.remove(&file_id) else {
+        // WebRTC race: bytes arrived before FileHeader. Save for later.
+        hollow_log!("[HOLLOW-STREAM] No pending FileHeader for stream {file_id} — saving as early arrival");
+        early_file_streams.insert(file_id, (request.temp_path.clone(), request.size, sender_peer.to_string()));
+        // Don't delete the temp file — FileHeader handler will pick it up.
+        return;
+    };
+
+    // Outcome of the decrypt attempt: Ok(disk_path) on success, Err(reason) on
+    // any failure (read error, bad key length, or GCM auth failure).
+    match try_decrypt_file_stream(request, &pfs, db_path, db_passphrase).await {
+        Ok(disk_path) => {
+            // Success — consume the assembled stream.
+            let _ = std::fs::remove_file(&request.temp_path);
+            let _ = event_tx.send(NetworkEvent::FileCompleted { file_id, disk_path }).await;
+        }
+        Err(fail_reason) => {
+            hold_early_arrival_and_retry(
+                &file_id, &fail_reason, request, sender_peer, pfs,
+                pending_file_streams, early_file_streams, ws_cmd_tx, ws_room_peers,
+            );
+        }
+    }
+}
+
+/// Decrypt an assembled inbound file stream against its pending FileHeader
+/// key and write the plaintext to its final path. A GCM failure here is
+/// usually a transient assembly/truncation race under concurrent transfers —
+/// the bytes on the source are fine — so the caller holds the bytes and
+/// bounded-re-requests rather than giving up (see FILE_DECRYPT_MAX_RETRIES).
+async fn try_decrypt_file_stream(
+    request: &ws_stream_transfer::StreamRequest,
+    pfs: &PendingFileStream,
+    db_path: &str,
+    db_passphrase: &str,
+) -> Result<String, String> {
+    let Ok(ciphertext) = tokio::fs::read(&request.temp_path).await else {
+        return Err("unreadable stream".to_string());
+    };
+    let key_bytes = hex::decode(&pfs.aes_key).unwrap_or_default();
+    let nonce_bytes = hex::decode(&pfs.aes_nonce).unwrap_or_default();
+    if key_bytes.len() != 32 || nonce_bytes.len() != 12 {
+        return Err("invalid AES key/nonce length".to_string());
+    }
+    let key: [u8; 32] = key_bytes.try_into().unwrap();
+    let nonce: [u8; 12] = nonce_bytes.try_into().unwrap();
+    let plaintext = crate::vault::pipeline::aes_decrypt(&ciphertext, &key, &nonce)
+        .map_err(|e| format!("decrypt failed: {e}"))?;
+    let final_path = file_transfer::final_file_path(&request.id, &pfs.ext);
+    if tokio::fs::write(&final_path, &plaintext).await.is_err() {
+        return Err("failed to write decrypted file".to_string());
+    }
+    let disk_path = final_path.to_string_lossy().to_string();
+    if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+        let _ = store.mark_file_complete(&request.id, &disk_path);
+    }
+    hollow_log!("[HOLLOW-STREAM] File {} complete: {disk_path}", request.id);
+    Ok(disk_path)
+}
+
+/// The ciphertext is intact (right size) but didn't decrypt against THIS
+/// pending stream's key. ROOT CAUSE: the bytes (fast WebRTC P2P) routinely
+/// BEAT the FileHeader (slower Olm/relay) — the logs show `FileHeader
+/// received` the line AFTER `decrypt failed`. So these bytes belong to a
+/// header that hasn't landed yet; the `pfs` we just popped was a STALE
+/// pending stream from a prior request (wrong key). Previously we deleted the
+/// bytes + immediately re-requested, which spawned ANOTHER crossed
+/// header/stream pair → an endless decrypt-fail loop that only a restart
+/// (serializing one clean pair) fixed.
+///
+/// FIX: PRESERVE the bytes as an early-arrival (keyed by file_id) and DO NOT
+/// re-request. The header that was already in flight arrives a moment later
+/// and its early-arrival path reprocesses these exact bytes against the
+/// CORRECT key → success, no loop. (`request.temp_path` is intentionally NOT
+/// removed here.)
+#[allow(clippy::too_many_arguments)]
+fn hold_early_arrival_and_retry(
+    file_id: &str,
+    fail_reason: &str,
+    request: &ws_stream_transfer::StreamRequest,
+    sender_peer: &str,
+    pfs: PendingFileStream,
+    pending_file_streams: &mut HashMap<String, PendingFileStream>,
+    early_file_streams: &mut HashMap<String, (PathBuf, u64, String)>,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+) {
+    hollow_log!(
+        "[HOLLOW-STREAM] File {file_id} {fail_reason} — bytes arrived before their header; holding as early-arrival for the matching key"
+    );
+    early_file_streams.insert(
+        file_id.to_string(),
+        (request.temp_path.clone(), request.size, sender_peer.to_string()),
+    );
+    // Safety net: if NO matching header ever arrives (e.g. the Olm
+    // header was genuinely lost, not just late), one bounded
+    // re-request recovers it. Gated on retry_count so it can't loop.
+    if pfs.retry_count < FILE_DECRYPT_MAX_RETRIES
+        && peer_is_reachable(ws_room_peers, &pfs.sender)
+    {
+        let next = pfs.retry_count + 1;
+        let sender = pfs.sender.clone();
+        let mut retry_pfs = pfs;
+        retry_pfs.retry_count = next;
+        // Keep the pending stream so a late header preserves the count.
+        pending_file_streams.insert(file_id.to_string(), retry_pfs);
+        send_message_to_peer(
+            ws_cmd_tx, ws_room_peers,
+            &sender, HavenMessage::FileRequest {
+                file_id: file_id.to_string(),
+                chunks: vec![],
+                offset: 0,
+            },
+        );
+        hollow_log!("[HOLLOW-STREAM] File {file_id} — safety re-request {next}/{FILE_DECRYPT_MAX_RETRIES} from {sender}");
+    }
+}
+
+/// StreamKind::Shard arm of handle_completed_stream: store the shard, emit
+/// ShardStored, and attempt reconstruction if a vault download is pending.
+#[allow(clippy::too_many_arguments)]
+async fn handle_shard_stream_complete(
+    request: &ws_stream_transfer::StreamRequest,
+    shard_index: u16,
+    sender_peer: &str,
+    pending_shard_streams: &mut HashMap<String, PendingShardStream>,
+    pending_vault_downloads: &mut HashMap<String, (String, usize, usize)>,
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    db_path: &str,
+    db_passphrase: &str,
+) {
+    let content_id = request.id.clone();
+    let key = format!("{content_id}:{shard_index}");
+    hollow_log!("[HOLLOW-STREAM] Inbound shard stream: cid={content_id} si={shard_index} ({} bytes)", request.size);
+
+    let Some(pss) = pending_shard_streams.remove(&key) else {
+        hollow_log!("[HOLLOW-STREAM] No pending ShardStore for stream {key} — ignoring");
+        let _ = std::fs::remove_file(&request.temp_path);
+        return;
+    };
+    if let Ok(shard_bytes) = tokio::fs::read(&request.temp_path).await {
+        let data_dir = crate::identity::data_dir().unwrap_or_default();
+        let vault_dir = data_dir.join("vault");
+        if let Ok(content_store) = crate::vault::content_store::ContentStore::open(db_path, db_passphrase, &vault_dir) {
+            let tier = crate::vault::content_store::StorageTier::from_str(&pss.tier);
+            let _ = content_store.store_shard(
+                &pss.server_id, &pss.content_id, pss.shard_index,
+                pss.k, pss.m, pss.total_size, tier, &shard_bytes,
+            );
+            hollow_log!("[HOLLOW-STREAM] Shard stored: cid={content_id} si={shard_index}");
+            let _ = event_tx.send(NetworkEvent::ShardStored {
+                server_id: pss.server_id.clone(),
+                content_id: content_id.clone(),
+                shard_index,
+                from_peer: sender_peer.to_string(),
+            }).await;
+
+            if let Some((dl_server_id, dl_k, _)) = pending_vault_downloads.remove(&content_id) {
+                hollow_log!("[HOLLOW-VAULT] Shard arrived for pending download — attempting reconstruction: {content_id}");
+                attempt_vault_reconstruction(
+                    content_store, pending_vault_downloads, event_tx,
+                    &content_id, dl_server_id, dl_k,
+                ).await;
             }
+        }
+    }
+    let _ = std::fs::remove_file(&request.temp_path);
+}
+
+/// Try to reconstruct a pending vault download after a new shard landed:
+/// gather local shards, reconstruct when >= k are available, else re-register
+/// the pending download and keep waiting for more shards.
+///
+/// Takes the ContentStore by VALUE (last use in the shard arm): an owned
+/// store is Send across .await points, while a `&ContentStore` is not
+/// (ContentStore is !Sync — it wraps a rusqlite Connection).
+async fn attempt_vault_reconstruction(
+    content_store: crate::vault::content_store::ContentStore,
+    pending_vault_downloads: &mut HashMap<String, (String, usize, usize)>,
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    content_id: &str,
+    dl_server_id: String,
+    dl_k: usize,
+) {
+    let Ok(Some(manifest)) = content_store.load_manifest(content_id) else { return; };
+    let n = dl_k + manifest.m as usize;
+    let local_shards = content_store.list_content_shards(&dl_server_id, content_id).unwrap_or_default();
+    let mut packed: Vec<Option<Vec<u8>>> = vec![None; n];
+    for record in &local_shards {
+        let idx = record.shard_index as usize;
+        if idx < n {
+            if let Ok(data) = content_store.read_shard_unchecked(&dl_server_id, &record.shard_key) {
+                packed[idx] = Some(data);
+            }
+        }
+    }
+    let avail = packed.iter().filter(|s| s.is_some()).count();
+    if avail < dl_k {
+        pending_vault_downloads.insert(content_id.to_string(), (dl_server_id, dl_k, 0));
+        hollow_log!("[HOLLOW-VAULT] Still need more shards: have {avail}, need {dl_k}");
+        return;
+    }
+    let ext = crate::vault::pipeline::ext_from_filename(&manifest.file_name);
+    match crate::vault::pipeline::reconstruct_file(&manifest, &packed) {
+        Ok(plaintext) => {
+            if let Ok(path) = crate::vault::pipeline::write_to_cache(content_id, &ext, &plaintext) {
+                let disk_path = path.to_string_lossy().to_string();
+                hollow_log!("[HOLLOW-VAULT] Download reconstructed: {disk_path}");
+                let _ = event_tx.send(NetworkEvent::VaultDownloadComplete {
+                    server_id: dl_server_id, content_id: content_id.to_string(), disk_path,
+                }).await;
+            }
+        }
+        Err(e) => {
+            hollow_log!("[HOLLOW-VAULT] Reconstruction failed: {e}");
+            let _ = event_tx.send(NetworkEvent::VaultDownloadFailed {
+                server_id: dl_server_id, content_id: content_id.to_string(), error: e,
+            }).await;
         }
     }
 }
@@ -1664,43 +2197,16 @@ pub(crate) async fn handle_envelope_file_header(
 ) {
     hollow_log!("[HOLLOW-FILE] MLS FileHeader: {fid} ({name}, {size} bytes, {chunks} chunks, share_ref={})", share_ref.is_some());
 
-    if share_ref.is_none() {
-        let max_mb_str = if let Some(state) = server_states.get(server_id) {
-            state.settings.get("max_file_size_mb")
-                .map(|r| r.read().clone())
-                .unwrap_or_else(|| "34".to_string())
-        } else { "34".to_string() };
-        let max_bytes = max_mb_str.parse::<u64>().unwrap_or(34) * 1024 * 1024;
-        if size > max_bytes {
-            hollow_log!("[HOLLOW-SECURITY] REJECTED MLS FileHeader from {sender_peer_id} — size {size} exceeds max {max_bytes}");
-            return;
-        }
+    if share_ref.is_none()
+        && mls_file_header_exceeds_cap(server_states, server_id, size, &sender_peer_id)
+    {
+        return;
     }
 
-    // Moderation trio (receive-side): drop files from muted members and
-    // non-media files headed into a media-only channel. Mirrors the text
-    // ingest gate in message_ops::handle_envelope_channel_message.
-    if let Some(state) = server_states.get(server_id) {
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
-        if state.is_muted(&sender_peer_id, now_ms) {
-            hollow_log!("[HOLLOW-MOD] DROPPED MLS FileHeader from muted member {sender_peer_id} in {server_id}");
-            return;
-        }
-        if let Some(c) = &cid {
-            if state.is_channel_media_only(c) {
-                let is_media = img
-                    || vthumb.is_some()
-                    || mime.starts_with("video/")
-                    || file_transfer::is_image_mime(&mime);
-                if !is_media {
-                    hollow_log!("[HOLLOW-MOD] DROPPED non-media FileHeader ({mime}) from {sender_peer_id} in media-only channel {c}");
-                    return;
-                }
-            }
-        }
+    if mls_file_header_moderation_dropped(
+        server_states, server_id, &sender_peer_id, &cid, &mime, img, &vthumb,
+    ) {
+        return;
     }
 
     let ctx_type = "channel";
@@ -1723,45 +2229,13 @@ pub(crate) async fn handle_envelope_file_header(
     // Register pending stream so binary file bytes can be decrypted on arrival.
     // Skip for share-backed files — no binary data arrives via P2P, Share handles delivery.
     if share_ref.is_none() && let (Some(ak), Some(an)) = (aes_key, aes_nonce) {
-        pending_file_streams.insert(fid.clone(), PendingFileStream {
-            aes_key: ak,
-            aes_nonce: an,
-            file_name: name.clone(),
-            ext: ext.clone(),
-            sender: sender_peer_id.clone(),
-            server_id: sid.clone().unwrap_or_else(|| server_id.to_string()),
-            channel_id: cid.clone().unwrap_or_default(),
-            message_id: mid.clone().unwrap_or_default(),
-            is_image: img,
-            width: w,
-            height: h,
-            retry_count: 0,
-        });
-        hollow_log!("[HOLLOW-FILE] Registered pending stream for {fid} (MLS streamed transfer)");
-
-        // Check if WebRTC bytes already arrived before this FileHeader.
-        if let Some((temp_path, file_size, sender)) = early_file_streams.remove(&fid) {
-            hollow_log!("[HOLLOW-FILE] Early arrival found for {fid} (MLS path) — processing now");
-            let request = ws_stream_transfer::StreamRequest {
-                kind: ws_stream_transfer::StreamKind::File,
-                id: fid.clone(),
-                size: file_size,
-                temp_path,
-            };
-            let mut empty_vault_dl = HashMap::new();
-            // This early-arrival path only ever carries StreamKind::File; link
-            // snapshots never take the WebRTC early-arrival route, so an empty map is fine.
-            let mut empty_link_snapshots = HashMap::new();
-            handle_completed_stream(
-                request, &sender,
-                pending_file_streams, pending_shard_streams,
-                &mut empty_vault_dl, early_file_streams,
-                &mut empty_link_snapshots,
-                bundle_keypair, event_tx,
-                ws_cmd_tx, ws_room_peers,
-                db_path, db_passphrase,
-            ).await;
-        }
+        register_pending_file_stream_and_reprocess(
+            &fid, ak, an, &name, &ext, &sender_peer_id, server_id,
+            &sid, &cid, &mid, img, w, h,
+            pending_file_streams, pending_shard_streams, early_file_streams,
+            bundle_keypair, event_tx, ws_cmd_tx, ws_room_peers,
+            db_path, db_passphrase,
+        ).await;
     }
 
     let _ = event_tx.send(NetworkEvent::FileHeaderReceived {
@@ -1778,6 +2252,131 @@ pub(crate) async fn handle_envelope_file_header(
         video_thumb: vthumb,
         share_ref,
     }).await;
+}
+
+/// Size-cap gate for a non-share-backed MLS FileHeader (server-configurable
+/// max_file_size_mb, default 34). Logs + returns true when it must be dropped.
+fn mls_file_header_exceeds_cap(
+    server_states: &HashMap<String, ServerState>,
+    server_id: &str,
+    size: u64,
+    sender_peer_id: &str,
+) -> bool {
+    let max_mb_str = if let Some(state) = server_states.get(server_id) {
+        state.settings.get("max_file_size_mb")
+            .map(|r| r.read().clone())
+            .unwrap_or_else(|| "34".to_string())
+    } else { "34".to_string() };
+    let max_bytes = max_mb_str.parse::<u64>().unwrap_or(34) * 1024 * 1024;
+    if size > max_bytes {
+        hollow_log!("[HOLLOW-SECURITY] REJECTED MLS FileHeader from {sender_peer_id} — size {size} exceeds max {max_bytes}");
+        return true;
+    }
+    false
+}
+
+/// Moderation trio (receive-side) for an MLS FileHeader: drop files from
+/// muted members and non-media files headed into a media-only channel.
+/// Mirrors the text ingest gate in message_ops::handle_envelope_channel_message.
+fn mls_file_header_moderation_dropped(
+    server_states: &HashMap<String, ServerState>,
+    server_id: &str,
+    sender_peer_id: &str,
+    cid: &Option<String>,
+    mime: &str,
+    img: bool,
+    vthumb: &Option<VideoThumbRef>,
+) -> bool {
+    let Some(state) = server_states.get(server_id) else { return false; };
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    if state.is_muted(sender_peer_id, now_ms) {
+        hollow_log!("[HOLLOW-MOD] DROPPED MLS FileHeader from muted member {sender_peer_id} in {server_id}");
+        return true;
+    }
+    if let Some(c) = cid {
+        if state.is_channel_media_only(c) {
+            let is_media = img
+                || vthumb.is_some()
+                || mime.starts_with("video/")
+                || file_transfer::is_image_mime(mime);
+            if !is_media {
+                hollow_log!("[HOLLOW-MOD] DROPPED non-media FileHeader ({mime}) from {sender_peer_id} in media-only channel {c}");
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Register the pending stream keyed by the FileHeader's AES material, then
+/// reprocess any WebRTC bytes that arrived before this header.
+#[allow(clippy::too_many_arguments)]
+async fn register_pending_file_stream_and_reprocess(
+    fid: &str,
+    ak: String,
+    an: String,
+    name: &str,
+    ext: &str,
+    sender_peer_id: &str,
+    server_id: &str,
+    sid: &Option<String>,
+    cid: &Option<String>,
+    mid: &Option<String>,
+    img: bool,
+    w: Option<u32>,
+    h: Option<u32>,
+    pending_file_streams: &mut HashMap<String, PendingFileStream>,
+    pending_shard_streams: &mut HashMap<String, PendingShardStream>,
+    early_file_streams: &mut HashMap<String, (PathBuf, u64, String)>,
+    bundle_keypair: &crate::identity::native_identity::NativeKeypair,
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    db_path: &str,
+    db_passphrase: &str,
+) {
+    pending_file_streams.insert(fid.to_string(), PendingFileStream {
+        aes_key: ak,
+        aes_nonce: an,
+        file_name: name.to_string(),
+        ext: ext.to_string(),
+        sender: sender_peer_id.to_string(),
+        server_id: sid.clone().unwrap_or_else(|| server_id.to_string()),
+        channel_id: cid.clone().unwrap_or_default(),
+        message_id: mid.clone().unwrap_or_default(),
+        is_image: img,
+        width: w,
+        height: h,
+        retry_count: 0,
+    });
+    hollow_log!("[HOLLOW-FILE] Registered pending stream for {fid} (MLS streamed transfer)");
+
+    // Check if WebRTC bytes already arrived before this FileHeader.
+    if let Some((temp_path, file_size, sender)) = early_file_streams.remove(fid) {
+        hollow_log!("[HOLLOW-FILE] Early arrival found for {fid} (MLS path) — processing now");
+        let request = ws_stream_transfer::StreamRequest {
+            kind: ws_stream_transfer::StreamKind::File,
+            id: fid.to_string(),
+            size: file_size,
+            temp_path,
+        };
+        let mut empty_vault_dl = HashMap::new();
+        // This early-arrival path only ever carries StreamKind::File; link
+        // snapshots never take the WebRTC early-arrival route, so an empty map is fine.
+        let mut empty_link_snapshots = HashMap::new();
+        handle_completed_stream(
+            request, &sender,
+            pending_file_streams, pending_shard_streams,
+            &mut empty_vault_dl, early_file_streams,
+            &mut empty_link_snapshots,
+            bundle_keypair, event_tx,
+            ws_cmd_tx, ws_room_peers,
+            db_path, db_passphrase,
+        ).await;
+    }
 }
 
 /// Handle `MessageEnvelope::FileChunk` — write chunk + assemble on completion.
@@ -1801,38 +2400,60 @@ pub(crate) async fn handle_envelope_file_chunk(
     if let Err(e) = file_transfer::write_chunk(&fid, idx, &chunk_bytes) {
         hollow_log!("[HOLLOW-FILE] {e}");
     } else {
-        if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
-            if let Ok(received) = store.mark_chunk_received(&fid, idx) {
-                if let Ok(Some(file_meta)) = store.get_file_metadata(&fid) {
-                    let _ = event_tx.send(NetworkEvent::FileProgress {
-                        file_id: fid.clone(),
-                        chunks_received: received,
-                        total_chunks: file_meta.chunk_count,
-                    }).await;
+        ingest_file_chunk_progress(fid, idx, event_tx, db_path, db_passphrase).await;
+    }
+}
 
-                    if received >= file_meta.chunk_count {
-                        let final_path = file_transfer::final_file_path(&fid, &file_meta.file_ext);
-                        match file_transfer::assemble_file(&fid, file_meta.chunk_count, &final_path) {
-                            Ok(()) => {
-                                let disk_path = final_path.to_string_lossy().to_string();
-                                let _ = store.mark_file_complete(&fid, &disk_path);
-                                hollow_log!("[HOLLOW-FILE] MLS file {fid} complete: {disk_path}");
-                                let _ = event_tx.send(NetworkEvent::FileCompleted {
-                                    file_id: fid,
-                                    disk_path,
-                                }).await;
-                            }
-                            Err(e) => {
-                                hollow_log!("[HOLLOW-FILE] MLS assembly failed: {e}");
-                                let _ = event_tx.send(NetworkEvent::FileFailed {
-                                    file_id: fid,
-                                    error: e,
-                                }).await;
-                            }
-                        }
-                    }
+/// DB-side chunk ingest: mark the chunk received, emit FileProgress, and
+/// assemble + mark complete when all chunks have arrived (event emit order:
+/// FileProgress first, then FileCompleted/FileFailed — unchanged).
+async fn ingest_file_chunk_progress(
+    fid: String,
+    idx: u32,
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    db_path: &str,
+    db_passphrase: &str,
+) {
+    if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+        if let Ok(received) = store.mark_chunk_received(&fid, idx) {
+            if let Ok(Some(file_meta)) = store.get_file_metadata(&fid) {
+                let _ = event_tx.send(NetworkEvent::FileProgress {
+                    file_id: fid.clone(),
+                    chunks_received: received,
+                    total_chunks: file_meta.chunk_count,
+                }).await;
+
+                if received >= file_meta.chunk_count {
+                    let completion = assemble_completed_chunked_file(
+                        &store, &fid, file_meta.chunk_count, &file_meta.file_ext,
+                    );
+                    let _ = event_tx.send(completion).await;
                 }
             }
+        }
+    }
+}
+
+/// Assemble a fully-received chunked file and mark it complete in the store.
+/// Sync (takes the already-open store) — returns the completion/failure event
+/// for the async caller to emit.
+fn assemble_completed_chunked_file(
+    store: &crate::storage::MessageStore,
+    fid: &str,
+    chunk_count: u32,
+    file_ext: &str,
+) -> NetworkEvent {
+    let final_path = file_transfer::final_file_path(fid, file_ext);
+    match file_transfer::assemble_file(fid, chunk_count, &final_path) {
+        Ok(()) => {
+            let disk_path = final_path.to_string_lossy().to_string();
+            let _ = store.mark_file_complete(fid, &disk_path);
+            hollow_log!("[HOLLOW-FILE] MLS file {fid} complete: {disk_path}");
+            NetworkEvent::FileCompleted { file_id: fid.to_string(), disk_path }
+        }
+        Err(e) => {
+            hollow_log!("[HOLLOW-FILE] MLS assembly failed: {e}");
+            NetworkEvent::FileFailed { file_id: fid.to_string(), error: e }
         }
     }
 }

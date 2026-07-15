@@ -125,142 +125,7 @@ pub(crate) fn handle_call_send_signal(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
 ) {
-    let msg = match signal_type.as_str() {
-        "invite" => {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&payload) {
-                HavenMessage::CallInvite {
-                    call_id: v["call_id"].as_str().unwrap_or("").to_string(),
-                    video: v["video"].as_bool().unwrap_or(false),
-                    sframe_key: v["sframe_key"].as_str().unwrap_or("").to_string(),
-                }
-            } else {
-                HavenMessage::CallInvite { call_id: payload, video: false, sframe_key: String::new() }
-            }
-        }
-        "accept" => {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&payload) {
-                HavenMessage::CallAccept {
-                    call_id: v["call_id"].as_str().unwrap_or(&payload).to_string(),
-                    sframe_key: v["sframe_key"].as_str().unwrap_or("").to_string(),
-                }
-            } else {
-                HavenMessage::CallAccept { call_id: payload, sframe_key: String::new() }
-            }
-        }
-        "reject" => HavenMessage::CallReject { call_id: payload },
-        "end" => HavenMessage::CallEnd { call_id: payload },
-        "busy" => HavenMessage::CallBusy { call_id: payload },
-        "sdp_offer" => {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&payload) {
-                HavenMessage::CallSdpOffer {
-                    call_id: v["call_id"].as_str().unwrap_or("").to_string(),
-                    sdp: v["sdp"].as_str().unwrap_or("").to_string(),
-                }
-            } else {
-                hollow_log!("[HOLLOW-CALL] Failed to parse sdp_offer payload");
-                return;
-            }
-        }
-        "sdp_answer" => {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&payload) {
-                HavenMessage::CallSdpAnswer {
-                    call_id: v["call_id"].as_str().unwrap_or("").to_string(),
-                    sdp: v["sdp"].as_str().unwrap_or("").to_string(),
-                }
-            } else {
-                hollow_log!("[HOLLOW-CALL] Failed to parse sdp_answer payload");
-                return;
-            }
-        }
-        "ice" => {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&payload) {
-                HavenMessage::CallIceCandidate {
-                    call_id: v["call_id"].as_str().unwrap_or("").to_string(),
-                    candidate: v["candidate"].as_str().unwrap_or("").to_string(),
-                    sdp_mid: v["sdpMid"].as_str().unwrap_or("").to_string(),
-                    sdp_mline_index: v["sdpMLineIndex"].as_u64().unwrap_or(0) as u32,
-                }
-            } else {
-                hollow_log!("[HOLLOW-CALL] Failed to parse ICE payload");
-                return;
-            }
-        }
-        "video_state" => {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&payload) {
-                HavenMessage::CallVideoState {
-                    call_id: v["call_id"].as_str().unwrap_or("").to_string(),
-                    enabled: v["enabled"].as_bool().unwrap_or(false),
-                }
-            } else {
-                hollow_log!("[HOLLOW-CALL] Failed to parse video_state payload");
-                return;
-            }
-        }
-        "audio_state" => {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&payload) {
-                HavenMessage::CallAudioState {
-                    call_id: v["call_id"].as_str().unwrap_or("").to_string(),
-                    muted: v["muted"].as_bool().unwrap_or(false),
-                    deafened: v["deafened"].as_bool().unwrap_or(false),
-                }
-            } else {
-                hollow_log!("[HOLLOW-CALL] Failed to parse audio_state payload");
-                return;
-            }
-        }
-        "screen_state" => {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&payload) {
-                HavenMessage::CallScreenState {
-                    call_id: v["call_id"].as_str().unwrap_or("").to_string(),
-                    enabled: v["enabled"].as_bool().unwrap_or(false),
-                    quality: v["quality"].as_str().map(|s| s.to_string()),
-                }
-            } else {
-                hollow_log!("[HOLLOW-CALL] Failed to parse screen_state payload");
-                return;
-            }
-        }
-        "screen_offer" => {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&payload) {
-                HavenMessage::CallScreenOffer {
-                    call_id: v["call_id"].as_str().unwrap_or("").to_string(),
-                    sdp: v["sdp"].as_str().unwrap_or("").to_string(),
-                }
-            } else {
-                hollow_log!("[HOLLOW-CALL] Failed to parse screen_offer payload");
-                return;
-            }
-        }
-        "screen_answer" => {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&payload) {
-                HavenMessage::CallScreenAnswer {
-                    call_id: v["call_id"].as_str().unwrap_or("").to_string(),
-                    sdp: v["sdp"].as_str().unwrap_or("").to_string(),
-                }
-            } else {
-                hollow_log!("[HOLLOW-CALL] Failed to parse screen_answer payload");
-                return;
-            }
-        }
-        "screen_ice" => {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&payload) {
-                HavenMessage::CallScreenIce {
-                    call_id: v["call_id"].as_str().unwrap_or("").to_string(),
-                    candidate: v["candidate"].as_str().unwrap_or("").to_string(),
-                    sdp_mid: v["sdpMid"].as_str().unwrap_or("").to_string(),
-                    sdp_mline_index: v["sdpMLineIndex"].as_u64().unwrap_or(0) as u32,
-                    role: v["role"].as_str().unwrap_or("").to_string(),
-                }
-            } else {
-                hollow_log!("[HOLLOW-CALL] Failed to parse screen_ice payload");
-                return;
-            }
-        }
-        _ => {
-            hollow_log!("[HOLLOW-CALL] Unknown call signal type: {signal_type}");
-            return;
-        }
-    };
+    let Some(msg) = build_call_signal(&signal_type, payload) else { return; };
     // Multi-device: `peer_id` is the friend's MASTER (the call UI keys on the
     // friend, not a device), which no socket authenticates as → every call signal
     // (invite/accept/sdp/ice/state) addressed to it is silently dropped and the
@@ -272,6 +137,113 @@ pub(crate) fn handle_call_send_signal(
     // Single-device falls back to the raw id (device == master), unchanged.
     let target = pick_online_device(ws_room_peers, &peer_id);
     send_message_to_peer(ws_cmd_tx, ws_room_peers, &target, msg);
+}
+
+/// JSON string field with the signal-payload convention: missing → "".
+fn jstr(v: &serde_json::Value, key: &str) -> String {
+    v[key].as_str().unwrap_or("").to_string()
+}
+
+/// Build the outbound 1:1 call-signal message. Signal types are WHITELISTED —
+/// an unknown type logs and yields `None` (dropped by design); a known
+/// JSON-carrying type with an unparseable payload also yields `None`.
+fn build_call_signal(signal_type: &str, payload: String) -> Option<HavenMessage> {
+    match signal_type {
+        "invite" => Some(build_call_invite(payload)),
+        "accept" => Some(build_call_accept(payload)),
+        "reject" => Some(HavenMessage::CallReject { call_id: payload }),
+        "end" => Some(HavenMessage::CallEnd { call_id: payload }),
+        "busy" => Some(HavenMessage::CallBusy { call_id: payload }),
+        _ => build_call_json_signal(signal_type, &payload),
+    }
+}
+
+/// CallInvite: JSON payload preferred, bare call-id string as legacy fallback.
+fn build_call_invite(payload: String) -> HavenMessage {
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&payload) {
+        HavenMessage::CallInvite {
+            call_id: jstr(&v, "call_id"),
+            video: v["video"].as_bool().unwrap_or(false),
+            sframe_key: jstr(&v, "sframe_key"),
+        }
+    } else {
+        HavenMessage::CallInvite { call_id: payload, video: false, sframe_key: String::new() }
+    }
+}
+
+/// CallAccept: JSON payload preferred, bare call-id string as legacy fallback.
+fn build_call_accept(payload: String) -> HavenMessage {
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&payload) {
+        HavenMessage::CallAccept {
+            call_id: v["call_id"].as_str().unwrap_or(&payload).to_string(),
+            sframe_key: jstr(&v, "sframe_key"),
+        }
+    } else {
+        HavenMessage::CallAccept { call_id: payload, sframe_key: String::new() }
+    }
+}
+
+/// Call signal types whose payload MUST be valid JSON (no legacy fallback).
+/// Unknown types log "Unknown call signal type"; known types with a bad
+/// payload log "Failed to parse … payload" — exactly the original arm order
+/// (an unknown type never reports a parse failure).
+fn build_call_json_signal(signal_type: &str, payload: &str) -> Option<HavenMessage> {
+    let parsed = serde_json::from_str::<serde_json::Value>(payload).ok();
+    let msg = match signal_type {
+        "sdp_offer" => parsed.map(|v| HavenMessage::CallSdpOffer {
+            call_id: jstr(&v, "call_id"),
+            sdp: jstr(&v, "sdp"),
+        }),
+        "sdp_answer" => parsed.map(|v| HavenMessage::CallSdpAnswer {
+            call_id: jstr(&v, "call_id"),
+            sdp: jstr(&v, "sdp"),
+        }),
+        "ice" => parsed.map(|v| HavenMessage::CallIceCandidate {
+            call_id: jstr(&v, "call_id"),
+            candidate: jstr(&v, "candidate"),
+            sdp_mid: jstr(&v, "sdpMid"),
+            sdp_mline_index: v["sdpMLineIndex"].as_u64().unwrap_or(0) as u32,
+        }),
+        "video_state" => parsed.map(|v| HavenMessage::CallVideoState {
+            call_id: jstr(&v, "call_id"),
+            enabled: v["enabled"].as_bool().unwrap_or(false),
+        }),
+        "audio_state" => parsed.map(|v| HavenMessage::CallAudioState {
+            call_id: jstr(&v, "call_id"),
+            muted: v["muted"].as_bool().unwrap_or(false),
+            deafened: v["deafened"].as_bool().unwrap_or(false),
+        }),
+        "screen_state" => parsed.map(|v| HavenMessage::CallScreenState {
+            call_id: jstr(&v, "call_id"),
+            enabled: v["enabled"].as_bool().unwrap_or(false),
+            quality: v["quality"].as_str().map(|s| s.to_string()),
+        }),
+        "screen_offer" => parsed.map(|v| HavenMessage::CallScreenOffer {
+            call_id: jstr(&v, "call_id"),
+            sdp: jstr(&v, "sdp"),
+        }),
+        "screen_answer" => parsed.map(|v| HavenMessage::CallScreenAnswer {
+            call_id: jstr(&v, "call_id"),
+            sdp: jstr(&v, "sdp"),
+        }),
+        "screen_ice" => parsed.map(|v| HavenMessage::CallScreenIce {
+            call_id: jstr(&v, "call_id"),
+            candidate: jstr(&v, "candidate"),
+            sdp_mid: jstr(&v, "sdpMid"),
+            sdp_mline_index: v["sdpMLineIndex"].as_u64().unwrap_or(0) as u32,
+            role: jstr(&v, "role"),
+        }),
+        _ => {
+            hollow_log!("[HOLLOW-CALL] Unknown call signal type: {signal_type}");
+            return None;
+        }
+    };
+    if msg.is_none() {
+        // Historic log labels: "ice" reported as "ICE", every other type by name.
+        let label = if signal_type == "ice" { "ICE" } else { signal_type };
+        hollow_log!("[HOLLOW-CALL] Failed to parse {label} payload");
+    }
+    msg
 }
 
 // ── VoiceChannelJoin ─────────────────────────────────────────────────
@@ -315,73 +287,23 @@ pub(crate) async fn handle_voice_channel_join(
         sid: server_id.clone(),
         cid: channel_id.clone(),
     };
-    let mls_ok = mls.as_ref().is_some_and(|m| m.has_group(&server_id));
-    if mls_ok {
-        let _ = send_mls_broadcast(mls.as_mut().unwrap(), ws_cmd_tx, &server_id, &envelope, crypto_store);
-    }
-    if let Some(state) = server_states.get(&server_id) {
-        let data = serde_json::to_vec(&HavenMessage::VoiceChannelJoin {
-            server_id: server_id.clone(), channel_id: channel_id.clone(),
-        }).unwrap_or_default();
-        for member in state.members.keys() {
-            if super::resolver::same_identity(member, local_peer_str) { continue; }
-            send_raw_to_identity(ws_cmd_tx, ws_room_peers, member, data.clone());
-        }
-    }
+    let plain = HavenMessage::VoiceChannelJoin {
+        server_id: server_id.clone(), channel_id: channel_id.clone(),
+    };
+    broadcast_vc_presence(
+        mls, ws_cmd_tx, ws_room_peers, server_states, crypto_store,
+        &server_id, local_peer_str, &envelope, &plain,
+    );
     // Track participant.
     let vc_key = format!("{}:{}", server_id, channel_id);
     voice_channel_participants.entry(vc_key.clone()).or_default()
         .insert(local_peer_str.to_string());
     // Emit current MLS epoch key BEFORE the join event — Dart caches it,
     // then applies it after creating the VoiceChannelService.
-    //
-    // For a RESTRICTED voice channel the SFrame key is derived from the channel's
-    // own MLS SUBGROUP (`subgroup_id`), NOT the server-wide group — so a
-    // non-qualifying member can't derive the key. The emitted event carries
-    // `channel_id: Some(cid)` so Dart routes the key to that channel's cryptor.
-    //
-    // CAUTION: the subgroup may not exist on our side yet (we just became a
-    // participant / were recently promoted). In that case we must NOT fall back to
-    // the server-group key (that would defeat the cryptographic isolation). Instead
-    // we pull ourselves into the subgroup via the same bootstrap path text uses —
-    // the resulting Welcome → MlsEpochChanged{channel_id} delivers the key.
-    let group_key = if restricted {
-        crate::crypto::subgroup_id(&server_id, &channel_id)
-    } else {
-        server_id.clone()
-    };
-    let emit_cid = if restricted { Some(channel_id.clone()) } else { None };
-    match mls.as_mut() {
-        Some(mls_mgr) => {
-            let has_group = mls_mgr.has_group(&group_key);
-            hollow_log!("[HOLLOW-VC-SFRAME] MLS exists, has_group({group_key})={has_group}");
-            if has_group {
-                match mls_mgr.export_secret(&group_key, "sframe", b"", 32) {
-                    Ok(sframe_key) => {
-                        let epoch = mls_mgr.epoch(&group_key).unwrap_or(0);
-                        hollow_log!("[HOLLOW-VC-SFRAME] Emitting SFrame key for {group_key} epoch {epoch}");
-                        let _ = event_tx.send(NetworkEvent::MlsEpochChanged {
-                            server_id: server_id.clone(), epoch, sframe_key,
-                            channel_id: emit_cid,
-                        }).await;
-                    }
-                    Err(e) => hollow_log!("[HOLLOW-VC-SFRAME] export_secret FAILED: {e}"),
-                }
-            } else if restricted {
-                // We qualify (guard above passed) but don't hold the subgroup yet.
-                // Pull our KeyPackage to the subgroup coordinator; the Welcome it
-                // sends back fires MlsEpochChanged with our channel_id.
-                if let Some(state) = server_states.get(&server_id) {
-                    hollow_log!("[HOLLOW-VC-SFRAME] Subgroup {group_key} not held — requesting bootstrap");
-                    super::crypto_handler::request_subgroup_bootstrap(
-                        mls_mgr, ws_cmd_tx, ws_room_peers,
-                        state, &server_id, &channel_id, local_peer_str,
-                    );
-                }
-            }
-        }
-        None => hollow_log!("[HOLLOW-VC-SFRAME] MLS is None — no SFrame key"),
-    }
+    emit_vc_sframe_key(
+        mls, ws_cmd_tx, ws_room_peers, server_states,
+        &server_id, &channel_id, restricted, local_peer_str, event_tx,
+    ).await;
     // Emit locally so our own UI updates.
     let _ = event_tx.send(NetworkEvent::VoiceChannelJoined {
         server_id: server_id.clone(), channel_id: channel_id.clone(),
@@ -393,6 +315,120 @@ pub(crate) async fn handle_voice_channel_join(
         voice_channel_participants, voice_channel_gossip_mode,
         gossip_overlays, local_peer_str, event_tx,
     ).await;
+}
+
+/// Fan a plaintext `HavenMessage` to every server member except ourselves
+/// (device→master fan handled inside `send_raw_to_identity`).
+fn fan_plaintext_to_members(
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    state: &ServerState,
+    local_peer_str: &str,
+    msg: &HavenMessage,
+) {
+    let data = serde_json::to_vec(msg).unwrap_or_default();
+    for member in state.members.keys() {
+        if super::resolver::same_identity(member, local_peer_str) { continue; }
+        send_raw_to_identity(ws_cmd_tx, ws_room_peers, member, data.clone());
+    }
+}
+
+/// Announce voice-channel presence (join/leave): MLS broadcast when the server
+/// group is held, PLUS always the plaintext member fan-out — voice presence
+/// must arrive even with stale MLS epochs.
+#[allow(clippy::too_many_arguments)]
+fn broadcast_vc_presence(
+    mls: &mut Option<MlsManager>,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    server_states: &HashMap<String, ServerState>,
+    crypto_store: &CryptoStore,
+    server_id: &str,
+    local_peer_str: &str,
+    envelope: &MessageEnvelope,
+    plain: &HavenMessage,
+) {
+    let mls_ok = mls.as_ref().is_some_and(|m| m.has_group(server_id));
+    if mls_ok {
+        let _ = send_mls_broadcast(mls.as_mut().unwrap(), ws_cmd_tx, server_id, envelope, crypto_store);
+    }
+    if let Some(state) = server_states.get(server_id) {
+        fan_plaintext_to_members(ws_cmd_tx, ws_room_peers, state, local_peer_str, plain);
+    }
+}
+
+/// Emit the current SFrame key for a voice channel we just joined.
+///
+/// For a RESTRICTED voice channel the SFrame key is derived from the channel's
+/// own MLS SUBGROUP (`subgroup_id`), NOT the server-wide group — so a
+/// non-qualifying member can't derive the key. The emitted event carries
+/// `channel_id: Some(cid)` so Dart routes the key to that channel's cryptor.
+///
+/// CAUTION: the subgroup may not exist on our side yet (we just became a
+/// participant / were recently promoted). In that case we must NOT fall back to
+/// the server-group key (that would defeat the cryptographic isolation). Instead
+/// we pull ourselves into the subgroup via the same bootstrap path text uses —
+/// the resulting Welcome → MlsEpochChanged{channel_id} delivers the key.
+#[allow(clippy::too_many_arguments)]
+async fn emit_vc_sframe_key(
+    mls: &mut Option<MlsManager>,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    server_states: &HashMap<String, ServerState>,
+    server_id: &str,
+    channel_id: &str,
+    restricted: bool,
+    local_peer_str: &str,
+    event_tx: &mpsc::Sender<NetworkEvent>,
+) {
+    let group_key = if restricted {
+        crate::crypto::subgroup_id(server_id, channel_id)
+    } else {
+        server_id.to_string()
+    };
+    let emit_cid = if restricted { Some(channel_id.to_string()) } else { None };
+    match mls.as_mut() {
+        Some(mls_mgr) => {
+            let has_group = mls_mgr.has_group(&group_key);
+            hollow_log!("[HOLLOW-VC-SFRAME] MLS exists, has_group({group_key})={has_group}");
+            if has_group {
+                export_and_emit_sframe(mls_mgr, &group_key, server_id, emit_cid, event_tx).await;
+            } else if restricted {
+                // We qualify (join guard passed) but don't hold the subgroup yet.
+                // Pull our KeyPackage to the subgroup coordinator; the Welcome it
+                // sends back fires MlsEpochChanged with our channel_id.
+                if let Some(state) = server_states.get(server_id) {
+                    hollow_log!("[HOLLOW-VC-SFRAME] Subgroup {group_key} not held — requesting bootstrap");
+                    super::crypto_handler::request_subgroup_bootstrap(
+                        mls_mgr, ws_cmd_tx, ws_room_peers,
+                        state, server_id, channel_id, local_peer_str,
+                    );
+                }
+            }
+        }
+        None => hollow_log!("[HOLLOW-VC-SFRAME] MLS is None — no SFrame key"),
+    }
+}
+
+/// Export the SFrame secret from a held MLS group and emit `MlsEpochChanged`.
+async fn export_and_emit_sframe(
+    mls_mgr: &mut MlsManager,
+    group_key: &str,
+    server_id: &str,
+    emit_cid: Option<String>,
+    event_tx: &mpsc::Sender<NetworkEvent>,
+) {
+    match mls_mgr.export_secret(group_key, "sframe", b"", 32) {
+        Ok(sframe_key) => {
+            let epoch = mls_mgr.epoch(group_key).unwrap_or(0);
+            hollow_log!("[HOLLOW-VC-SFRAME] Emitting SFrame key for {group_key} epoch {epoch}");
+            let _ = event_tx.send(NetworkEvent::MlsEpochChanged {
+                server_id: server_id.to_string(), epoch, sframe_key,
+                channel_id: emit_cid,
+            }).await;
+        }
+        Err(e) => hollow_log!("[HOLLOW-VC-SFRAME] export_secret FAILED: {e}"),
+    }
 }
 
 // ── VoiceChannelLeave ────────────────────────────────────────────────
@@ -418,19 +454,13 @@ pub(crate) async fn handle_voice_channel_leave(
         sid: server_id.clone(),
         cid: channel_id.clone(),
     };
-    let mls_ok = mls.as_ref().is_some_and(|m| m.has_group(&server_id));
-    if mls_ok {
-        let _ = send_mls_broadcast(mls.as_mut().unwrap(), ws_cmd_tx, &server_id, &envelope, crypto_store);
-    }
-    if let Some(state) = server_states.get(&server_id) {
-        let data = serde_json::to_vec(&HavenMessage::VoiceChannelLeave {
-            server_id: server_id.clone(), channel_id: channel_id.clone(),
-        }).unwrap_or_default();
-        for member in state.members.keys() {
-            if super::resolver::same_identity(member, local_peer_str) { continue; }
-            send_raw_to_identity(ws_cmd_tx, ws_room_peers, member, data.clone());
-        }
-    }
+    let plain = HavenMessage::VoiceChannelLeave {
+        server_id: server_id.clone(), channel_id: channel_id.clone(),
+    };
+    broadcast_vc_presence(
+        mls, ws_cmd_tx, ws_room_peers, server_states, crypto_store,
+        &server_id, local_peer_str, &envelope, &plain,
+    );
     // Untrack participant.
     let vc_key = format!("{}:{}", server_id, channel_id);
     if let Some(participants) = voice_channel_participants.get_mut(&vc_key) {
@@ -527,181 +557,150 @@ pub(crate) async fn handle_voice_channel_send_signal(
     event_tx: &mpsc::Sender<NetworkEvent>,
 ) {
     hollow_log!("[HOLLOW-VC] Send signal {signal_type} to {peer_id} in vc {channel_id}");
-    let envelope = match signal_type.as_str() {
-        "sdp_offer" => {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&payload) {
-                MessageEnvelope::VoiceChannelSdpOffer {
-                    sid: server_id.clone(),
-                    cid: channel_id.clone(),
-                    sdp: v["sdp"].as_str().unwrap_or("").to_string(),
-                    target: None,
-                }
-            } else { return; }
-        }
-        "sdp_answer" => {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&payload) {
-                MessageEnvelope::VoiceChannelSdpAnswer {
-                    sid: server_id.clone(),
-                    cid: channel_id.clone(),
-                    sdp: v["sdp"].as_str().unwrap_or("").to_string(),
-                    target: None,
-                }
-            } else { return; }
-        }
-        "ice" => {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&payload) {
-                MessageEnvelope::VoiceChannelIce {
-                    sid: server_id.clone(),
-                    cid: channel_id.clone(),
-                    candidate: v["candidate"].as_str().unwrap_or("").to_string(),
-                    sdp_mid: v["sdpMid"].as_str().unwrap_or("").to_string(),
-                    sdp_mline_index: v["sdpMLineIndex"].as_u64().unwrap_or(0) as u32,
-                    target: None,
-                }
-            } else { return; }
-        }
-        "audio_state" => {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&payload) {
-                MessageEnvelope::VoiceChannelAudioState {
-                    sid: server_id.clone(),
-                    cid: channel_id.clone(),
-                    muted: v["muted"].as_bool().unwrap_or(false),
-                    deafened: v["deafened"].as_bool().unwrap_or(false),
-                    target: None,
-                }
-            } else { return; }
-        }
-        "screen_offer" => {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&payload) {
-                MessageEnvelope::VoiceChannelScreenOffer {
-                    sid: server_id.clone(),
-                    cid: channel_id.clone(),
-                    sdp: v["sdp"].as_str().unwrap_or("").to_string(),
-                    target: None,
-                }
-            } else { return; }
-        }
-        "screen_answer" => {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&payload) {
-                MessageEnvelope::VoiceChannelScreenAnswer {
-                    sid: server_id.clone(),
-                    cid: channel_id.clone(),
-                    sdp: v["sdp"].as_str().unwrap_or("").to_string(),
-                    target: None,
-                }
-            } else { return; }
-        }
-        "screen_ice" => {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&payload) {
-                MessageEnvelope::VoiceChannelScreenIce {
-                    sid: server_id.clone(),
-                    cid: channel_id.clone(),
-                    candidate: v["candidate"].as_str().unwrap_or("").to_string(),
-                    sdp_mid: v["sdpMid"].as_str().unwrap_or("").to_string(),
-                    sdp_mline_index: v["sdpMLineIndex"].as_u64().unwrap_or(0) as u32,
-                    role: v["role"].as_str().unwrap_or("").to_string(),
-                    target: None,
-                }
-            } else { return; }
-        }
-        "screen_state" => {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&payload) {
-                MessageEnvelope::VoiceChannelScreenState {
-                    sid: server_id.clone(),
-                    cid: channel_id.clone(),
-                    enabled: v["enabled"].as_bool().unwrap_or(false),
-                    target: None,
-                    quality: v["quality"].as_str().map(|s| s.to_string()),
-                }
-            } else { return; }
-        }
-        "reneg_offer" => {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&payload) {
-                MessageEnvelope::VoiceChannelRenegOffer {
-                    sid: server_id.clone(),
-                    cid: channel_id.clone(),
-                    sdp: v["sdp"].as_str().unwrap_or("").to_string(),
-                    target: None,
-                }
-            } else { return; }
-        }
-        "reneg_answer" => {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&payload) {
-                MessageEnvelope::VoiceChannelRenegAnswer {
-                    sid: server_id.clone(),
-                    cid: channel_id.clone(),
-                    sdp: v["sdp"].as_str().unwrap_or("").to_string(),
-                    target: None,
-                }
-            } else { return; }
-        }
-        "camera_state" => {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&payload) {
-                MessageEnvelope::VoiceChannelCameraState {
-                    sid: server_id.clone(),
-                    cid: channel_id.clone(),
-                    enabled: v["enabled"].as_bool().unwrap_or(false),
-                    target: None,
-                }
-            } else { return; }
-        }
-        _ => {
-            hollow_log!("[HOLLOW-VC] Unknown signal type: {signal_type}");
-            return;
-        }
+    let Some(envelope) = build_vc_signal_envelope(&signal_type, &server_id, &channel_id, &payload) else {
+        return;
     };
     // Broadcast state signals (audio/screen/camera state) → MLS broadcast + plaintext fallback.
     // Targeted SDP/ICE signals → MLS targeted + Olm fallback (IPs are sensitive).
     let is_broadcast = matches!(signal_type.as_str(), "audio_state" | "screen_state" | "camera_state");
-    let mls_ok = mls.as_ref().is_some_and(|m| m.has_group(&server_id));
-
     if is_broadcast {
-        let mls_sent = mls_ok && send_mls_broadcast(mls.as_mut().unwrap(), ws_cmd_tx, &server_id, &envelope, crypto_store).is_ok();
-        if !mls_sent {
-            // Plaintext fallback: iterate members.
-            let plaintext_msg = match signal_type.as_str() {
-                "audio_state" => {
-                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&payload) {
-                        Some(HavenMessage::VoiceChannelAudioState {
-                            server_id: server_id.clone(), channel_id: channel_id.clone(),
-                            muted: v["muted"].as_bool().unwrap_or(false),
-                            deafened: v["deafened"].as_bool().unwrap_or(false),
-                        })
-                    } else { None }
-                }
-                "screen_state" => {
-                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&payload) {
-                        Some(HavenMessage::VoiceChannelScreenState {
-                            server_id: server_id.clone(), channel_id: channel_id.clone(),
-                            enabled: v["enabled"].as_bool().unwrap_or(false),
-                            quality: v["quality"].as_str().map(|s| s.to_string()),
-                        })
-                    } else { None }
-                }
-                "camera_state" => {
-                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&payload) {
-                        Some(HavenMessage::VoiceChannelCameraState {
-                            server_id: server_id.clone(), channel_id: channel_id.clone(),
-                            enabled: v["enabled"].as_bool().unwrap_or(false),
-                        })
-                    } else { None }
-                }
-                _ => None,
-            };
-            if let Some(msg) = plaintext_msg
-                && let Some(state) = server_states.get(&server_id)
-            {
-                let data = serde_json::to_vec(&msg).unwrap_or_default();
-                for member in state.members.keys() {
-                    if super::resolver::same_identity(member, local_peer_str) { continue; }
-                    send_raw_to_identity(ws_cmd_tx, ws_room_peers, member, data.clone());
-                }
-            }
-        }
+        broadcast_vc_state_signal(
+            &signal_type, &payload, &envelope,
+            mls, crypto_store, ws_cmd_tx, ws_room_peers, server_states,
+            &server_id, &channel_id, local_peer_str,
+        );
     } else {
         // Targeted SDP/ICE: Olm encrypted + SendDirect.
         let env_json = serde_json::to_string(&envelope).unwrap_or_default();
         send_encrypted_message(olm, crypto_store, &peer_id, &env_json, event_tx, ws_cmd_tx, ws_room_peers).await;
+    }
+}
+
+/// Build the outbound voice-channel signal envelope. Signal types are
+/// WHITELISTED — an unknown type logs and yields `None`; a known type with an
+/// unparseable payload silently yields `None` (dropped, matching the original
+/// arm-local `return`s).
+fn build_vc_signal_envelope(
+    signal_type: &str,
+    server_id: &str,
+    channel_id: &str,
+    payload: &str,
+) -> Option<MessageEnvelope> {
+    let sid = server_id.to_string();
+    let cid = channel_id.to_string();
+    let parsed = serde_json::from_str::<serde_json::Value>(payload).ok();
+    match signal_type {
+        "sdp_offer" => parsed.map(|v| MessageEnvelope::VoiceChannelSdpOffer {
+            sid, cid, sdp: jstr(&v, "sdp"), target: None,
+        }),
+        "sdp_answer" => parsed.map(|v| MessageEnvelope::VoiceChannelSdpAnswer {
+            sid, cid, sdp: jstr(&v, "sdp"), target: None,
+        }),
+        "ice" => parsed.map(|v| MessageEnvelope::VoiceChannelIce {
+            sid, cid,
+            candidate: jstr(&v, "candidate"),
+            sdp_mid: jstr(&v, "sdpMid"),
+            sdp_mline_index: v["sdpMLineIndex"].as_u64().unwrap_or(0) as u32,
+            target: None,
+        }),
+        "audio_state" => parsed.map(|v| MessageEnvelope::VoiceChannelAudioState {
+            sid, cid,
+            muted: v["muted"].as_bool().unwrap_or(false),
+            deafened: v["deafened"].as_bool().unwrap_or(false),
+            target: None,
+        }),
+        "screen_offer" => parsed.map(|v| MessageEnvelope::VoiceChannelScreenOffer {
+            sid, cid, sdp: jstr(&v, "sdp"), target: None,
+        }),
+        "screen_answer" => parsed.map(|v| MessageEnvelope::VoiceChannelScreenAnswer {
+            sid, cid, sdp: jstr(&v, "sdp"), target: None,
+        }),
+        "screen_ice" => parsed.map(|v| MessageEnvelope::VoiceChannelScreenIce {
+            sid, cid,
+            candidate: jstr(&v, "candidate"),
+            sdp_mid: jstr(&v, "sdpMid"),
+            sdp_mline_index: v["sdpMLineIndex"].as_u64().unwrap_or(0) as u32,
+            role: jstr(&v, "role"),
+            target: None,
+        }),
+        "screen_state" => parsed.map(|v| MessageEnvelope::VoiceChannelScreenState {
+            sid, cid,
+            enabled: v["enabled"].as_bool().unwrap_or(false),
+            target: None,
+            quality: v["quality"].as_str().map(|s| s.to_string()),
+        }),
+        "reneg_offer" => parsed.map(|v| MessageEnvelope::VoiceChannelRenegOffer {
+            sid, cid, sdp: jstr(&v, "sdp"), target: None,
+        }),
+        "reneg_answer" => parsed.map(|v| MessageEnvelope::VoiceChannelRenegAnswer {
+            sid, cid, sdp: jstr(&v, "sdp"), target: None,
+        }),
+        "camera_state" => parsed.map(|v| MessageEnvelope::VoiceChannelCameraState {
+            sid, cid,
+            enabled: v["enabled"].as_bool().unwrap_or(false),
+            target: None,
+        }),
+        _ => {
+            hollow_log!("[HOLLOW-VC] Unknown signal type: {signal_type}");
+            None
+        }
+    }
+}
+
+/// Broadcast a VC state signal (audio/screen/camera state): MLS broadcast when
+/// the server group is held; on failure or no group, plaintext member fan-out.
+#[allow(clippy::too_many_arguments)]
+fn broadcast_vc_state_signal(
+    signal_type: &str,
+    payload: &str,
+    envelope: &MessageEnvelope,
+    mls: &mut Option<MlsManager>,
+    crypto_store: &CryptoStore,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    server_states: &HashMap<String, ServerState>,
+    server_id: &str,
+    channel_id: &str,
+    local_peer_str: &str,
+) {
+    let mls_ok = mls.as_ref().is_some_and(|m| m.has_group(server_id));
+    let mls_sent = mls_ok && send_mls_broadcast(mls.as_mut().unwrap(), ws_cmd_tx, server_id, envelope, crypto_store).is_ok();
+    if !mls_sent {
+        // Plaintext fallback: iterate members.
+        let plaintext_msg = build_vc_plaintext_state(signal_type, server_id, channel_id, payload);
+        if let Some(msg) = plaintext_msg
+            && let Some(state) = server_states.get(server_id)
+        {
+            fan_plaintext_to_members(ws_cmd_tx, ws_room_peers, state, local_peer_str, &msg);
+        }
+    }
+}
+
+/// Plaintext `HavenMessage` twin of a broadcast VC state signal (used only as
+/// the MLS-failure fallback). Non-state types yield `None`.
+fn build_vc_plaintext_state(
+    signal_type: &str,
+    server_id: &str,
+    channel_id: &str,
+    payload: &str,
+) -> Option<HavenMessage> {
+    let parsed = serde_json::from_str::<serde_json::Value>(payload).ok();
+    match signal_type {
+        "audio_state" => parsed.map(|v| HavenMessage::VoiceChannelAudioState {
+            server_id: server_id.to_string(), channel_id: channel_id.to_string(),
+            muted: v["muted"].as_bool().unwrap_or(false),
+            deafened: v["deafened"].as_bool().unwrap_or(false),
+        }),
+        "screen_state" => parsed.map(|v| HavenMessage::VoiceChannelScreenState {
+            server_id: server_id.to_string(), channel_id: channel_id.to_string(),
+            enabled: v["enabled"].as_bool().unwrap_or(false),
+            quality: v["quality"].as_str().map(|s| s.to_string()),
+        }),
+        "camera_state" => parsed.map(|v| HavenMessage::VoiceChannelCameraState {
+            server_id: server_id.to_string(), channel_id: channel_id.to_string(),
+            enabled: v["enabled"].as_bool().unwrap_or(false),
+        }),
+        _ => None,
     }
 }
 

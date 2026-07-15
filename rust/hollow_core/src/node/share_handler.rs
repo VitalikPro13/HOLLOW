@@ -17,7 +17,7 @@ use tokio::sync::mpsc;
 #[allow(unused_imports)]
 use crate::hollow_log;
 use crate::identity::native_identity::NativeKeypair;
-use crate::storage::messages::MessageStore;
+use crate::storage::messages::{MessageStore, StoredShare};
 
 use super::types::{HavenMessage, NetworkEvent, ShareEntryRef, ShareManifest};
 use super::ws_client::WsCommand;
@@ -604,75 +604,93 @@ pub async fn handle_command_share_open_link(
     }
 }
 
+/// Load all share rows for ShareList. Returns None (handler bails silently)
+/// if the store can't be opened or the query fails.
+fn load_share_rows(bundle_keypair: &NativeKeypair) -> Option<Vec<StoredShare>> {
+    let store = open_message_store(bundle_keypair)?;
+    match store.load_shares() {
+        Ok(v) => Some(v),
+        Err(e) => {
+            hollow_log!("[SHARE] load_shares failed: {e}");
+            None
+        }
+    }
+}
+
+/// Auto-clean stale/unknown entries from DB + registry.
+fn cleanup_stale_share_rows(
+    rows: &[StoredShare],
+    registry: &mut ShareRegistry,
+    bundle_keypair: &NativeKeypair,
+) {
+    let store_cleanup = open_message_store(bundle_keypair);
+    for s in rows {
+        let is_stale = s.state == "stale";
+        let is_orphan_unknown = s.file_name == "(unknown)" && s.state == "downloading"
+            && s.chunk_count == 0 && !registry.contains_key(&s.root_hash);
+        if is_stale || is_orphan_unknown {
+            if let Some(ref store) = store_cleanup {
+                let _ = store.delete_share(&s.root_hash);
+            }
+            registry.remove(&s.root_hash);
+        }
+    }
+}
+
+/// Clean orphaned .send_*.tmp files that aren't for any active share.
+fn sweep_orphan_send_temps() {
+    let Ok(dir) = shares_dir() else { return; };
+    let Ok(entries_iter) = std::fs::read_dir(&dir) else { return; };
+    for entry in entries_iter.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with(".send_") && name.ends_with(".tmp") {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// Project one DB row into the UI-facing ShareEntryRef, preferring live
+/// registry chunk counts over the persisted estimate.
+fn share_entry_from_row(s: StoredShare, registry: &ShareRegistry) -> ShareEntryRef {
+    let (chunks_have, chunks_total) = if let Some(state) = registry.get(&s.root_hash) {
+        (state.have.count_set(), state.have.chunk_count)
+    } else {
+        // Not loaded; estimate from completion state.
+        let total = s.chunk_count;
+        let have = if s.state == "completed" { total } else { 0 };
+        (have, total)
+    };
+    ShareEntryRef {
+        root_hash: s.root_hash,
+        file_name: s.file_name,
+        total_size: s.total_size,
+        chunks_have,
+        chunks_total,
+        state: s.state,
+        seeding: s.seeding,
+        disk_path: s.disk_path,
+        bytes_uploaded: s.bytes_uploaded,
+        share_link: s.share_link,
+        created_at: s.created_at,
+        server_id: s.server_id,
+        context_type: s.context_type,
+    }
+}
+
 /// Handle NodeCommand::ShareList.
 pub async fn handle_command_share_list(
     bundle_keypair: &NativeKeypair,
     registry: &mut ShareRegistry,
     event_tx: &mpsc::Sender<NetworkEvent>,
 ) {
-    let rows = {
-        let Some(store) = open_message_store(bundle_keypair) else { return; };
-        match store.load_shares() {
-            Ok(v) => v,
-            Err(e) => {
-                hollow_log!("[SHARE] load_shares failed: {e}");
-                return;
-            }
-        }
-    };
+    let Some(rows) = load_share_rows(bundle_keypair) else { return; };
     // Auto-clean stale/unknown entries from DB + orphaned temp files.
-    {
-        let store_cleanup = open_message_store(bundle_keypair);
-        for s in &rows {
-            let is_stale = s.state == "stale";
-            let is_orphan_unknown = s.file_name == "(unknown)" && s.state == "downloading"
-                && s.chunk_count == 0 && !registry.contains_key(&s.root_hash);
-            if is_stale || is_orphan_unknown {
-                if let Some(ref store) = store_cleanup {
-                    let _ = store.delete_share(&s.root_hash);
-                }
-                registry.remove(&s.root_hash);
-            }
-        }
-    }
-    // Clean orphaned .send_*.tmp files that aren't for any active share.
-    if let Ok(dir) = shares_dir() {
-        if let Ok(entries_iter) = std::fs::read_dir(&dir) {
-            for entry in entries_iter.flatten() {
-                let name = entry.file_name().to_string_lossy().to_string();
-                if name.starts_with(".send_") && name.ends_with(".tmp") {
-                    let _ = std::fs::remove_file(entry.path());
-                }
-            }
-        }
-    }
+    cleanup_stale_share_rows(&rows, registry, bundle_keypair);
+    sweep_orphan_send_temps();
     let entries: Vec<ShareEntryRef> = rows.into_iter()
         .filter(|s| s.state != "stale")
-        .map(|s| {
-        let (chunks_have, chunks_total) = if let Some(state) = registry.get(&s.root_hash) {
-            (state.have.count_set(), state.have.chunk_count)
-        } else {
-            // Not loaded; estimate from completion state.
-            let total = s.chunk_count;
-            let have = if s.state == "completed" { total } else { 0 };
-            (have, total)
-        };
-        ShareEntryRef {
-            root_hash: s.root_hash,
-            file_name: s.file_name,
-            total_size: s.total_size,
-            chunks_have,
-            chunks_total,
-            state: s.state,
-            seeding: s.seeding,
-            disk_path: s.disk_path,
-            bytes_uploaded: s.bytes_uploaded,
-            share_link: s.share_link,
-            created_at: s.created_at,
-            server_id: s.server_id,
-            context_type: s.context_type,
-        }
-    }).collect();
+        .map(|s| share_entry_from_row(s, registry))
+        .collect();
     let _ = event_tx.send(NetworkEvent::ShareList { entries }).await;
 }
 
@@ -925,66 +943,77 @@ pub fn auto_rejoin_seeders(
     };
     let mut joined = 0usize;
     for stored in rows {
-        if stored.state != "completed" || !stored.seeding { continue; }
-        let manifest: ShareManifest = match serde_json::from_str(&stored.manifest_json) {
-            Ok(m) => m,
-            Err(_) => continue,
-        };
-        let Some(disk_path) = stored.disk_path.as_ref() else { continue; };
-        let data_file = match OpenOptions::new().read(true).open(disk_path) {
-            Ok(f) => f,
-            Err(_) => {
-                hollow_log!("[SHARE] auto_rejoin: file missing for {} — marking stale", stored.root_hash);
-                let _ = store.set_share_seeding(&stored.root_hash, false);
-                let _ = store.set_share_state(&stored.root_hash, "stale");
-                continue;
-            }
-        };
-        if stored.encryption_key.len() != 32 { continue; }
-        let mut key = [0u8; 32];
-        key.copy_from_slice(&stored.encryption_key);
-        let mut root = [0u8; 32];
-        match hex::decode(&stored.root_hash) {
-            Ok(b) if b.len() == 32 => root.copy_from_slice(&b),
-            _ => continue,
-        }
-
-        // Full Have bitmap (we have everything — we're a completed seed).
-        let mut have = ChunkBitmap::empty(manifest.chunk_count);
-        for i in 0..manifest.chunk_count { have.set(i); }
-
-        let now_inst = Instant::now();
-        let state = ShareSwarmState {
-            root_hash: root,
-            key,
-            manifest: Some(manifest),
-            file_ext: stored.file_ext,
-            save_dir: stored.save_dir.map(PathBuf::from),
-            have,
-            data_file: Some(data_file),
-            seeding: true,
-            bytes_uploaded: stored.bytes_uploaded,
-            bytes_downloaded: 0,
-            peer_have: HashMap::new(),
-            inflight: HashMap::new(),
-            last_have_broadcast: now_inst.checked_sub(HAVE_REBROADCAST_INTERVAL).unwrap_or(now_inst),
-            speed_samples: Vec::new(),
-            speed_bps: 0,
-            manifest_requested_at: None,
-            last_seeding_emit: now_inst,
-            sequential: false,
-            hidden: false,
-            server_id: stored.server_id,
-            context_type: stored.context_type,
-        };
+        let Some((registry_key, state)) = rebuild_seed_state(stored, &store) else { continue; };
         let room = state.room_id();
-        registry.insert(stored.root_hash.clone(), state);
+        registry.insert(registry_key, state);
         let _ = ws_cmd_tx.send(WsCommand::JoinRoom { room_code: room });
         joined += 1;
     }
     if joined > 0 {
         hollow_log!("[SHARE] auto-rejoined {joined} seeding share(s)");
     }
+}
+
+/// Rebuild the in-memory swarm state for one persisted completed+seeding row.
+/// Returns None to skip the row (not a seed, corrupt fields); a missing
+/// on-disk file additionally flips the row to seeding=0 / state='stale'.
+fn rebuild_seed_state(
+    stored: StoredShare,
+    store: &MessageStore,
+) -> Option<(String, ShareSwarmState)> {
+    if stored.state != "completed" || !stored.seeding { return None; }
+    let manifest: ShareManifest = match serde_json::from_str(&stored.manifest_json) {
+        Ok(m) => m,
+        Err(_) => return None,
+    };
+    let Some(disk_path) = stored.disk_path.as_ref() else { return None; };
+    let data_file = match OpenOptions::new().read(true).open(disk_path) {
+        Ok(f) => f,
+        Err(_) => {
+            hollow_log!("[SHARE] auto_rejoin: file missing for {} — marking stale", stored.root_hash);
+            let _ = store.set_share_seeding(&stored.root_hash, false);
+            let _ = store.set_share_state(&stored.root_hash, "stale");
+            return None;
+        }
+    };
+    if stored.encryption_key.len() != 32 { return None; }
+    let mut key = [0u8; 32];
+    key.copy_from_slice(&stored.encryption_key);
+    let mut root = [0u8; 32];
+    match hex::decode(&stored.root_hash) {
+        Ok(b) if b.len() == 32 => root.copy_from_slice(&b),
+        _ => return None,
+    }
+
+    // Full Have bitmap (we have everything — we're a completed seed).
+    let mut have = ChunkBitmap::empty(manifest.chunk_count);
+    for i in 0..manifest.chunk_count { have.set(i); }
+
+    let now_inst = Instant::now();
+    let state = ShareSwarmState {
+        root_hash: root,
+        key,
+        manifest: Some(manifest),
+        file_ext: stored.file_ext,
+        save_dir: stored.save_dir.map(PathBuf::from),
+        have,
+        data_file: Some(data_file),
+        seeding: true,
+        bytes_uploaded: stored.bytes_uploaded,
+        bytes_downloaded: 0,
+        peer_have: HashMap::new(),
+        inflight: HashMap::new(),
+        last_have_broadcast: now_inst.checked_sub(HAVE_REBROADCAST_INTERVAL).unwrap_or(now_inst),
+        speed_samples: Vec::new(),
+        speed_bps: 0,
+        manifest_requested_at: None,
+        last_seeding_emit: now_inst,
+        sequential: false,
+        hidden: false,
+        server_id: stored.server_id,
+        context_type: stored.context_type,
+    };
+    Some((stored.root_hash, state))
 }
 
 // ── Outbound seed bandwidth bucket ───────────────────────────────────────
@@ -1052,54 +1081,7 @@ pub async fn tick(
     let root_hashes: Vec<String> = registry.keys().cloned().collect();
 
     // 0. Manifest request timeout + seeding progress + stale cleanup.
-    let mut to_remove: Vec<String> = Vec::new();
-    for rh in &root_hashes {
-        let Some(state) = registry.get_mut(rh) else { continue; };
-
-        // Manifest timeout: if no manifest after 10s, emit failure.
-        if state.manifest.is_none() {
-            if let Some(req_at) = state.manifest_requested_at {
-                if now.duration_since(req_at) >= Duration::from_secs(10) {
-                    let _ = event_tx.send(NetworkEvent::ShareFailed {
-                        root_hash: rh.clone(),
-                        error: "No seeders found".to_string(),
-                    }).await;
-                    to_remove.push(rh.clone());
-                }
-            }
-            continue;
-        }
-
-        // Stale file check: if seeding but source file is gone, mark stale.
-        if state.seeding && state.data_file.is_none() {
-            state.seeding = false;
-            if let Some(store) = open_message_store(bundle_keypair) {
-                let _ = store.set_share_seeding(rh, false);
-                let _ = store.set_share_state(rh, "stale");
-            }
-            let _ = event_tx.send(NetworkEvent::ShareSeedingChanged {
-                root_hash: rh.clone(),
-                seeding: false,
-                seeders: 0,
-                leechers: 0,
-                bytes_uploaded: state.bytes_uploaded,
-            }).await;
-            continue;
-        }
-
-        // Periodic seeding progress emit (~every 2s).
-        if state.seeding && now.duration_since(state.last_seeding_emit) >= Duration::from_secs(2) {
-            state.last_seeding_emit = now;
-            let (seeders, leechers) = state.seeder_leecher_counts();
-            let _ = event_tx.send(NetworkEvent::ShareSeedingChanged {
-                root_hash: rh.clone(),
-                seeding: true,
-                seeders,
-                leechers,
-                bytes_uploaded: state.bytes_uploaded,
-            }).await;
-        }
-    }
+    let to_remove = tick_maintenance(registry, &root_hashes, now, event_tx, bundle_keypair).await;
     for rh in &to_remove {
         registry.remove(rh);
     }
@@ -1107,112 +1089,264 @@ pub async fn tick(
     for root_hash in root_hashes {
         if to_remove.contains(&root_hash) { continue; }
         // 1. Have rebroadcast.
-        let do_rebroadcast = registry.get(&root_hash)
-            .map(|s| now.duration_since(s.last_have_broadcast) >= HAVE_REBROADCAST_INTERVAL)
-            .unwrap_or(false);
-        if do_rebroadcast {
-            broadcast_have(registry, ws_cmd_tx, &root_hash).await;
-            if let Some(state) = registry.get_mut(&root_hash) {
-                state.last_have_broadcast = now;
-            }
-        }
+        tick_rebroadcast_have(registry, ws_cmd_tx, &root_hash, now).await;
 
         // 2. Timeout in-flight requests.
-        if let Some(state) = registry.get_mut(&root_hash) {
-            state.inflight.retain(|_, (_, requested_at)| {
-                now.duration_since(*requested_at) < CHUNK_REQUEST_TIMEOUT
-            });
-        }
+        expire_inflight_requests(registry, &root_hash, now);
 
         // 3. Schedule new chunk requests (skip if messaging is busy or share is
         // a pure seed with nothing to fetch, or download hasn't started yet).
         if messaging_active { continue; }
-        let Some(state) = registry.get(&root_hash) else { continue; };
-        if state.have.is_complete() { continue; }
-        let Some(ref manifest) = state.manifest else { continue; };
-        if state.data_file.is_none() { continue; }
-        if state.peer_have.is_empty() { continue; }
+        tick_schedule_requests(registry, ws_cmd_tx, webrtc_peers, event_tx, &root_hash, now).await;
+    }
+}
+
+/// Tick phase 0: per-share maintenance sweep. Returns the root hashes that
+/// should be dropped from the registry (manifest request timed out).
+async fn tick_maintenance(
+    registry: &mut ShareRegistry,
+    root_hashes: &[String],
+    now: Instant,
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    bundle_keypair: &NativeKeypair,
+) -> Vec<String> {
+    let mut to_remove: Vec<String> = Vec::new();
+    for rh in root_hashes {
+        let Some(state) = registry.get_mut(rh) else { continue; };
+        if tick_share_maintenance(state, rh, now, event_tx, bundle_keypair).await {
+            to_remove.push(rh.clone());
+        }
+    }
+    to_remove
+}
+
+/// Maintenance for one share: manifest timeout, stale-file demotion, and the
+/// periodic seeding progress emit. Returns true if the share should be removed.
+async fn tick_share_maintenance(
+    state: &mut ShareSwarmState,
+    rh: &str,
+    now: Instant,
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    bundle_keypair: &NativeKeypair,
+) -> bool {
+    // Manifest timeout: if no manifest after 10s, emit failure.
+    if state.manifest.is_none() {
+        if let Some(req_at) = state.manifest_requested_at {
+            if now.duration_since(req_at) >= Duration::from_secs(10) {
+                let _ = event_tx.send(NetworkEvent::ShareFailed {
+                    root_hash: rh.to_string(),
+                    error: "No seeders found".to_string(),
+                }).await;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Stale file check: if seeding but source file is gone, mark stale.
+    if state.seeding && state.data_file.is_none() {
+        state.seeding = false;
+        if let Some(store) = open_message_store(bundle_keypair) {
+            let _ = store.set_share_seeding(rh, false);
+            let _ = store.set_share_state(rh, "stale");
+        }
+        let _ = event_tx.send(NetworkEvent::ShareSeedingChanged {
+            root_hash: rh.to_string(),
+            seeding: false,
+            seeders: 0,
+            leechers: 0,
+            bytes_uploaded: state.bytes_uploaded,
+        }).await;
+        return false;
+    }
+
+    // Periodic seeding progress emit (~every 2s).
+    if state.seeding && now.duration_since(state.last_seeding_emit) >= Duration::from_secs(2) {
+        state.last_seeding_emit = now;
+        let (seeders, leechers) = state.seeder_leecher_counts();
+        let _ = event_tx.send(NetworkEvent::ShareSeedingChanged {
+            root_hash: rh.to_string(),
+            seeding: true,
+            seeders,
+            leechers,
+            bytes_uploaded: state.bytes_uploaded,
+        }).await;
+    }
+    false
+}
+
+/// Tick phase 1: re-broadcast our Have bitmap every HAVE_REBROADCAST_INTERVAL.
+async fn tick_rebroadcast_have(
+    registry: &mut ShareRegistry,
+    ws_cmd_tx: &mpsc::UnboundedSender<WsCommand>,
+    root_hash: &str,
+    now: Instant,
+) {
+    let do_rebroadcast = registry.get(root_hash)
+        .map(|s| now.duration_since(s.last_have_broadcast) >= HAVE_REBROADCAST_INTERVAL)
+        .unwrap_or(false);
+    if !do_rebroadcast { return; }
+    broadcast_have(registry, ws_cmd_tx, root_hash).await;
+    if let Some(state) = registry.get_mut(root_hash) {
+        state.last_have_broadcast = now;
+    }
+}
+
+/// Tick phase 2: forget in-flight chunk requests older than CHUNK_REQUEST_TIMEOUT
+/// so the rarest-first picker can re-issue against another peer.
+fn expire_inflight_requests(registry: &mut ShareRegistry, root_hash: &str, now: Instant) {
+    if let Some(state) = registry.get_mut(root_hash) {
+        state.inflight.retain(|_, (_, requested_at)| {
+            now.duration_since(*requested_at) < CHUNK_REQUEST_TIMEOUT
+        });
+    }
+}
+
+/// Tick phase 3 for one downloading share: pick needed chunks, assign them to
+/// peers (rarest-first, capped per peer), mark them in-flight and send requests.
+async fn tick_schedule_requests(
+    registry: &mut ShareRegistry,
+    ws_cmd_tx: &mpsc::UnboundedSender<WsCommand>,
+    webrtc_peers: &std::collections::HashSet<String>,
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    root_hash: &str,
+    now: Instant,
+) {
+    let (room, assignments) = {
+        let Some(state) = registry.get(root_hash) else { return; };
+        if state.have.is_complete() { return; }
+        let Some(ref manifest) = state.manifest else { return; };
+        if state.data_file.is_none() { return; }
+        if state.peer_have.is_empty() { return; }
 
         // Request WebRTC connections for peers we know about but aren't connected to.
-        let is_hidden = state.hidden;
-        for peer_id in state.peer_have.keys() {
-            if !webrtc_peers.contains(peer_id.as_str()) {
-                let _ = event_tx.send(NetworkEvent::ShareNeedWebRtc {
-                    peer_id: peer_id.clone(),
-                    hidden: is_hidden,
-                }).await;
-            }
-        }
+        request_missing_webrtc_links(state, webrtc_peers, event_tx).await;
 
-        // Build (chunk_idx → Vec<peer_id_who_has_it>) for chunks we need.
-        let chunk_count = manifest.chunk_count;
-        let is_sequential = state.sequential;
+        let needed = collect_needed_chunks(state, webrtc_peers, manifest.chunk_count);
+        let assignments = assign_chunks_to_peers(needed, &state.inflight);
+        (state.room_id(), assignments)
+    };
 
-        // Sequential mode: find the lowest missing chunk and only look ahead
-        // a limited window so we don't request far-future chunks.
-        let seq_start = if is_sequential {
-            (0..chunk_count).find(|&i| !state.have.has(i)).unwrap_or(chunk_count)
-        } else { 0 };
-        let seq_end = if is_sequential { (seq_start + 64).min(chunk_count) } else { chunk_count };
+    // Mark in-flight + send the requests.
+    mark_chunks_inflight(registry, root_hash, &assignments, now);
+    send_chunk_requests(ws_cmd_tx, &room, root_hash, assignments);
+}
 
-        let mut needed: Vec<(u32, Vec<String>)> = Vec::with_capacity(chunk_count as usize);
-        for idx in seq_start..seq_end {
-            if state.have.has(idx) { continue; }
-            if state.inflight.contains_key(&idx) { continue; }
-            let mut owners: Vec<String> = state.peer_have.iter()
-                .filter_map(|(p, bm)| {
-                    if bm.has(idx) && webrtc_peers.contains(p.as_str()) { Some(p.clone()) } else { None }
-                })
-                .collect();
-            if !owners.is_empty() {
-                owners.sort();
-                needed.push((idx, owners));
-            }
+/// Emit ShareNeedWebRtc for every known swarm peer without a data channel yet.
+async fn request_missing_webrtc_links(
+    state: &ShareSwarmState,
+    webrtc_peers: &std::collections::HashSet<String>,
+    event_tx: &mpsc::Sender<NetworkEvent>,
+) {
+    let is_hidden = state.hidden;
+    for peer_id in state.peer_have.keys() {
+        if !webrtc_peers.contains(peer_id.as_str()) {
+            let _ = event_tx.send(NetworkEvent::ShareNeedWebRtc {
+                peer_id: peer_id.clone(),
+                hidden: is_hidden,
+            }).await;
         }
-        // Rarest-first for normal shares; sequential keeps ascending idx order.
-        if !is_sequential {
-            needed.sort_by_key(|(_, owners)| owners.len());
-        }
+    }
+}
 
-        // Pick chunks until each peer is at MAX_INFLIGHT_PER_PEER.
-        let room = state.room_id();
-        let mut assignments: HashMap<String, Vec<u32>> = HashMap::new();
-        let mut per_peer_inflight: HashMap<String, usize> = HashMap::new();
-        for (peer_id, _ts) in state.inflight.values() {
-            *per_peer_inflight.entry(peer_id.clone()).or_default() += 1;
-        }
+/// The chunk index window to consider this tick. Sequential mode finds the
+/// lowest missing chunk and only looks ahead a limited window so we don't
+/// request far-future chunks; normal mode considers everything.
+fn schedule_window(state: &ShareSwarmState, chunk_count: u32) -> (u32, u32) {
+    let seq_start = if state.sequential {
+        (0..chunk_count).find(|&i| !state.have.has(i)).unwrap_or(chunk_count)
+    } else { 0 };
+    let seq_end = if state.sequential { (seq_start + 64).min(chunk_count) } else { chunk_count };
+    (seq_start, seq_end)
+}
 
-        for (idx, owners) in needed {
-            // Pick the owner with the smallest current backlog.
-            let pick = owners.into_iter().min_by_key(|p| {
-                *per_peer_inflight.get(p).unwrap_or(&0)
-            });
-            let Some(peer_id) = pick else { continue; };
-            let backlog = per_peer_inflight.entry(peer_id.clone()).or_insert(0);
-            if *backlog >= MAX_INFLIGHT_PER_PEER { continue; }
-            *backlog += 1;
-            assignments.entry(peer_id).or_default().push(idx);
+/// Build (chunk_idx → Vec<peer_id_who_has_it>) for chunks we still need.
+/// Rarest-first order for normal shares; sequential keeps ascending idx order.
+fn collect_needed_chunks(
+    state: &ShareSwarmState,
+    webrtc_peers: &std::collections::HashSet<String>,
+    chunk_count: u32,
+) -> Vec<(u32, Vec<String>)> {
+    let (seq_start, seq_end) = schedule_window(state, chunk_count);
+    let mut needed: Vec<(u32, Vec<String>)> = Vec::with_capacity(chunk_count as usize);
+    for idx in seq_start..seq_end {
+        if state.have.has(idx) { continue; }
+        if state.inflight.contains_key(&idx) { continue; }
+        let mut owners: Vec<String> = state.peer_have.iter()
+            .filter_map(|(p, bm)| {
+                if bm.has(idx) && webrtc_peers.contains(p.as_str()) { Some(p.clone()) } else { None }
+            })
+            .collect();
+        if !owners.is_empty() {
+            owners.sort();
+            needed.push((idx, owners));
         }
+    }
+    if !state.sequential {
+        needed.sort_by_key(|(_, owners)| owners.len());
+    }
+    needed
+}
 
-        // Mark in-flight + send the requests.
-        if let Some(state_mut) = registry.get_mut(&root_hash) {
-            for (peer_id, indices) in &assignments {
-                for idx in indices {
-                    state_mut.inflight.insert(*idx, (peer_id.clone(), now));
-                }
-            }
-        }
+/// Assign each needed chunk to the owning peer with the smallest backlog,
+/// capping every peer at MAX_INFLIGHT_PER_PEER outstanding requests.
+fn assign_chunks_to_peers(
+    needed: Vec<(u32, Vec<String>)>,
+    inflight: &HashMap<u32, (String, Instant)>,
+) -> HashMap<String, Vec<u32>> {
+    let mut assignments: HashMap<String, Vec<u32>> = HashMap::new();
+    let mut per_peer_inflight: HashMap<String, usize> = HashMap::new();
+    for (peer_id, _ts) in inflight.values() {
+        *per_peer_inflight.entry(peer_id.clone()).or_default() += 1;
+    }
+
+    for (idx, owners) in needed {
+        // Pick the owner with the smallest current backlog.
+        let pick = owners.into_iter().min_by_key(|p| {
+            *per_peer_inflight.get(p).unwrap_or(&0)
+        });
+        let Some(peer_id) = pick else { continue; };
+        let backlog = per_peer_inflight.entry(peer_id.clone()).or_insert(0);
+        if *backlog >= MAX_INFLIGHT_PER_PEER { continue; }
+        *backlog += 1;
+        assignments.entry(peer_id).or_default().push(idx);
+    }
+    assignments
+}
+
+/// Record the freshly assigned chunk requests as in-flight.
+fn mark_chunks_inflight(
+    registry: &mut ShareRegistry,
+    root_hash: &str,
+    assignments: &HashMap<String, Vec<u32>>,
+    now: Instant,
+) {
+    if let Some(state_mut) = registry.get_mut(root_hash) {
         for (peer_id, indices) in assignments {
-            if let Ok(payload) = serde_json::to_vec(&HavenMessage::ShareChunkRequest {
-                root_hash: root_hash.clone(),
-                indices,
-            }) {
-                let _ = ws_cmd_tx.send(WsCommand::SendDirect {
-                    room_code: room.clone(),
-                    target_peer: peer_id,
-                    data: payload,
-                });
+            for idx in indices {
+                state_mut.inflight.insert(*idx, (peer_id.clone(), now));
             }
+        }
+    }
+}
+
+/// Send one ShareChunkRequest per assigned peer via direct room routing.
+fn send_chunk_requests(
+    ws_cmd_tx: &mpsc::UnboundedSender<WsCommand>,
+    room: &str,
+    root_hash: &str,
+    assignments: HashMap<String, Vec<u32>>,
+) {
+    for (peer_id, indices) in assignments {
+        if let Ok(payload) = serde_json::to_vec(&HavenMessage::ShareChunkRequest {
+            root_hash: root_hash.to_string(),
+            indices,
+        }) {
+            let _ = ws_cmd_tx.send(WsCommand::SendDirect {
+                room_code: room.to_string(),
+                target_peer: peer_id,
+                data: payload,
+            });
         }
     }
 }
@@ -1348,35 +1482,51 @@ pub async fn handle_envelope_share_chunk_request(
     let chunk_size = state.manifest.as_ref().map(|m| m.chunk_size).unwrap_or(CHUNK_SIZE);
     let total_size = state.manifest.as_ref().map(|m| m.total_size).unwrap_or(0);
     let chunk_count = state.manifest.as_ref().map(|m| m.chunk_count).unwrap_or(0);
-    let mut bytes_served = 0u64;
+    let key = state.key;
     let Some(file) = state.data_file.as_mut() else { return; };
+    let bytes_served = serve_chunk_requests(
+        file, &state.have, &key, seed_budget, event_tx,
+        prefer_webrtc, sender_peer_id, &root_hash, indices,
+        chunk_size, total_size, chunk_count,
+    ).await;
+    state.bytes_uploaded += bytes_served;
+    if bytes_served > 0
+        && let Some(store) = open_message_store(bundle_keypair)
+    {
+        let _ = store.add_share_bytes_uploaded(&root_hash, bytes_served);
+    }
+}
+
+/// Serve the requested chunk indices to one peer over WebRTC, respecting the
+/// seed bandwidth budget. Returns the total ciphertext bytes served.
+#[allow(clippy::too_many_arguments)]
+async fn serve_chunk_requests(
+    file: &mut File,
+    have: &ChunkBitmap,
+    key: &[u8; 32],
+    seed_budget: &mut SeedBudget,
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    prefer_webrtc: bool,
+    sender_peer_id: &str,
+    root_hash: &str,
+    indices: Vec<u32>,
+    chunk_size: u32,
+    total_size: u64,
+    chunk_count: u32,
+) -> u64 {
+    let mut bytes_served = 0u64;
     for idx in indices {
         if idx >= chunk_count { continue; }
-        if !state.have.has(idx) { continue; }
+        if !have.has(idx) { continue; }
         // Bandwidth cap: defer this chunk to a later request if we don't have
         // tokens. The peer will retry via the scheduler timeout path.
-        let want_pre = if idx == chunk_count - 1 {
-            (total_size - idx as u64 * chunk_size as u64) as usize
-        } else {
-            chunk_size as usize
-        };
-        if !seed_budget.try_consume((want_pre + 16) as u64) {
+        let want = chunk_plain_len(idx, chunk_count, total_size, chunk_size);
+        if !seed_budget.try_consume((want + 16) as u64) {
             break;
         }
-        let offset = idx as u64 * chunk_size as u64;
-        let want = if idx == chunk_count - 1 {
-            (total_size - offset) as usize
-        } else {
-            chunk_size as usize
-        };
         // Read plaintext from original file, encrypt on-the-fly.
-        let mut pt_buf = vec![0u8; want];
-        if file.seek(SeekFrom::Start(offset)).is_err() { continue; }
-        if file.read_exact(&mut pt_buf).is_err() { continue; }
-        let buf = match encrypt_chunk(&state.key, idx, &pt_buf) {
-            Ok(ct) => ct,
-            Err(_) => continue,
-        };
+        let offset = idx as u64 * chunk_size as u64;
+        let Some(buf) = read_encrypt_chunk(file, key, idx, want, offset) else { continue; };
         let ct_len = buf.len();
 
         if !prefer_webrtc {
@@ -1384,13 +1534,9 @@ pub async fn handle_envelope_share_chunk_request(
             continue;
         }
 
-        let short_root = &root_hash[..32];
-        let transfer_id = format!("{short_root}:{idx}");
-        let temp_path = match shares_dir() {
-            Ok(d) => d.join(format!(".send_{short_root}_{idx}.tmp")),
-            Err(_) => continue,
+        let Some((transfer_id, temp_path)) = stage_chunk_for_webrtc(root_hash, idx, &buf) else {
+            continue;
         };
-        if std::fs::write(&temp_path, &buf).is_err() { continue; }
         let _ = event_tx.send(NetworkEvent::WebRtcSendFile {
             peer_id: sender_peer_id.to_string(),
             transfer_id,
@@ -1402,12 +1548,44 @@ pub async fn handle_envelope_share_chunk_request(
         }).await;
         bytes_served += ct_len as u64;
     }
-    state.bytes_uploaded += bytes_served;
-    if bytes_served > 0
-        && let Some(store) = open_message_store(bundle_keypair)
-    {
-        let _ = store.add_share_bytes_uploaded(&root_hash, bytes_served);
+    bytes_served
+}
+
+/// Plaintext byte length of chunk `idx` (the final chunk may be short).
+fn chunk_plain_len(idx: u32, chunk_count: u32, total_size: u64, chunk_size: u32) -> usize {
+    if idx == chunk_count - 1 {
+        (total_size - idx as u64 * chunk_size as u64) as usize
+    } else {
+        chunk_size as usize
     }
+}
+
+/// Read `want` plaintext bytes at `offset` and encrypt them as chunk `idx`.
+/// Returns None on any seek/read/encrypt failure (caller skips the chunk).
+fn read_encrypt_chunk(
+    file: &mut File,
+    key: &[u8; 32],
+    idx: u32,
+    want: usize,
+    offset: u64,
+) -> Option<Vec<u8>> {
+    let mut pt_buf = vec![0u8; want];
+    if file.seek(SeekFrom::Start(offset)).is_err() { return None; }
+    if file.read_exact(&mut pt_buf).is_err() { return None; }
+    encrypt_chunk(key, idx, &pt_buf).ok()
+}
+
+/// Stage one encrypted chunk to a `.send_*.tmp` file for the WebRTC send
+/// pipeline. Returns (transfer_id, temp_path) or None on failure.
+fn stage_chunk_for_webrtc(root_hash: &str, idx: u32, buf: &[u8]) -> Option<(String, PathBuf)> {
+    let short_root = &root_hash[..32];
+    let transfer_id = format!("{short_root}:{idx}");
+    let temp_path = match shares_dir() {
+        Ok(d) => d.join(format!(".send_{short_root}_{idx}.tmp")),
+        Err(_) => return None,
+    };
+    if std::fs::write(&temp_path, buf).is_err() { return None; }
+    Some((transfer_id, temp_path))
 }
 
 async fn finalize_completed_download(
@@ -1423,8 +1601,28 @@ async fn finalize_completed_download(
         None => match shares_dir() { Ok(d) => d, Err(_) => return },
     };
     let partial = partial_path_in(&dir, root_hash);
+    let final_p = unique_final_path(&dir, file_name);
+    if let Some(s) = registry.get_mut(root_hash) { s.data_file = None; }
+    if let Err(e) = std::fs::rename(&partial, &final_p) {
+        hollow_log!("[SHARE] rename .partial -> final failed: {e}");
+        return;
+    }
+    let is_hidden = registry.get(root_hash).map(|s| s.hidden).unwrap_or(false);
+    persist_share_completion(bundle_keypair, root_hash, &final_p, is_hidden);
+    if let Some(s) = registry.get_mut(root_hash) {
+        s.data_file = OpenOptions::new().read(true).open(&final_p).ok();
+        s.seeding = !is_hidden;
+    }
+    let _ = event_tx.send(NetworkEvent::ShareCompleted {
+        root_hash: root_hash.to_string(),
+        disk_path: final_p.to_string_lossy().to_string(),
+    }).await;
+}
+
+/// Final download path for `file_name` inside `dir`, appending " (1)", " (2)",
+/// ... before the extension to avoid collisions with existing files.
+fn unique_final_path(dir: &std::path::Path, file_name: &str) -> PathBuf {
     let mut final_p = dir.join(file_name);
-    // Avoid collisions: append (1), (2), ... if file already exists.
     if final_p.exists() {
         let stem = std::path::Path::new(file_name)
             .file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
@@ -1439,27 +1637,23 @@ async fn finalize_completed_download(
             if !final_p.exists() { break; }
         }
     }
-    if let Some(s) = registry.get_mut(root_hash) { s.data_file = None; }
-    if let Err(e) = std::fs::rename(&partial, &final_p) {
-        hollow_log!("[SHARE] rename .partial -> final failed: {e}");
-        return;
-    }
-    let is_hidden = registry.get(root_hash).map(|s| s.hidden).unwrap_or(false);
+    final_p
+}
+
+/// Persist download completion to the DB. Hidden shares (channel files) don't
+/// auto-seed — the receiver opts in via "Keep & Seed".
+fn persist_share_completion(
+    bundle_keypair: &NativeKeypair,
+    root_hash: &str,
+    final_p: &std::path::Path,
+    is_hidden: bool,
+) {
     if let Some(store) = open_message_store(bundle_keypair) {
         let _ = store.mark_share_complete(root_hash, &final_p.to_string_lossy(), now_unix_secs() as i64);
-        // Hidden shares (channel files) don't auto-seed — receiver opts in via "Keep & Seed".
         if !is_hidden {
             let _ = store.set_share_seeding(root_hash, true);
         }
     }
-    if let Some(s) = registry.get_mut(root_hash) {
-        s.data_file = OpenOptions::new().read(true).open(&final_p).ok();
-        s.seeding = !is_hidden;
-    }
-    let _ = event_tx.send(NetworkEvent::ShareCompleted {
-        root_hash: root_hash.to_string(),
-        disk_path: final_p.to_string_lossy().to_string(),
-    }).await;
 }
 
 pub async fn handle_envelope_share_chunk_response(

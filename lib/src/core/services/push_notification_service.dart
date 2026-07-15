@@ -257,159 +257,209 @@ Future<void> _firebaseBackgroundHandler(RemoteMessage message) async {
   // DEVICE id; a friend who DMs from two devices would otherwise create two
   // separate cards (and chat-route `dismissPeerNotification(friend.master)` —
   // keyed on master — wouldn't clear them). Resolve device→master so one person =
-  // one card. getPushProfile (above/below) warms the Rust resolver from DB links,
-  // so identityFor resolves correctly here; single-device → returns sender as-is.
+  // one card. getPushProfile (in _resolveDmPushProfile) warms the Rust resolver
+  // from DB links, so identityFor resolves correctly there; single-device →
+  // returns sender as-is.
   String personKey = sender;
 
   if (rustReady) {
-    try {
-      final profile = await network_api.getPushProfile(peerId: sender);
-      await _pushLog('getPushProfile: name=${profile?.displayName}, hasAvatar=${profile?.avatarBytes != null}');
-      if (profile != null && profile.displayName.isNotEmpty) {
-        displayName = profile.displayName;
-      }
-      avatarBytes = profile?.avatarBytes;
-      // Resolve AFTER getPushProfile (it warmed the resolver).
-      try {
-        final m = await network_api.identityFor(peerId: sender);
-        if (m.isNotEmpty) personKey = m;
-      } catch (_) {}
-    } catch (e) {
-      await _pushLog('getPushProfile FAILED: $e');
-    }
+    (displayName, avatarBytes, personKey) = await _resolveDmPushProfile(sender);
   }
 
   // Tier 2: fetch + decrypt the message content BEFORE showing the banner so the
   // user sees a correct, populated notification on its first appearance.
   bool contentShown = false;
 
-  // Android keeps the FULL node registered while backgrounded (the process
-  // survives), so `startFetchNode` refuses to start ("Full node is running")
-  // and EVERY backgrounded DM push used to degrade to the "Sent you a
-  // message" placeholder. Nudge the LIVE node instead: it (re)joins the DM
-  // room (the relay replays the buffered ciphertext on join; a doze-killed
-  // WS reconnects via the queued command), decrypts, persists, and the MAIN
-  // isolate — alive, since the node is — posts the real content notification
-  // through the normal routing (mute + message-id dedup respected). This
-  // handler then only confirms delivery and stays silent; the placeholder
-  // remains the timeout fallback.
   bool liveNodeHandled = false;
   if (rustReady && Platform.isAndroid) {
-    try {
-      if (await network_api.nudgeLiveDmFetch(senderPeerId: sender)) {
-        await _pushLog('Live node running — nudged DM room join, waiting for arrival');
-        final arrived = await _waitForLiveDmArrival(personKey);
-        await _pushLog(arrived
-            ? 'Live node delivered the DM — main isolate owns the banner'
-            : 'Live node did not deliver in time — falling back');
-        // The fetch node cannot run while the full node is registered, so
-        // this path is terminal either way; on timeout the generic fallback
-        // below still fires (same as before this fix).
-        liveNodeHandled = true;
-        contentShown = arrived;
-      }
-    } catch (e) {
-      await _pushLog('Live-node nudge FAILED: $e');
-    }
+    final (handled, arrived) = await _tryLiveDmNudge(sender, personKey);
+    liveNodeHandled = handled;
+    // arrived is only ever true when handled is (the helper returns
+    // (false, false) on a false/failed nudge), so this matches the original
+    // "set contentShown only inside the nudged branch" flow exactly.
+    contentShown = arrived;
   }
 
   if (rustReady && !liveNodeHandled) {
-    try {
-      await _pushLog('Starting fetch for $sender...');
-      // The relay replays buffered offline messages immediately on join, so the
-      // fetch node collects them within ~1-1.5s (short idle window in fetch.rs);
-      // the timeout only bounds the empty case. Kept well under Android's
-      // background window.
-      final messages = await network_api.startFetchNode(
-        senderPeerId: sender,
-        timeoutSecs: 12,
-      );
-      await _pushLog('Fetch returned ${messages.length} messages');
-      if (messages.isNotEmpty) {
-        // FIFO order — oldest first. Truncate each, then merge with previously
-        // cached lines (keyed by message_id so edits replace, not stack).
-        // Image DMs show a lightweight "📷 Image" line — NOT a BigPicture
-        // preview. The image still arrives (fetch decrypts + writes it to disk
-        // and inserts the DB row); we just skip rendering the photo in the
-        // banner because the BigPicture path (decode + downscale on the
-        // notification thread) made the whole notification noticeably slow. An
-        // image DM whose text is the "[file:<id>]" sentinel OR that carries an
-        // image_path is rendered as the "📷 Image" placeholder; a captioned
-        // image shows its caption text (the caption is the real message text).
-        // A captionless image's text is the "[file:<id>]" sentinel → "📷 Image".
-        // A captioned image carries the real caption as its text AND has its
-        // image_path attached (the fetch merges the inlined-image path onto the
-        // caption entry by message_id), so prefix the caption with 📷 to signal
-        // the attachment: "📷 <caption>". Plain text messages have no image_path
-        // → shown as-is. The 📷 always means "there's a photo here."
-        String previewText(network_api.FetchedMessage m) {
-          if (m.text.isEmpty || m.text.startsWith('[file:')) {
-            return '📷 Image';
-          }
-          final clipped =
-              m.text.length > 200 ? '${m.text.substring(0, 200)}...' : m.text;
-          return m.imagePath != null ? '📷 $clipped' : clipped;
-        }
-
-        final batch = messages
-            .map((m) => MapEntry(m.messageId, previewText(m)))
-            .toList();
-        final texts = await _accumulateLines(personKey, batch);
-
-        // iOS: the APNs alert banner (rewritten by the NSE to name+avatar) is
-        // ALREADY on screen — it grabbed attention. Remove it now and post ONE
-        // silent content banner in its place so the user ends up with a single
-        // per-peer notification that swapped generic → real text, never two
-        // stacked. The APNs notification's identifier is the apns-collapse-id
-        // (the sidecar set it to _iosCollapseId(sender)); cancel by that exact
-        // integer. The content post is SILENT (no re-buzz) since the alert
-        // already sounded. On Android this is one alerting post (no prior
-        // banner to replace — the handler is the first thing that shows).
-        final iosReplace = Platform.isIOS;
-        if (iosReplace) {
-          try {
-            await FlutterLocalNotificationsPlugin()
-                .cancel(_iosCollapseId(sender));
-            await _pushLog('iOS: cancelled APNs banner id=${_iosCollapseId(sender)} (person=$personKey)');
-          } catch (e) {
-            await _pushLog('iOS: cancel APNs banner failed: $e');
-          }
-        }
-
-        // First (and only) post on the happy path — already populated.
-        // No imagePath: BigPicture is intentionally omitted for speed (see above).
-        await _showNotification(
-          sender: personKey,
-          title: displayName,
-          body: texts.last,
-          lines: texts,
-          avatarBytes: avatarBytes,
-          // iOS content banner is silent (alert already sounded); Android alerts.
-          silent: iosReplace,
-        );
-        contentShown = true;
-        await _pushLog(
-            'Populated notification shown with ${texts.length} line(s)');
-      }
-    } catch (e) {
-      await _pushLog('Fetch FAILED: $e');
-    }
+    contentShown = await _fetchAndShowDmContent(
+        sender, personKey, displayName, avatarBytes);
   }
 
-  // Fallback: only if we couldn't show real content (fetch failed/empty/timed
-  // out, or Rust never initialized).
-  //
-  // iOS: the NSE has ALREADY shown a name+avatar banner ("Sent you a message")
-  // from the same push. Posting our own generic banner here would create a
-  // SECOND entry. So on iOS we leave the NSE banner standing and post nothing —
-  // the message still synced to the DB via the fetch (when it ran), it's just
-  // not in the banner. This keeps the single-banner guarantee on the failure
-  // path too.
-  //
-  // Android: the background handler is the ONLY source of a banner (there's no
-  // NSE), so we must post the name+avatar + generic-body fallback — never a
-  // silent miss.
-  if (!contentShown && !Platform.isIOS) {
+  await _showDmFallbackIfNeeded(
+      contentShown, personKey, displayName, avatarBytes);
+
+  await _pushLog('Handler complete');
+}
+
+/// Resolve the cached profile (display name + avatar) and the per-PERSON
+/// notification key for [sender]. Returns (displayName, avatarBytes,
+/// personKey) — defaults (truncated peer id / null / sender) on any failure.
+Future<(String, Uint8List?, String)> _resolveDmPushProfile(
+    String sender) async {
+  String displayName = _truncatePeerId(sender);
+  Uint8List? avatarBytes;
+  String personKey = sender;
+  try {
+    final profile = await network_api.getPushProfile(peerId: sender);
+    await _pushLog('getPushProfile: name=${profile?.displayName}, hasAvatar=${profile?.avatarBytes != null}');
+    if (profile != null && profile.displayName.isNotEmpty) {
+      displayName = profile.displayName;
+    }
+    avatarBytes = profile?.avatarBytes;
+    // Resolve AFTER getPushProfile (it warmed the resolver).
+    try {
+      final m = await network_api.identityFor(peerId: sender);
+      if (m.isNotEmpty) personKey = m;
+    } catch (_) {}
+  } catch (e) {
+    await _pushLog('getPushProfile FAILED: $e');
+  }
+  return (displayName, avatarBytes, personKey);
+}
+
+/// Android keeps the FULL node registered while backgrounded (the process
+/// survives), so `startFetchNode` refuses to start ("Full node is running")
+/// and EVERY backgrounded DM push used to degrade to the "Sent you a
+/// message" placeholder. Nudge the LIVE node instead: it (re)joins the DM
+/// room (the relay replays the buffered ciphertext on join; a doze-killed
+/// WS reconnects via the queued command), decrypts, persists, and the MAIN
+/// isolate — alive, since the node is — posts the real content notification
+/// through the normal routing (mute + message-id dedup respected). This
+/// handler then only confirms delivery and stays silent; the placeholder
+/// remains the timeout fallback.
+///
+/// Returns (liveNodeHandled, arrived). The fetch node cannot run while the
+/// full node is registered, so a handled nudge is terminal either way; on
+/// timeout the generic fallback in the caller still fires (same as before
+/// this fix).
+Future<(bool, bool)> _tryLiveDmNudge(String sender, String personKey) async {
+  try {
+    if (await network_api.nudgeLiveDmFetch(senderPeerId: sender)) {
+      await _pushLog('Live node running — nudged DM room join, waiting for arrival');
+      final arrived = await _waitForLiveDmArrival(personKey);
+      await _pushLog(arrived
+          ? 'Live node delivered the DM — main isolate owns the banner'
+          : 'Live node did not deliver in time — falling back');
+      return (true, arrived);
+    }
+  } catch (e) {
+    await _pushLog('Live-node nudge FAILED: $e');
+  }
+  return (false, false);
+}
+
+/// Notification preview line for one fetched DM.
+/// Image DMs show a lightweight "📷 Image" line — NOT a BigPicture
+/// preview. The image still arrives (fetch decrypts + writes it to disk
+/// and inserts the DB row); we just skip rendering the photo in the
+/// banner because the BigPicture path (decode + downscale on the
+/// notification thread) made the whole notification noticeably slow. An
+/// image DM whose text is the "[file:<id>]" sentinel OR that carries an
+/// image_path is rendered as the "📷 Image" placeholder; a captioned
+/// image shows its caption text (the caption is the real message text).
+/// A captionless image's text is the "[file:<id>]" sentinel → "📷 Image".
+/// A captioned image carries the real caption as its text AND has its
+/// image_path attached (the fetch merges the inlined-image path onto the
+/// caption entry by message_id), so prefix the caption with 📷 to signal
+/// the attachment: "📷 <caption>". Plain text messages have no image_path
+/// → shown as-is. The 📷 always means "there's a photo here."
+String _dmPreviewText(network_api.FetchedMessage m) {
+  if (m.text.isEmpty || m.text.startsWith('[file:')) {
+    return '📷 Image';
+  }
+  final clipped =
+      m.text.length > 200 ? '${m.text.substring(0, 200)}...' : m.text;
+  return m.imagePath != null ? '📷 $clipped' : clipped;
+}
+
+/// iOS happy path: the APNs alert banner (rewritten by the NSE to name+avatar)
+/// is ALREADY on screen — it grabbed attention. Remove it now and post ONE
+/// silent content banner in its place so the user ends up with a single
+/// per-peer notification that swapped generic → real text, never two
+/// stacked. The APNs notification's identifier is the apns-collapse-id
+/// (the sidecar set it to _iosCollapseId(sender)); cancel by that exact
+/// integer. The content post is SILENT (no re-buzz) since the alert
+/// already sounded. On Android this is one alerting post (no prior
+/// banner to replace — the handler is the first thing that shows).
+Future<void> _cancelIosDmApnsBanner(String sender, String personKey) async {
+  try {
+    await FlutterLocalNotificationsPlugin()
+        .cancel(_iosCollapseId(sender));
+    await _pushLog('iOS: cancelled APNs banner id=${_iosCollapseId(sender)} (person=$personKey)');
+  } catch (e) {
+    await _pushLog('iOS: cancel APNs banner failed: $e');
+  }
+}
+
+/// Tier 2 DM path: fetch + decrypt the buffered ciphertext and post the ONE
+/// populated notification. Returns true when real content was shown.
+Future<bool> _fetchAndShowDmContent(String sender, String personKey,
+    String displayName, Uint8List? avatarBytes) async {
+  try {
+    await _pushLog('Starting fetch for $sender...');
+    // The relay replays buffered offline messages immediately on join, so the
+    // fetch node collects them within ~1-1.5s (short idle window in fetch.rs);
+    // the timeout only bounds the empty case. Kept well under Android's
+    // background window.
+    final messages = await network_api.startFetchNode(
+      senderPeerId: sender,
+      timeoutSecs: 12,
+    );
+    await _pushLog('Fetch returned ${messages.length} messages');
+    if (messages.isNotEmpty) {
+      // FIFO order — oldest first. Truncate each (see _dmPreviewText), then
+      // merge with previously cached lines (keyed by message_id so edits
+      // replace, not stack).
+      final batch = messages
+          .map((m) => MapEntry(m.messageId, _dmPreviewText(m)))
+          .toList();
+      final texts = await _accumulateLines(personKey, batch);
+
+      // iOS: swap the NSE banner for the populated one (see helper).
+      final iosReplace = Platform.isIOS;
+      if (iosReplace) {
+        await _cancelIosDmApnsBanner(sender, personKey);
+      }
+
+      // First (and only) post on the happy path — already populated.
+      // No imagePath: BigPicture is intentionally omitted for speed (see
+      // _dmPreviewText).
+      await _showNotification(
+        sender: personKey,
+        title: displayName,
+        body: texts.last,
+        lines: texts,
+        avatarBytes: avatarBytes,
+        // iOS content banner is silent (alert already sounded); Android alerts.
+        silent: iosReplace,
+      );
+      await _pushLog(
+          'Populated notification shown with ${texts.length} line(s)');
+      return true;
+    }
+  } catch (e) {
+    await _pushLog('Fetch FAILED: $e');
+  }
+  return false;
+}
+
+/// Fallback: only if we couldn't show real content (fetch failed/empty/timed
+/// out, or Rust never initialized).
+///
+/// iOS: the NSE has ALREADY shown a name+avatar banner ("Sent you a message")
+/// from the same push. Posting our own generic banner here would create a
+/// SECOND entry. So on iOS we leave the NSE banner standing and post nothing —
+/// the message still synced to the DB via the fetch (when it ran), it's just
+/// not in the banner. This keeps the single-banner guarantee on the failure
+/// path too.
+///
+/// Android: the background handler is the ONLY source of a banner (there's no
+/// NSE), so we must post the name+avatar + generic-body fallback — never a
+/// silent miss.
+Future<void> _showDmFallbackIfNeeded(bool contentShown, String personKey,
+    String displayName, Uint8List? avatarBytes) async {
+  if (contentShown) return;
+  if (!Platform.isIOS) {
     await _showNotification(
       sender: personKey,
       title: displayName,
@@ -417,11 +467,9 @@ Future<void> _firebaseBackgroundHandler(RemoteMessage message) async {
       avatarBytes: avatarBytes,
     );
     await _pushLog('Fallback notification shown: $displayName');
-  } else if (!contentShown) {
+  } else {
     await _pushLog('iOS: no content — leaving NSE banner as-is (no double post)');
   }
-
-  await _pushLog('Handler complete');
 }
 
 /// Initialize Rust FFI in the background isolate. CRITICAL: Android reuses the
@@ -576,17 +624,8 @@ Future<void> _handleChannelWake(RemoteMessage message) async {
   String channelName = '';
   String notifLevel = 'all';
   if (rustReady) {
-    try {
-      final meta = await network_api.getPushChannelMeta(
-          serverId: server, channelId: channel);
-      if (meta != null) {
-        serverName = meta.serverName;
-        channelName = meta.channelName;
-        notifLevel = meta.notifLevel;
-      }
-    } catch (e) {
-      await _pushLog('getPushChannelMeta FAILED: $e');
-    }
+    (serverName, channelName, notifLevel) =
+        await _loadChannelWakeMeta(server, channel);
   }
   if (notifLevel == 'nothing' || (notifLevel == 'mentions' && !mention)) {
     // Muted locally — the relay-side prefs were stale. Android data pushes are
@@ -597,148 +636,264 @@ Future<void> _handleChannelWake(RemoteMessage message) async {
     return;
   }
 
-  // Android + full node still registered (backgrounded app): the fetch node
-  // cannot start — nudge the LIVE node to rejoin the server room instead (the
-  // relay replays the buffered channel ciphertext on join; a doze-killed WS
-  // reconnects via the queued command). The MAIN isolate then posts the real
-  // per-channel notification through the normal routing (prefs + mention
-  // filtering respected). Mirrors the DM nudge path.
   bool liveNodeHandled = false;
   if (rustReady && Platform.isAndroid) {
-    try {
-      if (await network_api.nudgeLiveRoomJoin(roomCode: server)) {
-        await _pushLog('channel_wake: live node running — nudged server room join');
-        final arrived = await _waitForLiveChannelArrival(server, channel);
-        await _pushLog(arrived
-            ? 'channel_wake: live node delivered — main isolate owns the banner'
-            : 'channel_wake: live node did not deliver in time — fallback');
-        liveNodeHandled = true;
-        if (arrived) return;
-        // Timeout: fall through to the generic fallback below (the fetch
-        // node cannot run while the full node is registered).
-      }
-    } catch (e) {
-      await _pushLog('channel_wake: live-node nudge FAILED: $e');
-    }
+    final (handled, arrived) = await _tryLiveChannelNudge(server, channel);
+    liveNodeHandled = handled;
+    if (arrived) return;
+    // Timeout while handled: fall through to the generic fallback below (the
+    // fetch node cannot run while the full node is registered).
   }
 
-  // Tier 2: fetch the buffered channel ciphertext + decrypt (MLS / public).
-  // The relay replays the whole server-room buffer, so one wake often yields
-  // messages for SEVERAL channels — group and post per channel.
-  final byChannel = <String, List<network_api.FetchedMessage>>{};
+  var byChannel = <String, List<network_api.FetchedMessage>>{};
   if (rustReady && !liveNodeHandled) {
-    try {
-      final messages = await network_api.startFetchNode(
-        senderPeerId: sender.isEmpty ? server : sender,
-        timeoutSecs: 12,
-        serverRoom: server,
-      );
-      await _pushLog('channel fetch returned ${messages.length} message(s)');
-      for (final m in messages) {
-        final cid = m.channelId;
-        if (cid == null || m.serverId != server) continue;
-        byChannel.putIfAbsent(cid, () => []).add(m);
-      }
-    } catch (e) {
-      await _pushLog('channel fetch FAILED: $e');
-    }
+    byChannel = await _fetchChannelWakeMessages(sender, server);
   }
 
+  // Shared display-name cache across the posting loop AND the fallback (one
+  // getPushProfile per sender for the whole wake).
   final profileNames = <String, String>{};
-  Future<String> nameOf(String peerId) async {
-    final cached = profileNames[peerId];
-    if (cached != null) return cached;
-    var name = _truncatePeerId(peerId);
+
+  final posted = await _postChannelWakeBanners(
+    byChannel: byChannel,
+    server: server,
+    channel: channel,
+    serverName: serverName,
+    channelName: channelName,
+    notifLevel: notifLevel,
+    mention: mention,
+    rustReady: rustReady,
+    profileNames: profileNames,
+  );
+
+  if (!posted) {
+    await _showChannelWakeFallback(
+      sender: sender,
+      server: server,
+      channel: channel,
+      serverName: serverName,
+      channelName: channelName,
+      mention: mention,
+      profileNames: profileNames,
+    );
+  }
+}
+
+/// Resolve (serverName, channelName, notifLevel) for the wake's triggering
+/// channel from SQLCipher; defaults ('', '', 'all') on failure.
+Future<(String, String, String)> _loadChannelWakeMeta(
+    String server, String channel) async {
+  String serverName = '';
+  String channelName = '';
+  String notifLevel = 'all';
+  try {
+    final meta = await network_api.getPushChannelMeta(
+        serverId: server, channelId: channel);
+    if (meta != null) {
+      serverName = meta.serverName;
+      channelName = meta.channelName;
+      notifLevel = meta.notifLevel;
+    }
+  } catch (e) {
+    await _pushLog('getPushChannelMeta FAILED: $e');
+  }
+  return (serverName, channelName, notifLevel);
+}
+
+/// Android + full node still registered (backgrounded app): the fetch node
+/// cannot start — nudge the LIVE node to rejoin the server room instead (the
+/// relay replays the buffered channel ciphertext on join; a doze-killed WS
+/// reconnects via the queued command). The MAIN isolate then posts the real
+/// per-channel notification through the normal routing (prefs + mention
+/// filtering respected). Mirrors the DM nudge path.
+///
+/// Returns (liveNodeHandled, arrived).
+Future<(bool, bool)> _tryLiveChannelNudge(String server, String channel) async {
+  try {
+    if (await network_api.nudgeLiveRoomJoin(roomCode: server)) {
+      await _pushLog('channel_wake: live node running — nudged server room join');
+      final arrived = await _waitForLiveChannelArrival(server, channel);
+      await _pushLog(arrived
+          ? 'channel_wake: live node delivered — main isolate owns the banner'
+          : 'channel_wake: live node did not deliver in time — fallback');
+      return (true, arrived);
+    }
+  } catch (e) {
+    await _pushLog('channel_wake: live-node nudge FAILED: $e');
+  }
+  return (false, false);
+}
+
+/// Tier 2: fetch the buffered channel ciphertext + decrypt (MLS / public).
+/// The relay replays the whole server-room buffer, so one wake often yields
+/// messages for SEVERAL channels — group them per channel id.
+Future<Map<String, List<network_api.FetchedMessage>>>
+    _fetchChannelWakeMessages(String sender, String server) async {
+  final byChannel = <String, List<network_api.FetchedMessage>>{};
+  try {
+    final messages = await network_api.startFetchNode(
+      senderPeerId: sender.isEmpty ? server : sender,
+      timeoutSecs: 12,
+      serverRoom: server,
+    );
+    await _pushLog('channel fetch returned ${messages.length} message(s)');
+    for (final m in messages) {
+      final cid = m.channelId;
+      if (cid == null || m.serverId != server) continue;
+      byChannel.putIfAbsent(cid, () => []).add(m);
+    }
+  } catch (e) {
+    await _pushLog('channel fetch FAILED: $e');
+  }
+  return byChannel;
+}
+
+/// Display name for [peerId] with a per-wake [cache] (the old `nameOf`
+/// closure). Falls back to the truncated peer id when no profile is cached.
+Future<String> _channelWakeNameOf(
+    String peerId, Map<String, String> cache) async {
+  final cached = cache[peerId];
+  if (cached != null) return cached;
+  var name = _truncatePeerId(peerId);
+  try {
+    final profile = await network_api.getPushProfile(peerId: peerId);
+    if (profile != null && profile.displayName.isNotEmpty) {
+      name = profile.displayName;
+    }
+  } catch (_) {}
+  cache[peerId] = name;
+  return name;
+}
+
+/// Per-channel local level check — the replay burst may span channels the
+/// user muted individually. The triggering channel reuses the already-loaded
+/// [triggerName]/[triggerLevel]; other channels re-resolve their own meta
+/// (default level "all"). Returns (channelName, level).
+Future<(String, String)> _channelWakeBannerMeta(String server, String cid,
+    String channel, String triggerName, String triggerLevel,
+    bool rustReady) async {
+  var chName = cid == channel ? triggerName : '';
+  var level = cid == channel ? triggerLevel : 'all';
+  if (rustReady && cid != channel) {
     try {
-      final profile = await network_api.getPushProfile(peerId: peerId);
-      if (profile != null && profile.displayName.isNotEmpty) {
-        name = profile.displayName;
+      final meta = await network_api.getPushChannelMeta(
+          serverId: server, channelId: cid);
+      if (meta != null) {
+        chName = meta.channelName;
+        level = meta.notifLevel;
       }
     } catch (_) {}
-    profileNames[peerId] = name;
-    return name;
   }
+  return (chName, level);
+}
 
+/// Notification preview line for one fetched channel message (text part only;
+/// the caller prefixes the sender name).
+String _channelWakePreviewText(String text) {
+  return text.isEmpty || text.startsWith('[file:')
+      ? '📷 Image'
+      : (text.length > 200 ? '${text.substring(0, 200)}...' : text);
+}
+
+/// iOS: replace the APNs/NSE banner (collapse-id = hash of server:channel)
+/// with one silent populated banner — mirrors the DM swap flow.
+Future<void> _cancelIosChannelApnsBanner(String server, String cid) async {
+  try {
+    await FlutterLocalNotificationsPlugin()
+        .cancel(_iosCollapseId('$server:$cid'));
+  } catch (_) {}
+}
+
+/// Banner title for a channel wake: "Server • #channel", degrading to just
+/// the server name when the channel name is unknown.
+String _channelWakeBannerTitle(String serverName, String chName) {
+  final sName = serverName.isNotEmpty ? serverName : 'Server';
+  return chName.isNotEmpty ? '$sName • #$chName' : sName;
+}
+
+/// Post one populated banner per channel that passed its local level check.
+/// Returns true when at least one banner was posted.
+Future<bool> _postChannelWakeBanners({
+  required Map<String, List<network_api.FetchedMessage>> byChannel,
+  required String server,
+  required String channel,
+  required String serverName,
+  required String channelName,
+  required String notifLevel,
+  required bool mention,
+  required bool rustReady,
+  required Map<String, String> profileNames,
+}) async {
   var posted = false;
   for (final entry in byChannel.entries) {
     final cid = entry.key;
 
-    // Per-channel local level check — the replay burst may span channels the
-    // user muted individually. The push's mention flag only applies to the
-    // channel that triggered it; other channels require level "all".
-    var chName = cid == channel ? channelName : '';
-    var level = cid == channel ? notifLevel : 'all';
-    if (rustReady && cid != channel) {
-      try {
-        final meta = await network_api.getPushChannelMeta(
-            serverId: server, channelId: cid);
-        if (meta != null) {
-          chName = meta.channelName;
-          level = meta.notifLevel;
-        }
-      } catch (_) {}
-    }
+    // The push's mention flag only applies to the channel that triggered it;
+    // other channels require level "all".
+    final (chName, level) = await _channelWakeBannerMeta(
+        server, cid, channel, channelName, notifLevel, rustReady);
     if (level == 'nothing') continue;
     if (level == 'mentions' && !(mention && cid == channel)) continue;
 
     final batch = <MapEntry<String, String>>[];
     for (final m in entry.value) {
-      final name = await nameOf(m.fromPeer);
-      final raw = m.text.isEmpty || m.text.startsWith('[file:')
-          ? '📷 Image'
-          : (m.text.length > 200 ? '${m.text.substring(0, 200)}...' : m.text);
-      batch.add(MapEntry(m.messageId, '$name: $raw'));
+      final name = await _channelWakeNameOf(m.fromPeer, profileNames);
+      batch.add(
+          MapEntry(m.messageId, '$name: ${_channelWakePreviewText(m.text)}'));
     }
     final texts = await _accumulateLines(_channelLineKey(server, cid), batch);
 
-    // iOS: replace the APNs/NSE banner (collapse-id = hash of server:channel)
-    // with one silent populated banner — mirrors the DM swap flow.
     final iosReplace = Platform.isIOS;
     if (iosReplace) {
-      try {
-        await FlutterLocalNotificationsPlugin()
-            .cancel(_iosCollapseId('$server:$cid'));
-      } catch (_) {}
+      await _cancelIosChannelApnsBanner(server, cid);
     }
 
     await _showChannelNotification(
       server: server,
       channel: cid,
-      title: chName.isNotEmpty
-          ? '${serverName.isNotEmpty ? serverName : 'Server'} • #$chName'
-          : (serverName.isNotEmpty ? serverName : 'Server'),
+      title: _channelWakeBannerTitle(serverName, chName),
       body: texts.isNotEmpty ? texts.last : 'New messages',
       lines: texts,
       silent: iosReplace,
     );
     posted = true;
   }
+  return posted;
+}
 
-  // Fallback: no decrypted content (fetch failed, stale MLS epoch, Olm-legacy
-  // server). iOS: leave the NSE banner standing (single-banner guarantee).
-  // Android: the handler is the only banner source — post a name-only line.
-  if (!posted) {
-    if (Platform.isIOS) {
-      await _pushLog('channel_wake: no content — leaving NSE banner as-is');
-      return;
-    }
-    final senderName = sender.isEmpty ? '' : await nameOf(sender);
-    await _showChannelNotification(
-      server: server,
-      channel: channel,
-      title: channelName.isNotEmpty
-          ? '${serverName.isNotEmpty ? serverName : 'Server'} • #$channelName'
-          : (serverName.isNotEmpty ? serverName : 'Hollow'),
-      body: mention
-          ? (senderName.isEmpty
-              ? 'You were mentioned'
-              : '$senderName mentioned you')
-          : (senderName.isEmpty
-              ? 'New messages'
-              : '$senderName sent a message'),
-    );
-    await _pushLog('channel_wake: fallback notification shown');
+/// Fallback: no decrypted content (fetch failed, stale MLS epoch, Olm-legacy
+/// server). iOS: leave the NSE banner standing (single-banner guarantee).
+/// Android: the handler is the only banner source — post a name-only line.
+Future<void> _showChannelWakeFallback({
+  required String sender,
+  required String server,
+  required String channel,
+  required String serverName,
+  required String channelName,
+  required bool mention,
+  required Map<String, String> profileNames,
+}) async {
+  if (Platform.isIOS) {
+    await _pushLog('channel_wake: no content — leaving NSE banner as-is');
+    return;
   }
+  final senderName =
+      sender.isEmpty ? '' : await _channelWakeNameOf(sender, profileNames);
+  await _showChannelNotification(
+    server: server,
+    channel: channel,
+    title: channelName.isNotEmpty
+        ? '${serverName.isNotEmpty ? serverName : 'Server'} • #$channelName'
+        : (serverName.isNotEmpty ? serverName : 'Hollow'),
+    body: mention
+        ? (senderName.isEmpty
+            ? 'You were mentioned'
+            : '$senderName mentioned you')
+        : (senderName.isEmpty
+            ? 'New messages'
+            : '$senderName sent a message'),
+  );
+  await _pushLog('channel_wake: fallback notification shown');
 }
 
 /// Line-cache key for a channel's accumulated notification lines.
@@ -1172,6 +1327,27 @@ class PushNotificationService {
 
     await _initLocalNotifications();
 
+    await _requestPermissionAndToken();
+
+    FirebaseMessaging.onMessage.listen(_handleForegroundMessage);
+
+    // Notification taps — FCM/APNs banner tapped while the app was in the
+    // background: bring the user straight to the sender's chat / channel.
+    FirebaseMessaging.onMessageOpenedApp.listen(_deliverFromRemote);
+    await _deliverColdStartTaps();
+
+    _messaging.onTokenRefresh.listen((newToken) {
+      _currentToken = newToken;
+      _registerTokenWithRelay(newToken);
+    });
+
+    _initialized = true;
+    debugPrint('[HOLLOW-PUSH] Push notification service initialized');
+  }
+
+  /// Request notification permission and, when granted, acquire the FCM token
+  /// and register it with the relay.
+  Future<void> _requestPermissionAndToken() async {
     try {
       final settings = await _messaging.requestPermission(
         alert: true,
@@ -1201,12 +1377,11 @@ class PushNotificationService {
     } catch (e) {
       debugPrint('████ [HOLLOW-PUSH] getToken/permission FAILED: $e');
     }
+  }
 
-    FirebaseMessaging.onMessage.listen(_handleForegroundMessage);
-
-    // Notification taps — FCM/APNs banner tapped while the app was in the
-    // background: bring the user straight to the sender's chat / channel.
-    FirebaseMessaging.onMessageOpenedApp.listen(_deliverFromRemote);
+  /// Cold-start tap delivery — the app was LAUNCHED by tapping a notification
+  /// (two of the three push-tap entry points; the third is onMessageOpenedApp).
+  Future<void> _deliverColdStartTaps() async {
     // Cold start: app launched by tapping a push notification.
     try {
       final initial = await _messaging.getInitialMessage();
@@ -1221,14 +1396,6 @@ class PushNotificationService {
         _deliverOpenChat(launch!.notificationResponse?.payload);
       }
     } catch (_) {}
-
-    _messaging.onTokenRefresh.listen((newToken) {
-      _currentToken = newToken;
-      _registerTokenWithRelay(newToken);
-    });
-
-    _initialized = true;
-    debugPrint('[HOLLOW-PUSH] Push notification service initialized');
   }
 
   /// iOS: poll for the APNs device token (delivered async by Apple after
