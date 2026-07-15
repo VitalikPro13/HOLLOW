@@ -10,6 +10,7 @@ import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
+import 'package:hollow/src/ui/components/selector_pill.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
 import 'package:hollow/src/ui/components/hollow_toggle.dart';
@@ -277,7 +278,7 @@ class _ScreenShareDialogState extends State<_ScreenShareDialog> {
                       ),
                       const SizedBox(width: HollowSpacing.sm),
                       ...ScreenShareResolution.values.map((r) =>
-                          _buildPill(hollow, r.label, r == _resolution,
+                          _buildPill(r.label, r == _resolution,
                               () => setState(() => _resolution = r))),
                     ],
                   ),
@@ -294,7 +295,7 @@ class _ScreenShareDialogState extends State<_ScreenShareDialog> {
                       ),
                       const SizedBox(width: HollowSpacing.sm),
                       ...ScreenShareFps.values.map((f) =>
-                          _buildPill(hollow, f.label, f == _fps,
+                          _buildPill(f.label, f == _fps,
                               () => setState(() => _fps = f))),
                     ],
                   ),
@@ -517,42 +518,14 @@ class _ScreenShareDialogState extends State<_ScreenShareDialog> {
     );
   }
 
-  Widget _buildPill(
-      HollowTheme hollow, String label, bool active, VoidCallback onTap) {
-    return Padding(
-      padding: const EdgeInsets.only(right: 4),
-      child: HollowFocusRing(
-        enabled: true,
-        onActivate: onTap,
-        borderRadius: BorderRadius.circular(hollow.radiusSm),
-        child: GestureDetector(
-          onTap: onTap,
-          child: Container(
-            padding: const EdgeInsets.symmetric(
-              horizontal: HollowSpacing.sm,
-              vertical: HollowSpacing.xs,
-            ),
-            decoration: BoxDecoration(
-              color: active
-                  ? hollow.accent.withValues(alpha: 0.15)
-                  : hollow.surface,
-              borderRadius: BorderRadius.circular(hollow.radiusSm),
-              border: Border.all(
-                color: active
-                    ? hollow.accent.withValues(alpha: 0.4)
-                    : hollow.border,
-              ),
-            ),
-            child: Text(
-              label,
-              style: HollowTypography.caption.copyWith(
-                color: active ? hollow.accent : hollow.textSecondary,
-                fontSize: 11,
-                fontWeight: active ? FontWeight.w600 : FontWeight.normal,
-              ),
-            ),
-          ),
-        ),
+  Widget _buildPill(String label, bool active, VoidCallback onTap) {
+    return SelectorPill(
+      label: label,
+      active: active,
+      onTap: onTap,
+      padding: const EdgeInsets.symmetric(
+        horizontal: HollowSpacing.sm,
+        vertical: HollowSpacing.xs,
       ),
     );
   }

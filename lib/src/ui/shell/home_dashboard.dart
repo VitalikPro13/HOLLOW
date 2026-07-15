@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:hollow/src/core/shared_tickers.dart';
 import 'package:hollow/src/core/reduce_motion.dart';
 import 'package:hollow/src/core/models/chat_message.dart';
 import 'package:hollow/src/core/providers/chat_provider.dart';
@@ -32,6 +31,7 @@ import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/status_dot.dart';
 import 'package:hollow/src/ui/shell/system_status_banner.dart';
 import 'package:hollow/src/ui/dialogs/user_settings_dialog.dart';
+import 'package:hollow/src/ui/settings/settings_shared.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:hollow/src/core/brand_icons.dart';
@@ -1084,7 +1084,7 @@ class _NetworkColumn extends ConsumerWidget {
               ),
               const SizedBox(width: HollowSpacing.sm),
               Expanded(
-                child: _ShimmerDivider(hollow: hollow),
+                child: ShimmerDividerLine(hollow: hollow),
               ),
               const SizedBox(width: HollowSpacing.sm),
               Text(
@@ -1573,37 +1573,6 @@ class _RelayStatsCardState extends ConsumerState<_RelayStatsCard>
           ),
         ],
       ),
-    );
-  }
-}
-
-/// 1px divider with a looping teal shimmer sweep (ASOT style).
-/// Uses [SharedTickers.shimmer] instead of its own AnimationController.
-class _ShimmerDivider extends StatelessWidget {
-  final HollowTheme hollow;
-  const _ShimmerDivider({required this.hollow});
-
-  @override
-  Widget build(BuildContext context) {
-    return ValueListenableBuilder<double>(
-      valueListenable: SharedTickers.instance.shimmer,
-      builder: (context, value, _) {
-        final pos = value * 4.0 - 1.5;
-        return Container(
-          height: 1,
-          decoration: BoxDecoration(
-            gradient: LinearGradient(
-              begin: Alignment(pos - 0.5, 0),
-              end: Alignment(pos + 0.5, 0),
-              colors: [
-                hollow.border,
-                hollow.accent.withValues(alpha: 0.6),
-                hollow.border,
-              ],
-            ),
-          ),
-        );
-      },
     );
   }
 }

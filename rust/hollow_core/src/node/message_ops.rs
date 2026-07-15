@@ -605,7 +605,7 @@ pub(crate) async fn handle_send_channel_message(
     // Receivers drop violations too — these are the cooperative-client fast-fail path.
     if let Some(message) = channel_send_gate_error(
         server, local_peer_str, &server_id, &channel_id, db_path, db_passphrase,
-    ) {
+    ).await {
         let _ = event_tx.send(NetworkEvent::Error { message }).await;
         return;
     }
@@ -720,8 +720,10 @@ pub(crate) async fn handle_send_channel_message(
 /// Cooperative-client fast-fail gates for a channel send: posting permission +
 /// the moderation trio (mute / media-only / slow mode). Receivers drop
 /// violations too. Returns the user-facing error for the FIRST failed gate,
-/// `None` when the send may proceed. Sync — may open the `MessageStore`.
-fn channel_send_gate_error(
+/// `None` when the send may proceed. Async — the slow-mode check reads the
+/// `MessageStore` on the blocking pool (SQLCipher key derivation is expensive
+/// and must not stall the event loop).
+async fn channel_send_gate_error(
     server: &ServerState,
     local_peer_str: &str,
     server_id: &str,
@@ -732,25 +734,45 @@ fn channel_send_gate_error(
     if !server.can_post_in_channel(local_peer_str, channel_id) {
         return Some("You don't have permission to post in this channel".to_string());
     }
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    if server.is_muted(local_peer_str, now.as_millis() as u64) {
-        return Some("You are muted on this server".to_string());
+    if let Some(message) = muted_send_error(server, local_peer_str) {
+        return Some(message);
     }
     if server.is_channel_media_only(channel_id) {
         // Standalone text is rejected; captions ride the file send path.
         return Some("This is a media-only channel — attach an image, GIF, or video".to_string());
     }
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64;
     slow_mode_wait_error(
         server, local_peer_str, server_id, channel_id,
-        now.as_millis() as i64, db_path, db_passphrase,
-    )
+        now_ms, db_path, db_passphrase,
+    ).await
+}
+
+/// Send-side mute gate (master-keyed, lazy expiry — the same lookup the
+/// new-message gate uses): `Some(error)` when we are muted on this server.
+/// Shared by the new-message, edit, and add-reaction send paths. Deletes and
+/// reaction removals are deliberately NOT gated — removing your own content
+/// is always allowed — and slow mode / media-only never apply to
+/// edits/deletes/reactions.
+fn muted_send_error(server: &ServerState, local_peer_str: &str) -> Option<String> {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    if server.is_muted(local_peer_str, now_ms) {
+        return Some("You are muted on this server".to_string());
+    }
+    None
 }
 
 /// Slow-mode half of the send gates: error when our own latest message in the
-/// channel is still inside the slow-mode window (Mod+ are exempt).
-fn slow_mode_wait_error(
+/// channel is still inside the slow-mode window. The Mod+ exemption
+/// short-circuits BEFORE any store access; the open+query hops onto the
+/// blocking pool.
+async fn slow_mode_wait_error(
     server: &ServerState,
     local_peer_str: &str,
     server_id: &str,
@@ -763,14 +785,37 @@ fn slow_mode_wait_error(
     if slow == 0 || server.bypasses_slow_mode(local_peer_str) {
         return None;
     }
-    let store = crate::storage::MessageStore::open(db_path, db_passphrase).ok()?;
-    let last_ts = store.latest_own_channel_ts(server_id, channel_id)?;
+    let last_ts = latest_own_channel_ts_blocking(server_id, channel_id, db_path, db_passphrase).await?;
     let next_allowed = last_ts + (slow as i64) * 1000;
     if now_ms < next_allowed {
         let wait_s = ((next_allowed - now_ms) + 999) / 1000;
         return Some(format!("Slow mode is on — wait {wait_s}s before sending again"));
     }
     None
+}
+
+/// Our own latest message ts in a channel, read on the blocking pool with
+/// owned captures — the store is created and dropped entirely inside the
+/// closure (rusqlite `Connection` is !Sync, never held across an .await).
+/// Store-open failure = `None` (gate allows — mirrors the original inline
+/// behavior). Shared with the channel file send gate (file_handler).
+pub(crate) async fn latest_own_channel_ts_blocking(
+    server_id: &str,
+    channel_id: &str,
+    db_path: &str,
+    db_passphrase: &str,
+) -> Option<i64> {
+    let sid = server_id.to_string();
+    let cid = channel_id.to_string();
+    let path = db_path.to_string();
+    let pass = db_passphrase.to_string();
+    tokio::task::spawn_blocking(move || {
+        let store = crate::storage::MessageStore::open(&path, &pass).ok()?;
+        store.latest_own_channel_ts(&sid, &cid)
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 /// Mention metadata for one outgoing channel message: (`has_everyone`,
@@ -814,7 +859,9 @@ fn send_public_channel_msg(
 /// pre-bootstrap path (no group yet). Returns the MLS wire bytes for the
 /// offline 0x09 push fan-out when the MLS broadcast succeeded, `None`
 /// otherwise. `bootstrap_subgroup` additionally kicks off subgroup bootstrap on
-/// the no-group path (new-message sends only — edits/deletes/reactions don't).
+/// the no-group path (ALL content sends — a client that only edits/reacts must
+/// still escape the Olm fallback; `request_subgroup_bootstrap` is cheap and
+/// no-ops when we're the coordinator or nobody qualifying is online).
 /// Shared driver for send/edit/delete/add-reaction/remove-reaction.
 #[allow(clippy::too_many_arguments)]
 async fn broadcast_channel_envelope(
@@ -854,9 +901,9 @@ async fn broadcast_channel_envelope(
         return None;
     }
     // Subgroup not yet bootstrapped (or legacy server with no MLS group):
-    // Olm fan-out to qualifying members, and (for a restricted channel on a
-    // new-message send) kick off subgroup bootstrap by sending our KeyPackage
-    // to the subgroup coordinator so future messages can use the subgroup.
+    // Olm fan-out to qualifying members, and (for a restricted channel) kick
+    // off subgroup bootstrap by sending our KeyPackage to the subgroup
+    // coordinator so future messages can use the subgroup.
     if bootstrap_subgroup && use_subgroup {
         if let Some(mls_mgr) = mls.as_mut() {
             super::crypto_handler::request_subgroup_bootstrap(
@@ -1070,6 +1117,15 @@ pub(crate) async fn handle_edit_channel_message(
         }
     };
 
+    // Moderation gate: mute blocks edits (authoring content) exactly like the
+    // new-message send gate; receivers drop a muted member's edits too.
+    // Deletes stay allowed — removing your own content is never blocked —
+    // and slow mode / media-only don't apply to edits.
+    if let Some(message) = muted_send_error(server, local_peer_str) {
+        let _ = event_tx.send(NetworkEvent::Error { message }).await;
+        return;
+    }
+
     let local_peer = local_peer_str.to_string();
     let edit_timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1119,7 +1175,7 @@ pub(crate) async fn handle_edit_channel_message(
         broadcast_channel_envelope(
             olm, crypto_store, mls, event_tx, ws_cmd_tx, ws_room_peers,
             server, local_peer_str, &server_id, &channel_id, &envelope,
-            "Edit encrypt failed, falling back to Olm", /*bootstrap_subgroup*/ false,
+            "Edit encrypt failed, falling back to Olm", /*bootstrap_subgroup*/ true,
         ).await;
     }
 
@@ -1371,7 +1427,7 @@ pub(crate) async fn handle_delete_channel_message(
         broadcast_channel_envelope(
             olm, crypto_store, mls, event_tx, ws_cmd_tx, ws_room_peers,
             server, local_peer_str, &server_id, &channel_id, &envelope,
-            "Delete encrypt failed, falling back to Olm", /*bootstrap_subgroup*/ false,
+            "Delete encrypt failed, falling back to Olm", /*bootstrap_subgroup*/ true,
         ).await;
     }
 
@@ -1500,6 +1556,15 @@ pub(crate) async fn handle_add_channel_reaction(
         }
     };
 
+    // Moderation gate: mute blocks adding reactions (authoring content)
+    // exactly like the new-message send gate; receivers drop them too.
+    // Removing a reaction stays allowed — removing your own content is never
+    // blocked — and slow mode / media-only don't apply to reactions.
+    if let Some(message) = muted_send_error(server, local_peer_str) {
+        let _ = event_tx.send(NetworkEvent::Error { message }).await;
+        return;
+    }
+
     let local_peer = local_peer_str.to_string();
     let reaction_ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1540,7 +1605,7 @@ pub(crate) async fn handle_add_channel_reaction(
         broadcast_channel_envelope(
             olm, crypto_store, mls, event_tx, ws_cmd_tx, ws_room_peers,
             server, local_peer_str, &server_id, &channel_id, &envelope,
-            "Reaction encrypt failed, falling back to Olm", /*bootstrap_subgroup*/ false,
+            "Reaction encrypt failed, falling back to Olm", /*bootstrap_subgroup*/ true,
         ).await;
     }
 
@@ -1702,7 +1767,7 @@ pub(crate) async fn handle_remove_channel_reaction(
         broadcast_channel_envelope(
             olm, crypto_store, mls, event_tx, ws_cmd_tx, ws_room_peers,
             server, local_peer_str, &server_id, &channel_id, &envelope,
-            "Remove reaction encrypt failed, Olm fallback", /*bootstrap_subgroup*/ false,
+            "Remove reaction encrypt failed, Olm fallback", /*bootstrap_subgroup*/ true,
         ).await;
     }
 
@@ -1838,7 +1903,7 @@ pub(crate) async fn handle_envelope_channel_message(
     if let Some(state) = server_state {
         if live_channel_moderation_drop(
             state, &sender_peer_id, &sid, &cid, file_id.is_some(), ts, db_path, db_passphrase,
-        ) {
+        ).await {
             return;
         }
     }
@@ -1849,6 +1914,11 @@ pub(crate) async fn handle_envelope_channel_message(
         reply_to.as_deref(), file_id.as_deref(), order_us,
         &link_preview, db_path, db_passphrase,
     ) else {
+        // Store-open failure — the message is silently gone otherwise; log
+        // channel + sender context (never content) so the drop is diagnosable.
+        hollow_log!(
+            "[HOLLOW-SWARM] DROPPED incoming channel message in {sid}/{cid} from {sender_peer_id} (mid={mid:?}) — MessageStore::open failed"
+        );
         return;
     };
     // ALWAYS emit — a ChannelSyncBatch racing this live message inserts
@@ -1901,10 +1971,10 @@ fn channel_sig_rejected(
 /// (mute / media-only / slow-mode violation), so a modified client can't bypass
 /// what receivers refuse to store. Sync backfill intentionally skips these
 /// gates — history may legitimately predate a mute / slow-mode / media-only
-/// change, and dropping it there would diverge stored history. Sync — may open
-/// the `MessageStore` (slow-mode window check).
+/// change, and dropping it there would diverge stored history. Async — the
+/// slow-mode window check reads the `MessageStore` on the blocking pool.
 #[allow(clippy::too_many_arguments)]
-fn live_channel_moderation_drop(
+async fn live_channel_moderation_drop(
     state: &ServerState,
     sender_peer_id: &str,
     sid: &str,
@@ -1928,13 +1998,41 @@ fn live_channel_moderation_drop(
     }
     let slow = state.channel_slow_mode(cid);
     if slow > 0 && !state.bypasses_slow_mode(sender_peer_id) {
-        if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
-            let window_start = ts - (slow as i64) * 1000;
-            if store.channel_sender_has_msg_in_range(sid, cid, sender_peer_id, window_start, ts) {
-                hollow_log!("[HOLLOW-MOD] DROPPED slow-mode violation from {sender_peer_id} in {cid} (window {slow}s)");
-                return true;
-            }
+        // Open+query on the blocking pool with owned captures (SQLCipher key
+        // derivation is expensive; the store lives entirely inside the
+        // closure — Connection is !Sync). Open failure = allow, as before.
+        let window_start = ts - (slow as i64) * 1000;
+        let (sid_o, cid_o) = (sid.to_string(), cid.to_string());
+        let sender = sender_peer_id.to_string();
+        let (path, pass) = (db_path.to_string(), db_passphrase.to_string());
+        let violation = tokio::task::spawn_blocking(move || {
+            crate::storage::MessageStore::open(&path, &pass)
+                .map(|store| store.channel_sender_has_msg_in_range(&sid_o, &cid_o, &sender, window_start, ts))
+                .unwrap_or(false)
+        }).await.unwrap_or(false);
+        if violation {
+            hollow_log!("[HOLLOW-MOD] DROPPED slow-mode violation from {sender_peer_id} in {cid} (window {slow}s)");
+            return true;
         }
+    }
+    false
+}
+
+/// LIVE-ingest mute gate shared by the edit and add-reaction envelope
+/// handlers: true = drop (the sender is muted — master-keyed, lazy expiry;
+/// every call site resolves the sender to its MASTER first). Mirrors the mute
+/// half of `live_channel_moderation_drop`. Deletes and reaction removals stay
+/// allowed — removing your own content is never blocked — and sync backfill
+/// never routes through these handlers, so history predating a mute survives.
+pub(crate) fn live_muted_ingest_drop(server_state: Option<&ServerState>, sender: &str, action: &str) -> bool {
+    let Some(state) = server_state else { return false; };
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    if state.is_muted(sender, now_ms) {
+        hollow_log!("[HOLLOW-MOD] DROPPED {action} from muted member {sender}");
+        return true;
     }
     false
 }
@@ -1990,6 +2088,7 @@ fn persist_incoming_channel_message(
 pub(crate) async fn handle_envelope_edit_message(
     event_tx: &mpsc::Sender<NetworkEvent>,
     bundle_keypair: &crate::identity::native_identity::NativeKeypair,
+    server_state: Option<&ServerState>,
     peer_str: &str,
     mid: String,
     new_text: String,
@@ -2001,6 +2100,12 @@ pub(crate) async fn handle_envelope_edit_message(
     db_path: &str,
     db_passphrase: &str,
 ) {
+    // Moderation (LIVE ingest only): drop edits from muted members, mirroring
+    // the new-message ingest gate — a modified client can't author content
+    // through the edit path while muted.
+    if live_muted_ingest_drop(server_state, peer_str, "edit") {
+        return;
+    }
     let mut edit_applied = false;
     if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
         let sender = store.get_channel_message_sender(&mid);
@@ -2071,6 +2176,7 @@ pub(crate) async fn handle_envelope_delete_message(
 pub(crate) async fn handle_envelope_add_reaction(
     event_tx: &mpsc::Sender<NetworkEvent>,
     bundle_keypair: &crate::identity::native_identity::NativeKeypair,
+    server_state: Option<&ServerState>,
     peer_str: &str,
     mid: String,
     emoji: String,
@@ -2087,6 +2193,11 @@ pub(crate) async fn handle_envelope_add_reaction(
     // emote token — nothing else reaches the DB.
     if !super::emotes::valid_reaction_emoji(&emoji) {
         hollow_log!("[HOLLOW-SECURITY] REJECTED reaction from {peer_str} — invalid emoji string ({} bytes)", emoji.len());
+        return;
+    }
+    // Moderation (LIVE ingest only): drop reactions from muted members,
+    // mirroring the new-message ingest gate; reaction REMOVALS stay allowed.
+    if live_muted_ingest_drop(server_state, peer_str, "reaction") {
         return;
     }
     if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {

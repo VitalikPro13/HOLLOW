@@ -24,11 +24,15 @@ import 'package:hollow/src/core/providers/relay_stats_provider.dart';
 import 'package:hollow/src/ui/shell/mobile_nav.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
+import 'package:hollow/src/ui/settings/about_shared.dart';
+import 'package:hollow/src/ui/settings/blocked_users_shared.dart';
+import 'package:hollow/src/ui/settings/device_management_shared.dart';
+import 'package:hollow/src/ui/settings/settings_shared.dart';
 import 'package:hollow/src/ui/settings/storage_section.dart';
+import 'package:hollow/src/ui/settings/verify_proof_section.dart';
 import 'package:hollow/src/core/providers/theme_provider.dart';
 import 'package:hollow/src/core/providers/updater_provider.dart';
 import 'package:hollow/src/core/services/app_lock_service.dart';
-import 'package:hollow/src/core/shared_tickers.dart';
 import 'package:hollow/src/core/reduce_motion.dart';
 import 'package:hollow/src/rust/api/identity.dart' as identity_api;
 import 'package:hollow/src/rust/api/network.dart' as network_api;
@@ -37,7 +41,6 @@ import 'package:hollow/src/rust/api/twitch.dart' as twitch_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
-import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/components/animated_gif_image.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
@@ -47,7 +50,6 @@ import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toggle.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/stat_bar.dart';
-import 'package:hollow/src/ui/components/rainbow_slider_track.dart';
 import 'package:hollow/src/ui/dialogs/device_link_dialog.dart';
 import 'package:hollow/src/ui/dialogs/image_crop_dialog.dart';
 import 'package:hollow/src/ui/dialogs/mnemonic_dialog.dart';
@@ -296,7 +298,7 @@ class _MobileOnlineCounter extends ConsumerWidget {
           ),
         ),
         const SizedBox(width: HollowSpacing.sm),
-        Expanded(child: _MobileShimmerLine(hollow: hollow)),
+        Expanded(child: ShimmerDividerLine(hollow: hollow)),
         const SizedBox(width: HollowSpacing.sm),
         Text(
           '${relayStats.onlineUsers}',
@@ -1578,7 +1580,11 @@ class _DevicesTab extends ConsumerWidget {
       children: [
         const _SectionLabel(label: 'Your Devices'),
         const SizedBox(height: HollowSpacing.sm),
-        const _DevicesSectionMobile(),
+        DevicesListSection(
+          infoStyle: (hollow) => HollowTypography.body
+              .copyWith(color: hollow.textSecondary, fontSize: 12),
+          rowBuilder: (d) => _DeviceRowMobile(device: d),
+        ),
         const SizedBox(height: HollowSpacing.xl),
         const _SectionLabel(label: 'Link a Device'),
         const SizedBox(height: HollowSpacing.sm),
@@ -1778,45 +1784,19 @@ class _AccentHueSection extends ConsumerWidget {
               color: hollow.textPrimary,
             )),
             const Spacer(),
-            Container(
-              width: 24,
-              height: 24,
-              decoration: BoxDecoration(
-                color: accentFromHue(currentHue),
-                borderRadius: BorderRadius.circular(6),
-                border: Border.all(
-                  color: Colors.white.withValues(alpha: 0.2),
-                ),
-              ),
-            ),
+            AccentHuePreviewBox(hue: currentHue, size: 24, radius: 6),
           ],
         ),
         const SizedBox(height: HollowSpacing.sm),
 
         // Rainbow hue slider
-        SizedBox(
+        AccentHueSliderRow(
+          hue: currentHue,
           height: 28,
-          child: SliderTheme(
-            data: SliderThemeData(
-              trackHeight: 16,
-              thumbShape: const RoundSliderThumbShape(
-                enabledThumbRadius: 10,
-                elevation: 2,
-              ),
-              thumbColor: Colors.white,
-              overlayShape: SliderComponentShape.noOverlay,
-              trackShape: RainbowSliderTrackShape(),
-              activeTrackColor: Colors.transparent,
-              inactiveTrackColor: Colors.transparent,
-            ),
-            child: Slider(
-              value: currentHue.clamp(0, 359),
-              min: 0,
-              max: 359,
-              onChanged: (value) =>
-                  ref.read(accentHueProvider.notifier).setHue(value),
-            ),
-          ),
+          trackHeight: 16,
+          thumbRadius: 10,
+          onChanged: (value) =>
+              ref.read(accentHueProvider.notifier).setHue(value),
         ),
 
         const SizedBox(height: HollowSpacing.sm),
@@ -2031,7 +2011,7 @@ class _ReduceMotionRow extends ConsumerWidget {
           ],
         ),
         const SizedBox(height: HollowSpacing.md),
-        _MobileSegment<ReduceMotionMode>(
+        TriStateSegment<ReduceMotionMode>(
           value: mode,
           options: const [
             (ReduceMotionMode.auto, 'Auto'),
@@ -2080,63 +2060,6 @@ class _ReduceTransparencyRow extends ConsumerWidget {
           inactiveTrackColor: hollow.border,
         ),
       ],
-    );
-  }
-}
-
-/// Horizontal segmented control for a small set of mutually-exclusive options.
-class _MobileSegment<T> extends StatelessWidget {
-  final T value;
-  final List<(T, String)> options;
-  final ValueChanged<T> onChanged;
-
-  const _MobileSegment({
-    required this.value,
-    required this.options,
-    required this.onChanged,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-    return Container(
-      decoration: BoxDecoration(
-        color: hollow.surface,
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: hollow.border),
-      ),
-      padding: const EdgeInsets.all(2),
-      child: Row(
-        children: [
-          for (final (opt, label) in options)
-            Expanded(
-              child: HollowPressable(
-                onTap: () => onChanged(opt),
-                borderRadius: BorderRadius.circular(6),
-                child: AnimatedContainer(
-                  duration: HollowDurations.fast,
-                  alignment: Alignment.center,
-                  padding:
-                      const EdgeInsets.symmetric(vertical: HollowSpacing.sm),
-                  decoration: BoxDecoration(
-                    color: opt == value ? hollow.accent : Colors.transparent,
-                    borderRadius: BorderRadius.circular(6),
-                  ),
-                  child: Text(
-                    label,
-                    style: HollowTypography.body.copyWith(
-                      color: opt == value
-                          ? hollow.textOnAccent
-                          : hollow.textSecondary,
-                      fontWeight:
-                          opt == value ? FontWeight.w600 : FontWeight.w400,
-                    ),
-                  ),
-                ),
-              ),
-            ),
-        ],
-      ),
     );
   }
 }
@@ -2235,7 +2158,7 @@ class _OfflineInboxSection extends ConsumerWidget {
                 color: hollow.textSecondary, fontSize: 11,
               )),
           const SizedBox(height: HollowSpacing.xs),
-          _MobileSegment<int>(
+          TriStateSegment<int>(
             value: retentionDays,
             options: const [
               (1, '1 day'),
@@ -3078,7 +3001,7 @@ class _SecurityTabState extends ConsumerState<_SecurityTab> {
         // Verify a Proof — same placement as the desktop Security tab.
         const _SectionLabel(label: 'Verify a Proof'),
         const SizedBox(height: HollowSpacing.sm),
-        const _VerifyProofSection(),
+        const VerifyProofSection(),
         const SizedBox(height: HollowSpacing.xl),
       ],
     );
@@ -3610,280 +3533,36 @@ Future<String?> _askBackupPassphrase(
 /// an empty device enters the code to pull a full snapshot). Mirrors the desktop
 /// Settings → Security entry.
 /// Step 8 — the "Your Devices" list (mobile twin of `_DevicesSection`).
-String _shortenPeerIdMobile(String id) =>
-    id.length <= 12 ? id : '${id.substring(0, 6)}…${id.substring(id.length - 4)}';
-
-/// Whether a device is "active" — worth showing by default (online / this device /
-/// labeled). Offline+unlabeled ghosts from re-link cycles fold behind "Show all".
-bool _deviceIsActiveMobile(MyDevice d) =>
-    d.online || d.isThisDevice || d.label.isNotEmpty;
-
-class _DevicesSectionMobile extends ConsumerStatefulWidget {
-  const _DevicesSectionMobile();
-  @override
-  ConsumerState<_DevicesSectionMobile> createState() => _DevicesSectionMobileState();
-}
-
-class _DevicesSectionMobileState extends ConsumerState<_DevicesSectionMobile> {
-  bool _showAll = false;
-
-  @override
-  void initState() {
-    super.initState();
-    // Re-pull the device list from the running node's resolver whenever this
-    // panel opens. The startup warm-up (event_provider) races node readiness and
-    // there's no live listener keeping deviceLinkProvider fresh while Settings is
-    // closed — so after an app restart the list would render empty/stale even
-    // though the data is persisted in the DB. Refreshing on mount fixes the
-    // "devices disappear after restart" bug.
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      ref.read(deviceLinkProvider.notifier).refresh();
-      ref.read(deviceLabelProvider.notifier).refresh();
-      ref.invalidate(localDevicePeerIdProvider);
-    });
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-    final devices = ref.watch(myDevicesProvider);
-
-    if (devices.length <= 1) {
-      return Text(
-        'Only this device is linked to your identity. Link another below to sync '
-        'your messages, friends and profile across devices.',
-        style: HollowTypography.body.copyWith(color: hollow.textSecondary, fontSize: 12),
-      );
-    }
-
-    final ghosts = devices.where((d) => !_deviceIsActiveMobile(d)).toList();
-    final shown = _showAll
-        ? devices
-        : devices.where(_deviceIsActiveMobile).toList();
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(
-          'Devices linked to your identity. Remove a device you no longer use or '
-          'have lost — it can no longer read your messages once removed.',
-          style: HollowTypography.body.copyWith(color: hollow.textSecondary, fontSize: 12),
-        ),
-        const SizedBox(height: HollowSpacing.sm),
-        for (final d in shown)
-          Padding(
-            padding: const EdgeInsets.only(bottom: HollowSpacing.sm),
-            child: _DeviceRowMobile(device: d),
-          ),
-        if (ghosts.isNotEmpty)
-          HollowButton.ghost(
-            compact: true,
-            onPressed: () => setState(() => _showAll = !_showAll),
-            child: Text(_showAll
-                ? 'Hide old devices'
-                : 'Show all (${ghosts.length} offline)'),
-          ),
-      ],
-    );
-  }
-}
-
 class _DeviceRowMobile extends ConsumerWidget {
   final MyDevice device;
   const _DeviceRowMobile({required this.device});
 
-  Future<void> _rename(BuildContext context, WidgetRef ref) async {
-    final controller = TextEditingController(text: device.label);
-    final saved = await showHollowDialog<bool>(
-      context: context,
-      builder: (ctx) => HollowDialog(
-        title: 'Rename device',
-        content: HollowTextField(
-          controller: controller,
-          hintText: 'e.g. My Pixel',
-          autofocus: true,
-        ),
-        actions: [
-          HollowButton.ghost(
-            onPressed: () => Navigator.of(ctx).pop(false),
-            child: const Text('Cancel'),
-          ),
-          HollowButton.filled(
-            onPressed: () => Navigator.of(ctx).pop(true),
-            child: const Text('Save'),
-          ),
-        ],
-      ),
-    );
-    if (saved == true) {
-      await ref
-          .read(deviceLabelProvider.notifier)
-          .setLabel(device.peerId, controller.text.trim());
-    }
-  }
-
-  Future<void> _syncFrom(BuildContext context, WidgetRef ref) async {
-    final name = device.label.isNotEmpty ? device.label : _shortenPeerIdMobile(device.peerId);
-    final confirmed = await showHollowDialog<bool>(
-      context: context,
-      builder: (ctx) => HollowDialog(
-        title: 'Sync from this device?',
-        content: Text(
-          'Pull servers and friends FROM "$name" onto THIS device. Use this if a '
-          'server or friend exists on "$name" but is missing here. It only adds '
-          'what\'s missing — nothing is removed, and your messages are unaffected.\n\n'
-          '"$name" must be online.',
-          style: HollowTypography.body.copyWith(color: HollowTheme.of(ctx).textSecondary),
-        ),
-        actions: [
-          HollowButton.ghost(
-            onPressed: () => Navigator.of(ctx).pop(false),
-            child: const Text('Cancel'),
-          ),
-          HollowButton.filled(
-            onPressed: () => Navigator.of(ctx).pop(true),
-            child: const Text('Sync now'),
-          ),
-        ],
-      ),
-    );
-    if (confirmed != true) return;
-    if (!device.online) {
-      if (context.mounted) {
-        HollowToast.show(context, '"$name" is offline — bring it online first',
-            type: HollowToastType.error);
-      }
-      return;
-    }
-    try {
-      await network_api.requestStateSync(sourceDeviceId: device.peerId);
-      if (context.mounted) {
-        HollowToast.show(context, 'Syncing from "$name"…', type: HollowToastType.info);
-      }
-    } catch (e) {
-      if (context.mounted) {
-        HollowToast.show(context, 'Sync failed: $e', type: HollowToastType.error);
-      }
-    }
-  }
-
-  Future<void> _remove(BuildContext context, WidgetRef ref) async {
-    final name = device.label.isNotEmpty ? device.label : _shortenPeerIdMobile(device.peerId);
-    final confirmed = await showHollowDialog<bool>(
-      context: context,
-      builder: (ctx) => HollowDialog(
-        title: 'Remove this device?',
-        content: Text(
-          'This permanently removes "$name" from your identity. It will stop '
-          'receiving your messages and is removed from your servers. This cannot '
-          'be undone from the removed device.',
-          style: HollowTypography.body.copyWith(color: HollowTheme.of(ctx).textSecondary),
-        ),
-        actions: [
-          HollowButton.ghost(
-            onPressed: () => Navigator.of(ctx).pop(false),
-            child: const Text('Cancel'),
-          ),
-          HollowButton.danger(
-            onPressed: () => Navigator.of(ctx).pop(true),
-            child: const Text('Remove device'),
-          ),
-        ],
-      ),
-    );
-    if (confirmed != true) return;
-    try {
-      await network_api.revokeDevice(devicePeerId: device.peerId);
-      if (context.mounted) {
-        HollowToast.show(context, 'Device removed', type: HollowToastType.success);
-      }
-    } catch (e) {
-      if (context.mounted) {
-        HollowToast.show(context, 'Failed to remove: $e', type: HollowToastType.error);
-      }
-    }
-  }
-
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
-    final title = device.label.isNotEmpty ? device.label : _shortenPeerIdMobile(device.peerId);
-    return Container(
-      padding: const EdgeInsets.symmetric(
-        horizontal: HollowSpacing.md,
-        vertical: HollowSpacing.sm,
-      ),
-      decoration: BoxDecoration(
-        color: hollow.surface,
-        borderRadius: BorderRadius.circular(hollow.radiusMd),
-        border: Border.all(color: hollow.border.withValues(alpha: 0.5)),
-      ),
-      child: Row(
-        children: [
-          Icon(LucideIcons.smartphone, size: 18, color: hollow.textSecondary),
-          const SizedBox(width: HollowSpacing.sm),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    Flexible(
-                      child: Text(
-                        title,
-                        overflow: TextOverflow.ellipsis,
-                        style: HollowTypography.body.copyWith(
-                            color: hollow.textPrimary, fontWeight: FontWeight.w600),
-                      ),
-                    ),
-                    if (device.isThisDevice) ...[
-                      const SizedBox(width: HollowSpacing.xs),
-                      Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
-                        decoration: BoxDecoration(
-                          color: hollow.accent.withValues(alpha: 0.15),
-                          borderRadius: BorderRadius.circular(4),
-                        ),
-                        child: Text(
-                          'This device',
-                          style: HollowTypography.caption.copyWith(
-                            color: hollow.accent,
-                            fontSize: 9,
-                            fontWeight: FontWeight.w700,
-                          ),
-                        ),
-                      ),
-                    ],
-                  ],
-                ),
-                Text(
-                  '${_shortenPeerIdMobile(device.peerId)} · ${device.online ? "online" : "offline"}',
-                  style: HollowTypography.caption.copyWith(color: hollow.textSecondary),
-                ),
-              ],
-            ),
-          ),
-          if (!device.isThisDevice)
-            IconButton(
-              visualDensity: VisualDensity.compact,
-              tooltip: 'Sync servers & friends from this device',
-              onPressed: () => _syncFrom(context, ref),
-              icon: Icon(LucideIcons.refreshCw, size: 16,
-                  color: device.online ? hollow.accent : hollow.textSecondary),
-            ),
+    return DeviceRowShell(
+      device: device,
+      actions: [
+        if (!device.isThisDevice)
           IconButton(
             visualDensity: VisualDensity.compact,
-            onPressed: () => _rename(context, ref),
-            icon: Icon(LucideIcons.pencil, size: 16, color: hollow.textSecondary),
+            tooltip: 'Sync servers & friends from this device',
+            onPressed: () => syncFromDeviceFlow(context, ref, device),
+            icon: Icon(LucideIcons.refreshCw, size: 16,
+                color: device.online ? hollow.accent : hollow.textSecondary),
           ),
-          if (!device.isThisDevice)
-            IconButton(
-              visualDensity: VisualDensity.compact,
-              onPressed: () => _remove(context, ref),
-              icon: Icon(LucideIcons.trash2, size: 16, color: hollow.error),
-            ),
-        ],
-      ),
+        IconButton(
+          visualDensity: VisualDensity.compact,
+          onPressed: () => renameDeviceFlow(context, ref, device),
+          icon: Icon(LucideIcons.pencil, size: 16, color: hollow.textSecondary),
+        ),
+        if (!device.isThisDevice)
+          IconButton(
+            visualDensity: VisualDensity.compact,
+            onPressed: () => removeDeviceFlow(context, device),
+            icon: Icon(LucideIcons.trash2, size: 16, color: hollow.error),
+          ),
+      ],
     );
   }
 }
@@ -3915,498 +3594,8 @@ class _ResetDeviceListButton extends StatelessWidget {
     );
   }
 
-  Future<void> _reset(BuildContext context) async {
-    final confirmed = await showHollowDialog<bool>(
-      context: context,
-      builder: (ctx) => HollowDialog(
-        title: 'Reset device list?',
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              'This permanently removes ALL your other linked devices, not just '
-              'this one. Each is signed out and wiped, and your friends stop '
-              'seeing them. Only this device stays. To use another device again, '
-              'link it fresh.\n\nUse this to clean up leftover or ghost devices.',
-              style: HollowTypography.body.copyWith(
-                  color: HollowTheme.of(ctx).textSecondary),
-            ),
-            const SizedBox(height: HollowSpacing.lg),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.end,
-              children: [
-                HollowButton.ghost(
-                  onPressed: () => Navigator.of(ctx).pop(false),
-                  child: const Text('Cancel'),
-                ),
-                const SizedBox(width: HollowSpacing.sm),
-                HollowButton.danger(
-                  onPressed: () => Navigator.of(ctx).pop(true),
-                  child: const Text('Reset'),
-                ),
-              ],
-            ),
-          ],
-        ),
-      ),
-    );
-    if (confirmed != true) return;
-    try {
-      await network_api.resetDeviceLists();
-      if (context.mounted) {
-        HollowToast.show(
-          context,
-          'Device list reset. All other devices were removed.',
-          type: HollowToastType.success,
-        );
-      }
-    } catch (e) {
-      if (context.mounted) {
-        HollowToast.show(context, 'Reset failed: $e',
-            type: HollowToastType.error);
-      }
-    }
-  }
-}
-
-/// Verify a Proof — paste or import a proof JSON and verify it using the same
-/// Ed25519 verification as the Message Proof dialog. Mobile port of the
-/// desktop Security-tab section (user_settings_dialog.dart).
-class _VerifyProofSection extends StatefulWidget {
-  const _VerifyProofSection();
-
-  @override
-  State<_VerifyProofSection> createState() => _VerifyProofSectionState();
-}
-
-class _VerifyProofSectionState extends State<_VerifyProofSection> {
-  final _controller = TextEditingController();
-  final _resultKey = GlobalKey();
-  _ProofResult? _result;
-  bool _verifying = false;
-
-  void _scrollToResult() {
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      final ctx = _resultKey.currentContext;
-      if (ctx != null) {
-        Scrollable.ensureVisible(ctx,
-            duration: const Duration(milliseconds: 200));
-      }
-    });
-  }
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  Future<void> _importFile() async {
-    try {
-      final result = await FilePicker.platform.pickFiles(
-        dialogTitle: 'Import Proof JSON',
-        type: FileType.custom,
-        allowedExtensions: ['json'],
-        withData: true, // mobile pickers may not expose a filesystem path
-      );
-      if (result == null || result.files.isEmpty) return;
-      final file = result.files.single;
-      final String content;
-      if (file.bytes != null) {
-        content = utf8.decode(file.bytes!);
-      } else if (file.path != null) {
-        content = await File(file.path!).readAsString();
-      } else {
-        return;
-      }
-      _controller.text = content;
-      _verify(content);
-    } catch (e) {
-      if (mounted) {
-        HollowToast.show(context, 'Failed to read file: $e',
-            type: HollowToastType.error);
-      }
-    }
-  }
-
-  Future<void> _verify(String jsonStr) async {
-    setState(() {
-      _verifying = true;
-      _result = null;
-    });
-
-    void fail(String error) {
-      setState(() {
-        _verifying = false;
-        _result = _ProofResult(valid: false, error: error);
-      });
-      _scrollToResult();
-    }
-
-    try {
-      final map = json.decode(jsonStr) as Map<String, dynamic>;
-
-      // Extract fields from the proof JSON.
-      final message = map['message'] as Map<String, dynamic>?;
-      final sender = map['sender'] as Map<String, dynamic>?;
-      final ctx = map['context'] as Map<String, dynamic>?;
-      final sig = map['signature'] as Map<String, dynamic>?;
-
-      if (message == null || sender == null || sig == null) {
-        fail('Invalid proof format — missing required fields.');
-        return;
-      }
-
-      // Validate envelope fields that must have exact expected values.
-      final version = map['version'];
-      final protocol = map['protocol'] as String?;
-      final algorithm = sig['algorithm'] as String?;
-
-      if (version != 1) {
-        fail('Unknown proof version: $version (expected 1).');
-        return;
-      }
-      if (protocol != 'hollow-proof-v1') {
-        fail('Unknown protocol: "$protocol" (expected "hollow-proof-v1").');
-        return;
-      }
-      if (algorithm != 'Ed25519') {
-        fail('Unknown algorithm: "$algorithm" (expected "Ed25519").');
-        return;
-      }
-
-      final text = message['text'] as String? ?? '';
-      final timestampMs = message['timestamp_ms'] as int? ?? 0;
-      final messageId = message['message_id'] as String?;
-      final peerId = sender['peer_id'] as String? ?? '';
-      final publicKeyB64 = sender['public_key_base64'] as String? ?? '';
-      final signatureB64 = sig['signature_base64'] as String? ?? '';
-      final canonicalPayload = sig['canonical_payload'] as String? ?? '';
-      final contextType = ctx?['type'] as String? ?? '';
-      final contextId = ctx?['id'] as String? ?? '';
-
-      if (peerId.isEmpty ||
-          publicKeyB64.isEmpty ||
-          signatureB64.isEmpty ||
-          canonicalPayload.isEmpty) {
-        fail('Proof is missing signature or public key data.');
-        return;
-      }
-
-      // Reconstruct the canonical payload from the individual JSON fields
-      // and verify it matches the embedded one. This catches field tampering
-      // (e.g. changing message text while keeping the old canonical_payload).
-      // Map human-readable context type back to the canonical short form
-      // used in the signing payload ('dm'/'ch'/'dm-delete'/'ch-delete').
-      final msgType = contextType == 'direct_message'
-          ? 'dm'
-          : contextType == 'channel'
-              ? 'ch'
-              : contextType; // pass through delete types as-is
-      final reconstructed =
-          'hollow-msg:$msgType:$contextId:$peerId:$timestampMs:$text';
-      if (reconstructed != canonicalPayload) {
-        fail('Payload mismatch — the message fields do not match the '
-            'canonical payload. The proof JSON may have been tampered with.\n\n'
-            'Expected: $canonicalPayload\n'
-            'Got: $reconstructed');
-        return;
-      }
-
-      final isValid = await network_api.verifyMessageProof(
-        senderPeerId: peerId,
-        signatureB64: signatureB64,
-        publicKeyB64: publicKeyB64,
-        canonicalPayload: canonicalPayload,
-      );
-
-      if (!mounted) return;
-      setState(() {
-        _verifying = false;
-        _result = _ProofResult(
-          valid: isValid,
-          text: text,
-          timestampMs: timestampMs,
-          messageId: messageId,
-          senderPeerId: peerId,
-          contextType: contextType,
-          contextId: contextId,
-        );
-      });
-      _scrollToResult();
-    } on FormatException {
-      if (!mounted) return;
-      fail('Invalid JSON format.');
-    } catch (e) {
-      if (!mounted) return;
-      fail('Verification failed: $e');
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(
-          'Paste a proof JSON or import a .json file to verify '
-          'that a message was authentically signed by its sender.',
-          style: HollowTypography.body.copyWith(
-            color: hollow.textSecondary,
-            fontSize: 12,
-          ),
-        ),
-        const SizedBox(height: HollowSpacing.md),
-
-        // Input area
-        Container(
-          width: double.infinity,
-          height: 120,
-          decoration: BoxDecoration(
-            color: hollow.background,
-            borderRadius: BorderRadius.circular(hollow.radiusMd),
-            border: Border.all(color: hollow.border),
-          ),
-          child: TextField(
-            controller: _controller,
-            maxLines: null,
-            expands: true,
-            style: HollowTypography.mono.copyWith(
-              color: hollow.textPrimary,
-              fontSize: 11,
-            ),
-            decoration: InputDecoration(
-              hintText: '{"version":1,"protocol":"hollow-proof-v1",...}',
-              hintStyle: HollowTypography.mono.copyWith(
-                color: hollow.textSecondary.withValues(alpha: 0.4),
-                fontSize: 11,
-              ),
-              contentPadding: const EdgeInsets.all(HollowSpacing.sm),
-              border: InputBorder.none,
-            ),
-          ),
-        ),
-        const SizedBox(height: HollowSpacing.md),
-
-        // Buttons
-        Row(
-          children: [
-            HollowButton.ghost(
-              onPressed: _importFile,
-              icon: const Icon(LucideIcons.fileUp, size: 16),
-              child: const Text('Import File'),
-            ),
-            const SizedBox(width: HollowSpacing.sm),
-            HollowButton.filled(
-              onPressed: _verifying
-                  ? null
-                  : () {
-                      final text = _controller.text.trim();
-                      if (text.isEmpty) {
-                        HollowToast.show(context, 'Paste a proof JSON first',
-                            type: HollowToastType.info);
-                        return;
-                      }
-                      _verify(text);
-                    },
-              icon: const Icon(LucideIcons.shieldCheck, size: 16),
-              child: Text(_verifying ? 'Verifying...' : 'Verify'),
-            ),
-          ],
-        ),
-
-        // Result
-        if (_result != null) ...[
-          const SizedBox(height: HollowSpacing.lg),
-          KeyedSubtree(key: _resultKey, child: _buildResult(hollow)),
-        ],
-      ],
-    );
-  }
-
-  Widget _buildResult(HollowTheme hollow) {
-    final r = _result!;
-
-    if (r.error != null) {
-      return Container(
-        width: double.infinity,
-        padding: const EdgeInsets.all(HollowSpacing.md),
-        decoration: BoxDecoration(
-          color: hollow.error.withValues(alpha: 0.08),
-          borderRadius: BorderRadius.circular(hollow.radiusMd),
-          border: Border.all(color: hollow.error.withValues(alpha: 0.3)),
-        ),
-        child: Row(
-          children: [
-            Icon(LucideIcons.shieldAlert, size: 16, color: hollow.error),
-            const SizedBox(width: HollowSpacing.sm),
-            Expanded(
-              child: Text(
-                r.error!,
-                style: HollowTypography.body.copyWith(
-                  color: hollow.error,
-                  fontSize: 13,
-                ),
-              ),
-            ),
-          ],
-        ),
-      );
-    }
-
-    final bgColor = r.valid
-        ? hollow.accent.withValues(alpha: 0.08)
-        : hollow.error.withValues(alpha: 0.08);
-    final borderColor = r.valid
-        ? hollow.accent.withValues(alpha: 0.3)
-        : hollow.error.withValues(alpha: 0.3);
-    final statusColor = r.valid ? hollow.accent : hollow.error;
-    final statusIcon =
-        r.valid ? LucideIcons.shieldCheck : LucideIcons.shieldAlert;
-    final statusText = r.valid ? 'VERIFIED' : 'INVALID SIGNATURE';
-
-    final timestamp = r.timestampMs != null && r.timestampMs! > 0
-        ? DateTime.fromMillisecondsSinceEpoch(r.timestampMs!)
-        : null;
-    final contextLabel = r.contextType == 'direct_message'
-        ? 'Direct Message'
-        : r.contextType == 'channel'
-            ? 'Channel'
-            : r.contextType ?? '';
-
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(HollowSpacing.md),
-      decoration: BoxDecoration(
-        color: bgColor,
-        borderRadius: BorderRadius.circular(hollow.radiusMd),
-        border: Border.all(color: borderColor),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // Status badge
-          Row(
-            children: [
-              Icon(statusIcon, size: 16, color: statusColor),
-              const SizedBox(width: HollowSpacing.sm),
-              Text(
-                statusText,
-                style: HollowTypography.label.copyWith(
-                  color: statusColor,
-                  fontWeight: FontWeight.w700,
-                  letterSpacing: 0.5,
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: HollowSpacing.md),
-
-          // Message text
-          if (r.text != null && r.text!.isNotEmpty) ...[
-            Text(
-              'MESSAGE',
-              style: HollowTypography.caption.copyWith(
-                color: hollow.textSecondary,
-                fontWeight: FontWeight.w700,
-                letterSpacing: 0.5,
-                fontSize: 10,
-              ),
-            ),
-            const SizedBox(height: 2),
-            Container(
-              width: double.infinity,
-              padding: const EdgeInsets.all(HollowSpacing.sm),
-              decoration: BoxDecoration(
-                color: hollow.surface.withValues(alpha: 0.5),
-                borderRadius: BorderRadius.circular(hollow.radiusSm),
-              ),
-              child: Text(
-                r.text!.length > 300
-                    ? '${r.text!.substring(0, 300)}...'
-                    : r.text!,
-                style: HollowTypography.body.copyWith(
-                  color: hollow.textPrimary,
-                  fontSize: 13,
-                ),
-                maxLines: 4,
-                overflow: TextOverflow.ellipsis,
-              ),
-            ),
-            const SizedBox(height: HollowSpacing.sm),
-          ],
-
-          // Sender
-          if (r.senderPeerId != null) ...[
-            Text(
-              'SENDER',
-              style: HollowTypography.caption.copyWith(
-                color: hollow.textSecondary,
-                fontWeight: FontWeight.w700,
-                letterSpacing: 0.5,
-                fontSize: 10,
-              ),
-            ),
-            const SizedBox(height: 2),
-            SelectableText(
-              r.senderPeerId!,
-              style: HollowTypography.mono.copyWith(
-                color: hollow.textPrimary,
-                fontSize: 11,
-              ),
-              maxLines: 1,
-            ),
-            const SizedBox(height: HollowSpacing.sm),
-          ],
-
-          // Context + Timestamp
-          Row(
-            children: [
-              if (contextLabel.isNotEmpty) ...[
-                Text(
-                  contextLabel,
-                  style: HollowTypography.bodySmall
-                      .copyWith(color: hollow.textSecondary),
-                ),
-                const SizedBox(width: HollowSpacing.md),
-              ],
-              if (timestamp != null)
-                Text(
-                  timestamp.toUtc().toIso8601String(),
-                  style: HollowTypography.bodySmall
-                      .copyWith(color: hollow.textSecondary),
-                ),
-            ],
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _ProofResult {
-  final bool valid;
-  final String? error;
-  final String? text;
-  final int? timestampMs;
-  final String? messageId;
-  final String? senderPeerId;
-  final String? contextType;
-  final String? contextId;
-
-  const _ProofResult({
-    required this.valid,
-    this.error,
-    this.text,
-    this.timestampMs,
-    this.messageId,
-    this.senderPeerId,
-    this.contextType,
-    this.contextId,
-  });
+  Future<void> _reset(BuildContext context) =>
+      resetDeviceListsFlow(context);
 }
 
 // ─────────────────────────────────────────────────
@@ -4590,42 +3779,22 @@ class _AboutTab extends ConsumerWidget {
         // Contact
         const _SectionLabel(label: 'Contact'),
         const SizedBox(height: HollowSpacing.sm),
-        Align(
-          alignment: Alignment.centerLeft,
-          child: HollowButton.ghost(
-            onPressed: () {
-              Clipboard.setData(
-                  const ClipboardData(text: 'feedback@anonlisten.com'));
-              HollowToast.show(context, 'Email copied to clipboard',
-                  type: HollowToastType.success);
-            },
-            icon: const Icon(LucideIcons.mail, size: 16),
-            child: const Text('feedback@anonlisten.com'),
-          ),
+        aboutLinkButton(
+          onPressed: () => copySupportEmail(context),
+          icon: LucideIcons.mail,
+          label: 'feedback@anonlisten.com',
         ),
         const SizedBox(height: HollowSpacing.xs),
-        Align(
-          alignment: Alignment.centerLeft,
-          child: HollowButton.ghost(
-            onPressed: () => launchUrl(
-              Uri.parse('https://anonlisten.com'),
-              mode: LaunchMode.externalApplication,
-            ),
-            icon: const Icon(LucideIcons.globe, size: 16),
-            child: const Text('anonlisten.com'),
-          ),
+        aboutLinkButton(
+          onPressed: openAnonListenSite,
+          icon: LucideIcons.globe,
+          label: 'anonlisten.com',
         ),
         const SizedBox(height: HollowSpacing.xs),
-        Align(
-          alignment: Alignment.centerLeft,
-          child: HollowButton.ghost(
-            onPressed: () => launchUrl(
-              Uri.parse('https://github.com/VitalikPro13/HOLLOW'),
-              mode: LaunchMode.externalApplication,
-            ),
-            icon: const Icon(BrandIcons.github, size: 16),
-            child: const Text('GitHub'),
-          ),
+        aboutLinkButton(
+          onPressed: () => launchBrandUrl('https://github.com/VitalikPro13/HOLLOW'),
+          icon: BrandIcons.github,
+          label: 'GitHub',
         ),
 
         const SizedBox(height: HollowSpacing.xl),
@@ -4639,7 +3808,7 @@ class _AboutTab extends ConsumerWidget {
               letterSpacing: 0.5,
             )),
             const SizedBox(width: HollowSpacing.sm),
-            Expanded(child: _MobileShimmerLine(hollow: hollow)),
+            Expanded(child: ShimmerDividerLine(hollow: hollow)),
             const SizedBox(width: HollowSpacing.sm),
             Text('Support', style: HollowTypography.label.copyWith(
               color: hollow.textSecondary,
@@ -4675,7 +3844,7 @@ class _AboutTab extends ConsumerWidget {
               url: 'https://kick.com/AnonListen',
             ),
             const SizedBox(width: HollowSpacing.sm),
-            Expanded(child: _MobileShimmerLine(hollow: hollow)),
+            Expanded(child: ShimmerDividerLine(hollow: hollow)),
             const SizedBox(width: HollowSpacing.sm),
             _MobileBrandIcon(
               icon: BrandIcons.patreon,
@@ -4696,48 +3865,22 @@ class _AboutTab extends ConsumerWidget {
         // Legal
         const _SectionLabel(label: 'Legal'),
         const SizedBox(height: HollowSpacing.sm),
-        Align(
-          alignment: Alignment.centerLeft,
-          child: HollowButton.ghost(
-            onPressed: () => _showLegalSheet(context, 'Privacy Policy', 'legal/PRIVACY_POLICY.md'),
-            icon: const Icon(LucideIcons.shield, size: 16),
-            child: const Text('Privacy Policy'),
-          ),
+        aboutLinkButton(
+          onPressed: () => _showLegalSheet(context, 'Privacy Policy', 'legal/PRIVACY_POLICY.md'),
+          icon: LucideIcons.shield,
+          label: 'Privacy Policy',
         ),
         const SizedBox(height: HollowSpacing.xs),
-        Align(
-          alignment: Alignment.centerLeft,
-          child: HollowButton.ghost(
-            onPressed: () => _showLegalSheet(context, 'Terms of Use', 'legal/TERMS_OF_USE.md'),
-            icon: const Icon(LucideIcons.scroll, size: 16),
-            child: const Text('Terms of Use'),
-          ),
+        aboutLinkButton(
+          onPressed: () => _showLegalSheet(context, 'Terms of Use', 'legal/TERMS_OF_USE.md'),
+          icon: LucideIcons.scroll,
+          label: 'Terms of Use',
         ),
         const SizedBox(height: HollowSpacing.xs),
-        Align(
-          alignment: Alignment.centerLeft,
-          child: HollowButton.ghost(
-            onPressed: () {
-              showLicensePage(
-                context: context,
-                applicationName: 'Hollow',
-                applicationVersion: 'Alpha',
-                applicationIcon: Padding(
-                  padding: const EdgeInsets.all(HollowSpacing.md),
-                  child: ClipRRect(
-                    borderRadius: BorderRadius.circular(12),
-                    child: Image.asset(
-                      'assets/hollow_logo_rounded.png',
-                      width: 48,
-                      height: 48,
-                    ),
-                  ),
-                ),
-              );
-            },
-            icon: const Icon(LucideIcons.fileText, size: 16),
-            child: const Text('Open-Source Licenses'),
-          ),
+        aboutLinkButton(
+          onPressed: () => showHollowLicensesPage(context),
+          icon: LucideIcons.fileText,
+          label: 'Open-Source Licenses',
         ),
 
         const SizedBox(height: HollowSpacing.xl),
@@ -4748,12 +3891,7 @@ class _AboutTab extends ConsumerWidget {
   static void _showLegalSheet(
       BuildContext context, String title, String assetPath) async {
     final hollow = HollowTheme.of(context);
-    final text = await rootBundle.loadString(assetPath);
-    final lines = text.split('\n');
-    final body = lines
-        .skipWhile((l) => l.startsWith('# ') || l.trim().isEmpty)
-        .join('\n')
-        .trim();
+    final body = await loadLegalMarkdownBody(assetPath);
 
     if (!context.mounted) return;
 
@@ -4794,51 +3932,11 @@ class _AboutTab extends ConsumerWidget {
             ),
             Divider(color: hollow.border, height: 1),
             Expanded(
-              child: Markdown(
-                data: body,
+              child: legalMarkdownView(
+                hollow,
+                body,
                 controller: scrollController,
-                selectable: true,
                 padding: const EdgeInsets.all(HollowSpacing.lg),
-                onTapLink: (text, href, title) {
-                  if (href != null) {
-                    launchUrl(Uri.parse(href),
-                        mode: LaunchMode.externalApplication);
-                  }
-                },
-                styleSheet: MarkdownStyleSheet(
-                  h2: HollowTypography.heading.copyWith(
-                    color: hollow.textPrimary,
-                    fontSize: 16,
-                  ),
-                  h3: HollowTypography.heading.copyWith(
-                    color: hollow.textPrimary,
-                    fontSize: 14,
-                  ),
-                  p: HollowTypography.body.copyWith(
-                    color: hollow.textPrimary,
-                    height: 1.6,
-                  ),
-                  listBullet: HollowTypography.body.copyWith(
-                    color: hollow.textSecondary,
-                  ),
-                  strong: HollowTypography.body.copyWith(
-                    color: hollow.textPrimary,
-                    fontWeight: FontWeight.w700,
-                  ),
-                  a: HollowTypography.body.copyWith(
-                    color: hollow.accent,
-                    decoration: TextDecoration.underline,
-                    decorationColor: hollow.accent,
-                  ),
-                  blockSpacing: 12,
-                  horizontalRuleDecoration: BoxDecoration(
-                    border: Border(
-                      top: BorderSide(
-                        color: hollow.border.withValues(alpha: 0.5),
-                      ),
-                    ),
-                  ),
-                ),
               ),
             ),
           ],
@@ -5066,35 +4164,6 @@ class _InfoRow extends StatelessWidget {
   }
 }
 
-class _MobileShimmerLine extends StatelessWidget {
-  final HollowTheme hollow;
-  const _MobileShimmerLine({required this.hollow});
-
-  @override
-  Widget build(BuildContext context) {
-    return ValueListenableBuilder<double>(
-      valueListenable: SharedTickers.instance.shimmer,
-      builder: (context, value, _) {
-        final pos = value * 4.0 - 1.5;
-        return Container(
-          height: 1,
-          decoration: BoxDecoration(
-            gradient: LinearGradient(
-              begin: Alignment(pos - 0.5, 0),
-              end: Alignment(pos + 0.5, 0),
-              colors: [
-                hollow.border,
-                hollow.accent.withValues(alpha: 0.6),
-                hollow.border,
-              ],
-            ),
-          ),
-        );
-      },
-    );
-  }
-}
-
 /// Blocked users management — mobile parity with the desktop Security tab's
 /// Blocked Users card: HollowAvatar + name + truncated master id + Unblock.
 class _BlockedUsersTab extends ConsumerWidget {
@@ -5104,7 +4173,6 @@ class _BlockedUsersTab extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
     final blocked = ref.watch(blockedUsersProvider).toList()..sort();
-    final profiles = ref.watch(profileProvider);
 
     if (blocked.isEmpty) {
       return Padding(
@@ -5120,75 +4188,17 @@ class _BlockedUsersTab extends ConsumerWidget {
     return ListView(
       padding: const EdgeInsets.all(HollowSpacing.lg),
       children: [
-        Text(
-          'Blocked users can\'t send you friend requests, direct messages, '
-          'or calls, and their channel messages are hidden.',
-          style:
-              HollowTypography.caption.copyWith(color: hollow.textSecondary),
-        ),
+        blockedUsersIntro(hollow),
         const SizedBox(height: HollowSpacing.md),
         for (final id in blocked)
           Padding(
             padding: const EdgeInsets.only(bottom: HollowSpacing.sm),
-            child: Container(
-              padding: const EdgeInsets.symmetric(
-                horizontal: HollowSpacing.md,
-                vertical: HollowSpacing.sm,
-              ),
-              decoration: BoxDecoration(
-                color: hollow.surface,
-                borderRadius: BorderRadius.circular(hollow.radiusMd),
-                border: Border.all(color: hollow.border),
-              ),
-              child: Row(
-                children: [
-                  HollowAvatar(peerId: id, size: 36),
-                  const SizedBox(width: HollowSpacing.md),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          displayNameForPeer(profiles[id], id),
-                          style: HollowTypography.body.copyWith(
-                            color: hollow.textPrimary,
-                            fontWeight: FontWeight.w600,
-                          ),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                        const SizedBox(height: 2),
-                        Text(
-                          id.length > 16
-                              ? '${id.substring(0, 8)}...${id.substring(id.length - 8)}'
-                              : id,
-                          style: HollowTypography.mono.copyWith(
-                            color: hollow.textSecondary,
-                            fontSize: 11,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(width: HollowSpacing.sm),
-                  HollowButton.ghost(
-                    compact: true,
-                    onPressed: () async {
-                      try {
-                        await ref
-                            .read(blockedUsersProvider.notifier)
-                            .unblock(id);
-                      } catch (_) {
-                        if (context.mounted) {
-                          HollowToast.show(context, 'Failed to unblock',
-                              type: HollowToastType.error);
-                        }
-                      }
-                    },
-                    child: const Text('Unblock'),
-                  ),
-                ],
-              ),
+            child: BlockedUserRow(
+              id: id,
+              avatarSize: 36,
+              shortId: id.length > 16
+                  ? '${id.substring(0, 8)}...${id.substring(id.length - 8)}'
+                  : id,
             ),
           ),
       ],

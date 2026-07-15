@@ -1051,6 +1051,12 @@ impl SeedBudget {
             false
         }
     }
+    /// Return tokens for bytes that were budgeted but never handed to the
+    /// transport (chunk skipped or staging failed). Capped at the burst
+    /// ceiling so refunds can't inflate the bucket past normal refill.
+    fn refund(&mut self, bytes: u64) {
+        self.tokens = (self.tokens + bytes as f64).min(SEED_BURST_BYTES as f64);
+    }
 }
 
 // ── Scheduler tick ───────────────────────────────────────────────────────
@@ -1083,6 +1089,11 @@ pub async fn tick(
     // 0. Manifest request timeout + seeding progress + stale cleanup.
     let to_remove = tick_maintenance(registry, &root_hashes, now, event_tx, bundle_keypair).await;
     for rh in &to_remove {
+        // Unsubscribe from the swarm room — mirrors the cancel/remove paths.
+        // Without this the WS socket stays joined to the dead share room.
+        let _ = ws_cmd_tx.send(WsCommand::LeaveRoom {
+            room_code: format!("{SHARE_ROOM_PREFIX}{rh}"),
+        });
         registry.remove(rh);
     }
 
@@ -1518,23 +1529,31 @@ async fn serve_chunk_requests(
     for idx in indices {
         if idx >= chunk_count { continue; }
         if !have.has(idx) { continue; }
-        // Bandwidth cap: defer this chunk to a later request if we don't have
-        // tokens. The peer will retry via the scheduler timeout path.
-        let want = chunk_plain_len(idx, chunk_count, total_size, chunk_size);
-        if !seed_budget.try_consume((want + 16) as u64) {
-            break;
-        }
-        // Read plaintext from original file, encrypt on-the-fly.
-        let offset = idx as u64 * chunk_size as u64;
-        let Some(buf) = read_encrypt_chunk(file, key, idx, want, offset) else { continue; };
-        let ct_len = buf.len();
-
+        // Relay-only peers never get chunks — skip BEFORE touching the budget
+        // (and before the pointless read+encrypt).
         if !prefer_webrtc {
             hollow_log!("[SHARE] skip chunk for relay-only peer {sender_peer_id}");
             continue;
         }
+        // Bandwidth cap: defer this chunk to a later request if we don't have
+        // tokens. The peer will retry via the scheduler timeout path.
+        let want = chunk_plain_len(idx, chunk_count, total_size, chunk_size);
+        let budgeted = (want + 16) as u64; // ciphertext = plaintext + GCM tag
+        if !seed_budget.try_consume(budgeted) {
+            break;
+        }
+        // Read plaintext from original file, encrypt on-the-fly.
+        let offset = idx as u64 * chunk_size as u64;
+        let Some(buf) = read_encrypt_chunk(file, key, idx, want, offset) else {
+            // Nothing handed to the transport — return the tokens.
+            seed_budget.refund(budgeted);
+            continue;
+        };
+        let ct_len = buf.len();
 
         let Some((transfer_id, temp_path)) = stage_chunk_for_webrtc(root_hash, idx, &buf) else {
+            // Staging failed — nothing sent, return the tokens.
+            seed_budget.refund(budgeted);
             continue;
         };
         let _ = event_tx.send(NetworkEvent::WebRtcSendFile {
@@ -1607,7 +1626,18 @@ async fn finalize_completed_download(
         hollow_log!("[SHARE] rename .partial -> final failed: {e}");
         return;
     }
-    let is_hidden = registry.get(root_hash).map(|s| s.hidden).unwrap_or(false);
+    let is_hidden = match registry.get(root_hash) {
+        Some(s) => s.hidden,
+        // Registry entry gone mid-finalize: fall back to the persisted share
+        // row — hidden shares are exactly the channel-context ones (server_id
+        // set; same derivation as handle_command_share_open_link). If even the
+        // row is missing, treat as hidden so we never auto-seed / un-hide a
+        // hidden download (persist_share_completion then leaves seeding alone).
+        None => open_message_store(bundle_keypair)
+            .and_then(|store| store.load_share(root_hash).ok().flatten())
+            .map(|s| s.server_id.is_some())
+            .unwrap_or(true),
+    };
     persist_share_completion(bundle_keypair, root_hash, &final_p, is_hidden);
     if let Some(s) = registry.get_mut(root_hash) {
         s.data_file = OpenOptions::new().read(true).open(&final_p).ok();

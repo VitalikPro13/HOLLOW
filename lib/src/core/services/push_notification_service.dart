@@ -108,8 +108,11 @@ Future<void> dismissPeerNotification(String sender) async {
         AndroidFlutterLocalNotificationsPlugin>();
     final active = await android?.getActiveNotifications() ?? const [];
     // If the only thing left in our group is the summary itself, drop it.
+    // Filter by the DM group key (mirroring dismissChannelNotification) —
+    // without it, active CHANNEL notifications count as children and keep an
+    // empty DM "Hollow" summary header lingering in the tray.
     final messageChildren = active.where((n) =>
-        n.id != null && n.id != _groupSummaryId && n.id != 0);
+        n.groupKey == _dmGroupKey && n.id != _groupSummaryId && n.id != 0);
     if (messageChildren.isEmpty) {
       await plugin.cancel(_groupSummaryId);
     }

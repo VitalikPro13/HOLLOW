@@ -777,6 +777,19 @@ impl TestNode {
             .unwrap_or_else(|| "absent".to_string())
     }
 
+    /// Revocation tombstones this node has PERSISTED for `master` (Step 7).
+    /// Empty when no signed device list is stored yet. This is the settle
+    /// signal that a peer durably ingested a revocation — both the sender-side
+    /// device targeting and the receive-side is_revoked guard read this list.
+    pub(crate) fn revoked_devices(&self, master: &str) -> Vec<String> {
+        self.store()
+            .load_device_list(master)
+            .ok()
+            .flatten()
+            .map(|l| l.revoked)
+            .unwrap_or_default()
+    }
+
     /// Friend-table status for a person (master-keyed): "accepted", "pending",
     /// or None if no row exists. Used by the reject/mutual-request tests.
     pub(crate) fn friend_status(&self, master: &str) -> Option<String> {
@@ -1789,11 +1802,40 @@ async fn device_revocation_cuts_off_and_ghost_fanout_holds() {
     seed_device_list_into_db(&b.db_path, &b.passphrase, M_MASTER, &[b_dev.clone(), c_dev.clone()]);
     seed_device_list_into_db(&c.db_path, &c.passphrase, M_MASTER, &[b_dev.clone(), c_dev.clone()]);
 
-    // Let Olm sessions confirm all around (A↔B, A↔C, B↔C siblings).
-    sleep_ms(5000).await;
+    // Let Olm sessions confirm all around (A↔B, A↔C, B↔C siblings). Poll until
+    // every direction is CONFIRMED instead of a fixed sleep — under llvm-cov
+    // instrumentation / full-suite parallel load the handshakes take far longer
+    // than 5s, and revocation traffic sent over a half-established (glare)
+    // session decrypts to "invalid MAC", so the tombstone silently never lands.
+    // Early-exits as soon as everything is confirmed (~2-5s uncontended).
+    let mut olm_ok = false;
+    for _ in 0..60 {
+        sleep_ms(500).await;
+        if a.olm_status(&b.device_id).await == "confirmed"
+            && a.olm_status(&c.device_id).await == "confirmed"
+            && b.olm_status(&a.device_id).await == "confirmed"
+            && b.olm_status(&c.device_id).await == "confirmed"
+            && c.olm_status(&a.device_id).await == "confirmed"
+            && c.olm_status(&b.device_id).await == "confirmed"
+        {
+            olm_ok = true;
+            break;
+        }
+    }
     drain_events(&mut a);
     drain_events(&mut b);
     drain_events(&mut c);
+    assert!(
+        olm_ok,
+        "all Olm sessions (A↔B, A↔C, B↔C) must confirm before the revocation \
+         (a↔b {}/{}, a↔c {}/{}, b↔c {}/{})",
+        a.olm_status(&b.device_id).await,
+        b.olm_status(&a.device_id).await,
+        a.olm_status(&c.device_id).await,
+        c.olm_status(&a.device_id).await,
+        b.olm_status(&c.device_id).await,
+        c.olm_status(&b.device_id).await,
+    );
 
     // B holds a session with sibling C before revocation.
     assert_ne!(
@@ -1808,8 +1850,9 @@ async fn device_revocation_cuts_off_and_ghost_fanout_holds() {
         .await
         .unwrap();
 
-    // The revoker B emits DeviceListUpdated.
-    let b_updated = wait_event(&mut b, std::time::Duration::from_secs(4), |ev| {
+    // The revoker B emits DeviceListUpdated. Generous window (early-exit on
+    // success) — instrumented CI stretches the revoke round-trip.
+    let b_updated = wait_event(&mut b, std::time::Duration::from_secs(20), |ev| {
         matches!(ev, NetworkEvent::DeviceListUpdated { .. })
     })
     .await;
@@ -1817,24 +1860,55 @@ async fn device_revocation_cuts_off_and_ghost_fanout_holds() {
 
     // The revoked device C receives the tombstone (ProfileUpdate to it FIRST) and
     // emits SelfRevoked — the trigger for the Dart-side data wipe.
-    let c_nuked = wait_event(&mut c, std::time::Duration::from_secs(4), |ev| {
+    let c_nuked = wait_event(&mut c, std::time::Duration::from_secs(20), |ev| {
         matches!(ev, NetworkEvent::SelfRevoked)
     })
     .await;
     assert!(c_nuked, "revoked device C should emit SelfRevoked");
-    sleep_ms(300).await;
 
-    // B's Olm session to C is torn down (enforce_device_revocations).
-    assert_eq!(
-        b.olm_status(&c.device_id).await,
-        "absent",
-        "B must drop its Olm session to the revoked device C"
+    // B's Olm session to C is torn down (enforce_device_revocations). The drop
+    // runs async after the revoke command — poll instead of a fixed sleep.
+    let mut b_dropped = false;
+    for _ in 0..40 {
+        sleep_ms(500).await;
+        if b.olm_status(&c.device_id).await == "absent" {
+            b_dropped = true;
+            break;
+        }
+    }
+    assert!(
+        b_dropped,
+        "B must drop its Olm session to the revoked device C (still {:?})",
+        b.olm_status(&c.device_id).await
+    );
+
+    // Friend A must durably ingest the revocation (B re-broadcasts the signed
+    // list to friends so they stop encrypting to the revoked device) BEFORE the
+    // post-revoke DM is sent — under load the tombstone propagation lags, and
+    // sending early races A's collect_target_devices against the ingest. Poll
+    // A's PERSISTED list for the tombstone (the exact state the sender-side
+    // device targeting reads).
+    let mut a_ingested = false;
+    for _ in 0..60 {
+        sleep_ms(500).await;
+        if a.revoked_devices(&m_master).iter().any(|d| *d == c.device_id) {
+            a_ingested = true;
+            break;
+        }
+    }
+    assert!(
+        a_ingested,
+        "friend A must ingest + persist the revocation tombstone for C before \
+         the post-revoke DM (got revoked={:?})",
+        a.revoked_devices(&m_master)
     );
 
     // --- Ghost fan-out guard: C self-nukes → disconnect; a later DM must NOT
     // reach it. Simulate C's disconnect (the real device wipes + drops its socket). ---
     relay.set_online(&c.device_id, false);
-    sleep_ms(300).await;
+    // Let A/B process the peer_left broadcast (the load-bearing settle — A's
+    // tombstone ingest — was already confirmed above).
+    sleep_ms(1000).await;
     drain_events(&mut c);
 
     // A sends a DM to our identity M. With C revoked + out of all rooms,
@@ -1851,7 +1925,7 @@ async fn device_revocation_cuts_off_and_ghost_fanout_holds() {
         .unwrap();
 
     // B (still live) receives it…
-    let b_got = wait_event(&mut b, std::time::Duration::from_secs(5), |ev| {
+    let b_got = wait_event(&mut b, std::time::Duration::from_secs(20), |ev| {
         matches!(ev, NetworkEvent::MessageReceived { text, .. } if text == "after-revoke")
     })
     .await;
@@ -1860,8 +1934,10 @@ async fn device_revocation_cuts_off_and_ghost_fanout_holds() {
     // …and C (revoked + offline) must NOT — its thread stays empty of the post-revoke
     // message even after coming back online (it's dropped from the room, never
     // targeted, and the receive-side is_revoked guard drops any stray delivery).
+    // Generous dwell: a NEGATIVE assert only gets stronger the longer we wait,
+    // and under load a stray buffered delivery would land late.
     relay.set_online(&c.device_id, true);
-    sleep_ms(800).await;
+    sleep_ms(2500).await;
     let c_thread = c.dm_thread(&a.master_id);
     assert!(
         !c_thread.iter().any(|m| m.text == "after-revoke"),

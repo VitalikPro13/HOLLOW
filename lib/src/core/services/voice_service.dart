@@ -1221,7 +1221,10 @@ class VoiceService {
     if (!_frameCryptor!.isEnabled) {
       await _frameCryptor!.init(sharedKey: true);
     }
-    await _frameCryptor!.setSharedKey(0, key);
+    // rotateKey, not setSharedKey: also updates the key index on any existing
+    // cryptors (DM keys are fixed at index 0, but a re-keyed call must never
+    // leave a live cryptor pointed at a stale index).
+    await _frameCryptor!.rotateKey(0, key);
 
     // Enable on sender (outgoing audio).
     try {
@@ -1358,11 +1361,14 @@ class VoiceService {
       'sdpMid': candidate.sdpMid,
       'sdpMLineIndex': candidate.sdpMLineIndex,
     });
+    // .catchError, not try/catch: fire-and-forget — a sync try/catch around
+    // the un-awaited Future catches nothing. Safe to swallow: ICE candidates
+    // are best-effort (the connection retries/renegotiates without this one).
     network_api.callSendSignal(
       peerId: peerId,
       signalType: 'ice',
       payload: payload,
-    );
+    ).catchError((_) {});
   }
 
   /// Body of pc.onTrack — audio auto-plays, video needs a renderer.

@@ -1599,13 +1599,16 @@ class VoiceChannelService {
       'sdpMid': candidate.sdpMid,
       'sdpMLineIndex': candidate.sdpMLineIndex,
     });
+    // .catchError, not try/catch: fire-and-forget — a sync try/catch around
+    // the un-awaited Future catches nothing. Safe to swallow: ICE candidates
+    // are best-effort (the connection retries/renegotiates without this one).
     network_api.voiceChannelSendSignal(
       serverId: _serverId!,
       channelId: _channelId!,
       peerId: peerId,
       signalType: 'ice',
       payload: payload,
-    );
+    ).catchError((_) {});
   }
 
   /// onConnectionState handler: fire onPeerConnected + a delayed ICE-route

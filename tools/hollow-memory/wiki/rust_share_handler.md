@@ -258,6 +258,7 @@ Without this, restarting the app would silently kill all seeding.
 - **Refill rate:** 20 MiB/s (`SEED_REFILL_BPS`).
 - **Max burst:** 40 MiB (`SEED_BURST_BYTES`).
 - `try_consume(bytes)` -- Refills based on elapsed time, then attempts to consume. Returns true on success, false if caller should defer. No partial consumption.
+- `refund(bytes)` (2026-07-15) -- Adds tokens back (capped at burst) when a charged chunk is NOT actually sent (read/encrypt failure, WebRTC staging failure). Relay-only peers (`!prefer_webrtc`) are skipped BEFORE the charge and before the read/encrypt — previously every skipped chunk burned ~256 KiB of budget plus a wasted disk read + AES-GCM encrypt.
 - Purpose: prevents runaway saturation. The coexistence pause (200ms after messaging) already protects real-time traffic; the bucket prevents Share from saturating bandwidth continuously.
 
 ---
@@ -270,7 +271,7 @@ Without this, restarting the app would silently kill all seeding.
 
 For each share in the registry:
 
-1. **Manifest timeout:** If no manifest after 10 seconds, emits `ShareFailed` with "No seeders found" and removes the entry.
+1. **Manifest timeout:** If no manifest after 10 seconds, emits `ShareFailed` with "No seeders found", sends `WsCommand::LeaveRoom` for the share room (fixed 2026-07-15 — the socket used to stay subscribed forever), and removes the entry.
 2. **Stale file check:** If seeding but `data_file` is None (source file deleted), disables seeding, marks state "stale" in DB, emits `ShareSeedingChanged`.
 3. **Seeding progress emit:** Every ~2 seconds, emits `ShareSeedingChanged` with current seeder/leecher counts and bytes_uploaded.
 
@@ -408,7 +409,7 @@ For each needed chunk (in rarest-first or sequential order):
 3. Renames `.partial` to the original filename in save_dir.
 4. **Collision avoidance:** If filename already exists, appends ` (1)`, ` (2)`, ... up to 999.
 5. Marks share complete in DB (`mark_share_complete()`).
-6. **Auto-seeding:** Non-hidden shares automatically start seeding. Hidden shares (channel files) don't auto-seed -- receiver opts in via "Keep & Seed".
+6. **Auto-seeding:** Non-hidden shares automatically start seeding. Hidden shares (channel files) don't auto-seed -- receiver opts in via "Keep & Seed". The hidden flag comes from the registry entry; if that entry vanished (race), the fallback is the persisted share row's `server_id.is_some()`, defaulting to hidden when no row exists either (fixed 2026-07-15 — used to default to visible, which would surface + auto-seed a hidden channel file). Known residual: `rebuild_seed_state` still hardcodes `hidden: false` on auto-rejoin (flagged in `reports/SONAR_CLEANUP_EPIC.md`).
 7. Re-opens the final file read-only as `data_file` for seeding.
 8. Emits `NetworkEvent::ShareCompleted` with disk_path.
 

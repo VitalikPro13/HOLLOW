@@ -93,7 +93,7 @@ pub(crate) async fn handle_send_file(
     if let Some(reason) = channel_file_send_rejection(
         server_states, &server_id, &channel_id, local_peer_str, &original_ext,
         db_path, db_passphrase,
-    ) {
+    ).await {
         let _ = event_tx.send(NetworkEvent::FileFailed {
             file_id: message_id.clone(),
             error: reason,
@@ -224,9 +224,10 @@ fn convert_image_for_send(
 
 /// Channel moderation gates for a file send (posting permission + mute +
 /// media-only + slow mode). Returns Some(reason) when the send must be
-/// rejected with FileFailed. Sync on purpose — the slow-mode check opens the
-/// MessageStore and must never be held across an .await (Connection is !Sync).
-fn channel_file_send_rejection(
+/// rejected with FileFailed. Async — the slow-mode check reads the
+/// MessageStore on the blocking pool (SQLCipher key derivation is expensive);
+/// the store lives entirely inside that closure (Connection is !Sync).
+async fn channel_file_send_rejection(
     server_states: &HashMap<String, ServerState>,
     server_id: &Option<String>,
     channel_id: &Option<String>,
@@ -257,13 +258,14 @@ fn channel_file_send_rejection(
             );
         }
     }
-    slow_mode_rejection(server, sid, cid, local_peer_str, now_ms, db_path, db_passphrase)
+    slow_mode_rejection(server, sid, cid, local_peer_str, now_ms, db_path, db_passphrase).await
 }
 
-/// Slow-mode gate for a channel file send (Mod+ exempt). Reads the sender's
-/// own latest channel ts from the store; store-open failure = allow (mirrors
-/// the original inline behavior).
-fn slow_mode_rejection(
+/// Slow-mode gate for a channel file send. The Mod+ exemption short-circuits
+/// BEFORE any store access; the sender's own latest channel ts is read on the
+/// blocking pool via the shared message_ops helper. Store-open failure =
+/// allow (mirrors the original inline behavior).
+async fn slow_mode_rejection(
     server: &ServerState,
     sid: &str,
     cid: &str,
@@ -276,8 +278,7 @@ fn slow_mode_rejection(
     if slow == 0 || server.bypasses_slow_mode(local_peer_str) {
         return None;
     }
-    let store = crate::storage::MessageStore::open(db_path, db_passphrase).ok()?;
-    let last_ts = store.latest_own_channel_ts(sid, cid)?;
+    let last_ts = super::message_ops::latest_own_channel_ts_blocking(sid, cid, db_path, db_passphrase).await?;
     let next_allowed = last_ts + (slow as i64) * 1000;
     if (now_ms as i64) < next_allowed {
         let wait_s = ((next_allowed - now_ms as i64) + 999) / 1000;
@@ -1973,7 +1974,30 @@ async fn attempt_vault_reconstruction(
     dl_server_id: String,
     dl_k: usize,
 ) {
-    let Ok(Some(manifest)) = content_store.load_manifest(content_id) else { return; };
+    // The caller already removed the pending-download registration — bailing
+    // out here without rolling it back would wedge this content_id forever
+    // (later shards find no pending entry and never retry reconstruction).
+    let manifest = match content_store.load_manifest(content_id) {
+        Ok(Some(m)) => m,
+        Ok(None) => {
+            // Manifest genuinely absent — reconstruction can never succeed;
+            // fail the download visibly instead of leaving the UI waiting.
+            hollow_log!("[HOLLOW-VAULT] No manifest for {content_id} — cannot reconstruct");
+            let _ = event_tx.send(NetworkEvent::VaultDownloadFailed {
+                server_id: dl_server_id,
+                content_id: content_id.to_string(),
+                error: "Manifest missing for this file".to_string(),
+            }).await;
+            return;
+        }
+        Err(e) => {
+            // Transient store failure — re-register the pending download so
+            // the next shard arrival retries instead of abandoning it.
+            hollow_log!("[HOLLOW-VAULT] load_manifest failed for {content_id}: {e} — keeping download pending for retry");
+            pending_vault_downloads.insert(content_id.to_string(), (dl_server_id, dl_k, 0));
+            return;
+        }
+    };
     let n = dl_k + manifest.m as usize;
     let local_shards = content_store.list_content_shards(&dl_server_id, content_id).unwrap_or_default();
     let mut packed: Vec<Option<Vec<u8>>> = vec![None; n];

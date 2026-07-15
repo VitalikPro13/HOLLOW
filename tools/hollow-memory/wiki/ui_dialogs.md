@@ -782,7 +782,7 @@ Simple label-value row with spaceBetween alignment.
 
 ## UserSettingsDialog -- Full User Settings Panel
 
-**File:** `lib/src/ui/dialogs/user_settings_dialog.dart` (5234 lines)
+**File:** `lib/src/ui/dialogs/user_settings_dialog.dart` (~740-line shell; split 2026-07-15 into per-category sections under `lib/src/ui/settings/` — see `ui_user_settings.md`)
 **Trigger:** Settings gear in user bar, Ctrl+, keyboard shortcut.
 **Entry point:** `showUserSettingsDialog(BuildContext context, WidgetRef ref, {openSystemTab, openUpdatesTab})`
 

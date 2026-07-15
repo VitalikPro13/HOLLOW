@@ -178,5 +178,10 @@ The harness is CI-gated. `.github/workflows/rust-coverage.yml` (job "Test & Cove
 `--ignore-filename-regex "(...|/node/|...)"` only excludes `node/` from the coverage PERCENTAGE, not
 from running. Branch protection requires "Test & Coverage" → the harness gates merges to `main`. No
 separate job needed. **Caveat:** the harness tests are timing-sensitive (sleeps for the MLS batch timer,
-Olm confirmation, etc.); a slower instrumented CI runner is a latent flakiness risk — bump the sleeps if
-CI flakes, don't assume a logic bug.
+Olm confirmation, etc.); a slower instrumented CI runner is a latent flakiness risk. **Deflake rule
+(2026-07-15, from the `device_revocation_cuts_off_and_ghost_fanout_holds` two-strike flake): don't just
+bump flat sleeps — convert them to poll-until-deadline loops (N × 500ms with a 20-30s ceiling, early-exit
+on success) on the actual precondition** (e.g. all Olm directions "confirmed" via `olm_status`, tombstone
+persisted via the `revoked_devices()` inspector) — flat sleeps proceed even when the precondition hasn't
+settled, producing downstream "invalid MAC"-style failures that look like logic bugs. Runtime stays fast
+(polls exit early); ceilings only pay out under instrumentation/parallel load.

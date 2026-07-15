@@ -6154,6 +6154,14 @@ async fn handle_incoming_request(
                 Ok(MessageEnvelope::EditMessage { mid, text: new_text, ts, sig, pk, sid, cid }) => {
                     hollow_log!("[HOLLOW-EDIT] Received edit for message {mid} from {peer_str}");
 
+                    // Moderation (LIVE ingest, channel edits only): drop edits from
+                    // muted members — mirrors the MLS twin in message_ops.rs.
+                    if message_ops::live_muted_ingest_drop(
+                        sid.as_deref().and_then(|s| server_states.get(s)), &peer_str, "edit",
+                    ) {
+                        return;
+                    }
+
                     // Persist the edit to local DB (preserves old text).
                     let mut edit_applied = false;
                     if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
@@ -6282,6 +6290,14 @@ async fn handle_incoming_request(
                         return;
                     }
                     hollow_log!("[HOLLOW-REACTION] Received reaction {emoji} on {mid} from {peer_str}");
+
+                    // Moderation (LIVE ingest, channel reactions only): drop reactions
+                    // from muted members — mirrors the MLS twin in message_ops.rs.
+                    if message_ops::live_muted_ingest_drop(
+                        sid.as_deref().and_then(|s| server_states.get(s)), &peer_str, "reaction",
+                    ) {
+                        return;
+                    }
 
                     // DM (sid==None): the reactor is keyed by the sender's MASTER id so
                     // reactions from any of a friend's devices attribute to one person.
@@ -8899,8 +8915,9 @@ async fn handle_incoming_request(
                                 ).await;
                             }
                             MessageEnvelope::EditMessage { mid, text: new_text, ts, sig, pk, sid, cid } => {
+                                let mod_state = sid.as_deref().and_then(|s| server_states.get(s));
                                 message_ops::handle_envelope_edit_message(
-                                    event_tx, bundle_keypair, &sender_master,
+                                    event_tx, bundle_keypair, mod_state, &sender_master,
                                     mid, new_text, ts, sig, pk, sid, cid,
                                     db_path, db_passphrase,
                                 ).await;
@@ -8913,8 +8930,9 @@ async fn handle_incoming_request(
                                 ).await;
                             }
                             MessageEnvelope::AddReaction { mid, emoji, ts, sig, pk, sid, cid } => {
+                                let mod_state = sid.as_deref().and_then(|s| server_states.get(s));
                                 message_ops::handle_envelope_add_reaction(
-                                    event_tx, bundle_keypair, &sender_master,
+                                    event_tx, bundle_keypair, mod_state, &sender_master,
                                     mid, emoji, ts, sig, pk, sid, cid,
                                     db_path, db_passphrase,
                                 ).await;
@@ -10400,7 +10418,7 @@ async fn handle_incoming_request(
             if peer_str == local_peer_str { return; }
             let sender_master = super::resolver::resolve(peer_str);
             message_ops::handle_envelope_edit_message(
-                &event_tx, &bundle_keypair, &sender_master,
+                &event_tx, &bundle_keypair, server_states.get(&server_id), &sender_master,
                 mid, text, ts, sig, pk,
                 Some(server_id), Some(channel_id),
                 &db_path, &db_passphrase,
@@ -10422,7 +10440,7 @@ async fn handle_incoming_request(
             if peer_str == local_peer_str { return; }
             let sender_master = super::resolver::resolve(peer_str);
             message_ops::handle_envelope_add_reaction(
-                &event_tx, &bundle_keypair, &sender_master,
+                &event_tx, &bundle_keypair, server_states.get(&server_id), &sender_master,
                 mid, emoji, ts, sig, pk,
                 Some(server_id), Some(channel_id),
                 &db_path, &db_passphrase,
