@@ -3366,19 +3366,32 @@ class _ScreenShareFullView extends ConsumerWidget {
     if (focused.peerId == null || focused.type == null) return null;
     final isLocal = focused.peerId == localPeerId;
     if (focused.type == 'screen') {
-      final r = isLocal ? localScreen : remoteScreen;
-      final active = isLocal ? call.isScreenSharing : call.remoteScreenSharing;
-      if (active && r != null) {
-        return (renderer: r, isCamera: false, isLocal: isLocal);
-      }
-    } else if (focused.type == 'camera') {
-      final r = isLocal ? localCamera : remoteCamera;
-      final active = isLocal ? call.isVideoEnabled : call.remoteVideoEnabled;
-      if (active && r != null) {
-        return (renderer: r, isCamera: true, isLocal: isLocal);
-      }
+      return _sourceIfActive(
+        isLocal ? localScreen : remoteScreen,
+        isLocal ? call.isScreenSharing : call.remoteScreenSharing,
+        isCamera: false,
+        isLocal: isLocal,
+      );
+    }
+    if (focused.type == 'camera') {
+      return _sourceIfActive(
+        isLocal ? localCamera : remoteCamera,
+        isLocal ? call.isVideoEnabled : call.remoteVideoEnabled,
+        isCamera: true,
+        isLocal: isLocal,
+      );
     }
     return null;
+  }
+
+  ({RTCVideoRenderer? renderer, bool isCamera, bool isLocal})? _sourceIfActive(
+    RTCVideoRenderer? renderer,
+    bool active, {
+    required bool isCamera,
+    required bool isLocal,
+  }) {
+    if (!active || renderer == null) return null;
+    return (renderer: renderer, isCamera: isCamera, isLocal: isLocal);
   }
 }
 
