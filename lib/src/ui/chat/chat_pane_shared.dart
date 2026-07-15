@@ -1,6 +1,9 @@
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/providers/device_link_provider.dart';
+import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/shared_tickers.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
@@ -136,41 +139,45 @@ Widget gifAwareImage(String path, {double? width, double? height}) =>
 /// test/widget/chat_list_element_reuse_test.dart).
 Widget reversedChatList({
   required BuildContext context,
-  required Key listKey,
+  Key? listKey,
   required ItemScrollController itemScrollController,
   required ItemPositionsListener itemPositionsListener,
-  required ScrollOffsetController scrollOffsetController,
+  ScrollOffsetController? scrollOffsetController,
   required int itemCount,
   required Map<String, int> indexByMessageId,
   required Widget Function(BuildContext context, int revIndex) itemBuilder,
+  // Mobile passes false: SelectionArea's touch long-press would fight the
+  // LongPressMessage action-sheet gesture on every bubble.
+  bool selectionArea = true,
+  EdgeInsets padding = const EdgeInsets.symmetric(vertical: HollowSpacing.sm),
 }) {
+  final list = ScrollConfiguration(
+    behavior: ScrollConfiguration.of(context).copyWith(scrollbars: false),
+    child: ScrollablePositionedList.builder(
+      key: listKey,
+      itemScrollController: itemScrollController,
+      itemPositionsListener: itemPositionsListener,
+      scrollOffsetController: scrollOffsetController,
+      reverse: true,
+      initialScrollIndex: 0,
+      initialAlignment: 0.0,
+      padding: padding,
+      itemCount: itemCount,
+      findChildIndexCallback: (key) {
+        if (key is! ValueKey<Object>) return null;
+        final id = key.value;
+        if (id is! String) return null;
+        final i = indexByMessageId[id];
+        if (i == null) return null;
+        return itemCount - 1 - i;
+      },
+      itemBuilder: itemBuilder,
+    ),
+  );
+  if (!selectionArea) return list;
   return SelectionArea(
     contextMenuBuilder: (_, _) => const SizedBox.shrink(),
-    child: ScrollConfiguration(
-      behavior: ScrollConfiguration.of(context).copyWith(scrollbars: false),
-      child: ScrollablePositionedList.builder(
-        key: listKey,
-        itemScrollController: itemScrollController,
-        itemPositionsListener: itemPositionsListener,
-        scrollOffsetController: scrollOffsetController,
-        reverse: true,
-        initialScrollIndex: 0,
-        initialAlignment: 0.0,
-        padding: const EdgeInsets.symmetric(
-          vertical: HollowSpacing.sm,
-        ),
-        itemCount: itemCount,
-        findChildIndexCallback: (key) {
-          if (key is! ValueKey<Object>) return null;
-          final id = key.value;
-          if (id is! String) return null;
-          final i = indexByMessageId[id];
-          if (i == null) return null;
-          return itemCount - 1 - i;
-        },
-        itemBuilder: itemBuilder,
-      ),
-    ),
+    child: list,
   );
 }
 
@@ -557,6 +564,31 @@ class UnreadJumpPill extends StatelessWidget {
       ),
     );
   }
+}
+
+/// Collapse a set of typing peer ids to MASTER identities, excluding every
+/// id that is "us". Robust self-filter (Step 9C/C1): a sibling device typing
+/// must never render as "you are typing" on our OTHER device. The typist id
+/// reaching here is collapsed to master in Rust ONLY IF the sibling's device
+/// id is warm in the resolver; if it isn't, it arrives as a raw DEVICE id and
+/// a bare `master != myMaster` check misses it. So exclude a typist that
+/// resolves to our master OR is one of OUR OWN known device ids OR is this
+/// running device — i.e. anything `sameIdentity` to us by any path.
+Set<String> typingMastersFor(WidgetRef ref, Set<String> typingPeers) {
+  final links = ref.watch(deviceLinkProvider);
+  final myMaster = links.identityOf(ref.watch(identityProvider).peerId ?? '');
+  final myDeviceIds =
+      ref.watch(myDevicesProvider).map((d) => d.peerId).toSet();
+  final myRunningDevice = ref.watch(localDevicePeerIdProvider).valueOrNull;
+  bool isMe(String pid) =>
+      links.identityOf(pid) == myMaster ||
+      links.sameIdentity(pid, myMaster) ||
+      myDeviceIds.contains(pid) ||
+      (myRunningDevice != null && pid == myRunningDevice);
+  return typingPeers
+      .where((pid) => !isMe(pid))
+      .map((pid) => links.identityOf(pid))
+      .toSet();
 }
 
 /// Typing indicator bar shown above the input area.

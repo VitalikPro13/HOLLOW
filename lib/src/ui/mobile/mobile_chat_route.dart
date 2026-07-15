@@ -9,6 +9,7 @@ import 'package:hollow/src/core/reduce_motion.dart';
 import 'package:hollow/src/core/services/channel_topic_service.dart';
 import 'package:hollow/src/core/providers/background_provider.dart';
 import 'package:hollow/src/core/models/channel_chat_message.dart';
+import 'package:hollow/src/core/models/channel_info.dart';
 import 'package:hollow/src/core/models/chat_message.dart';
 import 'package:hollow/src/core/models/file_attachment.dart';
 import 'package:hollow/src/core/moderation_format.dart';
@@ -29,11 +30,10 @@ import 'package:hollow/src/core/providers/unread_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
+import 'package:hollow/src/ui/chat/chat_pane_shared.dart';
 import 'package:hollow/src/ui/chat/hollow_link_utils.dart';
 import 'package:hollow/src/ui/chat/message_bubble.dart';
 import 'package:hollow/src/ui/chat/channel_message_bubble.dart';
-import 'package:hollow/src/ui/chat/staged_link_preview_card.dart';
-import 'package:hollow/src/ui/chat/staged_hollow_link_card.dart';
 import 'package:hollow/src/ui/chat/emoji_picker.dart';
 import 'package:hollow/src/ui/chat/emote_composer.dart';
 import 'package:hollow/src/ui/chat/emote_image.dart';
@@ -70,6 +70,15 @@ import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
+
+/// Wire prefix marking a message whose text is a file token (no copyable text).
+const String _kFilePrefix = '[file:';
+
+/// Display name given to recorded voice notes.
+const String _kVoiceMessageName = 'Voice message.ogg';
+
+String _hhmm(DateTime t) =>
+    '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
 
 class MobileChatRoute extends ConsumerStatefulWidget {
   /// RouteSettings name every push site tags its route with. Notification
@@ -166,84 +175,94 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     super.initState();
     _positionsListener.itemPositions.addListener(_checkAutoScroll);
     if (widget.isDm) {
-      // Opening the chat: clear any stacked push-notification lines + dismiss the
-      // OS notification for this peer so the next message starts a fresh stack.
-      clearNotificationLines(widget.peerId!);
-      // Dismiss this peer's notification (and the group summary if it was the
-      // last one) — a bare cancel() would leave an empty "Hollow" group header.
-      dismissPeerNotification(widget.peerId!);
-      // Also drop any pending in-app card for this DM — the user is here now;
-      // a lingering card would replay in the next chat they open. Post-frame:
-      // the card dismissal writes provider state, which is not allowed while
-      // the tree is building (this route is pushed during a tap-handler frame).
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!mounted) return;
-        ref.read(systemNotificationProvider.notifier).dismissDm(widget.peerId!);
-      });
-      ref.read(chatProvider.notifier).loadHistory(widget.peerId!).then((_) {
-        if (mounted) {
-          setState(() {});
-          _jumpToBottom();
-          _markSeen();
-        }
-      });
-      // Re-request any file whose bytes never arrived (failed live transfer) from
-      // the friend or an online sibling — mirrors the desktop chat_pane behavior.
-      ref.read(eventStreamProvider.notifier)
-          .requestMissingDmFilesOnOpen(widget.peerId!);
+      _initDmOpen();
     } else {
-      // Opening the channel: clear its accumulated push lines + dismiss the
-      // OS banner (and the channel group summary if it was the last one).
-      dismissChannelNotification(widget.serverId!, widget.channelId!);
-      // Also drop any pending in-app card for this channel (see DM branch —
-      // post-frame because it writes provider state during build).
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!mounted) return;
-        ref
-            .read(systemNotificationProvider.notifier)
-            .dismissChannel(widget.serverId!, widget.channelId!);
-      });
-      // Load FRESH channel + layout state for this server into the providers the
-      // chat UI reads. On mobile the Chats tab often has NO selected server, so
-      // `channelListProvider` can be empty/stale — without this, a re-opened chat
-      // reads a stale `posting`/visibility value (e.g. shows "locked" after the
-      // owner re-enabled posting while the phone sat on the Chats tab). Also
-      // invalidate role/permissions so `canPostInChannelProvider` recomputes.
-      // Desktop never hits this because its shell keeps these providers live.
-      // `loadForServer` is a notifier-method call (safe in initState); but
-      // `ref.invalidate` of a provider touches the ProviderScope inherited widget,
-      // which isn't available until AFTER initState — defer it one frame.
-      ref.read(channelListProvider.notifier).loadForServer(widget.serverId!);
-      ref.read(channelLayoutProvider.notifier).loadForServer(widget.serverId!);
-      // Subscribe this channel's relay topic on EVERY open. The Chats tab
-      // path never subscribed (only the push-tap path did), so a channel
-      // opened from the tab received NO live topic broadcasts — messages
-      // only appeared on the next sync. Route-level = every entry point.
-      // Node-safe helper: a cold-start push tap opens this route before
-      // start_node() completes; a bare call rejected with "Node is not
-      // running" past the (ineffective, un-awaited) try/catch.
-      subscribeChannelTopics(
-          serverId: widget.serverId!, channelIds: [widget.channelId!]);
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!mounted) return;
-        ref.invalidate(myRoleProvider(widget.serverId!));
-        ref.invalidate(myPermissionsProvider(widget.serverId!));
-      });
-      ref.read(channelChatProvider.notifier).loadHistory(
-            widget.serverId!,
-            widget.channelId!,
-          ).then((_) {
-        if (mounted) {
-          ref.read(pinnedProvider.notifier).loadPins(widget.serverId!, widget.channelId!);
-          setState(() {});
-          _jumpToBottom();
-          _markSeen();
-          // Re-derive the slow-mode cooldown from the freshly loaded history
-          // (the route remounts per open — pill state is gone, history isn't).
-          _recomputeSlowMode();
-        }
-      });
+      _initChannelOpen();
     }
+  }
+
+  void _initDmOpen() {
+    // Opening the chat: clear any stacked push-notification lines + dismiss the
+    // OS notification for this peer so the next message starts a fresh stack.
+    clearNotificationLines(widget.peerId!);
+    // Dismiss this peer's notification (and the group summary if it was the
+    // last one) — a bare cancel() would leave an empty "Hollow" group header.
+    dismissPeerNotification(widget.peerId!);
+    // Also drop any pending in-app card for this DM — the user is here now;
+    // a lingering card would replay in the next chat they open. Post-frame:
+    // the card dismissal writes provider state, which is not allowed while
+    // the tree is building (this route is pushed during a tap-handler frame).
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      ref.read(systemNotificationProvider.notifier).dismissDm(widget.peerId!);
+    });
+    ref.read(chatProvider.notifier).loadHistory(widget.peerId!).then((_) {
+      if (mounted) {
+        setState(() {});
+        _jumpToBottom();
+        _markSeen();
+      }
+    });
+    // Re-request any file whose bytes never arrived (failed live transfer) from
+    // the friend or an online sibling — mirrors the desktop chat_pane behavior.
+    ref.read(eventStreamProvider.notifier)
+        .requestMissingDmFilesOnOpen(widget.peerId!);
+  }
+
+  void _initChannelOpen() {
+    // Opening the channel: clear its accumulated push lines + dismiss the
+    // OS banner (and the channel group summary if it was the last one).
+    dismissChannelNotification(widget.serverId!, widget.channelId!);
+    // Also drop any pending in-app card for this channel (see DM branch —
+    // post-frame because it writes provider state during build).
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      ref
+          .read(systemNotificationProvider.notifier)
+          .dismissChannel(widget.serverId!, widget.channelId!);
+    });
+    // Load FRESH channel + layout state for this server into the providers the
+    // chat UI reads. On mobile the Chats tab often has NO selected server, so
+    // `channelListProvider` can be empty/stale — without this, a re-opened chat
+    // reads a stale `posting`/visibility value (e.g. shows "locked" after the
+    // owner re-enabled posting while the phone sat on the Chats tab). Also
+    // invalidate role/permissions so `canPostInChannelProvider` recomputes.
+    // Desktop never hits this because its shell keeps these providers live.
+    // `loadForServer` is a notifier-method call (safe in initState); but
+    // `ref.invalidate` of a provider touches the ProviderScope inherited widget,
+    // which isn't available until AFTER initState — defer it one frame.
+    ref.read(channelListProvider.notifier).loadForServer(widget.serverId!);
+    ref.read(channelLayoutProvider.notifier).loadForServer(widget.serverId!);
+    // Subscribe this channel's relay topic on EVERY open. The Chats tab
+    // path never subscribed (only the push-tap path did), so a channel
+    // opened from the tab received NO live topic broadcasts — messages
+    // only appeared on the next sync. Route-level = every entry point.
+    // Node-safe helper: a cold-start push tap opens this route before
+    // start_node() completes; a bare call rejected with "Node is not
+    // running" past the (ineffective, un-awaited) try/catch.
+    subscribeChannelTopics(
+        serverId: widget.serverId!, channelIds: [widget.channelId!]);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      ref.invalidate(myRoleProvider(widget.serverId!));
+      ref.invalidate(myPermissionsProvider(widget.serverId!));
+    });
+    ref.read(channelChatProvider.notifier).loadHistory(
+          widget.serverId!,
+          widget.channelId!,
+        ).then((_) {
+      if (mounted) {
+        ref
+            .read(pinnedProvider.notifier)
+            .loadPins(widget.serverId!, widget.channelId!);
+        setState(() {});
+        _jumpToBottom();
+        _markSeen();
+        // Re-derive the slow-mode cooldown from the freshly loaded history
+        // (the route remounts per open — pill state is gone, history isn't).
+        _recomputeSlowMode();
+      }
+    });
   }
 
   @override
@@ -324,7 +343,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
   String _formatTime(DateTime dt) {
     final now = DateTime.now();
     if (dt.year == now.year && dt.month == now.month && dt.day == now.day) {
-      return '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
+      return _hhmm(dt);
     }
     return '${dt.month}/${dt.day}';
   }
@@ -456,21 +475,35 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
       _dismissMention();
       return;
     }
-    int atPos = -1;
-    for (int i = cursor - 1; i >= 0; i--) {
-      final c = text[i];
-      if (c == '@') {
-        if (i == 0 || text[i - 1] == ' ' || text[i - 1] == '\n') atPos = i;
-        break;
-      }
-      if (c == ' ' || c == '\n') break;
-    }
+    final atPos = _mentionAtPosFor(text, cursor);
     if (atPos < 0) {
       _dismissMention();
       return;
     }
 
     final query = text.substring(atPos + 1, cursor).toLowerCase();
+    setState(() {
+      _mentionAtPosition = atPos;
+      _mentionCandidates = _mentionCandidatesFor(query).take(6).toList();
+    });
+  }
+
+  /// Position of the '@' opening the mention token the cursor sits in, or -1.
+  /// The '@' must start the text or follow whitespace; the token itself may
+  /// not contain whitespace.
+  int _mentionAtPosFor(String text, int cursor) {
+    for (int i = cursor - 1; i >= 0; i--) {
+      final c = text[i];
+      if (c == '@') {
+        final boundary = i == 0 || text[i - 1] == ' ' || text[i - 1] == '\n';
+        return boundary ? i : -1;
+      }
+      if (c == ' ' || c == '\n') return -1;
+    }
+    return -1;
+  }
+
+  List<_MobileMentionCandidate> _mentionCandidatesFor(String query) {
     final membersAsync = ref.read(serverMembersProvider(widget.serverId!));
     final profiles = ref.read(profileProvider);
     final nicknames = ref.read(serverNicknamesProvider(widget.serverId!));
@@ -502,11 +535,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
       candidates.insert(0,
           const _MobileMentionCandidate(peerId: '', displayName: 'everyone'));
     }
-
-    setState(() {
-      _mentionAtPosition = atPos;
-      _mentionCandidates = candidates.take(6).toList();
-    });
+    return candidates;
   }
 
   void _dismissMention() {
@@ -788,101 +817,24 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
 
     if (text.isEmpty && filePath == null) return;
     if (_blockedBySlowMode()) return;
-    if (_channelMediaOnly) {
-      if (filePath == null) {
-        HollowToast.show(
-          context,
-          'This is a media-only channel — attach an image, GIF, or video',
-          type: HollowToastType.info,
-        );
-        return;
-      }
-      final stagedExt = (_stagedFileName ?? '').contains('.')
-          ? _stagedFileName!.split('.').last.toLowerCase()
-          : '';
-      if (!kMediaOnlyExtensions.contains(stagedExt)) {
-        HollowToast.show(
-          context,
-          'This is a media-only channel — only images, GIFs, and videos can be posted',
-          type: HollowToastType.info,
-        );
-        return;
-      }
-    }
+    if (!_passesMediaOnlyGate(filePath, fileName)) return;
     _controller.clear();
     _lastTypingSent = null;
     _focusNode.requestFocus();
     final replyMid = _replyToMessageId;
     _urlDebounce?.cancel();
-    setState(() {
-      _replyToMessageId = null;
-      _replyToText = null;
-      _replyToSenderName = null;
-      _stagedFilePath = null;
-      _stagedFileName = null;
-      _stagedFileIsImage = false;
-      _stagedPreviewUrl = null;
-      _stagedPreview = null;
-      _stagedPreviewLoading = false;
-      _stagedHollowLink = null;
-      _mentionCandidates = [];
-      _mentionAtPosition = -1;
-    });
+    _clearComposerState();
 
     if (filePath != null) {
-      // Optimistic insert BEFORE the network send (desktop parity): the
-      // bubble renders instantly from the picker's local path; the sender's
-      // FileCompleted DB reload replaces it with the canonical row (dedup by
-      // message_id prevents a double bubble).
-      final messageId = generateMessageId();
       final name = fileName ?? filePath.replaceAll('\\', '/').split('/').last;
-      final ext = name.contains('.') ? name.split('.').last.toLowerCase() : '';
-      if (widget.isDm) {
-        ref.read(chatProvider.notifier).addFileMessage(
-              widget.peerId!,
-              messageId,
-              name,
-              File(filePath).lengthSync(),
-              ext,
-              fileIsImage,
-              filePath,
-              text: text,
-            );
-      } else {
-        ref.read(channelChatProvider.notifier).addFileMessage(
-              widget.serverId!,
-              widget.channelId!,
-              messageId,
-              name,
-              File(filePath).lengthSync(),
-              ext,
-              fileIsImage,
-              filePath,
-              text: text,
-            );
-      }
-      _jumpToBottom();
-      try {
-        // Full send pipeline (not raw network_api.sendFile): transfer
-        // progress state, video thumbnail pre-extraction, and >34 MB
-        // share-backed routing — same path desktop uses.
-        final members = widget.isDm
-            ? null
-            : ref.read(serverMembersProvider(widget.serverId!)).valueOrNull;
-        await ref.read(fileTransferProvider.notifier).sendFile(
-              peerId: widget.isDm ? widget.peerId : null,
-              serverId: widget.isDm ? null : widget.serverId,
-              channelId: widget.isDm ? null : widget.channelId,
-              filePath: filePath,
-              messageId: messageId,
-              messageText: text,
-              memberCount: members?.length ?? 0,
-            );
-      } catch (e) {
-        if (mounted) {
-          HollowToast.show(context, 'Failed to send file', type: HollowToastType.error);
-        }
-      }
+      await _sendFileMessage(
+        filePath: filePath,
+        fileName: name,
+        sizeBytes: File(filePath).lengthSync(),
+        isImage: fileIsImage,
+        text: text,
+        errorToast: 'Failed to send file',
+      );
     } else if (widget.isDm) {
       await ref.read(chatProvider.notifier).sendMessage(
             widget.peerId!,
@@ -907,12 +859,127 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     _markSeen();
   }
 
+  /// Media-only channel gate: false (and toasts) when the staged send isn't
+  /// an accepted image/GIF/video attachment.
+  bool _passesMediaOnlyGate(String? filePath, String? fileName) {
+    if (!_channelMediaOnly) return true;
+    if (filePath == null) {
+      HollowToast.show(
+        context,
+        'This is a media-only channel — attach an image, GIF, or video',
+        type: HollowToastType.info,
+      );
+      return false;
+    }
+    final stagedExt = (fileName ?? '').contains('.')
+        ? fileName!.split('.').last.toLowerCase()
+        : '';
+    if (!kMediaOnlyExtensions.contains(stagedExt)) {
+      HollowToast.show(
+        context,
+        'This is a media-only channel — only images, GIFs, and videos can be posted',
+        type: HollowToastType.info,
+      );
+      return false;
+    }
+    return true;
+  }
+
+  /// Reset reply/staged-file/staged-link/mention state after a send.
+  void _clearComposerState() {
+    setState(() {
+      _replyToMessageId = null;
+      _replyToText = null;
+      _replyToSenderName = null;
+      _stagedFilePath = null;
+      _stagedFileName = null;
+      _stagedFileIsImage = false;
+      _stagedPreviewUrl = null;
+      _stagedPreview = null;
+      _stagedPreviewLoading = false;
+      _stagedHollowLink = null;
+      _mentionCandidates = [];
+      _mentionAtPosition = -1;
+    });
+  }
+
+  /// Optimistic insert + full send pipeline, shared by staged files and voice
+  /// messages. Insert happens BEFORE the network send (desktop parity): the
+  /// bubble renders instantly from the local path; the sender's FileCompleted
+  /// DB reload replaces it with the canonical row (dedup by message_id
+  /// prevents a double bubble).
+  Future<void> _sendFileMessage({
+    required String filePath,
+    required String fileName,
+    required int sizeBytes,
+    required bool isImage,
+    required String text,
+    required String errorToast,
+  }) async {
+    final messageId = generateMessageId();
+    final ext = fileName.contains('.')
+        ? fileName.split('.').last.toLowerCase()
+        : '';
+    if (widget.isDm) {
+      ref.read(chatProvider.notifier).addFileMessage(
+            widget.peerId!,
+            messageId,
+            fileName,
+            sizeBytes,
+            ext,
+            isImage,
+            filePath,
+            text: text,
+          );
+    } else {
+      ref.read(channelChatProvider.notifier).addFileMessage(
+            widget.serverId!,
+            widget.channelId!,
+            messageId,
+            fileName,
+            sizeBytes,
+            ext,
+            isImage,
+            filePath,
+            text: text,
+          );
+    }
+    _jumpToBottom();
+    try {
+      // Full send pipeline (not raw network_api.sendFile): transfer
+      // progress state, video thumbnail pre-extraction, and >34 MB
+      // share-backed routing — same path desktop uses.
+      final members = widget.isDm
+          ? null
+          : ref.read(serverMembersProvider(widget.serverId!)).valueOrNull;
+      await ref.read(fileTransferProvider.notifier).sendFile(
+            peerId: widget.isDm ? widget.peerId : null,
+            serverId: widget.isDm ? null : widget.serverId,
+            channelId: widget.isDm ? null : widget.channelId,
+            filePath: filePath,
+            messageId: messageId,
+            messageText: text,
+            memberCount: members?.length ?? 0,
+          );
+    } catch (e) {
+      if (mounted) {
+        HollowToast.show(context, errorToast, type: HollowToastType.error);
+      }
+    }
+  }
+
   Future<void> _pickFile({bool imagesOnly = false}) async {
     // Media-only channels: restrict the picker to what the channel accepts.
+    final FileType pickerType;
+    if (imagesOnly) {
+      pickerType = FileType.image;
+    } else if (_channelMediaOnly) {
+      pickerType = FileType.custom;
+    } else {
+      pickerType = FileType.any;
+    }
     final result = await FilePicker.platform.pickFiles(
-      type: imagesOnly
-          ? FileType.image
-          : (_channelMediaOnly ? FileType.custom : FileType.any),
+      type: pickerType,
       allowedExtensions: !imagesOnly && _channelMediaOnly
           ? kMediaOnlyExtensions.toList()
           : null,
@@ -1073,58 +1140,23 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     if (size > kLargeFileThresholdBytes) {
       final ok = mounted &&
           await confirmLargeFileShare(context,
-              fileName: 'Voice message.ogg', sizeBytes: size);
+              fileName: _kVoiceMessageName, sizeBytes: size);
       if (!ok) {
         try { await file.delete(); } catch (_) {}
         return;
       }
     }
-    try {
-      final messageId = generateMessageId();
-      // Optimistic insert first (desktop parity) — the voice bubble appears
-      // immediately; the FileCompleted reload repoints diskPath to the
-      // files/ copy before the temp file below is deleted.
-      if (widget.isDm) {
-        ref.read(chatProvider.notifier).addFileMessage(
-              widget.peerId!,
-              messageId,
-              'Voice message.ogg',
-              size,
-              'ogg',
-              false,
-              result.filePath,
-            );
-      } else {
-        ref.read(channelChatProvider.notifier).addFileMessage(
-              widget.serverId!,
-              widget.channelId!,
-              messageId,
-              'Voice message.ogg',
-              size,
-              'ogg',
-              false,
-              result.filePath,
-            );
-      }
-      _jumpToBottom();
-      final members = widget.isDm
-          ? null
-          : ref.read(serverMembersProvider(widget.serverId!)).valueOrNull;
-      await ref.read(fileTransferProvider.notifier).sendFile(
-            peerId: widget.isDm ? widget.peerId : null,
-            serverId: widget.isDm ? null : widget.serverId,
-            channelId: widget.isDm ? null : widget.channelId,
-            filePath: result.filePath,
-            messageId: messageId,
-            messageText: '',
-            memberCount: members?.length ?? 0,
-          );
-    } catch (e) {
-      if (mounted) {
-        HollowToast.show(context, 'Failed to send voice message',
-            type: HollowToastType.error);
-      }
-    }
+    // Optimistic insert first (desktop parity) — the voice bubble appears
+    // immediately; the FileCompleted reload repoints diskPath to the
+    // files/ copy before the temp file below is deleted.
+    await _sendFileMessage(
+      filePath: result.filePath,
+      fileName: _kVoiceMessageName,
+      sizeBytes: size,
+      isImage: false,
+      text: '',
+      errorToast: 'Failed to send voice message',
+    );
     try { await file.delete(); } catch (_) {}
   }
 
@@ -1142,18 +1174,19 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
 
     try {
       Uint8List bytes;
+      String fileName = attachment.fileName;
       if (attachment.isImage && attachment.fileExt == 'webp') {
         bytes = await network_api.convertImageFormat(
           sourcePath: attachment.diskPath!,
           targetFormat: 'png',
         );
+        final base = fileName.contains('.')
+            ? fileName.substring(0, fileName.lastIndexOf('.'))
+            : fileName;
+        fileName = '$base.png';
       } else {
         bytes = await File(attachment.diskPath!).readAsBytes();
       }
-
-      final fileName = attachment.isImage && attachment.fileExt == 'webp'
-          ? '${attachment.fileName.contains('.') ? attachment.fileName.substring(0, attachment.fileName.lastIndexOf('.')) : attachment.fileName}.png'
-          : attachment.fileName;
 
       final savePath = await FilePicker.platform.saveFile(
         dialogTitle: 'Save file',
@@ -1253,315 +1286,70 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
     final bg = ref.watch(backgroundProvider);
-
-    // Channel-visibility eviction (server channels only): if the channel you're
-    // viewing stops being visible to you in real-time (visibility tier raised or
-    // you were demoted), the CRDT state already propagated — pop this route back
-    // to the Chats tab so the now-hidden channel simply disappears.
-    if (!widget.isDm && widget.serverId != null && widget.channelId != null) {
-      ref.listen(visibleChannelsProvider, (prev, next) {
-        // _routeDeactivated: a popped route's listener can still fire during
-        // the pop frame; ref.read on the deactivated element crashes.
-        if (!mounted || _routeDeactivated) return;
-        // Only act when THIS route's server is the selected one (visibleChannels
-        // tracks the selected server); otherwise the map isn't about us.
-        if (ref.read(selectedServerProvider) != widget.serverId) return;
-        if (next.containsKey(widget.channelId)) return; // still visible — fine
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (mounted && !_routeDeactivated && Navigator.of(context).canPop()) {
-            Navigator.of(context).pop();
-          }
-        });
-      });
-    }
+    _registerBuildListeners();
 
     Widget scaffold = Scaffold(
-          backgroundColor: bg.hasBackground ? Colors.transparent : hollow.background,
-          // Custom-emote pull source for every token/reaction in this chat:
-          // DM asks the counterpart's devices, channel asks a room member.
-          body: EmoteScope(
-            serverId: widget.serverId,
-            peerHint: widget.peerId,
-            child: SafeArea(
-            child: Column(
-              children: [
-                _MobileChatHeader(
-              peerId: widget.peerId,
-              serverId: widget.serverId,
-              channelId: widget.channelId,
-              channelName: widget.channelName,
-              searchOpen: _searchOpen,
-              onSearchToggle: widget.isDm ? null : () {
-                setState(() {
-                  _searchOpen = !_searchOpen;
-                  if (!_searchOpen) {
-                    _searchController.clear();
-                    _searchResults = [];
-                  }
-                });
-                if (_searchOpen) {
-                  WidgetsBinding.instance.addPostFrameCallback((_) {
-                    _searchFocusNode.requestFocus();
-                  });
-                }
-              },
-            ),
-            if (widget.isDm)
-              MobileCallStatusStrip(peerId: widget.peerId!),
-            const _VoiceChannelStatusStrip(),
-            if (_searchOpen)
-              _buildSearchBar(hollow),
-            if (!widget.isDm) _buildSyncIndicator(hollow),
-            if (!widget.isDm &&
-                (ref.watch(myPermissionsProvider(widget.serverId!)).valueOrNull ?? Permission.all) & Permission.readMessages == 0)
-              Expanded(
-                child: Center(
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(LucideIcons.eyeOff, size: 48,
-                          color: hollow.textSecondary.withValues(alpha: 0.3)),
-                      const SizedBox(height: HollowSpacing.md),
-                      Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.xl),
-                        child: Text(
-                          'You don\'t have permission to read messages in this channel',
-                          textAlign: TextAlign.center,
-                          style: HollowTypography.body.copyWith(color: hollow.textSecondary),
-                        ),
-                      ),
-                    ],
-                  ),
+      backgroundColor:
+          bg.hasBackground ? Colors.transparent : hollow.background,
+      // Custom-emote pull source for every token/reaction in this chat:
+      // DM asks the counterpart's devices, channel asks a room member.
+      body: EmoteScope(
+        serverId: widget.serverId,
+        peerHint: widget.peerId,
+        child: SafeArea(
+          child: Column(
+            children: [
+              _buildHeader(),
+              if (widget.isDm) MobileCallStatusStrip(peerId: widget.peerId!),
+              const _VoiceChannelStatusStrip(),
+              if (_searchOpen) _buildSearchBar(hollow),
+              if (!widget.isDm) _buildSyncIndicator(hollow),
+              if (!widget.isDm && !_canReadChannel)
+                _buildNoReadPermission(hollow)
+              else
+                _buildMessageArea(),
+              // System-status notice, just above the input cluster (typing bar /
+              // reply preview / composer) — the spot the user's thumb already
+              // rests on. Self-hides when there's nothing to announce.
+              const SystemStatusBanner(anchor: StatusBannerAnchor.bottom),
+              _TypingBar(
+                contextKey: widget.isDm ? widget.peerId! : _channelKey,
+              ),
+              if (_mentionCandidates.isNotEmpty) _buildMentionPanel(hollow),
+              if (_emoteCandidates.isNotEmpty) _buildEmotePanel(hollow),
+              if (_replyToMessageId != null)
+                ChatReplyPreviewBar(
+                  senderName: _replyToSenderName ?? '',
+                  text: _replyToText ?? '',
+                  imagePath: null,
+                  onCancel: _cancelReply,
                 ),
-              )
-            else
-            Expanded(
-              child: Stack(
-                children: [
-                  widget.isDm ? _buildDmMessages() : _buildChannelMessages(),
-                  Builder(builder: (context) {
-                    final unreadCount = widget.isDm
-                        ? ref.watch(unreadProvider.select(
-                            (s) => s.dmUnreadCounts[widget.peerId!] ?? 0))
-                        : ref.watch(unreadProvider.select((s) =>
-                            s.channelUnreadCounts[_channelKey] ?? 0));
-                    if (unreadCount > 0 && !_isInAutoScrollZone) {
-                      final label = unreadCount == 1
-                          ? '1 new message'
-                          : '$unreadCount new messages';
-                      return Positioned(
-                        bottom: HollowSpacing.md,
-                        left: 0,
-                        right: 0,
-                        child: Center(
-                          child: HollowPressable(
-                            onTap: _scrollToBottom,
-                            borderRadius: BorderRadius.circular(20),
-                            backgroundColor: hollow.accent,
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: HollowSpacing.md,
-                              vertical: HollowSpacing.xs + 2,
-                            ),
-                            child: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                Icon(LucideIcons.arrowDown,
-                                    size: 14, color: hollow.textOnAccent),
-                                const SizedBox(width: HollowSpacing.xs),
-                                Text(
-                                  label,
-                                  style: HollowTypography.caption.copyWith(
-                                    color: hollow.textOnAccent,
-                                    fontWeight: FontWeight.w600,
-                                    fontSize: 12,
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ),
-                      );
-                    }
-                    return const SizedBox.shrink();
-                  }),
-                ],
-              ),
-            ),
-            // System-status notice, just above the input cluster (typing bar /
-            // reply preview / composer) — the spot the user's thumb already
-            // rests on. Self-hides when there's nothing to announce.
-            const SystemStatusBanner(anchor: StatusBannerAnchor.bottom),
-            _TypingBar(
-              contextKey: widget.isDm
-                  ? widget.peerId!
-                  : '${widget.serverId}:${widget.channelId}',
-            ),
-            if (_mentionCandidates.isNotEmpty) _buildMentionPanel(hollow),
-            if (_emoteCandidates.isNotEmpty) _buildEmotePanel(hollow),
-            if (_replyToMessageId != null)
-              _ReplyPreview(
-                senderName: _replyToSenderName ?? '',
-                text: _replyToText ?? '',
-                onCancel: () => setState(() {
-                  _replyToMessageId = null;
-                  _replyToText = null;
-                  _replyToSenderName = null;
-                }),
-              ),
-            if (_stagedHollowLink != null)
-              StagedHollowLinkCard(
-                link: _stagedHollowLink!,
-                onDismiss: () {
-                  _urlDebounce?.cancel();
-                  setState(() {
-                    _stagedPreviewUrl = null;
-                    _stagedHollowLink = null;
-                  });
-                },
-              )
-            else if (_stagedPreviewUrl != null && _stagedHollowLink == null)
-              StagedLinkPreviewCard(
-                url: _stagedPreviewUrl!,
+              StagedLinkArea(
+                hollowLink: _stagedHollowLink,
+                previewUrl: _stagedPreviewUrl,
                 preview: _stagedPreview,
-                loading: _stagedPreviewLoading,
-                onDismiss: () {
-                  _urlDebounce?.cancel();
-                  setState(() {
-                    _stagedPreviewUrl = null;
-                    _stagedPreview = null;
-                    _stagedPreviewLoading = false;
-                  });
-                },
+                previewLoading: _stagedPreviewLoading,
+                onDismissHollowLink: _dismissStagedHollowLink,
+                onDismissPreview: _dismissStagedPreview,
               ),
-            if (_stagedFilePath != null)
-              _StagedFilePreview(
-                fileName: _stagedFileName ?? '',
-                filePath: _stagedFilePath!,
-                isImage: _stagedFileIsImage,
-                onCancel: () => setState(() {
-                  _stagedFilePath = null;
-                  _stagedFileName = null;
-                  _stagedFileIsImage = false;
-                }),
-              ),
-            // Slow-mode countdown pill (mirrors the desktop pill by the send button).
-            if (!widget.isDm && _slowModeReadyAt != null)
-              Container(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: HollowSpacing.md,
-                  vertical: HollowSpacing.xs,
+              if (_stagedFilePath != null)
+                StagedFilePreviewBar(
+                  filePath: _stagedFilePath!,
+                  fileName: _stagedFileName ?? '',
+                  isImage: _stagedFileIsImage,
+                  onRemove: _clearStagedFile,
                 ),
-                color: hollow.surface,
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(LucideIcons.timer, size: 12, color: hollow.warning),
-                    const SizedBox(width: 4),
-                    Text(
-                      'Slow mode — ${(_slowModeReadyAt!.difference(DateTime.now()).inSeconds + 1).clamp(1, 3600)}s',
-                      style: HollowTypography.caption.copyWith(
-                        color: hollow.warning,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            if (!widget.isDm &&
-                (!ref.watch(canPostInChannelProvider((
-                      serverId: widget.serverId!,
-                      channelId: widget.channelId!,
-                    ))) ||
-                    muteBannerText(ref
-                            .watch(myMuteStatusProvider(widget.serverId!))
-                            .valueOrNull) !=
-                        null))
-              Container(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: HollowSpacing.md,
-                  vertical: HollowSpacing.lg,
-                ),
-                decoration: BoxDecoration(
-                  color: hollow.surface,
-                  border: Border(top: BorderSide(color: hollow.border)),
-                ),
-                child: Center(
-                  child: Text(
-                    muteBannerText(ref
-                            .watch(myMuteStatusProvider(widget.serverId!))
-                            .valueOrNull) ??
-                        'You don\'t have permission to send messages in this channel',
-                    style: HollowTypography.bodySmall.copyWith(color: hollow.textSecondary),
-                  ),
-                ),
-              )
-            else
-              _isRecordingVoice
-                ? Padding(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: HollowSpacing.sm,
-                      vertical: HollowSpacing.sm,
-                    ),
-                    child: VoiceRecorderBar(
-                      onFinished: _stageVoiceMessage,
-                      onCancelled: () =>
-                          setState(() => _isRecordingVoice = false),
-                    ),
-                  )
-                : _MobileInputBar(
-                    controller: _controller,
-                    focusNode: _focusNode,
-                    onSend: _handleSend,
-                    onAttach: _showAttachSheet,
-                    onMic: _stagedFilePath != null
-                        ? null
-                        : () {
-                            // Voice notes are audio, not media — blocked in
-                            // media-only channels (toast, don't record).
-                            if (_channelMediaOnly) {
-                              HollowToast.show(
-                                context,
-                                'This is a media-only channel — voice messages can\'t be posted here',
-                                type: HollowToastType.info,
-                              );
-                              return;
-                            }
-                            setState(() => _isRecordingVoice = true);
-                          },
-                    onEmoji: _showEmojiSheet,
-                    onChanged: _onTextChanged,
-                    hasStagedFile: _stagedFilePath != null,
-                  ),
-          ],
+              if (!widget.isDm && _slowModeReadyAt != null)
+                _buildSlowModePill(hollow),
+              _buildComposerOrBanner(hollow),
+            ],
+          ),
         ),
-      ),
       ),
     );
 
     if (bg.hasBackground) {
-      final darkenAlpha = bg.panelOpacity.clamp(0.0, 0.92);
-      scaffold = Stack(
-        children: [
-          Positioned.fill(
-            child: Container(
-              color: Colors.black,
-              child: Image.memory(
-                bg.imageBytes!,
-                fit: BoxFit.cover,
-                gaplessPlayback: true,
-                width: double.infinity,
-                height: double.infinity,
-              ),
-            ),
-          ),
-          Positioned.fill(
-            child: Container(
-              color: hollow.background.withValues(alpha: darkenAlpha),
-            ),
-          ),
-          scaffold,
-        ],
-      );
+      scaffold = _wrapWithBackground(scaffold, bg, hollow);
     }
 
     return Stack(
@@ -1579,6 +1367,286 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
         ),
         const MobileActiveCallPill(),
         const MobileVoiceChannelPill(),
+      ],
+    );
+  }
+
+  /// ref.listen registrations, called unconditionally from build() —
+  /// registration during build is all Riverpod requires. The message-list
+  /// growth listeners deliberately stay inside the list builders so they are
+  /// only registered while a list actually shows (not, say, while read
+  /// permission is denied).
+  void _registerBuildListeners() {
+    // Channel-visibility eviction (server channels only): if the channel you're
+    // viewing stops being visible to you in real-time (visibility tier raised or
+    // you were demoted), the CRDT state already propagated — pop this route back
+    // to the Chats tab so the now-hidden channel simply disappears.
+    if (!widget.isDm && widget.serverId != null && widget.channelId != null) {
+      ref.listen(visibleChannelsProvider, _onVisibleChannelsChanged);
+    }
+  }
+
+  void _onVisibleChannelsChanged(
+      Map<String, ChannelInfo>? prev, Map<String, ChannelInfo> next) {
+    // _routeDeactivated: a popped route's listener can still fire during
+    // the pop frame; ref.read on the deactivated element crashes.
+    if (!mounted || _routeDeactivated) return;
+    // Only act when THIS route's server is the selected one (visibleChannels
+    // tracks the selected server); otherwise the map isn't about us.
+    if (ref.read(selectedServerProvider) != widget.serverId) return;
+    if (next.containsKey(widget.channelId)) return; // still visible — fine
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && !_routeDeactivated && Navigator.of(context).canPop()) {
+        Navigator.of(context).pop();
+      }
+    });
+  }
+
+  /// Whether this channel grants us Permission.readMessages.
+  bool get _canReadChannel =>
+      (ref.watch(myPermissionsProvider(widget.serverId!)).valueOrNull ??
+              Permission.all) &
+          Permission.readMessages !=
+      0;
+
+  Widget _buildHeader() {
+    return _MobileChatHeader(
+      peerId: widget.peerId,
+      serverId: widget.serverId,
+      channelId: widget.channelId,
+      channelName: widget.channelName,
+      searchOpen: _searchOpen,
+      onSearchToggle: widget.isDm ? null : _toggleSearch,
+    );
+  }
+
+  void _toggleSearch() {
+    setState(() {
+      _searchOpen = !_searchOpen;
+      if (!_searchOpen) {
+        _searchController.clear();
+        _searchResults = [];
+      }
+    });
+    if (_searchOpen) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _searchFocusNode.requestFocus();
+      });
+    }
+  }
+
+  Widget _buildNoReadPermission(HollowTheme hollow) {
+    return Expanded(
+      child: Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(LucideIcons.eyeOff, size: 48,
+                color: hollow.textSecondary.withValues(alpha: 0.3)),
+            const SizedBox(height: HollowSpacing.md),
+            Padding(
+              padding:
+                  const EdgeInsets.symmetric(horizontal: HollowSpacing.xl),
+              child: Text(
+                'You don\'t have permission to read messages in this channel',
+                textAlign: TextAlign.center,
+                style:
+                    HollowTypography.body.copyWith(color: hollow.textSecondary),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildMessageArea() {
+    return Expanded(
+      child: Stack(
+        children: [
+          widget.isDm ? _buildDmMessages() : _buildChannelMessages(),
+          _buildUnreadPillOverlay(),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildUnreadPillOverlay() {
+    final unreadCount = widget.isDm
+        ? ref.watch(unreadProvider
+            .select((s) => s.dmUnreadCounts[widget.peerId!] ?? 0))
+        : ref.watch(unreadProvider
+            .select((s) => s.channelUnreadCounts[_channelKey] ?? 0));
+    if (unreadCount <= 0 || _isInAutoScrollZone) {
+      return const SizedBox.shrink();
+    }
+    return Positioned(
+      bottom: HollowSpacing.md,
+      left: 0,
+      right: 0,
+      child: Center(
+        child: UnreadJumpPill(count: unreadCount, onTap: _scrollToBottom),
+      ),
+    );
+  }
+
+  void _cancelReply() {
+    setState(() {
+      _replyToMessageId = null;
+      _replyToText = null;
+      _replyToSenderName = null;
+    });
+  }
+
+  void _dismissStagedHollowLink() {
+    _urlDebounce?.cancel();
+    setState(() {
+      _stagedPreviewUrl = null;
+      _stagedHollowLink = null;
+    });
+  }
+
+  void _dismissStagedPreview() {
+    _urlDebounce?.cancel();
+    setState(() {
+      _stagedPreviewUrl = null;
+      _stagedPreview = null;
+      _stagedPreviewLoading = false;
+    });
+  }
+
+  void _clearStagedFile() {
+    setState(() {
+      _stagedFilePath = null;
+      _stagedFileName = null;
+      _stagedFileIsImage = false;
+    });
+  }
+
+  /// Slow-mode countdown pill (mirrors the desktop pill by the send button).
+  Widget _buildSlowModePill(HollowTheme hollow) {
+    return Container(
+      padding: const EdgeInsets.symmetric(
+        horizontal: HollowSpacing.md,
+        vertical: HollowSpacing.xs,
+      ),
+      color: hollow.surface,
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(LucideIcons.timer, size: 12, color: hollow.warning),
+          const SizedBox(width: 4),
+          Text(
+            'Slow mode — ${(_slowModeReadyAt!.difference(DateTime.now()).inSeconds + 1).clamp(1, 3600)}s',
+            style: HollowTypography.caption.copyWith(
+              color: hollow.warning,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// The input bar — or, in a channel where posting is currently blocked
+  /// (no permission / muted), the explanatory banner instead.
+  Widget _buildComposerOrBanner(HollowTheme hollow) {
+    if (!widget.isDm) {
+      final canPost = ref.watch(canPostInChannelProvider((
+        serverId: widget.serverId!,
+        channelId: widget.channelId!,
+      )));
+      final muteText = muteBannerText(
+          ref.watch(myMuteStatusProvider(widget.serverId!)).valueOrNull);
+      if (!canPost || muteText != null) {
+        return _buildBlockedBanner(hollow, muteText);
+      }
+    }
+    return _buildInputArea();
+  }
+
+  Widget _buildBlockedBanner(HollowTheme hollow, String? muteText) {
+    return Container(
+      padding: const EdgeInsets.symmetric(
+        horizontal: HollowSpacing.md,
+        vertical: HollowSpacing.lg,
+      ),
+      decoration: BoxDecoration(
+        color: hollow.surface,
+        border: Border(top: BorderSide(color: hollow.border)),
+      ),
+      child: Center(
+        child: Text(
+          muteText ??
+              'You don\'t have permission to send messages in this channel',
+          style: HollowTypography.bodySmall.copyWith(color: hollow.textSecondary),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildInputArea() {
+    if (_isRecordingVoice) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(
+          horizontal: HollowSpacing.sm,
+          vertical: HollowSpacing.sm,
+        ),
+        child: VoiceRecorderBar(
+          onFinished: _stageVoiceMessage,
+          onCancelled: () => setState(() => _isRecordingVoice = false),
+        ),
+      );
+    }
+    return _MobileInputBar(
+      controller: _controller,
+      focusNode: _focusNode,
+      onSend: _handleSend,
+      onAttach: _showAttachSheet,
+      onMic: _stagedFilePath != null ? null : _startVoiceRecording,
+      onEmoji: _showEmojiSheet,
+      onChanged: _onTextChanged,
+      hasStagedFile: _stagedFilePath != null,
+    );
+  }
+
+  void _startVoiceRecording() {
+    // Voice notes are audio, not media — blocked in media-only channels
+    // (toast, don't record).
+    if (_channelMediaOnly) {
+      HollowToast.show(
+        context,
+        'This is a media-only channel — voice messages can\'t be posted here',
+        type: HollowToastType.info,
+      );
+      return;
+    }
+    setState(() => _isRecordingVoice = true);
+  }
+
+  Widget _wrapWithBackground(
+      Widget scaffold, BackgroundState bg, HollowTheme hollow) {
+    final darkenAlpha = bg.panelOpacity.clamp(0.0, 0.92);
+    return Stack(
+      children: [
+        Positioned.fill(
+          child: Container(
+            color: Colors.black,
+            child: Image.memory(
+              bg.imageBytes!,
+              fit: BoxFit.cover,
+              gaplessPlayback: true,
+              width: double.infinity,
+              height: double.infinity,
+            ),
+          ),
+        ),
+        Positioned.fill(
+          child: Container(
+            color: hollow.background.withValues(alpha: darkenAlpha),
+          ),
+        ),
+        scaffold,
       ],
     );
   }
@@ -1656,33 +1724,16 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     }
   }
 
-  Widget _buildDmMessages() {
-    // Per-conversation select — messages in other conversations must not
-    // rebuild this list (the provider map is replaced wholesale per insert).
-    final allMessages =
-        ref.watch(chatProvider.select((m) => m[widget.peerId!])) ?? [];
-    // While the user reads history the display is frozen (see the
-    // reversed-list scroll model near _checkAutoScroll).
-    final messages = _displayMessages(allMessages);
-    final profiles = ref.watch(profileProvider);
-
-    // New-message handling under the reversed list: following (at bottom) →
-    // instant re-pin; reading history → freeze (unread pill takes over).
-    ref.listen<Map<String, List<ChatMessage>>>(chatProvider, (prev, next) {
-      if (!mounted || _routeDeactivated) return; // popped route — see field doc
-      final prevLen = (prev?[widget.peerId!] ?? const []).length;
-      final nextLen = (next[widget.peerId!] ?? const []).length;
-      if (nextLen <= prevLen) return;
-      if (_frozenLen != null) return; // frozen — held back + pill
-      if (!_isInAutoScrollZone) {
-        _frozenLen = prevLen;
-        return;
-      }
-      // _scrollToBottom (not the bare jump): it also marks the arrival seen —
-      // the user is following at the bottom, so it must not count as unread.
-      _scrollToBottom();
-    });
-
+  /// Shared shell for both message lists: freeze-aware display slice, the
+  /// reversed-list plumbing (chat_pane_shared owns the iron rules), and the
+  /// empty state.
+  Widget _buildMessageListShell<T>({
+    required List<T> messages,
+    required String? Function(T msg) messageIdOf,
+    required Widget Function(
+            List<T> messages, int revIndex, Map<String, int> indexById)
+        rowBuilder,
+  }) {
     if (messages.isEmpty) {
       return Center(
         child: Text('No messages yet', style: HollowTypography.body.copyWith(
@@ -1691,138 +1742,189 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
       );
     }
 
-    // messageId → chronological index, for findChildIndexCallback below.
+    // messageId → chronological index, for findChildIndexCallback.
     final indexById = <String, int>{
       for (var i = 0; i < messages.length; i++)
-        if (messages[i].messageId != null) messages[i].messageId!: i,
+        if (messageIdOf(messages[i]) != null) messageIdOf(messages[i])!: i,
     };
 
-    return ScrollablePositionedList.builder(
+    return reversedChatList(
+      context: context,
       itemScrollController: _scrollController,
       itemPositionsListener: _positionsListener,
-      // reverse:true — the NEWEST message is builder index 0, pinned to the
-      // bottom edge. No sentinel row; appends while following never move the
-      // viewport.
-      reverse: true,
-      initialScrollIndex: 0,
-      initialAlignment: 0.0,
       itemCount: messages.length,
-      // Let the list MOVE row elements across index slots when a new message
-      // shifts every revIndex by one — without this each shift remounted
-      // every visible row (full-list blink on every message).
-      findChildIndexCallback: (key) {
-        if (key is! ValueKey<Object>) return null;
-        final id = key.value;
-        if (id is! String) return null;
-        final i = indexById[id];
-        if (i == null) return null;
-        return messages.length - 1 - i;
-      },
+      indexByMessageId: indexById,
+      // No SelectionArea on mobile — it would fight LongPressMessage.
+      selectionArea: false,
       padding: const EdgeInsets.symmetric(
         horizontal: HollowSpacing.sm,
         vertical: HollowSpacing.sm,
       ),
-      itemBuilder: (context, revIndex) {
-        // Reversed builder index → chronological; all row logic below stays
-        // chronological.
-        final index = messages.length - 1 - revIndex;
-        final msg = messages[index];
-        final prev = index > 0 ? messages[index - 1] : null;
-
-        final showDate = prev == null || !_sameDay(prev.timestamp, msg.timestamp);
-        final showHeader = prev == null ||
-            prev.isMe != msg.isMe ||
-            msg.timestamp.difference(prev.timestamp).inMinutes > 5;
-
-        final localPeerId = ref.read(identityProvider).peerId ?? '';
-        final senderName = msg.isMe
-            ? 'You'
-            : displayNameFor(profiles, widget.peerId!);
-
-        // Edit mode: show inline editor instead of bubble.
-        if (_editingMessageId != null && _editingMessageId == msg.messageId) {
-          final editWidget = _buildEditView(
-            originalText: msg.text,
-            onSave: (newText) {
-              ref.read(chatProvider.notifier).editMessage(
-                    widget.peerId!, msg.messageId!, newText);
-              setState(() => _editingMessageId = null);
-            },
-            onCancel: () => setState(() => _editingMessageId = null),
-          );
-          return showDate
-              ? Column(mainAxisSize: MainAxisSize.min, children: [
-                  _DateSeparator(date: msg.timestamp), editWidget])
-              : editWidget;
-        }
-
-        // Look up reply target for this message. (Linear scan is acceptable
-        // here — it only runs for rows that ARE replies, and only when the
-        // per-conversation list itself changed thanks to the select above.)
-        String? replySender;
-        String? replyText;
-        if (msg.replyToMid != null) {
-          final idx = messages.indexWhere((m) => m.messageId == msg.replyToMid);
-          if (idx != -1) {
-            final original = messages[idx];
-            replyText = original.fileAttachment != null
-                ? (original.fileAttachment!.isImage
-                    ? '📷 Image'
-                    : '📎 ${original.fileAttachment!.fileName}')
-                : original.text;
-            final origSenderId = original.isMe ? localPeerId : widget.peerId!;
-            replySender = displayNameFor(profiles, origSenderId);
-          }
-        }
-
-        final bubble = LongPressMessage(
-          onLongPress: () => _showDmActions(msg, senderName, localPeerId),
-          child: MessageBubble(
-            message: msg,
-            peerId: widget.peerId!,
-            showHeader: showHeader,
-            replyToSenderName: replySender,
-            replyToText: replyText,
-            onToggleReaction: msg.messageId != null
-                ? (emoji) {
-                    final hasReacted =
-                        msg.reactions[emoji]?.contains(localPeerId) ?? false;
-                    final notifier = ref.read(chatProvider.notifier);
-                    if (hasReacted) {
-                      notifier.removeReaction(
-                          widget.peerId!, msg.messageId!, emoji);
-                    } else {
-                      notifier.addReaction(
-                          widget.peerId!, msg.messageId!, emoji);
-                    }
-                  }
-                : null,
-          ),
-        );
-
-        final messageWidget = showHeader
-            ? Padding(
-                padding: const EdgeInsets.only(top: HollowSpacing.sm + 2),
-                child: bubble,
-              )
-            : bubble;
-
-        // ValueKey(messageId): rows hold per-item state that must not shift
-        // onto a different message on delete/trim.
-        return KeyedSubtree(
-          key: ValueKey<Object>(msg.messageId ?? index),
-          child: showDate
-              ? Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    _DateSeparator(date: msg.timestamp),
-                    messageWidget,
-                  ],
-                )
-              : messageWidget,
-        );
-      },
+      itemBuilder: (context, revIndex) =>
+          rowBuilder(messages, revIndex, indexById),
     );
+  }
+
+  Widget _buildDmMessages() {
+    // Per-conversation select — messages in other conversations must not
+    // rebuild this list (the provider map is replaced wholesale per insert).
+    final allMessages =
+        ref.watch(chatProvider.select((m) => m[widget.peerId!])) ?? [];
+    // While the user reads history the display is frozen (see the
+    // reversed-list scroll model near _checkAutoScroll).
+    final messages = _displayMessages(allMessages);
+
+    // New-message handling under the reversed list: following (at bottom) →
+    // instant re-pin; reading history → freeze (unread pill takes over).
+    ref.listen<Map<String, List<ChatMessage>>>(
+        chatProvider, _onDmMessagesChanged);
+
+    return _buildMessageListShell<ChatMessage>(
+      messages: messages,
+      messageIdOf: (m) => m.messageId,
+      rowBuilder: _buildDmRow,
+    );
+  }
+
+  void _onDmMessagesChanged(
+      Map<String, List<ChatMessage>>? prev, Map<String, List<ChatMessage>> next) {
+    if (!mounted || _routeDeactivated) return; // popped route — see field doc
+    final prevLen = (prev?[widget.peerId!] ?? const []).length;
+    final nextLen = (next[widget.peerId!] ?? const []).length;
+    if (nextLen <= prevLen) return;
+    if (_frozenLen != null) return; // frozen — held back + pill
+    if (!_isInAutoScrollZone) {
+      _frozenLen = prevLen;
+      return;
+    }
+    // _scrollToBottom (not the bare jump): it also marks the arrival seen —
+    // the user is following at the bottom, so it must not count as unread.
+    _scrollToBottom();
+  }
+
+  Widget _buildDmRow(
+      List<ChatMessage> messages, int revIndex, Map<String, int> indexById) {
+    // Reversed builder index → chronological; all row logic below stays
+    // chronological.
+    final index = messages.length - 1 - revIndex;
+    final msg = messages[index];
+    final prev = index > 0 ? messages[index - 1] : null;
+    final profiles = ref.watch(profileProvider);
+
+    final showHeader = prev == null ||
+        !shouldGroup(
+          currentIsMe: msg.isMe,
+          previousIsMe: prev.isMe,
+          currentTime: msg.timestamp,
+          previousTime: prev.timestamp,
+        );
+
+    final localPeerId = ref.read(identityProvider).peerId ?? '';
+    final senderName =
+        msg.isMe ? 'You' : displayNameFor(profiles, widget.peerId!);
+
+    // Edit mode: show inline editor instead of bubble.
+    if (_editingMessageId != null && _editingMessageId == msg.messageId) {
+      return _editRow(
+        showDate: shouldShowDateSeparator(msg.timestamp, prev?.timestamp),
+        timestamp: msg.timestamp,
+        originalText: msg.text,
+        onSave: (newText) {
+          ref
+              .read(chatProvider.notifier)
+              .editMessage(widget.peerId!, msg.messageId!, newText);
+          setState(() => _editingMessageId = null);
+        },
+      );
+    }
+
+    // Look up reply target for this message. (Linear scan is acceptable
+    // here — it only runs for rows that ARE replies, and only when the
+    // per-conversation list itself changed thanks to the select above.)
+    String? replySender;
+    String? replyText;
+    if (msg.replyToMid != null) {
+      final idx = indexById[msg.replyToMid] ?? -1;
+      if (idx != -1) {
+        final original = messages[idx];
+        replyText =
+            _attachmentPreviewText(original.fileAttachment, original.text);
+        final origSenderId = original.isMe ? localPeerId : widget.peerId!;
+        replySender = displayNameFor(profiles, origSenderId);
+      }
+    }
+
+    final bubble = LongPressMessage(
+      onLongPress: () => _showDmActions(msg, senderName, localPeerId),
+      child: MessageBubble(
+        message: msg,
+        peerId: widget.peerId!,
+        showHeader: showHeader,
+        replyToSenderName: replySender,
+        replyToText: replyText,
+        onToggleReaction: msg.messageId != null
+            ? (emoji) => _toggleDmReaction(msg, emoji)
+            : null,
+      ),
+    );
+
+    return dateSeparatedChatRow(
+      rowKey: msg.messageId ?? index,
+      timestamp: msg.timestamp,
+      prevTimestamp: prev?.timestamp,
+      showHeader: showHeader,
+      child: bubble,
+    );
+  }
+
+  /// The inline editor as a list row, with the date separator preserved.
+  Widget _editRow({
+    required bool showDate,
+    required DateTime timestamp,
+    required String originalText,
+    required void Function(String) onSave,
+  }) {
+    final editWidget = _buildEditView(
+      originalText: originalText,
+      onSave: onSave,
+      onCancel: () => setState(() => _editingMessageId = null),
+    );
+    return showDate
+        ? Column(mainAxisSize: MainAxisSize.min, children: [
+            DateSeparator(date: timestamp),
+            editWidget,
+          ])
+        : editWidget;
+  }
+
+  /// Preview line for a reply target: file token or the raw text.
+  String _attachmentPreviewText(FileAttachment? att, String text) {
+    if (att == null) return text;
+    return att.isImage ? '📷 Image' : '📎 ${att.fileName}';
+  }
+
+  void _toggleDmReaction(ChatMessage msg, String emoji) {
+    final localPeerId = ref.read(identityProvider).peerId ?? '';
+    final hasReacted = msg.reactions[emoji]?.contains(localPeerId) ?? false;
+    final notifier = ref.read(chatProvider.notifier);
+    if (hasReacted) {
+      notifier.removeReaction(widget.peerId!, msg.messageId!, emoji);
+    } else {
+      notifier.addReaction(widget.peerId!, msg.messageId!, emoji);
+    }
+  }
+
+  void _toggleChannelReaction(ChannelChatMessage msg, String emoji) {
+    final localPeerId = ref.read(identityProvider).peerId ?? '';
+    final hasReacted = msg.reactions[emoji]?.contains(localPeerId) ?? false;
+    final notifier = ref.read(channelChatProvider.notifier);
+    if (hasReacted) {
+      notifier.removeReaction(
+          widget.serverId!, widget.channelId!, msg.messageId!, emoji);
+    } else {
+      notifier.addReaction(
+          widget.serverId!, widget.channelId!, msg.messageId!, emoji);
+    }
   }
 
   Widget _buildChannelMessages() {
@@ -1833,164 +1935,112 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     // While the user reads history the display is frozen (see the
     // reversed-list scroll model near _checkAutoScroll).
     final messages = _displayMessages(allMessages);
-    final profiles = ref.watch(profileProvider);
 
     // New-message handling under the reversed list — see _buildDmMessages.
-    ref.listen(channelChatProvider, (prev, next) {
-      if (!mounted || _routeDeactivated) return; // popped route — see field doc
-      final prevLen = (prev?[_channelKey] ?? const []).length;
-      final nextLen = (next[_channelKey] ?? const []).length;
-      if (nextLen <= prevLen) return;
-      // Slow mode: my optimistic send (and sibling-device sends) land here —
-      // re-derive the cooldown pill from the list, never from send-time state.
-      _recomputeSlowMode();
-      if (_frozenLen != null) return; // frozen — held back + pill
-      if (!_isInAutoScrollZone) {
-        _frozenLen = prevLen;
-        return;
-      }
-      // _scrollToBottom (not the bare jump): it also marks the arrival seen.
-      _scrollToBottom();
-    });
+    ref.listen(channelChatProvider, _onChannelMessagesChanged);
 
-    if (messages.isEmpty) {
-      return Center(
-        child: Text('No messages yet', style: HollowTypography.body.copyWith(
-          color: HollowTheme.of(context).textSecondary,
-        )),
+    return _buildMessageListShell<ChannelChatMessage>(
+      messages: messages,
+      messageIdOf: (m) => m.messageId,
+      rowBuilder: _buildChannelRow,
+    );
+  }
+
+  void _onChannelMessagesChanged(
+      Map<String, List<ChannelChatMessage>>? prev,
+      Map<String, List<ChannelChatMessage>> next) {
+    if (!mounted || _routeDeactivated) return; // popped route — see field doc
+    final prevLen = (prev?[_channelKey] ?? const []).length;
+    final nextLen = (next[_channelKey] ?? const []).length;
+    if (nextLen <= prevLen) return;
+    // Slow mode: my optimistic send (and sibling-device sends) land here —
+    // re-derive the cooldown pill from the list, never from send-time state.
+    _recomputeSlowMode();
+    if (_frozenLen != null) return; // frozen — held back + pill
+    if (!_isInAutoScrollZone) {
+      _frozenLen = prevLen;
+      return;
+    }
+    // _scrollToBottom (not the bare jump): it also marks the arrival seen.
+    _scrollToBottom();
+  }
+
+  Widget _buildChannelRow(List<ChannelChatMessage> messages, int revIndex,
+      Map<String, int> indexById) {
+    // Reversed builder index → chronological.
+    final index = messages.length - 1 - revIndex;
+    final msg = messages[index];
+    final prev = index > 0 ? messages[index - 1] : null;
+    final profiles = ref.watch(profileProvider);
+
+    // Multi-device: collapse each sender device→master so a person's messages
+    // group as ONE sender and the header shows their name (not a raw device id).
+    // Single-device → identityOf is a no-op.
+    final links = ref.watch(deviceLinkProvider);
+    final curSender = links.identityOf(msg.senderId);
+
+    final showHeader = prev == null ||
+        !shouldGroup(
+          currentIsMe: msg.isMe,
+          previousIsMe: prev.isMe,
+          currentTime: msg.timestamp,
+          previousTime: prev.timestamp,
+          currentSenderId: curSender,
+          previousSenderId: links.identityOf(prev.senderId),
+        );
+
+    final localPeerId = ref.read(identityProvider).peerId ?? '';
+    final senderName = displayNameFor(profiles, curSender);
+
+    // Edit mode: show inline editor instead of bubble.
+    if (_editingMessageId != null && _editingMessageId == msg.messageId) {
+      return _editRow(
+        showDate: shouldShowDateSeparator(msg.timestamp, prev?.timestamp),
+        timestamp: msg.timestamp,
+        originalText: msg.text,
+        onSave: (newText) {
+          ref.read(channelChatProvider.notifier).editMessage(
+              widget.serverId!, widget.channelId!, msg.messageId!, newText);
+          setState(() => _editingMessageId = null);
+        },
       );
     }
 
-    // messageId → chronological index, for findChildIndexCallback below.
-    final indexById = <String, int>{
-      for (var i = 0; i < messages.length; i++)
-        if (messages[i].messageId != null) messages[i].messageId!: i,
-    };
+    // Look up reply target for this message.
+    String? replySender;
+    String? replyText;
+    if (msg.replyToMid != null) {
+      final idx = indexById[msg.replyToMid] ?? -1;
+      if (idx != -1) {
+        final original = messages[idx];
+        replyText =
+            _attachmentPreviewText(original.fileAttachment, original.text);
+        replySender =
+            displayNameFor(profiles, links.identityOf(original.senderId));
+      }
+    }
 
-    return ScrollablePositionedList.builder(
-      itemScrollController: _scrollController,
-      itemPositionsListener: _positionsListener,
-      // reverse:true — newest message at builder index 0, pinned to the
-      // bottom edge (see _buildDmMessages).
-      reverse: true,
-      initialScrollIndex: 0,
-      initialAlignment: 0.0,
-      itemCount: messages.length,
-      // Element reuse across index shifts — see _buildDmMessages.
-      findChildIndexCallback: (key) {
-        if (key is! ValueKey<Object>) return null;
-        final id = key.value;
-        if (id is! String) return null;
-        final i = indexById[id];
-        if (i == null) return null;
-        return messages.length - 1 - i;
-      },
-      padding: const EdgeInsets.symmetric(
-        horizontal: HollowSpacing.sm,
-        vertical: HollowSpacing.sm,
+    final bubble = LongPressMessage(
+      onLongPress: () => _showChannelActions(msg, senderName, localPeerId),
+      child: ChannelMessageBubble(
+        message: msg,
+        serverId: widget.serverId!,
+        showHeader: showHeader,
+        isHighlighted: _highlightIndex == index,
+        replyToSenderName: replySender,
+        replyToText: replyText,
+        onToggleReaction: msg.messageId != null
+            ? (emoji) => _toggleChannelReaction(msg, emoji)
+            : null,
       ),
-      itemBuilder: (context, revIndex) {
-        // Reversed builder index → chronological.
-        final index = messages.length - 1 - revIndex;
-        final msg = messages[index];
-        final prev = index > 0 ? messages[index - 1] : null;
+    );
 
-        // Multi-device: collapse each sender device→master so a person's messages
-        // group as ONE sender and the header shows their name (not a raw device id).
-        // Single-device → identityOf is a no-op.
-        final links = ref.watch(deviceLinkProvider);
-        final curSender = links.identityOf(msg.senderId);
-
-        final showDate = prev == null || !_sameDay(prev.timestamp, msg.timestamp);
-        final showHeader = prev == null ||
-            links.identityOf(prev.senderId) != curSender ||
-            msg.timestamp.difference(prev.timestamp).inMinutes > 5;
-
-        final localPeerId = ref.read(identityProvider).peerId ?? '';
-        final senderName = displayNameFor(profiles, curSender);
-
-        // Edit mode: show inline editor instead of bubble.
-        if (_editingMessageId != null && _editingMessageId == msg.messageId) {
-          final editWidget = _buildEditView(
-            originalText: msg.text,
-            onSave: (newText) {
-              ref.read(channelChatProvider.notifier).editMessage(
-                    widget.serverId!, widget.channelId!, msg.messageId!, newText);
-              setState(() => _editingMessageId = null);
-            },
-            onCancel: () => setState(() => _editingMessageId = null),
-          );
-          return showDate
-              ? Column(mainAxisSize: MainAxisSize.min, children: [
-                  _DateSeparator(date: msg.timestamp), editWidget])
-              : editWidget;
-        }
-
-        // Look up reply target for this message.
-        String? replySender;
-        String? replyText;
-        if (msg.replyToMid != null) {
-          final idx = messages.indexWhere((m) => m.messageId == msg.replyToMid);
-          if (idx != -1) {
-            final original = messages[idx];
-            replyText = original.fileAttachment != null
-                ? (original.fileAttachment!.isImage
-                    ? '📷 Image'
-                    : '📎 ${original.fileAttachment!.fileName}')
-                : original.text;
-            replySender =
-                displayNameFor(profiles, links.identityOf(original.senderId));
-          }
-        }
-
-        final bubble = LongPressMessage(
-          onLongPress: () => _showChannelActions(msg, senderName, localPeerId),
-          child: ChannelMessageBubble(
-            message: msg,
-            serverId: widget.serverId!,
-            showHeader: showHeader,
-            isHighlighted: _highlightIndex == index,
-            replyToSenderName: replySender,
-            replyToText: replyText,
-            onToggleReaction: msg.messageId != null
-                ? (emoji) {
-                    final hasReacted =
-                        msg.reactions[emoji]?.contains(localPeerId) ?? false;
-                    final notifier = ref.read(channelChatProvider.notifier);
-                    if (hasReacted) {
-                      notifier.removeReaction(widget.serverId!,
-                          widget.channelId!, msg.messageId!, emoji);
-                    } else {
-                      notifier.addReaction(widget.serverId!,
-                          widget.channelId!, msg.messageId!, emoji);
-                    }
-                  }
-                : null,
-          ),
-        );
-
-        final messageWidget = showHeader
-            ? Padding(
-                padding: const EdgeInsets.only(top: HollowSpacing.sm + 2),
-                child: bubble,
-              )
-            : bubble;
-
-        // ValueKey(messageId): rows hold per-item state that must not shift
-        // onto a different message on delete/trim.
-        return KeyedSubtree(
-          key: ValueKey<Object>(msg.messageId ?? index),
-          child: showDate
-              ? Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    _DateSeparator(date: msg.timestamp),
-                    messageWidget,
-                  ],
-                )
-              : messageWidget,
-        );
-      },
+    return dateSeparatedChatRow(
+      rowKey: msg.messageId ?? index,
+      timestamp: msg.timestamp,
+      prevTimestamp: prev?.timestamp,
+      showHeader: showHeader,
+      child: bubble,
     );
   }
 
@@ -2006,76 +2056,44 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
       timestamp: _formatTime(msg.timestamp),
       isMe: msg.isMe,
       serverId: widget.serverId,
-      onReply: msg.messageId != null
-          ? () => _setReply(msg.messageId!, senderName, msg.text)
-          : null,
-      onEdit: msg.messageId != null && msg.isMe && msg.fileAttachment == null
-          ? () => _startEditing(msg.messageId!)
-          : null,
+      onReply: _replyActionFor(msg.messageId, senderName, msg.text),
+      onEdit: _editActionFor(msg.messageId, msg.isMe, msg.fileAttachment),
       onDelete: msg.messageId != null && msg.isMe
           ? () => ref.read(chatProvider.notifier)
               .deleteMessage(widget.peerId!, msg.messageId!)
           : null,
-      onCopy: msg.text.isNotEmpty && !msg.text.startsWith('[file:')
-          ? () {
-              Clipboard.setData(ClipboardData(text: msg.text));
-              HollowToast.show(context, 'Copied to clipboard',
-                  type: HollowToastType.success);
-            }
-          : null,
-      onDownload: msg.fileAttachment != null
-          ? () {
-              final att = msg.fileAttachment!;
-              final transfer = ref.read(fileTransferProvider)[att.fileId];
-              if (transfer != null && transfer.isDownloading) {
-                HollowToast.show(context, 'File is already downloading...', type: HollowToastType.info);
-                return;
-              }
-              if (att.diskPath != null) {
-                _saveFile(att);
-              } else {
-                _requestFileFromPeer(att, widget.peerId!);
-              }
-            }
-          : null,
+      onCopy: _copyActionFor(msg.text),
+      onDownload: _downloadActionFor(msg.fileAttachment, widget.peerId!),
       onReaction: msg.messageId != null
-          ? (emoji) {
-              final hasReacted =
-                  msg.reactions[emoji]?.contains(localPeerId) ?? false;
-              final notifier = ref.read(chatProvider.notifier);
-              if (hasReacted) {
-                notifier.removeReaction(
-                    widget.peerId!, msg.messageId!, emoji);
-              } else {
-                notifier.addReaction(widget.peerId!, msg.messageId!, emoji);
-              }
-            }
+          ? (emoji) => _toggleDmReaction(msg, emoji)
           : null,
       onInfo: msg.messageId != null
-          ? () {
-              final senderId = msg.isMe ? localPeerId : widget.peerId!;
-              showMessageProofDialog(
-                context,
-                MessageProofData(
-                  senderPeerId: senderId,
-                  senderDisplayName: senderName,
-                  text: msg.text,
-                  timestampMs: (msg.editedAt ?? msg.timestamp)
-                      .millisecondsSinceEpoch,
-                  signature: msg.signature,
-                  publicKey: msg.publicKey,
-                  messageId: msg.messageId,
-                  context: msg.isMe ? widget.peerId! : localPeerId,
-                  msgType: 'dm',
-                  fileAttachment: msg.fileAttachment,
-                ),
-              );
-            }
+          ? () => _showDmProof(msg, senderName, localPeerId)
           : null,
     );
   }
 
-  void _showChannelActions(ChannelChatMessage msg, String senderName, String localPeerId) {
+  void _showDmProof(ChatMessage msg, String senderName, String localPeerId) {
+    final senderId = msg.isMe ? localPeerId : widget.peerId!;
+    showMessageProofDialog(
+      context,
+      MessageProofData(
+        senderPeerId: senderId,
+        senderDisplayName: senderName,
+        text: msg.text,
+        timestampMs: (msg.editedAt ?? msg.timestamp).millisecondsSinceEpoch,
+        signature: msg.signature,
+        publicKey: msg.publicKey,
+        messageId: msg.messageId,
+        context: msg.isMe ? widget.peerId! : localPeerId,
+        msgType: 'dm',
+        fileAttachment: msg.fileAttachment,
+      ),
+    );
+  }
+
+  void _showChannelActions(
+      ChannelChatMessage msg, String senderName, String localPeerId) {
     showMobileMessageActions(
       context: context,
       messageText: msg.text,
@@ -2083,106 +2101,112 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
       timestamp: _formatTime(msg.timestamp),
       isMe: msg.isMe,
       serverId: widget.serverId,
-      onReply: msg.messageId != null
-          ? () => _setReply(msg.messageId!, senderName, msg.text)
-          : null,
-      onEdit: msg.messageId != null && msg.isMe && msg.fileAttachment == null
-          ? () => _startEditing(msg.messageId!)
-          : null,
+      onReply: _replyActionFor(msg.messageId, senderName, msg.text),
+      onEdit: _editActionFor(msg.messageId, msg.isMe, msg.fileAttachment),
       onDelete: msg.messageId != null && msg.isMe
-          ? () => ref.read(channelChatProvider.notifier)
-              .deleteMessage(widget.serverId!, widget.channelId!, msg.messageId!)
+          ? () => ref.read(channelChatProvider.notifier).deleteMessage(
+              widget.serverId!, widget.channelId!, msg.messageId!)
           : null,
-      onCopy: msg.text.isNotEmpty && !msg.text.startsWith('[file:')
+      onCopy: _copyActionFor(msg.text),
+      onDownload: _downloadActionFor(msg.fileAttachment, msg.senderId),
+      onReaction: msg.messageId != null
+          ? (emoji) => _toggleChannelReaction(msg, emoji)
+          : null,
+      onInfo: msg.messageId != null
+          ? () => _showChannelProof(msg, senderName)
+          : null,
+      onPin: _pinActionFor(msg.messageId),
+      isPinned: msg.messageId != null &&
+          (ref.read(pinnedProvider)[_channelKey] ?? [])
+              .contains(msg.messageId),
+    );
+  }
+
+  void _showChannelProof(ChannelChatMessage msg, String senderName) {
+    showMessageProofDialog(
+      context,
+      MessageProofData(
+        // The channel signature is computed over the sender's MASTER id,
+        // so the proof must verify against the master — resolve device→
+        // master or a multi-device sender's signature reads as invalid.
+        senderPeerId: ref.read(deviceLinkProvider).identityOf(msg.senderId),
+        senderDisplayName: senderName,
+        text: msg.text,
+        timestampMs: (msg.editedAt ?? msg.timestamp).millisecondsSinceEpoch,
+        signature: msg.signature,
+        publicKey: msg.publicKey,
+        messageId: msg.messageId,
+        context: '${widget.serverId!}:${widget.channelId!}',
+        msgType: 'ch',
+        fileAttachment: msg.fileAttachment,
+      ),
+    );
+  }
+
+  // ── Action-sheet callback factories (null hides the affordance) ──
+
+  VoidCallback? _replyActionFor(String? messageId, String senderName,
+      String text) =>
+      messageId != null ? () => _setReply(messageId, senderName, text) : null;
+
+  VoidCallback? _editActionFor(
+          String? messageId, bool isMe, FileAttachment? attachment) =>
+      messageId != null && isMe && attachment == null
+          ? () => _startEditing(messageId)
+          : null;
+
+  VoidCallback? _copyActionFor(String text) =>
+      text.isNotEmpty && !text.startsWith(_kFilePrefix)
           ? () {
-              Clipboard.setData(ClipboardData(text: msg.text));
+              Clipboard.setData(ClipboardData(text: text));
               HollowToast.show(context, 'Copied to clipboard',
                   type: HollowToastType.success);
             }
-          : null,
-      onDownload: msg.fileAttachment != null
-          ? () {
-              final att = msg.fileAttachment!;
-              final transfer = ref.read(fileTransferProvider)[att.fileId];
-              if (transfer != null && transfer.isDownloading) {
-                HollowToast.show(context, 'File is already downloading...', type: HollowToastType.info);
-                return;
-              }
-              if (att.diskPath != null) {
-                _saveFile(att);
-              } else {
-                _requestFileFromPeer(att, msg.senderId);
-              }
-            }
-          : null,
-      onReaction: msg.messageId != null
-          ? (emoji) {
-              final hasReacted =
-                  msg.reactions[emoji]?.contains(localPeerId) ?? false;
-              final notifier = ref.read(channelChatProvider.notifier);
-              if (hasReacted) {
-                notifier.removeReaction(widget.serverId!,
-                    widget.channelId!, msg.messageId!, emoji);
-              } else {
-                notifier.addReaction(widget.serverId!,
-                    widget.channelId!, msg.messageId!, emoji);
-              }
-            }
-          : null,
-      onInfo: msg.messageId != null
-          ? () {
-              showMessageProofDialog(
-                context,
-                MessageProofData(
-                  // The channel signature is computed over the sender's MASTER id,
-                  // so the proof must verify against the master — resolve device→
-                  // master or a multi-device sender's signature reads as invalid.
-                  senderPeerId:
-                      ref.read(deviceLinkProvider).identityOf(msg.senderId),
-                  senderDisplayName: senderName,
-                  text: msg.text,
-                  timestampMs: (msg.editedAt ?? msg.timestamp)
-                      .millisecondsSinceEpoch,
-                  signature: msg.signature,
-                  publicKey: msg.publicKey,
-                  messageId: msg.messageId,
-                  context: '${widget.serverId!}:${widget.channelId!}',
-                  msgType: 'ch',
-                  fileAttachment: msg.fileAttachment,
-                ),
-              );
-            }
-          : null,
-      onPin: msg.messageId != null &&
-              (ref.read(myPermissionsProvider(widget.serverId!)).whenOrNull(
-                      data: (perms) =>
-                          (perms & Permission.manageChannels) != 0) ??
-                  false)
-          ? () {
-              final pins = ref.read(pinnedProvider)[
-                      '${widget.serverId}:${widget.channelId}'] ??
-                  [];
-              if (pins.contains(msg.messageId)) {
-                crdt_api.unpinMessage(
-                  serverId: widget.serverId!,
-                  channelId: widget.channelId!,
-                  messageId: msg.messageId!,
-                );
-              } else {
-                crdt_api.pinMessage(
-                  serverId: widget.serverId!,
-                  channelId: widget.channelId!,
-                  messageId: msg.messageId!,
-                );
-              }
-            }
-          : null,
-      isPinned: msg.messageId != null &&
-          (ref.read(pinnedProvider)[
-                      '${widget.serverId}:${widget.channelId}'] ??
-                  [])
-              .contains(msg.messageId),
-    );
+          : null;
+
+  VoidCallback? _downloadActionFor(FileAttachment? attachment,
+      String senderId) {
+    if (attachment == null) return null;
+    return () {
+      final transfer = ref.read(fileTransferProvider)[attachment.fileId];
+      if (transfer != null && transfer.isDownloading) {
+        HollowToast.show(context, 'File is already downloading...',
+            type: HollowToastType.info);
+        return;
+      }
+      if (attachment.diskPath != null) {
+        _saveFile(attachment);
+      } else {
+        _requestFileFromPeer(attachment, senderId);
+      }
+    };
+  }
+
+  VoidCallback? _pinActionFor(String? messageId) {
+    // Gate order preserved: messageId first, THEN the permission read.
+    if (messageId == null) return null;
+    final canPin = ref.read(myPermissionsProvider(widget.serverId!)).whenOrNull(
+            data: (perms) => (perms & Permission.manageChannels) != 0) ??
+        false;
+    if (!canPin) return null;
+    return () => _togglePin(messageId);
+  }
+
+  void _togglePin(String messageId) {
+    final pins = ref.read(pinnedProvider)[_channelKey] ?? [];
+    if (pins.contains(messageId)) {
+      crdt_api.unpinMessage(
+        serverId: widget.serverId!,
+        channelId: widget.channelId!,
+        messageId: messageId,
+      );
+    } else {
+      crdt_api.pinMessage(
+        serverId: widget.serverId!,
+        channelId: widget.channelId!,
+        messageId: messageId,
+      );
+    }
   }
 
   // ─────────────────────────────────────────────────
@@ -2253,8 +2277,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
                       ref.watch(deviceLinkProvider).identityOf(msg.senderId));
                   final time = DateTime.fromMillisecondsSinceEpoch(
                       msg.timestamp.toInt());
-                  final timeStr =
-                      '${time.hour.toString().padLeft(2, '0')}:${time.minute.toString().padLeft(2, '0')}';
+                  final timeStr = _hhmm(time);
                   return Padding(
                     padding: const EdgeInsets.only(top: HollowSpacing.xs),
                     child: HollowPressable(
@@ -2426,8 +2449,6 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     );
   }
 
-  bool _sameDay(DateTime a, DateTime b) =>
-      a.year == b.year && a.month == b.month && a.day == b.day;
 }
 
 // ─────────────────────────────────────────────────
@@ -2454,7 +2475,6 @@ class _MobileChatHeader extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
-    final profiles = ref.watch(profileProvider);
     // Watch local nicknames so the DM title rebuilds the moment one is set/cleared
     // (displayNameFor reads a static cache that doesn't trigger a rebuild on its own).
     ref.watch(localNicknameProvider);
@@ -2466,21 +2486,6 @@ class _MobileChatHeader extends ConsumerWidget {
     final isSaved = isDm &&
         savedId != null &&
         ref.watch(deviceLinkProvider).identityOf(peerId!) == savedId;
-
-    String title;
-    if (isSaved) {
-      title = 'Saved messages';
-    } else if (isDm) {
-      title = displayNameFor(profiles, peerId!);
-    } else {
-      title = '# ${channelName ?? 'Channel'}';
-    }
-
-    // For a channel, show the server name as a subtitle so the user knows
-    // which server this channel belongs to (mirrors the DM Online/Offline line).
-    final serverName = (!isDm && serverId != null)
-        ? ref.watch(serverListProvider.select((m) => m[serverId]?.name))
-        : null;
 
     final isOnline = isDm && !isSaved && identityIsOnline(ref, peerId!);
 
@@ -2501,146 +2506,191 @@ class _MobileChatHeader extends ConsumerWidget {
             child: Icon(LucideIcons.arrowLeft, size: 22, color: hollow.textPrimary),
           ),
           const SizedBox(width: HollowSpacing.xs),
-          if (isSaved) ...[
-            const SavedMessagesAvatar(size: 32),
-            const SizedBox(width: HollowSpacing.sm),
-          ] else if (isDm) ...[
-            SizedBox(
-              width: 32, height: 32,
-              child: Stack(
-                children: [
-                  HollowAvatar(peerId: peerId!, size: 32),
-                  Positioned(
-                    right: 0, bottom: 0,
-                    child: Container(
-                      decoration: BoxDecoration(
-                        color: hollow.surface, shape: BoxShape.circle,
-                      ),
-                      padding: const EdgeInsets.all(1),
-                      child: StatusDot(
-                        color: isOnline ? hollow.success : hollow.textSecondary,
-                        size: 8, pulse: isOnline,
-                        filled: isOnline,
-                        semanticLabel: isOnline ? 'Online' : 'Offline',
-                      ),
-                    ),
-                  ),
-                ],
+          ..._leadingAvatar(hollow, isDm: isDm, isSaved: isSaved, isOnline: isOnline),
+          Expanded(
+            child: _titleBlock(context, ref, hollow,
+                isDm: isDm, isSaved: isSaved, isOnline: isOnline),
+          ),
+          ..._trailingActions(context, ref, hollow, isDm: isDm, isSaved: isSaved),
+        ],
+      ),
+    );
+  }
+
+  /// Saved-messages bookmark / DM avatar with presence dot; empty for channels.
+  List<Widget> _leadingAvatar(HollowTheme hollow,
+      {required bool isDm, required bool isSaved, required bool isOnline}) {
+    if (isSaved) {
+      return const [
+        SavedMessagesAvatar(size: 32),
+        SizedBox(width: HollowSpacing.sm),
+      ];
+    }
+    if (!isDm) return const [];
+    return [
+      SizedBox(
+        width: 32, height: 32,
+        child: Stack(
+          children: [
+            HollowAvatar(peerId: peerId!, size: 32),
+            Positioned(
+              right: 0, bottom: 0,
+              child: Container(
+                decoration: BoxDecoration(
+                  color: hollow.surface, shape: BoxShape.circle,
+                ),
+                padding: const EdgeInsets.all(1),
+                child: StatusDot(
+                  color: isOnline ? hollow.success : hollow.textSecondary,
+                  size: 8, pulse: isOnline,
+                  filled: isOnline,
+                  semanticLabel: isOnline ? 'Online' : 'Offline',
+                ),
               ),
             ),
-            const SizedBox(width: HollowSpacing.sm),
           ],
-          Expanded(
-            child: HollowPressable(
-              onTap: isDm ? () => _showProfileSheet(context, ref, peerId!) : null,
-              borderRadius: BorderRadius.circular(hollow.radiusSm),
-              padding: const EdgeInsets.symmetric(vertical: HollowSpacing.xs),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Flexible(
-                        child: Text(
-                          title,
-                          style: HollowTypography.body.copyWith(
-                            fontWeight: FontWeight.w600,
-                            color: hollow.textPrimary,
-                          ),
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ),
-                      // NSFW badge (channels only), left of the status.
-                      if (!isDm &&
-                          serverId != null &&
-                          (ref
-                                  .watch(serverIsNsfwProvider(serverId!))
-                                  .valueOrNull ??
-                              false)) ...[
-                        const SizedBox(width: HollowSpacing.sm),
-                        const _MobileNsfwBadge(),
-                      ],
-                    ],
+        ),
+      ),
+      const SizedBox(width: HollowSpacing.sm),
+    ];
+  }
+
+  /// Title + subtitle column (tappable for the DM profile sheet).
+  Widget _titleBlock(BuildContext context, WidgetRef ref, HollowTheme hollow,
+      {required bool isDm, required bool isSaved, required bool isOnline}) {
+    final profiles = ref.watch(profileProvider);
+    String title;
+    if (isSaved) {
+      title = 'Saved messages';
+    } else if (isDm) {
+      title = displayNameFor(profiles, peerId!);
+    } else {
+      title = '# ${channelName ?? 'Channel'}';
+    }
+
+    // For a channel, show the server name as a subtitle so the user knows
+    // which server this channel belongs to (mirrors the DM Online/Offline line).
+    final serverName = (!isDm && serverId != null)
+        ? ref.watch(serverListProvider.select((m) => m[serverId]?.name))
+        : null;
+
+    return HollowPressable(
+      onTap: isDm ? () => _showProfileSheet(context, ref, peerId!) : null,
+      borderRadius: BorderRadius.circular(hollow.radiusSm),
+      padding: const EdgeInsets.symmetric(vertical: HollowSpacing.xs),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Flexible(
+                child: Text(
+                  title,
+                  style: HollowTypography.body.copyWith(
+                    fontWeight: FontWeight.w600,
+                    color: hollow.textPrimary,
                   ),
-                  if (isDm && !isSaved)
-                    Text(
-                      isOnline ? 'Online' : 'Offline',
-                      style: HollowTypography.caption.copyWith(
-                        color: isOnline ? hollow.success : hollow.textSecondary,
-                      ),
-                    )
-                  else if (serverName != null && serverName.isNotEmpty)
-                    Text(
-                      serverName,
-                      style: HollowTypography.caption.copyWith(
-                        color: hollow.textSecondary,
-                      ),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                ],
+                  overflow: TextOverflow.ellipsis,
+                ),
               ),
+              // NSFW badge (channels only), left of the status.
+              if (!isDm &&
+                  serverId != null &&
+                  (ref.watch(serverIsNsfwProvider(serverId!)).valueOrNull ??
+                      false)) ...[
+                const SizedBox(width: HollowSpacing.sm),
+                const _MobileNsfwBadge(),
+              ],
+            ],
+          ),
+          if (isDm && !isSaved)
+            Text(
+              isOnline ? 'Online' : 'Offline',
+              style: HollowTypography.caption.copyWith(
+                color: isOnline ? hollow.success : hollow.textSecondary,
+              ),
+            )
+          else if (serverName != null && serverName.isNotEmpty)
+            Text(
+              serverName,
+              style: HollowTypography.caption.copyWith(
+                color: hollow.textSecondary,
+              ),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+        ],
+      ),
+    );
+  }
+
+  /// Right-edge header actions: DM call/mute buttons, or the channel
+  /// status/members/pins/search cluster.
+  List<Widget> _trailingActions(
+      BuildContext context, WidgetRef ref, HollowTheme hollow,
+      {required bool isDm, required bool isSaved}) {
+    if (isDm) {
+      return [
+        // Can't call yourself — Saved messages hides the call buttons.
+        if (!isSaved) _DmCallButtons(peerId: peerId!),
+        _DmMuteButton(peerId: peerId!),
+      ];
+    }
+    return [
+      // Channel encryption/connection status (Encrypted / Offline).
+      if (serverId != null) ...[
+        _MobileChannelStatus(serverId: serverId!),
+        const SizedBox(width: HollowSpacing.xs),
+      ],
+      if (serverId != null)
+        HollowPressable(
+          onTap: () => showMobileMemberPanel(context, serverId!),
+          semanticLabel: 'Members',
+          borderRadius: BorderRadius.circular(hollow.radiusSm),
+          padding: const EdgeInsets.all(HollowSpacing.sm),
+          child: Icon(LucideIcons.users, size: 20, color: hollow.textSecondary),
+        ),
+      if (serverId != null && channelId != null)
+        _pinnedButton(context, ref, hollow),
+      if (onSearchToggle != null)
+        HollowPressable(
+          onTap: onSearchToggle,
+          semanticLabel: 'Search messages',
+          borderRadius: BorderRadius.circular(hollow.radiusSm),
+          padding: const EdgeInsets.all(HollowSpacing.sm),
+          child: Icon(
+            LucideIcons.search,
+            size: 20,
+            color: searchOpen ? hollow.accent : hollow.textSecondary,
+          ),
+        ),
+    ];
+  }
+
+  Widget _pinnedButton(BuildContext context, WidgetRef ref, HollowTheme hollow) {
+    final pinKey = '$serverId:$channelId';
+    final pinnedIds = ref.watch(pinnedProvider)[pinKey] ?? [];
+    if (pinnedIds.isEmpty) return const SizedBox.shrink();
+    return HollowPressable(
+      onTap: () => _showPinnedMessagesSheet(
+          context, ref, serverId!, channelId!, pinnedIds),
+      semanticLabel: 'Pinned messages',
+      borderRadius: BorderRadius.circular(hollow.radiusSm),
+      padding: const EdgeInsets.all(HollowSpacing.sm),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(LucideIcons.pin, size: 16, color: hollow.accent),
+          const SizedBox(width: 2),
+          Text(
+            '${pinnedIds.length}',
+            style: HollowTypography.caption.copyWith(
+              color: hollow.accent,
+              fontWeight: FontWeight.w600,
             ),
           ),
-          if (isDm) ...[
-            // Can't call yourself — Saved messages hides the call buttons.
-            if (!isSaved) _DmCallButtons(peerId: peerId!),
-            _DmMuteButton(peerId: peerId!),
-          ],
-          // Channel encryption/connection status (Encrypted / Offline).
-          if (!isDm && serverId != null) ...[
-            _MobileChannelStatus(serverId: serverId!),
-            const SizedBox(width: HollowSpacing.xs),
-          ],
-          if (!isDm && serverId != null)
-            HollowPressable(
-              onTap: () => showMobileMemberPanel(context, serverId!),
-              semanticLabel: 'Members',
-              borderRadius: BorderRadius.circular(hollow.radiusSm),
-              padding: const EdgeInsets.all(HollowSpacing.sm),
-              child: Icon(LucideIcons.users, size: 20, color: hollow.textSecondary),
-            ),
-          if (!isDm && serverId != null && channelId != null)
-            Builder(builder: (context) {
-              final pinKey = '$serverId:$channelId';
-              final pinnedIds = ref.watch(pinnedProvider)[pinKey] ?? [];
-              if (pinnedIds.isEmpty) return const SizedBox.shrink();
-              return HollowPressable(
-                onTap: () => _showPinnedMessagesSheet(
-                    context, ref, serverId!, channelId!, pinnedIds),
-                semanticLabel: 'Pinned messages',
-                borderRadius: BorderRadius.circular(hollow.radiusSm),
-                padding: const EdgeInsets.all(HollowSpacing.sm),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(LucideIcons.pin, size: 16, color: hollow.accent),
-                    const SizedBox(width: 2),
-                    Text(
-                      '${pinnedIds.length}',
-                      style: HollowTypography.caption.copyWith(
-                        color: hollow.accent,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                  ],
-                ),
-              );
-            }),
-          if (!isDm && onSearchToggle != null)
-            HollowPressable(
-              onTap: onSearchToggle,
-              semanticLabel: 'Search messages',
-              borderRadius: BorderRadius.circular(hollow.radiusSm),
-              padding: const EdgeInsets.all(HollowSpacing.sm),
-              child: Icon(
-                LucideIcons.search,
-                size: 20,
-                color: searchOpen ? hollow.accent : hollow.textSecondary,
-              ),
-            ),
         ],
       ),
     );
@@ -2720,7 +2770,7 @@ class _MobileChatHeader extends ConsumerWidget {
                 child: ListView.separated(
                   shrinkWrap: true,
                   itemCount: pinnedMessages.length,
-                  separatorBuilder: (_, __) =>
+                  separatorBuilder: (_, _) =>
                       Divider(color: hollow.border, height: 1),
                   itemBuilder: (_, index) {
                     final msg = pinnedMessages[index]!;
@@ -2733,8 +2783,7 @@ class _MobileChatHeader extends ConsumerWidget {
                       pinnedMaster,
                       nickname: nicknames[pinnedMaster] ?? '',
                     );
-                    final time =
-                        '${msg.timestamp.hour.toString().padLeft(2, '0')}:${msg.timestamp.minute.toString().padLeft(2, '0')}';
+                    final time = _hhmm(msg.timestamp);
                     return Padding(
                       padding: const EdgeInsets.symmetric(
                         horizontal: HollowSpacing.md,
@@ -2765,7 +2814,7 @@ class _MobileChatHeader extends ConsumerWidget {
                           ),
                           const SizedBox(height: 2),
                           Text(
-                            msg.text.startsWith('[file:')
+                            msg.text.startsWith(_kFilePrefix)
                                 ? '📎 File'
                                 : msg.text,
                             style: HollowTypography.body
@@ -2977,70 +3026,6 @@ class _MobileInputBar extends StatelessWidget {
 }
 
 // ─────────────────────────────────────────────────
-// Reply preview bar
-// ─────────────────────────────────────────────────
-
-class _ReplyPreview extends StatelessWidget {
-  final String senderName;
-  final String text;
-  final VoidCallback onCancel;
-
-  const _ReplyPreview({
-    required this.senderName,
-    required this.text,
-    required this.onCancel,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-    return Container(
-      padding: const EdgeInsets.symmetric(
-        horizontal: HollowSpacing.lg,
-        vertical: HollowSpacing.sm,
-      ),
-      decoration: BoxDecoration(
-        color: hollow.surface,
-        border: Border(top: BorderSide(color: hollow.border)),
-      ),
-      child: Row(
-        children: [
-          Container(
-            width: 2, height: 28,
-            decoration: BoxDecoration(
-              color: hollow.accent,
-              borderRadius: BorderRadius.circular(1),
-            ),
-          ),
-          const SizedBox(width: HollowSpacing.sm),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(senderName, style: HollowTypography.caption.copyWith(
-                  color: hollow.accent, fontWeight: FontWeight.w600,
-                )),
-                Text(text, style: HollowTypography.caption.copyWith(
-                  color: hollow.textSecondary,
-                ), maxLines: 1, overflow: TextOverflow.ellipsis),
-              ],
-            ),
-          ),
-          HollowPressable(
-            onTap: onCancel,
-            semanticLabel: 'Cancel reply',
-            borderRadius: BorderRadius.circular(hollow.radiusSm),
-            padding: const EdgeInsets.all(HollowSpacing.xs),
-            child: Icon(LucideIcons.x, size: 16, color: hollow.textSecondary),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-// ─────────────────────────────────────────────────
 // DM mute toggle button (in header)
 // ─────────────────────────────────────────────────
 
@@ -3155,127 +3140,6 @@ class _DmCallButtons extends ConsumerWidget {
 }
 
 // ─────────────────────────────────────────────────
-// Staged file preview (above input bar)
-// ─────────────────────────────────────────────────
-
-class _StagedFilePreview extends StatelessWidget {
-  final String fileName;
-  final String filePath;
-  final bool isImage;
-  final VoidCallback onCancel;
-
-  const _StagedFilePreview({
-    required this.fileName,
-    required this.filePath,
-    required this.isImage,
-    required this.onCancel,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-    return Container(
-      padding: const EdgeInsets.symmetric(
-        horizontal: HollowSpacing.md,
-        vertical: HollowSpacing.sm,
-      ),
-      decoration: BoxDecoration(
-        color: hollow.surface,
-        border: Border(top: BorderSide(color: hollow.border)),
-      ),
-      child: Row(
-        children: [
-          if (isImage)
-            ClipRRect(
-              borderRadius: BorderRadius.circular(hollow.radiusSm),
-              child: Image.file(
-                File(filePath),
-                width: 48,
-                height: 48,
-                fit: BoxFit.cover,
-                errorBuilder: (context, error, stack) => Container(
-                  width: 48,
-                  height: 48,
-                  color: hollow.elevated,
-                  child: Icon(LucideIcons.image, size: 20, color: hollow.textSecondary),
-                ),
-              ),
-            )
-          else
-            Container(
-              width: 48,
-              height: 48,
-              decoration: BoxDecoration(
-                color: hollow.elevated,
-                borderRadius: BorderRadius.circular(hollow.radiusSm),
-              ),
-              child: Icon(LucideIcons.file, size: 20, color: hollow.textSecondary),
-            ),
-          const SizedBox(width: HollowSpacing.sm),
-          Expanded(
-            child: Text(
-              fileName,
-              style: HollowTypography.body.copyWith(color: hollow.textPrimary),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-            ),
-          ),
-          HollowPressable(
-            onTap: onCancel,
-            semanticLabel: 'Remove attachment',
-            borderRadius: BorderRadius.circular(hollow.radiusSm),
-            padding: const EdgeInsets.all(HollowSpacing.xs),
-            child: Icon(LucideIcons.x, size: 18, color: hollow.textSecondary),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-// ─────────────────────────────────────────────────
-// Date separator
-// ─────────────────────────────────────────────────
-
-class _DateSeparator extends StatelessWidget {
-  final DateTime date;
-  const _DateSeparator({required this.date});
-
-  @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-    final now = DateTime.now();
-    String label;
-    if (_sameDay(date, now)) {
-      label = 'Today';
-    } else if (_sameDay(date, now.subtract(const Duration(days: 1)))) {
-      label = 'Yesterday';
-    } else {
-      label = '${date.day}/${date.month}/${date.year}';
-    }
-
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: HollowSpacing.md),
-      child: Row(
-        children: [
-          Expanded(child: Divider(color: hollow.border, height: 1)),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.md),
-            child: Text(label, style: HollowTypography.caption.copyWith(
-              color: hollow.textSecondary,
-            )),
-          ),
-          Expanded(child: Divider(color: hollow.border, height: 1)),
-        ],
-      ),
-    );
-  }
-
-  bool _sameDay(DateTime a, DateTime b) =>
-      a.year == b.year && a.month == b.month && a.day == b.day;
-}
-
-// ─────────────────────────────────────────────────
 // Typing indicator bar
 // ─────────────────────────────────────────────────
 
@@ -3286,58 +3150,20 @@ class _TypingBar extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final hollow = HollowTheme.of(context);
     final typingPeers = ref.watch(typingProvider)[contextKey] ?? {};
     if (typingPeers.isEmpty) return const SizedBox.shrink();
 
-    // Robust self-filter (Step 9C/C1): a sibling device typing must never render as
-    // "you are typing" on our other device. Exclude any typist that resolves to our
-    // master OR is one of our own device ids OR this running device (the typist may
-    // arrive as a raw DEVICE id if its resolver link isn't warm — a bare master
-    // compare would miss it). Also collapse device→master for the display name so
-    // two devices of one friend show as a single person.
-    final links = ref.watch(deviceLinkProvider);
-    final myMaster = links.identityOf(ref.watch(identityProvider).peerId ?? '');
-    final myDeviceIds =
-        ref.watch(myDevicesProvider).map((d) => d.peerId).toSet();
-    final myRunningDevice =
-        ref.watch(localDevicePeerIdProvider).valueOrNull;
-    bool isMe(String pid) =>
-        links.identityOf(pid) == myMaster ||
-        links.sameIdentity(pid, myMaster) ||
-        myDeviceIds.contains(pid) ||
-        (myRunningDevice != null && pid == myRunningDevice);
-
+    // Collapse device→master + exclude ourselves (sibling devices included) —
+    // see [typingMastersFor] for the Step 9C/C1 self-filter rationale.
+    final masters = typingMastersFor(ref, typingPeers);
     final profiles = ref.watch(profileProvider);
-    final names = typingPeers
-        .where((pid) => !isMe(pid))
-        .map((pid) => displayNameFor(profiles, links.identityOf(pid)))
+    final names = masters
+        .map((master) => displayNameFor(profiles, master))
         .toSet()
         .toList();
     if (names.isEmpty) return const SizedBox.shrink();
 
-    String text;
-    if (names.length == 1) {
-      text = '${names.first} is typing...';
-    } else if (names.length == 2) {
-      text = '${names[0]} and ${names[1]} are typing...';
-    } else {
-      text = '${names.length} people are typing...';
-    }
-
-    return Padding(
-      padding: const EdgeInsets.symmetric(
-        horizontal: HollowSpacing.lg,
-        vertical: HollowSpacing.xs,
-      ),
-      child: Text(
-        text,
-        style: HollowTypography.caption.copyWith(
-          color: hollow.textSecondary,
-          fontStyle: FontStyle.italic,
-        ),
-      ),
-    );
+    return TypingIndicatorBar(names: names);
   }
 }
 

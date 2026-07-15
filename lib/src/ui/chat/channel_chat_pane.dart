@@ -2310,32 +2310,12 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
   /// each to its master so the profile/nickname lookup (master-keyed) hits
   /// and two devices of one person show as a single name. Also EXCLUDE our
   /// OWN identity — a sibling device (e.g. the master) typing must not show
-  /// "you are typing" to its other device (the "Pixel sees Pixel typing" leak).
+  /// "you are typing" to its other device (the "Pixel sees Pixel typing" leak)
+  /// — see [typingMastersFor] for the robust self-filter rationale.
   Widget _buildTypingBar(Set<String> typingPeers) {
-    final links = ref.watch(deviceLinkProvider);
-    final myMaster =
-        links.identityOf(ref.watch(identityProvider).peerId ?? '');
-    // Robust self-filter (Step 9C/C1): a sibling device typing must never
-    // render as "you are typing" on our OTHER device. The typist id reaching
-    // here is collapsed to master in Rust ONLY IF the sibling's device id is
-    // warm in the resolver; if it isn't, it arrives as a raw DEVICE id and a
-    // bare `master != myMaster` check misses it. So exclude a typist that
-    // resolves to our master OR is one of OUR OWN known device ids OR is this
-    // running device — i.e. anything `sameIdentity` to us by any path.
-    final myDeviceIds =
-        ref.watch(myDevicesProvider).map((d) => d.peerId).toSet();
-    final myRunningDevice = ref.watch(localDevicePeerIdProvider).valueOrNull;
-    bool isMe(String pid) =>
-        links.identityOf(pid) == myMaster ||
-        links.sameIdentity(pid, myMaster) ||
-        myDeviceIds.contains(pid) ||
-        (myRunningDevice != null && pid == myRunningDevice);
+    final masters = typingMastersFor(ref, typingPeers);
     final nicknames = ref.watch(serverNicknamesProvider(widget.serverId));
     final profiles = ref.watch(profileProvider);
-    final masters = typingPeers
-        .where((pid) => !isMe(pid))
-        .map((pid) => links.identityOf(pid))
-        .toSet();
     if (masters.isEmpty) return const SizedBox.shrink();
     return TypingIndicatorBar(
       names: masters

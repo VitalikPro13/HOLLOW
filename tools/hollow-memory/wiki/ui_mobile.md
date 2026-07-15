@@ -130,33 +130,40 @@ On entry: `_openDmChat` sets `selectedPeerProvider`, clears `selectedServerProvi
 On exit: Providers are cleared in `Navigator.push().then()` in `mobile_chats_tab.dart` — AFTER the route fully pops. `MobileChatRoute.dispose()` does NOT touch selection providers. This ensures `isViewingChannel` guard works during viewing but unreads accumulate after returning to Chats tab.
 Unread clearing: `_markSeen()` called after history loads in `initState` `.then()` callback (with real message IDs). Never calls `markChannelSeen`/`markDmSeen` with null.
 
+### Decomposed structure (2026-07-15 Sonar item-3, chat-pane shape)
+`build()` is a slim skeleton; sections are private builders on the State: `_buildHeader` (→ `_MobileChatHeader`, itself decomposed into `_leadingAvatar`/`_titleBlock`/`_trailingActions`/`_pinnedButton`), `_buildSearchBar`, `_buildSyncIndicator`, `_buildNoReadPermission` / `_buildMessageArea` (→ `_buildDmMessages`/`_buildChannelMessages` → shared `_buildMessageListShell` → `_buildDmRow`/`_buildChannelRow`) + `_buildUnreadPillOverlay`, `_buildSlowModePill`, `_buildComposerOrBanner` (→ `_buildBlockedBanner` / `_buildInputArea`), `_wrapWithBackground`. `_registerBuildListeners()` (called from build) holds the `visibleChannelsProvider` eviction listener (`_onVisibleChannelsChanged`); the message-growth listeners (`_onDmMessagesChanged`/`_onChannelMessagesChanged`) stay registered inside the list builders so they don't register while the read-permission gate replaces the list. Action-sheet callbacks are nullable factories (`_replyActionFor`/`_editActionFor`/`_copyActionFor`/`_downloadActionFor`/`_pinActionFor` — gate order preserved) with proof dialogs in `_showDmProof`/`_showChannelProof`; reactions via `_toggleDmReaction`/`_toggleChannelReaction` (shared by bubble + sheet). `_sendFileMessage` is the one optimistic-insert+`fileTransferProvider.sendFile` pipeline for staged files AND voice notes. It ADOPTS `chat_pane_shared.dart` — see wiki ui_chat_pane_shared.
+
 ### Widget Tree
 ```
 Scaffold
-├── SafeArea
+├── SafeArea (inside EmoteScope)
 │   └── Column
-│       ├── _MobileChatHeader (back, name, status, users icon, search icon, mute bell)
+│       ├── _MobileChatHeader (back, name, status, users icon, pins, search icon, mute bell)
+│       ├── MobileCallStatusStrip (DM) / _VoiceChannelStatusStrip
 │       ├── _buildSearchBar (channel only, when _searchOpen)
-│       ├── Expanded → Stack
-│       │   ├── ScrollablePositionedList.builder (initialScrollIndex: messages.length, initialAlignment: 1.0)
-│       │   │   └── _LongPressMessage → MessageBubble / ChannelMessageBubble (isHighlighted for search)
-│       │   └── Builder → unread pill (DM + channel, "N new messages")
-│       ├── _TypingBar
-│       ├── _ReplyPreview (if replying)
-│       ├── StagedHollowLinkCard / StagedLinkPreviewCard (link preview)
-│       ├── _StagedFilePreview (if file staged)
-│       ├── Post permission gate (channel only — replaces input bar when canPostInChannelProvider is false)
-│       └── VoiceRecorderBar (if _isRecordingVoice) OR _MobileInputBar (paperclip + image/gallery + text + emoji + mic + send)
+│       ├── _buildSyncIndicator (channel only)
+│       ├── Expanded → Stack   (or _buildNoReadPermission when read gate denies)
+│       │   ├── reversedChatList (shared shell, selectionArea: false)
+│       │   │   └── LongPressMessage → MessageBubble / ChannelMessageBubble (isHighlighted for search)
+│       │   └── _buildUnreadPillOverlay → shared UnreadJumpPill
+│       ├── SystemStatusBanner (bottom anchor)
+│       ├── _TypingBar → typingMastersFor + shared TypingIndicatorBar
+│       ├── _buildMentionPanel / _buildEmotePanel (autocomplete)
+│       ├── ChatReplyPreviewBar (if replying, shared)
+│       ├── StagedLinkArea (shared; hollow-link or OG preview)
+│       ├── StagedFilePreviewBar (if file staged, shared)
+│       ├── _buildSlowModePill (channel, cooldown active)
+│       └── _buildComposerOrBanner: blocked banner (no-post/muted) OR VoiceRecorderBar OR _MobileInputBar ([+] attach + text + emoji-in-field + mic + send)
 ```
 
 ### Message Rendering
-Uses `ScrollablePositionedList.builder` with sentinel pattern (`itemCount: messages.length + 1`).
+Uses the shared `reversedChatList()` shell: `reverse: true`, newest at builder index 0 bottom-pinned, `findChildIndexCallback` keyed-row reuse, `_frozenLen` display freeze while scrolled up (see chat_pane scroll model).
 
-**Grouping:** 5-minute window + sender change triggers `showHeader`.
+**Grouping:** shared `shouldGroup()` (same sender within 5 min; channel rows compare device→master collapsed sender ids). Date separators via shared `dateSeparatedChatRow`/`DateSeparator` ("Today"/"Yesterday"/"February 16, 2026" — desktop format since 2026-07-15).
 
-**Reply context:** For each message with `replyToMid`, looks up the original in the message list and passes `replyToSenderName` + `replyToText` to the bubble.
+**Reply context:** For each message with `replyToMid`, O(1) lookup via the per-build `indexById` map; passes `replyToSenderName` + `replyToText` (`_attachmentPreviewText` for file tokens) to the bubble.
 
-**Edit mode:** When `_editingMessageId` matches a message, renders `_buildEditView()` instead of the bubble — an inline `TextField` with accent border + Save/Cancel buttons.
+**Edit mode:** When `_editingMessageId` matches a message, `_editRow()` renders `_buildEditView()` instead of the bubble — an inline `TextField` with accent border + Save/Cancel buttons.
 
 ### _LongPressMessage Widget
 Wraps each message bubble. Provides:
@@ -167,8 +174,8 @@ Wraps each message bubble. Provides:
 ### File Actions
 - `_saveFile(FileAttachment)` — reads bytes, passes to `FilePicker.platform.saveFile(bytes:)`. Android requires `bytes:` param (crashes without it). Converts WebP→PNG if needed via `network_api.convertImageFormat()`.
 - `_requestFileFromPeer(FileAttachment, senderId)` — requests file via P2P when not on disk.
-- `_handleSend()` — if `_stagedFilePath` is set, sends as file attachment via `network_api.sendFile()`, otherwise sends text.
-- `_pickFile({bool imagesOnly = false})` — `FilePicker.platform.pickFiles(type: imagesOnly ? FileType.image : FileType.any)` → `network_api.sendFile`. The composer has TWO attach buttons: the paperclip (`onPickFile` → any file) and an image/gallery button to its RIGHT (`onPickImage` → `_pickFile(imagesOnly: true)`).
+- `_handleSend()` — slow-mode + media-only gates (`_blockedBySlowMode`/`_passesMediaOnlyGate`), clears composer state (`_clearComposerState`), then `_sendFileMessage(...)` if a file is staged (optimistic insert + `fileTransferProvider.sendFile`) else the text `sendMessage`.
+- `_pickFile({bool imagesOnly = false})` — `FilePicker.platform.pickFiles` (media-only channels restrict extensions), STAGES the file above the input bar (caption-friendly, desktop parity). One [+] attach button opens `_showAttachSheet` (Photo / File rows).
 
 ### Pin Messages (Channel Only)
 - `pinnedProvider` loaded after channel history loads in `initState` `.then()` callback
