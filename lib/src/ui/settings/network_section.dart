@@ -129,8 +129,11 @@ class NetworkSettingsView extends ConsumerWidget {
           ],
         ],
       ),
+      // Anti-censorship (VLESS+REALITY) tunnel — hidden from the UI: the
+      // current REALITY transport is non-functional. Kept in the codebase
+      // (widget below + Rust proxy_tunnel) for a future transport attempt.
       // Desktop-only for now (the tunnel runs as a bundled subprocess).
-      if (!Platform.isAndroid && !Platform.isIOS) const _AntiCensorshipCard(),
+      // if (!Platform.isAndroid && !Platform.isIOS) const _AntiCensorshipCard(),
     ]);
   }
 
