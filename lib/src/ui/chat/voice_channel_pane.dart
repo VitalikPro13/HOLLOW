@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
+import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/voice_channel_provider.dart';
@@ -13,6 +14,7 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/chat/channel_chat_pane.dart';
+import 'package:hollow/src/ui/chat/chat_pane_shared.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
@@ -159,48 +161,13 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
               crossAxisAlignment: CrossAxisAlignment.center,
               children: [
                 // Toggle button
-                AnimatedOpacity(
-                  opacity: _overlaysVisible ? 1.0 : 0.0,
-                  duration: HollowDurations.normal,
-                  child: IgnorePointer(
-                    ignoring: !_overlaysVisible,
-                    child: MouseRegion(
-                      onEnter: (_) => _pinOverlays(),
-                      onExit: (_) => _resetOverlayTimer(),
-                      child: GestureDetector(
-                        onTap: () => setState(
-                            () => _chatOverlayPinned = !_chatOverlayPinned),
-                        child: Container(
-                          width: 24,
-                          height: 48,
-                          decoration: BoxDecoration(
-                            color: hollow.surface.withValues(alpha: 0.88),
-                            borderRadius: const BorderRadius.horizontal(
-                              left: Radius.circular(8),
-                            ),
-                            border: Border(
-                              left: BorderSide(
-                                color: hollow.border.withValues(alpha: 0.5),
-                              ),
-                              top: BorderSide(
-                                color: hollow.border.withValues(alpha: 0.5),
-                              ),
-                              bottom: BorderSide(
-                                color: hollow.border.withValues(alpha: 0.5),
-                              ),
-                            ),
-                          ),
-                          child: Icon(
-                            _chatOverlayPinned
-                                ? LucideIcons.chevronRight
-                                : LucideIcons.chevronLeft,
-                            size: 14,
-                            color: hollow.textSecondary,
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
+                ChatOverlayToggleButton(
+                  overlaysVisible: _overlaysVisible,
+                  pinned: _chatOverlayPinned,
+                  onTap: () => setState(
+                      () => _chatOverlayPinned = !_chatOverlayPinned),
+                  onHoverEnter: _pinOverlays,
+                  onHoverExit: _resetOverlayTimer,
                 ),
                 // Chat panel — slides in/out
                 _OverlaySlider(
@@ -393,9 +360,12 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
     final isLocal = peerId == localPeerId;
     final renderer = ref.read(voiceChannelProvider.notifier)
         .getCameraRenderer(peerId);
+    // Remote camera keys are ROUTABLE device ids — collapse to the MASTER
+    // for the profile/avatar lookups (both are master-keyed).
+    final displayId = ref.watch(deviceLinkProvider).identityOf(peerId);
     final peerProfile =
-        ref.watch(profileProvider.select((p) => p[peerId]));
-    final name = isLocal ? 'You' : displayNameForPeer(peerProfile, peerId);
+        ref.watch(profileProvider.select((p) => p[displayId]));
+    final name = isLocal ? 'You' : displayNameForPeer(peerProfile, displayId);
     // Membership-select: this tile only rebuilds when ITS peer's speaking bit
     // flips, not on every VAD change in the channel.
     final isSpeaking =
@@ -434,7 +404,7 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     HollowAvatar(
-                      peerId: peerId,
+                      peerId: displayId,
                       size: 48,
                     ),
                     const SizedBox(height: HollowSpacing.xs),
@@ -587,7 +557,11 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
                                 color: hollow.elevated,
                                 child: Center(
                                   child: HollowAvatar(
-                                    peerId: peerId,
+                                    // Master-keyed avatar (routable id no-ops
+                                    // for single-device peers).
+                                    peerId: ref
+                                        .watch(deviceLinkProvider)
+                                        .identityOf(peerId),
                                     size: 28,
                                   ),
                                 ),
@@ -652,48 +626,13 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
               crossAxisAlignment: CrossAxisAlignment.center,
               children: [
                 // Toggle button
-                AnimatedOpacity(
-                  opacity: _overlaysVisible ? 1.0 : 0.0,
-                  duration: HollowDurations.normal,
-                  child: IgnorePointer(
-                    ignoring: !_overlaysVisible,
-                    child: MouseRegion(
-                      onEnter: (_) => _pinOverlays(),
-                      onExit: (_) => _resetOverlayTimer(),
-                      child: GestureDetector(
-                        onTap: () => setState(
-                            () => _chatOverlayPinned = !_chatOverlayPinned),
-                        child: Container(
-                          width: 24,
-                          height: 48,
-                          decoration: BoxDecoration(
-                            color: hollow.surface.withValues(alpha: 0.88),
-                            borderRadius: const BorderRadius.horizontal(
-                              left: Radius.circular(8),
-                            ),
-                            border: Border(
-                              left: BorderSide(
-                                color: hollow.border.withValues(alpha: 0.5),
-                              ),
-                              top: BorderSide(
-                                color: hollow.border.withValues(alpha: 0.5),
-                              ),
-                              bottom: BorderSide(
-                                color: hollow.border.withValues(alpha: 0.5),
-                              ),
-                            ),
-                          ),
-                          child: Icon(
-                            _chatOverlayPinned
-                                ? LucideIcons.chevronRight
-                                : LucideIcons.chevronLeft,
-                            size: 14,
-                            color: hollow.textSecondary,
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
+                ChatOverlayToggleButton(
+                  overlaysVisible: _overlaysVisible,
+                  pinned: _chatOverlayPinned,
+                  onTap: () => setState(
+                      () => _chatOverlayPinned = !_chatOverlayPinned),
+                  onHoverEnter: _pinOverlays,
+                  onHoverExit: _resetOverlayTimer,
                 ),
                 // Chat panel — slides in/out
                 _OverlaySlider(
@@ -927,11 +866,13 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
     final isLocal = focusedPeerId == localPeerId;
     final renderer = ref.read(voiceChannelProvider.notifier)
         .getCameraRenderer(focusedPeerId);
+    // Routable device id → master for the display lookups.
+    final displayId = ref.watch(deviceLinkProvider).identityOf(focusedPeerId);
     final focusedProfile =
-        ref.watch(profileProvider.select((p) => p[focusedPeerId]));
+        ref.watch(profileProvider.select((p) => p[displayId]));
     final name = isLocal
         ? 'You'
-        : displayNameForPeer(focusedProfile, focusedPeerId);
+        : displayNameForPeer(focusedProfile, displayId);
 
     return Container(
       color: Colors.black,
@@ -948,7 +889,7 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   HollowAvatar(
-                    peerId: focusedPeerId,
+                    peerId: displayId,
                     size: 64,
                   ),
                   const SizedBox(height: HollowSpacing.md),
@@ -1016,7 +957,11 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
               final isFocused =
                   peerId == vcState.focusedScreenSharePeerId &&
                   sourceType == vcState.focusedSourceType;
-              final name = displayNameFor(profiles, peerId);
+              // Routable device id → master for the name/avatar lookups;
+              // focus tracking stays keyed on the routable id.
+              final displayId =
+                  ref.watch(deviceLinkProvider).identityOf(peerId);
+              final name = displayNameFor(profiles, displayId);
 
               return Padding(
                 padding: const EdgeInsets.symmetric(
@@ -1047,7 +992,7 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
                       ),
                       const SizedBox(width: HollowSpacing.xs),
                       HollowAvatar(
-                        peerId: peerId,
+                        peerId: displayId,
                         size: 18,
                       ),
                       const SizedBox(width: HollowSpacing.xs),

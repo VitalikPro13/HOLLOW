@@ -1349,16 +1349,27 @@ class _VoiceParticipantRow extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    // VC participants are keyed by the ROUTABLE WS sender — a DEVICE peer id
+    // for multi-device peers (including our own row). Collapse to the MASTER
+    // identity for everything display-related (avatar, local nickname,
+    // profile name); audio/speaking/volume state stays keyed by the routable
+    // id. Single-device → identityOf is a no-op.
+    final master = ref.watch(deviceLinkProvider).identityOf(peerId);
     final peerProfile =
-        ref.watch(profileProvider.select((p) => p[peerId]));
-    final name = displayNameForPeer(peerProfile, peerId);
+        ref.watch(profileProvider.select((p) => p[master]));
+    final name = displayNameForPeer(peerProfile, master);
     final hollow = HollowTheme.of(context);
     final vcState = ref.watch(voiceChannelProvider);
     final localPeerId = ref.watch(identityProvider).peerId ?? '';
+    // Self = this row is THIS device (or the bare master id) — a sibling
+    // device of ours in the same channel is deliberately NOT self (it has
+    // its own mute/camera state).
+    final myDevice = ref.watch(localDevicePeerIdProvider).valueOrNull;
+    final isSelf = peerId == localPeerId || peerId == myDevice;
 
     final bool isMuted;
     final bool isDeafened;
-    if (peerId == localPeerId) {
+    if (isSelf) {
       isMuted = vcState.isMuted;
       isDeafened = vcState.isDeafened;
     } else {
@@ -1371,15 +1382,15 @@ class _VoiceParticipantRow extends ConsumerWidget {
     // flips, not on every VAD change in the channel.
     final speaking =
         ref.watch(vcSpeakingProvider.select((s) => s.contains(peerId)));
-    final isRemote = peerId != localPeerId;
-    final isScreenSharing = peerId == localPeerId
+    final isRemote = !isSelf;
+    final isScreenSharing = isSelf
         ? vcState.isScreenSharing
         : (vcState.peerScreenSharing[peerId] ?? false);
-    final isCameraOn = peerId == localPeerId
+    final isCameraOn = isSelf
         ? vcState.isCameraOn
         : (vcState.peerCameraOn[peerId] ?? false);
     final recState = ref.watch(recordingProvider);
-    final isRecording = peerId == localPeerId
+    final isRecording = isSelf
         ? recState.isMyRecording
         : recState.remoteRecorders.contains(peerId);
 
@@ -1393,7 +1404,7 @@ class _VoiceParticipantRow extends ConsumerWidget {
         child: Row(
           children: [
             HollowAvatar(
-                peerId: peerId,
+                peerId: master,
                 size: 18),
             const SizedBox(width: HollowSpacing.xs),
             Expanded(

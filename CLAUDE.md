@@ -34,9 +34,8 @@ HOLLOW/
 │       └── storage/      # SQLCipher message store
 ├── relay/                # Legacy Rust relay (superseded by relay-uws)
 ├── relay-uws/            # Production relay (uWebSockets C++, native TLS, OVH VPS)
-├── packages/flutter_webrtc/ # FORK of flutter_webrtc 1.5.2 on stock libwebrtc m144 (WASAPI loopback, native
-│                         # screen recording/share); screen_audio_capturer.exe = SEPARATE build target.
-│                         # See project_flutter_webrtc_152_upgrade
+├── packages/flutter_webrtc/ # FORK 1.5.2, stock libwebrtc m144 (WASAPI loopback, native recording/share);
+│                         # screen_audio_capturer.exe = SEPARATE target. See project_flutter_webrtc_152_upgrade
 ├── rust_builder/         # flutter_rust_bridge build system (cargokit)
 ├── vendor/ffmpeg/        # Bundled native binaries (gitignored, fetch_ffmpeg.ps1)
 ├── legal/                # Privacy Policy, Terms, version manifest
@@ -70,7 +69,7 @@ pwsh scripts\sign_release.ps1                  # sign every .exe/.dll in the Rel
 
 ## Hollow Design System
 All UI uses custom Hollow widgets — no Material defaults: **HollowPressable** (`subtle` mode), **HollowButton** (`.filled()/.ghost()/.outline()/.danger()`), **HollowTextField**, **HollowDialog** (`showHollowDialog()`), **HollowTooltip** (always dismiss via `_dismiss()` — immediate, no reverse animation), **HollowToast**, **HollowToggle**, **StatusDot** (presence by SHAPE — pass `filled: isOnline`), **StatBar/DailyUsageMeter**.
-- **CRITICAL — hover states:** NEVER animate a color from `Colors.transparent` (transparent BLACK — lerp flashes dark); HollowPressable callers pass `backgroundColor: null`, never `Colors.transparent`; hover must never paint outside the control (no glows; spacing outside, selection bg ON the pressable). Dialog pairs = ghost Cancel + filled confirm; `.danger` ONLY for destructive; selection state = chips, never `.filled`. See `feedback_hover_state_patterns`.
+- **CRITICAL — hover states:** NEVER animate a color from `Colors.transparent` (transparent BLACK — lerp flashes dark); HollowPressable callers pass `backgroundColor: null`, never `Colors.transparent`; hover must never paint outside the control (spacing outside, selection bg ON the pressable). Dialog pairs = ghost Cancel + filled confirm; `.danger` ONLY for destructive; selection state = chips, never `.filled`. See `feedback_hover_state_patterns`.
 
 ## Key Architecture Notes
 - **Multi-node test harness = PRIMARY testing for distributed logic.** `node/test_harness.rs` (cfg(test)): N real `spawn_node` loops over an in-process `MockRelay`, two-layer inspectors (UI = master-collapsed, raw = device-keyed). ALWAYS verify ring-1/ring-2 changes with it before declaring done. NOT covered: media/pixels/FFI/native/relay C++. See wiki `rust_test_harness`, `feedback_harness_first_testing`.
@@ -165,14 +164,14 @@ All UI uses custom Hollow widgets — no Material defaults: **HollowPressable** 
 - **CRITICAL — channels_tab auto-save guards against empty `channelListProvider`** (`channels.isNotEmpty` before saving derived layout state).
 - **CRITICAL — CRDT property changes need optimistic UI updates:** update `channelListProvider` BEFORE the FFI call — `CrdtStore` is fire-and-forget, the DB may be stale when `ServerUpdated` fires. See `feedback_crdt_optimistic_update`.
 - **Roles & permissions:** 4 power roles (Owner/Admin/Moderator/Member) + cosmetic labels; `role_permissions` overrides `default_permissions()`; tier-gated editing. See `project_roles_design`. **Moderation trio:** mute (master-keyed lazy expiry) / slow mode (Mod+ EXEMPT) / media-only — enforce at send + LIVE ingest, NEVER sync backfill; slow-mode UI cooldown DERIVED from the message list, never send-time state. See `project_moderation_trio`.
-- **CRITICAL — per-channel MLS subgroups (Option B):** restricted channels encrypt under their OWN MLS group keyed `"{server}#{channel}"` — visibility is cryptographically enforced. Membership via coordinator-gated `reconcile_subgroups_for_server`; voice derives SFrame from the subgroup `export_secret`; auto-leave on lost visibility runs on BOTH CrdtOp apply paths; VC participants key on the ROUTABLE WS sender, NEVER the MLS leaf. See `project_per_channel_mls_subgroups`, `feedback_owner_coordinator_mls_recovery`.
+- **CRITICAL — per-channel MLS subgroups (Option B):** restricted channels encrypt under their OWN MLS group keyed `"{server}#{channel}"` — visibility is cryptographically enforced. Membership via coordinator-gated `reconcile_subgroups_for_server`; voice derives SFrame from the subgroup `export_secret`; auto-leave on lost visibility runs on BOTH CrdtOp apply paths; VC participants key on the ROUTABLE WS sender, NEVER the MLS leaf — display sites collapse `identityOf` for avatar/nickname (see `vc_participant_display_master_collapse`). See `project_per_channel_mls_subgroups`, `feedback_owner_coordinator_mls_recovery`.
 - **CRITICAL — server-group MLS recovery:** owner-preferred coordinator + CRDT-mutating handlers ALWAYS also broadcast the op as plaintext `CrdtOpBroadcast` (idempotent; op_log dedups) — an MLS-only op silently drops at a skewed epoch with no recovery. `WrongEpoch` decrypt-fail fires a server-group `SyncRequest`. See `feedback_owner_coordinator_mls_recovery`.
 - **CRITICAL — channel visibility/posting UI reactivity:** `_refreshServerState` reloads `channelListProvider` + invalidates `serverChannelsProvider(id)` on a 0/120/400/1000ms ramp; eviction listeners on `visibleChannelsProvider` (desktop shell + mobile chat route); mobile chat route must `loadForServer` on open (Chats tab has no selected server). NEVER `ref.invalidate` in `initState` — defer to post-frame. See `feedback_channel_visibility_posting_ui_reactivity`.
 - **CRITICAL — new `CrdtPayload` variants emit `ServerUpdated` in BOTH match blocks** (`handle_envelope_crdt_op` + `handle_incoming_request`) — never fall into `_ =>` (emits `SyncCompleted`, no provider invalidation).
 - **CRITICAL — received CRDT ops persisted via `insert_crdt_op` at EVERY apply site** (op_log is `skip_serializing` — state JSON alone loses history); joins send `ServerStateSnapshot` BEFORE the op log; permission checks validate `op.author`, never the transport sender. See `feedback_crdt_sync_persistence`.
 - **CRITICAL — `RoomMembers` is the authoritative presence snapshot:** diff old vs new sets, emit `PeerDisconnected` for vanished peers; `PeerLeft` refreshes rooms still listing the leaver; caches keyed on room membership must tolerate missed `PeerLeft`. See `feedback_ws_presence_stale_rooms`.
 - **CRITICAL — list rows with per-item loaded state need `ValueKey(item id)`** + a `didUpdateWidget` reload — else Flutter re-parents State across different conversations. See `feedback_listview_state_reuse_keys`.
-- **CRITICAL — chat lists are `reverse: true`** (VENDORED `packages/scrollable_positioned_list/`): newest = index 0 bottom-pinned, maintenance = instant post-frame `jumpTo(0,0)` ONLY, scrolled-up reading FREEZES the display; mobile at-bottom growth calls `_scrollToBottom()`. Keyed chat lists MUST pass `findChildIndexCallback` (guard test `chat_list_element_reuse_test.dart`); popped MobileChatRoute callbacks bail on `_routeDeactivated`. See `feedback_reverse_chat_lists`.
+- **CRITICAL — chat lists are `reverse: true`** (VENDORED `packages/scrollable_positioned_list/`): newest = index 0 bottom-pinned, maintenance = instant post-frame `jumpTo(0,0)` ONLY, scrolled-up reading FREEZES the display; mobile at-bottom growth calls `_scrollToBottom()`. Keyed chat lists MUST pass `findChildIndexCallback` (guard test `chat_list_element_reuse_test.dart`); popped MobileChatRoute callbacks bail on `_routeDeactivated`. Twin-pane shared shell/widgets: `chat_pane_shared.dart` — extend it, never copy between panes. See `feedback_reverse_chat_lists`.
 - **`showHollowDialog` overlays need a `Material` ancestor** for `Text` widgets (else yellow debug underline).
 - **Android:** SQLCipher needs vendored prebuilt OpenSSL 1.1.1w per-arch; target-prefixed env vars must be SYSTEM env vars (Cargo `[env]` doesn't reach cargokit); Rust TLS uses `webpki-roots`, NEVER `native-roots` (silently breaks all WSS). See `feedback_android_platform`.
 - **Mobile data dir:** `hollowDataDir` (`hollow_data_dir.dart`) = `getApplicationDocumentsDirectory()/hollow`, passed via `set_data_dir()` FFI before `start_node()`.
@@ -189,10 +188,10 @@ All UI uses custom Hollow widgets — no Material defaults: **HollowPressable** 
 - **CRITICAL — Windows annotation mode:** `window_manager` maximize/unmaximize only — never raw Win32 or `setFullScreen`. See `feedback_annotation_window_management`.
 
 ## Semantic Memory Search (hollow-memory MCP)
-- **Tool:** `memory_search(query, limit=5)` — semantic search across memory files, wiki, HOLLOW_PLAN.md, WHITEPAPER.md, CLAUDE.md. ALWAYS search before arguing, designing, or re-investigating.
-- **Wiki:** `tools/hollow-memory/wiki/` — ~40 machine-optimized files covering every UI panel, data flow, provider, and Rust module. Keep in sync with code during `/compush`.
+- **Tool:** `memory_search(query, limit=5)` — semantic search across memory, wiki, plan/whitepaper docs. ALWAYS search before arguing, designing, or re-investigating.
+- **Wiki:** `tools/hollow-memory/wiki/` — ~40 machine-optimized files (UI panels, data flows, providers, Rust modules). Keep in sync during `/compush`.
 - **Reindex:** run `memory_reindex()` after modifying any indexed file.
-- **Save liberally:** granular patterns, decision rationale, subtle bug causes — threshold is "would finding this by meaning help a future session?". Location: `tools/hollow-memory/`.
+- **Save liberally:** threshold is "would finding this by meaning help a future session?". Location: `tools/hollow-memory/`.
 
 ## Rules
 - Never commit secrets, keys, or credentials.

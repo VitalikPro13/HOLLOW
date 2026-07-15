@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
@@ -56,7 +57,11 @@ class MobileSourceSwitchPill extends ConsumerWidget {
             final isScreen = source.type == 'screen';
             final isFocused = source.peerId == focusedPeerId &&
                 source.type == focusedType;
-            final name = displayNameFor(profiles, source.peerId);
+            // Routable device id → master for the name/avatar lookups;
+            // focus tracking stays keyed on the routable id.
+            final displayId =
+                ref.watch(deviceLinkProvider).identityOf(source.peerId);
+            final name = displayNameFor(profiles, displayId);
 
             return Padding(
               padding:
@@ -81,7 +86,7 @@ class MobileSourceSwitchPill extends ConsumerWidget {
                           isFocused ? hollow.accent : hollow.textSecondary,
                     ),
                     const SizedBox(width: HollowSpacing.xs),
-                    HollowAvatar(peerId: source.peerId, size: 18),
+                    HollowAvatar(peerId: displayId, size: 18),
                     const SizedBox(width: HollowSpacing.xs),
                     Text(
                       source.peerId == localPeerId ? 'You' : name,

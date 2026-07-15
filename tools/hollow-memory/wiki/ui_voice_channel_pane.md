@@ -2,6 +2,8 @@
 
 Voice channel composite view located at `lib/src/ui/chat/voice_channel_pane.dart` (~1358 lines). Wraps `ChannelChatPane` and adds camera grid, screen share full-bleed, floating controls pill, chat overlay slider, and source switcher. Conditionally renders one of four layout modes based on voice channel state.
 
+**Device→master collapse (2026-07-15, memory vc-participant-display-master-collapse):** participant/camera/screen ids here are ROUTABLE WS device ids. Every display site (video-tile name/avatar, PiP fallback avatar, focused-camera label, sharer-switcher name/avatar — same in `channel_sidebar.dart` `_VoiceParticipantRow`, `mobile_voice_avatars.dart`, `mobile_source_switch_pill.dart`) resolves `deviceLinkProvider.identityOf(peerId)` for the avatar/profile/nickname lookups; renderer, focus, speaking, and audio-state lookups stay keyed on the raw routable id.
+
 ## Widget Class Hierarchy
 
 - `VoiceChannelPane` -- `ConsumerStatefulWidget`, top-level widget. Constructor params: `serverId`, `channelId`, `channelName`.
@@ -125,9 +127,7 @@ Tapping a tab calls `voiceChannelProvider.notifier.setFocusedSource(peerId, sour
 Identical structure in both camera grid and screen share views. Right-aligned, full height. Consists of:
 
 ### Toggle Button
-24px wide, 48px tall tab with chevron icon. Semi-transparent surface background (88% alpha), left-rounded corners (8px), left/top/bottom border. Shows `chevronLeft` when closed, `chevronRight` when open. Tapping toggles `_chatOverlayPinned`. Mouse enter/exit calls `_pinOverlays()` / `_resetOverlayTimer()`.
-
-Wrapped in `AnimatedOpacity` + `IgnorePointer` controlled by `_overlaysVisible`.
+The shared `ChatOverlayToggleButton` from `chat_pane_shared.dart` (2026-07-15 — replaced two inline copies in this file): 24px wide, 48px tall tab with chevron icon, semi-transparent surface background (88% alpha), left-rounded corners (8px), left/top/bottom border. Shows `chevronLeft` when closed, `chevronRight` when open. Tapping toggles `_chatOverlayPinned`; hover enter/exit call `_pinOverlays()` / `_resetOverlayTimer()`; visibility rides `_overlaysVisible`.
 
 ### Sliding Chat Panel (_OverlaySlider)
 360px wide panel that slides in from the right when `_chatOverlayPinned = true`. Contains a full `ChannelChatPane` instance with the same `serverId`, `channelId`, `channelName`.

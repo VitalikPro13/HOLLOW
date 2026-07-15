@@ -183,18 +183,22 @@ Renders as `FadeTransition(opacity: _controller, child: child)`.
 
 `file:_VoiceParticipantRow` extends `ConsumerWidget`. Props: `peerId`, `serverId`, `channelId`.
 
+**Device→master collapse (2026-07-15, memory vc-participant-display-master-collapse):** `peerId` is the ROUTABLE WS sender — a DEVICE id for multi-device peers (including our own row). The row computes `master = deviceLinkProvider.identityOf(peerId)` and uses `master` for the avatar and profile/nickname lookups ONLY; every audio/media/volume lookup stays keyed on the raw routable `peerId`.
+
 **State reads:**
-- Profile display name via `displayNameFor(profiles, peerId)` (resolution: local nickname > profile display name > short peer ID).
+- Profile display name via `displayNameForPeer(profiles[master], master)` (resolution: local nickname > profile display name > short peer ID).
 - `vcState` from `voiceChannelProvider`.
-- `localPeerId` from `identityProvider`.
+- `localPeerId` (master) from `identityProvider`; `myDevice` from `localDevicePeerIdProvider`.
+
+**Self detection:** `isSelf = peerId == localPeerId || peerId == myDevice` — deliberately NOT `sameIdentity`: a sibling device of ours in the same channel counts as remote (it has its own mute/camera state).
 
 **Audio state detection:**
-For the local peer, reads `vcState.isMuted` and `vcState.isDeafened` directly. For remote peers, reads `vcState.getPeerAudioState(peerId)`.
+For self, reads `vcState.isMuted` and `vcState.isDeafened` directly. For remote peers, reads `vcState.getPeerAudioState(peerId)`.
 
 **Media state detection:**
-- `speaking` -- `vcState.isSpeaking(peerId)`.
-- `isScreenSharing` -- local: `vcState.isScreenSharing`; remote: `vcState.peerScreenSharing[peerId] ?? false`.
-- `isCameraOn` -- local: `vcState.isCameraOn`; remote: `vcState.peerCameraOn[peerId] ?? false`.
+- `speaking` -- `vcSpeakingProvider` membership-select on `peerId`.
+- `isScreenSharing` -- self: `vcState.isScreenSharing`; remote: `vcState.peerScreenSharing[peerId] ?? false`.
+- `isCameraOn` -- self: `vcState.isCameraOn`; remote: `vcState.peerCameraOn[peerId] ?? false`.
 
 **Row layout:**
 - `HollowAvatar` (18px) with profile avatar bytes.

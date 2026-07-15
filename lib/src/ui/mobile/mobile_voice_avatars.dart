@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
@@ -114,9 +115,14 @@ class MobileSpeakingAvatar extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
     final profiles = ref.watch(profileProvider);
-    final displayName = displayNameFor(profiles, peerId);
+    // VC participants are keyed by the ROUTABLE WS sender (a DEVICE id for
+    // multi-device peers) — collapse to the MASTER for the avatar/name
+    // lookups (both master-keyed). Single-device → no-op.
+    final displayId = ref.watch(deviceLinkProvider).identityOf(peerId);
+    final displayName = displayNameFor(profiles, displayId);
     final localPeerId = ref.read(identityProvider).peerId ?? '';
-    final isMe = peerId == localPeerId;
+    final myDevice = ref.watch(localDevicePeerIdProvider).valueOrNull;
+    final isMe = peerId == localPeerId || peerId == myDevice;
     final radius = hollow.radiusMd;
 
     return Column(
@@ -131,7 +137,7 @@ class MobileSpeakingAvatar extends ConsumerWidget {
           borderRadius: BorderRadius.circular(radius + 4),
           child: Stack(
             children: [
-              HollowAvatar(peerId: peerId, size: size),
+              HollowAvatar(peerId: displayId, size: size),
               // Muted badge bottom-left, deafened badge bottom-right.
               if (isMuted)
                 Positioned(
