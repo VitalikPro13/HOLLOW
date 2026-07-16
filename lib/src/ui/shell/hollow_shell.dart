@@ -1526,7 +1526,12 @@ class _HollowShellState extends ConsumerState<HollowShell>
       builder: (context, constraints) {
         final width = constraints.maxWidth;
         final isDesktop = width >= _kDesktopBreakpoint;
-        final isMobile = width < _kTabletBreakpoint;
+        // Android/iOS ALWAYS get the mobile shell — tablets (and landscape
+        // phones, before the portrait lock in main.dart) cross the 600px
+        // breakpoint and used to fall into the desktop layout.
+        final isMobile = width < _kTabletBreakpoint ||
+            Platform.isAndroid ||
+            Platform.isIOS;
 
         if (isMobile) {
           return const MobileShell();

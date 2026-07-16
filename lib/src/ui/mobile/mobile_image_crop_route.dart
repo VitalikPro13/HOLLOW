@@ -80,12 +80,11 @@ class _MobileImageCropRouteState extends State<MobileImageCropRoute> {
   void initState() {
     super.initState();
     // Lock orientation while cropping — a rotation re-runs _initLayout and
-    // would silently discard the user's crop position.
+    // would silently discard the user's crop position. Redundant with the
+    // app-wide portrait lock (main.dart) but kept so the crop stays safe if
+    // that lock is ever relaxed.
     if (_isMobilePlatform) {
-      SystemChrome.setPreferredOrientations([
-        DeviceOrientation.portraitUp,
-        DeviceOrientation.portraitDown,
-      ]);
+      SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
     }
     _decodeImage();
   }
@@ -276,7 +275,10 @@ class _MobileImageCropRouteState extends State<MobileImageCropRoute> {
   @override
   void dispose() {
     if (_isMobilePlatform) {
-      SystemChrome.setPreferredOrientations(DeviceOrientation.values);
+      // Re-assert the app-wide portrait lock (main.dart) — restoring
+      // DeviceOrientation.values here would unlock rotation for the rest
+      // of the session.
+      SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
     }
     _decodedImage?.dispose();
     super.dispose();

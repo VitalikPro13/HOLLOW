@@ -147,6 +147,15 @@ Future<void> _initCrashLogging() async {
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
+  // Phones and tablets are portrait-only for now: the UI is the mobile shell
+  // on all Android/iOS devices, and landscape/tablet layouts are unhandled
+  // (edge cases deferred). Also enforced in AndroidManifest.xml and
+  // Info.plist (iPad needs UIRequiresFullScreen for the lock to hold).
+  if (Platform.isAndroid || Platform.isIOS) {
+    await SystemChrome.setPreferredOrientations(
+        [DeviceOrientation.portraitUp]);
+  }
+
   // Release builds: debugPrint is a real print on every platform, and the
   // event dispatcher interpolates + prints per network event. Silence it —
   // release diagnostics go through hollow_log!/logFromDart (hollow_debug.log).

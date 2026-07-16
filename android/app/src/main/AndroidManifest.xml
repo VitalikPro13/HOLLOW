@@ -21,11 +21,15 @@
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher"
         android:allowAudioPlaybackCapture="false">
+        <!-- Portrait-only (incl. tablets): landscape/tablet layouts are the
+             mobile shell's deferred edge cases; also locked at runtime in
+             main.dart. -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
             android:launchMode="singleTop"
             android:taskAffinity=""
+            android:screenOrientation="portrait"
             android:theme="@style/LaunchTheme"
             android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
             android:hardwareAccelerated="true"
