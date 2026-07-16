@@ -78,14 +78,14 @@ Your identity is a cryptographic keypair. Zero registrations. One recovery phras
 
 | Platform | Links |
 |----------|------|
-| Windows (10+) | [.exe](https://anonlisten.com/hollow/releases/hollow-0.7.1-win64-setup.exe) / [.zip](https://anonlisten.com/hollow/releases/hollow-0.7.1-win64.zip) |
-| macOS (10.15+) | [.dmg](https://anonlisten.com/hollow/releases/hollow-0.7.1.dmg) |
-| Linux | [Flatpak](https://anonlisten.com/hollow/releases/hollow-0.7.1-linux-x86_64.flatpak) / [.tar.gz](https://anonlisten.com/hollow/releases/hollow-0.7.1-linux.tar.gz) (Experimental)|
-| Android (7+) | [.apk](https://anonlisten.com/hollow/releases/hollow-0.7.1-android.apk) |
+| Windows (10+) | [.exe](https://anonlisten.com/hollow/releases/hollow-0.8.0-win64-setup.exe) / [.zip](https://anonlisten.com/hollow/releases/hollow-0.8.0-win64.zip) |
+| macOS (10.15+) | [.dmg](https://anonlisten.com/hollow/releases/hollow-0.8.0.dmg) |
+| Linux | [Flatpak](https://anonlisten.com/hollow/releases/hollow-0.8.0-linux-x86_64.flatpak) / [.tar.gz](https://anonlisten.com/hollow/releases/hollow-0.8.0-linux.tar.gz) |
+| Android (7+) | [.apk](https://anonlisten.com/hollow/releases/hollow-0.8.0-android.apk) |
 | iOS | Coming soon |
 | Web | Not planned |
 
-Current Progress: macOS version requirement is now 10.15 instead of 14.2! Only limitations are the screen-share audio and recorder (13.0+). Flatpak is fixed on Linux. Full changelog is always [here.](changelog.txt) If you find any issues, make sure to report them. Thanks!
+Current Progress: Linux is out of Experimental phase! Tons of new cool features, so check out the [changelog!](changelog.txt) As for development, SonarQube was integrated, so now you can see some badges above about the quality of the current codebase and it would be easier for me to notice any future regressions. Enjoy!
 
 ## Tech Stack
 

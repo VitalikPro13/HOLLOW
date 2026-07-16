@@ -1,3 +1,129 @@
+v0.8 - Offline Delivery, Custom Emotes, Conferences, Mobile Screen Share & Moderation
+
+OFFLINE DELIVERY
+
+- Messages sent while you're offline now arrive when you come back: the relay temporarily holds encrypted DMs and channel messages (it cannot read them) and replays them on reconnect, so the sender no longer has to be online at the same time as you
+- DM offline delivery is on by default with a 3-day window, adjustable (1 / 3 / 7 days) in the new Offline Delivery settings card; small images are included
+- Server channels get the same catch-up, on by default and controllable per server by Owners and Admins in a new Offline Catch-Up section
+
+CUSTOM EMOTES & EMOJI
+
+- Custom emotes: upload still or animated emotes to your servers (up to 50, with a new Manage Emotes permission) or keep a personal set that works in every chat; use them in messages and reactions
+- Emote images sync between members privately and efficiently: recipients never contact any outside website to display an emote
+- FrankerFaceZ integration for building your emote set, opening to a curated selection of ~110 popular emotes
+- Redesigned emoji experience: a unified picker with 1,907 searchable emojis, recents, and Server / Mine / FFZ tabs on desktop and mobile, and typing ':' now offers emote and emoji autocomplete in every composer
+- Emotes render as actual images inside the message box as you type, and notifications display emotes properly too: in-app banners show the real image, system and push notifications show :emote-name: instead of raw code
+- Fixed emoji showing as empty boxes on Windows and Linux by bundling a color emoji font
+
+CONFERENCES
+
+- New Conferences: Zoom-style meetings you host and join by link, no server or friend request needed. A waiting room lets the host admit or decline each participant before they can enter
+- Admission is enforced by the encryption itself: being let in is what grants you the meeting's keys, kicking someone rotates them, and every meeting starts with fresh keys so past attendees can't decrypt the next one
+- Meeting chat is ephemeral by design: messages live only in memory during the call and are never written to disk
+- Join via hollow://conference links or shareable web links (the meeting id stays out of server logs), with invite cards in chat. Mobile gets a first version of the conference screen
+
+SAVED MESSAGES, BLOCKING & REPORTING
+
+- Saved Messages: a private space to message yourself, with everything DMs support — file storage, search, archive export, and sync across your linked devices
+- User blocking: blocked people can't send you friend requests, DMs, files, or calls — and blocking follows the person, so a blocked user's second device can't slip through. Their server messages are hidden (unblocking restores the history) and their activity never triggers unread badges or notifications. Manage the list in Settings > Security
+- Reporting: report a user for spam, harassment, illegal content, or impersonation straight from their profile. Reports are fully anonymous — the relay keeps only per-target category counts, and who reported whom is never stored or logged
+
+MODERATION
+
+- Moderators can now mute members, for a set duration or permanently. Muted members see a "You are muted" banner with the remaining time, and the Members tab shows who's muted. A mute can't be bypassed by editing old messages or adding reactions — it's enforced everywhere, including encrypted channels
+- Per-channel slow mode: set a minimum interval between messages (moderators and up are exempt), with a live cooldown countdown on the message box
+- Media-only channels: only images, GIFs, and videos (with optional captions) can be posted
+- All three rules are enforced on both the sending and the receiving side, so a modified client can't bypass them. Works identically on desktop and mobile
+
+PROFILES & SHOWCASE BOARDS
+
+- Showcase boards: curate your profile with blocks — text, Now Playing, Favorite Game, Game Shelf, and artwork/GIFs — which sync to other members like your avatar does, integrity-checked and with no outside connections on their end
+- Game blocks are powered by a game database: a reception strip (Metacritic score, Steam review verdict, time to beat), genre and mode tags, credits, system requirements, and clickable store links, with an accent color picked up from the game's cover art
+- Redesigned profile card with a cleaner layout, consistent between the quick popup and the full profile view on desktop and mobile; tapping someone in channel chat now shows their roles and labels
+- Your board is safe around older app versions: a friend on an old client updating their own profile can no longer wipe your showcase
+- Fixed animated GIFs fast-forwarding to catch up after being paused off-screen
+
+SCREEN SHARE
+
+- Phones can now share their screen — with device audio — into DM calls and voice channels, on both Android and iOS, with a pre-share sheet and an audio toggle. Your mic stays live over the shared sound (on Android 7-9 the audio toggle is shown as unavailable, since capturing device audio needs Android 10+)
+- Android and iOS can now also hear a desktop's shared screen audio, at full music quality
+- Linux gets screen-share audio in both directions: share your screen with system audio and hear others' shares. Sharing a single window captures only that app's sound, and whole-screen shares exclude Hollow's own audio so the call never echoes back
+- Windows: sharing a specific window now sends only that app's audio instead of your whole system's sound, and entire-screen shares keep the sound Hollow itself plays (like a video opened in chat) while dropping the call voices so nothing echoes
+- Smoother share audio for viewers: a small buffer absorbs bursty delivery from mobile senders, removing periodic micro-gaps in the sound
+
+VOICE & CALLS
+
+- Fixed joining a voice channel with a dead microphone (no one could hear you until someone toggled a camera) when either side uses more than one linked device: connection setup now elects exactly one leader, and a doubled join announcement can no longer create duplicate broken connections
+- Fixed the microphone always sounding too quiet in calls and distorting when boosted: the engine's built-in auto-gain was fighting the Voice Enhancement feature and cancelling out every boost
+- New Voice Enhancement chain: a studio-style EQ, compressor, and limiter on your mic, toggleable live mid-call, plus a Dynamic auto-level mode (on by default) that converges any microphone — quiet or hot — to a calibrated, consistent loudness
+- Calls are audible out of the box: the default mic gain is doubled behind a soft limiter, and the gain slider is rescaled so the new default reads as 100%
+- Changing your mic, camera, or speaker in settings now applies live to calls and voice channels you're already in — no reconnect needed (camera switching excluded on Linux for stability)
+- Mobile DM calls get a camera flip button (reliable on phones with more than two cameras), and your own preview now mirrors only for the front camera
+- Voice channel participants who use multiple devices now show their real name, avatar, and your nickname for them everywhere — sidebar, video tiles, picture-in-picture, and mobile — instead of a fallback avatar and a raw device id
+- iOS: the loudspeaker toggle now actually switches to the speaker (and survives turning the camera on), and calls mix with other apps' audio instead of being interrupted by it
+
+MESSAGES & CHAT
+
+- Fixed permanent message loss: sending two identical messages in the same instant used to silently drop one, and messages arriving in a narrow window around a reconnect could be skipped forever — sync now overlaps a lookback window so nothing falls through the cracks
+- Fixed conversations appearing in a different order on different machines when someone's clock was a few seconds off: messages now use a shared logical clock, so a reply can never sort above the message it answers
+- Fixed an open chat going stale (typing indicator animating but new messages never appearing until reopen) and live channel messages dying after a connection drop
+- Fixed ghost unread badges that only cleared by sending a message, stale badges reappearing on other channels of the same server, the mention counter always showing zero, and messages staying unread when you read them right after refocusing the window
+- Smoother chat: new messages slide in without the whole list blinking or jumping, and if you've scrolled up to read, the view stays frozen with an unread pill instead of shifting under you
+- Mobile chat now matches desktop: a "Replying to" bar above the composer, animated typing dots, and the same date separators and message grouping
+- Sending files, images, and voice messages on mobile now shows the message bubble instantly with a progress indicator instead of waiting for the upload
+
+FRIENDS & DIRECT MESSAGES
+
+- Fixed direct messages that could silently never arrive when you and the recipient shared more than one room: messages now always take a dedicated, deterministic route
+- Fixed friend requests that wouldn't go through until the sender restarted the app — they now deliver as soon as the two clients learn about each other
+- Rejecting a friend request now fully cancels any request you had queued to that person, so a rejection can't silently turn into a friendship later; two people requesting each other at the same time now become friends automatically
+
+MULTI-DEVICE
+
+- A full audit fixed a batch of cases where encrypted-group recovery, friend requests, and vault storage could silently fail to reach people who use multiple devices
+- Leaving a server now fully takes effect on all your linked devices — previously a leftover copy could resurrect the server after a restart
+- Fixed late joiners of a voice channel losing their data channel (screen-share audio, file transfers) to viewers with multiple devices
+- Server permission checks now respect custom role overrides everywhere, not just the default role powers
+- iOS: tapping a DM push notification right after a cold app start now opens the correct conversation instead of an empty thread
+
+LINKS & INVITES
+
+- hollow:// links now open the app directly on all platforms — even from a cold start or with the app hidden in the tray — and take you straight to the right dialog
+- Server invites now copy a shareable web link that opens the app if you have it or offers the download if you don't, and the invite id never appears in server logs. Web links paste correctly into every "Join a Server" input, and both link forms render the same Join card in chat
+
+NETWORK & RELAY
+
+- The relay now works over IPv6 as well as IPv4, including call connectivity on IPv6-only networks
+- Added a fair-use daily relay data budget (10 GB per connection per day) to protect the shared relay, with a clear "bandwidth limit" notice instead of silent failure and a usage meter on the Home screen and mobile Settings showing usage and reset time
+- Fixed the daily data meter jumping by megabytes on every restart: profile announcements no longer re-send full avatar and banner images to everyone on each reconnect — images transfer only when someone actually needs an updated copy
+- Missing-file re-downloads are now scoped to the conversation you have open, ask a single source, and stop endlessly retrying files that no longer exist; moving your data folder no longer makes existing files show up as "missing"
+- Big servers now use far less relay bandwidth: group-encryption updates go out as a single broadcast instead of one copy per member, and routine server updates travel peer-to-peer when possible
+- Fixed "zombie connections" where the app looked connected but received nothing until restart: the dead link is now detected within about a minute and reconnects automatically
+- Voice/video connection credentials now travel over the app's authenticated encrypted connection instead of a separate web endpoint
+
+NOTIFICATIONS
+
+- In-app notification cards no longer pile up and replay old messages: opening a conversation dismisses its pending notification, and exactly one surface shows per message — a system toast when the app is hidden, an in-app card when you're focused elsewhere
+- Fixed a stuck notification group header on Android that could linger after dismissing DM notifications
+- Privacy: decrypted message content and device-link pairing codes are no longer written to diagnostic logs
+
+PERFORMANCE & STABILITY
+
+- Full-stack performance pass: chat lists, calls, and video tiles do far less unnecessary work, and sending GIFs or images and background vault work no longer stall the networking engine
+- Linux: fixed random crashes during calls (a memory bug in the video-call plumbing, fixed for all platforms), crashes when toggling the camera mid-call, empty mic/speaker pickers on PipeWire systems, and the annotation overlay rendering as a black screen
+- Calls and screen shares now fully release their resources on every hang-up path, fixing gradual memory growth across long sessions
+- Fixed a "Node is not running" crash during startup, a crash when someone on a call or transfer dropped their connection, and several potential crashes from screens acting after they were already closed
+- Archive viewer: "jump to date" now actually works, the search field no longer collapses when the match counter appears, and imported channels show the server's name instead of a raw id
+- Hollow Share: downloads of hidden files now stay hidden in your file list, and your daily seeding budget is no longer wasted on chunks another relay was already handling
+- Vault downloads that hit a temporary hiccup now retry automatically instead of silently stalling
+
+PLATFORM, PRIVACY & LEGAL
+
+- New system status banner: maintenance windows, outages, and announcements now appear in the app with severity colors and a live countdown, delivered from the website so it still shows even when the relay itself is down
+- Windows: the app now bundles the Microsoft VC++ runtime, so it launches on fresh Windows installs instead of failing with "VCRUNTIME140.dll was not found"
+- "Verify a Proof" is now available in mobile Settings > Security, and all "account" wording is renamed to "identity" to match how Hollow actually works
+- Updated the Privacy Policy and Terms to accurately describe everything shipped recently: offline message buffering, the relay fair-use limit, push notifications, anonymous reports, and local-only blocking; game-showcase searches are proxied so your search text stays out of web server logs
+
 v0.7.1 - Screen Share Audio on Mac, Accessibility & Data Channel Fixes
 
 SCREEN SHARE & RECORDING

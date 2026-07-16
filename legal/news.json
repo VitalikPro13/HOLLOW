@@ -1,5 +1,11 @@
 [
   {
+    "id": "2026-07-15-v080",
+    "date": "July 16, 2026",
+    "title": "v0.8 - Offline Delivery, Custom Emotes, Conferences, Mobile Screen Share & Moderation",
+    "body": "Hello hello! Well, it's been 3 weeks since the last release, but this one is definitely worth it. We did lots of new stuff: custom emojis, Offline Delivery, conferences, saved messages, block/reports, moderation, profile showcase, mobile screen share+audio, links with invites, optimization; tons of fixes across multi-device, friends etc. Full detailed changelog for every version is [always here.](https://github.com/VitalikPro13/HOLLOW/blob/main/changelog.txt)\n\nPlease test the new features and write your feedback! I'll try my best to respond to everything. Take care!"
+  },
+  {
     "id": "2026-06-27-v071",
     "date": "Jun 27, 2026",
     "title": "v0.7.1 - Screen Share Audio on Mac, Accessibility & Data Channel Fixes",
