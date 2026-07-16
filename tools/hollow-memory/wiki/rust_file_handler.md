@@ -72,6 +72,10 @@ Receives: `peer_id` (Some for DM), `server_id`+`channel_id` (Some for channel), 
 
 **Multi-device (CRITICAL):** `peer_id_str` is the conversation MASTER (the UI/friend key), which no socket authenticates as — sending the FileRequest to it directly is silently dropped, so the bytes never arrive (`[file:<id>]` placeholder, Download does nothing). Resolves to **exactly ONE online device** via `crypto_handler::online_devices_for` (deterministic lowest id; if `peer_id_str` is already a live device id, used as-is). NOT a fan-out: a DM file is fanned out at send time to several devices, each holding a copy encrypted with its OWN random AES key — requesting from all → multiple streams → only one header's key kept → the rest fail AES-GCM decrypt and loop. Single-device falls back to the raw id unchanged.
 
+**Channel fallback (2026-07-16, HOLLOW_PLAN line-2016 fix):** when the requested identity has NO online device and the file row is `context_type == "channel"`, `channel_fallback_holder()` reroutes the FileRequest to ONE online device of another server member (lazy `MessageStore::open` only on this path; members are MASTER-keyed, candidates resolved via `online_devices_for`, sorted single pick — the one-stream/one-AES-key invariant above still holds). DM files are scope-guarded OUT (the Dart DM sweep owns that fallback). Works because the FileRequest RESPONDER (swarm.rs) serves any file with a `disk_path` — it is not sender-restricted. Best-effort: a picked member without the bytes silently ignores; the viewport sweep re-fires later. Guard test: `channel_file_request_reroutes_to_online_holder_when_sender_offline`.
+
+**`online_devices_for` legacy note (2026-07-16):** the helper keeps the bare master in its result when the master id itself IS a live room socket (legacy pre-multi-device identity, device == master). It used to strip it unconditionally, so fan-outs without a raw-id fallback — including `replicate_channel_file_full` — silently skipped legacy members entirely (channel file bytes never streamed to them). See memory `feedback_online_devices_for_legacy_master`.
+
 ---
 
 ## stream_to_peer()

@@ -952,6 +952,21 @@ class EventStreamNotifier extends Notifier<bool> {
 
       case NetworkEvent_NicknameResolveFailed(:final nickname, :final error):
         debugPrint('[HOLLOW] Nickname resolve failed: $nickname — $error');
+        // User-visible failure: the add-friend UIs show an optimistic
+        // "Looking up nickname..." toast at send time — without this, a bad
+        // or expired nickname fails in total silence.
+        final overlay = hollowNavigatorKey.currentState?.overlay;
+        final overlayContext = overlay?.context;
+        if (overlay != null && overlayContext != null && overlayContext.mounted) {
+          HollowToast.show(
+            overlayContext,
+            error == 'not_found'
+                ? "Nickname '$nickname' not found — it may have expired"
+                : "Couldn't look up '$nickname': $error",
+            type: HollowToastType.error,
+            overlayState: overlay,
+          );
+        }
 
       // -- Multi-device device linking (Step 4) --
       case NetworkEvent_LinkCodeClaimed(:final code):
@@ -1812,64 +1827,6 @@ class EventStreamNotifier extends Notifier<bool> {
     _fileRequestLast[fileId] = now;
     _fileRequestAttempts[fileId] = attempts + 1;
     return false;
-  }
-
-  /// Request missing files after message sync completes.
-  /// Queries messages with file_id that have no completed file on disk —
-  /// scoped to THIS server's channels only.
-  /// Delayed to let sync pipeline settle.
-  /// For 6+ member servers: only auto-requests images (non-images use vault shards).
-  Future<void> _requestMissingFiles(String serverId) async {
-    final memberCount = ref.read(serverMembersProvider(serverId)).valueOrNull?.length ?? 0;
-
-    List<String> missingIds;
-    if (memberCount >= 6) {
-      // For 6+ servers, only auto-request images via P2P streaming.
-      // Non-image files use vault erasure shards and are fetched via VaultDownloadFile.
-      await Future.delayed(const Duration(milliseconds: 1500));
-      try {
-        missingIds = await storage_api.getMissingImageFileIdsForServer(serverId: serverId);
-      } catch (e) {
-        debugPrint('[HOLLOW] Failed to get missing image file ids: $e');
-        return;
-      }
-    } else {
-      await Future.delayed(const Duration(seconds: 1));
-      try {
-        missingIds =
-            await storage_api.getMissingFileIdsForServer(serverId: serverId);
-      } catch (e) {
-        debugPrint('[HOLLOW] Failed to get missing file ids: $e');
-        return;
-      }
-    }
-
-    if (missingIds.isEmpty) return;
-    final peers = ref.read(peersProvider);
-    if (peers.isEmpty) return;
-
-    // Skip files that already have an active stream transfer in flight, then
-    // apply the request throttle (records an attempt per surviving id).
-    final activeTransfers = ref.read(fileTransferProvider);
-    final toRequest = missingIds.where((id) {
-      final t = activeTransfers[id];
-      return t == null || (!t.isDownloading && !t.isComplete);
-    }).where((id) => !_throttleFileRequest(id)).toList();
-    if (toRequest.isEmpty) return;
-    debugPrint('[HOLLOW] ${toRequest.length} missing files found, requesting...');
-    for (final fileId in toRequest) {
-      for (final peerId in peers.keys) {
-        try {
-          await requestFileFromPeer(
-            fileId: fileId,
-            peerId: peerId,
-            chunks: [],
-          );
-          break;
-        } catch (_) {}
-      }
-      await Future.delayed(const Duration(milliseconds: 100));
-    }
   }
 
   /// The peer_ids of OUR OWN other (sibling) devices that are currently online

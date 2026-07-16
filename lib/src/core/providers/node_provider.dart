@@ -43,7 +43,8 @@ class NodeNotifier extends Notifier<NodeState> {
       state = state.copyWith(status: NodeStatus.connected);
 
       // Reset stale file paths (files marked complete but missing on disk).
-      // Cleared entries will be picked up by _requestMissingFiles() when sync events fire.
+      // Cleared entries are re-fetched by the viewport sweep
+      // (requestVisibleFiles) when their messages scroll into view.
       try {
         final resetCount = await storage_api.resetStaleFiles();
         if (resetCount > 0) {
@@ -53,9 +54,8 @@ class NodeNotifier extends Notifier<NodeState> {
         debugPrint('[HOLLOW] Failed to reset stale files: $e');
       }
 
-      // Start polling for network events.
-      // Stale files (reset above) will be picked up by _requestMissingFiles()
-      // when SyncCompleted/MessageSyncCompleted events fire from peer connections.
+      // Start polling for network events. Stale files (reset above) are
+      // re-fetched on demand by the viewport sweep (requestVisibleFiles).
       ref.read(eventStreamProvider.notifier).start();
 
       // Auto-join saved guest rooms (realtime + onLaunch).

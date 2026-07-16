@@ -1162,16 +1162,30 @@ pub(crate) fn online_devices_for(
 ) -> Vec<String> {
     let master = super::resolver::resolve(peer_str);
     let mut set: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut master_is_socket = false;
     for peers in ws_room_peers.values() {
         for p in peers {
             // Match the exact id OR any device that resolves to the same master.
             if p == peer_str || super::resolver::resolve(p) == master {
+                if *p == master {
+                    // Room membership is socket-authenticated, so the master
+                    // id appearing IN a room means a socket really does
+                    // authenticate as it — a LEGACY single-device identity
+                    // (device == master, pre-multi-device install).
+                    master_is_socket = true;
+                }
                 set.insert(p.clone());
             }
         }
     }
-    // Never include the bare master (no socket authenticates as it).
-    set.remove(&master);
+    // Never include a bare master no socket authenticates as (sends to it are
+    // silently dropped) — but KEEP it when it IS a live socket (legacy
+    // device==master), else those identities get an empty vec and callers
+    // without a raw-id fallback silently skip them (channel file replication
+    // never streamed bytes to legacy members).
+    if !master_is_socket {
+        set.remove(&master);
+    }
     set.into_iter().collect()
 }
 

@@ -1312,6 +1312,7 @@ static void erase_nickname_binding(RelayState& state, const std::string& nicknam
     state.nickname_to_peer.erase(nickname);
     state.peer_to_nickname.erase(peer_id);
     state.nickname_expiry.erase(nickname);
+    state.nickname_to_master.erase(nickname);
 }
 
 // True iff a nickname's current binding is STALE: expired by TTL, or its holder's
@@ -1334,7 +1335,8 @@ static bool nickname_binding_is_stale(RelayState& state, const std::string& nick
 }
 
 static void handle_claim_nickname(SSLWebSocket* ws, PerSocketData* data,
-                                   const std::string& raw_nick, RelayState& state) {
+                                   const std::string& raw_nick,
+                                   const std::string& raw_master, RelayState& state) {
     if (data->is_guest) return;
 
     std::string nickname = to_lowercase(raw_nick);
@@ -1360,6 +1362,12 @@ static void handle_claim_nickname(SSLWebSocket* ws, PerSocketData* data,
     state.nickname_to_peer[nickname] = data->peer_id;
     state.peer_to_nickname[data->peer_id] = nickname;
     state.nickname_expiry[nickname] = now_unix_secs() + NICKNAME_TTL_SECS;
+    // Self-reported MASTER id, bounds-checked (old clients send none). Handed
+    // back verbatim on resolve; never used for relay-side routing decisions.
+    if (!raw_master.empty() && raw_master.rfind("12D3KooW", 0) == 0 &&
+        raw_master.size() <= 68) {
+        state.nickname_to_master[nickname] = raw_master;
+    }
     send_json(ws, {{"type", "nickname_claimed"}, {"nickname", nickname}});
 }
 
@@ -1382,7 +1390,11 @@ static void handle_resolve_nickname(SSLWebSocket* ws, PerSocketData* /*data*/,
         return;
     }
     auto it = state.nickname_to_peer.find(nickname);
-    send_json(ws, {{"type", "nickname_resolved"}, {"nickname", nickname}, {"peer_id", it->second}});
+    json reply = {{"type", "nickname_resolved"}, {"nickname", nickname},
+                  {"peer_id", it->second}};
+    auto mit = state.nickname_to_master.find(nickname);
+    if (mit != state.nickname_to_master.end()) reply["master_id"] = mit->second;
+    send_json(ws, reply);
 }
 
 // ── Multi-device link codes (Step 4) — mirrors the nickname registry ──────────
@@ -1559,7 +1571,7 @@ static void handle_text_message(SSLWebSocket* ws, PerSocketData* data,
         handle_subscribe(data, j.value("room", ""),
                          j.contains("topics") ? j["topics"] : json::array());
     } else if (type == "claim_nickname") {
-        handle_claim_nickname(ws, data, j.value("nickname", ""), state);
+        handle_claim_nickname(ws, data, j.value("nickname", ""), j.value("master", ""), state);
     } else if (type == "release_nickname") {
         handle_release_nickname(ws, data, state);
     } else if (type == "resolve_nickname") {
@@ -1666,11 +1678,12 @@ static void cleanup_peer(RelayState& state, const std::string& peer_id,
     bool owns_peer = (sock_it == state.peer_sockets.end() || sock_it->second == expected_ws);
 
     if (owns_peer) {
-        // Release temporary nickname (+ its expiry entry)
+        // Release temporary nickname (+ its expiry/master entries)
         auto nit = state.peer_to_nickname.find(peer_id);
         if (nit != state.peer_to_nickname.end()) {
             state.nickname_expiry.erase(nit->second);
             state.nickname_to_peer.erase(nit->second);
+            state.nickname_to_master.erase(nit->second);
             state.peer_to_nickname.erase(nit);
         }
 

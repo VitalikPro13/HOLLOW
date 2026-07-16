@@ -62,6 +62,10 @@ struct RelayInner {
     /// SendToRoomTopic frames tee in, TopicCatchup replays them to the
     /// requester (skipping the requester's own frames). Caps/TTL not modeled.
     topic_buffers: HashMap<(String, String), Vec<(String, Vec<u8>)>>,
+    /// nickname -> (claimer device_peer_id, claimer's self-reported master).
+    /// Mirrors the relay's temporary-nickname registry. TTL not modeled;
+    /// an offline holder resolves as not_found like the real staleness check.
+    nicknames: HashMap<String, (String, String)>,
     /// Optional load meter (scaling benchmark). When `Some`, every command the
     /// relay handles and every frame the relay DELIVERS to a socket is tallied
     /// here — the ground truth for "what does one server operation cost the
@@ -231,6 +235,13 @@ impl MockRelay {
         }
     }
 
+    /// Test inspector: the stored self-reported master for a claimed nickname
+    /// (None = nickname unknown).
+    pub(crate) fn nickname_master(&self, nickname: &str) -> Option<String> {
+        let inner = self.inner.lock().unwrap();
+        inner.nicknames.get(nickname).map(|v| v.1.clone())
+    }
+
     fn handle_command(&self, from: &str, cmd: WsCommand) {
         let mut inner = self.inner.lock().unwrap();
         // Drop everything from an offline node (mirrors a dead socket).
@@ -389,8 +400,45 @@ impl MockRelay {
                     let _ = conn.event_tx.send(WsEvent::PeerStatus { online, active_rooms });
                 }
             }
-            // Channel-direct offline push, nickname/linkcode/push registries:
-            // not needed for the current tests — no-op (add when a test does).
+            WsCommand::ClaimNickname { nickname, master } => {
+                // Auto-release any old binding of this claimer (like the relay).
+                inner.nicknames.retain(|_, v| v.0 != from);
+                inner.nicknames.insert(nickname.clone(), (from.to_string(), master));
+                if let Some(conn) = inner.conns.get(from) {
+                    let _ = conn.event_tx.send(WsEvent::NicknameClaimed { nickname });
+                }
+            }
+            WsCommand::ReleaseNickname => {
+                inner.nicknames.retain(|_, v| v.0 != from);
+                if let Some(conn) = inner.conns.get(from) {
+                    let _ = conn.event_tx.send(WsEvent::NicknameReleased);
+                }
+            }
+            WsCommand::ResolveNickname { nickname } => {
+                // An offline holder resolves as not_found (the real relay's
+                // dead-holder staleness check).
+                let hit = inner.nicknames.get(&nickname).and_then(|(dev, master)| {
+                    let online =
+                        inner.conns.get(dev).map(|c| c.online).unwrap_or(false);
+                    online.then(|| (dev.clone(), master.clone()))
+                });
+                let ev = match hit {
+                    Some((dev, master)) => WsEvent::NicknameResolved {
+                        nickname,
+                        peer_id: dev,
+                        master_id: master,
+                    },
+                    None => WsEvent::NicknameError {
+                        error: "not_found".to_string(),
+                        nickname,
+                    },
+                };
+                if let Some(conn) = inner.conns.get(from) {
+                    let _ = conn.event_tx.send(ev);
+                }
+            }
+            // Channel-direct offline push, linkcode/push registries: not
+            // needed for the current tests — no-op (add when a test does).
             _ => {}
         }
     }
@@ -631,6 +679,15 @@ impl TestNode {
         self.server_state(server_id)
             .map(|s| s.get_nickname(master))
             .unwrap_or_default()
+    }
+
+    /// A server setting as the UI reads it via `get_server_setting`
+    /// (None = never set).
+    pub(crate) fn server_setting(&self, server_id: &str, key: &str) -> Option<String> {
+        self.server_state(server_id)?
+            .settings
+            .get(key)
+            .map(|r| r.read().clone())
     }
 
     /// A channel's messages, oldest-first, as the channel pane shows them
@@ -2876,6 +2933,177 @@ async fn moderation_action_converges_on_actor_sibling_without_restart() {
 }
 
 // ---------------------------------------------------------------------------
+// "Latest authorized write wins" (2026-07-16): an Admin holding MANAGE_SERVER
+// flips a server setting the OWNER wrote earlier. Under the old priority-first
+// AdminLwwReg merge the admin's op silently lost on every replica (including
+// the admin's own) — the Twitch toggle "reverted". Pure HLC LWW + the
+// permission-gated ingest must land it everywhere: on the owner, on the admin,
+// and on a member that was OFFLINE during the flip and converges via sync.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
+async fn admin_flips_owner_setting_and_all_nodes_converge() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    const O_MASTER: u8 = 190;
+    const A_MASTER: u8 = 191;
+    const M_MASTER: u8 = 192;
+    let o_master = NativeKeypair::from_secret_bytes(&seed_bytes(O_MASTER)).peer_id();
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
+    let m_master = NativeKeypair::from_secret_bytes(&seed_bytes(M_MASTER)).peer_id();
+
+    let mut o =
+        spawn_node_with_friends(&relay, O_MASTER, O_MASTER, &[&a_master, &m_master]).await;
+    sleep_ms(1200).await;
+    let mut a = spawn_node_with_friends(&relay, A_MASTER, A_MASTER, &[&o_master]).await;
+    sleep_ms(1200).await;
+    let mut m = spawn_node_with_friends(&relay, M_MASTER, M_MASTER, &[&o_master]).await;
+    sleep_ms(4000).await; // let Olm confirm all around
+    drain_events(&mut o);
+    drain_events(&mut a);
+    drain_events(&mut m);
+
+    let server_id = create_server_and_wait(&mut o, "Settings Server").await;
+    sleep_ms(500).await;
+
+    // A and M join.
+    a.cmd_tx
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
+        .await
+        .unwrap();
+    let a_joined = wait_event(&mut a, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
+    })
+    .await;
+    assert!(a_joined, "admin-to-be A should join the server");
+    sleep_ms(1500).await;
+    m.cmd_tx
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
+        .await
+        .unwrap();
+    let m_joined = wait_event(&mut m, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
+    })
+    .await;
+    assert!(m_joined, "member M should join the server");
+    sleep_ms(2500).await; // CRDT membership converges across O, A, M
+    drain_events(&mut o);
+    drain_events(&mut a);
+    drain_events(&mut m);
+
+    // O promotes A to Admin. A's LOCAL state must hold the role before A
+    // authors the setting op (the author-side MANAGE_SERVER gate reads it).
+    o.cmd_tx
+        .send(NodeCommand::ChangeRole {
+            server_id: server_id.clone(),
+            peer_id: a_master.clone(),
+            new_role: "admin".to_string(),
+        })
+        .await
+        .unwrap();
+    sleep_ms(1500).await;
+    {
+        let a_row = a
+            .member_panel(&server_id, &relay)
+            .into_iter()
+            .find(|r| r.master == a_master)
+            .expect("A sees itself in the member panel");
+        assert_eq!(
+            a_row.role,
+            crate::crdt::operations::MemberRole::Admin,
+            "A must know it is Admin before flipping the setting"
+        );
+    }
+
+    // O writes the setting FIRST — the owner-written value that the old
+    // priority-first merge made permanently sticky.
+    o.cmd_tx
+        .send(NodeCommand::UpdateServerSetting {
+            server_id: server_id.clone(),
+            key: "twitch_verification_enabled".to_string(),
+            value: "true".to_string(),
+        })
+        .await
+        .unwrap();
+    let a_saw = wait_event(&mut a, std::time::Duration::from_secs(6), |ev| {
+        matches!(ev, NetworkEvent::ServerUpdated { server_id: sid } if *sid == server_id)
+    })
+    .await;
+    assert!(a_saw, "A must apply the owner's setting op");
+    let m_saw = wait_event(&mut m, std::time::Duration::from_secs(6), |ev| {
+        matches!(ev, NetworkEvent::ServerUpdated { server_id: sid } if *sid == server_id)
+    })
+    .await;
+    assert!(m_saw, "M must apply the owner's setting op");
+    sleep_ms(800).await; // fire-and-forget CrdtStore persist
+    for (label, node) in [("O", &o), ("A", &a), ("M", &m)] {
+        assert_eq!(
+            node.server_setting(&server_id, "twitch_verification_enabled").as_deref(),
+            Some("true"),
+            "{label} reads the owner's initial value"
+        );
+    }
+
+    // M goes offline — it must converge later via sync catch-up, not live fan.
+    relay.set_online(&m.device_id, false);
+    sleep_ms(500).await;
+    drain_events(&mut m);
+
+    // ADMIN A flips the owner-written setting OFF.
+    a.cmd_tx
+        .send(NodeCommand::UpdateServerSetting {
+            server_id: server_id.clone(),
+            key: "twitch_verification_enabled".to_string(),
+            value: "false".to_string(),
+        })
+        .await
+        .unwrap();
+    let o_saw = wait_event(&mut o, std::time::Duration::from_secs(6), |ev| {
+        matches!(ev, NetworkEvent::ServerUpdated { server_id: sid } if *sid == server_id)
+    })
+    .await;
+    assert!(o_saw, "owner must ingest the admin's setting op");
+    sleep_ms(800).await;
+    assert_eq!(
+        a.server_setting(&server_id, "twitch_verification_enabled").as_deref(),
+        Some("false"),
+        "the admin's own replica reflects the flip (was: silently reverted)"
+    );
+    assert_eq!(
+        o.server_setting(&server_id, "twitch_verification_enabled").as_deref(),
+        Some("false"),
+        "the owner's replica accepts the admin's later write (was: priority-first merge kept the owner value)"
+    );
+
+    // M returns; reconnect sync must deliver the admin's op. Poll the persisted
+    // state rather than a specific event — the sync path's emission differs
+    // from the live-broadcast path.
+    relay.set_online(&m.device_id, true);
+    let mut m_value = None;
+    for _ in 0..24 {
+        sleep_ms(500).await;
+        m_value = m.server_setting(&server_id, "twitch_verification_enabled");
+        if m_value.as_deref() == Some("false") {
+            break;
+        }
+    }
+    assert_eq!(
+        m_value.as_deref(),
+        Some("false"),
+        "offline member M converges to the admin's write after reconnect sync"
+    );
+
+    drop(o);
+    drop(a);
+    drop(m);
+}
+
+// ---------------------------------------------------------------------------
 // Step 9C / C5: a freshly-LINKED sibling's "Your devices" list shows BOTH devices
 // immediately (not just itself). Bug: the imported .hollow backup carries the
 // SOURCE device's signed device list, which does NOT contain the new sibling's
@@ -4851,6 +5079,89 @@ async fn requester_gets_accepted_row_after_acceptance() {
 }
 
 // ---------------------------------------------------------------------------
+// Temporary nicknames (2026-07-16): a nickname is claimed under the claimer's
+// WS-auth DEVICE id, but friend requests must target the MASTER — the claim now
+// carries the master through the relay and resolve hands it back (`master_id`),
+// so a stranger's request lands in `inbox:{master}` (the room the claimer
+// actually listens on) instead of queuing forever under a device id.
+//
+// Harness caveat: the resolver is process-global, so B's node incidentally
+// knows A's device→master mapping here (in production a stranger's resolver is
+// COLD). The relay-reported master_id path this test drives bypasses the
+// resolver entirely; the `nickname_master` inspector pins the new plumbing.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
+async fn nickname_friend_request_reaches_multi_device_claimer() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    // A = claimer with master ≠ device (the failing shape in production).
+    // B = stranger requester (single device).
+    const A_MASTER: u8 = 200;
+    const A_DEV: u8 = 201;
+    const B_MASTER: u8 = 210;
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
+    let a_dev = NativeKeypair::from_secret_bytes(&seed_bytes(A_DEV)).peer_id();
+    let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
+
+    let mut a = spawn_node_on(&relay, A_MASTER, A_DEV).await;
+    sleep_ms(1200).await;
+    let mut b = spawn_node_on(&relay, B_MASTER, B_MASTER).await;
+    sleep_ms(1500).await;
+    drain_events(&mut a);
+    drain_events(&mut b);
+
+    // A claims a nickname; the claim must carry A's MASTER to the relay.
+    a.cmd_tx
+        .send(NodeCommand::ClaimNickname { nickname: "testnick".to_string() })
+        .await
+        .unwrap();
+    let claimed = wait_event(&mut a, std::time::Duration::from_secs(6), |ev| {
+        matches!(ev, NetworkEvent::NicknameClaimed { nickname } if nickname == "testnick")
+    })
+    .await;
+    assert!(claimed, "A should claim the nickname");
+    assert_eq!(
+        relay.nickname_master("testnick").as_deref(),
+        Some(a_master.as_str()),
+        "the claim must bind the claimer's MASTER at the relay (new plumbing)"
+    );
+
+    // Stranger B friend-requests by nickname. Resolve returns (device,
+    // master_id); the request must key + deliver on the MASTER.
+    b.cmd_tx
+        .send(NodeCommand::SendFriendRequestByNickname { nickname: "testnick".to_string() })
+        .await
+        .unwrap();
+
+    let a_got = wait_event(&mut a, std::time::Duration::from_secs(10), |ev| {
+        matches!(ev, NetworkEvent::FriendRequestReceived { peer_id } if *peer_id == b_master)
+    })
+    .await;
+    assert!(a_got, "claimer A must receive the stranger's friend request");
+    sleep_ms(800).await;
+
+    // B's outgoing row is keyed by A's MASTER — never the device id.
+    let b_rows = b.store().load_friends(None).unwrap_or_default();
+    assert!(
+        b_rows.iter().any(|r| r.0 == a_master && r.1 == "pending" && r.2 == "outgoing"),
+        "B's pending outgoing row must be keyed by A's master, got {b_rows:?}"
+    );
+    assert!(
+        !b_rows.iter().any(|r| r.0 == a_dev),
+        "no friend row may be stranded under A's DEVICE id, got {b_rows:?}"
+    );
+
+    drop(a);
+    drop(b);
+}
+
+// ---------------------------------------------------------------------------
 // REMOVE → RE-ADD must NOT ping-pong. The bug: removing a friend while they were
 // offline queued a FriendRemove; re-adding then queued a FriendRequest — and on
 // the peer's reconnect BOTH drained, sending a contradictory FriendRequest +
@@ -6248,6 +6559,165 @@ async fn channel_relay_catchup_delivers_file_message_and_header() {
 
     drop(o);
     drop(j);
+}
+
+// ---------------------------------------------------------------------------
+// Channel file fallback (HOLLOW_PLAN line 2016, fixed 2026-07-16): O sends an
+// image/file to a full-replication channel, B (online) receives the bytes, O
+// goes OFFLINE, then C comes online and requests the file — targeting O, the
+// only holder the UI knows. `handle_request_file` used to drop the request on
+// the floor ("no online device"); now it reroutes to ONE online device of
+// another server member (B), who serves any file it has on disk. O being
+// offline proves the bytes can only have come from B.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
+async fn channel_file_request_reroutes_to_online_holder_when_sender_offline() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    const O_MASTER: u8 = 220;
+    const B_MASTER: u8 = 221;
+    const C_MASTER: u8 = 222;
+    let o_master = NativeKeypair::from_secret_bytes(&seed_bytes(O_MASTER)).peer_id();
+    let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
+    let c_master = NativeKeypair::from_secret_bytes(&seed_bytes(C_MASTER)).peer_id();
+
+    let mut o =
+        spawn_node_with_friends(&relay, O_MASTER, O_MASTER, &[&b_master, &c_master]).await;
+    sleep_ms(1200).await;
+    let mut b = spawn_node_with_friends(&relay, B_MASTER, B_MASTER, &[&o_master]).await;
+    sleep_ms(1200).await;
+    let mut c = spawn_node_with_friends(&relay, C_MASTER, C_MASTER, &[&o_master]).await;
+    sleep_ms(4000).await; // Olm confirm all around
+
+    let server_id = create_server_and_wait(&mut o, "Reroute Server").await;
+    let general = general_channel_of(&server_id);
+
+    for (label, node) in [("B", &mut b), ("C", &mut c)] {
+        node.cmd_tx
+            .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
+            .await
+            .unwrap();
+        let joined = wait_event(node, std::time::Duration::from_secs(8), |ev| {
+            matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
+        })
+        .await;
+        assert!(joined, "{label} should join the server");
+        sleep_ms(1500).await;
+    }
+    sleep_ms(2500).await; // membership + MLS settle (3 members < 6 → full replication)
+    drain_events(&mut o);
+    drain_events(&mut b);
+    drain_events(&mut c);
+
+    // C goes offline BEFORE the file is sent — it never gets the bytes stream.
+    // Generous settle: C's PeerLeft triggers a room-membership refresh on O,
+    // and SendFile must run against the SETTLED view (else O's transient
+    // ws_room_peers misses B and the byte stream is silently skipped).
+    relay.set_online(&c.device_id, false);
+    sleep_ms(2000).await;
+    drain_events(&mut o);
+    drain_events(&mut c);
+
+    // O sends a channel file; online member B receives the full bytes.
+    let contents: &[u8] = b"reroute me to an online holder";
+    let src = global_tmp.path().join("reroute.txt");
+    std::fs::write(&src, contents).expect("write src file");
+    o.cmd_tx
+        .send(NodeCommand::SendFile(Box::new(super::types::SendFilePayload {
+            peer_id: None,
+            server_id: Some(server_id.clone()),
+            channel_id: Some(general.clone()),
+            file_path: src.to_str().unwrap().to_string(),
+            message_id: "chan-file-reroute-1".to_string(),
+            message_text: "reroute-caption".to_string(),
+            vthumb: None,
+            override_width: None,
+            override_height: None,
+            share_ref: None,
+        })))
+        .await
+        .unwrap();
+
+    let mut got_fid: Option<String> = None;
+    wait_event(&mut b, std::time::Duration::from_secs(8), |ev| {
+        if let NetworkEvent::FileHeaderReceived { file_id, file_name, .. } = ev {
+            if file_name.starts_with("reroute") {
+                got_fid = Some(file_id.clone());
+            }
+        }
+        got_fid.is_some()
+    })
+    .await;
+    let fid = got_fid.expect("B must receive the channel FileHeader");
+    let b_done = wait_event(&mut b, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::FileCompleted { file_id, .. } if *file_id == fid)
+    })
+    .await;
+    assert!(b_done, "online member B must receive the full file bytes");
+    sleep_ms(500).await;
+    {
+        let meta = b.file_meta(&fid).expect("B persisted the files row");
+        let disk = meta.disk_path.expect("B's completed file has a disk path");
+        assert_eq!(std::fs::read(&disk).unwrap(), contents, "B holds the original bytes");
+    }
+
+    // The SENDER goes offline — B is now the only online holder.
+    relay.set_online(&o.device_id, false);
+    sleep_ms(300).await;
+    drain_events(&mut o);
+
+    // C returns; relay catch-up (default ON) replays the caption + FileHeader,
+    // so C learns the file exists — but has no bytes.
+    relay.set_online(&c.device_id, true);
+    let mut c_has_header = false;
+    wait_event(&mut c, std::time::Duration::from_secs(10), |ev| {
+        if matches!(ev, NetworkEvent::FileHeaderReceived { file_id, .. } if *file_id == fid) {
+            c_has_header = true;
+        }
+        c_has_header
+    })
+    .await;
+    assert!(c_has_header, "C must learn the file via relay catch-up");
+    sleep_ms(500).await;
+    assert!(
+        c.file_meta(&fid).map(|m| m.completed_at.is_none()).unwrap_or(true),
+        "C must not have the bytes yet"
+    );
+
+    // C requests the file the way the UI does — targeting the SENDER's master,
+    // who is offline. The fallback must reroute to B.
+    c.cmd_tx
+        .send(NodeCommand::RequestFile {
+            file_id: fid.clone(),
+            peer_id: o_master.clone(),
+            chunks: vec![],
+        })
+        .await
+        .unwrap();
+    let c_done = wait_event(&mut c, std::time::Duration::from_secs(10), |ev| {
+        matches!(ev, NetworkEvent::FileCompleted { file_id, .. } if *file_id == fid)
+    })
+    .await;
+    assert!(c_done, "C must complete the transfer via the rerouted holder (B)");
+    sleep_ms(300).await;
+    let meta = c.file_meta(&fid).expect("C persisted the files row");
+    assert!(meta.completed_at.is_some(), "C's transfer completed");
+    let disk = meta.disk_path.expect("C's completed file has a disk path");
+    assert_eq!(
+        std::fs::read(&disk).unwrap(),
+        contents,
+        "C's bytes must match the original — only B could have served them"
+    );
+
+    drop(o);
+    drop(b);
+    drop(c);
 }
 
 // ---------------------------------------------------------------------------

@@ -21,20 +21,6 @@ const _permissionEntries = <({String label, String desc, int bit})>[
   (label: 'Manage Emotes', desc: 'Add and remove custom server emotes', bit: Permission.manageEmotes),
 ];
 
-/// Default permission bitmasks per role (must match Rust MemberRole::default_permissions).
-const _defaultPerms = <String, int>{
-  'admin': Permission.manageChannels |
-      Permission.manageRoles |
-      Permission.kickMembers |
-      Permission.sendMessages |
-      Permission.readMessages |
-      Permission.manageEmotes,
-  'moderator': Permission.kickMembers |
-      Permission.sendMessages |
-      Permission.readMessages,
-  'member': Permission.sendMessages | Permission.readMessages,
-};
-
 /// Role colors matching the member panel.
 const _roleColors = <String, ({Color color, IconData icon})>{
   'admin': (color: Color(0xFFAB47BC), icon: LucideIcons.shieldCheck),
@@ -54,6 +40,10 @@ class RolesTab extends ConsumerStatefulWidget {
 
 class _RolesTabState extends ConsumerState<RolesTab> {
   final Map<String, int> _perms = {};
+  // Rust MemberRole::default_permissions via FFI — never a hand-written
+  // mirror: a stale copy here once froze Admin without MANAGE_SERVER into
+  // servers' role_permissions overrides via Reset.
+  final Map<String, int> _defaults = {};
   bool _loading = true;
 
   @override
@@ -63,6 +53,9 @@ class _RolesTabState extends ConsumerState<RolesTab> {
   }
 
   Future<void> _loadPermissions() async {
+    for (final role in ['admin', 'moderator', 'member']) {
+      _defaults[role] = crdt_api.defaultRolePermissions(role: role);
+    }
     try {
       for (final role in ['admin', 'moderator', 'member']) {
         final p = await crdt_api.getRolePermissions(
@@ -74,14 +67,14 @@ class _RolesTabState extends ConsumerState<RolesTab> {
     } catch (e) {
       // Fall back to defaults
       for (final role in ['admin', 'moderator', 'member']) {
-        _perms[role] = _defaultPerms[role]!;
+        _perms[role] = _defaults[role]!;
       }
     }
     if (mounted) setState(() => _loading = false);
   }
 
   Future<void> _togglePermission(String role, int bit, bool enabled) async {
-    final current = _perms[role] ?? _defaultPerms[role]!;
+    final current = _perms[role] ?? _defaults[role] ?? 0;
     final updated = enabled ? (current | bit) : (current & ~bit);
     setState(() => _perms[role] = updated);
     try {
@@ -103,7 +96,8 @@ class _RolesTabState extends ConsumerState<RolesTab> {
   }
 
   Future<void> _resetToDefault(String role) async {
-    final defaultPerm = _defaultPerms[role]!;
+    final defaultPerm = _defaults[role];
+    if (defaultPerm == null) return;
     final previous = _perms[role] ?? defaultPerm;
     setState(() => _perms[role] = defaultPerm);
     try {
@@ -153,7 +147,7 @@ class _RolesTabState extends ConsumerState<RolesTab> {
 
   Widget _buildRoleSection(String role, HollowTheme hollow, bool canEdit) {
     final info = _roleColors[role]!;
-    final perms = _perms[role] ?? _defaultPerms[role]!;
+    final perms = _perms[role] ?? _defaults[role] ?? 0;
     final displayName = role[0].toUpperCase() + role.substring(1);
 
     return Container(

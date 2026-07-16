@@ -198,8 +198,6 @@ fn broadcast_op_plaintext_with_fan(
 enum OpGate<'a> {
     /// `state.has_permission(local, bits)`.
     Perm(u32),
-    /// Owner or Admin role (server settings).
-    OwnerOrAdmin,
     /// `state.can_mute(local, target)`.
     CanMute(&'a str),
     /// MANAGE_ROLES and the actor outranks the named target role.
@@ -214,10 +212,6 @@ fn gate_allows(state: &ServerState, local_peer: &str, gate: &OpGate<'_>) -> bool
     use crate::crdt::operations::MemberRole;
     match gate {
         OpGate::Perm(bits) => state.has_permission(local_peer, *bits),
-        OpGate::OwnerOrAdmin => {
-            let role = state.get_role(local_peer);
-            role == MemberRole::Owner || role == MemberRole::Admin
-        }
         OpGate::CanMute(target) => state.can_mute(local_peer, target),
         OpGate::ManageRolesOutranking(role_name) => {
             let target = MemberRole::from_str(role_name);
@@ -802,15 +796,15 @@ pub(crate) async fn handle_update_server_setting(
     crypto_store: &CryptoStore,
     crdt_store: &CrdtStore,
 ) {
-    // Local permission gate (Owner or Admin), mirroring what every RECEIVER
-    // enforces for ServerSettingChanged. Without it a non-admin FFI call
-    // applies the op locally, the network rejects it, and the caller's own
-    // state diverges from everyone else's.
+    // Local permission gate (MANAGE_SERVER, override-aware), mirroring what
+    // every RECEIVER enforces for ServerSettingChanged. Without it an
+    // unauthorized FFI call applies the op locally, the network rejects it,
+    // and the caller's own state diverges from everyone else's.
     if author_broadcast_op(
         server_states, event_tx, ws_cmd_tx, ws_room_peers, gossip_overlays, local_peer_str,
         &server_id,
-        OpGate::OwnerOrAdmin,
-        Some("Permission denied: only Owner/Admin can change server settings"),
+        OpGate::Perm(Permission::MANAGE_SERVER),
+        Some("Permission denied: changing server settings needs the Manage Server permission"),
         CrdtPayload::ServerSettingChanged { key: key.clone(), value: value.clone() },
         &format!("Updating setting '{key}'='{value}'"),
         NetworkEvent::ServerUpdated { server_id: server_id.clone() },
@@ -1010,9 +1004,10 @@ pub(crate) async fn handle_change_role(
         }
 
         hollow_log!("[HOLLOW-CRDT] Changing role of {peer_id} to {new_role} in {server_id}");
-        // Use the author's (local user's) role priority, not the target role's.
-        // This ensures demotions work: an Owner(3) demoting Admin(2)→Member
-        // sends priority 3, which beats the existing priority 2 in AdminLwwReg.
+        // The payload priority (the author's role priority, not the target's)
+        // is wire-compat metadata for old clients that still merge
+        // priority-first; current merge is pure HLC LWW, so demotions land
+        // because the demotion op is later — can_change_role carries authority.
         let author_role = state.get_role(&local_peer);
         let op = author_op(state, crdt_store, &server_id, CrdtPayload::RoleChanged {
             peer_id: peer_id.clone(),

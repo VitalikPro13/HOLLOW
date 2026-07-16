@@ -1453,6 +1453,51 @@ async fn replicate_channel_file_full(
     }
 }
 
+/// Pick ONE online device of a server member OTHER than the requested identity
+/// (and not ourselves) to serve a CHANNEL file whose original target is
+/// offline. Full replication (<6-member servers) means every member online at
+/// send time holds the bytes — the classic gap this closes: the sender went
+/// offline, another member has the file, but the request only ever targeted
+/// the sender (HOLLOW_PLAN line 2016). Best-effort: a picked member without
+/// the bytes silently ignores the request (the responder needs a disk_path);
+/// the viewport sweep re-fires on later passes. Returns None for DM files —
+/// only the two parties + siblings hold those, and the Dart DM sweep already
+/// picks online sources with a sibling fallback.
+fn channel_fallback_holder(
+    file_id: &str,
+    requested: &str,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    server_states: &HashMap<String, ServerState>,
+    local_peer: &str,
+    db_path: &str,
+    db_passphrase: &str,
+) -> Option<String> {
+    // Lazy store open ONLY on this fallback path — zero cost when the target
+    // is online (same inline-open pattern as the FileRequest responder).
+    let store = crate::storage::MessageStore::open(db_path, db_passphrase).ok()?;
+    let meta = store.get_file_metadata(file_id).ok().flatten()?;
+    if meta.context_type != "channel" {
+        return None;
+    }
+    let server_id = meta.context_id.split(':').next()?;
+    let state = server_states.get(server_id)?;
+    // Members are MASTER-keyed; sends must target DEVICE ids. Deterministic
+    // single pick (sorted, first) — NEVER a fan-out: each holder re-encrypts
+    // its stream with its own AES key, and multiple streams poison the one
+    // FileHeader key the receiver kept (see the comment in the caller).
+    let mut candidates: Vec<String> = Vec::new();
+    for member in state.members.keys() {
+        if super::resolver::same_identity(member, local_peer)
+            || super::resolver::same_identity(member, requested)
+        {
+            continue;
+        }
+        candidates.extend(super::crypto_handler::online_devices_for(ws_room_peers, member));
+    }
+    candidates.sort();
+    candidates.into_iter().next()
+}
+
 /// Handle NodeCommand::RequestFile — request file from peer.
 /// Checks for a partial WS transfer and includes the byte offset for resumption.
 #[allow(clippy::too_many_arguments)]
@@ -1463,6 +1508,10 @@ pub(crate) fn handle_request_file(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     pending_ws_transfers: &HashMap<String, super::ws_stream_transfer::WsTransferState>,
+    server_states: &HashMap<String, ServerState>,
+    local_peer: &str,
+    db_path: &str,
+    db_passphrase: &str,
 ) {
     let offset = pending_ws_transfers.get(&file_id)
         .map(|s| s.bytes_received)
@@ -1505,7 +1554,23 @@ pub(crate) fn handle_request_file(
             );
         }
         None => {
-            hollow_log!("[HOLLOW-FILE] No online device for {peer_id_str} — FileRequest for {file_id} not sent");
+            // The requested identity is offline. Channel files are fully
+            // replicated — reroute to one online device of another member.
+            match channel_fallback_holder(
+                &file_id, &peer_id_str, ws_room_peers, server_states,
+                local_peer, db_path, db_passphrase,
+            ) {
+                Some(dev) => {
+                    hollow_log!("[HOLLOW-FILE] {peer_id_str} offline — rerouting FileRequest for {file_id} to server member device {dev}");
+                    send_message_to_peer(
+                        &ws_cmd_tx, &ws_room_peers,
+                        &dev, HavenMessage::FileRequest { file_id, chunks, offset },
+                    );
+                }
+                None => {
+                    hollow_log!("[HOLLOW-FILE] No online device for {peer_id_str} — FileRequest for {file_id} not sent");
+                }
+            }
         }
     }
 }

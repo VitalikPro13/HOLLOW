@@ -50,6 +50,10 @@ class ProfileNotifier extends Notifier<Map<String, storage_api.UserProfile>> {
     String? showcaseBoard,
     List<showcase_api.ShowcaseAsset>? showcaseAssets,
   }) async {
+    // NOTE: `updateProfile` resolves once the command is QUEUED on the node's
+    // channel — the surfaced failures are "Node is not running", oversized
+    // showcase assets, and channel-send failure. There is no end-to-end
+    // broadcast ack; callers must not claim one in their toast copy.
     try {
       await network_api.updateProfile(
         displayName: displayName,
@@ -62,7 +66,10 @@ class ProfileNotifier extends Notifier<Map<String, storage_api.UserProfile>> {
         showcaseAssets: showcaseAssets,
       );
     } catch (e) {
+      // Rethrow so save UIs can show a REAL failure instead of a false
+      // success toast (mobile showed "Profile updated" on a dead node).
       debugPrint('[HOLLOW] Failed to update profile: $e');
+      rethrow;
     }
   }
 

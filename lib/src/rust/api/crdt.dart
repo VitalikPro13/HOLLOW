@@ -406,6 +406,13 @@ Future<int> getRolePermissions({
   role: role,
 );
 
+/// Default permissions bitmask for a role name — the single source of truth
+/// for the Dart Roles UIs (Reset button + pre-load fallback). Pure function,
+/// no store needed. "owner" → ALL; unknown strings fall back to Member
+/// (MemberRole::from_str semantics).
+int defaultRolePermissions({required String role}) =>
+    RustLib.instance.api.crateApiCrdtDefaultRolePermissions(role: role);
+
 /// Leave a server. The local user is removed from the server.
 /// Owner cannot leave — must delete or transfer ownership first.
 Future<void> leaveServer({required String serverId}) =>

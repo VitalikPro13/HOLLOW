@@ -20,16 +20,13 @@ class MobileRolesRoute extends ConsumerStatefulWidget {
 
 class _MobileRolesRouteState extends ConsumerState<MobileRolesRoute> {
   final Map<String, int> _perms = {};
+  // Rust MemberRole::default_permissions via FFI — never a hand-written
+  // mirror: a stale copy here (missing manageServer AND manageEmotes) made
+  // Reset persist a stripped Admin mask into the server's CRDT overrides.
+  final Map<String, int> _defaults = {};
   bool _loading = true;
 
   static const _roles = ['admin', 'moderator', 'member'];
-
-  static const _defaultPerms = {
-    'admin': Permission.manageChannels | Permission.manageRoles |
-        Permission.kickMembers | Permission.sendMessages | Permission.readMessages,
-    'moderator': Permission.kickMembers | Permission.sendMessages | Permission.readMessages,
-    'member': Permission.sendMessages | Permission.readMessages,
-  };
 
   static const _permEntries = [
     (Permission.manageServer, 'Manage Server', LucideIcons.settings),
@@ -38,6 +35,7 @@ class _MobileRolesRouteState extends ConsumerState<MobileRolesRoute> {
     (Permission.kickMembers, 'Kick / Ban Members', LucideIcons.userMinus),
     (Permission.sendMessages, 'Send Messages', LucideIcons.messageSquare),
     (Permission.readMessages, 'Read Messages', LucideIcons.eye),
+    (Permission.manageEmotes, 'Manage Emotes', LucideIcons.smilePlus),
   ];
 
   @override
@@ -48,13 +46,14 @@ class _MobileRolesRouteState extends ConsumerState<MobileRolesRoute> {
 
   Future<void> _loadAll() async {
     for (final role in _roles) {
+      _defaults[role] = crdt_api.defaultRolePermissions(role: role);
       try {
         final p = await crdt_api.getRolePermissions(
           serverId: widget.serverId, role: role,
         );
         _perms[role] = p;
       } catch (_) {
-        _perms[role] = _defaultPerms[role] ?? 0;
+        _perms[role] = _defaults[role] ?? 0;
       }
     }
     if (mounted) setState(() => _loading = false);
@@ -77,7 +76,7 @@ class _MobileRolesRouteState extends ConsumerState<MobileRolesRoute> {
   }
 
   Future<void> _resetRole(String role) async {
-    final def = _defaultPerms[role] ?? 0;
+    final def = _defaults[role] ?? crdt_api.defaultRolePermissions(role: role);
     setState(() => _perms[role] = def);
     try {
       await crdt_api.changeRolePermissions(

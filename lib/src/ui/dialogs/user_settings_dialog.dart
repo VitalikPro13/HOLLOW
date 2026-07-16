@@ -196,6 +196,20 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
   Uint8List? _pendingBannerBytes;
   bool _avatarChanged = false;
   bool _bannerChanged = false;
+  // In-flight WebP processing (never-throwing futures — errors are handled
+  // inside). The preview stages the raw CROPPED bytes instantly; processing
+  // swaps in the WebP when done. Save AWAITS these so an early "Save Profile"
+  // can never commit while the final bytes are still being encoded.
+  Future<void>? _avatarProcessing;
+  Future<void>? _bannerProcessing;
+  // Stale-completion guards: any newer pick/clear/GIF bumps the generation so
+  // a late processing result can't clobber it.
+  int _avatarPickGen = 0;
+  int _bannerPickGen = 0;
+  // Drives the small processing spinner on the previews.
+  bool _avatarBusy = false;
+  bool _bannerBusy = false;
+  bool _savingProfile = false;
 
   // Active category + rail search filter.
   late _SettingsCategory _activeTab;
@@ -275,6 +289,10 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
       maxGifBytes: 1000000,
       gifTooLargeMessage: 'GIF too large (max 1MB)',
       onGifPicked: (gifBytes) => setState(() {
+        // Raw GIF is final (no crop/processing) — invalidate any in-flight
+        // crop processing so its late result can't clobber this pick.
+        _avatarPickGen++;
+        _avatarBusy = false;
         _pendingAvatarBytes = gifBytes;
         _avatarChanged = true;
         _profileDirty = true;
@@ -290,20 +308,46 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
       title: 'Crop Avatar',
     );
     if (cropped == null || !mounted) return;
-    try {
-      final processed = await network_api.processAvatar(rawBytes: cropped);
-      setState(() {
-        _pendingAvatarBytes = processed;
-        _avatarChanged = true;
-        _profileDirty = true;
-      });
-    } catch (e) {
-      if (mounted) HollowToast.show(context, 'Failed to process image', type: HollowToastType.error);
-    }
+
+    // Instant feedback: stage the cropped PNG for the preview NOW; the WebP
+    // encode (a real wall-clock wait) runs in the background and swaps in.
+    final prevBytes = _pendingAvatarBytes;
+    final prevChanged = _avatarChanged;
+    final gen = ++_avatarPickGen;
+    setState(() {
+      _pendingAvatarBytes = cropped;
+      _avatarChanged = true;
+      _profileDirty = true;
+      _avatarBusy = true;
+    });
+    _avatarProcessing = () async {
+      try {
+        final processed = await network_api.processAvatar(rawBytes: cropped);
+        if (!mounted || gen != _avatarPickGen) return;
+        setState(() {
+          _pendingAvatarBytes = processed;
+          _avatarBusy = false;
+        });
+      } catch (e) {
+        if (!mounted || gen != _avatarPickGen) return;
+        // Revert the optimistic staging — the pick failed.
+        setState(() {
+          _pendingAvatarBytes = prevBytes;
+          _avatarChanged = prevChanged;
+          _avatarBusy = false;
+        });
+        HollowToast.show(context, 'Failed to process image',
+            type: HollowToastType.error);
+      }
+    }();
   }
 
   void _clearAvatar() {
     setState(() {
+      // Uint8List(0) is the CLEAR sentinel — a late processing result must
+      // never overwrite it.
+      _avatarPickGen++;
+      _avatarBusy = false;
       _pendingAvatarBytes = Uint8List(0);
       _avatarChanged = true;
       _profileDirty = true;
@@ -315,6 +359,8 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
       maxGifBytes: 2000000,
       gifTooLargeMessage: 'GIF too large (max 2MB)',
       onGifPicked: (gifBytes) => setState(() {
+        _bannerPickGen++;
+        _bannerBusy = false;
         _pendingBannerBytes = gifBytes;
         _bannerChanged = true;
         _profileDirty = true;
@@ -330,20 +376,41 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
       title: 'Crop Banner',
     );
     if (cropped == null || !mounted) return;
-    try {
-      final processed = await network_api.processBanner(rawBytes: cropped);
-      setState(() {
-        _pendingBannerBytes = processed;
-        _bannerChanged = true;
-        _profileDirty = true;
-      });
-    } catch (e) {
-      if (mounted) HollowToast.show(context, 'Failed to process image', type: HollowToastType.error);
-    }
+
+    final prevBytes = _pendingBannerBytes;
+    final prevChanged = _bannerChanged;
+    final gen = ++_bannerPickGen;
+    setState(() {
+      _pendingBannerBytes = cropped;
+      _bannerChanged = true;
+      _profileDirty = true;
+      _bannerBusy = true;
+    });
+    _bannerProcessing = () async {
+      try {
+        final processed = await network_api.processBanner(rawBytes: cropped);
+        if (!mounted || gen != _bannerPickGen) return;
+        setState(() {
+          _pendingBannerBytes = processed;
+          _bannerBusy = false;
+        });
+      } catch (e) {
+        if (!mounted || gen != _bannerPickGen) return;
+        setState(() {
+          _pendingBannerBytes = prevBytes;
+          _bannerChanged = prevChanged;
+          _bannerBusy = false;
+        });
+        HollowToast.show(context, 'Failed to process image',
+            type: HollowToastType.error);
+      }
+    }();
   }
 
   void _clearBanner() {
     setState(() {
+      _bannerPickGen++;
+      _bannerBusy = false;
       _pendingBannerBytes = Uint8List(0);
       _bannerChanged = true;
       _profileDirty = true;
@@ -365,32 +432,52 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
   /// category auto-saves on change. Does NOT close the dialog — the user can
   /// keep browsing other categories afterward.
   Future<void> _saveProfile() async {
-    final displayName = widget.displayNameController.text.trim();
-    final status = widget.statusController.text.trim();
-    final aboutMe = widget.aboutMeController.text.trim();
-
-    // Save profile (include Twitch username if connected).
-    String twitchUsername = '';
+    if (_savingProfile) return;
+    setState(() => _savingProfile = true);
     try {
-      final tw = await twitch_api.twitchGetUsername();
-      if (tw != null && tw.isNotEmpty) twitchUsername = tw;
-    } catch (_) {}
-    await ref.read(profileProvider.notifier).updateMyProfile(
-          displayName: displayName,
-          status: status,
-          aboutMe: aboutMe,
-          avatarBytes: _avatarChanged ? _pendingAvatarBytes : null,
-          bannerBytes: _bannerChanged ? _pendingBannerBytes : null,
-          twitchUsername: twitchUsername,
-        );
+      // A Save tapped during image processing must WAIT for the final WebP
+      // (or the failure revert) — not silently commit half-staged state.
+      final avatarWait = _avatarProcessing;
+      if (avatarWait != null) await avatarWait;
+      final bannerWait = _bannerProcessing;
+      if (bannerWait != null) await bannerWait;
+      if (!mounted) return;
 
-    if (!mounted) return;
-    setState(() {
-      _profileDirty = false;
-      _avatarChanged = false;
-      _bannerChanged = false;
-    });
-    HollowToast.show(context, 'Profile saved', type: HollowToastType.success);
+      final displayName = widget.displayNameController.text.trim();
+      final status = widget.statusController.text.trim();
+      final aboutMe = widget.aboutMeController.text.trim();
+
+      // Save profile (include Twitch username if connected).
+      String twitchUsername = '';
+      try {
+        final tw = await twitch_api.twitchGetUsername();
+        if (tw != null && tw.isNotEmpty) twitchUsername = tw;
+      } catch (_) {}
+      await ref.read(profileProvider.notifier).updateMyProfile(
+            displayName: displayName,
+            status: status,
+            aboutMe: aboutMe,
+            avatarBytes: _avatarChanged ? _pendingAvatarBytes : null,
+            bannerBytes: _bannerChanged ? _pendingBannerBytes : null,
+            twitchUsername: twitchUsername,
+          );
+
+      if (!mounted) return;
+      setState(() {
+        _profileDirty = false;
+        _avatarChanged = false;
+        _bannerChanged = false;
+      });
+      HollowToast.show(context, 'Profile saved', type: HollowToastType.success);
+    } catch (e) {
+      // Keep the dirty flags — the edits are intact and Save is retryable.
+      if (mounted) {
+        HollowToast.show(context, 'Failed to save profile: $e',
+            type: HollowToastType.error);
+      }
+    } finally {
+      if (mounted) setState(() => _savingProfile = false);
+    }
   }
 
   // ── Relay selection handlers (Network category) ──────────────────
@@ -663,6 +750,9 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
       avatarChanged: _avatarChanged,
       bannerChanged: _bannerChanged,
       profileDirty: _profileDirty,
+      savingProfile: _savingProfile,
+      avatarProcessing: _avatarBusy,
+      bannerProcessing: _bannerBusy,
       onPickAvatar: _pickAvatar,
       onClearAvatar: _clearAvatar,
       onPickBanner: _pickBanner,

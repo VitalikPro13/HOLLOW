@@ -48,6 +48,9 @@ class ProfileSection extends ConsumerWidget {
   final bool avatarChanged;
   final bool bannerChanged;
   final bool profileDirty;
+  final bool savingProfile;
+  final bool avatarProcessing;
+  final bool bannerProcessing;
   final VoidCallback onPickAvatar;
   final VoidCallback onClearAvatar;
   final VoidCallback onPickBanner;
@@ -68,6 +71,9 @@ class ProfileSection extends ConsumerWidget {
     required this.avatarChanged,
     required this.bannerChanged,
     required this.profileDirty,
+    required this.savingProfile,
+    required this.avatarProcessing,
+    required this.bannerProcessing,
     required this.onPickAvatar,
     required this.onClearAvatar,
     required this.onPickBanner,
@@ -126,9 +132,11 @@ class ProfileSection extends ConsumerWidget {
           Align(
             alignment: Alignment.centerRight,
             child: HollowButton.filled(
-              onPressed: profileDirty ? onSaveProfile : null,
+              onPressed: (profileDirty && !savingProfile) ? onSaveProfile : null,
               icon: const Icon(LucideIcons.check, size: 16),
-              child: Text(profileDirty ? 'Save Profile' : 'Saved'),
+              child: Text(savingProfile
+                  ? 'Saving...'
+                  : (profileDirty ? 'Save Profile' : 'Saved')),
             ),
           ),
         ],
@@ -177,8 +185,9 @@ class ProfileSection extends ConsumerWidget {
     );
     final savedBanner = ref.watch(bannerProvider(localPeerId)).valueOrNull;
     final displayBanner = bannerChanged ? pendingBannerBytes : savedBanner;
+    Widget banner = fallback;
     if (displayBanner != null && displayBanner.isNotEmpty) {
-      return SizedBox(
+      banner = SizedBox(
         height: 70,
         width: double.infinity,
         child: AnimatedGifImage(
@@ -190,7 +199,30 @@ class ProfileSection extends ConsumerWidget {
         ),
       );
     }
-    return fallback;
+    if (!bannerProcessing) return banner;
+    return Stack(
+      children: [
+        banner,
+        Positioned(
+          top: HollowSpacing.xs,
+          right: HollowSpacing.xs,
+          child: _processingSpinner(hollow),
+        ),
+      ],
+    );
+  }
+
+  /// Small non-blocking spinner shown on a preview while the picked image is
+  /// being WebP-encoded in Rust (the preview already shows the cropped bytes).
+  Widget _processingSpinner(HollowTheme hollow) {
+    return SizedBox(
+      width: 14,
+      height: 14,
+      child: CircularProgressIndicator(
+        strokeWidth: 2,
+        color: hollow.textSecondary,
+      ),
+    );
   }
 
   Widget _buildPreviewIdentity(HollowTheme hollow, WidgetRef ref) {
@@ -204,20 +236,30 @@ class ProfileSection extends ConsumerWidget {
       crossAxisAlignment: CrossAxisAlignment.center,
       children: [
         // Avatar with border
-        Container(
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(hollow.radiusMd + 2),
-            border: Border.all(
-              color: hollow.surface,
-              width: 3,
+        Stack(
+          children: [
+            Container(
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(hollow.radiusMd + 2),
+                border: Border.all(
+                  color: hollow.surface,
+                  width: 3,
+                ),
+              ),
+              child: HollowAvatar(
+                peerId: localPeerId,
+                size: 56,
+                imageBytes: avatarChanged ? pendingAvatarBytes : null,
+                animate: true,
+              ),
             ),
-          ),
-          child: HollowAvatar(
-            peerId: localPeerId,
-            size: 56,
-            imageBytes: avatarChanged ? pendingAvatarBytes : null,
-            animate: true,
-          ),
+            if (avatarProcessing)
+              Positioned(
+                right: 0,
+                bottom: 0,
+                child: _processingSpinner(hollow),
+              ),
+          ],
         ),
 
         const SizedBox(height: HollowSpacing.xs),

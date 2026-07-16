@@ -748,16 +748,9 @@ CrdtOp {
 
 ### 10.4 Conflict Resolution
 
-**Last-Write-Wins (LWW)** per key, ordered by HLC timestamp. For role conflicts, a priority system applies:
+**Last-Write-Wins (LWW)** per key, ordered by HLC timestamp — the HLC ordering (physical time, logical counter, author id) is total, so any two distinct writes have a deterministic winner and every replica converges regardless of apply order.
 
-| Role | Priority |
-|------|----------|
-| Owner | 3 |
-| Admin | 2 |
-| Moderator | 1 |
-| Member | 0 |
-
-Higher-priority role changes always override lower-priority ones. Admin writes always win over member writes for server settings (AdminLwwReg).
+Authorization and conflict resolution are deliberately separated: **whether** a write is accepted is decided by the permission gates that validate the operation's *author* at every ingesting node (Section 11); **which** accepted write survives a conflict is decided purely by the HLC. Author role does not influence the merge — the latest authorized write wins. (Earlier versions resolved register conflicts by author-role priority, which made any value written by a higher role permanently immutable to lower — but still authorized — roles, and made convergence depend on each replica's possibly-stale view of the role map. Role rank is still carried on the wire for compatibility, but is not a merge input.)
 
 ### 10.5 Synchronization Protocol
 
@@ -832,7 +825,7 @@ Seven permission bits control access:
 | 6 | `READ_MESSAGES` | View channel content |
 | 7 | `MANAGE_EMOTES` | Add and remove custom server emotes |
 
-Default permissions per role can be overridden via `RolePermissionsChanged` CRDT operations. Custom permission sets are stored as `AdminLwwReg<u32>` (Last-Writer-Wins register, admin-only writes).
+Default permissions per role can be overridden via `RolePermissionsChanged` CRDT operations. Custom permission sets are stored as LWW registers; authorship of the override is validated by the permission gates at every ingesting node (`MANAGE_ROLES`), and conflicting overrides resolve by HLC timestamp (Section 10.4).
 
 ### 11.3 Tier-Gated Permission Editing
 
@@ -1030,9 +1023,9 @@ Since the relay is a zero-knowledge pipe, switching relays is transparent to the
 
 To allow users to send friend requests without sharing a 64-character peer ID, the relay supports **ephemeral, relay-scoped nicknames**:
 
-- A nickname (lowercase `a-z`, `0-9`, `_`; 3–20 characters) is claimed via a relay text command and held in a RAM-only `nickname → peer_id` map.
+- A nickname (lowercase `a-z`, `0-9`, `_`; 3–20 characters) is claimed via a relay text command and held in a RAM-only `nickname → peer_id` map. The claim also carries the claimer's self-reported **master identity** (multi-device identities authenticate to the relay as a per-device id, but friend requests must target the master's inbox), stored in the same RAM registry and handed back verbatim on resolve. The relay never verifies or routes on this value, and the resolver on the requesting client never trusts it as an identity mapping — it is used solely as the friend-request destination, with the same trust as a manually typed peer ID.
 - Nicknames are **never persisted** and are released on disconnect. There is no durable mapping between a handle and an identity on the relay.
-- A friend request resolves a nickname to a peer ID in one step, then proceeds via the normal friend-request flow.
+- A friend request resolves a nickname to a peer ID (and master, when present) in one step, then proceeds via the normal friend-request flow.
 
 Because the mapping lives only in relay memory for the duration of a connection, the relay holds no long-term directory of human-readable handles. The underlying identity remains the Ed25519 peer ID; the nickname is a transient convenience layer.
 

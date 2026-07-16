@@ -5,8 +5,9 @@ import 'package:hollow/src/core/models/file_attachment.dart';
 import 'package:hollow/src/core/providers/chat_provider.dart' show generateMessageId;
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/service_providers.dart';
+import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/file_transfer_provider.dart';
-import 'package:hollow/src/core/providers/peers_provider.dart';
+import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/rust/api/conference.dart' as conference_api;
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
@@ -620,9 +621,12 @@ class ChannelChatNotifier
       int firstVisible, int lastVisible) async {
     final start = (firstVisible - 15).clamp(0, messages.length - 1);
     final end = (lastVisible + 15).clamp(0, messages.length - 1);
-    final peers = ref.read(peersProvider);
-    if (peers.isEmpty) return;
-    final peerIds = peers.keys.toList();
+    // Candidates come from THIS server's online members (master-keyed) —
+    // never unrelated global peers, who don't hold channel files at all.
+    final onlineMembers = ref.read(onlineMembersProvider(serverId));
+    if (onlineMembers.isEmpty) return;
+    final links = ref.read(deviceLinkProvider);
+    final myMaster = ref.read(identityProvider).peerId;
 
     for (int i = start; i <= end; i++) {
       final msg = messages[i];
@@ -631,8 +635,23 @@ class ChannelChatNotifier
       if (_requestedFileIds.contains(att.fileId)) continue;
       final transfer = ref.read(fileTransferProvider)[att.fileId];
       if (transfer != null && (transfer.isDownloading || transfer.isComplete)) continue;
+
+      // Prefer the SENDER (most likely holder) when online, else any other
+      // online member (sorted for determinism). ONE request only — Rust
+      // reroutes an offline/failed target to another member, and multiple
+      // parallel streams would poison the single FileHeader AES key.
+      final senderMaster = links.identityOf(msg.senderId ?? '');
+      final others = onlineMembers
+          .where((m) => m != senderMaster && m != myMaster)
+          .toList()
+        ..sort();
+      final candidates = [
+        if (onlineMembers.contains(senderMaster)) senderMaster,
+        ...others,
+      ];
+      if (candidates.isEmpty) continue; // no throttle — a later pass retries
       _requestedFileIds.add(att.fileId);
-      for (final peerId in peerIds) {
+      for (final peerId in candidates) {
         try {
           await network_api.requestFileFromPeer(
               fileId: att.fileId, peerId: peerId, chunks: []);

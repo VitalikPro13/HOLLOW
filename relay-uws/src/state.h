@@ -175,6 +175,10 @@ struct RelayState {
     std::unordered_map<std::string, std::string> nickname_to_peer;  // nickname -> peer_id
     std::unordered_map<std::string, std::string> peer_to_nickname;  // peer_id -> nickname
     std::unordered_map<std::string, uint64_t>    nickname_expiry;   // nickname -> expiry unix secs
+    // nickname -> claimer's self-reported MASTER identity ("" never stored).
+    // Returned on resolve so a stranger's friend request targets inbox:{master}
+    // — the claimer's WS-auth peer_id is a DEVICE id whose inbox nobody joins.
+    std::unordered_map<std::string, std::string> nickname_to_master;
 
     // Multi-device link-code registry (RAM only, released on disconnect, 5-min TTL,
     // consumed on resolve). Mirrors the nickname registry. Used by Step 4 device

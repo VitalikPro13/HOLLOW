@@ -215,8 +215,9 @@ pub enum MemberRole {
 }
 
 impl MemberRole {
-    /// Numeric priority for CRDT conflict resolution.
-    /// Higher = more authority. Used by AdminLwwReg to resolve conflicts.
+    /// Numeric role rank. Higher = more authority. Used for rank comparisons
+    /// (outranking checks) and carried on RoleChanged ops as wire-compat
+    /// metadata for old clients — AdminLwwReg::merge no longer consults it.
     pub fn priority(&self) -> u8 {
         match self {
             Self::Owner => 3,
@@ -249,7 +250,8 @@ impl MemberRole {
     pub fn default_permissions(&self) -> u32 {
         match self {
             Self::Owner => Permission::ALL,
-            Self::Admin => Permission::MANAGE_CHANNELS
+            Self::Admin => Permission::MANAGE_SERVER
+                | Permission::MANAGE_CHANNELS
                 | Permission::MANAGE_ROLES
                 | Permission::KICK_MEMBERS
                 | Permission::SEND_MESSAGES

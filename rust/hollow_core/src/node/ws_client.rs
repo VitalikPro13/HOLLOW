@@ -61,8 +61,11 @@ pub enum WsCommand {
     /// WS connection (replaces the open HTTP /turn-credentials endpoint —
     /// retries ride the normal reconnect machinery instead of dead-chaining).
     GetTurnCredentials,
-    /// Claim a temporary nickname on the relay (RAM only).
-    ClaimNickname { nickname: String },
+    /// Claim a temporary nickname on the relay (RAM only). `master` is our
+    /// MASTER identity — the relay hands it back on resolve so a stranger's
+    /// friend request targets `inbox:{master}` (which we actually listen on)
+    /// instead of our WS-auth DEVICE id (whose inbox nobody joins).
+    ClaimNickname { nickname: String, master: String },
     /// Release the currently claimed nickname.
     ReleaseNickname,
     /// Resolve a nickname to a peer_id via the relay.
@@ -154,8 +157,9 @@ pub enum WsEvent {
     NicknameReleased,
     /// Nickname operation error (claim failed or resolve failed).
     NicknameError { error: String, nickname: String },
-    /// Nickname resolved to a peer_id.
-    NicknameResolved { nickname: String, peer_id: String },
+    /// Nickname resolved to a peer_id. `master_id` is the claimer's
+    /// self-reported MASTER identity (empty when the relay predates it).
+    NicknameResolved { nickname: String, peer_id: String, master_id: String },
     /// Multi-device link code successfully claimed.
     LinkCodeClaimed { code: String },
     /// Multi-device link code released.
@@ -214,7 +218,7 @@ enum ServerMsg {
     NicknameClaimed { nickname: String },
     NicknameReleased,
     NicknameError { error: String, #[serde(default)] nickname: String },
-    NicknameResolved { nickname: String, peer_id: String },
+    NicknameResolved { nickname: String, peer_id: String, #[serde(default)] master_id: String },
     LinkCodeClaimed { code: String },
     LinkCodeReleased,
     LinkCodeError { error: String, #[serde(default)] code: String },
@@ -749,8 +753,8 @@ async fn send_command(write: &mut WsSink, cmd: &WsCommand) -> bool {
             }
             return true;
         }
-        WsCommand::ClaimNickname { nickname } => {
-            let msg = serde_json::json!({ "type": "claim_nickname", "nickname": nickname });
+        WsCommand::ClaimNickname { nickname, master } => {
+            let msg = serde_json::json!({ "type": "claim_nickname", "nickname": nickname, "master": master });
             if let Err(e) = write.send(Message::Text(msg.to_string().into())).await {
                 hollow_log!("[HOLLOW-WS] ClaimNickname send failed: {e}");
                 return false;
@@ -1095,9 +1099,9 @@ async fn handle_server_message(event_tx: &mpsc::UnboundedSender<WsEvent>, msg: S
             hollow_log!("[HOLLOW-WS] Nickname error: {error} (nickname={nickname})");
             WsEvent::NicknameError { error, nickname }
         }
-        ServerMsg::NicknameResolved { nickname, peer_id } => {
-            hollow_log!("[HOLLOW-WS] Nickname resolved: {nickname} -> {peer_id}");
-            WsEvent::NicknameResolved { nickname, peer_id }
+        ServerMsg::NicknameResolved { nickname, peer_id, master_id } => {
+            hollow_log!("[HOLLOW-WS] Nickname resolved: {nickname} -> {peer_id} (master: {master_id})");
+            WsEvent::NicknameResolved { nickname, peer_id, master_id }
         }
         ServerMsg::LinkCodeClaimed { code } => {
             hollow_log!("[HOLLOW-LINK] Link code claimed: {code}");

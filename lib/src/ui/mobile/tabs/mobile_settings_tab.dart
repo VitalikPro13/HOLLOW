@@ -688,6 +688,19 @@ class _ProfileTabState extends ConsumerState<_ProfileTab> {
   Uint8List? _pendingBanner;
   bool _avatarChanged = false;
   bool _bannerChanged = false;
+  // In-flight WebP processing (never-throwing futures — errors handled
+  // inside). The preview stages the raw CROPPED bytes instantly; processing
+  // swaps in the WebP when done. _save AWAITS these — before this, a Save
+  // tapped during the processing window sent `avatarBytes: null` and the new
+  // image was silently dropped.
+  Future<void>? _avatarProcessing;
+  Future<void>? _bannerProcessing;
+  // Stale-completion guards: newer pick/clear/GIF bumps the generation so a
+  // late processing result can't clobber it.
+  int _avatarPickGen = 0;
+  int _bannerPickGen = 0;
+  bool _avatarBusy = false;
+  bool _bannerBusy = false;
   bool _populated = false;
 
   @override
@@ -736,7 +749,8 @@ class _ProfileTabState extends ConsumerState<_ProfileTab> {
         HollowToast.show(context, 'GIF must be under 1 MB', type: HollowToastType.error);
         return;
       }
-      setState(() { _pendingAvatar = bytes; _avatarChanged = true; });
+      // Raw GIF is final — invalidate any in-flight crop processing.
+      setState(() { _avatarPickGen++; _avatarBusy = false; _pendingAvatar = bytes; _avatarChanged = true; });
       return;
     }
 
@@ -750,12 +764,23 @@ class _ProfileTabState extends ConsumerState<_ProfileTab> {
           );
     if (cropped == null || !mounted) return;
 
-    try {
-      final processed = await network_api.processAvatar(rawBytes: cropped);
-      if (mounted) setState(() { _pendingAvatar = processed; _avatarChanged = true; });
-    } catch (e) {
-      if (mounted) HollowToast.show(context, 'Failed to process', type: HollowToastType.error);
-    }
+    // Instant feedback: preview the cropped PNG NOW; the WebP encode runs in
+    // the background and swaps in (or reverts + toasts on failure).
+    final prevBytes = _pendingAvatar;
+    final prevChanged = _avatarChanged;
+    final gen = ++_avatarPickGen;
+    setState(() { _pendingAvatar = cropped; _avatarChanged = true; _avatarBusy = true; });
+    _avatarProcessing = () async {
+      try {
+        final processed = await network_api.processAvatar(rawBytes: cropped);
+        if (!mounted || gen != _avatarPickGen) return;
+        setState(() { _pendingAvatar = processed; _avatarBusy = false; });
+      } catch (e) {
+        if (!mounted || gen != _avatarPickGen) return;
+        setState(() { _pendingAvatar = prevBytes; _avatarChanged = prevChanged; _avatarBusy = false; });
+        HollowToast.show(context, 'Failed to process', type: HollowToastType.error);
+      }
+    }();
   }
 
   Future<void> _pickBanner() async {
@@ -770,7 +795,7 @@ class _ProfileTabState extends ConsumerState<_ProfileTab> {
         HollowToast.show(context, 'GIF must be under 2 MB', type: HollowToastType.error);
         return;
       }
-      setState(() { _pendingBanner = bytes; _bannerChanged = true; });
+      setState(() { _bannerPickGen++; _bannerBusy = false; _pendingBanner = bytes; _bannerChanged = true; });
       return;
     }
 
@@ -784,17 +809,36 @@ class _ProfileTabState extends ConsumerState<_ProfileTab> {
           );
     if (cropped == null || !mounted) return;
 
-    try {
-      final processed = await network_api.processBanner(rawBytes: cropped);
-      if (mounted) setState(() { _pendingBanner = processed; _bannerChanged = true; });
-    } catch (e) {
-      if (mounted) HollowToast.show(context, 'Failed to process', type: HollowToastType.error);
-    }
+    final prevBytes = _pendingBanner;
+    final prevChanged = _bannerChanged;
+    final gen = ++_bannerPickGen;
+    setState(() { _pendingBanner = cropped; _bannerChanged = true; _bannerBusy = true; });
+    _bannerProcessing = () async {
+      try {
+        final processed = await network_api.processBanner(rawBytes: cropped);
+        if (!mounted || gen != _bannerPickGen) return;
+        setState(() { _pendingBanner = processed; _bannerBusy = false; });
+      } catch (e) {
+        if (!mounted || gen != _bannerPickGen) return;
+        setState(() { _pendingBanner = prevBytes; _bannerChanged = prevChanged; _bannerBusy = false; });
+        HollowToast.show(context, 'Failed to process', type: HollowToastType.error);
+      }
+    }();
   }
 
   Future<void> _save() async {
+    if (_saving) return;
     setState(() => _saving = true);
     try {
+      // A Save tapped during image processing must WAIT for the final WebP
+      // (or the failure revert) — this is what used to silently drop the
+      // freshly-cropped image (`_avatarChanged` was still false).
+      final avatarWait = _avatarProcessing;
+      if (avatarWait != null) await avatarWait;
+      final bannerWait = _bannerProcessing;
+      if (bannerWait != null) await bannerWait;
+      if (!mounted) return;
+
       String twitchUsername = '';
       try {
         twitchUsername = await twitch_api.twitchGetUsername() ?? '';
@@ -853,19 +897,35 @@ class _ProfileTabState extends ConsumerState<_ProfileTab> {
               GestureDetector(
                 onTap: _pickBanner,
                 onLongPress: _bannerChanged || bannerBytes != null
-                    ? () => setState(() { _pendingBanner = Uint8List(0); _bannerChanged = true; })
+                    ? () => setState(() { _bannerPickGen++; _bannerBusy = false; _pendingBanner = Uint8List(0); _bannerChanged = true; })
                     : null,
                 child: SizedBox(
                   height: 100,
                   width: double.infinity,
-                  child: _bannerChanged && _pendingBanner != null && _pendingBanner!.isNotEmpty
-                      ? Image.memory(_pendingBanner!, fit: BoxFit.cover)
-                      : bannerBytes != null && bannerBytes.isNotEmpty
-                          ? AnimatedGifImage(
-                              bytes: bannerBytes, height: 100, width: double.infinity, fit: BoxFit.cover,
-                              errorWidget: _bannerGradient(bannerColor),
-                            )
-                          : _bannerGradient(bannerColor),
+                  child: Stack(
+                    fit: StackFit.expand,
+                    children: [
+                      _bannerChanged && _pendingBanner != null && _pendingBanner!.isNotEmpty
+                          ? Image.memory(_pendingBanner!, fit: BoxFit.cover)
+                          : bannerBytes != null && bannerBytes.isNotEmpty
+                              ? AnimatedGifImage(
+                                  bytes: bannerBytes, height: 100, width: double.infinity, fit: BoxFit.cover,
+                                  errorWidget: _bannerGradient(bannerColor),
+                                )
+                              : _bannerGradient(bannerColor),
+                      if (_bannerBusy)
+                        Positioned(
+                          top: HollowSpacing.xs,
+                          right: HollowSpacing.xs,
+                          child: SizedBox(
+                            width: 14, height: 14,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2, color: hollow.textSecondary,
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
                 ),
               ),
 
@@ -880,19 +940,34 @@ class _ProfileTabState extends ConsumerState<_ProfileTab> {
                       GestureDetector(
                         onTap: _pickAvatar,
                         onLongPress: _avatarChanged
-                            ? () => setState(() { _pendingAvatar = null; _avatarChanged = false; })
+                            ? () => setState(() { _avatarPickGen++; _avatarBusy = false; _pendingAvatar = null; _avatarChanged = false; })
                             : null,
-                        child: Container(
-                          decoration: BoxDecoration(
-                            borderRadius: BorderRadius.circular(hollow.radiusMd + 2),
-                            border: Border.all(color: hollow.surface, width: 3),
-                          ),
-                          child: _avatarChanged && _pendingAvatar != null
-                              ? ClipRRect(
-                                  borderRadius: BorderRadius.circular(hollow.radiusMd - 1),
-                                  child: Image.memory(_pendingAvatar!, width: 64, height: 64, fit: BoxFit.cover),
-                                )
-                              : HollowAvatar(peerId: peerId, size: 64),
+                        child: Stack(
+                          children: [
+                            Container(
+                              decoration: BoxDecoration(
+                                borderRadius: BorderRadius.circular(hollow.radiusMd + 2),
+                                border: Border.all(color: hollow.surface, width: 3),
+                              ),
+                              child: _avatarChanged && _pendingAvatar != null
+                                  ? ClipRRect(
+                                      borderRadius: BorderRadius.circular(hollow.radiusMd - 1),
+                                      child: Image.memory(_pendingAvatar!, width: 64, height: 64, fit: BoxFit.cover),
+                                    )
+                                  : HollowAvatar(peerId: peerId, size: 64),
+                            ),
+                            if (_avatarBusy)
+                              Positioned(
+                                right: 0,
+                                bottom: 0,
+                                child: SizedBox(
+                                  width: 14, height: 14,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2, color: hollow.textSecondary,
+                                  ),
+                                ),
+                              ),
+                          ],
                         ),
                       ),
 

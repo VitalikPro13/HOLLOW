@@ -294,8 +294,8 @@ impl ServerState {
     /// to master; this drains those without a re-key. Future ops are already
     /// master-keyed at the source. Returns true if anything was re-keyed.
     ///
-    /// Conflict resolution: LWW registers fold via `AdminLwwReg::merge` (priority
-    /// then HLC — so the higher role survives). Plain entries keep the existing
+    /// Conflict resolution: LWW registers fold via `AdminLwwReg::merge` (pure
+    /// HLC — the latest write survives). Plain entries keep the existing
     /// master entry if present, else adopt the device entry's value under the
     /// master key.
     pub fn canonicalize_members(&mut self, resolve: impl Fn(&str) -> String) -> bool {
@@ -592,9 +592,11 @@ impl ServerState {
                 role,
                 priority,
             } => {
-                // Use the author's priority (from the op payload) so that higher-ranked
-                // authors can demote lower-ranked members. The priority in the payload
-                // is the author's role priority, not the target role's.
+                // The payload's `priority` (the author's role priority) is
+                // inert wire-compat metadata: merge is pure HLC LWW, so a
+                // demotion lands because the demotion op is HLC-later, and
+                // authority is enforced by can_change_role at author + ingest.
+                // Old clients still merge priority-first, so keep sending it.
                 let entry = self.roles.entry(peer_id.clone()).or_insert_with(|| {
                     AdminLwwReg::new(role.clone(), op.hlc.clone(), *priority)
                 });
@@ -1058,9 +1060,13 @@ impl ServerState {
             CrdtPayload::RoleChanged { peer_id, role, .. } => {
                 self.can_change_role(&op.author, peer_id, role)
             }
+            // Permission-based (override-aware), NOT role-based — the local
+            // send handlers gate on MANAGE_SERVER, so ingest must match or an
+            // override-granted author forks from the network (see doc above).
+            // Admin holds MANAGE_SERVER by default.
             CrdtPayload::ServerRenamed { .. }
             | CrdtPayload::ServerSettingChanged { .. } => {
-                sender_role == MemberRole::Owner || sender_role == MemberRole::Admin
+                (sender_perms & Permission::MANAGE_SERVER) != 0
             }
             // Self-removal (voluntary leave) is always allowed; kicking
             // someone ELSE needs moderator+ and outranking.
@@ -1459,9 +1465,10 @@ mod tests {
     }
 
     #[test]
-    fn canonicalize_merges_roles_keeping_higher() {
-        // A human's device leaf holds Admin while the master entry is Member —
-        // folding must keep the higher role (Admin).
+    fn canonicalize_merges_roles_keeping_latest() {
+        // A human's device leaf holds Admin (written later) while the master
+        // entry is Member — folding is pure HLC LWW, so the latest write
+        // (Admin) survives.
         let mut state = ServerState::new("s1".into(), "S".into(), "owner".into());
 
         // master entry as Member.
@@ -1629,6 +1636,100 @@ mod tests {
         assert_eq!(state_a.members.len(), state_b.members.len());
     }
 
+    /// Seed a server whose "admin_peer" holds the Admin role, plus an
+    /// owner-authored `twitch_verification_enabled=true` op that is NOT yet
+    /// applied (tests choose when/where to apply it).
+    fn owner_state_with_admin_and_setting() -> (ServerState, CrdtOp) {
+        let mut state = ServerState::new("s1".into(), "Test".into(), "owner".into());
+        let add = state.create_op(CrdtPayload::MemberAdded {
+            peer_id: "admin_peer".into(),
+            display_name: "A".into(),
+        });
+        state.apply_op(&add).unwrap();
+        let promote = state.create_op(CrdtPayload::RoleChanged {
+            peer_id: "admin_peer".into(),
+            role: MemberRole::Admin,
+            priority: MemberRole::Owner.priority(),
+        });
+        state.apply_op(&promote).unwrap();
+        let owner_set = state.create_op(CrdtPayload::ServerSettingChanged {
+            key: "twitch_verification_enabled".into(),
+            value: "true".into(),
+        });
+        (state, owner_set)
+    }
+
+    /// Give a cloned replica its own HLC that has witnessed `seen`, so its
+    /// next op is strictly HLC-later (deterministic even when every op in the
+    /// test lands in the same millisecond).
+    fn rekey_replica(state: &mut ServerState, actor: &str, seen: &HlcTimestamp) {
+        let mut hlc = Hlc::new(actor.into());
+        hlc.witness(seen);
+        state.set_hlc(hlc);
+    }
+
+    #[test]
+    fn admin_setting_overwrite_lands_after_owner_write() {
+        // The live 2026-07-16 bug: the Owner enables a server setting, an
+        // Admin holding MANAGE_SERVER flips it OFF, and the flip silently
+        // lost the priority-first merge on every replica (including the
+        // admin's own) — the toggle "reverted". Pure HLC LWW must land it.
+        let (mut owner_state, owner_set) = owner_state_with_admin_and_setting();
+        owner_state.apply_op(&owner_set).unwrap();
+
+        let mut admin_state = owner_state.clone();
+        rekey_replica(&mut admin_state, "admin_peer", &owner_set.hlc);
+        let admin_op = admin_state.create_op(CrdtPayload::ServerSettingChanged {
+            key: "twitch_verification_enabled".into(),
+            value: "false".into(),
+        });
+
+        // Authority: stock Admin now holds MANAGE_SERVER by default, so every
+        // ingest accepts the op.
+        assert!(owner_state.op_allowed(&admin_op));
+
+        admin_state.apply_op(&admin_op).unwrap();
+        assert_eq!(
+            admin_state.settings.get("twitch_verification_enabled").unwrap().read(),
+            "false",
+            "the admin's own replica must reflect the admin's write"
+        );
+
+        owner_state.apply_op(&admin_op).unwrap();
+        assert_eq!(
+            owner_state.settings.get("twitch_verification_enabled").unwrap().read(),
+            "false",
+            "the owner's replica must accept the admin's later write"
+        );
+    }
+
+    #[test]
+    fn setting_overwrite_converges_regardless_of_apply_order() {
+        let (base, owner_set) = owner_state_with_admin_and_setting();
+
+        let mut admin_replica = base.clone();
+        rekey_replica(&mut admin_replica, "admin_peer", &owner_set.hlc);
+        let admin_op = admin_replica.create_op(CrdtPayload::ServerSettingChanged {
+            key: "twitch_verification_enabled".into(),
+            value: "false".into(),
+        });
+
+        // Neither op is applied in `base` — replay the pair in both orders
+        // on fresh clones.
+        let mut forward = base.clone();
+        forward.apply_op(&owner_set).unwrap();
+        forward.apply_op(&admin_op).unwrap();
+
+        let mut reverse = base.clone();
+        reverse.apply_op(&admin_op).unwrap();
+        reverse.apply_op(&owner_set).unwrap();
+
+        let f = forward.settings.get("twitch_verification_enabled").unwrap().read();
+        let r = reverse.settings.get("twitch_verification_enabled").unwrap().read();
+        assert_eq!(f, r, "apply order must not change the converged value");
+        assert_eq!(f, "false", "the HLC-later (admin) write wins in both orders");
+    }
+
     #[test]
     fn owner_has_all_permissions() {
         let state = ServerState::new("s1".into(), "Test".into(), "owner".into());
@@ -1728,8 +1829,8 @@ mod tests {
     #[test]
     fn role_demotion_works() {
         // Regression test: Owner promotes member→admin, then demotes admin→member.
-        // The demotion must succeed because the author (Owner, priority 3) outranks
-        // the existing entry.
+        // The demotion must succeed because the demotion op is HLC-later than
+        // the promotion (merge is pure LWW; authority lives in can_change_role).
         let mut state = ServerState::new("s1".into(), "Test".into(), "owner".into());
         let op = state.create_op(CrdtPayload::MemberAdded {
             peer_id: "peer_b".into(),

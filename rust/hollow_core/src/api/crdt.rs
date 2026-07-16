@@ -1114,6 +1114,15 @@ pub fn get_role_permissions(server_id: String, role: String) -> Result<u32, Stri
     Ok(state.get_role_permissions(&role))
 }
 
+/// Default permissions bitmask for a role name — the single source of truth
+/// for the Dart Roles UIs (Reset button + pre-load fallback). Pure function,
+/// no store needed. "owner" → ALL; unknown strings fall back to Member
+/// (MemberRole::from_str semantics).
+#[frb(sync)]
+pub fn default_role_permissions(role: String) -> u32 {
+    crate::crdt::operations::MemberRole::from_str(&role).default_permissions()
+}
+
 /// Leave a server. The local user is removed from the server.
 /// Owner cannot leave — must delete or transfer ownership first.
 #[frb]

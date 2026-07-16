@@ -64,3 +64,27 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(frb_expand)'] }
 # gappy shared audio). Optimizing just this crate keeps dev build times sane.
 [profile.dev.package.unsafe-libopus]
 opt-level = 3
+
+# Image pipeline (avatar/banner/emote WebP): decode (png/fdeflate, zune-jpeg,
+# gif, image-webp), Lanczos3 resize (image), WebP encode (image-webp lossless;
+# webp-animation/libwebp-sys2 lossy + animated). Same dev-profile trap as
+# unsafe-libopus above — unoptimized builds made processAvatar take ~5 seconds
+# per pick, which read as a broken profile editor.
+[profile.dev.package.image]
+opt-level = 3
+[profile.dev.package.image-webp]
+opt-level = 3
+[profile.dev.package.png]
+opt-level = 3
+[profile.dev.package.fdeflate]
+opt-level = 3
+[profile.dev.package.zune-jpeg]
+opt-level = 3
+[profile.dev.package.gif]
+opt-level = 3
+[profile.dev.package.color_quant]
+opt-level = 3
+[profile.dev.package.webp-animation]
+opt-level = 3
+[profile.dev.package.libwebp-sys2]
+opt-level = 3

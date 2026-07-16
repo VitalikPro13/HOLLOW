@@ -207,7 +207,7 @@ The entire body is wrapped in `try-catch` to prevent unhandled exceptions from k
 - Cancels sync timeout timer.
 - Clears syncing peers and sync progress for the server.
 - Sets sync status to `synced`.
-- If `newMessageCount > 0`: clears channel chat cache for the server (unconditional), merges from DB if currently viewing. (It does NOT call `_requestMissingFiles` — that helper is currently dead code, no call sites; channel file bytes arrive via the per-message request-on-open path.)
+- If `newMessageCount > 0`: clears channel chat cache for the server (unconditional), merges from DB if currently viewing. (Channel file bytes arrive via the viewport sweep `requestVisibleFiles`; the old dead `_requestMissingFiles` helper was DELETED 2026-07-16.)
 - If `newMessageCount == 0` but viewing: reloads reactions only.
 - Always refreshes pins for the viewed channel.
 - Always recomputes unread counts from DB for non-viewed servers.
@@ -450,7 +450,7 @@ The entire body is wrapped in `try-catch` to prevent unhandled exceptions from k
 
 ### Helper Methods
 
-**`_requestMissingFiles(String serverId)`** -- CURRENTLY DEAD CODE (defined, no call sites — the MessageSyncCompleted hook that used to call it was removed at some point). Kept scoped + throttled (2026-07-06) in case it gets re-wired: queries `getMissingFileIdsForServer(serverId)` (scoped, not account-global), applies the shared `_throttleFileRequest` cooldown, for 6+ member servers only auto-requests images (non-images use vault erasure shards).
+**`_requestMissingFiles`** -- DELETED 2026-07-16 (was dead code with no call sites). Channel files are fetched on demand by `channel_chat_provider.requestVisibleFiles` (viewport sweep), whose candidates are now THIS server's online members — sender's master first (collapsed via `identityOf`), then other online members sorted — ONE request only (Rust `handle_request_file` reroutes an offline target to another member); zero online members = skip WITHOUT throttling so a later pass retries.
 
 **`_requestMissingFilesForDm(String peerId)`** -- The live missing-file sweep: fires on DM chat open (`requestMissingDmFilesOnOpen` from ChatPane / MobileChatRoute) and on message-bearing `DmSyncCompleted`. Since 2026-07-06 (bandwidth leak fix, see memory `feedback_profile_light_announce_bandwidth_leak`): queries `getMissingFileIdsForDm(peerId)` — THIS conversation only, never account-global (which also leaked unrelated file ids to the friend); requests each id from exactly ONE source (the friend if any of their devices is online, else the first online sibling — parallel sources trigger the AES-key-mismatch decrypt loop documented in `handle_request_file`); and applies `_throttleFileRequest` — per-file 10-min cooldown + 3 attempts per app run (both cleared on `FileCompleted`), so ids nobody holds stop re-firing on every open.
 

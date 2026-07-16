@@ -25,7 +25,7 @@ Steps:
 
 ### Friend Request by Nickname (two-step)
 
-`NodeCommand::SendFriendRequestByNickname { nickname }` in swarm.rs stores `pending_nickname_resolve = Some(nickname)` and sends `WsCommand::ResolveNickname` to the relay. When the relay responds with `WsEvent::NicknameResolved { peer_id }`, swarm.rs calls `handle_send_friend_request()` with the resolved peer_id. If resolution fails (`WsEvent::NicknameError`), emits `NetworkEvent::NicknameResolveFailed`.
+`NodeCommand::SendFriendRequestByNickname { nickname }` in swarm.rs stores `pending_nickname_resolve = Some(nickname)` and sends `WsCommand::ResolveNickname` to the relay. When the relay responds with `WsEvent::NicknameResolved { peer_id, master_id }`, swarm.rs calls `handle_send_friend_request()` with `master_id` when non-empty (2026-07-16: the claim carries the claimer's MASTER through the relay — `claim_nickname` sends a `"master"` field, `nickname_resolved` returns `"master_id"` — because the bound `peer_id` is the claimer's WS-auth DEVICE id, whose `inbox:{device}` room nobody listens on; a stranger's cold resolver couldn't collapse it and the request queued forever). Empty `master_id` (old relay) falls back to `resolver::resolve(peer_id)`. The relay-reported master is used ONLY as the friend-request target string — NEVER fed into the resolver (resolver mappings come only from master-signed device lists). If resolution fails (`WsEvent::NicknameError`), emits `NetworkEvent::NicknameResolveFailed`, which event_provider surfaces as an error toast.
 
 ### DM Room Code
 

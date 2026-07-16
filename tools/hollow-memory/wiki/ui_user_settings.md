@@ -111,17 +111,20 @@ Two `_ImageRow` widgets for Avatar and Banner. Each checks whether an image curr
 
 `_ImageRow` — Stateless widget. Shows a pressable label with image icon (accent-colored), a 1px divider line, and a trash icon. Trash uses `AnimatedOpacity` at 0.25 when no image exists, 1.0 when clearable. Trash icon colored `hollow.error` when active.
 
-### Avatar Picking Flow (`_pickAvatar()`)
+### Avatar Picking Flow (`_pickAvatar()`) — optimistic staging (2026-07-16)
 1. Opens `FilePicker.platform.pickFiles(type: FileType.image)`.
-2. GIF check: if `.gif`, skips crop. Max 1MB, stores raw bytes directly.
+2. GIF check: if `.gif`, skips crop. Max 1MB, stores raw bytes directly (bumps `_avatarPickGen` so a late crop-processing result can't clobber it).
 3. Non-GIF: opens `showImageCropDialog()` with 1:1 aspect ratio, "Crop Avatar" title.
-4. Cropped bytes passed to `network_api.processAvatar(rawBytes:)` (Rust FFI for WebP conversion/optimization).
-5. Result stored in `_pendingAvatarBytes`, `_avatarChanged = true`.
+4. **Cropped PNG bytes are staged IMMEDIATELY** (`_pendingAvatarBytes = cropped`, `_avatarChanged = true`, `_avatarBusy = true`) — the preview updates instantly. `network_api.processAvatar(rawBytes:)` (Rust WebP encode) runs in a tracked, never-throwing future (`_avatarProcessing`); success swaps in the processed WebP, failure REVERTS to the captured prior bytes + error toast. Every completion is generation-guarded (`_avatarPickGen`).
+5. While `_avatarBusy`, a small 14px `CircularProgressIndicator` overlays the preview avatar (passed to `ProfileSection` as `avatarProcessing`).
 
-`_clearAvatar()`: Sets `_pendingAvatarBytes` to empty `Uint8List(0)`, `_avatarChanged = true`.
+`_clearAvatar()`: Sets `_pendingAvatarBytes` to empty `Uint8List(0)` (the CLEAR sentinel), `_avatarChanged = true`, bumps the generation.
 
 ### Banner Picking Flow (`_pickBanner()`)
-Same as avatar but: GIF max 2MB, crop aspect ratio 3.0 (3:1), processes via `network_api.processBanner()`.
+Same as avatar but: GIF max 2MB, crop aspect ratio 3.0 (3:1), processes via `network_api.processBanner()`, tracked in `_bannerProcessing`/`_bannerPickGen`/`_bannerBusy`.
+
+### Save (`_saveProfile()`)
+Reentry-guarded by `_savingProfile` (button shows "Saving..." and disables). **AWAITS `_avatarProcessing`/`_bannerProcessing` before reading staged bytes** — a Save tapped mid-processing waits for the final WebP instead of committing half-staged state (on mobile this used to silently drop the new image). Wrapped in try/catch: `updateMyProfile` now RETHROWS (profile_provider), so failure shows an error toast and KEEPS the dirty flags (retryable). Note: the FFI resolves when the command is QUEUED — no end-to-end ack. Mobile `_ProfileTabState` (mobile_settings_tab.dart) mirrors this whole pattern.
 
 ### Right Column: Edit Fields
 Three `HollowTextField` inputs stacked vertically:

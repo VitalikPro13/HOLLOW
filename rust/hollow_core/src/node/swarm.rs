@@ -1628,7 +1628,13 @@ async fn run_event_loop(
                     }
 
                     NodeCommand::ClaimNickname { nickname } => {
-                        let _ = ws_cmd_tx.send(super::ws_client::WsCommand::ClaimNickname { nickname });
+                        // Send our MASTER id alongside: the relay returns it on
+                        // resolve so strangers friend-request `inbox:{master}`
+                        // (the room we listen on) instead of our device id.
+                        let _ = ws_cmd_tx.send(super::ws_client::WsCommand::ClaimNickname {
+                            nickname,
+                            master: local_peer_str.to_string(),
+                        });
                     }
 
                     NodeCommand::ReleaseNickname => {
@@ -1937,6 +1943,8 @@ async fn run_event_loop(
                             file_id, peer_id_str, chunks,
                             &ws_cmd_tx, &ws_room_peers,
                             &pending_ws_transfers,
+                            &server_states, &local_peer_str,
+                            &db_path, &db_passphrase,
                         );
                     }
 
@@ -3514,18 +3522,27 @@ async fn run_event_loop(
                             let _ = event_tx.send(NetworkEvent::NicknameClaimFailed { error }).await;
                         }
                     }
-                    WsEvent::NicknameResolved { nickname, peer_id } => {
+                    WsEvent::NicknameResolved { nickname, peer_id, master_id } => {
                         if pending_nickname_resolve.as_deref() == Some(&nickname) {
                             pending_nickname_resolve = None;
-                            // A temporary nickname is claimed at the relay under the
-                            // claimer's WS-auth DEVICE id, so `peer_id` is a DEVICE id —
-                            // but friendships key on the MASTER (presence/DM/profile all
-                            // do). Collapse device→master so the friend row isn't stranded
-                            // under a device id. Harmless when the resolver is cold (an
-                            // unknown id resolves to itself); the device-list ingest's
-                            // re-key (crypto_handler::ingest_device_list) repairs the row
-                            // once the mapping is learned, for the cold case.
-                            let target = super::resolver::resolve(&peer_id);
+                            // The relay binds a nickname to the claimer's WS-auth
+                            // DEVICE id but also hands back the claimer's
+                            // self-reported MASTER (`master_id`). Friendships key
+                            // on the master AND delivery targets `inbox:{master}`
+                            // — a device id has an inbox nobody joins, so a
+                            // stranger's request queued under it never drained.
+                            // Prefer master_id; fall back to the local resolver
+                            // for old relays (cold resolver = identity, then the
+                            // device-list ingest re-key repairs the row).
+                            // SECURITY: master_id is self-reported by the claimer
+                            // — use it ONLY as the friend-request target string,
+                            // NEVER feed it into `resolver` (resolver mappings
+                            // come only from master-signed device lists).
+                            let target = if !master_id.is_empty() {
+                                master_id
+                            } else {
+                                super::resolver::resolve(&peer_id)
+                            };
                             social::handle_send_friend_request(
                                 &event_tx, &ws_cmd_tx, &ws_room_peers,
                                 &mut pending_friend_requests,

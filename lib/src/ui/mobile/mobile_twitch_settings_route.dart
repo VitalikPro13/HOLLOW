@@ -264,16 +264,19 @@ class _MobileTwitchSettingsRouteState
                             hollow: hollow,
                           ),
 
-                          const SizedBox(height: HollowSpacing.xl),
-
-                          // Save button
-                          if (canManage)
-                            HollowButton.filled(
-                              onPressed: _saving ? null : _save,
-                              expand: true,
-                              child: Text(_saving ? 'Saving...' : 'Save Twitch Settings'),
-                            ),
                         ],
+
+                        const SizedBox(height: HollowSpacing.xl),
+
+                        // Save button — OUTSIDE the if(_enabled) block, else
+                        // toggling verification OFF hides it and the OFF state
+                        // can never be persisted.
+                        if (canManage)
+                          HollowButton.filled(
+                            onPressed: _saving ? null : _save,
+                            expand: true,
+                            child: Text(_saving ? 'Saving...' : 'Save Twitch Settings'),
+                          ),
                       ],
                     ),
             ),
