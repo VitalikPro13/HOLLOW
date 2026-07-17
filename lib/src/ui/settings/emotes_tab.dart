@@ -25,16 +25,14 @@ class EmotesTab extends ConsumerWidget {
   static const _maxEmotes = 50;
 
   Future<void> _addEmote(BuildContext context, WidgetRef ref) async {
-    final processed = await pickAndProcessEmoteImage(context);
-    if (processed == null || !context.mounted) return;
-    final name = await promptEmoteName(context, hash: processed.hash);
-    if (name == null || !context.mounted) return;
+    final named = await pickAndNameEmote(context);
+    if (named == null || !context.mounted) return;
     try {
       await emotes_api.addServerEmote(
         serverId: serverId,
-        name: name,
-        hash: processed.hash,
-        animated: processed.animated,
+        name: named.name,
+        hash: named.processed.hash,
+        animated: named.processed.animated,
       );
       // CrdtStore persists fire-and-forget; give the write a beat, then the
       // ServerUpdated event also invalidates serverEmotesProvider.

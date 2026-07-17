@@ -114,23 +114,35 @@ class MobileProfileSheet extends ConsumerWidget {
         : (profile?.twitchUsername ?? '');
     final board = ShowcaseBoard.decode(profile?.showcaseBoard);
 
+    // Cap the sheet below full screen (the barrier above stays tappable) and
+    // keep the drag handle OUTSIDE the scrollable — with a long showcase the
+    // inner scroll ate the drag-to-dismiss gesture and the full-height sheet
+    // left no barrier to tap, so the sheet couldn't be closed. Same shape as
+    // mobile_message_actions.dart.
     return SafeArea(
-      child: SingleChildScrollView(
+      child: ConstrainedBox(
+        constraints: BoxConstraints(
+          maxHeight: MediaQuery.sizeOf(context).height * 0.9,
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            // Drag handle
+            Padding(
+              padding: const EdgeInsets.only(top: HollowSpacing.sm),
+              child: Container(
+                width: 32, height: 4,
+                decoration: BoxDecoration(
+                  color: hollow.border,
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+            ),
+            Flexible(
+              child: SingleChildScrollView(
       child: Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        // Drag handle
-        Padding(
-          padding: const EdgeInsets.only(top: HollowSpacing.sm),
-          child: Container(
-            width: 32, height: 4,
-            decoration: BoxDecoration(
-              color: hollow.border,
-              borderRadius: BorderRadius.circular(2),
-            ),
-          ),
-        ),
-
         // Banner
         const SizedBox(height: HollowSpacing.sm),
         SizedBox(
@@ -496,7 +508,11 @@ class MobileProfileSheet extends ConsumerWidget {
         ),
       ],
     ),
-    ),
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 
@@ -558,10 +574,19 @@ class _FriendActionRow extends ConsumerWidget {
 
     if (friendInfo.status == 'pending' && friendInfo.direction == 'incoming') {
       return HollowButton.filled(
-        onPressed: () {
-          ref.read(friendsProvider.notifier).acceptRequest(peerId);
-          HollowToast.show(context, 'Friend request accepted',
-              type: HollowToastType.success);
+        onPressed: () async {
+          try {
+            await ref.read(friendsProvider.notifier).acceptRequest(peerId);
+            if (context.mounted) {
+              HollowToast.show(context, 'Friend request accepted',
+                  type: HollowToastType.success);
+            }
+          } catch (_) {
+            if (context.mounted) {
+              HollowToast.show(context, 'Could not accept request',
+                  type: HollowToastType.error);
+            }
+          }
         },
         icon: const Icon(LucideIcons.check, size: 16),
         expand: true,
@@ -643,7 +668,17 @@ class _NicknameDialogState extends ConsumerState<_NicknameDialog> {
 
   Future<void> _save() async {
     final nickname = widget.controller.text.trim();
-    await ref.read(localNicknameProvider.notifier).setNickname(widget.peerId, nickname);
+    try {
+      await ref
+          .read(localNicknameProvider.notifier)
+          .setNickname(widget.peerId, nickname);
+    } catch (_) {
+      if (mounted) {
+        HollowToast.show(context, 'Could not save nickname',
+            type: HollowToastType.error);
+      }
+      return;
+    }
     if (mounted) {
       Navigator.of(context).pop();
       HollowToast.show(

@@ -265,7 +265,7 @@ Watches `friendsProvider` and splits friends into three lists:
 
 `file:_HomeContent._showAddFriendDialog()` opens `_SidebarAddFriendDialog` via `showHollowDialog`.
 
-`_SidebarAddFriendDialog` is a `ConsumerStatefulWidget` with a unified input field (hint: "Peer ID or nickname..."). Auto-detects input type: if it starts with `12D3KooW`, sends as peer ID via `friendsProvider.notifier.sendRequest()`; otherwise resolves as a temporary nickname via `network_api.sendFriendRequestByNickname()`. Toast shows "Friend request sent" or "Looking up nickname..." accordingly.
+`_SidebarAddFriendDialog` is a `ConsumerStatefulWidget` with a unified input field (hint: "Peer ID or nickname..."). Auto-detects input type: if it starts with `12D3KooW`, sends as peer ID via `friendsProvider.notifier.sendRequest()`; otherwise resolves as a temporary nickname via `network_api.sendFriendRequestByNickname()`. The send is AWAITED: on failure the dialog stays open with a "Could not send request" error toast (no false success); only on success does it pop and toast "Friend request sent" / "Looking up nickname..." on `widget.parentContext` (guarded by that exact context's `mounted`).
 
 Actions: "Cancel" ghost button, "Send Request" filled button.
 

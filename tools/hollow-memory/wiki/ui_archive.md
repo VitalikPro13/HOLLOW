@@ -267,15 +267,15 @@ Left panel: file picker, drag-and-drop target, and list of loaded archives.
 - `importedArchivePathsProvider` (AsyncNotifierProvider) — persisted list of archive file paths (stored in SQLCipher via `archive_api.getImportedArchivePaths()` / `setImportedArchivePaths()`).
 - `selectedImportedArchiveProvider` — currently selected archive path.
 
-**Load button:** "Load Archive" pill button at top. Calls `_pickArchive()`.
+**Load button:** "Load Archive" pill button at top. Calls `_pickArchive()`. While `_loading`, disabled with a 14px spinner + "Verifying…" label.
 
 **_pickArchive():** Opens `FilePicker.platform.pickFiles()` with `.hollow-archive` extension filter. On success, calls `_loadArchive(path)`.
 
-**_loadArchive(path):**
-1. Calls `archive_api.verifyArchive(archivePath: path)` — quick integrity check.
+**_loadArchive(path):** gated by `bool _loading` (also guards `_handleDrop` — a re-drop mid-verify would double-fire; mobile twin `mobile_archive_tab.dart` has the same flag).
+1. Calls `archive_api.verifyArchive(archivePath: path)` — Ed25519 verify over the whole archive (slow for large ones).
 2. Adds path to `importedArchivePathsProvider`.
 3. Invalidates `importedArchiveVerifyProvider(path)` for re-fetch.
-4. Shows success/error toast.
+4. Shows success/error toast; `_loading` cleared in `finally`.
 
 **Drag-and-drop:** `DropTarget` widget (from `desktop_drop` package). On drag enter/exit toggles `_dragging`. On drop calls `_loadArchive()` with the first file's path.
 
@@ -288,7 +288,7 @@ Left panel: file picker, drag-and-drop target, and list of loaded archives.
 ### _ArchiveEntryCard (ConsumerWidget)
 Card displaying a loaded archive with verification status, metadata, and remove button.
 
-**Props:** `path`, `isSelected`.
+**Props:** `path`, `isSelected`. Selection bg (`accent` 0.12) is painted via `HollowPressable.backgroundColor` — ON the pressable, so it fills the exact rect the hover highlight paints (an inner Container was inset by the pressable padding and read as a mismatched outline).
 
 **Provider reads:**
 - `importedArchiveVerifyProvider(path)` (FutureProvider) — calls `archive_api.verifyArchive()` and returns verification result with signature validity, message counts, archive type, peer/channel/server info, export timestamp.

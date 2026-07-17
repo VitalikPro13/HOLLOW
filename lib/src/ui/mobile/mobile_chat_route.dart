@@ -835,21 +835,33 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
         text: text,
         errorToast: 'Failed to send file',
       );
-    } else if (widget.isDm) {
-      await ref.read(chatProvider.notifier).sendMessage(
-            widget.peerId!,
-            text,
-            replyToMid: replyMid,
-            linkPreview: preview,
-          );
     } else {
-      await ref.read(channelChatProvider.notifier).sendMessage(
-            widget.serverId!,
-            widget.channelId!,
-            text,
-            replyToMid: replyMid,
-            linkPreview: preview,
-          );
+      // Text-only send: the provider only adds the bubble AFTER the network
+      // send, so a failure here would otherwise vanish silently (composer
+      // already cleared, no bubble).
+      try {
+        if (widget.isDm) {
+          await ref.read(chatProvider.notifier).sendMessage(
+                widget.peerId!,
+                text,
+                replyToMid: replyMid,
+                linkPreview: preview,
+              );
+        } else {
+          await ref.read(channelChatProvider.notifier).sendMessage(
+                widget.serverId!,
+                widget.channelId!,
+                text,
+                replyToMid: replyMid,
+                linkPreview: preview,
+              );
+        }
+      } catch (_) {
+        if (!mounted || _routeDeactivated) return; // popped route — see field doc
+        HollowToast.show(context, 'Failed to send message',
+            type: HollowToastType.error);
+        return;
+      }
     }
     // Instant post-frame jump, not an animated scrollTo: the sender is
     // already at the bottom, and animating here races the chatProvider
@@ -1830,9 +1842,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
         timestamp: msg.timestamp,
         originalText: msg.text,
         onSave: (newText) {
-          ref
-              .read(chatProvider.notifier)
-              .editMessage(widget.peerId!, msg.messageId!, newText);
+          _submitEdit(msg.messageId!, newText);
           setState(() => _editingMessageId = null);
         },
       );
@@ -1903,27 +1913,39 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     return att.isImage ? '📷 Image' : '📎 ${att.fileName}';
   }
 
-  void _toggleDmReaction(ChatMessage msg, String emoji) {
+  Future<void> _toggleDmReaction(ChatMessage msg, String emoji) async {
     final localPeerId = ref.read(identityProvider).peerId ?? '';
     final hasReacted = msg.reactions[emoji]?.contains(localPeerId) ?? false;
     final notifier = ref.read(chatProvider.notifier);
-    if (hasReacted) {
-      notifier.removeReaction(widget.peerId!, msg.messageId!, emoji);
-    } else {
-      notifier.addReaction(widget.peerId!, msg.messageId!, emoji);
+    try {
+      if (hasReacted) {
+        await notifier.removeReaction(widget.peerId!, msg.messageId!, emoji);
+      } else {
+        await notifier.addReaction(widget.peerId!, msg.messageId!, emoji);
+      }
+    } catch (_) {
+      if (!mounted || _routeDeactivated) return; // popped route — see field doc
+      HollowToast.show(context, 'Failed to update reaction',
+          type: HollowToastType.error);
     }
   }
 
-  void _toggleChannelReaction(ChannelChatMessage msg, String emoji) {
+  Future<void> _toggleChannelReaction(ChannelChatMessage msg, String emoji) async {
     final localPeerId = ref.read(identityProvider).peerId ?? '';
     final hasReacted = msg.reactions[emoji]?.contains(localPeerId) ?? false;
     final notifier = ref.read(channelChatProvider.notifier);
-    if (hasReacted) {
-      notifier.removeReaction(
-          widget.serverId!, widget.channelId!, msg.messageId!, emoji);
-    } else {
-      notifier.addReaction(
-          widget.serverId!, widget.channelId!, msg.messageId!, emoji);
+    try {
+      if (hasReacted) {
+        await notifier.removeReaction(
+            widget.serverId!, widget.channelId!, msg.messageId!, emoji);
+      } else {
+        await notifier.addReaction(
+            widget.serverId!, widget.channelId!, msg.messageId!, emoji);
+      }
+    } catch (_) {
+      if (!mounted || _routeDeactivated) return; // popped route — see field doc
+      HollowToast.show(context, 'Failed to update reaction',
+          type: HollowToastType.error);
     }
   }
 
@@ -1999,8 +2021,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
         timestamp: msg.timestamp,
         originalText: msg.text,
         onSave: (newText) {
-          ref.read(channelChatProvider.notifier).editMessage(
-              widget.serverId!, widget.channelId!, msg.messageId!, newText);
+          _submitEdit(msg.messageId!, newText);
           setState(() => _editingMessageId = null);
         },
       );
@@ -2059,8 +2080,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
       onReply: _replyActionFor(msg.messageId, senderName, msg.text),
       onEdit: _editActionFor(msg.messageId, msg.isMe, msg.fileAttachment),
       onDelete: msg.messageId != null && msg.isMe
-          ? () => ref.read(chatProvider.notifier)
-              .deleteMessage(widget.peerId!, msg.messageId!)
+          ? () => _deleteMessage(msg.messageId!)
           : null,
       onCopy: _copyActionFor(msg.text),
       onDownload: _downloadActionFor(msg.fileAttachment, widget.peerId!),
@@ -2104,8 +2124,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
       onReply: _replyActionFor(msg.messageId, senderName, msg.text),
       onEdit: _editActionFor(msg.messageId, msg.isMe, msg.fileAttachment),
       onDelete: msg.messageId != null && msg.isMe
-          ? () => ref.read(channelChatProvider.notifier).deleteMessage(
-              widget.serverId!, widget.channelId!, msg.messageId!)
+          ? () => _deleteMessage(msg.messageId!)
           : null,
       onCopy: _copyActionFor(msg.text),
       onDownload: _downloadActionFor(msg.fileAttachment, msg.senderId),
@@ -2192,20 +2211,67 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     return () => _togglePin(messageId);
   }
 
-  void _togglePin(String messageId) {
+  Future<void> _togglePin(String messageId) async {
     final pins = ref.read(pinnedProvider)[_channelKey] ?? [];
-    if (pins.contains(messageId)) {
-      crdt_api.unpinMessage(
-        serverId: widget.serverId!,
-        channelId: widget.channelId!,
-        messageId: messageId,
-      );
-    } else {
-      crdt_api.pinMessage(
-        serverId: widget.serverId!,
-        channelId: widget.channelId!,
-        messageId: messageId,
-      );
+    final isPinned = pins.contains(messageId);
+    try {
+      if (isPinned) {
+        await crdt_api.unpinMessage(
+          serverId: widget.serverId!,
+          channelId: widget.channelId!,
+          messageId: messageId,
+        );
+      } else {
+        await crdt_api.pinMessage(
+          serverId: widget.serverId!,
+          channelId: widget.channelId!,
+          messageId: messageId,
+        );
+      }
+    } catch (_) {
+      if (!mounted || _routeDeactivated) return; // popped route — see field doc
+      HollowToast.show(
+          context,
+          isPinned ? 'Failed to unpin message' : 'Failed to pin message',
+          type: HollowToastType.error);
+    }
+  }
+
+  /// Deletes a message (DM or channel) and toasts on failure — the action
+  /// sheet is already popped by the time the await completes, so the toast
+  /// uses this State's own context.
+  Future<void> _deleteMessage(String messageId) async {
+    try {
+      if (widget.isDm) {
+        await ref
+            .read(chatProvider.notifier)
+            .deleteMessage(widget.peerId!, messageId);
+      } else {
+        await ref.read(channelChatProvider.notifier).deleteMessage(
+            widget.serverId!, widget.channelId!, messageId);
+      }
+    } catch (_) {
+      if (!mounted || _routeDeactivated) return; // popped route — see field doc
+      HollowToast.show(context, 'Failed to delete message',
+          type: HollowToastType.error);
+    }
+  }
+
+  /// Saves an edit (DM or channel) and toasts on failure.
+  Future<void> _submitEdit(String messageId, String newText) async {
+    try {
+      if (widget.isDm) {
+        await ref
+            .read(chatProvider.notifier)
+            .editMessage(widget.peerId!, messageId, newText);
+      } else {
+        await ref.read(channelChatProvider.notifier).editMessage(
+            widget.serverId!, widget.channelId!, messageId, newText);
+      }
+    } catch (_) {
+      if (!mounted || _routeDeactivated) return; // popped route — see field doc
+      HollowToast.show(context, 'Failed to save changes',
+          type: HollowToastType.error);
     }
   }
 

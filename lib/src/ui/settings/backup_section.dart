@@ -21,8 +21,13 @@ class BackupCategoryView extends StatefulWidget {
 class _BackupCategoryViewState extends State<BackupCategoryView> {
   bool _includeVault = false;
   bool _includeFiles = false;
+  // Gates the Export button while exportBackup runs (encrypts identity +
+  // messages + optionally files — multi-second). The mobile twin
+  // (_BackupExportButton) always had this; desktop was missing it.
+  bool _exporting = false;
 
   Future<void> _exportBackup() async {
+    if (_exporting) return;
     final passphrase =
         await askPassphraseDialog(context, 'Set Backup Passphrase', confirm: true);
     if (passphrase == null || !mounted) return;
@@ -35,6 +40,7 @@ class _BackupCategoryViewState extends State<BackupCategoryView> {
     );
     if (result == null || !mounted) return;
 
+    setState(() => _exporting = true);
     try {
       final size = await storage_api.exportBackup(
         outputPath: result,
@@ -49,6 +55,8 @@ class _BackupCategoryViewState extends State<BackupCategoryView> {
     } catch (e) {
       if (!mounted) return;
       HollowToast.show(context, 'Export failed: $e', type: HollowToastType.error);
+    } finally {
+      if (mounted) setState(() => _exporting = false);
     }
   }
 
@@ -109,9 +117,16 @@ class _BackupCategoryViewState extends State<BackupCategoryView> {
               // mobile Settings "Export Backup"; "Link a device" is the
               // section's one filled primary.
               HollowButton.outline(
-                onPressed: _exportBackup,
-                icon: const Icon(LucideIcons.download, size: 16),
-                child: const Text('Export Backup'),
+                onPressed: _exporting ? null : _exportBackup,
+                icon: _exporting
+                    ? SizedBox(
+                        width: 14,
+                        height: 14,
+                        child: CircularProgressIndicator(
+                            strokeWidth: 2, color: hollow.textSecondary),
+                      )
+                    : const Icon(LucideIcons.download, size: 16),
+                child: Text(_exporting ? 'Exporting…' : 'Export Backup'),
               ),
             ],
           ),

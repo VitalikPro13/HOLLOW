@@ -50,6 +50,9 @@ class LocalNicknameNotifier extends Notifier<Map<String, String>> {
     await _save();
   }
 
+  // Rethrows so call sites can toast a failed persist — the in-memory update
+  // above still applied, but a swallowed write here silently loses the
+  // nickname on the next launch.
   Future<void> _save() async {
     try {
       await storage_api.saveSetting(
@@ -58,6 +61,7 @@ class LocalNicknameNotifier extends Notifier<Map<String, String>> {
       );
     } catch (e) {
       debugPrint('[HOLLOW] Failed to save local nicknames: $e');
+      rethrow;
     }
   }
 }

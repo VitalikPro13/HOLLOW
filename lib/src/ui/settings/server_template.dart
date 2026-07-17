@@ -1,4 +1,5 @@
-﻿import 'dart:convert';
+﻿import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
@@ -373,7 +374,19 @@ Future<void> importServerTemplate(
     final confirmed = await _showConfirmationDialog(context, template, diff);
     if (confirmed != true || !context.mounted) return;
 
-    await _applyTemplate(context, ref, server.serverId, template, diff);
+    // Non-dismissible progress dialog: the apply runs channel deletes/creates
+    // plus an up-to-5s polling loop — without this the UI sits silent until
+    // the terminal toast. Popped in the finally.
+    unawaited(showHollowDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const _TemplateApplyProgressDialog(),
+    ));
+    try {
+      await _applyTemplate(context, ref, server.serverId, template, diff);
+    } finally {
+      if (context.mounted) Navigator.of(context).pop();
+    }
   } catch (e) {
     if (context.mounted) {
       HollowToast.show(context, 'Import failed: $e',
@@ -458,6 +471,35 @@ bool _listEquals<T>(List<T> a, List<T> b) {
 }
 
 // ─── Apply template ─────────────────────────────────────────────────────────
+
+/// Blocking progress dialog shown while [_applyTemplate] runs.
+class _TemplateApplyProgressDialog extends StatelessWidget {
+  const _TemplateApplyProgressDialog();
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+    return HollowDialog(
+      title: 'Applying Template',
+      content: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          SizedBox(
+            width: 16,
+            height: 16,
+            child: CircularProgressIndicator(
+                strokeWidth: 2, color: hollow.accent),
+          ),
+          const SizedBox(width: HollowSpacing.md),
+          Text(
+            'Updating settings and channels…',
+            style: HollowTypography.body.copyWith(color: hollow.textSecondary),
+          ),
+        ],
+      ),
+    );
+  }
+}
 
 Future<void> _applyTemplate(
   BuildContext context,

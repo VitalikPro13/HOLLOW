@@ -275,6 +275,39 @@ class _ChannelsTabState extends ConsumerState<ChannelsTab> {
          });
   }
 
+  /// Commit a channel-property CRDT write; on failure revert the optimistic
+  /// provider update (done at the call site BEFORE the FFI, per convention)
+  /// and toast — otherwise a dead node leaves the control lying silently.
+  Future<void> _commitChannelProp(
+      Future<void> Function() commit, VoidCallback revert) async {
+    try {
+      await commit();
+    } catch (_) {
+      revert();
+      if (mounted) {
+        HollowToast.show(context, 'Could not update channel',
+            type: HollowToastType.error);
+      }
+    }
+  }
+
+  /// Awaited rename with an error toast — a bare fire-and-forget here
+  /// rejected unhandled on a dead node with zero user feedback.
+  Future<void> _commitRename(String channelId, String newName) async {
+    try {
+      await crdt_api.renameChannel(
+        serverId: widget.serverId,
+        channelId: channelId,
+        newName: newName,
+      );
+    } catch (_) {
+      if (mounted) {
+        HollowToast.show(context, 'Could not rename channel',
+            type: HollowToastType.error);
+      }
+    }
+  }
+
   void _renameChannel(String channelId, String currentName) {
     final controller = TextEditingController(text: currentName);
     showHollowDialog(
@@ -288,11 +321,7 @@ class _ChannelsTabState extends ConsumerState<ChannelsTab> {
           onSubmitted: (_) {
             final newName = controller.text.trim();
             if (newName.isNotEmpty && newName != currentName) {
-              crdt_api.renameChannel(
-                serverId: widget.serverId,
-                channelId: channelId,
-                newName: newName,
-              );
+              _commitRename(channelId, newName);
             }
             Navigator.pop(ctx);
           },
@@ -306,11 +335,7 @@ class _ChannelsTabState extends ConsumerState<ChannelsTab> {
             onPressed: () {
               final newName = controller.text.trim();
               if (newName.isNotEmpty && newName != currentName) {
-                crdt_api.renameChannel(
-                  serverId: widget.serverId,
-                  channelId: channelId,
-                  newName: newName,
-                );
+                _commitRename(channelId, newName);
               }
               Navigator.pop(ctx);
             },
@@ -336,21 +361,34 @@ class _ChannelsTabState extends ConsumerState<ChannelsTab> {
             child: const Text('Cancel'),
           ),
           HollowButton.danger(
-            onPressed: () {
-              crdt_api.removeChannel(
-                serverId: widget.serverId,
-                channelId: channelId,
-              );
+            onPressed: () async {
+              Navigator.pop(ctx);
               setState(() {
                 _layout.removeWhere(
                     (i) => i is ChannelItem && i.channelId == channelId);
               });
-              Navigator.pop(ctx);
-              HollowToast.show(
-                context,
-                'Channel #$name deleted',
-                type: HollowToastType.info,
-              );
+              try {
+                await crdt_api.removeChannel(
+                  serverId: widget.serverId,
+                  channelId: channelId,
+                );
+              } catch (_) {
+                if (mounted) {
+                  // Re-sync the optimistically-pruned layout from the DB.
+                  setState(() => _loaded = false);
+                  _loadLayout();
+                  HollowToast.show(context, 'Could not delete channel',
+                      type: HollowToastType.error);
+                }
+                return;
+              }
+              if (mounted) {
+                HollowToast.show(
+                  context,
+                  'Channel #$name deleted',
+                  type: HollowToastType.info,
+                );
+              }
             },
             child: const Text('Delete'),
           ),
@@ -527,60 +565,103 @@ class _ChannelsTabState extends ConsumerState<ChannelsTab> {
                         slowModeSecs: info?.slowModeSecs ?? 0,
                         mediaOnly: info?.mediaOnly ?? false,
                         onSlowModeChanged: (secs) async {
-                          ref.read(channelListProvider.notifier).updateChannel(
+                          final channels =
+                              ref.read(channelListProvider.notifier);
+                          final prev = info?.slowModeSecs ?? 0;
+                          channels.updateChannel(
                             item.channelId,
                             (ch) => ch.copyWith(slowModeSecs: secs),
                           );
-                          await crdt_api.setChannelSlowMode(
-                            serverId: widget.serverId,
-                            channelId: item.channelId,
-                            seconds: secs,
+                          await _commitChannelProp(
+                            () => crdt_api.setChannelSlowMode(
+                              serverId: widget.serverId,
+                              channelId: item.channelId,
+                              seconds: secs,
+                            ),
+                            () => channels.updateChannel(
+                              item.channelId,
+                              (ch) => ch.copyWith(slowModeSecs: prev),
+                            ),
                           );
                         },
                         onMediaOnlyToggled: () {
+                          final channels =
+                              ref.read(channelListProvider.notifier);
                           final newVal = !(info?.mediaOnly ?? false);
-                          ref.read(channelListProvider.notifier).updateChannel(
+                          channels.updateChannel(
                             item.channelId,
                             (ch) => ch.copyWith(mediaOnly: newVal),
                           );
-                          crdt_api.setChannelMediaOnly(
-                            serverId: widget.serverId,
-                            channelId: item.channelId,
-                            mediaOnly: newVal,
-                          ).catchError((_) {});
+                          _commitChannelProp(
+                            () => crdt_api.setChannelMediaOnly(
+                              serverId: widget.serverId,
+                              channelId: item.channelId,
+                              mediaOnly: newVal,
+                            ),
+                            () => channels.updateChannel(
+                              item.channelId,
+                              (ch) => ch.copyWith(mediaOnly: !newVal),
+                            ),
+                          );
                         },
                         onVisibilityChanged: (v) async {
-                          ref.read(channelListProvider.notifier).updateChannel(
+                          final channels =
+                              ref.read(channelListProvider.notifier);
+                          final prev = info?.visibility ?? 'everyone';
+                          channels.updateChannel(
                             item.channelId,
                             (ch) => ch.copyWith(visibility: v),
                           );
-                          await crdt_api.setChannelVisibility(
-                            serverId: widget.serverId,
-                            channelId: item.channelId,
-                            visibility: v,
+                          await _commitChannelProp(
+                            () => crdt_api.setChannelVisibility(
+                              serverId: widget.serverId,
+                              channelId: item.channelId,
+                              visibility: v,
+                            ),
+                            () => channels.updateChannel(
+                              item.channelId,
+                              (ch) => ch.copyWith(visibility: prev),
+                            ),
                           );
                         },
                         onPostingChanged: (v) async {
-                          ref.read(channelListProvider.notifier).updateChannel(
+                          final channels =
+                              ref.read(channelListProvider.notifier);
+                          final prev = info?.posting ?? 'everyone';
+                          channels.updateChannel(
                             item.channelId,
                             (ch) => ch.copyWith(posting: v),
                           );
-                          await crdt_api.setChannelPosting(
-                            serverId: widget.serverId,
-                            channelId: item.channelId,
-                            posting: v,
+                          await _commitChannelProp(
+                            () => crdt_api.setChannelPosting(
+                              serverId: widget.serverId,
+                              channelId: item.channelId,
+                              posting: v,
+                            ),
+                            () => channels.updateChannel(
+                              item.channelId,
+                              (ch) => ch.copyWith(posting: prev),
+                            ),
                           );
                         },
                         onPublicToggled: () {
+                          final channels =
+                              ref.read(channelListProvider.notifier);
                           final newVal = !(info?.isPublic ?? false);
-                          crdt_api.setChannelPublic(
-                            serverId: widget.serverId,
-                            channelId: item.channelId,
-                            isPublic: newVal,
-                          );
-                          ref.read(channelListProvider.notifier).updateChannel(
+                          channels.updateChannel(
                             item.channelId,
                             (ch) => ch.copyWith(isPublic: newVal),
+                          );
+                          _commitChannelProp(
+                            () => crdt_api.setChannelPublic(
+                              serverId: widget.serverId,
+                              channelId: item.channelId,
+                              isPublic: newVal,
+                            ),
+                            () => channels.updateChannel(
+                              item.channelId,
+                              (ch) => ch.copyWith(isPublic: !newVal),
+                            ),
                           );
                         },
                         onRename: () =>

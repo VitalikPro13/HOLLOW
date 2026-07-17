@@ -700,10 +700,20 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
       _stagedPreviewLoading = false;
       _stagedHollowLink = null;
     });
-    await ref
-        .read(chatProvider.notifier)
-        .sendMessage(widget.peerId, text,
-            replyToMid: replyMid, linkPreview: preview);
+    try {
+      await ref
+          .read(chatProvider.notifier)
+          .sendMessage(widget.peerId, text,
+              replyToMid: replyMid, linkPreview: preview);
+    } catch (_) {
+      // The provider only adds the bubble AFTER the network send, so a
+      // failure here would otherwise vanish silently (composer already
+      // cleared, no bubble).
+      if (!mounted) return;
+      HollowToast.show(context, 'Failed to send message',
+          type: HollowToastType.error);
+      return;
+    }
     _scrollToBottom();
   }
 
@@ -1704,9 +1714,7 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
       onEditStart: _editStartFor(msg, revIndex),
       onEditSubmit: (newText) {
         setState(() => _editingMessageId = null);
-        ref
-            .read(chatProvider.notifier)
-            .editMessage(widget.peerId, msg.messageId!, newText);
+        _submitEdit(msg.messageId!, newText);
       },
       onEditCancel: () => setState(() => _editingMessageId = null),
       onDelete: _deleteFor(msg),
@@ -1799,9 +1807,31 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
 
   VoidCallback? _deleteFor(ChatMessage msg) {
     if (msg.messageId == null || !msg.isMe) return null;
-    return () => ref
-        .read(chatProvider.notifier)
-        .deleteMessage(widget.peerId, msg.messageId!);
+    return () => _deleteMessage(msg.messageId!);
+  }
+
+  Future<void> _deleteMessage(String messageId) async {
+    try {
+      await ref
+          .read(chatProvider.notifier)
+          .deleteMessage(widget.peerId, messageId);
+    } catch (_) {
+      if (!mounted) return;
+      HollowToast.show(context, 'Failed to delete message',
+          type: HollowToastType.error);
+    }
+  }
+
+  Future<void> _submitEdit(String messageId, String newText) async {
+    try {
+      await ref
+          .read(chatProvider.notifier)
+          .editMessage(widget.peerId, messageId, newText);
+    } catch (_) {
+      if (!mounted) return;
+      HollowToast.show(context, 'Failed to save changes',
+          type: HollowToastType.error);
+    }
   }
 
   VoidCallback? _replyFor(ChatMessage msg) {
@@ -1822,14 +1852,20 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     };
   }
 
-  void _toggleReaction(ChatMessage msg, String emoji) {
+  Future<void> _toggleReaction(ChatMessage msg, String emoji) async {
     final localPeerId = ref.read(identityProvider).peerId ?? '';
     final hasReacted = msg.reactions[emoji]?.contains(localPeerId) ?? false;
     final notifier = ref.read(chatProvider.notifier);
-    if (hasReacted) {
-      notifier.removeReaction(widget.peerId, msg.messageId!, emoji);
-    } else {
-      notifier.addReaction(widget.peerId, msg.messageId!, emoji);
+    try {
+      if (hasReacted) {
+        await notifier.removeReaction(widget.peerId, msg.messageId!, emoji);
+      } else {
+        await notifier.addReaction(widget.peerId, msg.messageId!, emoji);
+      }
+    } catch (_) {
+      if (!mounted) return;
+      HollowToast.show(context, 'Failed to update reaction',
+          type: HollowToastType.error);
     }
   }
 

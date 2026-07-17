@@ -504,9 +504,20 @@ class _FriendRow extends ConsumerWidget {
             child: const Text('Cancel'),
           ),
           HollowButton.filled(
-            onPressed: () {
+            onPressed: () async {
               final nickname = controller.text.trim();
-              ref.read(localNicknameProvider.notifier).setNickname(peerId, nickname);
+              try {
+                await ref
+                    .read(localNicknameProvider.notifier)
+                    .setNickname(peerId, nickname);
+              } catch (_) {
+                if (context.mounted) {
+                  HollowToast.show(context, 'Could not save nickname',
+                      type: HollowToastType.error);
+                }
+                return;
+              }
+              if (!context.mounted) return;
               Navigator.pop(context);
               HollowToast.show(context,
                   nickname.isEmpty ? 'Nickname cleared' : 'Nickname set',
@@ -531,13 +542,27 @@ class _FriendRow extends ConsumerWidget {
             child: const Text('Cancel'),
           ),
           HollowButton.danger(
-            onPressed: () {
+            onPressed: () async {
               Navigator.pop(context);
-              ref.read(friendsProvider.notifier).removeFriend(peerId);
+              // Capture the notifier first — the awaited removal rebuilds the
+              // friends list and may unmount this tile.
+              final favourites = ref.read(favouriteFriendsProvider.notifier);
+              try {
+                await ref.read(friendsProvider.notifier).removeFriend(peerId);
+              } catch (_) {
+                if (context.mounted) {
+                  HollowToast.show(context, 'Could not remove friend',
+                      type: HollowToastType.error);
+                }
+                return;
+              }
               // Also drop them from favourites so no stale entry lingers (parity
               // with desktop). peerId is the master from the collapsed list.
-              ref.read(favouriteFriendsProvider.notifier).remove(peerId);
-              HollowToast.show(context, 'Friend removed', type: HollowToastType.success);
+              favourites.remove(peerId);
+              if (context.mounted) {
+                HollowToast.show(context, 'Friend removed',
+                    type: HollowToastType.success);
+              }
             },
             child: const Text('Remove'),
           ),
@@ -627,10 +652,19 @@ class _PendingRow extends ConsumerWidget {
           ),
           if (isIncoming) ...[
             HollowPressable(
-              onTap: () {
-                ref.read(friendsProvider.notifier).acceptRequest(peerId);
-                HollowToast.show(context, 'Friend request accepted',
-                    type: HollowToastType.success);
+              onTap: () async {
+                try {
+                  await ref.read(friendsProvider.notifier).acceptRequest(peerId);
+                  if (context.mounted) {
+                    HollowToast.show(context, 'Friend request accepted',
+                        type: HollowToastType.success);
+                  }
+                } catch (_) {
+                  if (context.mounted) {
+                    HollowToast.show(context, 'Could not accept request',
+                        type: HollowToastType.error);
+                  }
+                }
               },
               semanticLabel: 'Accept friend request',
               borderRadius: BorderRadius.circular(hollow.radiusSm),
@@ -639,7 +673,16 @@ class _PendingRow extends ConsumerWidget {
             ),
             const SizedBox(width: HollowSpacing.xs),
             HollowPressable(
-              onTap: () => ref.read(friendsProvider.notifier).rejectRequest(peerId),
+              onTap: () async {
+                try {
+                  await ref.read(friendsProvider.notifier).rejectRequest(peerId);
+                } catch (_) {
+                  if (context.mounted) {
+                    HollowToast.show(context, 'Could not decline request',
+                        type: HollowToastType.error);
+                  }
+                }
+              },
               semanticLabel: 'Decline friend request',
               borderRadius: BorderRadius.circular(hollow.radiusSm),
               padding: const EdgeInsets.all(HollowSpacing.sm),
@@ -647,7 +690,16 @@ class _PendingRow extends ConsumerWidget {
             ),
           ] else
             HollowPressable(
-              onTap: () => ref.read(friendsProvider.notifier).rejectRequest(peerId),
+              onTap: () async {
+                try {
+                  await ref.read(friendsProvider.notifier).rejectRequest(peerId);
+                } catch (_) {
+                  if (context.mounted) {
+                    HollowToast.show(context, 'Could not cancel request',
+                        type: HollowToastType.error);
+                  }
+                }
+              },
               semanticLabel: 'Cancel friend request',
               borderRadius: BorderRadius.circular(hollow.radiusSm),
               padding: const EdgeInsets.all(HollowSpacing.sm),

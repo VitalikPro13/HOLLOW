@@ -186,11 +186,19 @@ class _ChannelActionsSheetState extends State<_ChannelActionsSheet> {
                   return;
                 }
                 Navigator.pop(ctx2);
-                await crdt_api.renameChannel(
-                  serverId: widget.serverId,
-                  channelId: widget.channel.channelId,
-                  newName: name,
-                );
+                try {
+                  await crdt_api.renameChannel(
+                    serverId: widget.serverId,
+                    channelId: widget.channel.channelId,
+                    newName: name,
+                  );
+                } catch (_) {
+                  if (mounted) {
+                    HollowToast.show(context, 'Could not rename channel',
+                        type: HollowToastType.error);
+                  }
+                  return;
+                }
                 widget.onChanged?.call();
                 if (mounted) {
                   HollowToast.show(context, 'Channel renamed',
@@ -327,10 +335,18 @@ class _ChannelActionsSheetState extends State<_ChannelActionsSheet> {
 
   Future<void> _doDelete() async {
     Navigator.pop(context);
-    await crdt_api.removeChannel(
-      serverId: widget.serverId,
-      channelId: widget.channel.channelId,
-    );
+    try {
+      await crdt_api.removeChannel(
+        serverId: widget.serverId,
+        channelId: widget.channel.channelId,
+      );
+    } catch (_) {
+      if (mounted) {
+        HollowToast.show(context, 'Could not delete channel',
+            type: HollowToastType.error);
+      }
+      return;
+    }
     widget.onChanged?.call();
     if (mounted) {
       HollowToast.show(context, 'Channel deleted', type: HollowToastType.success);
@@ -338,21 +354,39 @@ class _ChannelActionsSheetState extends State<_ChannelActionsSheet> {
   }
 
   Future<void> _setVisibility(String value) async {
-    await crdt_api.setChannelVisibility(
-      serverId: widget.serverId,
-      channelId: widget.channel.channelId,
-      visibility: value,
-    );
+    try {
+      await crdt_api.setChannelVisibility(
+        serverId: widget.serverId,
+        channelId: widget.channel.channelId,
+        visibility: value,
+      );
+    } catch (_) {
+      if (mounted) {
+        HollowToast.show(context, 'Could not update channel',
+            type: HollowToastType.error);
+      }
+      return;
+    }
+    if (!mounted) return;
     setState(() => _visibility = value);
     widget.onChanged?.call();
   }
 
   Future<void> _setPosting(String value) async {
-    await crdt_api.setChannelPosting(
-      serverId: widget.serverId,
-      channelId: widget.channel.channelId,
-      posting: value,
-    );
+    try {
+      await crdt_api.setChannelPosting(
+        serverId: widget.serverId,
+        channelId: widget.channel.channelId,
+        posting: value,
+      );
+    } catch (_) {
+      if (mounted) {
+        HollowToast.show(context, 'Could not update channel',
+            type: HollowToastType.error);
+      }
+      return;
+    }
+    if (!mounted) return;
     setState(() => _posting = value);
     widget.onChanged?.call();
   }

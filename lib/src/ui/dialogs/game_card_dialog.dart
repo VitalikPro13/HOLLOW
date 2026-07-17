@@ -140,8 +140,14 @@ class _GameCardDialogState extends State<_GameCardDialog> {
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
     final screenSize = MediaQuery.sizeOf(context);
-    final maxHeight = (screenSize.height - HollowSpacing.xl * 2)
-        .clamp(0.0, double.infinity);
+    // Status-bar/notch + home-indicator insets: showHollowDialog strips
+    // viewInsets and deliberately adds NO SafeArea, so respect it here — on
+    // phones the card otherwise ran under the notch and the hero's X close
+    // button landed in the unreachable strip.
+    final safe = MediaQuery.paddingOf(context);
+    final maxHeight =
+        (screenSize.height - safe.vertical - HollowSpacing.xl * 2)
+            .clamp(0.0, double.infinity);
 
     // Proportional scaling, exactly like the profile dialog: shrink the
     // ensemble before giving up its shape; only tiny windows stack.
@@ -214,7 +220,12 @@ class _GameCardDialogState extends State<_GameCardDialog> {
 
     return Center(
       child: Padding(
-        padding: const EdgeInsets.all(HollowSpacing.xl),
+        padding: EdgeInsets.fromLTRB(
+          HollowSpacing.xl,
+          HollowSpacing.xl + safe.top,
+          HollowSpacing.xl,
+          HollowSpacing.xl + safe.bottom,
+        ),
         child: ConstrainedBox(
           constraints: BoxConstraints(maxWidth: width, maxHeight: maxHeight),
           child: Material(

@@ -136,20 +136,44 @@ class _SecurityTabState extends State<SecurityTab> {
     }
   }
 
+  /// Which protection action is running an Argon2id/keychain FFI right now
+  /// (null = idle). One field for all five buttons — they mutate the same
+  /// identity file and must not overlap; the active button shows a spinner.
+  String? _busyAction;
+
+  Future<void> _runProtectionAction(
+      String action, Future<void> Function() body) async {
+    if (_busyAction != null) return;
+    setState(() => _busyAction = action);
+    try {
+      await body();
+    } finally {
+      if (mounted) setState(() => _busyAction = null);
+    }
+  }
+
+  Widget _busySpinner(Color color) => SizedBox(
+        width: 14,
+        height: 14,
+        child: CircularProgressIndicator(strokeWidth: 2, color: color),
+      );
+
   Future<void> _enablePassword() async {
     final passphrase = await _askPassphrase(context, 'Set App Password', confirm: true, buttonLabel: 'Set Password');
     if (passphrase == null || !mounted) return;
 
-    try {
-      await identity_api.enablePasswordProtection(password: passphrase, requireOnLaunch: true);
-      if (!mounted) return;
-      await _loadProtectionStatus();
-      if (!mounted) return;
-      HollowToast.show(context, 'Password protection enabled', type: HollowToastType.success);
-    } catch (e) {
-      if (!mounted) return;
-      HollowToast.show(context, 'Failed: $e', type: HollowToastType.error);
-    }
+    await _runProtectionAction('enablePassword', () async {
+      try {
+        await identity_api.enablePasswordProtection(password: passphrase, requireOnLaunch: true);
+        if (!mounted) return;
+        await _loadProtectionStatus();
+        if (!mounted) return;
+        HollowToast.show(context, 'Password protection enabled', type: HollowToastType.success);
+      } catch (e) {
+        if (!mounted) return;
+        HollowToast.show(context, 'Failed: $e', type: HollowToastType.error);
+      }
+    });
   }
 
   Future<void> _toggleRequireOnLaunch(bool require) async {
@@ -170,56 +194,64 @@ class _SecurityTabState extends State<SecurityTab> {
     final newPass = await _askPassphrase(context, 'New Password', confirm: true, buttonLabel: 'Change Password');
     if (newPass == null || !mounted) return;
 
-    try {
-      await identity_api.changePassword(oldPassword: oldPass, newPassword: newPass);
-      if (!mounted) return;
-      HollowToast.show(context, 'Password changed', type: HollowToastType.success);
-    } catch (e) {
-      if (!mounted) return;
-      HollowToast.show(context, 'Failed: $e', type: HollowToastType.error);
-    }
+    await _runProtectionAction('changePassword', () async {
+      try {
+        await identity_api.changePassword(oldPassword: oldPass, newPassword: newPass);
+        if (!mounted) return;
+        HollowToast.show(context, 'Password changed', type: HollowToastType.success);
+      } catch (e) {
+        if (!mounted) return;
+        HollowToast.show(context, 'Failed: $e', type: HollowToastType.error);
+      }
+    });
   }
 
   Future<void> _removePassword() async {
     final pass = await _askPassphrase(context, 'Enter Current Password', buttonLabel: 'Remove Password');
     if (pass == null || !mounted) return;
 
-    try {
-      await identity_api.removePasswordProtection(password: pass);
-      if (!mounted) return;
-      await _loadProtectionStatus();
-      if (!mounted) return;
-      HollowToast.show(context, 'App password removed', type: HollowToastType.success);
-    } catch (e) {
-      if (!mounted) return;
-      HollowToast.show(context, 'Wrong password', type: HollowToastType.error);
-    }
+    await _runProtectionAction('removePassword', () async {
+      try {
+        await identity_api.removePasswordProtection(password: pass);
+        if (!mounted) return;
+        await _loadProtectionStatus();
+        if (!mounted) return;
+        HollowToast.show(context, 'App password removed', type: HollowToastType.success);
+      } catch (e) {
+        if (!mounted) return;
+        HollowToast.show(context, 'Wrong password', type: HollowToastType.error);
+      }
+    });
   }
 
   Future<void> _enableOsKeychain() async {
-    try {
-      await identity_api.enableOsKeychainProtection();
-      if (!mounted) return;
-      await _loadProtectionStatus();
-      if (!mounted) return;
-      HollowToast.show(context, 'Device protection enabled', type: HollowToastType.success);
-    } catch (e) {
-      if (!mounted) return;
-      HollowToast.show(context, 'Failed: $e', type: HollowToastType.error);
-    }
+    await _runProtectionAction('enableKeychain', () async {
+      try {
+        await identity_api.enableOsKeychainProtection();
+        if (!mounted) return;
+        await _loadProtectionStatus();
+        if (!mounted) return;
+        HollowToast.show(context, 'Device protection enabled', type: HollowToastType.success);
+      } catch (e) {
+        if (!mounted) return;
+        HollowToast.show(context, 'Failed: $e', type: HollowToastType.error);
+      }
+    });
   }
 
   Future<void> _disableOsKeychain() async {
-    try {
-      await identity_api.disableOsKeychainProtection();
-      if (!mounted) return;
-      await _loadProtectionStatus();
-      if (!mounted) return;
-      HollowToast.show(context, 'Device protection removed', type: HollowToastType.success);
-    } catch (e) {
-      if (!mounted) return;
-      HollowToast.show(context, 'Failed: $e', type: HollowToastType.error);
-    }
+    await _runProtectionAction('disableKeychain', () async {
+      try {
+        await identity_api.disableOsKeychainProtection();
+        if (!mounted) return;
+        await _loadProtectionStatus();
+        if (!mounted) return;
+        HollowToast.show(context, 'Device protection removed', type: HollowToastType.success);
+      } catch (e) {
+        if (!mounted) return;
+        HollowToast.show(context, 'Failed: $e', type: HollowToastType.error);
+      }
+    });
   }
 
   Future<void> _loadMnemonic() async {
@@ -309,8 +341,10 @@ class _SecurityTabState extends State<SecurityTab> {
         ..._passwordActiveChildren(hollow)
       else
         HollowButton.filled(
-          onPressed: _enablePassword,
-          icon: const Icon(LucideIcons.lock, size: 16),
+          onPressed: _busyAction == null ? _enablePassword : null,
+          icon: _busyAction == 'enablePassword'
+              ? _busySpinner(hollow.textOnAccent)
+              : const Icon(LucideIcons.lock, size: 16),
           child: const Text('Set Password'),
         ),
 
@@ -391,14 +425,18 @@ class _SecurityTabState extends State<SecurityTab> {
       Row(
         children: [
           HollowButton.ghost(
-            onPressed: _changePassword,
-            icon: const Icon(LucideIcons.keyRound, size: 16),
+            onPressed: _busyAction == null ? _changePassword : null,
+            icon: _busyAction == 'changePassword'
+                ? _busySpinner(hollow.accent)
+                : const Icon(LucideIcons.keyRound, size: 16),
             child: const Text('Change Password'),
           ),
           const SizedBox(width: HollowSpacing.sm),
           HollowButton.ghost(
-            onPressed: _removePassword,
-            icon: const Icon(LucideIcons.shieldOff, size: 16),
+            onPressed: _busyAction == null ? _removePassword : null,
+            icon: _busyAction == 'removePassword'
+                ? _busySpinner(hollow.accent)
+                : const Icon(LucideIcons.shieldOff, size: 16),
             child: const Text('Remove Password'),
           ),
         ],
@@ -435,14 +473,18 @@ class _SecurityTabState extends State<SecurityTab> {
         ),
         const SizedBox(height: HollowSpacing.md),
         HollowButton.ghost(
-          onPressed: _disableOsKeychain,
-          icon: const Icon(LucideIcons.shieldOff, size: 16),
+          onPressed: _busyAction == null ? _disableOsKeychain : null,
+          icon: _busyAction == 'disableKeychain'
+              ? _busySpinner(hollow.accent)
+              : const Icon(LucideIcons.shieldOff, size: 16),
           child: const Text('Remove Device Protection'),
         ),
       ] else ...[
         HollowButton.outline(
-          onPressed: _enableOsKeychain,
-          icon: const Icon(LucideIcons.monitor, size: 16),
+          onPressed: _busyAction == null ? _enableOsKeychain : null,
+          icon: _busyAction == 'enableKeychain'
+              ? _busySpinner(hollow.accent)
+              : const Icon(LucideIcons.monitor, size: 16),
           child: const Text('Enable Device Protection'),
         ),
       ],

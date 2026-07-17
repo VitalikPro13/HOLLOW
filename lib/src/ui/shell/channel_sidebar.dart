@@ -676,10 +676,30 @@ class _HomeContent extends ConsumerWidget {
               hollow: hollow,
               peerId: req.peerId,
               direction: 'incoming',
-              onAccept: () =>
-                  ref.read(friendsProvider.notifier).acceptRequest(req.peerId),
-              onReject: () =>
-                  ref.read(friendsProvider.notifier).rejectRequest(req.peerId),
+              onAccept: () async {
+                try {
+                  await ref
+                      .read(friendsProvider.notifier)
+                      .acceptRequest(req.peerId);
+                } catch (_) {
+                  if (innerContext.mounted) {
+                    HollowToast.show(innerContext, 'Could not accept request',
+                        type: HollowToastType.error);
+                  }
+                }
+              },
+              onReject: () async {
+                try {
+                  await ref
+                      .read(friendsProvider.notifier)
+                      .rejectRequest(req.peerId);
+                } catch (_) {
+                  if (innerContext.mounted) {
+                    HollowToast.show(innerContext, 'Could not decline request',
+                        type: HollowToastType.error);
+                  }
+                }
+              },
             ),
           for (final req in pendingOutgoing)
             _PendingRequestTile(
@@ -972,17 +992,30 @@ class _SidebarAddFriendDialogState
     super.dispose();
   }
 
-  void _send() {
+  Future<void> _send() async {
     final input = _controller.text.trim();
     if (input.isEmpty) return;
-    if (_isPeerId(input)) {
-      ref.read(friendsProvider.notifier).sendRequest(input);
-    } else {
-      network_api.sendFriendRequestByNickname(nickname: input);
+    // Await the send so a failure (e.g. node not running) surfaces here —
+    // the dialog stays open for a retry instead of toasting a false success.
+    try {
+      if (_isPeerId(input)) {
+        await ref.read(friendsProvider.notifier).sendRequest(input);
+      } else {
+        await network_api.sendFriendRequestByNickname(nickname: input);
+      }
+    } catch (_) {
+      if (mounted) {
+        HollowToast.show(context, 'Could not send request',
+            type: HollowToastType.error);
+      }
+      return;
     }
+    if (!mounted) return;
     Navigator.pop(context);
+    final parentContext = widget.parentContext;
+    if (!parentContext.mounted) return;
     HollowToast.show(
-      widget.parentContext,
+      parentContext,
       _isPeerId(input) ? 'Friend request sent' : 'Looking up nickname...',
       type: HollowToastType.success,
     );

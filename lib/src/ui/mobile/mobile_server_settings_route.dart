@@ -59,6 +59,13 @@ class _MobileServerSettingsRouteState
   bool _saving = false;
   bool _savingNickname = false;
 
+  // Optimistic server-icon staging: the cropped bytes render instantly while
+  // the Rust WebP encode + CRDT write run behind a small spinner. Any newer
+  // pick/clear bumps the generation so a stale completion can't clobber it.
+  Uint8List? _stagedIcon;
+  bool _iconBusy = false;
+  int _iconPickGen = 0;
+
   bool _isPrivate = false;
   bool _isNsfw = false;
   bool _savingAccess = false;
@@ -285,12 +292,13 @@ class _MobileServerSettingsRouteState
   }
 
   Future<void> _pickAvatar() async {
+    final gen = ++_iconPickGen;
     final result = await FilePicker.platform.pickFiles(type: FileType.image);
     if (result == null || result.files.isEmpty) return;
     final path = result.files.first.path;
     if (path == null) return;
     final bytes = await result.files.first.xFile.readAsBytes();
-    if (!mounted) return;
+    if (!mounted || gen != _iconPickGen) return;
 
     final isMobile = Platform.isAndroid || Platform.isIOS;
     final cropped = isMobile
@@ -302,34 +310,63 @@ class _MobileServerSettingsRouteState
             context: context, imageBytes: bytes,
             aspectRatio: 1.0, title: 'Crop Server Avatar',
           );
-    if (cropped == null || !mounted) return;
+    if (cropped == null || !mounted || gen != _iconPickGen) return;
 
+    // Instant feedback: show the cropped bytes NOW; the Rust WebP encode +
+    // CRDT write (a real wall-clock wait) runs behind the spinner.
+    setState(() {
+      _stagedIcon = cropped;
+      _iconBusy = true;
+    });
     try {
       await crdt_api.setServerAvatar(
         serverId: widget.serverId,
         rawBytes: cropped,
       );
-      ref.invalidate(serverAvatarProvider);
-      if (mounted) {
-        HollowToast.show(context, 'Avatar updated',
-            type: HollowToastType.success);
-      }
+      if (!mounted || gen != _iconPickGen) return;
+      // Seed the provider with the bytes we just sent — reading the DB here
+      // races the fire-and-forget CRDT persist and returns the PREVIOUS
+      // avatar ("second upload applies the first" bug). applyLocalWrite
+      // reconciles to the processed bytes once the write lands.
+      ref
+          .read(serverAvatarProvider.notifier)
+          .applyLocalWrite(widget.serverId, cropped);
+      setState(() {
+        _stagedIcon = null;
+        _iconBusy = false;
+      });
+      HollowToast.show(context, 'Avatar updated',
+          type: HollowToastType.success);
     } catch (e) {
-      if (mounted) {
-        HollowToast.show(context, 'Failed to update avatar',
-            type: HollowToastType.error);
-      }
+      if (!mounted || gen != _iconPickGen) return;
+      // Revert the optimistic staging — the pick failed.
+      setState(() {
+        _stagedIcon = null;
+        _iconBusy = false;
+      });
+      HollowToast.show(context, 'Failed to update avatar',
+          type: HollowToastType.error);
     }
   }
 
   Future<void> _clearAvatar() async {
+    // Invalidate any in-flight pick — its late completion must not resurrect
+    // the staged icon after the clear.
+    _iconPickGen++;
+    setState(() {
+      _stagedIcon = null;
+      _iconBusy = false;
+    });
     try {
       await crdt_api.clearServerAvatar(serverId: widget.serverId);
-      ref.invalidate(serverAvatarProvider);
-      if (mounted) {
-        HollowToast.show(context, 'Avatar cleared',
-            type: HollowToastType.success);
-      }
+      if (!mounted) return;
+      // Drop the cached bytes NOW — a DB read here races the queued write
+      // and would resurrect the just-removed avatar.
+      ref
+          .read(serverAvatarProvider.notifier)
+          .applyLocalWrite(widget.serverId, null);
+      HollowToast.show(context, 'Avatar cleared',
+          type: HollowToastType.success);
     } catch (e) {
       if (mounted) {
         HollowToast.show(context, 'Failed to clear avatar',
@@ -502,6 +539,7 @@ class _MobileServerSettingsRouteState
     final canManageChannels = (perms & Permission.manageChannels) != 0;
     final isOwner = role == 'owner';
     final serverAvatar = ref.watch(serverAvatarProvider)[widget.serverId];
+    final displayAvatar = _stagedIcon ?? serverAvatar;
 
     if (server == null) {
       return Scaffold(
@@ -567,28 +605,52 @@ class _MobileServerSettingsRouteState
                           onLongPress: canManage && serverAvatar != null
                               ? _clearAvatar
                               : null,
-                          child: Container(
-                            width: 80,
-                            height: 80,
-                            decoration: BoxDecoration(
-                              color: hollow.elevated,
-                              borderRadius:
-                                  BorderRadius.circular(hollow.radiusLg),
-                            ),
-                            clipBehavior: Clip.antiAlias,
-                            child: serverAvatar != null
-                                ? Image.memory(serverAvatar, fit: BoxFit.cover)
-                                : Center(
-                                    child: Text(
-                                      server.name.isNotEmpty
-                                          ? server.name[0].toUpperCase()
-                                          : '?',
-                                      style:
-                                          HollowTypography.display.copyWith(
-                                        color: hollow.accent,
+                          child: Stack(
+                            children: [
+                              Container(
+                                width: 80,
+                                height: 80,
+                                decoration: BoxDecoration(
+                                  color: hollow.elevated,
+                                  borderRadius:
+                                      BorderRadius.circular(hollow.radiusLg),
+                                ),
+                                clipBehavior: Clip.antiAlias,
+                                // Staged bytes (optimistic pick) win over the
+                                // provider cache.
+                                child: displayAvatar != null
+                                    ? Image.memory(displayAvatar,
+                                        fit: BoxFit.cover,
+                                        gaplessPlayback: true)
+                                    : Center(
+                                        child: Text(
+                                          server.name.isNotEmpty
+                                              ? server.name[0].toUpperCase()
+                                              : '?',
+                                          style: HollowTypography.display
+                                              .copyWith(
+                                            color: hollow.accent,
+                                          ),
+                                        ),
                                       ),
+                              ),
+                              // Small non-blocking spinner while the WebP
+                              // encode + CRDT write run (the tile already
+                              // shows the cropped bytes).
+                              if (_iconBusy)
+                                Positioned(
+                                  right: 4,
+                                  bottom: 4,
+                                  child: SizedBox(
+                                    width: 14,
+                                    height: 14,
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2,
+                                      color: hollow.textSecondary,
                                     ),
                                   ),
+                                ),
+                            ],
                           ),
                         ),
                         if (canManage) ...[
@@ -1607,77 +1669,108 @@ class _ChannelLayoutEditorState extends ConsumerState<_ChannelLayoutEditor> {
     );
   }
 
-  /// Toggle a channel's public flag (mirrors desktop channels_tab globe). Sends
-  /// the CRDT op then optimistically updates the local channel map (same pattern
-  /// as `_renameChannel`).
-  Future<void> _toggleChannelPublic(String channelId, bool currentlyPublic) async {
-    final newVal = !currentlyPublic;
-    await crdt_api.setChannelPublic(
-      serverId: widget.serverId,
-      channelId: channelId,
-      isPublic: newVal,
-    );
+  /// Apply an optimistic channel-map update, commit the CRDT write, and on
+  /// failure revert + toast (parity with desktop channels_tab) — otherwise a
+  /// dead node leaves the control lying silently.
+  Future<void> _commitChannelProp(
+    String channelId,
+    ChannelInfo Function(ChannelInfo) update,
+    ChannelInfo Function(ChannelInfo) revert,
+    Future<void> Function() commit,
+  ) async {
     final old = _channels[channelId];
     if (old != null && mounted) {
-      setState(() {
-        _channels[channelId] = old.copyWith(isPublic: newVal);
-      });
+      setState(() => _channels[channelId] = update(old));
     }
+    try {
+      await commit();
+    } catch (_) {
+      final cur = _channels[channelId];
+      if (cur != null && mounted) {
+        setState(() => _channels[channelId] = revert(cur));
+      }
+      if (mounted) {
+        HollowToast.show(context, 'Could not update channel',
+            type: HollowToastType.error);
+      }
+    }
+  }
+
+  /// Toggle a channel's public flag (mirrors desktop channels_tab globe).
+  Future<void> _toggleChannelPublic(String channelId, bool currentlyPublic) {
+    final newVal = !currentlyPublic;
+    return _commitChannelProp(
+      channelId,
+      (ch) => ch.copyWith(isPublic: newVal),
+      (ch) => ch.copyWith(isPublic: currentlyPublic),
+      () => crdt_api.setChannelPublic(
+        serverId: widget.serverId,
+        channelId: channelId,
+        isPublic: newVal,
+      ),
+    );
   }
 
   /// Set who can SEE a channel (everyone / moderator / admin). Mirrors desktop's
   /// visibility _AccessChip: optimistic local update then the CRDT op.
-  Future<void> _setChannelVisibility(String channelId, String visibility) async {
-    final old = _channels[channelId];
-    if (old != null && mounted) {
-      setState(() => _channels[channelId] = old.copyWith(visibility: visibility));
-    }
-    await crdt_api.setChannelVisibility(
-      serverId: widget.serverId,
-      channelId: channelId,
-      visibility: visibility,
+  Future<void> _setChannelVisibility(String channelId, String visibility) {
+    final prev = _channels[channelId]?.visibility ?? 'everyone';
+    return _commitChannelProp(
+      channelId,
+      (ch) => ch.copyWith(visibility: visibility),
+      (ch) => ch.copyWith(visibility: prev),
+      () => crdt_api.setChannelVisibility(
+        serverId: widget.serverId,
+        channelId: channelId,
+        visibility: visibility,
+      ),
     );
   }
 
   /// Set who can POST in a channel (everyone / moderator / admin). Mirrors
   /// desktop's posting _AccessChip.
-  Future<void> _setChannelPosting(String channelId, String posting) async {
-    final old = _channels[channelId];
-    if (old != null && mounted) {
-      setState(() => _channels[channelId] = old.copyWith(posting: posting));
-    }
-    await crdt_api.setChannelPosting(
-      serverId: widget.serverId,
-      channelId: channelId,
-      posting: posting,
+  Future<void> _setChannelPosting(String channelId, String posting) {
+    final prev = _channels[channelId]?.posting ?? 'everyone';
+    return _commitChannelProp(
+      channelId,
+      (ch) => ch.copyWith(posting: posting),
+      (ch) => ch.copyWith(posting: prev),
+      () => crdt_api.setChannelPosting(
+        serverId: widget.serverId,
+        channelId: channelId,
+        posting: posting,
+      ),
     );
   }
 
   /// Set a channel's slow-mode interval (seconds, 0 = off). Mirrors the
   /// desktop _SlowModeChip: optimistic local update then the CRDT op.
-  Future<void> _setChannelSlowMode(String channelId, int seconds) async {
-    final old = _channels[channelId];
-    if (old != null && mounted) {
-      setState(() => _channels[channelId] = old.copyWith(slowModeSecs: seconds));
-    }
-    await crdt_api.setChannelSlowMode(
-      serverId: widget.serverId,
-      channelId: channelId,
-      seconds: seconds,
+  Future<void> _setChannelSlowMode(String channelId, int seconds) {
+    final prev = _channels[channelId]?.slowModeSecs ?? 0;
+    return _commitChannelProp(
+      channelId,
+      (ch) => ch.copyWith(slowModeSecs: seconds),
+      (ch) => ch.copyWith(slowModeSecs: prev),
+      () => crdt_api.setChannelSlowMode(
+        serverId: widget.serverId,
+        channelId: channelId,
+        seconds: seconds,
+      ),
     );
   }
 
   /// Toggle a channel's media-only flag. Mirrors the desktop image-icon toggle.
-  Future<void> _toggleChannelMediaOnly(String channelId, bool current) async {
+  Future<void> _toggleChannelMediaOnly(String channelId, bool current) {
     final newVal = !current;
-    final old = _channels[channelId];
-    if (old != null && mounted) {
-      setState(() => _channels[channelId] = old.copyWith(mediaOnly: newVal));
-    }
-    await crdt_api.setChannelMediaOnly(
-      serverId: widget.serverId,
-      channelId: channelId,
-      mediaOnly: newVal,
+    return _commitChannelProp(
+      channelId,
+      (ch) => ch.copyWith(mediaOnly: newVal),
+      (ch) => ch.copyWith(mediaOnly: current),
+      () => crdt_api.setChannelMediaOnly(
+        serverId: widget.serverId,
+        channelId: channelId,
+        mediaOnly: newVal,
+      ),
     );
   }
 

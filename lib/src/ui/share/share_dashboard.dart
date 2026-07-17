@@ -11,6 +11,7 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/share/paste_link_dialog.dart';
 import 'package:hollow/src/ui/share/share_card.dart';
 
@@ -25,6 +26,10 @@ class ShareDashboard extends ConsumerStatefulWidget {
 
 class _ShareDashboardState extends ConsumerState<ShareDashboard> {
   _ShareSubTab _subTab = _ShareSubTab.myShares;
+  // Gates "Share a File" while shareCreateFromFile chunks + hashes the whole
+  // file into the vault — multi-second for large files, and the new share
+  // only appears in the list once it finishes.
+  bool _sharing = false;
 
   @override
   void initState() {
@@ -84,9 +89,16 @@ class _ShareDashboardState extends ConsumerState<ShareDashboard> {
           if (_subTab == _ShareSubTab.myShares) ...[
             HollowButton.ghost(
               compact: true,
-              icon: const Icon(LucideIcons.filePlus, size: 14),
-              onPressed: _pickFile,
-              child: const Text('Share a File'),
+              icon: _sharing
+                  ? SizedBox(
+                      width: 14,
+                      height: 14,
+                      child: CircularProgressIndicator(
+                          strokeWidth: 2, color: hollow.textSecondary),
+                    )
+                  : const Icon(LucideIcons.filePlus, size: 14),
+              onPressed: _sharing ? null : _pickFile,
+              child: Text(_sharing ? 'Sharing…' : 'Share a File'),
             ),
             const SizedBox(width: HollowSpacing.sm),
             HollowButton.filled(
@@ -255,9 +267,19 @@ class _ShareDashboardState extends ConsumerState<ShareDashboard> {
   }
 
   Future<void> _pickFile() async {
+    if (_sharing) return;
     final result = await FilePicker.platform.pickFiles();
-    if (result != null && result.files.single.path != null) {
+    if (result == null || result.files.single.path == null || !mounted) return;
+    setState(() => _sharing = true);
+    try {
       await share_api.shareCreateFromFile(sourcePath: result.files.single.path!);
+    } catch (e) {
+      if (mounted) {
+        HollowToast.show(context, 'Could not share file: $e',
+            type: HollowToastType.error);
+      }
+    } finally {
+      if (mounted) setState(() => _sharing = false);
     }
   }
 

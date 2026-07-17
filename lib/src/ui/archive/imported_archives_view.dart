@@ -68,8 +68,14 @@ class _ImportedArchiveList extends ConsumerStatefulWidget {
 
 class _ImportedArchiveListState extends ConsumerState<_ImportedArchiveList> {
   bool _dragging = false;
+  // Gates the Load button AND drag-drop while verifyArchive runs (Ed25519
+  // over the whole archive — seconds for a large one); a re-drop mid-verify
+  // would otherwise double-fire with zero feedback.
+  bool _loading = false;
 
   Future<void> _loadArchive(String path) async {
+    if (_loading) return;
+    setState(() => _loading = true);
     try {
       // Quick verify first.
       await archive_api.verifyArchive(archivePath: path);
@@ -85,10 +91,13 @@ class _ImportedArchiveListState extends ConsumerState<_ImportedArchiveList> {
         HollowToast.show(context, 'Failed to load archive: $e',
             type: HollowToastType.error);
       }
+    } finally {
+      if (mounted) setState(() => _loading = false);
     }
   }
 
   Future<void> _pickArchive() async {
+    if (_loading) return;
     final result = await FilePicker.platform.pickFiles(
       type: FileType.custom,
       allowedExtensions: ['hollow-archive'],
@@ -104,7 +113,7 @@ class _ImportedArchiveListState extends ConsumerState<_ImportedArchiveList> {
 
   Future<void> _handleDrop(DropDoneDetails details) async {
     setState(() => _dragging = false);
-    if (details.files.isEmpty) return;
+    if (_loading || details.files.isEmpty) return;
     final path = details.files.first.path;
     if (path.isEmpty) return;
     await _loadArchive(path);
@@ -122,7 +131,7 @@ class _ImportedArchiveListState extends ConsumerState<_ImportedArchiveList> {
         Padding(
           padding: const EdgeInsets.all(HollowSpacing.md),
           child: HollowPressable(
-            onTap: _pickArchive,
+            onTap: _loading ? null : _pickArchive,
             borderRadius: BorderRadius.circular(hollow.radiusSm),
             padding: EdgeInsets.zero,
             child: Container(
@@ -137,11 +146,19 @@ class _ImportedArchiveListState extends ConsumerState<_ImportedArchiveList> {
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  Icon(LucideIcons.folderOpen,
-                      size: 14, color: hollow.accent),
+                  if (_loading)
+                    SizedBox(
+                      width: 14,
+                      height: 14,
+                      child: CircularProgressIndicator(
+                          strokeWidth: 2, color: hollow.accent),
+                    )
+                  else
+                    Icon(LucideIcons.folderOpen,
+                        size: 14, color: hollow.accent),
                   const SizedBox(width: HollowSpacing.sm),
                   Text(
-                    'Load Archive',
+                    _loading ? 'Verifying…' : 'Load Archive',
                     style: HollowTypography.body.copyWith(
                       color: hollow.accent,
                       fontWeight: FontWeight.w600,
@@ -286,17 +303,16 @@ class _ArchiveEntryCard extends ConsumerWidget {
           ref.read(selectedImportedArchiveProvider.notifier).state = path;
         },
         borderRadius: BorderRadius.circular(hollow.radiusSm),
+        // Selection bg lives ON the pressable so it fills the exact same
+        // rounded rect the hover highlight paints — an inner Container was
+        // inset by the pressable padding and read as a mismatched outline.
+        backgroundColor:
+            isSelected ? hollow.accent.withValues(alpha: 0.12) : null,
         padding: const EdgeInsets.symmetric(
           horizontal: HollowSpacing.sm,
           vertical: HollowSpacing.sm,
         ),
-        child: Container(
-          decoration: BoxDecoration(
-            color: isSelected
-                ? hollow.accent.withValues(alpha: 0.12)
-                : Colors.transparent,
-            borderRadius: BorderRadius.circular(hollow.radiusSm),
-          ),
+        child: Padding(
           padding: const EdgeInsets.all(HollowSpacing.sm),
           child: verifyAsync.when(
             loading: () => Row(

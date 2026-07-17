@@ -700,28 +700,40 @@ class _FriendsListTab extends ConsumerWidget {
                   message: 'Remove friend',
                   child: HollowPressable(
                     semanticLabel: 'Remove friend',
-                    onTap: () {
+                    onTap: () async {
                       final peerId = friend.peerId;
-                      ref
-                          .read(friendsProvider.notifier)
-                          .removeFriend(peerId);
-                      // Also remove from favourites.
-                      ref
-                          .read(favouriteFriendsProvider.notifier)
-                          .remove(peerId);
-                      // Close chat if viewing this friend.
-                      if (ref.read(selectedPeerProvider) == peerId) {
-                        ref.read(selectedPeerProvider.notifier).state =
-                            null;
-                      }
-                      // Close split pane if it shows this friend.
+                      // Capture notifiers/state up front — the awaited
+                      // removal rebuilds the friends list and may unmount
+                      // this row before the cleanup below runs.
+                      final favourites =
+                          ref.read(favouriteFriendsProvider.notifier);
+                      final selectedPeer =
+                          ref.read(selectedPeerProvider.notifier);
+                      final wasSelected =
+                          ref.read(selectedPeerProvider) == peerId;
+                      final splitView =
+                          ref.read(splitViewProvider.notifier);
                       final split = ref.read(splitViewProvider);
-                      if (split.isSplit &&
-                          split.rightPane?.peerId == peerId) {
-                        ref
-                            .read(splitViewProvider.notifier)
-                            .closeSplit();
+                      final shownInSplit = split.isSplit &&
+                          split.rightPane?.peerId == peerId;
+                      try {
+                        await ref
+                            .read(friendsProvider.notifier)
+                            .removeFriend(peerId);
+                      } catch (_) {
+                        if (context.mounted) {
+                          HollowToast.show(
+                              context, 'Could not remove friend',
+                              type: HollowToastType.error);
+                        }
+                        return;
                       }
+                      // Also remove from favourites.
+                      favourites.remove(peerId);
+                      // Close chat if viewing this friend.
+                      if (wasSelected) selectedPeer.state = null;
+                      // Close split pane if it shows this friend.
+                      if (shownInSplit) splitView.closeSplit();
                     },
                     borderRadius:
                         BorderRadius.circular(hollow.radiusSm),
@@ -976,6 +988,20 @@ class _RequestsTabState extends ConsumerState<_RequestsTab> {
     );
   }
 
+  /// Await a friend-request mutation and surface failure — the notifier
+  /// rethrows (e.g. node not running), and a silent drop here left the row
+  /// stuck with no feedback.
+  Future<void> _requestAction(
+      Future<void> Function() action, String failMsg) async {
+    try {
+      await action();
+    } catch (_) {
+      if (mounted) {
+        HollowToast.show(context, failMsg, type: HollowToastType.error);
+      }
+    }
+  }
+
   Widget _buildList(
     HollowTheme hollow,
     Map<String, storage_api.UserProfile> profiles,
@@ -1045,9 +1071,11 @@ class _RequestsTabState extends ConsumerState<_RequestsTab> {
                     message: 'Accept',
                     child: HollowPressable(
                       semanticLabel: 'Accept friend request',
-                      onTap: () => ref
-                          .read(friendsProvider.notifier)
-                          .acceptRequest(req.peerId),
+                      onTap: () => _requestAction(
+                          () => ref
+                              .read(friendsProvider.notifier)
+                              .acceptRequest(req.peerId),
+                          'Could not accept request'),
                       borderRadius:
                           BorderRadius.circular(hollow.radiusSm),
                       padding:
@@ -1060,9 +1088,11 @@ class _RequestsTabState extends ConsumerState<_RequestsTab> {
                     message: 'Reject',
                     child: HollowPressable(
                       semanticLabel: 'Reject friend request',
-                      onTap: () => ref
-                          .read(friendsProvider.notifier)
-                          .rejectRequest(req.peerId),
+                      onTap: () => _requestAction(
+                          () => ref
+                              .read(friendsProvider.notifier)
+                              .rejectRequest(req.peerId),
+                          'Could not decline request'),
                       borderRadius:
                           BorderRadius.circular(hollow.radiusSm),
                       padding:
@@ -1076,9 +1106,11 @@ class _RequestsTabState extends ConsumerState<_RequestsTab> {
                     message: 'Cancel request',
                     child: HollowPressable(
                       semanticLabel: 'Cancel friend request',
-                      onTap: () => ref
-                          .read(friendsProvider.notifier)
-                          .rejectRequest(req.peerId),
+                      onTap: () => _requestAction(
+                          () => ref
+                              .read(friendsProvider.notifier)
+                              .rejectRequest(req.peerId),
+                          'Could not cancel request'),
                       borderRadius:
                           BorderRadius.circular(hollow.radiusSm),
                       padding:
@@ -1247,14 +1279,25 @@ class _AddFriendTabState extends ConsumerState<_AddFriendTab> {
     );
   }
 
-  void _send() {
+  Future<void> _send() async {
     final input = widget.controller.text.trim();
     if (input.isEmpty) return;
-    if (_isPeerId(input)) {
-      ref.read(friendsProvider.notifier).sendRequest(input);
-    } else {
-      network_api.sendFriendRequestByNickname(nickname: input);
+    // Await the send so a failure (e.g. node not running) surfaces here —
+    // the input is kept for a retry instead of toasting a false success.
+    try {
+      if (_isPeerId(input)) {
+        await ref.read(friendsProvider.notifier).sendRequest(input);
+      } else {
+        await network_api.sendFriendRequestByNickname(nickname: input);
+      }
+    } catch (_) {
+      if (mounted) {
+        HollowToast.show(context, 'Could not send request',
+            type: HollowToastType.error);
+      }
+      return;
     }
+    if (!mounted) return;
     widget.controller.clear();
     HollowToast.show(
       context,

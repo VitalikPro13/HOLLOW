@@ -241,8 +241,7 @@ Below the Channels section, a "Management" section with `_NavRow` widgets (icon 
 **Purpose:** Shared profile bottom sheet used from member panel, DM header tap, and friend long-press.
 
 ### Layout
-- `SafeArea` → `Column(mainAxisSize: min)`
-- Drag handle (32×4px)
+- `SafeArea` → `ConstrainedBox(maxHeight: 0.9 × screen)` → `Column(min)`: drag handle (32×4px) OUTSIDE the scrollable, then `Flexible(SingleChildScrollView(...))` for everything below. The cap keeps the barrier tappable and the external handle keeps drag-to-dismiss working when a long showcase makes the content scroll (same shape as mobile_message_actions.dart) — before this, a filled showcase produced a full-screen sheet that couldn't be closed.
 - Banner (180px) — `AnimatedGifImage` or gradient fallback via `bannerColorFromId()`
 - Avatar (72px) overlapping banner by 36px (`Transform.translate`), bordered
 - Name: local nickname (bold) + profile name (secondary) if nickname set, else just profile name

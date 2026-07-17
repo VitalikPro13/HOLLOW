@@ -185,7 +185,11 @@ live DS3 full payload + cache-hit path + Zelda TOTK no-Steam degrade.
 - Game card dialog: `ui/dialogs/game_card_dialog.dart` — tap ANY game
   surface (now_playing / favorite_game via `_tappableGame`, game-shelf tiles
   directly) → `showGameCardDialog`, the SAME dialog everywhere. REDESIGNED
-  2026-07-10 (v10 "reception strip" pass). Center+right panel ensemble
+  2026-07-10 (v10 "reception strip" pass). 2026-07-17: outer padding +
+  maxHeight now include `MediaQuery.paddingOf` (status bar/notch + home
+  indicator) — `showHollowDialog` deliberately adds no SafeArea, and on
+  phones the corner-chip X landed under the notch; desktop unchanged
+  (insets 0). Center+right panel ensemble
   (profile surface recipe, 0.62× scale-then-stack; side-by-side panels are
   TOP-ALIGNED and size independently — the old IntrinsicHeight+stretch
   coupling left dead surface under About). Center = key-art hero (235px,

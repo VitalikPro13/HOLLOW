@@ -36,7 +36,7 @@ All four operations follow the same pattern: call Rust FFI network command, then
 - **`rejectRequest(peerId)`** — calls `network_api.rejectFriendRequest(peerId:)`. Rust removes the pending row and notifies the peer.
 - **`removeFriend(peerId)`** — calls `network_api.removeFriend(peerId:)`. Rust deletes the friend row and notifies the peer.
 
-All methods catch and log errors without throwing, so the UI never crashes on friend operation failures.
+All four mutation methods catch, log, and **RETHROW** (2026-07-16 UX sweep) so call sites can toast the failure — a swallow here made every "Friend request sent/accepted" toast lie on a dead node. Every call site awaits inside try/catch; a NEW bare fire-and-forget call would escape to the zone crash handler. `loadAll()` still swallows (hydration, not a user action).
 
 ### Friend Events (event_provider.dart dispatch)
 

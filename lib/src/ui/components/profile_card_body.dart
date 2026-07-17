@@ -801,8 +801,18 @@ class ProfileFriendAction extends ConsumerWidget {
 
     if (friendInfo == null) {
       return HollowButton.outline(
-        onPressed: () =>
-            ref.read(friendsProvider.notifier).sendRequest(peerId),
+        // Success feedback is the button itself flipping to "Request Sent"
+        // (provider refresh); failure needs an explicit toast.
+        onPressed: () async {
+          try {
+            await ref.read(friendsProvider.notifier).sendRequest(peerId);
+          } catch (_) {
+            if (context.mounted) {
+              HollowToast.show(context, 'Could not send request',
+                  type: HollowToastType.error);
+            }
+          }
+        },
         compact: true,
         expand: expand,
         icon: const Icon(LucideIcons.userPlus),
@@ -813,8 +823,16 @@ class ProfileFriendAction extends ConsumerWidget {
     if (friendInfo.status == 'pending') {
       if (friendInfo.direction == 'incoming') {
         return HollowButton.filled(
-          onPressed: () =>
-              ref.read(friendsProvider.notifier).acceptRequest(peerId),
+          onPressed: () async {
+            try {
+              await ref.read(friendsProvider.notifier).acceptRequest(peerId);
+            } catch (_) {
+              if (context.mounted) {
+                HollowToast.show(context, 'Could not accept request',
+                    type: HollowToastType.error);
+              }
+            }
+          },
           compact: true,
           expand: expand,
           icon: const Icon(LucideIcons.check),
@@ -922,13 +940,21 @@ class _LocalNicknameDialogState extends ConsumerState<_LocalNicknameDialog> {
     super.dispose();
   }
 
-  void _save() {
+  Future<void> _save() async {
     final nickname = _controller.text.trim();
-    ref.read(localNicknameProvider.notifier).setNickname(
-          widget.peerId,
-          nickname,
-        );
-    Navigator.of(context).pop();
+    try {
+      await ref.read(localNicknameProvider.notifier).setNickname(
+            widget.peerId,
+            nickname,
+          );
+    } catch (_) {
+      if (mounted) {
+        HollowToast.show(context, 'Could not save nickname',
+            type: HollowToastType.error);
+      }
+      return;
+    }
+    if (mounted) Navigator.of(context).pop();
   }
 
   @override

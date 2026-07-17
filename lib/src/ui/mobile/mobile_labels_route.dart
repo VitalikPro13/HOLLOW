@@ -297,7 +297,12 @@ class _SelfAssignSection extends StatelessWidget {
                     );
                   }
                   onReload();
-                } catch (_) {}
+                } catch (_) {
+                  if (context.mounted) {
+                    HollowToast.show(context, 'Could not update label',
+                        type: HollowToastType.error);
+                  }
+                }
               },
               borderRadius: BorderRadius.circular(hollow.radiusSm),
               child: Container(

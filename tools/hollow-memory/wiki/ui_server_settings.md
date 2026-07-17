@@ -82,14 +82,16 @@ Source: `lib/src/ui/settings/overview_tab.dart` (763 lines). `ConsumerStatefulWi
 Entire section wrapped in `if (widget.canManageServer)`. Contains:
 
 **Server Icon:**
-- Displays current avatar from `serverAvatarProvider[serverId]` as 48x48 `ClipRRect` image, or a placeholder container with image icon
-- "Upload" button (`HollowButton.ghost`) -> `_pickServerAvatar()`:
+- Displays `_stagedIcon ?? serverAvatarProvider[serverId]` as 48x48 `ClipRRect` image (gaplessPlayback), or a placeholder container with image icon; 14px spinner overlay while `_iconBusy`
+- "Upload" button (`HollowButton.ghost`) -> `_pickServerAvatar()` (optimistic staging, 2026-07-16/17):
   1. `FilePicker.platform.pickFiles(type: FileType.image)` to select image
   2. Reads file bytes
   3. `showImageCropDialog(imageBytes, aspectRatio: 1.0, title: 'Crop Server Icon')` for square crop
-  4. `crdt_api.setServerAvatar(serverId, rawBytes: cropped)` to persist via CRDT
-  5. Success toast on completion
-- "Remove" button (`HollowButton.ghost` with trash icon) -- only shown if `serverAvatarProvider` contains key for this server. Calls `_clearServerAvatar()` -> `crdt_api.clearServerAvatar(serverId)`.
+  4. Stages cropped bytes SYNCHRONOUSLY (`_stagedIcon` + `_iconBusy`) so the icon updates instantly; `_iconPickGen` guards overlapping picks
+  5. `crdt_api.setServerAvatar(serverId, rawBytes: cropped)` (Rust WebP encode + queued CRDT write)
+  6. On success: `serverAvatarProvider.applyLocalWrite(serverId, cropped)` — NEVER an immediate `loadAvatar` (races the fire-and-forget persist and shows the previous icon; see memory `feedback_crdt_read_after_write_race`), then drop staging + success toast. On failure: revert staging + error toast
+- "Remove" button (`HollowButton.ghost` with trash icon) -- only shown if `serverAvatarProvider` contains key for this server. `_clearServerAvatar()` bumps the pick gen, calls `crdt_api.clearServerAvatar(serverId)`, then `applyLocalWrite(serverId, null)` + toast.
+- Mobile twin: `mobile_server_settings_route.dart:_pickAvatar/_clearAvatar` — identical flow.
 
 **Server Name:**
 - `HollowTextField` with `_nameController`, hint "Server name", `maxLength: 32`, `onSubmitted` triggers save

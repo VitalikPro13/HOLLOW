@@ -49,6 +49,13 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
   bool _saving = false;
   bool _savingNickname = false;
 
+  // Optimistic server-icon staging: the cropped bytes render instantly while
+  // the Rust WebP encode + CRDT write run behind a small spinner. Any newer
+  // pick/clear bumps the generation so a stale completion can't clobber it.
+  Uint8List? _stagedIcon;
+  bool _iconBusy = false;
+  int _iconPickGen = 0;
+
   bool _twitchEnabled = false;
   bool _twitchRequireSub = false;
   bool _twitchOwnerVerify = false;
@@ -302,33 +309,54 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
   }
 
   Future<void> _pickServerAvatar() async {
+    final gen = ++_iconPickGen;
     final result = await FilePicker.platform.pickFiles(type: FileType.image);
     if (result == null || result.files.isEmpty) return;
     final path = result.files.single.path;
     if (path == null) return;
     final raw = await File(path).readAsBytes();
-    if (!mounted) return;
+    if (!mounted || gen != _iconPickGen) return;
     final cropped = await showImageCropDialog(
       context: context,
       imageBytes: raw,
       aspectRatio: 1.0,
       title: 'Crop Server Icon',
     );
-    if (cropped == null || !mounted) return;
+    if (cropped == null || !mounted || gen != _iconPickGen) return;
+    // Instant feedback: show the cropped bytes NOW; the Rust WebP encode +
+    // CRDT write (a real wall-clock wait) runs behind the spinner.
+    setState(() {
+      _stagedIcon = cropped;
+      _iconBusy = true;
+    });
     try {
       await crdt_api.setServerAvatar(
         serverId: widget.server.serverId,
         rawBytes: cropped,
       );
-      if (mounted) {
-        HollowToast.show(context, 'Server icon updated',
-            type: HollowToastType.success);
-      }
+      if (!mounted || gen != _iconPickGen) return;
+      // Seed the provider with the bytes we just sent — reading the DB here
+      // races the fire-and-forget CRDT persist and returns the PREVIOUS icon
+      // ("second upload applies the first" bug). applyLocalWrite reconciles
+      // to the processed bytes once the write lands.
+      ref
+          .read(serverAvatarProvider.notifier)
+          .applyLocalWrite(widget.server.serverId, cropped);
+      setState(() {
+        _stagedIcon = null;
+        _iconBusy = false;
+      });
+      HollowToast.show(context, 'Server icon updated',
+          type: HollowToastType.success);
     } catch (e) {
-      if (mounted) {
-        HollowToast.show(context, 'Failed to update icon: $e',
-            type: HollowToastType.error);
-      }
+      if (!mounted || gen != _iconPickGen) return;
+      // Revert the optimistic staging — the pick failed.
+      setState(() {
+        _stagedIcon = null;
+        _iconBusy = false;
+      });
+      HollowToast.show(context, 'Failed to update icon: $e',
+          type: HollowToastType.error);
     }
   }
 
@@ -412,12 +440,23 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
   }
 
   Future<void> _clearServerAvatar() async {
+    // Invalidate any in-flight pick — its late completion must not resurrect
+    // the staged icon after the clear.
+    _iconPickGen++;
+    setState(() {
+      _stagedIcon = null;
+      _iconBusy = false;
+    });
     try {
       await crdt_api.clearServerAvatar(serverId: widget.server.serverId);
-      if (mounted) {
-        HollowToast.show(context, 'Server icon removed',
-            type: HollowToastType.success);
-      }
+      if (!mounted) return;
+      // Drop the cached bytes NOW — a DB read here races the queued write
+      // and would resurrect the just-removed icon.
+      ref
+          .read(serverAvatarProvider.notifier)
+          .applyLocalWrite(widget.server.serverId, null);
+      HollowToast.show(context, 'Server icon removed',
+          type: HollowToastType.success);
     } catch (e) {
       if (mounted) {
         HollowToast.show(context, 'Failed to remove icon: $e',
@@ -455,22 +494,48 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
           Row(
             children: [
               Builder(builder: (_) {
-                final avatar = ref.watch(serverAvatarProvider)[widget.server.serverId];
+                // Staged bytes (optimistic pick) win over the provider cache.
+                final avatar = _stagedIcon ??
+                    ref.watch(serverAvatarProvider)[widget.server.serverId];
+                final Widget icon;
                 if (avatar != null) {
-                  return ClipRRect(
+                  icon = ClipRRect(
                     borderRadius: BorderRadius.circular(hollow.radiusMd),
-                    child: Image.memory(avatar, width: 48, height: 48, fit: BoxFit.cover),
+                    child: Image.memory(avatar,
+                        width: 48, height: 48, fit: BoxFit.cover,
+                        gaplessPlayback: true),
+                  );
+                } else {
+                  icon = Container(
+                    width: 48,
+                    height: 48,
+                    decoration: BoxDecoration(
+                      color: hollow.elevated,
+                      borderRadius: BorderRadius.circular(hollow.radiusMd),
+                    ),
+                    alignment: Alignment.center,
+                    child: Icon(LucideIcons.image, size: 20, color: hollow.textSecondary),
                   );
                 }
-                return Container(
-                  width: 48,
-                  height: 48,
-                  decoration: BoxDecoration(
-                    color: hollow.elevated,
-                    borderRadius: BorderRadius.circular(hollow.radiusMd),
-                  ),
-                  alignment: Alignment.center,
-                  child: Icon(LucideIcons.image, size: 20, color: hollow.textSecondary),
+                if (!_iconBusy) return icon;
+                // Small non-blocking spinner while the WebP encode + CRDT
+                // write run (the tile already shows the cropped bytes).
+                return Stack(
+                  children: [
+                    icon,
+                    Positioned(
+                      right: 2,
+                      bottom: 2,
+                      child: SizedBox(
+                        width: 14,
+                        height: 14,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: hollow.textSecondary,
+                        ),
+                      ),
+                    ),
+                  ],
                 );
               }),
               const SizedBox(width: HollowSpacing.md),

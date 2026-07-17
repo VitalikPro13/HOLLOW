@@ -682,14 +682,16 @@ In-memory cache of server avatar bytes. State is `Map<String, Uint8List>` keyed 
 
 ### Methods
 
-**`loadAvatar(serverId)`** — calls `crdt_api.getServerAvatar(serverId:)`. If bytes are non-null and non-empty, caches them in state. If null/empty (no avatar set), removes any existing cached entry for that server (handles avatar removal).
+**`loadAvatar(serverId)`** — calls `crdt_api.getServerAvatar(serverId:)`. If bytes are non-null and non-empty, caches them in state. If null/empty (no avatar set), removes any existing cached entry for that server (handles avatar removal). **NO-OP while a local write is pending for that server** (see `applyLocalWrite`).
 
 **`loadAll(serverIds)`** — iterates the list and calls `loadAvatar` for each server sequentially. Called on startup after server list is loaded.
+
+**`applyLocalWrite(serverId, bytes?)`** — the ONLY correct refresh after a local `setServerAvatar`/`clearServerAvatar` FFI call (2026-07-17). Those FFIs only QUEUE a `NodeCommand`; the CRDT apply + CrdtStore persist land later, so an immediate `loadAvatar` reads the PREVIOUS avatar (the "second upload applies the first icon" bug). `applyLocalWrite` seeds the cache with the bytes just sent (null = clear), marks the server write-pending so event-driven `loadAvatar` calls can't resurrect stale bytes, and reconciles from the DB after 1.2 s (per-server generation counter — a newer write supersedes an older timer). Never throws; callers fire-and-forget. See memory `feedback_crdt_read_after_write_race`.
 
 ### Caching Behavior
 - Purely in-memory. No disk cache beyond the CRDT store itself.
 - The avatar bytes come from the Rust CRDT store via FFI.
-- Invalidation: call `loadAvatar(serverId)` again after a `ServerUpdated` event that includes an avatar change. The CRDT store is the source of truth.
+- Invalidation: `ServerUpdated` events call `loadAvatar(serverId)` (event_provider.dart). The CRDT store is the source of truth — except during a pending local write, when the optimistic seed wins.
 
 ---
 

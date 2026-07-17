@@ -552,7 +552,12 @@ class _EmojiPickerBodyState extends ConsumerState<EmojiPickerBody> {
                         await emotes_api.removePersonalEmote(
                             name: filtered[i].name);
                         ref.invalidate(personalEmotesProvider);
-                      } catch (_) {}
+                      } catch (e) {
+                        if (mounted) {
+                          HollowToast.show(context, 'Could not remove emote',
+                              type: HollowToastType.error);
+                        }
+                      }
                     },
                   ),
                 ),
@@ -581,15 +586,13 @@ class _EmojiPickerBodyState extends ConsumerState<EmojiPickerBody> {
   }
 
   Future<void> _uploadPersonalEmote() async {
-    final processed = await pickAndProcessEmoteImage(context);
-    if (processed == null || !mounted) return;
-    final name = await promptEmoteName(context, hash: processed.hash);
-    if (name == null || !mounted) return;
+    final named = await pickAndNameEmote(context);
+    if (named == null || !mounted) return;
     try {
       await emotes_api.addPersonalEmote(
-        name: name,
-        hash: processed.hash,
-        animated: processed.animated,
+        name: named.name,
+        hash: named.processed.hash,
+        animated: named.processed.animated,
         source: 'upload',
       );
       ref.invalidate(personalEmotesProvider);
@@ -954,9 +957,13 @@ class _EmojiCell extends StatelessWidget {
 // Shared authoring helpers (also used by the server settings emotes tab)
 // ---------------------------------------------------------------------------
 
-/// Pick an image file and process it into an emote blob. Returns null on
-/// cancel; shows a toast on processing failure.
-Future<emotes_api.ProcessedEmote?> pickAndProcessEmoteImage(
+/// Pick an image file and prompt for a name while the emote is processed in
+/// the background: the name dialog opens instantly with the raw picked bytes
+/// as preview, the Rust WebP encode runs in a tracked never-throwing future
+/// (the preview swaps to the processed result when it lands), and Save awaits
+/// the in-flight processing. Returns null on cancel; shows a toast on
+/// processing failure.
+Future<({emotes_api.ProcessedEmote processed, String name})?> pickAndNameEmote(
     BuildContext context) async {
   final result = await FilePicker.platform.pickFiles(
     type: FileType.custom,
@@ -965,81 +972,148 @@ Future<emotes_api.ProcessedEmote?> pickAndProcessEmoteImage(
   );
   final bytes = result?.files.single.bytes;
   if (bytes == null) return null;
-  try {
-    return await emotes_api.processAndStoreEmote(rawBytes: bytes);
-  } catch (e) {
+
+  Object? processError;
+  // Listener-less after the dialog closes, so late updates are no-ops.
+  final processedHash = ValueNotifier<String?>(null);
+  final processing = emotes_api
+      .processAndStoreEmote(rawBytes: bytes)
+      .then<emotes_api.ProcessedEmote?>((p) {
+    processedHash.value = p.hash;
+    return p;
+  }).catchError((Object e) {
+    processError = e;
+    return null;
+  });
+
+  if (!context.mounted) return null;
+  final name = await _promptEmoteNameImpl(
+    context,
+    preview: ValueListenableBuilder<String?>(
+      valueListenable: processedHash,
+      builder: (ctx, hash, _) => hash != null
+          ? EmoteImage(name: 'preview', hash: hash, size: 40)
+          : Image.memory(
+              bytes,
+              width: 40,
+              height: 40,
+              fit: BoxFit.contain,
+              gaplessPlayback: true,
+              errorBuilder: (ctx, _, _) => Icon(LucideIcons.imageOff,
+                  size: 24, color: HollowTheme.of(ctx).textTertiary),
+            ),
+    ),
+    processing: processing,
+  );
+  if (name == null) return null; // cancelled
+  if (name.isEmpty) {
+    // Sentinel from the dialog: Save was pressed but processing failed.
     if (context.mounted) {
       HollowToast.show(
-          context, e.toString().replaceFirst('Exception: ', ''),
+          context, '$processError'.replaceFirst('Exception: ', ''),
           type: HollowToastType.error);
     }
     return null;
   }
+  final processed = await processing;
+  if (processed == null) return null;
+  return (processed: processed, name: name);
 }
 
 /// Prompt for an emote name (grammar-validated). Returns null on cancel.
 Future<String?> promptEmoteName(BuildContext context,
-    {required String hash, String initial = ''}) async {
+    {required String hash, String initial = ''}) {
+  return _promptEmoteNameImpl(
+    context,
+    preview: EmoteImage(name: 'preview', hash: hash, size: 40),
+    initial: initial,
+  );
+}
+
+final _emoteNameRegex = RegExp(r'^[a-z0-9_]{2,24}$');
+
+/// Shared name dialog. When [processing] is set, Save awaits it under a
+/// spinner and pops '' if it resolved null (= failed) — the caller toasts;
+/// pop(null) means the user cancelled.
+Future<String?> _promptEmoteNameImpl(
+  BuildContext context, {
+  required Widget preview,
+  String initial = '',
+  Future<Object?>? processing,
+}) async {
   final controller = TextEditingController(text: initial);
   final name = await showHollowDialog<String>(
     context: context,
     builder: (ctx) {
       String? error;
+      var saving = false;
       return StatefulBuilder(
-        builder: (ctx, setState) => HollowDialog(
-          title: 'Name this emote',
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              EmoteImage(name: 'preview', hash: hash, size: 40),
-              const SizedBox(height: HollowSpacing.sm),
-              HollowTextField(
-                controller: controller,
-                hintText: 'emote_name',
-                autofocus: true,
-                errorText: error,
-                onSubmitted: (_) => _submitEmoteName(ctx, controller.text,
-                    (msg) => setState(() => error = msg)),
-              ),
-              const SizedBox(height: HollowSpacing.xs),
-              Builder(builder: (context) {
-                final hollow = HollowTheme.of(context);
-                return Text(
+        builder: (ctx, setState) {
+          final hollow = HollowTheme.of(ctx);
+          Future<void> submit() async {
+            if (saving) return;
+            final name = controller.text.trim().toLowerCase();
+            if (!_emoteNameRegex.hasMatch(name)) {
+              setState(() => error = '2-24 characters, only a-z, 0-9 and _');
+              return;
+            }
+            if (processing != null) {
+              setState(() => saving = true);
+              final ok = await processing;
+              if (!ctx.mounted) return;
+              if (ok == null) {
+                Navigator.pop(ctx, '');
+                return;
+              }
+            }
+            if (ctx.mounted) Navigator.pop(ctx, name);
+          }
+
+          return HollowDialog(
+            title: 'Name this emote',
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                preview,
+                const SizedBox(height: HollowSpacing.sm),
+                HollowTextField(
+                  controller: controller,
+                  hintText: 'emote_name',
+                  autofocus: true,
+                  errorText: error,
+                  onSubmitted: (_) => submit(),
+                ),
+                const SizedBox(height: HollowSpacing.xs),
+                Text(
                   'Used as :name: — 2-24 characters: a-z, 0-9, _',
                   style: HollowTypography.caption
                       .copyWith(color: hollow.textTertiary),
-                );
-              }),
+                ),
+              ],
+            ),
+            actions: [
+              HollowButton.ghost(
+                onPressed: saving ? null : () => Navigator.of(ctx).pop(),
+                child: const Text('Cancel'),
+              ),
+              HollowButton.filled(
+                onPressed: saving ? null : submit,
+                child: saving
+                    ? SizedBox(
+                        width: 14,
+                        height: 14,
+                        child: CircularProgressIndicator(
+                            strokeWidth: 2, color: hollow.textSecondary),
+                      )
+                    : const Text('Save'),
+              ),
             ],
-          ),
-          actions: [
-            HollowButton.ghost(
-              onPressed: () => Navigator.of(ctx).pop(),
-              child: const Text('Cancel'),
-            ),
-            HollowButton.filled(
-              onPressed: () => _submitEmoteName(ctx, controller.text,
-                  (msg) => setState(() => error = msg)),
-              child: const Text('Save'),
-            ),
-          ],
-        ),
+          );
+        },
       );
     },
   );
   controller.dispose();
   return name;
-}
-
-final _emoteNameRegex = RegExp(r'^[a-z0-9_]{2,24}$');
-
-void _submitEmoteName(
-    BuildContext ctx, String raw, void Function(String) onError) {
-  final name = raw.trim().toLowerCase();
-  if (!_emoteNameRegex.hasMatch(name)) {
-    onError('2-24 characters, only a-z, 0-9 and _');
-    return;
-  }
-  Navigator.pop(ctx, name);
 }

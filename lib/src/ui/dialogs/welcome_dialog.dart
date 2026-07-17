@@ -34,6 +34,9 @@ class _WelcomeContent extends StatefulWidget {
 class _WelcomeContentState extends State<_WelcomeContent> {
   final _relayController = TextEditingController(text: kDefaultRelayDomain);
   bool _showAdvanced = false;
+  // Busy state for "Restore from Backup" — importBackup decrypts + restores
+  // the whole DB and can take seconds.
+  bool _restoring = false;
 
   String get _relayDomain {
     final text = _relayController.text.trim();
@@ -47,6 +50,7 @@ class _WelcomeContentState extends State<_WelcomeContent> {
   }
 
   Future<void> _onRestoreFromBackup() async {
+    if (_restoring) return;
     // iOS/Android don't recognize the custom `.hollow` extension as a UTI/MIME,
     // so a `FileType.custom` filter hides the backup file. Use `any` on mobile.
     final isMobile = Platform.isAndroid || Platform.isIOS;
@@ -99,6 +103,10 @@ class _WelcomeContentState extends State<_WelcomeContent> {
     );
     if (passphrase == null || passphrase.isEmpty || !mounted) return;
 
+    // Busy state while the decrypt + restore runs — this is the first-run
+    // screen, and a large backup takes seconds; frozen silence here reads
+    // as a hang.
+    setState(() => _restoring = true);
     try {
       await storage_api.importBackup(backupPath: path, passphrase: passphrase);
       if (!mounted) return;
@@ -106,6 +114,8 @@ class _WelcomeContentState extends State<_WelcomeContent> {
     } catch (e) {
       if (!mounted) return;
       HollowToast.show(context, 'Import failed: $e', type: HollowToastType.error);
+    } finally {
+      if (mounted) setState(() => _restoring = false);
     }
   }
 
@@ -228,9 +238,11 @@ class _WelcomeContentState extends State<_WelcomeContent> {
         const SizedBox(height: HollowSpacing.sm),
 
         _OptionCard(
-          icon: LucideIcons.folderInput,
-          title: 'Restore from Backup',
-          subtitle: 'Import a .hollow backup file',
+          icon: _restoring ? LucideIcons.loader : LucideIcons.folderInput,
+          title: _restoring ? 'Restoring…' : 'Restore from Backup',
+          subtitle: _restoring
+              ? 'Decrypting and importing your backup'
+              : 'Import a .hollow backup file',
           hollow: hollow,
           onTap: _onRestoreFromBackup,
         ),

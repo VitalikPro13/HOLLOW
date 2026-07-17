@@ -54,6 +54,10 @@ class FriendsNotifier extends Notifier<Map<String, FriendInfo>> {
     }
   }
 
+  // The four mutations below RETHROW (like profile_provider.updateMyProfile)
+  // so call sites can toast the failure — a swallow here made every caller's
+  // "sent/accepted" feedback lie on a dead node.
+
   /// Send a friend request.
   Future<void> sendRequest(String peerId) async {
     try {
@@ -61,6 +65,7 @@ class FriendsNotifier extends Notifier<Map<String, FriendInfo>> {
       await loadAll();
     } catch (e) {
       debugPrint('[HOLLOW] Failed to send friend request: $e');
+      rethrow;
     }
   }
 
@@ -71,6 +76,7 @@ class FriendsNotifier extends Notifier<Map<String, FriendInfo>> {
       await loadAll();
     } catch (e) {
       debugPrint('[HOLLOW] Failed to accept friend request: $e');
+      rethrow;
     }
   }
 
@@ -81,6 +87,7 @@ class FriendsNotifier extends Notifier<Map<String, FriendInfo>> {
       await loadAll();
     } catch (e) {
       debugPrint('[HOLLOW] Failed to reject friend request: $e');
+      rethrow;
     }
   }
 
@@ -91,6 +98,7 @@ class FriendsNotifier extends Notifier<Map<String, FriendInfo>> {
       await loadAll();
     } catch (e) {
       debugPrint('[HOLLOW] Failed to remove friend: $e');
+      rethrow;
     }
   }
 }

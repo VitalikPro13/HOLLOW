@@ -1555,7 +1555,13 @@ class _MobileImportedArchivesView extends ConsumerStatefulWidget {
 
 class _MobileImportedArchivesViewState
     extends ConsumerState<_MobileImportedArchivesView> {
+  // Gates the Load button while verifyArchive runs (Ed25519 over the whole
+  // archive — seconds for a large one). Parity with desktop
+  // imported_archives_view.dart.
+  bool _loading = false;
+
   Future<void> _pickArchive() async {
+    if (_loading) return;
     final result = await FilePicker.platform.pickFiles(
       type: FileType.custom,
       allowedExtensions: ['hollow-archive'],
@@ -1570,6 +1576,8 @@ class _MobileImportedArchivesViewState
   }
 
   Future<void> _loadArchive(String path) async {
+    if (_loading) return;
+    setState(() => _loading = true);
     try {
       await archive_api.verifyArchive(archivePath: path);
       await ref
@@ -1585,6 +1593,8 @@ class _MobileImportedArchivesViewState
         HollowToast.show(context, 'Failed to load: $e',
             type: HollowToastType.error);
       }
+    } finally {
+      if (mounted) setState(() => _loading = false);
     }
   }
 
@@ -1599,7 +1609,7 @@ class _MobileImportedArchivesViewState
         Padding(
           padding: const EdgeInsets.all(HollowSpacing.md),
           child: HollowPressable(
-            onTap: _pickArchive,
+            onTap: _loading ? null : _pickArchive,
             borderRadius: BorderRadius.circular(hollow.radiusSm),
             padding: EdgeInsets.zero,
             child: Container(
@@ -1615,11 +1625,19 @@ class _MobileImportedArchivesViewState
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  Icon(LucideIcons.folderOpen,
-                      size: 16, color: hollow.accent),
+                  if (_loading)
+                    SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(
+                          strokeWidth: 2, color: hollow.accent),
+                    )
+                  else
+                    Icon(LucideIcons.folderOpen,
+                        size: 16, color: hollow.accent),
                   const SizedBox(width: HollowSpacing.sm),
                   Text(
-                    'Load Archive',
+                    _loading ? 'Verifying…' : 'Load Archive',
                     style: HollowTypography.body.copyWith(
                       color: hollow.accent,
                       fontWeight: FontWeight.w600,
