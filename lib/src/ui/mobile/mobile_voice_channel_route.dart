@@ -12,6 +12,7 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/call_duration_text.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/components/share_volume_control.dart';
 import 'package:hollow/src/ui/mobile/mobile_screen_share_sheet.dart';
 import 'package:hollow/src/ui/mobile/mobile_sheet_drag.dart';
 import 'package:hollow/src/ui/mobile/mobile_source_switch_pill.dart';
@@ -127,7 +128,9 @@ class _MobileVoiceChannelRouteState
         body: SafeArea(
           child: Column(
             children: [
-              _buildTopBar(hollow, vcState.joinedAt),
+              _buildTopBar(hollow, vcState.joinedAt,
+                  remoteSharing:
+                      vcState.peerScreenSharing.values.any((v) => v)),
               // System-status notice, at the top under the channel name (divider
               // below) — surfaces maintenance/outage while you're in a call.
               const SystemStatusBanner(),
@@ -145,7 +148,8 @@ class _MobileVoiceChannelRouteState
     );
   }
 
-  Widget _buildTopBar(HollowTheme hollow, DateTime? joinedAt) {
+  Widget _buildTopBar(HollowTheme hollow, DateTime? joinedAt,
+      {required bool remoteSharing}) {
     return Padding(
       padding: const EdgeInsets.symmetric(
         horizontal: HollowSpacing.md,
@@ -185,6 +189,13 @@ class _MobileVoiceChannelRouteState
               ],
             ),
           ),
+          // Received share audio: volume + duck controls (opens the sheet).
+          // Top bar, not the controls row — that one is already crowded.
+          if (remoteSharing)
+            const ShareVolumeButton(
+              iconSize: 22,
+              padding: EdgeInsets.all(HollowSpacing.sm),
+            ),
         ],
       ),
     );

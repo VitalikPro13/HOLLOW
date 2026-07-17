@@ -179,7 +179,7 @@ The Column's children depend on whether screen share is active:
 - Layer 0: `_ScreenShareFullView` (full-bleed background)
 - Layer 0.5: Source switcher pill (top-center, `AnimatedOpacity`, only if 2+ sources)
 - Layer 1: Chat overlay slider (right side) -- toggle button + `_ChatOverlaySlider` with 360px chat panel
-- Layer 2: `_ScreenShareControlsOverlay` floating pill (bottom center, `AnimatedOpacity`)
+- Layer 2: `_ScreenShareControlsOverlay` floating pill (bottom center, `AnimatedOpacity`). When the REMOTE side is sharing (`call.remoteScreenSharing`), the pill includes a `ShareVolumeButton` (`ui/components/share_volume_control.dart`) between the share toggle and end-call — popover with the received-share-audio volume slider (0–200%, `shareAudioVolumeProvider`) and the voice-activity duck toggle (`shareAudioDuckProvider`), applied via the `ShareAudioLevel` bus.
 
 **If no screen share**: Standard column layout with:
 - `_InlineCallPanelSlider` (slides down when in call with this peer)

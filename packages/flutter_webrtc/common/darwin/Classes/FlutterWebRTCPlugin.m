@@ -1495,6 +1495,24 @@ static __weak id<RTCAudioDeviceModuleDelegate> gAudioDeviceModuleObserver = nil;
       [_captureGainProcessor setEnhanceDynamic:[dynamic boolValue]];
     }
     result(nil);
+  } else if ([@"setCaptureMuted" isEqualToString:call.method]) {
+    // Hollow fork: mic mute state for the capture processor — freezes the
+    // dynamic servo so it can't adapt to non-call audio while muted.
+    NSDictionary* argsMap = call.arguments;
+    NSNumber* muted = argsMap[@"muted"];
+    if (muted != nil && _captureGainProcessor != nil) {
+      [_captureGainProcessor setMuted:[muted boolValue]];
+    }
+    result(nil);
+  } else if ([@"setCaptureServoHold" isEqualToString:call.method]) {
+    // Hollow fork: share audio active (sending or playing) — freeze the
+    // dynamic servo so continuous music bleed can't re-calibrate it.
+    NSDictionary* argsMap = call.arguments;
+    NSNumber* hold = argsMap[@"hold"];
+    if (hold != nil && _captureGainProcessor != nil) {
+      [_captureGainProcessor setServoHold:[hold boolValue]];
+    }
+    result(nil);
   } else if ([@"startScreenAudioPlayer" isEqualToString:call.method]) {
     // Hollow fork: media-path PCM player for received screen-share audio.
     if (_screenAudioPlayer == nil) {

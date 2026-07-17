@@ -720,6 +720,7 @@ class VoiceChannelService {
     _remoteVideoStreamSynthetic.clear();
 
     _isMuted = false;
+    Helper.setCaptureMuted(false).catchError((_) {});
     _serverId = null;
     _channelId = null;
     _speakingPeers.clear();
@@ -738,6 +739,12 @@ class VoiceChannelService {
   // ---------------------------------------------------------------
 
   void setMuted(bool muted) {
+    // Tell the capture processor first (process-global, harmless without a
+    // stream): the dynamic servo FREEZES while muted so it can't adapt to
+    // room bleed (e.g. shared music on speakers) and bury the voice on
+    // unmute — the APM keeps processing real mic input while the track is
+    // disabled.
+    Helper.setCaptureMuted(muted).catchError((_) {});
     if (_localAudioStream == null) return;
     _isMuted = muted;
     for (final track in _localAudioStream!.getAudioTracks()) {

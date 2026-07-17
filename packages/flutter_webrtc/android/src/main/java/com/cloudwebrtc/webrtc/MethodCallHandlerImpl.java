@@ -872,6 +872,26 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
         result.success(null);
         break;
       }
+      case "setCaptureMuted": {
+        // Hollow fork: mic mute state for the capture processor — freezes
+        // the dynamic servo so it can't adapt to non-call audio while muted.
+        Boolean muted = call.argument("muted");
+        if (muted != null && captureGainProcessor != null) {
+          captureGainProcessor.setMuted(muted);
+        }
+        result.success(null);
+        break;
+      }
+      case "setCaptureServoHold": {
+        // Hollow fork: share audio active (sending or playing) — freeze the
+        // dynamic servo so continuous music bleed can't re-calibrate it.
+        Boolean hold = call.argument("hold");
+        if (hold != null && captureGainProcessor != null) {
+          captureGainProcessor.setServoHold(hold);
+        }
+        result.success(null);
+        break;
+      }
       case "startScreenAudioPlayer": {
         // Hollow fork: media-path PCM player for received screen-share audio.
         if (screenAudioPlayer == null) {

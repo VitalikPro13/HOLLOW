@@ -33,7 +33,12 @@ class FlutterCaptureGainProcessor
     : public libwebrtc::RTCAudioProcessing::CustomProcessing {
  public:
   FlutterCaptureGainProcessor()
-      : gain_(1.0f), enhance_(false), makeup_db_(12.0f), dynamic_(false) {}
+      : gain_(1.0f),
+        enhance_(false),
+        makeup_db_(12.0f),
+        dynamic_(false),
+        muted_(false),
+        servo_hold_(false) {}
   ~FlutterCaptureGainProcessor() override {}
 
   // Linear makeup-gain multiplier (1.0 = transparent in legacy mode; in
@@ -57,6 +62,24 @@ class FlutterCaptureGainProcessor
   // are ignored while active. Thread-safe, live.
   void SetEnhanceDynamic(bool enabled) {
     dynamic_.store(enabled, std::memory_order_relaxed);
+  }
+
+  // Mic muted: FREEZE the dynamic servo's meter/trim adaptation. The APM
+  // capture path (and this processor) keeps running on real mic input while
+  // the outbound track is disabled, and whatever the mic hears while muted
+  // (e.g. shared music on the speakers) is by definition not call speech —
+  // adapting to it slams the trim down (-20 dB range at 9 dB/s) and the
+  // voice comes back buried on unmute. Thread-safe, live.
+  void SetMuted(bool muted) { muted_.store(muted, std::memory_order_relaxed); }
+
+  // Screen-share audio is ACTIVE somewhere on this device (we are sharing
+  // WITH audio, or playing a received share): the room/speaker bleed passes
+  // the servo's speech floor continuously, so even between unmuted words the
+  // servo would re-calibrate to the music at 9 dB/s and bury the voice.
+  // Freeze adaptation for the whole share; the pre-share speech calibration
+  // holds. Thread-safe, live.
+  void SetServoHold(bool hold) {
+    servo_hold_.store(hold, std::memory_order_relaxed);
   }
 
   // CustomProcessing
@@ -91,6 +114,8 @@ class FlutterCaptureGainProcessor
   std::atomic<bool> enhance_;
   std::atomic<float> makeup_db_;
   std::atomic<bool> dynamic_;
+  std::atomic<bool> muted_;
+  std::atomic<bool> servo_hold_;
 
   int sample_rate_ = 48000;
   int channels_ = 1;

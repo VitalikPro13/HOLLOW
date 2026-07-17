@@ -6,9 +6,15 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `decode`, `decoder`, `encode`, `encoder`, `new`, `new`
+// These functions are ignored because they are not marked as `pub`: `decode`, `decoder`, `encode`, `encoder`, `gain_target`, `new`, `new`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `ScreenAudioDecoder`, `ScreenAudioEncoder`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `drop`, `drop`
+
+/// Set the screen-audio playback gain target (0.0..=1.0). Fire-and-forget
+/// from Dart; the decoder ramps toward it (fast down, slow up) so changes are
+/// click-free. Values ride through the next `decode_screen_audio` calls.
+Future<void> setScreenAudioGain({required double gain}) =>
+    RustLib.instance.api.crateApiScreenAudioSetScreenAudioGain(gain: gain);
 
 /// (Re)initialize the screen-audio decoder. Called when a mobile player starts,
 /// to clear any inter-packet state left over from a previous share session.

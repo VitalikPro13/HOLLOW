@@ -29,6 +29,7 @@
 //! so each is reset on session start via [`reset_screen_audio_decoder`] /
 //! [`reset_screen_audio_encoder`].
 
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Mutex;
 use std::sync::OnceLock;
 
@@ -38,9 +39,47 @@ const CHANNELS: i32 = 2;
 // Matches the desktop wrapper's 5760 cap. Output buffer is this * CHANNELS.
 const MAX_FRAME_PER_CHANNEL: usize = 5760;
 
+// ---------------------------------------------------------------------------
+// Playback gain (mobile receive path)
+//
+// Share audio is raw mastered content (music sits at −14 LUFS or hotter,
+// far denser than speech) while the voice chain converges at ~−16 LUFS, so
+// unity playback drowns the call. Dart drives a target gain here from the
+// share-volume slider + voice-activity ducking + deafen; the decoder ramps
+// toward it with a fast-down / slow-up envelope so ducks bite quickly and
+// releases never pump. Desktop applies the identical envelope in the render
+// exe (`RunRenderMode`) — keep the two in sync.
+// ---------------------------------------------------------------------------
+
+/// Default −6 dB: the calibrated trim that puts typical mastered content just
+/// under the voice chain's −16 LUFS target. Matches the Dart slider's 100%.
+const GAIN_DEFAULT: f32 = 0.5;
+/// Per-frame-pair smoothing coefficients (48 kHz): τ≈30 ms toward a LOWER
+/// target (duck attack), τ≈300 ms toward a HIGHER target (duck release /
+/// slider up). One gain step per stereo pair keeps L/R matched.
+const GAIN_COEF_DOWN: f32 = 1.0 / (0.030 * 48_000.0);
+const GAIN_COEF_UP: f32 = 1.0 / (0.300 * 48_000.0);
+
+/// Target playback gain, f32 bits in an atomic (lock-free from the FFI).
+static GAIN_TARGET: AtomicU32 = AtomicU32::new(f32::to_bits(GAIN_DEFAULT));
+
+fn gain_target() -> f32 {
+    f32::from_bits(GAIN_TARGET.load(Ordering::Relaxed))
+}
+
+/// Set the screen-audio playback gain target (0.0..=1.0). Fire-and-forget
+/// from Dart; the decoder ramps toward it (fast down, slow up) so changes are
+/// click-free. Values ride through the next `decode_screen_audio` calls.
+pub fn set_screen_audio_gain(gain: f32) {
+    let clamped = gain.clamp(0.0, 1.0);
+    GAIN_TARGET.store(clamped.to_bits(), Ordering::Relaxed);
+}
+
 /// Owns the raw `unsafe-libopus` decoder pointer and frees it on drop.
 struct ScreenAudioDecoder {
     ptr: *mut unsafe_libopus::OpusDecoder,
+    /// Smoothed playback gain, ramping toward [`GAIN_TARGET`].
+    gain: f32,
 }
 
 // The raw pointer is only ever touched while holding the global Mutex, so the
@@ -56,7 +95,11 @@ impl ScreenAudioDecoder {
         if err != 0 || ptr.is_null() {
             return Err(format!("opus_decoder_create failed (code {err})"));
         }
-        Ok(Self { ptr })
+        // Start AT the target — a session must not fade in from a stale level.
+        Ok(Self {
+            ptr,
+            gain: gain_target(),
+        })
     }
 
     /// Decode one Opus packet into interleaved int16 PCM. Returns the number of
@@ -113,7 +156,7 @@ pub fn decode_screen_audio(opus: Vec<u8>) -> Result<Vec<u8>, String> {
     if guard.is_none() {
         *guard = Some(ScreenAudioDecoder::new()?);
     }
-    let dec = guard.as_ref().expect("decoder just set");
+    let dec = guard.as_mut().expect("decoder just set");
 
     let mut pcm = vec![0i16; MAX_FRAME_PER_CHANNEL * CHANNELS as usize];
     let samples_per_channel = dec.decode(&opus, &mut pcm);
@@ -122,11 +165,24 @@ pub fn decode_screen_audio(opus: Vec<u8>) -> Result<Vec<u8>, String> {
     }
 
     let total = samples_per_channel as usize * CHANNELS as usize;
-    // Pack int16 -> bytes (little-endian) for the platform channel.
+    // Apply the ramped playback gain (one step per stereo pair, L/R matched)
+    // and pack int16 -> bytes (little-endian) for the platform channel.
+    let target = gain_target();
+    let mut g = dec.gain;
     let mut bytes = Vec::with_capacity(total * 2);
-    for &s in &pcm[..total] {
-        bytes.extend_from_slice(&s.to_le_bytes());
+    let mut i = 0;
+    while i < total {
+        let coef = if target < g { GAIN_COEF_DOWN } else { GAIN_COEF_UP };
+        g += (target - g) * coef;
+        for ch in 0..CHANNELS as usize {
+            let s = (f32::from(pcm[i + ch]) * g)
+                .round()
+                .clamp(f32::from(i16::MIN), f32::from(i16::MAX)) as i16;
+            bytes.extend_from_slice(&s.to_le_bytes());
+        }
+        i += CHANNELS as usize;
     }
+    dec.gain = g;
     Ok(bytes)
 }
 
@@ -307,15 +363,17 @@ pub fn encode_screen_audio(pcm: Vec<u8>) -> Result<Vec<Vec<u8>>, String> {
 mod tests {
     use super::*;
 
-    /// Mobile send-path smoke test: uneven PCM chunks in, seq-prefixed wire
-    /// packets out, and the mobile receive decoder plays them back at the
-    /// right frame size (proving both directions speak the same format).
-    #[test]
-    fn encode_decode_roundtrip() {
-        reset_screen_audio_encoder().unwrap();
-        reset_screen_audio_decoder().unwrap();
+    /// The encoder/decoder (and the gain target) are process-global; tests
+    /// that reset them must not interleave.
+    fn test_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: Mutex<()> = Mutex::new(());
+        LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 
-        // 100 ms of a 440 Hz sine, interleaved stereo s16le @ 48 kHz.
+    /// 100 ms of a 440 Hz sine, interleaved stereo s16le @ 48 kHz, encoded to
+    /// seq-prefixed wire packets (encoder is reset first).
+    fn encode_test_sine() -> Vec<Vec<u8>> {
+        reset_screen_audio_encoder().unwrap();
         let frames = 4800usize;
         let mut pcm = Vec::with_capacity(frames * 4);
         for i in 0..frames {
@@ -323,12 +381,31 @@ mod tests {
             pcm.extend_from_slice(&s.to_le_bytes());
             pcm.extend_from_slice(&s.to_le_bytes());
         }
-
         // Feed in uneven chunks — native capture callbacks aren't frame-aligned.
         let mut packets = Vec::new();
         for chunk in pcm.chunks(1000) {
             packets.extend(encode_screen_audio(chunk.to_vec()).unwrap());
         }
+        packets
+    }
+
+    fn max_abs(pcm_bytes: &[u8]) -> i32 {
+        pcm_bytes
+            .chunks_exact(2)
+            .map(|b| i32::from(i16::from_le_bytes([b[0], b[1]])).abs())
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Mobile send-path smoke test: uneven PCM chunks in, seq-prefixed wire
+    /// packets out, and the mobile receive decoder plays them back at the
+    /// right frame size (proving both directions speak the same format).
+    #[test]
+    fn encode_decode_roundtrip() {
+        let _guard = test_lock();
+        let packets = encode_test_sine();
+        reset_screen_audio_decoder().unwrap();
+
         // 100 ms = 10 complete 10 ms frames (residual < 1 frame stays buffered).
         assert!(packets.len() >= 9, "expected >=9 packets, got {}", packets.len());
 
@@ -341,6 +418,55 @@ mod tests {
             assert_eq!(out.len(), 480 * 2 * 2, "decoded frame size mismatch");
         }
 
+        stop_screen_audio_encoder();
+    }
+
+    /// Playback gain: a decoder created at a target scales exactly; a target
+    /// change mid-stream RAMPS (no click) with the fast-down envelope.
+    #[test]
+    fn playback_gain_scales_and_ramps() {
+        let _guard = test_lock();
+        let packets = encode_test_sine();
+        assert!(packets.len() >= 9);
+
+        // Fresh decoders produce identical PCM for the same packet sequence,
+        // so the unity/quarter runs differ only by the gain multiply.
+        set_screen_audio_gain(1.0);
+        reset_screen_audio_decoder().unwrap();
+        let mut unity_last = 0i32;
+        for packet in &packets {
+            unity_last = max_abs(&decode_screen_audio(packet[4..].to_vec()).unwrap());
+        }
+        assert!(unity_last > 8_000, "sine should decode loud, got {unity_last}");
+
+        set_screen_audio_gain(0.25);
+        reset_screen_audio_decoder().unwrap();
+        let mut quarter_last = 0i32;
+        for packet in &packets {
+            quarter_last = max_abs(&decode_screen_audio(packet[4..].to_vec()).unwrap());
+        }
+        let expect = unity_last / 4;
+        assert!(
+            (quarter_last - expect).abs() <= expect / 20 + 2,
+            "quarter gain should scale ~0.25x: unity {unity_last}, quarter {quarter_last}"
+        );
+
+        // Mid-stream duck to 0: the first packet after the change must NOT be
+        // silent (ramp, not a step), but ~300 ms later it must be near-silent
+        // (τ≈30 ms down).
+        set_screen_audio_gain(1.0);
+        reset_screen_audio_decoder().unwrap();
+        let _ = decode_screen_audio(packets[0][4..].to_vec()).unwrap();
+        set_screen_audio_gain(0.0);
+        let first = max_abs(&decode_screen_audio(packets[1][4..].to_vec()).unwrap());
+        assert!(first > 500, "duck must ramp, not step to silence: {first}");
+        let mut last = first;
+        for packet in packets.iter().cycle().skip(2).take(30) {
+            last = max_abs(&decode_screen_audio(packet[4..].to_vec()).unwrap());
+        }
+        assert!(last < 50, "after ~300 ms the duck should be settled: {last}");
+
+        set_screen_audio_gain(GAIN_DEFAULT);
         stop_screen_audio_encoder();
     }
 }

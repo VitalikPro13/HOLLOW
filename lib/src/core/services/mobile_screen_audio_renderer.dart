@@ -43,6 +43,15 @@ class MobileScreenAudioRenderer {
 
   bool get isActive => _active;
 
+  /// Set the playback gain target (0.0..=1.0); the Rust decoder ramps toward
+  /// it click-free (fast down / slow up). Fire-and-forget FFI — a rejection
+  /// must not escape to the zone handler.
+  void setGain(double gain) {
+    screen_audio_api
+        .setScreenAudioGain(gain: gain.clamp(0.0, 1.0).toDouble())
+        .catchError((_) {});
+  }
+
   Future<bool> start() async {
     if (_active) return true;
     if (_starting) return false;

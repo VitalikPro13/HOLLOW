@@ -18,6 +18,7 @@ import 'package:hollow/src/core/services/frame_cryptor_service.dart';
 import 'package:hollow/src/core/services/macos_version.dart';
 import 'package:hollow/src/core/services/mobile_screen_audio_capturer.dart';
 import 'package:hollow/src/core/services/screen_audio_receiver.dart';
+import 'package:hollow/src/core/services/share_audio_level.dart';
 import 'package:hollow/src/core/services/screen_share_service.dart';
 import 'package:hollow/src/core/services/voice_channel_service.dart';
 import 'package:hollow/src/core/providers/webrtc_provider.dart';
@@ -509,6 +510,9 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     // never every voiceChannelProvider watcher.
     _service!.onSpeakingChanged = (speaking) {
       ref.read(vcSpeakingProvider.notifier).set(speaking);
+      // Sidechain for share-audio ducking: anyone talking (self included)
+      // pulls received share audio down.
+      ShareAudioLevel.setSpeaking(speaking.isNotEmpty);
     };
 
     // Wire peer connected callback — send screen share offer once audio PC is ready.
@@ -547,10 +551,28 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
             _screenAudioRenderer = null;
             return;
           }
+          ShareAudioLevel.attach(_screenAudioRenderer!);
         }
         _screenAudioRenderer?.pushPacket(data);
       };
     }
+
+    // Share-audio playback level: seed the bus (carrying any live deafen
+    // state into a rejoin) and live-update it when the slider / duck toggle
+    // change mid-share.
+    ShareAudioLevel.setDeafened(state.isDeafened);
+    ShareAudioLevel.setVolumePercent(
+        ref.read(shareAudioVolumeProvider).valueOrNull ??
+            kShareAudioVolumeDefault);
+    ShareAudioLevel.setDuckEnabled(
+        ref.read(shareAudioDuckProvider).valueOrNull ?? true);
+    ref.listen(shareAudioVolumeProvider, (_, next) {
+      ShareAudioLevel.setVolumePercent(
+          next.valueOrNull ?? kShareAudioVolumeDefault);
+    });
+    ref.listen(shareAudioDuckProvider, (_, next) {
+      ShareAudioLevel.setDuckEnabled(next.valueOrNull ?? true);
+    });
 
     // Wire camera video callback.
     _service!.onRemoteVideoChanged = (peerId, renderer) {
@@ -803,9 +825,12 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
 
       // Stop out-of-process screen audio renderer.
       if (_screenAudioRenderer != null) {
+        ShareAudioLevel.detach(_screenAudioRenderer!);
         await _screenAudioRenderer!.stop();
         _screenAudioRenderer = null;
       }
+      // Channel left — any outgoing-share servo hold is stale.
+      ShareAudioLevel.setSendingShareAudio(false);
       // Clear screen audio callback.
       try {
         ref.read(webRtcProvider.notifier).service.onScreenAudioReceived = null;
@@ -872,6 +897,9 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     _service?.setMuted(newDeafened || state.isMuted);
     // Silence all remote audio when deafened.
     _service?.setDeafened(newDeafened);
+    // setDeafened only zeroes WebRTC voice tracks — share audio rides its own
+    // data-channel player and must be silenced explicitly.
+    ShareAudioLevel.setDeafened(newDeafened);
     _broadcastAudioState();
   }
 
@@ -1147,6 +1175,12 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       focusedScreenSharePeerId: localPeerId,
     );
 
+    // Sharing WITH audio: freeze the mic servo for the whole share so
+    // speaker bleed of the shared music can't re-calibrate the trim.
+    if (shareAudio) {
+      ShareAudioLevel.setSendingShareAudio(true);
+    }
+
     // ENTIRE-SCREEN anti-echo (Windows): in a voice channel we're already in a
     // call with everyone, so the peers' voices play from hollow.exe and a
     // whole-system capture would re-capture them. Redirect ALL peers' inbound
@@ -1230,6 +1264,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     if (!state.isScreenSharing || _stoppingScreenShare) return;
     _stoppingScreenShare = true;
     debugPrint('[HOLLOW-VC] Stopping screen share');
+    ShareAudioLevel.setSendingShareAudio(false);
 
     try {
       _screenTrackPoller?.cancel();

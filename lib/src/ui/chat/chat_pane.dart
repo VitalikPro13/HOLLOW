@@ -56,6 +56,7 @@ import 'package:hollow/src/core/services/macos_version.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/profile_card_popup.dart';
 import 'package:hollow/src/ui/components/saved_messages_avatar.dart';
+import 'package:hollow/src/ui/components/share_volume_control.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/large_file_share_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
@@ -3521,6 +3522,11 @@ class _ScreenShareControlsOverlayState
             const SizedBox(width: HollowSpacing.xs),
             _screenShareCallButton(context, ref, hollow, call,
                 iconSize: 16, padding: const EdgeInsets.all(HollowSpacing.xs)),
+          ],
+          // Received share audio: volume + duck controls.
+          if (call.remoteScreenSharing) ...[
+            const SizedBox(width: HollowSpacing.xs),
+            const ShareVolumeButton(),
           ],
           const SizedBox(width: HollowSpacing.sm),
           // End call

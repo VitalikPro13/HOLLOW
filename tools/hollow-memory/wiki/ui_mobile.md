@@ -844,6 +844,9 @@ Implemented 2026-06 across `mobile_call_video_view.dart` (1:1) and `mobile_voice
 ### Control rows (identical order in 1:1 and VC)
 mute, deafen (headphones, red when active), speaker (`LucideIcons.speaker`, accent when on), camera, [flip — VC only when camera on], hang up. VC row shrinks buttons 56→46px when ≥6 buttons (Row overflow on 360dp). The 1:1 remote-volume sheet was REMOVED from mobile (desktop volume popup remains).
 
+### Share-audio volume (2026-07-17)
+When a REMOTE peer is sharing, both call TOP BARS (not the crowded control rows) show a `ShareVolumeButton` (`ui/components/share_volume_control.dart`) — opens a bottom sheet with the received-share-audio volume slider (0–200%, persisted `shareAudioVolumeProvider`; 100% = −6 dB calibration, 200% = source loudness) + "Quieter when people talk" duck toggle (`shareAudioDuckProvider`). Gates: 1:1 = `call.remoteScreenSharing`; VC = `peerScreenSharing.values.any`. Values flow through the `ShareAudioLevel` bus (see providers_voice_files.md).
+
 ### Speaker routing (`Helper.setSpeakerphoneOn`, mobile-gated)
 Defaults: 1:1 voice → earpiece, 1:1 video → speaker, camera-on mid-call → auto-switch to speaker, VC join → speaker. Reset to earpiece in `_cleanup()` / `onLocalLeft()` so the next call never inherits a stale route. State: `CallState.isSpeakerOn` / `VoiceChannelState.isSpeakerOn`.
 

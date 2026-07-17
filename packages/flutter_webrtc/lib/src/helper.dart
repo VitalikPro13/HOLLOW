@@ -180,6 +180,20 @@ class Helper {
       NativeAudioManagement.setVoiceEnhance(enabled,
           makeupDb: makeupDb, dynamicMode: dynamicMode);
 
+  /// Tell the capture post-processor whether the mic is muted (Hollow fork
+  /// addition) so the dynamic servo FREEZES instead of adapting to non-call
+  /// audio (room music bleed) while the outbound track is disabled.
+  /// Process-global, live. No-op on web.
+  static Future<void> setCaptureMuted(bool muted) =>
+      NativeAudioManagement.setCaptureMuted(muted);
+
+  /// Tell the capture post-processor that screen-share audio is active on
+  /// this device (sending or playing) — the dynamic servo freezes for the
+  /// whole share so continuous music bleed can't re-calibrate the mic trim.
+  /// Process-global, live. No-op on web.
+  static Future<void> setCaptureServoHold(bool hold) =>
+      NativeAudioManagement.setCaptureServoHold(hold);
+
   /// Start a native PCM player for received screen-share audio (Hollow fork,
   /// mobile). Plays 48 kHz stereo int16 PCM on the media output path, OUTSIDE
   /// the WebRTC voice session so the call's AEC/AGC can't mangle the shared

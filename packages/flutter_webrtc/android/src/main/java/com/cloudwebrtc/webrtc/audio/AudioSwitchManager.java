@@ -11,6 +11,7 @@ import android.os.Looper;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
+import com.cloudwebrtc.webrtc.CallForegroundService;
 import com.twilio.audioswitch.AudioDevice;
 import com.twilio.audioswitch.AudioSwitch;
 
@@ -162,6 +163,11 @@ public class AudioSwitchManager {
                 if (!isActive) {
                     Objects.requireNonNull(audioSwitch).activate();
                     isActive = true;
+                    // Hollow fork: hold a microphone-typed FGS for the call's
+                    // lifetime so the mic survives backgrounding (must start
+                    // while the app is still foregrounded — i.e. right here,
+                    // at mic acquisition).
+                    CallForegroundService.start(context);
                 }
             });
         }
@@ -174,6 +180,7 @@ public class AudioSwitchManager {
                 if (isActive) {
                     Objects.requireNonNull(audioSwitch).deactivate();
                     isActive = false;
+                    CallForegroundService.stop(context);
                 }
             });
         }

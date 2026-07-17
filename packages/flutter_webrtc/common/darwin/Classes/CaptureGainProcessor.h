@@ -44,6 +44,16 @@ NS_ASSUME_NONNULL_BEGIN
  *  are ignored while active. Thread-safe, live. */
 - (void)setEnhanceDynamic:(BOOL)enabled;
 
+/** Mic muted: freeze the dynamic servo's adaptation — what the mic hears
+ *  while muted is never call speech (e.g. shared music on the speakers), and
+ *  adapting to it buries the voice on unmute. Thread-safe, live. */
+- (void)setMuted:(BOOL)muted;
+
+/** Share audio active on this device (sending or playing): freeze the servo
+ *  for the whole share — continuous room bleed passes the speech floor and
+ *  would re-calibrate the trim to the music. Thread-safe, live. */
+- (void)setServoHold:(BOOL)hold;
+
 @end
 
 NS_ASSUME_NONNULL_END

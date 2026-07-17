@@ -296,6 +296,60 @@ class MicGainNotifier extends AsyncNotifier<double> {
   }
 }
 
+/// Received screen-share audio volume, in UI percent (0–200). Playback gain
+/// is percent/200: 100% = the −6 dB calibration that sits mastered content
+/// just under the voice chain's −16 LUFS target, 200% = the source's
+/// original loudness (never amplified past unity, so it can't clip).
+/// Applied by [ShareAudioLevel] together with voice-activity ducking.
+const double kShareAudioVolumeDefault = 100.0;
+
+final shareAudioVolumeProvider =
+    AsyncNotifierProvider<ShareAudioVolumeNotifier, double>(
+        ShareAudioVolumeNotifier.new);
+
+class ShareAudioVolumeNotifier extends AsyncNotifier<double> {
+  @override
+  Future<double> build() async {
+    final val = await storage_api.loadSetting(key: 'share_audio_volume');
+    if (val == null || val.isEmpty) return kShareAudioVolumeDefault;
+    return (double.tryParse(val) ?? kShareAudioVolumeDefault)
+        .clamp(0.0, 200.0);
+  }
+
+  Future<void> setVolume(double percent) async {
+    final clamped = percent.clamp(0.0, 200.0).toDouble();
+    await storage_api.saveSetting(
+      key: 'share_audio_volume',
+      value: clamped.toStringAsFixed(0),
+    );
+    state = AsyncData(clamped);
+  }
+}
+
+/// Duck received screen-share audio by −10 dB while anyone in the call is
+/// speaking (MV6-style sidechain off the existing VAD). Default ON — this is
+/// what keeps voices on top of shared music without burying the share.
+final shareAudioDuckProvider =
+    AsyncNotifierProvider<ShareAudioDuckNotifier, bool>(
+        ShareAudioDuckNotifier.new);
+
+class ShareAudioDuckNotifier extends AsyncNotifier<bool> {
+  @override
+  Future<bool> build() async {
+    final val = await storage_api.loadSetting(key: 'share_audio_duck');
+    if (val == null || val.isEmpty) return true;
+    return val != 'false';
+  }
+
+  Future<void> setEnabled(bool enabled) async {
+    await storage_api.saveSetting(
+      key: 'share_audio_duck',
+      value: enabled ? 'true' : 'false',
+    );
+    state = AsyncData(enabled);
+  }
+}
+
 /// Voice enhancement — the native EQ + compressor + limiter chain applied to
 /// the mic AFTER WebRTC's AGC (highpass + presence EQ, -18 dBFS 3:1
 /// compressor with makeup, -1 dBFS limiter). Default ON: this is what makes

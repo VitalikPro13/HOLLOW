@@ -20,6 +20,10 @@ class ScreenAudioRenderer {
   bool _active = false;
   int _packetCount = 0;
 
+  /// Last requested playback gain — re-sent on (re)spawn so the exe never
+  /// plays at its built-in default when the user has a different setting.
+  double _gain = -1;
+
   bool get isActive => _active;
 
   static String? _findExePath() {
@@ -114,7 +118,36 @@ class ScreenAudioRenderer {
     });
 
     _log('[SCREEN-AUDIO-RENDER] Started (PID ${_process!.pid})');
+    if (_gain >= 0) _sendGainFrame(_gain);
     return true;
+  }
+
+  /// Set the playback gain target (0.0..=1.0); the exe ramps toward it
+  /// click-free (fast down / slow up). Sent as a control frame — seq
+  /// 0xFFFFFFFF, cmd 0x01, float32 LE — on the same stdin pipe as audio.
+  void setGain(double gain) {
+    final clamped = gain.clamp(0.0, 1.0).toDouble();
+    // Control frames ride between audio packets; skip byte-identical resends.
+    if (clamped == _gain && _active) return;
+    _gain = clamped;
+    if (!_active || _process == null) return;
+    _sendGainFrame(clamped);
+  }
+
+  void _sendGainFrame(double gain) {
+    final payload = ByteData(9)
+      ..setUint32(0, 0xFFFFFFFF, Endian.little)
+      ..setUint8(4, 0x01)
+      ..setFloat32(5, gain, Endian.little);
+    final frame = Uint8List(2 + 9);
+    frame[0] = 9;
+    frame[1] = 0;
+    frame.setRange(2, 11, payload.buffer.asUint8List());
+    try {
+      _process!.stdin.add(frame);
+    } catch (e) {
+      _log('[SCREEN-AUDIO-RENDER] gain frame write failed: $e');
+    }
   }
 
   /// Feed a received Opus packet for playback.

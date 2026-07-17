@@ -103,6 +103,8 @@ public class CaptureGainProcessor
     private volatile boolean enhance = false;
     private volatile float makeupDb = 12.0f;
     private volatile boolean dynamic = false;
+    private volatile boolean muted = false;
+    private volatile boolean servoHold = false;
 
     // Dynamic-mode servo (single mic — one servo, not per-channel).
     private float dynMeterDb;
@@ -171,6 +173,30 @@ public class CaptureGainProcessor
         this.dynamic = enabled;
     }
 
+    /**
+     * Mic muted: FREEZE the dynamic servo's meter/trim adaptation. The APM
+     * capture path keeps running on real mic input while the outbound track
+     * is disabled, and whatever the mic hears while muted (e.g. shared music
+     * on the speakers) is by definition not call speech — adapting to it
+     * slams the trim down and the voice comes back buried on unmute.
+     * Thread-safe, live.
+     */
+    public void setMuted(boolean muted) {
+        this.muted = muted;
+    }
+
+    /**
+     * Screen-share audio is ACTIVE somewhere on this device (sharing WITH
+     * audio, or playing a received share): room/speaker bleed passes the
+     * servo's speech floor continuously, so even between unmuted words it
+     * would re-calibrate to the music and bury the voice. Freeze adaptation
+     * for the whole share; the pre-share speech calibration holds.
+     * Thread-safe, live.
+     */
+    public void setServoHold(boolean hold) {
+        this.servoHold = hold;
+    }
+
     @Override
     public void initialize(int sampleRateHz, int numChannels) {
         if (sampleRateHz > 0) {
@@ -195,6 +221,8 @@ public class CaptureGainProcessor
         final float g = gain;
         final boolean enh = enhance;
         final boolean dyn = dynamic;
+        final boolean mut = muted;
+        final boolean hold = servoHold;
         final float mkDb = dyn ? DYN_MAKEUP_DB : makeupDb;
         if (buffer == null) {
             return;
@@ -223,7 +251,10 @@ public class CaptureGainProcessor
 
         // Dynamic-mode servo: frame-rate, speech-gated, measured on the
         // first segment's PRE-trim samples (band0 / channel 0 = the mic).
-        if (dyn && segLen > 0) {
+        // FROZEN while muted and while share audio is active on this device
+        // — room bleed (shared music on speakers) passes the speech floor
+        // and adapting to non-speech buries the voice.
+        if (dyn && segLen > 0 && !mut && !hold) {
             double sumsq = 0.0;
             for (int i = 0; i < segLen; i++) {
                 final double v = fb.get(i);

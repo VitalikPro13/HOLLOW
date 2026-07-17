@@ -980,7 +980,16 @@ static int RunPipeModeLinux(const Options& opts) {
 // Reads framed Opus packets from stdin (binary):
 //   [uint16_le: payload_len][uint32_le: seq][...opus_bytes...]
 //
-// Decodes with Opus and plays via waveOut. Runs until stdin EOF or 'Q'.
+// A seq of 0xFFFFFFFF marks a CONTROL frame instead (never reached by real
+// wire seqs — that's 1.4 years of packets):
+//   [uint16_le: 9][0xFFFFFFFF][uint8: cmd][payload]
+//   cmd 0x01 = set playback gain target, payload = float32_le in 0..1.
+//
+// Decodes with Opus, applies a ramped playback gain (share audio is raw
+// mastered content vs the voice chain's −16 LUFS — Dart drives the target
+// from the share-volume slider + voice-activity ducking; envelope kept in
+// sync with the mobile twin in hollow_core api/screen_audio.rs), and plays
+// via waveOut. Runs until stdin EOF or 'Q'.
 // =============================================================================
 
 // AudioPlayer is defined in audio_player_{win,mac,linux}.cpp
@@ -1010,6 +1019,15 @@ static int RunRenderMode(const Options&) {
   std::vector<uint8_t> frame_buf;
   uint32_t packets_played = 0;
 
+  // Ramped playback gain (default −6 dB, the calibrated trim vs the voice
+  // chain; Dart sends the real target right after spawn). Fast toward a
+  // LOWER target (duck attack, τ≈30 ms), slow toward a HIGHER one (release,
+  // τ≈300 ms). One step per stereo pair keeps L/R matched.
+  float gain_target = 0.5f;
+  float gain_cur = 0.5f;
+  constexpr float kGainCoefDown = 1.0f / (0.030f * 48000.0f);
+  constexpr float kGainCoefUp = 1.0f / (0.300f * 48000.0f);
+
   // Diagnostics: packet-size histogram (tiny = silence-grade frames), max
   // inter-arrival gap, and short-decode counter per 500-packet (~5s) window.
   // These turn "the audio stutters" into numbers: a big arrival gap = the
@@ -1035,6 +1053,21 @@ static int RunRenderMode(const Options&) {
         static_cast<size_t>(payload_len))
       break;
 
+    uint32_t seq = frame_buf[0] | (frame_buf[1] << 8) | (frame_buf[2] << 16) |
+                   (static_cast<uint32_t>(frame_buf[3]) << 24);
+    if (seq == 0xFFFFFFFFu) {
+      // Control frame — not audio; keep it out of the arrival stats.
+      if (payload_len >= 9 && frame_buf[4] == 0x01) {
+        float g;
+        memcpy(&g, frame_buf.data() + 5, sizeof(g));
+        if (g >= 0.0f && g <= 1.0f) {
+          gain_target = g;
+          fprintf(stderr, "[RENDER] Gain target -> %.3f\n", g);
+        }
+      }
+      continue;
+    }
+
     auto now = std::chrono::steady_clock::now();
     int64_t gap_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                          now - last_arrival)
@@ -1055,6 +1088,15 @@ static int RunRenderMode(const Options&) {
     int samples = decoder.Decode(opus_data, opus_len, pcm_out);
     if (samples > 0) {
       if (samples != 480) short_decodes++;
+      for (int f = 0; f < samples; ++f) {
+        float coef = (gain_target < gain_cur) ? kGainCoefDown : kGainCoefUp;
+        gain_cur += (gain_target - gain_cur) * coef;
+        for (int ch = 0; ch < 2; ++ch) {
+          float v = static_cast<float>(pcm_out[f * 2 + ch]) * gain_cur;
+          v = std::max(-32768.0f, std::min(32767.0f, v));
+          pcm_out[f * 2 + ch] = static_cast<int16_t>(lrintf(v));
+        }
+      }
       player.Push(pcm_out.data(), samples, 2);
       packets_played++;
 

@@ -47,6 +47,9 @@ public class OrientationAwareScreenCapturer implements VideoCapturer, VideoSink 
     private MediaProjectionManager mediaProjectionManager;
     private WindowManager windowManager;
     private boolean isPortrait;
+    // Hollow fork: teardown-in-progress marker, volatile so the texture
+    // thread's onFrame sees it WITHOUT taking the capturer monitor.
+    private volatile boolean stopping = false;
 
     /**
      * Constructs a new Screen Capturer.
@@ -64,7 +67,16 @@ public class OrientationAwareScreenCapturer implements VideoCapturer, VideoSink 
     }
 
     public void onFrame(VideoFrame frame) {
-        checkNotDisposed();
+        // Hollow fork: bail WITHOUT touching the capturer monitor during
+        // teardown. changeCaptureFormat below is synchronized, so a frame
+        // delivered while stopCapture is in flight used to deadlock: main
+        // held the monitor and awaited this (texture) thread, this thread
+        // blocked on the monitor — AB-BA, app frozen (3 identical ANRs on
+        // the Pixel, 2026-07-17). Also replaces the old checkNotDisposed()
+        // throw for a late frame after dispose.
+        if (stopping || isDisposed) {
+            return;
+        }
         this.isPortrait = isDeviceOrientationPortrait();
         final int max = Math.max(this.height, this.width);
         final int min = Math.min(this.height, this.width);
@@ -114,6 +126,7 @@ public class OrientationAwareScreenCapturer implements VideoCapturer, VideoSink 
             final int width, final int height, final int ignoredFramerate) {
         //checkNotDisposed();
 
+        stopping = false;
         this.isPortrait = isDeviceOrientationPortrait();
         if (this.isPortrait) {
             this.width = width;
@@ -135,8 +148,14 @@ public class OrientationAwareScreenCapturer implements VideoCapturer, VideoSink 
     }
 
     @Override
-    public synchronized void stopCapture() {
+    public void stopCapture() {
+        // Hollow fork: deliberately NOT synchronized. Holding the capturer
+        // monitor while awaiting the texture thread deadlocks against
+        // onFrame -> synchronized changeCaptureFormat (see onFrame). The
+        // stopping flag keeps frames out of the format path instead, and the
+        // teardown body is serialized by the texture thread itself.
         checkNotDisposed();
+        stopping = true;
         ThreadUtils.invokeAtFrontUninterruptibly(surfaceTextureHelper.getHandler(), new Runnable() {
             @Override
             public void run() {

@@ -176,6 +176,8 @@ static Coef CoefPeaking(float fc, float gainDb, float q, float fs) {
   _Atomic(BOOL) _enhance;
   _Atomic(float) _makeupDb;
   _Atomic(BOOL) _dynamic;
+  _Atomic(BOOL) _muted;
+  _Atomic(BOOL) _servoHold;
   ChannelState _ch[2 /* kMaxChannels */];
   int _sampleRate;
   float _compAlphaA;
@@ -199,6 +201,8 @@ static Coef CoefPeaking(float fc, float gainDb, float q, float fs) {
     atomic_init(&_enhance, NO);
     atomic_init(&_makeupDb, 12.0f);
     atomic_init(&_dynamic, NO);
+    atomic_init(&_muted, NO);
+    atomic_init(&_servoHold, NO);
     _sampleRate = 48000;
     [self setupFilters:_sampleRate];
     [self resetState];
@@ -220,6 +224,24 @@ static Coef CoefPeaking(float fc, float gainDb, float q, float fs) {
 
 - (void)setEnhanceDynamic:(BOOL)enabled {
   atomic_store_explicit(&_dynamic, enabled, memory_order_relaxed);
+}
+
+// Mic muted: FREEZE the dynamic servo's meter/trim adaptation. The APM
+// capture path keeps running on real mic input while the outbound track is
+// disabled, and whatever the mic hears while muted (e.g. shared music on the
+// speakers) is by definition not call speech — adapting to it slams the trim
+// down and the voice comes back buried on unmute. Thread-safe, live.
+- (void)setMuted:(BOOL)muted {
+  atomic_store_explicit(&_muted, muted, memory_order_relaxed);
+}
+
+// Screen-share audio is ACTIVE somewhere on this device (sharing WITH audio,
+// or playing a received share): room/speaker bleed passes the servo's speech
+// floor continuously, so even between unmuted words it would re-calibrate to
+// the music and bury the voice. Freeze adaptation for the whole share; the
+// pre-share speech calibration holds. Thread-safe, live.
+- (void)setServoHold:(BOOL)hold {
+  atomic_store_explicit(&_servoHold, hold, memory_order_relaxed);
 }
 
 - (void)setupFilters:(int)sampleRate {
@@ -280,6 +302,8 @@ static Coef CoefPeaking(float fc, float gainDb, float q, float fs) {
   const float gain = atomic_load_explicit(&_gain, memory_order_relaxed);
   const BOOL enhance = atomic_load_explicit(&_enhance, memory_order_relaxed);
   const BOOL dynamic = atomic_load_explicit(&_dynamic, memory_order_relaxed);
+  const BOOL muted = atomic_load_explicit(&_muted, memory_order_relaxed);
+  const BOOL servoHold = atomic_load_explicit(&_servoHold, memory_order_relaxed);
   const float makeupDb =
       dynamic ? kDynMakeupDb
               : atomic_load_explicit(&_makeupDb, memory_order_relaxed);
@@ -305,8 +329,11 @@ static Coef CoefPeaking(float fc, float gainDb, float q, float fs) {
 
   // Dynamic-mode servo: frame-rate, speech-gated, measured on channel 0's
   // PRE-trim samples (the one real mic).
+  // FROZEN while muted and while share audio is active on this device —
+  // room bleed (shared music on speakers) passes the speech floor and
+  // adapting to non-speech buries the voice.
   float *ch0 = [audioBuffer rawBufferForChannel:0];
-  if (dynamic && ch0 != NULL && frames > 0) {
+  if (dynamic && ch0 != NULL && frames > 0 && !muted && !servoHold) {
     double sumsq = 0.0;
     for (int i = 0; i < frames; i++) {
       sumsq += (double)ch0[i] * (double)ch0[i];

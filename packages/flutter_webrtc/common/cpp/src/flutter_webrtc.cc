@@ -649,6 +649,36 @@ void FlutterWebRTC::HandleMethodCall(
       }
     }
     result->Success();
+  } else if (method_call.method_name().compare("setCaptureMuted") == 0) {
+    // Hollow fork: mic mute state for the capture processor — freezes the
+    // dynamic servo so it can't adapt to non-call audio while muted.
+    auto args = method_call.arguments();
+    if (!args) {
+      result->Error("Bad Arguments",
+                    "setCaptureMuted() Null arguments received");
+      return;
+    }
+    const EncodableMap params = GetValue<EncodableMap>(*args);
+    const bool muted = findBoolean(params, "muted");
+    if (capture_gain_processor()) {
+      capture_gain_processor()->SetMuted(muted);
+    }
+    result->Success();
+  } else if (method_call.method_name().compare("setCaptureServoHold") == 0) {
+    // Hollow fork: share audio active (sending or playing) — freeze the
+    // dynamic servo so continuous music bleed can't re-calibrate the trim.
+    auto args = method_call.arguments();
+    if (!args) {
+      result->Error("Bad Arguments",
+                    "setCaptureServoHold() Null arguments received");
+      return;
+    }
+    const EncodableMap params = GetValue<EncodableMap>(*args);
+    const bool hold = findBoolean(params, "hold");
+    if (capture_gain_processor()) {
+      capture_gain_processor()->SetServoHold(hold);
+    }
+    result->Success();
   } else if (method_call.method_name().compare("voiceRedirectStart") == 0) {
     // Hollow fork (Windows): begin out-of-process rendering of the given REMOTE
     // audio track ids so the call voices play from a separate pid (excluded from

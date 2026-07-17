@@ -484,6 +484,11 @@ class VoiceService {
     if (audioTracks.isEmpty) return;
     _isMuted = !_isMuted;
     audioTracks.first.enabled = !_isMuted;
+    // Freeze the capture processor's dynamic servo while muted — the APM
+    // keeps processing real mic input with the track disabled, and adapting
+    // to room bleed (e.g. shared music on speakers) buries the voice on
+    // unmute.
+    Helper.setCaptureMuted(_isMuted).catchError((_) {});
     _log('[HOLLOW-VOICE] Mute toggled: $_isMuted');
   }
 
@@ -1017,6 +1022,28 @@ class VoiceService {
     } catch (e) {
       _log('[HOLLOW-VOICE] Audio output switch failed: $e');
     }
+    // Defensive capture revive (device test 2026-07-17: after a mid-call
+    // output switch the REMOTE side stopped hearing this machine's mic —
+    // the ADM's playout restart appears to take the capture stream with it
+    // on Windows). Re-asserting the recording device forces a
+    // StopRecording -> InitRecording -> StartRecording cycle, which is
+    // harmless (~100 ms gap) when capture is healthy and revives it when
+    // the playout restart killed it. Only possible when a concrete input
+    // device is selected — the ADM API can't re-assert "system default".
+    if (_localStream != null) {
+      final inputId = _capturedAudioInputDeviceId;
+      if (inputId != null) {
+        try {
+          await Helper.selectAudioInput(inputId);
+          _log('[HOLLOW-VOICE] Re-asserted audio input after output switch');
+        } catch (e) {
+          _log('[HOLLOW-VOICE] Input re-assert failed: $e');
+        }
+      } else {
+        _log('[HOLLOW-VOICE] Output switched with default input — '
+            'no capture re-assert possible');
+      }
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -1208,6 +1235,7 @@ class VoiceService {
     _activePeerId = null;
     _activeCallId = null;
     _isMuted = false;
+    Helper.setCaptureMuted(false).catchError((_) {});
     _useFrontCamera = true;
   }
 

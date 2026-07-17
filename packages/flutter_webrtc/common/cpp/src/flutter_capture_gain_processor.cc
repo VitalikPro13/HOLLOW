@@ -259,6 +259,8 @@ void FlutterCaptureGainProcessor::Process(int num_bands, int /*num_frames*/,
   const float gain = gain_.load(std::memory_order_relaxed);
   const bool enhance = enhance_.load(std::memory_order_relaxed);
   const bool dynamic = dynamic_.load(std::memory_order_relaxed);
+  const bool muted = muted_.load(std::memory_order_relaxed);
+  const bool servo_hold = servo_hold_.load(std::memory_order_relaxed);
   const float makeup_db =
       dynamic ? kDynMakeupDb : makeup_db_.load(std::memory_order_relaxed);
 
@@ -300,7 +302,11 @@ void FlutterCaptureGainProcessor::Process(int num_bands, int /*num_frames*/,
   // Measures the PRE-trim RMS of the first segment (band0 / channel 0 — the
   // one real mic), slews the trim toward (target - meter), then the trim is
   // de-zippered per sample in the processing loops below.
-  if (dynamic && seg_len > 0) {
+  // FROZEN while muted (the APM keeps feeding real mic audio here with the
+  // outbound track disabled) and while share audio is active anywhere on the
+  // device (room bleed passes the speech floor continuously) — adapting to
+  // non-speech buries the voice.
+  if (dynamic && seg_len > 0 && !muted && !servo_hold) {
     double sumsq = 0.0;
     for (int i = 0; i < seg_len; ++i) {
       const double v = static_cast<double>(buffer[i]);

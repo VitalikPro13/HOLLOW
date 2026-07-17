@@ -15,6 +15,7 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/call_duration_text.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/components/share_volume_control.dart';
 import 'package:hollow/src/ui/mobile/mobile_screen_share_sheet.dart';
 import 'package:hollow/src/ui/mobile/mobile_sheet_drag.dart';
 import 'package:hollow/src/ui/mobile/mobile_source_switch_pill.dart';
@@ -197,6 +198,13 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
               ],
             ),
           ),
+          // Received share audio: volume + duck controls (opens the sheet).
+          // Top bar, not the controls row — that one already overflows at 6.
+          if (call.remoteScreenSharing)
+            const ShareVolumeButton(
+              iconSize: 22,
+              padding: EdgeInsets.all(HollowSpacing.sm),
+            ),
         ],
       ),
     );

@@ -4,11 +4,19 @@
        service of type mediaProjection on API 29+ (hard-enforced on 34+). -->
   <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
   <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+  <!-- Hollow fork: mic capture in a BACKGROUNDED app is silenced by the OS
+       (Android 11+) unless a microphone-typed foreground service is running;
+       CallForegroundService holds it for the duration of every call. -->
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
 
   <application>
     <service
       android:name="com.cloudwebrtc.webrtc.ScreenCaptureForegroundService"
       android:exported="false"
       android:foregroundServiceType="mediaProjection" />
+    <service
+      android:name="com.cloudwebrtc.webrtc.CallForegroundService"
+      android:exported="false"
+      android:foregroundServiceType="microphone" />
   </application>
 </manifest>

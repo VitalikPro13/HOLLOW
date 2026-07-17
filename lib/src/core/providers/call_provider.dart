@@ -19,6 +19,7 @@ import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/core/providers/webrtc_provider.dart';
 import 'package:hollow/src/core/services/macos_version.dart';
 import 'package:hollow/src/core/services/screen_audio_receiver.dart';
+import 'package:hollow/src/core/services/share_audio_level.dart';
 import 'package:hollow/src/core/services/screen_share_service.dart';
 import 'package:hollow/src/core/services/voice_service.dart';
 import 'package:hollow/src/ui/app.dart' show hollowNavigatorKey;
@@ -258,6 +259,9 @@ class CallNotifier extends Notifier<CallState> {
                 local: localSpeaking,
                 remote: remoteSpeaking,
               );
+          // Sidechain for share-audio ducking: anyone talking (self
+          // included) pulls received share audio down.
+          ShareAudioLevel.setSpeaking(localSpeaking || remoteSpeaking);
         };
         _voiceService!.startVad();
 
@@ -273,6 +277,7 @@ class CallNotifier extends Notifier<CallState> {
                 _screenAudioRenderer = null;
                 return;
               }
+              ShareAudioLevel.attach(_screenAudioRenderer!);
             }
             _screenAudioRenderer?.pushPacket(data);
           };
@@ -350,6 +355,23 @@ class CallNotifier extends Notifier<CallState> {
             remoteVideoTrackSeq: state.remoteVideoTrackSeq + 1);
       }
     };
+
+    // Share-audio playback level: seed the bus now and live-update it when
+    // the slider / duck toggle change mid-share. DM calls have no deafen, so
+    // clear any state a previous voice-channel session left behind.
+    ShareAudioLevel.setDeafened(false);
+    ShareAudioLevel.setVolumePercent(
+        ref.read(shareAudioVolumeProvider).valueOrNull ??
+            kShareAudioVolumeDefault);
+    ShareAudioLevel.setDuckEnabled(
+        ref.read(shareAudioDuckProvider).valueOrNull ?? true);
+    ref.listen(shareAudioVolumeProvider, (_, next) {
+      ShareAudioLevel.setVolumePercent(
+          next.valueOrNull ?? kShareAudioVolumeDefault);
+    });
+    ref.listen(shareAudioDuckProvider, (_, next) {
+      ShareAudioLevel.setDuckEnabled(next.valueOrNull ?? true);
+    });
 
     // Update mic gain mid-call when user adjusts the slider.
     ref.listen(micGainProvider, (_, next) {
@@ -818,9 +840,13 @@ class CallNotifier extends Notifier<CallState> {
             webrtc.sendScreenAudio(peerId, packet);
           },
         );
+        // Sharing WITH audio: freeze the mic servo for the whole share so
+        // speaker bleed of the shared music can't re-calibrate the trim.
+        ShareAudioLevel.setSendingShareAudio(true);
       }
     } catch (e) {
       debugPrint('[HOLLOW-CALL] Failed to start screen share: $e');
+      ShareAudioLevel.setSendingShareAudio(false);
       await _disarmVoiceRedirect();
       await _outgoingScreenShare?.close();
       _outgoingScreenShare = null;
@@ -843,6 +869,7 @@ class CallNotifier extends Notifier<CallState> {
 
   /// Stop screen sharing.
   Future<void> stopScreenShare() async {
+    ShareAudioLevel.setSendingShareAudio(false);
     // Stop the capturer FIRST, then disarm the redirect — so the brief window
     // where the remote voice's in-process volume is restored isn't captured
     // (the capturer is already gone), avoiding a momentary echo blip on stop.
@@ -1475,9 +1502,12 @@ class CallNotifier extends Notifier<CallState> {
     _lastRemoteVolume = 1.0;
     // Stop out-of-process screen audio renderer.
     if (_screenAudioRenderer != null) {
+      ShareAudioLevel.detach(_screenAudioRenderer!);
       await _screenAudioRenderer!.stop();
       _screenAudioRenderer = null;
     }
+    // Call over — any outgoing-share servo hold is stale.
+    ShareAudioLevel.setSendingShareAudio(false);
     try {
       ref.read(webRtcProvider.notifier).service.onScreenAudioReceived = null;
     } catch (_) {}

@@ -84,6 +84,31 @@ class NativeAudioManagement {
     });
   }
 
+  /// Tell the capture post-processor whether the mic is MUTED (Hollow fork
+  /// addition). The APM keeps processing real mic input while the outbound
+  /// track is disabled, so without this the dynamic servo adapts to whatever
+  /// the room plays while muted (e.g. shared music on speakers) and the voice
+  /// comes back buried on unmute. Process-global, live. No-op on web.
+  static Future<void> setCaptureMuted(bool muted) async {
+    if (kIsWeb) return;
+    await WebRTC.invokeMethod('setCaptureMuted', <String, dynamic>{
+      'muted': muted,
+    });
+  }
+
+  /// Tell the capture post-processor that screen-share AUDIO is active on
+  /// this device — either sending a share with audio or playing a received
+  /// one (Hollow fork addition). Freezes the dynamic servo for the whole
+  /// share: continuous speaker/room music bleed passes the servo's speech
+  /// floor and would re-calibrate the mic trim to the music, burying the
+  /// voice. Process-global, live. No-op on web.
+  static Future<void> setCaptureServoHold(bool hold) async {
+    if (kIsWeb) return;
+    await WebRTC.invokeMethod('setCaptureServoHold', <String, dynamic>{
+      'hold': hold,
+    });
+  }
+
   /// Begin out-of-process rendering of the given REMOTE audio tracks (Hollow
   /// fork, Windows only). Each track's decoded PCM is tapped via an
   /// AudioTrackSink and forwarded to a child `render-pcm` process that plays it,

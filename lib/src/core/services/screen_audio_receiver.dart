@@ -17,6 +17,12 @@ abstract class ScreenAudioReceiver {
   void pushPacket(Uint8List packet);
   Future<void> stop();
 
+  /// Set the playback gain target (0.0..=1.0). The sink ramps toward it
+  /// (fast down / slow up) so changes are click-free; driven by
+  /// [ShareAudioLevel] (share-volume slider + voice-activity ducking +
+  /// deafen), never called with raw UI values directly.
+  void setGain(double gain);
+
   /// Pick the receiver for the current platform.
   factory ScreenAudioReceiver.forPlatform() {
     if (Platform.isAndroid || Platform.isIOS) {
@@ -36,6 +42,8 @@ class _DesktopAdapter implements ScreenAudioReceiver {
   void pushPacket(Uint8List packet) => _inner.pushPacket(packet);
   @override
   Future<void> stop() => _inner.stop();
+  @override
+  void setGain(double gain) => _inner.setGain(gain);
 }
 
 class _MobileAdapter implements ScreenAudioReceiver {
@@ -48,4 +56,6 @@ class _MobileAdapter implements ScreenAudioReceiver {
   void pushPacket(Uint8List packet) => _inner.pushPacket(packet);
   @override
   Future<void> stop() => _inner.stop();
+  @override
+  void setGain(double gain) => _inner.setGain(gain);
 }

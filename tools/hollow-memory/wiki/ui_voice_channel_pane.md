@@ -8,7 +8,7 @@ Voice channel composite view located at `lib/src/ui/chat/voice_channel_pane.dart
 
 - `VoiceChannelPane` -- `ConsumerStatefulWidget`, top-level widget. Constructor params: `serverId`, `channelId`, `channelName`.
 - `_VoiceChannelPaneState` -- main state class (~1000 lines). Manages overlay visibility, chat overlay pin, focused video peer, and builds all layout modes.
-- `_VoiceControlsPill` -- `ConsumerStatefulWidget`, the floating controls bar at bottom center during camera/screen share modes. Contains mute, deafen, camera, screen share, disconnect buttons plus call duration timer.
+- `_VoiceControlsPill` -- `ConsumerStatefulWidget`, the floating controls bar at bottom center during camera/screen share modes. Contains mute, deafen, camera, screen share, disconnect buttons plus call duration timer. When any REMOTE peer is sharing (`peerScreenSharing.values.any`), a `ShareVolumeButton` (`ui/components/share_volume_control.dart`) appears left of Disconnect — popover above the button with the received-share-audio volume slider (0–200%, persisted `shareAudioVolumeProvider`) and the "Quieter when people talk" duck toggle (`shareAudioDuckProvider`); values flow through the `ShareAudioLevel` bus.
 - `_VoiceControlsPillState` -- manages duration timer, screen share toggle.
 - `_OverlaySlider` -- `StatefulWidget`, animated slide-in/out panel for the chat overlay during camera/screen share modes.
 - `_OverlaySliderState` -- `SingleTickerProviderStateMixin`, manages `AnimationController` for slide animation.

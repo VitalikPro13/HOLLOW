@@ -19,6 +19,7 @@ import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
+import 'package:hollow/src/ui/components/share_volume_control.dart';
 import 'package:hollow/src/ui/components/status_dot.dart';
 import 'package:hollow/src/ui/dialogs/screen_share_dialog.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -1212,6 +1213,11 @@ class _VoiceControlsPillState extends ConsumerState<_VoiceControlsPill> {
                   ),
                 ),
               ),
+            // Received share audio: volume + duck controls.
+            if (vcState.peerScreenSharing.values.any((v) => v)) ...[
+              const SizedBox(width: HollowSpacing.xs),
+              const ShareVolumeButton(),
+            ],
             const SizedBox(width: HollowSpacing.sm),
             // Disconnect
             HollowTooltip(
