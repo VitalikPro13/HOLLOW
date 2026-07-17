@@ -50,6 +50,62 @@ static const float kLimReleaseMs = 100.0f;
 static const float kSafetyKnee = 0.85f * kLimCeiling;
 static const float kSafetyRange = kLimCeiling - kSafetyKnee;
 
+// --- Gate + upward compression (dynamic mode only) ---------------------------
+// Port of the fused stage in flutter_capture_gain_processor.cc — KEEP IN
+// SYNC (full design + timing rationale documented there). Sits between the
+// EQ and the compressor, driven by ONE shared fast/slow envelope:
+//   - upward compression (3:1 toward the speech point, capped +8 dB) lifts
+//     word tails / soft speech, gated by TWO presence factors: SNR above a
+//     min-statistics noise-floor tracker, and positive-only 3-8 Hz syllabic
+//     modulation — boost exists only for content clearly above the mic's own
+//     floor that pumps like speech;
+//   - a soft downward expander (4:1 below the gate threshold, capped -14 dB)
+//     cuts the between-words floor BELOW the old chain's.
+static const float kUpEnvAttackMs = 1.0f;
+static const float kUpEnvReleaseMs = 25.0f;
+static const float kUpThresholdDb = -15.0f;  // speech envelope, harness-calibrated
+static const float kUpRatio = 3.0f;
+static const float kUpMaxBoostDb = 8.0f;
+static const float kUpKneeDb = 6.0f;
+static const float kUpBoostAttackMs = 50.0f;
+static const float kUpBoostReleaseMs = 4.0f;
+static const float kFloorWindowMs = 750.0f;
+static const float kFloorSmoothMs = 100.0f;
+static const float kSnrZeroDb = 6.0f;
+static const float kSnrFullDb = 12.0f;
+static const float kModSlowMs = 250.0f;
+static const float kModAvgMs = 400.0f;
+static const float kModClampDb = 6.0f;
+static const float kModZeroDb = 1.0f;
+static const float kModFullDb = 3.0f;
+// Gate threshold = LOWER of the absolute ceiling and tracked-floor + 10 dB
+// (absolute-only gating ate quiet speech on weak mics whose servo trim is
+// pinned at +12 — see the C++ port's constants block).
+static const float kGateThresholdDb = kUpThresholdDb - 17.0f;
+static const float kGateAboveFloorDb = 10.0f;
+static const float kGateRatio = 4.0f;
+static const float kGateMaxCutDb = 14.0f;
+static const float kGateKneeDb = 6.0f;
+static const float kGateOpenMs = 8.0f;
+static const float kGateCloseMs = 60.0f;
+
+// --- De-esser (both enhance modes) -------------------------------------------
+// Port of the de-esser in flutter_capture_gain_processor.cc — KEEP IN SYNC
+// (design + placement rationale documented there). AFTER the compressor,
+// BEFORE the limiter: split v = lp + hf at a fixed lowpass, duck ONLY hf,
+// keyed on the ratio of a TRUE 24 dB/oct highpass detector to the fullband
+// envelope, times a level gate.
+static const float kDeEssSplitFreq = 4800.0f;
+static const float kDeEssEnvAttackMs = 1.0f;
+static const float kDeEssEnvReleaseMs = 40.0f;
+static const float kDeEssRatioZeroDb = -10.0f;
+static const float kDeEssRatioFullDb = -3.0f;
+static const float kDeEssLevelFloorDb = -40.0f;
+static const float kDeEssLevelRampDb = 6.0f;
+static const float kDeEssMaxCutDb = 10.0f;
+static const float kDeEssCutAttackMs = 2.0f;
+static const float kDeEssCutReleaseMs = 40.0f;
+
 // Dynamic mode: a slow speech-gated RMS meter servos ONE input trim so any
 // mic lands at the calibrated speech level (~-28 dBFS RMS at the compressor
 // input — the Shure MV6 golden reference, 2026-07-02). Frame-rate decisions,
@@ -85,7 +141,100 @@ typedef struct {
   float comp_y1;  // decoupled detector intermediate (dB)
   float comp_yl;  // smoothed gain reduction (dB)
   float lim_gr;   // limiter smoothed linear gain
+  // Fused gate + upward-compression stage (dynamic mode only).
+  float up_env;            // fast-attack/slow-release envelope (linear)
+  float up_boost_db;       // smoothed upward boost (dB >= 0)
+  float gate_cut_db;       // smoothed expander attenuation (dB >= 0)
+  float mod_slow_db;       // slow envelope mean (dB) for modulation
+  float mod_depth_db;      // smoothed positive syllabic modulation (dB)
+  float up_floor_db;       // smoothed noise-floor estimate (dB, min stats)
+  float floor_sub_min_db;  // current sub-window minimum (dB)
+  float floor_prev_min_db; // previous sub-window minimum (dB)
+  int floor_count;         // samples into the current sub-window
+  // De-esser (both enhance modes).
+  Biquad deess_lp;         // fixed split lowpass (hf = v - lp)
+  Biquad deess_hp;         // detector highpass, stage 1
+  Biquad deess_hp2;        // detector highpass, stage 2 (24 dB/oct)
+  float de_env_hf;         // HF envelope (linear)
+  float de_env_fb;         // fullband envelope (linear)
+  float de_cut_db;         // smoothed HF cut (dB >= 0)
 } ChannelState;
+
+// Time constants for the gate + upward stage, recomputed per sample rate.
+typedef struct {
+  float env_a, env_r;       // envelope rise / fall
+  float boost_up, boost_dn; // boost grows / ducks
+  float gate_open, gate_close;
+  float mod_slow, mod_avg;
+  float floor_smooth;
+  int floor_win;
+} StageAlphas;
+
+// Per-sample step of the fused gate + upward-compression stage: updates the
+// channel's envelope + smoothed gains from the rectified sample and returns
+// the stage gain in dB. Mirrors GateUpwardGainDb in the C++ port.
+static inline float GateUpwardGainDb(ChannelState *s, float av,
+                                     const StageAlphas *a) {
+  // Envelope follower: fast rise, slow fall.
+  const float ae = av > s->up_env ? a->env_a : a->env_r;
+  s->up_env = ae * s->up_env + (1.0f - ae) * av + kDenormal;
+  const float envDb = 20.0f * log10f(fmaxf(s->up_env, kLogFloor) / kFullScale);
+
+  // Upward boost target: soft-knee lift below the speech point, capped.
+  const float under = kUpThresholdDb - envDb;
+  float bt;
+  if (2.0f * under <= -kUpKneeDb) {
+    bt = 0.0f;
+  } else if (2.0f * under >= kUpKneeDb) {
+    bt = under * (1.0f - 1.0f / kUpRatio);
+  } else {
+    const float t = under + kUpKneeDb * 0.5f;
+    bt = (1.0f - 1.0f / kUpRatio) * t * t / (2.0f * kUpKneeDb);
+  }
+  bt = fminf(bt, kUpMaxBoostDb);
+  // SNR presence: min-statistics floor tracker, boost only well above it.
+  s->floor_sub_min_db = fminf(s->floor_sub_min_db, envDb);
+  if (++s->floor_count >= a->floor_win) {
+    s->floor_count = 0;
+    s->floor_prev_min_db = s->floor_sub_min_db;
+    s->floor_sub_min_db = envDb;
+  }
+  const float floorRaw = fminf(s->floor_sub_min_db, s->floor_prev_min_db);
+  s->up_floor_db =
+      a->floor_smooth * s->up_floor_db + (1.0f - a->floor_smooth) * floorRaw;
+  float pr = (envDb - s->up_floor_db - kSnrZeroDb) / (kSnrFullDb - kSnrZeroDb);
+  pr = fminf(fmaxf(pr, 0.0f), 1.0f);
+  bt *= pr * pr * (3.0f - 2.0f * pr);
+  // Modulation presence: no boost on steady noise/tones.
+  s->mod_slow_db = a->mod_slow * s->mod_slow_db + (1.0f - a->mod_slow) * envDb;
+  const float md = fminf(fmaxf(envDb - s->mod_slow_db, 0.0f), kModClampDb);
+  s->mod_depth_db = a->mod_avg * s->mod_depth_db + (1.0f - a->mod_avg) * md;
+  float pm = (s->mod_depth_db - kModZeroDb) / (kModFullDb - kModZeroDb);
+  pm = fminf(fmaxf(pm, 0.0f), 1.0f);
+  bt *= pm * pm * (3.0f - 2.0f * pm);
+  const float ab = bt > s->up_boost_db ? a->boost_up : a->boost_dn;
+  s->up_boost_db = ab * s->up_boost_db + (1.0f - ab) * bt;
+
+  // Gate cut target: soft-knee downward expansion below the effective
+  // threshold (floor-relative, absolute-capped).
+  const float gateThresh =
+      fminf(kGateThresholdDb, s->up_floor_db + kGateAboveFloorDb);
+  const float underG = gateThresh - envDb;
+  float gt;
+  if (2.0f * underG <= -kGateKneeDb) {
+    gt = 0.0f;
+  } else if (2.0f * underG >= kGateKneeDb) {
+    gt = underG * (kGateRatio - 1.0f);
+  } else {
+    const float t = underG + kGateKneeDb * 0.5f;
+    gt = (kGateRatio - 1.0f) * t * t / (2.0f * kGateKneeDb);
+  }
+  gt = fminf(gt, kGateMaxCutDb);
+  const float ag = gt > s->gate_cut_db ? a->gate_close : a->gate_open;
+  s->gate_cut_db = ag * s->gate_cut_db + (1.0f - ag) * gt;
+
+  return s->up_boost_db - s->gate_cut_db;
+}
 
 static inline float SoftLimitLegacy(float x) {
   const float ax = fabsf(x);
@@ -138,6 +287,21 @@ static Coef CoefHighpass(float fc, float q, float fs) {
   return c;
 }
 
+static Coef CoefLowpass(float fc, float q, float fs) {
+  if (fc >= 0.45f * fs) return CoefIdentity();
+  const float w0 = 2.0f * (float)M_PI * fc / fs;
+  const float cw = cosf(w0);
+  const float alpha = sinf(w0) / (2.0f * q);
+  const float a0 = 1.0f + alpha;
+  Coef c;
+  c.b0 = (1.0f - cw) / 2.0f / a0;
+  c.b1 = (1.0f - cw) / a0;
+  c.b2 = (1.0f - cw) / 2.0f / a0;
+  c.a1 = -2.0f * cw / a0;
+  c.a2 = (1.0f - alpha) / a0;
+  return c;
+}
+
 static Coef CoefLowShelf(float fc, float gainDb, float fs) {
   if (fc >= 0.45f * fs) return CoefIdentity();
   const float A = powf(10.0f, gainDb / 40.0f);
@@ -184,6 +348,12 @@ static Coef CoefPeaking(float fc, float gainDb, float q, float fs) {
   float _compAlphaR;
   float _limAlphaA;
   float _limAlphaR;
+  StageAlphas _stage;  // gate + upward stage time constants
+  // De-esser time constants.
+  float _deEnvAlphaA;
+  float _deEnvAlphaR;
+  float _deCutAlphaA;
+  float _deCutAlphaR;
   // Dynamic-mode servo (single mic — one servo, not per-channel).
   float _dynMeterDb;
   BOOL _dynMeterPrimed;
@@ -263,11 +433,39 @@ static Coef CoefPeaking(float fc, float gainDb, float q, float fs) {
       _ch[chan].eq[i].a2 = c[i].a2;
     }
   }
+  // De-esser split + 24 dB/oct detector (see the C++ port for rationale).
+  const Coef dl = CoefLowpass(kDeEssSplitFreq, 0.70710678f, fs);
+  const Coef dh = CoefHighpass(kDeEssSplitFreq, 0.70710678f, fs);
+  for (int chan = 0; chan < kMaxChannels; chan++) {
+    Biquad *bq = &_ch[chan].deess_lp;
+    bq->b0 = dl.b0; bq->b1 = dl.b1; bq->b2 = dl.b2;
+    bq->a1 = dl.a1; bq->a2 = dl.a2;
+    Biquad *hps[2] = {&_ch[chan].deess_hp, &_ch[chan].deess_hp2};
+    for (int i = 0; i < 2; i++) {
+      hps[i]->b0 = dh.b0; hps[i]->b1 = dh.b1; hps[i]->b2 = dh.b2;
+      hps[i]->a1 = dh.a1; hps[i]->a2 = dh.a2;
+    }
+  }
   _compAlphaA = AlphaFromMs(kCompAttackMs, sampleRate);
   _compAlphaR = AlphaFromMs(kCompReleaseMs, sampleRate);
   _limAlphaA = AlphaFromMs(kLimAttackMs, sampleRate);
   _limAlphaR = AlphaFromMs(kLimReleaseMs, sampleRate);
   _dynSmoothAlpha = AlphaFromMs(kDynSmoothMs, sampleRate);
+  _stage.env_a = AlphaFromMs(kUpEnvAttackMs, sampleRate);
+  _stage.env_r = AlphaFromMs(kUpEnvReleaseMs, sampleRate);
+  _stage.boost_up = AlphaFromMs(kUpBoostAttackMs, sampleRate);
+  _stage.boost_dn = AlphaFromMs(kUpBoostReleaseMs, sampleRate);
+  _stage.gate_open = AlphaFromMs(kGateOpenMs, sampleRate);
+  _stage.gate_close = AlphaFromMs(kGateCloseMs, sampleRate);
+  _stage.mod_slow = AlphaFromMs(kModSlowMs, sampleRate);
+  _stage.mod_avg = AlphaFromMs(kModAvgMs, sampleRate);
+  _stage.floor_smooth = AlphaFromMs(kFloorSmoothMs, sampleRate);
+  _stage.floor_win = (int)(kFloorWindowMs * 0.001f * (float)sampleRate);
+  if (_stage.floor_win < 1) _stage.floor_win = 1;
+  _deEnvAlphaA = AlphaFromMs(kDeEssEnvAttackMs, sampleRate);
+  _deEnvAlphaR = AlphaFromMs(kDeEssEnvReleaseMs, sampleRate);
+  _deCutAlphaA = AlphaFromMs(kDeEssCutAttackMs, sampleRate);
+  _deCutAlphaR = AlphaFromMs(kDeEssCutReleaseMs, sampleRate);
 }
 
 - (void)resetState {
@@ -279,6 +477,26 @@ static Coef CoefPeaking(float fc, float gainDb, float q, float fs) {
     _ch[chan].comp_y1 = 0.0f;
     _ch[chan].comp_yl = 0.0f;
     _ch[chan].lim_gr = 1.0f;
+    _ch[chan].up_env = 0.0f;
+    _ch[chan].up_boost_db = 0.0f;
+    // Boot in the gated state (a stream starts in silence) — the gate opens
+    // on the first word instead of popping the pre-speech floor.
+    _ch[chan].gate_cut_db = kGateMaxCutDb;
+    _ch[chan].mod_slow_db = -80.0f;
+    _ch[chan].mod_depth_db = 0.0f;
+    // Floor tracker boots HIGH: no boost until real minima are observed.
+    _ch[chan].up_floor_db = 10.0f;
+    _ch[chan].floor_sub_min_db = 10.0f;
+    _ch[chan].floor_prev_min_db = 10.0f;
+    _ch[chan].floor_count = 0;
+    Biquad *des[3] = {&_ch[chan].deess_lp, &_ch[chan].deess_hp,
+                      &_ch[chan].deess_hp2};
+    for (int i = 0; i < 3; i++) {
+      des[i]->x1 = des[i]->x2 = des[i]->y1 = des[i]->y2 = 0.0f;
+    }
+    _ch[chan].de_env_hf = 0.0f;
+    _ch[chan].de_env_fb = 0.0f;
+    _ch[chan].de_cut_db = 0.0f;
   }
   _dynMeterDb = 0.0f;
   _dynMeterPrimed = NO;
@@ -402,6 +620,12 @@ static Coef CoefPeaking(float fc, float gainDb, float q, float fs) {
         bq->y1 = y;
         v = y;
       }
+      // Gate + upward compression (dynamic mode only) between EQ and
+      // compressor: gate BEFORE the compressor so its makeup can never lift
+      // the pause noise floor.
+      if (dynamic) {
+        v *= powf(10.0f, GateUpwardGainDb(s, fabsf(v), &_stage) * 0.05f);
+      }
       // Compressor: Giannoulis soft-knee gain computer + decoupled smooth
       // peak detector, single dB-domain gain, single multiply.
       const float av = fabsf(v);
@@ -422,6 +646,45 @@ static Coef CoefPeaking(float fc, float gainDb, float q, float fs) {
       s->comp_y1 = xl > rel ? xl : rel;
       s->comp_yl = _compAlphaA * s->comp_yl + (1.0f - _compAlphaA) * s->comp_y1;
       v *= powf(10.0f, (makeupDb - s->comp_yl) * 0.05f);
+      // De-esser (constants block above; mirrors the C++ port): split
+      // v = lp + hf, duck ONLY hf, keyed on the 24 dB/oct HF detector to
+      // fullband envelope ratio with a level gate.
+      {
+        Biquad *dl = &s->deess_lp;
+        const float lp = dl->b0 * v + dl->b1 * dl->x1 + dl->b2 * dl->x2 -
+                         dl->a1 * dl->y1 - dl->a2 * dl->y2 + kDenormal;
+        dl->x2 = dl->x1; dl->x1 = v; dl->y2 = dl->y1; dl->y1 = lp;
+        const float hf = v - lp;
+        Biquad *dh = &s->deess_hp;
+        const float hp1 = dh->b0 * v + dh->b1 * dh->x1 + dh->b2 * dh->x2 -
+                          dh->a1 * dh->y1 - dh->a2 * dh->y2 + kDenormal;
+        dh->x2 = dh->x1; dh->x1 = v; dh->y2 = dh->y1; dh->y1 = hp1;
+        Biquad *dh2 = &s->deess_hp2;
+        const float hp = dh2->b0 * hp1 + dh2->b1 * dh2->x1 +
+                         dh2->b2 * dh2->x2 - dh2->a1 * dh2->y1 -
+                         dh2->a2 * dh2->y2 + kDenormal;
+        dh2->x2 = dh2->x1; dh2->x1 = hp1; dh2->y2 = dh2->y1; dh2->y1 = hp;
+        const float ahf = fabsf(hp);
+        const float afb = fabsf(v);
+        const float ah = ahf > s->de_env_hf ? _deEnvAlphaA : _deEnvAlphaR;
+        s->de_env_hf = ah * s->de_env_hf + (1.0f - ah) * ahf + kDenormal;
+        const float af = afb > s->de_env_fb ? _deEnvAlphaA : _deEnvAlphaR;
+        s->de_env_fb = af * s->de_env_fb + (1.0f - af) * afb + kDenormal;
+        const float hfDb =
+            20.0f * log10f(fmaxf(s->de_env_hf, kLogFloor) / kFullScale);
+        const float fbDb =
+            20.0f * log10f(fmaxf(s->de_env_fb, kLogFloor) / kFullScale);
+        float ra = (hfDb - fbDb - kDeEssRatioZeroDb) /
+                   (kDeEssRatioFullDb - kDeEssRatioZeroDb);
+        ra = fminf(fmaxf(ra, 0.0f), 1.0f);
+        float lv = (fbDb - kDeEssLevelFloorDb) / kDeEssLevelRampDb;
+        lv = fminf(fmaxf(lv, 0.0f), 1.0f);
+        const float ct = kDeEssMaxCutDb * ra * ra * (3.0f - 2.0f * ra) * lv *
+                         lv * (3.0f - 2.0f * lv);
+        const float ac = ct > s->de_cut_db ? _deCutAlphaA : _deCutAlphaR;
+        s->de_cut_db = ac * s->de_cut_db + (1.0f - ac) * ct;
+        v = lp + hf * powf(10.0f, -s->de_cut_db * 0.05f);
+      }
       // Limiter: gain-smoothed peak limiter into a tanh safety net.
       const float pv = fabsf(v);
       const float target = pv > kLimCeiling ? kLimCeiling / pv : 1.0f;

@@ -18,8 +18,11 @@ namespace flutter_webrtc_plugin {
 //  - enhance ON (default): a STATIC broadcast voice chain —
 //      trim -> EQ (HP 100 Hz 24 dB/oct, low shelf 110 Hz +6 dB,
 //      peak 291 Hz -3 dB Q1.5, 3 kHz +2 dB Q1.5, 7 kHz +3.5 dB Q2,
-//      12 kHz +1.5 dB Q2) -> compressor (-18 dBFS, 3:1, 10/100 ms,
-//      +12 dB makeup) -> smoothed peak limiter (-1 dBFS) -> tanh safety.
+//      12 kHz +1.5 dB Q2) -> [dynamic mode only: gate + upward
+//      compression, one fused stage] -> compressor (-24 dBFS, 3:1,
+//      10/100 ms, +12.5 dB makeup) -> de-esser (ratio-keyed HF duck,
+//      both enhance modes) -> smoothed peak limiter (-1 dBFS) -> tanh
+//      safety.
 //    Every stage has FIXED parameters (no adaptive leveler): fixed biquads
 //    are LTI and cannot zipper, and the single compressor uses the
 //    Giannoulis decoupled smooth detector with one dB-domain gain and one
@@ -105,10 +108,32 @@ class FlutterCaptureGainProcessor
     float comp_y1 = 0.0f;  // decoupled detector intermediate (dB)
     float comp_yl = 0.0f;  // smoothed gain reduction (dB)
     float lim_gr = 1.0f;   // limiter smoothed linear gain
+    // Fused gate + upward-compression stage (dynamic mode only).
+    float up_env = 0.0f;        // shared fast-attack/slow-release envelope (linear)
+    float up_boost_db = 0.0f;   // smoothed upward boost (dB >= 0)
+    float gate_cut_db = 0.0f;   // smoothed expander attenuation (dB >= 0)
+    float mod_slow_db = -80.0f; // slow envelope mean (dB) for modulation
+    float mod_depth_db = 0.0f;  // smoothed positive syllabic modulation (dB)
+    // Min-statistics noise-floor tracker: two alternating sub-window minima.
+    float up_floor_db = 10.0f;       // smoothed floor estimate (dB)
+    float floor_sub_min_db = 10.0f;  // current sub-window minimum (dB)
+    float floor_prev_min_db = 10.0f; // previous sub-window minimum (dB)
+    int floor_count = 0;             // samples into the current sub-window
+    // De-esser (both enhance modes): dynamic HF duck keyed on HF/full ratio.
+    Biquad deess_lp;                 // fixed split lowpass (hf = v - lp)
+    Biquad deess_hp;                 // detector highpass, stage 1
+    Biquad deess_hp2;                // detector highpass, stage 2 (24 dB/oct)
+    float de_env_hf = 0.0f;          // HF envelope (linear)
+    float de_env_fb = 0.0f;          // fullband envelope (linear)
+    float de_cut_db = 0.0f;          // smoothed HF cut (dB >= 0)
   };
 
   void SetupFilters(int sample_rate_hz);
   void ResetState();
+  // Per-sample step of the fused gate + upward-compression stage (dynamic
+  // mode only): updates the channel's envelope + smoothed gains from the
+  // rectified sample and returns the stage gain in dB.
+  float GateUpwardGainDb(ChannelState& s, float av);
 
   std::atomic<float> gain_;
   std::atomic<bool> enhance_;
@@ -125,6 +150,22 @@ class FlutterCaptureGainProcessor
   float comp_alpha_r_ = 0.0f;
   float lim_alpha_a_ = 0.0f;
   float lim_alpha_r_ = 0.0f;
+  // Gate + upward-compression stage time constants (dynamic mode only).
+  float up_env_alpha_a_ = 0.0f;    // envelope rise (fast)
+  float up_env_alpha_r_ = 0.0f;    // envelope fall (slow)
+  float up_boost_alpha_up_ = 0.0f; // boost grows (moderate)
+  float up_boost_alpha_dn_ = 0.0f; // boost ducks fast (onset guard)
+  float gate_alpha_open_ = 0.0f;   // gate opens fast (onset guard)
+  float gate_alpha_close_ = 0.0f;  // gate closes slowly (no chatter)
+  float mod_slow_alpha_ = 0.0f;    // slow envelope mean
+  float mod_avg_alpha_ = 0.0f;     // modulation-depth smoothing
+  float floor_smooth_alpha_ = 0.0f;  // floor estimate smoothing
+  int floor_win_samples_ = 36000;    // min-statistics sub-window length
+  // De-esser time constants.
+  float de_env_alpha_a_ = 0.0f;
+  float de_env_alpha_r_ = 0.0f;
+  float de_cut_alpha_a_ = 0.0f;
+  float de_cut_alpha_r_ = 0.0f;
   // Dynamic-mode auto-trim servo (single mic — one servo, not per-channel).
   // The meter reads PRE-trim speech RMS; the trim is slew-limited in dB and
   // de-zippered per sample.

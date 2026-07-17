@@ -16,8 +16,9 @@ import java.nio.FloatBuffer;
  *   <li>enhance OFF (legacy): flat makeup gain + a -3 dBFS soft limiter.</li>
  *   <li>enhance ON (default from the app): a STATIC broadcast voice chain —
  *   trim -> EQ (HP 100 Hz 24 dB/oct, low shelf 110 Hz +6 dB, peaking 291/-3,
- *   3k/+2, 7k/+3.5, 12k/+1.5 dB) -> compressor (-18 dBFS, 3:1, 10/100 ms,
- *   +12 dB makeup) -> smoothed peak limiter (-1 dBFS) -> tanh safety net.
+ *   3k/+2, 7k/+3.5, 12k/+1.5 dB) -> [dynamic mode only: fused gate + upward
+ *   compression] -> compressor (-24 dBFS, 3:1, 10/100 ms, +12.5 dB makeup)
+ *   -> smoothed peak limiter (-1 dBFS) -> tanh safety net.
  *   All parameters are FIXED (no adaptive leveler): fixed biquads cannot
  *   zipper, and the single compressor uses the Giannoulis decoupled smooth
  *   detector — the anti-crackle rules from the reverted adaptive chain.
@@ -71,6 +72,59 @@ public class CaptureGainProcessor
     private static final float LIM_RELEASE_MS = 100.0f;
     private static final float SAFETY_KNEE = 0.85f * LIM_CEILING;
     private static final float SAFETY_RANGE = LIM_CEILING - SAFETY_KNEE;
+
+    // --- Gate + upward compression (dynamic mode only) ---------------------
+    // Port of the fused stage in flutter_capture_gain_processor.cc — KEEP IN
+    // SYNC (full design + timing rationale documented there). Sits between
+    // the EQ and the compressor, driven by ONE shared fast/slow envelope:
+    // upward compression (3:1 toward the speech point, capped +8 dB) lifts
+    // word tails / soft speech, gated by SNR above a min-statistics floor
+    // tracker AND positive-only 3-8 Hz syllabic modulation; a soft downward
+    // expander (4:1, capped -14 dB) cuts the between-words floor.
+    private static final float UP_ENV_ATTACK_MS = 1.0f;
+    private static final float UP_ENV_RELEASE_MS = 25.0f;
+    private static final float UP_THRESHOLD_DB = -15.0f; // harness-calibrated
+    private static final float UP_RATIO = 3.0f;
+    private static final float UP_MAX_BOOST_DB = 8.0f;
+    private static final float UP_KNEE_DB = 6.0f;
+    private static final float UP_BOOST_ATTACK_MS = 50.0f;
+    private static final float UP_BOOST_RELEASE_MS = 4.0f;
+    private static final float FLOOR_WINDOW_MS = 750.0f;
+    private static final float FLOOR_SMOOTH_MS = 100.0f;
+    private static final float SNR_ZERO_DB = 6.0f;
+    private static final float SNR_FULL_DB = 12.0f;
+    private static final float MOD_SLOW_MS = 250.0f;
+    private static final float MOD_AVG_MS = 400.0f;
+    private static final float MOD_CLAMP_DB = 6.0f;
+    private static final float MOD_ZERO_DB = 1.0f;
+    private static final float MOD_FULL_DB = 3.0f;
+    // Gate threshold = LOWER of the absolute ceiling and tracked-floor +
+    // 10 dB (absolute-only gating ate quiet speech on weak mics whose servo
+    // trim is pinned at +12 — see the C++ port's constants block).
+    private static final float GATE_THRESHOLD_DB = UP_THRESHOLD_DB - 17.0f;
+    private static final float GATE_ABOVE_FLOOR_DB = 10.0f;
+    private static final float GATE_RATIO = 4.0f;
+    private static final float GATE_MAX_CUT_DB = 14.0f;
+    private static final float GATE_KNEE_DB = 6.0f;
+    private static final float GATE_OPEN_MS = 8.0f;
+    private static final float GATE_CLOSE_MS = 60.0f;
+
+    // --- De-esser (both enhance modes) -------------------------------------
+    // Port of the de-esser in flutter_capture_gain_processor.cc — KEEP IN
+    // SYNC (design + placement rationale documented there). AFTER the
+    // compressor, BEFORE the limiter: split v = lp + hf at a fixed lowpass,
+    // duck ONLY hf, keyed on the ratio of a TRUE 24 dB/oct highpass detector
+    // to the fullband envelope, times a level gate.
+    private static final float DEESS_SPLIT_FREQ = 4800.0f;
+    private static final float DEESS_ENV_ATTACK_MS = 1.0f;
+    private static final float DEESS_ENV_RELEASE_MS = 40.0f;
+    private static final float DEESS_RATIO_ZERO_DB = -10.0f;
+    private static final float DEESS_RATIO_FULL_DB = -3.0f;
+    private static final float DEESS_LEVEL_FLOOR_DB = -40.0f;
+    private static final float DEESS_LEVEL_RAMP_DB = 6.0f;
+    private static final float DEESS_MAX_CUT_DB = 10.0f;
+    private static final float DEESS_CUT_ATTACK_MS = 2.0f;
+    private static final float DEESS_CUT_RELEASE_MS = 40.0f;
 
     // Dynamic mode: a slow speech-gated RMS meter servos ONE input trim so
     // any mic lands at the calibrated speech level (~-28 dBFS RMS at the
@@ -129,6 +183,26 @@ public class CaptureGainProcessor
     private final float[] compYl = new float[MAX_CHANNELS];
     private final float[] limGr = new float[MAX_CHANNELS];
     private final float[] bandGain = new float[MAX_BAND_LEN];
+    // Fused gate + upward-compression stage state (dynamic mode only).
+    private final float[] upEnv = new float[MAX_CHANNELS];
+    private final float[] upBoostDb = new float[MAX_CHANNELS];
+    private final float[] gateCutDb = new float[MAX_CHANNELS];
+    private final float[] modSlowDb = new float[MAX_CHANNELS];
+    private final float[] modDepthDb = new float[MAX_CHANNELS];
+    private final float[] upFloorDb = new float[MAX_CHANNELS];
+    private final float[] floorSubMinDb = new float[MAX_CHANNELS];
+    private final float[] floorPrevMinDb = new float[MAX_CHANNELS];
+    private final int[] floorCount = new int[MAX_CHANNELS];
+    // De-esser (both enhance modes): filter coefficients (shared) + state
+    // {x1,x2,y1,y2} per channel, envelopes and smoothed cut.
+    private final float[] deLpCoef = new float[5]; // b0,b1,b2,a1,a2
+    private final float[] deHpCoef = new float[5];
+    private final float[][] deLpState = new float[MAX_CHANNELS][4];
+    private final float[][] deHp1State = new float[MAX_CHANNELS][4];
+    private final float[][] deHp2State = new float[MAX_CHANNELS][4];
+    private final float[] deEnvHf = new float[MAX_CHANNELS];
+    private final float[] deEnvFb = new float[MAX_CHANNELS];
+    private final float[] deCutDb = new float[MAX_CHANNELS];
 
     private int sampleRate = 48000;
     private int channels = 1;
@@ -136,6 +210,20 @@ public class CaptureGainProcessor
     private float compAlphaR;
     private float limAlphaA;
     private float limAlphaR;
+    private float upEnvAlphaA;
+    private float upEnvAlphaR;
+    private float upBoostAlphaUp;
+    private float upBoostAlphaDn;
+    private float gateAlphaOpen;
+    private float gateAlphaClose;
+    private float modSlowAlpha;
+    private float modAvgAlpha;
+    private float floorSmoothAlpha;
+    private int floorWinSamples = 36000;
+    private float deEnvAlphaA;
+    private float deEnvAlphaR;
+    private float deCutAlphaA;
+    private float deCutAlphaR;
 
     public CaptureGainProcessor() {
         setupFilters(sampleRate);
@@ -311,8 +399,17 @@ public class CaptureGainProcessor
             // trim + the band0 compressor gain time-aligned to higher bands
             // (a linear gain commutes with the filterbank).
             for (int i = 0; i < segLen; i++) {
-                final float t = trimBuf[i];
-                final float v = fb.get(i) * t;
+                float t = trimBuf[i];
+                float v = fb.get(i) * t;
+                // Gate + upward compression (dynamic mode only), computed on
+                // band0 and ridden to the higher bands via bandGain like the
+                // compressor's gain.
+                if (dyn) {
+                    final float gs = (float) Math.pow(
+                            10.0, gateUpwardGainDb(0, Math.abs(v)) * 0.05);
+                    v *= gs;
+                    t *= gs;
+                }
                 final float gc = compressorGain(0, v, mkDb);
                 bandGain[i] = t * gc;
                 fb.put(i, v * gc);
@@ -355,8 +452,18 @@ public class CaptureGainProcessor
                     y1[f] = y;
                     v = y;
                 }
+                // Gate + upward compression (dynamic mode only) between EQ
+                // and compressor: gate BEFORE the compressor so its makeup
+                // can never lift the pause noise floor.
+                if (dyn) {
+                    v *= (float) Math.pow(
+                            10.0, gateUpwardGainDb(ch, Math.abs(v)) * 0.05);
+                }
                 // Compressor.
                 v *= compressorGain(ch, v, mkDb);
+                // De-esser: AFTER the compressor so the full cut lands on
+                // the output (the ratio key is invariant to broadband gain).
+                v = deEss(ch, v);
                 // Limiter: gain-smoothed peak limiter into a tanh safety net.
                 final float pv = Math.abs(v);
                 final float target = pv > LIM_CEILING ? LIM_CEILING / pv : 1.0f;
@@ -368,6 +475,75 @@ public class CaptureGainProcessor
                 fb.put(base + i, softLimitSafety(v * limGr[ch]));
             }
         }
+    }
+
+    /**
+     * Per-sample step of the fused gate + upward-compression stage (dynamic
+     * mode only): updates channel {@code ch}'s envelope + smoothed gains from
+     * the rectified sample and returns the stage gain in dB. Mirrors
+     * GateUpwardGainDb in the C++ port — keep in sync.
+     */
+    private float gateUpwardGainDb(int ch, float av) {
+        // Envelope follower: fast rise, slow fall.
+        final float ae = av > upEnv[ch] ? upEnvAlphaA : upEnvAlphaR;
+        upEnv[ch] = ae * upEnv[ch] + (1.0f - ae) * av + DENORMAL;
+        final float envDb =
+                20.0f * (float) Math.log10(Math.max(upEnv[ch], LOG_FLOOR) / FULL_SCALE);
+
+        // Upward boost target: soft-knee lift below the speech point, capped.
+        final float under = UP_THRESHOLD_DB - envDb;
+        float bt;
+        if (2.0f * under <= -UP_KNEE_DB) {
+            bt = 0.0f;
+        } else if (2.0f * under >= UP_KNEE_DB) {
+            bt = under * (1.0f - 1.0f / UP_RATIO);
+        } else {
+            final float t = under + UP_KNEE_DB * 0.5f;
+            bt = (1.0f - 1.0f / UP_RATIO) * t * t / (2.0f * UP_KNEE_DB);
+        }
+        bt = Math.min(bt, UP_MAX_BOOST_DB);
+        // SNR presence: min-statistics floor tracker, boost only well above.
+        floorSubMinDb[ch] = Math.min(floorSubMinDb[ch], envDb);
+        if (++floorCount[ch] >= floorWinSamples) {
+            floorCount[ch] = 0;
+            floorPrevMinDb[ch] = floorSubMinDb[ch];
+            floorSubMinDb[ch] = envDb;
+        }
+        final float floorRaw = Math.min(floorSubMinDb[ch], floorPrevMinDb[ch]);
+        upFloorDb[ch] = floorSmoothAlpha * upFloorDb[ch]
+                + (1.0f - floorSmoothAlpha) * floorRaw;
+        float pr = (envDb - upFloorDb[ch] - SNR_ZERO_DB) / (SNR_FULL_DB - SNR_ZERO_DB);
+        pr = clamp(pr, 0.0f, 1.0f);
+        bt *= pr * pr * (3.0f - 2.0f * pr);
+        // Modulation presence: no boost on steady noise/tones.
+        modSlowDb[ch] = modSlowAlpha * modSlowDb[ch] + (1.0f - modSlowAlpha) * envDb;
+        final float md = clamp(envDb - modSlowDb[ch], 0.0f, MOD_CLAMP_DB);
+        modDepthDb[ch] = modAvgAlpha * modDepthDb[ch] + (1.0f - modAvgAlpha) * md;
+        float pm = (modDepthDb[ch] - MOD_ZERO_DB) / (MOD_FULL_DB - MOD_ZERO_DB);
+        pm = clamp(pm, 0.0f, 1.0f);
+        bt *= pm * pm * (3.0f - 2.0f * pm);
+        final float ab = bt > upBoostDb[ch] ? upBoostAlphaUp : upBoostAlphaDn;
+        upBoostDb[ch] = ab * upBoostDb[ch] + (1.0f - ab) * bt;
+
+        // Gate cut target: soft-knee downward expansion below the effective
+        // threshold (floor-relative, absolute-capped).
+        final float gateThresh =
+                Math.min(GATE_THRESHOLD_DB, upFloorDb[ch] + GATE_ABOVE_FLOOR_DB);
+        final float underG = gateThresh - envDb;
+        float gt;
+        if (2.0f * underG <= -GATE_KNEE_DB) {
+            gt = 0.0f;
+        } else if (2.0f * underG >= GATE_KNEE_DB) {
+            gt = underG * (GATE_RATIO - 1.0f);
+        } else {
+            final float t = underG + GATE_KNEE_DB * 0.5f;
+            gt = (GATE_RATIO - 1.0f) * t * t / (2.0f * GATE_KNEE_DB);
+        }
+        gt = Math.min(gt, GATE_MAX_CUT_DB);
+        final float ag = gt > gateCutDb[ch] ? gateAlphaClose : gateAlphaOpen;
+        gateCutDb[ch] = ag * gateCutDb[ch] + (1.0f - ag) * gt;
+
+        return upBoostDb[ch] - gateCutDb[ch];
     }
 
     /**
@@ -400,6 +576,49 @@ public class CaptureGainProcessor
         return Math.min(Math.max(v, lo), hi);
     }
 
+    /**
+     * De-esser step (mirrors the C++ port — keep in sync): splits v into
+     * lp + hf, ducks ONLY hf, keyed on the ratio of a 24 dB/oct HF detector
+     * to the fullband envelope, times a level gate. Returns the sample.
+     */
+    private float deEss(int ch, float v) {
+        final float lp = biquadStep(deLpCoef, deLpState[ch], v);
+        final float hf = v - lp;
+        final float hp1 = biquadStep(deHpCoef, deHp1State[ch], v);
+        final float hp = biquadStep(deHpCoef, deHp2State[ch], hp1);
+        final float ahf = Math.abs(hp);
+        final float afb = Math.abs(v);
+        final float ah = ahf > deEnvHf[ch] ? deEnvAlphaA : deEnvAlphaR;
+        deEnvHf[ch] = ah * deEnvHf[ch] + (1.0f - ah) * ahf + DENORMAL;
+        final float af = afb > deEnvFb[ch] ? deEnvAlphaA : deEnvAlphaR;
+        deEnvFb[ch] = af * deEnvFb[ch] + (1.0f - af) * afb + DENORMAL;
+        final float hfDb = 20.0f
+                * (float) Math.log10(Math.max(deEnvHf[ch], LOG_FLOOR) / FULL_SCALE);
+        final float fbDb = 20.0f
+                * (float) Math.log10(Math.max(deEnvFb[ch], LOG_FLOOR) / FULL_SCALE);
+        float ra = (hfDb - fbDb - DEESS_RATIO_ZERO_DB)
+                / (DEESS_RATIO_FULL_DB - DEESS_RATIO_ZERO_DB);
+        ra = clamp(ra, 0.0f, 1.0f);
+        float lv = (fbDb - DEESS_LEVEL_FLOOR_DB) / DEESS_LEVEL_RAMP_DB;
+        lv = clamp(lv, 0.0f, 1.0f);
+        final float ct = DEESS_MAX_CUT_DB * ra * ra * (3.0f - 2.0f * ra)
+                * lv * lv * (3.0f - 2.0f * lv);
+        final float ac = ct > deCutDb[ch] ? deCutAlphaA : deCutAlphaR;
+        deCutDb[ch] = ac * deCutDb[ch] + (1.0f - ac) * ct;
+        return lp + hf * (float) Math.pow(10.0, -deCutDb[ch] * 0.05);
+    }
+
+    /** Direct Form I biquad; state layout {x1, x2, y1, y2}. */
+    private static float biquadStep(float[] c, float[] st, float x) {
+        final float y = c[0] * x + c[1] * st[0] + c[2] * st[1]
+                - c[3] * st[2] - c[4] * st[3] + DENORMAL;
+        st[1] = st[0];
+        st[0] = x;
+        st[3] = st[2];
+        st[2] = y;
+        return y;
+    }
+
     private void setupFilters(int fsHz) {
         final float fs = (float) fsHz;
         int n = 0;
@@ -414,6 +633,25 @@ public class CaptureGainProcessor
         limAlphaA = alphaFromMs(LIM_ATTACK_MS, fsHz);
         limAlphaR = alphaFromMs(LIM_RELEASE_MS, fsHz);
         dynSmoothAlpha = alphaFromMs(DYN_SMOOTH_MS, fsHz);
+        upEnvAlphaA = alphaFromMs(UP_ENV_ATTACK_MS, fsHz);
+        upEnvAlphaR = alphaFromMs(UP_ENV_RELEASE_MS, fsHz);
+        upBoostAlphaUp = alphaFromMs(UP_BOOST_ATTACK_MS, fsHz);
+        upBoostAlphaDn = alphaFromMs(UP_BOOST_RELEASE_MS, fsHz);
+        gateAlphaOpen = alphaFromMs(GATE_OPEN_MS, fsHz);
+        gateAlphaClose = alphaFromMs(GATE_CLOSE_MS, fsHz);
+        modSlowAlpha = alphaFromMs(MOD_SLOW_MS, fsHz);
+        modAvgAlpha = alphaFromMs(MOD_AVG_MS, fsHz);
+        floorSmoothAlpha = alphaFromMs(FLOOR_SMOOTH_MS, fsHz);
+        floorWinSamples = Math.max(1, (int) (FLOOR_WINDOW_MS * 0.001f * fsHz));
+        // De-esser split + 24 dB/oct detector (see the C++ port).
+        System.arraycopy(lowpass(DEESS_SPLIT_FREQ, 0.70710678f, fs), 0,
+                deLpCoef, 0, 5);
+        System.arraycopy(highpass(DEESS_SPLIT_FREQ, 0.70710678f, fs), 0,
+                deHpCoef, 0, 5);
+        deEnvAlphaA = alphaFromMs(DEESS_ENV_ATTACK_MS, fsHz);
+        deEnvAlphaR = alphaFromMs(DEESS_ENV_RELEASE_MS, fsHz);
+        deCutAlphaA = alphaFromMs(DEESS_CUT_ATTACK_MS, fsHz);
+        deCutAlphaR = alphaFromMs(DEESS_CUT_RELEASE_MS, fsHz);
     }
 
     private void resetState() {
@@ -424,6 +662,24 @@ public class CaptureGainProcessor
             compY1[ch] = 0.0f;
             compYl[ch] = 0.0f;
             limGr[ch] = 1.0f;
+            upEnv[ch] = 0.0f;
+            upBoostDb[ch] = 0.0f;
+            // Boot in the gated state (a stream starts in silence) — the gate
+            // opens on the first word instead of popping the pre-speech floor.
+            gateCutDb[ch] = GATE_MAX_CUT_DB;
+            modSlowDb[ch] = -80.0f;
+            modDepthDb[ch] = 0.0f;
+            // Floor tracker boots HIGH: no boost until real minima observed.
+            upFloorDb[ch] = 10.0f;
+            floorSubMinDb[ch] = 10.0f;
+            floorPrevMinDb[ch] = 10.0f;
+            floorCount[ch] = 0;
+            java.util.Arrays.fill(deLpState[ch], 0.0f);
+            java.util.Arrays.fill(deHp1State[ch], 0.0f);
+            java.util.Arrays.fill(deHp2State[ch], 0.0f);
+            deEnvHf[ch] = 0.0f;
+            deEnvFb[ch] = 0.0f;
+            deCutDb[ch] = 0.0f;
         }
         dynMeterDb = 0.0f;
         dynMeterPrimed = false;
@@ -455,6 +711,17 @@ public class CaptureGainProcessor
         return new float[]{
                 (1.0f + cw) / 2.0f / a0, -(1.0f + cw) / a0,
                 (1.0f + cw) / 2.0f / a0, -2.0f * cw / a0, (1.0f - alpha) / a0};
+    }
+
+    private static float[] lowpass(float fc, float q, float fs) {
+        if (fc >= 0.45f * fs) return identity();
+        final float w0 = 2.0f * (float) Math.PI * fc / fs;
+        final float cw = (float) Math.cos(w0);
+        final float alpha = (float) Math.sin(w0) / (2.0f * q);
+        final float a0 = 1.0f + alpha;
+        return new float[]{
+                (1.0f - cw) / 2.0f / a0, (1.0f - cw) / a0,
+                (1.0f - cw) / 2.0f / a0, -2.0f * cw / a0, (1.0f - alpha) / a0};
     }
 
     private static float[] lowShelf(float fc, float gainDb, float fs) {
