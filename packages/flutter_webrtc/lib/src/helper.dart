@@ -194,6 +194,23 @@ class Helper {
   static Future<void> setCaptureServoHold(bool hold) =>
       NativeAudioManagement.setCaptureServoHold(hold);
 
+  /// Toggle DeepFilterNet3 AI noise suppression at the head of the capture
+  /// chain (Hollow fork addition, post-AEC — the Krisp slot). First enable
+  /// loads the model in the background (~0.5 s); until then frames pass
+  /// through. Callers must also disable WebRTC's legacy NS in the capture
+  /// constraints while this is on. Process-global, live. No-op on web.
+  static Future<void> setNoiseSuppressAi(bool enabled,
+          {double attenLimDb = 100.0, double postFilterBeta = 0.0}) =>
+      NativeAudioManagement.setNoiseSuppressAi(enabled,
+          attenLimDb: attenLimDb, postFilterBeta: postFilterBeta);
+
+  /// DFN3 engine status snapshot (`available`/`enabled`/`ready`/`bailed`/
+  /// `formatOk`/`active` bools + `frames`/`emaMs` diagnostics) — lets
+  /// callers fall back to WebRTC NS when DFN can't run on this device.
+  /// Empty map on web.
+  static Future<Map<String, dynamic>> getNoiseSuppressAiActive() =>
+      NativeAudioManagement.getNoiseSuppressAiActive();
+
   /// Start a native PCM player for received screen-share audio (Hollow fork,
   /// mobile). Plays 48 kHz stereo int16 PCM on the media output path, OUTSIDE
   /// the WebRTC voice session so the call's AEC/AGC can't mangle the shared

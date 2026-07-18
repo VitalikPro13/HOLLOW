@@ -54,6 +54,20 @@ NS_ASSUME_NONNULL_BEGIN
  *  would re-calibrate the trim to the music. Thread-safe, live. */
 - (void)setServoHold:(BOOL)hold;
 
+/** AI noise suppression (DeepFilterNet3 via hollow_core's C ABI, resolved
+ *  with dlsym at first enable). Runs at the HEAD of the chain, post-AEC.
+ *  The first enable spawns a one-shot background model load (100-500 ms);
+ *  frames pass through until ready. [attenLimDb] caps suppression
+ *  (100 = uncapped); [postFilterBeta] 0 disables the post-filter.
+ *  Thread-safe, live. */
+- (void)setNoiseSuppressAi:(BOOL)enabled
+                attenLimDb:(float)attenLimDb
+            postFilterBeta:(float)postFilterBeta;
+
+/** DFN status snapshot for the Dart fallback logic: keys available/enabled/
+ *  ready/bailed/formatOk/active (NSNumber bools). */
+- (NSDictionary<NSString *, NSNumber *> *)noiseSuppressAiStatus;
+
 @end
 
 NS_ASSUME_NONNULL_END

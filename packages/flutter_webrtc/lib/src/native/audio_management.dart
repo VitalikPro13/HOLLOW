@@ -109,6 +109,49 @@ class NativeAudioManagement {
     });
   }
 
+  /// Toggle DeepFilterNet3 AI noise suppression at the HEAD of the capture
+  /// post-processor chain (Hollow fork addition). Runs post-AEC, before the
+  /// enhancement chain, via hollow_core's C ABI bound at runtime. The first
+  /// enable triggers a one-shot background model load (100-500 ms); frames
+  /// pass through untouched until it's ready. [attenLimDb] caps the maximum
+  /// suppression (100 = uncapped); [postFilterBeta] enables the model's
+  /// post-filter (0 = off). Callers must ALSO disable WebRTC's legacy NS in
+  /// the getUserMedia constraints while this is on (double suppression =
+  /// artifacts) — see [getNoiseSuppressAiActive] for the fallback check.
+  /// Process-global, live. No-op on web.
+  static Future<void> setNoiseSuppressAi(bool enabled,
+      {double attenLimDb = 100.0, double postFilterBeta = 0.0}) async {
+    if (kIsWeb) return;
+    await WebRTC.invokeMethod('setNoiseSuppressAi', <String, dynamic>{
+      'enabled': enabled,
+      'attenLimDb': attenLimDb,
+      'postFilterBeta': postFilterBeta,
+    });
+  }
+
+  /// Snapshot of the DFN3 engine state (Hollow fork addition): bool keys
+  /// `available` (symbols bound), `enabled`, `ready` (model loaded),
+  /// `bailed` (realtime watchdog latched bypass), `formatOk` (capture shape
+  /// processable), `active` (all of the above — actually denoising), plus
+  /// diagnostics `frames` (int — frames denoised this session; > 0 is the
+  /// PROOF the engine is in the audio path) and `emaMs` (double — smoothed
+  /// per-frame cost). Callers use this to fall back to WebRTC NS when DFN
+  /// can't run here. Returns an empty map on web/unsupported.
+  static Future<Map<String, dynamic>> getNoiseSuppressAiActive() async {
+    if (kIsWeb) return const {};
+    try {
+      final res = await WebRTC.invokeMethod('getNoiseSuppressAiActive');
+      if (res is Map) {
+        return res.map((k, v) => MapEntry(k.toString(), v));
+      }
+      return const {};
+    } on PlatformException {
+      return const {};
+    } on MissingPluginException {
+      return const {};
+    }
+  }
+
   /// Begin out-of-process rendering of the given REMOTE audio tracks (Hollow
   /// fork, Windows only). Each track's decoded PCM is tapped via an
   /// AudioTrackSink and forwarded to a child `render-pcm` process that plays it,

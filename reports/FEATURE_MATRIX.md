@@ -290,7 +290,8 @@
 | 182 | Audio quality preset | `settings_provider.dart` | Done | Dropdown | Mobile: 3 pills in Settings > System > Voice & Audio |
 | 183 | Microphone gain | `settings_provider.dart` | Done | Slider 0.0-2.0 | Mobile: slider in Settings > System > Voice & Audio |
 | 184 | Echo cancellation | `voice_channel_service.dart`, `voice_service.dart` | Done | Audio constraint | Mobile: shown as "Auto" in Settings (always on) |
-| 185 | Noise suppression | `voice_channel_service.dart`, `voice_service.dart` | Done | Audio constraint | Mobile: shown as "Auto" in Settings (always on) |
+| 185 | Noise suppression | `voice_channel_service.dart`, `voice_service.dart` | Done | Audio constraint | Mobile: shown as "Auto" in Settings (always on); auto-disabled while AI noise suppression is active |
+| 185a | AI noise suppression (DeepFilterNet3) | `audio_section.dart`, `settings_provider.dart`, `rust/hollow_dfn` | Done | Toggle (default OFF) | Mobile: toggle in Settings > System > Voice & Audio; runs post-AEC in the capture chain, falls back to WebRTC NS when the device can't run it |
 | 186 | Auto gain control | `voice_channel_service.dart`, `voice_service.dart` | Done | Audio constraint | Mobile: shown as "Auto" in Settings (always on) |
 | 187 | Ringtone file picker | `settings_provider.dart` | Done | File picker | Mobile: in Settings > System > Ringtone section |
 | 188 | Ringtone trim (start/end) | `settings_provider.dart` | Done | Trim button → clip editor dialog | Uses shared `ringtone_clip_editor_dialog.dart` |

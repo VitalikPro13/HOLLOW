@@ -2645,6 +2645,40 @@ class _VoiceEnhanceToggle extends ConsumerWidget {
             ],
           ),
         ),
+        const SizedBox(height: HollowSpacing.sm),
+        Row(
+          children: [
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('AI Noise Suppression',
+                      style: HollowTypography.bodySmall
+                          .copyWith(color: hollow.textSecondary)),
+                  const SizedBox(height: 2),
+                  Text(
+                    'Removes keyboard, fan and background noise with '
+                    'DeepFilterNet. Uses more battery; takes ~1 second '
+                    'to engage. Switches live mid-call.',
+                    style: HollowTypography.caption.copyWith(
+                      color: hollow.textSecondary,
+                      fontSize: 11,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: HollowSpacing.md),
+            Switch(
+              value: ref.watch(noiseSuppressAiProvider).valueOrNull ?? false,
+              onChanged: (v) =>
+                  ref.read(noiseSuppressAiProvider.notifier).setEnabled(v),
+              activeTrackColor: hollow.accent,
+              activeColor: Colors.white,
+              inactiveTrackColor: hollow.border,
+            ),
+          ],
+        ),
       ],
     );
   }

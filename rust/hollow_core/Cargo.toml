@@ -44,6 +44,14 @@ argon2 = "0.5"
 # Pure-Rust Opus (libopus transpiled via c2rust) — decodes screen-share audio
 # packets on mobile. Pure Rust = no cmake/NDK, rides the existing cross-compile.
 unsafe-libopus = "0.2"
+# DeepFilterNet3 AI noise suppression engine (HOLLOW_PLAN ~2008). The C ABI
+# the capture-processor ports bind lives in src/dfn_ffi.rs; the engine +
+# offline harness live in the sibling crate.
+hollow_dfn = { path = "../hollow_dfn" }
+
+[target.'cfg(target_os = "android")'.dependencies]
+# JNI exports for the fork's DfnBridge.java (see dfn_ffi.rs).
+jni = "0.21"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_Security_Cryptography", "Win32_Security_Credentials", "Win32_Foundation"] }
@@ -87,4 +95,43 @@ opt-level = 3
 [profile.dev.package.webp-animation]
 opt-level = 3
 [profile.dev.package.libwebp-sys2]
+opt-level = 3
+
+# DeepFilterNet3 inference (hollow_dfn → deep_filter → tract): runs on the
+# REALTIME capture audio thread — 10 ms budget per frame. Same dev-profile
+# trap as unsafe-libopus: unoptimized tract cannot hit realtime in debug
+# builds.
+[profile.dev.package.hollow_dfn]
+opt-level = 3
+[profile.dev.package.deep_filter]
+opt-level = 3
+[profile.dev.package.tract-core]
+opt-level = 3
+[profile.dev.package.tract-linalg]
+opt-level = 3
+[profile.dev.package.tract-onnx]
+opt-level = 3
+[profile.dev.package.tract-onnx-opl]
+opt-level = 3
+[profile.dev.package.tract-hir]
+opt-level = 3
+[profile.dev.package.tract-pulse]
+opt-level = 3
+[profile.dev.package.tract-pulse-opl]
+opt-level = 3
+[profile.dev.package.tract-nnef]
+opt-level = 3
+[profile.dev.package.tract-data]
+opt-level = 3
+[profile.dev.package.ndarray]
+opt-level = 3
+[profile.dev.package.matrixmultiply]
+opt-level = 3
+[profile.dev.package.rustfft]
+opt-level = 3
+[profile.dev.package.realfft]
+opt-level = 3
+[profile.dev.package.num-complex]
+opt-level = 3
+[profile.dev.package.half]
 opt-level = 3

@@ -364,6 +364,10 @@ class _AudioDeviceSettingsState extends ConsumerState<_AudioDeviceSettings> {
 
         // Enhancement strength (compressor makeup gain; locked in Dynamic)
         _buildStrengthSlider(hollow),
+        const SizedBox(height: HollowSpacing.sm),
+
+        // AI noise suppression (DeepFilterNet3, head of the capture chain)
+        _buildNoiseSuppressAiToggle(),
         const SizedBox(height: HollowSpacing.md),
 
         // Speaker output (win32audio)
@@ -620,6 +624,23 @@ class _AudioDeviceSettingsState extends ConsumerState<_AudioDeviceSettings> {
             'Switches live mid-call.',
         value: enhance,
         onChanged: (v) => ref.read(voiceEnhanceProvider.notifier).setEnabled(v),
+      ),
+    );
+  }
+
+  Widget _buildNoiseSuppressAiToggle() {
+    final enabled = ref.watch(noiseSuppressAiProvider).valueOrNull ?? false;
+    return Padding(
+      padding: const EdgeInsets.only(left: 30),
+      child: SettingsToggleRow(
+        icon: LucideIcons.brainCircuit,
+        label: 'AI noise suppression',
+        subtitle: 'Removes keyboard, fan and background noise with '
+            'DeepFilterNet. Uses more CPU; takes ~1 second to engage. '
+            'Switches live mid-call.',
+        value: enabled,
+        onChanged: (v) =>
+            ref.read(noiseSuppressAiProvider.notifier).setEnabled(v),
       ),
     );
   }

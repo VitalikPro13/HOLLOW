@@ -1,6 +1,9 @@
 #include "flutter_webrtc.h"
 #include "flutter_capture_gain_processor.h"
 #include "flutter_data_channel.h"
+#include "hollow_dfn_binding.h"
+
+#include <thread>
 
 #include "flutter_webrtc/flutter_web_r_t_c_plugin.h"
 
@@ -679,6 +682,84 @@ void FlutterWebRTC::HandleMethodCall(
       capture_gain_processor()->SetServoHold(hold);
     }
     result->Success();
+  } else if (method_call.method_name().compare("setNoiseSuppressAi") == 0) {
+    // Hollow fork: DeepFilterNet3 AI noise suppression at the HEAD of the
+    // capture chain (post-AEC), via hollow_core's C ABI. The tract model
+    // load takes 100-500 ms, so the FIRST enable spawns a one-shot
+    // background create; frames pass through untouched until the handle is
+    // published. Enable/disable itself is a live atomic flip.
+    auto args = method_call.arguments();
+    if (!args) {
+      result->Error("Bad Arguments",
+                    "setNoiseSuppressAi() Null arguments received");
+      return;
+    }
+    const EncodableMap params = GetValue<EncodableMap>(*args);
+    const bool enabled = findBoolean(params, "enabled");
+    const std::optional<double> atten = maybeFindDouble(params, "attenLimDb");
+    const std::optional<double> beta =
+        maybeFindDouble(params, "postFilterBeta");
+    auto* proc = capture_gain_processor();
+    if (proc) {
+      proc->SetNoiseSuppressAi(enabled);
+      if (enabled && hollow_dfn::Bind()) {
+        if (void* h = proc->GetDfnHandle()) {
+          // Already loaded: apply parameter updates live.
+          if (atten.has_value())
+            hollow_dfn::SetAttenLim(h, static_cast<float>(atten.value()));
+          if (beta.has_value())
+            hollow_dfn::SetPostFilterBeta(h, static_cast<float>(beta.value()));
+        } else if (proc->TryBeginDfnCreate()) {
+          const float atten_v =
+              static_cast<float>(atten.value_or(100.0));
+          const float beta_v = static_cast<float>(beta.value_or(0.0));
+          // proc is the process-global capture processor (never destroyed
+          // while the plugin lives) — safe to capture across the load.
+          std::thread([proc, atten_v, beta_v]() {
+            void* h = hollow_dfn::Create();
+            if (h != nullptr) {
+              hollow_dfn::SetAttenLim(h, atten_v);
+              hollow_dfn::SetPostFilterBeta(h, beta_v);
+              proc->SetDfnHandle(h);
+            }
+          }).detach();
+        }
+      }
+    }
+    result->Success();
+  } else if (method_call.method_name().compare("getNoiseSuppressAiActive") ==
+             0) {
+    // Hollow fork: DFN status snapshot so Dart can fall back to WebRTC NS
+    // when DFN can't run here (unbound symbols, unsupported capture shape,
+    // realtime bail) instead of leaving a call with NO noise suppression.
+    EncodableMap res;
+    auto* proc = capture_gain_processor();
+    const bool available = hollow_dfn::IsBound();
+    const bool enabled = proc && proc->NoiseSuppressAiEnabled();
+    const bool ready = proc && proc->DfnReady();
+    const bool bailed = proc && proc->DfnBailed();
+    const bool format_ok = proc && proc->DfnFormatOk();
+    res[EncodableValue("available")] = EncodableValue(available);
+    res[EncodableValue("enabled")] = EncodableValue(enabled);
+    res[EncodableValue("ready")] = EncodableValue(ready);
+    res[EncodableValue("bailed")] = EncodableValue(bailed);
+    res[EncodableValue("formatOk")] = EncodableValue(format_ok);
+    res[EncodableValue("active")] = EncodableValue(
+        enabled && ready && !bailed && format_ok);
+    // frames > 0 is the PROOF the engine is actually denoising the mic —
+    // Dart logs this map so a field test is never ambiguous again.
+    res[EncodableValue("frames")] =
+        EncodableValue(proc ? proc->DfnFramesProcessed() : 0);
+    res[EncodableValue("emaMs")] = EncodableValue(
+        proc ? static_cast<double>(proc->DfnMsEma()) : 0.0);
+    // Raw capture shape — says WHY a format was rejected.
+    res[EncodableValue("rate")] = EncodableValue(proc ? proc->SampleRate() : 0);
+    res[EncodableValue("channels")] =
+        EncodableValue(proc ? proc->Channels() : 0);
+    res[EncodableValue("bands")] = EncodableValue(proc ? proc->LastBands() : 0);
+    res[EncodableValue("bufferSize")] =
+        EncodableValue(proc ? proc->LastBufferSize() : 0);
+    result->Success(EncodableValue(res));
   } else if (method_call.method_name().compare("voiceRedirectStart") == 0) {
     // Hollow fork (Windows): begin out-of-process rendering of the given REMOTE
     // audio track ids so the call voices play from a separate pid (excluded from

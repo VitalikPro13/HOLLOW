@@ -96,6 +96,10 @@ mod chat_clock;
 /// Tier B). Raw `extern "C"`, intentionally OUTSIDE `api` so flutter_rust_bridge
 /// codegen never scans it.
 pub mod push_enrich;
+/// C-ABI + Android JNI surface for DeepFilterNet3 noise suppression, bound at
+/// runtime by the forked flutter_webrtc capture-processor ports. Raw
+/// `extern "C"`, intentionally OUTSIDE `api` (same rule as `push_enrich`).
+pub mod dfn_ffi;
 mod crdt;
 mod crypto;
 mod frb_generated;

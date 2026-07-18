@@ -1,7 +1,10 @@
 #include "flutter_capture_gain_processor.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <cstdio>
+#include <cstring>
 
 // MSVC: <windows.h> (pulled in transitively) defines max/min macros that
 // break std::max/std::min. No-op on GCC/Clang.
@@ -11,6 +14,14 @@
 #ifdef min
 #undef min
 #endif
+
+// DeepFilterNet3 runtime binding (hollow_dfn_binding.cc). Forward-declared
+// instead of included so the offline g++ chain harness can keep compiling
+// this file standalone — a harness driver just defines its own stub:
+//   namespace hollow_dfn { int ProcessFrame(void*, float*, int) { return 1; } }
+namespace hollow_dfn {
+int ProcessFrame(void* handle, float* frame, int len);
+}
 
 namespace flutter_webrtc_plugin {
 
@@ -515,11 +526,88 @@ void FlutterCaptureGainProcessor::Reset(int new_rate) {
 
 void FlutterCaptureGainProcessor::Release() {}
 
+// AI noise suppression (DFN3) — the HEAD of the chain. Sits after WebRTC's
+// APM AEC (this whole processor is the capture POST-processor) and before
+// trim/EQ, the same slot Krisp uses; NEVER move it pre-AEC (nonlinear
+// suppression breaks echo estimation). Only 48 kHz fullband mono 10 ms
+// frames are processable — DFN3's hop is exactly the APM cadence. Anything
+// else (Linux split-band, non-48k devices, stereo mics) passes through
+// untouched and flips the format flag so Dart can fall back to WebRTC NS.
+void FlutterCaptureGainProcessor::ProcessDfn(int num_bands, int buffer_size,
+                                             float* buffer) {
+  // Shape breadcrumbs for the status getter — stored even with DFN off so
+  // diagnosis never needs a special build.
+  last_bands_.store(num_bands, std::memory_order_relaxed);
+  last_buffer_size_.store(buffer_size, std::memory_order_relaxed);
+  if (!noise_suppress_ai_.load(std::memory_order_relaxed) ||
+      dfn_bailed_.load(std::memory_order_relaxed)) {
+    return;
+  }
+  void* handle = dfn_handle_.load(std::memory_order_acquire);
+  if (handle == nullptr) {
+    return;  // model still loading (or unavailable) — pass through
+  }
+  // Accept fullband 48 kHz mono OR stereo (planar 2x480 — desktop mics
+  // routinely enumerate stereo; the 2026-07-17 field test proved BOTH
+  // platforms reject on it). Stereo strategy: denoise channel 0 in place
+  // and copy it to channel 1 — voice-call stereo capture is virtually
+  // always duplicated mono, and collapsing a true stereo mic to its first
+  // channel is a fine trade for a voice call.
+  const int chans = std::min(std::max(channels_, 1), 2);
+  if (num_bands != 1 || sample_rate_ != 48000 || buffer_size != 480 * chans) {
+    dfn_format_ok_.store(false, std::memory_order_relaxed);
+    if (!dfn_format_logged_) {
+      dfn_format_logged_ = true;
+      std::fprintf(stderr,
+                   "[hollow_dfn] unsupported capture shape (bands=%d rate=%d "
+                   "size=%d chans=%d) — DFN bypassed\n",
+                   num_bands, sample_rate_, buffer_size, channels_);
+    }
+    return;
+  }
+  dfn_format_ok_.store(true, std::memory_order_relaxed);
+
+  const auto t0 = std::chrono::steady_clock::now();
+  const int rc = hollow_dfn::ProcessFrame(handle, buffer, 480);
+  if (rc == 0 && chans == 2) {
+    std::memcpy(buffer + 480, buffer, 480 * sizeof(float));
+  }
+  const float ms = std::chrono::duration<float, std::milli>(
+                       std::chrono::steady_clock::now() - t0)
+                       .count();
+  if (rc != 0) {
+    // Engine error mid-stream: latch bypass — the frame may be half-written
+    // and per-frame retry on the audio thread is how glitches are born.
+    dfn_bailed_.store(true, std::memory_order_relaxed);
+    std::fprintf(stderr, "[hollow_dfn] process rc=%d — bypassed for session\n",
+                 rc);
+    return;
+  }
+  // Realtime watchdog: EMA of per-frame cost, 100-frame warmup grace (cold
+  // caches / first-inference lazy init). Budget is 10 ms; sustained >6 ms
+  // means this device can't afford DFN — latch bypass, keep the call alive.
+  const int frames = dfn_frames_.load(std::memory_order_relaxed) + 1;
+  dfn_frames_.store(frames, std::memory_order_relaxed);
+  const float ema =
+      frames == 1
+          ? ms
+          : 0.98f * dfn_ms_ema_.load(std::memory_order_relaxed) + 0.02f * ms;
+  dfn_ms_ema_.store(ema, std::memory_order_relaxed);
+  if (frames > 100 && ema > 6.0f) {
+    dfn_bailed_.store(true, std::memory_order_relaxed);
+    std::fprintf(stderr,
+                 "[hollow_dfn] realtime overrun (EMA %.2f ms/frame) — "
+                 "bypassed for session\n",
+                 ema);
+  }
+}
+
 void FlutterCaptureGainProcessor::Process(int num_bands, int /*num_frames*/,
                                           int buffer_size, float* buffer) {
   if (buffer == nullptr || buffer_size <= 0) {
     return;
   }
+  ProcessDfn(num_bands, buffer_size, buffer);
   const float gain = gain_.load(std::memory_order_relaxed);
   const bool enhance = enhance_.load(std::memory_order_relaxed);
   const bool dynamic = dynamic_.load(std::memory_order_relaxed);

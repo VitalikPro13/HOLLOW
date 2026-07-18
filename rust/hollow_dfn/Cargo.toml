@@ -1,0 +1,34 @@
+[package]
+name = "hollow_dfn"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+# DeepFilterNet3 AI noise suppression engine (HOLLOW_PLAN line ~2008).
+#
+# This crate is the ONE realtime Rust home for DFN inference — the three
+# native capture-processor ports (C++ / darwin / Java) never re-implement
+# it; they call the C ABI that rust/hollow_core/src/dfn_ffi.rs re-exports
+# from here. Keep this crate free of hollow_core dependencies: it must
+# stay compilable standalone for the offline harness (examples/).
+#
+# deep_filter is a GIT dependency pinned to the v0.5.6 tag: crates.io only
+# ever got the ancient 0.2.x line — the 0.5.x releases were never published
+# there. The lock file records the exact rev for reproducible DSP. If this
+# pin ever fails to build against a newer toolchain, the escape hatch is
+# vendoring libDF (MIT/Apache-2.0) — only the DfTract inference path is
+# needed.
+
+[dependencies]
+deep_filter = { git = "https://github.com/Rikorose/DeepFilterNet", tag = "v0.5.6", default-features = false, features = [
+    "tract",
+    "default-model",
+] }
+# Must match deep_filter's ndarray major so ArrayView types line up.
+ndarray = "0.15"
+
+[dev-dependencies]
+# WAV I/O + spectral metrics for the offline harness example only.
+hound = "3.5"
+rustfft = "6"

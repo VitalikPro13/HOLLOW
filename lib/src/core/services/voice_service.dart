@@ -80,6 +80,20 @@ class VoiceService {
   /// Dynamic mode: the native auto-level servo (ignores micGain/makeup).
   bool enhanceDynamic = true;
 
+  /// AI noise suppression (DeepFilterNet3) — user preference, seeded from
+  /// noiseSuppressAiProvider. The engine runs at the HEAD of the native
+  /// capture chain (post-AEC); while it's on, WebRTC's legacy NS is dropped
+  /// from the capture constraints (double suppression = artifacts).
+  bool noiseSuppressAi = false;
+
+  /// TRUE when DFN can't actually run here (symbols unbound, unsupported
+  /// capture shape, realtime bail) and WebRTC's legacy NS was re-enabled as
+  /// the fallback — a call must never end up with NO noise suppression.
+  bool _dfnFallbackNsOn = false;
+
+  /// WebRTC's own NS is wanted whenever DFN isn't (or can't be) doing the job.
+  bool get _wantWebrtcNs => !noiseSuppressAi || _dfnFallbackNsOn;
+
   /// SFrame encryption service for DM call E2EE.
   FrameCryptorService? _frameCryptor;
   FrameCryptorService? get frameCryptor => _frameCryptor;
@@ -806,7 +820,13 @@ class VoiceService {
     preferredAudioInputDeviceId = deviceId;
     if (_pc == null || _localStream == null) return false; // next call uses it
     if (_capturedAudioInputDeviceId == deviceId) return false; // already live
+    return _recaptureMic(deviceId);
+  }
 
+  /// Shared live mic re-capture — device switch OR an NS-constraint flip
+  /// (the AI-noise-suppression toggle changes what getUserMedia must ask
+  /// for). Same renegotiation contract as [setAudioInputDevice].
+  Future<bool> _recaptureMic(String? deviceId) async {
     // Capture the NEW mic first — if it fails, keep the old one working.
     final newStream = await _captureSwitchMicStream(deviceId);
     if (newStream == null) return false;
@@ -848,7 +868,9 @@ class VoiceService {
   Future<MediaStream?> _captureSwitchMicStream(String? deviceId) async {
     final audioConstraints = <String, dynamic>{
       'echoCancellation': true,
-      'noiseSuppression': true,
+      // Legacy NS off while DFN3 owns suppression (unless fallback re-armed).
+      'noiseSuppression': _wantWebrtcNs,
+      'googNoiseSuppression': _wantWebrtcNs,
       // AGC stays OFF — see _captureLocalAudio.
       'autoGainControl': false,
       'googAutoGainControl': false,
@@ -1491,9 +1513,16 @@ class VoiceService {
   /// peer connection so that getUserMedia latency (100-500 ms on Windows)
   /// doesn't eat into the ICE gathering window.
   Future<void> _captureLocalAudio() async {
+    // AI NS (DFN3): kick the engine (first enable = background model load)
+    // and decide the WebRTC-NS fallback BEFORE building constraints — the
+    // native bail/format flags are latched, so a device that already proved
+    // it can't run DFN keeps legacy NS from the very first frame.
+    await _syncNoiseSuppressAiEngine();
     final audioConstraints = <String, dynamic>{
       'echoCancellation': true,
-      'noiseSuppression': true,
+      // Legacy NS off while DFN3 owns suppression (unless fallback re-armed).
+      'noiseSuppression': _wantWebrtcNs,
+      'googNoiseSuppression': _wantWebrtcNs,
       // AGC OFF: WebRTC's AGC targets a conservative ~-18 dBFS and, on desktop,
       // rides the OS mic slider DOWN to hold it — fighting (and beating) our
       // post-APM Voice Enhancement chain's makeup gain, which is why the mic is
@@ -1593,6 +1622,68 @@ class VoiceService {
     await Helper.setVoiceEnhance(voiceEnhance,
         makeupDb: enhanceMakeupDb, dynamicMode: enabled);
     _log('[HOLLOW-VOICE] Updated voice enhance dynamic: $enabled');
+  }
+
+  /// Toggle DFN3 AI noise suppression live. Returns true when the mic was
+  /// re-captured (the WebRTC-NS constraint flipped with it) — the caller
+  /// MUST send a renegotiation offer, same contract as
+  /// [setAudioInputDevice].
+  Future<bool> updateNoiseSuppressAi(bool enabled) async {
+    noiseSuppressAi = enabled;
+    _dfnFallbackNsOn = false;
+    await _syncNoiseSuppressAiEngine();
+    _log('[HOLLOW-VOICE] Updated AI noise suppression: $enabled');
+    if (_pc == null || _localStream == null) return false;
+    return _recaptureMic(_capturedAudioInputDeviceId);
+  }
+
+  /// Post-enable safety net (schedule a few seconds after enabling): if the
+  /// engine reports it cannot run here while legacy NS is off, re-arm
+  /// WebRTC NS and re-capture — a call must never sit with NO suppression.
+  /// Returns true when the caller must renegotiate.
+  Future<bool> reconcileNoiseSuppressAi() async {
+    if (!noiseSuppressAi || _dfnFallbackNsOn) return false;
+    Map<String, dynamic> st;
+    try {
+      st = await Helper.getNoiseSuppressAiActive();
+    } catch (_) {
+      return false;
+    }
+    // ALWAYS log — "silently working" and "silently absent" must never
+    // look the same (2026-07-17 field-test lesson). frames > 0 is the
+    // proof the engine is denoising.
+    _log('[HOLLOW-VOICE] AI-NS reconcile status: $st');
+    if (st.isEmpty) return false;
+    final cannotRun = st['available'] != true ||
+        st['bailed'] == true ||
+        st['formatOk'] == false;
+    if (!cannotRun) return false;
+    _dfnFallbackNsOn = true;
+    _log('[HOLLOW-VOICE] DFN cannot run here — falling back to WebRTC NS');
+    if (_pc == null || _localStream == null) return false;
+    return _recaptureMic(_capturedAudioInputDeviceId);
+  }
+
+  /// Push the AI-NS preference into the native engine and refresh the
+  /// fallback decision from the engine's latched status flags (a device
+  /// that already bailed keeps legacy NS from the first frame).
+  Future<void> _syncNoiseSuppressAiEngine() async {
+    try {
+      await Helper.setNoiseSuppressAi(noiseSuppressAi);
+      if (noiseSuppressAi) {
+        final st = await Helper.getNoiseSuppressAiActive();
+        _dfnFallbackNsOn = st.isNotEmpty &&
+            (st['available'] != true ||
+                st['bailed'] == true ||
+                st['formatOk'] == false);
+        _log('[HOLLOW-VOICE] AI-NS engine status at capture: $st '
+            '(webrtcNsFallback=$_dfnFallbackNsOn)');
+      } else {
+        _dfnFallbackNsOn = false;
+      }
+    } catch (e) {
+      _log('[HOLLOW-VOICE] AI-NS engine sync failed: $e');
+    }
   }
 
   /// Add pre-captured audio tracks to the peer connection (synchronous aside

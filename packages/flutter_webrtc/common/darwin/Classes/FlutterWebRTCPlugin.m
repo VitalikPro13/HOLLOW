@@ -1513,6 +1513,27 @@ static __weak id<RTCAudioDeviceModuleDelegate> gAudioDeviceModuleObserver = nil;
       [_captureGainProcessor setServoHold:[hold boolValue]];
     }
     result(nil);
+  } else if ([@"setNoiseSuppressAi" isEqualToString:call.method]) {
+    // Hollow fork: DeepFilterNet3 AI noise suppression at the head of the
+    // capture chain (hollow_core C ABI via dlsym; background model load).
+    NSDictionary* argsMap = call.arguments;
+    NSNumber* enabled = argsMap[@"enabled"];
+    NSNumber* attenLim = argsMap[@"attenLimDb"];
+    NSNumber* pfBeta = argsMap[@"postFilterBeta"];
+    if (enabled != nil && _captureGainProcessor != nil) {
+      [_captureGainProcessor
+          setNoiseSuppressAi:[enabled boolValue]
+                  attenLimDb:attenLim != nil ? [attenLim floatValue] : 100.0f
+              postFilterBeta:pfBeta != nil ? [pfBeta floatValue] : 0.0f];
+    }
+    result(nil);
+  } else if ([@"getNoiseSuppressAiActive" isEqualToString:call.method]) {
+    // Hollow fork: DFN status snapshot for the Dart WebRTC-NS fallback.
+    if (_captureGainProcessor != nil) {
+      result([_captureGainProcessor noiseSuppressAiStatus]);
+    } else {
+      result(@{});
+    }
   } else if ([@"startScreenAudioPlayer" isEqualToString:call.method]) {
     // Hollow fork: media-path PCM player for received screen-share audio.
     if (_screenAudioPlayer == nil) {

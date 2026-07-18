@@ -160,6 +160,25 @@ public class CaptureGainProcessor
     private volatile boolean muted = false;
     private volatile boolean servoHold = false;
 
+    // AI noise suppression (DFN3) — mirrors the C++ port's fields. The
+    // handle is created ONCE on a background thread and lives for the
+    // process lifetime; the audio thread only does volatile reads.
+    private volatile boolean noiseSuppressAi = false;
+    private volatile long dfnHandle = 0;
+    private final java.util.concurrent.atomic.AtomicBoolean dfnCreateStarted =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+    private volatile boolean dfnBailed = false;
+    private volatile boolean dfnFormatOk = true;
+    // DFN realtime watchdog. Single writer (audio thread); volatile so the
+    // status getter can report frames/cost from the platform thread.
+    private volatile float dfnMsEma = 0f;
+    private volatile int dfnFrames = 0;
+    private boolean dfnFormatLogged = false;
+    // Raw capture shape as last seen by process() — stored even with DFN
+    // off so the status getter can say WHY a format was rejected.
+    private volatile int lastBands = 0;
+    private volatile int lastCount = 0;
+
     // Dynamic-mode servo (single mic — one servo, not per-channel).
     private float dynMeterDb;
     private boolean dynMeterPrimed;
@@ -285,6 +304,127 @@ public class CaptureGainProcessor
         this.servoHold = hold;
     }
 
+    /**
+     * AI noise suppression (DeepFilterNet3 via hollow_core's JNI exports,
+     * HOLLOW_PLAN ~2008): runs at the HEAD of process() — post-APM-AEC,
+     * before the enhancement chain — on 48 kHz fullband mono 10 ms frames
+     * only. The first enable spawns a one-shot background model load
+     * (100-500 ms); frames pass through untouched until ready.
+     * Thread-safe, live.
+     */
+    public void setNoiseSuppressAi(
+            boolean enabled, float attenLimDb, float postFilterBeta) {
+        noiseSuppressAi = enabled;
+        if (!enabled || !DfnBridge.available()) {
+            return;
+        }
+        final long h = dfnHandle;
+        if (h != 0) {
+            // Already loaded: live parameter update (lock-free FFI staging).
+            DfnBridge.setAttenLim(h, attenLimDb);
+            DfnBridge.setPostFilterBeta(h, postFilterBeta);
+            return;
+        }
+        if (!dfnCreateStarted.compareAndSet(false, true)) {
+            return; // create already in flight
+        }
+        new Thread(() -> {
+            final long handle = DfnBridge.create();
+            if (handle != 0) {
+                DfnBridge.setAttenLim(handle, attenLimDb);
+                DfnBridge.setPostFilterBeta(handle, postFilterBeta);
+                dfnHandle = handle;
+            }
+        }, "hollow-dfn-load").start();
+    }
+
+    /** DFN status snapshot for the Dart WebRTC-NS fallback logic. */
+    public java.util.Map<String, Object> noiseSuppressAiStatus() {
+        final boolean enabled = noiseSuppressAi;
+        final boolean ready = dfnHandle != 0;
+        final boolean bailed = dfnBailed;
+        final boolean formatOk = dfnFormatOk;
+        final java.util.HashMap<String, Object> res = new java.util.HashMap<>();
+        res.put("available", DfnBridge.available());
+        res.put("enabled", enabled);
+        res.put("ready", ready);
+        res.put("bailed", bailed);
+        res.put("formatOk", formatOk);
+        res.put("active", enabled && ready && !bailed && formatOk);
+        // frames > 0 is the proof the engine is actually denoising the mic.
+        res.put("frames", dfnFrames);
+        res.put("emaMs", (double) dfnMsEma);
+        // Raw capture shape — says WHY a format was rejected.
+        res.put("rate", sampleRate);
+        res.put("channels", channels);
+        res.put("bands", lastBands);
+        res.put("bufferSize", lastCount);
+        return res;
+    }
+
+    /**
+     * Head-of-chain DFN3 step (audio thread only). Keep behavior-identical
+     * to FlutterCaptureGainProcessor::ProcessDfn in the C++ port.
+     */
+    private void maybeProcessDfn(int numBands, ByteBuffer buffer, int count) {
+        // Shape breadcrumbs for the status getter (stored even with DFN off).
+        lastBands = numBands;
+        lastCount = count;
+        if (!noiseSuppressAi || dfnBailed) {
+            return;
+        }
+        final long h = dfnHandle;
+        if (h == 0) {
+            return; // model still loading (or unavailable) — pass through
+        }
+        // Accept fullband 48 kHz mono OR stereo (planar 2x480) — the
+        // 2026-07-17 field test proved captures routinely arrive stereo.
+        // Stereo strategy: denoise channel 0 in place, copy to channel 1
+        // (voice-call stereo capture is virtually always duplicated mono).
+        final int chans = Math.min(Math.max(channels, 1), 2);
+        if (numBands != 1 || sampleRate != 48000 || count != 480 * chans
+                || !buffer.isDirect()) {
+            dfnFormatOk = false;
+            if (!dfnFormatLogged) {
+                dfnFormatLogged = true;
+                android.util.Log.w("hollow_dfn",
+                        "unsupported capture shape (bands=" + numBands
+                                + " rate=" + sampleRate + " count=" + count
+                                + " chans=" + channels
+                                + " direct=" + buffer.isDirect()
+                                + ") — DFN bypassed");
+            }
+            return;
+        }
+        dfnFormatOk = true;
+        final long t0 = System.nanoTime();
+        final int rc = DfnBridge.processDirect(h, buffer, 0);
+        if (rc == 0 && chans == 2) {
+            final FloatBuffer fb =
+                    buffer.order(ByteOrder.nativeOrder()).asFloatBuffer();
+            for (int i = 0; i < 480; i++) {
+                fb.put(480 + i, fb.get(i));
+            }
+        }
+        final float ms = (System.nanoTime() - t0) / 1_000_000.0f;
+        if (rc != 0) {
+            dfnBailed = true;
+            android.util.Log.w("hollow_dfn",
+                    "process rc=" + rc + " — bypassed for session");
+            return;
+        }
+        // Realtime watchdog: EMA of per-frame cost, 100-frame warmup grace.
+        // Budget is 10 ms; sustained >6 ms latches bypass — this matters
+        // most on phones (WebRTC NS is Dart's fallback).
+        dfnFrames++;
+        dfnMsEma = dfnFrames == 1 ? ms : 0.98f * dfnMsEma + 0.02f * ms;
+        if (dfnFrames > 100 && dfnMsEma > 6.0f) {
+            dfnBailed = true;
+            android.util.Log.w("hollow_dfn", "realtime overrun (EMA "
+                    + dfnMsEma + " ms/frame) — bypassed for session");
+        }
+    }
+
     @Override
     public void initialize(int sampleRateHz, int numChannels) {
         if (sampleRateHz > 0) {
@@ -321,6 +461,10 @@ public class CaptureGainProcessor
         if (count <= 0) {
             return;
         }
+
+        // AI noise suppression (DFN3) — HEAD of the chain, post-APM-AEC,
+        // both enhance modes AND the legacy path (see the C++ port).
+        maybeProcessDfn(numBands, buffer, count);
 
         if (!enh) {
             // Legacy path — identical to the shipped flat-gain processor.

@@ -892,6 +892,30 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
         result.success(null);
         break;
       }
+      case "setNoiseSuppressAi": {
+        // Hollow fork: DeepFilterNet3 AI noise suppression at the head of
+        // the capture chain (hollow_core JNI; background model load).
+        Boolean enabled = call.argument("enabled");
+        Double attenLim = call.argument("attenLimDb");
+        Double pfBeta = call.argument("postFilterBeta");
+        if (enabled != null && captureGainProcessor != null) {
+          captureGainProcessor.setNoiseSuppressAi(
+              enabled,
+              attenLim != null ? attenLim.floatValue() : 100.0f,
+              pfBeta != null ? pfBeta.floatValue() : 0.0f);
+        }
+        result.success(null);
+        break;
+      }
+      case "getNoiseSuppressAiActive": {
+        // Hollow fork: DFN status snapshot for the Dart WebRTC-NS fallback.
+        if (captureGainProcessor != null) {
+          result.success(captureGainProcessor.noiseSuppressAiStatus());
+        } else {
+          result.success(new java.util.HashMap<String, Boolean>());
+        }
+        break;
+      }
       case "startScreenAudioPlayer": {
         // Hollow fork: media-path PCM player for received screen-share audio.
         if (screenAudioPlayer == null) {

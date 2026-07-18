@@ -73,6 +73,17 @@ class VoiceChannelService {
   /// Dynamic mode: the native auto-level servo (ignores micGain/makeup).
   bool enhanceDynamic = true;
 
+  /// AI noise suppression (DeepFilterNet3) — user preference; see the
+  /// matching fields in voice_service.dart (kept behavior-identical).
+  bool noiseSuppressAi = false;
+
+  /// TRUE when DFN can't run here and WebRTC's legacy NS was re-enabled in
+  /// the capture constraints as the fallback.
+  bool _dfnFallbackNsOn = false;
+
+  /// WebRTC's own NS is wanted whenever DFN isn't (or can't be) doing the job.
+  bool get _wantWebrtcNs => !noiseSuppressAi || _dfnFallbackNsOn;
+
   /// VAD: set of currently speaking peer IDs (updated every 200ms).
   final Set<String> _speakingPeers = {};
   Timer? _vadTimer;
@@ -167,9 +178,14 @@ class VoiceChannelService {
     frameCryptor = FrameCryptorService();
     await frameCryptor!.init(sharedKey: true);
 
+    // AI NS (DFN3): kick the engine and decide the WebRTC-NS fallback BEFORE
+    // building constraints (see the matching note in voice_service.dart).
+    await _syncNoiseSuppressAiEngine();
     final audioConstraints = <String, dynamic>{
       'echoCancellation': true,
-      'noiseSuppression': true,
+      // Legacy NS off while DFN3 owns suppression (unless fallback re-armed).
+      'noiseSuppression': _wantWebrtcNs,
+      'googNoiseSuppression': _wantWebrtcNs,
       // AGC OFF — see the matching note in voice_service.dart. WebRTC's AGC was
       // fighting our enhancement chain (conservative -18 dBFS target + desktop
       // OS-mic-slider riding), leaving the mic quiet. We own loudness in the
@@ -796,6 +812,63 @@ class VoiceChannelService {
     _vcLog('[HOLLOW-VC] Updated voice enhance dynamic: $enabled');
   }
 
+  /// Toggle DFN3 AI noise suppression live. When in a session, re-captures
+  /// the mic (the WebRTC-NS constraint flipped) — mesh swap + renegotiation
+  /// happen internally, unlike the DM service's caller contract.
+  Future<void> updateNoiseSuppressAi(bool enabled) async {
+    noiseSuppressAi = enabled;
+    _dfnFallbackNsOn = false;
+    await _syncNoiseSuppressAiEngine();
+    _vcLog('[HOLLOW-VC] Updated AI noise suppression: $enabled');
+    if (_localAudioStream == null) return;
+    await _recaptureMic(_capturedAudioInputDeviceId);
+  }
+
+  /// Post-enable safety net (schedule a few seconds after enabling): if the
+  /// engine reports it cannot run here while legacy NS is off, re-arm
+  /// WebRTC NS and re-capture. See voice_service.reconcileNoiseSuppressAi.
+  Future<void> reconcileNoiseSuppressAi() async {
+    if (!noiseSuppressAi || _dfnFallbackNsOn) return;
+    Map<String, dynamic> st;
+    try {
+      st = await Helper.getNoiseSuppressAiActive();
+    } catch (_) {
+      return;
+    }
+    // ALWAYS log — see the matching note in voice_service.dart.
+    _vcLog('[HOLLOW-VC] AI-NS reconcile status: $st');
+    if (st.isEmpty) return;
+    final cannotRun = st['available'] != true ||
+        st['bailed'] == true ||
+        st['formatOk'] == false;
+    if (!cannotRun) return;
+    _dfnFallbackNsOn = true;
+    _vcLog('[HOLLOW-VC] DFN cannot run here — falling back to WebRTC NS');
+    if (_localAudioStream == null) return;
+    await _recaptureMic(_capturedAudioInputDeviceId);
+  }
+
+  /// Push the AI-NS preference into the native engine and refresh the
+  /// fallback decision from the engine's latched status flags.
+  Future<void> _syncNoiseSuppressAiEngine() async {
+    try {
+      await Helper.setNoiseSuppressAi(noiseSuppressAi);
+      if (noiseSuppressAi) {
+        final st = await Helper.getNoiseSuppressAiActive();
+        _dfnFallbackNsOn = st.isNotEmpty &&
+            (st['available'] != true ||
+                st['bailed'] == true ||
+                st['formatOk'] == false);
+        _vcLog('[HOLLOW-VC] AI-NS engine status at capture: $st '
+            '(webrtcNsFallback=$_dfnFallbackNsOn)');
+      } else {
+        _dfnFallbackNsOn = false;
+      }
+    } catch (e) {
+      _vcLog('[HOLLOW-VC] AI-NS engine sync failed: $e');
+    }
+  }
+
   Future<void> setRemoteVolume(String peerId, double volume) async {
     final pc = _peerConnections[peerId];
     if (pc == null) return;
@@ -1069,7 +1142,13 @@ class VoiceChannelService {
     preferredAudioInputDeviceId = deviceId;
     if (_localAudioStream == null) return; // next session uses it
     if (_capturedAudioInputDeviceId == deviceId) return; // already live
+    await _recaptureMic(deviceId);
+  }
 
+  /// Shared live mic re-capture — device switch OR an NS-constraint flip
+  /// (the AI-noise-suppression toggle changes what getUserMedia must ask
+  /// for). Swaps every PC in the mesh + renegotiates internally.
+  Future<void> _recaptureMic(String? deviceId) async {
     // Capture the NEW mic first — if it fails, keep the old one working.
     final newStream = await _captureMicSwitchStream(deviceId);
     if (newStream == null) return;
@@ -1107,7 +1186,9 @@ class VoiceChannelService {
   Future<MediaStream?> _captureMicSwitchStream(String? deviceId) async {
     final audioConstraints = <String, dynamic>{
       'echoCancellation': true,
-      'noiseSuppression': true,
+      // Legacy NS off while DFN3 owns suppression (unless fallback re-armed).
+      'noiseSuppression': _wantWebrtcNs,
+      'googNoiseSuppression': _wantWebrtcNs,
       // AGC stays OFF — see startAudio.
       'autoGainControl': false,
       'googAutoGainControl': false,

@@ -28,6 +28,7 @@ add_library(${PLUGIN_NAME} SHARED
   "../common/cpp/src/flutter_webrtc.cc"
   "../common/cpp/src/flutter_webrtc_base.cc"
   "../common/cpp/src/flutter_capture_gain_processor.cc"
+  "../common/cpp/src/hollow_dfn_binding.cc"
   "../common/cpp/src/flutter_common.cc"
   "loopback_capturer_factory.cc"
   "hollow_pulse_devices.cc"

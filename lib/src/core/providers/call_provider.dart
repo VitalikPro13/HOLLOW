@@ -227,6 +227,8 @@ class CallNotifier extends Notifier<CallState> {
             kEnhanceStrengthDefault);
     _voiceService!.enhanceDynamic =
         ref.read(voiceEnhanceDynamicProvider).valueOrNull ?? true;
+    _voiceService!.noiseSuppressAi =
+        ref.read(noiseSuppressAiProvider).valueOrNull ?? false;
     return _voiceService!;
   }
 
@@ -245,6 +247,23 @@ class CallNotifier extends Notifier<CallState> {
           startedAt: DateTime.now(),
         );
         _scheduleStatsDump(peerId);
+
+        // AI-NS fallback check for calls that STARTED with the toggle on
+        // (the toggle listener only covers mid-call flips): if DFN proves
+        // unable to run once frames flow, re-arm WebRTC NS + renegotiate.
+        // Also logs the engine status either way — a field test must never
+        // be ambiguous about whether DFN was denoising.
+        final nsService = _voiceService;
+        if (nsService != null && nsService.noiseSuppressAi) {
+          unawaited(Future.delayed(const Duration(seconds: 4), () async {
+            try {
+              final again = await nsService.reconcileNoiseSuppressAi();
+              if (again) await _sendDeviceSwitchReneg('ai-ns-fallback');
+            } catch (e) {
+              _callLog('[HOLLOW-CALL] AI-NS call-start check failed: $e');
+            }
+          }));
+        }
 
         // Mobile audio route: voice calls start on the earpiece, video
         // calls on the loudspeaker.
@@ -393,6 +412,14 @@ class CallNotifier extends Notifier<CallState> {
       _voiceService?.updateVoiceEnhanceDynamic(enabled);
     });
 
+    // AI noise suppression: flips the native DFN engine AND the WebRTC-NS
+    // capture constraint — mid-call that means a mic re-capture + reneg,
+    // so guard on prev==next like the device switches below.
+    ref.listen(noiseSuppressAiProvider, (prev, next) {
+      if (prev?.valueOrNull == next.valueOrNull) return;
+      unawaited(_applyNoiseSuppressAiChange(next.valueOrNull ?? false));
+    });
+
     // Live device switching mid-call (Settings > Audio & Video pickers).
     // Guard on prev==next: AsyncNotifier listeners also fire on initial load.
     ref.listen(audioInputDeviceProvider, (prev, next) {
@@ -409,6 +436,31 @@ class CallNotifier extends Notifier<CallState> {
           _voiceService?.setAudioOutputDevice(next.valueOrNull) ??
               Future.value());
     });
+  }
+
+  /// AI-NS toggle: update the service (re-captures the mic when in-call —
+  /// same reneg contract as a device switch), then schedule the fallback
+  /// check: DFN may only prove unable to run once frames start flowing
+  /// (unsupported capture shape, realtime bail), and a call must never sit
+  /// with NO noise suppression while the constraint has legacy NS off.
+  Future<void> _applyNoiseSuppressAiChange(bool enabled) async {
+    final service = _voiceService;
+    if (service == null) return; // no service yet — next call seeds from it
+    try {
+      final swapped = await service.updateNoiseSuppressAi(enabled);
+      if (swapped) await _sendDeviceSwitchReneg('ai-ns');
+    } catch (e) {
+      _callLog('[HOLLOW-CALL] AI noise suppression toggle failed: $e');
+    }
+    if (!enabled) return;
+    unawaited(Future.delayed(const Duration(seconds: 4), () async {
+      try {
+        final again = await service.reconcileNoiseSuppressAi();
+        if (again) await _sendDeviceSwitchReneg('ai-ns-fallback');
+      } catch (e) {
+        _callLog('[HOLLOW-CALL] AI-NS fallback check failed: $e');
+      }
+    }));
   }
 
   /// Live mic switch: swap the sender in the service, then renegotiate so

@@ -1,9 +1,11 @@
 #import "CaptureGainProcessor.h"
 
 #import <WebRTC/WebRTC.h>
+#import <dlfcn.h>
 #import <math.h>
 #import <stdatomic.h>
 #import <string.h>
+#import <time.h>
 
 // Port of common/cpp/src/flutter_capture_gain_processor.cc — keep in sync.
 // WebRTC's APM delivers float PCM in int16 scale (~ +/-32768), not +/-1.0;
@@ -335,6 +337,64 @@ static Coef CoefPeaking(float fc, float gainDb, float q, float fs) {
   return c;
 }
 
+// --- DeepFilterNet3 runtime binding (Hollow fork, HOLLOW_PLAN ~2008) --------
+// hollow_core builds as a DYNAMIC framework on both darwin platforms (its
+// podspec force-loads libhollow_core.a), so the `hollow_dfn_*` C symbols
+// exported by rust/hollow_core/src/dfn_ffi.rs are strip roots and visible to
+// dlsym(RTLD_DEFAULT) once the app is loaded. ABI handshake guards drift;
+// any resolution failure leaves DFN gracefully unavailable.
+typedef uint32_t (*HollowDfnAbiVersionFn)(void);
+typedef void *(*HollowDfnCreateFn)(void);
+typedef int32_t (*HollowDfnProcessFn)(void *, float *, int32_t);
+typedef void (*HollowDfnSetF32Fn)(void *, float);
+
+static _Atomic(HollowDfnProcessFn) gDfnProcess;
+static HollowDfnCreateFn gDfnCreate = NULL;
+static HollowDfnSetF32Fn gDfnSetAttenLim = NULL;
+static HollowDfnSetF32Fn gDfnSetPfBeta = NULL;
+static BOOL gDfnBound = NO;
+
+static BOOL HollowDfnBind(void) {
+  static dispatch_once_t once;
+  dispatch_once(&once, ^{
+    HollowDfnAbiVersionFn abi =
+        (HollowDfnAbiVersionFn)dlsym(RTLD_DEFAULT, "hollow_dfn_abi_version");
+    if (abi == NULL) {
+      NSLog(@"[hollow_dfn] hollow_core symbols not found — AI NS unavailable");
+      return;
+    }
+    if (abi() != 1u) {
+      NSLog(@"[hollow_dfn] ABI mismatch (core %u) — AI NS unavailable", abi());
+      return;
+    }
+    HollowDfnCreateFn create =
+        (HollowDfnCreateFn)dlsym(RTLD_DEFAULT, "hollow_dfn_create");
+    HollowDfnProcessFn process =
+        (HollowDfnProcessFn)dlsym(RTLD_DEFAULT, "hollow_dfn_process");
+    HollowDfnSetF32Fn setAtten =
+        (HollowDfnSetF32Fn)dlsym(RTLD_DEFAULT, "hollow_dfn_set_atten_lim");
+    HollowDfnSetF32Fn setBeta = (HollowDfnSetF32Fn)dlsym(
+        RTLD_DEFAULT, "hollow_dfn_set_post_filter_beta");
+    if (create == NULL || process == NULL || setAtten == NULL ||
+        setBeta == NULL) {
+      NSLog(@"[hollow_dfn] incomplete symbol set — AI NS unavailable");
+      return;
+    }
+    gDfnCreate = create;
+    gDfnSetAttenLim = setAtten;
+    gDfnSetPfBeta = setBeta;
+    atomic_store_explicit(&gDfnProcess, process, memory_order_release);
+    gDfnBound = YES;
+  });
+  return gDfnBound;
+}
+
+static double HollowDfnNowMs(void) {
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1e6;
+}
+
 @implementation CaptureGainProcessor {
   _Atomic(float) _gain;
   _Atomic(BOOL) _enhance;
@@ -342,6 +402,21 @@ static Coef CoefPeaking(float fc, float gainDb, float q, float fs) {
   _Atomic(BOOL) _dynamic;
   _Atomic(BOOL) _muted;
   _Atomic(BOOL) _servoHold;
+  // AI noise suppression (DFN3) — mirrors the C++ port's fields.
+  _Atomic(BOOL) _noiseSuppressAi;
+  _Atomic(void *) _dfnHandle;
+  _Atomic(BOOL) _dfnCreateStarted;
+  _Atomic(BOOL) _dfnBailed;
+  _Atomic(BOOL) _dfnFormatOk;
+  // DFN realtime watchdog. Single writer (audio thread); atomics so the
+  // status getter can report frames/cost from the platform thread.
+  _Atomic(float) _dfnMsEma;
+  _Atomic(int) _dfnFrames;
+  // Raw capture shape as last seen (stored even with DFN off) — the status
+  // getter says WHY a format was rejected.
+  _Atomic(int) _lastFrameCount;
+  _Atomic(int) _lastChannels;
+  BOOL _dfnFormatLogged;
   ChannelState _ch[2 /* kMaxChannels */];
   int _sampleRate;
   float _compAlphaA;
@@ -373,6 +448,16 @@ static Coef CoefPeaking(float fc, float gainDb, float q, float fs) {
     atomic_init(&_dynamic, NO);
     atomic_init(&_muted, NO);
     atomic_init(&_servoHold, NO);
+    atomic_init(&_noiseSuppressAi, NO);
+    atomic_init(&_dfnHandle, NULL);
+    atomic_init(&_dfnCreateStarted, NO);
+    atomic_init(&_dfnBailed, NO);
+    atomic_init(&_dfnFormatOk, YES);
+    atomic_init(&_dfnMsEma, 0.0f);
+    atomic_init(&_dfnFrames, 0);
+    atomic_init(&_lastFrameCount, 0);
+    atomic_init(&_lastChannels, 0);
+    _dfnFormatLogged = NO;
     _sampleRate = 48000;
     [self setupFilters:_sampleRate];
     [self resetState];
@@ -382,6 +467,70 @@ static Coef CoefPeaking(float fc, float gainDb, float q, float fs) {
 
 - (void)setGain:(float)gain {
   atomic_store_explicit(&_gain, gain, memory_order_relaxed);
+}
+
+- (void)setNoiseSuppressAi:(BOOL)enabled
+                attenLimDb:(float)attenLimDb
+            postFilterBeta:(float)postFilterBeta {
+  atomic_store_explicit(&_noiseSuppressAi, enabled, memory_order_relaxed);
+  if (!enabled || !HollowDfnBind()) {
+    return;
+  }
+  void *handle = atomic_load_explicit(&_dfnHandle, memory_order_acquire);
+  if (handle != NULL) {
+    // Already loaded: live parameter update (lock-free staging in the FFI).
+    gDfnSetAttenLim(handle, attenLimDb);
+    gDfnSetPfBeta(handle, postFilterBeta);
+    return;
+  }
+  BOOL expected = NO;
+  if (!atomic_compare_exchange_strong(&_dfnCreateStarted, &expected, YES)) {
+    return;  // create already in flight
+  }
+  // One-shot background model load (100-500 ms) — NEVER the audio thread.
+  __weak CaptureGainProcessor *weakSelf = self;
+  dispatch_async(
+      dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        void *h = gDfnCreate != NULL ? gDfnCreate() : NULL;
+        CaptureGainProcessor *strongSelf = weakSelf;
+        if (h == NULL || strongSelf == NULL) {
+          return;
+        }
+        gDfnSetAttenLim(h, attenLimDb);
+        gDfnSetPfBeta(h, postFilterBeta);
+        atomic_store_explicit(&strongSelf->_dfnHandle, h,
+                              memory_order_release);
+      });
+}
+
+- (NSDictionary<NSString *, NSNumber *> *)noiseSuppressAiStatus {
+  const BOOL available = gDfnBound;
+  const BOOL enabled =
+      atomic_load_explicit(&_noiseSuppressAi, memory_order_relaxed);
+  const BOOL ready =
+      atomic_load_explicit(&_dfnHandle, memory_order_acquire) != NULL;
+  const BOOL bailed =
+      atomic_load_explicit(&_dfnBailed, memory_order_relaxed);
+  const BOOL formatOk =
+      atomic_load_explicit(&_dfnFormatOk, memory_order_relaxed);
+  return @{
+    @"available" : @(available),
+    @"enabled" : @(enabled),
+    @"ready" : @(ready),
+    @"bailed" : @(bailed),
+    @"formatOk" : @(formatOk),
+    @"active" : @(enabled && ready && !bailed && formatOk),
+    // frames > 0 is the proof the engine is actually denoising the mic.
+    @"frames" : @(atomic_load_explicit(&_dfnFrames, memory_order_relaxed)),
+    @"emaMs" : @((double)atomic_load_explicit(&_dfnMsEma,
+                                              memory_order_relaxed)),
+    // Raw capture shape — says WHY a format was rejected.
+    @"rate" : @(_sampleRate),
+    @"channels" :
+        @(atomic_load_explicit(&_lastChannels, memory_order_relaxed)),
+    @"bufferSize" :
+        @(atomic_load_explicit(&_lastFrameCount, memory_order_relaxed)),
+  };
 }
 
 - (void)setEnhance:(BOOL)enabled {
@@ -516,6 +665,78 @@ static Coef CoefPeaking(float fc, float gainDb, float q, float fs) {
   [self resetState];
 }
 
+// Head-of-chain DFN3 step (audio thread only). Keep behavior-identical to
+// FlutterCaptureGainProcessor::ProcessDfn in the C++ port.
+- (void)maybeProcessDfn:(RTC_OBJC_TYPE(RTCAudioBuffer) *)audioBuffer
+                 frames:(int)frames
+               channels:(int)channels {
+  // Shape breadcrumbs for the status getter (stored even with DFN off).
+  atomic_store_explicit(&_lastFrameCount, frames, memory_order_relaxed);
+  atomic_store_explicit(&_lastChannels, channels, memory_order_relaxed);
+  if (!atomic_load_explicit(&_noiseSuppressAi, memory_order_relaxed) ||
+      atomic_load_explicit(&_dfnBailed, memory_order_relaxed)) {
+    return;
+  }
+  void *handle = atomic_load_explicit(&_dfnHandle, memory_order_acquire);
+  if (handle == NULL) {
+    return;  // model still loading (or unavailable) — pass through
+  }
+  // Accept 48 kHz mono OR stereo — the 2026-07-17 field test proved
+  // captures routinely arrive stereo. Stereo strategy: denoise channel 0,
+  // copy to channel 1 (voice-call stereo is virtually always dup'd mono).
+  if (_sampleRate != 48000 || channels < 1 || channels > 2 || frames != 480) {
+    atomic_store_explicit(&_dfnFormatOk, NO, memory_order_relaxed);
+    if (!_dfnFormatLogged) {
+      _dfnFormatLogged = YES;
+      NSLog(@"[hollow_dfn] unsupported capture shape (rate=%d ch=%d "
+            @"frames=%d) — DFN bypassed",
+            _sampleRate, channels, frames);
+    }
+    return;
+  }
+  atomic_store_explicit(&_dfnFormatOk, YES, memory_order_relaxed);
+  float *ch0 = [audioBuffer rawBufferForChannel:0];
+  if (ch0 == NULL) {
+    return;
+  }
+  HollowDfnProcessFn process =
+      atomic_load_explicit(&gDfnProcess, memory_order_relaxed);
+  if (process == NULL) {
+    return;
+  }
+  const double t0 = HollowDfnNowMs();
+  const int rc = process(handle, ch0, 480);
+  if (rc == 0 && channels == 2) {
+    float *ch1 = [audioBuffer rawBufferForChannel:1];
+    if (ch1 != NULL) {
+      memcpy(ch1, ch0, 480 * sizeof(float));
+    }
+  }
+  const double ms = HollowDfnNowMs() - t0;
+  if (rc != 0) {
+    atomic_store_explicit(&_dfnBailed, YES, memory_order_relaxed);
+    NSLog(@"[hollow_dfn] process rc=%d — bypassed for session", rc);
+    return;
+  }
+  // Realtime watchdog: EMA of per-frame cost, 100-frame warmup grace.
+  // Budget is 10 ms; sustained >6 ms latches bypass (matters on phones).
+  const int frames =
+      atomic_load_explicit(&_dfnFrames, memory_order_relaxed) + 1;
+  atomic_store_explicit(&_dfnFrames, frames, memory_order_relaxed);
+  const float ema =
+      frames == 1
+          ? (float)ms
+          : 0.98f * atomic_load_explicit(&_dfnMsEma, memory_order_relaxed) +
+                0.02f * (float)ms;
+  atomic_store_explicit(&_dfnMsEma, ema, memory_order_relaxed);
+  if (frames > 100 && ema > 6.0f) {
+    atomic_store_explicit(&_dfnBailed, YES, memory_order_relaxed);
+    NSLog(@"[hollow_dfn] realtime overrun (EMA %.2f ms/frame) — bypassed "
+          @"for session",
+          ema);
+  }
+}
+
 - (void)audioProcessingProcess:(RTC_OBJC_TYPE(RTCAudioBuffer) *)audioBuffer {
   const float gain = atomic_load_explicit(&_gain, memory_order_relaxed);
   const BOOL enhance = atomic_load_explicit(&_enhance, memory_order_relaxed);
@@ -527,6 +748,12 @@ static Coef CoefPeaking(float fc, float gainDb, float q, float fs) {
               : atomic_load_explicit(&_makeupDb, memory_order_relaxed);
   const int frames = (int)audioBuffer.frames;
   const int channels = (int)audioBuffer.channels;
+
+  // AI noise suppression (DFN3) — HEAD of the chain, post-APM-AEC, before
+  // trim/EQ, both enhance modes AND the legacy path. Mirrors the C++ port:
+  // only 48 kHz mono 10 ms frames are processable; anything else passes
+  // through and flips the format flag for the Dart fallback logic.
+  [self maybeProcessDfn:audioBuffer frames:frames channels:channels];
 
   if (!enhance) {
     // Legacy path — identical to the shipped flat-gain processor.

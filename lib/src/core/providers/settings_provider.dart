@@ -440,6 +440,34 @@ class VoiceEnhanceDynamicNotifier extends AsyncNotifier<bool> {
   }
 }
 
+/// AI noise suppression (DeepFilterNet3) — removes keyboard/fan/music/room
+/// noise from the outgoing mic at the HEAD of the capture chain (post-AEC,
+/// the Krisp slot). Independent of the Voice Enhancement toggle. While ON,
+/// WebRTC's legacy NS is disabled in the capture constraints (double
+/// suppression = artifacts); the services fall back to WebRTC NS
+/// automatically when the engine can't run on this device. Default OFF
+/// while the feature matures (flip after field validation).
+final noiseSuppressAiProvider =
+    AsyncNotifierProvider<NoiseSuppressAiNotifier, bool>(
+        NoiseSuppressAiNotifier.new);
+
+class NoiseSuppressAiNotifier extends AsyncNotifier<bool> {
+  @override
+  Future<bool> build() async {
+    final val = await storage_api.loadSetting(key: 'noise_suppress_ai');
+    if (val == null || val.isEmpty) return false;
+    return val == 'true';
+  }
+
+  Future<void> setEnabled(bool enabled) async {
+    await storage_api.saveSetting(
+      key: 'noise_suppress_ai',
+      value: enabled ? 'true' : 'false',
+    );
+    state = AsyncData(enabled);
+  }
+}
+
 /// Custom ringtone file path for incoming calls. Null = default system sound.
 final ringtonePathProvider =
     AsyncNotifierProvider<RingtonePathNotifier, String?>(

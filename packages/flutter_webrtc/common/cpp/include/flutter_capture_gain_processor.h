@@ -41,7 +41,12 @@ class FlutterCaptureGainProcessor
         makeup_db_(12.0f),
         dynamic_(false),
         muted_(false),
-        servo_hold_(false) {}
+        servo_hold_(false),
+        noise_suppress_ai_(false),
+        dfn_handle_(nullptr),
+        dfn_create_started_(false),
+        dfn_bailed_(false),
+        dfn_format_ok_(true) {}
   ~FlutterCaptureGainProcessor() override {}
 
   // Linear makeup-gain multiplier (1.0 = transparent in legacy mode; in
@@ -83,6 +88,64 @@ class FlutterCaptureGainProcessor
   // holds. Thread-safe, live.
   void SetServoHold(bool hold) {
     servo_hold_.store(hold, std::memory_order_relaxed);
+  }
+
+  // AI noise suppression (DeepFilterNet3 via hollow_core's C ABI, HOLLOW_PLAN
+  // ~2008): runs at the HEAD of Process — after WebRTC's APM AEC, before the
+  // enhancement chain — on 48 kHz fullband mono 10 ms frames only (anything
+  // else passes through and flips the format flag for the status getter).
+  // The handle is created ONCE on a background thread (model load is
+  // 100-500 ms), published here, and lives for the process lifetime — the
+  // audio thread only ever does one relaxed pointer load per frame.
+  void SetNoiseSuppressAi(bool enabled) {
+    noise_suppress_ai_.store(enabled, std::memory_order_relaxed);
+  }
+  void SetDfnHandle(void* handle) {
+    dfn_handle_.store(handle, std::memory_order_release);
+  }
+  // First caller wins and owns starting the background create.
+  bool TryBeginDfnCreate() {
+    bool expected = false;
+    return dfn_create_started_.compare_exchange_strong(expected, true);
+  }
+  bool DfnReady() const {
+    return dfn_handle_.load(std::memory_order_acquire) != nullptr;
+  }
+  // Latched TRUE when inference overran the realtime budget or errored —
+  // DFN stays bypassed for the session (WebRTC NS is Dart's fallback).
+  bool DfnBailed() const {
+    return dfn_bailed_.load(std::memory_order_relaxed);
+  }
+  // FALSE once a frame arrived in a shape DFN can't process (split-band,
+  // non-48k, stereo).
+  bool DfnFormatOk() const {
+    return dfn_format_ok_.load(std::memory_order_relaxed);
+  }
+  bool NoiseSuppressAiEnabled() const {
+    return noise_suppress_ai_.load(std::memory_order_relaxed);
+  }
+  // Diagnostics for the status getter: frames actually denoised this
+  // session + smoothed per-frame cost (ms). frames > 0 is THE proof the
+  // engine is really in the audio path.
+  int DfnFramesProcessed() const {
+    return dfn_frames_.load(std::memory_order_relaxed);
+  }
+  float DfnMsEma() const {
+    return dfn_ms_ema_.load(std::memory_order_relaxed);
+  }
+  // Raw capture shape as last seen by Process() (stored unconditionally,
+  // even with DFN off) — lets the status getter say exactly WHY a format
+  // was rejected instead of a bare formatOk=false.
+  int LastBands() const { return last_bands_.load(std::memory_order_relaxed); }
+  int LastBufferSize() const {
+    return last_buffer_size_.load(std::memory_order_relaxed);
+  }
+  int SampleRate() const { return sample_rate_; }
+  int Channels() const { return channels_; }
+  // For live parameter updates from the plugin (atten limit / post-filter);
+  // the FFI stages values atomically, so calling with a live handle is safe.
+  void* GetDfnHandle() const {
+    return dfn_handle_.load(std::memory_order_acquire);
   }
 
   // CustomProcessing
@@ -135,12 +198,29 @@ class FlutterCaptureGainProcessor
   // rectified sample and returns the stage gain in dB.
   float GateUpwardGainDb(ChannelState& s, float av);
 
+  // Head-of-chain DFN3 step (no-op unless enabled, ready and fullband mono
+  // 48 kHz). Audio thread only.
+  void ProcessDfn(int num_bands, int buffer_size, float* buffer);
+
   std::atomic<float> gain_;
   std::atomic<bool> enhance_;
   std::atomic<float> makeup_db_;
   std::atomic<bool> dynamic_;
   std::atomic<bool> muted_;
   std::atomic<bool> servo_hold_;
+  std::atomic<bool> noise_suppress_ai_;
+  std::atomic<void*> dfn_handle_;
+  std::atomic<bool> dfn_create_started_;
+  std::atomic<bool> dfn_bailed_;
+  std::atomic<bool> dfn_format_ok_;
+  // DFN realtime watchdog state. Single writer (audio thread); atomics so
+  // the status getter can report frames/cost from the platform thread —
+  // "silently working" and "silently absent" must be distinguishable.
+  std::atomic<float> dfn_ms_ema_{0.0f};
+  std::atomic<int> dfn_frames_{0};
+  std::atomic<int> last_bands_{0};
+  std::atomic<int> last_buffer_size_{0};
+  bool dfn_format_logged_ = false;
 
   int sample_rate_ = 48000;
   int channels_ = 1;

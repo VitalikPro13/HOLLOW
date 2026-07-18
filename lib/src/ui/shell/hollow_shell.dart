@@ -1,6 +1,8 @@
-﻿import 'dart:io';
+﻿import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_webrtc/flutter_webrtc.dart' show Helper;
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/android_platform.dart';
@@ -794,6 +796,18 @@ class _HollowShellState extends ConsumerState<HollowShell>
         if (!_revealController.isCompleted) {
           _revealController.value = 1.0;
         }
+      }
+    } catch (_) {}
+
+    // AI noise suppression pre-warm: the DFN3 model load is a one-time
+    // background cost per process, but it measured 15 SECONDS on a Pixel —
+    // kicked at first call it eats the start of the call (frames pass
+    // through undenoised until ready). If the user has the toggle on, start
+    // the load NOW so the engine is warm before any call begins.
+    try {
+      final aiNs = await ref.read(noiseSuppressAiProvider.future);
+      if (aiNs) {
+        unawaited(Helper.setNoiseSuppressAi(true).catchError((_) {}));
       }
     } catch (_) {}
 

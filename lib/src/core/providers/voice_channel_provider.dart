@@ -504,6 +504,8 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
         await ref.read(voiceEnhanceStrengthProvider.future));
     _service!.enhanceDynamic =
         await ref.read(voiceEnhanceDynamicProvider.future);
+    _service!.noiseSuppressAi =
+        await ref.read(noiseSuppressAiProvider.future);
 
     // Wire VAD callback. Writes go to the dedicated vcSpeakingProvider (NOT
     // VoiceChannelState) so a speaking flip only rebuilds the glow consumers,
@@ -590,6 +592,16 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
 
     await _service!.startAudio(serverId, channelId);
 
+    // AI-NS fallback check for sessions that STARTED with the toggle on
+    // (the toggle listener only covers mid-session flips). Logs the engine
+    // status either way; re-captures internally if fallback is needed.
+    if (_service?.noiseSuppressAi == true) {
+      unawaited(Future.delayed(const Duration(seconds: 4), () {
+        return _service?.reconcileNoiseSuppressAi().catchError((_) {}) ??
+            Future.value();
+      }));
+    }
+
     // Update mic gain mid-session when user adjusts the slider.
     ref.listen(micGainProvider, (_, next) {
       final gain = next.valueOrNull ?? kMicGainDefault;
@@ -633,6 +645,23 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
                 ?.setAudioOutputDevice(next.valueOrNull)
                 .catchError((_) {}) ??
             Future.value());
+      });
+      // AI noise suppression: flips the native DFN engine AND the WebRTC-NS
+      // capture constraint — the service re-captures the mesh mic, so this
+      // is heavy like a device switch and must never stack per join. The
+      // delayed pass re-arms legacy NS if DFN proves unable to run here.
+      ref.listen(noiseSuppressAiProvider, (prev, next) {
+        if (prev?.valueOrNull == next.valueOrNull) return;
+        final enabled = next.valueOrNull ?? false;
+        unawaited(
+            _service?.updateNoiseSuppressAi(enabled).catchError((_) {}) ??
+                Future.value());
+        if (enabled) {
+          unawaited(Future.delayed(const Duration(seconds: 4), () {
+            return _service?.reconcileNoiseSuppressAi().catchError((_) {}) ??
+                Future.value();
+          }));
+        }
       });
     }
 
