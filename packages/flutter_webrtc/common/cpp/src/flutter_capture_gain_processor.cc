@@ -657,17 +657,28 @@ void FlutterCaptureGainProcessor::Process(int num_bands, int /*num_frames*/,
   const float makeup_db =
       dynamic ? kDynMakeupDb : makeup_db_.load(std::memory_order_relaxed);
 
+  // Layout truth (2026-07-18 Pixel field test — the CRITICAL note in
+  // ProcessDfn has the wrapper-source receipts): the buffer is channel 0's
+  // LIVE FULLBAND samples — one 10 ms frame at sample_rate_ — while
+  // num_bands / channels_ are the APM's INTERNAL metadata, NOT this
+  // buffer's layout. Recognize that frame by its size and run the FULL
+  // chain on it. Until this fix, 48 kHz-native devices (Pixel, Linux)
+  // always reported num_bands=3 and rode the linear-gains-only split
+  // branch below — they never got the EQ, de-esser, or limiter. The
+  // split-band and multi-channel interpretations survive below ONLY as
+  // insurance for an unknown wrapper whose shape doesn't match.
+  const bool fullband_mono = buffer_size == sample_rate_ / 100;
+
   if (!enhance) {
-    // Legacy path — byte-identical to the shipped flat-gain processor.
+    // Legacy path — flat gain + -3 dBFS soft limiter.
     //
-    // CRITICAL — band-split awareness. WebRTC's APM hands the capture
-    // post-processor its buffer in the SPLIT-BAND domain when num_bands > 1
-    // (e.g. at 48 kHz on Linux the fullband 480-sample frame is split into 3
-    // contiguous sub-bands of 160 samples). A per-sample NONLINEARITY run
-    // independently across concatenated bands wrecks the spectral balance on
-    // recombination, so the limiter only runs on fullband data; a LINEAR
-    // gain commutes with the filterbank and is always safe.
-    if (num_bands > 1) {
+    // A per-sample NONLINEARITY run independently across concatenated
+    // split bands would wreck the spectral balance on recombination, so
+    // the limiter runs only on a shape known to be fullband (which per
+    // the layout note above is every real capture); an unknown shape
+    // gets the LINEAR gain only — that commutes with any filterbank and
+    // is always safe.
+    if (num_bands > 1 && !fullband_mono) {
       if (gain != 1.0f) {
         for (int i = 0; i < buffer_size; ++i) {
           buffer[i] *= gain;
@@ -685,11 +696,16 @@ void FlutterCaptureGainProcessor::Process(int num_bands, int /*num_frames*/,
   const float inv_ratio_m1 = (1.0f / kCompRatio) - 1.0f;
 
   // Segment length carrying ONE time-aligned gain trace: the samples of
-  // band 0 (split-band) or of one channel (fullband).
+  // band 0 (split-band) or of one channel (fullband). The effective layout
+  // overrides the APM metadata for the known fullband mono frame (see the
+  // layout note above) — that is what routes Pixel/Linux 48 kHz captures
+  // into the full chain instead of the split-band branch.
   const int chans_raw = std::min(std::max(channels_, 1), kMaxChannels);
-  const int seg_len = num_bands > 1
-                          ? buffer_size / num_bands
-                          : buffer_size / chans_raw;
+  const int eff_bands = fullband_mono ? 1 : num_bands;
+  const int eff_chans = fullband_mono ? 1 : chans_raw;
+  const int seg_len = eff_bands > 1
+                          ? buffer_size / eff_bands
+                          : buffer_size / eff_chans;
 
   // --- Dynamic-mode servo (frame-rate, speech-gated) -------------------------
   // Measures the PRE-trim RMS of the first segment (band0 / channel 0 — the
@@ -713,7 +729,7 @@ void FlutterCaptureGainProcessor::Process(int num_bands, int /*num_frames*/,
       // Frame duration: subband samples tick at fs/num_bands.
       const float frame_sec =
           static_cast<float>(seg_len) *
-          static_cast<float>(num_bands > 1 ? num_bands : 1) /
+          static_cast<float>(eff_bands > 1 ? eff_bands : 1) /
           static_cast<float>(sample_rate_);
       if (!dyn_meter_primed_) {
         // First speech: snap straight to the right level (nothing has been
@@ -756,14 +772,16 @@ void FlutterCaptureGainProcessor::Process(int num_bands, int /*num_frames*/,
     band_gain_[i] = dyn_trim_lin_;
   }
 
-  if (num_bands > 1) {
-    // Split-band (Linux 48 kHz): the biquad EQ and the limiter are only
-    // valid on recombined FULLBAND audio, so they are skipped here. The
-    // compressor's per-sample gain is computed on band0 (where nearly all
-    // speech energy lives) and re-applied TIME-ALIGNED to the higher bands
-    // — subband samples with the same index describe the same instant, and
-    // a linear gain commutes with the filterbank. WebRTC's own downstream
-    // limiter still prevents hard clipping.
+  if (eff_bands > 1) {
+    // Split-band INSURANCE branch (unknown wrapper shape only — every real
+    // capture is the fullband mono frame handled below; see the layout
+    // note): the biquad EQ and the limiter are only valid on recombined
+    // FULLBAND audio, so they are skipped here. The compressor's per-sample
+    // gain is computed on band0 (where nearly all speech energy lives) and
+    // re-applied TIME-ALIGNED to the higher bands — subband samples with
+    // the same index describe the same instant, and a linear gain commutes
+    // with the filterbank. WebRTC's own downstream limiter still prevents
+    // hard clipping.
     ChannelState& s = ch_[0];
     for (int i = 0; i < seg_len; ++i) {
       float t = band_gain_[i];
@@ -800,7 +818,7 @@ void FlutterCaptureGainProcessor::Process(int num_bands, int /*num_frames*/,
       band_gain_[i] = t * g;
       buffer[i] = v * g;
     }
-    for (int b = 1; b < num_bands; ++b) {
+    for (int b = 1; b < eff_bands; ++b) {
       float* band = buffer + b * seg_len;
       for (int i = 0; i < seg_len; ++i) {
         band[i] = band[i] * band_gain_[i];
@@ -809,9 +827,12 @@ void FlutterCaptureGainProcessor::Process(int num_bands, int /*num_frames*/,
     return;
   }
 
-  // Fullband: the APM hands deinterleaved per-channel data. Run the full
-  // chain per channel; anything beyond kMaxChannels gets the legacy path.
-  if (channels_ > kMaxChannels || buffer_size % chans_raw != 0) {
+  // Fullband: the known wrapper frame is channel 0 only (eff_chans == 1);
+  // the deinterleaved multi-channel interpretation survives for a
+  // bands==1 shape that is NOT the 10 ms mono frame. Run the full chain
+  // per channel; anything beyond kMaxChannels gets the legacy path.
+  if (!fullband_mono &&
+      (channels_ > kMaxChannels || buffer_size % chans_raw != 0)) {
     for (int i = 0; i < buffer_size; ++i) {
       buffer[i] = SoftLimitLegacy(buffer[i] * gain);
     }
@@ -819,7 +840,7 @@ void FlutterCaptureGainProcessor::Process(int num_bands, int /*num_frames*/,
   }
   const int frames = seg_len;
 
-  for (int chan = 0; chan < chans_raw; ++chan) {
+  for (int chan = 0; chan < eff_chans; ++chan) {
     ChannelState& s = ch_[chan];
     float* x = buffer + chan * frames;
     for (int i = 0; i < frames; ++i) {

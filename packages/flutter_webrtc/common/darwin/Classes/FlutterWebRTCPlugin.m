@@ -138,6 +138,27 @@ void postEvent(FlutterEventSink _Nullable sink, id _Nullable event) {
 }
 @end
 
+// Hollow fork: serial queue for AUDIO track enable/volume ops. Setting
+// RTCMediaStreamTrack.isEnabled (and RTCAudioSource.volume / the .source
+// getter) is a SYNCHRONOUS proxy hop onto WebRTC's signaling thread, and
+// for the local mic this build's LiveKit core releases the microphone
+// while all audio tracks are disabled (the OS mic indicator turns off on
+// mute) — a full audio-unit/HAL round trip per mute/unmute. With
+// Flutter's merged UI/platform thread that blocks the whole UI for the
+// duration (proven on Android: 2+ s Pixel mute freeze, 2026-07-18 —
+// mirror of audioTrackOpExecutor in MethodCallHandlerImpl.java, KEEP IN
+// SYNC). The ObjC wrapper retains the native track, so an op queued
+// across a teardown is safe — it just applies to a detached track.
+static dispatch_queue_t HollowAudioTrackOpQueue(void) {
+  static dispatch_queue_t queue;
+  static dispatch_once_t once;
+  dispatch_once(&once, ^{
+    queue = dispatch_queue_create("com.cloudwebrtc.webrtc.audioTrackOp",
+                                  DISPATCH_QUEUE_SERIAL);
+  });
+  return queue;
+}
+
 @implementation FlutterWebRTCPlugin {
 #pragma clang diagnostic pop
   FlutterMethodChannel* _methodChannel;
@@ -1090,7 +1111,16 @@ static __weak id<RTCAudioDeviceModuleDelegate> gAudioDeviceModuleObserver = nil;
 
     RTCMediaStreamTrack* track = [self trackForId:trackId peerConnectionId:peerConnectionId];
     if (track != nil) {
-      track.isEnabled = enabled.boolValue;
+      if ([track isKindOfClass:[RTCAudioTrack class]]) {
+        // Off the UI thread — see HollowAudioTrackOpQueue. Video stays
+        // synchronous (camera flows untouched).
+        BOOL value = enabled.boolValue;
+        dispatch_async(HollowAudioTrackOpQueue(), ^{
+          track.isEnabled = value;
+        });
+      } else {
+        track.isEnabled = enabled.boolValue;
+      }
     }
     result(nil);
   } else if ([@"mediaStreamAddTrack" isEqualToString:call.method]) {
@@ -1466,8 +1496,14 @@ static __weak id<RTCAudioDeviceModuleDelegate> gAudioDeviceModuleObserver = nil;
     RTCMediaStreamTrack* track = [self trackForId:trackId peerConnectionId:peerConnectionId];
     if (track != nil && [track isKindOfClass:[RTCAudioTrack class]]) {
       RTCAudioTrack* audioTrack = (RTCAudioTrack*)track;
-      RTCAudioSource* audioSource = audioTrack.source;
-      audioSource.volume = [volume doubleValue];
+      double value = [volume doubleValue];
+      // Off the UI thread — the .source getter and the volume setter are
+      // BOTH signaling-thread hops; during mute churn they queue behind
+      // the mic teardown (see HollowAudioTrackOpQueue).
+      dispatch_async(HollowAudioTrackOpQueue(), ^{
+        RTCAudioSource* audioSource = audioTrack.source;
+        audioSource.volume = value;
+      });
     }
     result(nil);
   } else if ([@"setCaptureGain" isEqualToString:call.method]) {
@@ -1564,7 +1600,11 @@ static __weak id<RTCAudioDeviceModuleDelegate> gAudioDeviceModuleObserver = nil;
     id<LocalTrack> track = self.localTracks[trackId];
     if (track != nil && [track isKindOfClass:[LocalAudioTrack class]]) {
       RTCAudioTrack* audioTrack = ((LocalAudioTrack*)track).audioTrack;
-      audioTrack.isEnabled = !mute.boolValue;
+      BOOL value = !mute.boolValue;
+      // Off the UI thread — see HollowAudioTrackOpQueue.
+      dispatch_async(HollowAudioTrackOpQueue(), ^{
+        audioTrack.isEnabled = value;
+      });
     }
     result(nil);
   }

@@ -518,10 +518,34 @@ public class CaptureGainProcessor
         // both enhance modes AND the legacy path (see the C++ port).
         maybeProcessDfn(numBands, buffer, count);
 
+        // Layout truth (2026-07-18 Pixel field test — the CRITICAL note in
+        // maybeProcessDfn has the wrapper-source receipts): the buffer is
+        // channel 0's LIVE FULLBAND samples — one 10 ms frame at
+        // sampleRate — while numBands / channels are the APM's INTERNAL
+        // metadata, NOT this buffer's layout. Recognize that frame by its
+        // size and run the FULL chain on it. Until this fix, 48 kHz-native
+        // devices (Pixel) always reported numBands=3 and rode the
+        // linear-gains-only split branch below — they never got the EQ,
+        // de-esser, or limiter. The split-band and multi-channel
+        // interpretations survive below ONLY as insurance for an unknown
+        // wrapper whose shape doesn't match. KEEP IN SYNC with the C++ port.
+        final boolean fullbandMono = count == sampleRate / 100;
+
         if (!enh) {
-            // Legacy path — identical to the shipped flat-gain processor.
-            for (int i = 0; i < count; i++) {
-                fb.put(i, softLimitLegacy(fb.get(i) * g));
+            // Legacy path — flat gain + -3 dBFS soft limiter. A per-sample
+            // NONLINEARITY across concatenated split bands would wreck the
+            // spectral balance on recombination, so an unknown shape gets
+            // the LINEAR gain only (commutes with any filterbank).
+            if (numBands > 1 && !fullbandMono) {
+                if (g != 1.0f) {
+                    for (int i = 0; i < count; i++) {
+                        fb.put(i, fb.get(i) * g);
+                    }
+                }
+            } else {
+                for (int i = 0; i < count; i++) {
+                    fb.put(i, softLimitLegacy(fb.get(i) * g));
+                }
             }
             return;
         }
@@ -529,9 +553,13 @@ public class CaptureGainProcessor
         final float manualTrim = g * ENHANCE_TRIM_SCALE;
 
         // Segment length carrying ONE time-aligned gain trace: the samples
-        // of band 0 (split-band) or of one channel (fullband).
+        // of band 0 (split-band) or of one channel (fullband). The
+        // effective layout overrides the APM metadata for the known
+        // fullband mono frame (see the layout note above).
         final int chansRaw = Math.min(Math.max(channels, 1), MAX_CHANNELS);
-        final int segLen = numBands > 1 ? count / numBands : count / chansRaw;
+        final int effBands = fullbandMono ? 1 : numBands;
+        final int effChans = fullbandMono ? 1 : chansRaw;
+        final int segLen = effBands > 1 ? count / effBands : count / effChans;
 
         // Dynamic-mode servo: frame-rate, speech-gated, measured on the
         // first segment's PRE-trim samples (band0 / channel 0 = the mic).
@@ -550,7 +578,7 @@ public class CaptureGainProcessor
             if (rmsDb > DYN_SPEECH_FLOOR_DB) {
                 // Subband samples tick at fs/numBands.
                 final float frameSec =
-                        (float) segLen * (numBands > 1 ? numBands : 1) / sampleRate;
+                        (float) segLen * (effBands > 1 ? effBands : 1) / sampleRate;
                 if (!dynMeterPrimed) {
                     // First speech: snap straight to the right level, then
                     // servo slowly from there.
@@ -590,10 +618,12 @@ public class CaptureGainProcessor
             trimBuf[i] = dynTrimLin;
         }
 
-        if (numBands > 1) {
-            // Split-band: EQ/limiter are only valid on fullband audio; apply
-            // trim + the band0 compressor gain time-aligned to higher bands
-            // (a linear gain commutes with the filterbank).
+        if (effBands > 1) {
+            // Split-band INSURANCE branch (unknown wrapper shape only —
+            // every real capture is the fullband mono frame handled below;
+            // see the layout note): EQ/limiter are only valid on fullband
+            // audio; apply trim + the band0 compressor gain time-aligned to
+            // higher bands (a linear gain commutes with the filterbank).
             for (int i = 0; i < segLen; i++) {
                 float t = trimBuf[i];
                 float v = fb.get(i) * t;
@@ -610,7 +640,7 @@ public class CaptureGainProcessor
                 bandGain[i] = t * gc;
                 fb.put(i, v * gc);
             }
-            for (int b = 1; b < numBands; b++) {
+            for (int b = 1; b < effBands; b++) {
                 final int off = b * segLen;
                 for (int i = 0; i < segLen; i++) {
                     fb.put(off + i, fb.get(off + i) * bandGain[i]);
@@ -619,9 +649,12 @@ public class CaptureGainProcessor
             return;
         }
 
-        // Fullband: deinterleaved per-channel segments. Full chain per
+        // Fullband: the known wrapper frame is channel 0 only (effChans ==
+        // 1); the deinterleaved multi-channel interpretation survives for a
+        // bands==1 shape that is NOT the 10 ms mono frame. Full chain per
         // channel; anything beyond MAX_CHANNELS gets the legacy path.
-        if (channels > MAX_CHANNELS || count % chansRaw != 0) {
+        if (!fullbandMono
+                && (channels > MAX_CHANNELS || count % chansRaw != 0)) {
             for (int i = 0; i < count; i++) {
                 fb.put(i, softLimitLegacy(fb.get(i) * g));
             }
@@ -629,7 +662,7 @@ public class CaptureGainProcessor
         }
         final int frames = segLen;
 
-        for (int ch = 0; ch < chansRaw; ch++) {
+        for (int ch = 0; ch < effChans; ch++) {
             final int base = ch * frames;
             final float[] x1 = eqX1[ch];
             final float[] x2 = eqX2[ch];

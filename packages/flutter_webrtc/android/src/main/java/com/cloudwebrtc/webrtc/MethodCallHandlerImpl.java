@@ -170,6 +170,19 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
   ExecutorService executor = Executors.newSingleThreadExecutor();
   Handler mainHandler = new Handler(Looper.getMainLooper());
 
+  // Hollow fork: serial executor for AUDIO track enable/volume ops.
+  // MediaStreamTrack.setEnabled is a SYNCHRONOUS hop onto WebRTC's
+  // signaling thread, and for the local mic it is anything but cheap: this
+  // build's LiveKit core releases the microphone while all audio tracks
+  // are disabled (that's why the OS mic indicator turns off on mute), so
+  // every mute/unmute is a full audio-HAL stream teardown/open — ~0.5 s,
+  // multi-second when toggles queue. With Flutter's merged UI/platform
+  // thread that froze the whole UI (Pixel mute freeze 2026-07-18: main
+  // thread parked in Java_org_webrtc_MediaStreamTrack_nativeSetEnabled for
+  // 2+ s, trace_40..42). Running the ops here keeps their order, keeps the
+  // audible behavior identical, and never blocks a frame.
+  ExecutorService audioTrackOpExecutor = Executors.newSingleThreadExecutor();
+
   public static LogSink logSink = new LogSink();
 
   MethodCallHandlerImpl(Context context, BinaryMessenger messenger, TextureRegistry textureRegistry) {
@@ -1954,7 +1967,39 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
     if (track == null) {
       Log.d(TAG, "mediaStreamTrackSetEnabled() track is null");
       return;
-    } else if (track.enabled() == enabled) {
+    }
+    if (track instanceof AudioTrack) {
+      // Off the UI thread — see audioTrackOpExecutor. The enabled() check
+      // also moves: it is a blocking proxy hop of its own, and it must see
+      // the state AFTER any queued toggle, not before.
+      final boolean isLocal;
+      synchronized (localTracks) {
+        isLocal = localTracks.containsKey(id);
+      }
+      audioTrackOpExecutor.execute(() -> {
+        if (isLocal) {
+          // Teardown guard: trackDispose removes the id from localTracks
+          // before the native dispose happens (in streamDispose, next
+          // channel message), so a toggle queued for a dying track bails
+          // here instead of racing the native free.
+          synchronized (localTracks) {
+            if (!localTracks.containsKey(id)) {
+              return;
+            }
+          }
+        }
+        try {
+          if (track.enabled() != enabled) {
+            track.setEnabled(enabled);
+          }
+        } catch (IllegalStateException e) {
+          // Track disposed while this op was queued (call ended mid-toggle).
+          Log.d(TAG, "mediaStreamTrackSetEnabled() track disposed: " + id);
+        }
+      });
+      return;
+    }
+    if (track.enabled() == enabled) {
       return;
     }
     track.setEnabled(enabled);
@@ -1964,11 +2009,16 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
     MediaStreamTrack track = getTrackForId(id, null);
     if (track instanceof AudioTrack) {
       Log.d(TAG, "setVolume(): " + id + "," + volume);
-      try {
-        ((AudioTrack) track).setVolume(volume);
-      } catch (Exception e) {
-        Log.e(TAG, "setVolume(): error", e);
-      }
+      // Same serial executor as setEnabled: the volume set is a signaling
+      // -thread hop too, and during the mute churn it queued behind the
+      // mic teardown and froze the UI (deafen at 16:28:20, trace_42).
+      audioTrackOpExecutor.execute(() -> {
+        try {
+          ((AudioTrack) track).setVolume(volume);
+        } catch (Exception e) {
+          Log.e(TAG, "setVolume(): error", e);
+        }
+      });
     } else {
       Log.w(TAG, "setVolume(): track not found: " + id);
     }

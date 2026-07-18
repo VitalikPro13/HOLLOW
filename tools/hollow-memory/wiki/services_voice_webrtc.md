@@ -151,6 +151,7 @@ Four methods manage per-peer, per-kind SFrame encryption:
 - `setMuted(bool)`: Toggles `track.enabled` on local audio tracks
 - `setDeafened(bool)`: Sets volume 0.0 or 1.0 on all remote audio receiver tracks via `Helper.setVolume()`
 - `setRemoteVolume(peerId, volume)`: Per-peer volume control
+- **Native threading (2026-07-18):** audio-track `setEnabled`/`setVolume` are SYNCHRONOUS WebRTC signaling-thread hops, and the LiveKit core releases the microphone while all audio tracks are disabled (mic indicator off on mute = full audio-HAL teardown/open per toggle). On the merged UI/platform thread that froze the UI 2+ s (Pixel). The fork runs these ops on a serial background executor — `audioTrackOpExecutor` (Android MethodCallHandlerImpl) / `HollowAudioTrackOpQueue` (darwin, 3 sites) — order preserved, video setEnabled stays synchronous. NEVER call audio track proxy methods on the platform thread. See memory `feedback_android_audio_track_proxy_ui_freeze`.
 
 ### Live Device Switching (2026-07-10)
 

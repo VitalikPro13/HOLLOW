@@ -1540,6 +1540,7 @@ dependencies = [
  "hollow_dfn",
  "image",
  "jni",
+ "log",
  "openmls",
  "openmls_basic_credential",
  "openmls_memory_storage",
