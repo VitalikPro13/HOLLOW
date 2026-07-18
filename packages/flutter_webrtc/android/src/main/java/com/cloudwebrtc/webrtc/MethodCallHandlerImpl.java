@@ -893,14 +893,17 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
         break;
       }
       case "setNoiseSuppressAi": {
-        // Hollow fork: DeepFilterNet3 AI noise suppression at the head of
-        // the capture chain (hollow_core JNI; background model load).
+        // Hollow fork: AI noise suppression (RNNoise default / DFN3 via
+        // `engine`) at the head of the capture chain (hollow_core JNI;
+        // background engine create).
         Boolean enabled = call.argument("enabled");
+        Integer engine = call.argument("engine");
         Double attenLim = call.argument("attenLimDb");
         Double pfBeta = call.argument("postFilterBeta");
         if (enabled != null && captureGainProcessor != null) {
           captureGainProcessor.setNoiseSuppressAi(
               enabled,
+              engine != null ? engine : 0,
               attenLim != null ? attenLim.floatValue() : 100.0f,
               pfBeta != null ? pfBeta.floatValue() : 0.0f);
         }

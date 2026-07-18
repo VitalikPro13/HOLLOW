@@ -229,6 +229,9 @@ class CallNotifier extends Notifier<CallState> {
         ref.read(voiceEnhanceDynamicProvider).valueOrNull ?? true;
     _voiceService!.noiseSuppressAi =
         ref.read(noiseSuppressAiProvider).valueOrNull ?? false;
+    _voiceService!.noiseSuppressEngine = noiseSuppressEngineToNative(
+        ref.read(noiseSuppressEngineProvider).valueOrNull ??
+            kNoiseSuppressEngineRnnoise);
     return _voiceService!;
   }
 
@@ -420,6 +423,16 @@ class CallNotifier extends Notifier<CallState> {
       unawaited(_applyNoiseSuppressAiChange(next.valueOrNull ?? false));
     });
 
+    // AI-NS engine switch: the native side swaps the engine handle in place
+    // (no constraint flip, no re-capture, no reneg — safe mid-call), but a
+    // heavier engine can prove unable to run once frames flow, so the same
+    // delayed fallback check as the toggle applies.
+    ref.listen(noiseSuppressEngineProvider, (prev, next) {
+      if (prev?.valueOrNull == next.valueOrNull) return;
+      unawaited(_applyNoiseSuppressEngineChange(
+          next.valueOrNull ?? kNoiseSuppressEngineRnnoise));
+    });
+
     // Live device switching mid-call (Settings > Audio & Video pickers).
     // Guard on prev==next: AsyncNotifier listeners also fire on initial load.
     ref.listen(audioInputDeviceProvider, (prev, next) {
@@ -438,11 +451,35 @@ class CallNotifier extends Notifier<CallState> {
     });
   }
 
+  /// AI-NS engine switch: live native handle swap, then the same delayed
+  /// fallback check as the toggle (the new engine may bail once frames
+  /// flow).
+  Future<void> _applyNoiseSuppressEngineChange(String engine) async {
+    final service = _voiceService;
+    if (service == null) return; // no service yet — next call seeds from it
+    try {
+      await service
+          .updateNoiseSuppressEngine(noiseSuppressEngineToNative(engine));
+    } catch (e) {
+      _callLog('[HOLLOW-CALL] AI-NS engine switch failed: $e');
+    }
+    if (!service.noiseSuppressAi) return;
+    unawaited(Future.delayed(const Duration(seconds: 4), () async {
+      try {
+        final again = await service.reconcileNoiseSuppressAi();
+        if (again) await _sendDeviceSwitchReneg('ai-ns-fallback');
+      } catch (e) {
+        _callLog('[HOLLOW-CALL] AI-NS fallback check failed: $e');
+      }
+    }));
+  }
+
   /// AI-NS toggle: update the service (re-captures the mic when in-call —
   /// same reneg contract as a device switch), then schedule the fallback
-  /// check: DFN may only prove unable to run once frames start flowing
-  /// (unsupported capture shape, realtime bail), and a call must never sit
-  /// with NO noise suppression while the constraint has legacy NS off.
+  /// check: the engine may only prove unable to run once frames start
+  /// flowing (unsupported capture shape, realtime bail), and a call must
+  /// never sit with NO noise suppression while the constraint has legacy
+  /// NS off.
   Future<void> _applyNoiseSuppressAiChange(bool enabled) async {
     final service = _voiceService;
     if (service == null) return; // no service yet — next call seeds from it

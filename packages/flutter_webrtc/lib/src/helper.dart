@@ -194,15 +194,25 @@ class Helper {
   static Future<void> setCaptureServoHold(bool hold) =>
       NativeAudioManagement.setCaptureServoHold(hold);
 
-  /// Toggle DeepFilterNet3 AI noise suppression at the head of the capture
-  /// chain (Hollow fork addition, post-AEC — the Krisp slot). First enable
-  /// loads the model in the background (~0.5 s); until then frames pass
-  /// through. Callers must also disable WebRTC's legacy NS in the capture
-  /// constraints while this is on. Process-global, live. No-op on web.
+  /// AI noise-suppression engine ids (Hollow fork addition).
+  static const int nsEngineRnnoise = NativeAudioManagement.nsEngineRnnoise;
+  static const int nsEngineDfn3 = NativeAudioManagement.nsEngineDfn3;
+
+  /// Toggle AI noise suppression at the head of the capture chain (Hollow
+  /// fork addition, post-AEC — the Krisp slot). [engine] picks RNNoise
+  /// (default, instant) or DFN3 (higher quality, slow load; a later call
+  /// with a different engine swaps live). Until the engine is ready frames
+  /// pass through. Callers must also disable WebRTC's legacy NS in the
+  /// capture constraints while this is on. Process-global, live. No-op on
+  /// web.
   static Future<void> setNoiseSuppressAi(bool enabled,
-          {double attenLimDb = 100.0, double postFilterBeta = 0.0}) =>
+          {int engine = nsEngineRnnoise,
+          double attenLimDb = 100.0,
+          double postFilterBeta = 0.0}) =>
       NativeAudioManagement.setNoiseSuppressAi(enabled,
-          attenLimDb: attenLimDb, postFilterBeta: postFilterBeta);
+          engine: engine,
+          attenLimDb: attenLimDb,
+          postFilterBeta: postFilterBeta);
 
   /// DFN3 engine status snapshot (`available`/`enabled`/`ready`/`bailed`/
   /// `formatOk`/`active` bools + `frames`/`emaMs` diagnostics) — lets

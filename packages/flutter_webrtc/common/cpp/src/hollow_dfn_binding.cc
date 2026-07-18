@@ -14,16 +14,19 @@
 namespace hollow_dfn {
 namespace {
 
-constexpr uint32_t kExpectedAbi = 1;
+constexpr uint32_t kExpectedAbi = 3;
 
 using AbiVersionFn = uint32_t (*)();
-using CreateFn = void* (*)();
-using ProcessFn = int32_t (*)(void*, float*, int32_t);
+using CreateEngineFn = void* (*)(int32_t);
+using ProcessExFn =
+    int32_t (*)(void*, float*, int32_t, int32_t, int32_t, int32_t);
+using LastVadFn = float (*)(void*);
 using SetF32Fn = void (*)(void*, float);
 
 // Published once by Bind(); read with relaxed loads on the audio thread.
-std::atomic<CreateFn> g_create{nullptr};
-std::atomic<ProcessFn> g_process{nullptr};
+std::atomic<CreateEngineFn> g_create_engine{nullptr};
+std::atomic<ProcessExFn> g_process_ex{nullptr};
+std::atomic<LastVadFn> g_last_vad{nullptr};
 std::atomic<SetF32Fn> g_set_atten{nullptr};
 std::atomic<SetF32Fn> g_set_beta{nullptr};
 std::once_flag g_bind_once;
@@ -68,23 +71,27 @@ void BindImpl() {
                  v, kExpectedAbi);
     return;
   }
-  const auto create = reinterpret_cast<CreateFn>(ResolveSym("hollow_dfn_create"));
-  const auto process =
-      reinterpret_cast<ProcessFn>(ResolveSym("hollow_dfn_process"));
+  const auto create_engine =
+      reinterpret_cast<CreateEngineFn>(ResolveSym("hollow_dfn_create_engine"));
+  const auto process_ex =
+      reinterpret_cast<ProcessExFn>(ResolveSym("hollow_dfn_process_ex"));
+  const auto last_vad =
+      reinterpret_cast<LastVadFn>(ResolveSym("hollow_dfn_last_vad"));
   const auto set_atten =
       reinterpret_cast<SetF32Fn>(ResolveSym("hollow_dfn_set_atten_lim"));
   const auto set_beta =
       reinterpret_cast<SetF32Fn>(ResolveSym("hollow_dfn_set_post_filter_beta"));
-  if (!create || !process || !set_atten || !set_beta) {
+  if (!create_engine || !process_ex || !last_vad || !set_atten || !set_beta) {
     std::fprintf(stderr, "[hollow_dfn] incomplete symbol set — unavailable\n");
     return;
   }
-  g_create.store(create, std::memory_order_relaxed);
+  g_create_engine.store(create_engine, std::memory_order_relaxed);
+  g_last_vad.store(last_vad, std::memory_order_relaxed);
   g_set_atten.store(set_atten, std::memory_order_relaxed);
   g_set_beta.store(set_beta, std::memory_order_relaxed);
   // process last, release: a relaxed audio-thread reader that sees it also
   // sees a fully-bound state.
-  g_process.store(process, std::memory_order_release);
+  g_process_ex.store(process_ex, std::memory_order_release);
   g_bound.store(true, std::memory_order_release);
 }
 
@@ -97,15 +104,24 @@ bool Bind() {
 
 bool IsBound() { return g_bound.load(std::memory_order_acquire); }
 
-void* Create() {
-  const auto fn = g_create.load(std::memory_order_relaxed);
-  return fn ? fn() : nullptr;
+void* CreateEngine(int engine) {
+  const auto fn = g_create_engine.load(std::memory_order_relaxed);
+  return fn ? fn(static_cast<int32_t>(engine)) : nullptr;
 }
 
-int ProcessFrame(void* handle, float* frame, int len) {
-  const auto fn = g_process.load(std::memory_order_relaxed);
+int ProcessFrameEx(void* handle, float* buf, int len, int num_bands, int rate,
+                   int channels) {
+  const auto fn = g_process_ex.load(std::memory_order_relaxed);
   if (!fn || !handle) return 1;
-  return fn(handle, frame, static_cast<int32_t>(len));
+  return fn(handle, buf, static_cast<int32_t>(len),
+            static_cast<int32_t>(num_bands), static_cast<int32_t>(rate),
+            static_cast<int32_t>(channels));
+}
+
+float LastVad(void* handle) {
+  const auto fn = g_last_vad.load(std::memory_order_relaxed);
+  if (!fn || !handle) return -1.0f;
+  return fn(handle);
 }
 
 void SetAttenLim(void* handle, float db) {

@@ -97,11 +97,13 @@ opt-level = 3
 [profile.dev.package.libwebp-sys2]
 opt-level = 3
 
-# DeepFilterNet3 inference (hollow_dfn → deep_filter → tract): runs on the
-# REALTIME capture audio thread — 10 ms budget per frame. Same dev-profile
-# trap as unsafe-libopus: unoptimized tract cannot hit realtime in debug
-# builds.
+# AI noise suppression (hollow_dfn → nnnoiseless / deep_filter → tract):
+# runs on the REALTIME capture audio thread — 10 ms budget per frame. Same
+# dev-profile trap as unsafe-libopus: unoptimized inference cannot hit
+# realtime in debug builds.
 [profile.dev.package.hollow_dfn]
+opt-level = 3
+[profile.dev.package.nnnoiseless]
 opt-level = 3
 [profile.dev.package.deep_filter]
 opt-level = 3

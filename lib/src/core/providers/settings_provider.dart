@@ -214,7 +214,7 @@ class ImageQualityNotifier extends AsyncNotifier<ImageQuality> {
 /// Audio quality preset for voice calls.
 /// Controls Opus bitrate and stereo settings via SDP munging.
 enum AudioQualityPreset {
-  voice('Voice', 32000, false),     // 32 kbps mono — speech-optimized
+  voice('Voice', 96000, false),     // 96 kbps mono — high-quality speech
   music('Music', 128000, true),     // 128 kbps stereo — CD-like quality
   hifi('Hi-Fi', 256000, true);      // 256 kbps stereo — perceptually lossless
 
@@ -440,13 +440,14 @@ class VoiceEnhanceDynamicNotifier extends AsyncNotifier<bool> {
   }
 }
 
-/// AI noise suppression (DeepFilterNet3) — removes keyboard/fan/music/room
-/// noise from the outgoing mic at the HEAD of the capture chain (post-AEC,
-/// the Krisp slot). Independent of the Voice Enhancement toggle. While ON,
-/// WebRTC's legacy NS is disabled in the capture constraints (double
-/// suppression = artifacts); the services fall back to WebRTC NS
-/// automatically when the engine can't run on this device. Default OFF
-/// while the feature matures (flip after field validation).
+/// AI noise suppression — removes keyboard/fan/music/room noise from the
+/// outgoing mic at the HEAD of the capture chain (post-AEC, the Krisp
+/// slot). Independent of the Voice Enhancement toggle. While ON, WebRTC's
+/// legacy NS is disabled in the capture constraints (double suppression =
+/// artifacts); the services fall back to WebRTC NS automatically when the
+/// engine can't run on this device. Default OFF while the feature matures
+/// (flip after field validation). The engine is picked by
+/// [noiseSuppressEngineProvider].
 final noiseSuppressAiProvider =
     AsyncNotifierProvider<NoiseSuppressAiNotifier, bool>(
         NoiseSuppressAiNotifier.new);
@@ -465,6 +466,41 @@ class NoiseSuppressAiNotifier extends AsyncNotifier<bool> {
       value: enabled ? 'true' : 'false',
     );
     state = AsyncData(enabled);
+  }
+}
+
+/// AI noise-suppression engine ('rnnoise' | 'dfn3'). RNNoise is the default
+/// everywhere (instant init, ~1 MB, trivial CPU — the engine that actually
+/// runs on every device); DeepFilterNet3 stays available behind the
+/// advanced selector on desktop (higher suppression quality, 0.5 s desktop
+/// / ~15 s mobile model load, ~10x the CPU). Switching while a call is live
+/// swaps the engine in place — no re-capture, no renegotiation.
+const kNoiseSuppressEngineRnnoise = 'rnnoise';
+const kNoiseSuppressEngineDfn3 = 'dfn3';
+
+/// Maps the persisted engine pref onto the native engine id
+/// (Helper.nsEngineRnnoise / Helper.nsEngineDfn3 in the fork).
+int noiseSuppressEngineToNative(String engine) =>
+    engine == kNoiseSuppressEngineDfn3 ? 1 : 0;
+
+final noiseSuppressEngineProvider =
+    AsyncNotifierProvider<NoiseSuppressEngineNotifier, String>(
+        NoiseSuppressEngineNotifier.new);
+
+class NoiseSuppressEngineNotifier extends AsyncNotifier<String> {
+  @override
+  Future<String> build() async {
+    final val = await storage_api.loadSetting(key: 'noise_suppress_engine');
+    if (val == kNoiseSuppressEngineDfn3) return kNoiseSuppressEngineDfn3;
+    return kNoiseSuppressEngineRnnoise;
+  }
+
+  Future<void> setEngine(String engine) async {
+    await storage_api.saveSetting(
+      key: 'noise_suppress_engine',
+      value: engine,
+    );
+    state = AsyncData(engine);
   }
 }
 

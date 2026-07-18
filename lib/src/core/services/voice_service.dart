@@ -80,11 +80,15 @@ class VoiceService {
   /// Dynamic mode: the native auto-level servo (ignores micGain/makeup).
   bool enhanceDynamic = true;
 
-  /// AI noise suppression (DeepFilterNet3) — user preference, seeded from
+  /// AI noise suppression — user preference, seeded from
   /// noiseSuppressAiProvider. The engine runs at the HEAD of the native
   /// capture chain (post-AEC); while it's on, WebRTC's legacy NS is dropped
   /// from the capture constraints (double suppression = artifacts).
   bool noiseSuppressAi = false;
+
+  /// Which engine (Helper.nsEngineRnnoise default / nsEngineDfn3), seeded
+  /// from noiseSuppressEngineProvider.
+  int noiseSuppressEngine = Helper.nsEngineRnnoise;
 
   /// TRUE when DFN can't actually run here (symbols unbound, unsupported
   /// capture shape, realtime bail) and WebRTC's legacy NS was re-enabled as
@@ -121,7 +125,7 @@ class VoiceService {
 
   /// Audio quality preset — set by CallNotifier before creating offer/answer.
   /// Controls Opus bitrate and stereo via SDP munging.
-  int opusBitrate = 32000;     // default: 32 kbps (voice)
+  int opusBitrate = 96000;     // default: 96 kbps (voice)
   bool opusStereo = false;     // default: mono
 
   // ---------------------------------------------------------------------------
@@ -1624,7 +1628,7 @@ class VoiceService {
     _log('[HOLLOW-VOICE] Updated voice enhance dynamic: $enabled');
   }
 
-  /// Toggle DFN3 AI noise suppression live. Returns true when the mic was
+  /// Toggle AI noise suppression live. Returns true when the mic was
   /// re-captured (the WebRTC-NS constraint flipped with it) — the caller
   /// MUST send a renegotiation offer, same contract as
   /// [setAudioInputDevice].
@@ -1635,6 +1639,19 @@ class VoiceService {
     _log('[HOLLOW-VOICE] Updated AI noise suppression: $enabled');
     if (_pc == null || _localStream == null) return false;
     return _recaptureMic(_capturedAudioInputDeviceId);
+  }
+
+  /// Switch the AI-NS engine (Helper.nsEngineRnnoise / nsEngineDfn3). The
+  /// native side swaps the engine handle in place — no constraint flip, no
+  /// re-capture, no renegotiation — so this is safe mid-call. Clears the
+  /// fallback latch (the new engine deserves a fresh verdict); the caller
+  /// should schedule [reconcileNoiseSuppressAi] like after an enable.
+  Future<void> updateNoiseSuppressEngine(int engine) async {
+    noiseSuppressEngine = engine;
+    if (!noiseSuppressAi) return;
+    _dfnFallbackNsOn = false;
+    await _syncNoiseSuppressAiEngine();
+    _log('[HOLLOW-VOICE] Updated AI-NS engine: $engine');
   }
 
   /// Post-enable safety net (schedule a few seconds after enabling): if the
@@ -1669,7 +1686,8 @@ class VoiceService {
   /// that already bailed keeps legacy NS from the first frame).
   Future<void> _syncNoiseSuppressAiEngine() async {
     try {
-      await Helper.setNoiseSuppressAi(noiseSuppressAi);
+      await Helper.setNoiseSuppressAi(noiseSuppressAi,
+          engine: noiseSuppressEngine);
       if (noiseSuppressAi) {
         final st = await Helper.getNoiseSuppressAiActive();
         _dfnFallbackNsOn = st.isNotEmpty &&

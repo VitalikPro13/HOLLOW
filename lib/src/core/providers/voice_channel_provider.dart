@@ -506,6 +506,8 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
         await ref.read(voiceEnhanceDynamicProvider.future);
     _service!.noiseSuppressAi =
         await ref.read(noiseSuppressAiProvider.future);
+    _service!.noiseSuppressEngine = noiseSuppressEngineToNative(
+        await ref.read(noiseSuppressEngineProvider.future));
 
     // Wire VAD callback. Writes go to the dedicated vcSpeakingProvider (NOT
     // VoiceChannelState) so a speaking flip only rebuilds the glow consumers,
@@ -657,6 +659,22 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
             _service?.updateNoiseSuppressAi(enabled).catchError((_) {}) ??
                 Future.value());
         if (enabled) {
+          unawaited(Future.delayed(const Duration(seconds: 4), () {
+            return _service?.reconcileNoiseSuppressAi().catchError((_) {}) ??
+                Future.value();
+          }));
+        }
+      });
+      // AI-NS engine switch: live native handle swap (no re-capture, no
+      // mesh reneg), then the same delayed fallback pass as the toggle.
+      ref.listen(noiseSuppressEngineProvider, (prev, next) {
+        if (prev?.valueOrNull == next.valueOrNull) return;
+        final engine = noiseSuppressEngineToNative(
+            next.valueOrNull ?? kNoiseSuppressEngineRnnoise);
+        unawaited(
+            _service?.updateNoiseSuppressEngine(engine).catchError((_) {}) ??
+                Future.value());
+        if (_service?.noiseSuppressAi == true) {
           unawaited(Future.delayed(const Duration(seconds: 4), () {
             return _service?.reconcileNoiseSuppressAi().catchError((_) {}) ??
                 Future.value();

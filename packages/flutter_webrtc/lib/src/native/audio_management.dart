@@ -109,21 +109,34 @@ class NativeAudioManagement {
     });
   }
 
-  /// Toggle DeepFilterNet3 AI noise suppression at the HEAD of the capture
-  /// post-processor chain (Hollow fork addition). Runs post-AEC, before the
-  /// enhancement chain, via hollow_core's C ABI bound at runtime. The first
-  /// enable triggers a one-shot background model load (100-500 ms); frames
-  /// pass through untouched until it's ready. [attenLimDb] caps the maximum
-  /// suppression (100 = uncapped); [postFilterBeta] enables the model's
-  /// post-filter (0 = off). Callers must ALSO disable WebRTC's legacy NS in
-  /// the getUserMedia constraints while this is on (double suppression =
-  /// artifacts) — see [getNoiseSuppressAiActive] for the fallback check.
-  /// Process-global, live. No-op on web.
+  /// AI noise-suppression engine ids — MUST match hollow_dfn::EngineKind
+  /// in Rust (Hollow fork addition).
+  static const int nsEngineRnnoise = 0;
+  static const int nsEngineDfn3 = 1;
+
+  /// Toggle AI noise suppression at the HEAD of the capture post-processor
+  /// chain (Hollow fork addition). Runs post-AEC, before the enhancement
+  /// chain, via hollow_core's C ABI bound at runtime; the Rust adapter
+  /// converts whatever capture shape the APM delivers (48 kHz fullband,
+  /// 3-band split, 16 kHz mono). [engine] picks the suppressor —
+  /// [nsEngineRnnoise] (default: instant init, trivial CPU) or
+  /// [nsEngineDfn3] (higher quality, expensive init) — and a later call
+  /// with a different engine performs a live swap. The first enable
+  /// triggers a one-shot background engine create; frames pass through
+  /// untouched until it's ready. [attenLimDb] caps the maximum suppression
+  /// (100 = uncapped); [postFilterBeta] enables the model's post-filter
+  /// (0 = off) — both DFN3-only. Callers must ALSO disable WebRTC's legacy
+  /// NS in the getUserMedia constraints while this is on (double
+  /// suppression = artifacts) — see [getNoiseSuppressAiActive] for the
+  /// fallback check. Process-global, live. No-op on web.
   static Future<void> setNoiseSuppressAi(bool enabled,
-      {double attenLimDb = 100.0, double postFilterBeta = 0.0}) async {
+      {int engine = nsEngineRnnoise,
+      double attenLimDb = 100.0,
+      double postFilterBeta = 0.0}) async {
     if (kIsWeb) return;
     await WebRTC.invokeMethod('setNoiseSuppressAi', <String, dynamic>{
       'enabled': enabled,
+      'engine': engine,
       'attenLimDb': attenLimDb,
       'postFilterBeta': postFilterBeta,
     });

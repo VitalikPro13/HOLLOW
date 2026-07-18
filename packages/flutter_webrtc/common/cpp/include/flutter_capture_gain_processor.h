@@ -44,7 +44,8 @@ class FlutterCaptureGainProcessor
         servo_hold_(false),
         noise_suppress_ai_(false),
         dfn_handle_(nullptr),
-        dfn_create_started_(false),
+        dfn_engine_(-1),
+        dfn_create_in_flight_(false),
         dfn_bailed_(false),
         dfn_format_ok_(true) {}
   ~FlutterCaptureGainProcessor() override {}
@@ -90,26 +91,55 @@ class FlutterCaptureGainProcessor
     servo_hold_.store(hold, std::memory_order_relaxed);
   }
 
-  // AI noise suppression (DeepFilterNet3 via hollow_core's C ABI, HOLLOW_PLAN
-  // ~2008): runs at the HEAD of Process — after WebRTC's APM AEC, before the
-  // enhancement chain — on 48 kHz fullband mono 10 ms frames only (anything
-  // else passes through and flips the format flag for the status getter).
-  // The handle is created ONCE on a background thread (model load is
-  // 100-500 ms), published here, and lives for the process lifetime — the
-  // audio thread only ever does one relaxed pointer load per frame.
+  // AI noise suppression (RNNoise default / DFN3 optional, via hollow_core's
+  // C ABI, HOLLOW_PLAN ~2008): runs at the HEAD of Process — after WebRTC's
+  // APM AEC, before the enhancement chain. The Rust adapter behind the ABI
+  // converts whatever shape the APM delivers (48 kHz fullband, 16 kHz mono,
+  // 3-band split) around the engine core; a shape it can't convert flips
+  // the format flag for the status getter and passes through. The handle is
+  // created on a background thread (DFN3's model load is 100-500 ms;
+  // RNNoise is instant), published here, and lives until an engine SWAP
+  // publishes a replacement (the old handle deliberately leaks — the audio
+  // thread may still be inside it) — the audio thread only ever does one
+  // relaxed pointer load per frame.
   void SetNoiseSuppressAi(bool enabled) {
     noise_suppress_ai_.store(enabled, std::memory_order_relaxed);
   }
-  void SetDfnHandle(void* handle) {
+  // Publish a freshly created engine handle. Also clears the bail/format
+  // latches and the watchdog counters: a new engine deserves a fresh
+  // verdict (a DFN3 realtime bail must not condemn the RNNoise it was
+  // swapped for).
+  void PublishDfnHandle(void* handle, int engine) {
+    dfn_frames_.store(0, std::memory_order_relaxed);
+    dfn_ms_ema_.store(0.0f, std::memory_order_relaxed);
+    dfn_bailed_.store(false, std::memory_order_relaxed);
+    dfn_format_ok_.store(true, std::memory_order_relaxed);
+    dfn_engine_.store(engine, std::memory_order_relaxed);
     dfn_handle_.store(handle, std::memory_order_release);
+    dfn_create_in_flight_.store(false, std::memory_order_release);
   }
-  // First caller wins and owns starting the background create.
-  bool TryBeginDfnCreate() {
+  // First caller wins and owns starting the background create. Returns
+  // true when a create for `engine` should start: nothing loaded yet, or a
+  // LIVE ENGINE SWAP (a handle exists but for a different engine).
+  bool TryBeginDfnCreate(int engine) {
+    if (dfn_handle_.load(std::memory_order_acquire) != nullptr &&
+        dfn_engine_.load(std::memory_order_relaxed) == engine) {
+      return false;
+    }
     bool expected = false;
-    return dfn_create_started_.compare_exchange_strong(expected, true);
+    return dfn_create_in_flight_.compare_exchange_strong(expected, true);
+  }
+  // Create failed — allow a later retry (next toggle/reconcile pass).
+  void EndDfnCreate() {
+    dfn_create_in_flight_.store(false, std::memory_order_release);
   }
   bool DfnReady() const {
     return dfn_handle_.load(std::memory_order_acquire) != nullptr;
+  }
+  // Engine id of the PUBLISHED handle (-1 = none yet); hollow_dfn binding
+  // engine constants.
+  int DfnEngine() const {
+    return dfn_engine_.load(std::memory_order_relaxed);
   }
   // Latched TRUE when inference overran the realtime budget or errored —
   // DFN stays bypassed for the session (WebRTC NS is Dart's fallback).
@@ -133,6 +163,10 @@ class FlutterCaptureGainProcessor
   float DfnMsEma() const {
     return dfn_ms_ema_.load(std::memory_order_relaxed);
   }
+  // Voice probability of the last denoised frame (-1 = engine not
+  // supplying one) — status-getter diagnostic mirror of the audio-thread
+  // value the gate stage consumes.
+  float DfnVad() const { return dfn_vad_.load(std::memory_order_relaxed); }
   // Raw capture shape as last seen by Process() (stored unconditionally,
   // even with DFN off) — lets the status getter say exactly WHY a format
   // was rejected instead of a bare formatOk=false.
@@ -198,8 +232,8 @@ class FlutterCaptureGainProcessor
   // rectified sample and returns the stage gain in dB.
   float GateUpwardGainDb(ChannelState& s, float av);
 
-  // Head-of-chain DFN3 step (no-op unless enabled, ready and fullband mono
-  // 48 kHz). Audio thread only.
+  // Head-of-chain AI-NS step (no-op unless enabled and ready; the Rust
+  // adapter handles the shape). Audio thread only.
   void ProcessDfn(int num_bands, int buffer_size, float* buffer);
 
   std::atomic<float> gain_;
@@ -210,7 +244,8 @@ class FlutterCaptureGainProcessor
   std::atomic<bool> servo_hold_;
   std::atomic<bool> noise_suppress_ai_;
   std::atomic<void*> dfn_handle_;
-  std::atomic<bool> dfn_create_started_;
+  std::atomic<int> dfn_engine_;
+  std::atomic<bool> dfn_create_in_flight_;
   std::atomic<bool> dfn_bailed_;
   std::atomic<bool> dfn_format_ok_;
   // DFN realtime watchdog state. Single writer (audio thread); atomics so
@@ -220,7 +255,13 @@ class FlutterCaptureGainProcessor
   std::atomic<int> dfn_frames_{0};
   std::atomic<int> last_bands_{0};
   std::atomic<int> last_buffer_size_{0};
+  std::atomic<float> dfn_vad_{-1.0f};
   bool dfn_format_logged_ = false;
+  // Speech presence for THIS frame from the AI-NS engine (RNNoise's voice
+  // probability; -1 = unavailable — engine off/bailed/DFN3). Written by
+  // ProcessDfn and read by GateUpwardGainDb in the SAME Process() call on
+  // the audio thread — deliberately not atomic.
+  float vad_presence_ = -1.0f;
 
   int sample_rate_ = 48000;
   int channels_ = 1;

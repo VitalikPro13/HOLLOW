@@ -90,6 +90,12 @@ static const float kGateMaxCutDb = 14.0f;
 static const float kGateKneeDb = 6.0f;
 static const float kGateOpenMs = 8.0f;
 static const float kGateCloseMs = 60.0f;
+// RNNoise voice-probability presence: replaces SNR+modulation presence for
+// the upward boost while the AI-NS engine is actively denoising (breath
+// discrimination). KEEP IN SYNC with the C++ port's constants block — full
+// rationale there.
+static const float kVadZeroProb = 0.40f;
+static const float kVadFullProb = 0.75f;
 
 // --- De-esser (both enhance modes) -------------------------------------------
 // Port of the de-esser in flutter_capture_gain_processor.cc — KEEP IN SYNC
@@ -175,8 +181,10 @@ typedef struct {
 // Per-sample step of the fused gate + upward-compression stage: updates the
 // channel's envelope + smoothed gains from the rectified sample and returns
 // the stage gain in dB. Mirrors GateUpwardGainDb in the C++ port.
+// `vadPresence` = RNNoise voice probability for this frame (-1 = absent).
 static inline float GateUpwardGainDb(ChannelState *s, float av,
-                                     const StageAlphas *a) {
+                                     const StageAlphas *a,
+                                     float vadPresence) {
   // Envelope follower: fast rise, slow fall.
   const float ae = av > s->up_env ? a->env_a : a->env_r;
   s->up_env = ae * s->up_env + (1.0f - ae) * av + kDenormal;
@@ -206,14 +214,23 @@ static inline float GateUpwardGainDb(ChannelState *s, float av,
       a->floor_smooth * s->up_floor_db + (1.0f - a->floor_smooth) * floorRaw;
   float pr = (envDb - s->up_floor_db - kSnrZeroDb) / (kSnrFullDb - kSnrZeroDb);
   pr = fminf(fmaxf(pr, 0.0f), 1.0f);
-  bt *= pr * pr * (3.0f - 2.0f * pr);
-  // Modulation presence: no boost on steady noise/tones.
+  // Modulation presence state: kept warm even while the RNNoise VAD is in
+  // charge, so a mid-call fallback resumes converged.
   s->mod_slow_db = a->mod_slow * s->mod_slow_db + (1.0f - a->mod_slow) * envDb;
   const float md = fminf(fmaxf(envDb - s->mod_slow_db, 0.0f), kModClampDb);
   s->mod_depth_db = a->mod_avg * s->mod_depth_db + (1.0f - a->mod_avg) * md;
   float pm = (s->mod_depth_db - kModZeroDb) / (kModFullDb - kModZeroDb);
   pm = fminf(fmaxf(pm, 0.0f), 1.0f);
-  bt *= pm * pm * (3.0f - 2.0f * pm);
+  if (vadPresence >= 0.0f) {
+    // RNNoise voice probability REPLACES the SNR+modulation presence
+    // (breath discrimination — see the C++ port).
+    float pv = (vadPresence - kVadZeroProb) / (kVadFullProb - kVadZeroProb);
+    pv = fminf(fmaxf(pv, 0.0f), 1.0f);
+    bt *= pv * pv * (3.0f - 2.0f * pv);
+  } else {
+    bt *= pr * pr * (3.0f - 2.0f * pr);
+    bt *= pm * pm * (3.0f - 2.0f * pm);
+  }
   const float ab = bt > s->up_boost_db ? a->boost_up : a->boost_dn;
   s->up_boost_db = ab * s->up_boost_db + (1.0f - ab) * bt;
 
@@ -337,19 +354,24 @@ static Coef CoefPeaking(float fc, float gainDb, float q, float fs) {
   return c;
 }
 
-// --- DeepFilterNet3 runtime binding (Hollow fork, HOLLOW_PLAN ~2008) --------
-// hollow_core builds as a DYNAMIC framework on both darwin platforms (its
-// podspec force-loads libhollow_core.a), so the `hollow_dfn_*` C symbols
-// exported by rust/hollow_core/src/dfn_ffi.rs are strip roots and visible to
-// dlsym(RTLD_DEFAULT) once the app is loaded. ABI handshake guards drift;
-// any resolution failure leaves DFN gracefully unavailable.
+// --- AI noise-suppression runtime binding (Hollow fork, HOLLOW_PLAN ~2008) --
+// RNNoise by default, DFN3 behind engine id 1, both behind hollow_core's
+// Rust format adapter (ABI v2). hollow_core builds as a DYNAMIC framework on
+// both darwin platforms (its podspec force-loads libhollow_core.a), so the
+// `hollow_dfn_*` C symbols exported by rust/hollow_core/src/dfn_ffi.rs are
+// strip roots and visible to dlsym(RTLD_DEFAULT) once the app is loaded.
+// ABI handshake guards drift; any resolution failure leaves AI NS
+// gracefully unavailable.
 typedef uint32_t (*HollowDfnAbiVersionFn)(void);
-typedef void *(*HollowDfnCreateFn)(void);
-typedef int32_t (*HollowDfnProcessFn)(void *, float *, int32_t);
+typedef void *(*HollowDfnCreateEngineFn)(int32_t);
+typedef int32_t (*HollowDfnProcessExFn)(void *, float *, int32_t, int32_t,
+                                        int32_t, int32_t);
+typedef float (*HollowDfnLastVadFn)(void *);
 typedef void (*HollowDfnSetF32Fn)(void *, float);
 
-static _Atomic(HollowDfnProcessFn) gDfnProcess;
-static HollowDfnCreateFn gDfnCreate = NULL;
+static _Atomic(HollowDfnProcessExFn) gDfnProcessEx;
+static HollowDfnCreateEngineFn gDfnCreateEngine = NULL;
+static HollowDfnLastVadFn gDfnLastVad = NULL;
 static HollowDfnSetF32Fn gDfnSetAttenLim = NULL;
 static HollowDfnSetF32Fn gDfnSetPfBeta = NULL;
 static BOOL gDfnBound = NO;
@@ -363,27 +385,30 @@ static BOOL HollowDfnBind(void) {
       NSLog(@"[hollow_dfn] hollow_core symbols not found — AI NS unavailable");
       return;
     }
-    if (abi() != 1u) {
+    if (abi() != 3u) {
       NSLog(@"[hollow_dfn] ABI mismatch (core %u) — AI NS unavailable", abi());
       return;
     }
-    HollowDfnCreateFn create =
-        (HollowDfnCreateFn)dlsym(RTLD_DEFAULT, "hollow_dfn_create");
-    HollowDfnProcessFn process =
-        (HollowDfnProcessFn)dlsym(RTLD_DEFAULT, "hollow_dfn_process");
+    HollowDfnCreateEngineFn create = (HollowDfnCreateEngineFn)dlsym(
+        RTLD_DEFAULT, "hollow_dfn_create_engine");
+    HollowDfnProcessExFn process =
+        (HollowDfnProcessExFn)dlsym(RTLD_DEFAULT, "hollow_dfn_process_ex");
+    HollowDfnLastVadFn lastVad =
+        (HollowDfnLastVadFn)dlsym(RTLD_DEFAULT, "hollow_dfn_last_vad");
     HollowDfnSetF32Fn setAtten =
         (HollowDfnSetF32Fn)dlsym(RTLD_DEFAULT, "hollow_dfn_set_atten_lim");
     HollowDfnSetF32Fn setBeta = (HollowDfnSetF32Fn)dlsym(
         RTLD_DEFAULT, "hollow_dfn_set_post_filter_beta");
-    if (create == NULL || process == NULL || setAtten == NULL ||
-        setBeta == NULL) {
+    if (create == NULL || process == NULL || lastVad == NULL ||
+        setAtten == NULL || setBeta == NULL) {
       NSLog(@"[hollow_dfn] incomplete symbol set — AI NS unavailable");
       return;
     }
-    gDfnCreate = create;
+    gDfnCreateEngine = create;
+    gDfnLastVad = lastVad;
     gDfnSetAttenLim = setAtten;
     gDfnSetPfBeta = setBeta;
-    atomic_store_explicit(&gDfnProcess, process, memory_order_release);
+    atomic_store_explicit(&gDfnProcessEx, process, memory_order_release);
     gDfnBound = YES;
   });
   return gDfnBound;
@@ -402,10 +427,13 @@ static double HollowDfnNowMs(void) {
   _Atomic(BOOL) _dynamic;
   _Atomic(BOOL) _muted;
   _Atomic(BOOL) _servoHold;
-  // AI noise suppression (DFN3) — mirrors the C++ port's fields.
+  // AI noise suppression (RNNoise default / DFN3 optional) — mirrors the
+  // C++ port's fields. An engine swap publishes a new handle over the old
+  // one (which deliberately leaks — the audio thread may still be in it).
   _Atomic(BOOL) _noiseSuppressAi;
   _Atomic(void *) _dfnHandle;
-  _Atomic(BOOL) _dfnCreateStarted;
+  _Atomic(int) _dfnEngine;
+  _Atomic(BOOL) _dfnCreateInFlight;
   _Atomic(BOOL) _dfnBailed;
   _Atomic(BOOL) _dfnFormatOk;
   // DFN realtime watchdog. Single writer (audio thread); atomics so the
@@ -416,6 +444,12 @@ static double HollowDfnNowMs(void) {
   // getter says WHY a format was rejected.
   _Atomic(int) _lastFrameCount;
   _Atomic(int) _lastChannels;
+  // Speech presence for THIS frame from the AI-NS engine (RNNoise's voice
+  // probability; -1 = unavailable). Written by maybeProcessDfn and read by
+  // the gate stage in the SAME process call on the audio thread — plain.
+  float _vadPresence;
+  // Status-getter diagnostic mirror.
+  _Atomic(float) _dfnVad;
   BOOL _dfnFormatLogged;
   ChannelState _ch[2 /* kMaxChannels */];
   int _sampleRate;
@@ -450,13 +484,16 @@ static double HollowDfnNowMs(void) {
     atomic_init(&_servoHold, NO);
     atomic_init(&_noiseSuppressAi, NO);
     atomic_init(&_dfnHandle, NULL);
-    atomic_init(&_dfnCreateStarted, NO);
+    atomic_init(&_dfnEngine, -1);
+    atomic_init(&_dfnCreateInFlight, NO);
     atomic_init(&_dfnBailed, NO);
     atomic_init(&_dfnFormatOk, YES);
     atomic_init(&_dfnMsEma, 0.0f);
     atomic_init(&_dfnFrames, 0);
     atomic_init(&_lastFrameCount, 0);
     atomic_init(&_lastChannels, 0);
+    _vadPresence = -1.0f;
+    atomic_init(&_dfnVad, -1.0f);
     _dfnFormatLogged = NO;
     _sampleRate = 48000;
     [self setupFilters:_sampleRate];
@@ -470,6 +507,7 @@ static double HollowDfnNowMs(void) {
 }
 
 - (void)setNoiseSuppressAi:(BOOL)enabled
+                    engine:(int)engine
                 attenLimDb:(float)attenLimDb
             postFilterBeta:(float)postFilterBeta {
   atomic_store_explicit(&_noiseSuppressAi, enabled, memory_order_relaxed);
@@ -477,28 +515,48 @@ static double HollowDfnNowMs(void) {
     return;
   }
   void *handle = atomic_load_explicit(&_dfnHandle, memory_order_acquire);
-  if (handle != NULL) {
-    // Already loaded: live parameter update (lock-free staging in the FFI).
+  if (handle != NULL &&
+      atomic_load_explicit(&_dfnEngine, memory_order_relaxed) == engine) {
+    // Right engine already loaded: live parameter update (lock-free
+    // staging in the FFI).
     gDfnSetAttenLim(handle, attenLimDb);
     gDfnSetPfBeta(handle, postFilterBeta);
     return;
   }
   BOOL expected = NO;
-  if (!atomic_compare_exchange_strong(&_dfnCreateStarted, &expected, YES)) {
+  if (!atomic_compare_exchange_strong(&_dfnCreateInFlight, &expected, YES)) {
     return;  // create already in flight
   }
-  // One-shot background model load (100-500 ms) — NEVER the audio thread.
+  // One-shot background engine create (RNNoise instant; DFN3 100-500 ms) —
+  // NEVER the audio thread. A different-engine call is a LIVE SWAP: the
+  // new handle is published over the old one, latches reset.
   __weak CaptureGainProcessor *weakSelf = self;
   dispatch_async(
       dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-        void *h = gDfnCreate != NULL ? gDfnCreate() : NULL;
+        void *h = gDfnCreateEngine != NULL ? gDfnCreateEngine(engine) : NULL;
         CaptureGainProcessor *strongSelf = weakSelf;
-        if (h == NULL || strongSelf == NULL) {
+        if (strongSelf == NULL) {
           return;
         }
-        gDfnSetAttenLim(h, attenLimDb);
-        gDfnSetPfBeta(h, postFilterBeta);
-        atomic_store_explicit(&strongSelf->_dfnHandle, h,
+        if (h != NULL) {
+          gDfnSetAttenLim(h, attenLimDb);
+          gDfnSetPfBeta(h, postFilterBeta);
+          // Publish + reset the latches/watchdog: a new engine deserves a
+          // fresh verdict.
+          atomic_store_explicit(&strongSelf->_dfnFrames, 0,
+                                memory_order_relaxed);
+          atomic_store_explicit(&strongSelf->_dfnMsEma, 0.0f,
+                                memory_order_relaxed);
+          atomic_store_explicit(&strongSelf->_dfnBailed, NO,
+                                memory_order_relaxed);
+          atomic_store_explicit(&strongSelf->_dfnFormatOk, YES,
+                                memory_order_relaxed);
+          atomic_store_explicit(&strongSelf->_dfnEngine, engine,
+                                memory_order_relaxed);
+          atomic_store_explicit(&strongSelf->_dfnHandle, h,
+                                memory_order_release);
+        }
+        atomic_store_explicit(&strongSelf->_dfnCreateInFlight, NO,
                               memory_order_release);
       });
 }
@@ -524,6 +582,11 @@ static double HollowDfnNowMs(void) {
     @"frames" : @(atomic_load_explicit(&_dfnFrames, memory_order_relaxed)),
     @"emaMs" : @((double)atomic_load_explicit(&_dfnMsEma,
                                               memory_order_relaxed)),
+    // Engine id of the published handle (-1 = none): 0 RNNoise, 1 DFN3.
+    @"engine" : @(atomic_load_explicit(&_dfnEngine, memory_order_relaxed)),
+    // Voice probability of the last denoised frame (-1 = none) — proves
+    // the RNNoise VAD is feeding the chain's speech gate.
+    @"vad" : @((double)atomic_load_explicit(&_dfnVad, memory_order_relaxed)),
     // Raw capture shape — says WHY a format was rejected.
     @"rate" : @(_sampleRate),
     @"channels" :
@@ -665,59 +728,70 @@ static double HollowDfnNowMs(void) {
   [self resetState];
 }
 
-// Head-of-chain DFN3 step (audio thread only). Keep behavior-identical to
-// FlutterCaptureGainProcessor::ProcessDfn in the C++ port.
+// Head-of-chain AI-NS step (audio thread only). Keep behavior-identical to
+// FlutterCaptureGainProcessor::ProcessDfn in the C++ port. darwin's
+// RTCAudioBuffer hands channels as SEPARATE buffers, so channel 0 goes to
+// the Rust adapter as MONO with its raw rate (the adapter resamples 16 kHz;
+// 48 kHz is direct) and the stereo dup-copy stays local — voice-call
+// stereo is virtually always duplicated mono. rc 4 = shape the adapter
+// can't convert (frame untouched, latch formatOk for the WebRTC-NS
+// fallback); other nonzero = engine error (latch session bypass).
 - (void)maybeProcessDfn:(RTC_OBJC_TYPE(RTCAudioBuffer) *)audioBuffer
                  frames:(int)frames
                channels:(int)channels {
-  // Shape breadcrumbs for the status getter (stored even with DFN off).
+  // Shape breadcrumbs for the status getter (stored even with AI NS off).
   atomic_store_explicit(&_lastFrameCount, frames, memory_order_relaxed);
   atomic_store_explicit(&_lastChannels, channels, memory_order_relaxed);
+  // Default: no engine VAD this frame — every early-out below leaves the
+  // gate stage on its own SNR+modulation presence.
+  _vadPresence = -1.0f;
+  atomic_store_explicit(&_dfnVad, -1.0f, memory_order_relaxed);
   if (!atomic_load_explicit(&_noiseSuppressAi, memory_order_relaxed) ||
       atomic_load_explicit(&_dfnBailed, memory_order_relaxed)) {
     return;
   }
   void *handle = atomic_load_explicit(&_dfnHandle, memory_order_acquire);
   if (handle == NULL) {
-    return;  // model still loading (or unavailable) — pass through
+    return;  // engine still loading (or unavailable) — pass through
   }
-  // Accept 48 kHz mono OR stereo — the 2026-07-17 field test proved
-  // captures routinely arrive stereo. Stereo strategy: denoise channel 0,
-  // copy to channel 1 (voice-call stereo is virtually always dup'd mono).
-  if (_sampleRate != 48000 || channels < 1 || channels > 2 || frames != 480) {
+  float *ch0 = [audioBuffer rawBufferForChannel:0];
+  if (ch0 == NULL) {
+    return;
+  }
+  HollowDfnProcessExFn process =
+      atomic_load_explicit(&gDfnProcessEx, memory_order_relaxed);
+  if (process == NULL) {
+    return;
+  }
+  const double t0 = HollowDfnNowMs();
+  const int rc = process(handle, ch0, frames, 1, _sampleRate, 1);
+  if (rc == 0 && channels >= 2) {
+    float *ch1 = [audioBuffer rawBufferForChannel:1];
+    if (ch1 != NULL) {
+      memcpy(ch1, ch0, (size_t)frames * sizeof(float));
+    }
+  }
+  const double ms = HollowDfnNowMs() - t0;
+  if (rc == 4) {
     atomic_store_explicit(&_dfnFormatOk, NO, memory_order_relaxed);
     if (!_dfnFormatLogged) {
       _dfnFormatLogged = YES;
       NSLog(@"[hollow_dfn] unsupported capture shape (rate=%d ch=%d "
-            @"frames=%d) — DFN bypassed",
+            @"frames=%d) — AI NS bypassed",
             _sampleRate, channels, frames);
     }
     return;
   }
   atomic_store_explicit(&_dfnFormatOk, YES, memory_order_relaxed);
-  float *ch0 = [audioBuffer rawBufferForChannel:0];
-  if (ch0 == NULL) {
-    return;
-  }
-  HollowDfnProcessFn process =
-      atomic_load_explicit(&gDfnProcess, memory_order_relaxed);
-  if (process == NULL) {
-    return;
-  }
-  const double t0 = HollowDfnNowMs();
-  const int rc = process(handle, ch0, 480);
-  if (rc == 0 && channels == 2) {
-    float *ch1 = [audioBuffer rawBufferForChannel:1];
-    if (ch1 != NULL) {
-      memcpy(ch1, ch0, 480 * sizeof(float));
-    }
-  }
-  const double ms = HollowDfnNowMs() - t0;
   if (rc != 0) {
     atomic_store_explicit(&_dfnBailed, YES, memory_order_relaxed);
     NSLog(@"[hollow_dfn] process rc=%d — bypassed for session", rc);
     return;
   }
+  // Frame denoised: pick up the engine's voice probability for the gate
+  // stage (RNNoise supplies one; DFN3 returns -1 -> fallback gating).
+  _vadPresence = gDfnLastVad != NULL ? gDfnLastVad(handle) : -1.0f;
+  atomic_store_explicit(&_dfnVad, _vadPresence, memory_order_relaxed);
   // Realtime watchdog: EMA of per-frame cost, 100-frame warmup grace.
   // Budget is 10 ms; sustained >6 ms latches bypass (matters on phones).
   const int frames =
@@ -851,7 +925,8 @@ static double HollowDfnNowMs(void) {
       // compressor: gate BEFORE the compressor so its makeup can never lift
       // the pause noise floor.
       if (dynamic) {
-        v *= powf(10.0f, GateUpwardGainDb(s, fabsf(v), &_stage) * 0.05f);
+        v *= powf(10.0f,
+                  GateUpwardGainDb(s, fabsf(v), &_stage, _vadPresence) * 0.05f);
       }
       // Compressor: Giannoulis soft-knee gain computer + decoupled smooth
       // peak detector, single dB-domain gain, single multiply.

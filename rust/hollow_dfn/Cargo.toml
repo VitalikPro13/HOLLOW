@@ -2,16 +2,22 @@
 name = "hollow_dfn"
 version = "0.1.0"
 edition = "2021"
-license = "MIT"
+# MIT for this crate's own code; split_band.rs is a port of WebRTC's
+# ThreeBandFilterBank (BSD-3-Clause) and nnnoiseless is BSD-3-Clause.
+license = "MIT AND BSD-3-Clause"
 publish = false
 
-# DeepFilterNet3 AI noise suppression engine (HOLLOW_PLAN line ~2008).
+# AI noise suppression engines (HOLLOW_PLAN line ~2008): RNNoise
+# (nnnoiseless, the default — instant init, ~1 MB, trivial CPU) and
+# DeepFilterNet3 (deep_filter — higher quality, 0.5 s desktop / 15 s
+# mobile model load), both behind ONE format-adapting API (`Adapter`).
 #
-# This crate is the ONE realtime Rust home for DFN inference — the three
-# native capture-processor ports (C++ / darwin / Java) never re-implement
-# it; they call the C ABI that rust/hollow_core/src/dfn_ffi.rs re-exports
-# from here. Keep this crate free of hollow_core dependencies: it must
-# stay compilable standalone for the offline harness (examples/).
+# This crate is the ONE realtime Rust home for denoise inference — the
+# three native capture-processor ports (C++ / darwin / Java) never
+# re-implement it; they call the C ABI that
+# rust/hollow_core/src/dfn_ffi.rs re-exports from here. Keep this crate
+# free of hollow_core dependencies: it must stay compilable standalone
+# for the offline harness (examples/).
 #
 # deep_filter is a GIT dependency pinned to the v0.5.6 tag: crates.io only
 # ever got the ancient 0.2.x line — the 0.5.x releases were never published
@@ -27,6 +33,9 @@ deep_filter = { git = "https://github.com/Rikorose/DeepFilterNet", tag = "v0.5.6
 ] }
 # Must match deep_filter's ndarray major so ArrayView types line up.
 ndarray = "0.15"
+# RNNoise (pure-Rust port) — the default engine. No default features: we
+# only need DenoiseState, not the CLI bin or dasp helpers.
+nnnoiseless = { version = "0.5.2", default-features = false }
 
 [dev-dependencies]
 # WAV I/O + spectral metrics for the offline harness example only.

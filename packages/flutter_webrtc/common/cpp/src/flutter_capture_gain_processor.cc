@@ -15,12 +15,18 @@
 #undef min
 #endif
 
-// DeepFilterNet3 runtime binding (hollow_dfn_binding.cc). Forward-declared
-// instead of included so the offline g++ chain harness can keep compiling
-// this file standalone — a harness driver just defines its own stub:
-//   namespace hollow_dfn { int ProcessFrame(void*, float*, int) { return 1; } }
+// AI noise-suppression runtime binding (hollow_dfn_binding.cc).
+// Forward-declared instead of included so the offline g++ chain harness can
+// keep compiling this file standalone — a harness driver just defines its
+// own stubs:
+//   namespace hollow_dfn {
+//   int ProcessFrameEx(void*, float*, int, int, int, int) { return 1; }
+//   float LastVad(void*) { return -1.0f; }
+//   }
 namespace hollow_dfn {
-int ProcessFrame(void* handle, float* frame, int len);
+int ProcessFrameEx(void* handle, float* buf, int len, int num_bands, int rate,
+                   int channels);
+float LastVad(void* handle);
 }
 
 namespace flutter_webrtc_plugin {
@@ -187,6 +193,18 @@ constexpr float kGateKneeDb = 6.0f;
 // at the gate threshold.
 constexpr float kGateOpenMs = 8.0f;
 constexpr float kGateCloseMs = 60.0f;
+// RNNoise voice-probability presence: while the AI-NS engine is actively
+// denoising it hands the chain a per-10 ms voice probability, and that
+// REPLACES the SNR+modulation presence for the upward boost — a trained
+// speech model discriminates breath/turbulence from voiced speech, which
+// level+modulation gating structurally cannot (the 2026-07-18 breath
+// regression). Smoothstep ramp: zero boost at/below kVadZeroProb (breath
+// lands ~0.1-0.4, unvoiced consonants dip mid-range but are too short for
+// the 50 ms boost attack anyway), full boost at/above kVadFullProb (voiced
+// speech sits 0.8+). Frame-rate steps are smoothed by the boost's own
+// attack/release. -1 = unavailable -> the SNR+modulation gates take over.
+constexpr float kVadZeroProb = 0.40f;
+constexpr float kVadFullProb = 0.75f;
 
 // --- De-esser (both enhance modes, fullband path only) -----------------------
 // The EQ's 7 kHz presence peak sits exactly on measured sibilance (Razer raw
@@ -471,9 +489,9 @@ float FlutterCaptureGainProcessor::GateUpwardGainDb(ChannelState& s,
   float pr = (env_db - s.up_floor_db - kSnrZeroDb) /
              (kSnrFullDb - kSnrZeroDb);
   pr = std::min(std::max(pr, 0.0f), 1.0f);
-  bt *= pr * pr * (3.0f - 2.0f * pr);
-  // Modulation presence: no boost on steady noise. Positive-only syllabic
-  // modulation of the envelope around its slow mean, clamped and smoothed.
+  // Modulation presence state: kept warm even while the RNNoise VAD is in
+  // charge, so a mid-call fallback (engine bail) resumes with converged
+  // gates instead of a cold 250-400 ms transient.
   s.mod_slow_db =
       mod_slow_alpha_ * s.mod_slow_db + (1.0f - mod_slow_alpha_) * env_db;
   const float md = std::min(std::max(env_db - s.mod_slow_db, 0.0f),
@@ -482,7 +500,16 @@ float FlutterCaptureGainProcessor::GateUpwardGainDb(ChannelState& s,
       mod_avg_alpha_ * s.mod_depth_db + (1.0f - mod_avg_alpha_) * md;
   float pm = (s.mod_depth_db - kModZeroDb) / (kModFullDb - kModZeroDb);
   pm = std::min(std::max(pm, 0.0f), 1.0f);
-  bt *= pm * pm * (3.0f - 2.0f * pm);
+  if (vad_presence_ >= 0.0f) {
+    // RNNoise voice probability (see the constants block): the trained
+    // model's verdict REPLACES the SNR+modulation presence.
+    float pv = (vad_presence_ - kVadZeroProb) / (kVadFullProb - kVadZeroProb);
+    pv = std::min(std::max(pv, 0.0f), 1.0f);
+    bt *= pv * pv * (3.0f - 2.0f * pv);
+  } else {
+    bt *= pr * pr * (3.0f - 2.0f * pr);
+    bt *= pm * pm * (3.0f - 2.0f * pm);
+  }
   const float ab =
       bt > s.up_boost_db ? up_boost_alpha_up_ : up_boost_alpha_dn_;
   s.up_boost_db = ab * s.up_boost_db + (1.0f - ab) * bt;
@@ -526,55 +553,65 @@ void FlutterCaptureGainProcessor::Reset(int new_rate) {
 
 void FlutterCaptureGainProcessor::Release() {}
 
-// AI noise suppression (DFN3) — the HEAD of the chain. Sits after WebRTC's
-// APM AEC (this whole processor is the capture POST-processor) and before
-// trim/EQ, the same slot Krisp uses; NEVER move it pre-AEC (nonlinear
-// suppression breaks echo estimation). Only 48 kHz fullband mono 10 ms
-// frames are processable — DFN3's hop is exactly the APM cadence. Anything
-// else (Linux split-band, non-48k devices, stereo mics) passes through
-// untouched and flips the format flag so Dart can fall back to WebRTC NS.
+// AI noise suppression (RNNoise default / DFN3 optional) — the HEAD of the
+// chain. Sits after WebRTC's APM AEC (this whole processor is the capture
+// POST-processor) and before trim/EQ, the same slot Krisp uses; NEVER move
+// it pre-AEC (nonlinear suppression breaks echo estimation). The buffer is
+// fullband mono (see the layout note at the call below), so the Rust
+// adapter (ABI v2) only ever exercises its direct-48 kHz and
+// 16 kHz-resample paths here — the v1 "48 kHz only" gate was why no
+// engine ever denoised a live frame on a 16 kHz-class mic. A rate the
+// adapter can't convert (rc 4, e.g. 32 kHz) passes through untouched and
+// flips the format flag so Dart can fall back to WebRTC NS.
 void FlutterCaptureGainProcessor::ProcessDfn(int num_bands, int buffer_size,
                                              float* buffer) {
-  // Shape breadcrumbs for the status getter — stored even with DFN off so
+  // Shape breadcrumbs for the status getter — stored even with AI NS off so
   // diagnosis never needs a special build.
   last_bands_.store(num_bands, std::memory_order_relaxed);
   last_buffer_size_.store(buffer_size, std::memory_order_relaxed);
+  // Default: no engine VAD this frame — every early-out below leaves the
+  // gate stage on its own SNR+modulation presence.
+  vad_presence_ = -1.0f;
+  dfn_vad_.store(-1.0f, std::memory_order_relaxed);
   if (!noise_suppress_ai_.load(std::memory_order_relaxed) ||
       dfn_bailed_.load(std::memory_order_relaxed)) {
     return;
   }
   void* handle = dfn_handle_.load(std::memory_order_acquire);
   if (handle == nullptr) {
-    return;  // model still loading (or unavailable) — pass through
+    return;  // engine still loading (or unavailable) — pass through
   }
-  // Accept fullband 48 kHz mono OR stereo (planar 2x480 — desktop mics
-  // routinely enumerate stereo; the 2026-07-17 field test proved BOTH
-  // platforms reject on it). Stereo strategy: denoise channel 0 in place
-  // and copy it to channel 1 — voice-call stereo capture is virtually
-  // always duplicated mono, and collapsing a true stereo mic to its first
-  // channel is a fine trade for a voice call.
-  const int chans = std::min(std::max(channels_, 1), 2);
-  if (num_bands != 1 || sample_rate_ != 48000 || buffer_size != 480 * chans) {
+
+  // CRITICAL — the buffer is ALWAYS live FULLBAND mono, never split bands:
+  // libwebrtc's CustomProcessingAdapter (webrtc-sdk libwebrtc
+  // src/rtc_audio_processing_impl.cc) passes audio->channels()[0] — the
+  // merged channel-0 samples, buffer_size = one 10 ms frame at
+  // sample_rate_ — while num_bands is the APM's INTERNAL split count, not
+  // this buffer's layout. Passing num_bands through as if the buffer were
+  // banded runs filterbank synthesis on raw PCM chunks = spectral garbage
+  // (the 2026-07-18 Pixel "pixelated mic" field test). Same for channels:
+  // only channel 0 is ever handed over.
+  const auto t0 = std::chrono::steady_clock::now();
+  const int rc = hollow_dfn::ProcessFrameEx(handle, buffer, buffer_size,
+                                            /*num_bands=*/1, sample_rate_,
+                                            /*channels=*/1);
+  const float ms = std::chrono::duration<float, std::milli>(
+                       std::chrono::steady_clock::now() - t0)
+                       .count();
+  if (rc == 4) {
+    // Unsupported capture shape: frame untouched. Latch formatOk=false so
+    // the Dart reconcile pass re-arms WebRTC NS.
     dfn_format_ok_.store(false, std::memory_order_relaxed);
     if (!dfn_format_logged_) {
       dfn_format_logged_ = true;
       std::fprintf(stderr,
                    "[hollow_dfn] unsupported capture shape (bands=%d rate=%d "
-                   "size=%d chans=%d) — DFN bypassed\n",
+                   "size=%d chans=%d) — AI NS bypassed\n",
                    num_bands, sample_rate_, buffer_size, channels_);
     }
     return;
   }
   dfn_format_ok_.store(true, std::memory_order_relaxed);
-
-  const auto t0 = std::chrono::steady_clock::now();
-  const int rc = hollow_dfn::ProcessFrame(handle, buffer, 480);
-  if (rc == 0 && chans == 2) {
-    std::memcpy(buffer + 480, buffer, 480 * sizeof(float));
-  }
-  const float ms = std::chrono::duration<float, std::milli>(
-                       std::chrono::steady_clock::now() - t0)
-                       .count();
   if (rc != 0) {
     // Engine error mid-stream: latch bypass — the frame may be half-written
     // and per-frame retry on the audio thread is how glitches are born.
@@ -583,6 +620,10 @@ void FlutterCaptureGainProcessor::ProcessDfn(int num_bands, int buffer_size,
                  rc);
     return;
   }
+  // Frame denoised: pick up the engine's voice probability for the gate
+  // stage (RNNoise supplies one; DFN3 returns -1 -> fallback gating).
+  vad_presence_ = hollow_dfn::LastVad(handle);
+  dfn_vad_.store(vad_presence_, std::memory_order_relaxed);
   // Realtime watchdog: EMA of per-frame cost, 100-frame warmup grace (cold
   // caches / first-inference lazy init). Budget is 10 ms; sustained >6 ms
   // means this device can't afford DFN — latch bypass, keep the call alive.

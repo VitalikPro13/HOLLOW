@@ -2658,8 +2658,7 @@ class _VoiceEnhanceToggle extends ConsumerWidget {
                   const SizedBox(height: 2),
                   Text(
                     'Removes keyboard, fan and background noise with '
-                    'DeepFilterNet. Uses more battery; takes ~1 second '
-                    'to engage. Switches live mid-call.',
+                    'RNNoise. Engages instantly; switches live mid-call.',
                     style: HollowTypography.caption.copyWith(
                       color: hollow.textSecondary,
                       fontSize: 11,

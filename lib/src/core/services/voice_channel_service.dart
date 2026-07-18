@@ -51,7 +51,7 @@ class VoiceChannelService {
   String? _channelId;
 
   /// Audio quality settings (default: voice preset).
-  int opusBitrate = 32000;
+  int opusBitrate = 96000;
   bool opusStereo = false;
 
   /// Device preferences.
@@ -73,9 +73,13 @@ class VoiceChannelService {
   /// Dynamic mode: the native auto-level servo (ignores micGain/makeup).
   bool enhanceDynamic = true;
 
-  /// AI noise suppression (DeepFilterNet3) — user preference; see the
-  /// matching fields in voice_service.dart (kept behavior-identical).
+  /// AI noise suppression — user preference; see the matching fields in
+  /// voice_service.dart (kept behavior-identical).
   bool noiseSuppressAi = false;
+
+  /// Which engine (Helper.nsEngineRnnoise default / nsEngineDfn3), seeded
+  /// from noiseSuppressEngineProvider.
+  int noiseSuppressEngine = Helper.nsEngineRnnoise;
 
   /// TRUE when DFN can't run here and WebRTC's legacy NS was re-enabled in
   /// the capture constraints as the fallback.
@@ -812,7 +816,7 @@ class VoiceChannelService {
     _vcLog('[HOLLOW-VC] Updated voice enhance dynamic: $enabled');
   }
 
-  /// Toggle DFN3 AI noise suppression live. When in a session, re-captures
+  /// Toggle AI noise suppression live. When in a session, re-captures
   /// the mic (the WebRTC-NS constraint flipped) — mesh swap + renegotiation
   /// happen internally, unlike the DM service's caller contract.
   Future<void> updateNoiseSuppressAi(bool enabled) async {
@@ -822,6 +826,17 @@ class VoiceChannelService {
     _vcLog('[HOLLOW-VC] Updated AI noise suppression: $enabled');
     if (_localAudioStream == null) return;
     await _recaptureMic(_capturedAudioInputDeviceId);
+  }
+
+  /// Switch the AI-NS engine. Native swaps the engine handle in place — no
+  /// constraint flip, no re-capture, no mesh reneg — safe mid-session. See
+  /// voice_service.updateNoiseSuppressEngine (kept behavior-identical).
+  Future<void> updateNoiseSuppressEngine(int engine) async {
+    noiseSuppressEngine = engine;
+    if (!noiseSuppressAi) return;
+    _dfnFallbackNsOn = false;
+    await _syncNoiseSuppressAiEngine();
+    _vcLog('[HOLLOW-VC] Updated AI-NS engine: $engine');
   }
 
   /// Post-enable safety net (schedule a few seconds after enabling): if the
@@ -852,7 +867,8 @@ class VoiceChannelService {
   /// fallback decision from the engine's latched status flags.
   Future<void> _syncNoiseSuppressAiEngine() async {
     try {
-      await Helper.setNoiseSuppressAi(noiseSuppressAi);
+      await Helper.setNoiseSuppressAi(noiseSuppressAi,
+          engine: noiseSuppressEngine);
       if (noiseSuppressAi) {
         final st = await Helper.getNoiseSuppressAiActive();
         _dfnFallbackNsOn = st.isNotEmpty &&

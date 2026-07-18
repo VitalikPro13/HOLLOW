@@ -1514,15 +1514,18 @@ static __weak id<RTCAudioDeviceModuleDelegate> gAudioDeviceModuleObserver = nil;
     }
     result(nil);
   } else if ([@"setNoiseSuppressAi" isEqualToString:call.method]) {
-    // Hollow fork: DeepFilterNet3 AI noise suppression at the head of the
-    // capture chain (hollow_core C ABI via dlsym; background model load).
+    // Hollow fork: AI noise suppression (RNNoise default / DFN3 via
+    // `engine`) at the head of the capture chain (hollow_core C ABI via
+    // dlsym; background engine create).
     NSDictionary* argsMap = call.arguments;
     NSNumber* enabled = argsMap[@"enabled"];
+    NSNumber* engine = argsMap[@"engine"];
     NSNumber* attenLim = argsMap[@"attenLimDb"];
     NSNumber* pfBeta = argsMap[@"postFilterBeta"];
     if (enabled != nil && _captureGainProcessor != nil) {
       [_captureGainProcessor
           setNoiseSuppressAi:[enabled boolValue]
+                      engine:engine != nil ? [engine intValue] : 0
                   attenLimDb:attenLim != nil ? [attenLim floatValue] : 100.0f
               postFilterBeta:pfBeta != nil ? [pfBeta floatValue] : 0.0f];
     }

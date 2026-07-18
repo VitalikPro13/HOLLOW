@@ -108,6 +108,12 @@ public class CaptureGainProcessor
     private static final float GATE_KNEE_DB = 6.0f;
     private static final float GATE_OPEN_MS = 8.0f;
     private static final float GATE_CLOSE_MS = 60.0f;
+    // RNNoise voice-probability presence: replaces SNR+modulation presence
+    // for the upward boost while the AI-NS engine is actively denoising
+    // (breath discrimination). KEEP IN SYNC with the C++ port's constants
+    // block — full rationale there.
+    private static final float VAD_ZERO_PROB = 0.40f;
+    private static final float VAD_FULL_PROB = 0.75f;
 
     // --- De-esser (both enhance modes) -------------------------------------
     // Port of the de-esser in flutter_capture_gain_processor.cc — KEEP IN
@@ -160,12 +166,16 @@ public class CaptureGainProcessor
     private volatile boolean muted = false;
     private volatile boolean servoHold = false;
 
-    // AI noise suppression (DFN3) — mirrors the C++ port's fields. The
-    // handle is created ONCE on a background thread and lives for the
-    // process lifetime; the audio thread only does volatile reads.
+    // AI noise suppression (RNNoise default / DFN3 optional) — mirrors the
+    // C++ port's fields. The handle is created on a background thread and
+    // lives until an engine SWAP publishes a replacement (the old handle
+    // deliberately leaks — the audio thread may still be inside it); the
+    // audio thread only does volatile reads.
     private volatile boolean noiseSuppressAi = false;
     private volatile long dfnHandle = 0;
-    private final java.util.concurrent.atomic.AtomicBoolean dfnCreateStarted =
+    /** Engine id of the PUBLISHED handle (-1 = none yet). */
+    private volatile int dfnEngine = -1;
+    private final java.util.concurrent.atomic.AtomicBoolean dfnCreateInFlight =
             new java.util.concurrent.atomic.AtomicBoolean(false);
     private volatile boolean dfnBailed = false;
     private volatile boolean dfnFormatOk = true;
@@ -178,6 +188,12 @@ public class CaptureGainProcessor
     // off so the status getter can say WHY a format was rejected.
     private volatile int lastBands = 0;
     private volatile int lastCount = 0;
+    // Speech presence for THIS frame from the AI-NS engine (RNNoise's voice
+    // probability; -1 = unavailable). Written by maybeProcessDfn and read
+    // by gateUpwardGainDb in the SAME process() call on the audio thread.
+    private float vadPresence = -1f;
+    // Status-getter diagnostic mirror.
+    private volatile float dfnVad = -1f;
 
     // Dynamic-mode servo (single mic — one servo, not per-channel).
     private float dynMeterDb;
@@ -305,36 +321,48 @@ public class CaptureGainProcessor
     }
 
     /**
-     * AI noise suppression (DeepFilterNet3 via hollow_core's JNI exports,
+     * AI noise suppression (RNNoise default / DFN3 via {@code engine}, both
+     * behind hollow_core's JNI exports + the Rust format adapter,
      * HOLLOW_PLAN ~2008): runs at the HEAD of process() — post-APM-AEC,
-     * before the enhancement chain — on 48 kHz fullband mono 10 ms frames
-     * only. The first enable spawns a one-shot background model load
-     * (100-500 ms); frames pass through untouched until ready.
-     * Thread-safe, live.
+     * before the enhancement chain. The first enable spawns a one-shot
+     * background create (RNNoise instant; DFN3 measured ~15 s on a Pixel);
+     * frames pass through untouched until ready. A later call with a
+     * DIFFERENT engine performs a live swap (new handle published over the
+     * old one, latches reset). Thread-safe, live.
      */
-    public void setNoiseSuppressAi(
-            boolean enabled, float attenLimDb, float postFilterBeta) {
+    public void setNoiseSuppressAi(boolean enabled, int engine,
+            float attenLimDb, float postFilterBeta) {
         noiseSuppressAi = enabled;
         if (!enabled || !DfnBridge.available()) {
             return;
         }
         final long h = dfnHandle;
-        if (h != 0) {
-            // Already loaded: live parameter update (lock-free FFI staging).
+        if (h != 0 && dfnEngine == engine) {
+            // Right engine already loaded: live parameter update (lock-free
+            // FFI staging).
             DfnBridge.setAttenLim(h, attenLimDb);
             DfnBridge.setPostFilterBeta(h, postFilterBeta);
             return;
         }
-        if (!dfnCreateStarted.compareAndSet(false, true)) {
+        if (!dfnCreateInFlight.compareAndSet(false, true)) {
             return; // create already in flight
         }
         new Thread(() -> {
-            final long handle = DfnBridge.create();
+            final long handle = DfnBridge.createEngine(engine);
             if (handle != 0) {
                 DfnBridge.setAttenLim(handle, attenLimDb);
                 DfnBridge.setPostFilterBeta(handle, postFilterBeta);
+                // Publish + reset the latches/watchdog: a new engine
+                // deserves a fresh verdict (a DFN3 realtime bail must not
+                // condemn the RNNoise it was swapped for).
+                dfnFrames = 0;
+                dfnMsEma = 0f;
+                dfnBailed = false;
+                dfnFormatOk = true;
+                dfnEngine = engine;
                 dfnHandle = handle;
             }
+            dfnCreateInFlight.set(false);
         }, "hollow-dfn-load").start();
     }
 
@@ -354,6 +382,11 @@ public class CaptureGainProcessor
         // frames > 0 is the proof the engine is actually denoising the mic.
         res.put("frames", dfnFrames);
         res.put("emaMs", (double) dfnMsEma);
+        // Engine id of the published handle (-1 = none): 0 RNNoise, 1 DFN3.
+        res.put("engine", dfnEngine);
+        // Voice probability of the last denoised frame (-1 = none) —
+        // proves the RNNoise VAD is feeding the chain's speech gate.
+        res.put("vad", (double) dfnVad);
         // Raw capture shape — says WHY a format was rejected.
         res.put("rate", sampleRate);
         res.put("channels", channels);
@@ -363,27 +396,53 @@ public class CaptureGainProcessor
     }
 
     /**
-     * Head-of-chain DFN3 step (audio thread only). Keep behavior-identical
-     * to FlutterCaptureGainProcessor::ProcessDfn in the C++ port.
+     * Head-of-chain AI-NS step (audio thread only). Keep behavior-identical
+     * to FlutterCaptureGainProcessor::ProcessDfn in the C++ port: the
+     * buffer is fullband mono (see the layout note at the call below), so
+     * the Rust adapter (ABI v2) runs its direct-48 kHz or 16 kHz-resample
+     * path. rc 4 = a rate the adapter can't convert (frame untouched,
+     * latch formatOk for the WebRTC-NS fallback); other nonzero = engine
+     * error (latch session bypass).
      */
     private void maybeProcessDfn(int numBands, ByteBuffer buffer, int count) {
-        // Shape breadcrumbs for the status getter (stored even with DFN off).
+        // Shape breadcrumbs for the status getter (stored even with AI NS
+        // off).
         lastBands = numBands;
         lastCount = count;
+        // Default: no engine VAD this frame — every early-out below leaves
+        // the gate stage on its own SNR+modulation presence.
+        vadPresence = -1f;
+        dfnVad = -1f;
         if (!noiseSuppressAi || dfnBailed) {
             return;
         }
         final long h = dfnHandle;
         if (h == 0) {
-            return; // model still loading (or unavailable) — pass through
+            return; // engine still loading (or unavailable) — pass through
         }
-        // Accept fullband 48 kHz mono OR stereo (planar 2x480) — the
-        // 2026-07-17 field test proved captures routinely arrive stereo.
-        // Stereo strategy: denoise channel 0 in place, copy to channel 1
-        // (voice-call stereo capture is virtually always duplicated mono).
-        final int chans = Math.min(Math.max(channels, 1), 2);
-        if (numBands != 1 || sampleRate != 48000 || count != 480 * chans
-                || !buffer.isDirect()) {
+        if (!buffer.isDirect()) {
+            dfnFormatOk = false;
+            if (!dfnFormatLogged) {
+                dfnFormatLogged = true;
+                android.util.Log.w("hollow_dfn",
+                        "capture buffer is not direct — AI NS bypassed");
+            }
+            return;
+        }
+        // CRITICAL — the buffer is ALWAYS live FULLBAND mono, never split
+        // bands: the AAR's ExternalAudioProcessor (webrtc-sdk
+        // sdk/android/src/jni/pc/external_audio_processor.cc) passes
+        // audio->channels()[0] — the merged channel-0 samples, count = one
+        // 10 ms frame at sampleRate — while numBands is the APM's INTERNAL
+        // split count, not this buffer's layout. Passing numBands through
+        // as if the buffer were banded runs filterbank synthesis on raw
+        // PCM chunks = spectral garbage (the 2026-07-18 Pixel "pixelated
+        // mic" field test).
+        final long t0 = System.nanoTime();
+        final int rc = DfnBridge.processDirectEx(
+                h, buffer, count, /*numBands=*/1, sampleRate, /*channels=*/1);
+        final float ms = (System.nanoTime() - t0) / 1_000_000.0f;
+        if (rc == 4) {
             dfnFormatOk = false;
             if (!dfnFormatLogged) {
                 dfnFormatLogged = true;
@@ -391,28 +450,21 @@ public class CaptureGainProcessor
                         "unsupported capture shape (bands=" + numBands
                                 + " rate=" + sampleRate + " count=" + count
                                 + " chans=" + channels
-                                + " direct=" + buffer.isDirect()
-                                + ") — DFN bypassed");
+                                + ") — AI NS bypassed");
             }
             return;
         }
         dfnFormatOk = true;
-        final long t0 = System.nanoTime();
-        final int rc = DfnBridge.processDirect(h, buffer, 0);
-        if (rc == 0 && chans == 2) {
-            final FloatBuffer fb =
-                    buffer.order(ByteOrder.nativeOrder()).asFloatBuffer();
-            for (int i = 0; i < 480; i++) {
-                fb.put(480 + i, fb.get(i));
-            }
-        }
-        final float ms = (System.nanoTime() - t0) / 1_000_000.0f;
         if (rc != 0) {
             dfnBailed = true;
             android.util.Log.w("hollow_dfn",
                     "process rc=" + rc + " — bypassed for session");
             return;
         }
+        // Frame denoised: pick up the engine's voice probability for the
+        // gate stage (RNNoise supplies one; DFN3 returns -1 -> fallback).
+        vadPresence = DfnBridge.lastVad(h);
+        dfnVad = vadPresence;
         // Realtime watchdog: EMA of per-frame cost, 100-frame warmup grace.
         // Budget is 10 ms; sustained >6 ms latches bypass — this matters
         // most on phones (WebRTC NS is Dart's fallback).
@@ -658,14 +710,24 @@ public class CaptureGainProcessor
                 + (1.0f - floorSmoothAlpha) * floorRaw;
         float pr = (envDb - upFloorDb[ch] - SNR_ZERO_DB) / (SNR_FULL_DB - SNR_ZERO_DB);
         pr = clamp(pr, 0.0f, 1.0f);
-        bt *= pr * pr * (3.0f - 2.0f * pr);
-        // Modulation presence: no boost on steady noise/tones.
+        // Modulation presence state: kept warm even while the RNNoise VAD
+        // is in charge, so a mid-call fallback resumes converged.
         modSlowDb[ch] = modSlowAlpha * modSlowDb[ch] + (1.0f - modSlowAlpha) * envDb;
         final float md = clamp(envDb - modSlowDb[ch], 0.0f, MOD_CLAMP_DB);
         modDepthDb[ch] = modAvgAlpha * modDepthDb[ch] + (1.0f - modAvgAlpha) * md;
         float pm = (modDepthDb[ch] - MOD_ZERO_DB) / (MOD_FULL_DB - MOD_ZERO_DB);
         pm = clamp(pm, 0.0f, 1.0f);
-        bt *= pm * pm * (3.0f - 2.0f * pm);
+        if (vadPresence >= 0.0f) {
+            // RNNoise voice probability REPLACES the SNR+modulation
+            // presence (breath discrimination — see the C++ port).
+            float pv = (vadPresence - VAD_ZERO_PROB)
+                    / (VAD_FULL_PROB - VAD_ZERO_PROB);
+            pv = clamp(pv, 0.0f, 1.0f);
+            bt *= pv * pv * (3.0f - 2.0f * pv);
+        } else {
+            bt *= pr * pr * (3.0f - 2.0f * pr);
+            bt *= pm * pm * (3.0f - 2.0f * pm);
+        }
         final float ab = bt > upBoostDb[ch] ? upBoostAlphaUp : upBoostAlphaDn;
         upBoostDb[ch] = ab * upBoostDb[ch] + (1.0f - ab) * bt;
 

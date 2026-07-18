@@ -11,7 +11,9 @@ import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
+import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
+import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/dialogs/ringtone_clip_editor_dialog.dart';
 import 'package:hollow/src/ui/settings/settings_shared.dart';
@@ -632,15 +634,64 @@ class _AudioDeviceSettingsState extends ConsumerState<_AudioDeviceSettings> {
     final enabled = ref.watch(noiseSuppressAiProvider).valueOrNull ?? false;
     return Padding(
       padding: const EdgeInsets.only(left: 30),
-      child: SettingsToggleRow(
-        icon: LucideIcons.brainCircuit,
-        label: 'AI noise suppression',
-        subtitle: 'Removes keyboard, fan and background noise with '
-            'DeepFilterNet. Uses more CPU; takes ~1 second to engage. '
-            'Switches live mid-call.',
-        value: enabled,
-        onChanged: (v) =>
-            ref.read(noiseSuppressAiProvider.notifier).setEnabled(v),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SettingsToggleRow(
+            icon: LucideIcons.brainCircuit,
+            label: 'AI noise suppression',
+            subtitle: 'Removes keyboard, fan and background noise. '
+                'Engages instantly; switches live mid-call.',
+            value: enabled,
+            onChanged: (v) =>
+                ref.read(noiseSuppressAiProvider.notifier).setEnabled(v),
+          ),
+          if (enabled) ...[
+            const SizedBox(height: HollowSpacing.xs),
+            _buildNoiseSuppressEngineRow(),
+          ],
+        ],
+      ),
+    );
+  }
+
+  /// Advanced engine picker, shown only while AI NS is on. RNNoise is the
+  /// default that runs well everywhere; DeepFilterNet3 stays available for
+  /// desktop machines that can afford it (slow first load, ~10x the CPU).
+  /// Switching mid-call swaps the engine live — no renegotiation.
+  Widget _buildNoiseSuppressEngineRow() {
+    final hollow = HollowTheme.of(context);
+    final engine = ref.watch(noiseSuppressEngineProvider).valueOrNull ??
+        kNoiseSuppressEngineRnnoise;
+    return Padding(
+      padding: const EdgeInsets.only(left: 26),
+      child: Row(
+        children: [
+          Text(
+            'Engine',
+            style: HollowTypography.caption.copyWith(
+              color: hollow.textSecondary,
+            ),
+          ),
+          const SizedBox(width: HollowSpacing.md),
+          _EngineChip(
+            label: 'RNNoise',
+            hint: 'light, instant',
+            isSelected: engine == kNoiseSuppressEngineRnnoise,
+            onTap: () => ref
+                .read(noiseSuppressEngineProvider.notifier)
+                .setEngine(kNoiseSuppressEngineRnnoise),
+          ),
+          const SizedBox(width: HollowSpacing.xs),
+          _EngineChip(
+            label: 'DeepFilterNet3',
+            hint: 'stronger, heavy',
+            isSelected: engine == kNoiseSuppressEngineDfn3,
+            onTap: () => ref
+                .read(noiseSuppressEngineProvider.notifier)
+                .setEngine(kNoiseSuppressEngineDfn3),
+          ),
+        ],
       ),
     );
   }
@@ -981,6 +1032,71 @@ class _AudioDeviceSettingsState extends ConsumerState<_AudioDeviceSettings> {
           ),
         ),
       ],
+    );
+  }
+}
+
+/// Selection chip for the AI-NS engine picker (selection state = chip fill,
+/// never a filled button — hover-state rules).
+class _EngineChip extends StatelessWidget {
+  final String label;
+  final String hint;
+  final bool isSelected;
+  final VoidCallback onTap;
+
+  const _EngineChip({
+    required this.label,
+    required this.hint,
+    required this.isSelected,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+    return HollowFocusRing(
+      enabled: true,
+      onActivate: onTap,
+      borderRadius: BorderRadius.circular(hollow.radiusSm),
+      child: GestureDetector(
+        onTap: onTap,
+        child: AnimatedContainer(
+          duration: HollowDurations.fast,
+          padding: const EdgeInsets.symmetric(
+            horizontal: HollowSpacing.sm,
+            vertical: 3,
+          ),
+          decoration: BoxDecoration(
+            color: isSelected ? hollow.accentMuted : hollow.surface,
+            borderRadius: BorderRadius.circular(hollow.radiusSm),
+            border: Border.all(
+              color: isSelected ? hollow.accent : hollow.border,
+            ),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                label,
+                style: HollowTypography.caption.copyWith(
+                  color:
+                      isSelected ? hollow.accentText : hollow.textSecondary,
+                  fontWeight:
+                      isSelected ? FontWeight.w600 : FontWeight.w400,
+                ),
+              ),
+              const SizedBox(width: HollowSpacing.xs),
+              Text(
+                hint,
+                style: HollowTypography.caption.copyWith(
+                  color: hollow.textTertiary,
+                  fontSize: 10,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }

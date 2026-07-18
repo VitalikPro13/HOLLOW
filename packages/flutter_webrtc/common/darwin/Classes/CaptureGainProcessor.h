@@ -54,13 +54,16 @@ NS_ASSUME_NONNULL_BEGIN
  *  would re-calibrate the trim to the music. Thread-safe, live. */
 - (void)setServoHold:(BOOL)hold;
 
-/** AI noise suppression (DeepFilterNet3 via hollow_core's C ABI, resolved
- *  with dlsym at first enable). Runs at the HEAD of the chain, post-AEC.
- *  The first enable spawns a one-shot background model load (100-500 ms);
- *  frames pass through until ready. [attenLimDb] caps suppression
- *  (100 = uncapped); [postFilterBeta] 0 disables the post-filter.
- *  Thread-safe, live. */
+/** AI noise suppression (RNNoise default / DFN3 via [engine] — 0/1, both
+ *  behind hollow_core's C ABI + Rust format adapter, resolved with dlsym at
+ *  first enable). Runs at the HEAD of the chain, post-AEC. The first
+ *  enable spawns a one-shot background engine create (RNNoise instant;
+ *  DFN3 100-500 ms); frames pass through until ready. A later call with a
+ *  different engine performs a live swap. [attenLimDb] caps suppression
+ *  (100 = uncapped); [postFilterBeta] 0 disables the post-filter — both
+ *  DFN3-only. Thread-safe, live. */
 - (void)setNoiseSuppressAi:(BOOL)enabled
+                    engine:(int)engine
                 attenLimDb:(float)attenLimDb
             postFilterBeta:(float)postFilterBeta;
 

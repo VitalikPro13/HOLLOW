@@ -799,15 +799,19 @@ class _HollowShellState extends ConsumerState<HollowShell>
       }
     } catch (_) {}
 
-    // AI noise suppression pre-warm: the DFN3 model load is a one-time
-    // background cost per process, but it measured 15 SECONDS on a Pixel —
-    // kicked at first call it eats the start of the call (frames pass
-    // through undenoised until ready). If the user has the toggle on, start
-    // the load NOW so the engine is warm before any call begins.
+    // AI noise suppression pre-warm: engine create is a one-time background
+    // cost per process — instant for RNNoise (the default), but DFN3's
+    // model load measured 15 SECONDS on a Pixel; kicked at first call it
+    // eats the start of the call (frames pass through undenoised until
+    // ready). If the user has the toggle on, start the load NOW so the
+    // engine is warm before any call begins.
     try {
       final aiNs = await ref.read(noiseSuppressAiProvider.future);
       if (aiNs) {
-        unawaited(Helper.setNoiseSuppressAi(true).catchError((_) {}));
+        final engine = noiseSuppressEngineToNative(
+            await ref.read(noiseSuppressEngineProvider.future));
+        unawaited(Helper.setNoiseSuppressAi(true, engine: engine)
+            .catchError((_) {}));
       }
     } catch (_) {}
 

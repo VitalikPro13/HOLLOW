@@ -683,11 +683,15 @@ void FlutterWebRTC::HandleMethodCall(
     }
     result->Success();
   } else if (method_call.method_name().compare("setNoiseSuppressAi") == 0) {
-    // Hollow fork: DeepFilterNet3 AI noise suppression at the HEAD of the
-    // capture chain (post-AEC), via hollow_core's C ABI. The tract model
-    // load takes 100-500 ms, so the FIRST enable spawns a one-shot
-    // background create; frames pass through untouched until the handle is
-    // published. Enable/disable itself is a live atomic flip.
+    // Hollow fork: AI noise suppression (RNNoise default / DFN3 via the
+    // `engine` param) at the HEAD of the capture chain (post-AEC), via
+    // hollow_core's C ABI. The first enable spawns a one-shot background
+    // create (RNNoise is instant; DFN3's tract model load takes 100-500 ms);
+    // frames pass through untouched until the handle is published. A later
+    // call with a DIFFERENT engine performs a LIVE SWAP: the new handle is
+    // created in the background and published over the old one (which
+    // deliberately leaks — the audio thread may still be inside it).
+    // Enable/disable itself is a live atomic flip.
     auto args = method_call.arguments();
     if (!args) {
       result->Error("Bad Arguments",
@@ -696,6 +700,8 @@ void FlutterWebRTC::HandleMethodCall(
     }
     const EncodableMap params = GetValue<EncodableMap>(*args);
     const bool enabled = findBoolean(params, "enabled");
+    int engine = findInt(params, "engine");
+    if (engine < 0) engine = hollow_dfn::kEngineRnnoise;
     const std::optional<double> atten = maybeFindDouble(params, "attenLimDb");
     const std::optional<double> beta =
         maybeFindDouble(params, "postFilterBeta");
@@ -703,24 +709,27 @@ void FlutterWebRTC::HandleMethodCall(
     if (proc) {
       proc->SetNoiseSuppressAi(enabled);
       if (enabled && hollow_dfn::Bind()) {
-        if (void* h = proc->GetDfnHandle()) {
-          // Already loaded: apply parameter updates live.
+        void* h = proc->GetDfnHandle();
+        if (h != nullptr && proc->DfnEngine() == engine) {
+          // Right engine already loaded: apply parameter updates live.
           if (atten.has_value())
             hollow_dfn::SetAttenLim(h, static_cast<float>(atten.value()));
           if (beta.has_value())
             hollow_dfn::SetPostFilterBeta(h, static_cast<float>(beta.value()));
-        } else if (proc->TryBeginDfnCreate()) {
+        } else if (proc->TryBeginDfnCreate(engine)) {
           const float atten_v =
               static_cast<float>(atten.value_or(100.0));
           const float beta_v = static_cast<float>(beta.value_or(0.0));
           // proc is the process-global capture processor (never destroyed
           // while the plugin lives) — safe to capture across the load.
-          std::thread([proc, atten_v, beta_v]() {
-            void* h = hollow_dfn::Create();
-            if (h != nullptr) {
-              hollow_dfn::SetAttenLim(h, atten_v);
-              hollow_dfn::SetPostFilterBeta(h, beta_v);
-              proc->SetDfnHandle(h);
+          std::thread([proc, engine, atten_v, beta_v]() {
+            void* h2 = hollow_dfn::CreateEngine(engine);
+            if (h2 != nullptr) {
+              hollow_dfn::SetAttenLim(h2, atten_v);
+              hollow_dfn::SetPostFilterBeta(h2, beta_v);
+              proc->PublishDfnHandle(h2, engine);
+            } else {
+              proc->EndDfnCreate();
             }
           }).detach();
         }
@@ -752,6 +761,13 @@ void FlutterWebRTC::HandleMethodCall(
         EncodableValue(proc ? proc->DfnFramesProcessed() : 0);
     res[EncodableValue("emaMs")] = EncodableValue(
         proc ? static_cast<double>(proc->DfnMsEma()) : 0.0);
+    // Engine id of the published handle (-1 = none): 0 RNNoise, 1 DFN3.
+    res[EncodableValue("engine")] =
+        EncodableValue(proc ? proc->DfnEngine() : -1);
+    // Voice probability of the last denoised frame (-1 = none) — proves
+    // the RNNoise VAD is feeding the chain's speech gate.
+    res[EncodableValue("vad")] = EncodableValue(
+        proc ? static_cast<double>(proc->DfnVad()) : -1.0);
     // Raw capture shape — says WHY a format was rejected.
     res[EncodableValue("rate")] = EncodableValue(proc ? proc->SampleRate() : 0);
     res[EncodableValue("channels")] =
