@@ -2,6 +2,7 @@
 #define FLUTTER_CAPTURE_GAIN_PROCESSOR_HXX
 
 #include <atomic>
+#include <cstdint>
 
 #include "rtc_audio_processing.h"
 
@@ -176,6 +177,18 @@ class FlutterCaptureGainProcessor
   }
   int SampleRate() const { return sample_rate_; }
   int Channels() const { return channels_; }
+  // -- Performance sentinels (status-map diagnostics; see Process()). --
+  // Smoothed whole-chain cost per 10 ms frame (AI-NS + EQ + comp + de-ess +
+  // limiter together), and the capture-gap counter/worst since session start.
+  float ChainMsEma() const {
+    return chain_ms_ema_.load(std::memory_order_relaxed);
+  }
+  int CaptureGaps() const {
+    return capture_gaps_.load(std::memory_order_relaxed);
+  }
+  int WorstGapMs() const {
+    return worst_gap_ms_.load(std::memory_order_relaxed);
+  }
   // For live parameter updates from the plugin (atten limit / post-filter);
   // the FFI stages values atomically, so calling with a live handle is safe.
   void* GetDfnHandle() const {
@@ -236,6 +249,11 @@ class FlutterCaptureGainProcessor
   // adapter handles the shape). Audio thread only.
   void ProcessDfn(int num_bands, int buffer_size, float* buffer);
 
+  // The actual per-frame chain (AI-NS + gain/enhance stages). Process() is
+  // a thin sentinel wrapper around this so the whole-chain cost is measured
+  // across every early return. Audio thread only.
+  void ProcessChain(int num_bands, int buffer_size, float* buffer);
+
   std::atomic<float> gain_;
   std::atomic<bool> enhance_;
   std::atomic<float> makeup_db_;
@@ -257,6 +275,19 @@ class FlutterCaptureGainProcessor
   std::atomic<int> last_buffer_size_{0};
   std::atomic<float> dfn_vad_{-1.0f};
   bool dfn_format_logged_ = false;
+  // -- Performance sentinel state (see Process()). Quiet by default: each
+  // anomaly logs ONCE (latched bool); counters ride the status map. Atomics
+  // because the status getter reads from the platform thread; the audio
+  // thread is the single writer.
+  std::atomic<float> chain_ms_ema_{0.0f};
+  std::atomic<int> chain_frames_{0};
+  std::atomic<int> capture_gaps_{0};
+  std::atomic<int> worst_gap_ms_{0};
+  bool chain_overrun_logged_ = false;
+  bool capture_gap_logged_ = false;
+  // Last Process() entry time (audio thread only; 0 = fresh stream so the
+  // idle time between capture sessions never counts as a gap).
+  int64_t last_process_us_ = 0;
   // Speech presence for THIS frame from the AI-NS engine (RNNoise's voice
   // probability; -1 = unavailable — engine off/bailed/DFN3). Written by
   // ProcessDfn and read by GateUpwardGainDb in the SAME Process() call on

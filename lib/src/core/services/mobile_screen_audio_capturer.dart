@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 
 import '../../rust/api/network.dart' as network_api;
 import '../../rust/api/screen_audio.dart' as screen_audio_api;
+import '../perf_sentinel.dart';
 
 void _log(String msg) {
   network_api.logFromDart(message: msg);
@@ -78,7 +79,8 @@ class MobileScreenAudioCapturer {
 
     bool ok = false;
     try {
-      ok = await _method.invokeMethod<bool>('startScreenShareAudioCapture') ??
+      ok = await PerfSentinel.timedChannelCall<bool>(
+              _method, 'startScreenShareAudioCapture') ??
           false;
     } catch (e) {
       _log('[MOBILE-AU-SCREEN] native capture start failed: $e');
@@ -133,7 +135,8 @@ class MobileScreenAudioCapturer {
     _active = false;
     _log('[MOBILE-AU-SCREEN] Stopping...');
     try {
-      await _method.invokeMethod('stopScreenShareAudioCapture');
+      await PerfSentinel.timedChannelCall<void>(
+          _method, 'stopScreenShareAudioCapture');
     } catch (_) {}
     await _pcmSub?.cancel();
     _pcmSub = null;

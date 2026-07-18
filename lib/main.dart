@@ -13,6 +13,7 @@ import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/rust/api/identity.dart' as identity_api;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 import 'package:hollow/src/rust/frb_generated.dart';
+import 'package:hollow/src/core/perf_sentinel.dart';
 import 'package:hollow/src/core/services/deep_link_service.dart';
 import 'package:hollow/src/core/shared_tickers.dart';
 import 'package:hollow/src/core/reduce_motion.dart';
@@ -200,6 +201,10 @@ Future<void> main() async {
   if (Platform.isAndroid || Platform.isIOS) {
     await identity_api.setDataDir(path: hollowDataDir);
   }
+
+  // Performance sentinels: frame-stall logger + slow platform-channel
+  // watchdog. Quiet by default — anomalies only, into hollow_debug.log.
+  PerfSentinel.init();
 
   // Initialize Firebase early (required before FCM token generation).
   if (Platform.isAndroid || Platform.isIOS) {

@@ -159,6 +159,31 @@ static dispatch_queue_t HollowAudioTrackOpQueue(void) {
   return queue;
 }
 
+// [SENTINEL] enqueue->run latency watchdog for HollowAudioTrackOpQueue: the
+// queue keeps a congested signaling thread from freezing the UI, but an op
+// waiting >500 ms is still an anomaly worth ONE line per episode (the latch
+// re-arms once ops run promptly again). KEEP IN SYNC with runAudioTrackOp in
+// MethodCallHandlerImpl.java.
+static void HollowRunAudioTrackOp(NSString* opName, dispatch_block_t block) {
+  const CFAbsoluteTime enqueuedAt = CFAbsoluteTimeGetCurrent();
+  dispatch_async(HollowAudioTrackOpQueue(), ^{
+    // Serial queue — this static latch is only ever touched sequentially.
+    static BOOL congested = NO;
+    const double waitMs = (CFAbsoluteTimeGetCurrent() - enqueuedAt) * 1000.0;
+    if (waitMs > 500.0) {
+      if (!congested) {
+        congested = YES;
+        NSLog(@"[SENTINEL] audioTrackOp %@ enqueue->run %.0fms (signaling "
+              @"thread congested)",
+              opName, waitMs);
+      }
+    } else if (waitMs < 100.0) {
+      congested = NO;
+    }
+    block();
+  });
+}
+
 @implementation FlutterWebRTCPlugin {
 #pragma clang diagnostic pop
   FlutterMethodChannel* _methodChannel;
@@ -1115,7 +1140,7 @@ static __weak id<RTCAudioDeviceModuleDelegate> gAudioDeviceModuleObserver = nil;
         // Off the UI thread — see HollowAudioTrackOpQueue. Video stays
         // synchronous (camera flows untouched).
         BOOL value = enabled.boolValue;
-        dispatch_async(HollowAudioTrackOpQueue(), ^{
+        HollowRunAudioTrackOp(@"setEnabled", ^{
           track.isEnabled = value;
         });
       } else {
@@ -1500,7 +1525,7 @@ static __weak id<RTCAudioDeviceModuleDelegate> gAudioDeviceModuleObserver = nil;
       // Off the UI thread — the .source getter and the volume setter are
       // BOTH signaling-thread hops; during mute churn they queue behind
       // the mic teardown (see HollowAudioTrackOpQueue).
-      dispatch_async(HollowAudioTrackOpQueue(), ^{
+      HollowRunAudioTrackOp(@"setVolume", ^{
         RTCAudioSource* audioSource = audioTrack.source;
         audioSource.volume = value;
       });
@@ -1602,7 +1627,7 @@ static __weak id<RTCAudioDeviceModuleDelegate> gAudioDeviceModuleObserver = nil;
       RTCAudioTrack* audioTrack = ((LocalAudioTrack*)track).audioTrack;
       BOOL value = !mute.boolValue;
       // Off the UI thread — see HollowAudioTrackOpQueue.
-      dispatch_async(HollowAudioTrackOpQueue(), ^{
+      HollowRunAudioTrackOp(@"setMicrophoneMute", ^{
         audioTrack.isEnabled = value;
       });
     }

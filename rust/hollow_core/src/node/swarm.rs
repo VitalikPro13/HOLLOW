@@ -980,10 +980,23 @@ async fn run_event_loop(
     let mut turn_refresh_timer = tokio::time::interval(Duration::from_secs(50 * 60));
     turn_refresh_timer.tick().await; // consume immediate first tick
 
+    // -- Performance sentinels (quiet by default; see src/sentinel.rs) --
+    // Runtime starvation heartbeat: once per process (harness nodes share it).
+    crate::sentinel::spawn_runtime_heartbeat();
+    let mut loop_stall = crate::sentinel::LoopStall::new();
+    // (arm, variant, start) of the dispatch arm that just ran — measured at
+    // the top of the NEXT iteration so the `continue;` early-exits scattered
+    // through the arms are still covered.
+    let mut arm_started: Option<(&'static str, &'static str, std::time::Instant)> = None;
+
     loop {
+        if let Some((arm, name, t0)) = arm_started.take() {
+            loop_stall.check(arm, name, t0);
+        }
         tokio::select! {
             // Handle commands from the FFI layer.
             Some(cmd) = cmd_rx.recv() => {
+                arm_started = Some(("cmd", cmd.kind(), std::time::Instant::now()));
                 match cmd {
                     NodeCommand::JoinRoom { room_code } => {
                         // If switching rooms, unregister from the old room and clear state.
@@ -2293,6 +2306,7 @@ async fn run_event_loop(
             // -- WebSocket relay events --
             Some(ws_event) = ws_event_rx.recv() => {
                 use super::ws_client::WsEvent;
+                arm_started = Some(("ws", ws_event.kind(), std::time::Instant::now()));
                 match ws_event {
                     WsEvent::Connecting { reconnecting } => {
                         let _ = event_tx.send(NetworkEvent::RelayConnecting { reconnecting }).await;
@@ -3956,6 +3970,7 @@ async fn run_event_loop(
 
             // MLS batch timer — process queued removals then additions (2 epochs max for N peers).
             _ = mls_batch_timer.tick() => {
+                arm_started = Some(("timer", "mls_batch", std::time::Instant::now()));
                 if let Some(ref mut mls_mgr) = mls {
                     // Phase 1: Batch removals (stale members + recovery re-adds) — single commit.
                     // Keys are MLS GROUP keys: a bare `server_id` (server-wide group)
@@ -4134,6 +4149,7 @@ async fn run_event_loop(
 
             // Periodic re-bootstrap for signaling re-registration.
             _ = rebootstrap_timer.tick() => {
+                arm_started = Some(("timer", "rebootstrap", std::time::Instant::now()));
                 // Primary peer discovery now rides the LIVE WS connection (no fresh TLS
                 // handshake — fixes the bootstrap stall under WS frame bursts). The HTTP
                 // bootstrap below is kept as a non-fatal fallback (legacy address-based
@@ -4261,6 +4277,7 @@ async fn run_event_loop(
             // Checks every 100ms if any servers have passed the 500ms collection window
             // and are ready to dispatch channel sync probes across peers.
             _ = sync_dispatch_timer.tick() => {
+                arm_started = Some(("timer", "sync_dispatch", std::time::Instant::now()));
                 let ready = sync_coordinator.collect_ready();
                 for (server_id, assignments) in &ready {
                     let total_channels: usize = assignments.iter().map(|(_, chs)| chs.len()).sum();
@@ -4318,6 +4335,7 @@ async fn run_event_loop(
             // Flush pending disconnects that have passed the debounce window.
             // -- Stream transfer progress poll (every 500ms) --
             _ = stream_progress_timer.tick() => {
+                arm_started = Some(("timer", "stream_progress", std::time::Instant::now()));
                 // Snapshot progress under lock, then emit events outside lock.
                 let snapshot: Vec<(String, u64, u64)> = {
                     let Ok(map) = super::ws_stream_transfer::stream_progress().lock() else { continue };
@@ -4347,6 +4365,7 @@ async fn run_event_loop(
 
             // -- Vault rebalance + retention enforcement (every 30 min) --
             _ = rebalance_timer.tick() => {
+                arm_started = Some(("timer", "rebalance", std::time::Instant::now()));
                 crdt_store.prune_ops(1000);
                 hollow_log!("[HOLLOW-VAULT] Running rebalance + retention check");
                 let local_peer = local_peer_str.to_string();
@@ -4533,6 +4552,7 @@ async fn run_event_loop(
 
             // -- Event-driven vault rebalance (debounced 10s) --
             _ = rebalance_debounce.tick() => {
+                arm_started = Some(("timer", "rebalance_debounce", std::time::Instant::now()));
                 if !rebalance_pending.is_empty() {
                     let servers_to_check: Vec<String> = rebalance_pending.drain().collect();
                     hollow_log!("[HOLLOW-VAULT] Event-driven rebalance for {} servers", servers_to_check.len());
@@ -4671,16 +4691,19 @@ async fn run_event_loop(
 
             // -- Gossip overlay rotation timer (5 minutes) --
             _ = gossip_rotation_timer.tick() => {
+                arm_started = Some(("timer", "gossip_rotation", std::time::Instant::now()));
                 super::gossip_relay::handle_gossip_rotation(&mut gossip_overlays, &event_tx, webrtc_peers.len()).await;
             }
 
             // -- Gossip broadcast dedup eviction timer (60s) --
             _ = gossip_eviction_timer.tick() => {
+                arm_started = Some(("timer", "gossip_eviction", std::time::Instant::now()));
                 super::gossip_relay::handle_gossip_eviction(&mut gossip_overlays, &ws_cmd_tx, &ws_room_peers);
             }
 
             // -- Gossip peer exchange timer (2 minutes) --
             _ = gossip_exchange_timer.tick() => {
+                arm_started = Some(("timer", "gossip_exchange", std::time::Instant::now()));
                 super::gossip_relay::handle_gossip_exchange(&gossip_overlays, &ws_cmd_tx, &ws_room_peers);
                 // Adaptive interval: scale with largest server's member count.
                 let max_members = server_states.values().map(|s| s.members.len()).max().unwrap_or(0);
@@ -4694,6 +4717,7 @@ async fn run_event_loop(
             // Pauses chunk requests when messaging/voice traffic is recent so
             // share never starves real-time traffic on the same peer connection.
             _ = share_tick_timer.tick() => {
+                arm_started = Some(("timer", "share_tick", std::time::Instant::now()));
                 let messaging_active = std::time::Instant::now()
                     .duration_since(last_message_traffic) < super::share_handler::COEXIST_PAUSE;
                 super::share_handler::tick(&mut share_registry, &ws_cmd_tx, messaging_active, &webrtc_peers, &event_tx, &bundle_keypair).await;
@@ -4701,6 +4725,7 @@ async fn run_event_loop(
 
             // -- TURN credential refresh (50 min) --
             _ = turn_refresh_timer.tick() => {
+                arm_started = Some(("timer", "turn_refresh", std::time::Instant::now()));
                 let _ = ws_cmd_tx.send(super::ws_client::WsCommand::GetTurnCredentials);
             }
 
@@ -4711,6 +4736,7 @@ async fn run_event_loop(
             // rule) — a regressed send ratchet re-uses generations and wedges
             // the group for every receiver.
             _ = mls_persist_timer.tick() => {
+                arm_started = Some(("timer", "mls_persist", std::time::Instant::now()));
                 if mls_dirty {
                     if let Some(ref mls_mgr) = mls {
                         persist_mls_state(mls_mgr, &crypto_store);
@@ -4722,6 +4748,7 @@ async fn run_event_loop(
             // Peer liveness check — ask the relay if "offline" friends are actually alive.
             // Only checks friends (DM/inbox), NOT servers (MLS re-join disrupts group state).
             _ = peer_liveness_timer.tick() => {
+                arm_started = Some(("timer", "peer_liveness", std::time::Instant::now()));
                 let mut check_peers: Vec<String> = Vec::new();
 
                 if let Ok(store) = crate::storage::MessageStore::open(&db_path, &db_passphrase) {

@@ -105,5 +105,6 @@ mod crypto;
 mod frb_generated;
 mod identity;
 mod node;
+mod sentinel;
 mod storage;
 mod vault;

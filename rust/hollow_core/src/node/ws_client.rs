@@ -174,6 +174,40 @@ pub enum WsEvent {
     BandwidthLimited,
 }
 
+impl WsEvent {
+    /// Variant name only — for the swarm-loop stall sentinel. Never exposes
+    /// payload (no rooms/peers/content in sentinel lines).
+    pub(crate) fn kind(&self) -> &'static str {
+        match self {
+            Self::Connected => "Connected",
+            Self::Disconnected => "Disconnected",
+            Self::Connecting { .. } => "Connecting",
+            Self::PeerJoined { .. } => "PeerJoined",
+            Self::PeerLeft { .. } => "PeerLeft",
+            Self::RoomMembers { .. } => "RoomMembers",
+            Self::Message { .. } => "Message",
+            Self::DirectMessage { .. } => "DirectMessage",
+            Self::BinaryDirect { .. } => "BinaryDirect",
+            Self::LicenseError { .. } => "LicenseError",
+            Self::RoomBudgetUpdate { .. } => "RoomBudgetUpdate",
+            Self::RoomCapHit { .. } => "RoomCapHit",
+            Self::PeerStatus { .. } => "PeerStatus",
+            Self::DiscoveredPeers { .. } => "DiscoveredPeers",
+            Self::TurnCredentials { .. } => "TurnCredentials",
+            Self::NicknameClaimed { .. } => "NicknameClaimed",
+            Self::NicknameReleased => "NicknameReleased",
+            Self::NicknameError { .. } => "NicknameError",
+            Self::NicknameResolved { .. } => "NicknameResolved",
+            Self::LinkCodeClaimed { .. } => "LinkCodeClaimed",
+            Self::LinkCodeReleased => "LinkCodeReleased",
+            Self::LinkCodeError { .. } => "LinkCodeError",
+            Self::LinkCodeResolved { .. } => "LinkCodeResolved",
+            Self::BandwidthStatus { .. } => "BandwidthStatus",
+            Self::BandwidthLimited => "BandwidthLimited",
+        }
+    }
+}
+
 // -- Wire protocol (matches relay/src/ws_router.rs) --
 
 fn is_false(v: &bool) -> bool { !*v }

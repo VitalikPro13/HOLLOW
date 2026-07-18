@@ -541,6 +541,9 @@ void FlutterCaptureGainProcessor::Initialize(int sample_rate_hz,
   channels_ = num_channels > 0 ? num_channels : 1;
   SetupFilters(sample_rate_);
   ResetState();
+  // Fresh stream: the idle time since the last capture session is not a
+  // capture gap (the gap sentinel only measures WITHIN a running stream).
+  last_process_us_ = 0;
 }
 
 void FlutterCaptureGainProcessor::Reset(int new_rate) {
@@ -549,6 +552,7 @@ void FlutterCaptureGainProcessor::Reset(int new_rate) {
     SetupFilters(sample_rate_);
   }
   ResetState();
+  last_process_us_ = 0;
 }
 
 void FlutterCaptureGainProcessor::Release() {}
@@ -648,6 +652,60 @@ void FlutterCaptureGainProcessor::Process(int num_bands, int /*num_frames*/,
   if (buffer == nullptr || buffer_size <= 0) {
     return;
   }
+  // [SENTINEL] capture-gap detector: >30 ms between Process() calls (3 lost
+  // 10 ms frames) = a HAL/driver stall (the mute-churn signature) seen from
+  // the audio side. Log-once; counter + worst ride the status map.
+  const auto chain_t0 = std::chrono::steady_clock::now();
+  const int64_t now_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                             chain_t0.time_since_epoch())
+                             .count();
+  if (last_process_us_ > 0) {
+    const int64_t gap_ms = (now_us - last_process_us_) / 1000;
+    if (gap_ms > 30) {
+      capture_gaps_.store(capture_gaps_.load(std::memory_order_relaxed) + 1,
+                          std::memory_order_relaxed);
+      if (gap_ms > worst_gap_ms_.load(std::memory_order_relaxed)) {
+        worst_gap_ms_.store(static_cast<int>(gap_ms),
+                            std::memory_order_relaxed);
+      }
+      if (!capture_gap_logged_) {
+        capture_gap_logged_ = true;
+        std::fprintf(stderr,
+                     "[SENTINEL] capture gap %lldms (first this session; "
+                     "counting further gaps in status)\n",
+                     static_cast<long long>(gap_ms));
+      }
+    }
+  }
+  last_process_us_ = now_us;
+
+  ProcessChain(num_bands, buffer_size, buffer);
+
+  // [SENTINEL] whole-chain cost EMA — same pattern as the DFN watchdog
+  // (EMA, 100-frame warmup grace) but for the ENTIRE Process() chain.
+  // Budget is 10 ms/frame; sustained >2 ms is an anomaly worth one line.
+  // Never bails — the chain stays live, the status map carries the number.
+  const float chain_ms = std::chrono::duration<float, std::milli>(
+                             std::chrono::steady_clock::now() - chain_t0)
+                             .count();
+  const int frames = chain_frames_.load(std::memory_order_relaxed) + 1;
+  chain_frames_.store(frames, std::memory_order_relaxed);
+  const float ema =
+      frames == 1 ? chain_ms
+                  : 0.98f * chain_ms_ema_.load(std::memory_order_relaxed) +
+                        0.02f * chain_ms;
+  chain_ms_ema_.store(ema, std::memory_order_relaxed);
+  if (!chain_overrun_logged_ && frames > 100 && ema > 2.0f) {
+    chain_overrun_logged_ = true;
+    std::fprintf(stderr,
+                 "[SENTINEL] audio chain sustained %.2f ms/frame (10 ms "
+                 "budget)\n",
+                 ema);
+  }
+}
+
+void FlutterCaptureGainProcessor::ProcessChain(int num_bands, int buffer_size,
+                                               float* buffer) {
   ProcessDfn(num_bands, buffer_size, buffer);
   const float gain = gain_.load(std::memory_order_relaxed);
   const bool enhance = enhance_.load(std::memory_order_relaxed);

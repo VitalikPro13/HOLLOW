@@ -1,11 +1,11 @@
 import 'dart:async';
 import 'dart:io';
-import 'dart:typed_data';
 
 import 'package:flutter/services.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
 import '../../rust/api/network.dart' as network_api;
+import '../perf_sentinel.dart';
 import 'screen_audio_capturer.dart';
 import 'mac_sck_screen_audio_capturer.dart';
 import 'mobile_screen_audio_capturer.dart';
@@ -703,8 +703,8 @@ class ScreenShareService {
   Future<void> _disableMacSystemAudioTap() async {
     if (!_macSystemAudioActive) return;
     try {
-      await _kFlutterWebRTCChannel
-          .invokeMethod<bool>('disableScreenShareSystemAudio');
+      await PerfSentinel.timedChannelCall<bool>(
+          _kFlutterWebRTCChannel, 'disableScreenShareSystemAudio');
       _log('[HOLLOW-SCREEN] macOS Process Tap disabled');
     } catch (e) {
       _log('[HOLLOW-SCREEN] disableScreenShareSystemAudio failed: $e');

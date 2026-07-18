@@ -24,16 +24,38 @@ class WebRTC {
 
   static bool get platformIsWeb => false;
 
+  /// HOLLOW: performance sentinel hook. The app installs this (PerfSentinel);
+  /// any platform call that takes >= [slowInvokeThresholdMs] is reported as
+  /// (methodName, elapsedMs). Rate limiting is the listener's job — this
+  /// funnel only measures. Null listener = zero overhead beyond a null check.
+  static void Function(String method, int elapsedMs)? slowInvokeListener;
+  static const int slowInvokeThresholdMs = 50;
+
   static Future<T?> invokeMethod<T, P>(String methodName,
       [dynamic param]) async {
     await initialize(options: {
       'logSeverity': NativeLogsListener.instance.severity,
     });
 
-    return _channel.invokeMethod<T>(
-      methodName,
-      param,
-    );
+    final listener = slowInvokeListener;
+    if (listener == null) {
+      return _channel.invokeMethod<T>(
+        methodName,
+        param,
+      );
+    }
+    final sw = Stopwatch()..start();
+    try {
+      return await _channel.invokeMethod<T>(
+        methodName,
+        param,
+      );
+    } finally {
+      sw.stop();
+      if (sw.elapsedMilliseconds >= slowInvokeThresholdMs) {
+        listener(methodName, sw.elapsedMilliseconds);
+      }
+    }
   }
 
   static bool initialized = false;

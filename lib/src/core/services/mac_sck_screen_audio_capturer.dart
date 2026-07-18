@@ -5,6 +5,7 @@ import 'dart:typed_data';
 import 'package:flutter/services.dart';
 
 import '../../rust/api/network.dart' as network_api;
+import '../perf_sentinel.dart';
 
 void _log(String msg) {
   network_api.logFromDart(message: msg);
@@ -106,7 +107,8 @@ class MacSckScreenAudioCapturer {
 
     // Start native SCK capture; PCM arrives on the event channel.
     try {
-      final ok = await _method.invokeMethod<bool>('startScreenShareAudioCapture');
+      final ok = await PerfSentinel.timedChannelCall<bool>(
+          _method, 'startScreenShareAudioCapture');
       if (ok != true) {
         _log('[SCK-AUDIO] Native capture returned false');
         await _teardown();
@@ -190,7 +192,8 @@ class MacSckScreenAudioCapturer {
 
   Future<void> _teardown() async {
     try {
-      await _method.invokeMethod('stopScreenShareAudioCapture');
+      await PerfSentinel.timedChannelCall<void>(
+          _method, 'stopScreenShareAudioCapture');
     } catch (_) {}
     await _pcmSub?.cancel();
     _pcmSub = null;

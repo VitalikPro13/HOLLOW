@@ -194,6 +194,19 @@ public class CaptureGainProcessor
     private float vadPresence = -1f;
     // Status-getter diagnostic mirror.
     private volatile float dfnVad = -1f;
+    // -- Performance sentinels (see process()). Quiet by default: each
+    // anomaly logs ONCE (latched boolean); counters ride the status map.
+    // volatile: single audio-thread writer, status getter reads from the
+    // platform thread. KEEP IN SYNC with the C++ and darwin ports.
+    private volatile float chainMsEma = 0f;
+    private volatile int chainFrames = 0;
+    private volatile int captureGaps = 0;
+    private volatile int worstGapMs = 0;
+    private boolean chainOverrunLogged = false;
+    private boolean captureGapLogged = false;
+    // Last process() entry time (audio thread only; 0 = fresh stream so idle
+    // time between capture sessions never counts as a gap).
+    private long lastProcessNs = 0;
 
     // Dynamic-mode servo (single mic — one servo, not per-channel).
     private float dynMeterDb;
@@ -392,6 +405,11 @@ public class CaptureGainProcessor
         res.put("channels", channels);
         res.put("bands", lastBands);
         res.put("bufferSize", lastCount);
+        // Performance sentinels: smoothed WHOLE-chain cost per 10 ms frame,
+        // and capture-gap count/worst (>30 ms between process() calls).
+        res.put("chainEmaMs", (double) chainMsEma);
+        res.put("captureGaps", captureGaps);
+        res.put("worstGapMs", worstGapMs);
         return res;
     }
 
@@ -485,6 +503,9 @@ public class CaptureGainProcessor
         channels = numChannels > 0 ? numChannels : 1;
         setupFilters(sampleRate);
         resetState();
+        // Fresh stream: idle time since the last capture session is not a
+        // capture gap (the gap sentinel only measures WITHIN a stream).
+        lastProcessNs = 0;
     }
 
     @Override
@@ -494,10 +515,62 @@ public class CaptureGainProcessor
             setupFilters(sampleRate);
         }
         resetState();
+        lastProcessNs = 0;
     }
 
     @Override
     public void process(int numBands, int numFrames, ByteBuffer buffer) {
+        if (buffer == null) {
+            return;
+        }
+        // [SENTINEL] capture-gap detector: >30 ms between process() calls
+        // (3 lost 10 ms frames) = a HAL stall (the mute-churn signature)
+        // seen from the audio side. Log-once; counter + worst ride the
+        // status map. KEEP IN SYNC with the C++ and darwin ports.
+        final long chainT0 = System.nanoTime();
+        if (lastProcessNs > 0) {
+            final long gapMs = (chainT0 - lastProcessNs) / 1_000_000L;
+            if (gapMs > 30) {
+                captureGaps++;
+                if (gapMs > worstGapMs) {
+                    worstGapMs = (int) gapMs;
+                }
+                if (!captureGapLogged) {
+                    captureGapLogged = true;
+                    android.util.Log.w("hollow_sentinel",
+                            "[SENTINEL] capture gap " + gapMs
+                                    + "ms (first this session; counting "
+                                    + "further gaps in status)");
+                }
+            }
+        }
+        lastProcessNs = chainT0;
+
+        processChain(numBands, numFrames, buffer);
+
+        // [SENTINEL] whole-chain cost EMA — same pattern as the DFN
+        // watchdog (EMA, 100-frame warmup grace) but for the ENTIRE
+        // process() chain. Budget is 10 ms/frame; sustained >2 ms is an
+        // anomaly worth one line. Never bails — the chain stays live.
+        final float chainMs = (System.nanoTime() - chainT0) / 1_000_000.0f;
+        chainFrames++;
+        chainMsEma = chainFrames == 1
+                ? chainMs
+                : 0.98f * chainMsEma + 0.02f * chainMs;
+        if (!chainOverrunLogged && chainFrames > 100 && chainMsEma > 2.0f) {
+            chainOverrunLogged = true;
+            android.util.Log.w("hollow_sentinel",
+                    "[SENTINEL] audio chain sustained " + chainMsEma
+                            + " ms/frame (10 ms budget)");
+        }
+    }
+
+    /**
+     * The actual per-frame chain (AI-NS + gain/enhance stages). process()
+     * is a thin sentinel wrapper around this so the whole-chain cost is
+     * measured across every early return.
+     */
+    private void processChain(int numBands, int numFrames, ByteBuffer buffer) {
         final float g = gain;
         final boolean enh = enhance;
         final boolean dyn = dynamic;

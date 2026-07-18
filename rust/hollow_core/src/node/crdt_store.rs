@@ -51,8 +51,10 @@ impl CrdtStore {
 
             let mut pending_states: HashMap<String, PendingState> = HashMap::new();
             let mut pending_blobs: HashMap<(String, String), String> = HashMap::new();
+            let mut backlog = crate::sentinel::BacklogLatch::new("crdt_store", 256);
 
             while let Some(cmd) = cmd_rx.blocking_recv() {
+                backlog.observe(cmd_rx.len());
                 let _ = store.begin_transaction();
 
                 // Process first command

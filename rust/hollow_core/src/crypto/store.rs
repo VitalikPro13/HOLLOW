@@ -36,7 +36,9 @@ impl CryptoStore {
 
             // Block this OS thread, receiving commands from the async world.
             // We use `blocking_recv` since we're already on a blocking thread.
+            let mut backlog = crate::sentinel::BacklogLatch::new("crypto_store", 256);
             while let Some(cmd) = cmd_rx.blocking_recv() {
+                backlog.observe(cmd_rx.len());
                 match cmd {
                     CryptoStoreCmd::SaveAccount(pickle) => {
                         if let Err(e) = store.save_olm_account(&pickle) {

@@ -183,6 +183,30 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
   // audible behavior identical, and never blocks a frame.
   ExecutorService audioTrackOpExecutor = Executors.newSingleThreadExecutor();
 
+  // [SENTINEL] enqueue->run latency watchdog for audioTrackOpExecutor: the
+  // executor keeps a congested signaling thread from freezing the UI, but an
+  // op waiting >500 ms is still an anomaly worth ONE line per episode (the
+  // latch re-arms once ops run promptly again). KEEP IN SYNC with the darwin
+  // HollowAudioTrackOpQueue port.
+  private final java.util.concurrent.atomic.AtomicBoolean audioOpCongested =
+      new java.util.concurrent.atomic.AtomicBoolean(false);
+
+  private void runAudioTrackOp(final String opName, final Runnable op) {
+    final long enqueuedAt = android.os.SystemClock.elapsedRealtime();
+    audioTrackOpExecutor.execute(() -> {
+      final long waitMs = android.os.SystemClock.elapsedRealtime() - enqueuedAt;
+      if (waitMs > 500) {
+        if (audioOpCongested.compareAndSet(false, true)) {
+          Log.w(TAG, "[SENTINEL] audioTrackOp " + opName + " enqueue->run "
+              + waitMs + "ms (signaling thread congested)");
+        }
+      } else if (waitMs < 100) {
+        audioOpCongested.set(false);
+      }
+      op.run();
+    });
+  }
+
   public static LogSink logSink = new LogSink();
 
   MethodCallHandlerImpl(Context context, BinaryMessenger messenger, TextureRegistry textureRegistry) {
@@ -1976,7 +2000,7 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
       synchronized (localTracks) {
         isLocal = localTracks.containsKey(id);
       }
-      audioTrackOpExecutor.execute(() -> {
+      runAudioTrackOp("setEnabled", () -> {
         if (isLocal) {
           // Teardown guard: trackDispose removes the id from localTracks
           // before the native dispose happens (in streamDispose, next
@@ -2012,7 +2036,7 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
       // Same serial executor as setEnabled: the volume set is a signaling
       // -thread hop too, and during the mute churn it queued behind the
       // mic teardown and froze the UI (deafen at 16:28:20, trace_42).
-      audioTrackOpExecutor.execute(() -> {
+      runAudioTrackOp("setVolume", () -> {
         try {
           ((AudioTrack) track).setVolume(volume);
         } catch (Exception e) {

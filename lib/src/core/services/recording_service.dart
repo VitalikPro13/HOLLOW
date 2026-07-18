@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
 
 import '../../rust/api/network.dart' as network_api;
+import '../perf_sentinel.dart';
 import 'macos_version.dart';
 import 'video_thumbnail_service.dart';
 
@@ -94,7 +95,9 @@ class RecordingService {
           ? 'hollowMacStartScreenRecord'
           : 'hollowWinStartScreenRecord';
       try {
-        final res = await _channel.invokeMethod<Map<Object?, Object?>>(
+        final res =
+            await PerfSentinel.timedChannelCall<Map<Object?, Object?>>(
+          _channel,
           method,
           {'path': outFile},
         );
@@ -164,7 +167,7 @@ class RecordingService {
           ? 'hollowMacStopScreenRecord'
           : 'hollowWinStopScreenRecord';
       try {
-        await _channel.invokeMethod<bool>(method);
+        await PerfSentinel.timedChannelCall<bool>(_channel, method);
         _recLog('native stop OK ($method)');
       } on PlatformException catch (e) {
         // The native recorder embeds writer status + per-track sample counts +
@@ -230,7 +233,8 @@ class RecordingService {
 
     if (Platform.isMacOS) {
       try {
-        await _channel.invokeMethod<bool>('hollowMacStopRecordingAudio');
+        await PerfSentinel.timedChannelCall<bool>(
+            _channel, 'hollowMacStopRecordingAudio');
       } catch (_) {}
     }
 

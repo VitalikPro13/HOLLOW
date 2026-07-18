@@ -451,6 +451,19 @@ static double HollowDfnNowMs(void) {
   // Status-getter diagnostic mirror.
   _Atomic(float) _dfnVad;
   BOOL _dfnFormatLogged;
+  // -- Performance sentinels (see audioProcessingProcess:). Quiet by
+  // default: each anomaly logs ONCE (latched BOOL); counters ride the
+  // status map. Atomics: single audio-thread writer, status getter reads
+  // from the platform thread. KEEP IN SYNC with the C++ and Java ports.
+  _Atomic(float) _chainMsEma;
+  _Atomic(int) _chainFrames;
+  _Atomic(int) _captureGaps;
+  _Atomic(int) _worstGapMs;
+  BOOL _chainOverrunLogged;
+  BOOL _captureGapLogged;
+  // Last process entry (ms clock, audio thread only; 0 = fresh stream so
+  // idle time between capture sessions never counts as a gap).
+  double _lastProcessMs;
   ChannelState _ch[2 /* kMaxChannels */];
   int _sampleRate;
   float _compAlphaA;
@@ -495,6 +508,13 @@ static double HollowDfnNowMs(void) {
     _vadPresence = -1.0f;
     atomic_init(&_dfnVad, -1.0f);
     _dfnFormatLogged = NO;
+    atomic_init(&_chainMsEma, 0.0f);
+    atomic_init(&_chainFrames, 0);
+    atomic_init(&_captureGaps, 0);
+    atomic_init(&_worstGapMs, 0);
+    _chainOverrunLogged = NO;
+    _captureGapLogged = NO;
+    _lastProcessMs = 0.0;
     _sampleRate = 48000;
     [self setupFilters:_sampleRate];
     [self resetState];
@@ -593,6 +613,14 @@ static double HollowDfnNowMs(void) {
         @(atomic_load_explicit(&_lastChannels, memory_order_relaxed)),
     @"bufferSize" :
         @(atomic_load_explicit(&_lastFrameCount, memory_order_relaxed)),
+    // Performance sentinels: smoothed WHOLE-chain cost per 10 ms frame,
+    // and capture-gap count/worst (>30 ms between process calls).
+    @"chainEmaMs" : @((double)atomic_load_explicit(&_chainMsEma,
+                                                   memory_order_relaxed)),
+    @"captureGaps" :
+        @(atomic_load_explicit(&_captureGaps, memory_order_relaxed)),
+    @"worstGapMs" :
+        @(atomic_load_explicit(&_worstGapMs, memory_order_relaxed)),
   };
 }
 
@@ -726,6 +754,9 @@ static double HollowDfnNowMs(void) {
     [self setupFilters:_sampleRate];
   }
   [self resetState];
+  // Fresh stream: idle time since the last capture session is not a
+  // capture gap (the gap sentinel only measures WITHIN a stream).
+  _lastProcessMs = 0.0;
 }
 
 // Head-of-chain AI-NS step (audio thread only). Keep behavior-identical to
@@ -812,6 +843,61 @@ static double HollowDfnNowMs(void) {
 }
 
 - (void)audioProcessingProcess:(RTC_OBJC_TYPE(RTCAudioBuffer) *)audioBuffer {
+  // [SENTINEL] capture-gap detector: >30 ms between process calls (3 lost
+  // 10 ms frames) = a HAL stall (the mute-churn signature) seen from the
+  // audio side. Log-once; counter + worst ride the status map. KEEP IN
+  // SYNC with the C++ and Java ports.
+  const double chainT0 = HollowDfnNowMs();
+  if (_lastProcessMs > 0) {
+    const double gapMs = chainT0 - _lastProcessMs;
+    if (gapMs > 30.0) {
+      atomic_store_explicit(
+          &_captureGaps,
+          atomic_load_explicit(&_captureGaps, memory_order_relaxed) + 1,
+          memory_order_relaxed);
+      if ((int)gapMs >
+          atomic_load_explicit(&_worstGapMs, memory_order_relaxed)) {
+        atomic_store_explicit(&_worstGapMs, (int)gapMs,
+                              memory_order_relaxed);
+      }
+      if (!_captureGapLogged) {
+        _captureGapLogged = YES;
+        NSLog(@"[SENTINEL] capture gap %.0fms (first this session; "
+              @"counting further gaps in status)",
+              gapMs);
+      }
+    }
+  }
+  _lastProcessMs = chainT0;
+
+  [self processChain:audioBuffer];
+
+  // [SENTINEL] whole-chain cost EMA — same pattern as the DFN watchdog
+  // (EMA, 100-frame warmup grace) but for the ENTIRE process chain.
+  // Budget is 10 ms/frame; sustained >2 ms is an anomaly worth one line.
+  // Never bails — the chain stays live.
+  const float chainMs = (float)(HollowDfnNowMs() - chainT0);
+  const int chainFrames =
+      atomic_load_explicit(&_chainFrames, memory_order_relaxed) + 1;
+  atomic_store_explicit(&_chainFrames, chainFrames, memory_order_relaxed);
+  const float chainEma =
+      chainFrames == 1
+          ? chainMs
+          : 0.98f * atomic_load_explicit(&_chainMsEma,
+                                         memory_order_relaxed) +
+                0.02f * chainMs;
+  atomic_store_explicit(&_chainMsEma, chainEma, memory_order_relaxed);
+  if (!_chainOverrunLogged && chainFrames > 100 && chainEma > 2.0f) {
+    _chainOverrunLogged = YES;
+    NSLog(@"[SENTINEL] audio chain sustained %.2f ms/frame (10 ms budget)",
+          chainEma);
+  }
+}
+
+// The actual per-frame chain (AI-NS + gain/enhance stages).
+// audioProcessingProcess: is a thin sentinel wrapper around this so the
+// whole-chain cost is measured across every early return.
+- (void)processChain:(RTC_OBJC_TYPE(RTCAudioBuffer) *)audioBuffer {
   const float gain = atomic_load_explicit(&_gain, memory_order_relaxed);
   const BOOL enhance = atomic_load_explicit(&_enhance, memory_order_relaxed);
   const BOOL dynamic = atomic_load_explicit(&_dynamic, memory_order_relaxed);

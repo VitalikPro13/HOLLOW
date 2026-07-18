@@ -775,6 +775,14 @@ void FlutterWebRTC::HandleMethodCall(
     res[EncodableValue("bands")] = EncodableValue(proc ? proc->LastBands() : 0);
     res[EncodableValue("bufferSize")] =
         EncodableValue(proc ? proc->LastBufferSize() : 0);
+    // Performance sentinels: smoothed WHOLE-chain cost per 10 ms frame, and
+    // capture-gap count/worst (>30 ms between Process() calls) this session.
+    res[EncodableValue("chainEmaMs")] = EncodableValue(
+        proc ? static_cast<double>(proc->ChainMsEma()) : 0.0);
+    res[EncodableValue("captureGaps")] =
+        EncodableValue(proc ? proc->CaptureGaps() : 0);
+    res[EncodableValue("worstGapMs")] =
+        EncodableValue(proc ? proc->WorstGapMs() : 0);
     result->Success(EncodableValue(res));
   } else if (method_call.method_name().compare("voiceRedirectStart") == 0) {
     // Hollow fork (Windows): begin out-of-process rendering of the given REMOTE
