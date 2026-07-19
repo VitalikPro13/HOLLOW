@@ -1088,6 +1088,7 @@ class _VoiceControlsPillState extends ConsumerState<_VoiceControlsPill> {
               shareAudio: selection.shareAudio,
               pid: selection.pid,
               windowHwnd: selection.windowHwnd,
+              profile: selection.profile,
             );
       }
     }

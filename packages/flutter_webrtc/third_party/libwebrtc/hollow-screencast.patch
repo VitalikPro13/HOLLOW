@@ -1,0 +1,101 @@
+diff --git a/include/rtc_types.h b/include/rtc_types.h
+index d3123a2..5d21ac0 100644
+--- a/include/rtc_types.h
++++ b/include/rtc_types.h
+@@ -11,6 +11,8 @@
+ #define LIB_WEBRTC_API
+ #endif
+ 
++#include <cstdint>
++
+ #include "base/fixed_size_function.h"
+ #include "base/portable.h"
+ #include "base/refcount.h"
+diff --git a/include/rtc_video_track.h b/include/rtc_video_track.h
+index 46850c5..b77ba9e 100644
+--- a/include/rtc_video_track.h
++++ b/include/rtc_video_track.h
+@@ -10,12 +10,22 @@ namespace libwebrtc {
+ 
+ class RTCVideoTrack : public RTCMediaTrack {
+  public:
++  // Mirrors webrtc::VideoTrackInterface::ContentHint. kDetailed/kText force
++  // the screencast encoding pipeline for this track's sender regardless of
++  // the source's is_screencast(); kFluid forces the camera pipeline; kNone
++  // defers to the source. See pc/rtp_sender.cc in upstream WebRTC.
++  enum class ContentHint { kNone = 0, kFluid = 1, kDetailed = 2, kText = 3 };
++
+   virtual void AddRenderer(
+       RTCVideoRenderer<scoped_refptr<RTCVideoFrame>>* renderer) = 0;
+ 
+   virtual void RemoveRenderer(
+       RTCVideoRenderer<scoped_refptr<RTCVideoFrame>>* renderer) = 0;
+ 
++  // NOTE: appended after the pre-existing virtuals on purpose — existing
++  // vtable slot indices stay valid against older prebuilt binaries.
++  virtual void SetContentHint(ContentHint hint) = 0;
++
+  protected:
+   ~RTCVideoTrack() {}
+ };
+diff --git a/src/internal/desktop_capturer.h b/src/internal/desktop_capturer.h
+index be024c8..843e98d 100644
+--- a/src/internal/desktop_capturer.h
++++ b/src/internal/desktop_capturer.h
+@@ -43,6 +43,14 @@ class ScreenCapturerTrackSource : public webrtc::VideoTrackSource {
+       : VideoTrackSource(/*remote=*/false), capturer_(std::move(capturer)) {}
+   virtual ~ScreenCapturerTrackSource() { capturer_->Stop(); }
+ 
++  // Desktop capture IS screen content. Without this the engine encodes the
++  // share as camera video: denoising on, QP quality scaler downscaling
++  // resolution, and none of the codecs' screen-content modes (VP8 screen
++  // mode, VP9 screen tune, AV1 palette) ever activate — blocky text.
++  // (macOS/iOS pass screencast at source creation; Android's capturer
++  // overrides isScreencast() — this brings Windows/Linux in line.)
++  bool is_screencast() const override { return true; }
++
+  private:
+   webrtc::VideoSourceInterface<webrtc::VideoFrame>* source() override {
+     return static_cast<RTCDesktopCapturerImpl*>(capturer_.get());
+diff --git a/src/rtc_video_track_impl.cc b/src/rtc_video_track_impl.cc
+index 0c3d78b..2cb3f78 100644
+--- a/src/rtc_video_track_impl.cc
++++ b/src/rtc_video_track_impl.cc
+@@ -28,4 +28,24 @@ void VideoTrackImpl::RemoveRenderer(
+   return video_sink_->RemoveRenderer(renderer);
+ }
+ 
++void VideoTrackImpl::SetContentHint(ContentHint hint) {
++  webrtc::VideoTrackInterface::ContentHint rtc_hint;
++  switch (hint) {
++    case ContentHint::kFluid:
++      rtc_hint = webrtc::VideoTrackInterface::ContentHint::kFluid;
++      break;
++    case ContentHint::kDetailed:
++      rtc_hint = webrtc::VideoTrackInterface::ContentHint::kDetailed;
++      break;
++    case ContentHint::kText:
++      rtc_hint = webrtc::VideoTrackInterface::ContentHint::kText;
++      break;
++    case ContentHint::kNone:
++    default:
++      rtc_hint = webrtc::VideoTrackInterface::ContentHint::kNone;
++      break;
++  }
++  rtc_track_->set_content_hint(rtc_hint);
++}
++
+ }  // namespace libwebrtc
+diff --git a/src/rtc_video_track_impl.h b/src/rtc_video_track_impl.h
+index 4b083e7..f34457d 100644
+--- a/src/rtc_video_track_impl.h
++++ b/src/rtc_video_track_impl.h
+@@ -42,6 +42,8 @@ class VideoTrackImpl : public RTCVideoTrack {
+     return static_cast<RTCTrackState>(rtc_track_->state());
+   }
+ 
++  virtual void SetContentHint(ContentHint hint) override;
++
+  private:
+   webrtc::scoped_refptr<webrtc::VideoTrackInterface> rtc_track_;
+   scoped_refptr<RTCVideoSourceImpl> video_source_;

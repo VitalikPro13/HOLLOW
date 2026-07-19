@@ -489,6 +489,29 @@ void FlutterWebRTC::HandleMethodCall(
       }
     }
     result->Success();
+  } else if (method_call.method_name().compare("videoTrackSetContentHint") ==
+             0) {
+    if (!method_call.arguments()) {
+      result->Error("Bad Arguments", "Null constraints arguments received");
+      return;
+    }
+    const EncodableMap params =
+        GetValue<EncodableMap>(*method_call.arguments());
+    const std::string track_id = findString(params, "trackId");
+    const std::string hint = findString(params, "hint");
+    scoped_refptr<RTCMediaTrack> track = MediaTrackForId(track_id);
+    if (track != nullptr && track->kind().std_string() == "video") {
+      auto content_hint = RTCVideoTrack::ContentHint::kNone;
+      if (hint == "motion") {
+        content_hint = RTCVideoTrack::ContentHint::kFluid;
+      } else if (hint == "detail") {
+        content_hint = RTCVideoTrack::ContentHint::kDetailed;
+      } else if (hint == "text") {
+        content_hint = RTCVideoTrack::ContentHint::kText;
+      }
+      static_cast<RTCVideoTrack*>(track.get())->SetContentHint(content_hint);
+    }
+    result->Success();
   } else if (method_call.method_name().compare("trackDispose") == 0) {
     if (!method_call.arguments()) {
       result->Error("Bad Arguments", "Null constraints arguments received");

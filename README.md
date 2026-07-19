@@ -62,8 +62,11 @@ Your identity is a cryptographic keypair. Zero registrations. One recovery phras
 ## Features
 
 - **End-to-end encrypted messaging** -- Olm (Double Ratchet) for DMs, OpenMLS for servers. Forward secrecy by default
+- **Multi-device** -- link your phone and desktop into one identity with a short code. Messages, servers, and friends stay in sync end-to-end encrypted across your devices, and a lost device can be revoked remotely at any time
+- **Offline delivery without servers** -- messages sent while you're away are waiting when you come back. The relay buffers only ciphertext with a short expiry; nothing readable is ever stored anywhere
 - **Encrypted voice and video calls** -- peer-to-peer WebRTC with SFrame (AES-128-GCM)
-- **Screen sharing** -- with system audio capture (Windows & macOS), encrypted with the same SFrame pipeline
+- **Voice that sounds right** -- on-device noise suppression (RNNoise, with DeepFilterNet3 on desktop), automatic loudness leveling, fullband Opus. No cloud processing ever touches your audio
+- **Screen sharing that stays sharp** -- a custom-tuned WebRTC engine encodes screens as screen content, not webcam video: crisp text, AV1/VP9, resolution, framerate and content profiles. Works on all five platforms, both sending and receiving, encrypted with the same SFrame pipeline. Share audio travels on its own encrypted music-grade Opus stream (with per-app capture on Windows and Linux) instead of the voice-call path, so game or music audio arrives crisp instead of call-quality mushy
 - **File sharing** -- encrypted peer-to-peer transfers. Files up to 34 MB transfer directly. Larger files use Hollow Share (BitTorrent-like swarmed distribution)
 - **Distributed storage (Vault)** -- erasure-coded encrypted shards distributed across server members. Files survive even when individual peers go offline
 - **Servers and channels** -- create communities with text channels, voice channels, roles, and permissions. All state synchronized via CRDTs with no authoritative server. Optional: secure Twitch verification to limit members only to your followers/subs
@@ -131,6 +134,18 @@ In the Hollow app, enter your relay domain during setup or in Settings. See [rel
 - Flutter SDK (stable channel)
 - Rust toolchain (stable)
 - flutter_rust_bridge_codegen v2.11.1
+
+### The custom WebRTC engine
+
+Hollow's desktop builds ship a **patched libwebrtc**: screen shares are encoded
+as screen content instead of webcam video (screencast mode + W3C content
+hints), which is why text stays sharp instead of turning blocky. The patched
+binaries and headers are vendored in git at
+`packages/flutter_webrtc/third_party/libwebrtc/`, so a normal clone + build
+just works -- no downloads, no extra steps. Rebuilding libwebrtc itself is only
+needed for maintainers bumping the upstream milestone; the full reproducible
+recipe (source pins, patch file, gn args) lives in
+[BUILDING.md](packages/flutter_webrtc/third_party/libwebrtc/BUILDING.md).
 
 ### Build (Windows)
 

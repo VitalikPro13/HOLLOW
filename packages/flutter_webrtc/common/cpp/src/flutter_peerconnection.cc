@@ -809,6 +809,15 @@ scoped_refptr<RTCRtpParameters> FlutterPeerConnection::updateRtpParameters(
     }
   }
 
+  // CRITICAL: encodings() hands out COPIES of the underlying
+  // webrtc::RtpEncodingParameters (rtc_rtp_parameters_impl.cc wraps each in a
+  // fresh RefCountedObject). Without writing the mutated copies back, every
+  // per-encoding field above (maxBitrate/minBitrate/maxFramerate/
+  // scaleResolutionDownBy/...) is a silent no-op and the sender keeps its old
+  // encodings — only degradationPreference below mutates `parameters`
+  // directly. This was why screen-share resolution caps never applied.
+  parameters->set_encodings(params);
+
   EncodableValue value =
       findEncodableValue(newParameters, "degradationPreference");
   if (!value.IsNull()) {

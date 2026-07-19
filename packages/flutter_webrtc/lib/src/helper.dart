@@ -120,6 +120,22 @@ class Helper {
   static Future<void> selectAudioInput(String deviceId) =>
       NativeAudioManagement.selectAudioInput(deviceId);
 
+  /// Set the W3C contentHint on a native video track ('' | 'motion' |
+  /// 'detail' | 'text'). 'detail'/'text' force the screencast encoding
+  /// pipeline for the track's sender, 'motion' forces the camera pipeline,
+  /// '' defers to the capture source's is_screencast flag.
+  ///
+  /// Hollow desktop (Windows/Linux) only — rides the patched libwebrtc
+  /// wrapper's RTCVideoTrack::SetContentHint; other platforms have no
+  /// handler and will throw [PlatformException].
+  static Future<void> setVideoContentHint(
+      MediaStreamTrack track, String hint) async {
+    await WebRTC.invokeMethod('videoTrackSetContentHint', <String, dynamic>{
+      'trackId': track.id,
+      'hint': hint,
+    });
+  }
+
   /// Enable or disable speakerphone
   /// for iOS/Android only
   static Future<void> setSpeakerphoneOn(bool enable) =>

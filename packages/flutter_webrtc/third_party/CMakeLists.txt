@@ -81,6 +81,23 @@ endif()
 set(LIBWEBRTC_ASSET "libwebrtc-${LIBWEBRTC_OS}-${LIBWEBRTC_ARCH}-release")
 set(ZIPFILE "${LIBWEBRTC_THIRD_PARTY_DIR}/downloads/${LIBWEBRTC_ASSET}.zip")
 
+# Hollow ships a CUSTOM libwebrtc build (screen-content patches: desktop
+# is_screencast + RTCVideoTrack::SetContentHint) vendored in git at
+# third_party/libwebrtc/. When it is present, NEVER run the stock downloader:
+# extraction REMOVE_RECURSEs the vendored dir and would replace the patched
+# binaries/headers with stock ones, which no longer match the plugin sources
+# (SetContentHint would fail to compile/link). Downloader remains only as a
+# bootstrap fallback for checkouts that somehow lack the vendored build.
+if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
+  set(_libwebrtc_vendored_bin "${LIBWEBRTC_THIRD_PARTY_DIR}/libwebrtc/lib/libwebrtc.dll.lib")
+else()
+  set(_libwebrtc_vendored_bin "${LIBWEBRTC_THIRD_PARTY_DIR}/libwebrtc/lib/libwebrtc.so")
+endif()
+if(EXISTS "${_libwebrtc_vendored_bin}" AND EXISTS "${LIBWEBRTC_THIRD_PARTY_DIR}/libwebrtc/include/libwebrtc.h")
+  message(STATUS "libwebrtc: using vendored Hollow custom build (stock download skipped)")
+  return()
+endif()
+
 # Final URL = <base>/<binary_version>/<asset>.zip
 set(DOWNLOAD_URL "${LIBWEBRTC_DOWNLOAD_URL_BASE}/${LIBWEBRTC_BINARY_VERSION}/${LIBWEBRTC_ASSET}.zip")
 

@@ -6,6 +6,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/core/services/macos_version.dart';
+import 'package:hollow/src/core/services/screen_share_service.dart'
+    show ScreenContentProfile;
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
@@ -50,6 +52,10 @@ class ScreenShareSelection {
   final bool shareAudio;
   final int pid;
 
+  /// What the shared content mostly is — drives encoder tuning (degradation
+  /// preference, codec order, contentHint). See [ScreenContentProfile].
+  final ScreenContentProfile profile;
+
   /// For a WINDOW share on Windows: the window's HWND (the desktop source `id`
   /// IS the decimal HWND). 0 for screen shares. The screen-audio exe resolves
   /// this HWND -> owning pid -> the app's audio-rendering pids itself, which is
@@ -65,6 +71,7 @@ class ScreenShareSelection {
     this.shareAudio = false,
     this.pid = 0,
     this.windowHwnd = 0,
+    this.profile = ScreenContentProfile.motion,
   });
 
   /// Human-readable quality label, e.g. "1080p60", "4K30".
@@ -97,14 +104,41 @@ class _ScreenShareDialogState extends State<_ScreenShareDialog> {
   String? _selectedSourceId;
   ScreenShareResolution _resolution = ScreenShareResolution.p1080;
   ScreenShareFps _fps = ScreenShareFps.fps60;
+  ScreenContentProfile _profile = ScreenContentProfile.motion;
   bool _shareAudio = false;
   bool _loading = true;
   bool _showScreens = true; // true = screens tab, false = windows tab
   Timer? _refreshTimer;
+  late final List<ScreenShareResolution> _availableResolutions =
+      _computeAvailableResolutions();
+
+  /// Only offer resolutions a connected display can actually produce —
+  /// capture is native-res and the encoder only ever downscales, so a
+  /// preset above the display is pure waste (same pixels, higher bitrate
+  /// cap). Orientation-agnostic (portrait monitors compare by long/short
+  /// side); on multi-monitor setups a preset stays available if ANY display
+  /// fits it. Falls back to the full list if the platform reports nothing.
+  List<ScreenShareResolution> _computeAvailableResolutions() {
+    final displays = WidgetsBinding.instance.platformDispatcher.displays;
+    if (displays.isEmpty) return ScreenShareResolution.values;
+    bool fitsAny(ScreenShareResolution r) => displays.any((d) {
+          final w = d.size.width, h = d.size.height;
+          final long = w > h ? w : h;
+          final short = w > h ? h : w;
+          return r.width <= long && r.height <= short;
+        });
+    final fitting = ScreenShareResolution.values.where(fitsAny).toList();
+    return fitting.isEmpty ? [ScreenShareResolution.p360] : fitting;
+  }
 
   @override
   void initState() {
     super.initState();
+    // Clamp the default (1080p) down to the best available tier on smaller
+    // displays (e.g. a 720p laptop offers 360p/480p/720p, defaults to 720p).
+    if (!_availableResolutions.contains(_resolution)) {
+      _resolution = _availableResolutions.last;
+    }
     _loadSources();
 
     // Listen for source changes.
@@ -266,6 +300,37 @@ class _ScreenShareDialogState extends State<_ScreenShareDialog> {
                   ),
                   const SizedBox(height: HollowSpacing.md),
 
+                  // Content profile pills — tunes the encoder for what's
+                  // being shared. Switching also snaps the fps default
+                  // (15 for text, 60 for motion); the user can still
+                  // override fps afterwards.
+                  Row(
+                    children: [
+                      Text(
+                        'Optimize for',
+                        style: HollowTypography.caption.copyWith(
+                          color: hollow.textSecondary,
+                          fontSize: 12,
+                        ),
+                      ),
+                      const SizedBox(width: HollowSpacing.sm),
+                      _buildPill(
+                          'Smooth motion',
+                          _profile == ScreenContentProfile.motion,
+                          () => setState(() {
+                                _profile = ScreenContentProfile.motion;
+                                _fps = ScreenShareFps.fps60;
+                              })),
+                      _buildPill(
+                          'Sharp text',
+                          _profile == ScreenContentProfile.text,
+                          () => setState(() {
+                                _profile = ScreenContentProfile.text;
+                                _fps = ScreenShareFps.fps15;
+                              })),
+                    ],
+                  ),
+                  const SizedBox(height: HollowSpacing.sm),
                   // Quality: resolution pills
                   Row(
                     children: [
@@ -277,7 +342,7 @@ class _ScreenShareDialogState extends State<_ScreenShareDialog> {
                         ),
                       ),
                       const SizedBox(width: HollowSpacing.sm),
-                      ...ScreenShareResolution.values.map((r) =>
+                      ..._availableResolutions.map((r) =>
                           _buildPill(r.label, r == _resolution,
                               () => setState(() => _resolution = r))),
                     ],
@@ -396,6 +461,7 @@ class _ScreenShareDialogState extends State<_ScreenShareDialog> {
                                     shareAudio: _shareAudio,
                                     pid: selectedSource?.pid ?? 0,
                                     windowHwnd: hwnd,
+                                    profile: _profile,
                                   ),
                                 );
                               }

@@ -35,6 +35,7 @@ class VoiceChannelPanel extends ConsumerWidget {
               shareAudio: selection.shareAudio,
               pid: selection.pid,
               windowHwnd: selection.windowHwnd,
+              profile: selection.profile,
             );
       }
     }

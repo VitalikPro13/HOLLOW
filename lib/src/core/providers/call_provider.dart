@@ -817,6 +817,7 @@ class CallNotifier extends Notifier<CallState> {
     bool shareAudio = false,
     int pid = 0,
     int windowHwnd = 0,
+    ScreenContentProfile profile = ScreenContentProfile.motion,
   }) async {
     if (state.status != CallStatus.active) return;
 
@@ -855,6 +856,7 @@ class CallNotifier extends Notifier<CallState> {
       final offerSdp = await _outgoingScreenShare!.createOffer(
         sourceId, width, height, fps,
         shareAudio: shareAudio,
+        profile: profile,
       );
 
       // Enable SFrame E2EE on the screen share PC.

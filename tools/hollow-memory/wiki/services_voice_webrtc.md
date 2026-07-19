@@ -529,7 +529,7 @@ Takes `localPeerId` and `iceServers`. State:
 
 libwebrtc's desktop capturer ignores all resolution constraints (`scaleResolutionDownBy`, mandatory width/height). Native platform capture APIs were used to replace it:
 
-**Windows:** `NativeScreenCapturer` (`packages/flutter_webrtc/windows/native_screen_capturer.{h,cc}`) uses Graphics Capture API + D3D11, downscales via `ScaleBGRA()`, pushes frames via `RTCVideoFrame::CreateFromBGRA()` → `RTCVideoSource::OnCapturedFrame()`. **⚠️ As of the 1.5.2 / stock-libwebrtc-m144 rebase (2026-06-26) this is GATED OFF and screen-share video falls back to libwebrtc's own desktop capturer.** `CreateFromBGRA` only exists in the fork's OLD custom-patched libwebrtc; stock webrtc-sdk m144 lacks it. The file stays on disk and all its call sites in `flutter_screen_capture.{cc,h}` are behind `#if defined(_WIN32) && defined(HOLLOW_USE_NATIVE_SCREEN_CAPTURER)` — re-enable by defining that macro + linking a libwebrtc that exports `CreateFromBGRA` (or port the 2 call sites to stock `RTCVideoFrame::Create()` + a BGRA→I420 conversion). So Windows screen-share resolution control via the native capturer is currently INACTIVE; whether stock m144's quality scaler respects resolution on its own is an open question. `StartMonitor(HMONITOR)`/`StartWindow(HWND)` (gated). See `project_flutter_webrtc_152_upgrade`.
+**Windows:** `NativeScreenCapturer` (`packages/flutter_webrtc/windows/native_screen_capturer.{h,cc}`) uses Graphics Capture API + D3D11, downscales via `ScaleBGRA()`, pushes frames via `RTCVideoFrame::CreateFromBGRA()` → `RTCVideoSource::OnCapturedFrame()`. **⚠️ As of the 1.5.2 / stock-libwebrtc-m144 rebase (2026-06-26) this is GATED OFF and screen-share video falls back to libwebrtc's own desktop capturer.** `CreateFromBGRA` only exists in the fork's OLD custom-patched libwebrtc; stock webrtc-sdk m144 lacks it. The file stays on disk and all its call sites in `flutter_screen_capture.{cc,h}` are behind `#if defined(_WIN32) && defined(HOLLOW_USE_NATIVE_SCREEN_CAPTURER)` — re-enable by defining that macro + linking a libwebrtc that exports `CreateFromBGRA` (or port the 2 call sites to stock `RTCVideoFrame::Create()` + a BGRA→I420 conversion). So Windows screen-share resolution control via the native capturer is currently INACTIVE. (2026-07-19 answer to the then-open quality-scaler question: stock m144 encoded desktop shares as CAMERA content — quality scaler ON, blocky text; fixed by the custom libwebrtc build, see "Screen-Content Encoding" below.) `StartMonitor(HMONITOR)`/`StartWindow(HWND)` (gated). See `project_flutter_webrtc_152_upgrade`.
 
 **macOS:** `FlutterScreenCaptureKitCapturer` accepts `width:height:` params — `SCStreamConfiguration.width/height` set to target dimensions (GPU-accelerated downscale). Window capture via `SCContentFilter initWithDesktopIndependentWindow:`. Both screen and window sources use ScreenCaptureKit path. (Unaffected by the rebase — does not use `CreateFromBGRA`.)
 
@@ -539,22 +539,27 @@ libwebrtc's desktop capturer ignores all resolution constraints (`scaleResolutio
 
 **NOTE — the `screen_audio_capturer.exe` is AUDIO-ONLY.** A common misconception is that a native capturer streams VIDEO over the data channel; it does not. `screen_audio_test.exe` (`test_apps/screen_audio_test/`) handles ONLY screen-share system audio (WASAPI loopback → Opus → data channel `0x03` → playback). All screen-share VIDEO goes through a WebRTC video track (native capturer when enabled, else libwebrtc's). A native-video-over-data-channel path does not exist (it's a candidate future architecture).
 
+### Screen-Content Encoding (2026-07-19 overhaul)
+
+Desktop screen shares now ride a **custom libwebrtc build** (both `libwebrtc.dll` and `libwebrtc.so`, vendored in git at `packages/flutter_webrtc/third_party/libwebrtc/` with two patch files + `BUILDING.md` recipe):
+
+- `ScreenCapturerTrackSource::is_screencast()` returns `true` — activates libwebrtc's screencast pipeline (denoising off, QP quality scaler off, VP8 screen mode / VP9 screen tune / AV1 palette on). Previously desktop shares encoded as CAMERA content = the historical blocky text.
+- `RTCVideoTrack::SetContentHint` exposed; Dart `Helper.setVideoContentHint(track, hint)` → plugin method `videoTrackSetContentHint`. `_applyContentHint` (Windows+Linux) sends `'detail'` for the text profile, `''` for motion. NEVER send `'motion'` — it forces the camera pipeline back on.
+- **`ScreenContentProfile { text, motion }`** rides `createOffer`/`createOfferFromStream` from the share dialog ("Optimize for" pills; motion default keeps 1080p60, text snaps fps to 15). Stored in VoiceChannelProvider (`_screenShareProfile`) for VC re-offers.
+- **setParameters write-back fix** (`flutter_peerconnection.cc` `updateRtpParameters`): the wrapper's `encodings()` returns COPIES; without `parameters->set_encodings(params)` every per-encoding field was a silent no-op on Windows/Linux — maxBitrate/minBitrate/maxFramerate/scaleResolutionDownBy had NEVER applied.
+- Codec preference (`_applyScreenCodecPreference`, both offer paths, desktop senders only): macOS VP8→VP9 (Apple H.264 hw-profile black-screen trap), Win/Linux VP9→VP8 with AV1 first on the text profile. Stable bucket ordering (Dart List.sort is not stable).
+
 ### Resolution and Bitrate Capping
 
-`_applyResolutionCap(maxWidth, maxHeight, fps)`: Belt-and-suspenders on the video sender's encoding parameters after `addTrack`. Native capture handles the real resolution control; this constrains the encoder as a second layer:
+`_applyResolutionCap(maxWidth, maxHeight, fps, profile)` on the video sender after `addTrack`:
 
-1. Sets `degradationPreference = MAINTAIN_FRAMERATE` to prevent adaptive quality from overriding resolution
-2. Gets sender track settings (captureWidth/captureHeight)
-3. Computes scale factor if capture exceeds target, sets `scaleResolutionDownBy`
-4. Sets `maxFramerate` to user-selected fps
-5. Caps bitrate by pixel count tier:
-   - 360p: 800 kbps
-   - 480p: 1500 kbps
-   - 720p: 3000 kbps
-   - 1080p: 6000 kbps
-   - 1440p: 9000 kbps
-   - 4K: 15000 kbps
-6. Higher than camera bitrates because screen content has sharp edges/text that compress poorly
+1. `degradationPreference`: text profile → `MAINTAIN_RESOLUTION` (drop frames, keep sharpness — W3C mapping for text content); motion → `MAINTAIN_FRAMERATE`
+2. Computes scale factor from track settings if capture exceeds target, sets `scaleResolutionDownBy` (capture is native-res; the encoder downscales — the local preview always shows native res by design). **OPEN BUG: receiver still gets native res — see repo tmp_nextSession.txt**
+3. `maxFramerate` = user-selected fps
+4. Bitrate caps by pixel tier (800/1500/3000/6000/9000/15000 kbps for 360p→4K) — higher than camera because screen content compresses poorly
+5. **minBitrate floors** (300/500/800/1500/2000/2500 kbps) so a stale low bandwidth estimate can't starve the encoder into QP mush
+
+The share dialog (`screen_share_dialog.dart`) also locks resolution presets to what a connected display can produce (`_computeAvailableResolutions` via `platformDispatcher.displays`, orientation-agnostic, any-display rule).
 
 ### Outgoing Screen Share
 

@@ -20,6 +20,17 @@ void _log(String msg) {
   network_api.logFromDart(message: msg);
 }
 
+/// What the shared content mostly is — drives encoder tuning.
+///
+/// [text]: code, documents, UI. Under pressure the encoder drops FRAMES and
+/// keeps resolution (blocky text is the visible failure mode); codec
+/// preference leans AV1/VP9 (screen-content compression); dialog defaults
+/// to 15 fps so each refresh gets a bigger bit budget.
+///
+/// [motion]: gameplay, video playback. Under pressure the encoder keeps
+/// FRAMERATE (a slideshow hurts more than blur); VP9-first; 60 fps default.
+enum ScreenContentProfile { text, motion }
+
 /// Manages a dedicated RTCPeerConnection for one direction of screen sharing.
 ///
 /// Each screen share direction (local→remote, remote→local) gets its own
@@ -74,6 +85,10 @@ class ScreenShareService {
   /// Preferred audio output device — set by CallNotifier before handleOffer.
   String? preferredAudioOutputDeviceId;
 
+  /// Content profile of the current outgoing share (set by both offer paths).
+  /// Will also drive the track contentHint once the fork exposes it.
+  ScreenContentProfile _contentProfile = ScreenContentProfile.motion;
+
   // --- Screen audio via out-of-process capturer (Windows) ---
   ScreenAudioCapturer? _screenAudioCapturer;
   // --- Screen audio via ScreenCaptureKit (macOS 13.0–14.1) ---
@@ -91,7 +106,8 @@ class ScreenShareService {
   /// encoding parameters. Even though getDisplayMedia now receives width/height
   /// constraints, the desktop capturer may still deliver native-resolution
   /// frames — this enforces the cap at the encoder level as a second layer.
-  Future<void> _applyResolutionCap(int maxWidth, int maxHeight, int fps) async {
+  Future<void> _applyResolutionCap(
+      int maxWidth, int maxHeight, int fps, ScreenContentProfile profile) async {
     if (_pc == null) return;
     final senders = await _pc!.getSenders();
     for (final sender in senders) {
@@ -101,12 +117,14 @@ class ScreenShareService {
           params.encodings = [RTCRtpEncoding()];
         }
 
-        // Prevent WebRTC's adaptive quality scaler from overriding our
-        // resolution cap. "maintain-framerate" tells the encoder to drop
-        // resolution (not frames) under bandwidth pressure — and with a
-        // tight maxBitrate it can't ramp resolution back up either.
-        params.degradationPreference =
-            RTCDegradationPreference.MAINTAIN_FRAMERATE;
+        // Text content must stay SHARP: under bandwidth/CPU pressure drop
+        // frames, never resolution (maintain-resolution is the W3C mapping
+        // for detail/text screen content). Motion content is the opposite —
+        // a slideshow hurts more than transient blur. The resolution cap
+        // itself is enforced by scaleResolutionDownBy below either way.
+        params.degradationPreference = profile == ScreenContentProfile.text
+            ? RTCDegradationPreference.MAINTAIN_RESOLUTION
+            : RTCDegradationPreference.MAINTAIN_FRAMERATE;
 
         for (final encoding in params.encodings!) {
           _configureVideoEncoding(
@@ -145,7 +163,13 @@ class ScreenShareService {
 
     final maxBitrateKbps = _maxBitrateKbpsFor(maxWidth, maxHeight);
     encoding.maxBitrate = maxBitrateKbps * 1000; // bps
-    _log('[HOLLOW-SCREEN] Set maxBitrate=${maxBitrateKbps}kbps '
+    // Floor the allocation too: after a congestion episode the bandwidth
+    // estimator ramps back slowly, and with no floor the encoder sits at a
+    // starvation bitrate long after the link recovers — text turns to QP
+    // mush with nothing pushing it back up.
+    final minBitrateKbps = _minBitrateKbpsFor(maxWidth, maxHeight);
+    encoding.minBitrate = minBitrateKbps * 1000; // bps
+    _log('[HOLLOW-SCREEN] Set bitrate=$minBitrateKbps-${maxBitrateKbps}kbps '
         'maxFramerate=${fps}fps for ${maxWidth}x$maxHeight');
   }
 
@@ -174,6 +198,26 @@ class ScreenShareService {
     }
   }
 
+  /// Minimum bitrate floor per tier — high enough that the encoder is never
+  /// starved into blockiness by a stale low bandwidth estimate, low enough
+  /// not to overrun genuinely narrow (e.g. TURN-relayed) links.
+  int _minBitrateKbpsFor(int maxWidth, int maxHeight) {
+    final pixels = maxWidth * maxHeight;
+    if (pixels <= 640 * 360) {
+      return 300;
+    } else if (pixels <= 854 * 480) {
+      return 500;
+    } else if (pixels <= 1280 * 720) {
+      return 800;
+    } else if (pixels <= 1920 * 1080) {
+      return 1500;
+    } else if (pixels <= 2560 * 1440) {
+      return 2000;
+    } else {
+      return 2500;
+    }
+  }
+
   // ---------------------------------------------------------------------------
   // Outgoing: we share our screen to the remote peer.
   // ---------------------------------------------------------------------------
@@ -186,9 +230,12 @@ class ScreenShareService {
     int height,
     int fps, {
     bool shareAudio = false,
+    ScreenContentProfile profile = ScreenContentProfile.motion,
   }) async {
     _log('[HOLLOW-SCREEN] Creating offer: source=$sourceId '
-        '${width}x$height @ ${fps}fps audio=$shareAudio');
+        '${width}x$height @ ${fps}fps audio=$shareAudio '
+        'profile=${profile.name}');
+    _contentProfile = profile;
 
     // Idempotent: tear down any prior PC/stream on this service before
     // capturing a new one, so a re-share on the same instance can't strand the
@@ -256,10 +303,11 @@ class ScreenShareService {
     await _pc!.addTrack(screenTrack, _screenStream!);
     _log('[HOLLOW-SCREEN] Added screen video track to PC');
 
-    await _preferVp8OnMacOS(screenTrack);
+    await _applyContentHint(screenTrack);
+    await _applyScreenCodecPreference(screenTrack, profile);
 
     // Apply resolution cap on the encoder (getDisplayMedia captures at native res).
-    await _applyResolutionCap(width, height, fps);
+    await _applyResolutionCap(width, height, fps, profile);
 
     await _addCapturedAudioTracks(shareAudio);
 
@@ -335,33 +383,81 @@ class ScreenShareService {
     }
   }
 
-  /// On macOS prefer VP8 for screen share. Apple's H.264 hardware encoder
-  /// can emit a profile (e.g. high) that Windows libwebrtc's software
-  /// decoder fails to render — frames decode to a black image with no
-  /// error. VP8 has no profile axis and works identically on both ends.
-  Future<void> _preferVp8OnMacOS(MediaStreamTrack screenTrack) async {
-    if (!Platform.isMacOS) return;
+  /// Push the content profile down to the native encoder pipeline as a W3C
+  /// contentHint. Windows + Linux: the hint rides our patched libwebrtc
+  /// binaries (RTCVideoTrack::SetContentHint, vendored in third_party);
+  /// darwin/Android capture sources already carry the screencast flag
+  /// natively and have no wrapper hint API.
+  ///
+  /// text → 'detail' (screencast pipeline, explicitly). motion → '' (defer
+  /// to the source's is_screencast=true, which our patched desktop capture
+  /// source now sets — screencast pipeline with framerate-first
+  /// degradation). We deliberately never send 'motion': it would force the
+  /// CAMERA pipeline (denoising + QP quality scaler) back on.
+  Future<void> _applyContentHint(MediaStreamTrack screenTrack) async {
+    if (!Platform.isWindows && !Platform.isLinux) return;
+    final hint = _contentProfile == ScreenContentProfile.text ? 'detail' : '';
+    try {
+      await Helper.setVideoContentHint(screenTrack, hint);
+      _log('[HOLLOW-SCREEN] contentHint="$hint" applied '
+          '(profile=${_contentProfile.name})');
+    } catch (e) {
+      _log('[HOLLOW-SCREEN] contentHint set failed (ignored): $e');
+    }
+  }
+
+  /// Order codec preferences for the screen-share sender (desktop senders
+  /// only — mobile hardware encoder support varies; leave its defaults alone).
+  ///
+  /// - macOS: VP8 first (Apple's H.264 hardware encoder can emit a profile
+  ///   that Windows libwebrtc's software decoder renders as pure black with
+  ///   no error; VP8 has no profile axis), VP9 second.
+  /// - Windows/Linux: VP9 first (≈2x VP8's quality-per-bit on screen
+  ///   content), VP8 as the universal fallback. For the TEXT profile AV1
+  ///   leads: it has actual screen-content tools (palette mode) and its
+  ///   software encode is cheap at text-profile framerates. Receivers
+  ///   without AV1/VP9 fall back through normal SDP negotiation.
+  Future<void> _applyScreenCodecPreference(
+      MediaStreamTrack screenTrack, ScreenContentProfile profile) async {
+    if (Platform.isAndroid || Platform.isIOS) return;
     try {
       final caps = await getRtpSenderCapabilities('video');
-      final vp8 = caps.codecs
-              ?.where((c) => c.mimeType.toLowerCase().endsWith('vp8'))
-              .toList() ??
-          [];
-      if (vp8.isNotEmpty) {
-        final transceivers = await _pc!.getTransceivers();
-        for (final t in transceivers) {
-          if (t.sender.track?.id == screenTrack.id) {
-            // Put VP8 first; keep other codecs as fallback in case the
-            // remote peer can't negotiate VP8 for some reason.
-            final ordered = [
-              ...vp8,
-              ...(caps.codecs ?? []).where(
-                  (c) => !c.mimeType.toLowerCase().endsWith('vp8')),
-            ];
-            await t.setCodecPreferences(ordered);
-            _log('[HOLLOW-SCREEN] Forced VP8 codec preference on macOS');
-            break;
-          }
+      final codecs = caps.codecs ?? [];
+      if (codecs.isEmpty) return;
+
+      int rank(RTCRtpCodecCapability c) {
+        final mime = c.mimeType.toLowerCase();
+        if (Platform.isMacOS) {
+          if (mime == 'video/vp8') return 0;
+          if (mime == 'video/vp9') return 1;
+          return 2;
+        }
+        if (profile == ScreenContentProfile.text && mime == 'video/av1') {
+          return 0;
+        }
+        if (mime == 'video/vp9') return 1;
+        if (mime == 'video/vp8') return 2;
+        return 3;
+      }
+
+      // Stable bucket ordering (List.sort is not stable in Dart — rtx/red/
+      // ulpfec entries must keep their relative order).
+      final buckets = <int, List<RTCRtpCodecCapability>>{};
+      for (final c in codecs) {
+        buckets.putIfAbsent(rank(c), () => []).add(c);
+      }
+      final ordered = [
+        for (final k in buckets.keys.toList()..sort()) ...buckets[k]!,
+      ];
+
+      final transceivers = await _pc!.getTransceivers();
+      for (final t in transceivers) {
+        if (t.sender.track?.id == screenTrack.id) {
+          await t.setCodecPreferences(ordered);
+          _log('[HOLLOW-SCREEN] Codec preference: '
+              '${ordered.take(3).map((c) => c.mimeType).join(' > ')} '
+              '(profile=${profile.name})');
+          break;
         }
       }
     } catch (e) {
@@ -388,8 +484,16 @@ class ScreenShareService {
   /// Create an offer using a pre-captured screen stream (for voice channels
   /// where one capture is shared across multiple peer connections).
   /// The caller manages the track poller centrally.
-  Future<String> createOfferFromStream(MediaStream stream, {int maxWidth = 1920, int maxHeight = 1080, int fps = 60}) async {
-    _log('[HOLLOW-SCREEN] Creating offer from shared stream');
+  Future<String> createOfferFromStream(
+    MediaStream stream, {
+    int maxWidth = 1920,
+    int maxHeight = 1080,
+    int fps = 60,
+    ScreenContentProfile profile = ScreenContentProfile.motion,
+  }) async {
+    _log('[HOLLOW-SCREEN] Creating offer from shared stream '
+        '(profile=${profile.name})');
+    _contentProfile = profile;
 
     // Idempotent: if this service already holds a PC (re-fired offer on
     // reconnect), tear the old one down before building a new one so its
@@ -420,8 +524,11 @@ class ScreenShareService {
       await _pc!.addTrack(screenTrack, _screenStream!);
       _log('[HOLLOW-SCREEN] Added screen video track to PC');
 
+      await _applyContentHint(screenTrack);
+      await _applyScreenCodecPreference(screenTrack, profile);
+
       // Apply resolution cap on the encoder.
-      await _applyResolutionCap(maxWidth, maxHeight, fps);
+      await _applyResolutionCap(maxWidth, maxHeight, fps, profile);
 
       // Add audio tracks if available (macOS Process Tap audio goes via tracks).
       final audioTracks = _screenStream!.getAudioTracks();

@@ -284,6 +284,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
   bool _screenShareAudio = false;
   int _screenSharePid = 0;
   int _screenShareHwnd = 0;
+  ScreenContentProfile _screenShareProfile = ScreenContentProfile.motion;
   ScreenAudioReceiver? _screenAudioRenderer;
 
   /// MOBILE share-audio capture — ONE central instance for the whole channel
@@ -1146,6 +1147,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     bool shareAudio = false,
     int pid = 0,
     int windowHwnd = 0,
+    ScreenContentProfile profile = ScreenContentProfile.motion,
   }) async {
     if (!state.isInVoiceChannel || _leaving) return;
     if (state.isScreenSharing) return;
@@ -1164,6 +1166,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     _screenShareAudio = shareAudio;
     _screenSharePid = pid;
     _screenShareHwnd = windowHwnd;
+    _screenShareProfile = profile;
 
     // Capture screen ONCE. Source enumeration is desktop-only; mobile
     // captures THE screen (MediaProjection / ReplayKit broadcast).
@@ -1439,6 +1442,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
         maxWidth: _screenShareMaxWidth,
         maxHeight: _screenShareMaxHeight,
         fps: _screenShareFps,
+        profile: _screenShareProfile,
       );
 
       // Enable SFrame E2EE on the outgoing screen share PC.
