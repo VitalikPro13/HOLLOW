@@ -476,9 +476,17 @@ void FlutterWebRTC::HandleMethodCall(
         GetValue<EncodableMap>(*method_call.arguments());
     const std::string track_id = findString(params, "trackId");
     const EncodableValue enable = findEncodableValue(params, "enabled");
-    RTCMediaTrack* track = MediaTrackForId(track_id);
+    scoped_refptr<RTCMediaTrack> track = MediaTrackForId(track_id);
     if (track != nullptr) {
-      track->set_enabled(GetValue<bool>(enable));
+      const bool value = GetValue<bool>(enable);
+      if (track->kind().std_string() == "audio") {
+        // Off the platform thread — see HollowAudioOpQueue. Video stays
+        // synchronous (camera flows untouched).
+        audio_op_queue().Post("setEnabled",
+                              [track, value]() { track->set_enabled(value); });
+      } else {
+        track->set_enabled(value);
+      }
     }
     result->Success();
   } else if (method_call.method_name().compare("trackDispose") == 0) {
@@ -596,8 +604,8 @@ void FlutterWebRTC::HandleMethodCall(
       return;
     }
 
-    RTCMediaTrack* track = MediaTrackForId(trackId);
-    if (nullptr == track) {
+    scoped_refptr<RTCMediaTrack> track = MediaTrackForId(trackId);
+    if (nullptr == track.get()) {
       result->Error("setVolume", "setVolume() Unable to find provided track");
       return;
     }
@@ -609,8 +617,13 @@ void FlutterWebRTC::HandleMethodCall(
       return;
     }
 
-    auto audioTrack = static_cast<RTCAudioTrack*>(track);
-    audioTrack->SetVolume(volume.value());
+    // Off the platform thread — SetVolume is a signaling-thread hop that
+    // queues behind mic teardown during mute churn (see HollowAudioOpQueue).
+    auto audioTrack =
+        scoped_refptr<RTCAudioTrack>(static_cast<RTCAudioTrack*>(track.get()));
+    const double vol = volume.value();
+    audio_op_queue().Post("setVolume",
+                          [audioTrack, vol]() { audioTrack->SetVolume(vol); });
 
     result->Success();
   } else if (method_call.method_name().compare("setCaptureGain") == 0) {

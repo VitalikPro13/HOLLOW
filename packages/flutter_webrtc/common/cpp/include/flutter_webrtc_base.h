@@ -4,10 +4,16 @@
 #include "flutter_common.h"
 
 #include <string.h>
+#include <chrono>
+#include <condition_variable>
+#include <deque>
+#include <functional>
 #include <list>
 #include <map>
 #include <memory>
 #include <mutex>
+#include <string>
+#include <thread>
 
 #include "libwebrtc.h"
 
@@ -34,6 +40,41 @@ class FlutterPeerConnectionObserver;
 #ifdef _WIN32
 class FlutterVoiceRedirect;
 #endif
+
+// Hollow fork: serial worker for audio-track ops that are SYNCHRONOUS
+// signaling-thread hops (set_enabled, SetVolume, stream->RemoveTrack for
+// audio). This build's LiveKit core releases the microphone while all audio
+// tracks are disabled/removed, so each of these can carry a full audio-HAL
+// teardown (~0.5 s; 662 ms trackDispose hangup stall, sentinel 2026-07-18).
+// With Flutter's merged UI/platform thread that blocks rendering — run them
+// here instead. Order is preserved (single thread), audible behavior is
+// identical. Desktop analog of Java audioTrackOpExecutor / darwin
+// HollowAudioTrackOpQueue — KEEP the three in sync.
+class HollowAudioOpQueue {
+ public:
+  ~HollowAudioOpQueue();
+  // Queues `task` on the worker (lazily started). `op_name` must be a
+  // string literal — it is kept by pointer for the sentinel line.
+  void Post(const char* op_name, std::function<void()> task);
+  // Drains remaining ops and joins the worker. Idempotent. Must run BEFORE
+  // LibWebRTC::Terminate() (~FlutterWebRTCBase calls it explicitly — member
+  // destruction alone would run after the Terminate in the dtor body).
+  void Shutdown();
+
+ private:
+  struct QueuedOp {
+    const char* name;
+    std::chrono::steady_clock::time_point enqueued_at;
+    std::function<void()> fn;
+  };
+  void Run();
+  std::mutex mu_;
+  std::condition_variable cv_;
+  std::deque<QueuedOp> queue_;
+  std::thread thread_;
+  bool started_ = false;
+  bool stop_ = false;
+};
 
 class FlutterWebRTCBase {
  public:
@@ -118,6 +159,8 @@ class FlutterWebRTCBase {
   libwebrtc::scoped_refptr<libwebrtc::KeyProvider> GetKeyProviderForId(
       const std::string& keyProviderId);
 
+  HollowAudioOpQueue& audio_op_queue() { return audio_op_queue_; }
+
  private:
   void ParseConstraints(const EncodableMap& src,
                         scoped_refptr<RTCMediaConstraints> mediaConstraints,
@@ -163,6 +206,9 @@ class FlutterWebRTCBase {
   TaskRunner* task_runner_;
   TextureRegistrar* textures_;
   std::unique_ptr<EventChannelProxy> event_channel_;
+  // LAST member: destroyed first, so the worker drains and joins while the
+  // factory/tracks above are still alive.
+  HollowAudioOpQueue audio_op_queue_;
 };
 
 }  // namespace flutter_webrtc_plugin

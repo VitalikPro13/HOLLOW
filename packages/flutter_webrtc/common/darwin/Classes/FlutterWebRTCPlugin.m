@@ -1209,7 +1209,14 @@ static __weak id<RTCAudioDeviceModuleDelegate> gAudioDeviceModuleObserver = nil;
       RTCMediaStream* stream = [self.localStreams objectForKey:streamId];
       for (RTCAudioTrack* track in stream.audioTracks) {
         if ([trackId isEqualToString:track.trackId]) {
-          [stream removeAudioTrack:track];
+          // removeAudioTrack is a signaling-thread hop and at hangup it can
+          // carry the mic-release HAL teardown — same stall class as mute
+          // (see HollowAudioTrackOpQueue), so it runs off the UI thread.
+          // The block retains stream + track, so the removal stays valid
+          // after localStreams lets go of the stream.
+          HollowRunAudioTrackOp(@"trackDispose", ^{
+            [stream removeAudioTrack:track];
+          });
           audioTrack = YES;
         }
       }
@@ -1228,7 +1235,19 @@ static __weak id<RTCAudioDeviceModuleDelegate> gAudioDeviceModuleObserver = nil;
     }
     [_localTracks removeObjectForKey:trackId];
     if (audioTrack) {
-      [self ensureAudioSession];
+      // Inlined ensureAudioSession, split across threads: the recording
+      // flag MUST be computed here (hasLocalAudioTrack reads _localTracks —
+      // platform-thread state, and it must see the removal above), while
+      // the AVAudioSession work — the slow part — rides the same serial
+      // queue so it runs AFTER the queued removeAudioTrack.
+#if TARGET_OS_IPHONE
+      if (self.audioSessionManagementEnabled) {
+        BOOL recording = [self hasLocalAudioTrack];
+        HollowRunAudioTrackOp(@"ensureAudioSession", ^{
+          [AudioUtils ensureAudioSessionWithRecording:recording];
+        });
+      }
+#endif
     }
     FlutterRTCVideoRenderer *renderer = [self findRendererByTrackId:trackId];
     if(renderer != nil) {

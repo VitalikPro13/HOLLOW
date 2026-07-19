@@ -9,9 +9,76 @@
 
 #include "helper.h"
 
+#include <cstdio>
+
 namespace flutter_webrtc_plugin {
 
 const char* kEventChannelName = "FlutterWebRTC.Event";
+
+void HollowAudioOpQueue::Post(const char* op_name, std::function<void()> task) {
+  std::unique_lock<std::mutex> lock(mu_);
+  if (stop_) {
+    return;  // plugin teardown — the drain in Shutdown() already ran
+  }
+  if (!started_) {
+    started_ = true;
+    thread_ = std::thread([this]() { Run(); });
+  }
+  queue_.push_back({op_name, std::chrono::steady_clock::now(), std::move(task)});
+  cv_.notify_one();
+}
+
+void HollowAudioOpQueue::Run() {
+  // [SENTINEL] enqueue->run latency watchdog: the queue keeps a congested
+  // signaling thread from freezing the UI, but an op waiting >500 ms is
+  // still an anomaly worth ONE line per episode (the latch re-arms once ops
+  // run promptly again). KEEP IN SYNC with runAudioTrackOp
+  // (MethodCallHandlerImpl.java) and HollowRunAudioTrackOp (darwin).
+  bool congested = false;
+  for (;;) {
+    QueuedOp op;
+    {
+      std::unique_lock<std::mutex> lock(mu_);
+      cv_.wait(lock, [this]() { return stop_ || !queue_.empty(); });
+      if (queue_.empty()) {
+        return;  // stop_ set and fully drained
+      }
+      op = std::move(queue_.front());
+      queue_.pop_front();
+    }
+    const long long wait_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - op.enqueued_at)
+            .count();
+    if (wait_ms > 500) {
+      if (!congested) {
+        congested = true;
+        std::fprintf(stderr,
+                     "[SENTINEL] audioTrackOp %s enqueue->run %lldms "
+                     "(signaling thread congested)\n",
+                     op.name, wait_ms);
+      }
+    } else if (wait_ms < 100) {
+      congested = false;
+    }
+    op.fn();
+  }
+}
+
+void HollowAudioOpQueue::Shutdown() {
+  {
+    std::unique_lock<std::mutex> lock(mu_);
+    stop_ = true;
+  }
+  cv_.notify_all();
+  if (thread_.joinable()) {
+    thread_.join();
+  }
+}
+
+HollowAudioOpQueue::~HollowAudioOpQueue() {
+  Shutdown();
+}
 
 FlutterWebRTCBase::FlutterWebRTCBase(BinaryMessenger* messenger,
                                      TextureRegistrar* textures,
@@ -35,6 +102,8 @@ FlutterWebRTCBase::FlutterWebRTCBase(BinaryMessenger* messenger,
 }
 
 FlutterWebRTCBase::~FlutterWebRTCBase() {
+  // Drain queued audio ops while the factory/tracks are still alive.
+  audio_op_queue_.Shutdown();
   LibWebRTC::Terminate();
   // Deleted after Terminate() so the audio pipeline no longer references it.
   if (capture_gain_processor_) {

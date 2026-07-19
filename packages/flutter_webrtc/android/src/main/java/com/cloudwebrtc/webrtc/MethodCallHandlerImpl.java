@@ -1976,9 +1976,24 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
       return;
     }
     removeTrackForRendererById(trackId);
-    track.setEnabled(false);
     if (track instanceof LocalVideoTrack) {
+      track.setEnabled(false);
       getUserMediaImpl.removeVideoCapturer(trackId);
+    } else {
+      // Audio: setEnabled(false) is a synchronous signaling-thread hop and
+      // at hangup it carries the mic-release HAL teardown — the same stall
+      // class as mute (see audioTrackOpExecutor), so it runs off the
+      // platform thread. The lambda holds the wrapper; if streamDispose
+      // freed the native track before this op ran, nothing is left to
+      // disable.
+      final LocalTrack audioTrack = track;
+      runAudioTrackOp("disposeDisable", () -> {
+        try {
+          audioTrack.setEnabled(false);
+        } catch (IllegalStateException e) {
+          Log.d(TAG, "trackDispose(): track already disposed, skipping");
+        }
+      });
     }
     synchronized (localTracks) {
       localTracks.remove(trackId);

@@ -1,6 +1,10 @@
 #include "flutter_media_stream.h"
 
+#include <string>
+#include <vector>
+
 #include "flutter_utf8_sanitize.h"
+#include "task_runner.h"
 
 #define DEFAULT_WIDTH 1280
 #define DEFAULT_HEIGHT 720
@@ -558,28 +562,41 @@ void FlutterMediaStream::MediaStreamDispose(
     return;
   }
 
-  vector<scoped_refptr<RTCAudioTrack>> audio_tracks = stream->audio_tracks();
-
-  for (auto track : audio_tracks.std_vector()) {
-    stream->RemoveTrack(track);
-    base_->local_tracks_.erase(track->id().std_string());
-  }
-
-  vector<scoped_refptr<RTCVideoTrack>> video_tracks = stream->video_tracks();
-  for (auto track : video_tracks.std_vector()) {
-    stream->RemoveTrack(track);
-    base_->local_tracks_.erase(track->id().std_string());
-    if (base_->video_capturers_.find(track->id().std_string()) !=
-        base_->video_capturers_.end()) {
-      auto video_capture = base_->video_capturers_[track->id().std_string()];
-      if (video_capture->CaptureStarted()) {
-        video_capture->StopCapture();
-      }
-      base_->video_capturers_.erase(track->id().std_string());
-    }
-  }
-
+  // Same proof as MediaStreamTrackDispose below: even the track-vector
+  // getters hop onto the signaling thread, so the whole walk runs on the
+  // worker. In the normal flow every track was already stopped
+  // (trackDispose) and both vectors are empty. Leftover tracks — a stream
+  // disposed without stopping its tracks first — are removed on the worker,
+  // and their map entries (platform-thread state) are cleaned up back on
+  // the platform thread via task_runner.
+  FlutterWebRTCBase* base = base_;
+  TaskRunner* task_runner = base_->task_runner_;
   base_->RemoveStreamForId(stream_id);
+  base_->audio_op_queue().Post("streamDispose", [base, task_runner, stream]() {
+    std::vector<std::string> leftover_ids;
+    for (auto track : stream->audio_tracks().std_vector()) {
+      leftover_ids.push_back(track->id().std_string());
+      stream->RemoveTrack(track);
+    }
+    for (auto track : stream->video_tracks().std_vector()) {
+      leftover_ids.push_back(track->id().std_string());
+      stream->RemoveTrack(track);
+    }
+    if (!leftover_ids.empty() && task_runner != nullptr) {
+      task_runner->EnqueueTask([base, leftover_ids]() {
+        for (auto& id : leftover_ids) {
+          auto vc = base->video_capturers_.find(id);
+          if (vc != base->video_capturers_.end()) {
+            if (vc->second->CaptureStarted()) {
+              vc->second->StopCapture();
+            }
+            base->video_capturers_.erase(vc);
+          }
+          base->RemoveMediaTrackForId(id);
+        }
+      });
+    }
+  });
   result->Success();
 }
 
@@ -611,29 +628,51 @@ void FlutterMediaStream::MediaStreamTrackSwitchCamera(
 void FlutterMediaStream::MediaStreamTrackDispose(
     const std::string& track_id,
     std::unique_ptr<MethodResultProxy> result) {
-  for (auto it : base_->local_streams_) {
-    auto stream = it.second;
-    auto audio_tracks = stream->audio_tracks();
-    for (auto track : audio_tracks.std_vector()) {
-      if (track->id().std_string() == track_id) {
-        stream->RemoveTrack(track);
-      }
-    }
-    auto video_tracks = stream->video_tracks();
-    for (auto track : video_tracks.std_vector()) {
-      if (track->id().std_string() == track_id) {
-        stream->RemoveTrack(track);
-
-        if (base_->video_capturers_.find(track_id) !=
-            base_->video_capturers_.end()) {
-          auto video_capture = base_->video_capturers_[track_id];
-          if (video_capture->CaptureStarted()) {
-            video_capture->StopCapture();
-          }
-          base_->video_capturers_.erase(track_id);
+  // PROVEN by sentinel (641 ms on the build that offloaded only
+  // RemoveTrack): the track-vector GETTERS hop onto the signaling thread
+  // too, so for audio the ENTIRE stream walk runs on the worker. The
+  // platform thread only snapshots refptrs out of the maps (no libwebrtc
+  // calls). Camera tracks are classified WITHOUT touching libwebrtc — by
+  // their video_capturers_ entry — and keep the fully synchronous path
+  // (capturer lifecycle stays platform-thread work).
+  auto vc = base_->video_capturers_.find(track_id);
+  if (vc != base_->video_capturers_.end()) {
+    for (auto it : base_->local_streams_) {
+      auto stream = it.second;
+      auto video_tracks = stream->video_tracks();
+      for (auto track : video_tracks.std_vector()) {
+        if (track->id().std_string() == track_id) {
+          stream->RemoveTrack(track);
         }
       }
     }
+    auto video_capture = vc->second;
+    if (video_capture->CaptureStarted()) {
+      video_capture->StopCapture();
+    }
+    base_->video_capturers_.erase(track_id);
+  } else {
+    // Audio (or a capturer-less video track, e.g. screen share): the walk
+    // and removal run off the platform thread. The lambda's stream refptrs
+    // keep every touched object alive until the removals have run.
+    std::vector<scoped_refptr<RTCMediaStream>> streams;
+    for (auto it : base_->local_streams_) {
+      streams.push_back(it.second);
+    }
+    base_->audio_op_queue().Post("trackDispose", [streams, track_id]() {
+      for (auto stream : streams) {
+        for (auto track : stream->audio_tracks().std_vector()) {
+          if (track->id().std_string() == track_id) {
+            stream->RemoveTrack(track);
+          }
+        }
+        for (auto track : stream->video_tracks().std_vector()) {
+          if (track->id().std_string() == track_id) {
+            stream->RemoveTrack(track);
+          }
+        }
+      }
+    });
   }
   base_->RemoveMediaTrackForId(track_id);
   result->Success();
