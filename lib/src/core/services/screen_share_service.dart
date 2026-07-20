@@ -89,6 +89,12 @@ class ScreenShareService {
   /// Will also drive the track contentHint once the fork exposes it.
   ScreenContentProfile _contentProfile = ScreenContentProfile.motion;
 
+  /// Last requested resolution/fps cap for the OUTGOING share (null on
+  /// incoming-only PCs). Used by the post-connect re-apply + verification.
+  int? _capWidth;
+  int? _capHeight;
+  int? _capFps;
+
   // --- Screen audio via out-of-process capturer (Windows) ---
   ScreenAudioCapturer? _screenAudioCapturer;
   // --- Screen audio via ScreenCaptureKit (macOS 13.0–14.1) ---
@@ -106,8 +112,17 @@ class ScreenShareService {
   /// encoding parameters. Even though getDisplayMedia now receives width/height
   /// constraints, the desktop capturer may still deliver native-resolution
   /// frames — this enforces the cap at the encoder level as a second layer.
+  ///
+  /// [captureWidth]/[captureHeight] override the track.getSettings() capture
+  /// size when the caller knows better (post-connect we read the true size
+  /// from media-source stats — getSettings is absent for desktop captures on
+  /// some platforms and the 1920x1080 fallback computes a wrong scale).
   Future<void> _applyResolutionCap(
-      int maxWidth, int maxHeight, int fps, ScreenContentProfile profile) async {
+      int maxWidth, int maxHeight, int fps, ScreenContentProfile profile,
+      {int? captureWidth, int? captureHeight}) async {
+    _capWidth = maxWidth;
+    _capHeight = maxHeight;
+    _capFps = fps;
     if (_pc == null) return;
     final senders = await _pc!.getSenders();
     for (final sender in senders) {
@@ -126,29 +141,69 @@ class ScreenShareService {
             ? RTCDegradationPreference.MAINTAIN_RESOLUTION
             : RTCDegradationPreference.MAINTAIN_FRAMERATE;
 
+        final (capW, capH) = (captureWidth != null &&
+                captureHeight != null &&
+                captureWidth > 0 &&
+                captureHeight > 0)
+            ? (captureWidth, captureHeight)
+            : _captureSizeOf(sender.track!);
         for (final encoding in params.encodings!) {
           _configureVideoEncoding(
-              encoding, sender.track!, maxWidth, maxHeight, fps);
+              encoding, capW, capH, maxWidth, maxHeight, fps);
         }
-        await sender.setParameters(params);
+        final ok = await sender.setParameters(params);
+        _log('[HOLLOW-SCREEN] setParameters(cap ${maxWidth}x$maxHeight'
+            '@${fps}fps) -> ${ok ? 'accepted' : 'REJECTED by libwebrtc'}');
         break;
       }
     }
+  }
+
+  /// Capture dimensions from track.getSettings(), defaulting to 1920x1080
+  /// when the platform reports nothing (desktop captures often do). Logged
+  /// loudly because a wrong assumption here computes a wrong scale factor.
+  (int, int) _captureSizeOf(MediaStreamTrack track) {
+    Map<dynamic, dynamic> settings = const {};
+    try {
+      settings = track.getSettings();
+    } catch (_) {}
+    final w = settings['width'] as int?;
+    final h = settings['height'] as int?;
+    if (w == null || h == null || w <= 0 || h <= 0) {
+      _log('[HOLLOW-SCREEN] track.getSettings() has no capture size '
+          '($settings) — assuming 1920x1080');
+      return (1920, 1080);
+    }
+    return (w, h);
+  }
+
+  /// Build the send encoding handed to addTransceiver. Supplying encodings at
+  /// transceiver-init time is the path libwebrtc guarantees to honor across
+  /// offer/answer (they become the sender's init parameters and are applied
+  /// when the sender attaches at negotiation) — a pre-negotiation
+  /// setParameters is NOT reliably carried across that transition, which is
+  /// how the receiver ended up with native resolution.
+  RTCRtpEncoding _buildScreenSendEncoding(
+      MediaStreamTrack track, int maxWidth, int maxHeight, int fps) {
+    final encoding = RTCRtpEncoding()
+      // Dart defaults this to 1, which would pin the encoder to a single
+      // temporal layer; null lets libwebrtc pick per-codec.
+      ..numTemporalLayers = null;
+    final (capW, capH) = _captureSizeOf(track);
+    _configureVideoEncoding(encoding, capW, capH, maxWidth, maxHeight, fps);
+    return encoding;
   }
 
   /// Configure one video encoding: downscale to the cap if the capture is
   /// larger, pin the framerate, and set the bitrate tier for the target size.
   void _configureVideoEncoding(
     RTCRtpEncoding encoding,
-    MediaStreamTrack track,
+    int captureWidth,
+    int captureHeight,
     int maxWidth,
     int maxHeight,
     int fps,
   ) {
-    final settings = track.getSettings();
-    final captureWidth = settings['width'] as int? ?? 1920;
-    final captureHeight = settings['height'] as int? ?? 1080;
-
     // Downscale if the capture is larger than the target.
     if (captureWidth > maxWidth || captureHeight > maxHeight) {
       final scaleW = captureWidth / maxWidth;
@@ -157,6 +212,8 @@ class ScreenShareService {
       encoding.scaleResolutionDownBy = scale;
       _log('[HOLLOW-SCREEN] Set scaleResolutionDownBy=$scale '
           '(${captureWidth}x$captureHeight -> ${maxWidth}x$maxHeight)');
+    } else {
+      encoding.scaleResolutionDownBy = 1.0;
     }
 
     encoding.maxFramerate = fps;
@@ -299,14 +356,28 @@ class ScreenShareService {
     _pc = await createPeerConnection(iceServers);
     _setupCallbacks();
 
-    // Add screen video track.
-    await _pc!.addTrack(screenTrack, _screenStream!);
-    _log('[HOLLOW-SCREEN] Added screen video track to PC');
+    // Add screen video track WITH the resolution cap as init sendEncodings —
+    // the only pre-negotiation channel libwebrtc reliably folds into the
+    // sender at offer/answer (see _buildScreenSendEncoding).
+    await _pc!.addTransceiver(
+      track: screenTrack,
+      init: RTCRtpTransceiverInit(
+        direction: TransceiverDirection.SendRecv,
+        streams: [_screenStream!],
+        sendEncodings: [
+          _buildScreenSendEncoding(screenTrack, width, height, fps),
+        ],
+      ),
+    );
+    _log('[HOLLOW-SCREEN] Added screen video transceiver '
+        '(init cap ${width}x$height@${fps}fps)');
 
     await _applyContentHint(screenTrack);
     await _applyScreenCodecPreference(screenTrack, profile);
 
-    // Apply resolution cap on the encoder (getDisplayMedia captures at native res).
+    // Second layer: setParameters with the same cap (also carries the
+    // degradationPreference, which transceiver init cannot). Re-applied
+    // post-connect either way — see _scheduleResolutionCapEnforcement.
     await _applyResolutionCap(width, height, fps, profile);
 
     await _addCapturedAudioTracks(shareAudio);
@@ -520,14 +591,25 @@ class ScreenShareService {
       _pc = await createPeerConnection(iceServers);
       _setupCallbacks();
 
-      // Add screen video track.
-      await _pc!.addTrack(screenTrack, _screenStream!);
-      _log('[HOLLOW-SCREEN] Added screen video track to PC');
+      // Add screen video track WITH the resolution cap as init sendEncodings
+      // (see createOffer for why this must ride the transceiver init).
+      await _pc!.addTransceiver(
+        track: screenTrack,
+        init: RTCRtpTransceiverInit(
+          direction: TransceiverDirection.SendRecv,
+          streams: [_screenStream!],
+          sendEncodings: [
+            _buildScreenSendEncoding(screenTrack, maxWidth, maxHeight, fps),
+          ],
+        ),
+      );
+      _log('[HOLLOW-SCREEN] Added screen video transceiver '
+          '(init cap ${maxWidth}x$maxHeight@${fps}fps)');
 
       await _applyContentHint(screenTrack);
       await _applyScreenCodecPreference(screenTrack, profile);
 
-      // Apply resolution cap on the encoder.
+      // Second layer: setParameters (degradationPreference + cap re-assert).
       await _applyResolutionCap(maxWidth, maxHeight, fps, profile);
 
       // Add audio tracks if available (macOS Process Tap audio goes via tracks).
@@ -803,6 +885,9 @@ class ScreenShareService {
 
     _pendingCandidates.clear();
     _remoteDescriptionSet = false;
+    _capWidth = null;
+    _capHeight = null;
+    _capFps = null;
   }
 
   /// Tear down the macOS system audio tap first so the system default input
@@ -914,12 +999,105 @@ class ScreenShareService {
       case RTCPeerConnectionState.RTCPeerConnectionStateConnected:
         onConnected?.call();
         _scheduleIceRouteLog();
+        _scheduleResolutionCapEnforcement();
       case RTCPeerConnectionState.RTCPeerConnectionStateFailed:
       case RTCPeerConnectionState.RTCPeerConnectionStateClosed:
       case RTCPeerConnectionState.RTCPeerConnectionStateDisconnected:
         onDisconnected?.call();
       default:
         break;
+    }
+  }
+
+  /// Post-connect enforcement + verification of the resolution cap (outgoing
+  /// shares only — no-op when no cap was requested on this PC).
+  ///
+  /// A live setParameters on a NEGOTIATED sender is the one path the spec
+  /// requires to work, so 2s after connect we re-apply the cap — with the
+  /// true capture size read from media-source stats, since getSettings() can
+  /// be empty for desktop captures — and read the sender's parameters back.
+  /// 3s later we log what the encoder ACTUALLY emits (outbound-rtp
+  /// frameWidth/frameHeight) with a clear applied/not-applied verdict.
+  void _scheduleResolutionCapEnforcement() {
+    final screenPc = _pc;
+    if (screenPc == null || _capWidth == null) return;
+    Future.delayed(const Duration(seconds: 2), () async {
+      if (screenPc != _pc) return; // Torn down or replaced meanwhile.
+      await _reapplyResolutionCap(screenPc);
+      await Future.delayed(const Duration(seconds: 3));
+      if (screenPc != _pc) return;
+      await _logEncodedResolution(screenPc);
+    });
+  }
+
+  Future<void> _reapplyResolutionCap(RTCPeerConnection screenPc) async {
+    try {
+      int? srcW, srcH;
+      final stats = await screenPc.getStats();
+      for (final report in stats) {
+        final kind = report.values['kind'] ?? report.values['mediaType'];
+        if (report.type == 'media-source' && kind == 'video') {
+          srcW = (report.values['width'] as num?)?.toInt();
+          srcH = (report.values['height'] as num?)?.toInt();
+          break;
+        }
+      }
+      _log('[HOLLOW-SCREEN] Post-connect cap re-apply: capture=${srcW}x$srcH '
+          'cap=${_capWidth}x$_capHeight@${_capFps}fps');
+      await _applyResolutionCap(
+          _capWidth!, _capHeight!, _capFps!, _contentProfile,
+          captureWidth: srcW, captureHeight: srcH);
+
+      // Read back what the sender now reports — did the scale survive?
+      final senders = await screenPc.getSenders();
+      for (final sender in senders) {
+        if (sender.track?.kind == 'video') {
+          final encodings = sender.parameters.encodings ?? const [];
+          final desc = encodings
+              .map((e) => 'scale=${e.scaleResolutionDownBy} '
+                  'maxBr=${e.maxBitrate} minBr=${e.minBitrate} '
+                  'maxFps=${e.maxFramerate}')
+              .join(' | ');
+          _log('[HOLLOW-SCREEN] Sender params readback: '
+              '${encodings.isEmpty ? 'NO ENCODINGS' : desc}');
+          break;
+        }
+      }
+    } catch (e) {
+      _log('[HOLLOW-SCREEN] Post-connect cap re-apply failed: $e');
+    }
+  }
+
+  Future<void> _logEncodedResolution(RTCPeerConnection screenPc) async {
+    try {
+      final stats = await screenPc.getStats();
+      for (final report in stats) {
+        final kind = report.values['kind'] ?? report.values['mediaType'];
+        if (report.type == 'outbound-rtp' && kind == 'video') {
+          final w = (report.values['frameWidth'] as num?)?.toInt();
+          final h = (report.values['frameHeight'] as num?)?.toInt();
+          final fps = report.values['framesPerSecond'];
+          final limit = report.values['qualityLimitationReason'];
+          final capW = _capWidth, capH = _capHeight;
+          // Compare LONG edges so portrait window shares don't false-fail;
+          // small tolerance for encoder rounding.
+          final longEdge = (w ?? 0) > (h ?? 0) ? w : h;
+          final capLongEdge =
+              (capW ?? 0) > (capH ?? 0) ? capW : capH;
+          final verdict = (w == null || h == null)
+              ? 'no frames encoded yet'
+              : (capLongEdge != null &&
+                      longEdge! <= capLongEdge * 1.05 + 16)
+                  ? 'CAP APPLIED'
+                  : 'CAP NOT APPLIED';
+          _log('[HOLLOW-SCREEN] Encoded output: ${w}x$h@${fps}fps '
+              'limit=$limit cap=${capW}x$capH -> $verdict');
+          return;
+        }
+      }
+      _log('[HOLLOW-SCREEN] Encoded output: no outbound-rtp video stats');
+    } catch (e) {
+      _log('[HOLLOW-SCREEN] Encoded resolution check failed: $e');
     }
   }
 

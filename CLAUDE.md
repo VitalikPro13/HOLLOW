@@ -182,7 +182,7 @@ All UI uses custom Hollow widgets — no Material defaults: **HollowPressable** 
 - **Mobile UI:** `lib/src/ui/mobile/`; `MobileShell` (4-tab) replaces desktop below 600px; chat views push onto the root navigator; all mobile code platform-gated. Floating pills go in MobileShell + MobileChatRoute stacks, NEVER in `app.dart` builder (only `IncomingCallOverlay` there). See `feedback_mobile_ui_patterns`.
 - **Widget tests:** `test/helpers/test_app.dart` — `pumpHollowMobile()` mocks FFI providers (~1s, no device). **Feature matrix:** `reports/FEATURE_MATRIX.md`.
 - **Forked `flutter_webrtc`** at `packages/flutter_webrtc/` (pubspec `path:`). When iterating its native C++, delete `build/windows/x64/plugins/flutter_webrtc/` before rebuilding, and ALWAYS build `--release` if testing from the Release folder.
-- **CRITICAL — desktop libwebrtc (dll+so) is OUR patched build**, vendored in git under `third_party/libwebrtc/` with headers + 2 patch files (is_screencast + SetContentHint; rebuild recipe + gotchas = BUILDING.md there; wrapper README Linux args BROKEN). Screen shares ride `ScreenContentProfile` (text = MAINTAIN_RESOLUTION + AV1-first + 'detail'; motion = MAINTAIN_FRAMERATE + VP9-first); NEVER send hint 'motion'. See `project_webrtc_engine_screenshare_research`.
+- **CRITICAL — desktop libwebrtc (dll+so) is OUR patched build**, vendored at `third_party/libwebrtc/` (2 patches: is_screencast + SetContentHint; recipe = BUILDING.md). Screen shares ride `ScreenContentProfile` (text = MAINTAIN_RESOLUTION + AV1-first + 'detail'; motion = MAINTAIN_FRAMERATE + VP9-first); NEVER hint 'motion'. Encoding caps (scaleResolutionDownBy/bitrates) ride `addTransceiver` init `sendEncodings` (pre-negotiation setParameters is DROPPED at O/A); runtime = live setParameters. See `project_webrtc_engine_screenshare_research`.
 - **CRITICAL — Linux window close: minimize to taskbar, never tray** (AppIndicator broken); second close while minimized = quit.
 - **CRITICAL — Linux `record` needs `parecord`** (absent on PipeWire) — mic test crashes; calls fine (libwebrtc).
 - **Linux audio enumeration:** prebuilt libwebrtc ADM reports 0 devices on pipewire-pulse → native libpulse shim (`hollowLinuxAudioDevices`, dep `libpulse-dev`). A distorted Linux mic is HARDWARE first — check `amixer sget Capture` for a maxed analog gain. See `feedback_linux_audio_libpulse_enum_shim`, `feedback_linux_agc_clipping_distortion`.
@@ -193,9 +193,9 @@ All UI uses custom Hollow widgets — no Material defaults: **HollowPressable** 
 
 ## Semantic Memory Search (hollow-memory MCP)
 - **Tool:** `memory_search(query, limit=5)` — semantic search across memory, wiki, plan/whitepaper docs. ALWAYS search before arguing, designing, or re-investigating.
-- **Wiki:** `tools/hollow-memory/wiki/` — ~40 machine-optimized files (UI panels, data flows, providers, Rust modules). Keep in sync during `/compush`.
+- **Wiki:** `tools/hollow-memory/wiki/` — ~40 machine-optimized files; keep in sync during `/compush`.
 - **Reindex:** run `memory_reindex()` after modifying any indexed file.
-- **Save liberally:** threshold is "would finding this by meaning help a future session?". Location: `tools/hollow-memory/`.
+- **Save liberally:** threshold = "would finding this by meaning help a future session?".
 
 ## Rules
 - Never commit secrets, keys, or credentials.

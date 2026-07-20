@@ -549,15 +549,20 @@ Desktop screen shares now ride a **custom libwebrtc build** (both `libwebrtc.dll
 - **setParameters write-back fix** (`flutter_peerconnection.cc` `updateRtpParameters`): the wrapper's `encodings()` returns COPIES; without `parameters->set_encodings(params)` every per-encoding field was a silent no-op on Windows/Linux — maxBitrate/minBitrate/maxFramerate/scaleResolutionDownBy had NEVER applied.
 - Codec preference (`_applyScreenCodecPreference`, both offer paths, desktop senders only): macOS VP8→VP9 (Apple H.264 hw-profile black-screen trap), Win/Linux VP9→VP8 with AV1 first on the text profile. Stable bucket ordering (Dart List.sort is not stable).
 
-### Resolution and Bitrate Capping
+### Resolution and Bitrate Capping (FIXED 2026-07-20 — three layers)
 
-`_applyResolutionCap(maxWidth, maxHeight, fps, profile)` on the video sender after `addTrack`:
+The screen track is added via **`addTransceiver` with the cap in init `sendEncodings`** (`_buildScreenSendEncoding`), NOT `addTrack` + pre-negotiation `setParameters`. Init encodings are the only pre-negotiation channel libwebrtc reliably folds into the sender at offer/answer — a setParameters issued before negotiation is silently dropped on that transition (this was why the receiver got native res at a 360p preset). The built encoding nulls `numTemporalLayers` (Dart defaults it to 1, which would pin the encoder).
+
+`_applyResolutionCap(maxWidth, maxHeight, fps, profile, {captureWidth, captureHeight})` — still called pre-offer (carries `degradationPreference`, which init cannot) and re-applied post-connect:
 
 1. `degradationPreference`: text profile → `MAINTAIN_RESOLUTION` (drop frames, keep sharpness — W3C mapping for text content); motion → `MAINTAIN_FRAMERATE`
-2. Computes scale factor from track settings if capture exceeds target, sets `scaleResolutionDownBy` (capture is native-res; the encoder downscales — the local preview always shows native res by design). **OPEN BUG: receiver still gets native res — see repo tmp_nextSession.txt**
+2. Computes scale factor if capture exceeds target, sets `scaleResolutionDownBy` (capture is native-res; the encoder downscales — the local preview always shows native res by design). Capture size from `_captureSizeOf` (`track.getSettings()`, loud-logged 1920x1080 fallback when the platform reports nothing) or the explicit `captureWidth/Height` override
 3. `maxFramerate` = user-selected fps
 4. Bitrate caps by pixel tier (800/1500/3000/6000/9000/15000 kbps for 360p→4K) — higher than camera because screen content compresses poorly
 5. **minBitrate floors** (300/500/800/1500/2000/2500 kbps) so a stale low bandwidth estimate can't starve the encoder into QP mush
+6. Logs the `setParameters` result bool (`accepted` / `REJECTED by libwebrtc`)
+
+**Post-connect enforcement** (`_scheduleResolutionCapEnforcement`, fired on `RTCPeerConnectionStateConnected`, outgoing only — no-ops when `_capWidth == null`): +2s re-applies the cap via live setParameters on the negotiated sender (the spec-mandated live path), using the TRUE capture size from `media-source` stats, then logs a sender-params readback; +5s logs `outbound-rtp` frameWidth/frameHeight with an explicit `CAP APPLIED`/`CAP NOT APPLIED` verdict (long-edge compare, so portrait window shares don't false-fail). Cap state (`_capWidth/_capHeight/_capFps`) reset in `close()`.
 
 The share dialog (`screen_share_dialog.dart`) also locks resolution presets to what a connected display can produce (`_computeAvailableResolutions` via `platformDispatcher.displays`, orientation-agnostic, any-display rule).
 
@@ -569,8 +574,8 @@ The share dialog (`screen_share_dialog.dart`) also locks resolution presets to w
 3. Validates video tracks exist (security check)
 4. Creates local self-preview renderer
 5. Creates PC, wires callbacks via `_setupCallbacks()`
-6. Adds screen video track via `pc.addTrack()`
-7. Applies resolution/bitrate cap
+6. Adds screen video track via `pc.addTransceiver(track, init: sendEncodings=[cap])` (see Resolution and Bitrate Capping)
+7. Applies resolution/bitrate cap via setParameters (second layer + degradationPreference)
 8. If audio tracks present, adds them all via `pc.addTrack()`
 9. Creates offer, sets local description
 10. Starts track poller (2s interval checks if screen track is still enabled)
