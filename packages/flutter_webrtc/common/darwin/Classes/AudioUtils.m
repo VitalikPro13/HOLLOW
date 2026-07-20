@@ -19,7 +19,11 @@
     // unit, so iOS suspends the app ~45s later and the whole call collapses
     // (device-proven 2026-07-05 during iOS screen share + music). With it,
     // the call coexists with other apps' audio, Discord-style.
-    config.categoryOptions =
+    // OR-in (|=), never assign: the template carries route flags too —
+    // DefaultToSpeaker is baked in by setSpeakerphoneOn, and a track
+    // add/dispose passing through here must not clobber the user's
+    // speaker route.
+    config.categoryOptions |=
         AVAudioSessionCategoryOptionMixWithOthers |
         AVAudioSessionCategoryOptionAllowBluetooth |
         AVAudioSessionCategoryOptionAllowBluetoothA2DP |
@@ -71,7 +75,25 @@
 + (void)setSpeakerphoneOn:(BOOL)enable {
   RTCAudioSession* session = [RTCAudioSession sharedInstance];
   RTCAudioSessionConfiguration* config = [RTCAudioSessionConfiguration webRTCConfiguration];
-    
+
+  // Hollow fork: make the speaker route DURABLE by baking it into libwebrtc's
+  // own session template (same technique as the MixWithOthers patch in
+  // initWithChannel). libwebrtc re-applies webRTCConfiguration whenever its
+  // audio unit restarts (camera toggle, track churn, renegotiation) — with
+  // only a live overrideOutputAudioPort the route silently reverted to the
+  // earpiece moments into a call. The session MODE is the durable selector
+  // Apple honors: videoChat defaults output to the loudspeaker, voiceChat to
+  // the receiver (LiveKit's policy; both keep VPIO). The live set below still
+  // runs for the immediate flip.
+  if (enable) {
+    config.categoryOptions |= AVAudioSessionCategoryOptionDefaultToSpeaker;
+    config.mode = AVAudioSessionModeVideoChat;
+  } else {
+    config.categoryOptions &= ~AVAudioSessionCategoryOptionDefaultToSpeaker;
+    config.mode = AVAudioSessionModeVoiceChat;
+  }
+  [RTCAudioSessionConfiguration setWebRTCConfiguration:config];
+
   if(enable && config.category != AVAudioSessionCategoryPlayAndRecord) {
     NSLog(@"setSpeakerphoneOn: Category option 'defaultToSpeaker' is only applicable with category 'playAndRecord', ignore.");
     return;

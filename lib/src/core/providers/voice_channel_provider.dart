@@ -595,6 +595,20 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
 
     await _service!.startAudio(serverId, channelId);
 
+    // Re-assert the speaker route now that the audio session actually
+    // exists. The early _setSpeakerRoute(true) above ran BEFORE the service
+    // was constructed — the platform audio bring-up (audioswitch activate on
+    // Android, VPIO unit start on iOS) lands after it and can clobber the
+    // route, leaving the channel on the earpiece despite the loudspeaker
+    // default. One immediate pass plus one delayed pass once the audio unit
+    // settles.
+    _setSpeakerRoute(state.isSpeakerOn);
+    Future.delayed(const Duration(milliseconds: 1200), () {
+      if (!_leaving && state.isInVoiceChannel) {
+        _setSpeakerRoute(state.isSpeakerOn);
+      }
+    });
+
     // AI-NS fallback check for sessions that STARTED with the toggle on
     // (the toggle listener only covers mid-session flips). Logs the engine
     // status either way; re-captures internally if fallback is needed.
@@ -1060,6 +1074,12 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
         isFrontCamera: _service!.useFrontCamera,
       );
       _broadcastCameraState(true);
+
+      // Camera on implies hands-off use — switch to the loudspeaker
+      // (parity with the DM call path).
+      if (_isMobile && !state.isSpeakerOn) {
+        _setSpeakerRoute(true);
+      }
     } else {
       // Turn camera OFF.
       await _service!.stopCamera();
@@ -1073,6 +1093,17 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
 
       state = state.copyWith(isCameraOn: false);
       _broadcastCameraState(false);
+    }
+
+    // Either camera flip restarts the platform audio unit (iOS VPIO
+    // especially), which can drop the active route — re-assert once it
+    // settles (parity with the DM toggleVideo path).
+    if (_isMobile) {
+      Future.delayed(const Duration(milliseconds: 1200), () {
+        if (!_leaving && state.isInVoiceChannel) {
+          _setSpeakerRoute(state.isSpeakerOn);
+        }
+      });
     }
   }
 

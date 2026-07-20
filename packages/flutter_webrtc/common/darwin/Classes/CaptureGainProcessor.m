@@ -825,16 +825,18 @@ static double HollowDfnNowMs(void) {
   atomic_store_explicit(&_dfnVad, _vadPresence, memory_order_relaxed);
   // Realtime watchdog: EMA of per-frame cost, 100-frame warmup grace.
   // Budget is 10 ms; sustained >6 ms latches bypass (matters on phones).
-  const int frames =
+  // (dfnFrames, not frames — the method parameter of that name is the
+  // per-callback sample count.)
+  const int dfnFrames =
       atomic_load_explicit(&_dfnFrames, memory_order_relaxed) + 1;
-  atomic_store_explicit(&_dfnFrames, frames, memory_order_relaxed);
+  atomic_store_explicit(&_dfnFrames, dfnFrames, memory_order_relaxed);
   const float ema =
-      frames == 1
+      dfnFrames == 1
           ? (float)ms
           : 0.98f * atomic_load_explicit(&_dfnMsEma, memory_order_relaxed) +
                 0.02f * (float)ms;
   atomic_store_explicit(&_dfnMsEma, ema, memory_order_relaxed);
-  if (frames > 100 && ema > 6.0f) {
+  if (dfnFrames > 100 && ema > 6.0f) {
     atomic_store_explicit(&_dfnBailed, YES, memory_order_relaxed);
     NSLog(@"[hollow_dfn] realtime overrun (EMA %.2f ms/frame) — bypassed "
           @"for session",

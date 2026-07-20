@@ -325,18 +325,10 @@ class CallNotifier extends Notifier<CallState> {
                 state.isVideoCall &&
                 !state.isVideoEnabled) {
               _callLog('[HOLLOW-CALL] Auto-enabling camera for video call');
+              // toggleVideo itself re-asserts the speaker route after the
+              // renegotiation settles (the camera flip restarts the platform
+              // audio unit, which can drop the loudspeaker route).
               toggleVideo();
-              // iOS: the camera enable restarts the voice-processing audio
-              // unit, which re-applies WebRTC's default session config and
-              // can silently drop the loudspeaker override — re-assert the
-              // current route once the renegotiation settles.
-              if (_isMobile) {
-                Future.delayed(const Duration(milliseconds: 1200), () {
-                  if (state.status == CallStatus.active) {
-                    _setSpeakerRoute(state.isSpeakerOn);
-                  }
-                });
-              }
             } else {
               _callLog('[HOLLOW-CALL] Auto-toggle skipped: '
                   'status=${state.status} isVideoCall=${state.isVideoCall} '
@@ -590,6 +582,11 @@ class CallNotifier extends Notifier<CallState> {
 
     final callId = _generateCallId();
     final sframeKey = _generateSframeKey();
+    // File-visible breadcrumb (debugPrint never reaches hollow_debug.log):
+    // outgoing attempts used to be invisible, so a call that silently went
+    // nowhere left zero evidence on the caller.
+    _callLog('[HOLLOW-CALL] Starting ${withVideo ? 'video' : 'voice'} call '
+        'to $peerId call=$callId');
     state = CallState(
       status: CallStatus.ringing,
       peerId: peerId,
@@ -616,7 +613,8 @@ class CallNotifier extends Notifier<CallState> {
     _ringTimer = Timer(const Duration(seconds: 30), () async {
       if (state.status == CallStatus.ringing &&
           state.direction == CallDirection.outgoing) {
-        debugPrint('[HOLLOW-CALL] Ring timeout, ending call');
+        _callLog('[HOLLOW-CALL] Ring timeout — no response from $peerId '
+            '(call=$callId)');
         _sendSignal(peerId, 'end', callId);
         await _cleanup();
       }
@@ -753,6 +751,19 @@ class CallNotifier extends Notifier<CallState> {
     // loudspeaker (mobile). Turning it off keeps whatever route is active.
     if (enabled && !wasEnabled && _isMobile && !state.isSpeakerOn) {
       _setSpeakerRoute(true);
+    }
+
+    // Any actual camera flip (on OR off) restarts the platform audio unit
+    // (iOS VPIO especially), which can drop the active route — re-assert
+    // once the renegotiation settles. The native template fix makes iOS
+    // self-healing; this also covers Android and manual toggles, which the
+    // old auto-enable-only re-assert missed.
+    if (enabled != wasEnabled && _isMobile) {
+      Future.delayed(const Duration(milliseconds: 1200), () {
+        if (state.status == CallStatus.active) {
+          _setSpeakerRoute(state.isSpeakerOn);
+        }
+      });
     }
 
     final peerId = state.peerId;

@@ -395,8 +395,53 @@ static __weak id<RTCAudioDeviceModuleDelegate> gAudioDeviceModuleObserver = nil;
        routeChangeReason == AVAudioSessionRouteChangeReasonOverride)) {
     postEvent(self.eventSink, @{@"event" : @"onDeviceChange"});
   }
+
+  // Hollow fork: self-heal the loudspeaker route on ANY route change —
+  // session reconfigurations (libwebrtc audio-unit restarts, category
+  // re-sets on track churn, a screen share's PC + AudioQueue bring-up) can
+  // land the output back on the RECEIVER even though the user chose
+  // speaker, and iOS reports several of these with reason 'unknown', so a
+  // reason filter misses them. The receiver check inside the helper is the
+  // real guard. Async: never mutate the session from inside the
+  // route-change notification (CoreAudio re-entrancy).
+  dispatch_async(dispatch_get_main_queue(), ^{
+    [self healSpeakerRouteIfClobbered];
+  });
 #endif
 }
+
+#if TARGET_OS_IPHONE
+// Hollow fork: if the user chose the loudspeaker but the session output is
+// sitting on the RECEIVER, re-assert speaker. The receiver is never correct
+// while _speakerOn (headphones/BT are different ports and always win), so
+// this cannot fight external hardware — and speaker-off needs no healing
+// (the receiver is the session default). Debounced so a misbehaving session
+// can't loop us.
+- (void)healSpeakerRouteIfClobbered {
+  if (!_speakerOn || !self.audioSessionManagementEnabled) {
+    return;
+  }
+  static CFAbsoluteTime lastHeal = 0;
+  const CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+  if (now - lastHeal < 0.9) {
+    return;
+  }
+  BOOL onReceiver = NO;
+  for (AVAudioSessionPortDescription* output in
+       [AVAudioSession sharedInstance].currentRoute.outputs) {
+    if ([output.portType isEqualToString:AVAudioSessionPortBuiltInReceiver]) {
+      onReceiver = YES;
+      break;
+    }
+  }
+  if (onReceiver) {
+    lastHeal = now;
+    NSLog(@"[SENTINEL] speaker route clobbered (output on receiver) — "
+          @"re-asserting loudspeaker");
+    [AudioUtils setSpeakerphoneOn:YES];
+  }
+}
+#endif
 
 -(void) initLoggerCallback:(RTCLoggingSeverity)severity {
   if(loggerCallback == nil) {
@@ -1623,6 +1668,21 @@ static __weak id<RTCAudioDeviceModuleDelegate> gAudioDeviceModuleObserver = nil;
       _screenAudioPlayer = [[ScreenAudioPlayer alloc] init];
     }
     [_screenAudioPlayer start];
+#if TARGET_OS_IPHONE
+    // A share starting mid-call nudges the session (the share PC's
+    // negotiation + this AudioQueue's spin-up) and can land audio on the
+    // receiver despite speaker mode — the "share audio plays from the
+    // earpiece until the user double-toggles speaker" bug. Re-assert now
+    // and check again once the bring-up settles.
+    if (_speakerOn && self.audioSessionManagementEnabled) {
+      [AudioUtils setSpeakerphoneOn:YES];
+      dispatch_after(
+          dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
+          dispatch_get_main_queue(), ^{
+            [self healSpeakerRouteIfClobbered];
+          });
+    }
+#endif
     result(nil);
   } else if ([@"writeScreenAudioPcm" isEqualToString:call.method]) {
     NSDictionary* argsMap = call.arguments;
