@@ -1,5 +1,11 @@
 [
   {
+    "id": "2026-07-20-v081",
+    "date": "July 20, 2026",
+    "title": "v0.8.1 - Noise Suppression, Voice Chain Completion & Screen Share Quality",
+    "body": "Hey! This update includes some new additions like noise suppression and voice enhancement improvements, but also fixes lots of nasty bugs and even improves screen sharing. We patched WebRTC engine, so now it actually knows how to properly encode the stream for the selected quality. Plus some other additional stuff that you look [right here.](https://github.com/VitalikPro13/HOLLOW/blob/main/changelog.txt)\n\nAlright, that's all I have, for now. Have a great day!"
+  },
+  {
     "id": "2026-07-15-v080",
     "date": "July 16, 2026",
     "title": "v0.8 - Offline Delivery, Custom Emotes, Conferences, Mobile Screen Share & Moderation",

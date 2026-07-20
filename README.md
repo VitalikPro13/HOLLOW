@@ -81,14 +81,14 @@ Your identity is a cryptographic keypair. Zero registrations. One recovery phras
 
 | Platform | Links |
 |----------|------|
-| Windows (10+) | [.exe](https://anonlisten.com/hollow/releases/hollow-0.8.0-win64-setup.exe) / [.zip](https://anonlisten.com/hollow/releases/hollow-0.8.0-win64.zip) |
-| macOS (10.15+) | [.dmg](https://anonlisten.com/hollow/releases/hollow-0.8.0.dmg) |
-| Linux | [Flatpak](https://anonlisten.com/hollow/releases/hollow-0.8.0-linux-x86_64.flatpak) / [.tar.gz](https://anonlisten.com/hollow/releases/hollow-0.8.0-linux.tar.gz) |
-| Android (7+) | [.apk](https://anonlisten.com/hollow/releases/hollow-0.8.0-android.apk) |
-| iOS | Coming soon |
+| Windows (10+) | [.exe](https://anonlisten.com/hollow/releases/hollow-0.8.1-win64-setup.exe) / [.zip](https://anonlisten.com/hollow/releases/hollow-0.8.1-win64.zip) |
+| macOS (10.15+) | [.dmg](https://anonlisten.com/hollow/releases/hollow-0.8.1.dmg) |
+| Linux | [Flatpak](https://anonlisten.com/hollow/releases/hollow-0.8.1-linux-x86_64.flatpak) / [.tar.gz](https://anonlisten.com/hollow/releases/hollow-0.8.1-linux.tar.gz) |
+| Android (7+) | [.apk](https://anonlisten.com/hollow/releases/hollow-0.8.1-android.apk) |
+| iOS | In progress |
 | Web | Not planned |
 
-Current Progress: Linux is out of Experimental phase! Tons of new cool features, so check out the [changelog!](changelog.txt) As for development, SonarQube was integrated, so now you can see some badges above about the quality of the current codebase and it would be easier for me to notice any future regressions. Enjoy!
+Current Progress: iOS is coming to TestFlight soon! The link will be included to join and you would need to have the TestFlight installed in order to participate (and there is a limit of max 10k people). Overall, the app was improved on the voice calls, screen sharing and fixing on the bugs. For now, I think it's better to focus on improvements rather than implementing something new, but we'll see.
 
 ## Tech Stack
 

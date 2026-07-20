@@ -1,3 +1,57 @@
+v0.8.1 - Noise Suppression, Voice Chain Completion & Screen Share Quality
+
+NOISE SUPPRESSION
+
+- New noise suppression for your microphone (Settings > Audio): a neural network strips keyboard clatter, fans, and room noise while keeping your voice natural. Runs fully on-device on every platform, and if the engine can't run for any reason the classic suppressor re-arms automatically so a call never sits unprotected
+- Desktop gets an Engine selector: RNNoise (default, ultra-light) or DeepFilterNet3 (heavier, deeper cleanup), switchable live mid-call without reconnecting
+
+VOICE QUALITY
+
+- Voice Enhancement's Dynamic mode now lifts quiet speech: soft talkers and word tails get a speech-only boost (up to 8 dB) while the noise floor between words is pushed further down. The boost keys on actual speech, so fans, tones, and steady noise get zero lift
+- Both enhancement modes gain a de-esser that tames harsh "s" sounds without dulling the voice
+- Voice in calls now streams at triple the audio bitrate (96 kbps, up from 32), audibly cleaner and fuller
+- Android and Linux mics had been running a reduced enhancement path since the chain shipped; they now get the full studio EQ, de-esser, and limiter like Windows
+- Music or video sound from a screen share can no longer re-calibrate your mic's auto-level and bury your voice: the auto-level now freezes while you're muted or while share audio is playing
+
+SCREEN SHARE
+
+- Desktop screen shares now ride a custom-patched WebRTC engine that knows it's encoding a screen instead of a webcam: shared text stays sharp instead of turning to mush
+- New content profiles in the share dialog: Sharp text (holds resolution for reading) or Smooth motion (holds framerate for video and games)
+- Fixed share quality settings silently never applying on Windows and Linux (bitrate, framerate, and resolution caps were dropped by the engine), and fixed the resolution preset being ignored entirely: receivers were getting native resolution no matter what you picked
+- Resolution presets are now limited to what your connected displays can actually produce
+- Share audio gets a volume slider on every call surface, auto-ducks while someone speaks so voices stay on top, and deafen now silences it too
+- Fixed Android freezing with an "app not responding" dialog when stopping a screen share
+
+CALLS
+
+- Hanging up no longer briefly freezes the app: audio teardown was blocking the interface thread on every platform
+- iOS: your speaker choice now sticks. Turning the camera on or off, or an incoming screen share, no longer flips the call back to the earpiece
+- Android: the microphone now survives backgrounding the app during calls and screen shares, and muting or unmuting no longer freezes the interface for seconds
+- Call setup problems now leave a trace in the diagnostic log instead of failing with zero evidence
+
+SERVERS & ROLES
+
+- Fixed server settings changed by Admins reverting: once the Owner had ever written a setting, rename, role, or nickname, no one else could durably change it, even with full permission. The latest authorized write now wins everywhere
+- Fixed mobile's role "Reset to defaults" silently stripping Admin permissions, and added the missing Manage Emotes toggle to the mobile role editor
+- A friend request sent to someone's temporary nickname could queue forever if they use multiple devices; it now arrives immediately
+- Channel file downloads now reroute to any online member who holds the file when the original sender is offline, and files no longer silently skip some single-device members
+- Fixed the Twitch integration toggle not saving when switched off on mobile
+
+INTERFACE & FEEDBACK
+
+- No more lying toasts: friend requests, nicknames, message send/edit/delete/pin, reactions, and channel setting toggles now show an error and roll back when they fail, instead of claiming success on a dead connection
+- Slow operations now show busy indicators: archive loading, backup export and restore, sharing a file, and the security actions
+- Avatar, banner, and server icon updates preview instantly while processing, and Save waits for processing to finish: an early Save used to silently drop your new image, and the first server-icon upload used to appear to do nothing
+- Uploading a custom emote now opens the naming dialog instantly with a live preview
+- Mobile: profile sheets with long showcases no longer trap you inside, and the game card's close button is always reachable
+- Phones and tablets now always get the mobile interface (tablets and landscape phones used to cross into the desktop layout), and mobile is locked to portrait
+
+NETWORK & STABILITY
+
+- Fixed a rarer class of frozen connections: a wedged link could hang all networking forever, including the watchdog that was supposed to catch it. Sends now time out and trigger a clean reconnect
+- Privacy: the WebRTC engine's debug logger was writing relay frame contents to the Android system log in release builds; logging is now capped
+- New quiet performance sentinels record anomalies (interface stalls, audio gaps, engine backlogs) in the diagnostic log, so bug reports can pinpoint causes much faster
+
 v0.8 - Offline Delivery, Custom Emotes, Conferences, Mobile Screen Share & Moderation
 
 OFFLINE DELIVERY
