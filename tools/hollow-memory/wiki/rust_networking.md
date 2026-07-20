@@ -82,9 +82,11 @@ Persistent WSS connection to the relay (configurable domain, default `relay.anon
 3. Re-join all previously tracked rooms from `WsClientState.joined_rooms` (persisted in `Arc<RwLock<HashSet<String>>>`)
 4. Flush `pending_commands` buffer (commands received while disconnected)
 5. Enter main `tokio::select!` loop:
-   - **30s keepalive ping** — sends WS Ping frame `[0x01]`. If send fails, break to reconnect.
-   - **Incoming relay messages** — dispatches JSON text to `handle_server_message()`, dispatches binary frames by type byte
+   - **30s keepalive ping** — checks the 70s receive-side liveness deadline FIRST (`last_recv`, refreshed by ANY inbound frame; lapse → break to reconnect), then sends WS Ping frame `[0x01]`. If send fails, break to reconnect.
+   - **Incoming relay messages** — dispatches JSON text to `handle_server_message()`, dispatches binary frames by type byte. A failed pong reply breaks to reconnect.
    - **Commands from swarm** — calls `send_command()` + `track_room_change()`
+
+**CRITICAL — every sink write goes through `bounded_send(write, msg)`** (30s `tokio::time::timeout` around `SinkExt::send`; all ~30 sites incl. auth, rejoin, ping, pong, every `send_command` arm). An unbounded send on a wedged TCP connection (zero-window zombie peer) pends FOREVER with no error, and while that await is pending `select!` polls no other arm — the liveness watchdog itself can never run. Timeout ⇒ error ⇒ existing break-to-reconnect paths. Never add a raw `write.send(...)` here. See memory `feedback_ws_zombie_liveness_timeout`.
 6. On disconnect: emit `WsEvent::Disconnected`, drain `cmd_rx` into `pending_commands` buffer
 7. Exponential backoff: sleep `backoff_secs` (starts 1, doubles to max 30), then loop back to step 1
 8. **License error special case**: if `connect_and_auth` error contains "license_key" or "license key", emit `LicenseError` and `return` (no reconnect)

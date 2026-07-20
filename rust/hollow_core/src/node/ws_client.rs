@@ -21,7 +21,7 @@ use crate::hollow_log;
 /// ping, or pong) before we declare the socket a zombie and force a reconnect.
 ///
 /// A silently-dropped network path (NAT/router/WiFi/ISP blip) lets local
-/// `ws_write.send()` succeed into the OS buffer with no error, so a
+/// socket writes succeed into the OS buffer with no error, so a
 /// write-failure check alone never fires — the connection looks "alive" while
 /// nothing reaches the relay and nothing comes back. The relay sends WS pings
 /// automatically (`sendPingsAutomatically=true`, see relay-uws ws_handler.cpp)
@@ -29,6 +29,19 @@ use crate::hollow_log;
 /// refreshes `last_recv` well within this window; only a truly dead path lets
 /// it lapse. 70s = tolerate one lost 30s keepalive cycle, react on the next.
 const LIVENESS_TIMEOUT: Duration = Duration::from_secs(70);
+
+/// Max time for ONE socket write to complete before the connection is
+/// declared wedged. The liveness deadline above cannot catch everything: a
+/// peer whose KERNEL stays alive but whose application stops reading keeps
+/// ACKing with a zero TCP window, so an in-flight `SinkExt::send` pends
+/// FOREVER with no error — and while that await is pending, `tokio::select!`
+/// polls no other arm, so the ping tick that runs the liveness check can
+/// never fire. Observed 2026-07-20: desktop sat 2h11m frozen mid-write —
+/// stale presence, every call invite silently vanished — until the relay
+/// finally reset the socket. 30s: the largest relay frame is a 256 KB
+/// stream chunk, which hands off to the OS buffer well inside 30s even on a
+/// dreadful-but-alive uplink; only a genuinely wedged connection lapses.
+const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 
 // -- Public types --
 
@@ -346,7 +359,7 @@ async fn ws_client_loop(
                     for room in rooms.iter() {
                         let join_msg = serde_json::to_string(&ClientMsg::Join { room: room.clone() })
                             .unwrap_or_default();
-                        let _ = ws_write.send(Message::Text(join_msg.into())).await;
+                        let _ = bounded_send(&mut ws_write, Message::Text(join_msg.into())).await;
                     }
                     let _ = event_tx.send(WsEvent::RoomBudgetUpdate { joined: rooms.len() as u32, limit: ROOM_BUDGET_LIMIT });
                 }
@@ -364,7 +377,7 @@ async fn ws_client_loop(
                             "room": room,
                             "topics": topics,
                         });
-                        if ws_write.send(Message::Text(msg.to_string().into())).await.is_err() {
+                        if bounded_send(&mut ws_write, Message::Text(msg.to_string().into())).await.is_err() {
                             hollow_log!("[HOLLOW-WS] Re-subscribe send failed for room {room}");
                             break;
                         }
@@ -385,7 +398,7 @@ async fn ws_client_loop(
                             "enabled": enabled,
                             "retention_secs": retention_secs,
                         });
-                        if ws_write.send(Message::Text(msg.to_string().into())).await.is_err() {
+                        if bounded_send(&mut ws_write, Message::Text(msg.to_string().into())).await.is_err() {
                             hollow_log!("[HOLLOW-WS] Offline-buffer re-register send failed");
                         }
                     }
@@ -426,7 +439,7 @@ async fn ws_client_loop(
                                 );
                                 break;
                             }
-                            if let Err(e) = ws_write.send(Message::Ping(vec![0x01].into())).await {
+                            if let Err(e) = bounded_send(&mut ws_write, Message::Ping(vec![0x01].into())).await {
                                 hollow_log!("[HOLLOW-WS] Ping failed: {e}");
                                 break; // Connection dead, trigger reconnect.
                             }
@@ -493,7 +506,14 @@ async fn ws_client_loop(
                                     }
                                 }
                                 Some(Ok(Message::Ping(data))) => {
-                                    let _ = ws_write.send(Message::Pong(data)).await;
+                                    // A failed/wedged pong reply is a dead
+                                    // connection — reconnect, don't limp on.
+                                    if let Err(e) =
+                                        bounded_send(&mut ws_write, Message::Pong(data)).await
+                                    {
+                                        hollow_log!("[HOLLOW-WS] Pong reply failed: {e}");
+                                        break;
+                                    }
                                 }
                                 Some(Ok(Message::Pong(_))) => {
                                     // Reply to our keepalive ping. Liveness is
@@ -639,7 +659,7 @@ pub(crate) async fn connect_and_auth(
         fetch,
     };
     let auth_json = serde_json::to_string(&auth).map_err(|e| format!("JSON error: {e}"))?;
-    write.send(Message::Text(auth_json.into()))
+    bounded_send(&mut write, Message::Text(auth_json.into()))
         .await
         .map_err(|e| format!("Failed to send auth: {e}"))?;
 
@@ -713,6 +733,22 @@ async fn connect_via_socks(url: &str, socks_addr: &str) -> Result<WsStream, Stri
 
 type WsSink = futures_util::stream::SplitSink<WsStream, Message>;
 
+/// Bounded socket write — the ONLY way this module writes to the sink.
+/// See WRITE_TIMEOUT for why an unbounded `send` can freeze the entire
+/// client loop (zero-window zombie peer) with the liveness watchdog unable
+/// to run. A timeout is reported as an error string so every existing
+/// `Err → reconnect` path handles the wedge exactly like a dead socket.
+async fn bounded_send(write: &mut WsSink, msg: Message) -> Result<(), String> {
+    match tokio::time::timeout(WRITE_TIMEOUT, write.send(msg)).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => Err(e.to_string()),
+        Err(_) => Err(format!(
+            "write timed out after {}s — connection wedged",
+            WRITE_TIMEOUT.as_secs()
+        )),
+    }
+}
+
 /// Returns false if the send failed (connection dead — caller should break).
 async fn send_command(write: &mut WsSink, cmd: &WsCommand) -> bool {
     match cmd {
@@ -726,7 +762,7 @@ async fn send_command(write: &mut WsSink, cmd: &WsCommand) -> bool {
             frame.extend_from_slice(target);
             frame.push(0x00);
             frame.extend_from_slice(data);
-            if let Err(e) = write.send(Message::Binary(frame.into())).await {
+            if let Err(e) = bounded_send(write, Message::Binary(frame.into())).await {
                 hollow_log!("[HOLLOW-WS] Binary send failed: {e}");
                 return false;
             }
@@ -739,7 +775,7 @@ async fn send_command(write: &mut WsSink, cmd: &WsCommand) -> bool {
                 "rooms": rooms,
             });
             let text = msg.to_string();
-            if let Err(e) = write.send(Message::Text(text.into())).await {
+            if let Err(e) = bounded_send(write, Message::Text(text.into())).await {
                 hollow_log!("[HOLLOW-WS] CheckPeers send failed: {e}");
                 return false;
             }
@@ -751,7 +787,7 @@ async fn send_command(write: &mut WsSink, cmd: &WsCommand) -> bool {
                 "room": room_code,
             });
             let text = msg.to_string();
-            if let Err(e) = write.send(Message::Text(text.into())).await {
+            if let Err(e) = bounded_send(write, Message::Text(text.into())).await {
                 hollow_log!("[HOLLOW-WS] DiscoverPeers send failed: {e}");
                 return false;
             }
@@ -760,7 +796,7 @@ async fn send_command(write: &mut WsSink, cmd: &WsCommand) -> bool {
         WsCommand::GetTurnCredentials => {
             let msg = serde_json::json!({ "type": "get_turn_credentials" });
             let text = msg.to_string();
-            if let Err(e) = write.send(Message::Text(text.into())).await {
+            if let Err(e) = bounded_send(write, Message::Text(text.into())).await {
                 hollow_log!("[HOLLOW-WS] GetTurnCredentials send failed: {e}");
                 return false;
             }
@@ -768,7 +804,7 @@ async fn send_command(write: &mut WsSink, cmd: &WsCommand) -> bool {
         }
         WsCommand::GetBandwidth => {
             let msg = serde_json::json!({ "type": "get_bandwidth" });
-            if let Err(e) = write.send(Message::Text(msg.to_string().into())).await {
+            if let Err(e) = bounded_send(write, Message::Text(msg.to_string().into())).await {
                 hollow_log!("[HOLLOW-WS] GetBandwidth send failed: {e}");
                 return false;
             }
@@ -781,7 +817,7 @@ async fn send_command(write: &mut WsSink, cmd: &WsCommand) -> bool {
                 "topics": topics,
             });
             let text = msg.to_string();
-            if let Err(e) = write.send(Message::Text(text.into())).await {
+            if let Err(e) = bounded_send(write, Message::Text(text.into())).await {
                 hollow_log!("[HOLLOW-WS] Subscribe send failed: {e}");
                 return false;
             }
@@ -789,7 +825,7 @@ async fn send_command(write: &mut WsSink, cmd: &WsCommand) -> bool {
         }
         WsCommand::ClaimNickname { nickname, master } => {
             let msg = serde_json::json!({ "type": "claim_nickname", "nickname": nickname, "master": master });
-            if let Err(e) = write.send(Message::Text(msg.to_string().into())).await {
+            if let Err(e) = bounded_send(write, Message::Text(msg.to_string().into())).await {
                 hollow_log!("[HOLLOW-WS] ClaimNickname send failed: {e}");
                 return false;
             }
@@ -797,7 +833,7 @@ async fn send_command(write: &mut WsSink, cmd: &WsCommand) -> bool {
         }
         WsCommand::ReleaseNickname => {
             let msg = serde_json::json!({ "type": "release_nickname" });
-            if let Err(e) = write.send(Message::Text(msg.to_string().into())).await {
+            if let Err(e) = bounded_send(write, Message::Text(msg.to_string().into())).await {
                 hollow_log!("[HOLLOW-WS] ReleaseNickname send failed: {e}");
                 return false;
             }
@@ -805,7 +841,7 @@ async fn send_command(write: &mut WsSink, cmd: &WsCommand) -> bool {
         }
         WsCommand::ResolveNickname { nickname } => {
             let msg = serde_json::json!({ "type": "resolve_nickname", "nickname": nickname });
-            if let Err(e) = write.send(Message::Text(msg.to_string().into())).await {
+            if let Err(e) = bounded_send(write, Message::Text(msg.to_string().into())).await {
                 hollow_log!("[HOLLOW-WS] ResolveNickname send failed: {e}");
                 return false;
             }
@@ -813,7 +849,7 @@ async fn send_command(write: &mut WsSink, cmd: &WsCommand) -> bool {
         }
         WsCommand::ClaimLinkCode { code } => {
             let msg = serde_json::json!({ "type": "claim_link_code", "code": code });
-            if let Err(e) = write.send(Message::Text(msg.to_string().into())).await {
+            if let Err(e) = bounded_send(write, Message::Text(msg.to_string().into())).await {
                 hollow_log!("[HOLLOW-WS] ClaimLinkCode send failed: {e}");
                 return false;
             }
@@ -821,7 +857,7 @@ async fn send_command(write: &mut WsSink, cmd: &WsCommand) -> bool {
         }
         WsCommand::ReleaseLinkCode => {
             let msg = serde_json::json!({ "type": "release_link_code" });
-            if let Err(e) = write.send(Message::Text(msg.to_string().into())).await {
+            if let Err(e) = bounded_send(write, Message::Text(msg.to_string().into())).await {
                 hollow_log!("[HOLLOW-WS] ReleaseLinkCode send failed: {e}");
                 return false;
             }
@@ -829,7 +865,7 @@ async fn send_command(write: &mut WsSink, cmd: &WsCommand) -> bool {
         }
         WsCommand::ResolveLinkCode { code } => {
             let msg = serde_json::json!({ "type": "resolve_link_code", "code": code });
-            if let Err(e) = write.send(Message::Text(msg.to_string().into())).await {
+            if let Err(e) = bounded_send(write, Message::Text(msg.to_string().into())).await {
                 hollow_log!("[HOLLOW-WS] ResolveLinkCode send failed: {e}");
                 return false;
             }
@@ -837,7 +873,7 @@ async fn send_command(write: &mut WsSink, cmd: &WsCommand) -> bool {
         }
         WsCommand::RegisterPushToken { token, platform } => {
             let msg = serde_json::json!({ "type": "register_push_token", "token": token, "platform": platform });
-            if let Err(e) = write.send(Message::Text(msg.to_string().into())).await {
+            if let Err(e) = bounded_send(write, Message::Text(msg.to_string().into())).await {
                 hollow_log!("[HOLLOW-WS] RegisterPushToken send failed: {e}");
                 return false;
             }
@@ -851,7 +887,7 @@ async fn send_command(write: &mut WsSink, cmd: &WsCommand) -> bool {
                 return true;
             };
             let msg = serde_json::json!({ "type": "set_push_prefs", "prefs": prefs });
-            if let Err(e) = write.send(Message::Text(msg.to_string().into())).await {
+            if let Err(e) = bounded_send(write, Message::Text(msg.to_string().into())).await {
                 hollow_log!("[HOLLOW-WS] SetPushPrefs send failed: {e}");
                 return false;
             }
@@ -863,7 +899,7 @@ async fn send_command(write: &mut WsSink, cmd: &WsCommand) -> bool {
                 "enabled": enabled,
                 "retention_secs": retention_secs,
             });
-            if let Err(e) = write.send(Message::Text(msg.to_string().into())).await {
+            if let Err(e) = bounded_send(write, Message::Text(msg.to_string().into())).await {
                 hollow_log!("[HOLLOW-WS] SetOfflineBuffer send failed: {e}");
                 return false;
             }
@@ -875,7 +911,7 @@ async fn send_command(write: &mut WsSink, cmd: &WsCommand) -> bool {
                 "target": target,
                 "category": category,
             });
-            if let Err(e) = write.send(Message::Text(msg.to_string().into())).await {
+            if let Err(e) = bounded_send(write, Message::Text(msg.to_string().into())).await {
                 hollow_log!("[HOLLOW-WS] ReportUser send failed: {e}");
                 return false;
             }
@@ -896,7 +932,7 @@ async fn send_command(write: &mut WsSink, cmd: &WsCommand) -> bool {
                     "retention_secs": retention_secs,
                 })
             };
-            if let Err(e) = write.send(Message::Text(msg.to_string().into())).await {
+            if let Err(e) = bounded_send(write, Message::Text(msg.to_string().into())).await {
                 hollow_log!("[HOLLOW-WS] SetTopicBuffer send failed: {e}");
                 return false;
             }
@@ -909,7 +945,7 @@ async fn send_command(write: &mut WsSink, cmd: &WsCommand) -> bool {
                 "channel": channel_id,
                 "max_age_secs": max_age_secs,
             });
-            if let Err(e) = write.send(Message::Text(msg.to_string().into())).await {
+            if let Err(e) = bounded_send(write, Message::Text(msg.to_string().into())).await {
                 hollow_log!("[HOLLOW-WS] TopicCatchup send failed: {e}");
                 return false;
             }
@@ -933,7 +969,7 @@ async fn send_command(write: &mut WsSink, cmd: &WsCommand) -> bool {
             frame.push(0x00);
             frame.push(if *mention { 0x01 } else { 0x00 });
             frame.extend_from_slice(data);
-            if let Err(e) = write.send(Message::Binary(frame.into())).await {
+            if let Err(e) = bounded_send(write, Message::Binary(frame.into())).await {
                 hollow_log!("[HOLLOW-WS] Channel direct send failed: {e}");
                 return false;
             }
@@ -947,7 +983,7 @@ async fn send_command(write: &mut WsSink, cmd: &WsCommand) -> bool {
             frame.extend_from_slice(topic.as_bytes());
             frame.push(0x00);
             frame.extend_from_slice(data);
-            if let Err(e) = write.send(Message::Binary(frame.into())).await {
+            if let Err(e) = bounded_send(write, Message::Binary(frame.into())).await {
                 hollow_log!("[HOLLOW-WS] Topic send failed: {e}");
                 return false;
             }
@@ -960,7 +996,7 @@ async fn send_command(write: &mut WsSink, cmd: &WsCommand) -> bool {
             frame.extend_from_slice(room);
             frame.push(0x00);
             frame.extend_from_slice(data);
-            if let Err(e) = write.send(Message::Binary(frame.into())).await {
+            if let Err(e) = bounded_send(write, Message::Binary(frame.into())).await {
                 hollow_log!("[HOLLOW-WS] Room send failed: {e}");
                 return false;
             }
@@ -976,7 +1012,7 @@ async fn send_command(write: &mut WsSink, cmd: &WsCommand) -> bool {
             frame.extend_from_slice(target);
             frame.push(0x00);
             frame.extend_from_slice(data);
-            if let Err(e) = write.send(Message::Binary(frame.into())).await {
+            if let Err(e) = bounded_send(write, Message::Binary(frame.into())).await {
                 hollow_log!("[HOLLOW-WS] Direct send failed: {e}");
                 return false;
             }
@@ -995,7 +1031,7 @@ async fn send_command(write: &mut WsSink, cmd: &WsCommand) -> bool {
             frame.extend_from_slice(target);
             frame.push(0x00);
             frame.extend_from_slice(data);
-            if let Err(e) = write.send(Message::Binary(frame.into())).await {
+            if let Err(e) = bounded_send(write, Message::Binary(frame.into())).await {
                 hollow_log!("[HOLLOW-WS] Direct image send failed: {e}");
                 return false;
             }
@@ -1015,7 +1051,7 @@ async fn send_command(write: &mut WsSink, cmd: &WsCommand) -> bool {
     };
 
     if let Ok(json) = json {
-        if let Err(e) = write.send(Message::Text(json.into())).await {
+        if let Err(e) = bounded_send(write, Message::Text(json.into())).await {
             hollow_log!("[HOLLOW-WS] Send failed: {e}");
             return false;
         }

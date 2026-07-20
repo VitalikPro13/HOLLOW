@@ -136,6 +136,23 @@ pub(crate) fn handle_call_send_signal(
     // this v1 reaches the friend's (deterministically chosen) online device.
     // Single-device falls back to the raw id (device == master), unchanged.
     let target = pick_online_device(ws_room_peers, &peer_id);
+    // Observability (2026-07-20): the outgoing call path used to be fully
+    // silent — an invite aimed at a stale-presence peer vanished with no
+    // trace anywhere (UI rang 30s, logs empty, undiagnosable). Log the
+    // resolved target for the LOW-VOLUME control signals, and always log
+    // when the target is about to be dropped as unreachable; sdp/ice floods
+    // stay quiet on the happy path.
+    let reachable = ws_room_peers.values().any(|ps| ps.contains(&target));
+    let control = matches!(
+        signal_type.as_str(),
+        "invite" | "accept" | "reject" | "end" | "busy"
+    );
+    if control || !reachable {
+        hollow_log!(
+            "[HOLLOW-CALL] Send {signal_type} for {peer_id} -> device {target} ({})",
+            if reachable { "in-room" } else { "UNREACHABLE — will be dropped" }
+        );
+    }
     send_message_to_peer(ws_cmd_tx, ws_room_peers, &target, msg);
 }
 

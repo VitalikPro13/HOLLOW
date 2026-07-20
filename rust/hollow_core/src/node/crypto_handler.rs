@@ -1917,8 +1917,23 @@ pub(crate) fn send_message_to_peer(
             target_peer: peer_str.to_string(),
             data: json.into_bytes(),
         });
+    } else {
+        // Peer unreachable — the message is dropped (upper layers own their
+        // retry/queue semantics), but NEVER silently: this branch is exactly
+        // where "call/message to a stale-presence peer vanished with no
+        // trace" episodes die, and without this line the logs contain zero
+        // evidence (2026-07-20 investigation). Externally-tagged serde:
+        // the variant name is the JSON object's single key.
+        let kind = serde_json::to_value(&msg)
+            .ok()
+            .and_then(|v| match v {
+                serde_json::Value::Object(o) => o.keys().next().cloned(),
+                serde_json::Value::String(s) => Some(s),
+                _ => None,
+            })
+            .unwrap_or_else(|| "?".into());
+        hollow_log!("[HOLLOW-SEND] DROPPED {kind} to {peer_str} — not in any WS room");
     }
-    // else: peer unreachable — drop silently
 }
 
 /// Like `send_message_to_peer` but routes into an EXPLICIT room (the
