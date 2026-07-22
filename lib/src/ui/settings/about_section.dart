@@ -50,7 +50,7 @@ class AboutTab extends StatelessWidget {
                   ),
                   const SizedBox(height: 2),
                   Text(
-                    'Alpha Version',
+                    'Beta Version',
                     style: HollowTypography.body.copyWith(
                       color: hollow.accent,
                       fontWeight: FontWeight.w600,

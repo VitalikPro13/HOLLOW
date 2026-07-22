@@ -1,0 +1,525 @@
+================================================================================
+HOLLOW - COMPLETE VOICE / AUDIO STACK PARAMETER EXTRACT
+Generated 2026-07-21 directly from source code (not from docs or memory).
+Purpose: hand to a sound engineer for review of the whole voice chain.
+
+Convention: ALL dBFS figures are relative to int16 full scale (32768.0).
+The whole capture chain works on float PCM at int16 scale, 10 ms frames.
+================================================================================
+
+--------------------------------------------------------------------------------
+0. SIGNAL FLOW OVERVIEW (capture, i.e. what the microphone goes through)
+--------------------------------------------------------------------------------
+
+  mic hardware
+   -> OS capture
+   -> WebRTC APM: AEC3 echo cancellation ON, WebRTC noise suppression
+      (ON by default, auto-disabled while AI-NS runs), AGC fully OFF,
+      APM high-pass filter OFF
+   -> custom capture post-processor ("the chain", runs in the APM's
+      SetCapturePostProcessing slot, realtime audio thread, allocation-free):
+        1. AI noise suppression (RNNoise default / DFN3 optional) - head slot
+        2. input trim (manual gain, or auto-level servo in dynamic mode)
+        3. EQ - 7 fixed RBJ biquads (100 Hz HPF 24 dB/oct, shelf, 4 peaks)
+        4. gate + upward compression (fused stage, dynamic mode only)
+        5. downward compressor (Giannoulis soft-knee, 3:1)
+        6. de-esser (split-band HF duck, ratio-keyed)
+        7. peak limiter (-1 dBFS) + tanh safety net
+   -> Opus encoder (libwebrtc built-in; bitrate via SDP fmtp munging)
+   -> SFrame media encryption (AES-GCM) -> RTP -> network
+
+  Playback/render side: NO custom processing at all (pass-through of WebRTC's
+  mixer). Per-user volume 0..200% via track volume. Received screen-share
+  audio is a completely separate pipeline (section 8) with its own level bus.
+
+  The chain is implemented THREE times with byte-identical constants
+  ("3 ports in sync"):
+    - Windows/Linux:  flutter_capture_gain_processor.cc (C++, the reference)
+    - Android:        CaptureGainProcessor.java
+    - iOS/macOS:      CaptureGainProcessor.m (one file, symlinked to both)
+  The frame handed to the chain is ALWAYS fullband mono, one 10 ms frame
+  (buffer_size == sample_rate/100); typical rates seen live: 48 kHz
+  (Pixel, Linux, macOS), 16 kHz (Windows with 16k-class headset mics).
+
+--------------------------------------------------------------------------------
+1. CAPTURE: DEVICE SELECTION + WEBRTC APM CONFIGURATION
+--------------------------------------------------------------------------------
+
+getUserMedia audio constraints (identical in DM calls and voice channels,
+identical on initial capture and live mic-switch re-capture):
+  echoCancellation        = true        (WebRTC AEC3 stays ON everywhere)
+  noiseSuppression        = dynamic     (see below)
+  googNoiseSuppression    = same as noiseSuppression
+  autoGainControl         = false       (AGC1 fully disabled)
+  googAutoGainControl     = false
+  highpass_filter (APM)   = false       (never overridden; HPF is done in EQ)
+  device selection        = {'optional': [{'sourceId': deviceId}]}
+                            ('deviceId' key is ignored by native builds)
+  NO sampleRate / channelCount / latency constraints are set.
+
+WebRTC NS policy: _wantWebrtcNs = !noiseSuppressAi || dfnFallback
+  - AI-NS off  -> WebRTC legacy NS on (a call never runs with zero NS)
+  - AI-NS on and healthy -> WebRTC NS off (AI engine owns suppression)
+  - AI-NS bails/format-fails -> WebRTC NS automatically re-armed (re-capture)
+
+Why AGC is off (measured 2026-07-06): WebRTC AGC1 targets about -18 dBFS RMS
+and on desktop runs kAdaptiveAnalog, physically riding the OS mic slider down.
+Two levelers in series fight and the slow outer loop wins -> permanently quiet
+mic and "boosting distorts". Loudness is owned entirely by the chain below.
+AGC2 is not reachable in the prebuilt libwebrtc m144 (verified via exports),
+so the choice is binary on/off, and it is off.
+
+NOT exposed / not used: transient suppression, typing detection, AEC3 tuning,
+AGC target level, NS aggressiveness level. The prebuilt libwebrtc wrapper only
+offers the four booleans above.
+
+--------------------------------------------------------------------------------
+2. AI NOISE SUPPRESSION (head of the chain, the "Krisp slot": post-AEC)
+--------------------------------------------------------------------------------
+
+User toggle: default OFF (feature maturing). Engine selector:
+  RNNoise (default, engine id 0)  - nnnoiseless 0.5.2 (pure-Rust RNNoise port),
+                                    ~1 MB, instant init, trivial CPU
+  DeepFilterNet3 (engine id 1)    - deep_filter git tag v0.5.6 + tract 0.19,
+                                    model load 100-500 ms desktop / ~15 s on a
+                                    Pixel (pre-warmed at app start), ~10x CPU
+
+Frame contract (engine core): 480 samples = 10 ms @ 48 kHz mono, float at
+int16 scale. RNNoise natively int16-scale; DFN3 scaled to +-1.0 internally.
+
+Format adapter (Rust, hollow_dfn), accepts the raw APM shape:
+  - 48 kHz fullband mono/stereo: direct (stereo = denoise ch0, copy to ch1)
+  - 16 kHz mono/stereo: 1:3 polyphase upsample -> denoise -> 3:1 downsample
+      polyphase pair: 145-tap Kaiser sinc, beta 6.0, -6 dB cutoff 7.6 kHz,
+      round trip delay 48 samples @16k = 3 ms, null tests SNR > 40 dB
+  - 48 kHz 3-band split (3x160): WebRTC ThreeBandFilterBank port
+      (line-verified vs C++ to 1e-7) - DORMANT in practice, see note
+  - anything else (e.g. 32 kHz) -> unsupported -> automatic WebRTC NS fallback
+  NOTE: in practice every wrapper hands over live fullband mono channel 0;
+  num_bands metadata is the APM's internal split count, not the buffer layout.
+
+DFN3-only tuning knobs (RNNoise ignores both):
+  attenLimDb      default 100.0  (max suppression cap, dB; effectively uncapped)
+  postFilterBeta  default 0.0    (off)
+
+RNNoise byproduct: per-frame voice probability (VAD) exported to the chain
+(ABI v3) - used to gate the upward-compression boost, see 3.3.
+
+Realtime watchdog: per-frame cost EMA, 100-frame warmup grace, sustained
+> 6 ms -> latched session bypass (WebRTC NS fallback re-armed from Dart).
+Denoiser diagnostics exposed: frames count ("frames > 0 or it didn't happen"),
+emaMs, engine, vad, raw shape (rate/channels/bands/bufferSize).
+
+Known behavior: DNS-class suppressors kill keyboard/fan/music/room noise but
+pass direct breath/nose turbulence (spectrally speech-like); Krisp ships a
+separate breath model for that. On a quiet-room mic with -80..-90 dBFS gaps
+the audible delta vs WebRTC NS is small; the win is noise EVENTS and noisy
+rooms (measured: synthetic noisy twin gaps -43.9 -> -66.5 dBFS = -22.6 dB).
+
+--------------------------------------------------------------------------------
+3. VOICE ENHANCEMENT CHAIN (the core DSP; enhance default ON, dynamic ON)
+--------------------------------------------------------------------------------
+
+Design lineage: static "broadcast chain" modeled on the user's Adobe Audition
+chain + an RVox-style operating-point retune (2026-07-06). Everything is
+branchless one-pole smoothers, continuous soft-knee curves, gains summed in
+dB with ONE pow10 + ONE multiply per sample. Static biquads (LTI) chosen
+deliberately: per-sample adaptive levelers crackled ("zipper") in two earlier
+attempts and were reverted. Denormal offset 1e-15, log floor 1e-9 everywhere.
+
+3.1 TRIM / INPUT GAIN
+  Manual mode: trim = micGain * 0.5   (slider "100%" = linear 2.0 -> unity)
+  Dynamic mode: trim set by the servo (3.7). De-zippered per sample, tau 5 ms.
+
+3.2 EQ - 7 fixed RBJ biquads (Direct Form I), fullband path only
+  HPF        100 Hz, 24 dB/oct (2 cascaded Butterworth biquads,
+             Q = 0.54119610 and 1.30656296)
+  Low shelf  110 Hz, +6.0 dB (slope S=1)
+  Peak 1     291 Hz, -3.0 dB, Q 1.5
+  Peak 2     3000 Hz, +2.0 dB, Q 1.5
+  Peak 3     7005 Hz, +3.5 dB, Q 2.0
+  Peak 4     12000 Hz, +1.5 dB, Q 2.0
+  Any band at or above 0.45 * fs collapses to identity (16 kHz devices:
+  the 12 kHz peak is identity; measured response there ends at 8 kHz).
+
+3.3 GATE + UPWARD COMPRESSION (one fused stage, DYNAMIC MODE ONLY)
+  Placed between EQ and compressor. One shared envelope; boost and cut summed
+  in dB.
+  Envelope follower: attack 1 ms / release 25 ms on |post-EQ sample|
+  Upward compression (lifts soft speech / word tails):
+    threshold -15 dBFS (harness-measured speech envelope at this chain point)
+    ratio 3:1 toward the threshold, soft knee 6 dB, max boost +8 dB
+    boost smoothing: attack 50 ms (slow grow) / release 4 ms (fast duck,
+    protects onsets from slamming the limiter)
+  Presence gating of the boost (so the floor is never lifted):
+    a) While AI-NS is actively denoising: RNNoise per-frame voice probability,
+       smoothstep 0.40 (zero boost) .. 0.75 (full boost). Breath measures
+       ~0.1-0.4, voiced speech 0.8+. This replaced the legacy gates after a
+       field regression where remote listeners heard lifted breaths.
+    b) Legacy fallback (no VAD available):
+       SNR presence: min-statistics floor tracker, two alternating 750 ms
+         sub-window minima, 100 ms smoothing, boots HIGH; boost zero within
+         6 dB of the tracked floor, full at 12 dB above it.
+       Modulation presence: positive-only syllabic modulation, env minus a
+         250 ms slow mean, clamp 6 dB, smoothed 400 ms; zero below 1 dB depth,
+         full above 3 dB (speech pumps 3-8 Hz; steady noise does not).
+       Both smoothstepped and multiplied. Legacy gate STATE keeps updating
+       even while VAD is in charge, so an engine bail falls back converged.
+  Gate (downward soft expander, runs in both AI-NS and legacy modes):
+    threshold = min(-32 dBFS absolute, tracked_floor + 10 dB)  <- SNR-relative
+      (the absolute-only version dropped quiet speech on weak mics whose
+      needed trim exceeds the servo's +12 dB cap; measured recovery +13 dB)
+    ratio 4:1 below threshold, soft knee 6 dB, max cut 14 dB
+    open 8 ms / close 60 ms; boots CLOSED (no pre-speech floor pop)
+
+3.4 COMPRESSOR (Giannoulis soft-knee, decoupled smooth peak detector)
+  threshold -24 dBFS
+  ratio 3:1
+  attack 10 ms / release 100 ms
+  knee 6 dB
+  makeup: manual mode = strength knob (default +3.6 dB; 12 dB at "100%",
+          range 0-150% = 0..+18 dB); dynamic mode = fixed +12.5 dB
+  Operating point (dynamic): servo parks speech RMS at -21 dBFS at the
+  compressor input = +3 dB over threshold, so the compressor does real gain
+  reduction on every syllable; loudness comes from crest-factor reduction,
+  not limiter grinding.
+
+3.5 DE-ESSER (both enhance modes, fullband path only, post-compressor)
+  Why: the user's esses center 6.3-6.9 kHz and the EQ's +3.5 dB peak at
+  7005 Hz brightens them along with consonants.
+  Split: v = lp + hf at 4800 Hz Butterworth lowpass (subtract-complement,
+  exact reconstruction at zero cut). Only hf is ducked.
+  Detector: TRUE 24 dB/oct highpass (two cascaded HP2 at 4800 Hz) envelope
+  RATIO to fullband envelope - level-invariant, so weak mics and quiet
+  speech de-ess correctly.
+    ratio -10 dB = clean (no cut) .. -3 dB = full ess (full cut)
+    level gate: sleeps below -40 dBFS, 6 dB ramp
+    max cut 10 dB
+    envelopes: attack 1 ms / release 40 ms; cut smoothing 2 ms / 40 ms
+  (Design note: pre-compressor placement measured only -3.5 dB effective;
+  post-compressor the full cut lands. Using the split difference as detector
+  falsely engaged on vowels - phase-mismatch skirt; hence the true HP pair.)
+
+3.6 LIMITER + SAFETY
+  Smoothed peak limiter (gain-smoothed, NOT memoryless):
+    ceiling -1 dBFS (0.8913 * full scale)
+    attack 1 ms / release 100 ms, NO lookahead (live-call latency budget)
+  tanh soft-clip safety net: knee at 0.85 * ceiling. In a correctly staged
+  chain it should almost never engage.
+
+3.7 AUTO-LEVEL SERVO (dynamic mode; default ON - "one servo, one gain")
+  Slow speech-gated RMS meter on the PRE-trim input servos ONE trim gain
+  toward (target - meter). Frame-rate decisions only, never per-sample.
+    target: speech RMS -21 dBFS at compressor input
+    with +12.5 makeup -> chain output converges to about -16 dBFS RMS
+    (harness: inputs -32..-8 dBFS all land at -16.1 dBFS out, peak -1.3;
+     a -40 dBFS whisper reaches -18.8)
+    speech gate: meter ignores content below -55 dBFS (silence never drags
+    trim up)
+    meter time constant: 2.0 s
+    first-speech PRIME: snaps instantly to the correct trim, then servos
+    slew limits: +3 dB/s boosting, -9 dB/s cutting
+    trim range: -20 dB .. +12 dB (cut range wider than boost on purpose;
+    boosting lifts the noise floor, cutting is free)
+    per-sample de-zipper: 5 ms one-pole, trim trace shared time-aligned
+    across channels/bands
+  Servo FREEZES while: mic muted (setCaptureMuted) or share audio active
+  anywhere (setCaptureServoHold) - otherwise music bleed re-calibrates the
+  trim down and buries the voice on unmute.
+  While dynamic is ON, the mic-gain and strength sliders are ignored (UI
+  shows "Auto" and disables them).
+
+3.8 LEGACY PATH (enhance OFF - the A/B kill switch)
+  Byte-identical to the original pipeline: flat gain * micGain -> tanh soft
+  limit with ceiling -3 dBFS (0.7079 * FS), knee at 0.6 * ceiling.
+  Kept so any chain problem can be A/B'd or disabled live without a rebuild.
+
+3.9 SENTINELS / SELF-DIAGNOSIS (all ports)
+  Capture-gap detector: > 30 ms between process() calls logged (HAL stall).
+  Whole-chain cost EMA: logs once if sustained > 2 ms/frame (never bails).
+  AI-NS watchdog: bails the session at sustained > 6 ms/frame (see 2).
+
+--------------------------------------------------------------------------------
+4. USER CONTROLS AND DEFAULTS (Dart settings layer)
+--------------------------------------------------------------------------------
+
+  Voice Enhancement toggle   default ON   (key voice_enhance)
+  Dynamic mode toggle        default ON   (key voice_enhance_dynamic)
+  Mic gain slider            0.68x..4.0x linear (displays 34%..200%,
+                             display unit: 100% = 2.0x), default 1.0x = "50%",
+                             83 divisions = 2% steps (key mic_gain_v2)
+                             -> native setCaptureGain
+  Enhancement strength       0..150% (default 30% = +3.6 dB makeup;
+                             100% = +12 dB), 30 divisions
+                             (key voice_enhance_strength)
+  AI noise suppression       default OFF  (key noise_suppress_ai)
+  NS engine selector         'rnnoise' (default) | 'dfn3'
+                             (key noise_suppress_engine)
+  Audio quality preset       Voice (default) | Music | Hi-Fi (key audio_quality)
+  Share audio volume         0..200%, default 100% (= -6 dB), key
+                             share_audio_volume
+  Share audio ducking        default ON, key share_audio_duck
+  Per-user playback volume   0..200% per remote user, default 100%
+
+--------------------------------------------------------------------------------
+5. ENCODING: OPUS (voice calls - DM and voice channels identical)
+--------------------------------------------------------------------------------
+
+Codec: Opus 48 kHz via libwebrtc's built-in encoder. All control is via SDP
+fmtp munging on every offer AND answer (no setParameters/sendEncodings for
+audio anywhere).
+
+fmtp written:  minptime=10; useinbandfec=1; maxaveragebitrate=<preset>
+               [; stereo=1; sprop-stereo=1  when the preset is stereo]
+
+Quality presets:
+  Voice  96 kbps  mono    (DEFAULT)
+  Music  128 kbps stereo
+  Hi-Fi  256 kbps stereo
+NOT set: usedtx (DTX off at default), cbr, maxplaybackrate, ptime, codec
+reordering for audio.
+In-band FEC is ON (useinbandfec=1). Jitter buffer = libwebrtc NetEq defaults
+(not exposed/modified).
+
+--------------------------------------------------------------------------------
+6. SPEAKING DETECTION (VAD for UI + ducking; NOT in the audio path)
+--------------------------------------------------------------------------------
+
+  DM calls: getStats poll every 200 ms; speaking = audioLevel > 0.01
+  (fallback: totalAudioEnergy delta > 0.0001). Local forced false while muted.
+  No explicit hangover; the 200 ms poll is the smoothing.
+  Voice channels, remote: same 200 ms getStats poll, same thresholds.
+  Voice channels, local: 'record' package amplitude monitor
+  (PCM16, mono, 16 kHz), amplitude poll 150 ms, dBFS mapped over a -60 dB
+  window; speaking = level > 0.30 (i.e. above -42 dBFS).
+  This VAD drives: speaking rings in UI + share-audio ducking (section 9).
+  (The chain's own gating uses its internal envelopes/RNNoise VAD - separate.)
+
+--------------------------------------------------------------------------------
+7. PLAYBACK SIDE
+--------------------------------------------------------------------------------
+
+  No render-side DSP (SetRenderPreProcessing exists in the SDK, never used).
+  Per-user volume: track volume 0.0..2.0 (0..200%), default 1.0.
+  Deafen: sets all remote track volumes to 0 (and share audio bus to 0).
+  Mobile output routing: speakerphone/earpiece via audio session mode
+  (iOS: videoChat = speaker, voiceChat = earpiece); BT headset preferred
+  when present.
+
+--------------------------------------------------------------------------------
+8. SCREEN-SHARE AUDIO (separate pipeline; deliberately OUTSIDE the call's APM)
+--------------------------------------------------------------------------------
+
+Rationale: share audio must not pass AEC/AGC/NS (mangles music). It rides its
+own Opus stream over the data channel (0x03 frames), decoded into a separate
+media-path player on the receiver. Voice AEC does not see it (it processes
+mic capture, not this playback).
+
+Encode (all platforms): Opus 48 kHz stereo s16le, OPUS_APPLICATION_AUDIO
+(music mode), bitrate 128 kbps, 10 ms frames (480 samples/ch).
+  complexity: 10 on desktop (out-of-process capturer exe),
+              5 on mobile (phone also runs video encode + the call; and the
+              transpiled Rust libopus is ~20% slower than C)
+  VBR: libopus default (on); FEC/DTX not set (off).
+Send-side backlog cap ~0.5 s, drop-oldest, frame-aligned.
+
+Capture sources:
+  Windows: WASAPI loopback 48 kHz (process-tree filtered for per-app share;
+           per-app NEVER falls back to system-wide; entire-screen excludes
+           Hollow's own process tree; during entire-screen share the call
+           voices are re-routed to a child render process and muted in-app
+           so they can be excluded from the loopback - AddSink tap upstream
+           of SetVolume(0))
+  Android: AudioPlaybackCapture (API 29+) 48 kHz stereo s16, usages
+           MEDIA/GAME/UNKNOWN, 20 ms read chunks
+  iOS:     ReplayKit .audioApp buffers (typically 44.1 kHz) resampled by
+           AVAudioConverter to 48 kHz stereo s16le; .audioMic buffers are
+           deliberately dropped (the call carries the mic)
+  macOS:   ScreenCaptureKit audio
+
+Receive players (media path, not voice path):
+  Desktop: out-of-process renderer exe (stdin control frames for gain)
+  iOS:     AudioQueue, 48 kHz stereo, 8 buffers x 10 ms; jitter buffer max
+           ~1 s, overrun drains to ~200 ms
+  Android: AudioTrack USAGE_MEDIA/CONTENT_TYPE_MUSIC, 48 kHz stereo;
+           queue cap ~1.2 s drop-oldest; pinned to speaker when speakerphone
+  Receiver gain ramps in the sink: tau ~30 ms toward lower targets (duck),
+  ~300 ms toward higher (release), one step per stereo pair.
+
+--------------------------------------------------------------------------------
+9. LEVELS / DUCKING BUS (received share audio vs voices)
+--------------------------------------------------------------------------------
+
+Problem it solves: mic rides the chain to about -16 LUFS; mastered content
+is -14 LUFS or hotter, so raw share audio drowned voices.
+  Receiver-side only (per-viewer preference, zero wire changes):
+  target gain = deafened ? 0
+              : (slider% / 200) * (duckEnabled && anyoneSpeaking ? 0.316 : 1)
+  slider 100% = -6 dB calibration; 200% = source loudness; never above unity
+  duck = -10 dB (0.316) while anyone in the call speaks (self included)
+  hold = 400 ms after last speech (VAD updates ~200 ms)
+  No compression/normalization of share content (movies/games keep dynamics).
+Sender side: while sending OR receiving share audio, the capture servo is
+frozen (setCaptureServoHold) so music bleed cannot re-calibrate the mic trim.
+
+--------------------------------------------------------------------------------
+10. PLATFORM LAYER
+--------------------------------------------------------------------------------
+
+WINDOWS/LINUX (C++ reference port)
+  Prebuilt libwebrtc m144 (webrtc-sdk) + two local patches: screen-content
+  video patch and an audio TRANSPORT patch (pluggable AudioTransportFactory
+  for the voice-redirect tap). NO DSP/APM patches inside libwebrtc; all DSP
+  is in the post-processor + Rust.
+  Windows 16k-class headsets run the whole chain at 16 kHz (12 kHz EQ band
+  = identity); AI-NS bridges 16k via the polyphase pair.
+  Linux: device enumeration via a native libpulse shim (prebuilt ADM reports
+  0 devices on pipewire-pulse); mic test path needs parecord; hardware note:
+  a distorted Linux mic is usually a maxed analog capture gain (amixer).
+
+ANDROID
+  Audio mode MODE_IN_COMMUNICATION, focus AUDIOFOCUS_GAIN, attributes
+  USAGE_VOICE_COMMUNICATION / CONTENT_TYPE_SPEECH, source AudioSource.MIC.
+  Hardware AEC and NS effects enabled on Android 10+; low-latency path on 8+.
+  Sample rate: PROPERTY_OUTPUT_SAMPLE_RATE, fallback 48000.
+  Mic keeps working in background ONLY via a microphone-type foreground
+  service started at mic acquisition (CallForegroundService).
+  Device routing priority: BT headset > wired > speaker > earpiece.
+  All audio-track ops (setEnabled/setVolume/dispose) go through a serial
+  op queue with a 500 ms wait watchdog (mute used to freeze the UI 2+ s:
+  synchronous signaling-thread hop does a full HAL round trip).
+
+iOS
+  AVAudioEngine ADM + Apple Voice-Processing IO (VPIO) ALWAYS ON - never
+  bypassed (tried once: kills Apple's hardware AEC -> echo + feedback howl).
+  VPIO includes Apple's own AGC/AEC/NS and attenuates playback ~6-10 dB;
+  accepted because the sender-side chain delivers hot audio.
+  Session: PlayAndRecord + MixWithOthers | AllowBluetooth | AllowBluetoothA2DP
+  | AllowAirPlay (MixWithOthers is load-bearing: without it another app's
+  playback kills the backgrounded call within ~45 s).
+  Speaker route = session MODE: videoChat (speaker) / voiceChat (earpiece),
+  baked into the WebRTC session template so route survives engine restarts.
+  The shared chain runs ON TOP of VPIO-processed audio (same constants).
+
+macOS
+  CoreAudio ADM (the AudioEngine ADM crashes in this SDK build on macOS 15).
+  No platform voice processing engaged; the shared chain is the only capture
+  DSP. Explicit default device selection at init.
+
+--------------------------------------------------------------------------------
+11. MEDIA ENCRYPTION (context - after the encoder, transparent to audio)
+--------------------------------------------------------------------------------
+
+  SFrame frame encryption, AES-GCM, on every voice/video/share frame.
+  Key: MLS group export_secret(label "sframe", 32 bytes) per epoch; rotates
+  on ANY membership change. Ratchet salt "hollow-sframe-salt", key ring 16,
+  ratchet window 16. Restricted channels derive from the channel's own MLS
+  subgroup. (Zero audio-quality impact; listed for completeness.)
+
+--------------------------------------------------------------------------------
+12. DESIGN HISTORY / RATIONALE (what a consultant should know up front)
+--------------------------------------------------------------------------------
+
+  - Two earlier ADAPTIVE chains (5-stage cascade with per-sample levelers)
+    audibly crackled and were fully reverted. Iron rule since: static LTI
+    biquads + frame-rate servo decisions + per-sample one-pole de-zipper only.
+  - The EQ curve is the user's own Adobe Audition preset, transplanted.
+  - The RVox-style retune (servo -21 / threshold -24 / makeup +12.5) was
+    tuned offline in a g++ harness against the real .cc before any device
+    build; verdict on device: "much better, voice much richer".
+  - Output target is about -16 dBFS RMS speech (harness-converged from any
+    mic level -40..-8 dBFS). Reference points used: pro voice -16..-18 LUFS.
+  - The upward-compression stage caused a real field regression: remote
+    listeners heard breaths lifted (+8 dB max boost applied to turbulence).
+    Fixes tried: harmonicity gate (fully validated offline: NSDF clarity
+    smoothstep 0.40..0.60, fricative-gated 180 ms hangover, silence cutout
+    -65 dBFS) - SHELVED after an ear A/B sounded near-identical to its
+    author; instead the RNNoise VAD now gates the boost while AI-NS runs.
+    One-constant escape hatch if complaints return: max boost 8 -> 0 dB.
+  - Weak-mic lesson: every downstream threshold that can meet content the
+    servo failed to normalize (trim cap!) must be floor/SNR-relative, not
+    absolute. The gate got this fix; measured +13 dB quiet-word recovery.
+  - The user's own mic (Razer BlackShark V2 X): brickwalls at 8 kHz, very
+    dark (-27 dB @2.5-5k vs vowels), speech RMS -34.6 dBFS raw (needs +13.6
+    trim vs the +12 cap), floor -87 dBFS. Its "distortion" is not clipping;
+    it's consonants riding 5-10 dB over the floor above 2 kHz.
+  - Same-room two-device tests produce phantom AEC/quality bugs; only
+    remote-peer listens count. For AI-NS: "frames > 0 in the log or the
+    test didn't happen".
+  - AGC2 retune inside libwebrtc: permanently off the table (symbols not
+    exported in the prebuilt DLL); the CustomProcessing hook is the only
+    injection point, which validates putting the whole chain there.
+
+--------------------------------------------------------------------------------
+13. KNOWN LIMITATIONS / OPEN ITEMS
+--------------------------------------------------------------------------------
+
+  - Mobile settings label says Voice = "32 kbps" but the actual preset is
+    96 kbps (label bug, fix pending).
+  - iOS loudspeaker route: enabling speaker changes Apple's CAPTURE tuning
+    (VPIO re-config) -> known echo/noise regression on speaker; parked.
+  - 48 kHz devices (Pixel/Linux) only recently got the FULL chain (EQ/
+    de-esser/limiter) after the fullband-layout fix; a dedicated remote-peer
+    listen test of that change is still pending.
+  - Breath handling: VAD gate covers AI-NS users; legacy-gate users can
+    still get breath lift in the upward stage.
+  - No lookahead in the limiter (latency budget); loud transients rely on
+    the 1 ms attack + tanh net.
+  - DFN3 on iOS runs post-VPIO (Apple NS can't be disabled) - potential
+    double-suppression artifacts; default OFF there.
+  - The g++ chain tuning harness lives in session scratchpads, not the repo
+    (the Rust DFN harness dfn_offline.rs IS committed).
+
+--------------------------------------------------------------------------------
+14. QUESTIONS WORTH ASKING A SOUND ENGINEER
+--------------------------------------------------------------------------------
+
+  1. EQ: the fixed curve was tuned for one dark 16 kHz headset mic. Is a
+     one-curve-fits-all EQ defensible, or should EQ adapt to (or be bypassed
+     for) already-bright/flat mics? (A spectral tilt detector was considered.)
+  2. Operating point: servo -21 dBFS in, 3:1 over -24 threshold, +12.5
+     makeup -> -16 dBFS out. Would you choose a different density/ratio for
+     conversational VoIP vs broadcast?
+  3. Upward compression: is +8 dB max boost with VAD gating a sound design,
+     or would you replace it (e.g. with proper harmonicity gating or drop
+     upward compression entirely)?
+  4. De-esser: ratio-keyed broadband HF duck at 4.8 kHz split, max 10 dB.
+     Any concern vs a narrower dynamic-EQ style dip at 6-7 kHz?
+  5. Limiter without lookahead at -1 dBFS with tanh net: acceptable for
+     speech, or is a 1-2 ms lookahead worth the latency?
+  6. Loudness: is -16 dBFS RMS speech the right target for a voice app when
+     mastered share content sits at -14 LUFS (currently solved by ducking
+     the share audio -6 dB default, -10 dB while speaking)?
+  7. Servo dynamics: 2 s meter, +3/-9 dB/s slew, prime-snap on first speech.
+     Would you tune convergence differently for very quiet talkers?
+  8. Noise suppression placement: RNNoise/DFN3 post-AEC pre-chain (Krisp
+     slot). Any reason to prefer pre-AEC or dual-stage?
+  9. 16 kHz capture reality: many Windows headsets run the whole chain at
+     16 kHz. Anything in the chain you would change for narrowband devices?
+ 10. Opus: 96 kbps mono default with FEC on, DTX off, complexity default.
+     Would you change frame size (10 ms), enable DTX, or raise the default?
+
+--------------------------------------------------------------------------------
+15. SOURCE MAP (where each piece lives, for verification)
+--------------------------------------------------------------------------------
+
+  Chain (3 ports, constants must stay in sync):
+    packages/flutter_webrtc/common/cpp/src/flutter_capture_gain_processor.cc
+    packages/flutter_webrtc/android/.../audio/CaptureGainProcessor.java
+    packages/flutter_webrtc/common/darwin/Classes/CaptureGainProcessor.m
+  APM options / constraints: common/cpp/src/flutter_media_stream.cc,
+    lib/src/core/services/voice_service.dart + voice_channel_service.dart
+  AI-NS engine: rust/hollow_dfn/ (lib.rs, resample.rs, split_band.rs),
+    rust/hollow_core/src/dfn_ffi.rs,
+    common/cpp/src/hollow_dfn_binding.cc, android .../audio/DfnBridge.java
+  Settings/defaults: lib/src/core/providers/settings_provider.dart
+  SDP munge: voice_service.dart / voice_channel_service.dart (_mungeOpusParams)
+  Share audio: rust/hollow_core/src/api/screen_audio.rs,
+    packages/flutter_webrtc/windows/screen_audio_capturer.cc,
+    lib/src/core/services/share_audio_level.dart
+  SFrame: lib/src/core/services/frame_cryptor_service.dart,
+    rust/hollow_core/src/crypto/mls_manager.rs (export label "sframe")
+
+================================================================================
+END
+================================================================================

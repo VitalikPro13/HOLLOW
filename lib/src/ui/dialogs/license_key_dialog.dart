@@ -143,7 +143,7 @@ class _LicenseKeyContentState extends State<_LicenseKeyContent> {
                   const SizedBox(height: HollowSpacing.xs),
 
                   Text(
-                    'Enter your alpha access key to continue',
+                    'Enter your beta access key to continue',
                     style: HollowTypography.body.copyWith(
                       color: hollow.textSecondary,
                     ),

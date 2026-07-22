@@ -17,7 +17,7 @@ The relay is a lightweight, stateless message router. It does **not** store mess
 - **Binary protocol** — `0x01` for room broadcasts, `0x02` for targeted peer-to-peer delivery, `0x03`/`0x04` for bandwidth-optimized message broadcast/direct (25-42% savings vs JSON), `0x07`/`0x08` for topic-routed channel messages (per-channel pub/sub). The relay rewrites target fields to sender fields on forwarding.
 - **Signaling HTTP** — bootstrap peer discovery (`/register`, `/unregister`, `/bootstrap/{room}`) with Ed25519-signed requests.
 - **TURN credential generation** — time-limited HMAC-SHA1 credentials for NAT traversal via coturn (`/turn-credentials`).
-- **License key gating** — optional closed-alpha access control via a `keys.json` file, with 30-second hot-reload and active connection revocation.
+- **License key gating** — optional closed-beta access control via a `keys.json` file, with 30-second hot-reload and active connection revocation.
 - **Server stats** — live memory, bandwidth, and online user count via `/server-stats` (reads `/proc` on Linux).
 
 ## Performance

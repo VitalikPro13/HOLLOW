@@ -119,7 +119,7 @@ void showHollowLicensesPage(BuildContext context) {
   showLicensePage(
     context: context,
     applicationName: 'Hollow',
-    applicationVersion: 'Alpha',
+    applicationVersion: 'Beta',
     applicationIcon: Padding(
       padding: const EdgeInsets.all(HollowSpacing.md),
       child: ClipRRect(

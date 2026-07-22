@@ -12,7 +12,7 @@ Hollow is a fully distributed, end-to-end encrypted communication platform. Ther
 
 Hollow provides real-time text messaging, voice and video calls, screen sharing, file sharing, and distributed storage — all with end-to-end encryption. A single human identity can run on multiple devices (multi-device sync), and mobile clients receive push notifications without ever exposing message content to Apple or Google. The protocol is designed so that even a fully compromised relay operator learns nothing beyond which peer IDs are connected and which rooms they occupy.
 
-This document describes the Hollow protocol as implemented in the Alpha release. It covers the cryptographic architecture, networking model, synchronization protocol, multi-device identity model, push-notification privacy design, and security properties. It is not an implementation guide — it describes the system at the protocol level so that its security properties can be evaluated independently of the source code.
+This document describes the Hollow protocol as implemented in the Beta release. It covers the cryptographic architecture, networking model, synchronization protocol, multi-device identity model, push-notification privacy design, and security properties. It is not an implementation guide — it describes the system at the protocol level so that its security properties can be evaluated independently of the source code.
 
 The client is a native application for Windows, macOS, Linux, Android, and iOS (a single Rust core shared across all platforms, with a Flutter UI). All cryptographic operations are identical across platforms.
 
@@ -1418,7 +1418,7 @@ It deliberately does **not** cover the WebRTC media plane (audio/video pixels, S
 - **Traffic analysis.** Message timing and size patterns are visible to the relay and network observers. Constant-rate padding is not implemented.
 - **Local device compromise.** If an attacker has access to an unlocked device with the decrypted database open, they can read everything. This is true of any E2EE system. Identity at-rest protection (§2.3) mitigates offline attacks: the identity file is encrypted via DPAPI/Keychain (machine-bound) or a user password (Argon2id), so a stolen identity file is useless without the original machine or password. However, a live session with the wrapping key in memory remains vulnerable.
 - **Relay availability attacks.** A malicious relay can selectively drop or delay messages. The current single-relay architecture has no failover. Multi-relay support is designed but not yet deployed.
-- **Quantum computing.** All key exchanges use Curve25519. Migration to ML-KEM (Kyber) is planned but not prioritized for the alpha.
+- **Quantum computing.** All key exchanges use Curve25519. Migration to ML-KEM (Kyber) is planned but not prioritized for the beta.
 - **Trust-on-first-use (TOFU).** Peer identity verification relies on out-of-band fingerprint comparison. There is no certificate authority or web of trust.
 
 ### 22.3 Relay Operator Trust Assumptions
@@ -1443,4 +1443,4 @@ The relay operator is **not trusted** with: message contents, encryption keys, f
 
 ---
 
-*This document describes the Hollow protocol as implemented in the Alpha release. The protocol is subject to change. Check the GitHub repository for the latest updates. The relay server is open-source under the MIT License. The client application is open-source under the GNU Affero General Public License v3.0 (AGPL-3.0).*
+*This document describes the Hollow protocol as implemented in the Beta release. The protocol is subject to change. Check the GitHub repository for the latest updates. The relay server is open-source under the MIT License. The client application is open-source under the GNU Affero General Public License v3.0 (AGPL-3.0).*

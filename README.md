@@ -14,7 +14,7 @@
   <img src="https://img.shields.io/badge/encryption-end--to--end-blueviolet" alt="Encryption">
   <a href="https://codecov.io/gh/VitalikPro13/HOLLOW" > 
   <img src="https://codecov.io/gh/VitalikPro13/HOLLOW/graph/badge.svg?token=F0TBC256BF" alt="Rust Coverage"></a>
-  <img src="https://img.shields.io/badge/status-alpha-orange" alt="Status">
+  <img src="https://img.shields.io/badge/status-beta-00BFA6" alt="Status">
 </p>
 
 <p align="center">
@@ -85,10 +85,10 @@ Your identity is a cryptographic keypair. Zero registrations. One recovery phras
 | macOS (10.15+) | [.dmg](https://anonlisten.com/hollow/releases/hollow-0.8.1.dmg) |
 | Linux | [Flatpak](https://anonlisten.com/hollow/releases/hollow-0.8.1-linux-x86_64.flatpak) / [.tar.gz](https://anonlisten.com/hollow/releases/hollow-0.8.1-linux.tar.gz) |
 | Android (7+) | [.apk](https://anonlisten.com/hollow/releases/hollow-0.8.1-android.apk) |
-| iOS | In progress |
+| iOS (16+) | [TestFlight](https://testflight.apple.com/join/5YG2S5e8) |
 | Web | Not planned |
 
-Current Progress: iOS is coming to TestFlight soon! The link will be included to join and you would need to have the TestFlight installed in order to participate (and there is a limit of max 10k people). Overall, the app was improved on the voice calls, screen sharing and fixing on the bugs. For now, I think it's better to focus on improvements rather than implementing something new, but we'll see.
+Current Progress: iOS is finally here! Though, I recently released v0.8.1 but only noq got the approval for the TestFlight, which still has the old v0.8.0 if I'm not wrong. Not a big deal, simply join and you'll get new versions automatically! Limit up to 10k testers.
 
 ## Tech Stack
 

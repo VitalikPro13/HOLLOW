@@ -35,7 +35,7 @@ Out of scope:
 
 | Version | Supported |
 |---------|-----------|
-| Latest alpha | Yes |
+| Latest beta | Yes |
 | Older builds | Best effort |
 
 ## Disclosure

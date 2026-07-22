@@ -537,7 +537,7 @@ The version list shows ALL versions from the manifest, not just newer ones. Any 
 `StatelessWidget`. A `SingleChildScrollView` with sections separated by 0.5-alpha dividers.
 
 ### App Identity
-Row: 72x72 rounded app logo (`assets/hollow_logo_rounded.png`) + Column with "Hollow" (24px heading), "Alpha Version" (accent, bold), "by AnonListen" (caption).
+Row: 72x72 rounded app logo (`assets/hollow_logo_rounded.png`) + Column with "Hollow" (24px heading), "Beta Version" (accent, bold), "by AnonListen" (caption).
 
 ### Contact Section
 - **Email**: Ghost button "feedback@anonlisten.com" with mail icon. Copies to clipboard on tap.
@@ -576,7 +576,7 @@ Variant with custom green color (#C0FF00). Same hover pattern. Uses `assets/kick
 ### Legal Section
 - **Privacy Policy**: Ghost button with shield icon. Opens `_showLegalDocument()` with `legal/PRIVACY_POLICY.md`.
 - **Terms of Use**: Ghost button with scroll icon. Opens `_showLegalDocument()` with `legal/TERMS_OF_USE.md`.
-- **Open-Source Licenses**: Ghost button with fileText icon. Opens Flutter's built-in `showLicensePage()` with app name "Hollow", version "Alpha", and 48x48 rounded logo.
+- **Open-Source Licenses**: Ghost button with fileText icon. Opens Flutter's built-in `showLicensePage()` with app name "Hollow", version "Beta", and 48x48 rounded logo.
 
 ### _showLegalDocument()
 Top-level function. Loads markdown from asset bundle, strips the `# Title` heading. Opens a 640x520 `showHollowDialog` with:

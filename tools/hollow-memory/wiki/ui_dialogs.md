@@ -250,7 +250,7 @@ Uses `HollowDialog` with title "Your Recovery Phrase".
 
 ---
 
-## LicenseKeyDialog -- Alpha Access Key Input
+## LicenseKeyDialog -- Beta Access Key Input
 
 **File:** `lib/src/ui/dialogs/license_key_dialog.dart` (194 lines)
 **Trigger:** On app startup when relay reports key-required via `/relay-status`.
@@ -277,7 +277,7 @@ Uses `HollowDialog` with title "Your Recovery Phrase".
 **Layout (440x340 max):**
 - KeyRound icon in 56px accent-tinted container
 - "License Key Required" heading
-- "Enter your alpha access key to continue" subtitle
+- "Enter your beta access key to continue" subtitle
 - `HollowTextField` with autofocus, mono font, hint "HLLW-XXXX-XXXX-XXXX", letter-spacing 1.5
 - Error text (conditional)
 - "Activate" filled button (full width)
@@ -871,7 +871,7 @@ Values: `profile`, `system`, `security`, `updates`, `about`
 ### About Tab (`_AboutTab`)
 
 **Layout:**
-- App logo (72px rounded) + "Hollow" / "Alpha Version" / "by AnonListen"
+- App logo (72px rounded) + "Hollow" / "Beta Version" / "by AnonListen"
 - Contact: feedback@anonlisten.com (copy) + anonlisten.com (launch)
 - Follow & Support: brand icons row (YouTube, X, TikTok, Twitch, Kick | shimmer divider | Patreon, Ko-Fi) -- each uses `_BrandIcon` or `_SvgBrandIcon` with hover scale animation + `HollowTooltip`
 - Legal: Privacy Policy, Terms of Use (both render markdown from `legal/` assets in a sub-dialog), Open-Source Licenses (Flutter's `showLicensePage`)
