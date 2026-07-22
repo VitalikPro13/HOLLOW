@@ -88,7 +88,7 @@ Your identity is a cryptographic keypair. Zero registrations. One recovery phras
 | iOS (16+) | [TestFlight](https://testflight.apple.com/join/5YG2S5e8) |
 | Web | Not planned |
 
-Current Progress: iOS is finally here! Though, I recently released v0.8.1 but only noq got the approval for the TestFlight, which still has the old v0.8.0 if I'm not wrong. Not a big deal, simply join and you'll get new versions automatically! Limit up to 10k testers.
+Current Progress: iOS is finally here! Though, I recently released v0.8.1 but only now got the approval for the TestFlight, which still has the old v0.8.0 if I'm not wrong. Not a big deal, simply join and you'll get new versions automatically! Limit up to 10k testers.
 
 ## Tech Stack
 
