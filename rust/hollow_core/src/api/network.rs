@@ -162,6 +162,10 @@ pub enum NetworkEvent {
     ProfileUpdated { peer_id: String },
     /// A device list was ingested for `master_peer_id` (multi-device, Phase 6).
     DeviceListUpdated { master_peer_id: String },
+    /// A contact's identity changed in a way worth showing (Issue 1-C): a new
+    /// device joined their identity, or one of their devices re-keyed. `peer_id`
+    /// is the MASTER; `kind` is `new_device` or `identity_key_changed`.
+    SecurityAlert { peer_id: String, kind: String, detail: String, created_at: i64 },
     /// THIS device was revoked (Step 7) — Dart self-nukes (wipe + relaunch).
     SelfRevoked,
     // -- Message editing events (Phase 3.5) --
@@ -836,6 +840,9 @@ fn to_ffi_event(event: node::NetworkEvent) -> NetworkEvent {
         node::NetworkEvent::SelfRevoked => NetworkEvent::SelfRevoked,
         node::NetworkEvent::DeviceListUpdated { master_peer_id } => {
             NetworkEvent::DeviceListUpdated { master_peer_id }
+        }
+        node::NetworkEvent::SecurityAlert { peer_id, kind, detail, created_at } => {
+            NetworkEvent::SecurityAlert { peer_id, kind, detail, created_at }
         }
         node::NetworkEvent::ChannelMessageEdited { server_id, channel_id, message_id, new_text, edited_at, signature, public_key } => {
             NetworkEvent::ChannelMessageEdited { server_id, channel_id, message_id, new_text, edited_at, signature, public_key }

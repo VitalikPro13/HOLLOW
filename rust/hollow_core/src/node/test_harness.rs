@@ -847,6 +847,23 @@ impl TestNode {
             .unwrap_or_default()
     }
 
+    /// Active device ids this node has PERSISTED for `master`. Empty until a
+    /// signed device list for that identity has been ingested.
+    pub(crate) fn known_devices(&self, master: &str) -> Vec<String> {
+        self.store()
+            .load_device_list(master)
+            .ok()
+            .flatten()
+            .map(|l| l.devices)
+            .unwrap_or_default()
+    }
+
+    /// Security alerts this node has recorded (Issue 1-C). The DB is the dedup
+    /// authority, so this is the assertion surface for "warned exactly once".
+    pub(crate) fn security_alerts(&self) -> Vec<crate::storage::messages::SecurityAlertRow> {
+        self.store().get_security_alerts().unwrap_or_default()
+    }
+
     /// Friend-table status for a person (master-keyed): "accepted", "pending",
     /// or None if no row exists. Used by the reject/mutual-request tests.
     pub(crate) fn friend_status(&self, master: &str) -> Option<String> {
@@ -2001,6 +2018,126 @@ async fn device_revocation_cuts_off_and_ghost_fanout_holds() {
         "revoked device C must NOT receive the post-revocation DM (ghost fan-out guard), got {:?}",
         c_thread.iter().map(|m| &m.text).collect::<Vec<_>>()
     );
+}
+
+// ---------------------------------------------------------------------------
+// Issue 1-C: "a NEW DEVICE appeared for this contact" must reach the friend as a
+// visible alert — that is the real-world attack shape (a device linked to a
+// compromised account), and it is detectable only because the device list is
+// master-signed and already ingested + verified.
+//
+// The distributed part is what makes this worth a harness test rather than a
+// unit test: the alert has to be driven by a device list that genuinely
+// propagated over the wire, and it must NOT fire on the FIRST list a friend ever
+// sees (that is a baseline, not a change — an alert there would fire for every
+// new friend and train users to dismiss without reading).
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
+async fn friend_is_warned_when_a_new_device_joins_their_contact() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    // A = the friend who should be warned. M = the contact, devices B then C.
+    const A_MASTER: u8 = 110;
+    const M_MASTER: u8 = 120;
+    const B_DEV: u8 = 121;
+    const C_DEV: u8 = 122;
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
+    let m_master = NativeKeypair::from_secret_bytes(&seed_bytes(M_MASTER)).peer_id();
+    let b_dev = NativeKeypair::from_secret_bytes(&seed_bytes(B_DEV)).peer_id();
+    let c_dev = NativeKeypair::from_secret_bytes(&seed_bytes(C_DEV)).peer_id();
+
+    super::resolver::seed_self(&m_master, &[b_dev.clone(), c_dev.clone()]);
+
+    // A and M's first device B come up and become friends.
+    let mut a = spawn_node_with_friends(&relay, A_MASTER, A_MASTER, &[&m_master]).await;
+    sleep_ms(1200).await;
+    let mut b = spawn_node_with_friends(&relay, M_MASTER, B_DEV, &[&a_master]).await;
+
+    // B publishes a device list of {B}. A ingests it as its BASELINE for M.
+    seed_device_list_into_db(&b.db_path, &b.passphrase, M_MASTER, &[b_dev.clone()]);
+
+    let mut a_saw_b = false;
+    for _ in 0..40 {
+        sleep_ms(500).await;
+        if a.known_devices(&m_master).iter().any(|d| *d == b_dev) {
+            a_saw_b = true;
+            break;
+        }
+    }
+    assert!(
+        a_saw_b,
+        "A should ingest M's first device list (got {:?})",
+        a.known_devices(&m_master)
+    );
+
+    // FIRST contact must be silent. Assert against the DB, not the event
+    // channel: the store write is the dedup authority, so an empty table is the
+    // real proof that nothing was raised.
+    assert!(
+        a.security_alerts().is_empty(),
+        "the first device list for a contact is a baseline, not a warning (got {:?})",
+        a.security_alerts().iter().map(|r| r.kind.clone()).collect::<Vec<_>>()
+    );
+    drain_events(&mut a);
+
+    // --- M links a SECOND device, C. ---
+    let mut c = spawn_node_with_friends(&relay, M_MASTER, C_DEV, &[&a_master]).await;
+
+    // A must now be warned — once, naming the device that appeared.
+    let warned = wait_event(&mut a, std::time::Duration::from_secs(30), |ev| {
+        matches!(
+            ev,
+            NetworkEvent::SecurityAlert { peer_id, kind, detail, .. }
+                if peer_id == &m_master
+                    && kind == super::security_alerts::KIND_NEW_DEVICE
+                    && detail == &c_dev
+        )
+    })
+    .await;
+    assert!(
+        warned,
+        "A must be warned that a new device joined M (alerts: {:?})",
+        a.security_alerts().iter().map(|r| (r.kind.clone(), r.detail.clone())).collect::<Vec<_>>()
+    );
+
+    // The list is re-published on every reconnect; the warning must not pile up.
+    // Bounce C so A re-ingests the same {B,C} list at least once more.
+    relay.set_online(&c.device_id, false);
+    sleep_ms(1000).await;
+    relay.set_online(&c.device_id, true);
+    sleep_ms(3000).await;
+
+    let new_device_alerts: Vec<_> = a
+        .security_alerts()
+        .into_iter()
+        .filter(|r| r.kind == super::security_alerts::KIND_NEW_DEVICE)
+        .collect();
+    assert_eq!(
+        new_device_alerts.len(),
+        1,
+        "a re-ingested device list must not re-raise the warning (got {:?})",
+        new_device_alerts.iter().map(|r| r.detail.clone()).collect::<Vec<_>>()
+    );
+    assert_eq!(new_device_alerts[0].detail, c_dev, "the alert names the NEW device");
+    assert!(
+        new_device_alerts[0].acknowledged_at.is_none(),
+        "a fresh warning starts unread"
+    );
+
+    // M's own devices never warn ABOUT THEMSELVES — the user linked them, and
+    // they surface in linked-devices instead.
+    assert!(
+        b.security_alerts().is_empty(),
+        "a device must not warn about its own identity's siblings (got {:?})",
+        b.security_alerts().iter().map(|r| r.kind.clone()).collect::<Vec<_>>()
+    );
+    drain_events(&mut c);
 }
 
 // ---------------------------------------------------------------------------

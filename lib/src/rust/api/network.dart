@@ -1236,6 +1236,16 @@ sealed class NetworkEvent with _$NetworkEvent {
   const factory NetworkEvent.deviceListUpdated({required String masterPeerId}) =
       NetworkEvent_DeviceListUpdated;
 
+  /// A contact's identity changed in a way worth showing (Issue 1-C): a new
+  /// device joined their identity, or one of their devices re-keyed. `peer_id`
+  /// is the MASTER; `kind` is `new_device` or `identity_key_changed`.
+  const factory NetworkEvent.securityAlert({
+    required String peerId,
+    required String kind,
+    required String detail,
+    required PlatformInt64 createdAt,
+  }) = NetworkEvent_SecurityAlert;
+
   /// THIS device was revoked (Step 7) — Dart self-nukes (wipe + relaunch).
   const factory NetworkEvent.selfRevoked() = NetworkEvent_SelfRevoked;
   const factory NetworkEvent.channelMessageEdited({

@@ -985,6 +985,15 @@ pub(crate) async fn ingest_device_list(
         stored.master_peer_id, stored.version, stored.devices.len(),
         stored.revoked.len(), added
     );
+    // SECURITY (Issue 1-C): a device joining someone else's identity is the one
+    // device-list change that carries an attack signal — it is the shape of
+    // "someone linked a device to an account they compromised". Warn visibly.
+    // First contact (`prev_devices` empty) establishes a baseline instead; the
+    // helper enforces that, and dedups so a reconnect can't re-raise it.
+    super::security_alerts::note_new_devices(
+        event_tx, db_path, db_passphrase, local_master_peer_id,
+        &stored.master_peer_id, &prev_devices, &stored.devices,
+    ).await;
     let _ = event_tx.send(NetworkEvent::DeviceListUpdated {
         master_peer_id: stored.master_peer_id,
     }).await;

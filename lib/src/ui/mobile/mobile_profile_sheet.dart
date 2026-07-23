@@ -7,6 +7,8 @@ import 'package:hollow/src/core/providers/friends_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/local_nickname_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
+import 'package:hollow/src/core/providers/verified_peers_provider.dart';
+import 'package:hollow/src/ui/dialogs/verify_contact_dialog.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/models/showcase_board.dart';
 import 'package:hollow/src/core/providers/selected_peer_provider.dart';
@@ -428,6 +430,32 @@ class MobileProfileSheet extends ConsumerWidget {
                         ),
                       ),
 
+                      // Verify contact — mobile parity with the desktop
+                      // profile card and DM panel (Issue 1-D).
+                      Builder(builder: (context) {
+                        final master =
+                            ref.watch(deviceLinkProvider).identityOf(peerId);
+                        final isVerified =
+                            ref.watch(isPeerVerifiedProvider(master));
+                        return Padding(
+                          padding:
+                              const EdgeInsets.only(bottom: HollowSpacing.sm),
+                          child: HollowButton.outline(
+                            onPressed: () => _openVerify(context, master),
+                            icon: Icon(
+                              isVerified
+                                  ? LucideIcons.shieldCheck
+                                  : LucideIcons.shield,
+                              size: 16,
+                            ),
+                            expand: true,
+                            child: Text(isVerified
+                                ? 'Verified — view number'
+                                : 'Verify contact'),
+                          ),
+                        );
+                      }),
+
                       // Friend action
                       _FriendActionRow(peerId: peerId),
 
@@ -514,6 +542,15 @@ class MobileProfileSheet extends ConsumerWidget {
         ),
       ),
     );
+  }
+
+  /// The sheet is itself a route, so pop it before pushing the verify screen —
+  /// otherwise it stays mounted underneath and reappears on the way back.
+  /// Capture the root navigator FIRST: popping invalidates this context.
+  void _openVerify(BuildContext context, String masterId) {
+    final navContext = Navigator.of(context, rootNavigator: true).context;
+    Navigator.of(context).pop();
+    showVerifyContactDialog(navContext, peerId: masterId);
   }
 
   void _showNicknameDialog(BuildContext context, WidgetRef ref) {

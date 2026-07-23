@@ -122,22 +122,6 @@ Future<String?> loadSetting({required String key}) =>
 Future<List<SettingEntry>> loadSettingsWithPrefix({required String prefix}) =>
     RustLib.instance.api.crateApiStorageLoadSettingsWithPrefix(prefix: prefix);
 
-/// Mark a peer as identity-verified (fingerprint confirmed in person).
-Future<void> setPeerVerified({required String peerId}) =>
-    RustLib.instance.api.crateApiStorageSetPeerVerified(peerId: peerId);
-
-/// Remove verified status from a peer.
-Future<void> removePeerVerified({required String peerId}) =>
-    RustLib.instance.api.crateApiStorageRemovePeerVerified(peerId: peerId);
-
-/// Check if a peer is identity-verified.
-Future<bool> isPeerVerified({required String peerId}) =>
-    RustLib.instance.api.crateApiStorageIsPeerVerified(peerId: peerId);
-
-/// Get all verified peers as (peer_id, verified_at_ms) pairs.
-Future<List<(String, PlatformInt64)>> getVerifiedPeers() =>
-    RustLib.instance.api.crateApiStorageGetVerifiedPeers();
-
 /// Count unread DM messages newer than the given last-seen message ID.
 /// Only counts non-hidden messages from the other peer (is_mine = 0).
 Future<int> countUnreadDm({

@@ -46,6 +46,14 @@ Returns `bool`. Three-step verification:
 2. **PeerId derivation check:** Reconstructs PeerId from the public key protobuf (identity multihash: `0x00` prefix + length byte + pk_bytes, then bs58 Bitcoin-alphabet encode). Compares derived PeerId to `sender_peer_str` — rejects if mismatch. This prevents spoofing (attacker cannot sign with their key and claim to be another peer).
 3. Base64-decode signature, call `NativeKeypair::verify_peer_signature(&pk_bytes, &sig_bytes, payload.as_bytes())`.
 
+Returns `false` when `sig` or `pk` is `None`, so callers must NOT pre-gate on the signature being present.
+
+**ENFORCEMENT (0.8.2) — callers must reject, not log.** Until 0.8.2 the DM receive path called this and only `hollow_log!`'d on failure, with no `return`, AND skipped it entirely behind `if sig.is_some()`. That combination meant a relay in the middle could FORGE DM content, not merely read it. Both the DM path (`swarm.rs`, `MessageEnvelope::DirectMessage`) and the live channel path (`channel_sig_rejected()`, which serves both MLS private channels and plaintext PUBLIC channels) now drop the message and require a signature to be present.
+
+Two rules that fall out of this:
+- **Verify BEFORE normalising the signed bytes.** The DM path clamps text to 4,000 BYTES, but the composer limit is 4,000 CHARACTERS — up to ~16,000 bytes in Cyrillic/CJK/emoji. Verification runs against the RAW text; clamping first would drop every long non-Latin message.
+- **LIVE ingest enforces; sync backfill tolerates.** `ChannelSyncBatch` / `sync_handler` still accept unsigned rows so history predating per-message signing (e2cc8ab, 2026-03-09) keeps replicating instead of diverging. Same split the moderation trio uses.
+
 ---
 
 ## handle_send_message() — DM Send

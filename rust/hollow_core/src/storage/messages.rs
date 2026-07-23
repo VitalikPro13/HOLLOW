@@ -736,6 +736,37 @@ impl MessageStore {
                 verified_at INTEGER NOT NULL
             )")?;
 
+        // -- Security alerts (Issue 1-C: visible key/device change warnings) --
+        // One row per NOTEWORTHY identity event for a contact. `alert_id` is
+        // deterministic ("{kind}:{peer}:{detail}") so re-ingesting the same
+        // device list — which happens on every reconnect — can never pile up
+        // duplicates of a fact the user has already seen.
+        // `peer_id` is always the MASTER id: alerts are about a PERSON.
+        ddl(conn, "security_alerts table",
+            "CREATE TABLE IF NOT EXISTS security_alerts (
+                alert_id        TEXT PRIMARY KEY,
+                peer_id         TEXT NOT NULL,
+                kind            TEXT NOT NULL,
+                detail          TEXT NOT NULL DEFAULT '',
+                created_at      INTEGER NOT NULL,
+                acknowledged_at INTEGER
+            )")?;
+        ddl(conn, "idx_security_alerts_peer",
+            "CREATE INDEX IF NOT EXISTS idx_security_alerts_peer
+                ON security_alerts (peer_id, acknowledged_at)")?;
+
+        // -- Olm identity-key pins (Issue 1-C, TOFU) --
+        // The Curve25519 identity key we first saw for a DEVICE. Keyed by DEVICE
+        // (not master) because the Olm ratchet is per-device: each device of one
+        // identity legitimately has its own key, and only a CHANGE within one
+        // device id means a reinstall/re-key.
+        ddl(conn, "olm_key_pins table",
+            "CREATE TABLE IF NOT EXISTS olm_key_pins (
+                device_peer_id TEXT PRIMARY KEY,
+                identity_key   TEXT NOT NULL,
+                pinned_at      INTEGER NOT NULL
+            )")?;
+
         // -- Hollow Share (Phase 7A) --
         // One row per share we've created, opened, or downloaded. The encryption_key
         // is the AES-256-GCM key from the share link; if the user loses the link
@@ -3579,6 +3610,133 @@ impl MessageStore {
         Ok(result)
     }
 
+    // ── Security alerts (Issue 1-C) ────────────────────────────────
+
+    /// Record a security alert for a contact. Returns `true` if this is a NEW
+    /// fact (the row did not exist), `false` if we have already recorded it.
+    ///
+    /// Callers use the return value to decide whether to emit a live event —
+    /// a device list is re-ingested on every reconnect, so emitting
+    /// unconditionally would re-raise a warning the user already dismissed.
+    ///
+    /// `peer_id` MUST be a master id (alerts are about a person, not a socket).
+    pub fn record_security_alert(
+        &self,
+        peer_id: &str,
+        kind: &str,
+        detail: &str,
+        created_at: i64,
+    ) -> Result<bool, String> {
+        let alert_id = format!("{kind}:{peer_id}:{detail}");
+        let changed = self
+            .conn
+            .execute(
+                "INSERT OR IGNORE INTO security_alerts
+                    (alert_id, peer_id, kind, detail, created_at, acknowledged_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, NULL)",
+                params![alert_id, peer_id, kind, detail, created_at],
+            )
+            .map_err(|e| format!("Failed to record security alert: {e}"))?;
+        Ok(changed > 0)
+    }
+
+    /// All security alerts, newest first. `acknowledged_at` is `None` while the
+    /// alert is still unread.
+    pub fn get_security_alerts(&self) -> Result<Vec<SecurityAlertRow>, String> {
+        let mut stmt = self
+            .conn
+            .prepare_cached(
+                "SELECT alert_id, peer_id, kind, detail, created_at, acknowledged_at
+                   FROM security_alerts ORDER BY created_at DESC",
+            )
+            .map_err(|e| format!("Failed to prepare security_alerts query: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(SecurityAlertRow {
+                    alert_id: row.get(0)?,
+                    peer_id: row.get(1)?,
+                    kind: row.get(2)?,
+                    detail: row.get(3)?,
+                    created_at: row.get(4)?,
+                    acknowledged_at: row.get(5)?,
+                })
+            })
+            .map_err(|e| format!("Failed to query security_alerts: {e}"))?;
+        Ok(rows.flatten().collect())
+    }
+
+    /// Mark one alert as read. Idempotent — re-acknowledging keeps the first
+    /// timestamp so "when did I dismiss this" stays truthful.
+    pub fn acknowledge_security_alert(&self, alert_id: &str) -> Result<(), String> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
+        self.conn
+            .execute(
+                "UPDATE security_alerts SET acknowledged_at = ?2
+                  WHERE alert_id = ?1 AND acknowledged_at IS NULL",
+                params![alert_id, now],
+            )
+            .map_err(|e| format!("Failed to acknowledge security alert: {e}"))?;
+        Ok(())
+    }
+
+    /// Mark every outstanding alert for one contact as read (the "Dismiss"
+    /// action on the conversation banner, which speaks for all of them).
+    pub fn acknowledge_security_alerts_for_peer(&self, peer_id: &str) -> Result<(), String> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
+        self.conn
+            .execute(
+                "UPDATE security_alerts SET acknowledged_at = ?2
+                  WHERE peer_id = ?1 AND acknowledged_at IS NULL",
+                params![peer_id, now],
+            )
+            .map_err(|e| format!("Failed to acknowledge security alerts: {e}"))?;
+        Ok(())
+    }
+
+    // ── Olm identity-key pins (Issue 1-C, TOFU) ────────────────────
+
+    /// The Curve25519 identity key previously pinned for `device_peer_id`, or
+    /// `None` if we have never completed a key exchange with it.
+    pub fn get_olm_key_pin(&self, device_peer_id: &str) -> Result<Option<String>, String> {
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT identity_key FROM olm_key_pins WHERE device_peer_id = ?1")
+            .map_err(|e| format!("Failed to prepare olm_key_pins query: {e}"))?;
+        let mut rows = stmt
+            .query_map(params![device_peer_id], |row| row.get::<_, String>(0))
+            .map_err(|e| format!("Failed to query olm_key_pins: {e}"))?;
+        match rows.next() {
+            Some(Ok(key)) => Ok(Some(key)),
+            Some(Err(e)) => Err(format!("Failed to read olm key pin: {e}")),
+            None => Ok(None),
+        }
+    }
+
+    /// Pin (or re-pin) a device's Olm identity key.
+    pub fn set_olm_key_pin(&self, device_peer_id: &str, identity_key: &str) -> Result<(), String> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
+        self.conn
+            .execute(
+                "INSERT INTO olm_key_pins (device_peer_id, identity_key, pinned_at)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(device_peer_id) DO UPDATE SET
+                    identity_key = excluded.identity_key,
+                    pinned_at    = excluded.pinned_at",
+                params![device_peer_id, identity_key, now],
+            )
+            .map_err(|e| format!("Failed to set olm key pin: {e}"))?;
+        Ok(())
+    }
+
     // ── File sharing storage ────────────────────────────────────────
 
     /// Insert file metadata (called when FileHeader is received or file is sent).
@@ -4368,6 +4526,24 @@ impl MessageStore {
                 other => Err(format!("Failed to load chunk bitmap: {other}")),
             })
     }
+}
+
+/// A recorded identity event for a contact (Issue 1-C).
+///
+/// `kind` is one of the [`crate::node::security_alerts`] constants; `detail`
+/// carries the device id (`new_device`) or the new Olm identity key
+/// (`identity_key_changed`) so the UI can show WHAT changed, not just that
+/// something did.
+#[derive(Clone, Debug)]
+pub struct SecurityAlertRow {
+    pub alert_id: String,
+    /// MASTER peer_id — an alert is about a person.
+    pub peer_id: String,
+    pub kind: String,
+    pub detail: String,
+    pub created_at: i64,
+    /// `None` while the alert is still unread.
+    pub acknowledged_at: Option<i64>,
 }
 
 /// Persisted conference room (host-local; reports/CONFERENCES_PLAN.md).

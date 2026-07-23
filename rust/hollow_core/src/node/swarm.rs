@@ -5135,6 +5135,17 @@ async fn handle_incoming_request(
                 return;
             }
 
+            // SECURITY (Issue 1-C): the bundle is authenticated at this point —
+            // signed by the sender's device key, and that device is in its
+            // master's signed list. Pin the Olm identity key so a LATER change
+            // (a reinstall) is surfaced instead of passing silently. Done before
+            // the glare/session branching so the fact is recorded even when this
+            // particular bundle loses the tiebreaker and builds no session.
+            super::security_alerts::note_olm_identity_key(
+                event_tx, db_path, db_passphrase, master_peer_str,
+                &super::resolver::resolve(peer_str), peer_str, &identity_key,
+            ).await;
+
             // Peer responded with their key bundle — create outbound Olm session.
             if olm.has_session(peer_str) {
                 hollow_log!("[HOLLOW-CRYPTO] Already have session with {peer_str}, ignoring KeyBundle");
@@ -5266,6 +5277,15 @@ async fn handle_incoming_request(
                                             peer_id: peer_str.to_string(),
                                         })
                                         .await;
+                                    // SECURITY (Issue 1-C): pin only AFTER the session
+                                    // was built — vodozemac has now proven this
+                                    // identity key belongs to the sender, so a forged
+                                    // key can't fabricate a "they re-keyed" notice.
+                                    super::security_alerts::note_olm_identity_key(
+                                        event_tx, db_path, db_passphrase, master_peer_str,
+                                        &super::resolver::resolve(peer_str), peer_str,
+                                        their_identity,
+                                    ).await;
                                     key_request_in_flight.remove(peer_str);
                                     // Send encrypted SessionAck to upgrade peer's outbound ratchet.
                                     let ack_json = serde_json::to_string(&MessageEnvelope::SessionAck).unwrap_or_default();
@@ -5325,6 +5345,14 @@ async fn handle_incoming_request(
                                     peer_id: peer_str.to_string(),
                                 })
                                 .await;
+                            // SECURITY (Issue 1-C): see the sibling call above —
+                            // pinning after successful session creation is what makes
+                            // the pinned key trustworthy.
+                            super::security_alerts::note_olm_identity_key(
+                                event_tx, db_path, db_passphrase, master_peer_str,
+                                &super::resolver::resolve(peer_str), peer_str,
+                                their_identity,
+                            ).await;
                             key_request_in_flight.remove(peer_str);
                             // Send encrypted SessionAck to upgrade peer's outbound ratchet.
                             let ack_json = serde_json::to_string(&MessageEnvelope::SessionAck).unwrap_or_default();

@@ -25,7 +25,9 @@ import 'package:hollow/src/ui/shell/mobile_nav.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/ui/settings/about_shared.dart';
+import 'package:hollow/src/core/providers/verified_peers_provider.dart';
 import 'package:hollow/src/ui/settings/blocked_users_shared.dart';
+import 'package:hollow/src/ui/settings/verified_contacts_shared.dart';
 import 'package:hollow/src/ui/settings/device_management_shared.dart';
 import 'package:hollow/src/ui/settings/settings_shared.dart';
 import 'package:hollow/src/ui/settings/storage_section.dart';
@@ -200,6 +202,14 @@ class MobileSettingsTab extends ConsumerWidget {
           subtitle: 'App lock, recovery phrase & proofs',
           onTap: () => _push(context, 'Security',
               const _SecurityTab(key: ValueKey('security'))),
+        ),
+        const SizedBox(height: HollowSpacing.sm),
+        _SettingsNavTile(
+          icon: LucideIcons.userCheck,
+          title: 'Verified Contacts',
+          subtitle: 'Safety numbers you\'ve confirmed',
+          onTap: () => _push(context, 'Verified Contacts',
+              const _VerifiedContactsTab(key: ValueKey('verified'))),
         ),
         const SizedBox(height: HollowSpacing.sm),
         _SettingsNavTile(
@@ -4230,6 +4240,50 @@ class _InfoRow extends StatelessWidget {
           )),
         ],
       ),
+    );
+  }
+}
+
+/// Verified contacts — mobile parity with the desktop Security tab's Verified
+/// Contacts card (Issue 1-D). Every badge the app shows is reviewable and
+/// withdrawable here.
+class _VerifiedContactsTab extends ConsumerWidget {
+  const _VerifiedContactsTab({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final hollow = HollowTheme.of(context);
+    final verified = ref.watch(verifiedPeersProvider).toList()..sort();
+
+    if (verified.isEmpty) {
+      return Padding(
+        padding: const EdgeInsets.all(HollowSpacing.lg),
+        child: Text(
+          'No verified contacts yet. Open a contact\'s profile and choose '
+          '"Verify contact" to compare safety numbers.',
+          style:
+              HollowTypography.caption.copyWith(color: hollow.textSecondary),
+        ),
+      );
+    }
+
+    return ListView(
+      padding: const EdgeInsets.all(HollowSpacing.lg),
+      children: [
+        verifiedContactsIntro(hollow),
+        const SizedBox(height: HollowSpacing.md),
+        for (final id in verified)
+          Padding(
+            padding: const EdgeInsets.only(bottom: HollowSpacing.sm),
+            child: VerifiedContactRow(
+              id: id,
+              avatarSize: 36,
+              shortId: id.length > 16
+                  ? '${id.substring(0, 8)}...${id.substring(id.length - 8)}'
+                  : id,
+            ),
+          ),
+      ],
     );
   }
 }

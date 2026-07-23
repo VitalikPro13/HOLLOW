@@ -20,6 +20,7 @@ import 'package:hollow/src/core/providers/chat_provider.dart';
 import 'package:hollow/src/core/providers/emote_provider.dart';
 import 'package:hollow/src/core/providers/node_provider.dart';
 import 'package:hollow/src/core/providers/peers_provider.dart';
+import 'package:hollow/src/core/providers/security_alerts_provider.dart';
 import 'package:hollow/src/core/providers/selected_peer_provider.dart';
 import 'package:hollow/src/core/providers/split_view_provider.dart';
 import 'package:hollow/src/core/providers/server_avatar_provider.dart';
@@ -843,6 +844,14 @@ class EventStreamNotifier extends Notifier<bool> {
         // device id). Reload so the now-master-keyed friend surfaces with the
         // correct name/presence instead of a raw device id.
         ref.read(friendsProvider.notifier).loadAll();
+
+      case NetworkEvent_SecurityAlert(:final peerId, :final kind):
+        // Issue 1-C: a contact's identity changed in a way worth showing. Rust
+        // has already persisted + deduped it, so this only has to re-pull —
+        // the banner in their conversation is the durable surface, deliberately
+        // NOT a toast (a toast is missable and does not survive scrollback).
+        debugPrint('[HOLLOW] Security alert for $peerId: $kind');
+        ref.read(securityAlertsProvider.notifier).refresh();
 
       case NetworkEvent_SelfRevoked():
         // Step 7: THIS device was revoked by the identity. Self-nuke — wipe the

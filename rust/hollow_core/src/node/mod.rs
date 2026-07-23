@@ -15,6 +15,7 @@ pub(crate) mod message_ops;
 pub(crate) mod proxy_tunnel;
 pub(crate) mod recovery_pool;
 pub(crate) mod resolver;
+pub(crate) mod security_alerts;
 pub(crate) mod share_handler;
 pub(crate) mod social;
 pub(crate) mod sync_handler;

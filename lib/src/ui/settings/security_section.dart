@@ -11,6 +11,7 @@ import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/hollow_toggle.dart';
 import 'package:hollow/src/ui/settings/blocked_users_shared.dart';
+import 'package:hollow/src/ui/settings/verified_contacts_shared.dart';
 import 'package:hollow/src/ui/settings/settings_shared.dart';
 import 'package:hollow/src/ui/settings/verify_proof_section.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -315,6 +316,13 @@ class _SecurityTabState extends State<SecurityTab> {
           const SettingsSectionLabel(label: 'VERIFY A PROOF'),
           const SizedBox(height: HollowSpacing.sm),
           const VerifyProofSection(),
+
+          const SizedBox(height: HollowSpacing.xl),
+
+          // ── Verified Contacts ──
+          // Every verified badge the app shows is a claim made on the user's
+          // behalf; this is where they can review and withdraw them.
+          const VerifiedContactsCard(),
 
           const SizedBox(height: HollowSpacing.xl),
 

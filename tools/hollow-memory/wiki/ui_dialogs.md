@@ -916,3 +916,38 @@ Values: `profile`, `system`, `security`, `updates`, `about`
 - **MessageProofDialog**: compact-aware width/padding; preview + info rows scroll in a `Flexible`; on phones the actions stack (Copy|Export row + full-width Close).
 - **WelcomeDialog**: compact-aware minWidth (was forced 360) + internal scroll.
 - **Unlock/recovery dialogs** (hollow_shell.dart): widths are `(screenWidth - padding).clamp(0, 380/420)` (were fixed 380/420 — overflowed phones); the password-unlock dialog is PIN-aware (numeric keyboard) and offers biometric retry. See ui_mobile.md "Security Tab (App Lock)".
+
+---
+
+## VerifyContactDialog -- Safety Number Comparison (Issue 1-D, 2026-07)
+
+**File:** `lib/src/ui/dialogs/verify_contact_dialog.dart`
+**Entry point:** `showVerifyContactDialog(context, peerId:)` -- desktop opens a `HollowDialog`, mobile pushes `MobileVerifyContactRoute` via `hollowMobileRoute()`. Both wrap the same `VerifyContactBody`, so the flow can never drift between platforms.
+**Reached from:** `ProfileCardBody` (both densities -- hover popup and profile dialog), the DM left-hand profile panel (`_DmProfilePanel._buildDmActions` in chat_pane.dart), `MobileProfileSheet`, the "Verify" button on `SecurityAlertBanner`, and the "View" action in Settings > Security > Verified Contacts.
+
+**Every floating host dismisses itself first.** `ProfileCardBody._openVerifyDialog` and `MobileProfileSheet._openVerify` both capture the ROOT navigator context, then close the host, then push -- the same pattern as nickname/block/report. Capturing first is load-bearing: dismissing disposes the host's own context. The DM panel is persistent, not floating, so it opens the screen directly.
+
+The button label doubles as the state readout -- "Verify contact" vs "Verified — view number" -- so every surface shows verification status without needing a separate badge.
+
+### What the user is doing
+
+Both people open this screen and see the **same** 60-digit number, because it is derived symmetrically from their two master Ed25519 keys (`crypto/safety_number.rs`). If the numbers match, nothing is sitting in the middle. It must be compared over a channel an attacker on the relay does not control -- in person, on a video call, or through an app they already trust.
+
+There is deliberately no "yours / theirs" split: a single shared number removes the ordering mistake users would otherwise make.
+
+### Layout
+
+- Explainer naming the contact.
+- `_NumberBlock` -- 12 groups of 5, three rows of four, `HollowTypography.mono` at 17px inside a `SelectionArea`. Grouping comes from the Rust `formatSafetyNumber()` so desktop and mobile cannot render the same number two different ways.
+- Copy button (copies the grouped form).
+- **Paste-compare** -- a `HollowTextField` whose `onChanged` runs the sync FFI `safetyNumbersMatch()`. 60 digits is too many to check reliably by eye; the machine does it. Both sides are normalized to digits first, so display spacing or a pasted newline never produces a false mismatch (a false alarm on a security screen teaches users to ignore it). Result renders in a `Semantics(liveRegion: true)` row with an ICON as well as colour.
+- Outstanding `security_alerts` for this contact, surfaced here too -- this is the moment the user decides whether to trust the person.
+- `_VerifiedRow` -- current state plus "Mark verified" / "Remove", with a `_busy` spinner and a success/error toast (the mutating provider rethrows).
+
+### Failure handling
+
+`safetyNumberWith()` returning `Err` renders `_ErrorBox` INSTEAD of a number. The screen never shows a plausible-looking value it did not actually compute -- per the spec's own warning, a badge or number that fails to reflect reality is worse than none, because it asserts a safety that is not there.
+
+### No camera scanning
+
+`mobile_scanner` has no Windows or Linux support, so a scan flow could never be the primary path on the platform Hollow is developed and tested on. Paste-compare works identically on all six platforms. Revisit only if the mobile story demands it.

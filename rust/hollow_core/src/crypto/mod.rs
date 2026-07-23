@@ -1,5 +1,6 @@
 mod mls_manager;
 mod olm_manager;
+pub(crate) mod safety_number;
 mod store;
 
 pub(crate) use mls_manager::MlsManager;

@@ -428,8 +428,9 @@ Authentication protocol (first message after WebSocket open):
 2. Check `type == "auth"`. Reject otherwise.
 3. Validate `peer_id`, `public_key`, `signature` are non-empty. Reject if any missing.
 4. Check timestamp skew: `|now - timestamp| <= 60s`. Reject if too far.
-5. Build signed message: `"hollow-ws-auth:" + peer_id + ":" + timestamp`.
-6. Verify Ed25519 signature via `verify_ed25519()`. Reject if invalid.
+5. **SECURITY — bind `peer_id` to `public_key`:** recompute the peer_id via `derive_peer_id(public_key)` (crypto.cpp) and reject any mismatch. A peer_id is an identity multihash that INLINES the Ed25519 public key, so it is a pure function of that key. Without this check, step 6 proves only that the sender holds the private half of the key they supplied — NOT that they own the peer_id they claim. Anyone could mint a throwaway keypair, sign `hollow-ws-auth:<victim_peer_id>:<ts>` with it, and authenticate AS the victim; since a newer socket for an existing peer_id EVICTS the incumbent, that is a persistent remote deauth of any user (peer_ids are public — broadcast in `peer_joined` + member snapshots). Added 0.8.2 after an external report; the same check also guards both legacy HTTP register/unregister endpoints. **The derivation is duplicated in Rust and C++ and is pinned by matching known-answer tests** (`peer_id_derivation_known_answer` / `relay-uws/test/test_derive_peer_id.cpp`) — silent drift fails auth for EVERY client, so change both or neither.
+6. Build signed message: `"hollow-ws-auth:" + peer_id + ":" + timestamp`.
+7. Verify Ed25519 signature via `verify_ed25519()`. Reject if invalid.
 7. Validate license key via `state.license.validate_key()`. Handle all `LicenseResult` cases:
    - `Ok` / `NotRequired`: continue.
    - `InvalidKey`: send `{"type":"auth_failed","error":"invalid_license_key"}`, close with "bad_license".

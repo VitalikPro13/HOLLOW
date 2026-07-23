@@ -29,6 +29,7 @@ import 'package:hollow/src/core/providers/favourite_friends_provider.dart';
 import 'package:hollow/src/core/providers/hidden_archive_dm_provider.dart';
 import 'package:hollow/src/core/providers/blocked_users_provider.dart';
 import 'package:hollow/src/core/providers/friends_provider.dart';
+import 'package:hollow/src/core/providers/security_alerts_provider.dart';
 import 'package:hollow/src/core/providers/verified_peers_provider.dart';
 import 'package:hollow/src/core/providers/status_provider.dart';
 import 'package:hollow/src/core/providers/annotation_mode_provider.dart';
@@ -977,6 +978,11 @@ class _HollowShellState extends ConsumerState<HollowShell>
 
     // Load verified peers from local DB.
     await ref.read(verifiedPeersProvider.notifier).load();
+
+    // Load recorded key/device change alerts (Issue 1-C). Must be loaded, not
+    // only streamed: an alert raised while the app was closed has to be waiting
+    // in the conversation on next launch, or the warning is missable.
+    await ref.read(securityAlertsProvider.notifier).load();
 
     // Load the persisted system-status dismissal (must run after the DB is open
     // — see StatusNotifier.loadDismissed). Without this the dismissed banner

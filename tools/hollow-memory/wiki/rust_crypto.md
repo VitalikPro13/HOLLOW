@@ -282,7 +282,7 @@ The swarm code prevents this via **glare detection** using `key_bundle_sent_to: 
 ### Session Lifecycle Summary
 
 The complete DM handshake:
-1. **Key exchange:** Alice obtains Bob's identity key + one-time key (via `KeyBundle` message).
+1. **Key exchange:** Alice obtains Bob's identity key + one-time key (via `KeyBundle` message). **The bundle is DEVICE-SIGNED and verified before use — see "Authenticated key exchange" below.**
 2. **Outbound session:** Alice calls `create_outbound_session("bob", bob_identity, bob_otk)`.
 3. **First message:** Alice encrypts — produces PreKey (type 0) with embedded session establishment data. Identity key is attached to the `HavenMessage::Encrypted` envelope.
 4. **Inbound session:** Bob receives PreKey, calls `create_inbound_session("alice", alice_identity, prekey_bytes)` — decrypts and establishes session.
@@ -290,6 +290,31 @@ The complete DM handshake:
 6. **Ratchet advance:** Alice decrypts Bob's Normal reply — her ratchet advances. All subsequent Alice encrypts produce Normal (type 1).
 
 If multiple PreKeys arrive before step 4, Bob uses `try_decrypt_prekey_with_existing` for the extras.
+
+### Authenticated key exchange (root of trust) — 0.8.2
+
+`KeyBundle` and `KeyRequest` carry `to` / `ts` / `sig` / `pk`, signed with the sender's **DEVICE** Ed25519 key. Verified in the swarm handlers (`verify_key_exchange` + `key_exchange_device_unauthorized`, crypto_handler.rs) BEFORE any session is created.
+
+**Why.** Until 0.8.2 the bundle carried the Curve25519 keys with nothing binding them to an Ed25519 identity. The relay carries those keys, so a hostile relay could substitute its own, decrypt, re-encrypt to the real recipient and forward — an invisible MITM on every DM. An unsigned `KeyRequest` additionally forced a session teardown on demand. Reported externally; see `project_security_disclosure_2026_07`.
+
+**Canonical payloads** (crypto_handler.rs):
+```
+hollow-keybundle:{sender_device}:{recipient_device}:{identity_key}:{one_time_key}:{ts}
+hollow-keyrequest:{sender_device}:{recipient_device}:{ts}
+```
+`sender` binds the signature to the claimed peer_id, `recipient` blocks reflection at a third party, both keys block re-pairing a valid signature with substituted keys, `ts` blocks replay after rotation (`KEY_EXCHANGE_SKEW_SECS` = 300).
+
+**DEVICE key, not master.** `verify_message_signature` re-derives the peer_id from `pk`, so a device signature is self-verifying against the peer_id the transport reports — no resolver lookup, no cold-start hole. The master→device link is enforced separately by `verify_device_list`, and the two compose:
+
+```
+identity (known out of band) → master-signed device list → device key → signed bundle → Olm keys
+```
+
+**A signature alone is insufficient.** `key_exchange_device_unauthorized()` also requires a device that maps to a KNOWN master to appear in that master's signed list — otherwise a relay could mint a keypair, sign with it, report the frame as coming from that new device, and speak in the victim's name. An unknown device resolves to itself (single-device / first contact), where `sender_device == master` makes the signature check complete on its own.
+
+**`REQUIRE_SIGNED_KEY_EXCHANGE`** (crypto_handler.rs) is `true`. Unsigned key exchange is refused outright. Consequence: a pre-0.8.2 client cannot complete NEW key exchange with 0.8.2 in either direction. **Existing sessions are unaffected** — a live session never requests a bundle — so impact is new contacts and re-keys with stale peers, self-healing on update. The full multi-node harness passes with enforcement ON; that is the end-to-end proof every node both produces and verifies signed frames. Re-run `cargo test --lib test_harness` if this is ever touched.
+
+**Not covered:** this authenticates the exchange against a peer_id. A peer_id substituted BEFORE first contact (tampered invite link) still yields a valid chain to the wrong person. Key-change warnings and out-of-band verification (safety numbers) remain unimplemented — spec in repo `tmp2.txt`, see `project_signed_key_exchange_root_of_trust`.
 
 ### Unit Tests
 
@@ -603,3 +628,74 @@ On startup, `MlsManager::from_persisted()` restores from these blobs and loads M
 - `remove_group` MUST delete from OpenMLS provider storage (not just the HashMap) to avoid `GroupAlreadyExists` on re-join.
 - All MLS encrypted messages in a server room are broadcast to ALL members — targeted messages still encrypt for the whole group to keep ratchets in sync, with a `target` field for selective processing.
 - CryptoStore persistence is fire-and-forget — if the blocking thread crashes, crypto state is lost on restart but the in-memory OlmManager continues functioning.
+
+---
+
+## Safety Numbers — Out-of-Band Contact Verification (`crypto/safety_number.rs`)
+
+Answers "is the peer_id itself right?" — the gap the signed key exchange leaves open. Authenticating a key exchange against a peer_id proves nothing if the peer_id came from a tampered invite link in the first place.
+
+### Derivation
+
+Per identity, from the raw 32-byte Ed25519 public key:
+
+```
+h = SHA-512( VERSION(2B) || "hollow-safety-number" || pubkey )
+repeat 5200x:  h = SHA-512( h || pubkey )
+digits = 6 chunks of 5 bytes from h[..30], each big-endian % 100000 → "%05d"
+```
+
+The 5200 iterations are a deliberate cost parameter (matches Signal): brute-forcing a key whose displayed digits collide with a target costs 5200 hashes per attempt.
+
+`safety_number(a, b)` sorts the two 30-digit halves and concatenates → **60 digits, symmetric**. Both ends display the identical string; there is no yours/theirs.
+
+### `pubkey_from_peer_id()`
+
+A Hollow `peer_id` is a libp2p **identity multihash with the protobuf pubkey inlined verbatim**:
+
+```
+base58btc( [0x00, 0x24] || [0x08, 0x01, 0x12, 0x20] || pubkey[32] )
+            id mh, len=36   protobuf: Ed25519, 32-byte field
+```
+
+So extracting the key is a decode — no network, no DB, no trust assumption. Returns `None` for anything malformed (truncated, non-Ed25519, SHA-256 multihash).
+
+### Why MASTER peer_ids only
+
+Derived from the two **master** identities, never Olm keys or device ids:
+
+- Stable across reinstalls AND across the contact adding/removing devices.
+- Changes only when the master identity changes — i.e. it is a different person.
+- Strictly better than Signal, whose number churns on reinstall and trains users to click through the warning.
+- Therefore verification is **not** reset by a reinstall; `security_alerts` covers what actually changed.
+
+`api/verification.rs` resolves device → master (via `identity_for_persisted`, so it works when the resolver is cold) for EVERY entry point — safety numbers, the verified flag, and alert acknowledgement alike.
+
+### Pinned known-answer test
+
+`safety_number_known_answer` pins two fixture peer_ids and the exact 60 digits. **If it fails, the construction changed** and every previously-verified contact silently re-derives to a different number — users would be told their contacts changed identity when nothing happened. Change it only together with a `VERSION` bump and a migration plan.
+
+`safety_numbers_match()` normalizes both sides to digits before a constant-time compare, so display spacing / a pasted newline never produces a false mismatch.
+
+---
+
+## Security Alerts — Key & Device Change Warnings (`node/security_alerts.rs`)
+
+| kind | means | weight |
+|------|-------|--------|
+| `new_device` | a device joined the contact's master-signed device list | WARNING |
+| `identity_key_changed` | one device presented a new Olm identity key | notice |
+
+**Why the warning is about DEVICES, not keys.** Before the signed key exchange, a changed Olm key was ambiguous — a relay could substitute one. Now it must have been signed by that device's real Ed25519 key, so it means the contact reinstalled. The signal that still carries information is *a new device appeared*, which is the real-world attack shape and is detectable precisely because the device list is master-signed and already verified at ingest.
+
+**Deliberately NOT alerted:** first contact (a baseline, not a change — alerting there fires for every new friend), our own siblings (the user is the actor; linked-devices covers it), and device REMOVAL (revocation is a safe act).
+
+**Detection sites**
+- `crypto_handler::ingest_device_list` → `note_new_devices(prev_devices, stored.devices)`. The sibling/self path returns before it, and the helper double-guards on the local master.
+- `swarm.rs` KeyBundle arm (after full auth) and BOTH `create_inbound_session` success sites → `note_olm_identity_key`. Pinning only after the session is built is what makes the pin trustworthy: a forged identity key fails session creation, so it can never fabricate a "they re-keyed" notice.
+
+**Dedup** is a deterministic `alert_id` (`{kind}:{peer}:{detail}`) with `INSERT OR IGNORE`. Device lists re-ingest on every reconnect, so the store write is the dedup authority and the `NetworkEvent::SecurityAlert` is emitted only when the row is genuinely new — a dismissed warning stays dismissed.
+
+Tables: `security_alerts` (alert_id PK, peer_id MASTER, kind, detail, created_at, acknowledged_at) and `olm_key_pins` (device_peer_id PK — per-DEVICE, since each device of one identity legitimately has its own Olm key).
+
+Harness coverage: `friend_is_warned_when_a_new_device_joins_their_contact` (test_harness.rs) proves the alert rides a device list that genuinely propagated, that first contact is silent, and that a re-ingest does not re-warn.

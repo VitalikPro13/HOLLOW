@@ -1112,6 +1112,22 @@ Use a system similar to `AdaptiveScaleProvider` from WholesomeStoryADay — norm
 
 **Deliverable:** All known security vulnerabilities patched. Wire protocol hardened against malicious peers. Relay server hardened against unauthorized access and DoS. Ready for distributed storage (Phase 4) where peers store shards on each other's devices — trust boundaries are enforced.
 
+> **Correction (2026-07-23):** the "Enforce signature verification" box above was ticked while only the CHANNEL path was actually enforcing. The DM path called `verify_message_signature`, logged the failure, and stored the message anyway — and the check was gated behind `if sig.is_some()`, so stripping the signature skipped it entirely. It sat that way for ~3.5 months. **A ticked box is not a test.** Regression tests were added with the fix. See section below.
+
+### Security: External Disclosure Response (2026-07)
+
+First external coordinated-disclosure report (Folf / `itsfolf`). Three reported vulnerabilities plus two found during remediation, all fixed in 0.8.2. Full record in memory `project_security_disclosure_2026_07`; the notes-to-self file is repo `tmp2.txt`.
+
+- [X] **Authenticated Olm key exchange** — `KeyBundle`/`KeyRequest` are DEVICE-signed and enforced (`REQUIRE_SIGNED_KEY_EXCHANGE`). Closes relay key substitution. `project_signed_key_exchange_root_of_trust`.
+- [X] **Relay binds `peer_id` to the supplied pubkey** — deployed to relay.anonlisten.com; self-hosters must rebuild.
+- [X] **Share filename sanitization** — remote names through `safe_file_name()` before any path join.
+- [X] **DM signature verification REJECTS** — and no longer skippable by omitting the signature; verified against RAW text before the length clamp.
+- [X] **Remote panic on multi-byte text** — 4 byte-slice sites replaced with a char-boundary-safe `clip_text`.
+- [X] **Visible key/device change warning (Issue 1-C)** — warns on a NEW DEVICE joining a contact's master-signed device list (the shape that carries an attack signal); Olm key changes recorded as a low-key reinstall notice. First device list is a baseline, not a warning. Persistent in-conversation banner, not a toast.
+- [X] **Out-of-band verification (Issue 1-D)** — 60-digit safety numbers derived from the two MASTER peer_ids, so they survive reinstalls and device changes and move only when the person does. Verify Contact screen (desktop + mobile) with copy and paste-compare; verified badge on profiles; reviewable list in Settings › Security. No camera scanning — `mobile_scanner` has no Windows/Linux support, so it could never be the primary path.
+
+C and D live on `security/0.8.2-continuation`. Both: `project_contact_verification_safety_numbers`.
+
 ### Phase 4: Shared Vault — Distributed Storage
 
 **Goal:** The core innovation — distributed file storage across members. Vault handles **files/media only** (not messages/CRDTs). Automatic mode: full replication for <6 members, erasure coding for 6+. DMs stay direct P2P. See section 4 for design details.

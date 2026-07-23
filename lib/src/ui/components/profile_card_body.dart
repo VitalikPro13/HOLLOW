@@ -11,6 +11,7 @@ import 'package:hollow/src/core/providers/friends_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/local_nickname_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
+import 'package:hollow/src/core/providers/verified_peers_provider.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/rust/api/twitch.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
@@ -26,6 +27,7 @@ import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/status_dot.dart';
 import 'package:hollow/src/ui/dialogs/report_user_dialog.dart';
 import 'package:hollow/src/ui/dialogs/user_settings_dialog.dart';
+import 'package:hollow/src/ui/dialogs/verify_contact_dialog.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:url_launcher/url_launcher.dart';
 
@@ -296,6 +298,23 @@ class _ProfileCardBodyState extends ConsumerState<ProfileCardBody> {
                       fontSize: _compact ? 11 : 12,
                     ),
                   ),
+                  // Issue 1-D: the badge only ever appears for a contact whose
+                  // safety number the user confirmed out of band. Carries an
+                  // ICON as well as colour so it is not colour-only.
+                  if (!isMe && ref.watch(isPeerVerifiedProvider(widget.peerId))) ...[
+                    const SizedBox(width: HollowSpacing.sm),
+                    Icon(LucideIcons.shieldCheck,
+                        size: _compact ? 11 : 12, color: hollow.success),
+                    const SizedBox(width: HollowSpacing.xxs),
+                    Text(
+                      'Verified',
+                      style: HollowTypography.caption.copyWith(
+                        color: hollow.success,
+                        fontSize: _compact ? 11 : 12,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
                 ],
               ),
               if (status.isNotEmpty) ...[
@@ -503,6 +522,16 @@ class _ProfileCardBodyState extends ConsumerState<ProfileCardBody> {
     showReportUserDialog(navContext, masterId: masterId, displayName: name);
   }
 
+  /// Same host-dismiss pattern as nickname/block/report: the hover popup is
+  /// transient and would sit on top of (or vanish out from under) the verify
+  /// screen. Capture the root nav context BEFORE dismissing, since dismissing
+  /// disposes this widget's own context.
+  void _openVerifyDialog(String masterId) {
+    final navContext = Navigator.of(context, rootNavigator: true).context;
+    widget.dismissHost();
+    showVerifyContactDialog(navContext, peerId: masterId);
+  }
+
   List<Widget> _buildFullActions(HollowTheme hollow, String? localNick) {
     final localPeerId = ref.read(identityProvider).peerId;
     if (widget.peerId == localPeerId) {
@@ -524,6 +553,7 @@ class _ProfileCardBodyState extends ConsumerState<ProfileCardBody> {
     }
     final master = ref.watch(deviceLinkProvider).identityOf(widget.peerId);
     final isBlocked = ref.watch(blockedUsersProvider).contains(master);
+    final isVerified = ref.watch(isPeerVerifiedProvider(master));
     return [
       // Set Nickname — full-width outline (matches Edit Profile styling).
       SizedBox(
@@ -533,6 +563,16 @@ class _ProfileCardBodyState extends ConsumerState<ProfileCardBody> {
           compact: true,
           icon: Icon(localNick != null ? LucideIcons.pencil : LucideIcons.tag),
           child: Text(localNick != null ? 'Edit Nickname' : 'Set Nickname'),
+        ),
+      ),
+      // Verify — the entry point to the safety-number comparison (Issue 1-D).
+      SizedBox(
+        width: double.infinity,
+        child: HollowButton.outline(
+          onPressed: () => _openVerifyDialog(master),
+          compact: true,
+          icon: Icon(isVerified ? LucideIcons.shieldCheck : LucideIcons.shield),
+          child: Text(isVerified ? 'Verified — view number' : 'Verify contact'),
         ),
       ),
       // Block + Report share one full-width row (each half). Red outline
@@ -588,6 +628,7 @@ class _ProfileCardBodyState extends ConsumerState<ProfileCardBody> {
     }
     final master = ref.watch(deviceLinkProvider).identityOf(widget.peerId);
     final isBlocked = ref.watch(blockedUsersProvider).contains(master);
+    final isVerified = ref.watch(isPeerVerifiedProvider(master));
     return [
       // Set Nickname — outline (matches Edit Profile styling).
       HollowButton.outline(
@@ -596,6 +637,15 @@ class _ProfileCardBodyState extends ConsumerState<ProfileCardBody> {
         expand: true,
         icon: Icon(localNick != null ? LucideIcons.pencil : LucideIcons.tag),
         child: Text(localNick != null ? 'Edit Nickname' : 'Set Nickname'),
+      ),
+      const SizedBox(height: HollowSpacing.xs),
+      // Verify — the entry point to the safety-number comparison (Issue 1-D).
+      HollowButton.outline(
+        onPressed: () => _openVerifyDialog(master),
+        compact: true,
+        expand: true,
+        icon: Icon(isVerified ? LucideIcons.shieldCheck : LucideIcons.shield),
+        child: Text(isVerified ? 'Verified — view number' : 'Verify contact'),
       ),
       const SizedBox(height: HollowSpacing.xs),
       // Block + Report share one row (each half), red outline (danger tint).

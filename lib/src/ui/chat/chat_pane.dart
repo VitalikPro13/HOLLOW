@@ -60,7 +60,10 @@ import 'package:hollow/src/ui/components/share_volume_control.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/large_file_share_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
+import 'package:hollow/src/core/providers/verified_peers_provider.dart';
+import 'package:hollow/src/ui/components/security_alert_banner.dart';
 import 'package:hollow/src/ui/components/status_dot.dart';
+import 'package:hollow/src/ui/dialogs/verify_contact_dialog.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:hollow/src/ui/dialogs/message_proof_dialog.dart';
 import 'package:hollow/src/ui/dialogs/report_user_dialog.dart';
@@ -1015,6 +1018,10 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
         _buildHeader(hollow,
             isSavedMessages: isSavedMessages,
             showProfilePanel: showProfilePanel),
+
+        // Issue 1-C: pinned above the message list, not a toast — the warning
+        // has to survive scrollback and restarts. Renders nothing when clear.
+        if (!isSavedMessages) SecurityAlertBanner(peerId: widget.peerId),
 
         // Screen share: full-bleed layout with overlay chat + controls.
         // Normal call / no call: standard column layout.
@@ -3895,6 +3902,7 @@ class _DmProfilePanel extends ConsumerWidget {
     required String? localNick,
   }) {
     final hasNick = localNick != null && localNick.isNotEmpty;
+    final isVerified = ref.watch(isPeerVerifiedProvider(master));
     return [
       SizedBox(
         width: double.infinity,
@@ -3908,6 +3916,18 @@ class _DmProfilePanel extends ConsumerWidget {
           compact: true,
           icon: Icon(hasNick ? LucideIcons.pencil : LucideIcons.tag),
           child: Text(hasNick ? 'Edit Nickname' : 'Set Nickname'),
+        ),
+      ),
+      const SizedBox(height: HollowSpacing.xs),
+      // Verify — same action and ordering as the profile card, so the DM panel
+      // is not a place where verification is quietly unavailable.
+      SizedBox(
+        width: double.infinity,
+        child: HollowButton.outline(
+          onPressed: () => showVerifyContactDialog(context, peerId: master),
+          compact: true,
+          icon: Icon(isVerified ? LucideIcons.shieldCheck : LucideIcons.shield),
+          child: Text(isVerified ? 'Verified — view number' : 'Verify contact'),
         ),
       ),
       const SizedBox(height: HollowSpacing.xs),

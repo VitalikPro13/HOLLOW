@@ -406,12 +406,26 @@ For each needed chunk (in rarest-first or sequential order):
 
 1. Resolves save directory (from state or default shares_dir).
 2. Closes data_file handle (sets to None in registry).
-3. Renames `.partial` to the original filename in save_dir.
+3. Renames `.partial` to the sanitized filename in save_dir (see `unique_final_path()` / `safe_file_name()` below).
 4. **Collision avoidance:** If filename already exists, appends ` (1)`, ` (2)`, ... up to 999.
 5. Marks share complete in DB (`mark_share_complete()`).
 6. **Auto-seeding:** Non-hidden shares automatically start seeding. Hidden shares (channel files) don't auto-seed -- receiver opts in via "Keep & Seed". The hidden flag comes from the registry entry; if that entry vanished (race), the fallback is the persisted share row's `server_id.is_some()`, defaulting to hidden when no row exists either (fixed 2026-07-15 — used to default to visible, which would surface + auto-seed a hidden channel file). Known residual: `rebuild_seed_state` still hardcodes `hidden: false` on auto-rejoin (flagged in `reports/SONAR_CLEANUP_EPIC.md`).
 7. Re-opens the final file read-only as `data_file` for seeding.
 8. Emits `NetworkEvent::ShareCompleted` with disk_path.
+
+### unique_final_path() / safe_file_name() — SECURITY
+
+`share_handler.rs:unique_final_path()` builds the download path. It routes the name through `safe_file_name()` FIRST, then asserts the result's parent is still the target dir as a backstop.
+
+**Why (fixed 0.8.2, external report).** `ShareManifest.file_name` is authored entirely by the sender, and the manifest root hash is NOT a trust signal — the sender computes it over their own manifest, so a hostile name hashes correctly. This path used to be a bare `dir.join(file_name)`. Because share-backed files at or below the auto-download threshold (default 169 MB) are fetched with **no user interaction**, one channel message wrote an attacker-chosen file on every member's machine; writing into an OS autostart directory is code execution at next login.
+
+Two escape primitives, not one:
+- relative traversal (`..\..\..\poc.txt`), and
+- an **ABSOLUTE** name — `Path::join` DISCARDS the base directory entirely, so no `..` is needed and a traversal-only filter misses it. Also `\\host\share` (UNC) and `C:name` (drive-relative, still a join prefix).
+
+`safe_file_name()` reduces the name to one inert component: last component only (treating `/` AND `\` as separators on every platform), trailing dot/space stripping (Windows removes them at create time), `.`/`..` rejection, control chars + Windows-illegal set + `:` (drive-relative and NTFS alternate data streams) mapped to `_`, reserved device names (`CON`, `NUL`, `COM1`…) prefixed, bidi overrides stripped (category Cf, so `is_control()` misses them; `evil\u{202E}txt.exe` renders as `evil exe.txt`), char-boundary byte cap, fallback if empty.
+
+**Do NOT substitute `file_transfer.rs:sanitize_path_component()`** — it is alphanumeric-only and would turn `Отчёт.pdf` into `pdf`. Correct for file IDs/extensions, wrong for user-facing names. A regression test pins Cyrillic/CJK/emoji.
 
 ---
 

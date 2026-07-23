@@ -426,43 +426,9 @@ pub fn load_settings_with_prefix(prefix: String) -> Result<Vec<SettingEntry>, St
         .collect())
 }
 
-// ── Verified Peers (RAT Files) ──────────────────────────────────
-
-/// Mark a peer as identity-verified (fingerprint confirmed in person).
-#[frb]
-pub fn set_peer_verified(peer_id: String) -> Result<(), String> {
-    let store = get_store();
-    let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
-    let ms = guard.as_ref().ok_or("Message store is not open")?;
-    ms.set_peer_verified(&peer_id)
-}
-
-/// Remove verified status from a peer.
-#[frb]
-pub fn remove_peer_verified(peer_id: String) -> Result<(), String> {
-    let store = get_store();
-    let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
-    let ms = guard.as_ref().ok_or("Message store is not open")?;
-    ms.remove_peer_verified(&peer_id)
-}
-
-/// Check if a peer is identity-verified.
-#[frb]
-pub fn is_peer_verified(peer_id: String) -> Result<bool, String> {
-    let store = get_store();
-    let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
-    let ms = guard.as_ref().ok_or("Message store is not open")?;
-    ms.is_peer_verified(&peer_id)
-}
-
-/// Get all verified peers as (peer_id, verified_at_ms) pairs.
-#[frb]
-pub fn get_verified_peers() -> Result<Vec<(String, i64)>, String> {
-    let store = get_store();
-    let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
-    let ms = guard.as_ref().ok_or("Message store is not open")?;
-    ms.get_verified_peers()
-}
+// Verified peers moved to `api::verification` (Issue 1-D) so every entry point
+// resolves device → master in one auditable place. A verified flag stored under
+// a device id stops applying the moment that contact links a device.
 
 /// Count unread DM messages newer than the given last-seen message ID.
 /// Only counts non-hidden messages from the other peer (is_mine = 0).

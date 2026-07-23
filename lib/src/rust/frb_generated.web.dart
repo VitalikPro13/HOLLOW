@@ -19,6 +19,7 @@ import 'api/simple.dart';
 import 'api/storage.dart';
 import 'api/twitch.dart';
 import 'api/updater.dart';
+import 'api/verification.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'frb_generated.dart';
@@ -273,6 +274,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<(String, PlatformInt64)> dco_decode_list_record_string_i_64(dynamic raw);
 
   @protected
+  List<SecurityAlertFfi> dco_decode_list_security_alert_ffi(dynamic raw);
+
+  @protected
   List<ServerEmote> dco_decode_list_server_emote(dynamic raw);
 
   @protected
@@ -389,6 +393,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   (String, PlatformInt64) dco_decode_record_string_i_64(dynamic raw);
+
+  @protected
+  SecurityAlertFfi dco_decode_security_alert_ffi(dynamic raw);
 
   @protected
   ServerEmote dco_decode_server_emote(dynamic raw);
@@ -768,6 +775,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  List<SecurityAlertFfi> sse_decode_list_security_alert_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   List<ServerEmote> sse_decode_list_server_emote(SseDeserializer deserializer);
 
   @protected
@@ -922,6 +934,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   (String, PlatformInt64) sse_decode_record_string_i_64(
     SseDeserializer deserializer,
   );
+
+  @protected
+  SecurityAlertFfi sse_decode_security_alert_ffi(SseDeserializer deserializer);
 
   @protected
   ServerEmote sse_decode_server_emote(SseDeserializer deserializer);
@@ -1420,6 +1435,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_list_security_alert_ffi(
+    List<SecurityAlertFfi> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_list_server_emote(
     List<ServerEmote> self,
     SseSerializer serializer,
@@ -1623,6 +1644,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_record_string_i_64(
     (String, PlatformInt64) self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_security_alert_ffi(
+    SecurityAlertFfi self,
     SseSerializer serializer,
   );
 

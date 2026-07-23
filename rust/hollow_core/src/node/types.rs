@@ -179,6 +179,13 @@ pub(crate) enum NetworkEvent {
     /// A device list was ingested for `master_peer_id` (multi-device, Phase 6).
     /// Dart invalidates its device→identity map so attribution updates.
     DeviceListUpdated { master_peer_id: String },
+    /// A contact's identity changed in a way worth showing the user (Issue 1-C):
+    /// a NEW DEVICE joined their identity, or one of their devices re-keyed.
+    /// `peer_id` is the MASTER (an alert is about a person), `kind` is a
+    /// `security_alerts::KIND_*` constant, `detail` is the device id or key that
+    /// changed. Emitted ONLY the first time each distinct fact is recorded, so a
+    /// dismissed warning stays dismissed across reconnects.
+    SecurityAlert { peer_id: String, kind: String, detail: String, created_at: i64 },
     /// THIS device has been revoked by the identity (Step 7) — it appears in the
     /// signed `revoked` tombstone set. Dart self-nukes: `stash_pending_wipe()` +
     /// relaunch → clean Welcome. The cryptographic cutoff already happened on
