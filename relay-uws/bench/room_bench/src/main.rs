@@ -13,7 +13,40 @@ type WsStream = tokio_tungstenite::WebSocketStream<
     tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
 >;
 
-fn make_auth_message(peer_id: &str) -> String {
+const B58_ALPHABET: &[u8] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+
+fn base58_encode(data: &[u8]) -> String {
+    let zeros = data.iter().take_while(|b| **b == 0).count();
+    let mut buf = vec![0u8; (data.len() - zeros) * 138 / 100 + 1];
+    for &byte in &data[zeros..] {
+        let mut carry = byte as usize;
+        for slot in buf.iter_mut().rev() {
+            carry += 256 * (*slot as usize);
+            *slot = (carry % 58) as u8;
+            carry /= 58;
+        }
+    }
+    let skip = buf.iter().take_while(|b| **b == 0).count();
+    let mut out = String::new();
+    out.extend(std::iter::repeat('1').take(zeros));
+    out.extend(buf[skip..].iter().map(|&b| B58_ALPHABET[b as usize] as char));
+    out
+}
+
+/// Mirror of `NativeKeypair::peer_id()`: bs58btc of the identity multihash
+/// wrapping the protobuf public key.
+///
+/// The relay now REJECTS an auth frame whose peer_id is not the derivation of
+/// its public key, so a synthetic id like "roombench-0001" no longer
+/// authenticates. Each connection generates its own keypair, so derived ids are
+/// still unique per connection.
+fn derive_peer_id(raw_pub: &[u8; 32]) -> String {
+    let mut multihash = vec![0x00, 0x24, 0x08, 0x01, 0x12, 0x20];
+    multihash.extend_from_slice(raw_pub);
+    base58_encode(&multihash)
+}
+
+fn make_auth_message() -> String {
     let signing_key = SigningKey::generate(&mut OsRng);
     let verifying_key = signing_key.verifying_key();
 
@@ -21,6 +54,7 @@ fn make_auth_message(peer_id: &str) -> String {
     let mut wrapped = vec![0x08, 0x01, 0x12, 0x20];
     wrapped.extend_from_slice(&raw_pub);
     let pub_b64 = base64::engine::general_purpose::STANDARD.encode(&wrapped);
+    let peer_id = derive_peer_id(&raw_pub);
 
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -42,7 +76,6 @@ fn make_auth_message(peer_id: &str) -> String {
 }
 
 async fn connect_and_auth(
-    peer_id: &str,
     tls_connector: &tokio_tungstenite::Connector,
 ) -> Option<WsStream> {
     let (mut ws, _) = tokio_tungstenite::connect_async_tls_with_config(
@@ -54,7 +87,7 @@ async fn connect_and_auth(
     .await
     .ok()?;
 
-    let auth_msg = make_auth_message(peer_id);
+    let auth_msg = make_auth_message();
     ws.send(Message::Text(auth_msg)).await.ok()?;
 
     let timeout = tokio::time::timeout(Duration::from_secs(10), ws.next()).await;
@@ -164,8 +197,7 @@ async fn main() {
     println!("\n--- Phase 1: Connecting {} peers ---", num_peers);
     let mut peers: Vec<Arc<Mutex<WsStream>>> = Vec::new();
     for i in 0..num_peers {
-        let peer_id = format!("roombench-{:04}", i);
-        match connect_and_auth(&peer_id, &tls_connector).await {
+        match connect_and_auth(&tls_connector).await {
             Some(ws) => peers.push(Arc::new(Mutex::new(ws))),
             None => eprintln!("  Failed to connect peer {}", i),
         }

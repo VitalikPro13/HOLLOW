@@ -14,7 +14,40 @@ static AUTH_OK: AtomicU64 = AtomicU64::new(0);
 static FAILED: AtomicU64 = AtomicU64::new(0);
 static DROPPED: AtomicU64 = AtomicU64::new(0);
 
-fn make_auth_message(peer_id: &str) -> String {
+const B58_ALPHABET: &[u8] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+
+fn base58_encode(data: &[u8]) -> String {
+    let zeros = data.iter().take_while(|b| **b == 0).count();
+    let mut buf = vec![0u8; (data.len() - zeros) * 138 / 100 + 1];
+    for &byte in &data[zeros..] {
+        let mut carry = byte as usize;
+        for slot in buf.iter_mut().rev() {
+            carry += 256 * (*slot as usize);
+            *slot = (carry % 58) as u8;
+            carry /= 58;
+        }
+    }
+    let skip = buf.iter().take_while(|b| **b == 0).count();
+    let mut out = String::new();
+    out.extend(std::iter::repeat('1').take(zeros));
+    out.extend(buf[skip..].iter().map(|&b| B58_ALPHABET[b as usize] as char));
+    out
+}
+
+/// Mirror of `NativeKeypair::peer_id()`: bs58btc of the identity multihash
+/// wrapping the protobuf public key.
+///
+/// The relay now REJECTS an auth frame whose peer_id is not the derivation of
+/// its public key, so a synthetic id like "stress-000001" no longer
+/// authenticates. Each connection generates its own keypair, so derived ids are
+/// still unique per connection.
+fn derive_peer_id(raw_pub: &[u8; 32]) -> String {
+    let mut multihash = vec![0x00, 0x24, 0x08, 0x01, 0x12, 0x20];
+    multihash.extend_from_slice(raw_pub);
+    base58_encode(&multihash)
+}
+
+fn make_auth_message() -> String {
     let signing_key = SigningKey::generate(&mut OsRng);
     let verifying_key = signing_key.verifying_key();
 
@@ -22,6 +55,7 @@ fn make_auth_message(peer_id: &str) -> String {
     let mut wrapped = vec![0x08, 0x01, 0x12, 0x20];
     wrapped.extend_from_slice(&raw_pub);
     let pub_b64 = base64::engine::general_purpose::STANDARD.encode(&wrapped);
+    let peer_id = derive_peer_id(&raw_pub);
 
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -47,8 +81,6 @@ async fn connect_and_hold(
     semaphore: Arc<Semaphore>,
     tls_connector: tokio_tungstenite::Connector,
 ) {
-    let peer_id = format!("stress-{:06}", id);
-
     let (mut ws, _) = {
         let _permit = semaphore.acquire().await.unwrap();
 
@@ -71,7 +103,7 @@ async fn connect_and_hold(
         }
     };
 
-    let auth_msg = make_auth_message(&peer_id);
+    let auth_msg = make_auth_message();
     if ws.send(Message::Text(auth_msg)).await.is_err() {
         FAILED.fetch_add(1, Ordering::Relaxed);
         return;

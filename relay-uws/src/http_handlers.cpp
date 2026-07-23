@@ -78,6 +78,14 @@ static void handle_register(HttpResponse* res, HttpRequest* /*req*/, RelayState&
             addrs_joined += addresses[i];
         }
 
+        // SECURITY: bind the claimed peer_id to the supplied public key — the
+        // signature alone proves key possession, not identity ownership. Without
+        // this, anyone could register arbitrary addresses under another peer's
+        // id and poison discovery. See derive_peer_id() in crypto.h.
+        if (derive_peer_id(public_key) != peer_id) {
+            json_error(res, "Invalid signature", "403 Forbidden"); return;
+        }
+
         std::string signed_message = "hollow-register:" + room_code + ":" +
             peer_id + ":" + addrs_joined + ":" + std::to_string(timestamp);
 
@@ -149,6 +157,13 @@ static void handle_unregister(HttpResponse* res, HttpRequest* /*req*/, RelayStat
         uint64_t diff = (now > timestamp) ? (now - timestamp) : (timestamp - now);
         if (diff > TIMESTAMP_SKEW_SECS) {
             json_error(res, "Timestamp too far from server time", "403 Forbidden"); return;
+        }
+
+        // SECURITY: bind the claimed peer_id to the supplied public key —
+        // otherwise anyone could unregister another peer from discovery. See
+        // derive_peer_id() in crypto.h.
+        if (derive_peer_id(public_key) != peer_id) {
+            json_error(res, "Invalid signature", "403 Forbidden"); return;
         }
 
         std::string signed_message = "hollow-unregister:" + room_code + ":" +

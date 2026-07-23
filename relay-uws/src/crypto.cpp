@@ -4,6 +4,7 @@
 #include <openssl/evp.h>
 #include <chrono>
 #include <cstring>
+#include <vector>
 
 bool verify_ed25519(const std::string& pubkey_b64,
                     const std::string& sig_b64,
@@ -40,6 +41,63 @@ bool verify_ed25519(const std::string& pubkey_b64,
         message.size(),
         ed25519_key
     ) == 0;
+}
+
+// Bitcoin base58 alphabet (no 0, O, I, l).
+static const char* B58_ALPHABET =
+    "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+
+// Standard base58btc encode. Each leading zero byte maps to a literal '1'.
+static std::string base58_encode(const unsigned char* data, size_t len) {
+    size_t zeros = 0;
+    while (zeros < len && data[zeros] == 0) zeros++;
+
+    // log(256)/log(58) ~= 1.365; 138/100 is the usual safe over-allocation.
+    std::vector<unsigned char> b58((len - zeros) * 138 / 100 + 1, 0);
+
+    for (size_t i = zeros; i < len; i++) {
+        int carry = data[i];
+        for (size_t j = b58.size(); j-- > 0;) {
+            carry += 256 * b58[j];
+            b58[j] = static_cast<unsigned char>(carry % 58);
+            carry /= 58;
+        }
+    }
+
+    size_t it = 0;
+    while (it < b58.size() && b58[it] == 0) it++;
+
+    std::string result;
+    result.reserve(zeros + (b58.size() - it));
+    result.assign(zeros, '1');
+    for (; it < b58.size(); it++) result += B58_ALPHABET[b58[it]];
+    return result;
+}
+
+std::string derive_peer_id(const std::string& pubkey_b64) {
+    unsigned char proto_bytes[36];
+    size_t proto_len = 0;
+    if (sodium_base642bin(proto_bytes, sizeof(proto_bytes),
+                          pubkey_b64.c_str(), pubkey_b64.size(),
+                          nullptr, &proto_len, nullptr,
+                          sodium_base64_VARIANT_ORIGINAL) != 0 || proto_len != 36) {
+        return "";
+    }
+
+    // Protobuf header: 08 01 12 20 (Ed25519 key type + 32-byte length).
+    if (proto_bytes[0] != 0x08 || proto_bytes[1] != 0x01 ||
+        proto_bytes[2] != 0x12 || proto_bytes[3] != 0x20) {
+        return "";
+    }
+
+    // Identity multihash (code 0x00) wrapping the 36-byte protobuf key. libp2p
+    // inlines rather than hashing because 36 <= the 42-byte threshold.
+    unsigned char multihash[38];
+    multihash[0] = 0x00;
+    multihash[1] = 0x24;  // 36
+    memcpy(multihash + 2, proto_bytes, sizeof(proto_bytes));
+
+    return base58_encode(multihash, sizeof(multihash));
 }
 
 std::string hmac_sha1_base64(const std::string& secret,

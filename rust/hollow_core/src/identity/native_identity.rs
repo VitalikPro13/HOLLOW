@@ -235,6 +235,33 @@ mod tests {
         assert_eq!(kp.secret_key_bytes(), loaded.secret_key_bytes());
     }
 
+    /// KNOWN-ANSWER VECTOR for peer_id derivation.
+    ///
+    /// The relay reimplements this derivation in C++ (`derive_peer_id` in
+    /// `relay-uws/src/crypto.cpp`) to bind an auth frame's claimed peer_id to
+    /// its public key. If this derivation ever changes without the relay
+    /// changing in lockstep, EVERY client fails auth. The same vector is pinned
+    /// on the relay side in `relay-uws/test/test_derive_peer_id.cpp` — change
+    /// both or neither.
+    #[test]
+    fn peer_id_derivation_known_answer() {
+        let kp = NativeKeypair::from_secret_bytes(&[1u8; 32]);
+
+        use base64::Engine as _;
+        let pubkey_b64 = base64::engine::general_purpose::STANDARD
+            .encode(kp.public_key_protobuf());
+        assert_eq!(
+            pubkey_b64,
+            "CAESIIqI4910CfGV/VLbLTy6XXLKZwm/HZQSG/N0iAG0D29c",
+            "public key protobuf encoding changed"
+        );
+        assert_eq!(
+            kp.peer_id(),
+            "12D3KooWK99VoVxNE7XzyBwXEzW7xhK7Gpv85r9F3V3fyKSUKPH5",
+            "peer_id derivation changed — relay-uws/src/crypto.cpp must match"
+        );
+    }
+
     /// Test signature creation and verification.
     #[test]
     fn signature_sign_and_verify() {

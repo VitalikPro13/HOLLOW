@@ -183,6 +183,27 @@ static void handle_auth(SSLWebSocket* ws, PerSocketData* data,
         return;
     }
 
+    // SECURITY: bind the claimed peer_id to the supplied public key.
+    //
+    // The signature check below proves only that the sender holds the private
+    // half of `public_key` — NOT that they own `peer_id`. Without this binding,
+    // anyone could mint a throwaway keypair, sign
+    // "hollow-ws-auth:<victim_peer_id>:<now>" with it, and authenticate AS the
+    // victim: peer_ids are public (broadcast in peer_joined + room member
+    // snapshots), and a newer socket for an existing peer_id EVICTS the
+    // incumbent below, so this was a persistent remote deauth of any user, plus
+    // delivery of their routed traffic and offline buffer.
+    //
+    // peer_id is a pure function of the public key, so just recompute it. Every
+    // real client already derives it this way (full node, push fetch node, and
+    // the web guest viewer's derivePeerId).
+    std::string derived_peer_id = derive_peer_id(public_key);
+    if (derived_peer_id.empty() || derived_peer_id != peer_id) {
+        send_json(ws, {{"type", "auth_failed"}, {"error", "Authentication failed"}});
+        ws->end(1008, "bad_auth");
+        return;
+    }
+
     std::string signed_msg = "hollow-ws-auth:" + peer_id + ":" + std::to_string(timestamp);
     if (!verify_ed25519(public_key, signature, signed_msg)) {
         send_json(ws, {{"type", "auth_failed"}, {"error", "Authentication failed"}});
