@@ -9,7 +9,7 @@ use super::network::get_runtime;
 use crate::frb_generated::StreamSink;
 use crate::identity::data_dir;
 
-const APP_VERSION: &str = "0.8.1";
+const APP_VERSION: &str = "0.8.2";
 
 pub struct DownloadProgress {
     pub bytes_downloaded: u64,
