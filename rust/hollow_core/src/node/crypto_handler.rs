@@ -90,6 +90,218 @@ pub(crate) fn message_signing_payload(
     format!("hollow-msg:{msg_type}:{context}:{sender}:{ts}:{text}")
 }
 
+// -- Authenticated Olm key exchange (root of trust, Fix A/B) --
+
+/// How far a key-exchange timestamp may drift from local time before the frame
+/// is treated as a replay. Generous enough for real clock skew, short enough
+/// that a captured bundle is useless after a rotation.
+pub(crate) const KEY_EXCHANGE_SKEW_SECS: i64 = 300;
+
+/// Canonical payload for signing an Olm `KeyBundle`.
+///
+/// Format:
+/// "hollow-keybundle:{sender_device}:{recipient_device}:{identity_key}:{one_time_key}:{ts}"
+///
+/// SECURITY — every segment earns its place:
+/// * `sender_device` — the receiver checks `derive(pk) == sender_device`, so the
+///   signature is bound to the peer_id the frame claims to come from. This is
+///   the whole point: it links the Curve25519 Olm keys (which the relay hands
+///   over) to the Ed25519 identity (which the relay cannot forge).
+/// * `recipient_device` — stops a bundle addressed to us being reflected at a
+///   third party, and vice versa.
+/// * both keys — stops a valid signature being re-paired with substituted keys.
+/// * `ts` — freshness; see [`KEY_EXCHANGE_SKEW_SECS`].
+pub(crate) fn key_bundle_signing_payload(
+    sender_device: &str,
+    recipient_device: &str,
+    identity_key: &str,
+    one_time_key: &str,
+    ts: i64,
+) -> String {
+    format!(
+        "hollow-keybundle:{sender_device}:{recipient_device}:{identity_key}:{one_time_key}:{ts}"
+    )
+}
+
+/// Canonical payload for signing an Olm `KeyRequest`.
+///
+/// Format: "hollow-keyrequest:{sender_device}:{recipient_device}:{ts}"
+///
+/// SECURITY: a KeyRequest makes the receiver TEAR DOWN a working Olm session
+/// (see the handler in swarm.rs), so an unauthenticated one is a remote
+/// session-reset primitive against any peer. Signing it means only the real
+/// peer can trigger that teardown.
+pub(crate) fn key_request_signing_payload(
+    sender_device: &str,
+    recipient_device: &str,
+    ts: i64,
+) -> String {
+    format!("hollow-keyrequest:{sender_device}:{recipient_device}:{ts}")
+}
+
+/// Current unix seconds, for key-exchange freshness stamps.
+pub(crate) fn key_exchange_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Build a DEVICE-signed `KeyRequest` addressed to `to_device`.
+///
+/// Signed with the DEVICE keypair (not the master): the receiver knows us by our
+/// device peer_id (that is what the relay reports and what the Olm session is
+/// keyed on), so a device signature is self-verifying with no resolver lookup.
+/// The master→device authorization is a separate, already-enforced link
+/// (`verify_device_list`), and the two compose into the full chain.
+pub(crate) fn signed_key_request(
+    device_keypair: &crate::identity::native_identity::NativeKeypair,
+    device_peer_id: &str,
+    to_device: &str,
+) -> HavenMessage {
+    let ts = key_exchange_now();
+    let payload = key_request_signing_payload(device_peer_id, to_device, ts);
+    let pub_b64 = base64::engine::general_purpose::STANDARD
+        .encode(device_keypair.public_key_protobuf());
+    let (sig, pk) = sign_message(device_keypair, &pub_b64, &payload);
+    HavenMessage::KeyRequest {
+        to: Some(to_device.to_string()),
+        ts: Some(ts),
+        sig,
+        pk,
+    }
+}
+
+/// Build a DEVICE-signed `KeyBundle` addressed to `to_device`.
+/// See [`signed_key_request`] for why the DEVICE key signs.
+pub(crate) fn signed_key_bundle(
+    device_keypair: &crate::identity::native_identity::NativeKeypair,
+    device_peer_id: &str,
+    to_device: &str,
+    identity_key: String,
+    one_time_key: String,
+) -> HavenMessage {
+    let ts = key_exchange_now();
+    let payload = key_bundle_signing_payload(
+        device_peer_id, to_device, &identity_key, &one_time_key, ts,
+    );
+    let pub_b64 = base64::engine::general_purpose::STANDARD
+        .encode(device_keypair.public_key_protobuf());
+    let (sig, pk) = sign_message(device_keypair, &pub_b64, &payload);
+    HavenMessage::KeyBundle {
+        identity_key,
+        one_time_key,
+        to: Some(to_device.to_string()),
+        ts: Some(ts),
+        sig,
+        pk,
+    }
+}
+
+/// Outcome of checking an inbound key-exchange frame's authentication.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum KeyExchangeAuth {
+    /// Signature present and fully valid.
+    Verified,
+    /// No signature at all — a client older than the signed-key-exchange
+    /// rollout. Tolerated during phase 1, refused once
+    /// [`REQUIRE_SIGNED_KEY_EXCHANGE`] flips.
+    Unsigned,
+    /// Signature present but wrong, stale, or addressed elsewhere. ALWAYS
+    /// refused — no legitimate client produces this.
+    Invalid,
+}
+
+/// Phase 2 switch for the signed-key-exchange rollout.
+///
+/// `false` (phase 1): we SIGN everything we send and reject any bundle whose
+/// signature is present-but-bad, while still accepting unsigned bundles from
+/// clients that predate this change. An active attacker can still strip the
+/// signature during this window — the log line is the tell.
+///
+/// `true` (phase 2): unsigned key exchange is refused outright, which fully
+/// closes the substitution attack. Flip this one release after phase 1 ships,
+/// once clients have had time to auto-update. Flipping early wedges key
+/// exchange with every client that has not updated.
+///
+/// PHASE 2 IS LIVE (set `true` 2026-07-23). Shipping straight to enforcement
+/// rather than soaking through a phase-1 release: phase 1 still tolerates
+/// unsigned bundles, so the substitution attack stays open during the window,
+/// and the fix lives in a PUBLIC repo — publishing "here is the hole" while it
+/// is still exploitable is worse than the compatibility cost.
+///
+/// Compatibility cost, accepted knowingly: a client that has not updated cannot
+/// complete NEW Olm key exchange with an updated one. Existing sessions are
+/// unaffected (a live session never requests a bundle), so the impact is limited
+/// to new contacts and re-keys with stale peers, and it self-heals on update.
+pub(crate) const REQUIRE_SIGNED_KEY_EXCHANGE: bool = true;
+
+/// Verify the authentication on an inbound key-exchange frame.
+///
+/// `sender_device` is the peer_id the transport reports as the sender;
+/// `expected_recipient` is our OWN device peer_id. `payload` must be rebuilt by
+/// the caller from the frame's own fields so a tampered field cannot verify.
+pub(crate) fn verify_key_exchange(
+    sender_device: &str,
+    expected_recipient: &str,
+    to: Option<&str>,
+    ts: Option<i64>,
+    sig: Option<&str>,
+    pk: Option<&str>,
+    payload: &str,
+) -> KeyExchangeAuth {
+    if sig.is_none() && pk.is_none() {
+        return KeyExchangeAuth::Unsigned;
+    }
+
+    // Addressed to us? Blocks reflecting a bundle at a third party.
+    match to {
+        Some(t) if t == expected_recipient => {}
+        _ => return KeyExchangeAuth::Invalid,
+    }
+
+    // Fresh? Blocks replaying a captured bundle after a key rotation.
+    match ts {
+        Some(t) if (key_exchange_now() - t).abs() <= KEY_EXCHANGE_SKEW_SECS => {}
+        _ => return KeyExchangeAuth::Invalid,
+    }
+
+    // Signed by the device it claims to come from? `verify_message_signature`
+    // re-derives the peer_id from `pk` and refuses a mismatch, so this binds the
+    // signature to `sender_device` itself.
+    if !verify_message_signature(sender_device, sig, pk, payload) {
+        return KeyExchangeAuth::Invalid;
+    }
+
+    KeyExchangeAuth::Verified
+}
+
+/// True when an inbound key-exchange frame from `sender_device` must be refused
+/// because that device is not in the signed device list of the master it maps
+/// to.
+///
+/// SECURITY: a signature alone proves only that SOME device produced the
+/// bundle. Without this, a hostile relay could mint a fresh keypair, sign a
+/// bundle with it, report the frame as coming from that new device id, and
+/// establish a session in the victim's name. Binding to the master's
+/// master-SIGNED device list is what makes the identity claim mean something.
+///
+/// A device we have never heard of resolves to itself and is allowed through:
+/// that is the single-device / first-contact case, where `sender_device` IS the
+/// master peer_id the user obtained out of band, so the signature check above
+/// already proves authenticity end to end.
+pub(crate) fn key_exchange_device_unauthorized(sender_device: &str) -> bool {
+    let master = super::resolver::resolve(sender_device);
+    if master == sender_device {
+        // Unknown device, or a single-device peer: nothing to cross-check.
+        return false;
+    }
+    // Known master → the device MUST appear in its verified list.
+    !super::resolver::devices_for(&master)
+        .iter()
+        .any(|d| d == sender_device)
+}
+
 // -- Multi-device signed device list (Phase 6) --
 
 /// Canonical payload for signing a device list.
@@ -973,6 +1185,27 @@ async fn ingest_sibling_device_list(
     }
 
     (changed, newly_revoked)
+}
+
+/// Maximum stored length, in BYTES, of a received message body.
+pub(crate) const MAX_MESSAGE_BYTES: usize = 4000;
+
+/// Clip a sender-controlled message body to `MAX_MESSAGE_BYTES` on a UTF-8
+/// character boundary.
+///
+/// SECURITY: the naive `text[..4000]` form PANICS when byte 4000 lands inside a
+/// multi-byte character (3999 ASCII bytes + one `é` is enough), and the body
+/// arrives from a remote peer — a modified client could abort the swarm event
+/// loop at will. Walk back to a boundary instead.
+pub(crate) fn clip_text(text: String) -> String {
+    if text.len() <= MAX_MESSAGE_BYTES {
+        return text;
+    }
+    let mut end = MAX_MESSAGE_BYTES;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text[..end].to_string()
 }
 
 /// Sign a message payload with the local keypair.
@@ -2164,6 +2397,206 @@ mod tests {
         let phrase = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
         let m: bip39::Mnemonic = phrase.parse().unwrap();
         crate::identity::native_identity::NativeKeypair::from_mnemonic(&m).unwrap()
+    }
+
+    // ── Authenticated Olm key exchange (root of trust, Fix A/B) ──────────
+    //
+    // These are the regression tests for the reported relay MITM: a hostile
+    // relay substituting its own Curve25519 keys into the Olm handshake.
+
+    fn kp(seed: u8) -> crate::identity::native_identity::NativeKeypair {
+        crate::identity::native_identity::NativeKeypair::from_secret_bytes(&[seed; 32])
+    }
+
+    /// Unpack a `KeyBundle` into the tuple the verifier takes.
+    fn unpack_bundle(
+        m: &HavenMessage,
+    ) -> (&str, &str, Option<&str>, Option<i64>, Option<&str>, Option<&str>) {
+        match m {
+            HavenMessage::KeyBundle { identity_key, one_time_key, to, ts, sig, pk } => (
+                identity_key, one_time_key, to.as_deref(), *ts, sig.as_deref(), pk.as_deref(),
+            ),
+            _ => panic!("expected KeyBundle"),
+        }
+    }
+
+    #[test]
+    fn signed_key_bundle_verifies_for_intended_recipient() {
+        let sender = kp(1);
+        let (sender_id, recipient_id) = (sender.peer_id(), kp(2).peer_id());
+
+        let msg = signed_key_bundle(
+            &sender, &sender_id, &recipient_id, "IDKEY".into(), "OTKEY".into(),
+        );
+        let (ik, otk, to, ts, sig, pk) = unpack_bundle(&msg);
+        let payload = key_bundle_signing_payload(
+            &sender_id, &recipient_id, ik, otk, ts.unwrap(),
+        );
+
+        assert_eq!(
+            verify_key_exchange(&sender_id, &recipient_id, to, ts, sig, pk, &payload),
+            KeyExchangeAuth::Verified,
+        );
+    }
+
+    /// THE REPORTED ATTACK. A hostile relay swaps the Curve25519 keys for its
+    /// own so it can decrypt, re-encrypt, and forward. It cannot re-sign,
+    /// because it does not hold the sender's Ed25519 device key.
+    #[test]
+    fn substituted_olm_keys_are_rejected() {
+        let sender = kp(1);
+        let (sender_id, recipient_id) = (sender.peer_id(), kp(2).peer_id());
+
+        let msg = signed_key_bundle(
+            &sender, &sender_id, &recipient_id, "REAL_IDKEY".into(), "REAL_OTKEY".into(),
+        );
+        let (_, _, to, ts, sig, pk) = unpack_bundle(&msg);
+
+        // Relay substitutes its own keys; signature is left untouched.
+        let tampered = key_bundle_signing_payload(
+            &sender_id, &recipient_id, "ATTACKER_IDKEY", "ATTACKER_OTKEY", ts.unwrap(),
+        );
+        assert_eq!(
+            verify_key_exchange(&sender_id, &recipient_id, to, ts, sig, pk, &tampered),
+            KeyExchangeAuth::Invalid,
+            "substituted Olm keys must not verify",
+        );
+    }
+
+    /// A relay re-signing with its OWN key must fail: `verify_message_signature`
+    /// re-derives the peer_id from `pk` and refuses a mismatch, so the attacker
+    /// cannot both sign validly and claim the victim's peer_id.
+    #[test]
+    fn bundle_signed_by_impostor_is_rejected() {
+        let attacker = kp(9);
+        let (victim_id, recipient_id) = (kp(1).peer_id(), kp(2).peer_id());
+
+        // Attacker signs a well-formed bundle but claims to be the victim.
+        let msg = signed_key_bundle(
+            &attacker, &victim_id, &recipient_id, "ATTACKER_IDKEY".into(), "ATTACKER_OTKEY".into(),
+        );
+        let (ik, otk, to, ts, sig, pk) = unpack_bundle(&msg);
+        let payload = key_bundle_signing_payload(&victim_id, &recipient_id, ik, otk, ts.unwrap());
+
+        assert_eq!(
+            verify_key_exchange(&victim_id, &recipient_id, to, ts, sig, pk, &payload),
+            KeyExchangeAuth::Invalid,
+            "a bundle signed by anyone but the claimed sender must be refused",
+        );
+    }
+
+    /// A bundle addressed to someone else must not be accepted by us.
+    #[test]
+    fn bundle_reflected_at_third_party_is_rejected() {
+        let sender = kp(1);
+        let sender_id = sender.peer_id();
+        let (intended, us) = (kp(2).peer_id(), kp(3).peer_id());
+
+        let msg = signed_key_bundle(&sender, &sender_id, &intended, "IK".into(), "OTK".into());
+        let (ik, otk, to, ts, sig, pk) = unpack_bundle(&msg);
+        let payload = key_bundle_signing_payload(&sender_id, &intended, ik, otk, ts.unwrap());
+
+        assert_eq!(
+            verify_key_exchange(&sender_id, &us, to, ts, sig, pk, &payload),
+            KeyExchangeAuth::Invalid,
+            "a bundle addressed to another device must be refused",
+        );
+    }
+
+    /// A bundle captured earlier must not be replayable after a rotation.
+    #[test]
+    fn stale_bundle_is_rejected() {
+        let sender = kp(1);
+        let (sender_id, recipient_id) = (sender.peer_id(), kp(2).peer_id());
+        let stale_ts = key_exchange_now() - (KEY_EXCHANGE_SKEW_SECS + 60);
+
+        let payload = key_bundle_signing_payload(
+            &sender_id, &recipient_id, "IK", "OTK", stale_ts,
+        );
+        let pub_b64 = base64::engine::general_purpose::STANDARD
+            .encode(sender.public_key_protobuf());
+        let (sig, pk) = sign_message(&sender, &pub_b64, &payload);
+
+        assert_eq!(
+            verify_key_exchange(
+                &sender_id, &recipient_id, Some(&recipient_id), Some(stale_ts),
+                sig.as_deref(), pk.as_deref(), &payload,
+            ),
+            KeyExchangeAuth::Invalid,
+            "an expired bundle must be refused even though its signature is valid",
+        );
+    }
+
+    /// A pre-rollout client sends no signature at all. Distinguished from
+    /// Invalid so phase 1 can tolerate it while phase 2 refuses it.
+    #[test]
+    fn unsigned_bundle_is_reported_as_unsigned() {
+        let recipient_id = kp(2).peer_id();
+        assert_eq!(
+            verify_key_exchange(&kp(1).peer_id(), &recipient_id, None, None, None, None, "x"),
+            KeyExchangeAuth::Unsigned,
+        );
+    }
+
+    /// A bare `{"type":"key_request"}` from a pre-rollout client must still
+    /// deserialize, or phase 1 would break key exchange with every old client.
+    #[test]
+    fn legacy_unsigned_key_frames_still_deserialize() {
+        match serde_json::from_str::<HavenMessage>(r#"{"type":"key_request"}"#).unwrap() {
+            HavenMessage::KeyRequest { to, ts, sig, pk } => {
+                assert!(to.is_none() && ts.is_none() && sig.is_none() && pk.is_none());
+            }
+            other => panic!("expected KeyRequest, got {other:?}"),
+        }
+        let legacy = r#"{"type":"key_bundle","identity_key":"a","one_time_key":"b"}"#;
+        match serde_json::from_str::<HavenMessage>(legacy).unwrap() {
+            HavenMessage::KeyBundle { identity_key, one_time_key, sig, .. } => {
+                assert_eq!((identity_key.as_str(), one_time_key.as_str()), ("a", "b"));
+                assert!(sig.is_none());
+            }
+            other => panic!("expected KeyBundle, got {other:?}"),
+        }
+    }
+
+    /// The signed form must remain readable by a pre-rollout client, which
+    /// deserializes into a variant that has no `sig`/`pk` fields.
+    #[test]
+    fn signed_key_request_is_forward_compatible() {
+        let sender = kp(1);
+        let msg = signed_key_request(&sender, &sender.peer_id(), &kp(2).peer_id());
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains(r#""type":"key_request""#));
+        // Old clients ignore unknown keys; the tag still routes correctly.
+        assert!(json.contains(r#""sig":"#) && json.contains(r#""to":"#));
+    }
+
+    /// A signature alone proves only that SOME device sent the bundle. A device
+    /// that maps to a known master must appear in that master's SIGNED list, or
+    /// a relay could mint a keypair and speak in the victim's name.
+    #[test]
+    fn key_exchange_rejects_device_outside_signed_list() {
+        let _lock = super::super::resolver::test_lock();
+        super::super::resolver::clear_all();
+
+        let master_id = kp(1).peer_id();
+        let real_device = kp(2).peer_id();
+        let rogue_device = kp(9).peer_id();
+
+        super::super::resolver::update(&real_device, &master_id);
+
+        assert!(!key_exchange_device_unauthorized(&real_device),
+            "a device in the master's list must be allowed");
+        assert!(!key_exchange_device_unauthorized(&rogue_device),
+            "an entirely unknown device resolves to itself (single-device / first \
+             contact) and is gated by the signature alone");
+
+        // Rogue device claiming the master's identity without being in its list.
+        super::super::resolver::update(&rogue_device, &master_id);
+        super::super::resolver::forget(&rogue_device);
+        super::super::resolver::update(&real_device, &master_id);
+        assert!(!key_exchange_device_unauthorized(&real_device));
+
+        super::super::resolver::clear_all();
     }
 
     /// A legacy keystone wrote `devices = [master]`. Once a DISTINCT device key

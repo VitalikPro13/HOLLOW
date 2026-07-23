@@ -25,6 +25,8 @@ pub(crate) async fn handle_send_message(
     bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     pub_key_b64: &str,
     local_peer_str: &str,
+    // THIS device's keypair — signs the Olm KeyRequest (Fix B).
+    device_keypair: &crate::identity::native_identity::NativeKeypair,
     device_peer_id: &str,
     peer_id_str: String,
     text: String,
@@ -106,7 +108,7 @@ pub(crate) async fn handle_send_message(
     fan_out_dm_envelope(
         olm, crypto_store, event_tx, ws_cmd_tx, ws_room_peers,
         pending_messages, key_request_in_flight,
-        local_peer_str, device_peer_id, &recipient_master, &envelope_json,
+        local_peer_str, device_keypair, device_peer_id, &recipient_master, &envelope_json,
         Some(&sibling_envelope_json),
     ).await;
 
@@ -142,6 +144,8 @@ async fn fan_out_dm_envelope(
     pending_messages: &mut HashMap<String, Vec<String>>,
     key_request_in_flight: &mut HashMap<String, std::time::Instant>,
     local_peer_str: &str,
+    // THIS device's identity — signs the KeyRequest (Fix B).
+    device_keypair: &crate::identity::native_identity::NativeKeypair,
     device_peer_id: &str,
     recipient_master: &str,
     envelope_json: &str,
@@ -177,6 +181,7 @@ async fn fan_out_dm_envelope(
         send_dm_to_device(
             olm, crypto_store, event_tx, ws_cmd_tx, ws_room_peers,
             pending_messages, key_request_in_flight,
+            device_keypair, device_peer_id,
             device_peer, envelope_json, &dm_room, /*is_sibling*/ false,
         ).await;
     }
@@ -214,6 +219,7 @@ async fn fan_out_dm_envelope(
         send_dm_to_device(
             olm, crypto_store, event_tx, ws_cmd_tx, ws_room_peers,
             pending_messages, key_request_in_flight,
+            device_keypair, device_peer_id,
             sibling, sibling_json, &dm_room, /*is_sibling*/ true,
         ).await;
     }
@@ -342,6 +348,9 @@ async fn send_dm_to_device(
     ws_room_peers: &HashMap<String, HashSet<String>>,
     pending_messages: &mut HashMap<String, Vec<String>>,
     key_request_in_flight: &mut HashMap<String, std::time::Instant>,
+    // THIS device's identity — signs the KeyRequest (Fix B).
+    device_keypair: &crate::identity::native_identity::NativeKeypair,
+    device_peer_id: &str,
     device_peer: &str,
     envelope_json: &str,
     dm_room: &str,
@@ -367,7 +376,7 @@ async fn send_dm_to_device(
         // the device reconnects (PeerJoined/RoomMembers/KeyBundle).
         queue_dm_key_request(
             ws_cmd_tx, ws_room_peers, pending_messages, key_request_in_flight,
-            device_peer, envelope_json, device_online,
+            device_keypair, device_peer_id, device_peer, envelope_json, device_online,
         );
         return;
     }
@@ -539,11 +548,15 @@ fn queue_pending_envelope(
 
 /// No Olm session with this device — queue the signed envelope (drained on
 /// PeerJoined/RoomMembers/KeyBundle) and fire a throttled KeyRequest.
+#[allow(clippy::too_many_arguments)]
 fn queue_dm_key_request(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, HashSet<String>>,
     pending_messages: &mut HashMap<String, Vec<String>>,
     key_request_in_flight: &mut HashMap<String, std::time::Instant>,
+    // THIS device's identity — signs the KeyRequest (Fix B).
+    device_keypair: &crate::identity::native_identity::NativeKeypair,
+    device_peer_id: &str,
     device_peer: &str,
     envelope_json: &str,
     device_online: bool,
@@ -560,7 +573,10 @@ fn queue_dm_key_request(
         if device_online {
             send_message_to_peer(
                 ws_cmd_tx, ws_room_peers,
-                device_peer, HavenMessage::KeyRequest,
+                device_peer,
+                super::crypto_handler::signed_key_request(
+                    device_keypair, device_peer_id, device_peer,
+                ),
             );
             key_request_in_flight.insert(device_peer.to_string(), std::time::Instant::now());
         }
@@ -1204,6 +1220,8 @@ pub(crate) async fn handle_edit_dm_message(
     bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     pub_key_b64: &str,
     local_peer_str: &str,
+    // THIS device's keypair — signs the Olm KeyRequest (Fix B).
+    device_keypair: &crate::identity::native_identity::NativeKeypair,
     device_peer_id: &str,
     peer_id_str: String,
     message_id: String,
@@ -1266,7 +1284,7 @@ pub(crate) async fn handle_edit_dm_message(
     fan_out_dm_envelope(
         olm, crypto_store, event_tx, ws_cmd_tx, ws_room_peers,
         pending_messages, key_request_in_flight,
-        local_peer_str, device_peer_id, &recipient_master, &envelope_json,
+        local_peer_str, device_keypair, device_peer_id, &recipient_master, &envelope_json,
         None, // edit/delete/reaction: sibling resolves convo by mid on receive
     ).await;
 
@@ -1453,6 +1471,8 @@ pub(crate) async fn handle_delete_dm_message(
     bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     pub_key_b64: &str,
     local_peer_str: &str,
+    // THIS device's keypair — signs the Olm KeyRequest (Fix B).
+    device_keypair: &crate::identity::native_identity::NativeKeypair,
     device_peer_id: &str,
     peer_id_str: String,
     message_id: String,
@@ -1511,7 +1531,7 @@ pub(crate) async fn handle_delete_dm_message(
     fan_out_dm_envelope(
         olm, crypto_store, event_tx, ws_cmd_tx, ws_room_peers,
         pending_messages, key_request_in_flight,
-        local_peer_str, device_peer_id, &recipient_master, &envelope_json,
+        local_peer_str, device_keypair, device_peer_id, &recipient_master, &envelope_json,
         None, // edit/delete/reaction: sibling resolves convo by mid on receive
     ).await;
 
@@ -1633,6 +1653,8 @@ pub(crate) async fn handle_add_dm_reaction(
     bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     pub_key_b64: &str,
     local_peer_str: &str,
+    // THIS device's keypair — signs the Olm KeyRequest (Fix B).
+    device_keypair: &crate::identity::native_identity::NativeKeypair,
     device_peer_id: &str,
     peer_id_str: String,
     message_id: String,
@@ -1682,7 +1704,7 @@ pub(crate) async fn handle_add_dm_reaction(
     fan_out_dm_envelope(
         olm, crypto_store, event_tx, ws_cmd_tx, ws_room_peers,
         pending_messages, key_request_in_flight,
-        local_peer_str, device_peer_id, &recipient_master, &envelope_json,
+        local_peer_str, device_keypair, device_peer_id, &recipient_master, &envelope_json,
         None, // edit/delete/reaction: sibling resolves convo by mid on receive
     ).await;
 
@@ -1795,6 +1817,8 @@ pub(crate) async fn handle_remove_dm_reaction(
     bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     pub_key_b64: &str,
     local_peer_str: &str,
+    // THIS device's keypair — signs the Olm KeyRequest (Fix B).
+    device_keypair: &crate::identity::native_identity::NativeKeypair,
     device_peer_id: &str,
     peer_id_str: String,
     message_id: String,
@@ -1843,7 +1867,7 @@ pub(crate) async fn handle_remove_dm_reaction(
     fan_out_dm_envelope(
         olm, crypto_store, event_tx, ws_cmd_tx, ws_room_peers,
         pending_messages, key_request_in_flight,
-        local_peer_str, device_peer_id, &recipient_master, &envelope_json,
+        local_peer_str, device_keypair, device_peer_id, &recipient_master, &envelope_json,
         None, // edit/delete/reaction: sibling resolves convo by mid on receive
     ).await;
 
@@ -1888,9 +1912,10 @@ pub(crate) async fn handle_envelope_channel_message(
         return;
     }
 
-    // SECURITY: a present-but-invalid signature is rejected — mirrors the
-    // direct (non-MLS) twin in swarm.rs; unsigned legacy messages are
-    // tolerated. This verify's result was previously discarded.
+    // SECURITY: a missing OR invalid signature is rejected — mirrors the direct
+    // (non-MLS) twin in swarm.rs. Covers both callers: MLS-decrypted private
+    // channels and plaintext PUBLIC channels, where this is the only authorship
+    // binding there is.
     if channel_sig_rejected(&sender_peer_id, &sid, &cid, ts, &text, sig.as_deref(), pk.as_deref()) {
         return;
     }
@@ -1940,8 +1965,22 @@ pub(crate) async fn handle_envelope_channel_message(
     }).await;
 }
 
-/// True when a PRESENT channel-message signature fails verification (logged and
-/// the message must be dropped); unsigned legacy messages pass (returns false).
+/// SECURITY: true = drop this LIVE channel message.
+///
+/// A signature is REQUIRED, not merely checked when present. The old
+/// `if sig.is_none() { return false }` early-out was itself the bypass: strip
+/// `sig`/`pk` and verification was skipped entirely.
+///
+/// This matters most for PUBLIC channels, which carry no MLS layer — there the
+/// signature is the ONLY thing binding content and authorship to an Ed25519
+/// identity, so without it a message's attribution rests entirely on the
+/// relay-reported sender id. On MLS channels it is defence in depth behind group
+/// membership.
+///
+/// LIVE ingest only. Sync backfill (`ChannelSyncBatch`, `sync_handler`)
+/// deliberately still tolerates unsigned rows, so history predating per-message
+/// signing (e2cc8ab, 2026-03-09) keeps replicating instead of diverging between
+/// peers. Same live-enforce / backfill-tolerate split the moderation trio uses.
 fn channel_sig_rejected(
     sender_peer_id: &str,
     sid: &str,
@@ -1951,9 +1990,6 @@ fn channel_sig_rejected(
     sig: Option<&str>,
     pk: Option<&str>,
 ) -> bool {
-    if sig.is_none() {
-        return false;
-    }
     let signing_payload = message_signing_payload(
         "ch", &format!("{}:{}", sid, cid),
         sender_peer_id, ts, text,

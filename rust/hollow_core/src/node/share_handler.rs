@@ -175,22 +175,122 @@ fn partial_path_in(dir: &std::path::Path, root_hash_hex: &str) -> PathBuf {
     dir.join(format!("{root_hash_hex}.partial"))
 }
 
-fn final_path_in(dir: &std::path::Path, root_hash_hex: &str, ext: &str) -> PathBuf {
-    let name = if ext.is_empty() {
-        root_hash_hex.to_string()
-    } else {
-        format!("{root_hash_hex}.{ext}")
-    };
-    dir.join(name)
+/// Max length, in bytes, of a sanitized download file name. Most filesystems cap
+/// a single component at 255; leave headroom for the " (12)" collision suffix
+/// `unique_final_path` may append.
+const MAX_DOWNLOAD_NAME_BYTES: usize = 200;
+
+/// Name used when nothing usable survives sanitization.
+const FALLBACK_DOWNLOAD_NAME: &str = "download";
+
+/// SECURITY: reduce a sender-controlled manifest file name to a single, inert
+/// path component.
+///
+/// `ShareManifest.file_name` is authored entirely by the sender. The manifest
+/// root hash is NOT a trust signal here — the sender computes it over their own
+/// manifest, so a hostile name hashes just fine. Joining it to the download
+/// directory unchanged let a peer write anywhere the process can reach:
+///
+///   * `..\..\..\poc.txt` walks out of the download directory, and
+///   * an ABSOLUTE name (`C:\...\Startup\x.exe`, `/home/u/.bashrc`) makes
+///     `Path::join` DISCARD the base directory entirely — no `..` required, so
+///     a traversal-only filter would not have caught it.
+///
+/// Share-backed files under the auto-download threshold are fetched with no user
+/// interaction, and a file landing in an OS autostart directory is code
+/// execution at next login. This is the boundary that has to hold.
+///
+/// Rules, in order:
+///  1. Keep only the text after the last `/` or `\`. BOTH are separators on
+///     EVERY platform here: a name minted on Linux (where `\` is a legal
+///     filename character) must not become a traversal when it reaches Windows.
+///  2. Trim surrounding whitespace, then trailing dots and spaces — Windows
+///     silently strips those when creating a file, so `evil.exe. ` and
+///     `evil.exe` are the same file and any check on the un-stripped form is
+///     bypassable.
+///  3. Reject the pure-dot components `.` and `..`.
+///  4. Map control characters and the Windows-illegal set to `_`. This includes
+///     `:`, which kills both drive-relative names (`C:evil`, which `join` also
+///     treats as a prefix) and NTFS alternate data streams (`a.txt:evil`).
+///  5. Prefix reserved Windows device names (`CON`, `NUL`, `COM1`, ...) with
+///     `_`; they are reserved with any extension and on every drive.
+///  6. Truncate to `MAX_DOWNLOAD_NAME_BYTES` on a char boundary, then re-trim.
+///
+/// The result is always exactly one component, never empty, and never `.`/`..`,
+/// so `dir.join(safe_file_name(x))` is always inside `dir`.
+pub(crate) fn safe_file_name(raw: &str) -> String {
+    // 1. Last component only, treating both separators as separators everywhere.
+    let name = raw.rsplit(['/', '\\']).next().unwrap_or(raw);
+
+    // 2. Windows-equivalent trailing junk.
+    let name = name.trim().trim_end_matches(['.', ' ']);
+
+    // 3. Pure-dot components are traversal, not names.
+    if name.is_empty() || name == "." || name == ".." {
+        return FALLBACK_DOWNLOAD_NAME.to_string();
+    }
+
+    // 4. Neutralize control chars and everything Windows forbids in a component.
+    //    Also the bidi override/isolate characters: they are category Cf, so
+    //    `is_control()` does NOT catch them, and `evil\u{202E}txt.exe` renders as
+    //    `evil exe.txt` in a file manager — the classic right-to-left-override
+    //    extension spoof, which matters exactly because these files auto-download.
+    let mut cleaned: String = name
+        .chars()
+        .map(|c| {
+            if c.is_control()
+                || matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*')
+                || matches!(c,
+                    '\u{202A}'..='\u{202E}'   // LRE/RLE/PDF/LRO/RLO
+                    | '\u{2066}'..='\u{2069}' // LRI/RLI/FSI/PDI
+                    | '\u{200E}' | '\u{200F}' // LRM/RLM
+                )
+            {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+
+    // 5. Reserved device names, with or without an extension (`CON.txt` counts).
+    const RESERVED: [&str; 22] = [
+        "CON", "PRN", "AUX", "NUL",
+        "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+        "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    ];
+    let stem = cleaned.split('.').next().unwrap_or("").to_ascii_uppercase();
+    if RESERVED.contains(&stem.as_str()) {
+        cleaned.insert(0, '_');
+    }
+
+    // 6. Byte-cap on a char boundary (never split a multi-byte character).
+    if cleaned.len() > MAX_DOWNLOAD_NAME_BYTES {
+        let mut end = MAX_DOWNLOAD_NAME_BYTES;
+        while end > 0 && !cleaned.is_char_boundary(end) {
+            end -= 1;
+        }
+        cleaned.truncate(end);
+    }
+
+    // Truncation can re-expose a trailing dot/space, and could empty the string.
+    let cleaned = cleaned.trim_end_matches(['.', ' ']);
+    if cleaned.is_empty() || cleaned == "." || cleaned == ".." {
+        return FALLBACK_DOWNLOAD_NAME.to_string();
+    }
+    cleaned.to_string()
 }
 
 fn partial_path(root_hash_hex: &str) -> Result<PathBuf, String> {
     Ok(partial_path_in(&shares_dir()?, root_hash_hex))
 }
 
-fn final_path(root_hash_hex: &str, ext: &str) -> Result<PathBuf, String> {
-    Ok(final_path_in(&shares_dir()?, root_hash_hex, ext))
-}
+// REMOVED: `final_path_in` / `final_path`. Both were dead code that built a
+// download path from `{root_hash}.{ext}`, where `ext` is derived from the
+// sender-controlled `manifest.file_name` via `rsplit_once('.')`. A name like
+// `poc.\..\..\Startup\x` yields the ext `\..\..\Startup\x`, so wiring either one
+// up would have silently reintroduced the path traversal that `safe_file_name`
+// exists to close. Build download paths with `unique_final_path` instead.
 
 // ── Bitmap (compact Have representation) ─────────────────────────────────
 
@@ -1651,12 +1751,23 @@ async fn finalize_completed_download(
 
 /// Final download path for `file_name` inside `dir`, appending " (1)", " (2)",
 /// ... before the extension to avoid collisions with existing files.
+///
+/// SECURITY: `file_name` is sender-controlled, so it goes through
+/// `safe_file_name` before it ever touches the filesystem. See that function for
+/// the escape primitives this closes.
 fn unique_final_path(dir: &std::path::Path, file_name: &str) -> PathBuf {
-    let mut final_p = dir.join(file_name);
+    let safe_name = safe_file_name(file_name);
+    if safe_name != file_name {
+        hollow_log!(
+            "[HOLLOW-SECURITY] Share file name sanitized: {file_name:?} -> {safe_name:?}"
+        );
+    }
+
+    let mut final_p = dir.join(&safe_name);
     if final_p.exists() {
-        let stem = std::path::Path::new(file_name)
+        let stem = std::path::Path::new(&safe_name)
             .file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-        let ext = std::path::Path::new(file_name)
+        let ext = std::path::Path::new(&safe_name)
             .extension().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
         for i in 1..1000 {
             final_p = if ext.is_empty() {
@@ -1666,6 +1777,16 @@ fn unique_final_path(dir: &std::path::Path, file_name: &str) -> PathBuf {
             };
             if !final_p.exists() { break; }
         }
+    }
+
+    // Backstop: `safe_file_name` guarantees a single inert component, so this
+    // can only fire if that guarantee is ever broken by a future edit. Refuse to
+    // hand back a path outside `dir` rather than trusting the invariant.
+    if final_p.parent() != Some(dir) {
+        hollow_log!(
+            "[HOLLOW-SECURITY] Refusing out-of-directory share path {final_p:?} — using fallback"
+        );
+        return dir.join(FALLBACK_DOWNLOAD_NAME);
     }
     final_p
 }
@@ -1896,6 +2017,135 @@ pub async fn handle_webrtc_share_chunk_complete(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every sanitized name must be a single component that stays inside `dir`.
+    fn assert_contained(raw: &str) {
+        let dir = std::path::Path::new("/base/shares");
+        let joined = dir.join(safe_file_name(raw));
+        assert_eq!(
+            joined.parent(),
+            Some(dir),
+            "{raw:?} escaped the download directory as {joined:?}"
+        );
+    }
+
+    #[test]
+    fn safe_name_blocks_relative_traversal() {
+        // The reported PoC payload, both separator flavours.
+        assert_eq!(safe_file_name(r"..\..\..\..\Downloads\poc.txt"), "poc.txt");
+        assert_eq!(safe_file_name("../../../../Downloads/poc.txt"), "poc.txt");
+        assert_eq!(safe_file_name(".."), FALLBACK_DOWNLOAD_NAME);
+        assert_eq!(safe_file_name("."), FALLBACK_DOWNLOAD_NAME);
+        for raw in [r"..\..\poc.txt", "../../poc.txt", "..", ".", r"..\", "../"] {
+            assert_contained(raw);
+        }
+    }
+
+    #[test]
+    fn safe_name_blocks_absolute_paths() {
+        // `Path::join` DISCARDS the base for an absolute argument, so these are
+        // arbitrary writes with no `..` involved.
+        assert_eq!(
+            safe_file_name(r"C:\Users\v\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup\x.exe"),
+            "x.exe"
+        );
+        assert_eq!(safe_file_name("/home/u/.bashrc"), ".bashrc");
+        assert_eq!(safe_file_name(r"\\evil-host\share\x.dll"), "x.dll");
+        for raw in [
+            r"C:\Windows\System32\x.dll",
+            "/etc/cron.d/x",
+            r"\\host\share\x",
+            r"C:evil.exe",
+        ] {
+            assert_contained(raw);
+        }
+    }
+
+    #[test]
+    fn safe_name_blocks_drive_relative_and_ads() {
+        // `C:evil` is drive-RELATIVE, still a `join` prefix; `a.txt:evil` is an
+        // NTFS alternate data stream.
+        assert_eq!(safe_file_name("C:evil.exe"), "C_evil.exe");
+        assert_eq!(safe_file_name("a.txt:evil"), "a.txt_evil");
+    }
+
+    #[test]
+    fn safe_name_strips_windows_trailing_junk() {
+        // Windows silently drops trailing dots/spaces at create time.
+        assert_eq!(safe_file_name("evil.exe. "), "evil.exe");
+        assert_eq!(safe_file_name("  spaced.txt  "), "spaced.txt");
+        assert_eq!(safe_file_name("..."), FALLBACK_DOWNLOAD_NAME);
+    }
+
+    #[test]
+    fn safe_name_escapes_reserved_device_names() {
+        // Reserved with ANY extension and on every drive.
+        assert_eq!(safe_file_name("CON"), "_CON");
+        assert_eq!(safe_file_name("con.txt"), "_con.txt");
+        assert_eq!(safe_file_name("COM1.pdf"), "_COM1.pdf");
+        assert_eq!(safe_file_name("LPT9"), "_LPT9");
+        // Not reserved — must pass through untouched.
+        assert_eq!(safe_file_name("CONTACT.txt"), "CONTACT.txt");
+        assert_eq!(safe_file_name("COM10.txt"), "COM10.txt");
+    }
+
+    #[test]
+    fn safe_name_preserves_legitimate_names() {
+        // Regression guard: the sanitizer must NOT be the alphanumeric-only
+        // filter used for file IDs — that would reduce these to "pdf"/"png".
+        assert_eq!(safe_file_name("Отчёт за июль.pdf"), "Отчёт за июль.pdf");
+        assert_eq!(safe_file_name("会议记录.docx"), "会议记录.docx");
+        assert_eq!(safe_file_name("vacation 🏖️ (final).png"), "vacation 🏖️ (final).png");
+        assert_eq!(safe_file_name("my-file_v2.tar.gz"), "my-file_v2.tar.gz");
+    }
+
+    #[test]
+    fn safe_name_truncates_on_char_boundary() {
+        // 300 Cyrillic chars = 600 bytes; the cap must not split a character.
+        let long = "я".repeat(300);
+        let out = safe_file_name(&long);
+        assert!(out.len() <= MAX_DOWNLOAD_NAME_BYTES);
+        assert!(!out.is_empty());
+        // Round-trips as valid UTF-8 with no replacement characters.
+        assert!(out.chars().all(|c| c == 'я'));
+    }
+
+    #[test]
+    fn safe_name_strips_bidi_override_spoof() {
+        // U+202E makes "evil\u{202E}txt.exe" render as "evil exe.txt".
+        assert_eq!(safe_file_name("evil\u{202E}txt.exe"), "evil_txt.exe");
+        assert_eq!(safe_file_name("a\u{2066}b\u{2069}c.png"), "a_b_c.png");
+        for out in [safe_file_name("x\u{202E}y"), safe_file_name("\u{200F}z")] {
+            assert!(!out.chars().any(|c| matches!(c,
+                '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{200E}' | '\u{200F}')));
+        }
+    }
+
+    #[test]
+    fn safe_name_never_empty_or_control() {
+        for raw in ["", "   ", "\u{0}\u{1}", "/", r"\", "//", r"\\"] {
+            let out = safe_file_name(raw);
+            assert!(!out.is_empty(), "{raw:?} produced an empty name");
+            assert!(!out.contains('/') && !out.contains('\\'));
+            assert_contained(raw);
+        }
+    }
+
+    #[test]
+    fn unique_final_path_stays_inside_dir() {
+        let dir = std::env::temp_dir().join("hollow-share-traversal-test");
+        std::fs::create_dir_all(&dir).expect("create test dir");
+        for raw in [
+            r"..\..\..\..\Downloads\poc.txt",
+            "../../../../poc.txt",
+            r"C:\Windows\System32\evil.dll",
+            "/etc/passwd",
+        ] {
+            let p = unique_final_path(&dir, raw);
+            assert_eq!(p.parent(), Some(dir.as_path()), "{raw:?} escaped to {p:?}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn link_round_trip() {

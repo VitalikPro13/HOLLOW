@@ -15,7 +15,9 @@ use tokio_tungstenite::tungstenite::Message;
 use crate::crypto::{CryptoStore, MlsManager, OlmManager};
 #[allow(unused_imports)]
 use crate::hollow_log;
-use crate::node::crypto_handler::{persist_crypto_state, persist_mls_state, persist_olm_session};
+use crate::node::crypto_handler::{
+    clip_text, persist_crypto_state, persist_mls_state, persist_olm_session,
+};
 use crate::node::types::{
     ChannelMessagePayload, DirectMessagePayload, FileHeaderPayload, HavenMessage, LinkPreviewRef,
     MessageEnvelope,
@@ -521,18 +523,6 @@ fn try_process_channel_msg(
     }
 }
 
-fn clip_text(text: String) -> String {
-    if text.len() > 4000 {
-        let mut end = 4000;
-        while end > 0 && !text.is_char_boundary(end) {
-            end -= 1;
-        }
-        text[..end].to_string()
-    } else {
-        text
-    }
-}
-
 /// Insert a fetched channel message row, deduplicated by message_id — the same
 /// message may arrive again via channel sync when the full app opens.
 #[allow(clippy::too_many_arguments)]
@@ -709,11 +699,7 @@ fn handle_direct_message(
         ..
     } = inner;
 
-    let msg_text = if msg_text.len() > 4000 {
-        msg_text[..4000].to_string()
-    } else {
-        msg_text
-    };
+    let msg_text = clip_text(msg_text);
 
     persist_direct_message(
         from, convo, &msg_text, ts, mid.as_deref(), reply_to.as_deref(), file_id.as_deref(),
@@ -815,11 +801,7 @@ fn handle_edit_message(
     db_path: &str,
     db_passphrase: &str,
 ) -> Option<FetchedDm> {
-    let new_text = if new_text.len() > 4000 {
-        new_text[..4000].to_string()
-    } else {
-        new_text
-    };
+    let new_text = clip_text(new_text);
     if let Ok(store) =
         crate::storage::MessageStore::open(db_path, db_passphrase)
     {

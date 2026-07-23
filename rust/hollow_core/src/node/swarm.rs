@@ -256,6 +256,10 @@ use crate::crypto::{CryptoStore, MlsManager, OlmManager};
 use super::types::*;
 
 use super::crypto_handler::{
+    clip_text,
+    key_bundle_signing_payload, key_request_signing_payload, signed_key_bundle, signed_key_request,
+    verify_key_exchange, key_exchange_device_unauthorized,
+    KeyExchangeAuth, REQUIRE_SIGNED_KEY_EXCHANGE,
     message_signing_payload, sign_message, verify_message_signature, verify_message_signature_cached,
     persist_mls_state, persist_crypto_state, persist_olm_session,
     peer_is_reachable, is_mls_coordinator, is_vault_coordinator, elect_coordinator, ws_room_for_peer,
@@ -337,7 +341,7 @@ pub(crate) async fn spawn_node(
 
     let handle = tokio::spawn(run_event_loop(
         event_tx, cmd_rx, cmd_tx, olm, crypto_store, crdt_store,
-        bundle_keypair, ws_cmd_tx, ws_event_rx, master_peer_id.clone(), device_peer_id,
+        bundle_keypair, device_keypair, ws_cmd_tx, ws_event_rx, master_peer_id.clone(), device_peer_id,
         initial_invisible, db_path, db_passphrase,
     ));
 
@@ -388,7 +392,7 @@ pub(crate) async fn spawn_node_mock(
 
     let handle = tokio::spawn(run_event_loop(
         event_tx, cmd_rx, cmd_tx, olm, crypto_store, crdt_store,
-        bundle_keypair, ws_cmd_tx, ws_event_rx, master_peer_id.clone(), device_peer_id,
+        bundle_keypair, device_keypair, ws_cmd_tx, ws_event_rx, master_peer_id.clone(), device_peer_id,
         initial_invisible, db_path, db_passphrase,
     ));
 
@@ -404,6 +408,10 @@ async fn run_event_loop(
     crypto_store: CryptoStore,
     crdt_store: super::crdt_store::CrdtStore,
     bundle_keypair: crate::identity::native_identity::NativeKeypair,
+    // THIS device's keypair. Distinct from `bundle_keypair` (the master): it
+    // signs the Olm key exchange, which the receiver verifies against the
+    // device peer_id the transport reports. See `crypto_handler::signed_key_request`.
+    device_keypair: crate::identity::native_identity::NativeKeypair,
     ws_cmd_tx: tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     mut ws_event_rx: tokio::sync::mpsc::UnboundedReceiver<super::ws_client::WsEvent>,
     local_peer_str: String,
@@ -1015,7 +1023,7 @@ async fn run_event_loop(
                         message_ops::handle_send_message(
                             &mut olm, &crypto_store, &event_tx, &ws_cmd_tx, &ws_room_peers,
                             &mut pending_messages, &mut key_request_in_flight,
-                            &bundle_keypair, &pub_key_b64, &local_peer_str, &device_peer_id,
+                            &bundle_keypair, &pub_key_b64, &local_peer_str, &device_keypair, &device_peer_id,
                             peer_id_str, text, message_id, reply_to_mid, link_preview,
                             &db_path, &db_passphrase,
                         ).await;
@@ -1559,7 +1567,7 @@ async fn run_event_loop(
                         message_ops::handle_edit_dm_message(
                             &mut olm, &crypto_store, &event_tx, &ws_cmd_tx, &ws_room_peers,
                             &mut pending_messages, &mut key_request_in_flight,
-                            &bundle_keypair, &pub_key_b64, &local_peer_str, &device_peer_id,
+                            &bundle_keypair, &pub_key_b64, &local_peer_str, &device_keypair, &device_peer_id,
                             peer_id_str, message_id, new_text,
                             &db_path, &db_passphrase,
                         ).await;
@@ -1579,7 +1587,7 @@ async fn run_event_loop(
                         message_ops::handle_delete_dm_message(
                             &mut olm, &crypto_store, &event_tx, &ws_cmd_tx, &ws_room_peers,
                             &mut pending_messages, &mut key_request_in_flight,
-                            &bundle_keypair, &pub_key_b64, &local_peer_str, &device_peer_id,
+                            &bundle_keypair, &pub_key_b64, &local_peer_str, &device_keypair, &device_peer_id,
                             peer_id_str, message_id,
                             &db_path, &db_passphrase,
                         ).await;
@@ -1599,7 +1607,7 @@ async fn run_event_loop(
                         message_ops::handle_add_dm_reaction(
                             &mut olm, &crypto_store, &event_tx, &ws_cmd_tx, &ws_room_peers,
                             &mut pending_messages, &mut key_request_in_flight,
-                            &bundle_keypair, &pub_key_b64, &local_peer_str, &device_peer_id,
+                            &bundle_keypair, &pub_key_b64, &local_peer_str, &device_keypair, &device_peer_id,
                             peer_id_str, message_id, emoji,
                             &db_path, &db_passphrase,
                         ).await;
@@ -1619,7 +1627,7 @@ async fn run_event_loop(
                         message_ops::handle_remove_dm_reaction(
                             &mut olm, &crypto_store, &event_tx, &ws_cmd_tx, &ws_room_peers,
                             &mut pending_messages, &mut key_request_in_flight,
-                            &bundle_keypair, &pub_key_b64, &local_peer_str, &device_peer_id,
+                            &bundle_keypair, &pub_key_b64, &local_peer_str, &device_keypair, &device_peer_id,
                             peer_id_str, message_id, emoji,
                             &db_path, &db_passphrase,
                         ).await;
@@ -1921,7 +1929,7 @@ async fn run_event_loop(
                             peer_id, server_id, channel_id, file_path, message_id, message_text,
                             vthumb, override_width, override_height, share_ref,
                             &cmd_tx,
-                            &event_tx, &server_states, &bundle_keypair, &pub_key_b64, &local_peer_str,
+                            &event_tx, &server_states, &bundle_keypair, &device_keypair, &pub_key_b64, &local_peer_str,
                             &device_peer_id,
                             &mut olm, &crypto_store, &mut mls,
                             &ws_cmd_tx, &ws_room_peers, &webrtc_peers, &mut pending_webrtc_sends,
@@ -1942,7 +1950,7 @@ async fn run_event_loop(
                             peer_id, server_id, channel_id, message_id, message_text,
                             vthumb, share_ref, original_name, is_image,
                             final_data, final_ext, width, height,
-                            &event_tx, &server_states, &bundle_keypair, &pub_key_b64, &local_peer_str,
+                            &event_tx, &server_states, &bundle_keypair, &device_keypair, &pub_key_b64, &local_peer_str,
                             &device_peer_id,
                             &mut olm, &crypto_store, &mut mls,
                             &ws_cmd_tx, &ws_room_peers, &webrtc_peers, &mut pending_webrtc_sends,
@@ -2164,7 +2172,7 @@ async fn run_event_loop(
                                 &mut olm, &crypto_store, &crdt_store, &event_tx,
                                 &mut pending_messages, &mut key_request_in_flight, &mut key_bundle_sent_to,
                                 &mut server_states, &bundle_keypair,
-                                &master_keypair, &master_peer_str, &device_peer_id,
+                                &master_keypair, &device_keypair, &master_peer_str, &device_peer_id,
                                 &mut pending_server_joins,
                                 &mut pending_sync_requests, &mut mls,
                                 &mut mls_bootstrap_requested,
@@ -2667,7 +2675,7 @@ async fn run_event_loop(
                                         hollow_log!("[HOLLOW-WS] Proactive key exchange for {peer_id}");
                                         send_message_to_peer(
                                             &ws_cmd_tx, &ws_room_peers,
-                                            &peer_id, HavenMessage::KeyRequest,
+                                            &peer_id, signed_key_request(&device_keypair, &device_peer_id, &peer_id),
                                         );
                                         key_request_in_flight.insert(peer_id.clone(), std::time::Instant::now());
                                     }
@@ -2854,7 +2862,7 @@ async fn run_event_loop(
                                     hollow_log!("[HOLLOW-CRYPTO] DM-room co-presence with {peer_id} and no session — re-keying (handshake-race heal)");
                                     send_message_to_peer(
                                         &ws_cmd_tx, &ws_room_peers,
-                                        &peer_id, HavenMessage::KeyRequest,
+                                        &peer_id, signed_key_request(&device_keypair, &device_peer_id, &peer_id),
                                     );
                                     key_request_in_flight.insert(peer_id.clone(), std::time::Instant::now());
                                 }
@@ -3303,7 +3311,7 @@ async fn run_event_loop(
                                         hollow_log!("[HOLLOW-WS] RoomMembers: proactive key exchange for {pid_str}");
                                         send_message_to_peer(
                                             &ws_cmd_tx, &ws_room_peers,
-                                            pid_str, HavenMessage::KeyRequest,
+                                            pid_str, signed_key_request(&device_keypair, &device_peer_id, pid_str),
                                         );
                                         key_request_in_flight.insert(pid_str.clone(), std::time::Instant::now());
                                     }
@@ -3441,7 +3449,7 @@ async fn run_event_loop(
                                     hollow_log!("[HOLLOW-CRYPTO] DM-room co-presence (RoomMembers) with {pid_str} and no session — re-keying (handshake-race heal)");
                                     send_message_to_peer(
                                         &ws_cmd_tx, &ws_room_peers,
-                                        pid_str, HavenMessage::KeyRequest,
+                                        pid_str, signed_key_request(&device_keypair, &device_peer_id, pid_str),
                                     );
                                     key_request_in_flight.insert(pid_str.clone(), std::time::Instant::now());
                                 }
@@ -3517,7 +3525,7 @@ async fn run_event_loop(
                                 && !key_request_is_fresh(&key_request_in_flight, pid)
                             {
                                 hollow_log!("[HOLLOW-WS] DiscoveredPeers: key exchange for {pid}");
-                                send_message_to_peer(&ws_cmd_tx, &ws_room_peers, pid, HavenMessage::KeyRequest);
+                                send_message_to_peer(&ws_cmd_tx, &ws_room_peers, pid, signed_key_request(&device_keypair, &device_peer_id, pid));
                                 key_request_in_flight.insert(pid.clone(), std::time::Instant::now());
                             }
                         }
@@ -3932,7 +3940,7 @@ async fn run_event_loop(
                                         &mut olm, &crypto_store, &crdt_store, &event_tx,
                                         &mut pending_messages, &mut key_request_in_flight, &mut key_bundle_sent_to,
                                         &mut server_states, &bundle_keypair,
-                                        &master_keypair, &master_peer_str, &device_peer_id,
+                                        &master_keypair, &device_keypair, &master_peer_str, &device_peer_id,
                                         &mut pending_server_joins,
                                         &mut pending_sync_requests, &mut mls,
                                         &mut mls_bootstrap_requested,
@@ -4226,7 +4234,7 @@ async fn run_event_loop(
                             continue;
                         }
                         hollow_log!("[HOLLOW-CRYPTO] Reconciliation sweep: re-keying online peer {peer} (no confirmed session)");
-                        send_message_to_peer(&ws_cmd_tx, &ws_room_peers, peer, HavenMessage::KeyRequest);
+                        send_message_to_peer(&ws_cmd_tx, &ws_room_peers, peer, signed_key_request(&device_keypair, &device_peer_id, peer));
                         key_request_in_flight.insert(peer.clone(), std::time::Instant::now());
                     }
                 }
@@ -4975,6 +4983,8 @@ async fn handle_incoming_request(
     server_states: &mut HashMap<String, ServerState>,
     bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     master_keypair: &crate::identity::native_identity::NativeKeypair,
+    // THIS device's keypair — signs the Olm key exchange (Fix A/B).
+    device_keypair: &crate::identity::native_identity::NativeKeypair,
     master_peer_str: &str,
     device_peer_id: &str,
     pending_server_joins: &mut HashMap<String, PendingJoin>,
@@ -5017,7 +5027,37 @@ async fn handle_incoming_request(
 ) {
 
     match request {
-        HavenMessage::KeyRequest => {
+        HavenMessage::KeyRequest { to, ts, sig, pk } => {
+            // SECURITY (Fix B): this handler TEARS DOWN a working Olm session, so
+            // an unauthenticated KeyRequest is a remote session-reset primitive
+            // against any peer. Authenticate before acting on it.
+            //
+            // A device that is not in its master's SIGNED device list is refused
+            // outright — a signature alone only proves that *some* device sent
+            // this, not that it speaks for the identity we think we're talking to.
+            let payload = key_request_signing_payload(peer_str, device_peer_id, ts.unwrap_or(0));
+            let auth = verify_key_exchange(
+                peer_str, device_peer_id, to.as_deref(), ts, sig.as_deref(), pk.as_deref(), &payload,
+            );
+            match auth {
+                KeyExchangeAuth::Invalid => {
+                    hollow_log!("[HOLLOW-SECURITY] REJECTED KeyRequest from {peer_str} — authentication FAILED");
+                    return;
+                }
+                KeyExchangeAuth::Unsigned => {
+                    if REQUIRE_SIGNED_KEY_EXCHANGE {
+                        hollow_log!("[HOLLOW-SECURITY] REJECTED unsigned KeyRequest from {peer_str}");
+                        return;
+                    }
+                    hollow_log!("[HOLLOW-SECURITY] Unsigned KeyRequest from {peer_str} — accepted (pre-rollout client)");
+                }
+                KeyExchangeAuth::Verified => {}
+            }
+            if key_exchange_device_unauthorized(peer_str) {
+                hollow_log!("[HOLLOW-SECURITY] REJECTED KeyRequest from {peer_str} — device not in its master's signed device list");
+                return;
+            }
+
             // A peer asking for a key bundle means THEIR side has no usable session.
             // If we hold a CONFIRMED session, our half is stale relative to theirs
             // (they pruned / lost / restarted) — silently ignoring it strands both
@@ -5047,13 +5087,54 @@ async fn handle_incoming_request(
                 }
                 persist_crypto_state(olm, crypto_store, peer_str);
                 key_bundle_sent_to.insert(peer_str.to_string());
-                send_message_to_peer(ws_cmd_tx, ws_room_peers, peer_str, HavenMessage::KeyBundle {
-                    identity_key, one_time_key: otk,
-                });
+                send_message_to_peer(
+                    ws_cmd_tx, ws_room_peers, peer_str,
+                    signed_key_bundle(device_keypair, device_peer_id, peer_str, identity_key, otk),
+                );
             }
         }
 
-        HavenMessage::KeyBundle { identity_key, one_time_key } => {
+        HavenMessage::KeyBundle { identity_key, one_time_key, to, ts, sig, pk } => {
+            // SECURITY (Fix A): these Curve25519 keys arrive over the relay and
+            // become the Olm ratchet for this peer. Unauthenticated, a hostile
+            // relay could substitute its own keys and sit in the middle of every
+            // DM with no visible sign — the reported MITM.
+            //
+            // The signature binds them to the sender's Ed25519 DEVICE key, and
+            // `verify_message_signature` re-derives the peer_id from `pk`, so the
+            // keys are cryptographically tied to the peer_id the frame claims to
+            // come from. The device-list check then ties that device to a master
+            // the user actually trusts, completing the chain:
+            //   master (known out of band) → signed device list → device key →
+            //   signed bundle → Olm keys.
+            let payload = key_bundle_signing_payload(
+                peer_str, device_peer_id, &identity_key, &one_time_key, ts.unwrap_or(0),
+            );
+            let auth = verify_key_exchange(
+                peer_str, device_peer_id, to.as_deref(), ts, sig.as_deref(), pk.as_deref(), &payload,
+            );
+            match auth {
+                KeyExchangeAuth::Invalid => {
+                    hollow_log!("[HOLLOW-SECURITY] REJECTED KeyBundle from {peer_str} — authentication FAILED (possible key substitution)");
+                    key_bundle_sent_to.remove(peer_str);
+                    return;
+                }
+                KeyExchangeAuth::Unsigned => {
+                    if REQUIRE_SIGNED_KEY_EXCHANGE {
+                        hollow_log!("[HOLLOW-SECURITY] REJECTED unsigned KeyBundle from {peer_str}");
+                        key_bundle_sent_to.remove(peer_str);
+                        return;
+                    }
+                    hollow_log!("[HOLLOW-SECURITY] Unsigned KeyBundle from {peer_str} — accepted (pre-rollout client)");
+                }
+                KeyExchangeAuth::Verified => {}
+            }
+            if key_exchange_device_unauthorized(peer_str) {
+                hollow_log!("[HOLLOW-SECURITY] REJECTED KeyBundle from {peer_str} — device not in its master's signed device list");
+                key_bundle_sent_to.remove(peer_str);
+                return;
+            }
+
             // Peer responded with their key bundle — create outbound Olm session.
             if olm.has_session(peer_str) {
                 hollow_log!("[HOLLOW-CRYPTO] Already have session with {peer_str}, ignoring KeyBundle");
@@ -5224,7 +5305,7 @@ async fn handle_incoming_request(
                                             key_request_in_flight.insert(peer_str.to_string(), now);
                                             send_message_to_peer(
                                                 ws_cmd_tx, ws_room_peers,
-                                                peer_str, HavenMessage::KeyRequest,
+                                                peer_str, signed_key_request(device_keypair, device_peer_id, peer_str),
                                             );
                                         }
                                     }
@@ -5301,7 +5382,7 @@ async fn handle_incoming_request(
                                 key_request_in_flight.insert(peer_str.to_string(), now);
                                 send_message_to_peer(
                                     ws_cmd_tx, ws_room_peers,
-                                    peer_str, HavenMessage::KeyRequest,
+                                    peer_str, signed_key_request(device_keypair, device_peer_id, peer_str),
                                 );
                             }
                             persist_crypto_state(olm, crypto_store, &peer_str);
@@ -5387,7 +5468,7 @@ async fn handle_incoming_request(
                             key_request_in_flight.insert(peer_str.to_string(), now);
                             send_message_to_peer(
                                 ws_cmd_tx, ws_room_peers,
-                                peer_str, HavenMessage::KeyRequest,
+                                peer_str, signed_key_request(device_keypair, device_peer_id, peer_str),
                             );
                         }
 
@@ -5423,8 +5504,15 @@ async fn handle_incoming_request(
                         return;
                     }
 
-                    // SECURITY: Reject messages with invalid signatures.
-                    if sig.is_some() {
+                    // SECURITY: a LIVE channel message MUST carry a signature that
+                    // verifies. The old `if sig.is_some()` gate was itself the
+                    // bypass — strip `sig`/`pk` and verification was skipped
+                    // entirely, leaving attribution resting on the relay-reported
+                    // sender id. LIVE ingest only; `ChannelSyncBatch` backfill still
+                    // tolerates unsigned rows so pre-signing history (before e2cc8ab,
+                    // 2026-03-09) keeps syncing rather than diverging. Same
+                    // live-enforce / backfill-tolerate split as the moderation trio.
+                    {
                         let payload = message_signing_payload(
                             "ch", &format!("{sid}:{cid}"), &sender_master, ts, &msg_text,
                         );
@@ -5434,8 +5522,12 @@ async fn handle_incoming_request(
                         }
                     }
 
-                    // SECURITY: Enforce 4,000 character limit on message text.
-                    let msg_text = if msg_text.len() > 4000 { msg_text[..4000].to_string() } else { msg_text };
+                    // SECURITY: Enforce the 4,000 byte storage limit (already
+                    // signature-verified above, against the raw text). Char-boundary
+                    // safe: the old `msg_text[..4000]` PANICKED when byte 4,000 landed
+                    // inside a multi-byte character, aborting the swarm event loop on a
+                    // remote-controlled string.
+                    let msg_text = clip_text(msg_text);
 
                     // Multi-device: a message authored by ANY of our own devices is ours.
                     let is_mine = super::resolver::same_identity(&sender_master, &local_peer_str);
@@ -5659,8 +5751,9 @@ async fn handle_incoming_request(
                 }
                 Ok(MessageEnvelope::DirectMessage { inner }) => {
                     let DirectMessagePayload { text: msg_text, ts, sig, pk, mid, reply_to, file_id, link_preview, convo, order_us } = *inner;
-                    // SECURITY: Enforce 4,000 character limit on message text.
-                    let msg_text = if msg_text.len() > 4000 { msg_text[..4000].to_string() } else { msg_text };
+                    // NOTE: the length clamp lives AFTER signature verification —
+                    // the signature covers the text the sender actually sent, so
+                    // clipping first would invalidate it. See below.
 
                     // Multi-device: attribute the DM to the sender's MASTER identity
                     // so messages from any of a friend's devices land in the single
@@ -5693,16 +5786,32 @@ async fn handle_incoming_request(
                         _ => super::resolver::resolve(&peer_str),
                     };
 
-                    // Verify DM signature if present. The signed payload's context is
-                    // the RECIPIENT master and the signer is the SENDER master:
-                    //   - Normal incoming DM (from a friend): recipient = OUR master,
-                    //     signer = the friend (`convo_peer`).
-                    //   - Self fan-out echo (`is_own_device`, our OWN sibling mirroring
-                    //     a message WE sent): WE were the signer and the FRIEND
-                    //     (`convo_peer`) was the recipient — so context/signer are
-                    //     SWAPPED. Verifying with the friend as signer (as for a normal
-                    //     DM) made every self-echo log a (cosmetic) sig FAIL.
-                    if sig.is_some() {
+                    // SECURITY: a DM whose signature does not verify is DROPPED.
+                    //
+                    // This signature is the ONLY thing binding DM content to the
+                    // sender's Ed25519 identity. The Olm session it arrived on proves
+                    // only that someone holds the ratchet, and the KeyBundle that
+                    // established that ratchet is itself unauthenticated (no
+                    // signature, no pinning), so a hostile relay can sit in the
+                    // middle. Verifying-then-storing-anyway (the old behaviour: log,
+                    // no `return`) meant such a relay could FORGE DM content, not
+                    // merely read it.
+                    //
+                    // A MISSING signature is rejected too. The old `if sig.is_some()`
+                    // gate was itself the bypass: strip `sig`/`pk` and verification
+                    // was skipped entirely. `verify_message_signature` already returns
+                    // false for None, so the gate is simply gone. Signed DMs have been
+                    // mandatory since e2cc8ab (2026-03-09).
+                    //
+                    // Verified against the RAW text, before the length clamp: the
+                    // sender signed what they sent, and a 4,000-CHARACTER composer
+                    // limit is up to ~16,000 BYTES in Cyrillic/CJK/emoji. Clipping
+                    // first would have dropped every long non-Latin DM.
+                    //
+                    // Signer/context are SWAPPED for a self fan-out echo
+                    // (`is_own_device`, our OWN sibling mirroring a message WE sent):
+                    // WE signed it and the FRIEND (`convo_peer`) was the recipient.
+                    {
                         let (recipient_m, signer_m): (&str, &str) = if is_own_device {
                             (&convo_peer, master_peer_str)
                         } else {
@@ -5712,9 +5821,16 @@ async fn handle_incoming_request(
                             "dm", recipient_m, signer_m, ts, &msg_text,
                         );
                         if !verify_message_signature(signer_m, sig.as_deref(), pk.as_deref(), &payload) {
-                            hollow_log!("[HOLLOW-CRYPTO] Signature verification FAILED for DM from {peer_str} (signer {signer_m})");
+                            hollow_log!("[HOLLOW-SECURITY] REJECTED DM from {peer_str} (signer {signer_m}) — signature verification FAILED");
+                            return;
                         }
                     }
+
+                    // Enforce the 4,000 byte storage limit, char-boundary safe: the
+                    // old `msg_text[..4000]` PANICKED when byte 4,000 landed inside a
+                    // multi-byte character, aborting the swarm event loop on a
+                    // remote-controlled string.
+                    let msg_text = clip_text(msg_text);
 
                     // Persist received DM using sender's timestamp (not Dart DateTime.now()).
                     // This ensures DM sync timestamps are consistent for deduplication.
@@ -7700,7 +7816,7 @@ async fn handle_incoming_request(
                                         && !key_request_is_fresh(key_request_in_flight, &dev)
                                     {
                                         hollow_log!("[HOLLOW-SWARM] No confirmed Olm session with server member device {dev}, sending KeyRequest");
-                                        send_message_to_peer(ws_cmd_tx, ws_room_peers, &dev, HavenMessage::KeyRequest);
+                                        send_message_to_peer(ws_cmd_tx, ws_room_peers, &dev, signed_key_request(device_keypair, device_peer_id, &dev));
                                         key_request_in_flight.insert(dev.clone(), std::time::Instant::now());
                                     }
                                 }
@@ -8358,7 +8474,7 @@ async fn handle_incoming_request(
                     hollow_log!("[HOLLOW-SWARM] No confirmed Olm session with new member {peer_str}, sending KeyRequest");
                     send_message_to_peer(
                         ws_cmd_tx, ws_room_peers,
-                        peer_str, HavenMessage::KeyRequest,
+                        peer_str, signed_key_request(device_keypair, device_peer_id, peer_str),
                     );
                     key_request_in_flight.insert(peer_str.to_string(), std::time::Instant::now());
                 }
@@ -8651,7 +8767,7 @@ async fn handle_incoming_request(
                                 if !key_request_is_fresh(key_request_in_flight, peer_str) {
                                     send_message_to_peer(
                                         ws_cmd_tx, ws_room_peers,
-                                        peer_str, HavenMessage::KeyRequest,
+                                        peer_str, signed_key_request(device_keypair, device_peer_id, peer_str),
                                     );
                                     key_request_in_flight
                                         .insert(peer_str.to_string(), std::time::Instant::now());
@@ -8720,7 +8836,7 @@ async fn handle_incoming_request(
                         if !key_request_is_fresh(key_request_in_flight, peer_str) {
                             send_message_to_peer(
                                 ws_cmd_tx, ws_room_peers,
-                                peer_str, HavenMessage::KeyRequest,
+                                peer_str, signed_key_request(device_keypair, device_peer_id, peer_str),
                             );
                             key_request_in_flight
                                 .insert(peer_str.to_string(), std::time::Instant::now());

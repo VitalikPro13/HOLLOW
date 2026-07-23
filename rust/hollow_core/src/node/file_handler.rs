@@ -47,6 +47,8 @@ pub(crate) async fn handle_send_file(
     event_tx: &mpsc::Sender<NetworkEvent>,
     server_states: &HashMap<String, ServerState>,
     bundle_keypair: &crate::identity::native_identity::NativeKeypair,
+    // THIS device's keypair — signs the Olm key exchange (Fix A/B).
+    device_keypair: &crate::identity::native_identity::NativeKeypair,
     pub_key_b64: &str,
     local_peer_str: &str,
     device_peer_id: &str,
@@ -161,7 +163,7 @@ pub(crate) async fn handle_send_file(
         peer_id, server_id, channel_id, message_id, message_text,
         vthumb, share_ref, original_name, is_image,
         final_data, final_ext, override_width, override_height,
-        event_tx, server_states, bundle_keypair, pub_key_b64, local_peer_str,
+        event_tx, server_states, bundle_keypair, device_keypair, pub_key_b64, local_peer_str,
         device_peer_id, olm, crypto_store, mls,
         ws_cmd_tx, ws_room_peers, webrtc_peers, pending_webrtc_sends,
         gossip_overlays, db_path, db_passphrase,
@@ -364,6 +366,8 @@ pub(crate) async fn finish_send_file(
     event_tx: &mpsc::Sender<NetworkEvent>,
     server_states: &HashMap<String, ServerState>,
     bundle_keypair: &crate::identity::native_identity::NativeKeypair,
+    // THIS device's keypair — signs the Olm key exchange (Fix A/B).
+    device_keypair: &crate::identity::native_identity::NativeKeypair,
     pub_key_b64: &str,
     local_peer_str: &str,
     device_peer_id: &str,
@@ -499,6 +503,8 @@ pub(crate) async fn finish_send_file(
             message_text: &message_text,
             local_peer_str,
             total_chunks,
+            device_keypair,
+            device_peer_id,
         };
         send_dm_file_fanout(
             &peer_str, &msg, device_peer_id,
@@ -638,6 +644,10 @@ struct DmFileMsg<'a> {
     message_text: &'a str,
     local_peer_str: &'a str,
     total_chunks: u32,
+    // THIS device's identity — signs the Olm KeyRequest fired when a DM file
+    // targets a device we have no session with (Fix B).
+    device_keypair: &'a crate::identity::native_identity::NativeKeypair,
+    device_peer_id: &'a str,
 }
 
 /// Shared DM FileHeader builder — every DM header uses chunks=0 (streamed),
@@ -908,7 +918,10 @@ async fn send_dm_file_to_device(
         hollow_log!("[HOLLOW-FILE] No session for DM file target {peer_str} — sending KeyRequest");
         send_message_to_peer(
             ws_cmd_tx, ws_room_peers,
-            peer_str, HavenMessage::KeyRequest,
+            peer_str,
+            crate::node::crypto_handler::signed_key_request(
+                msg.device_keypair, msg.device_peer_id, peer_str,
+            ),
         );
     }
 

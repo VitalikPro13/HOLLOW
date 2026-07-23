@@ -982,13 +982,46 @@ pub(crate) struct DebugSnapshotReply {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub(crate) enum HavenMessage {
+    /// Ask a peer for an Olm prekey bundle.
+    ///
+    /// SECURITY: receiving this makes us TEAR DOWN a working session, so it is
+    /// DEVICE-signed (see `crypto_handler::signed_key_request`). All four fields
+    /// are `Option` + `#[serde(default)]` so a pre-rollout client's bare
+    /// `{"type":"key_request"}` still deserializes during phase 1.
     #[serde(rename = "key_request")]
-    KeyRequest,
+    KeyRequest {
+        /// Recipient device peer_id — blocks reflection at a third party.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        to: Option<String>,
+        /// Unix seconds — freshness, blocks replay.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ts: Option<i64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sig: Option<String>,
+        /// Sender's DEVICE Ed25519 public key (protobuf, base64).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pk: Option<String>,
+    },
 
+    /// An Olm prekey bundle: the Curve25519 keys a peer will ratchet with.
+    ///
+    /// SECURITY: these keys travel through the relay, so they are DEVICE-signed
+    /// (see `crypto_handler::signed_key_bundle`). Without the signature a
+    /// hostile relay could substitute its own keys and sit in the middle of the
+    /// conversation — the reported MITM. Same `Option` + `#[serde(default)]`
+    /// rollout treatment as `KeyRequest`.
     #[serde(rename = "key_bundle")]
     KeyBundle {
         identity_key: String,
         one_time_key: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        to: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ts: Option<i64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sig: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pk: Option<String>,
     },
 
     #[serde(rename = "encrypted")]
