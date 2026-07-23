@@ -90,6 +90,151 @@ pub(crate) fn message_signing_payload(
     format!("hollow-msg:{msg_type}:{context}:{sender}:{ts}:{text}")
 }
 
+// -- Versioned message signing (Issue 2.3, itsfolf 2nd report) --
+//
+// The v1 payload above covers ONLY the text. Everything else that rides a
+// message — reply_to, file_id, link_preview, order_us, mid — is OUTSIDE the
+// signature, so anyone who can modify a message in flight or serve a sync batch
+// can, on an OTHERWISE-VALID message:
+//   * re-target a reply (reply_to)          * swap / ADD an attachment (file_id)
+//   * rewrite a link preview -> phishing     * reorder messages (order_us)
+//   * manipulate the dedup key (mid)
+// and the signature still verifies. v2 folds these fields into the signed
+// payload so the signature covers the whole message structure.
+//
+// ROLLOUT — WIRE-BREAKING (a pre-0.8.3 client cannot verify a v2 signature),
+// so it is staged exactly like the signed-key-exchange root of trust
+// (REQUIRE_SIGNED_KEY_EXCHANGE) and the device-list payload versioning:
+//   1. Ship VERIFY-BOTH everywhere (accept a valid v1 OR v2 signature) while
+//      still SIGNING v1 — `MSG_SIG_V2_SIGNING = false`. Deploys the new
+//      verifier fleet-wide with ZERO interop breakage.
+//   2. Once the fleet verifies-both, flip `MSG_SIG_V2_SIGNING = true`; new
+//      messages sign v2. Pre-0.8.3 clients then render them "unverified".
+//   3. Later, drop v1 verification (enforce v2). Stored v1 history keeps
+//      verifying because the verifier picks the format it TRIES from the
+//      message fields, not the sender's version — v2 first, then v1.
+//
+// This commit lands step 1's building blocks (payload + digest + verify-both +
+// version-selecting signer) with tests. Wiring the ~19 sign/verify sites AND
+// the Dart-side canonical-payload builder (`verify_message_proof` takes a
+// Dart-built payload — the grammar is dual-defined, like the emote token) is
+// the follow-up that also flips the flag. Until then these stay dead-code.
+
+/// When true, NEW message signatures are produced over the v2 payload. Keep
+/// FALSE until verify-both (step 1) has shipped fleet-wide — see the rollout
+/// note above. Flipping it is a wire-breaking change vs pre-0.8.3 clients.
+#[allow(dead_code)]
+pub(crate) const MSG_SIG_V2_SIGNING: bool = false;
+
+/// SHA-256 (hex) of the phishing-relevant link-preview fields, each
+/// length-prefixed so no two distinct field-sets can collide (a raw
+/// concatenation would let "ab"+"c" hash the same as "a"+"bc"). Folded into the
+/// v2 payload so a tamperer cannot rewrite a preview's title / description /
+/// image on an otherwise-valid message.
+#[allow(dead_code)]
+pub(crate) fn link_preview_digest(lp: &LinkPreviewRef) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    for field in [&lp.url, &lp.title, &lp.description, &lp.domain, &lp.site_name] {
+        h.update((field.len() as u64).to_le_bytes());
+        h.update(field.as_bytes());
+    }
+    // The thumbnail IS the phishing surface — bind its bytes too (present flag
+    // first so `None` can't be forged into an empty-string thumbnail).
+    match &lp.thumb_webp_b64 {
+        Some(t) => {
+            h.update([1u8]);
+            h.update((t.len() as u64).to_le_bytes());
+            h.update(t.as_bytes());
+        }
+        None => h.update([0u8]),
+    }
+    hex::encode(h.finalize())
+}
+
+/// The structured fields a v2 signature binds, alongside type/context/sender/
+/// ts/text. Every signer and verifier fills this from the message at hand; all
+/// `Option` because older wire payloads omit them.
+#[derive(Debug, Clone, Copy, Default)]
+#[allow(dead_code)]
+pub(crate) struct SignedExtras<'a> {
+    pub mid: Option<&'a str>,
+    pub reply_to: Option<&'a str>,
+    pub file_id: Option<&'a str>,
+    pub order_us: Option<i64>,
+    pub link_preview: Option<&'a LinkPreviewRef>,
+}
+
+/// Canonical v2 signing payload:
+///   hollow-msg2:{type}:{context}:{sender}:{ts}:{mid}:{reply_to}:{file_id}:{order_us}:{lp}:{text}
+/// Every field before `text` is colon-free (UUIDs / hex hashes / a number / a
+/// hex digest), so `text` — the only field that may contain a colon — stays
+/// LAST, exactly like v1, and the layout is unambiguous.
+#[allow(dead_code)]
+pub(crate) fn message_signing_payload_v2(
+    msg_type: &str,
+    context: &str,
+    sender: &str,
+    ts: i64,
+    extras: &SignedExtras,
+    text: &str,
+) -> String {
+    let mid = extras.mid.unwrap_or("");
+    let reply_to = extras.reply_to.unwrap_or("");
+    let file_id = extras.file_id.unwrap_or("");
+    let order_us = extras.order_us.map(|n| n.to_string()).unwrap_or_default();
+    let lp = extras.link_preview.map(link_preview_digest).unwrap_or_default();
+    format!("hollow-msg2:{msg_type}:{context}:{sender}:{ts}:{mid}:{reply_to}:{file_id}:{order_us}:{lp}:{text}")
+}
+
+/// Sign a message, choosing v1 or v2 by [`MSG_SIG_V2_SIGNING`]. Callers pass the
+/// structured fields unconditionally so flipping the flag (step 2) needs no
+/// further call-site change. While the flag is false this is byte-for-byte the
+/// existing v1 `sign_message`.
+#[allow(dead_code)]
+pub(crate) fn sign_message_versioned(
+    keypair: &crate::identity::native_identity::NativeKeypair,
+    pub_key_b64: &str,
+    msg_type: &str,
+    context: &str,
+    sender: &str,
+    ts: i64,
+    extras: &SignedExtras,
+    text: &str,
+) -> (Option<String>, Option<String>) {
+    let payload = if MSG_SIG_V2_SIGNING {
+        message_signing_payload_v2(msg_type, context, sender, ts, extras, text)
+    } else {
+        message_signing_payload(msg_type, context, sender, ts, text)
+    };
+    sign_message(keypair, pub_key_b64, &payload)
+}
+
+/// Verify-both (transition window): accept a signature that matches EITHER the
+/// v2 payload (structured fields covered) or the legacy v1 payload (text only).
+/// v2 is tried first; v1 is the fallback that keeps pre-0.8.3 signatures and all
+/// stored history verifying. Reuses `pk_cache` across a batch. A missing
+/// signature returns false, same as v1.
+#[allow(dead_code, clippy::too_many_arguments)]
+pub(crate) fn verify_message_signature_v2(
+    sender_peer_str: &str,
+    sig_b64: Option<&str>,
+    pk_b64: Option<&str>,
+    msg_type: &str,
+    context: &str,
+    ts: i64,
+    extras: &SignedExtras,
+    text: &str,
+    pk_cache: &mut PkCache,
+) -> bool {
+    let v2 = message_signing_payload_v2(msg_type, context, sender_peer_str, ts, extras, text);
+    if verify_message_signature_cached(sender_peer_str, sig_b64, pk_b64, &v2, pk_cache) {
+        return true;
+    }
+    let v1 = message_signing_payload(msg_type, context, sender_peer_str, ts, text);
+    verify_message_signature_cached(sender_peer_str, sig_b64, pk_b64, &v1, pk_cache)
+}
+
 // -- Authenticated Olm key exchange (root of trust, Fix A/B) --
 
 /// How far a key-exchange timestamp may drift from local time before the frame
@@ -2990,6 +3135,146 @@ mod tests {
             ),
             BackfillSig::Valid,
         );
+    }
+
+    // ── v2 signing payload (Issue 2.3) ───────────────────────────────────
+    //
+    // The whole point of v2 is that the signature covers the structured fields,
+    // not just the text. These lock the canonical format + the verify-both
+    // transition semantics before any call site or the Dart mirror is wired.
+
+    fn lp(title: &str) -> LinkPreviewRef {
+        LinkPreviewRef {
+            url: "https://example.com".into(),
+            title: title.into(),
+            description: "desc".into(),
+            domain: "example.com".into(),
+            site_name: "Example".into(),
+            thumb_webp_b64: Some("AAAA".into()),
+            thumb_w: Some(10),
+            thumb_h: Some(10),
+        }
+    }
+
+    /// A v2 signature verifies through verify-both, and each structured field is
+    /// actually covered — flipping any one of them breaks verification.
+    #[test]
+    fn v2_signature_covers_structured_fields() {
+        let a = kp(21);
+        let a_id = a.peer_id();
+        let a_pk = pk_b64(&a);
+        let mut cache = PkCache::new();
+
+        let preview = lp("Real Title");
+        let extras = SignedExtras {
+            mid: Some("mid-1"),
+            reply_to: Some("parent-1"),
+            file_id: Some("file-1"),
+            order_us: Some(42),
+            link_preview: Some(&preview),
+        };
+        let payload = message_signing_payload_v2("dm", "recipient", &a_id, 1_000, &extras, "hi");
+        let (sig, pk) = sign_message(&a, &a_pk, &payload);
+
+        // Verify-both accepts the v2 signature.
+        assert!(verify_message_signature_v2(
+            &a_id, sig.as_deref(), pk.as_deref(), "dm", "recipient", 1_000, &extras, "hi", &mut cache,
+        ));
+
+        // Each field is load-bearing — tamper with one, verification fails.
+        let tampered_reply = SignedExtras { reply_to: Some("parent-EVIL"), ..extras };
+        assert!(!verify_message_signature_v2(
+            &a_id, sig.as_deref(), pk.as_deref(), "dm", "recipient", 1_000, &tampered_reply, "hi", &mut cache,
+        ), "reply_to must be covered");
+
+        let tampered_file = SignedExtras { file_id: Some("file-EVIL"), ..extras };
+        assert!(!verify_message_signature_v2(
+            &a_id, sig.as_deref(), pk.as_deref(), "dm", "recipient", 1_000, &tampered_file, "hi", &mut cache,
+        ), "file_id must be covered");
+
+        let tampered_order = SignedExtras { order_us: Some(9_999), ..extras };
+        assert!(!verify_message_signature_v2(
+            &a_id, sig.as_deref(), pk.as_deref(), "dm", "recipient", 1_000, &tampered_order, "hi", &mut cache,
+        ), "order_us must be covered");
+
+        let evil_preview = lp("Phishing Title");
+        let tampered_lp = SignedExtras { link_preview: Some(&evil_preview), ..extras };
+        assert!(!verify_message_signature_v2(
+            &a_id, sig.as_deref(), pk.as_deref(), "dm", "recipient", 1_000, &tampered_lp, "hi", &mut cache,
+        ), "link_preview must be covered");
+
+        // Text is still covered too.
+        assert!(!verify_message_signature_v2(
+            &a_id, sig.as_deref(), pk.as_deref(), "dm", "recipient", 1_000, &extras, "bye", &mut cache,
+        ), "text must be covered");
+    }
+
+    /// Transition-window guarantee: a legacy v1 signature (text only) still
+    /// verifies through verify-both, so stored history and pre-0.8.3 peers keep
+    /// working while the fleet is mixed.
+    #[test]
+    fn verify_both_accepts_legacy_v1_signature() {
+        let a = kp(22);
+        let a_id = a.peer_id();
+        let a_pk = pk_b64(&a);
+        let mut cache = PkCache::new();
+
+        // Signed the OLD way — text only, no structured fields.
+        let v1 = message_signing_payload("ch", "srv:chan", &a_id, 1_000, "legacy");
+        let (sig, pk) = sign_message(&a, &a_pk, &v1);
+
+        // verify-both accepts it even though the caller supplies v2 extras
+        // (a v1 signer simply didn't cover them).
+        let extras = SignedExtras { mid: Some("m"), file_id: Some("f"), ..Default::default() };
+        assert!(verify_message_signature_v2(
+            &a_id, sig.as_deref(), pk.as_deref(), "ch", "srv:chan", 1_000, &extras, "legacy", &mut cache,
+        ));
+    }
+
+    /// `sign_message_versioned` tracks the flag: while `MSG_SIG_V2_SIGNING` is
+    /// false it signs v1 (byte-for-byte the existing send path), and either way
+    /// verify-both accepts the result — so flipping the flag is safe once the
+    /// verifier has shipped.
+    #[test]
+    fn versioned_signer_matches_flag_and_verifies_both_ways() {
+        let a = kp(23);
+        let a_id = a.peer_id();
+        let a_pk = pk_b64(&a);
+        let mut cache = PkCache::new();
+
+        let preview = lp("t");
+        let extras = SignedExtras {
+            mid: Some("mid"), reply_to: None, file_id: Some("fid"),
+            order_us: Some(7), link_preview: Some(&preview),
+        };
+        let (sig, pk) = sign_message_versioned(
+            &a, &a_pk, "dm", "recipient", &a_id, 500, &extras, "payload",
+        );
+
+        // Whatever the flag, verify-both accepts.
+        assert!(verify_message_signature_v2(
+            &a_id, sig.as_deref(), pk.as_deref(), "dm", "recipient", 500, &extras, "payload", &mut cache,
+        ));
+
+        // While the flag is false it is exactly the v1 signature.
+        if !MSG_SIG_V2_SIGNING {
+            let v1 = message_signing_payload("dm", "recipient", &a_id, 500, "payload");
+            let (v1_sig, _) = sign_message(&a, &a_pk, &v1);
+            assert_eq!(sig, v1_sig, "flag off must produce the legacy v1 signature");
+        }
+    }
+
+    /// The link-preview digest is length-prefixed, so a field-boundary shift
+    /// that keeps the raw concatenation identical still changes the hash.
+    #[test]
+    fn link_preview_digest_is_collision_resistant() {
+        let mut a = lp("");
+        a.url = "ab".into();
+        a.title = "c".into();
+        let mut b = lp("");
+        b.url = "a".into();
+        b.title = "bc".into();
+        assert_ne!(link_preview_digest(&a), link_preview_digest(&b));
     }
 
     /// An edit is re-signed over the EDIT timestamp and the NEW text
