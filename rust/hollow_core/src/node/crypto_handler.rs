@@ -1248,18 +1248,14 @@ pub(crate) fn verify_message_signature(
         return false;
     };
 
-    // Verify PeerId matches the public key (derive PeerId from pubkey protobuf).
-    if pk_bytes.len() >= 36 && pk_bytes[0] == 0x08 && pk_bytes[1] == 0x01 {
-        // Build a temporary NativeKeypair-style PeerId from the pubkey protobuf.
-        let mut multihash = Vec::with_capacity(2 + pk_bytes.len());
-        multihash.push(0x00); // Identity multihash code
-        multihash.push(pk_bytes.len() as u8);
-        multihash.extend_from_slice(&pk_bytes);
-        let derived_pid = bs58::encode(&multihash).with_alphabet(bs58::Alphabet::BITCOIN).into_string();
-        if derived_pid != sender_peer_str {
-            return false;
-        }
-    } else {
+    // Bind the public key to the claimed sender: the PeerId derived from this
+    // key MUST be the sender the payload names. One canonical derivation
+    // (`peer_id_from_pubkey_protobuf`) — the hand-rolled copy that used to live
+    // here checked a weaker protobuf header than the verifier itself.
+    let Some(derived_pid) = NativeKeypair::peer_id_from_pubkey_protobuf(&pk_bytes) else {
+        return false;
+    };
+    if derived_pid != sender_peer_str {
         return false;
     }
 
@@ -1271,14 +1267,35 @@ pub(crate) fn verify_message_signature(
         .unwrap_or(false)
 }
 
-/// Batch-optimized variant that caches decoded+verified pk_bytes across calls.
-/// The cache maps pk_b64 → pk_bytes (only inserted after PeerId derivation succeeds).
+/// Decoded-public-key cache for ONE sync batch: `pk_b64 → (pk_bytes, peer_id
+/// DERIVED from those bytes)`.
+///
+/// SECURITY — the derived peer_id is cached *alongside* the bytes on purpose.
+/// The first version cached the bytes only and checked `derive(pk) == sender`
+/// on the cache-MISS path, so within a batch a key was bound to whichever
+/// sender was seen FIRST:
+///
+/// ```text
+///   item 1:  s = A, pk = A  → derive(pk) == A, cached
+///   item 2:  s = B, pk = A  → CACHE HIT, binding check skipped,
+///                             A's real signature verified against a payload naming B
+/// ```
+///
+/// A really did sign those bytes, so the Ed25519 check passed and the forgery
+/// displayed as VERIFIED in the Message Proof dialog — any server member could
+/// attribute arbitrary text to any other member. Reported by itsfolf, 2026-07.
+/// Keep the comparison on the HIT path (see `verify_message_signature_cached`).
+pub(crate) type PkCache = HashMap<String, (Vec<u8>, String)>;
+
+/// Batch-optimized [`verify_message_signature`]: caches the base64 decode and
+/// the PeerId derivation across calls (the expensive per-key work), never the
+/// pk→sender *decision*.
 pub(crate) fn verify_message_signature_cached(
     sender_peer_str: &str,
     sig_b64: Option<&str>,
     pk_b64: Option<&str>,
     payload: &str,
-    pk_cache: &mut HashMap<String, Vec<u8>>,
+    pk_cache: &mut PkCache,
 ) -> bool {
     use crate::identity::native_identity::NativeKeypair;
 
@@ -1287,33 +1304,91 @@ pub(crate) fn verify_message_signature_cached(
         _ => return false,
     };
 
-    let pk_bytes = if let Some(cached) = pk_cache.get(pk) {
-        cached.clone()
-    } else {
+    // Populate on miss. Only the decode + derivation are cached.
+    if !pk_cache.contains_key(pk) {
         let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(pk) else {
             return false;
         };
-        if bytes.len() >= 36 && bytes[0] == 0x08 && bytes[1] == 0x01 {
-            let mut multihash = Vec::with_capacity(2 + bytes.len());
-            multihash.push(0x00);
-            multihash.push(bytes.len() as u8);
-            multihash.extend_from_slice(&bytes);
-            let derived_pid = bs58::encode(&multihash).with_alphabet(bs58::Alphabet::BITCOIN).into_string();
-            if derived_pid != sender_peer_str {
-                return false;
-            }
-        } else {
+        let Some(derived_pid) = NativeKeypair::peer_id_from_pubkey_protobuf(&bytes) else {
             return false;
-        }
-        pk_cache.insert(pk.to_string(), bytes.clone());
-        bytes
+        };
+        pk_cache.insert(pk.to_string(), (bytes, derived_pid));
+    }
+    let Some((pk_bytes, derived_pid)) = pk_cache.get(pk) else {
+        return false;
     };
+
+    // SECURITY: the pk→claimed-sender binding is re-checked on EVERY call, hit
+    // or miss. See [`PkCache`] for what skipping it on a hit made possible.
+    if derived_pid != sender_peer_str {
+        return false;
+    }
 
     let Ok(sig_bytes) = base64::engine::general_purpose::STANDARD.decode(sig) else {
         return false;
     };
-    NativeKeypair::verify_peer_signature(&pk_bytes, &sig_bytes, payload.as_bytes())
+    NativeKeypair::verify_peer_signature(pk_bytes, &sig_bytes, payload.as_bytes())
         .unwrap_or(false)
+}
+
+/// Outcome of checking the signature on a BACKFILLED (sync) message item.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BackfillSig {
+    /// No signature material at all. TOLERATE: history from before per-message
+    /// signing (e2cc8ab, 2026-03-09) is unsigned, and refusing it would strand
+    /// that history and permanently diverge peers.
+    Absent,
+    /// Signature present and it verifies against the claimed sender.
+    Valid,
+    /// Signature present and it does NOT verify. REJECT the item — a wrong
+    /// signature is not legacy data, it is tampering.
+    Forged,
+}
+
+/// Apply the backfill signature rule to one sync item.
+///
+/// The live-enforce / backfill-tolerate split was originally applied at the
+/// WRONG GRANULARITY — backfill accepted anything, so a sync responder could
+/// hand us messages with invalid signatures and we stored them. The rule the
+/// live path already draws, now carried across:
+///
+/// ```text
+///   backfill TOLERATES an ABSENT   signature   (pre-signing history)
+///   backfill REJECTS  a PRESENT-but-INVALID one (an attack)
+/// ```
+///
+/// Do NOT "fix" this by requiring a signature in backfill: that drops all
+/// pre-signing history and diverges peers, which is what tolerate exists for.
+///
+/// `edited_at` selects the timestamp the signature was really made over — an
+/// edit is re-signed over the EDIT timestamp and the NEW text
+/// (`message_ops::handle_edit_*`), the same rule
+/// `archive::loader::verify_one_message` uses. Verifying an edited row against
+/// its original `ts` fails every one of them, which is why edits used to skip
+/// verification entirely — and why setting `edited_at` was a way around it.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn check_backfill_signature(
+    signer: &str,
+    msg_type: &str,
+    context: &str,
+    ts: i64,
+    edited_at: Option<i64>,
+    text: &str,
+    sig_b64: Option<&str>,
+    pk_b64: Option<&str>,
+    pk_cache: &mut PkCache,
+) -> BackfillSig {
+    if sig_b64.is_none() && pk_b64.is_none() {
+        return BackfillSig::Absent;
+    }
+    let payload = message_signing_payload(
+        msg_type, context, signer, edited_at.unwrap_or(ts), text,
+    );
+    if verify_message_signature_cached(signer, sig_b64, pk_b64, &payload, pk_cache) {
+        BackfillSig::Valid
+    } else {
+        BackfillSig::Forged
+    }
 }
 
 /// Persist MLS state (signer + credential + storage) via the CryptoStore actor.
@@ -2790,5 +2865,162 @@ mod tests {
         assert_ne!(plain.sig_b64, revoking.sig_b64, "revoked set is part of the signed payload");
         assert!(verify_device_list(&plain));
         assert!(verify_device_list(&revoking));
+    }
+
+    // ── Backfill signature rule + public-key cache binding ────────────────
+    //
+    // Both reported by itsfolf (2026-07, second report). Neither was visible to
+    // the tests that existed: they fed ONE sender per batch (so the cache was
+    // never consulted for a second sender) and never a batch whose signature
+    // was wrong (so "stored anyway" never showed up).
+
+    /// base64 of a keypair's public key protobuf — what rides `pk` on the wire.
+    fn pk_b64(k: &crate::identity::native_identity::NativeKeypair) -> String {
+        base64::engine::general_purpose::STANDARD.encode(k.public_key_protobuf())
+    }
+
+    /// THE REPORTED ATTACK (public key cache poisoning). Two items in ONE sync
+    /// batch: item 1 is A's real message and primes the cache; item 2 claims
+    /// sender B but ships A's key. A genuinely signed item 2's bytes, so the
+    /// Ed25519 check passes — the pk→sender binding is the only thing that
+    /// stops it, and the cache-HIT path skipped that check. These forgeries
+    /// VERIFIED: the Message Proof dialog would have shown text the claimed
+    /// author never wrote as authentic.
+    #[test]
+    fn cached_verify_rechecks_pk_binding_on_cache_hit() {
+        let a = kp(11);
+        let (a_id, b_id) = (a.peer_id(), kp(12).peer_id());
+        let a_pk = pk_b64(&a);
+        let mut cache = PkCache::new();
+
+        // Item 1 — legitimate, primes the cache with A's key.
+        let p1 = message_signing_payload("ch", "srv:chan", &a_id, 1_000, "hello");
+        let (sig1, pk1) = sign_message(&a, &a_pk, &p1);
+        assert!(verify_message_signature_cached(
+            &a_id, sig1.as_deref(), pk1.as_deref(), &p1, &mut cache,
+        ));
+
+        // Item 2 — A signs a payload naming B, and ships A's key.
+        let p2 = message_signing_payload("ch", "srv:chan", &b_id, 2_000, "B never wrote this");
+        let (sig2, _) = sign_message(&a, &a_pk, &p2);
+        assert!(
+            !verify_message_signature_cached(&b_id, sig2.as_deref(), pk1.as_deref(), &p2, &mut cache),
+            "a cache HIT must still bind the public key to the CLAIMED sender",
+        );
+
+        // ...and the cache still does its job for the key's real owner.
+        let p3 = message_signing_payload("ch", "srv:chan", &a_id, 3_000, "still me");
+        let (sig3, _) = sign_message(&a, &a_pk, &p3);
+        assert!(verify_message_signature_cached(
+            &a_id, sig3.as_deref(), pk1.as_deref(), &p3, &mut cache,
+        ));
+    }
+
+    /// The same attack through the entry point the four sync sites call.
+    #[test]
+    fn backfill_rejects_signature_replayed_onto_another_sender() {
+        let a = kp(13);
+        let (a_id, b_id) = (a.peer_id(), kp(14).peer_id());
+        let a_pk = pk_b64(&a);
+        let mut cache = PkCache::new();
+
+        let p1 = message_signing_payload("ch", "srv:chan", &a_id, 1_000, "first");
+        let (sig1, pk1) = sign_message(&a, &a_pk, &p1);
+        assert_eq!(
+            check_backfill_signature(
+                &a_id, "ch", "srv:chan", 1_000, None, "first",
+                sig1.as_deref(), pk1.as_deref(), &mut cache,
+            ),
+            BackfillSig::Valid,
+        );
+
+        let p2 = message_signing_payload("ch", "srv:chan", &b_id, 2_000, "attributed to B");
+        let (sig2, _) = sign_message(&a, &a_pk, &p2);
+        assert_eq!(
+            check_backfill_signature(
+                &b_id, "ch", "srv:chan", 2_000, None, "attributed to B",
+                sig2.as_deref(), pk1.as_deref(), &mut cache,
+            ),
+            BackfillSig::Forged,
+            "A's key must not authenticate a message claiming to come from B",
+        );
+    }
+
+    /// Pre-signing history (before e2cc8ab, 2026-03-09) carries no signature at
+    /// all and MUST keep replicating — requiring one in backfill would strand
+    /// that history and permanently diverge peers.
+    #[test]
+    fn backfill_tolerates_unsigned_history() {
+        let mut cache = PkCache::new();
+        assert_eq!(
+            check_backfill_signature(
+                "12D3KooWlegacy", "ch", "srv:chan", 1, None, "old message",
+                None, None, &mut cache,
+            ),
+            BackfillSig::Absent,
+        );
+    }
+
+    /// ...but a signature that is PRESENT and does not verify is tampering, not
+    /// legacy data. This is the case all four sync sites used to log and then
+    /// store anyway.
+    #[test]
+    fn backfill_rejects_tampered_text() {
+        let a = kp(15);
+        let a_id = a.peer_id();
+        let a_pk = pk_b64(&a);
+        let mut cache = PkCache::new();
+
+        let payload = message_signing_payload("dm", "recipient", &a_id, 500, "send 5");
+        let (sig, pk) = sign_message(&a, &a_pk, &payload);
+
+        // Same signature, text altered by whoever served the batch.
+        assert_eq!(
+            check_backfill_signature(
+                &a_id, "dm", "recipient", 500, None, "send 5000",
+                sig.as_deref(), pk.as_deref(), &mut cache,
+            ),
+            BackfillSig::Forged,
+        );
+        // Untouched still verifies.
+        assert_eq!(
+            check_backfill_signature(
+                &a_id, "dm", "recipient", 500, None, "send 5",
+                sig.as_deref(), pk.as_deref(), &mut cache,
+            ),
+            BackfillSig::Valid,
+        );
+    }
+
+    /// An edit is re-signed over the EDIT timestamp and the NEW text
+    /// (`message_ops::handle_edit_*`), so that is what backfill verifies
+    /// against — the same rule `archive::loader` uses. Skipping edited rows
+    /// (the old behavior) made `edited_at` a way to skip verification.
+    #[test]
+    fn backfill_verifies_edit_against_edit_signature() {
+        let a = kp(16);
+        let a_id = a.peer_id();
+        let a_pk = pk_b64(&a);
+        let mut cache = PkCache::new();
+
+        let (orig_ts, edit_ts) = (1_000i64, 2_000i64);
+        let edit_payload = message_signing_payload("ch", "srv:chan", &a_id, edit_ts, "edited text");
+        let (sig, pk) = sign_message(&a, &a_pk, &edit_payload);
+
+        assert_eq!(
+            check_backfill_signature(
+                &a_id, "ch", "srv:chan", orig_ts, Some(edit_ts), "edited text",
+                sig.as_deref(), pk.as_deref(), &mut cache,
+            ),
+            BackfillSig::Valid,
+        );
+        assert_eq!(
+            check_backfill_signature(
+                &a_id, "ch", "srv:chan", orig_ts, Some(edit_ts), "text the author never wrote",
+                sig.as_deref(), pk.as_deref(), &mut cache,
+            ),
+            BackfillSig::Forged,
+            "claiming to be an edit must not dodge verification",
+        );
     }
 }

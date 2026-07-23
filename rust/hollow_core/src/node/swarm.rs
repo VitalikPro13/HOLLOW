@@ -260,7 +260,8 @@ use super::crypto_handler::{
     key_bundle_signing_payload, key_request_signing_payload, signed_key_bundle, signed_key_request,
     verify_key_exchange, key_exchange_device_unauthorized,
     KeyExchangeAuth, REQUIRE_SIGNED_KEY_EXCHANGE,
-    message_signing_payload, sign_message, verify_message_signature, verify_message_signature_cached,
+    message_signing_payload, verify_message_signature,
+    check_backfill_signature, BackfillSig, PkCache,
     persist_mls_state, persist_crypto_state, persist_olm_session,
     peer_is_reachable, is_mls_coordinator, is_vault_coordinator, elect_coordinator, ws_room_for_peer,
     send_mls_broadcast, send_encrypted_message,
@@ -5622,21 +5623,27 @@ async fn handle_incoming_request(
 
                     if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
                         let _ = store.begin_transaction();
-                        let mut pk_cache: std::collections::HashMap<String, Vec<u8>> = std::collections::HashMap::new();
+                        let mut pk_cache = PkCache::new();
                         for msg in &messages {
-                            // Verify signature on each synced message.
-                            // Skip edited messages — the stored signature was created
-                            // against the original text, not the edited text.
-                            let mut sig_verified = false;
-                            if msg.sig.is_some() && msg.edited_at.is_none() {
-                                let payload = message_signing_payload(
-                                    "ch", &format!("{sid}:{cid}"), &msg.s, msg.ts, &msg.t,
+                            // Backfill signature rule: absent = tolerate (pre-signing
+                            // history), present-but-invalid = tampering. An edited row
+                            // verifies against its EDIT signature (edited_at + current
+                            // text). See `check_backfill_signature`.
+                            let sig_check = check_backfill_signature(
+                                &msg.s, "ch", &format!("{sid}:{cid}"),
+                                msg.ts, msg.edited_at, &msg.t,
+                                msg.sig.as_deref(), msg.pk.as_deref(), &mut pk_cache,
+                            );
+                            // SECURITY: drop the whole item — text, edit, file
+                            // metadata, reactions and the hidden flag all ride it.
+                            if sig_check == BackfillSig::Forged {
+                                hollow_log!(
+                                    "[HOLLOW-SECURITY] REJECTED synced channel message in {sid}/{cid} claiming sender {} — signature present but INVALID (mid={:?}, ts={}, text_len={}, has_pk={})",
+                                    msg.s, msg.mid, msg.ts, msg.t.len(), msg.pk.is_some()
                                 );
-                                sig_verified = verify_message_signature_cached(&msg.s, msg.sig.as_deref(), msg.pk.as_deref(), &payload, &mut pk_cache);
-                                if !sig_verified {
-                                    hollow_log!("[HOLLOW-CRYPTO] Sig verify FAILED for synced msg from {} ts={} text_len={} has_pk={}", msg.s, msg.ts, msg.t.len(), msg.pk.is_some());
-                                }
+                                continue;
                             }
+                            let sig_verified = sig_check == BackfillSig::Valid;
 
                             let is_mine = msg.s == local_peer;
                             let already_exists = msg.mid.as_ref()
@@ -5952,37 +5959,43 @@ async fn handle_incoming_request(
 
                     if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
                         let _ = store.begin_transaction();
-                        let mut pk_cache: std::collections::HashMap<String, Vec<u8>> = std::collections::HashMap::new();
+                        let mut pk_cache = PkCache::new();
                         for msg in &messages {
                             // Effective direction from OUR perspective (see the
                             // responder-relative note above): invert on the friend
                             // path, keep as-is from a sibling.
                             let is_mine = if from_sibling { msg.mine } else { !msg.mine };
 
-                            // Verify signature if present.
-                            // Skip edited messages — sig was against original text.
-                            if msg.sig.is_some() && msg.edited_at.is_none() {
-                                // CRITICAL (multi-device): the signer is always a
-                                // MASTER id, never the raw device id `peer_str` the
-                                // relay reported. The original sig context is the
-                                // FRIEND conversation, direction-dependent on OUR
-                                // effective `is_mine`:
-                                //   is_mine=true  → sender = our master, recipient = convo
-                                //   is_mine=false → sender = convo,      recipient = our master
-                                // (mirrors the sibling-batch receiver below). Verifying
-                                // against the wrong end failed EVERY signature for a
-                                // multi-device friend (the "Sig verify FAILED" flood).
-                                let (sender_m, recipient_m): (&str, &str) = if is_mine {
-                                    (&local_peer, &convo_peer)
-                                } else {
-                                    (&convo_peer, &local_peer)
-                                };
-                                let payload = message_signing_payload(
-                                    "dm", recipient_m, sender_m, msg.ts, &msg.t,
+                            // CRITICAL (multi-device): the signer is always a
+                            // MASTER id, never the raw device id `peer_str` the
+                            // relay reported. The original sig context is the
+                            // FRIEND conversation, direction-dependent on OUR
+                            // effective `is_mine`:
+                            //   is_mine=true  → sender = our master, recipient = convo
+                            //   is_mine=false → sender = convo,      recipient = our master
+                            // (mirrors the sibling-batch receiver below). Verifying
+                            // against the wrong end failed EVERY signature for a
+                            // multi-device friend (the "Sig verify FAILED" flood).
+                            let (sender_m, recipient_m): (&str, &str) = if is_mine {
+                                (&local_peer, &convo_peer)
+                            } else {
+                                (&convo_peer, &local_peer)
+                            };
+                            // Backfill signature rule: absent = tolerate (pre-signing
+                            // history), present-but-invalid = tampering.
+                            let sig_check = check_backfill_signature(
+                                sender_m, "dm", recipient_m,
+                                msg.ts, msg.edited_at, &msg.t,
+                                msg.sig.as_deref(), msg.pk.as_deref(), &mut pk_cache,
+                            );
+                            // SECURITY: drop the whole item — the edit, file metadata,
+                            // reactions and hidden flag all ride it.
+                            if sig_check == BackfillSig::Forged {
+                                hollow_log!(
+                                    "[HOLLOW-SECURITY] REJECTED synced DM from {peer_str} (master {convo_peer}, is_mine={is_mine}) — signature present but INVALID (mid={:?}, ts={}, text_len={}, has_pk={})",
+                                    msg.mid, msg.ts, msg.t.len(), msg.pk.is_some()
                                 );
-                                if !verify_message_signature_cached(sender_m, msg.sig.as_deref(), msg.pk.as_deref(), &payload, &mut pk_cache) {
-                                    hollow_log!("[HOLLOW-CRYPTO] Sig verify FAILED for DM sync msg from {peer_str} (master {convo_peer}, is_mine={is_mine}) ts={} text_len={} has_pk={}", msg.ts, msg.t.len(), msg.pk.is_some());
-                                }
+                                continue;
                             }
 
                             let already_exists = msg.mid.as_ref()
@@ -6168,25 +6181,31 @@ async fn handle_incoming_request(
 
                     if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
                         let _ = store.begin_transaction();
-                        let mut pk_cache: std::collections::HashMap<String, Vec<u8>> = std::collections::HashMap::new();
+                        let mut pk_cache = PkCache::new();
                         for msg in &messages {
-                            // Verify signature if present (skip edited — sig was over original).
                             // The original sig context is the FRIEND conversation, not us:
                             //   mine=true  → sender = our master, recipient = convo
                             //   mine=false → sender = convo,      recipient = our master
                             // The claimed signer (whose pubkey is checked) is the SENDER master.
-                            if msg.sig.is_some() && msg.edited_at.is_none() {
-                                let (sender_m, recipient_m): (&str, &str) = if msg.mine {
-                                    (&local_peer, &convo_peer)
-                                } else {
-                                    (&convo_peer, &local_peer)
-                                };
-                                let payload = message_signing_payload(
-                                    "dm", recipient_m, sender_m, msg.ts, &msg.t,
+                            let (sender_m, recipient_m): (&str, &str) = if msg.mine {
+                                (&local_peer, &convo_peer)
+                            } else {
+                                (&convo_peer, &local_peer)
+                            };
+                            // Backfill signature rule: absent = tolerate (pre-signing
+                            // history), present-but-invalid = tampering. A sibling is
+                            // still only as trustworthy as the batch it forwards.
+                            let sig_check = check_backfill_signature(
+                                sender_m, "dm", recipient_m,
+                                msg.ts, msg.edited_at, &msg.t,
+                                msg.sig.as_deref(), msg.pk.as_deref(), &mut pk_cache,
+                            );
+                            if sig_check == BackfillSig::Forged {
+                                hollow_log!(
+                                    "[HOLLOW-SECURITY] REJECTED sibling DM from {peer_str} (convo {convo_peer}, mine={}) — signature present but INVALID (mid={:?}, ts={})",
+                                    msg.mine, msg.mid, msg.ts
                                 );
-                                if !verify_message_signature_cached(sender_m, msg.sig.as_deref(), msg.pk.as_deref(), &payload, &mut pk_cache) {
-                                    hollow_log!("[HOLLOW-CRYPTO] Sig verify FAILED for sibling DM (convo {convo_peer}, mine={}) ts={}", msg.mine, msg.ts);
-                                }
+                                continue;
                             }
 
                             let already_exists = msg.mid.as_ref()

@@ -16,7 +16,8 @@ use crate::crypto::{CryptoStore, MlsManager, OlmManager};
 #[allow(unused_imports)]
 use crate::hollow_log;
 use crate::node::crypto_handler::{
-    clip_text, persist_crypto_state, persist_mls_state, persist_olm_session,
+    check_backfill_signature, clip_text, persist_crypto_state, persist_mls_state,
+    persist_olm_session, BackfillSig, PkCache,
 };
 use crate::node::types::{
     ChannelMessagePayload, DirectMessagePayload, FileHeaderPayload, HavenMessage, LinkPreviewRef,
@@ -110,13 +111,14 @@ pub(crate) async fn run_fetch(
         match msg {
             Message::Text(text) => {
                 handle_text_frame(
-                    &text, olm, crypto_store, db_path, db_passphrase, peer_id, &mut messages,
+                    &text, olm, crypto_store, db_path, db_passphrase, peer_id, local_master,
+                    &mut messages,
                 );
             }
             Message::Binary(data) => {
                 handle_binary_frame(
                     &data, server_room, olm, mls, &mut mls_dirty, crypto_store, db_path,
-                    db_passphrase, peer_id, &mut messages,
+                    db_passphrase, peer_id, local_master, &mut messages,
                 );
             }
             Message::Close(_) => {
@@ -228,6 +230,7 @@ where
 
 /// Handle a relay text frame: room control messages plus the legacy
 /// text-direct DM path.
+#[allow(clippy::too_many_arguments)]
 fn handle_text_frame(
     text: &str,
     olm: &mut OlmManager,
@@ -235,6 +238,7 @@ fn handle_text_frame(
     db_path: &str,
     db_passphrase: &str,
     peer_id: &str,
+    local_master: &str,
     messages: &mut Vec<FetchedDm>,
 ) {
     if let Ok(server_msg) = serde_json::from_str::<serde_json::Value>(text) {
@@ -258,9 +262,9 @@ fn handle_text_frame(
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
 
-                if let Some(dm) =
-                    try_decrypt_dm(from, data, olm, crypto_store, db_path, db_passphrase, peer_id)
-                {
+                if let Some(dm) = try_decrypt_dm(
+                    from, data, olm, crypto_store, db_path, db_passphrase, peer_id, local_master,
+                ) {
                     persist_olm_session(olm, crypto_store, from);
                     messages.push(dm);
                 }
@@ -282,6 +286,7 @@ fn handle_binary_frame(
     db_path: &str,
     db_passphrase: &str,
     peer_id: &str,
+    local_master: &str,
     messages: &mut Vec<FetchedDm>,
 ) {
     // Relay frames (payload = HavenMessage JSON):
@@ -311,7 +316,7 @@ fn handle_binary_frame(
             }
         } else if data[0] == 0x06 {
             if let Some(dm) = try_decrypt_dm(
-                &from, &payload, olm, crypto_store, db_path, db_passphrase, peer_id,
+                &from, &payload, olm, crypto_store, db_path, db_passphrase, peer_id, local_master,
             ) {
                 persist_olm_session(olm, crypto_store, &from);
                 messages.push(dm);
@@ -472,6 +477,13 @@ fn try_process_channel_msg(
                     // so the fetched row is master-keyed, mirroring the live MLS
                     // handler (swarm.rs sender_master). Single-device → no-op.
                     let sender_master = crate::node::resolver::resolve(&sender);
+                    // Reject a present-but-invalid signature (defence in depth
+                    // behind MLS group membership) — see fetch_channel_sig_rejected.
+                    if fetch_channel_sig_rejected(
+                        &sender_master, &sid, &cid, ts, &text, sig.as_deref(), pk.as_deref(),
+                    ) {
+                        return None;
+                    }
                     let text = clip_text(text);
                     insert_channel_row(
                         db_path, db_passphrase, &sid, &cid, &sender_master, &text, ts,
@@ -503,6 +515,16 @@ fn try_process_channel_msg(
             // instead of a raw device id. The resolver is warmed from DB links before
             // run_fetch; a single-device sender resolves to itself (no-op).
             let sender_master = crate::node::resolver::resolve(from);
+            // Public channels are PLAINTEXT — a hostile relay can tamper with the
+            // frame in flight, exactly the disclosure threat model. The live path
+            // rejects a present-but-invalid signature; the push path must too, or
+            // the tampered row is stored and never re-verified (dedup by mid).
+            if fetch_channel_sig_rejected(
+                &sender_master, &server_id, &channel_id, ts, &text,
+                sig.as_deref(), pk.as_deref(),
+            ) {
+                return None;
+            }
             let text = clip_text(text);
             insert_channel_row(
                 db_path, db_passphrase, &server_id, &channel_id, &sender_master, &text, ts,
@@ -521,6 +543,43 @@ fn try_process_channel_msg(
         }
         _ => None,
     }
+}
+
+/// A push-fetched channel message signed by `sender_master` over the canonical
+/// `ch:{sid}:{cid}` payload must not be stored with a signature that does not
+/// verify. The live channel handlers reject present-but-invalid signatures
+/// (`message_ops::channel_sig_rejected`, `swarm.rs` public + Olm-fallback
+/// paths); the push path used to store the row unchecked, and because both
+/// sync and the app dedup by `message_id`, that bad row was NEVER re-verified.
+/// A hostile relay can tamper with a plaintext public-channel frame in flight,
+/// so the gap was real for public channels; for MLS it is defence in depth
+/// behind group membership.
+///
+/// Backfill rule (same as the four sync sites): an ABSENT signature is
+/// tolerated (pre-signing history, e2cc8ab 2026-03-09), a PRESENT-but-INVALID
+/// one is rejected. `true` = reject (do not store, do not surface a notification
+/// for tampered content); the full app re-syncs the authentic copy later.
+fn fetch_channel_sig_rejected(
+    sender_master: &str,
+    sid: &str,
+    cid: &str,
+    ts: i64,
+    text: &str,
+    sig: Option<&str>,
+    pk: Option<&str>,
+) -> bool {
+    let mut pk_cache = PkCache::new();
+    let verdict = check_backfill_signature(
+        sender_master, "ch", &format!("{sid}:{cid}"),
+        ts, None, text, sig, pk, &mut pk_cache,
+    );
+    if verdict == BackfillSig::Forged {
+        hollow_log!(
+            "[HOLLOW-FETCH] REJECTED push channel message in {sid}/{cid} claiming sender {sender_master} — signature present but INVALID"
+        );
+        return true;
+    }
+    false
 }
 
 /// Insert a fetched channel message row, deduplicated by message_id — the same
@@ -556,6 +615,7 @@ fn insert_channel_row(
 }
 
 /// Attempt to decrypt a single incoming WS message as a DM.
+#[allow(clippy::too_many_arguments)]
 fn try_decrypt_dm(
     from: &str,
     data: &str,
@@ -564,6 +624,10 @@ fn try_decrypt_dm(
     db_path: &str,
     db_passphrase: &str,
     local_peer_id: &str,
+    // OUR master id — the recipient half of the DM signing context. `local_peer_id`
+    // is THIS device (used only for the own-sibling self-check); the signature is
+    // over the master, so the two are distinct on a linked device.
+    local_master: &str,
 ) -> Option<FetchedDm> {
     let haven: HavenMessage = serde_json::from_str(data).ok()?;
 
@@ -608,10 +672,10 @@ fn try_decrypt_dm(
             let text = String::from_utf8_lossy(&plaintext).to_string();
             match serde_json::from_str::<MessageEnvelope>(&text) {
                 Ok(MessageEnvelope::DirectMessage { inner }) => {
-                    handle_direct_message(from, &convo, *inner, db_path, db_passphrase)
+                    handle_direct_message(from, &convo, local_master, *inner, db_path, db_passphrase)
                 }
                 Ok(MessageEnvelope::EditMessage { mid, text: new_text, ts, sig, pk, .. }) => {
-                    handle_edit_message(&convo, mid, new_text, ts, sig, pk, db_path, db_passphrase)
+                    handle_edit_message(&convo, local_master, mid, new_text, ts, sig, pk, db_path, db_passphrase)
                 }
                 Ok(MessageEnvelope::FileHeader { inner }) => {
                     handle_file_header(&convo, *inner, db_path, db_passphrase)
@@ -678,11 +742,44 @@ fn create_inbound_prekey_session(
     }
 }
 
+/// Reject a present-but-invalid signature on a push-fetched DM (or DM edit),
+/// mirroring the channel fetch paths and the four sync sites: tolerate an ABSENT
+/// signature (legacy pre-signing history), reject a PRESENT-but-INVALID one.
+///
+/// This path is inbound-only — own-sibling echoes are dropped upstream in
+/// `try_decrypt_dm` — so the signer is always the friend's MASTER (`convo`) and
+/// the recipient is our master (`local_master`), matching the live DM handler's
+/// `!is_own_device` branch. The DM is Olm-authenticated already; this is
+/// defence in depth (and keeps push consistent with live, which enforces).
+fn fetch_dm_sig_rejected(
+    convo: &str,
+    local_master: &str,
+    ts: i64,
+    text: &str,
+    sig: Option<&str>,
+    pk: Option<&str>,
+) -> bool {
+    let mut pk_cache = PkCache::new();
+    // ts already IS the edit timestamp for an edit envelope (the send side signs
+    // over it), so edited_at stays None and the payload uses ts directly.
+    let verdict = check_backfill_signature(
+        convo, "dm", local_master, ts, None, text, sig, pk, &mut pk_cache,
+    );
+    if verdict == BackfillSig::Forged {
+        hollow_log!(
+            "[HOLLOW-FETCH] REJECTED push DM from {convo} — signature present but INVALID (ts={ts})"
+        );
+        return true;
+    }
+    false
+}
+
 /// Handle a decrypted DirectMessage envelope: persist the row (dedup by
 /// message_id) and surface it for the notification.
 fn handle_direct_message(
     from: &str,
     convo: &str,
+    local_master: &str,
     inner: DirectMessagePayload,
     db_path: &str,
     db_passphrase: &str,
@@ -698,6 +795,12 @@ fn handle_direct_message(
         link_preview,
         ..
     } = inner;
+
+    // Verify against the RAW text, before the length clamp — the sender signed
+    // what they sent (see the live DM handler's ordering note).
+    if fetch_dm_sig_rejected(convo, local_master, ts, &msg_text, sig.as_deref(), pk.as_deref()) {
+        return None;
+    }
 
     let msg_text = clip_text(msg_text);
 
@@ -793,6 +896,7 @@ fn persist_direct_message(
 #[allow(clippy::too_many_arguments)]
 fn handle_edit_message(
     convo: &str,
+    local_master: &str,
     mid: String,
     new_text: String,
     ts: i64,
@@ -801,6 +905,10 @@ fn handle_edit_message(
     db_path: &str,
     db_passphrase: &str,
 ) -> Option<FetchedDm> {
+    // Reject a tampered edit before it overwrites the stored row (raw text).
+    if fetch_dm_sig_rejected(convo, local_master, ts, &new_text, sig.as_deref(), pk.as_deref()) {
+        return None;
+    }
     let new_text = clip_text(new_text);
     if let Ok(store) =
         crate::storage::MessageStore::open(db_path, db_passphrase)

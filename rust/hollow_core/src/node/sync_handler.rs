@@ -11,6 +11,7 @@ use super::crdt_store::CrdtStore;
 use super::crypto_handler::{
     peer_is_reachable, send_message_to_peer, send_mls_broadcast,
     persist_mls_state, send_encrypted_message, send_raw_to_identity, online_devices_for,
+    BackfillSig, PkCache,
 };
 use super::types::*;
 
@@ -2523,10 +2524,22 @@ pub(crate) async fn handle_envelope_channel_sync_batch(
     // auto-commit made this handler fsync hundreds of times per sync page.
     // Same pattern as its plaintext twin in swarm.rs (ChannelSyncBatch).
     let _ = store.begin_transaction();
-    let mut pk_cache: HashMap<String, Vec<u8>> = HashMap::new();
+    let mut pk_cache = PkCache::new();
     let mut new_count = 0u32;
     for msg in &messages {
-        let sig_verified = verify_sync_item_sig(msg, &sid, &cid, &mut pk_cache);
+        let sig_check = verify_sync_item_sig(msg, &sid, &cid, &mut pk_cache);
+        // SECURITY: a PRESENT-but-INVALID signature is tampering, not legacy
+        // data — drop the whole item (text, edit, file metadata, reactions and
+        // the hidden flag all ride it). Unsigned history still replicates; see
+        // `check_backfill_signature`.
+        if sig_check == BackfillSig::Forged {
+            hollow_log!(
+                "[HOLLOW-SECURITY] REJECTED synced channel message in {sid}/{cid} claiming sender {} — signature present but INVALID (mid={:?}, ts={})",
+                msg.s, msg.mid, msg.ts
+            );
+            continue;
+        }
+        let sig_verified = sig_check == BackfillSig::Valid;
         // Multi-device: a message authored by ANY of our own devices is ours.
         let is_mine = super::resolver::same_identity(&msg.s, local_peer);
         // The helpers stay synchronous and hand back the events to emit:
@@ -2563,22 +2576,20 @@ pub(crate) async fn handle_envelope_channel_sync_batch(
     }
 }
 
-/// Verify one synced item's signature (cached pubkey parse). Skips edited
-/// messages — the stored signature covers the original text.
+/// Verify one synced item's signature (cached pubkey parse) under the backfill
+/// rule: absent = tolerated legacy history, present-but-invalid = rejected.
+/// An edited row is verified against its EDIT signature (`edited_at` + current
+/// text) rather than skipped.
 fn verify_sync_item_sig(
     msg: &SyncMessageItem,
     sid: &str,
     cid: &str,
-    pk_cache: &mut HashMap<String, Vec<u8>>,
-) -> bool {
-    if msg.sig.is_none() || msg.edited_at.is_some() {
-        return false;
-    }
-    let payload = super::crypto_handler::message_signing_payload(
-        "ch", &format!("{sid}:{cid}"), &msg.s, msg.ts, &msg.t,
-    );
-    super::crypto_handler::verify_message_signature_cached(
-        &msg.s, msg.sig.as_deref(), msg.pk.as_deref(), &payload, pk_cache,
+    pk_cache: &mut PkCache,
+) -> BackfillSig {
+    super::crypto_handler::check_backfill_signature(
+        &msg.s, "ch", &format!("{sid}:{cid}"),
+        msg.ts, msg.edited_at, &msg.t,
+        msg.sig.as_deref(), msg.pk.as_deref(), pk_cache,
     )
 }
 
