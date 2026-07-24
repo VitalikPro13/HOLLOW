@@ -324,6 +324,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   MemberFfi dco_decode_member_ffi(dynamic raw);
 
   @protected
+  MessageProofV2 dco_decode_message_proof_v_2(dynamic raw);
+
+  @protected
   MutedMemberFfi dco_decode_muted_member_ffi(dynamic raw);
 
   @protected
@@ -841,6 +844,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   MemberFfi sse_decode_member_ffi(SseDeserializer deserializer);
+
+  @protected
+  MessageProofV2 sse_decode_message_proof_v_2(SseDeserializer deserializer);
 
   @protected
   MutedMemberFfi sse_decode_muted_member_ffi(SseDeserializer deserializer);
@@ -1524,6 +1530,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_member_ffi(MemberFfi self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_message_proof_v_2(
+    MessageProofV2 self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_muted_member_ffi(

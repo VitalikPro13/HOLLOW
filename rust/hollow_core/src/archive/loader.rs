@@ -5,7 +5,6 @@ use base64::Engine;
 use sha2::{Digest, Sha256};
 
 use crate::archive::types::*;
-use crate::node::{message_signing_payload, verify_message_signature};
 
 type ZipReader<'a> = zip::ZipArchive<std::io::Cursor<&'a [u8]>>;
 
@@ -261,12 +260,26 @@ fn verify_one_message(
         let context = message_signing_context(msg, manifest, is_dm, dm_peer, dm_exporter);
         // For edited messages, the main-row signature uses edited_at timestamp.
         let ts = msg.edited_at.unwrap_or(msg.timestamp);
-        let payload = message_signing_payload(msg_type, &context, &msg.sender_id, ts, &msg.text);
-        verify_message_signature(
+        // Verify-both: v2 (structured fields from the archive row) first, then
+        // legacy v1. Edit signatures bind the same full extras as originals,
+        // so the edited branch differs only in the timestamp above.
+        let extras = crate::node::crypto_handler::SignedExtras {
+            mid: Some(&msg.message_id),
+            reply_to: msg.reply_to_mid.as_deref(),
+            file_id: msg.file_id.as_deref(),
+            order_us: msg.order_us,
+            lp_digest: msg.lp_digest.as_deref(),
+        };
+        crate::node::crypto_handler::verify_message_signature_v2(
             &msg.sender_id,
             msg.signature.as_deref(),
             msg.public_key.as_deref(),
-            &payload,
+            msg_type,
+            &context,
+            ts,
+            &extras,
+            &msg.text,
+            &mut crate::node::crypto_handler::PkCache::new(),
         )
     } else {
         false

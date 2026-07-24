@@ -4,28 +4,36 @@ Source: `rust/hollow_core/src/node/message_ops.rs` (~1235 lines). All handler fu
 
 ---
 
-## Message Signing Payload Format
+## Message Signing Payload Format (VERSIONED since 0.8.3)
 
-Defined in `crypto_handler.rs:message_signing_payload()`. Canonical format:
+**v2 (current — `MSG_SIG_V2_SIGNING = true`)**, defined in `crypto_handler.rs:message_signing_payload_v2()`:
 
 ```
-hollow-msg:{msg_type}:{context}:{sender}:{ts}:{text}
+hollow-msg2:{msg_type}:{context}:{sender}:{ts}:{mid}:{reply_to}:{file_id}:{order_us}:{lp_digest}:{text}
 ```
+
+Extras ride `SignedExtras { mid, reply_to, file_id, order_us, lp_digest }` — absent `Option` ≡ empty string; `lp_digest` = `link_preview_digest()` (length-prefixed SHA-256 hex of the preview's url/title/description/domain/site_name/thumb). `text` stays LAST (only colon-bearing field). Legacy **v1** (`hollow-msg:{msg_type}:{context}:{sender}:{ts}:{text}`) is still ACCEPTED by every verifier — `verify_message_signature_v2()` tries v2 then falls back to v1 ("verify-both"). ALL sign sites go through `sign_message_versioned()`; never sign or verify v1-only.
 
 **msg_type values and their contexts:**
 
 | msg_type | context | Used by |
 |---|---|---|
-| `"dm"` | peer_id (recipient for send, local_peer for receive) | DM send + DM receive verification |
-| `"ch"` | `"{server_id}:{channel_id}"` | Channel send + channel receive verification |
+| `"dm"` | peer_id (recipient for send, local_peer for receive) | DM send/edit + DM receive verification |
+| `"ch"` | `"{server_id}:{channel_id}"` | Channel send/edit + channel receive verification |
 | `"dm-delete"` | peer_id | DM delete (prevents replay as send) |
 | `"ch-delete"` | `"{server_id}:{channel_id}"` | Channel delete (prevents replay as send) |
 
-**Reaction signing uses a different format** (not `message_signing_payload`):
+**Edit/delete signatures bind the row's FULL extras** (loaded via `RowExtras::load_dm/load_channel` from `get_*_message_sig_row`), signed over the edit/delete timestamp + new/current text. Binding the full row (not just mid) keeps the offline-queue edit rewrite (`rewrite_pending_dm_edits`) verifying and stops file_id-grafting onto edited rows in sync batches. Receivers reconstruct the same extras from THEIR row.
+
+**Reaction signing uses a different format** (not versioned, already binds mid):
 - Add: `"reaction:{mid}:{emoji}:{ts}"`
 - Remove: `"unreaction:{mid}:{emoji}:{ts}"`
+- Since 0.8.3 live ingest REQUIRES a valid reaction signature on every surface (`reaction_sig_rejected`, verified against the resolved MASTER).
 
-**Critical invariant:** Dart timestamps MUST be hydrated from Rust's signed value (the `ts` in the `MessageSent`/`ChannelMessageSent` event), not `DateTime.now()`. The signing payload embeds the timestamp, so any mismatch breaks verification.
+**Critical invariants:**
+- Dart timestamps MUST be hydrated from Rust's signed value (the `ts` in the `MessageSent`/`ChannelMessageSent` event), not `DateTime.now()`. The signing payload embeds the timestamp, so any mismatch breaks verification.
+- **`order_us` is SIGNED** — every row-creating path must persist the SENDER's wire value; `insert()`'s `ts*1000` default on `None` produces a row whose v2 signature fails when re-served through sync. Carriers: DM/MLS envelopes, `PublicChannelMessage.order_us`, `FileHeaderPayload.order_us` (inline-image sentinel rows), sync items, fetch inserts.
+- Sync items (`SyncMessageItem`/`DmSyncItem`) carry `lp_digest` (64 hex chars), never preview bytes.
 
 ---
 

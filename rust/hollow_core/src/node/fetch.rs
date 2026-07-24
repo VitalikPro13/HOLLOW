@@ -465,7 +465,8 @@ fn try_process_channel_msg(
             match serde_json::from_str::<MessageEnvelope>(&envelope_str).ok()? {
                 MessageEnvelope::ChannelMessage { inner } => {
                     let ChannelMessagePayload {
-                        sid, cid, text, ts, sig, pk, mid, reply_to, file_id, ..
+                        sid, cid, text, ts, sig, pk, mid, reply_to, file_id,
+                        link_preview, order_us,
                     } = *inner;
                     // Conference chat is live-only — it must never be persisted
                     // by a push-fetch either (mirrors the live-ingest guard).
@@ -479,8 +480,18 @@ fn try_process_channel_msg(
                     let sender_master = crate::node::resolver::resolve(&sender);
                     // Reject a present-but-invalid signature (defence in depth
                     // behind MLS group membership) — see fetch_channel_sig_rejected.
+                    let lp_digest = link_preview.as_ref()
+                        .map(crate::node::crypto_handler::link_preview_digest);
+                    let extras = crate::node::crypto_handler::SignedExtras {
+                        mid: mid.as_deref(),
+                        reply_to: reply_to.as_deref(),
+                        file_id: file_id.as_deref(),
+                        order_us,
+                        lp_digest: lp_digest.as_deref(),
+                    };
                     if fetch_channel_sig_rejected(
                         &sender_master, &sid, &cid, ts, &text, sig.as_deref(), pk.as_deref(),
+                        &extras,
                     ) {
                         return None;
                     }
@@ -488,7 +499,7 @@ fn try_process_channel_msg(
                     insert_channel_row(
                         db_path, db_passphrase, &sid, &cid, &sender_master, &text, ts,
                         sig.as_deref(), pk.as_deref(), mid.as_deref(), reply_to.as_deref(),
-                        file_id.as_deref(),
+                        file_id.as_deref(), order_us, link_preview.as_ref(),
                     );
                     Some(FetchedDm {
                         from_peer: sender_master,
@@ -506,7 +517,8 @@ fn try_process_channel_msg(
             }
         }
         HavenMessage::PublicChannelMessage {
-            server_id, channel_id, text, ts, sig, pk, mid, reply_to, file_id, ..
+            server_id, channel_id, text, ts, sig, pk, mid, reply_to, file_id,
+            link_preview, order_us,
         } => {
             // Public channels: signed plaintext. The relay-attested frame author
             // (`from`) is the sender's DEVICE id, but the message is signed by — and
@@ -519,9 +531,18 @@ fn try_process_channel_msg(
             // frame in flight, exactly the disclosure threat model. The live path
             // rejects a present-but-invalid signature; the push path must too, or
             // the tampered row is stored and never re-verified (dedup by mid).
+            let lp_digest = link_preview.as_ref()
+                .map(crate::node::crypto_handler::link_preview_digest);
+            let extras = crate::node::crypto_handler::SignedExtras {
+                mid: Some(&mid),
+                reply_to: reply_to.as_deref(),
+                file_id: file_id.as_deref(),
+                order_us,
+                lp_digest: lp_digest.as_deref(),
+            };
             if fetch_channel_sig_rejected(
                 &sender_master, &server_id, &channel_id, ts, &text,
-                sig.as_deref(), pk.as_deref(),
+                sig.as_deref(), pk.as_deref(), &extras,
             ) {
                 return None;
             }
@@ -529,7 +550,7 @@ fn try_process_channel_msg(
             insert_channel_row(
                 db_path, db_passphrase, &server_id, &channel_id, &sender_master, &text, ts,
                 sig.as_deref(), pk.as_deref(), Some(&mid), reply_to.as_deref(),
-                file_id.as_deref(),
+                file_id.as_deref(), order_us, link_preview.as_ref(),
             );
             Some(FetchedDm {
                 from_peer: sender_master,
@@ -559,6 +580,7 @@ fn try_process_channel_msg(
 /// tolerated (pre-signing history, e2cc8ab 2026-03-09), a PRESENT-but-INVALID
 /// one is rejected. `true` = reject (do not store, do not surface a notification
 /// for tampered content); the full app re-syncs the authentic copy later.
+#[allow(clippy::too_many_arguments)]
 fn fetch_channel_sig_rejected(
     sender_master: &str,
     sid: &str,
@@ -567,11 +589,12 @@ fn fetch_channel_sig_rejected(
     text: &str,
     sig: Option<&str>,
     pk: Option<&str>,
+    extras: &crate::node::crypto_handler::SignedExtras,
 ) -> bool {
     let mut pk_cache = PkCache::new();
     let verdict = check_backfill_signature(
         sender_master, "ch", &format!("{sid}:{cid}"),
-        ts, None, text, sig, pk, &mut pk_cache,
+        ts, None, extras, text, sig, pk, &mut pk_cache,
     );
     if verdict == BackfillSig::Forged {
         hollow_log!(
@@ -584,6 +607,10 @@ fn fetch_channel_sig_rejected(
 
 /// Insert a fetched channel message row, deduplicated by message_id — the same
 /// message may arrive again via channel sync when the full app opens.
+///
+/// `order_us` is the SENDER's Lamport stamp from the wire frame — persisted
+/// faithfully because the v2 signature binds it; a local `ts*1000` default
+/// would store a row whose signature fails when re-served through sync.
 #[allow(clippy::too_many_arguments)]
 fn insert_channel_row(
     db_path: &str,
@@ -598,6 +625,8 @@ fn insert_channel_row(
     mid: Option<&str>,
     reply_to: Option<&str>,
     file_id: Option<&str>,
+    order_us: Option<i64>,
+    link_preview: Option<&LinkPreviewRef>,
 ) {
     if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
         let exists = mid.map(|m| store.channel_message_exists(m)).unwrap_or(false);
@@ -606,10 +635,20 @@ fn insert_channel_row(
             server_id, channel_id, sender, mid, exists
         );
         if !exists {
-            let _ = store.insert_channel_message(
+            let inserted = store.insert_channel_message(
                 server_id, channel_id, sender, text, false, ts, sig, pk, mid,
-                reply_to, file_id, None, // push-fetch frame carries no order_us → ts*1000 default
+                reply_to, file_id, order_us,
             );
+            // Persist the preview alongside (the wire carried it; without this
+            // the fetched row rendered without its preview forever — dedup by
+            // mid means the full app never re-ingests it).
+            if let (Ok(n), Some(lp), Some(message_id)) = (inserted, link_preview, mid) {
+                if n > 0 {
+                    if let Ok(lp_json) = serde_json::to_string(lp) {
+                        let _ = store.update_channel_link_preview(message_id, &lp_json);
+                    }
+                }
+            }
         }
     }
 }
@@ -678,7 +717,7 @@ fn try_decrypt_dm(
                     handle_edit_message(&convo, local_master, mid, new_text, ts, sig, pk, db_path, db_passphrase)
                 }
                 Ok(MessageEnvelope::FileHeader { inner }) => {
-                    handle_file_header(&convo, *inner, db_path, db_passphrase)
+                    handle_file_header(&convo, local_master, *inner, db_path, db_passphrase)
                 }
                 _ => None, // Other envelope types — ignore in fetch mode.
             }
@@ -751,6 +790,7 @@ fn create_inbound_prekey_session(
 /// the recipient is our master (`local_master`), matching the live DM handler's
 /// `!is_own_device` branch. The DM is Olm-authenticated already; this is
 /// defence in depth (and keeps push consistent with live, which enforces).
+#[allow(clippy::too_many_arguments)]
 fn fetch_dm_sig_rejected(
     convo: &str,
     local_master: &str,
@@ -758,12 +798,13 @@ fn fetch_dm_sig_rejected(
     text: &str,
     sig: Option<&str>,
     pk: Option<&str>,
+    extras: &crate::node::crypto_handler::SignedExtras,
 ) -> bool {
     let mut pk_cache = PkCache::new();
     // ts already IS the edit timestamp for an edit envelope (the send side signs
     // over it), so edited_at stays None and the payload uses ts directly.
     let verdict = check_backfill_signature(
-        convo, "dm", local_master, ts, None, text, sig, pk, &mut pk_cache,
+        convo, "dm", local_master, ts, None, extras, text, sig, pk, &mut pk_cache,
     );
     if verdict == BackfillSig::Forged {
         hollow_log!(
@@ -793,12 +834,23 @@ fn handle_direct_message(
         sig,
         pk,
         link_preview,
+        order_us,
         ..
     } = inner;
 
     // Verify against the RAW text, before the length clamp — the sender signed
-    // what they sent (see the live DM handler's ordering note).
-    if fetch_dm_sig_rejected(convo, local_master, ts, &msg_text, sig.as_deref(), pk.as_deref()) {
+    // what they sent (see the live DM handler's ordering note). The v2 extras
+    // come from the same wire fields persisted below.
+    let lp_digest = link_preview.as_ref()
+        .map(crate::node::crypto_handler::link_preview_digest);
+    let extras = crate::node::crypto_handler::SignedExtras {
+        mid: mid.as_deref(),
+        reply_to: reply_to.as_deref(),
+        file_id: file_id.as_deref(),
+        order_us,
+        lp_digest: lp_digest.as_deref(),
+    };
+    if fetch_dm_sig_rejected(convo, local_master, ts, &msg_text, sig.as_deref(), pk.as_deref(), &extras) {
         return None;
     }
 
@@ -806,7 +858,7 @@ fn handle_direct_message(
 
     persist_direct_message(
         from, convo, &msg_text, ts, mid.as_deref(), reply_to.as_deref(), file_id.as_deref(),
-        sig.as_deref(), pk.as_deref(), link_preview.as_ref(), db_path, db_passphrase,
+        order_us, sig.as_deref(), pk.as_deref(), link_preview.as_ref(), db_path, db_passphrase,
     );
 
     Some(FetchedDm {
@@ -833,6 +885,9 @@ fn persist_direct_message(
     mid: Option<&str>,
     reply_to: Option<&str>,
     file_id: Option<&str>,
+    // The SENDER's Lamport stamp from the wire — persisted faithfully because
+    // the v2 signature binds it (a ts*1000 default would wedge later re-serves).
+    order_us: Option<i64>,
     sig: Option<&str>,
     pk: Option<&str>,
     link_preview: Option<&LinkPreviewRef>,
@@ -860,7 +915,7 @@ fn persist_direct_message(
                 mid,
                 reply_to,
                 file_id,
-                None, // push-fetch frame carries no order_us → ts*1000 default
+                order_us,
             );
             if let (Some(lp), Some(message_id)) = (link_preview, mid) {
                 if let Ok(lp_json) = serde_json::to_string(lp) {
@@ -906,7 +961,25 @@ fn handle_edit_message(
     db_passphrase: &str,
 ) -> Option<FetchedDm> {
     // Reject a tampered edit before it overwrites the stored row (raw text).
-    if fetch_dm_sig_rejected(convo, local_master, ts, &new_text, sig.as_deref(), pk.as_deref()) {
+    // The v2 edit signature binds the ORIGINAL row's structural fields —
+    // reconstruct them from our stored row (edit-before-original leaves no row:
+    // extras degrade to mid-only, v2+v1 fail for a v2 edit, and the edit is
+    // deferred to DM-sync — matching the live handler, which also requires the
+    // row before applying an edit).
+    let row_extras = crate::storage::MessageStore::open(db_path, db_passphrase)
+        .ok()
+        .and_then(|store| store.get_dm_message_sig_row(&mid));
+    let lp_digest = row_extras.as_ref()
+        .and_then(|r| r.link_preview.as_ref())
+        .map(crate::node::crypto_handler::link_preview_digest);
+    let extras = crate::node::crypto_handler::SignedExtras {
+        mid: Some(&mid),
+        reply_to: row_extras.as_ref().and_then(|r| r.reply_to_mid.as_deref()),
+        file_id: row_extras.as_ref().and_then(|r| r.file_id.as_deref()),
+        order_us: row_extras.as_ref().and_then(|r| r.order_us),
+        lp_digest: lp_digest.as_deref(),
+    };
+    if fetch_dm_sig_rejected(convo, local_master, ts, &new_text, sig.as_deref(), pk.as_deref(), &extras) {
         return None;
     }
     let new_text = clip_text(new_text);
@@ -949,6 +1022,7 @@ fn handle_edit_message(
 /// text DM (same mid) is what gets surfaced.
 fn handle_file_header(
     convo: &str,
+    local_master: &str,
     p: FileHeaderPayload,
     db_path: &str,
     db_passphrase: &str,
@@ -972,7 +1046,7 @@ fn handle_file_header(
                 // — otherwise the image file lands on disk with no
                 // message referencing it and renders as nothing.
                 let msg_text = format!("[file:{}]", p.fid);
-                persist_inline_image(convo, &p, &msg_text, &disk_str, db_path, db_passphrase);
+                persist_inline_image(convo, local_master, &p, &msg_text, &disk_str, db_path, db_passphrase);
                 hollow_log!(
                     "[HOLLOW-FETCH] wrote inline image {} ({} bytes) -> {}",
                     p.fid, plaintext.len(), disk_str
@@ -1018,6 +1092,7 @@ fn decrypt_inline_image(b64: &str, key_hex: &str, nonce_hex: &str) -> Option<Vec
 /// Persist the message row + file metadata for an inlined image FileHeader.
 fn persist_inline_image(
     convo: &str,
+    local_master: &str,
     p: &FileHeaderPayload,
     msg_text: &str,
     disk_str: &str,
@@ -1027,14 +1102,32 @@ fn persist_inline_image(
     if let Ok(store) =
         crate::storage::MessageStore::open(db_path, db_passphrase)
     {
-        if !p.mid.as_deref()
-            .map(|m| store.dm_message_exists(m))
-            .unwrap_or(false)
+        // SECURITY (backfill rule): the header's sig is the MESSAGE signature
+        // over the sentinel text — reject a present-but-invalid one instead of
+        // storing it. A CAPTIONED image's header legitimately fails here (the
+        // sender signed the caption); its companion caption DM creates the row.
+        // Mirrors the full-node sentinel path in swarm.rs. `order_us` from the
+        // header — the v2 signature binds the sender's Lamport stamp.
+        let extras = crate::node::crypto_handler::SignedExtras {
+            mid: p.mid.as_deref(),
+            reply_to: None,
+            file_id: Some(&p.fid),
+            order_us: p.order_us,
+            lp_digest: None,
+        };
+        let sentinel_forged = check_backfill_signature(
+            convo, "dm", local_master, p.ts, None, &extras, msg_text,
+            p.sig.as_deref(), p.pk.as_deref(), &mut PkCache::new(),
+        ) == BackfillSig::Forged;
+        if !sentinel_forged
+            && !p.mid.as_deref()
+                .map(|m| store.dm_message_exists(m))
+                .unwrap_or(false)
         {
             let _ = store.insert(
                 convo, msg_text, false, p.ts,
                 p.sig.as_deref(), p.pk.as_deref(),
-                p.mid.as_deref(), None, Some(&p.fid), None,
+                p.mid.as_deref(), None, Some(&p.fid), p.order_us,
             );
         }
         // context_id + sender_id key on the MASTER so the

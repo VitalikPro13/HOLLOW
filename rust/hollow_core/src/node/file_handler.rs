@@ -9,7 +9,6 @@ use crate::crypto::{MlsManager, OlmManager, CryptoStore};
 use crate::node::file_transfer;
 use crate::node::image_convert;
 use super::crypto_handler::{
-    message_signing_payload, sign_message,
     peer_is_reachable, ws_room_for_peer,
     send_mls_broadcast, send_mls_broadcast_topic, send_encrypted_message,
     send_message_to_peer,
@@ -468,7 +467,8 @@ pub(crate) async fn finish_send_file(
     // causing every file-message signature to fail verification.
     let (sig, pk) = sign_file_message(
         &peer_id, &server_id, &channel_id, &local_peer, timestamp,
-        &signing_payload_text, bundle_keypair, pub_key_b64,
+        &signing_payload_text, &message_id, &file_id, order_us,
+        bundle_keypair, pub_key_b64,
     );
 
     if let Some(peer_str) = peer_id {
@@ -525,8 +525,11 @@ pub(crate) async fn finish_send_file(
     }
 }
 
-/// Sign the file message with the canonical `message_signing_payload` for its
-/// context (DM = recipient, channel = "sid:cid"); no context → unsigned.
+/// Sign the file message with the canonical signing payload for its context
+/// (DM = recipient, channel = "sid:cid"); no context → unsigned. The v2
+/// signature binds mid + file_id + order_us exactly as they ride the
+/// companion DirectMessage/ChannelMessage envelope (file sends carry no
+/// reply_to and no link preview).
 #[allow(clippy::too_many_arguments)]
 fn sign_file_message(
     peer_id: &Option<String>,
@@ -535,21 +538,31 @@ fn sign_file_message(
     local_peer: &str,
     timestamp: i64,
     signing_payload_text: &str,
+    message_id: &str,
+    file_id: &str,
+    order_us: i64,
     bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     pub_key_b64: &str,
 ) -> (Option<String>, Option<String>) {
+    let extras = crate::node::crypto_handler::SignedExtras {
+        mid: Some(message_id),
+        reply_to: None,
+        file_id: Some(file_id),
+        order_us: Some(order_us),
+        lp_digest: None,
+    };
     if let Some(peer_str) = peer_id {
         // DM: context = recipient, sender = local
-        let payload = message_signing_payload(
-            "dm", peer_str, local_peer, timestamp, signing_payload_text,
-        );
-        sign_message(bundle_keypair, pub_key_b64, &payload)
+        crate::node::crypto_handler::sign_message_versioned(
+            bundle_keypair, pub_key_b64, "dm", peer_str, local_peer,
+            timestamp, &extras, signing_payload_text,
+        )
     } else if let (Some(sid), Some(cid)) = (server_id, channel_id) {
         // Channel: context = server_id:channel_id, sender = local
-        let payload = message_signing_payload(
-            "ch", &format!("{sid}:{cid}"), local_peer, timestamp, signing_payload_text,
-        );
-        sign_message(bundle_keypair, pub_key_b64, &payload)
+        crate::node::crypto_handler::sign_message_versioned(
+            bundle_keypair, pub_key_b64, "ch", &format!("{sid}:{cid}"), local_peer,
+            timestamp, &extras, signing_payload_text,
+        )
     } else {
         (None, None)
     }
@@ -683,6 +696,7 @@ fn build_dm_file_header(
             target: None,
             vthumb: msg.vthumb.clone(),
             share_ref: None,
+            order_us: Some(msg.order_us),
             inline_bytes,
         }),
     }
@@ -1219,6 +1233,7 @@ async fn send_channel_file(
             target: None,
             vthumb: vthumb.clone(),
             share_ref: share_ref.clone(),
+            order_us: Some(order_us),
             inline_bytes: None,
         }),
     };

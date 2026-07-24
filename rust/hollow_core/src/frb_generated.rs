@@ -37,7 +37,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.11.1";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 1272170364;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 301912278;
 
 // Section: executor
 
@@ -9803,6 +9803,47 @@ fn wire__crate__api__network__verify_message_proof_impl(
         },
     )
 }
+fn wire__crate__api__network__verify_message_proof_v2_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "verify_message_proof_v2",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_msg_type = <String>::sse_decode(&mut deserializer);
+            let api_context = <String>::sse_decode(&mut deserializer);
+            let api_sender_peer_id = <String>::sse_decode(&mut deserializer);
+            let api_message_id = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, String>((move || {
+                    let output_ok = crate::api::network::verify_message_proof_v2(
+                        api_msg_type,
+                        api_context,
+                        api_sender_peer_id,
+                        api_message_id,
+                    )?;
+                    Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
 fn wire__crate__api__network__voice_channel_join_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -11568,6 +11609,40 @@ impl SseDecode for crate::api::crdt::MemberFfi {
             nickname: var_nickname,
             twitch_username: var_twitchUsername,
             labels: var_labels,
+        };
+    }
+}
+
+impl SseDecode for crate::api::network::MessageProofV2 {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_hasSignature = <bool>::sse_decode(deserializer);
+        let mut var_valid = <bool>::sse_decode(deserializer);
+        let mut var_sigVersion = <i32>::sse_decode(deserializer);
+        let mut var_canonicalPayload = <String>::sse_decode(deserializer);
+        let mut var_text = <String>::sse_decode(deserializer);
+        let mut var_timestampMs = <i64>::sse_decode(deserializer);
+        let mut var_editedAt = <Option<i64>>::sse_decode(deserializer);
+        let mut var_replyTo = <Option<String>>::sse_decode(deserializer);
+        let mut var_fileId = <Option<String>>::sse_decode(deserializer);
+        let mut var_orderUs = <Option<i64>>::sse_decode(deserializer);
+        let mut var_lpDigest = <Option<String>>::sse_decode(deserializer);
+        let mut var_signatureB64 = <Option<String>>::sse_decode(deserializer);
+        let mut var_publicKeyB64 = <Option<String>>::sse_decode(deserializer);
+        return crate::api::network::MessageProofV2 {
+            has_signature: var_hasSignature,
+            valid: var_valid,
+            sig_version: var_sigVersion,
+            canonical_payload: var_canonicalPayload,
+            text: var_text,
+            timestamp_ms: var_timestampMs,
+            edited_at: var_editedAt,
+            reply_to: var_replyTo,
+            file_id: var_fileId,
+            order_us: var_orderUs,
+            lp_digest: var_lpDigest,
+            signature_b64: var_signatureB64,
+            public_key_b64: var_publicKeyB64,
         };
     }
 }
@@ -14372,67 +14447,73 @@ fn pde_ffi_dispatcher_primary_impl(
         280 => {
             wire__crate__api__network__verify_message_proof_impl(port, ptr, rust_vec_len, data_len)
         }
-        281 => {
+        281 => wire__crate__api__network__verify_message_proof_v2_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        282 => {
             wire__crate__api__network__voice_channel_join_impl(port, ptr, rust_vec_len, data_len)
         }
-        282 => {
+        283 => {
             wire__crate__api__network__voice_channel_leave_impl(port, ptr, rust_vec_len, data_len)
         }
-        283 => wire__crate__api__network__voice_channel_send_signal_impl(
+        284 => wire__crate__api__network__voice_channel_send_signal_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        284 => {
+        285 => {
             wire__crate__api__network__watch_network_events_impl(port, ptr, rust_vec_len, data_len)
         }
-        285 => wire__crate__api__network__webrtc_broadcast_received_impl(
+        286 => wire__crate__api__network__webrtc_broadcast_received_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        286 => wire__crate__api__network__webrtc_gossip_op_received_impl(
+        287 => wire__crate__api__network__webrtc_gossip_op_received_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        287 => {
+        288 => {
             wire__crate__api__network__webrtc_peer_connected_impl(port, ptr, rust_vec_len, data_len)
         }
-        288 => wire__crate__api__network__webrtc_peer_disconnected_impl(
+        289 => wire__crate__api__network__webrtc_peer_disconnected_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        289 => {
+        290 => {
             wire__crate__api__network__webrtc_ping_report_impl(port, ptr, rust_vec_len, data_len)
         }
-        290 => {
+        291 => {
             wire__crate__api__network__webrtc_route_report_impl(port, ptr, rust_vec_len, data_len)
         }
-        291 => {
+        292 => {
             wire__crate__api__network__webrtc_send_complete_impl(port, ptr, rust_vec_len, data_len)
         }
-        292 => {
+        293 => {
             wire__crate__api__network__webrtc_send_signal_impl(port, ptr, rust_vec_len, data_len)
         }
-        293 => wire__crate__api__network__webrtc_share_chunk_complete_impl(
+        294 => wire__crate__api__network__webrtc_share_chunk_complete_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        294 => wire__crate__api__network__webrtc_transfer_complete_impl(
+        295 => wire__crate__api__network__webrtc_transfer_complete_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        295 => wire__crate__api__network__webrtc_transfer_failed_impl(
+        296 => wire__crate__api__network__webrtc_transfer_failed_impl(
             port,
             ptr,
             rust_vec_len,
@@ -15131,6 +15212,38 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::crdt::MemberFfi>
     for crate::api::crdt::MemberFfi
 {
     fn into_into_dart(self) -> crate::api::crdt::MemberFfi {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::network::MessageProofV2 {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.has_signature.into_into_dart().into_dart(),
+            self.valid.into_into_dart().into_dart(),
+            self.sig_version.into_into_dart().into_dart(),
+            self.canonical_payload.into_into_dart().into_dart(),
+            self.text.into_into_dart().into_dart(),
+            self.timestamp_ms.into_into_dart().into_dart(),
+            self.edited_at.into_into_dart().into_dart(),
+            self.reply_to.into_into_dart().into_dart(),
+            self.file_id.into_into_dart().into_dart(),
+            self.order_us.into_into_dart().into_dart(),
+            self.lp_digest.into_into_dart().into_dart(),
+            self.signature_b64.into_into_dart().into_dart(),
+            self.public_key_b64.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::network::MessageProofV2
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::network::MessageProofV2>
+    for crate::api::network::MessageProofV2
+{
+    fn into_into_dart(self) -> crate::api::network::MessageProofV2 {
         self
     }
 }
@@ -17937,6 +18050,25 @@ impl SseEncode for crate::api::crdt::MemberFfi {
         <String>::sse_encode(self.nickname, serializer);
         <String>::sse_encode(self.twitch_username, serializer);
         <Vec<crate::api::crdt::LabelFfi>>::sse_encode(self.labels, serializer);
+    }
+}
+
+impl SseEncode for crate::api::network::MessageProofV2 {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.has_signature, serializer);
+        <bool>::sse_encode(self.valid, serializer);
+        <i32>::sse_encode(self.sig_version, serializer);
+        <String>::sse_encode(self.canonical_payload, serializer);
+        <String>::sse_encode(self.text, serializer);
+        <i64>::sse_encode(self.timestamp_ms, serializer);
+        <Option<i64>>::sse_encode(self.edited_at, serializer);
+        <Option<String>>::sse_encode(self.reply_to, serializer);
+        <Option<String>>::sse_encode(self.file_id, serializer);
+        <Option<i64>>::sse_encode(self.order_us, serializer);
+        <Option<String>>::sse_encode(self.lp_digest, serializer);
+        <Option<String>>::sse_encode(self.signature_b64, serializer);
+        <Option<String>>::sse_encode(self.public_key_b64, serializer);
     }
 }
 

@@ -107,6 +107,14 @@ pub(crate) struct ArchiveMessage {
     /// Channel ID — populated only in server (multi-channel) archives.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub channel_id: Option<String>,
+    /// Microsecond send stamp (0.8.3, v2 signatures) — the v2 payload binds
+    /// it, so the viewer needs it to verify. Absent in pre-0.8.3 archives
+    /// (their rows are v1-signed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order_us: Option<i64>,
+    /// Hex link-preview digest (0.8.3, v2 signatures) — same rationale.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lp_digest: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reactions: Vec<ArchiveReaction>,
 }

@@ -21,21 +21,22 @@ File: `rust/hollow_core/src/node/crypto_handler.rs`
 
 This module provides helper functions called from `swarm.rs` and other node modules. It does NOT own crypto state; it borrows `OlmManager`, `MlsManager`, `CryptoStore`, and `NativeKeypair` from the swarm's state variables.
 
-### Message Signing Payload — Canonical Format
+### Message Signing Payload — Canonical Format (VERSIONED since 0.8.3)
 
-`crypto_handler:message_signing_payload(msg_type, context, sender, ts, text) -> String`
-
-Constructs the canonical string that gets Ed25519-signed for every message. Format:
+Current (v2): `crypto_handler:message_signing_payload_v2(msg_type, context, sender, ts, &SignedExtras, text)`:
 
 ```
-hollow-msg:{type}:{context}:{sender}:{ts}:{text}
+hollow-msg2:{type}:{context}:{sender}:{ts}:{mid}:{reply_to}:{file_id}:{order_us}:{lp_digest}:{text}
 ```
+
+`SignedExtras { mid, reply_to, file_id, order_us, lp_digest }` — absent `Option` ≡ empty string; `lp_digest` = `link_preview_digest()` (length-prefixed SHA-256 hex over the preview's fields + thumb). Legacy v1 (`hollow-msg:{type}:{context}:{sender}:{ts}:{text}`, `message_signing_payload()`) remains accepted by every verifier via verify-both. Signers: `sign_message_versioned()` (picks the version by `MSG_SIG_V2_SIGNING`, now `true`). Verifiers: `verify_message_signature_v2()` (live, required) and `check_backfill_signature(... &SignedExtras ...)` (backfill: tolerate-absent / reject-invalid).
 
 Two message types:
 - **Channel messages:** `msg_type = "ch"`, `context = "{server_id}:{channel_id}"`
 - **DM messages:** `msg_type = "dm"`, `context = "{recipient_peer_id}"`
+- Deletes use `"ch-delete"` / `"dm-delete"`; edit/delete signatures bind the row's FULL extras at the edit/delete timestamp.
 
-Critical rule: Dart timestamps MUST be hydrated from Rust's signed value, not `DateTime.now()`. The payload string must be identical on both signing and verification sides.
+Critical rules: Dart timestamps MUST be hydrated from Rust's signed value, not `DateTime.now()`. The payload string must be identical on both signing and verification sides — which now includes persisting the SENDER's `order_us` on every row-creating path (never the local ts*1000 default) and carrying `lp_digest` in sync items.
 
 ### Ed25519 Signing
 

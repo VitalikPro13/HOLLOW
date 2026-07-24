@@ -5,11 +5,60 @@ use tokio::sync::mpsc;
 use crate::crypto::{CryptoStore, MlsManager, OlmManager};
 use crate::crdt::server_state::ServerState;
 use super::crypto_handler::{
-    message_signing_payload, sign_message, verify_message_signature,
+    link_preview_digest, sign_message, sign_message_versioned,
+    verify_message_signature, verify_message_signature_v2, PkCache, SignedExtras,
     peer_is_reachable, send_mls_broadcast, send_mls_broadcast_topic, send_encrypted_message,
     send_message_to_peer,
 };
 use super::types::*;
+
+/// Owned v2-signature extras loaded from an EXISTING message row. Edit and
+/// delete signatures bind the same structural fields as the original message
+/// (the row's reply_to / file_id / order_us / link preview are immutable under
+/// edit), so the SIGN sites load them from the signer's row and the live
+/// VERIFY sites reconstruct them from the receiver's row — both ends agree by
+/// construction. A missing row degrades to mid-only extras (verification then
+/// fails unless the signer also saw no row, which is the correct outcome).
+pub(crate) struct RowExtras {
+    pub text: Option<String>,
+    pub reply_to: Option<String>,
+    pub file_id: Option<String>,
+    pub order_us: Option<i64>,
+    pub lp_digest: Option<String>,
+}
+
+impl RowExtras {
+    pub(crate) fn load_channel(store: &crate::storage::MessageStore, mid: &str) -> Self {
+        Self::from_row(store.get_channel_message_sig_row(mid))
+    }
+
+    pub(crate) fn load_dm(store: &crate::storage::MessageStore, mid: &str) -> Self {
+        Self::from_row(store.get_dm_message_sig_row(mid))
+    }
+
+    fn from_row(row: Option<crate::storage::messages::MessageSigRow>) -> Self {
+        let Some(r) = row else {
+            return Self { text: None, reply_to: None, file_id: None, order_us: None, lp_digest: None };
+        };
+        Self {
+            lp_digest: r.link_preview.as_ref().map(link_preview_digest),
+            text: Some(r.text),
+            reply_to: r.reply_to_mid,
+            file_id: r.file_id,
+            order_us: r.order_us,
+        }
+    }
+
+    pub(crate) fn as_signed<'a>(&'a self, mid: &'a str) -> SignedExtras<'a> {
+        SignedExtras {
+            mid: Some(mid),
+            reply_to: self.reply_to.as_deref(),
+            file_id: self.file_id.as_deref(),
+            order_us: self.order_us,
+            lp_digest: self.lp_digest.as_deref(),
+        }
+    }
+}
 
 // ── 1. SendMessage (DM) ──────────────────────────────────────────────
 
@@ -47,10 +96,21 @@ pub(crate) async fn handle_send_message(
     // it's carried over the wire + persisted for same-ms burst ordering).
     let dm_order_us = crate::chat_clock::next_send_stamp_us();
     let dm_timestamp = dm_order_us / 1000;
-    let signing_payload = message_signing_payload(
-        "dm", &peer_id_str, &local_peer, dm_timestamp, &text,
+    // v2 signature binds the structured fields exactly as they ride the wire
+    // envelope below — the receiver reconstructs these extras from the same
+    // envelope fields it persists.
+    let lp_digest = link_preview.as_ref().map(link_preview_digest);
+    let extras = SignedExtras {
+        mid: Some(&message_id),
+        reply_to: reply_to_mid.as_deref(),
+        file_id: None,
+        order_us: Some(dm_order_us),
+        lp_digest: lp_digest.as_deref(),
+    };
+    let (sig, pk) = sign_message_versioned(
+        bundle_keypair, pub_key_b64, "dm", &peer_id_str, &local_peer,
+        dm_timestamp, &extras, &text,
     );
-    let (sig, pk) = sign_message(bundle_keypair, pub_key_b64, &signing_payload);
     let recipient_master = super::resolver::resolve(&peer_id_str);
     let build_dm = |convo: Option<String>| MessageEnvelope::DirectMessage {
         inner: Box::new(DirectMessagePayload {
@@ -632,12 +692,22 @@ pub(crate) async fn handle_send_channel_message(
     let order_us = crate::chat_clock::next_send_stamp_us();
     let timestamp = order_us / 1000;
 
-    // Sign the message before encryption.
-    let signing_payload = message_signing_payload(
-        "ch", &format!("{}:{}", server_id, channel_id),
-        &local_peer, timestamp, &text,
+    // Sign the message before encryption. The v2 signature binds the
+    // structured fields as they ride BOTH wire forms below (the MLS envelope
+    // and the public-channel plaintext both carry mid/reply_to/link_preview/
+    // order_us — PublicChannelMessage gained order_us in 0.8.3 for this).
+    let lp_digest = link_preview.as_ref().map(link_preview_digest);
+    let extras = SignedExtras {
+        mid: Some(&message_id),
+        reply_to: reply_to_mid.as_deref(),
+        file_id: None,
+        order_us: Some(order_us),
+        lp_digest: lp_digest.as_deref(),
+    };
+    let (sig, pk) = sign_message_versioned(
+        bundle_keypair, pub_key_b64, "ch", &format!("{}:{}", server_id, channel_id),
+        &local_peer, timestamp, &extras, &text,
     );
-    let (sig, pk) = sign_message(bundle_keypair, pub_key_b64, &signing_payload);
 
     // Mention metadata — shared by the notification hint and the offline push
     // fan-out below.
@@ -662,6 +732,7 @@ pub(crate) async fn handle_send_channel_message(
             reply_to: reply_to_mid.clone(),
             file_id: None,
             link_preview: link_preview.clone(),
+            order_us: Some(order_us),
         };
         send_public_channel_msg(ws_cmd_tx, &server_id, &msg)
     } else {
@@ -1148,21 +1219,20 @@ pub(crate) async fn handle_edit_channel_message(
         .unwrap_or_default()
         .as_millis() as i64;
 
-    // Sign the edit using the canonical payload format so
-    // the Dart verifier (which reconstructs from the current
-    // message state) can verify edited messages.
-    let signing_payload = message_signing_payload(
-        "ch",
-        &format!("{}:{}", server_id, channel_id),
-        &local_peer,
-        edit_timestamp,
-        &new_text,
-    );
-    let (sig, pk) = sign_message(bundle_keypair, pub_key_b64, &signing_payload);
-
-    // Update local DB (preserves old text in message_edits table).
+    // Sign the edit over the EDIT timestamp + new text, binding the row's
+    // structural fields (v2) so receivers verify against the same extras
+    // their own row carries. Update local DB in the same open (preserves old
+    // text in message_edits table).
+    let mut sig = None;
+    let mut pk = None;
     {
         if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+            let row = RowExtras::load_channel(&store, &message_id);
+            (sig, pk) = sign_message_versioned(
+                bundle_keypair, pub_key_b64, "ch",
+                &format!("{}:{}", server_id, channel_id),
+                &local_peer, edit_timestamp, &row.as_signed(&message_id), &new_text,
+            );
             let _ = store.edit_channel_message(
                 &message_id, &new_text, edit_timestamp,
                 sig.as_deref(), pk.as_deref(),
@@ -1237,21 +1307,21 @@ pub(crate) async fn handle_edit_dm_message(
         .unwrap_or_default()
         .as_millis() as i64;
 
-    // Sign the edit using the canonical payload format so
-    // the Dart verifier (which reconstructs from the current
-    // message state) can verify edited messages.
-    let signing_payload = message_signing_payload(
-        "dm",
-        &peer_id_str,
-        &local_peer,
-        edit_timestamp,
-        &new_text,
-    );
-    let (sig, pk) = sign_message(bundle_keypair, pub_key_b64, &signing_payload);
-
-    // Update local DB.
+    // Sign the edit over the EDIT timestamp + new text, binding the row's
+    // structural fields (v2) — see the channel-edit twin above. Binding the
+    // full row (not just mid) is what keeps `rewrite_pending_dm_edits`
+    // verifying: the queued DirectMessage envelope keeps the original
+    // mid/reply_to/order_us/link_preview, and the receiver verifies THIS edit
+    // signature against exactly those wire fields.
+    let mut sig = None;
+    let mut pk = None;
     {
         if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+            let row = RowExtras::load_dm(&store, &message_id);
+            (sig, pk) = sign_message_versioned(
+                bundle_keypair, pub_key_b64, "dm", &peer_id_str,
+                &local_peer, edit_timestamp, &row.as_signed(&message_id), &new_text,
+            );
             let _ = store.edit_dm_message(
                 &message_id, &new_text, edit_timestamp,
                 sig.as_deref(), pk.as_deref(),
@@ -1395,29 +1465,24 @@ pub(crate) async fn handle_delete_channel_message(
         .unwrap_or_default()
         .as_millis() as i64;
 
-    // Sign the deletion using the canonical payload format
-    // with the text at deletion time. Uses "ch-delete" msg
-    // type so a delete signature cannot be confused with or
-    // replayed as a send signature. Fetches current text
-    // from DB so the archive viewer (later) can verify the
-    // delete against the same state the exporter saw.
-    let current_text = crate::storage::MessageStore::open(db_path, db_passphrase)
-        .ok()
-        .and_then(|store| store.get_channel_message_text(&message_id))
-        .unwrap_or_default();
-
-    let signing_payload = message_signing_payload(
-        "ch-delete",
-        &format!("{}:{}", server_id, channel_id),
-        &local_peer,
-        delete_timestamp,
-        &current_text,
-    );
-    let (sig, pk) = sign_message(bundle_keypair, pub_key_b64, &signing_payload);
-
-    // Hide in local DB (preserves text in message_deletions table).
+    // Sign the deletion with the text at deletion time. Uses "ch-delete" msg
+    // type so a delete signature cannot be confused with or replayed as a
+    // send signature; v2 additionally binds the row's structural fields (mid
+    // included — a v1 delete signature was replayable onto any same-text
+    // message in the same channel). Text from DB so the archive viewer can
+    // verify the delete against the same state the exporter saw.
+    let mut sig = None;
+    let mut pk = None;
     {
         if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+            let row = RowExtras::load_channel(&store, &message_id);
+            let current_text = row.text.clone().unwrap_or_default();
+            (sig, pk) = sign_message_versioned(
+                bundle_keypair, pub_key_b64, "ch-delete",
+                &format!("{}:{}", server_id, channel_id),
+                &local_peer, delete_timestamp, &row.as_signed(&message_id), &current_text,
+            );
+            // Hide in local DB (preserves text in message_deletions table).
             let _ = store.hide_channel_message(
                 &message_id, delete_timestamp,
                 sig.as_deref(), pk.as_deref(),
@@ -1487,26 +1552,20 @@ pub(crate) async fn handle_delete_dm_message(
         .unwrap_or_default()
         .as_millis() as i64;
 
-    // Sign the deletion using the canonical payload format
-    // with the text at deletion time. Uses "dm-delete" msg
-    // type — distinct from "dm" to prevent replay.
-    let current_text = crate::storage::MessageStore::open(db_path, db_passphrase)
-        .ok()
-        .and_then(|store| store.get_dm_message_text(&message_id))
-        .unwrap_or_default();
-
-    let signing_payload = message_signing_payload(
-        "dm-delete",
-        &peer_id_str,
-        &local_peer,
-        delete_timestamp,
-        &current_text,
-    );
-    let (sig, pk) = sign_message(bundle_keypair, pub_key_b64, &signing_payload);
-
-    // Hide in local DB.
+    // Sign the deletion with the text at deletion time. "dm-delete" msg type —
+    // distinct from "dm" to prevent replay; v2 additionally binds the row's
+    // structural fields (see the channel-delete twin above).
+    let mut sig = None;
+    let mut pk = None;
     {
         if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+            let row = RowExtras::load_dm(&store, &message_id);
+            let current_text = row.text.clone().unwrap_or_default();
+            (sig, pk) = sign_message_versioned(
+                bundle_keypair, pub_key_b64, "dm-delete", &peer_id_str,
+                &local_peer, delete_timestamp, &row.as_signed(&message_id), &current_text,
+            );
+            // Hide in local DB.
             let _ = store.hide_dm_message(
                 &message_id, delete_timestamp,
                 sig.as_deref(), pk.as_deref(),
@@ -1915,8 +1974,19 @@ pub(crate) async fn handle_envelope_channel_message(
     // SECURITY: a missing OR invalid signature is rejected — mirrors the direct
     // (non-MLS) twin in swarm.rs. Covers both callers: MLS-decrypted private
     // channels and plaintext PUBLIC channels, where this is the only authorship
-    // binding there is.
-    if channel_sig_rejected(&sender_peer_id, &sid, &cid, ts, &text, sig.as_deref(), pk.as_deref()) {
+    // binding there is. The v2 extras come from the same wire fields persisted
+    // below, so what verifies is exactly what gets stored.
+    let lp_digest = link_preview.as_ref().map(link_preview_digest);
+    let extras = SignedExtras {
+        mid: mid.as_deref(),
+        reply_to: reply_to.as_deref(),
+        file_id: file_id.as_deref(),
+        order_us,
+        lp_digest: lp_digest.as_deref(),
+    };
+    if channel_sig_rejected(
+        &sender_peer_id, &sid, &cid, ts, &text, sig.as_deref(), pk.as_deref(), &extras,
+    ) {
         return;
     }
 
@@ -1981,6 +2051,7 @@ pub(crate) async fn handle_envelope_channel_message(
 /// deliberately still tolerates unsigned rows, so history predating per-message
 /// signing (e2cc8ab, 2026-03-09) keeps replicating instead of diverging between
 /// peers. Same live-enforce / backfill-tolerate split the moderation trio uses.
+#[allow(clippy::too_many_arguments)]
 fn channel_sig_rejected(
     sender_peer_id: &str,
     sid: &str,
@@ -1989,12 +2060,13 @@ fn channel_sig_rejected(
     text: &str,
     sig: Option<&str>,
     pk: Option<&str>,
+    extras: &SignedExtras,
 ) -> bool {
-    let signing_payload = message_signing_payload(
-        "ch", &format!("{}:{}", sid, cid),
-        sender_peer_id, ts, text,
-    );
-    if !verify_message_signature(sender_peer_id, sig, pk, &signing_payload) {
+    // Verify-both (v2 with the wire's structured fields, then legacy v1).
+    if !verify_message_signature_v2(
+        sender_peer_id, sig, pk, "ch", &format!("{}:{}", sid, cid),
+        ts, extras, text, &mut PkCache::new(),
+    ) {
         hollow_log!(
             "[HOLLOW-SECURITY] REJECTED ChannelMessage (MLS) from {sender_peer_id} — signature verification FAILED"
         );
@@ -2146,6 +2218,22 @@ pub(crate) async fn handle_envelope_edit_message(
     if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
         let sender = store.get_channel_message_sender(&mid);
         if sender.as_deref() == Some(peer_str) {
+            // SECURITY: a LIVE edit must carry a signature that verifies —
+            // the row-ownership check above trusts the transport-reported
+            // sender, which on plaintext PUBLIC channels is relay-controlled.
+            // The extras come from OUR row (immutable under edit), matching
+            // what the editor's row-loaded signature bound.
+            let ctx = format!(
+                "{}:{}", sid.as_deref().unwrap_or_default(), cid.as_deref().unwrap_or_default(),
+            );
+            let row = RowExtras::load_channel(&store, &mid);
+            if !verify_message_signature_v2(
+                peer_str, sig.as_deref(), pk.as_deref(), "ch", &ctx,
+                ts, &row.as_signed(&mid), &new_text, &mut PkCache::new(),
+            ) {
+                hollow_log!("[HOLLOW-SECURITY] REJECTED channel edit of {mid} from {peer_str} — signature verification FAILED");
+                return;
+            }
             let _ = store.edit_channel_message(
                 &mid, &new_text, ts,
                 sig.as_deref(), pk.as_deref(),
@@ -2192,6 +2280,24 @@ pub(crate) async fn handle_envelope_delete_message(
             hollow_log!("[HOLLOW-SECURITY] REJECTED MLS DeleteMessage from {sender_peer_id} — not the sender of {mid}");
             return;
         }
+        // SECURITY: a LIVE delete must carry a signature that verifies — on
+        // plaintext PUBLIC channels the transport-reported sender is
+        // relay-controlled, and an unauthenticated delete is a censorship
+        // primitive. The deleter signed over OUR row's current text + extras
+        // ("ch-delete" payload); a receiver whose text lags (missed edit)
+        // rejects here and converges via sync's hidden_at instead.
+        let ctx = format!(
+            "{}:{}", sid.as_deref().unwrap_or_default(), cid.as_deref().unwrap_or_default(),
+        );
+        let row = RowExtras::load_channel(&store, &mid);
+        let current_text = row.text.clone().unwrap_or_default();
+        if !verify_message_signature_v2(
+            sender_peer_id, sig.as_deref(), pk.as_deref(), "ch-delete", &ctx,
+            ts, &row.as_signed(&mid), &current_text, &mut PkCache::new(),
+        ) {
+            hollow_log!("[HOLLOW-SECURITY] REJECTED channel delete of {mid} from {sender_peer_id} — signature verification FAILED");
+            return;
+        }
         let _ = store.hide_channel_message(
             &mid, ts,
             sig.as_deref(), pk.as_deref(),
@@ -2236,6 +2342,14 @@ pub(crate) async fn handle_envelope_add_reaction(
     if live_muted_ingest_drop(server_state, peer_str, "reaction") {
         return;
     }
+    // SECURITY: a LIVE reaction must carry a signature that verifies — on
+    // plaintext PUBLIC channels the transport-reported reactor is
+    // relay-controlled, so an unsigned reaction is attributable to anyone.
+    // The reaction payload has its own grammar (binds mid+emoji+ts already);
+    // no v2 needed.
+    if reaction_sig_rejected(peer_str, "reaction", &mid, &emoji, ts, sig.as_deref(), pk.as_deref()) {
+        return;
+    }
     if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
         let _ = store.add_reaction(
             &mid, &emoji, peer_str, ts,
@@ -2254,6 +2368,31 @@ pub(crate) async fn handle_envelope_add_reaction(
     }
 }
 
+/// SECURITY: true = drop this LIVE reaction add/remove — signature missing or
+/// invalid. Reactions sign their own canonical payload
+/// (`{kind}:{mid}:{emoji}:{ts}`, kind = "reaction" | "unreaction"), which
+/// already binds the message id, so a valid signature cannot be replayed onto
+/// another message or emoji. Live ingest only; reactions riding sync batches
+/// are covered by the item-level backfill rule.
+pub(crate) fn reaction_sig_rejected(
+    reactor: &str,
+    kind: &str,
+    mid: &str,
+    emoji: &str,
+    ts: i64,
+    sig: Option<&str>,
+    pk: Option<&str>,
+) -> bool {
+    let payload = format!("{kind}:{mid}:{emoji}:{ts}");
+    if !verify_message_signature(reactor, sig, pk, &payload) {
+        hollow_log!(
+            "[HOLLOW-SECURITY] REJECTED {kind} on {mid} claiming reactor {reactor} — signature verification FAILED"
+        );
+        return true;
+    }
+    false
+}
+
 /// Handle `MessageEnvelope::RemoveReaction` (MLS-decrypted path).
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_envelope_remove_reaction(
@@ -2270,6 +2409,10 @@ pub(crate) async fn handle_envelope_remove_reaction(
     db_path: &str,
     db_passphrase: &str,
 ) {
+    // SECURITY: same rule as the add path — see `reaction_sig_rejected`.
+    if reaction_sig_rejected(peer_str, "unreaction", &mid, &emoji, ts, sig.as_deref(), pk.as_deref()) {
+        return;
+    }
     if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
         let _ = store.remove_reaction(
             &mid, &emoji, peer_str, ts,

@@ -248,6 +248,9 @@ fn dm_target_data(
                 reply_to_mid: m.reply_to_mid,
                 file_id: m.file_id,
                 channel_id: None,
+                order_us: m.order_us,
+                lp_digest: m.link_preview.as_ref()
+                    .map(crate::node::crypto_handler::link_preview_digest),
                 reactions: Vec::new(),
             }
         })
@@ -290,6 +293,9 @@ fn channel_target_data(
                 reply_to_mid: m.reply_to_mid,
                 file_id: m.file_id,
                 channel_id: None,
+                order_us: m.order_us,
+                lp_digest: m.link_preview.as_ref()
+                    .map(crate::node::crypto_handler::link_preview_digest),
                 reactions: Vec::new(),
             }
         })
@@ -334,6 +340,9 @@ fn server_target_data(
                 reply_to_mid: m.reply_to_mid,
                 file_id: m.file_id,
                 channel_id: Some(ch_id.clone()),
+                order_us: m.order_us,
+                lp_digest: m.link_preview.as_ref()
+                    .map(crate::node::crypto_handler::link_preview_digest),
                 reactions: Vec::new(),
             });
         }

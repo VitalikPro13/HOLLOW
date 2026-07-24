@@ -181,6 +181,30 @@ Future<bool> verifyMessageProof({
   canonicalPayload: canonicalPayload,
 );
 
+/// Versioned (v2 → v1 fallback) verification for the Message Proof dialog.
+///
+/// The v2 payload binds the message's structured fields (mid / reply_to /
+/// file_id / order_us / link-preview digest), which live in the DB row — so
+/// this loads the row by `message_id` and builds the canonical payload in
+/// RUST, keeping the grammar single-sourced instead of mirroring it in Dart.
+/// An EDITED row verifies against its edit signature (edited_at + current
+/// text), same rule as every other verifier.
+///
+/// - `msg_type`: "dm" | "ch"
+/// - `context`: recipient MASTER peer_id for DMs, "server_id:channel_id" for
+///   channels (same values the v1 dialog already computes).
+Future<MessageProofV2> verifyMessageProofV2({
+  required String msgType,
+  required String context,
+  required String senderPeerId,
+  required String messageId,
+}) => RustLib.instance.api.crateApiNetworkVerifyMessageProofV2(
+  msgType: msgType,
+  context: context,
+  senderPeerId: senderPeerId,
+  messageId: messageId,
+);
+
 /// Fetch OpenGraph metadata for a URL and return a link preview the sender
 /// can embed in their next outgoing message. Runs on the shared Tokio
 /// runtime. Fails silently at every step — the caller should treat errors
@@ -1089,6 +1113,83 @@ class LinkPreviewRef {
           thumbWebpB64 == other.thumbWebpB64 &&
           thumbW == other.thumbW &&
           thumbH == other.thumbH;
+}
+
+/// Result of a versioned Message Proof verification — see
+/// [`verify_message_proof_v2`].
+class MessageProofV2 {
+  final bool hasSignature;
+  final bool valid;
+
+  /// 2 = verified against the v2 payload (structured fields covered),
+  /// 1 = legacy v1 (text only), 0 = did not verify.
+  final int sigVersion;
+
+  /// The canonical payload string that verified (the v2 candidate when the
+  /// signature is missing/invalid) — displayed and exported by the dialog.
+  final String canonicalPayload;
+
+  /// The row's signed fields, for the exported proof JSON.
+  final String text;
+  final PlatformInt64 timestampMs;
+  final PlatformInt64? editedAt;
+  final String? replyTo;
+  final String? fileId;
+  final PlatformInt64? orderUs;
+  final String? lpDigest;
+  final String? signatureB64;
+  final String? publicKeyB64;
+
+  const MessageProofV2({
+    required this.hasSignature,
+    required this.valid,
+    required this.sigVersion,
+    required this.canonicalPayload,
+    required this.text,
+    required this.timestampMs,
+    this.editedAt,
+    this.replyTo,
+    this.fileId,
+    this.orderUs,
+    this.lpDigest,
+    this.signatureB64,
+    this.publicKeyB64,
+  });
+
+  @override
+  int get hashCode =>
+      hasSignature.hashCode ^
+      valid.hashCode ^
+      sigVersion.hashCode ^
+      canonicalPayload.hashCode ^
+      text.hashCode ^
+      timestampMs.hashCode ^
+      editedAt.hashCode ^
+      replyTo.hashCode ^
+      fileId.hashCode ^
+      orderUs.hashCode ^
+      lpDigest.hashCode ^
+      signatureB64.hashCode ^
+      publicKeyB64.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is MessageProofV2 &&
+          runtimeType == other.runtimeType &&
+          hasSignature == other.hasSignature &&
+          valid == other.valid &&
+          sigVersion == other.sigVersion &&
+          canonicalPayload == other.canonicalPayload &&
+          text == other.text &&
+          timestampMs == other.timestampMs &&
+          editedAt == other.editedAt &&
+          replyTo == other.replyTo &&
+          fileId == other.fileId &&
+          orderUs == other.orderUs &&
+          lpDigest == other.lpDigest &&
+          signatureB64 == other.signatureB64 &&
+          publicKeyB64 == other.publicKeyB64;
 }
 
 @freezed

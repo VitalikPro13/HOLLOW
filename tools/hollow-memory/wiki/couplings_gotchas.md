@@ -308,18 +308,19 @@ Additionally, `handle_send_file()` skips writing ciphertext to temp file and ski
 
 ## Message Signing Gotchas
 
-### Canonical signing payload must be used at ALL signing sites
+### Canonical signing payload must be used at ALL signing sites (v2 since 0.8.3)
 
-**Rule:** All message signing MUST use `crypto_handler::message_signing_payload(msg_type, context, sender, ts, text)` to construct the payload string. The format is `hollow-msg:{type}:{context}:{sender}:{ts}:{text}`.
+**Rule:** All message signing MUST go through `crypto_handler::sign_message_versioned(..., &SignedExtras, text)` and all verification through `verify_message_signature_v2` / `check_backfill_signature` (verify-both: v2 `hollow-msg2:{type}:{context}:{sender}:{ts}:{mid}:{reply_to}:{file_id}:{order_us}:{lp_digest}:{text}` first, legacy v1 `hollow-msg:{type}:{context}:{sender}:{ts}:{text}` fallback). Never sign or verify v1-only.
 
-**Why:** The verification side reconstructs the same payload and checks the signature against it. If any signing site constructs the payload differently (different field order, missing fields, different separator), verification fails. Failed verification means the message shows as UNVERIFIED in the UI's Message Proof dialog.
+**Why:** The verification side reconstructs the same payload — including the structured extras, from the same wire/row fields it persists — and checks the signature against it. Any signing site that constructs the payload differently, or any carrier path that LOSES an extras field (order_us defaulted to ts*1000, lp_digest missing from a sync item), makes verification fail: the message shows UNVERIFIED at best, and sync backfill DROPS it as Forged at worst.
 
 **Where:**
-- `rust/hollow_core/src/node/message_ops.rs:handle_send_message()` -- DM signing (type="dm", context=peer_id)
+- `rust/hollow_core/src/node/message_ops.rs:handle_send_message()` -- DM signing (type="dm", context=peer_id, extras from the wire envelope)
 - `rust/hollow_core/src/node/message_ops.rs:handle_send_channel_message()` -- channel signing (type="ch", context="sid:cid")
-- `rust/hollow_core/src/node/file_handler.rs:handle_send_file()` -- file message signing
-- Delete message signing uses `"dm-delete"` and `"ch-delete"` types to prevent replay
-- Reaction signing uses a DIFFERENT format: `"reaction:{mid}:{emoji}:{ts}"` / `"unreaction:{mid}:{emoji}:{ts}"`
+- `rust/hollow_core/src/node/file_handler.rs:sign_file_message()` -- file message signing (extras: mid + file_id + order_us)
+- Edit/delete signing binds the row's FULL extras (`RowExtras::load_*`); deletes use `"dm-delete"` / `"ch-delete"` types to prevent replay
+- Reaction signing uses a DIFFERENT format: `"reaction:{mid}:{emoji}:{ts}"` / `"unreaction:{mid}:{emoji}:{ts}"` — live-REQUIRED since 0.8.3 (`reaction_sig_rejected`)
+- Message Proof: `verify_message_proof_v2` FFI builds the payload in Rust from the DB row; only `verify_proof_section.dart` (external proof files) mirrors the grammar in Dart
 
 ### Dart timestamps must be hydrated from Rust's signed value
 

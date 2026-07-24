@@ -77,6 +77,21 @@ pub(crate) struct StoredChannelMessage {
     pub order_us: Option<i64>,
 }
 
+/// One message row's signature-relevant fields (v2 message signing) — see
+/// [`MessageStore::get_dm_message_sig_row`]. Not a display row: only what a
+/// signer/verifier needs to build the canonical payload.
+pub(crate) struct MessageSigRow {
+    pub text: String,
+    pub timestamp: i64,
+    pub signature: Option<String>,
+    pub public_key: Option<String>,
+    pub edited_at: Option<i64>,
+    pub reply_to_mid: Option<String>,
+    pub file_id: Option<String>,
+    pub order_us: Option<i64>,
+    pub link_preview: Option<crate::node::LinkPreviewRef>,
+}
+
 /// A stored file metadata entry.
 pub(crate) struct StoredFile {
     pub file_id: String,
@@ -2600,6 +2615,49 @@ impl MessageStore {
                 |row| row.get(0),
             )
             .ok()
+    }
+
+    /// One message row's signature-relevant fields (v2 message signing).
+    /// Loaded by the edit/delete SIGN sites (the edit signature binds the
+    /// row's structural fields), the live edit/delete VERIFY sites (the
+    /// receiver reconstructs the same extras from ITS row), and the Message
+    /// Proof FFI.
+    fn message_sig_row(&self, table: &str, message_id: &str) -> Option<MessageSigRow> {
+        self.conn
+            .query_row(
+                &format!(
+                    "SELECT text, timestamp, signature, public_key, edited_at, \
+                     reply_to_mid, file_id, order_us, link_preview_json \
+                     FROM {table} WHERE message_id = ?1"
+                ),
+                params![message_id],
+                |row| {
+                    Ok(MessageSigRow {
+                        text: row.get(0)?,
+                        timestamp: row.get(1)?,
+                        signature: row.get(2)?,
+                        public_key: row.get(3)?,
+                        edited_at: row.get(4)?,
+                        reply_to_mid: row.get(5)?,
+                        file_id: row.get(6)?,
+                        order_us: row.get(7)?,
+                        link_preview: row
+                            .get::<_, Option<String>>(8)?
+                            .and_then(|json| serde_json::from_str(&json).ok()),
+                    })
+                },
+            )
+            .ok()
+    }
+
+    /// [`Self::message_sig_row`] for the DM `messages` table.
+    pub fn get_dm_message_sig_row(&self, message_id: &str) -> Option<MessageSigRow> {
+        self.message_sig_row("messages", message_id)
+    }
+
+    /// [`Self::message_sig_row`] for the `channel_messages` table.
+    pub fn get_channel_message_sig_row(&self, message_id: &str) -> Option<MessageSigRow> {
+        self.message_sig_row("channel_messages", message_id)
     }
 
     pub fn set_channel_message_edited_at(&self, message_id: &str, edited_at: i64) -> Result<(), String> {

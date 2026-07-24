@@ -119,6 +119,10 @@ class _MessageProofDialogContentState
     extends State<_MessageProofDialogContent>
     with SingleTickerProviderStateMixin {
   bool? _verified;
+
+  /// Versioned verification result (v2 → v1 fallback), when the message has a
+  /// message_id to load the row by. Null = legacy payload-string verification.
+  network_api.MessageProofV2? _v2;
   late final AnimationController _staggerController;
   late final List<Animation<double>> _fadeAnims;
   late final List<Animation<Offset>> _slideAnims;
@@ -174,6 +178,30 @@ class _MessageProofDialogContentState
 
   Future<void> _verifySignature() async {
     if (proof.signature == null || proof.publicKey == null) return;
+    // Versioned path (0.8.3): Rust loads the row by message_id, builds the
+    // canonical payload (v2 binds mid/reply_to/file_id/order_us/link-preview
+    // digest) and verifies-both — the grammar stays single-sourced in Rust.
+    final mid = proof.messageId;
+    if (mid != null && mid.isNotEmpty) {
+      try {
+        final r = await network_api.verifyMessageProofV2(
+          msgType: proof.msgType,
+          context: proof.context,
+          senderPeerId: proof.senderPeerId,
+          messageId: mid,
+        );
+        if (mounted) {
+          setState(() {
+            _v2 = r;
+            _verified = r.valid;
+          });
+        }
+        return;
+      } catch (_) {
+        // Row not found (e.g. legacy list entry) — fall through to the
+        // payload-string path below.
+      }
+    }
     try {
       final result = await network_api.verifyMessageProof(
         senderPeerId: proof.senderPeerId,
@@ -187,8 +215,57 @@ class _MessageProofDialogContentState
     }
   }
 
-  String _proofJsonString() =>
-      const JsonEncoder.withIndent('  ').convert(proof.toProofJson());
+  /// Exported proof JSON. A v2-verified message exports the v2 envelope (its
+  /// signature covers the structured fields); everything else keeps the exact
+  /// legacy v1 format so existing external verifiers stay compatible.
+  String _proofJsonString() {
+    final v2 = _v2;
+    final Map<String, dynamic> body;
+    if (v2 != null && v2.sigVersion == 2) {
+      body = {
+        'version': 2,
+        'protocol': 'hollow-proof-v2',
+        'message': {
+          'text': v2.text,
+          // The SIGNED timestamp: edited_at for an edited message.
+          'timestamp_ms': v2.timestampMs,
+          'message_id': proof.messageId,
+          if (v2.editedAt != null) 'edited_at': v2.editedAt,
+          if (v2.replyTo != null) 'reply_to': v2.replyTo,
+          if (v2.fileId != null) 'file_id': v2.fileId,
+          if (v2.orderUs != null) 'order_us': v2.orderUs,
+          if (v2.lpDigest != null) 'link_preview_digest': v2.lpDigest,
+        },
+        'sender': {
+          'peer_id': proof.senderPeerId,
+          'public_key_base64': v2.publicKeyB64,
+        },
+        'context': {
+          'type': proof.msgType == 'dm' ? 'direct_message' : 'channel',
+          'id': proof.context,
+        },
+        'signature': {
+          'algorithm': 'Ed25519',
+          'payload_version': 2,
+          'canonical_payload': v2.canonicalPayload,
+          'signature_base64': v2.signatureB64,
+        },
+        'verification': {
+          'instructions': [
+            '1. Base64-decode the public_key to get the protobuf-wrapped Ed25519 pubkey (36 bytes: header 08 01 12 20 + 32-byte key)',
+            '2. Extract the raw 32-byte Ed25519 public key (bytes 4..36)',
+            '3. Base64-decode the signature to get the 64-byte Ed25519 signature',
+            '4. Rebuild the payload: hollow-msg2:{type}:{context}:{sender}:{timestamp_ms}:{message_id}:{reply_to}:{file_id}:{order_us}:{link_preview_digest}:{text} (absent fields = empty string) and check it equals canonical_payload',
+            '5. Verify: Ed25519_verify(public_key, signature, canonical_payload.as_bytes())',
+            '6. Derive PeerId: Identity-multihash(protobuf_pubkey) -> Base58btc -> must match sender.peer_id',
+          ],
+        },
+      };
+    } else {
+      body = proof.toProofJson();
+    }
+    return const JsonEncoder.withIndent('  ').convert(body);
+  }
 
   Future<void> _exportProofFile(BuildContext context) async {
     final json = _proofJsonString();

@@ -1162,19 +1162,28 @@ When two peers simultaneously attempt to establish a connection, the **polite-pe
 
 ### 15.1 Canonical Signing Payload
 
-Every message carries an Ed25519 signature over a canonical string:
+Every message carries an Ed25519 signature over a canonical string. Since 0.8.3 the signature covers the whole message structure (payload v2):
 
 ```
-hollow-msg:{type}:{context}:{sender}:{timestamp_ms}:{text}
+hollow-msg2:{type}:{context}:{sender}:{timestamp_ms}:{message_id}:{reply_to}:{file_id}:{order_us}:{lp_digest}:{text}
 ```
 
 | Field | Value |
 |-------|-------|
-| type | `"ch"` (channel) or `"dm"` (direct message) |
+| type | `"ch"` (channel) or `"dm"` (direct message); edits reuse the base type, deletions use `"ch-delete"` / `"dm-delete"` |
 | context | `"{server_id}:{channel_id}"` for channels; `"{recipient_peer_id}"` for DMs |
 | sender | Sender's peer ID |
 | timestamp_ms | Milliseconds since Unix epoch (i64) |
-| text | Message body (may be empty for file-only messages) |
+| message_id | The message's UUID (dedup key) |
+| reply_to | message_id of the replied-to message, or empty |
+| file_id | Attachment id, or empty |
+| order_us | Microsecond Lamport send stamp (same-millisecond ordering), or empty |
+| lp_digest | SHA-256 (hex) of the link preview's length-prefixed fields (url, title, description, domain, site name, thumbnail bytes), or empty |
+| text | Message body — the only field that may contain `:`, so it is last |
+
+Absent optional fields serialize as empty strings. Binding these fields closes the v1 gaps: an attacker who could replay an otherwise-valid signed message can no longer re-target its reply, swap or add an attachment, rewrite its link preview into a phishing card, reorder it within a millisecond burst, or manipulate its dedup key.
+
+The legacy v1 payload (`hollow-msg:{type}:{context}:{sender}:{timestamp_ms}:{text}`) remains accepted by every verifier for signatures produced before 0.8.3 — verifiers try v2 first, then fall back to v1 ("verify-both"). Stored history therefore keeps verifying without re-signing; new signatures are always v2.
 
 ### 15.2 Verification
 
@@ -1195,7 +1204,9 @@ The timestamp in the signature payload is authoritative. The UI hydrates its dis
 
 ### 15.4 Edit and Delete Signing
 
-Message edits and deletions carry their own signatures over canonical payloads. The edit chain is preserved: each edit records the previous signature, public key, and timestamp, creating a verifiable history. Deletion operations are signed events, not tombstones.
+Message edits and deletions carry their own signatures over canonical payloads. An edit signs the edit timestamp and the new text; a deletion signs the deletion timestamp and the text at deletion time (evidence of what was removed). Under payload v2 both also bind the row's structural fields — message_id included — so an edit or delete signature cannot be replayed onto a different message, and a sync responder cannot graft forged attachments onto an edited row. The edit chain is preserved: each edit records the previous signature, public key, and timestamp, creating a verifiable history. Deletion operations are signed events, not tombstones.
+
+Live ingest requires a valid signature on edits, deletions, and reactions on every surface (MLS channels, public channels, DMs) — on plaintext public channels the signature is the only thing binding these actions to an identity, and an unauthenticated delete would otherwise be a censorship primitive available to a hostile relay.
 
 ---
 

@@ -255,12 +255,12 @@ use crate::crypto::{CryptoStore, MlsManager, OlmManager};
 
 use super::types::*;
 
+use super::crypto_handler;
 use super::crypto_handler::{
     clip_text,
     key_bundle_signing_payload, key_request_signing_payload, signed_key_bundle, signed_key_request,
     verify_key_exchange, key_exchange_device_unauthorized,
     KeyExchangeAuth, REQUIRE_SIGNED_KEY_EXCHANGE,
-    message_signing_payload, verify_message_signature,
     check_backfill_signature, BackfillSig, PkCache,
     persist_mls_state, persist_crypto_state, persist_olm_session,
     peer_is_reachable, is_mls_coordinator, is_vault_coordinator, elect_coordinator, ws_room_for_peer,
@@ -4910,6 +4910,7 @@ fn build_dm_sync_items(
             file_meta,
             hidden_at: m.hidden_at,
             order_us: m.order_us,
+            lp_digest: m.link_preview.as_ref().map(crypto_handler::link_preview_digest),
             reactions,
         }
     }).collect()
@@ -5542,10 +5543,20 @@ async fn handle_incoming_request(
                     // 2026-03-09) keeps syncing rather than diverging. Same
                     // live-enforce / backfill-tolerate split as the moderation trio.
                     {
-                        let payload = message_signing_payload(
-                            "ch", &format!("{sid}:{cid}"), &sender_master, ts, &msg_text,
-                        );
-                        if !verify_message_signature(&sender_master, sig.as_deref(), pk.as_deref(), &payload) {
+                        // Verify-both (v2 binds the wire's structured fields, v1 legacy).
+                        let lp_digest = link_preview.as_ref().map(crypto_handler::link_preview_digest);
+                        let extras = crypto_handler::SignedExtras {
+                            mid: mid.as_deref(),
+                            reply_to: reply_to.as_deref(),
+                            file_id: file_id.as_deref(),
+                            order_us,
+                            lp_digest: lp_digest.as_deref(),
+                        };
+                        if !crypto_handler::verify_message_signature_v2(
+                            &sender_master, sig.as_deref(), pk.as_deref(),
+                            "ch", &format!("{sid}:{cid}"), ts, &extras, &msg_text,
+                            &mut PkCache::new(),
+                        ) {
                             hollow_log!("[HOLLOW-SECURITY] REJECTED ChannelMessage from {peer_str} — signature verification FAILED");
                             return;
                         }
@@ -5629,9 +5640,16 @@ async fn handle_incoming_request(
                             // history), present-but-invalid = tampering. An edited row
                             // verifies against its EDIT signature (edited_at + current
                             // text). See `check_backfill_signature`.
+                            let extras = crypto_handler::SignedExtras {
+                                mid: msg.mid.as_deref(),
+                                reply_to: msg.reply_to.as_deref(),
+                                file_id: msg.file_id.as_deref(),
+                                order_us: msg.order_us,
+                                lp_digest: msg.lp_digest.as_deref(),
+                            };
                             let sig_check = check_backfill_signature(
                                 &msg.s, "ch", &format!("{sid}:{cid}"),
-                                msg.ts, msg.edited_at, &msg.t,
+                                msg.ts, msg.edited_at, &extras, &msg.t,
                                 msg.sig.as_deref(), msg.pk.as_deref(), &mut pk_cache,
                             );
                             // SECURITY: drop the whole item — text, edit, file
@@ -5852,10 +5870,20 @@ async fn handle_incoming_request(
                         } else {
                             (master_peer_str, &convo_peer)
                         };
-                        let payload = message_signing_payload(
-                            "dm", recipient_m, signer_m, ts, &msg_text,
-                        );
-                        if !verify_message_signature(signer_m, sig.as_deref(), pk.as_deref(), &payload) {
+                        // Verify-both (v2 binds the wire's structured fields, v1 legacy).
+                        let lp_digest = link_preview.as_ref().map(crypto_handler::link_preview_digest);
+                        let extras = crypto_handler::SignedExtras {
+                            mid: mid.as_deref(),
+                            reply_to: reply_to.as_deref(),
+                            file_id: file_id.as_deref(),
+                            order_us,
+                            lp_digest: lp_digest.as_deref(),
+                        };
+                        if !crypto_handler::verify_message_signature_v2(
+                            signer_m, sig.as_deref(), pk.as_deref(),
+                            "dm", recipient_m, ts, &extras, &msg_text,
+                            &mut PkCache::new(),
+                        ) {
                             hollow_log!("[HOLLOW-SECURITY] REJECTED DM from {peer_str} (signer {signer_m}) — signature verification FAILED");
                             return;
                         }
@@ -5983,9 +6011,16 @@ async fn handle_incoming_request(
                             };
                             // Backfill signature rule: absent = tolerate (pre-signing
                             // history), present-but-invalid = tampering.
+                            let extras = crypto_handler::SignedExtras {
+                                mid: msg.mid.as_deref(),
+                                reply_to: msg.reply_to.as_deref(),
+                                file_id: msg.file_id.as_deref(),
+                                order_us: msg.order_us,
+                                lp_digest: msg.lp_digest.as_deref(),
+                            };
                             let sig_check = check_backfill_signature(
                                 sender_m, "dm", recipient_m,
-                                msg.ts, msg.edited_at, &msg.t,
+                                msg.ts, msg.edited_at, &extras, &msg.t,
                                 msg.sig.as_deref(), msg.pk.as_deref(), &mut pk_cache,
                             );
                             // SECURITY: drop the whole item — the edit, file metadata,
@@ -6195,9 +6230,16 @@ async fn handle_incoming_request(
                             // Backfill signature rule: absent = tolerate (pre-signing
                             // history), present-but-invalid = tampering. A sibling is
                             // still only as trustworthy as the batch it forwards.
+                            let extras = crypto_handler::SignedExtras {
+                                mid: msg.mid.as_deref(),
+                                reply_to: msg.reply_to.as_deref(),
+                                file_id: msg.file_id.as_deref(),
+                                order_us: msg.order_us,
+                                lp_digest: msg.lp_digest.as_deref(),
+                            };
                             let sig_check = check_backfill_signature(
                                 sender_m, "dm", recipient_m,
-                                msg.ts, msg.edited_at, &msg.t,
+                                msg.ts, msg.edited_at, &extras, &msg.t,
                                 msg.sig.as_deref(), msg.pk.as_deref(), &mut pk_cache,
                             );
                             if sig_check == BackfillSig::Forged {
@@ -6376,6 +6418,21 @@ async fn handle_incoming_request(
                             // Channel edit — verify sender owns the message.
                             let sender = store.get_channel_message_sender(&mid);
                             if sender.as_deref() == Some(&peer_str) {
+                                // SECURITY: a LIVE edit must carry a signature that
+                                // verifies (v2 binds the row's structural fields; the
+                                // ownership check above trusts the transport-reported
+                                // sender). Mirrors message_ops::handle_envelope_edit_message.
+                                let ctx = format!(
+                                    "{}:{}", sid.as_deref().unwrap_or_default(), cid.as_deref().unwrap_or_default(),
+                                );
+                                let row = message_ops::RowExtras::load_channel(&store, &mid);
+                                if !crypto_handler::verify_message_signature_v2(
+                                    &peer_str, sig.as_deref(), pk.as_deref(), "ch", &ctx,
+                                    ts, &row.as_signed(&mid), &new_text, &mut PkCache::new(),
+                                ) {
+                                    hollow_log!("[HOLLOW-SECURITY] REJECTED channel edit of {mid} from {peer_str} — signature verification FAILED");
+                                    return;
+                                }
                                 let _ = store.edit_channel_message(
                                     &mid, &new_text, ts,
                                     sig.as_deref(), pk.as_deref(),
@@ -6394,6 +6451,27 @@ async fn handle_incoming_request(
                             let is_mine = store.get_dm_message_is_mine(&mid);
                             let is_sibling = super::resolver::same_identity(&peer_str, master_peer_str);
                             if is_mine == Some(false) || (is_mine == Some(true) && is_sibling) {
+                                // SECURITY: verify the edit signature. Signer/context
+                                // mirror the live-DM rule: a sibling echo of OUR edit
+                                // was signed by US with the row's conversation peer as
+                                // recipient; a friend's edit was signed by them with
+                                // US as recipient.
+                                let (signer, ctx): (String, String) = if is_sibling {
+                                    (
+                                        master_peer_str.to_string(),
+                                        store.get_dm_message_peer(&mid).unwrap_or_default(),
+                                    )
+                                } else {
+                                    (super::resolver::resolve(&peer_str), master_peer_str.to_string())
+                                };
+                                let row = message_ops::RowExtras::load_dm(&store, &mid);
+                                if !crypto_handler::verify_message_signature_v2(
+                                    &signer, sig.as_deref(), pk.as_deref(), "dm", &ctx,
+                                    ts, &row.as_signed(&mid), &new_text, &mut PkCache::new(),
+                                ) {
+                                    hollow_log!("[HOLLOW-SECURITY] REJECTED DM edit of {mid} from {peer_str} (signer {signer}) — signature verification FAILED");
+                                    return;
+                                }
                                 let _ = store.edit_dm_message(
                                     &mid, &new_text, ts,
                                     sig.as_deref(), pk.as_deref(),
@@ -6447,6 +6525,21 @@ async fn handle_incoming_request(
                                 hollow_log!("[HOLLOW-SECURITY] REJECTED DeleteMessage from {peer_str} — not the sender of message {mid}");
                                 return;
                             }
+                            // SECURITY: verify the delete signature ("ch-delete" over
+                            // the row's current text + structural fields) — an
+                            // unauthenticated delete is a censorship primitive.
+                            let ctx = format!(
+                                "{}:{}", sid.as_deref().unwrap_or_default(), cid.as_deref().unwrap_or_default(),
+                            );
+                            let row = message_ops::RowExtras::load_channel(&store, &mid);
+                            let current_text = row.text.clone().unwrap_or_default();
+                            if !crypto_handler::verify_message_signature_v2(
+                                &peer_str, sig.as_deref(), pk.as_deref(), "ch-delete", &ctx,
+                                ts, &row.as_signed(&mid), &current_text, &mut PkCache::new(),
+                            ) {
+                                hollow_log!("[HOLLOW-SECURITY] REJECTED channel delete of {mid} from {peer_str} — signature verification FAILED");
+                                return;
+                            }
                             let _ = store.hide_channel_message(
                                 &mid, ts,
                                 sig.as_deref(), pk.as_deref(),
@@ -6463,6 +6556,25 @@ async fn handle_incoming_request(
                                 // is_mine None → message not found; true & not sibling
                                 // → a peer trying to delete our message. Reject both.
                                 hollow_log!("[HOLLOW-SECURITY] REJECTED DeleteMessage (DM) from {peer_str} — not the sender of message {mid}");
+                                return;
+                            }
+                            // SECURITY: verify the delete signature ("dm-delete") —
+                            // signer/context mirror the DM edit arm above.
+                            let (signer, ctx): (String, String) = if is_sibling {
+                                (
+                                    master_peer_str.to_string(),
+                                    store.get_dm_message_peer(&mid).unwrap_or_default(),
+                                )
+                            } else {
+                                (super::resolver::resolve(&peer_str), master_peer_str.to_string())
+                            };
+                            let row = message_ops::RowExtras::load_dm(&store, &mid);
+                            let current_text = row.text.clone().unwrap_or_default();
+                            if !crypto_handler::verify_message_signature_v2(
+                                &signer, sig.as_deref(), pk.as_deref(), "dm-delete", &ctx,
+                                ts, &row.as_signed(&mid), &current_text, &mut PkCache::new(),
+                            ) {
+                                hollow_log!("[HOLLOW-SECURITY] REJECTED DM delete of {mid} from {peer_str} (signer {signer}) — signature verification FAILED");
                                 return;
                             }
                             let _ = store.hide_dm_message(
@@ -6515,6 +6627,18 @@ async fn handle_incoming_request(
                         peer_str.to_string()
                     };
 
+                    // SECURITY: a LIVE reaction must carry a signature that verifies
+                    // (the reactor identity below is otherwise transport-attested
+                    // only). Reactions are signed by the MASTER keypair, so verify
+                    // against the resolved master even where the stored reactor key
+                    // stays the raw device id (channel branch).
+                    if message_ops::reaction_sig_rejected(
+                        &super::resolver::resolve(&peer_str), "reaction", &mid, &emoji, ts,
+                        sig.as_deref(), pk.as_deref(),
+                    ) {
+                        return;
+                    }
+
                     if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
                         let _ = store.add_reaction(
                             &mid, &emoji, &reactor_key, ts,
@@ -6556,6 +6680,15 @@ async fn handle_incoming_request(
                         peer_str.to_string()
                     };
 
+                    // SECURITY: same rule as the add path — verify against the
+                    // resolved MASTER (reactions are master-signed).
+                    if message_ops::reaction_sig_rejected(
+                        &super::resolver::resolve(&peer_str), "unreaction", &mid, &emoji, ts,
+                        sig.as_deref(), pk.as_deref(),
+                    ) {
+                        return;
+                    }
+
                     if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
                         let _ = store.remove_reaction(
                             &mid, &emoji, &reactor_key, ts,
@@ -6585,7 +6718,7 @@ async fn handle_incoming_request(
                 }
                 // -- File transfer receive handlers --
                 Ok(MessageEnvelope::FileHeader { inner }) => {
-                    let FileHeaderPayload { fid, name, ext, mime, size, chunks, img, w, h, mid, sid, cid, ts, sig, pk, aes_key, aes_nonce, vthumb, share_ref, inline_bytes, .. } = *inner;
+                    let FileHeaderPayload { fid, name, ext, mime, size, chunks, img, w, h, mid, sid, cid, ts, sig, pk, aes_key, aes_nonce, vthumb, share_ref, order_us, inline_bytes, .. } = *inner;
                     use crate::node::file_transfer;
                     hollow_log!("[HOLLOW-FILE] FileHeader received: {fid} ({name}, {size} bytes, {chunks} chunks, share_ref={})", share_ref.is_some());
 
@@ -6750,15 +6883,44 @@ async fn handle_incoming_request(
                                         // insert the message row here (dedup by mid — a
                                         // captioned image's real caption DM wins later via
                                         // promote_file_sentinel_to_caption). Mirrors fetch.rs.
+                                        //
+                                        // SECURITY (backfill rule): the header's sig is the
+                                        // MESSAGE signature over the sentinel text — reject a
+                                        // present-but-invalid one instead of storing it (a
+                                        // captioned image's header legitimately fails here,
+                                        // since the sender signed the CAPTION — its caption DM
+                                        // creates the row instead). Sibling echoes skip the
+                                        // check: the sender is us, and the header carries no
+                                        // convo to reconstruct the signing context from.
+                                        // `order_us` from the header — the v2 signature binds
+                                        // the sender's Lamport stamp, so a local ts*1000
+                                        // default would wedge this row's later sync re-serve.
+                                        let from_sibling = super::resolver::same_identity(&peer_str, master_peer_str);
+                                        let sentinel_text = format!("[file:{fid}]");
+                                        let sentinel_forged = !from_sibling && {
+                                            let extras = crypto_handler::SignedExtras {
+                                                mid: mid.as_deref(),
+                                                reply_to: None,
+                                                file_id: Some(&fid),
+                                                order_us,
+                                                lp_digest: None,
+                                            };
+                                            check_backfill_signature(
+                                                &dm_convo, "dm", master_peer_str, ts, None,
+                                                &extras, &sentinel_text,
+                                                sig.as_deref(), pk.as_deref(), &mut PkCache::new(),
+                                            ) == BackfillSig::Forged
+                                        };
                                         if ctx_type == "dm"
+                                            && !sentinel_forged
                                             && !mid.as_deref()
                                                 .map(|m| store.dm_message_exists(m))
                                                 .unwrap_or(false)
                                         {
                                             let _ = store.insert(
-                                                &dm_convo, &format!("[file:{fid}]"), false, ts,
+                                                &dm_convo, &sentinel_text, false, ts,
                                                 sig.as_deref(), pk.as_deref(),
-                                                mid.as_deref(), None, Some(&fid), None,
+                                                mid.as_deref(), None, Some(&fid), order_us,
                                             );
                                         }
                                         let _ = store.mark_file_complete(&fid, &disk_str);
@@ -10603,7 +10765,7 @@ async fn handle_incoming_request(
             let _ = event_tx.send(NetworkEvent::LinkPushComplete { bytes: 0 }).await;
         }
 
-        HavenMessage::PublicChannelMessage { server_id, channel_id, text, ts, sig, pk, mid, reply_to, file_id, link_preview } => {
+        HavenMessage::PublicChannelMessage { server_id, channel_id, text, ts, sig, pk, mid, reply_to, file_id, link_preview, order_us } => {
             if peer_str == local_peer_str { return; }
             // Multi-device: the relay frame author (`peer_str`) is the sender's
             // DEVICE id, but a public channel message is SIGNED by — and must be
@@ -10611,12 +10773,16 @@ async fn handle_incoming_request(
             // master id; see message_ops public-channel send). Resolve first so the
             // signature verifies and the row is master-keyed, exactly like the MLS
             // path. Single-device senders resolve to themselves (no-op).
+            //
+            // `order_us` is the SENDER's Lamport stamp (0.8.3+) — persist it
+            // faithfully: the v2 signature binds it, so a local ts*1000 default
+            // would store a row whose signature fails when re-served via sync.
             let sender_master = super::resolver::resolve(peer_str);
             message_ops::handle_envelope_channel_message(
                 &event_tx, &bundle_keypair, server_states.get(&server_id), &local_peer_str,
                 sender_master,
                 server_id, channel_id, text, ts, sig, pk,
-                Some(mid), reply_to, file_id, link_preview, None,
+                Some(mid), reply_to, file_id, link_preview, order_us,
                 &db_path, &db_passphrase,
             ).await;
         }
@@ -10762,6 +10928,7 @@ async fn handle_incoming_request(
                                 file_meta,
                                 hidden_at: m.hidden_at,
                                 order_us: m.order_us,
+                                lp_digest: m.link_preview.as_ref().map(crypto_handler::link_preview_digest),
                                 reactions,
                             }
                         }).collect();
@@ -11135,6 +11302,10 @@ async fn handle_incoming_request(
                                                 target: None,
                                                 vthumb: file_meta.video_thumb.clone(),
                                                 share_ref: None,
+                                                // Bytes re-serve for an EXISTING message row —
+                                                // no sentinel insert happens (no inline_bytes),
+                                                // so no ordering stamp to carry.
+                                                order_us: None,
                                                 inline_bytes: None,
                                             }),
                                         };

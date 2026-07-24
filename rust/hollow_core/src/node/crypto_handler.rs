@@ -114,24 +114,39 @@ pub(crate) fn message_signing_payload(
 //      verifying because the verifier picks the format it TRIES from the
 //      message fields, not the sender's version — v2 first, then v1.
 //
-// This commit lands step 1's building blocks (payload + digest + verify-both +
-// version-selecting signer) with tests. Wiring the ~19 sign/verify sites AND
-// the Dart-side canonical-payload builder (`verify_message_proof` takes a
-// Dart-built payload — the grammar is dual-defined, like the emote token) is
-// the follow-up that also flips the flag. Until then these stay dead-code.
+// Wired in 0.8.3: every sign site goes through `sign_message_versioned`, every
+// verify site (live, 4 sync, fetch, archive, Message Proof FFI) verifies-both.
+// The public fleet at flip time ran ≤0.8.1, which never ENFORCED message
+// signatures on receive (verify-then-log) — so v2 messages render there as
+// "unverified" rather than being dropped, and the two-release verify-both
+// window would have protected nobody. That is why signing flips in the same
+// release that ships the verifier.
+//
+// EDIT / DELETE signatures also ride v2: they bind the SAME full extras as the
+// original message, read from the signer's own ROW at edit/delete time (the
+// row's reply_to / file_id / order_us / link-preview are immutable under edit,
+// so both ends agree). Binding the full row — not just `mid` — is what keeps
+// the offline-queue edit rewrite verifying (the queued DirectMessage envelope
+// keeps the original structured fields; see `rewrite_pending_dm_edits`) and
+// stops a sync responder from attaching a forged `file_id` to an edited row
+// whose original signature was overwritten by the edit signature.
 
-/// When true, NEW message signatures are produced over the v2 payload. Keep
-/// FALSE until verify-both (step 1) has shipped fleet-wide — see the rollout
-/// note above. Flipping it is a wire-breaking change vs pre-0.8.3 clients.
-#[allow(dead_code)]
-pub(crate) const MSG_SIG_V2_SIGNING: bool = false;
+/// When true, NEW message signatures are produced over the v2 payload.
+/// Flipped in 0.8.3 alongside fleet-wide verify-both — see the rollout note
+/// above. Pre-0.8.3 clients show v2 messages as unverified (≤0.8.1 does not
+/// enforce); step 3 (dropping v1 VERIFICATION) comes in a later release.
+pub(crate) const MSG_SIG_V2_SIGNING: bool = true;
 
 /// SHA-256 (hex) of the phishing-relevant link-preview fields, each
 /// length-prefixed so no two distinct field-sets can collide (a raw
 /// concatenation would let "ab"+"c" hash the same as "a"+"bc"). Folded into the
 /// v2 payload so a tamperer cannot rewrite a preview's title / description /
 /// image on an otherwise-valid message.
-#[allow(dead_code)]
+///
+/// The DIGEST — not the preview — is what rides where the full preview does
+/// not: sync items carry `lp_digest` (64 hex chars) instead of shipping
+/// thumbnail bytes through backfill, and archives store it alongside the row.
+/// Verification only ever needs the digest.
 pub(crate) fn link_preview_digest(lp: &LinkPreviewRef) -> String {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
@@ -154,15 +169,19 @@ pub(crate) fn link_preview_digest(lp: &LinkPreviewRef) -> String {
 
 /// The structured fields a v2 signature binds, alongside type/context/sender/
 /// ts/text. Every signer and verifier fills this from the message at hand; all
-/// `Option` because older wire payloads omit them.
+/// `Option` because older wire payloads omit them. An absent field and an
+/// empty-string field are payload-equivalent (both serialize as "").
+///
+/// `lp_digest` is the hex [`link_preview_digest`] — callers holding a full
+/// [`LinkPreviewRef`] compute it; sync/archive carriers pass the stored digest
+/// straight through.
 #[derive(Debug, Clone, Copy, Default)]
-#[allow(dead_code)]
 pub(crate) struct SignedExtras<'a> {
     pub mid: Option<&'a str>,
     pub reply_to: Option<&'a str>,
     pub file_id: Option<&'a str>,
     pub order_us: Option<i64>,
-    pub link_preview: Option<&'a LinkPreviewRef>,
+    pub lp_digest: Option<&'a str>,
 }
 
 /// Canonical v2 signing payload:
@@ -170,7 +189,6 @@ pub(crate) struct SignedExtras<'a> {
 /// Every field before `text` is colon-free (UUIDs / hex hashes / a number / a
 /// hex digest), so `text` — the only field that may contain a colon — stays
 /// LAST, exactly like v1, and the layout is unambiguous.
-#[allow(dead_code)]
 pub(crate) fn message_signing_payload_v2(
     msg_type: &str,
     context: &str,
@@ -183,7 +201,7 @@ pub(crate) fn message_signing_payload_v2(
     let reply_to = extras.reply_to.unwrap_or("");
     let file_id = extras.file_id.unwrap_or("");
     let order_us = extras.order_us.map(|n| n.to_string()).unwrap_or_default();
-    let lp = extras.link_preview.map(link_preview_digest).unwrap_or_default();
+    let lp = extras.lp_digest.unwrap_or("");
     format!("hollow-msg2:{msg_type}:{context}:{sender}:{ts}:{mid}:{reply_to}:{file_id}:{order_us}:{lp}:{text}")
 }
 
@@ -191,7 +209,6 @@ pub(crate) fn message_signing_payload_v2(
 /// structured fields unconditionally so flipping the flag (step 2) needs no
 /// further call-site change. While the flag is false this is byte-for-byte the
 /// existing v1 `sign_message`.
-#[allow(dead_code)]
 pub(crate) fn sign_message_versioned(
     keypair: &crate::identity::native_identity::NativeKeypair,
     pub_key_b64: &str,
@@ -215,7 +232,7 @@ pub(crate) fn sign_message_versioned(
 /// v2 is tried first; v1 is the fallback that keeps pre-0.8.3 signatures and all
 /// stored history verifying. Reuses `pk_cache` across a batch. A missing
 /// signature returns false, same as v1.
-#[allow(dead_code, clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn verify_message_signature_v2(
     sender_peer_str: &str,
     sig_b64: Option<&str>,
@@ -1511,6 +1528,12 @@ pub(crate) enum BackfillSig {
 /// `archive::loader::verify_one_message` uses. Verifying an edited row against
 /// its original `ts` fails every one of them, which is why edits used to skip
 /// verification entirely — and why setting `edited_at` was a way around it.
+///
+/// v2 (0.8.3): verifies-both — the v2 payload (structured `extras` covered)
+/// first, the legacy text-only v1 payload as fallback. `extras` are the item's
+/// structural fields; edit signatures bind the SAME full extras (the row's
+/// structure is immutable under edit), so the edited branch differs only in
+/// the timestamp used.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn check_backfill_signature(
     signer: &str,
@@ -1518,6 +1541,7 @@ pub(crate) fn check_backfill_signature(
     context: &str,
     ts: i64,
     edited_at: Option<i64>,
+    extras: &SignedExtras,
     text: &str,
     sig_b64: Option<&str>,
     pk_b64: Option<&str>,
@@ -1526,10 +1550,10 @@ pub(crate) fn check_backfill_signature(
     if sig_b64.is_none() && pk_b64.is_none() {
         return BackfillSig::Absent;
     }
-    let payload = message_signing_payload(
-        msg_type, context, signer, edited_at.unwrap_or(ts), text,
-    );
-    if verify_message_signature_cached(signer, sig_b64, pk_b64, &payload, pk_cache) {
+    let signed_ts = edited_at.unwrap_or(ts);
+    if verify_message_signature_v2(
+        signer, sig_b64, pk_b64, msg_type, context, signed_ts, extras, text, pk_cache,
+    ) {
         BackfillSig::Valid
     } else {
         BackfillSig::Forged
@@ -3073,7 +3097,7 @@ mod tests {
         let (sig1, pk1) = sign_message(&a, &a_pk, &p1);
         assert_eq!(
             check_backfill_signature(
-                &a_id, "ch", "srv:chan", 1_000, None, "first",
+                &a_id, "ch", "srv:chan", 1_000, None, &SignedExtras::default(), "first",
                 sig1.as_deref(), pk1.as_deref(), &mut cache,
             ),
             BackfillSig::Valid,
@@ -3083,7 +3107,7 @@ mod tests {
         let (sig2, _) = sign_message(&a, &a_pk, &p2);
         assert_eq!(
             check_backfill_signature(
-                &b_id, "ch", "srv:chan", 2_000, None, "attributed to B",
+                &b_id, "ch", "srv:chan", 2_000, None, &SignedExtras::default(), "attributed to B",
                 sig2.as_deref(), pk1.as_deref(), &mut cache,
             ),
             BackfillSig::Forged,
@@ -3099,7 +3123,7 @@ mod tests {
         let mut cache = PkCache::new();
         assert_eq!(
             check_backfill_signature(
-                "12D3KooWlegacy", "ch", "srv:chan", 1, None, "old message",
+                "12D3KooWlegacy", "ch", "srv:chan", 1, None, &SignedExtras::default(), "old message",
                 None, None, &mut cache,
             ),
             BackfillSig::Absent,
@@ -3122,7 +3146,7 @@ mod tests {
         // Same signature, text altered by whoever served the batch.
         assert_eq!(
             check_backfill_signature(
-                &a_id, "dm", "recipient", 500, None, "send 5000",
+                &a_id, "dm", "recipient", 500, None, &SignedExtras::default(), "send 5000",
                 sig.as_deref(), pk.as_deref(), &mut cache,
             ),
             BackfillSig::Forged,
@@ -3130,7 +3154,7 @@ mod tests {
         // Untouched still verifies.
         assert_eq!(
             check_backfill_signature(
-                &a_id, "dm", "recipient", 500, None, "send 5",
+                &a_id, "dm", "recipient", 500, None, &SignedExtras::default(), "send 5",
                 sig.as_deref(), pk.as_deref(), &mut cache,
             ),
             BackfillSig::Valid,
@@ -3165,13 +3189,13 @@ mod tests {
         let a_pk = pk_b64(&a);
         let mut cache = PkCache::new();
 
-        let preview = lp("Real Title");
+        let preview_digest = link_preview_digest(&lp("Real Title"));
         let extras = SignedExtras {
             mid: Some("mid-1"),
             reply_to: Some("parent-1"),
             file_id: Some("file-1"),
             order_us: Some(42),
-            link_preview: Some(&preview),
+            lp_digest: Some(&preview_digest),
         };
         let payload = message_signing_payload_v2("dm", "recipient", &a_id, 1_000, &extras, "hi");
         let (sig, pk) = sign_message(&a, &a_pk, &payload);
@@ -3197,11 +3221,16 @@ mod tests {
             &a_id, sig.as_deref(), pk.as_deref(), "dm", "recipient", 1_000, &tampered_order, "hi", &mut cache,
         ), "order_us must be covered");
 
-        let evil_preview = lp("Phishing Title");
-        let tampered_lp = SignedExtras { link_preview: Some(&evil_preview), ..extras };
+        let evil_digest = link_preview_digest(&lp("Phishing Title"));
+        let tampered_lp = SignedExtras { lp_digest: Some(&evil_digest), ..extras };
         assert!(!verify_message_signature_v2(
             &a_id, sig.as_deref(), pk.as_deref(), "dm", "recipient", 1_000, &tampered_lp, "hi", &mut cache,
-        ), "link_preview must be covered");
+        ), "link_preview digest must be covered");
+
+        let tampered_mid = SignedExtras { mid: Some("mid-EVIL"), ..extras };
+        assert!(!verify_message_signature_v2(
+            &a_id, sig.as_deref(), pk.as_deref(), "dm", "recipient", 1_000, &tampered_mid, "hi", &mut cache,
+        ), "mid must be covered");
 
         // Text is still covered too.
         assert!(!verify_message_signature_v2(
@@ -3242,10 +3271,10 @@ mod tests {
         let a_pk = pk_b64(&a);
         let mut cache = PkCache::new();
 
-        let preview = lp("t");
+        let preview_digest = link_preview_digest(&lp("t"));
         let extras = SignedExtras {
             mid: Some("mid"), reply_to: None, file_id: Some("fid"),
-            order_us: Some(7), link_preview: Some(&preview),
+            order_us: Some(7), lp_digest: Some(&preview_digest),
         };
         let (sig, pk) = sign_message_versioned(
             &a, &a_pk, "dm", "recipient", &a_id, 500, &extras, "payload",
@@ -3256,10 +3285,19 @@ mod tests {
             &a_id, sig.as_deref(), pk.as_deref(), "dm", "recipient", 500, &extras, "payload", &mut cache,
         ));
 
-        // While the flag is false it is exactly the v1 signature.
-        if !MSG_SIG_V2_SIGNING {
-            let v1 = message_signing_payload("dm", "recipient", &a_id, 500, "payload");
-            let (v1_sig, _) = sign_message(&a, &a_pk, &v1);
+        let v1 = message_signing_payload("dm", "recipient", &a_id, 500, "payload");
+        let (v1_sig, _) = sign_message(&a, &a_pk, &v1);
+        if MSG_SIG_V2_SIGNING {
+            // Flag ON (0.8.3): the signature is v2 — it must NOT equal the v1
+            // signature, and a v1-only verifier must fail it (that is the
+            // wire-breaking edge the rollout note documents).
+            assert_ne!(sig, v1_sig, "flag on must produce a v2 signature");
+            assert!(
+                !verify_message_signature(&a_id, sig.as_deref(), pk.as_deref(), &v1),
+                "a v2 signature must not verify against the v1 payload",
+            );
+        } else {
+            // Flag off: byte-for-byte the legacy v1 signature.
             assert_eq!(sig, v1_sig, "flag off must produce the legacy v1 signature");
         }
     }
@@ -3294,18 +3332,105 @@ mod tests {
 
         assert_eq!(
             check_backfill_signature(
-                &a_id, "ch", "srv:chan", orig_ts, Some(edit_ts), "edited text",
+                &a_id, "ch", "srv:chan", orig_ts, Some(edit_ts), &SignedExtras::default(), "edited text",
                 sig.as_deref(), pk.as_deref(), &mut cache,
             ),
             BackfillSig::Valid,
         );
         assert_eq!(
             check_backfill_signature(
-                &a_id, "ch", "srv:chan", orig_ts, Some(edit_ts), "text the author never wrote",
+                &a_id, "ch", "srv:chan", orig_ts, Some(edit_ts), &SignedExtras::default(), "text the author never wrote",
                 sig.as_deref(), pk.as_deref(), &mut cache,
             ),
             BackfillSig::Forged,
             "claiming to be an edit must not dodge verification",
+        );
+    }
+
+    /// v2 EDIT signatures bind the row's full structural fields (same extras
+    /// the original bound) at the EDIT timestamp — so backfill verifies an
+    /// edited item end-to-end, and a sync responder cannot re-attach the edit
+    /// signature to a different mid or graft a forged file_id onto the edited
+    /// row (whose original signature the edit overwrote).
+    #[test]
+    fn backfill_verifies_v2_edit_and_rejects_extras_tamper() {
+        let a = kp(24);
+        let a_id = a.peer_id();
+        let a_pk = pk_b64(&a);
+        let mut cache = PkCache::new();
+
+        let (orig_ts, edit_ts) = (1_000i64, 2_000i64);
+        let extras = SignedExtras {
+            mid: Some("mid-edit"), reply_to: Some("parent-1"),
+            file_id: None, order_us: Some(1_000_042), lp_digest: None,
+        };
+        // The edit sign sites (`handle_edit_*`) sign v2 over edit_ts + new text
+        // + the row's extras.
+        let edit_payload = message_signing_payload_v2("ch", "srv:chan", &a_id, edit_ts, &extras, "edited text");
+        let (sig, pk) = sign_message(&a, &a_pk, &edit_payload);
+
+        assert_eq!(
+            check_backfill_signature(
+                &a_id, "ch", "srv:chan", orig_ts, Some(edit_ts), &extras, "edited text",
+                sig.as_deref(), pk.as_deref(), &mut cache,
+            ),
+            BackfillSig::Valid,
+        );
+        // Replay the edit signature onto a different message id → rejected.
+        let other_mid = SignedExtras { mid: Some("mid-OTHER"), ..extras };
+        assert_eq!(
+            check_backfill_signature(
+                &a_id, "ch", "srv:chan", orig_ts, Some(edit_ts), &other_mid, "edited text",
+                sig.as_deref(), pk.as_deref(), &mut cache,
+            ),
+            BackfillSig::Forged,
+            "an edit signature must be bound to its message id",
+        );
+        // Graft a file_id onto the edited item → rejected.
+        let grafted_file = SignedExtras { file_id: Some("file-EVIL"), ..extras };
+        assert_eq!(
+            check_backfill_signature(
+                &a_id, "ch", "srv:chan", orig_ts, Some(edit_ts), &grafted_file, "edited text",
+                sig.as_deref(), pk.as_deref(), &mut cache,
+            ),
+            BackfillSig::Forged,
+            "an edited row's structural fields must stay covered",
+        );
+    }
+
+    /// End-to-end shape of the 0.8.3 send path: `sign_message_versioned` (flag
+    /// ON → v2) must verify at a backfill site that reconstructs the same
+    /// extras from a sync item, and any structural tamper on the item must be
+    /// rejected.
+    #[test]
+    fn versioned_send_roundtrips_through_backfill() {
+        let a = kp(25);
+        let a_id = a.peer_id();
+        let a_pk = pk_b64(&a);
+        let mut cache = PkCache::new();
+
+        let extras = SignedExtras {
+            mid: Some("mid-rt"), reply_to: None, file_id: Some("file-rt"),
+            order_us: Some(777), lp_digest: None,
+        };
+        let (sig, pk) = sign_message_versioned(
+            &a, &a_pk, "ch", "srv:chan", &a_id, 3_000, &extras, "round trip",
+        );
+        assert_eq!(
+            check_backfill_signature(
+                &a_id, "ch", "srv:chan", 3_000, None, &extras, "round trip",
+                sig.as_deref(), pk.as_deref(), &mut cache,
+            ),
+            BackfillSig::Valid,
+        );
+        let reordered = SignedExtras { order_us: Some(778), ..extras };
+        assert_eq!(
+            check_backfill_signature(
+                &a_id, "ch", "srv:chan", 3_000, None, &reordered, "round trip",
+                sig.as_deref(), pk.as_deref(), &mut cache,
+            ),
+            BackfillSig::Forged,
+            "order_us tamper on a synced item must be rejected",
         );
     }
 }

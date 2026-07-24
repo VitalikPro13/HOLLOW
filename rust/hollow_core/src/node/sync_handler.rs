@@ -427,6 +427,8 @@ pub(crate) fn channel_sync_items(
             file_meta,
             hidden_at: m.hidden_at,
             order_us: m.order_us,
+            lp_digest: m.link_preview.as_ref()
+                .map(super::crypto_handler::link_preview_digest),
             reactions,
         }
     }).collect()
@@ -2586,9 +2588,16 @@ fn verify_sync_item_sig(
     cid: &str,
     pk_cache: &mut PkCache,
 ) -> BackfillSig {
+    let extras = super::crypto_handler::SignedExtras {
+        mid: msg.mid.as_deref(),
+        reply_to: msg.reply_to.as_deref(),
+        file_id: msg.file_id.as_deref(),
+        order_us: msg.order_us,
+        lp_digest: msg.lp_digest.as_deref(),
+    };
     super::crypto_handler::check_backfill_signature(
         &msg.s, "ch", &format!("{sid}:{cid}"),
-        msg.ts, msg.edited_at, &msg.t,
+        msg.ts, msg.edited_at, &extras, &msg.t,
         msg.sig.as_deref(), msg.pk.as_deref(), pk_cache,
     )
 }

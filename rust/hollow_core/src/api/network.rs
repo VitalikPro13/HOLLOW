@@ -1699,6 +1699,110 @@ pub fn verify_message_proof(
     )
 }
 
+/// Result of a versioned Message Proof verification — see
+/// [`verify_message_proof_v2`].
+pub struct MessageProofV2 {
+    pub has_signature: bool,
+    pub valid: bool,
+    /// 2 = verified against the v2 payload (structured fields covered),
+    /// 1 = legacy v1 (text only), 0 = did not verify.
+    pub sig_version: i32,
+    /// The canonical payload string that verified (the v2 candidate when the
+    /// signature is missing/invalid) — displayed and exported by the dialog.
+    pub canonical_payload: String,
+    /// The row's signed fields, for the exported proof JSON.
+    pub text: String,
+    pub timestamp_ms: i64,
+    pub edited_at: Option<i64>,
+    pub reply_to: Option<String>,
+    pub file_id: Option<String>,
+    pub order_us: Option<i64>,
+    pub lp_digest: Option<String>,
+    pub signature_b64: Option<String>,
+    pub public_key_b64: Option<String>,
+}
+
+/// Versioned (v2 → v1 fallback) verification for the Message Proof dialog.
+///
+/// The v2 payload binds the message's structured fields (mid / reply_to /
+/// file_id / order_us / link-preview digest), which live in the DB row — so
+/// this loads the row by `message_id` and builds the canonical payload in
+/// RUST, keeping the grammar single-sourced instead of mirroring it in Dart.
+/// An EDITED row verifies against its edit signature (edited_at + current
+/// text), same rule as every other verifier.
+///
+/// - `msg_type`: "dm" | "ch"
+/// - `context`: recipient MASTER peer_id for DMs, "server_id:channel_id" for
+///   channels (same values the v1 dialog already computes).
+#[frb]
+pub fn verify_message_proof_v2(
+    msg_type: String,
+    context: String,
+    sender_peer_id: String,
+    message_id: String,
+) -> Result<MessageProofV2, String> {
+    let id = identity::load_existing_identity()
+        .map_err(|e| format!("Identity: {e}"))?
+        .ok_or("No identity")?;
+    let proto = id.keypair.to_protobuf_encoding().map_err(|e| format!("Identity: {e}"))?;
+    let passphrase = hex::encode(&proto[..32.min(proto.len())]);
+    let db_path = crate::identity::data_dir()
+        .map_err(|e| format!("Data dir: {e}"))?
+        .join("messages.db");
+    let store = MessageStore::open(db_path.to_str().ok_or("Invalid path encoding")?, &passphrase)?;
+    let row = if msg_type == "dm" {
+        store.get_dm_message_sig_row(&message_id)
+    } else {
+        store.get_channel_message_sig_row(&message_id)
+    }
+    .ok_or("Message not found")?;
+
+    let lp_digest = row.link_preview.as_ref()
+        .map(crate::node::crypto_handler::link_preview_digest);
+    let extras = crate::node::crypto_handler::SignedExtras {
+        mid: Some(&message_id),
+        reply_to: row.reply_to_mid.as_deref(),
+        file_id: row.file_id.as_deref(),
+        order_us: row.order_us,
+        lp_digest: lp_digest.as_deref(),
+    };
+    let ts = row.edited_at.unwrap_or(row.timestamp);
+    let v2 = crate::node::crypto_handler::message_signing_payload_v2(
+        &msg_type, &context, &sender_peer_id, ts, &extras, &row.text,
+    );
+    let v1 = crate::node::message_signing_payload(
+        &msg_type, &context, &sender_peer_id, ts, &row.text,
+    );
+    let has_signature = row.signature.is_some() && row.public_key.is_some();
+    let verify = |payload: &str| {
+        crate::node::verify_message_signature(
+            &sender_peer_id, row.signature.as_deref(), row.public_key.as_deref(), payload,
+        )
+    };
+    let (valid, sig_version, canonical_payload) = if has_signature && verify(&v2) {
+        (true, 2, v2)
+    } else if has_signature && verify(&v1) {
+        (true, 1, v1)
+    } else {
+        (false, 0, v2)
+    };
+    Ok(MessageProofV2 {
+        has_signature,
+        valid,
+        sig_version,
+        canonical_payload,
+        text: row.text,
+        timestamp_ms: ts,
+        edited_at: row.edited_at,
+        reply_to: row.reply_to_mid,
+        file_id: row.file_id,
+        order_us: row.order_us,
+        lp_digest,
+        signature_b64: row.signature,
+        public_key_b64: row.public_key,
+    })
+}
+
 /// Fetch OpenGraph metadata for a URL and return a link preview the sender
 /// can embed in their next outgoing message. Runs on the shared Tokio
 /// runtime. Fails silently at every step — the caller should treat errors

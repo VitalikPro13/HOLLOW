@@ -121,8 +121,22 @@ class _VerifyProofSectionState extends State<VerifyProofSection> {
       // Reconstruct the canonical payload from the individual JSON fields
       // and verify it matches the embedded one. This catches field tampering
       // (e.g. changing message text while keeping the old canonical_payload).
-      final reconstructed =
-          'hollow-msg:${_canonicalMsgType(contextType)}:$contextId:$peerId:$timestampMs:$text';
+      // v2 proofs (hollow-proof-v2) additionally bind the structured fields —
+      // the grammar mirrors Rust's `message_signing_payload_v2` (absent
+      // fields serialize as empty strings).
+      final String reconstructed;
+      if (map['version'] == 2) {
+        final replyTo = message['reply_to'] as String? ?? '';
+        final fileId = message['file_id'] as String? ?? '';
+        final orderUs = message['order_us']?.toString() ?? '';
+        final lpDigest = message['link_preview_digest'] as String? ?? '';
+        reconstructed =
+            'hollow-msg2:${_canonicalMsgType(contextType)}:$contextId:$peerId:'
+            '$timestampMs:${messageId ?? ''}:$replyTo:$fileId:$orderUs:$lpDigest:$text';
+      } else {
+        reconstructed =
+            'hollow-msg:${_canonicalMsgType(contextType)}:$contextId:$peerId:$timestampMs:$text';
+      }
       if (reconstructed != canonicalPayload) {
         fail('Payload mismatch — the message fields do not match the '
             'canonical payload. The proof JSON may have been tampered with.\n\n'
@@ -175,11 +189,12 @@ class _VerifyProofSectionState extends State<VerifyProofSection> {
     final version = map['version'];
     final protocol = map['protocol'] as String?;
     final algorithm = sig['algorithm'] as String?;
-    if (version != 1) {
-      return 'Unknown proof version: $version (expected 1).';
+    if (version != 1 && version != 2) {
+      return 'Unknown proof version: $version (expected 1 or 2).';
     }
-    if (protocol != 'hollow-proof-v1') {
-      return 'Unknown protocol: "$protocol" (expected "hollow-proof-v1").';
+    final expectedProtocol = version == 2 ? 'hollow-proof-v2' : 'hollow-proof-v1';
+    if (protocol != expectedProtocol) {
+      return 'Unknown protocol: "$protocol" (expected "$expectedProtocol").';
     }
     if (algorithm != 'Ed25519') {
       return 'Unknown algorithm: "$algorithm" (expected "Ed25519").';

@@ -1489,6 +1489,12 @@ pub(crate) enum HavenMessage {
         file_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         link_preview: Option<LinkPreviewRef>,
+        /// Microsecond send stamp (Lamport). Carried since 0.8.3 — the v2
+        /// message signature binds it, so the receive path must persist the
+        /// SENDER's value, not a local `ts*1000` default. `None` from a
+        /// pre-0.8.3 sender (their signatures are v1 and don't cover it).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        order_us: Option<i64>,
     },
 
     #[serde(rename = "pub_ch_edit")]
@@ -2085,6 +2091,13 @@ pub(crate) struct FileHeaderPayload {
     pub vthumb: Option<VideoThumbRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub share_ref: Option<ShareRef>,
+    /// Microsecond send stamp of the companion message (Lamport). Since 0.8.3:
+    /// the captionless-offline-image path creates the MESSAGE row from this
+    /// header ("[file:...]" sentinel), and the v2 message signature binds
+    /// `order_us` — inserting with a local `ts*1000` default would store a row
+    /// whose signature no longer verifies when re-served through sync.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order_us: Option<i64>,
     /// Base64 of the AES-encrypted file bytes, INLINED into the header.
     /// Only set when delivering a small image to an OFFLINE peer: the bytes ride
     /// inside the Olm-encrypted FileHeader (via SendDirectImage / 0x08) so the
@@ -2788,6 +2801,13 @@ pub(crate) struct SyncMessageItem {
     /// falls back to `ts * 1000` (legacy-equivalent).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub order_us: Option<i64>,
+    /// Hex `link_preview_digest` of the message's link preview (0.8.3, v2
+    /// signatures). Backfill verification needs the digest the sender signed —
+    /// carrying the 64-char digest instead of the full preview keeps thumbnail
+    /// bytes out of sync batches. `None` = no preview (or a pre-0.8.3
+    /// responder; their rows are v1-signed and don't cover it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lp_digest: Option<String>,
     /// Reactions on this message (synced alongside the message).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reactions: Vec<SyncReactionItem>,
@@ -2946,6 +2966,10 @@ pub(crate) struct DmSyncItem {
     /// See [`SyncMessageItem::order_us`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub order_us: Option<i64>,
+    /// Hex link-preview digest for v2 signature verification.
+    /// See [`SyncMessageItem::lp_digest`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lp_digest: Option<String>,
     /// Reactions on this message (synced alongside the message).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reactions: Vec<SyncReactionItem>,

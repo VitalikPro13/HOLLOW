@@ -79,7 +79,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.11.1';
 
   @override
-  int get rustContentHash => 1272170364;
+  int get rustContentHash => 301912278;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -1169,6 +1169,13 @@ abstract class RustLibApi extends BaseApi {
     required String signatureB64,
     required String publicKeyB64,
     required String canonicalPayload,
+  });
+
+  Future<MessageProofV2> crateApiNetworkVerifyMessageProofV2({
+    required String msgType,
+    required String context,
+    required String senderPeerId,
+    required String messageId,
   });
 
   Future<void> crateApiNetworkVoiceChannelJoin({
@@ -10420,6 +10427,45 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
+  Future<MessageProofV2> crateApiNetworkVerifyMessageProofV2({
+    required String msgType,
+    required String context,
+    required String senderPeerId,
+    required String messageId,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(msgType, serializer);
+          sse_encode_String(context, serializer);
+          sse_encode_String(senderPeerId, serializer);
+          sse_encode_String(messageId, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 281,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_message_proof_v_2,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiNetworkVerifyMessageProofV2ConstMeta,
+        argValues: [msgType, context, senderPeerId, messageId],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiNetworkVerifyMessageProofV2ConstMeta =>
+      const TaskConstMeta(
+        debugName: "verify_message_proof_v2",
+        argNames: ["msgType", "context", "senderPeerId", "messageId"],
+      );
+
+  @override
   Future<void> crateApiNetworkVoiceChannelJoin({
     required String serverId,
     required String channelId,
@@ -10433,7 +10479,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 281,
+            funcId: 282,
             port: port_,
           );
         },
@@ -10468,7 +10514,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 282,
+            funcId: 283,
             port: port_,
           );
         },
@@ -10509,7 +10555,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 283,
+            funcId: 284,
             port: port_,
           );
         },
@@ -10542,7 +10588,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             pdeCallFfi(
               generalizedFrbRustBinding,
               serializer,
-              funcId: 284,
+              funcId: 285,
               port: port_,
             );
           },
@@ -10593,7 +10639,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 285,
+            funcId: 286,
             port: port_,
           );
         },
@@ -10648,7 +10694,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 286,
+            funcId: 287,
             port: port_,
           );
         },
@@ -10679,7 +10725,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 287,
+            funcId: 288,
             port: port_,
           );
         },
@@ -10710,7 +10756,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 288,
+            funcId: 289,
             port: port_,
           );
         },
@@ -10745,7 +10791,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 289,
+            funcId: 290,
             port: port_,
           );
         },
@@ -10780,7 +10826,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 290,
+            funcId: 291,
             port: port_,
           );
         },
@@ -10811,7 +10857,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 291,
+            funcId: 292,
             port: port_,
           );
         },
@@ -10850,7 +10896,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 292,
+            funcId: 293,
             port: port_,
           );
         },
@@ -10889,7 +10935,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 293,
+            funcId: 294,
             port: port_,
           );
         },
@@ -10930,7 +10976,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 294,
+            funcId: 295,
             port: port_,
           );
         },
@@ -10973,7 +11019,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 295,
+            funcId: 296,
             port: port_,
           );
         },
@@ -11856,6 +11902,29 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       nickname: dco_decode_String(arr[3]),
       twitchUsername: dco_decode_String(arr[4]),
       labels: dco_decode_list_label_ffi(arr[5]),
+    );
+  }
+
+  @protected
+  MessageProofV2 dco_decode_message_proof_v_2(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 13)
+      throw Exception('unexpected arr length: expect 13 but see ${arr.length}');
+    return MessageProofV2(
+      hasSignature: dco_decode_bool(arr[0]),
+      valid: dco_decode_bool(arr[1]),
+      sigVersion: dco_decode_i_32(arr[2]),
+      canonicalPayload: dco_decode_String(arr[3]),
+      text: dco_decode_String(arr[4]),
+      timestampMs: dco_decode_i_64(arr[5]),
+      editedAt: dco_decode_opt_box_autoadd_i_64(arr[6]),
+      replyTo: dco_decode_opt_String(arr[7]),
+      fileId: dco_decode_opt_String(arr[8]),
+      orderUs: dco_decode_opt_box_autoadd_i_64(arr[9]),
+      lpDigest: dco_decode_opt_String(arr[10]),
+      signatureB64: dco_decode_opt_String(arr[11]),
+      publicKeyB64: dco_decode_opt_String(arr[12]),
     );
   }
 
@@ -14468,6 +14537,39 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       nickname: var_nickname,
       twitchUsername: var_twitchUsername,
       labels: var_labels,
+    );
+  }
+
+  @protected
+  MessageProofV2 sse_decode_message_proof_v_2(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_hasSignature = sse_decode_bool(deserializer);
+    var var_valid = sse_decode_bool(deserializer);
+    var var_sigVersion = sse_decode_i_32(deserializer);
+    var var_canonicalPayload = sse_decode_String(deserializer);
+    var var_text = sse_decode_String(deserializer);
+    var var_timestampMs = sse_decode_i_64(deserializer);
+    var var_editedAt = sse_decode_opt_box_autoadd_i_64(deserializer);
+    var var_replyTo = sse_decode_opt_String(deserializer);
+    var var_fileId = sse_decode_opt_String(deserializer);
+    var var_orderUs = sse_decode_opt_box_autoadd_i_64(deserializer);
+    var var_lpDigest = sse_decode_opt_String(deserializer);
+    var var_signatureB64 = sse_decode_opt_String(deserializer);
+    var var_publicKeyB64 = sse_decode_opt_String(deserializer);
+    return MessageProofV2(
+      hasSignature: var_hasSignature,
+      valid: var_valid,
+      sigVersion: var_sigVersion,
+      canonicalPayload: var_canonicalPayload,
+      text: var_text,
+      timestampMs: var_timestampMs,
+      editedAt: var_editedAt,
+      replyTo: var_replyTo,
+      fileId: var_fileId,
+      orderUs: var_orderUs,
+      lpDigest: var_lpDigest,
+      signatureB64: var_signatureB64,
+      publicKeyB64: var_publicKeyB64,
     );
   }
 
@@ -17434,6 +17536,27 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_String(self.nickname, serializer);
     sse_encode_String(self.twitchUsername, serializer);
     sse_encode_list_label_ffi(self.labels, serializer);
+  }
+
+  @protected
+  void sse_encode_message_proof_v_2(
+    MessageProofV2 self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_bool(self.hasSignature, serializer);
+    sse_encode_bool(self.valid, serializer);
+    sse_encode_i_32(self.sigVersion, serializer);
+    sse_encode_String(self.canonicalPayload, serializer);
+    sse_encode_String(self.text, serializer);
+    sse_encode_i_64(self.timestampMs, serializer);
+    sse_encode_opt_box_autoadd_i_64(self.editedAt, serializer);
+    sse_encode_opt_String(self.replyTo, serializer);
+    sse_encode_opt_String(self.fileId, serializer);
+    sse_encode_opt_box_autoadd_i_64(self.orderUs, serializer);
+    sse_encode_opt_String(self.lpDigest, serializer);
+    sse_encode_opt_String(self.signatureB64, serializer);
+    sse_encode_opt_String(self.publicKeyB64, serializer);
   }
 
   @protected
