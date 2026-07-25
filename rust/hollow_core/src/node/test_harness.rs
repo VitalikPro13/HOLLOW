@@ -7751,3 +7751,298 @@ async fn conference_waiting_room_admits_denies_and_chats() {
     drop(bee);
     drop(mallory);
 }
+
+// ---------------------------------------------------------------------------
+// 0.8.4 — deletion propagation through sync is AUTHENTICATED (reject-absent).
+//
+// `hidden_at` on a sync item is only honored with the author's own
+// "ch-delete"/"dm-delete" proof riding next to it (`hidden_sig`/`hidden_pk`).
+// Three scenarios:
+//   1. A real deletion (signed by the author) reaches a late joiner via sync
+//      and the joiner ADOPTS the proof (transitive propagation).
+//   2. A bare hidden flag (no proof — legacy responder or omit-the-sig
+//      attack) is DROPPED: the message stays visible.
+//   3. A forged proof (a non-author identity signing the deletion payload
+//      with its own key) is DROPPED: the pk↔author binding rejects it.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn synced_channel_deletion_hides_for_late_joiner() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+    const A: u8 = 190;
+    const B: u8 = 191;
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A)).peer_id();
+    let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B)).peer_id();
+
+    let mut a = spawn_node_with_friends(&relay, A, A, &[&b_master]).await;
+    sleep_ms(1000).await;
+    let mut b = spawn_node_with_friends(&relay, B, B, &[&a_master]).await;
+    sleep_ms(3000).await; // let Olm confirm A↔B
+    drain_events(&mut a);
+    drain_events(&mut b);
+
+    // A creates the server, posts two messages and deletes one via the REAL
+    // delete path (signs "ch-delete", stores the proof in message_deletions)
+    // — all BEFORE B ever joins, so the deletion can only reach B via sync.
+    let server_id = create_server_and_wait(&mut a, "Deletion Sync").await;
+    let general = general_channel_of(&server_id);
+    sleep_ms(300).await;
+    for (mid, text) in [("keep-1", "stays"), ("del-1", "goes away")] {
+        a.cmd_tx
+            .send(NodeCommand::SendChannelMessage {
+                server_id: server_id.clone(),
+                channel_id: general.clone(),
+                text: text.to_string(),
+                message_id: mid.to_string(),
+                reply_to_mid: None,
+                link_preview: None,
+            })
+            .await
+            .unwrap();
+        sleep_ms(80).await;
+    }
+    a.cmd_tx
+        .send(NodeCommand::DeleteChannelMessage {
+            server_id: server_id.clone(),
+            channel_id: general.clone(),
+            message_id: "del-1".to_string(),
+        })
+        .await
+        .unwrap();
+    let a_deleted = wait_event(&mut a, std::time::Duration::from_secs(4), |ev| {
+        matches!(ev, NetworkEvent::ChannelMessageDeleted { message_id, .. } if message_id == "del-1")
+    })
+    .await;
+    assert!(a_deleted, "A emits ChannelMessageDeleted for its own delete");
+    assert!(
+        a.store().load_deletion_proof("del-1").is_some(),
+        "the real delete path must store a signed deletion proof"
+    );
+    drain_events(&mut a);
+
+    // B joins fresh; the join-time channel sync must deliver BOTH messages,
+    // one of them hidden — with the proof verifying on B.
+    b.cmd_tx
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
+        .await
+        .unwrap();
+    let b_joined = wait_event(&mut b, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
+    })
+    .await;
+    assert!(b_joined, "B should join the server");
+    sleep_ms(6000).await; // channel-sync round trip + commit
+
+    let on_b = b.channel_messages(&server_id, &general);
+    assert!(
+        on_b.iter().any(|m| m.text == "stays"),
+        "sync must deliver the surviving message, got {:?}",
+        on_b.iter().map(|m| &m.text).collect::<Vec<_>>()
+    );
+    assert!(
+        !on_b.iter().any(|m| m.text == "goes away"),
+        "the deleted message must arrive HIDDEN on B (verified deletion applied)"
+    );
+    // Row present + hidden + proof ADOPTED, so B itself can re-serve the
+    // deletion under reject-absent (transitive propagation).
+    assert!(b.store().get_channel_message_hidden_at("del-1").is_some(), "del-1 hidden on B");
+    assert!(b.store().load_deletion_proof("del-1").is_some(), "B adopts the deletion proof");
+
+    drop(a);
+    drop(b);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn synced_channel_deletion_rejects_unproven_hidden_flags() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+    const A: u8 = 193;
+    const B: u8 = 194;
+    const EVIL: u8 = 195; // never spawned — a foreign identity forging proofs
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A)).peer_id();
+    let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B)).peer_id();
+
+    let mut a = spawn_node_with_friends(&relay, A, A, &[&b_master]).await;
+    sleep_ms(1000).await;
+    let mut b = spawn_node_with_friends(&relay, B, B, &[&a_master]).await;
+    sleep_ms(3000).await;
+    drain_events(&mut a);
+    drain_events(&mut b);
+
+    let server_id = create_server_and_wait(&mut a, "Censor Attempt").await;
+    let general = general_channel_of(&server_id);
+    sleep_ms(300).await;
+    for (mid, text) in [("abs-1", "hidden with no proof"), ("forg-1", "hidden with forged proof")] {
+        a.cmd_tx
+            .send(NodeCommand::SendChannelMessage {
+                server_id: server_id.clone(),
+                channel_id: general.clone(),
+                text: text.to_string(),
+                message_id: mid.to_string(),
+                reply_to_mid: None,
+                link_preview: None,
+            })
+            .await
+            .unwrap();
+        sleep_ms(80).await;
+    }
+    sleep_ms(400).await;
+
+    // Tamper A's store the way a malicious/legacy responder would serve it.
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64;
+    {
+        use base64::Engine as _;
+        let store = a.store();
+        // (1) hidden_at with NO deletion evidence — what a bare `hidden_at`
+        //     injection (or a pre-signing legacy deletion) looks like.
+        store.set_channel_message_hidden("abs-1", now_ms).unwrap();
+        // (2) hidden_at with a FORGED proof: a NON-AUTHOR signs the correct
+        //     "ch-delete" payload with ITS OWN key.
+        let evil = NativeKeypair::from_secret_bytes(&seed_bytes(EVIL));
+        let evil_pk = base64::engine::general_purpose::STANDARD.encode(evil.public_key_protobuf());
+        let row = super::message_ops::RowExtras::load_channel(&store, "forg-1");
+        let text = row.text.clone().unwrap_or_default();
+        let (esig, epk) = super::crypto_handler::sign_message_versioned(
+            &evil, &evil_pk, "ch-delete", &format!("{server_id}:{general}"),
+            &a_master, now_ms + 100, &row.as_signed("forg-1"), &text,
+        );
+        store.hide_channel_message("forg-1", now_ms + 100, esig.as_deref(), epk.as_deref()).unwrap();
+    }
+
+    // B joins fresh and syncs the channel — both hidden flags must be DROPPED
+    // (messages visible), while the rows themselves still replicate.
+    b.cmd_tx
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
+        .await
+        .unwrap();
+    let b_joined = wait_event(&mut b, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
+    })
+    .await;
+    assert!(b_joined, "B should join the server");
+    sleep_ms(6000).await;
+
+    let on_b = b.channel_messages(&server_id, &general);
+    for text in ["hidden with no proof", "hidden with forged proof"] {
+        assert!(
+            on_b.iter().any(|m| m.text == text),
+            "{text:?} must stay VISIBLE on B (unproven deletion dropped), got {:?}",
+            on_b.iter().map(|m| &m.text).collect::<Vec<_>>()
+        );
+    }
+    assert_eq!(b.store().get_channel_message_hidden_at("abs-1"), None, "no-proof flag dropped");
+    assert_eq!(b.store().get_channel_message_hidden_at("forg-1"), None, "forged-proof flag dropped");
+
+    drop(a);
+    drop(b);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn synced_dm_deletion_requires_proof() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+    const A: u8 = 197;
+    const B: u8 = 198;
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A)).peer_id();
+    let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B)).peer_id();
+
+    let mut a = spawn_node_with_friends(&relay, A, A, &[&b_master]).await;
+    sleep_ms(1000).await;
+    let mut b = spawn_node_with_friends(&relay, B, B, &[&a_master]).await;
+    sleep_ms(3000).await;
+    drain_events(&mut a);
+    drain_events(&mut b);
+
+    // A sends B two DMs live (real Olm path); both land on B.
+    for (mid, text) in [("dmdel-1", "dm to be deleted"), ("dmabs-1", "dm bare-hidden")] {
+        a.cmd_tx
+            .send(NodeCommand::SendMessage {
+                peer_id: b_master.clone(),
+                text: text.to_string(),
+                message_id: mid.to_string(),
+                reply_to_mid: None,
+                link_preview: None,
+            })
+            .await
+            .unwrap();
+        sleep_ms(150).await;
+    }
+    let b_got = wait_event(&mut b, std::time::Duration::from_secs(6), |ev| {
+        matches!(ev, NetworkEvent::MessageReceived { text, .. } if text == "dm bare-hidden")
+    })
+    .await;
+    assert!(b_got, "B must receive both live DMs");
+    sleep_ms(300).await;
+
+    // Hide both on A at the STORE level only (no live delete envelope is ever
+    // sent), signing dmdel-1 exactly like the production delete path — so the
+    // deletion can only reach B through DM sync.
+    let del_ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64;
+    {
+        use base64::Engine as _;
+        let store = a.store();
+        let a_kp = NativeKeypair::from_secret_bytes(&seed_bytes(A));
+        let a_pk = base64::engine::general_purpose::STANDARD.encode(a_kp.public_key_protobuf());
+        let row = super::message_ops::RowExtras::load_dm(&store, "dmdel-1");
+        let text = row.text.clone().unwrap_or_default();
+        let (sig, pk) = super::crypto_handler::sign_message_versioned(
+            &a_kp, &a_pk, "dm-delete", &b_master, &a_master, del_ts,
+            &row.as_signed("dmdel-1"), &text,
+        );
+        store.hide_dm_message("dmdel-1", del_ts, sig.as_deref(), pk.as_deref()).unwrap();
+        // The bare flag: hidden with NO proof to serve.
+        store.set_dm_message_hidden("dmabs-1", del_ts + 10).unwrap();
+    }
+
+    // B reconnects; its connect flow fires a DmSyncRequest toward A, and A
+    // re-serves both rows (their updated_at moved) with hidden flags.
+    relay.set_online(&b.device_id, false);
+    sleep_ms(300).await;
+    drain_events(&mut b);
+    relay.set_online(&b.device_id, true);
+    let b_synced = wait_event(&mut b, std::time::Duration::from_secs(10), |ev| {
+        matches!(ev, NetworkEvent::DmSyncCompleted { peer_id, .. } if *peer_id == a_master)
+    })
+    .await;
+    assert!(b_synced, "B should complete a DM sync with A after reconnect");
+    sleep_ms(800).await;
+
+    let store_b = b.store();
+    assert!(store_b.dm_message_exists("dmdel-1"), "dmdel-1 row exists on B");
+    assert!(
+        store_b.get_dm_message_hidden_at("dmdel-1").is_some(),
+        "the author-signed deletion must propagate through DM sync"
+    );
+    assert!(
+        store_b.load_deletion_proof("dmdel-1").is_some(),
+        "B adopts the DM deletion proof for onward sync"
+    );
+    assert!(store_b.dm_message_exists("dmabs-1"), "dmabs-1 row exists on B");
+    assert_eq!(
+        store_b.get_dm_message_hidden_at("dmabs-1"),
+        None,
+        "a bare hidden flag with no proof must be dropped (REJECT-ABSENT)"
+    );
+
+    drop(a);
+    drop(b);
+}

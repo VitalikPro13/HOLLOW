@@ -2882,6 +2882,112 @@ impl MessageStore {
         Ok(())
     }
 
+    /// The stored deletion proof for a message: `(deleted_at, signature,
+    /// public_key)` from the latest SIGNED `message_deletions` evidence row.
+    /// Sync responders attach this to `hidden_at` items (0.8.4); `None` for
+    /// pre-signing legacy deletions — those no longer propagate through sync
+    /// (REJECT-ABSENT).
+    pub fn load_deletion_proof(&self, message_id: &str) -> Option<(i64, String, String)> {
+        self.conn
+            .query_row(
+                "SELECT deleted_at, signature, public_key FROM message_deletions
+                 WHERE message_id = ?1 AND signature IS NOT NULL AND public_key IS NOT NULL
+                 ORDER BY id DESC LIMIT 1",
+                params![message_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .ok()
+    }
+
+    /// `hidden_at` of a channel message row (`None` = visible or no such row).
+    pub fn get_channel_message_hidden_at(&self, message_id: &str) -> Option<i64> {
+        self.conn
+            .query_row(
+                "SELECT hidden_at FROM channel_messages WHERE message_id = ?1",
+                params![message_id],
+                |row| row.get(0),
+            )
+            .ok()
+            .flatten()
+    }
+
+    /// `hidden_at` of a DM message row (`None` = visible or no such row).
+    pub fn get_dm_message_hidden_at(&self, message_id: &str) -> Option<i64> {
+        self.conn
+            .query_row(
+                "SELECT hidden_at FROM messages WHERE message_id = ?1",
+                params![message_id],
+                |row| row.get(0),
+            )
+            .ok()
+            .flatten()
+    }
+
+    /// Sync-apply setter for a VERIFIED deletion (0.8.4): sets `hidden_at`
+    /// like [`Self::set_channel_message_hidden`] AND stores the verified
+    /// proof in `message_deletions` (once) so THIS node can re-serve the
+    /// deletion with its proof. Without the store-forward, REJECT-ABSENT
+    /// would stop deletions from propagating past the first sync hop.
+    pub fn set_channel_message_hidden_verified(
+        &self,
+        message_id: &str,
+        hidden_at: i64,
+        signature: &str,
+        public_key: &str,
+    ) -> Result<(), String> {
+        self.set_message_hidden_verified_in("channel_messages", message_id, hidden_at, signature, public_key)
+    }
+
+    /// DM twin of [`Self::set_channel_message_hidden_verified`].
+    pub fn set_dm_message_hidden_verified(
+        &self,
+        message_id: &str,
+        hidden_at: i64,
+        signature: &str,
+        public_key: &str,
+    ) -> Result<(), String> {
+        self.set_message_hidden_verified_in("messages", message_id, hidden_at, signature, public_key)
+    }
+
+    /// Shared verified-hidden setter. `table` is a fixed table name, never
+    /// user input. Idempotent under sync re-apply: the evidence row is only
+    /// inserted while no SIGNED one exists for this message.
+    fn set_message_hidden_verified_in(
+        &self,
+        table: &str,
+        message_id: &str,
+        hidden_at: i64,
+        signature: &str,
+        public_key: &str,
+    ) -> Result<(), String> {
+        let have_signed: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM message_deletions WHERE message_id = ?1 AND signature IS NOT NULL",
+                params![message_id],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        if have_signed == 0 {
+            let text: String = self
+                .conn
+                .query_row(
+                    &format!("SELECT text FROM {table} WHERE message_id = ?1"),
+                    params![message_id],
+                    |row| row.get(0),
+                )
+                .unwrap_or_default();
+            self.conn
+                .execute(
+                    "INSERT INTO message_deletions (message_id, deleted_text, deleted_at, signature, public_key)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![message_id, text, hidden_at, signature, public_key],
+                )
+                .map_err(|e| format!("Failed to store synced deletion proof: {e}"))?;
+        }
+        self.set_message_hidden_in(table, message_id, hidden_at)
+    }
+
     // ── Emoji Reactions (Phase 3.5) ──────────────────────────────
 
     /// Add a reaction to a message. INSERT OR IGNORE handles duplicates via UNIQUE constraint.
@@ -4701,6 +4807,39 @@ mod tests {
         assert_eq!(both.len(), 6, "peer-fallback serve must return both directions");
         assert_eq!(both.iter().filter(|m| m.is_mine).count(), 3);
         assert_eq!(both.iter().filter(|m| !m.is_mine).count(), 3);
+    }
+
+    /// 0.8.4 deletion-proof plumbing: `load_deletion_proof` returns only a
+    /// SIGNED evidence row (a legacy bare hide has none to serve), and the
+    /// verified sync setter stores the proof exactly once under re-apply.
+    #[test]
+    fn deletion_proof_load_and_verified_setter_idempotency() {
+        let store = mem_store();
+        store.insert_channel_message("s", "c", "peer", "msg a", false, 100, None, None, Some("ma"), None, None, None).unwrap();
+        store.insert_channel_message("s", "c", "peer", "msg b", false, 110, None, None, Some("mb"), None, None, None).unwrap();
+
+        // A local (real) delete stores the proof; the loader returns it.
+        store.hide_channel_message("ma", 200, Some("sig-a"), Some("pk-a")).unwrap();
+        assert_eq!(
+            store.load_deletion_proof("ma"),
+            Some((200, "sig-a".to_string(), "pk-a".to_string())),
+        );
+        // Legacy bare hide: hidden, but no proof to serve.
+        store.set_channel_message_hidden("mb", 210).unwrap();
+        assert_eq!(store.get_channel_message_hidden_at("mb"), Some(210));
+        assert_eq!(store.load_deletion_proof("mb"), None);
+
+        // Verified sync setter: hides + stores the proof ONCE — a re-apply
+        // (sync overlap) must not add a second, competing evidence row.
+        store.insert("friend", "dm msg", false, 120, None, None, Some("md"), None, None, None).unwrap();
+        store.set_dm_message_hidden_verified("md", 220, "sig-d", "pk-d").unwrap();
+        store.set_dm_message_hidden_verified("md", 220, "sig-DIFFERENT", "pk-DIFFERENT").unwrap();
+        assert_eq!(store.get_dm_message_hidden_at("md"), Some(220));
+        assert_eq!(
+            store.load_deletion_proof("md"),
+            Some((220, "sig-d".to_string(), "pk-d".to_string())),
+            "re-apply must not overwrite or duplicate the stored proof",
+        );
     }
 
     /// A friend added by temporary nickname is stored under the friend's DEVICE

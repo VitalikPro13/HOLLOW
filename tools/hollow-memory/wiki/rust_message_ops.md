@@ -451,6 +451,7 @@ DB path: `~/.hollow/messages.db`.
 8. **DM edits/deletes have no offline queue** — If peer has no Olm session or is unreachable, the edit/delete is persisted locally but never transmitted. Only `handle_send_message()` queues into `pending_messages`.
 9. **Channel permission check** — Only `handle_send_channel_message()` checks `server.can_post_in_channel()`. Edit/delete/reaction handlers do NOT re-check permissions (they verify ownership instead).
 10. **PeerId-pubkey binding** — `verify_message_signature()` derives PeerId from the public key protobuf and checks it matches the claimed sender, preventing key substitution attacks.
+11. **Sync deletion propagation is authenticated (0.8.4, REJECT-ABSENT)** — a sync item's `hidden_at` is applied only when `hidden_sig`/`hidden_pk` verify as the row AUTHOR's `"ch-delete"`/`"dm-delete"` proof (`apply_verified_channel_deletion` / `apply_verified_dm_deletion`; author derived from the receiver's ROW — `get_channel_message_sender` / `get_dm_message_is_mine` — never from the item's `s`/`mine` fields). Absent or invalid proof → the flag is dropped. Verified applies store the proof (`set_*_hidden_verified`) so the deletion re-propagates; `deletion_proof_fields()` attaches it on the build side; `verified_guest_hidden_at()` covers the guest preview.
 
 ---
 

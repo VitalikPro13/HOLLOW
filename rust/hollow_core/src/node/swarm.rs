@@ -4897,6 +4897,10 @@ fn build_dm_sync_items(
                 vthumb: f.video_thumb.clone(),
             })
         });
+        // Deletion proof rides with the hidden flag (REJECT-ABSENT on apply).
+        let (hidden_at, hidden_sig, hidden_pk) = message_ops::deletion_proof_fields(
+            store, m.hidden_at, m.message_id.as_deref(),
+        );
         DmSyncItem {
             t: m.text.clone(),
             ts: m.timestamp,
@@ -4908,7 +4912,9 @@ fn build_dm_sync_items(
             reply_to: m.reply_to_mid.clone(),
             file_id: m.file_id.clone(),
             file_meta,
-            hidden_at: m.hidden_at,
+            hidden_at,
+            hidden_sig,
+            hidden_pk,
             order_us: m.order_us,
             lp_digest: m.link_preview.as_ref().map(crypto_handler::link_preview_digest),
             reactions,
@@ -5715,9 +5721,14 @@ async fn handle_incoming_request(
                                 }
                             }
 
-                            // Apply deletion if the message was hidden on the syncing peer.
+                            // Apply deletion if the message was hidden on the syncing peer —
+                            // ONLY with the author's own deletion proof (REJECT-ABSENT, 0.8.4).
                             if let (Some(hidden_ts), Some(mid)) = (msg.hidden_at, &msg.mid) {
-                                let _ = store.set_channel_message_hidden(mid, hidden_ts);
+                                let _ = message_ops::apply_verified_channel_deletion(
+                                    &store, &sid, &cid, mid, hidden_ts,
+                                    msg.hidden_sig.as_deref(), msg.hidden_pk.as_deref(),
+                                    &mut pk_cache,
+                                );
                             }
 
                             // Insert file metadata and emit FileHeaderReceived for late joiners.
@@ -6110,9 +6121,14 @@ async fn handle_incoming_request(
                                 }
                             }
 
-                            // Apply deletion if the message was hidden on the syncing peer.
+                            // Apply deletion if the message was hidden on the syncing peer —
+                            // ONLY with the author's own deletion proof (REJECT-ABSENT, 0.8.4).
                             if let (Some(hidden_ts), Some(mid)) = (msg.hidden_at, &msg.mid) {
-                                if store.set_dm_message_hidden(mid, hidden_ts).is_ok() {
+                                if message_ops::apply_verified_dm_deletion(
+                                    &store, &local_peer, mid, hidden_ts,
+                                    msg.hidden_sig.as_deref(), msg.hidden_pk.as_deref(),
+                                    &mut pk_cache,
+                                ) {
                                     let _ = event_tx.send(NetworkEvent::DmMessageDeleted {
                                         peer_id: convo_peer.clone(),
                                         message_id: mid.clone(),
@@ -6328,9 +6344,14 @@ async fn handle_incoming_request(
                                 }
                             }
 
-                            // Apply deletion if hidden on the sibling.
+                            // Apply deletion if hidden on the sibling — ONLY with the
+                            // author's own deletion proof (REJECT-ABSENT, 0.8.4).
                             if let (Some(hidden_ts), Some(mid)) = (msg.hidden_at, &msg.mid) {
-                                if store.set_dm_message_hidden(mid, hidden_ts).is_ok() {
+                                if message_ops::apply_verified_dm_deletion(
+                                    &store, &local_peer, mid, hidden_ts,
+                                    msg.hidden_sig.as_deref(), msg.hidden_pk.as_deref(),
+                                    &mut pk_cache,
+                                ) {
                                     let _ = event_tx.send(NetworkEvent::DmMessageDeleted {
                                         peer_id: convo_peer.clone(),
                                         message_id: mid.clone(),
@@ -10915,6 +10936,11 @@ async fn handle_incoming_request(
                                     vthumb: f.video_thumb.clone(),
                                 })
                             });
+                            // Deletion proof rides with the hidden flag — guests
+                            // verify it item-locally (REJECT-ABSENT, 0.8.4).
+                            let (hidden_at, hidden_sig, hidden_pk) = message_ops::deletion_proof_fields(
+                                &store, m.hidden_at, m.message_id.as_deref(),
+                            );
                             SyncMessageItem {
                                 s: m.sender_id.clone(),
                                 t: m.text.clone(),
@@ -10926,7 +10952,9 @@ async fn handle_incoming_request(
                                 reply_to: m.reply_to_mid.clone(),
                                 file_id: m.file_id.clone(),
                                 file_meta,
-                                hidden_at: m.hidden_at,
+                                hidden_at,
+                                hidden_sig,
+                                hidden_pk,
                                 order_us: m.order_us,
                                 lp_digest: m.link_preview.as_ref().map(crypto_handler::link_preview_digest),
                                 reactions,
@@ -10999,20 +11027,30 @@ async fn handle_incoming_request(
         HavenMessage::PublicChannelSyncResponse { server_id, channel_id, messages, has_more, sender_profiles } => {
             if peer_str == local_peer_str { return; }
             if !guest_rooms.contains(&server_id) { return; }
+            // Guests hold no rows to check against, so the hidden flag is
+            // verified from the item's own fields — REJECT-ABSENT (0.8.4):
+            // public-channel sync is plaintext (relay-tamperable), and a bare
+            // hidden_at would censor messages out of the preview.
+            let mut pk_cache = PkCache::new();
             let ffi_messages: Vec<GuestSyncMessageFfi> = messages.into_iter()
-                .map(|m| GuestSyncMessageFfi {
-                    sender_id: m.s,
-                    text: m.t,
-                    timestamp: m.ts,
-                    message_id: m.mid,
-                    signature: m.sig,
-                    public_key: m.pk,
-                    edited_at: m.edited_at,
-                    reply_to: m.reply_to,
-                    hidden_at: m.hidden_at,
-                    reactions: m.reactions.into_iter().map(|r| GuestReactionFfi {
-                        emoji: r.e, peer_id: r.p, added_at: r.ts,
-                    }).collect(),
+                .map(|m| {
+                    let hidden_at = message_ops::verified_guest_hidden_at(
+                        &m, &server_id, &channel_id, &mut pk_cache,
+                    );
+                    GuestSyncMessageFfi {
+                        sender_id: m.s,
+                        text: m.t,
+                        timestamp: m.ts,
+                        message_id: m.mid,
+                        signature: m.sig,
+                        public_key: m.pk,
+                        edited_at: m.edited_at,
+                        reply_to: m.reply_to,
+                        hidden_at,
+                        reactions: m.reactions.into_iter().map(|r| GuestReactionFfi {
+                            emoji: r.e, peer_id: r.p, added_at: r.ts,
+                        }).collect(),
+                    }
                 })
                 .collect();
             let ffi_profiles: Vec<SyncSenderProfileFfi> = sender_profiles.into_iter().map(|(pid, p)| {

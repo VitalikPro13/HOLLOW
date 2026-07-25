@@ -414,6 +414,10 @@ pub(crate) fn channel_sync_items(
                 vthumb: f.video_thumb.clone(),
             })
         });
+        // Deletion proof rides with the hidden flag (REJECT-ABSENT on apply).
+        let (hidden_at, hidden_sig, hidden_pk) = super::message_ops::deletion_proof_fields(
+            store, m.hidden_at, m.message_id.as_deref(),
+        );
         SyncMessageItem {
             s: m.sender_id.clone(),
             t: m.text.clone(),
@@ -425,7 +429,9 @@ pub(crate) fn channel_sync_items(
             reply_to: m.reply_to_mid.clone(),
             file_id: m.file_id.clone(),
             file_meta,
-            hidden_at: m.hidden_at,
+            hidden_at,
+            hidden_sig,
+            hidden_pk,
             order_us: m.order_us,
             lp_digest: m.link_preview.as_ref()
                 .map(super::crypto_handler::link_preview_digest),
@@ -2549,7 +2555,7 @@ pub(crate) async fn handle_envelope_channel_sync_batch(
         // (rusqlite's Connection is !Sync).
         let (inserted, events) = upsert_synced_channel_message(&store, &sid, &cid, msg, is_mine, sig_verified);
         new_count += inserted;
-        for ev in events.into_iter().chain(apply_sync_item_extras(&store, &sid, &cid, msg, is_mine)) {
+        for ev in events.into_iter().chain(apply_sync_item_extras(&store, &sid, &cid, msg, is_mine, &mut pk_cache)) {
             let _ = event_tx.send(ev).await;
         }
     }
@@ -2695,10 +2701,16 @@ fn apply_sync_item_extras(
     cid: &str,
     msg: &SyncMessageItem,
     is_mine: bool,
+    pk_cache: &mut PkCache,
 ) -> Vec<NetworkEvent> {
     let mut events = Vec::new();
+    // Hidden flag: honored ONLY with the author's own deletion proof
+    // (REJECT-ABSENT, 0.8.4) — see `message_ops::apply_verified_channel_deletion`.
     if let (Some(hidden_ts), Some(mid)) = (msg.hidden_at, &msg.mid) {
-        if store.set_channel_message_hidden(mid, hidden_ts).is_ok() {
+        if super::message_ops::apply_verified_channel_deletion(
+            store, sid, cid, mid, hidden_ts,
+            msg.hidden_sig.as_deref(), msg.hidden_pk.as_deref(), pk_cache,
+        ) {
             events.push(NetworkEvent::ChannelMessageDeleted {
                 server_id: sid.to_string(),
                 channel_id: cid.to_string(),

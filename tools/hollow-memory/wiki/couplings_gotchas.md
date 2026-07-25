@@ -322,6 +322,17 @@ Additionally, `handle_send_file()` skips writing ciphertext to temp file and ski
 - Reaction signing uses a DIFFERENT format: `"reaction:{mid}:{emoji}:{ts}"` / `"unreaction:{mid}:{emoji}:{ts}"` — live-REQUIRED since 0.8.3 (`reaction_sig_rejected`)
 - Message Proof: `verify_message_proof_v2` FFI builds the payload in Rust from the DB row; only `verify_proof_section.dart` (external proof files) mirrors the grammar in Dart
 
+### Sync `hidden_at` applies ONLY with the author's deletion proof (REJECT-ABSENT, 0.8.4)
+
+**Rule:** A `hidden_at` arriving on a sync item is applied ONLY when its `hidden_sig`/`hidden_pk` verify as the AUTHOR's own `"ch-delete"`/`"dm-delete"` signature, reconstructed from the RECEIVER's row (`message_ops::apply_verified_channel_deletion` / `apply_verified_dm_deletion`; the guest public-channel preview verifies item-locally via `verified_guest_hidden_at`). Absent proof = the flag is DROPPED — there is deliberately NO tolerate-absent fallback (omitting the sig would reopen the hole). Never call the bare `set_*_message_hidden` from a sync path.
+
+**Why:** A bare hidden flag in a sync batch is a forge-a-deletion / censorship primitive: any sync responder (or a relay tampering with a plaintext public-channel batch) could hide arbitrary messages on the victim. Deletes are SELF-ONLY, so verification is a plain author-signature check — but the author MUST be derived from the receiver's row (channel: `get_channel_message_sender` → resolve; DM: `get_dm_message_is_mine` picks signer/ctx), never from item fields the responder controls: trusting the item's `mine` flag would let a friend "delete" YOUR message with THEIR own valid signature.
+
+**Where:**
+- Build (attach proof): `message_ops::deletion_proof_fields()` reads `message_deletions` via `store.load_deletion_proof()`; sites: `sync_handler.rs:channel_sync_items`, `swarm.rs:build_dm_sync_items`, the swarm.rs public-channel sync responder
+- Apply (verify + store-forward): `sync_handler.rs:apply_sync_item_extras` and the swarm.rs ChannelSyncBatch / DmSyncBatch / DmSiblingSyncBatch arms — all through `apply_verified_*_deletion`, which also ADOPTS the proof (`set_*_hidden_verified`) so the deletion keeps propagating under reject-absent
+- Accepted cost: pre-signing (unsigned) legacy deletions no longer propagate through sync; v1 delete sigs still verify (verify-both)
+
 ### Dart timestamps must be hydrated from Rust's signed value
 
 **Rule:** Dart timestamps for messages MUST be hydrated from the timestamp in `NetworkEvent::MessageSent` / `ChannelMessageSent`, NOT from `DateTime.now()`.

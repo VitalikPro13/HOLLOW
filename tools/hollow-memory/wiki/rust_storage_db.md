@@ -164,8 +164,11 @@ Messages are never truly deleted. Deletion sets `hidden_at` on the message row a
 
 - `messages.rs:hide_channel_message()` -- Three-step: (1) read current text, (2) insert into `message_deletions`, (3) `UPDATE channel_messages SET hidden_at`. Returns false if not found.
 - `messages.rs:hide_dm_message()` -- Same pattern for DM messages.
-- `messages.rs:set_channel_message_hidden()` -- Lightweight setter for sync. Only sets `hidden_at`, does NOT create deletion evidence (original deleter already did). Used when syncing to late joiners.
-- `messages.rs:set_dm_message_hidden()` -- Same lightweight setter for DM sync.
+- `messages.rs:set_channel_message_hidden()` -- Lightweight setter: only sets `hidden_at`, no deletion evidence. Since 0.8.4 sync paths must NOT call it directly — they go through `message_ops::apply_verified_*_deletion` (REJECT-ABSENT) → `set_*_message_hidden_verified()`.
+- `messages.rs:set_dm_message_hidden()` -- Same lightweight setter, same 0.8.4 rule.
+- `messages.rs:set_channel_message_hidden_verified()` / `set_dm_message_hidden_verified()` -- 0.8.4 sync-apply: sets `hidden_at` AND stores the VERIFIED (sig, pk) into `message_deletions` once (idempotent under re-apply), so this node can re-serve the deletion with its proof under reject-absent.
+- `messages.rs:load_deletion_proof()` -- Latest SIGNED evidence row for a message: `(deleted_at, signature, public_key)`; `None` for pre-signing legacy deletions (those no longer propagate through sync).
+- `messages.rs:get_channel_message_hidden_at()` / `get_dm_message_hidden_at()` -- Row's `hidden_at` (`None` = visible or missing row); the idempotency check for verified sync applies.
 - `messages.rs:load_deletions_for_messages()` -- Batch load: dynamic `IN (...)`. Returns `HashMap<message_id, Vec<(deleted_text, deleted_at, signature, public_key)>>`.
 
 ## Table: message_reactions (Emoji Reactions)

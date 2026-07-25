@@ -2795,6 +2795,17 @@ pub(crate) struct SyncMessageItem {
     /// Deletion timestamp (if message was deleted).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hidden_at: Option<i64>,
+    /// Author's own deletion signature for `hidden_at` (0.8.4) — the
+    /// "ch-delete" proof stored in `message_deletions` at deletion time.
+    /// Receivers REJECT-ABSENT: a hidden flag with no verifying proof is
+    /// dropped (a bare `hidden_at` in a sync batch is a censorship primitive
+    /// — any responder, or a relay tampering with a plaintext public-channel
+    /// batch, could hide arbitrary messages on the victim).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hidden_sig: Option<String>,
+    /// Author public key (base64 protobuf) paired with `hidden_sig`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hidden_pk: Option<String>,
     /// Microsecond send timestamp for stable cross-device ordering (Step 9C/C4).
     /// Carried verbatim through backfill so a sender's same-millisecond burst sorts
     /// in true send order on every device. `None` from a pre-9C peer → the receiver
@@ -2962,6 +2973,13 @@ pub(crate) struct DmSyncItem {
     /// Deletion timestamp (if message was deleted).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hidden_at: Option<i64>,
+    /// Author's own "dm-delete" proof for `hidden_at` (0.8.4). See
+    /// [`SyncMessageItem::hidden_sig`] — REJECT-ABSENT on apply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hidden_sig: Option<String>,
+    /// Author public key (base64 protobuf) paired with `hidden_sig`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hidden_pk: Option<String>,
     /// Microsecond send timestamp for stable cross-device ordering (Step 9C/C4).
     /// See [`SyncMessageItem::order_us`].
     #[serde(default, skip_serializing_if = "Option::is_none")]

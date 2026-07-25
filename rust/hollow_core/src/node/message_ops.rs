@@ -60,6 +60,173 @@ impl RowExtras {
     }
 }
 
+// ── Deletion propagation through sync (0.8.4) ────────────────────────
+//
+// `hidden_at` on a sync item is honored ONLY with the author's own deletion
+// signature riding next to it (`hidden_sig`/`hidden_pk` — the "ch-delete" /
+// "dm-delete" proof created at deletion time and stored in
+// `message_deletions`). REJECT-ABSENT: a hidden flag with no valid proof is
+// DROPPED, never applied — a bare `hidden_at` in a sync batch is a
+// forge-a-deletion / censorship primitive (any sync responder, or a relay
+// tampering with a plaintext public-channel batch, could hide arbitrary
+// messages on the victim). There is deliberately NO tolerate-absent fallback:
+// tolerating absence reopens the gap via omit-the-sig. The accepted cost is
+// that pre-signing (ancient, unsigned) deletions no longer propagate through
+// sync. Deletes are SELF-ONLY (live handlers reject sender != author), so
+// verification is a plain author-signature check — and the author is derived
+// from the RECEIVER'S ROW, never from item fields the responder controls.
+
+/// Outbound half: the `(hidden_at, hidden_sig, hidden_pk)` triple for a sync
+/// item built from row `mid`. Attaches the stored deletion proof; prefers the
+/// proof's own `deleted_at` over a drifted row `hidden_at` so the served
+/// (ts, sig) pair is always the one the author signed. A hidden row with no
+/// signed proof is served bare (receivers drop the flag).
+pub(crate) fn deletion_proof_fields(
+    store: &crate::storage::MessageStore,
+    hidden_at: Option<i64>,
+    mid: Option<&str>,
+) -> (Option<i64>, Option<String>, Option<String>) {
+    let (Some(_), Some(mid)) = (hidden_at, mid) else {
+        return (hidden_at, None, None);
+    };
+    match store.load_deletion_proof(mid) {
+        Some((ts, sig, pk)) => (Some(ts), Some(sig), Some(pk)),
+        None => (hidden_at, None, None),
+    }
+}
+
+/// Inbound half (channel): verify + apply one sync-carried deletion. The
+/// proof is checked against OUR row (author = row sender resolved to master,
+/// extras/text from the row — the same reconstruction the live DeleteMessage
+/// handler uses), then stored for onward propagation and `hidden_at` set.
+/// Returns true when the row was NEWLY hidden (callers emit their deletion
+/// event on true); false = rejected, already hidden, or no such row.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn apply_verified_channel_deletion(
+    store: &crate::storage::MessageStore,
+    sid: &str,
+    cid: &str,
+    mid: &str,
+    hidden_ts: i64,
+    hidden_sig: Option<&str>,
+    hidden_pk: Option<&str>,
+    pk_cache: &mut PkCache,
+) -> bool {
+    let already_hidden = store.get_channel_message_hidden_at(mid).is_some();
+    // Converged (hidden + proof on file): quiet no-op. An already-hidden row
+    // MISSING its proof still runs the verify below so a valid arriving proof
+    // is adopted (heals legacy-hidden rows for onward propagation).
+    if already_hidden && store.load_deletion_proof(mid).is_some() {
+        return false;
+    }
+    let (Some(sig), Some(pk)) = (hidden_sig, hidden_pk) else {
+        if !already_hidden {
+            hollow_log!("[HOLLOW-SECURITY] REJECTED synced deletion of {mid} in {sid}/{cid} — hidden_at without a deletion proof");
+        }
+        return false;
+    };
+    // Deletes are SELF-ONLY: only the row's AUTHOR can have signed it.
+    let Some(sender) = store.get_channel_message_sender(mid) else {
+        return false;
+    };
+    let signer = super::resolver::resolve(&sender);
+    let row = RowExtras::load_channel(store, mid);
+    let current_text = row.text.clone().unwrap_or_default();
+    if !verify_message_signature_v2(
+        &signer, Some(sig), Some(pk), "ch-delete", &format!("{sid}:{cid}"),
+        hidden_ts, &row.as_signed(mid), &current_text, pk_cache,
+    ) {
+        if !already_hidden {
+            hollow_log!("[HOLLOW-SECURITY] REJECTED synced deletion of {mid} in {sid}/{cid} (signer {signer}) — deletion signature INVALID");
+        }
+        return false;
+    }
+    let _ = store.set_channel_message_hidden_verified(mid, hidden_ts, sig, pk);
+    !already_hidden
+}
+
+/// Inbound half (DM): like [`apply_verified_channel_deletion`] but signer and
+/// context depend on the ROW's direction. `is_mine` comes from OUR row —
+/// deriving it from the item's `mine` flag would let a friend "delete" OUR
+/// message with THEIR OWN (valid) signature. "dm-delete" signing convention
+/// (`handle_delete_dm_message` + the live receive arm): signer = the
+/// deleter's master, context = the OTHER party's master.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn apply_verified_dm_deletion(
+    store: &crate::storage::MessageStore,
+    local_master: &str,
+    mid: &str,
+    hidden_ts: i64,
+    hidden_sig: Option<&str>,
+    hidden_pk: Option<&str>,
+    pk_cache: &mut PkCache,
+) -> bool {
+    let already_hidden = store.get_dm_message_hidden_at(mid).is_some();
+    if already_hidden && store.load_deletion_proof(mid).is_some() {
+        return false;
+    }
+    let (Some(sig), Some(pk)) = (hidden_sig, hidden_pk) else {
+        if !already_hidden {
+            hollow_log!("[HOLLOW-SECURITY] REJECTED synced DM deletion of {mid} — hidden_at without a deletion proof");
+        }
+        return false;
+    };
+    let Some(is_mine) = store.get_dm_message_is_mine(mid) else {
+        return false;
+    };
+    let row_peer = super::resolver::resolve(
+        &store.get_dm_message_peer(mid).unwrap_or_default(),
+    );
+    let (signer, ctx) = if is_mine {
+        // We authored + deleted it; we signed ctx = the conversation peer.
+        (local_master.to_string(), row_peer)
+    } else {
+        // The peer authored + deleted it; they signed ctx = us.
+        (row_peer, local_master.to_string())
+    };
+    let row = RowExtras::load_dm(store, mid);
+    let current_text = row.text.clone().unwrap_or_default();
+    if !verify_message_signature_v2(
+        &signer, Some(sig), Some(pk), "dm-delete", &ctx,
+        hidden_ts, &row.as_signed(mid), &current_text, pk_cache,
+    ) {
+        if !already_hidden {
+            hollow_log!("[HOLLOW-SECURITY] REJECTED synced DM deletion of {mid} (signer {signer}) — deletion signature INVALID");
+        }
+        return false;
+    }
+    let _ = store.set_dm_message_hidden_verified(mid, hidden_ts, sig, pk);
+    !already_hidden
+}
+
+/// Guest-preview half: verify a public-channel sync item's hidden flag from
+/// the item's own fields (guests hold no rows to check against). Returns the
+/// `hidden_at` to honor, or `None` to strip the flag (absent/invalid proof).
+/// The pubkey↔signer binding inside the verify stops a non-author forging
+/// the proof; a replayed REAL deletion is legitimate propagation.
+pub(crate) fn verified_guest_hidden_at(
+    m: &super::types::SyncMessageItem,
+    sid: &str,
+    cid: &str,
+    pk_cache: &mut PkCache,
+) -> Option<i64> {
+    let hidden_ts = m.hidden_at?;
+    let (sig, pk) = (m.hidden_sig.as_deref()?, m.hidden_pk.as_deref()?);
+    let signer = super::resolver::resolve(&m.s);
+    let extras = SignedExtras {
+        mid: m.mid.as_deref(),
+        reply_to: m.reply_to.as_deref(),
+        file_id: m.file_id.as_deref(),
+        order_us: m.order_us,
+        lp_digest: m.lp_digest.as_deref(),
+    };
+    verify_message_signature_v2(
+        &signer, Some(sig), Some(pk), "ch-delete", &format!("{sid}:{cid}"),
+        hidden_ts, &extras, &m.t, pk_cache,
+    )
+    .then_some(hidden_ts)
+}
+
 // ── 1. SendMessage (DM) ──────────────────────────────────────────────
 
 #[allow(clippy::too_many_arguments)]
@@ -2428,5 +2595,228 @@ pub(crate) async fn handle_envelope_remove_reaction(
             reactor: peer_str.to_string(),
             removed_at: ts,
         }).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::identity::native_identity::NativeKeypair;
+
+    // ── Deletion propagation through sync (0.8.4) — REJECT-ABSENT ──────
+    //
+    // Unit twins of the multi-node harness deletion tests: the apply helpers
+    // against a real store, mirroring crypto_handler's v2 tamper tests.
+
+    fn mem_store() -> crate::storage::MessageStore {
+        crate::storage::MessageStore::open(":memory:", &"ab".repeat(32)).expect("open store")
+    }
+
+    fn kp(seed: u8) -> NativeKeypair {
+        NativeKeypair::from_secret_bytes(&[seed; 32])
+    }
+
+    fn pk_b64(k: &NativeKeypair) -> String {
+        use base64::Engine as _;
+        base64::engine::general_purpose::STANDARD.encode(k.public_key_protobuf())
+    }
+
+    /// Sign a channel deletion exactly like `handle_delete_channel_message`:
+    /// "ch-delete" over the row's structural extras + current text.
+    #[allow(clippy::too_many_arguments)]
+    fn sign_channel_delete(
+        store: &crate::storage::MessageStore,
+        signer_kp: &NativeKeypair,
+        signer_pk_b64: &str,
+        sender: &str,
+        sid: &str,
+        cid: &str,
+        mid: &str,
+        ts: i64,
+    ) -> (Option<String>, Option<String>) {
+        let row = RowExtras::load_channel(store, mid);
+        let text = row.text.clone().unwrap_or_default();
+        sign_message_versioned(
+            signer_kp, signer_pk_b64, "ch-delete", &format!("{sid}:{cid}"),
+            sender, ts, &row.as_signed(mid), &text,
+        )
+    }
+
+    /// REJECT-ABSENT at the apply site: absent proof → dropped; a non-author
+    /// proof → dropped (pk↔author binding); tampered ts → dropped; the
+    /// author's real proof → hidden AND the proof stored for onward serving.
+    #[test]
+    fn synced_channel_deletion_requires_author_proof() {
+        let _g = crate::node::resolver::test_lock();
+        let store = mem_store();
+        let author = kp(231);
+        let author_id = author.peer_id();
+        let author_pk = pk_b64(&author);
+        let (sid, cid, mid) = ("srv-1", "chan-1", "mid-del-1");
+        store.insert_channel_message(
+            sid, cid, &author_id, "to be deleted", false, 1_000,
+            None, None, Some(mid), None, None, Some(1_000_000),
+        ).unwrap();
+        let mut cache = PkCache::new();
+
+        // Absent proof (legacy responder or omit-the-sig attack) → dropped.
+        assert!(!apply_verified_channel_deletion(
+            &store, sid, cid, mid, 2_000, None, None, &mut cache,
+        ));
+        assert_eq!(store.get_channel_message_hidden_at(mid), None, "absent proof must not hide");
+
+        // Forged proof: a NON-AUTHOR signs the correct payload with their own
+        // key — the pk↔author binding rejects it (the censorship attack).
+        let evil = kp(232);
+        let evil_pk = pk_b64(&evil);
+        let (esig, epk) = sign_channel_delete(&store, &evil, &evil_pk, &author_id, sid, cid, mid, 2_000);
+        assert!(!apply_verified_channel_deletion(
+            &store, sid, cid, mid, 2_000, esig.as_deref(), epk.as_deref(), &mut cache,
+        ));
+        assert_eq!(store.get_channel_message_hidden_at(mid), None, "a non-author proof must not hide");
+
+        // The author's real proof — but served with a shifted timestamp → dropped.
+        let (sig, pk) = sign_channel_delete(&store, &author, &author_pk, &author_id, sid, cid, mid, 2_000);
+        assert!(!apply_verified_channel_deletion(
+            &store, sid, cid, mid, 2_001, sig.as_deref(), pk.as_deref(), &mut cache,
+        ));
+
+        // The real proof with its real timestamp → newly hidden + proof stored.
+        assert!(apply_verified_channel_deletion(
+            &store, sid, cid, mid, 2_000, sig.as_deref(), pk.as_deref(), &mut cache,
+        ));
+        assert_eq!(store.get_channel_message_hidden_at(mid), Some(2_000));
+        let (pts, psig, ppk) = store.load_deletion_proof(mid)
+            .expect("proof stored so THIS node can re-serve the deletion");
+        assert_eq!(pts, 2_000);
+        assert_eq!(Some(psig.as_str()), sig.as_deref());
+        assert_eq!(Some(ppk.as_str()), pk.as_deref());
+
+        // Sync overlap re-apply: converged → quiet no-op (no fresh event).
+        assert!(!apply_verified_channel_deletion(
+            &store, sid, cid, mid, 2_000, sig.as_deref(), pk.as_deref(), &mut cache,
+        ));
+    }
+
+    /// DM deletions bind to the ROW's direction: the signer derives from OUR
+    /// is_mine, so a friend cannot censor OUR OWN message by signing a
+    /// "deletion" of it with their (valid) key and a flipped mine flag.
+    #[test]
+    fn synced_dm_deletion_binds_author_direction() {
+        let _g = crate::node::resolver::test_lock();
+        let store = mem_store();
+        let us = kp(233);
+        let them = kp(234);
+        let (us_id, them_id) = (us.peer_id(), them.peer_id());
+        let (us_pk, them_pk) = (pk_b64(&us), pk_b64(&them));
+        let mut cache = PkCache::new();
+
+        // THEIR message (our is_mine=false): their proof (ctx = us) hides it.
+        store.insert(&them_id, "their message", false, 1_000, None, None, Some("dm-1"), None, None, None).unwrap();
+        let row = RowExtras::load_dm(&store, "dm-1");
+        let (sig, pk) = sign_message_versioned(
+            &them, &them_pk, "dm-delete", &us_id, &them_id, 2_000,
+            &row.as_signed("dm-1"), &row.text.clone().unwrap_or_default(),
+        );
+        assert!(apply_verified_dm_deletion(
+            &store, &us_id, "dm-1", 2_000, sig.as_deref(), pk.as_deref(), &mut cache,
+        ));
+        assert_eq!(store.get_dm_message_hidden_at("dm-1"), Some(2_000));
+
+        // OUR message (is_mine=true): the friend signs a "deletion" of it with
+        // their own key. The row says WE authored it, so their proof must be
+        // rejected — deletes are self-only.
+        store.insert(&them_id, "our message", true, 3_000, None, None, Some("dm-2"), None, None, None).unwrap();
+        let row2 = RowExtras::load_dm(&store, "dm-2");
+        let text2 = row2.text.clone().unwrap_or_default();
+        let (esig, epk) = sign_message_versioned(
+            &them, &them_pk, "dm-delete", &us_id, &them_id, 4_000,
+            &row2.as_signed("dm-2"), &text2,
+        );
+        assert!(!apply_verified_dm_deletion(
+            &store, &us_id, "dm-2", 4_000, esig.as_deref(), epk.as_deref(), &mut cache,
+        ));
+        assert_eq!(store.get_dm_message_hidden_at("dm-2"), None, "a friend must not delete OUR message");
+
+        // Our own proof (signer = us, ctx = the convo peer) does hide it.
+        let (sig2, pk2) = sign_message_versioned(
+            &us, &us_pk, "dm-delete", &them_id, &us_id, 4_000,
+            &row2.as_signed("dm-2"), &text2,
+        );
+        assert!(apply_verified_dm_deletion(
+            &store, &us_id, "dm-2", 4_000, sig2.as_deref(), pk2.as_deref(), &mut cache,
+        ));
+        assert_eq!(store.get_dm_message_hidden_at("dm-2"), Some(4_000));
+    }
+
+    /// Outbound builder: a signed deletion is served as (proof ts, sig, pk);
+    /// a legacy bare-hidden row is served with NO proof (receivers drop it);
+    /// a visible row is untouched.
+    #[test]
+    fn deletion_proof_fields_serves_only_signed_proofs() {
+        let store = mem_store();
+        store.insert_channel_message("s", "c", "peer-a", "signed del", false, 1_000, None, None, Some("m-signed"), None, None, None).unwrap();
+        store.insert_channel_message("s", "c", "peer-a", "legacy del", false, 1_100, None, None, Some("m-legacy"), None, None, None).unwrap();
+        store.hide_channel_message("m-signed", 2_000, Some("SIG"), Some("PK")).unwrap();
+        store.set_channel_message_hidden("m-legacy", 2_100).unwrap();
+
+        assert_eq!(
+            deletion_proof_fields(&store, Some(2_000), Some("m-signed")),
+            (Some(2_000), Some("SIG".to_string()), Some("PK".to_string())),
+        );
+        assert_eq!(
+            deletion_proof_fields(&store, Some(2_100), Some("m-legacy")),
+            (Some(2_100), None, None),
+        );
+        assert_eq!(deletion_proof_fields(&store, None, Some("m-signed")), (None, None, None));
+    }
+
+    /// Guest preview: the hidden flag verifies from the item's own fields;
+    /// a tampered or missing proof strips it (REJECT-ABSENT).
+    #[test]
+    fn guest_hidden_flag_requires_valid_item_proof() {
+        let _g = crate::node::resolver::test_lock();
+        let author = kp(235);
+        let author_id = author.peer_id();
+        let author_pk = pk_b64(&author);
+        let (sid, cid) = ("srv-g", "chan-g");
+        let extras = SignedExtras {
+            mid: Some("g-1"), reply_to: None, file_id: None,
+            order_us: Some(42), lp_digest: None,
+        };
+        let (sig, pk) = sign_message_versioned(
+            &author, &author_pk, "ch-delete", &format!("{sid}:{cid}"),
+            &author_id, 5_000, &extras, "guest text",
+        );
+        let mut item = crate::node::types::SyncMessageItem {
+            s: author_id.clone(),
+            t: "guest text".to_string(),
+            ts: 4_000,
+            sig: None,
+            pk: None,
+            mid: Some("g-1".to_string()),
+            edited_at: None,
+            reply_to: None,
+            file_id: None,
+            file_meta: None,
+            hidden_at: Some(5_000),
+            hidden_sig: sig.clone(),
+            hidden_pk: pk.clone(),
+            order_us: Some(42),
+            lp_digest: None,
+            reactions: Vec::new(),
+        };
+        let mut cache = PkCache::new();
+        assert_eq!(verified_guest_hidden_at(&item, sid, cid, &mut cache), Some(5_000));
+
+        // Tampered text (a relay rewriting the plaintext batch) → stripped.
+        item.t = "not what the author deleted".to_string();
+        assert_eq!(verified_guest_hidden_at(&item, sid, cid, &mut cache), None);
+        item.t = "guest text".to_string();
+
+        // No proof at all → stripped (REJECT-ABSENT).
+        item.hidden_sig = None;
+        item.hidden_pk = None;
+        assert_eq!(verified_guest_hidden_at(&item, sid, cid, &mut cache), None);
     }
 }

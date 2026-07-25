@@ -842,6 +842,7 @@ A single message in a channel sync batch (`ChannelSyncBatch.messages`).
 - `file_id: Option<String>` — file attachment
 - `file_meta: Option<SyncFileMetaItem>` — file metadata for late joiners (so they can create file cards)
 - `hidden_at: Option<i64>` — deletion timestamp (if soft-deleted)
+- `hidden_sig, hidden_pk: Option<String>` — author's `"ch-delete"` deletion proof for `hidden_at` (0.8.4; receivers REJECT-ABSENT — no proof, no hide)
 - `reactions: Vec<SyncReactionItem>` — reactions on this message
 
 ### `SyncReactionItem`
@@ -877,6 +878,7 @@ A single DM in a DM sync batch (`DmSyncBatch.messages`).
 - `file_id: Option<String>` — file attachment
 - `file_meta: Option<SyncFileMetaItem>` — file metadata for late joiners
 - `hidden_at: Option<i64>` — deletion timestamp
+- `hidden_sig, hidden_pk: Option<String>` — author's `"dm-delete"` deletion proof (0.8.4; REJECT-ABSENT)
 - `reactions: Vec<SyncReactionItem>` — reactions
 
 ---
