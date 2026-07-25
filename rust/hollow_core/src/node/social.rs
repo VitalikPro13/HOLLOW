@@ -718,6 +718,14 @@ pub(crate) fn save_incoming_profile(
     db_passphrase: &str,
 ) -> (String, bool) {
     let master = super::resolver::resolve(sender_peer_id);
+    // SECURITY (0.8.5): no verified owner proof, no stored profile. See
+    // `verified_profile_proof` — the plaintext ProfileUpdate fallback is a JSON
+    // body the relay can rewrite in flight. The caller has already ingested the
+    // sender's device list, which is separately master-signed, so presence
+    // collapse is unaffected by this refusal.
+    let Some(proof) = proof else {
+        return (master, false);
+    };
     let Ok(db) = crate::storage::MessageStore::open(db_path, db_passphrase) else {
         return (master, false);
     };
@@ -736,7 +744,7 @@ pub(crate) fn save_incoming_profile(
     if let Err(e) = db.save_profile(
         &master, display_name, status, about_me, updated_at,
         avatar_bytes, banner_bytes, twitch_username, showcase_board,
-        showcase_assets, proof,
+        showcase_assets, Some(proof),
     ) {
         hollow_log!("[HOLLOW-PROFILE] Failed to save incoming profile for {master}: {e}");
         return (master, false);
@@ -755,18 +763,24 @@ pub(crate) fn sanitize_incoming_showcase(showcase_board: Option<&str>) -> Option
     }
 }
 
-/// Verify the owner proof on a profile that arrived over an AUTHENTICATED
-/// transport (`ProfileUpdate`, MLS or plaintext). Returns the proof parts to
-/// persist, or `None` to persist none.
+/// Verify the owner proof on a profile arriving via `ProfileUpdate` (MLS or
+/// plaintext). `None` = the PROFILE FIELDS must not be stored.
 ///
-/// The rule here is deliberately different from `handle_profile_relay`:
-///   * the sender IS the subject (there is no `source_peer_id` to lie about —
-///     attribution comes from the transport), so an ABSENT signature is not a
-///     spoofing risk. It is tolerated, and the profile simply stores no proof,
-///     which means we will never relay it onward.
-///   * a PRESENT-but-INVALID signature is refused outright and nothing is
-///     stored: it is either tampering or a bug, and persisting an unverified
-///     proof would let US launder it to every peer that asks us to relay.
+/// REQUIRED, not tolerated. The tempting argument is that the sender IS the
+/// subject here — there is no `source_peer_id` to lie about, attribution comes
+/// from the transport — so an absent signature cannot spoof anyone. That
+/// covers a malicious PEER and misses a malicious RELAY: the plaintext
+/// `HavenMessage::ProfileUpdate` fallback (used for DM peers and pre-MLS
+/// servers) passes through the relay as an unencrypted JSON body it can
+/// rewrite in flight. Without a required signature it could rename anyone to
+/// anything. The MLS variant is not exposed to that, but there is no reason
+/// for the two to disagree.
+///
+/// **This gates the profile fields ONLY.** The caller ingests the sender's
+/// signed DEVICE LIST first and unconditionally: it carries its own master
+/// signature (`verify_device_list`), and a node with no profile row yet still
+/// announces a device list — that announce is what collapses its devices into
+/// one online identity, so gating it here would break presence.
 ///
 /// The signer is the sender's MASTER — profiles are one per identity and any
 /// device announces the same one.
@@ -782,16 +796,52 @@ pub(crate) fn verified_profile_proof(
     profile_sig: Option<&str>,
     profile_pk: Option<&str>,
 ) -> Option<(String, String, String)> {
-    let (sig, pk) = (profile_sig?, profile_pk?);
     let master = super::resolver::resolve(sender_peer_id);
+    let (Some(sig), Some(pk)) = (profile_sig, profile_pk) else {
+        hollow_log!("[HOLLOW-SECURITY] REJECTED profile fields from {sender_peer_id} (master {master}) — NO owner signature (device list, if any, still ingested)");
+        return None;
+    };
     if !super::crypto_handler::verify_profile_signature(
         &master, updated_at, display_name, status, about_me,
         twitch_username, avatar_hash, Some(sig), Some(pk),
     ) {
-        hollow_log!("[HOLLOW-SECURITY] Profile from {sender_peer_id} (master {master}) carried an INVALID owner signature — proof discarded");
+        hollow_log!("[HOLLOW-SECURITY] REJECTED profile fields from {sender_peer_id} (master {master}) — owner signature INVALID");
         return None;
     }
     Some((sig.to_string(), pk.to_string(), avatar_hash.to_string()))
+}
+
+/// The proof to attach to an outgoing announce of OUR OWN profile.
+///
+/// Prefers the stored one (its `profile_avatar_hash` is the hash the signature
+/// really covers, which a re-hash of a mid-update blob could disagree with) and
+/// signs fresh when there is none. Signing fresh is what stops an upgrade from
+/// silently blanking us at every peer: rows written before 0.8.5 carry no
+/// proof, receivers now REQUIRE one, and without this our profile would stay
+/// invisible until the user happened to edit it.
+///
+/// Returns `(sig, pk, avatar_hash)`; the hash is what must ride the wire.
+pub(crate) fn own_profile_proof(
+    master_keypair: &crate::identity::native_identity::NativeKeypair,
+    local_master: &str,
+    stored: Option<&crate::storage::messages::StoredProfile>,
+) -> (Option<String>, Option<String>, String) {
+    let Some(p) = stored else {
+        return (None, None, String::new());
+    };
+    if let (Some(sig), Some(pk), Some(hash)) = (
+        p.profile_sig.as_ref(), p.profile_pk.as_ref(), p.profile_avatar_hash.as_ref(),
+    ) {
+        return (Some(sig.clone()), Some(pk.clone()), hash.clone());
+    }
+    let avatar_hash = profile_blob_hash(p.avatar_bytes.as_deref());
+    let pub_b64 = base64::engine::general_purpose::STANDARD
+        .encode(master_keypair.public_key_protobuf());
+    let (sig, pk) = super::crypto_handler::sign_profile(
+        master_keypair, &pub_b64, local_master, p.updated_at,
+        &p.display_name, &p.status, &p.about_me, &p.twitch_username, &avatar_hash,
+    );
+    (sig, pk, avatar_hash)
 }
 
 /// Hex SHA-256 of a profile blob; empty string when there is no blob.
@@ -877,12 +927,11 @@ fn send_own_profile_inner(
         // (swarm.rs) and the receive-side empty-profile guard that ignores blank
         // names so this never clobbers a real cached profile.
         let profile = store.load_profile(local_peer_str).ok().flatten();
-        // The stored proof rides along so receivers can relay us onward; the
-        // SIGNED avatar hash is what the signature covers, so it wins over a
-        // freshly computed one (they agree unless our own row is mid-update).
-        let (profile_sig, profile_pk, signed_avatar_hash) = profile.as_ref()
-            .map(|p| (p.profile_sig.clone(), p.profile_pk.clone(), p.profile_avatar_hash.clone()))
-            .unwrap_or((None, None, None));
+        // Our proof rides along: receivers REQUIRE it to store the profile at
+        // all, and forward it when relaying us onward. Signed fresh if the row
+        // predates 0.8.5 - see `own_profile_proof`.
+        let (profile_sig, profile_pk, signed_avatar_hash) =
+            own_profile_proof(master_keypair, local_peer_str, profile.as_ref());
         let (display_name, status, about_me, updated_at, avatar_bytes, banner_bytes, twitch_username, showcase_board, showcase_assets) =
             match profile {
                 Some(p) => (
@@ -892,8 +941,7 @@ fn send_own_profile_inner(
                 ),
                 None => (String::new(), String::new(), String::new(), 0, None, None, String::new(), String::new(), None),
             };
-        let avatar_hash = signed_avatar_hash
-            .unwrap_or_else(|| profile_blob_hash(avatar_bytes.as_deref()));
+        let avatar_hash = signed_avatar_hash;
         let banner_hash = profile_blob_hash(banner_bytes.as_deref());
         let showcase_assets_hash = profile_blob_hash(showcase_assets.as_deref());
         // Light sends leave the b64 fields EMPTY (= "no change" on the receiver);
@@ -1089,7 +1137,7 @@ pub(crate) async fn handle_envelope_profile_update(
     });
     // Multi-device: persist under the sender's MASTER (any device updates the one
     // identity profile) + empty-profile guard. Single-device: master == sender.
-    let (profile_master, _saved) = save_incoming_profile(
+    let (profile_master, saved) = save_incoming_profile(
         &sender_peer_id, &display_name, &status, &about_me, updated_at,
         avatar_bytes.as_deref(), banner_bytes.as_deref(), &twitch_username,
         sanitize_incoming_showcase(showcase_board.as_deref()),
@@ -1105,8 +1153,10 @@ pub(crate) async fn handle_envelope_profile_update(
     );
     // Update display_name in server member lists (local-only, not a CRDT op).
     // Members are master-keyed (multi-device); update under the resolved master.
+    // `saved` gates this too: an unverified display name must not reach the
+    // member list either, or the spoof just lands one layer up.
     for (_, state) in server_states.iter_mut() {
-        if !display_name.is_empty() {
+        if saved && !display_name.is_empty() {
             if let Some(member) = state.members.get_mut(&profile_master) {
                 member.display_name = display_name.clone();
             }

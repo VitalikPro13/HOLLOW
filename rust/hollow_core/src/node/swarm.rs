@@ -10656,17 +10656,16 @@ async fn handle_incoming_request(
                             .and_then(|s| s.load_profile(local_peer_str).ok().flatten());
                         // LIGHT announce (device list is the payload here) — blobs
                         // ride as hashes; a stale friend pulls via ProfileRequest.
-                        // Our stored proof rides along so the friend can relay
-                        // us onward; `profile_avatar_hash` is the hash the
-                        // signature actually covers.
-                        let (profile_sig, profile_pk, signed_avatar_hash) = profile.as_ref()
-                            .map(|p| (p.profile_sig.clone(), p.profile_pk.clone(), p.profile_avatar_hash.clone()))
-                            .unwrap_or((None, None, None));
+                        // Our proof rides along - receivers REQUIRE it to store
+                        // the profile, and forward it when relaying us onward.
+                        // Signed fresh if the row predates 0.8.5.
+                        let (profile_sig, profile_pk, signed_avatar_hash) =
+                            social::own_profile_proof(master_keypair, local_peer_str, profile.as_ref());
                         let (display_name, status, about_me, updated_at, avatar_hash, banner_hash, twitch_username, showcase_board, showcase_assets_hash) =
                             match profile {
                                 Some(p) => (
                                     p.display_name, p.status, p.about_me, p.updated_at,
-                                    signed_avatar_hash.unwrap_or_else(|| social::profile_blob_hash(p.avatar_bytes.as_deref())),
+                                    signed_avatar_hash,
                                     social::profile_blob_hash(p.banner_bytes.as_deref()),
                                     p.twitch_username, p.showcase_board,
                                     social::profile_blob_hash(p.showcase_assets.as_deref()),
@@ -11313,7 +11312,7 @@ async fn handle_incoming_request(
             let proof = verified_proof.as_ref().map(|(sig, pk, ah)| {
                 crate::storage::ProfileProof { sig, pk, avatar_hash: ah }
             });
-            let (profile_master, _saved) = social::save_incoming_profile(
+            let (profile_master, saved) = social::save_incoming_profile(
                 &peer_str, &display_name, &status, &about_me, updated_at,
                 avatar_bytes.as_deref(), banner_bytes.as_deref(), &twitch_username,
                 social::sanitize_incoming_showcase(showcase_board.as_deref()),
@@ -11331,8 +11330,9 @@ async fn handle_incoming_request(
 
             // Update display_name in server member lists (local-only, not a CRDT
             // op). Members are master-keyed (multi-device); update under the master.
+            // `saved` gates this too — see the MLS twin in social.rs.
             for (_, state) in server_states.iter_mut() {
-                if !display_name.is_empty() {
+                if saved && !display_name.is_empty() {
                     if let Some(member) = state.members.get_mut(&profile_master) {
                         member.display_name = display_name.clone();
                     }

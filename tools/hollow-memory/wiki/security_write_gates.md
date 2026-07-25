@@ -103,9 +103,20 @@ Now the owner signs, relayers forward the signature, receivers verify:
   rather than truncated (verifying a clamped copy would check a string the
   signer never signed, and truncation would make our stored copy diverge from
   the signature we forward on the next hop).
-- `ProfileUpdate` ingest: absent is TOLERATED (the sender IS the subject there —
-  nothing to spoof), invalid is refused, and the proof is persisted **only when
-  it verifies**, so we can never launder an unverified signature into a relay.
+- `ProfileUpdate` ingest: the signature is **REQUIRED there too**, and the
+  profile fields are not stored without it. The tempting argument is that the
+  sender IS the subject on that path (no `source_peer_id` to lie about), so an
+  absent signature cannot spoof anyone. That covers a malicious PEER and misses
+  a malicious RELAY: the plaintext `ProfileUpdate` fallback used for DM peers
+  and pre-MLS servers is an unencrypted JSON body the relay can rewrite in
+  flight. The gate covers the profile FIELDS only — the sender's device list is
+  ingested first and unconditionally, since it carries its own master signature
+  and a profile-less node's announce is what collapses its devices into one
+  online identity. `saved` also gates the member-list display-name write, or the
+  spoof just lands one layer up.
+- Announces sign on the fly when the stored row predates 0.8.5
+  (`own_profile_proof`) — without that, requiring the signature would blank
+  every upgraded user at their peers until they happened to edit their profile.
 
 ## 6. Local-only — not reachable from a remote frame
 

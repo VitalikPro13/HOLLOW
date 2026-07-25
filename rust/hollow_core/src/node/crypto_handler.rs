@@ -3513,6 +3513,40 @@ mod tests {
         verify_profile_signature(peer, ts, n, s, a, t, ah, None, None)
     }
 
+    /// A relay can rewrite the body of a PLAINTEXT `ProfileUpdate` in flight,
+    /// which is why the signature is REQUIRED on that path and not merely
+    /// "tolerated because the sender is the subject". Tampering with any field
+    /// after signing must fail even though the transport-reported sender is
+    /// still genuinely the subject.
+    #[test]
+    fn relay_tampering_with_an_own_profile_update_fails() {
+        let alice = kp(32);
+        let alice_id = alice.peer_id();
+        let alice_pk = pk_b64(&alice);
+        let hash = "c".repeat(64);
+
+        let (sig, pk) = sign_profile(
+            &alice, &alice_pk, &alice_id, 7_000, "alice", "online", "hi", "", &hash,
+        );
+        assert!(verify_profile_signature(
+            &alice_id, 7_000, "alice", "online", "hi", "", &hash,
+            sig.as_deref(), pk.as_deref(),
+        ));
+        // Relay renames her in transit; sender id and everything else untouched.
+        assert!(
+            !verify_profile_signature(
+                &alice_id, 7_000, "Hollow Support", "online", "hi", "", &hash,
+                sig.as_deref(), pk.as_deref(),
+            ),
+            "a relay-rewritten display name must not verify",
+        );
+        // ...and swaps the avatar the announce advertises.
+        assert!(!verify_profile_signature(
+            &alice_id, 7_000, "alice", "online", "hi", "", &"d".repeat(64),
+            sig.as_deref(), pk.as_deref(),
+        ));
+    }
+
     /// Profile fields are free text, so the payload length-prefixes each one:
     /// two different field splits that concatenate identically must NOT produce
     /// the same signature (otherwise a display name could impersonate the next
