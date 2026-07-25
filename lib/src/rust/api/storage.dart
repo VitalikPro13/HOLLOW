@@ -14,23 +14,6 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 Future<void> openMessageStore() =>
     RustLib.instance.api.crateApiStorageOpenMessageStore();
 
-/// Save a message to the local database.
-Future<PlatformInt64> saveMessage({
-  required String peerId,
-  required String text,
-  required bool isMine,
-  required PlatformInt64 timestamp,
-  String? signature,
-  String? publicKey,
-}) => RustLib.instance.api.crateApiStorageSaveMessage(
-  peerId: peerId,
-  text: text,
-  isMine: isMine,
-  timestamp: timestamp,
-  signature: signature,
-  publicKey: publicKey,
-);
-
 /// Load recent messages for a peer from the local database.
 /// Returns messages ordered oldest-first, up to `limit`.
 Future<List<StoredMessage>> loadMessages({
@@ -224,27 +207,6 @@ Future<List<StoredMessage>> searchDmMessages({
 Future<List<StoredReaction>> loadReactions({
   required List<String> messageIds,
 }) => RustLib.instance.api.crateApiStorageLoadReactions(messageIds: messageIds);
-
-/// Save a channel message to the local database.
-Future<PlatformInt64> saveChannelMessage({
-  required String serverId,
-  required String channelId,
-  required String senderId,
-  required String text,
-  required bool isMine,
-  required PlatformInt64 timestamp,
-  String? signature,
-  String? publicKey,
-}) => RustLib.instance.api.crateApiStorageSaveChannelMessage(
-  serverId: serverId,
-  channelId: channelId,
-  senderId: senderId,
-  text: text,
-  isMine: isMine,
-  timestamp: timestamp,
-  signature: signature,
-  publicKey: publicKey,
-);
 
 /// Load recent channel messages from the local database.
 /// Returns messages ordered oldest-first, up to `limit`.

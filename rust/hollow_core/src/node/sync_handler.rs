@@ -2536,14 +2536,15 @@ pub(crate) async fn handle_envelope_channel_sync_batch(
     let mut new_count = 0u32;
     for msg in &messages {
         let sig_check = verify_sync_item_sig(msg, &sid, &cid, &mut pk_cache);
-        // SECURITY: a PRESENT-but-INVALID signature is tampering, not legacy
-        // data — drop the whole item (text, edit, file metadata, reactions and
-        // the hidden flag all ride it). Unsigned history still replicates; see
+        // SECURITY: only a VERIFYING signature gets stored — drop the whole
+        // item (text, edit, file metadata, reactions and the hidden flag all
+        // ride it). Unsigned is refused too as of 0.8.5: the item names its own
+        // sender, so omitting the signature was an impersonation primitive. See
         // `check_backfill_signature`.
-        if sig_check == BackfillSig::Forged {
+        if !sig_check.is_acceptable() {
             hollow_log!(
-                "[HOLLOW-SECURITY] REJECTED synced channel message in {sid}/{cid} claiming sender {} — signature present but INVALID (mid={:?}, ts={})",
-                msg.s, msg.mid, msg.ts
+                "[HOLLOW-SECURITY] REJECTED synced channel message in {sid}/{cid} claiming sender {} — {} (mid={:?}, ts={})",
+                msg.s, sig_check.reject_reason(), msg.mid, msg.ts
             );
             continue;
         }
@@ -2585,7 +2586,7 @@ pub(crate) async fn handle_envelope_channel_sync_batch(
 }
 
 /// Verify one synced item's signature (cached pubkey parse) under the backfill
-/// rule: absent = tolerated legacy history, present-but-invalid = rejected.
+/// rule: `Valid` or the item is dropped (see `BackfillSig::is_acceptable`).
 /// An edited row is verified against its EDIT signature (`edited_at` + current
 /// text) rather than skipped.
 fn verify_sync_item_sig(
@@ -2719,7 +2720,12 @@ fn apply_sync_item_extras(
             });
         }
     }
-    if let Some(ref fm) = msg.file_meta {
+    // Owner guard (0.8.5): the item's v2 signature binds `file_id`, not this
+    // file_meta blob — see `file_handler::file_meta_write_allowed`.
+    if let Some(ref fm) = msg.file_meta
+        .as_ref()
+        .filter(|fm| super::file_handler::file_meta_write_allowed(store, &fm.fid, &fm.sender))
+    {
         let ctx_id = format!("{sid}:{cid}");
         let _ = store.insert_file_metadata(
             &fm.fid, &fm.name, &fm.ext, &fm.mime,
@@ -2741,6 +2747,12 @@ fn apply_sync_item_extras(
     }
     if let Some(mid) = &msg.mid {
         for r in &msg.reactions {
+            // Each reaction names its own reactor, so it needs its own
+            // signature check — the item-level backfill verdict covers the
+            // message, not the reactions attached to it.
+            if !super::message_ops::sync_reaction_accepted(mid, r) {
+                continue;
+            }
             let _ = store.add_reaction(
                 mid, &r.e, &r.p, r.ts,
                 r.sig.as_deref(), r.pk.as_deref(),

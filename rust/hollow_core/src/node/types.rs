@@ -1309,6 +1309,15 @@ pub(crate) enum HavenMessage {
         showcase_assets_b64: String,
         #[serde(default)]
         showcase_assets_hash: String,
+        /// Owner's signature over the relayable subset of this profile
+        /// (`crypto_handler::profile_signing_payload`). REQUIRED on ingest —
+        /// receivers store it so they can forward it in a `ProfileRelay`, which
+        /// is what stops a forwarder asserting a third party's profile.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        profile_sig: Option<String>,
+        /// Owner MASTER public key (base64 protobuf) paired with `profile_sig`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        profile_pk: Option<String>,
     },
 
     // -- Multi-peer fan-out sync (Phase 3.5) --
@@ -1818,6 +1827,23 @@ pub(crate) enum HavenMessage {
         avatar_b64: String,
         #[serde(default)]
         twitch_username: String,
+        /// The avatar hash the OWNER signed — carried explicitly rather than
+        /// derived from `avatar_b64`, because a relayer's cached blob can lag
+        /// the owner's current one (announces are light: hash, no bytes).
+        /// Receivers verify the signature over THIS, then separately check the
+        /// bytes against it and drop just the avatar on a mismatch.
+        #[serde(default)]
+        avatar_hash: String,
+        /// The SUBJECT's own signature, forwarded verbatim by the relayer.
+        ///
+        /// This frame is the reason profiles are signed at all: `source_peer_id`
+        /// is chosen by whoever sends the frame, and it is PLAINTEXT, so without
+        /// this the relay or any co-present peer could rewrite any identity's
+        /// name and avatar in our DB. REQUIRED — an unsigned relay is dropped.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        profile_sig: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        profile_pk: Option<String>,
     },
 
     // -- Voice channel coordination (plaintext for MLS epoch resilience) --
@@ -2449,6 +2475,11 @@ pub(crate) enum MessageEnvelope {
         showcase_assets_b64: String,
         #[serde(default)]
         showcase_assets_hash: String,
+        /// Owner's profile signature — see HavenMessage::ProfileUpdate.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        profile_sig: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        profile_pk: Option<String>,
     },
 
     /// CRDT sync request (replaces HavenMessage::SyncRequest for MLS path).

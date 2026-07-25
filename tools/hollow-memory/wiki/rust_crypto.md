@@ -29,7 +29,7 @@ Current (v2): `crypto_handler:message_signing_payload_v2(msg_type, context, send
 hollow-msg2:{type}:{context}:{sender}:{ts}:{mid}:{reply_to}:{file_id}:{order_us}:{lp_digest}:{text}
 ```
 
-`SignedExtras { mid, reply_to, file_id, order_us, lp_digest }` — absent `Option` ≡ empty string; `lp_digest` = `link_preview_digest()` (length-prefixed SHA-256 hex over the preview's fields + thumb). Legacy v1 (`hollow-msg:{type}:{context}:{sender}:{ts}:{text}`, `message_signing_payload()`) remains accepted by every verifier via verify-both. Signers: `sign_message_versioned()` (picks the version by `MSG_SIG_V2_SIGNING`, now `true`). Verifiers: `verify_message_signature_v2()` (live, required) and `check_backfill_signature(... &SignedExtras ...)` (backfill: tolerate-absent / reject-invalid).
+`SignedExtras { mid, reply_to, file_id, order_us, lp_digest }` — absent `Option` ≡ empty string; `lp_digest` = `link_preview_digest()` (length-prefixed SHA-256 hex over the preview's fields + thumb). Legacy v1 (`hollow-msg:...`) is NO LONGER ACCEPTED anywhere (0.8.5); `message_signing_payload()` is `#[cfg(test)]`-only so tests can prove v1 is rejected. Signers: `sign_message_versioned()` (always v2). Verifiers: `verify_message_signature_v2()` (live) and `check_backfill_signature(... &SignedExtras ...)` → gate on `BackfillSig::is_acceptable()`, which under `REQUIRE_SIGNED_BACKFILL` refuses ABSENT as well as forged.
 
 Two message types:
 - **Channel messages:** `msg_type = "ch"`, `context = "{server_id}:{channel_id}"`

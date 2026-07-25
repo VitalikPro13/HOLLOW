@@ -17,7 +17,7 @@ use crate::crypto::{CryptoStore, MlsManager, OlmManager};
 use crate::hollow_log;
 use crate::node::crypto_handler::{
     check_backfill_signature, clip_text, persist_crypto_state, persist_mls_state,
-    persist_olm_session, BackfillSig, PkCache,
+    persist_olm_session, PkCache,
 };
 use crate::node::types::{
     ChannelMessagePayload, DirectMessagePayload, FileHeaderPayload, HavenMessage, LinkPreviewRef,
@@ -576,10 +576,10 @@ fn try_process_channel_msg(
 /// so the gap was real for public channels; for MLS it is defence in depth
 /// behind group membership.
 ///
-/// Backfill rule (same as the four sync sites): an ABSENT signature is
-/// tolerated (pre-signing history, e2cc8ab 2026-03-09), a PRESENT-but-INVALID
-/// one is rejected. `true` = reject (do not store, do not surface a notification
-/// for tampered content); the full app re-syncs the authentic copy later.
+/// Backfill rule (same as the four sync sites): only a VERIFYING signature is
+/// stored — absent is refused too as of 0.8.5. `true` = reject (do not store,
+/// do not surface a notification for tampered content); the full app re-syncs
+/// the authentic copy later.
 #[allow(clippy::too_many_arguments)]
 fn fetch_channel_sig_rejected(
     sender_master: &str,
@@ -596,9 +596,10 @@ fn fetch_channel_sig_rejected(
         sender_master, "ch", &format!("{sid}:{cid}"),
         ts, None, extras, text, sig, pk, &mut pk_cache,
     );
-    if verdict == BackfillSig::Forged {
+    if !verdict.is_acceptable() {
         hollow_log!(
-            "[HOLLOW-FETCH] REJECTED push channel message in {sid}/{cid} claiming sender {sender_master} — signature present but INVALID"
+            "[HOLLOW-FETCH] REJECTED push channel message in {sid}/{cid} claiming sender {sender_master} — {}",
+            verdict.reject_reason()
         );
         return true;
     }
@@ -781,9 +782,9 @@ fn create_inbound_prekey_session(
     }
 }
 
-/// Reject a present-but-invalid signature on a push-fetched DM (or DM edit),
-/// mirroring the channel fetch paths and the four sync sites: tolerate an ABSENT
-/// signature (legacy pre-signing history), reject a PRESENT-but-INVALID one.
+/// Reject an unverified signature on a push-fetched DM (or DM edit), mirroring
+/// the channel fetch paths and the four sync sites: `Valid` or the row is not
+/// stored (absent included, as of 0.8.5).
 ///
 /// This path is inbound-only — own-sibling echoes are dropped upstream in
 /// `try_decrypt_dm` — so the signer is always the friend's MASTER (`convo`) and
@@ -806,9 +807,10 @@ fn fetch_dm_sig_rejected(
     let verdict = check_backfill_signature(
         convo, "dm", local_master, ts, None, extras, text, sig, pk, &mut pk_cache,
     );
-    if verdict == BackfillSig::Forged {
+    if !verdict.is_acceptable() {
         hollow_log!(
-            "[HOLLOW-FETCH] REJECTED push DM from {convo} — signature present but INVALID (ts={ts})"
+            "[HOLLOW-FETCH] REJECTED push DM from {convo} — {} (ts={ts})",
+            verdict.reject_reason()
         );
         return true;
     }
@@ -1102,9 +1104,9 @@ fn persist_inline_image(
     if let Ok(store) =
         crate::storage::MessageStore::open(db_path, db_passphrase)
     {
-        // SECURITY (backfill rule): the header's sig is the MESSAGE signature
-        // over the sentinel text — reject a present-but-invalid one instead of
-        // storing it. A CAPTIONED image's header legitimately fails here (the
+        // SECURITY (backfill rule, 0.8.5): the header's sig is the MESSAGE
+        // signature over the sentinel text — the row is stored ONLY when it
+        // VERIFIES. A CAPTIONED image's header legitimately fails here (the
         // sender signed the caption); its companion caption DM creates the row.
         // Mirrors the full-node sentinel path in swarm.rs. `order_us` from the
         // header — the v2 signature binds the sender's Lamport stamp.
@@ -1115,11 +1117,11 @@ fn persist_inline_image(
             order_us: p.order_us,
             lp_digest: None,
         };
-        let sentinel_forged = check_backfill_signature(
+        let sentinel_sig_ok = check_backfill_signature(
             convo, "dm", local_master, p.ts, None, &extras, msg_text,
             p.sig.as_deref(), p.pk.as_deref(), &mut PkCache::new(),
-        ) == BackfillSig::Forged;
-        if !sentinel_forged
+        ).is_acceptable();
+        if sentinel_sig_ok
             && !p.mid.as_deref()
                 .map(|m| store.dm_message_exists(m))
                 .unwrap_or(false)
@@ -1133,13 +1135,16 @@ fn persist_inline_image(
         // context_id + sender_id key on the MASTER so the
         // file lands under the same thread as its message
         // row (Step 5.1 DM-file context rule).
-        let _ = store.insert_file_metadata(
-            &p.fid, &p.name, &p.ext, &p.mime,
-            p.size, 0, p.img, p.w, p.h,
-            p.mid.as_deref(), "dm", convo,
-            convo, false, p.ts,
-            p.vthumb.as_ref(),
-        );
+        // Owner guard (0.8.5) — see `file_handler::file_meta_write_allowed`.
+        if crate::node::file_handler::file_meta_write_allowed(&store, &p.fid, convo) {
+            let _ = store.insert_file_metadata(
+                &p.fid, &p.name, &p.ext, &p.mime,
+                p.size, 0, p.img, p.w, p.h,
+                p.mid.as_deref(), "dm", convo,
+                convo, false, p.ts,
+                p.vthumb.as_ref(),
+            );
+        }
         let _ = store.mark_file_complete(&p.fid, disk_str);
     }
 }

@@ -1705,10 +1705,13 @@ pub struct MessageProofV2 {
     pub has_signature: bool,
     pub valid: bool,
     /// 2 = verified against the v2 payload (structured fields covered),
-    /// 1 = legacy v1 (text only), 0 = did not verify.
+    /// 0 = did not verify. `1` (legacy v1, text only) is no longer produced —
+    /// v1 verification was dropped in 0.8.5; the variant is kept out of the
+    /// contract rather than out of the range so old Dart builds that switch on
+    /// `== 2` keep behaving correctly.
     pub sig_version: i32,
-    /// The canonical payload string that verified (the v2 candidate when the
-    /// signature is missing/invalid) — displayed and exported by the dialog.
+    /// The canonical v2 payload string — displayed and exported by the dialog
+    /// whether or not it verified.
     pub canonical_payload: String,
     /// The row's signed fields, for the exported proof JSON.
     pub text: String,
@@ -1722,7 +1725,7 @@ pub struct MessageProofV2 {
     pub public_key_b64: Option<String>,
 }
 
-/// Versioned (v2 → v1 fallback) verification for the Message Proof dialog.
+/// v2 verification for the Message Proof dialog (no v1 fallback since 0.8.5).
 ///
 /// The v2 payload binds the message's structured fields (mid / reply_to /
 /// file_id / order_us / link-preview digest), which live in the DB row — so
@@ -1770,22 +1773,15 @@ pub fn verify_message_proof_v2(
     let v2 = crate::node::crypto_handler::message_signing_payload_v2(
         &msg_type, &context, &sender_peer_id, ts, &extras, &row.text,
     );
-    let v1 = crate::node::message_signing_payload(
-        &msg_type, &context, &sender_peer_id, ts, &row.text,
-    );
     let has_signature = row.signature.is_some() && row.public_key.is_some();
-    let verify = |payload: &str| {
-        crate::node::verify_message_signature(
-            &sender_peer_id, row.signature.as_deref(), row.public_key.as_deref(), payload,
-        )
-    };
-    let (valid, sig_version, canonical_payload) = if has_signature && verify(&v2) {
-        (true, 2, v2)
-    } else if has_signature && verify(&v1) {
-        (true, 1, v1)
-    } else {
-        (false, 0, v2)
-    };
+    // v2 or nothing (0.8.5). A row signed by <=0.8.2 reports sig_version 0 and
+    // displays as unverified — the v1 grammar covered text only, so accepting
+    // it here would let a grafted file_id / reply_to / preview show as VERIFIED.
+    let valid = has_signature
+        && crate::node::verify_message_signature(
+            &sender_peer_id, row.signature.as_deref(), row.public_key.as_deref(), &v2,
+        );
+    let (sig_version, canonical_payload) = (if valid { 2 } else { 0 }, v2);
     Ok(MessageProofV2 {
         has_signature,
         valid,

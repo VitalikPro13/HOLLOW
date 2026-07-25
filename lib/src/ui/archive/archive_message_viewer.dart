@@ -268,6 +268,7 @@ class _DmMessageListState extends ConsumerState<_DmMessageList> {
                 context: msg.isMe ? widget.peerId : localPeerId,
                 msgType: 'dm',
                 fileAttachment: msg.fileAttachment,
+                preverified: msg.archiveSignatureValid,
               ),
             );
           },
@@ -571,6 +572,7 @@ class _ChannelMessageListState extends ConsumerState<_ChannelMessageList> {
                   '${widget.serverId}:${widget.channelId}',
               msgType: 'ch',
               fileAttachment: msg.fileAttachment,
+              preverified: msg.archiveSignatureValid,
             ),
           );
         },

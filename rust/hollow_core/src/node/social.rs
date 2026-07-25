@@ -560,6 +560,7 @@ pub(crate) async fn handle_update_profile(
                 &local_peer_str, &display_name, &status, &about_me, now,
                 avatar_bytes.as_deref(), banner_bytes.as_deref(), &twitch_username,
                 showcase_board.as_deref(), showcase_assets.as_deref(),
+                None, // proof written below, once the stored blob's hash is known
             ) {
                 hollow_log!("[HOLLOW-SWARM] Failed to save own profile: {e}");
             }
@@ -574,6 +575,28 @@ pub(crate) async fn handle_update_profile(
         }
         stored
     };
+
+    // Sign the relayable subset (0.8.5). This has to happen AFTER the save +
+    // reload: the avatar arg may be None = "unchanged", so only the STORED
+    // blob's hash describes what receivers will actually check against.
+    // Re-persisted onto our own row so `handle_profile_request_for` can forward
+    // it — receivers refuse a relayed profile that carries no owner signature.
+    let master_pub_b64 = base64::engine::general_purpose::STANDARD
+        .encode(master_keypair.public_key_protobuf());
+    let (profile_sig, profile_pk) = super::crypto_handler::sign_profile(
+        master_keypair, &master_pub_b64, local_peer_str, now,
+        &display_name, &status, &about_me, &twitch_username, &avatar_hash,
+    );
+    if let (Ok(db), Some(sig), Some(pk)) = (
+        crate::storage::MessageStore::open(db_path, db_passphrase),
+        profile_sig.as_deref(), profile_pk.as_deref(),
+    ) {
+        let _ = db.save_profile(
+            local_peer_str, &display_name, &status, &about_me, now,
+            None, None, &twitch_username, None, None,
+            Some(crate::storage::ProfileProof { sig, pk, avatar_hash: &avatar_hash }),
+        );
+    }
 
     // Build our master-signed device list so friends learn (tamper-proof) which
     // device peer_ids resolve to us (multi-device, Phase 6).
@@ -597,6 +620,8 @@ pub(crate) async fn handle_update_profile(
         showcase_board: Some(stored_showcase.clone()),
         showcase_assets_b64: showcase_assets_b64.clone(),
         showcase_assets_hash: stored_assets_hash.clone(),
+        profile_sig: profile_sig.clone(),
+        profile_pk: profile_pk.clone(),
     };
     let mut mls_reached: std::collections::HashSet<String> = std::collections::HashSet::new();
     // Send via MLS to each server we're in.
@@ -629,6 +654,8 @@ pub(crate) async fn handle_update_profile(
         showcase_board: Some(stored_showcase),
         showcase_assets_b64,
         showcase_assets_hash: stored_assets_hash,
+        profile_sig,
+        profile_pk,
     };
     hollow_log!("[HOLLOW-SWARM] Broadcasting profile update");
     {
@@ -686,6 +713,7 @@ pub(crate) fn save_incoming_profile(
     twitch_username: &str,
     showcase_board: Option<&str>,
     showcase_assets: Option<&[u8]>,
+    proof: Option<crate::storage::ProfileProof<'_>>,
     db_path: &str,
     db_passphrase: &str,
 ) -> (String, bool) {
@@ -708,7 +736,7 @@ pub(crate) fn save_incoming_profile(
     if let Err(e) = db.save_profile(
         &master, display_name, status, about_me, updated_at,
         avatar_bytes, banner_bytes, twitch_username, showcase_board,
-        showcase_assets,
+        showcase_assets, proof,
     ) {
         hollow_log!("[HOLLOW-PROFILE] Failed to save incoming profile for {master}: {e}");
         return (master, false);
@@ -725,6 +753,45 @@ pub(crate) fn sanitize_incoming_showcase(showcase_board: Option<&str>) -> Option
         Some(s) if s.len() > 16 * 1024 => None,
         other => other,
     }
+}
+
+/// Verify the owner proof on a profile that arrived over an AUTHENTICATED
+/// transport (`ProfileUpdate`, MLS or plaintext). Returns the proof parts to
+/// persist, or `None` to persist none.
+///
+/// The rule here is deliberately different from `handle_profile_relay`:
+///   * the sender IS the subject (there is no `source_peer_id` to lie about —
+///     attribution comes from the transport), so an ABSENT signature is not a
+///     spoofing risk. It is tolerated, and the profile simply stores no proof,
+///     which means we will never relay it onward.
+///   * a PRESENT-but-INVALID signature is refused outright and nothing is
+///     stored: it is either tampering or a bug, and persisting an unverified
+///     proof would let US launder it to every peer that asks us to relay.
+///
+/// The signer is the sender's MASTER — profiles are one per identity and any
+/// device announces the same one.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn verified_profile_proof(
+    sender_peer_id: &str,
+    updated_at: i64,
+    display_name: &str,
+    status: &str,
+    about_me: &str,
+    twitch_username: &str,
+    avatar_hash: &str,
+    profile_sig: Option<&str>,
+    profile_pk: Option<&str>,
+) -> Option<(String, String, String)> {
+    let (sig, pk) = (profile_sig?, profile_pk?);
+    let master = super::resolver::resolve(sender_peer_id);
+    if !super::crypto_handler::verify_profile_signature(
+        &master, updated_at, display_name, status, about_me,
+        twitch_username, avatar_hash, Some(sig), Some(pk),
+    ) {
+        hollow_log!("[HOLLOW-SECURITY] Profile from {sender_peer_id} (master {master}) carried an INVALID owner signature — proof discarded");
+        return None;
+    }
+    Some((sig.to_string(), pk.to_string(), avatar_hash.to_string()))
 }
 
 /// Hex SHA-256 of a profile blob; empty string when there is no blob.
@@ -810,6 +877,12 @@ fn send_own_profile_inner(
         // (swarm.rs) and the receive-side empty-profile guard that ignores blank
         // names so this never clobbers a real cached profile.
         let profile = store.load_profile(local_peer_str).ok().flatten();
+        // The stored proof rides along so receivers can relay us onward; the
+        // SIGNED avatar hash is what the signature covers, so it wins over a
+        // freshly computed one (they agree unless our own row is mid-update).
+        let (profile_sig, profile_pk, signed_avatar_hash) = profile.as_ref()
+            .map(|p| (p.profile_sig.clone(), p.profile_pk.clone(), p.profile_avatar_hash.clone()))
+            .unwrap_or((None, None, None));
         let (display_name, status, about_me, updated_at, avatar_bytes, banner_bytes, twitch_username, showcase_board, showcase_assets) =
             match profile {
                 Some(p) => (
@@ -819,7 +892,8 @@ fn send_own_profile_inner(
                 ),
                 None => (String::new(), String::new(), String::new(), 0, None, None, String::new(), String::new(), None),
             };
-        let avatar_hash = profile_blob_hash(avatar_bytes.as_deref());
+        let avatar_hash = signed_avatar_hash
+            .unwrap_or_else(|| profile_blob_hash(avatar_bytes.as_deref()));
         let banner_hash = profile_blob_hash(banner_bytes.as_deref());
         let showcase_assets_hash = profile_blob_hash(showcase_assets.as_deref());
         // Light sends leave the b64 fields EMPTY (= "no change" on the receiver);
@@ -851,6 +925,7 @@ fn send_own_profile_inner(
             avatar_hash, banner_hash,
             showcase_board: Some(showcase_board),
             showcase_assets_b64, showcase_assets_hash,
+            profile_sig, profile_pk,
         };
         send_message_to_peer(ws_cmd_tx, ws_room_peers, target_peer, msg);
     }
@@ -955,6 +1030,8 @@ pub(crate) async fn handle_envelope_profile_update(
     showcase_board: Option<String>,
     showcase_assets_b64: String,
     showcase_assets_hash: String,
+    profile_sig: Option<String>,
+    profile_pk: Option<String>,
     db_path: &str,
     db_passphrase: &str,
 ) -> Vec<String> {
@@ -1000,13 +1077,23 @@ pub(crate) async fn handle_envelope_profile_update(
         base64::engine::general_purpose::STANDARD.decode(&showcase_assets_b64).ok()
             .filter(|b| b.len() <= 2_000_000)
     };
+    // Owner proof (0.8.5): persisted only when it VERIFIES, so we can never
+    // launder an unverified signature into a ProfileRelay. See
+    // `verified_profile_proof` for why absent is tolerated on this path.
+    let verified = verified_profile_proof(
+        &sender_peer_id, updated_at, &display_name, &status, &about_me,
+        &twitch_username, &avatar_hash, profile_sig.as_deref(), profile_pk.as_deref(),
+    );
+    let proof = verified.as_ref().map(|(s, p, h)| crate::storage::ProfileProof {
+        sig: s, pk: p, avatar_hash: h,
+    });
     // Multi-device: persist under the sender's MASTER (any device updates the one
     // identity profile) + empty-profile guard. Single-device: master == sender.
     let (profile_master, _saved) = save_incoming_profile(
         &sender_peer_id, &display_name, &status, &about_me, updated_at,
         avatar_bytes.as_deref(), banner_bytes.as_deref(), &twitch_username,
         sanitize_incoming_showcase(showcase_board.as_deref()),
-        showcase_assets_bytes.as_deref(),
+        showcase_assets_bytes.as_deref(), proof,
         db_path, db_passphrase,
     );
     // Light announce with hashes we don't match → pull the full profile once.
@@ -1045,8 +1132,21 @@ pub(crate) fn handle_profile_request_for(
 
     if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
         if let Ok(Some(profile)) = store.load_profile(target_peer_id) {
+            // Only a SIGNED profile can be relayed (0.8.5) — the receiver
+            // refuses an unsigned one, so sending it would just burn bandwidth
+            // and mask the real reason with a silent drop on their side.
+            let (Some(sig), Some(pk), Some(avatar_hash)) = (
+                profile.profile_sig, profile.profile_pk, profile.profile_avatar_hash,
+            ) else {
+                hollow_log!("[HOLLOW-PROFILE] Not relaying {target_peer_id} to {requester_peer} — no owner signature stored");
+                return;
+            };
+            // Only ship the blob when it IS the one the signature covers; a
+            // stale cached avatar would just be dropped by the receiver, who
+            // then pulls the current one from the owner.
             let avatar_b64 = profile.avatar_bytes
                 .as_ref()
+                .filter(|b| profile_blob_hash(Some(b)) == avatar_hash)
                 .map(|b| base64::engine::general_purpose::STANDARD.encode(b))
                 .unwrap_or_default();
             let msg = HavenMessage::ProfileRelay {
@@ -1057,6 +1157,9 @@ pub(crate) fn handle_profile_request_for(
                 updated_at: profile.updated_at,
                 avatar_b64,
                 twitch_username: profile.twitch_username,
+                avatar_hash,
+                profile_sig: Some(sig),
+                profile_pk: Some(pk),
             };
             send_message_to_peer(ws_cmd_tx, ws_room_peers, requester_peer, msg);
             hollow_log!("[HOLLOW-PROFILE] Relayed profile for {target_peer_id} to {requester_peer}");
@@ -1078,20 +1181,58 @@ pub(crate) async fn handle_profile_relay(
     updated_at: i64,
     avatar_b64: String,
     twitch_username: String,
+    avatar_hash: String,
+    profile_sig: Option<String>,
+    profile_pk: Option<String>,
     db_path: &str,
     db_passphrase: &str,
 ) {
-    // Truncate fields (same limits as ProfileUpdate handler).
-    let display_name = if display_name.len() > 64 { display_name[..64].to_string() } else { display_name };
-    let status = if status.len() > 96 { status[..96].to_string() } else { status };
-    let about_me = if about_me.len() > 256 { about_me[..256].to_string() } else { about_me };
-    let twitch_username = if twitch_username.len() > 64 { twitch_username[..64].to_string() } else { twitch_username };
+    // SECURITY (0.8.5): this frame asserts a THIRD party's profile — the sender
+    // picks `source_peer_id` AND `updated_at`, and it arrives in plaintext, so
+    // before this check any co-present peer (or the relay) could permanently
+    // overwrite anyone's display name and avatar by claiming updated_at =
+    // i64::MAX. Only the subject's own signature makes the claim credible.
+    //
+    // Fields are checked EXACTLY as received, before any clamping — verifying a
+    // clamped copy would check a string the signer never signed
+    // (feedback_signature_enforcement_not_logging). Over-long fields are
+    // therefore REJECTED rather than truncated: a genuine client is bounded by
+    // the same limits, and truncating would also make the stored copy diverge
+    // from the signature we forward on the next hop.
+    if display_name.len() > 64 || status.len() > 96
+        || about_me.len() > 256 || twitch_username.len() > 64
+    {
+        hollow_log!("[HOLLOW-SECURITY] REJECTED relayed profile for {source_peer_id} — field exceeds its limit");
+        return;
+    }
+    if !super::crypto_handler::verify_profile_signature(
+        &source_peer_id, updated_at, &display_name, &status, &about_me,
+        &twitch_username, &avatar_hash,
+        profile_sig.as_deref(), profile_pk.as_deref(),
+    ) {
+        hollow_log!(
+            "[HOLLOW-SECURITY] REJECTED relayed profile for {source_peer_id} — {} (updated_at={updated_at})",
+            if profile_sig.is_none() { "NO owner signature" } else { "owner signature INVALID" }
+        );
+        return;
+    }
 
+    // The blob is bound by HASH, so it is checked separately from the text
+    // fields: a relayer with a stale cache loses only its avatar here (we keep
+    // the verified text and pull the real blob from the owner), while a relayer
+    // that SWAPPED the avatar is caught by the same comparison.
     let avatar_bytes: Option<Vec<u8>> = if avatar_b64.is_empty() {
         None
     } else {
         base64::engine::general_purpose::STANDARD.decode(&avatar_b64).ok()
             .filter(|b| b.len() <= 1_000_000)
+            .filter(|b| {
+                let ok = profile_blob_hash(Some(b)) == avatar_hash;
+                if !ok {
+                    hollow_log!("[HOLLOW-SECURITY] DROPPED relayed avatar for {source_peer_id} — bytes do not match the signed hash");
+                }
+                ok
+            })
     };
 
     if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
@@ -1103,9 +1244,17 @@ pub(crate) async fn handle_profile_relay(
         };
         if should_save {
             // Relay carries no showcase board/assets — None preserves stored ones.
+            // The verified proof rides along so WE can relay it onward.
+            let proof = match (profile_sig.as_deref(), profile_pk.as_deref()) {
+                (Some(sig), Some(pk)) => Some(crate::storage::ProfileProof {
+                    sig, pk, avatar_hash: &avatar_hash,
+                }),
+                _ => None,
+            };
             let _ = store.save_profile(
                 &source_peer_id, &display_name, &status, &about_me, updated_at,
                 avatar_bytes.as_deref(), None, &twitch_username, None, None,
+                proof,
             );
             hollow_log!("[HOLLOW-PROFILE] Saved relayed profile for {source_peer_id}");
         } else {

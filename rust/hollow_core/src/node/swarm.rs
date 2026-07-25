@@ -5642,10 +5642,11 @@ async fn handle_incoming_request(
                         let _ = store.begin_transaction();
                         let mut pk_cache = PkCache::new();
                         for msg in &messages {
-                            // Backfill signature rule: absent = tolerate (pre-signing
-                            // history), present-but-invalid = tampering. An edited row
-                            // verifies against its EDIT signature (edited_at + current
-                            // text). See `check_backfill_signature`.
+                            // Backfill signature rule (0.8.5): Valid or nothing —
+                            // an unsigned item is an injection that can claim ANY
+                            // sender via `msg.s`. An edited row verifies against its
+                            // EDIT signature (edited_at + current text). See
+                            // `check_backfill_signature`.
                             let extras = crypto_handler::SignedExtras {
                                 mid: msg.mid.as_deref(),
                                 reply_to: msg.reply_to.as_deref(),
@@ -5660,10 +5661,10 @@ async fn handle_incoming_request(
                             );
                             // SECURITY: drop the whole item — text, edit, file
                             // metadata, reactions and the hidden flag all ride it.
-                            if sig_check == BackfillSig::Forged {
+                            if !sig_check.is_acceptable() {
                                 hollow_log!(
-                                    "[HOLLOW-SECURITY] REJECTED synced channel message in {sid}/{cid} claiming sender {} — signature present but INVALID (mid={:?}, ts={}, text_len={}, has_pk={})",
-                                    msg.s, msg.mid, msg.ts, msg.t.len(), msg.pk.is_some()
+                                    "[HOLLOW-SECURITY] REJECTED synced channel message in {sid}/{cid} claiming sender {} — {} (mid={:?}, ts={}, text_len={}, has_pk={})",
+                                    msg.s, sig_check.reject_reason(), msg.mid, msg.ts, msg.t.len(), msg.pk.is_some()
                                 );
                                 continue;
                             }
@@ -5732,7 +5733,13 @@ async fn handle_incoming_request(
                             }
 
                             // Insert file metadata and emit FileHeaderReceived for late joiners.
-                            if let Some(ref fm) = msg.file_meta {
+                            // The item's v2 signature binds `file_id`, NOT this
+                            // file_meta blob — so the owner guard is what stops a
+                            // responder relabelling someone else's attachment.
+                            if let Some(ref fm) = msg.file_meta
+                                .as_ref()
+                                .filter(|fm| file_handler::file_meta_write_allowed(&store, &fm.fid, &fm.sender))
+                            {
                                 let ctx_id = format!("{sid}:{cid}");
                                 let _ = store.insert_file_metadata(
                                     &fm.fid, &fm.name, &fm.ext, &fm.mime,
@@ -5758,8 +5765,14 @@ async fn handle_incoming_request(
                             }
 
                             // Sync reactions for this message (INSERT OR IGNORE — idempotent).
+                            // Each reaction names its own reactor, so it carries
+                            // its own signature check — the item verdict above
+                            // covers the message, not the reactions on it.
                             if let Some(mid) = &msg.mid {
                                 for r in &msg.reactions {
+                                    if !message_ops::sync_reaction_accepted(mid, r) {
+                                        continue;
+                                    }
                                     let _ = store.add_reaction(
                                         mid, &r.e, &r.p, r.ts,
                                         r.sig.as_deref(), r.pk.as_deref(),
@@ -6020,8 +6033,7 @@ async fn handle_incoming_request(
                             } else {
                                 (&convo_peer, &local_peer)
                             };
-                            // Backfill signature rule: absent = tolerate (pre-signing
-                            // history), present-but-invalid = tampering.
+                            // Backfill signature rule (0.8.5): Valid or nothing.
                             let extras = crypto_handler::SignedExtras {
                                 mid: msg.mid.as_deref(),
                                 reply_to: msg.reply_to.as_deref(),
@@ -6036,10 +6048,10 @@ async fn handle_incoming_request(
                             );
                             // SECURITY: drop the whole item — the edit, file metadata,
                             // reactions and hidden flag all ride it.
-                            if sig_check == BackfillSig::Forged {
+                            if !sig_check.is_acceptable() {
                                 hollow_log!(
-                                    "[HOLLOW-SECURITY] REJECTED synced DM from {peer_str} (master {convo_peer}, is_mine={is_mine}) — signature present but INVALID (mid={:?}, ts={}, text_len={}, has_pk={})",
-                                    msg.mid, msg.ts, msg.t.len(), msg.pk.is_some()
+                                    "[HOLLOW-SECURITY] REJECTED synced DM from {peer_str} (master {convo_peer}, is_mine={is_mine}) — {} (mid={:?}, ts={}, text_len={}, has_pk={})",
+                                    sig_check.reject_reason(), msg.mid, msg.ts, msg.t.len(), msg.pk.is_some()
                                 );
                                 continue;
                             }
@@ -6141,7 +6153,11 @@ async fn handle_incoming_request(
                             // DM file context = the conversation MASTER (`convo_peer`),
                             // NOT the raw device id, so it matches where the message row
                             // is stored and `_reloadChatForFile` reloads the right thread.
-                            if let Some(ref fm) = msg.file_meta {
+                            // Owner guard: see the channel batch above.
+                            if let Some(ref fm) = msg.file_meta
+                                .as_ref()
+                                .filter(|fm| file_handler::file_meta_write_allowed(&store, &fm.fid, &fm.sender))
+                            {
                                 let _ = store.insert_file_metadata(
                                     &fm.fid, &fm.name, &fm.ext, &fm.mime,
                                     fm.size, 0, fm.img, fm.w, fm.h,
@@ -6166,8 +6182,12 @@ async fn handle_incoming_request(
                             }
 
                             // Sync reactions for this message (INSERT OR IGNORE — idempotent).
+                            // Signature-checked per reaction; see the channel batch.
                             if let Some(mid) = &msg.mid {
                                 for r in &msg.reactions {
+                                    if !message_ops::sync_reaction_accepted(mid, r) {
+                                        continue;
+                                    }
                                     let _ = store.add_reaction(
                                         mid, &r.e, &r.p, r.ts,
                                         r.sig.as_deref(), r.pk.as_deref(),
@@ -6243,9 +6263,9 @@ async fn handle_incoming_request(
                             } else {
                                 (&convo_peer, &local_peer)
                             };
-                            // Backfill signature rule: absent = tolerate (pre-signing
-                            // history), present-but-invalid = tampering. A sibling is
-                            // still only as trustworthy as the batch it forwards.
+                            // Backfill signature rule (0.8.5): Valid or nothing. A
+                            // sibling is still only as trustworthy as the batch it
+                            // forwards.
                             let extras = crypto_handler::SignedExtras {
                                 mid: msg.mid.as_deref(),
                                 reply_to: msg.reply_to.as_deref(),
@@ -6258,10 +6278,10 @@ async fn handle_incoming_request(
                                 msg.ts, msg.edited_at, &extras, &msg.t,
                                 msg.sig.as_deref(), msg.pk.as_deref(), &mut pk_cache,
                             );
-                            if sig_check == BackfillSig::Forged {
+                            if !sig_check.is_acceptable() {
                                 hollow_log!(
-                                    "[HOLLOW-SECURITY] REJECTED sibling DM from {peer_str} (convo {convo_peer}, mine={}) — signature present but INVALID (mid={:?}, ts={})",
-                                    msg.mine, msg.mid, msg.ts
+                                    "[HOLLOW-SECURITY] REJECTED sibling DM from {peer_str} (convo {convo_peer}, mine={}) — {} (mid={:?}, ts={})",
+                                    msg.mine, sig_check.reject_reason(), msg.mid, msg.ts
                                 );
                                 continue;
                             }
@@ -6361,7 +6381,11 @@ async fn handle_incoming_request(
                             }
 
                             // File metadata (so the card renders; bytes fetch on demand).
-                            if let Some(ref fm) = msg.file_meta {
+                            // Owner guard: see the channel batch above.
+                            if let Some(ref fm) = msg.file_meta
+                                .as_ref()
+                                .filter(|fm| file_handler::file_meta_write_allowed(&store, &fm.fid, &fm.sender))
+                            {
                                 let _ = store.insert_file_metadata(
                                     &fm.fid, &fm.name, &fm.ext, &fm.mime,
                                     fm.size, 0, fm.img, fm.w, fm.h,
@@ -6386,8 +6410,12 @@ async fn handle_incoming_request(
                             }
 
                             // Reactions (INSERT OR IGNORE — idempotent).
+                            // Signature-checked per reaction; see the channel batch.
                             if let Some(mid) = &msg.mid {
                                 for r in &msg.reactions {
+                                    if !message_ops::sync_reaction_accepted(mid, r) {
+                                        continue;
+                                    }
                                     let _ = store.add_reaction(
                                         mid, &r.e, &r.p, r.ts,
                                         r.sig.as_deref(), r.pk.as_deref(),
@@ -6814,16 +6842,20 @@ async fn handle_incoming_request(
                         _ => dm_convo.clone(),
                     };
 
-                    // Save file metadata to DB.
+                    // Save file metadata to DB. Owner guard (0.8.5): the header
+                    // is Olm-authenticated, but that only proves WHO sent it —
+                    // not that the `file_id` inside is theirs to relabel.
                     if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
-                        let _ = store.insert_file_metadata(
-                            &fid, &name, &ext, &mime,
-                            size, chunks, img,
-                            w, h,
-                            mid.as_deref(), ctx_type, &ctx_id,
-                            &peer_str, false, ts,
-                            vthumb.as_ref(),
-                        );
+                        if file_handler::file_meta_write_allowed(&store, &fid, &peer_str) {
+                            let _ = store.insert_file_metadata(
+                                &fid, &name, &ext, &mime,
+                                size, chunks, img,
+                                w, h,
+                                mid.as_deref(), ctx_type, &ctx_id,
+                                &peer_str, false, ts,
+                                vthumb.as_ref(),
+                            );
+                        }
                     }
 
                     let mid_str = mid.clone().unwrap_or_default();
@@ -6905,12 +6937,13 @@ async fn handle_incoming_request(
                                         // captioned image's real caption DM wins later via
                                         // promote_file_sentinel_to_caption). Mirrors fetch.rs.
                                         //
-                                        // SECURITY (backfill rule): the header's sig is the
-                                        // MESSAGE signature over the sentinel text — reject a
-                                        // present-but-invalid one instead of storing it (a
-                                        // captioned image's header legitimately fails here,
-                                        // since the sender signed the CAPTION — its caption DM
-                                        // creates the row instead). Sibling echoes skip the
+                                        // SECURITY (backfill rule, 0.8.5): the header's sig is
+                                        // the MESSAGE signature over the sentinel text — the
+                                        // row is stored ONLY when it VERIFIES (a captioned
+                                        // image's header legitimately fails here, since the
+                                        // sender signed the CAPTION — its caption DM creates
+                                        // the row instead; an unsigned header no longer
+                                        // materialises a row at all). Sibling echoes skip the
                                         // check: the sender is us, and the header carries no
                                         // convo to reconstruct the signing context from.
                                         // `order_us` from the header — the v2 signature binds
@@ -6918,7 +6951,7 @@ async fn handle_incoming_request(
                                         // default would wedge this row's later sync re-serve.
                                         let from_sibling = super::resolver::same_identity(&peer_str, master_peer_str);
                                         let sentinel_text = format!("[file:{fid}]");
-                                        let sentinel_forged = !from_sibling && {
+                                        let sentinel_sig_ok = from_sibling || {
                                             let extras = crypto_handler::SignedExtras {
                                                 mid: mid.as_deref(),
                                                 reply_to: None,
@@ -6930,10 +6963,10 @@ async fn handle_incoming_request(
                                                 &dm_convo, "dm", master_peer_str, ts, None,
                                                 &extras, &sentinel_text,
                                                 sig.as_deref(), pk.as_deref(), &mut PkCache::new(),
-                                            ) == BackfillSig::Forged
+                                            ).is_acceptable()
                                         };
                                         if ctx_type == "dm"
-                                            && !sentinel_forged
+                                            && sentinel_sig_ok
                                             && !mid.as_deref()
                                                 .map(|m| store.dm_message_exists(m))
                                                 .unwrap_or(false)
@@ -9471,7 +9504,7 @@ async fn handle_incoming_request(
                                 ).await;
                             }
 
-                            MessageEnvelope::ProfileUpdate { display_name, status, about_me, updated_at, avatar_b64, banner_b64, is_invisible: peer_invisible, twitch_username, device_list, avatar_hash, banner_hash, showcase_board, showcase_assets_b64, showcase_assets_hash } => {
+                            MessageEnvelope::ProfileUpdate { display_name, status, about_me, updated_at, avatar_b64, banner_b64, is_invisible: peer_invisible, twitch_username, device_list, avatar_hash, banner_hash, showcase_board, showcase_assets_b64, showcase_assets_hash, profile_sig, profile_pk } => {
                                 if peer_invisible {
                                     let _ = event_tx.send(NetworkEvent::PeerStatusChanged {
                                         peer_id: sender_peer_id.clone(),
@@ -9485,6 +9518,7 @@ async fn handle_incoming_request(
                                     updated_at, avatar_b64, banner_b64, twitch_username,
                                     device_list, avatar_hash, banner_hash, showcase_board,
                                     showcase_assets_b64, showcase_assets_hash,
+                                    profile_sig, profile_pk,
                                     db_path, db_passphrase,
                                 ).await;
                                 // Step 7: enforce revocations learned via the MLS
@@ -10622,11 +10656,17 @@ async fn handle_incoming_request(
                             .and_then(|s| s.load_profile(local_peer_str).ok().flatten());
                         // LIGHT announce (device list is the payload here) — blobs
                         // ride as hashes; a stale friend pulls via ProfileRequest.
+                        // Our stored proof rides along so the friend can relay
+                        // us onward; `profile_avatar_hash` is the hash the
+                        // signature actually covers.
+                        let (profile_sig, profile_pk, signed_avatar_hash) = profile.as_ref()
+                            .map(|p| (p.profile_sig.clone(), p.profile_pk.clone(), p.profile_avatar_hash.clone()))
+                            .unwrap_or((None, None, None));
                         let (display_name, status, about_me, updated_at, avatar_hash, banner_hash, twitch_username, showcase_board, showcase_assets_hash) =
                             match profile {
                                 Some(p) => (
                                     p.display_name, p.status, p.about_me, p.updated_at,
-                                    social::profile_blob_hash(p.avatar_bytes.as_deref()),
+                                    signed_avatar_hash.unwrap_or_else(|| social::profile_blob_hash(p.avatar_bytes.as_deref())),
                                     social::profile_blob_hash(p.banner_bytes.as_deref()),
                                     p.twitch_username, p.showcase_board,
                                     social::profile_blob_hash(p.showcase_assets.as_deref()),
@@ -10646,6 +10686,7 @@ async fn handle_incoming_request(
                             showcase_board: Some(showcase_board),
                             showcase_assets_b64: String::new(),
                             showcase_assets_hash,
+                            profile_sig, profile_pk,
                         };
                         let json = serde_json::to_string(&msg).unwrap_or_default();
                         let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendDirect {
@@ -11027,32 +11068,46 @@ async fn handle_incoming_request(
         HavenMessage::PublicChannelSyncResponse { server_id, channel_id, messages, has_more, sender_profiles } => {
             if peer_str == local_peer_str { return; }
             if !guest_rooms.contains(&server_id) { return; }
-            // Guests hold no rows to check against, so the hidden flag is
-            // verified from the item's own fields — REJECT-ABSENT (0.8.4):
-            // public-channel sync is plaintext (relay-tamperable), and a bare
-            // hidden_at would censor messages out of the preview.
+            // Guests hold no rows to check against, so EVERYTHING is verified
+            // from the items' own fields — public-channel sync is plaintext, so
+            // the relay (or any responder) can rewrite the whole batch:
+            //   * content signature  -> drop the item        (0.8.5)
+            //   * hidden flag proof  -> strip the flag       (0.8.4, REJECT-ABSENT)
+            //   * reaction signature -> drop that reaction   (0.8.5)
+            // This is the one surface strangers see, so it gets the same rule
+            // the four member-side backfill sites use.
             let mut pk_cache = PkCache::new();
-            let ffi_messages: Vec<GuestSyncMessageFfi> = messages.into_iter()
-                .map(|m| {
-                    let hidden_at = message_ops::verified_guest_hidden_at(
-                        &m, &server_id, &channel_id, &mut pk_cache,
-                    );
-                    GuestSyncMessageFfi {
-                        sender_id: m.s,
-                        text: m.t,
-                        timestamp: m.ts,
-                        message_id: m.mid,
-                        signature: m.sig,
-                        public_key: m.pk,
-                        edited_at: m.edited_at,
-                        reply_to: m.reply_to,
-                        hidden_at,
-                        reactions: m.reactions.into_iter().map(|r| GuestReactionFfi {
-                            emoji: r.e, peer_id: r.p, added_at: r.ts,
-                        }).collect(),
-                    }
-                })
-                .collect();
+            let mut ffi_messages: Vec<GuestSyncMessageFfi> = Vec::with_capacity(messages.len());
+            for m in messages {
+                if !message_ops::guest_item_accepted(&m, &server_id, &channel_id, &mut pk_cache) {
+                    continue;
+                }
+                let hidden_at = message_ops::verified_guest_hidden_at(
+                    &m, &server_id, &channel_id, &mut pk_cache,
+                );
+                let reactions = match &m.mid {
+                    Some(mid) => m.reactions.iter()
+                        .filter(|r| message_ops::sync_reaction_accepted(mid, r))
+                        .map(|r| GuestReactionFfi {
+                            emoji: r.e.clone(), peer_id: r.p.clone(), added_at: r.ts,
+                        })
+                        .collect(),
+                    // No mid = nothing a reaction signature could bind to.
+                    None => Vec::new(),
+                };
+                ffi_messages.push(GuestSyncMessageFfi {
+                    sender_id: m.s,
+                    text: m.t,
+                    timestamp: m.ts,
+                    message_id: m.mid,
+                    signature: m.sig,
+                    public_key: m.pk,
+                    edited_at: m.edited_at,
+                    reply_to: m.reply_to,
+                    hidden_at,
+                    reactions,
+                });
+            }
             let ffi_profiles: Vec<SyncSenderProfileFfi> = sender_profiles.into_iter().map(|(pid, p)| {
                 let avatar = p.avatar_b64.and_then(|b64| base64::engine::general_purpose::STANDARD.decode(&b64).ok());
                 SyncSenderProfileFfi { peer_id: pid, name: p.name, avatar }
@@ -11108,7 +11163,7 @@ async fn handle_incoming_request(
             }).await;
         }
 
-        HavenMessage::ProfileUpdate { display_name, status, about_me, updated_at, avatar_b64, banner_b64, is_invisible: peer_invisible, twitch_username, device_list, avatar_hash, banner_hash, showcase_board, showcase_assets_b64, showcase_assets_hash } => {
+        HavenMessage::ProfileUpdate { display_name, status, about_me, updated_at, avatar_b64, banner_b64, is_invisible: peer_invisible, twitch_username, device_list, avatar_hash, banner_hash, showcase_board, showcase_assets_b64, showcase_assets_hash, profile_sig, profile_pk } => {
             // If the profile carries an invisible flag, emit PeerStatusChanged so the
             // UI treats this peer as offline from the very first event.
             if peer_invisible {
@@ -11247,11 +11302,22 @@ async fn handle_incoming_request(
                     .filter(|b| b.len() <= 2_000_000)
             };
 
+            // Owner proof (0.8.5) — stored only when it VERIFIES, so an
+            // unverified signature can never be laundered into a ProfileRelay
+            // by us. Absent is fine here: attribution is transport-attested on
+            // this path, the profile just becomes non-relayable.
+            let verified_proof = social::verified_profile_proof(
+                peer_str, updated_at, &display_name, &status, &about_me,
+                &twitch_username, &avatar_hash, profile_sig.as_deref(), profile_pk.as_deref(),
+            );
+            let proof = verified_proof.as_ref().map(|(sig, pk, ah)| {
+                crate::storage::ProfileProof { sig, pk, avatar_hash: ah }
+            });
             let (profile_master, _saved) = social::save_incoming_profile(
                 &peer_str, &display_name, &status, &about_me, updated_at,
                 avatar_bytes.as_deref(), banner_bytes.as_deref(), &twitch_username,
                 social::sanitize_incoming_showcase(showcase_board.as_deref()),
-                showcase_assets_bytes.as_deref(),
+                showcase_assets_bytes.as_deref(), proof,
                 db_path, db_passphrase,
             );
 
@@ -11739,12 +11805,12 @@ async fn handle_incoming_request(
             );
         }
 
-        HavenMessage::ProfileRelay { source_peer_id, display_name, status, about_me, updated_at, avatar_b64, twitch_username } => {
+        HavenMessage::ProfileRelay { source_peer_id, display_name, status, about_me, updated_at, avatar_b64, twitch_username, avatar_hash, profile_sig, profile_pk } => {
             hollow_log!("[HOLLOW-PROFILE] ProfileRelay for {source_peer_id} from {peer_str}");
             social::handle_profile_relay(
                 event_tx, server_states,
                 source_peer_id, display_name, status, about_me, updated_at,
-                avatar_b64, twitch_username,
+                avatar_b64, twitch_username, avatar_hash, profile_sig, profile_pk,
                 db_path, db_passphrase,
             ).await;
         }

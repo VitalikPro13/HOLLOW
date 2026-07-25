@@ -667,7 +667,7 @@ Uses `HollowPressable` wrapper. Shows check icon when selected.
 - `fileAttachment` -- nullable `FileAttachment`
 
 **Computed properties:**
-- `canonicalPayload` -- `'hollow-msg:$msgType:$context:$senderPeerId:$timestampMs:$text'`
+- (0.8.5) `canonicalPayload` REMOVED — Dart builds no signing payload at all. Live rows verify via `verifyMessageProofV2` (Rust loads the row, builds the v2 payload); imported-archive rows carry the Rust loader's verdict as `MessageProofData.preverified`; anything else displays unverified. Copy/Export gate on `_canExport` (a v2 payload exists).
 - `publicKeyFingerprint` -- base64-decoded key -> hex -> groups of 4 uppercase chars (first 32 hex chars = 16 bytes)
 - `toProofJson()` -- structured JSON with version, protocol, message, sender, context, signature, verification instructions
 

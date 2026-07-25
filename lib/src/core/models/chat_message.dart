@@ -21,6 +21,15 @@ class ChatMessage {
   /// the message was sent before link previews existed.
   final network_api.LinkPreviewRef? linkPreview;
 
+  /// Signature verdict for a message loaded from an IMPORTED ARCHIVE, computed
+  /// by the Rust archive loader (`archive::loader::verify_one_message`, v2
+  /// payload). Null for live messages — those verify through
+  /// `verifyMessageProofV2`, which reads the row out of the local DB. The
+  /// archive has no such row, and Dart cannot rebuild a v2 payload on its own
+  /// (it would need the link-preview digest), so the loader's verdict is
+  /// carried instead of re-deriving one.
+  final bool? archiveSignatureValid;
+
   ChatMessage({
     required this.text,
     required this.isMe,
@@ -34,6 +43,7 @@ class ChatMessage {
     Map<String, List<String>>? reactions,
     this.fileAttachment,
     this.linkPreview,
+    this.archiveSignatureValid,
   })  : timestamp = timestamp ?? DateTime.now(),
         reactions = reactions ?? const {};
 
@@ -62,6 +72,7 @@ class ChatMessage {
       reactions: reactions ?? this.reactions,
       fileAttachment: fileAttachment ?? this.fileAttachment,
       linkPreview: linkPreview ?? this.linkPreview,
+      archiveSignatureValid: archiveSignatureValid,
     );
   }
 }

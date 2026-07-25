@@ -460,6 +460,10 @@ List<ChatMessage> convertArchiveDmMessages(
       replyToMid: m.replyToMid,
       reactions: reactions.isNotEmpty ? reactions : null,
       fileAttachment: fileAttachment,
+      // The Rust loader already verified this row against the v2 payload with
+      // every signed field (order_us / link-preview digest) in hand; carry its
+      // verdict so the proof dialog reports it instead of re-deriving one.
+      archiveSignatureValid: m.signatureValid,
     );
   }).toList();
 }
@@ -496,6 +500,8 @@ List<ChannelChatMessage> convertArchiveChannelMessages(
       replyToMid: m.replyToMid,
       reactions: reactions.isNotEmpty ? reactions : null,
       fileAttachment: fileAttachment,
+      // See the DM converter above — the loader's v2 verdict is authoritative.
+      archiveSignatureValid: m.signatureValid,
     );
   }).toList();
 }

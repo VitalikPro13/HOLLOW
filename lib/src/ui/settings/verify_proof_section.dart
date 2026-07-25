@@ -121,22 +121,21 @@ class _VerifyProofSectionState extends State<VerifyProofSection> {
       // Reconstruct the canonical payload from the individual JSON fields
       // and verify it matches the embedded one. This catches field tampering
       // (e.g. changing message text while keeping the old canonical_payload).
-      // v2 proofs (hollow-proof-v2) additionally bind the structured fields —
-      // the grammar mirrors Rust's `message_signing_payload_v2` (absent
-      // fields serialize as empty strings).
-      final String reconstructed;
-      if (map['version'] == 2) {
-        final replyTo = message['reply_to'] as String? ?? '';
-        final fileId = message['file_id'] as String? ?? '';
-        final orderUs = message['order_us']?.toString() ?? '';
-        final lpDigest = message['link_preview_digest'] as String? ?? '';
-        reconstructed =
-            'hollow-msg2:${_canonicalMsgType(contextType)}:$contextId:$peerId:'
-            '$timestampMs:${messageId ?? ''}:$replyTo:$fileId:$orderUs:$lpDigest:$text';
-      } else {
-        reconstructed =
-            'hollow-msg:${_canonicalMsgType(contextType)}:$contextId:$peerId:$timestampMs:$text';
-      }
+      // The grammar mirrors Rust's `message_signing_payload_v2` (absent fields
+      // serialize as empty strings) — the one place it is dual-defined.
+      //
+      // v1 proofs are refused outright in `_envelopeError`: their canonical
+      // payload covers the text ONLY, so a v1 proof whose reply_to / file_id /
+      // order_us / link preview were rewritten would reconstruct cleanly and
+      // verify. Accepting one here would reintroduce finding 2.3 through the
+      // manual verifier.
+      final replyTo = message['reply_to'] as String? ?? '';
+      final fileId = message['file_id'] as String? ?? '';
+      final orderUs = message['order_us']?.toString() ?? '';
+      final lpDigest = message['link_preview_digest'] as String? ?? '';
+      final reconstructed =
+          'hollow-msg2:${_canonicalMsgType(contextType)}:$contextId:$peerId:'
+          '$timestampMs:${messageId ?? ''}:$replyTo:$fileId:$orderUs:$lpDigest:$text';
       if (reconstructed != canonicalPayload) {
         fail('Payload mismatch — the message fields do not match the '
             'canonical payload. The proof JSON may have been tampered with.\n\n'
@@ -189,12 +188,22 @@ class _VerifyProofSectionState extends State<VerifyProofSection> {
     final version = map['version'];
     final protocol = map['protocol'] as String?;
     final algorithm = sig['algorithm'] as String?;
-    if (version != 1 && version != 2) {
-      return 'Unknown proof version: $version (expected 1 or 2).';
+    // v1 (hollow-proof-v1) is refused since 0.8.5. Its canonical payload
+    // covered the message TEXT only, so the reply target, attachment, ordering
+    // stamp and link preview sat outside the signature and could be rewritten
+    // while the proof still verified. Accepting one would let a doctored proof
+    // display as authentic.
+    if (version == 1) {
+      return 'This is a legacy v1 proof. The v1 signature covered only the '
+          'message text — the attachment, reply target, ordering and link '
+          'preview were not signed — so Hollow no longer accepts it. Re-export '
+          'the proof from Hollow 0.8.5 or newer.';
     }
-    final expectedProtocol = version == 2 ? 'hollow-proof-v2' : 'hollow-proof-v1';
-    if (protocol != expectedProtocol) {
-      return 'Unknown protocol: "$protocol" (expected "$expectedProtocol").';
+    if (version != 2) {
+      return 'Unknown proof version: $version (expected 2).';
+    }
+    if (protocol != 'hollow-proof-v2') {
+      return 'Unknown protocol: "$protocol" (expected "hollow-proof-v2").';
     }
     if (algorithm != 'Ed25519') {
       return 'Unknown algorithm: "$algorithm" (expected "Ed25519").';

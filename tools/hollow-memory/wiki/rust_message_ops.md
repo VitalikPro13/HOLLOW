@@ -6,13 +6,13 @@ Source: `rust/hollow_core/src/node/message_ops.rs` (~1235 lines). All handler fu
 
 ## Message Signing Payload Format (VERSIONED since 0.8.3)
 
-**v2 (current — `MSG_SIG_V2_SIGNING = true`)**, defined in `crypto_handler.rs:message_signing_payload_v2()`:
+**v2 (the ONLY accepted payload since 0.8.5)**, defined in `crypto_handler.rs:message_signing_payload_v2()`:
 
 ```
 hollow-msg2:{msg_type}:{context}:{sender}:{ts}:{mid}:{reply_to}:{file_id}:{order_us}:{lp_digest}:{text}
 ```
 
-Extras ride `SignedExtras { mid, reply_to, file_id, order_us, lp_digest }` — absent `Option` ≡ empty string; `lp_digest` = `link_preview_digest()` (length-prefixed SHA-256 hex of the preview's url/title/description/domain/site_name/thumb). `text` stays LAST (only colon-bearing field). Legacy **v1** (`hollow-msg:{msg_type}:{context}:{sender}:{ts}:{text}`) is still ACCEPTED by every verifier — `verify_message_signature_v2()` tries v2 then falls back to v1 ("verify-both"). ALL sign sites go through `sign_message_versioned()`; never sign or verify v1-only.
+Extras ride `SignedExtras { mid, reply_to, file_id, order_us, lp_digest }` — absent `Option` ≡ empty string; `lp_digest` = `link_preview_digest()` (length-prefixed SHA-256 hex of the preview's url/title/description/domain/site_name/thumb). `text` stays LAST (only colon-bearing field). Legacy **v1** (`hollow-msg:...`) is REJECTED everywhere since 0.8.5 — `verify_message_signature_v2()` tries the v2 payload and nothing else. ALL sign sites go through `sign_message_versioned()`. Never add a v1 fallback back: it is a downgrade oracle.
 
 **msg_type values and their contexts:**
 

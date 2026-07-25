@@ -181,7 +181,7 @@ Future<bool> verifyMessageProof({
   canonicalPayload: canonicalPayload,
 );
 
-/// Versioned (v2 → v1 fallback) verification for the Message Proof dialog.
+/// v2 verification for the Message Proof dialog (no v1 fallback since 0.8.5).
 ///
 /// The v2 payload binds the message's structured fields (mid / reply_to /
 /// file_id / order_us / link-preview digest), which live in the DB row — so
@@ -1122,11 +1122,14 @@ class MessageProofV2 {
   final bool valid;
 
   /// 2 = verified against the v2 payload (structured fields covered),
-  /// 1 = legacy v1 (text only), 0 = did not verify.
+  /// 0 = did not verify. `1` (legacy v1, text only) is no longer produced —
+  /// v1 verification was dropped in 0.8.5; the variant is kept out of the
+  /// contract rather than out of the range so old Dart builds that switch on
+  /// `== 2` keep behaving correctly.
   final int sigVersion;
 
-  /// The canonical payload string that verified (the v2 candidate when the
-  /// signature is missing/invalid) — displayed and exported by the dialog.
+  /// The canonical v2 payload string — displayed and exported by the dialog
+  /// whether or not it verified.
   final String canonicalPayload;
 
   /// The row's signed fields, for the exported proof JSON.

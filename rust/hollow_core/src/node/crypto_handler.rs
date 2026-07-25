@@ -74,53 +74,40 @@ pub(crate) fn request_sibling_dm_backfill(
     );
 }
 
-// -- Per-message Ed25519 signing helpers --
-
-/// Build canonical payload for message signing.
-/// Format: "hollow-msg:{type}:{context}:{sender}:{ts}:{text}"
-/// - Channel: type="ch", context="{sid}:{cid}"
-/// - DM:      type="dm", context="{recipient_peer_id}"
-pub(crate) fn message_signing_payload(
-    msg_type: &str,
-    context: &str,
-    sender: &str,
-    ts: i64,
-    text: &str,
-) -> String {
-    format!("hollow-msg:{msg_type}:{context}:{sender}:{ts}:{text}")
-}
-
-// -- Versioned message signing (Issue 2.3, itsfolf 2nd report) --
+// -- Per-message Ed25519 signing helpers (v2 only since 0.8.5) --
 //
-// The v1 payload above covers ONLY the text. Everything else that rides a
-// message — reply_to, file_id, link_preview, order_us, mid — is OUTSIDE the
-// signature, so anyone who can modify a message in flight or serve a sync batch
-// can, on an OTHERWISE-VALID message:
+// The legacy v1 payload — "hollow-msg:{type}:{context}:{sender}:{ts}:{text}" —
+// covered ONLY the text. Everything else that rides a message (reply_to,
+// file_id, link_preview, order_us, mid) sat OUTSIDE the signature, so anyone
+// who could modify a message in flight or serve a sync batch could, on an
+// OTHERWISE-VALID message:
 //   * re-target a reply (reply_to)          * swap / ADD an attachment (file_id)
 //   * rewrite a link preview -> phishing     * reorder messages (order_us)
 //   * manipulate the dedup key (mid)
-// and the signature still verifies. v2 folds these fields into the signed
+// and the signature still verified. v2 folds these fields into the signed
 // payload so the signature covers the whole message structure.
 //
-// ROLLOUT — WIRE-BREAKING (a pre-0.8.3 client cannot verify a v2 signature),
-// so it is staged exactly like the signed-key-exchange root of trust
+// ROLLOUT — COMPLETE. It was staged like the signed-key-exchange root of trust
 // (REQUIRE_SIGNED_KEY_EXCHANGE) and the device-list payload versioning:
-//   1. Ship VERIFY-BOTH everywhere (accept a valid v1 OR v2 signature) while
-//      still SIGNING v1 — `MSG_SIG_V2_SIGNING = false`. Deploys the new
-//      verifier fleet-wide with ZERO interop breakage.
-//   2. Once the fleet verifies-both, flip `MSG_SIG_V2_SIGNING = true`; new
-//      messages sign v2. Pre-0.8.3 clients then render them "unverified".
-//   3. Later, drop v1 verification (enforce v2). Stored v1 history keeps
-//      verifying because the verifier picks the format it TRIES from the
-//      message fields, not the sender's version — v2 first, then v1.
+//   1. (0.8.3) Ship the v2 verifier everywhere, verifying-both.
+//   2. (0.8.3) Sign v2 — flipped in the same release, because the public fleet
+//      at that point ran <=0.8.1, which never ENFORCED signatures on receive
+//      (verify-then-log), so a soak window would have protected nobody.
+//   3. (0.8.5) DROP v1 verification — this step. `verify_message_signature_v2`
+//      tries the v2 payload and NOTHING else.
 //
-// Wired in 0.8.3: every sign site goes through `sign_message_versioned`, every
-// verify site (live, 4 sync, fetch, archive, Message Proof FFI) verifies-both.
-// The public fleet at flip time ran ≤0.8.1, which never ENFORCED message
-// signatures on receive (verify-then-log) — so v2 messages render there as
-// "unverified" rather than being dropped, and the two-release verify-both
-// window would have protected nobody. That is why signing flips in the same
-// release that ships the verifier.
+// Why step 3 matters and is not cosmetic: while the v1 fallback existed,
+// finding 2.3 stayed exploitable against any v1-signed row. Re-point a
+// file_id, re-parent a reply, swap the link preview, alter order_us — the
+// original v1 signature still verified, because it never covered those fields.
+// A fallback that accepts a weaker payload is a downgrade oracle: an attacker
+// picks the format, not the sender.
+//
+// CONSEQUENCE, accepted knowingly at a 2-user fleet: nothing signed by <=0.8.2
+// verifies any more. Those rows stay in the local DB and still display, they
+// just show as unverified and no longer replicate through sync (backfill needs
+// a Valid verdict — see REQUIRE_SIGNED_BACKFILL). Nothing about identity, Olm
+// sessions, MLS groups, friends or servers is affected.
 //
 // EDIT / DELETE signatures also ride v2: they bind the SAME full extras as the
 // original message, read from the signer's own ROW at edit/delete time (the
@@ -131,11 +118,20 @@ pub(crate) fn message_signing_payload(
 // stops a sync responder from attaching a forged `file_id` to an edited row
 // whose original signature was overwritten by the edit signature.
 
-/// When true, NEW message signatures are produced over the v2 payload.
-/// Flipped in 0.8.3 alongside fleet-wide verify-both — see the rollout note
-/// above. Pre-0.8.3 clients show v2 messages as unverified (≤0.8.1 does not
-/// enforce); step 3 (dropping v1 VERIFICATION) comes in a later release.
-pub(crate) const MSG_SIG_V2_SIGNING: bool = true;
+/// The retired v1 payload builder. `#[cfg(test)]` ON PURPOSE: it exists ONLY so
+/// tests can mint a v1 signature and assert that it is REJECTED. Production
+/// code cannot reach it, which is what makes "v1 is gone" a compile-time
+/// property rather than a convention someone can quietly undo.
+#[cfg(test)]
+pub(crate) fn message_signing_payload(
+    msg_type: &str,
+    context: &str,
+    sender: &str,
+    ts: i64,
+    text: &str,
+) -> String {
+    format!("hollow-msg:{msg_type}:{context}:{sender}:{ts}:{text}")
+}
 
 /// SHA-256 (hex) of the phishing-relevant link-preview fields, each
 /// length-prefixed so no two distinct field-sets can collide (a raw
@@ -205,10 +201,9 @@ pub(crate) fn message_signing_payload_v2(
     format!("hollow-msg2:{msg_type}:{context}:{sender}:{ts}:{mid}:{reply_to}:{file_id}:{order_us}:{lp}:{text}")
 }
 
-/// Sign a message, choosing v1 or v2 by [`MSG_SIG_V2_SIGNING`]. Callers pass the
-/// structured fields unconditionally so flipping the flag (step 2) needs no
-/// further call-site change. While the flag is false this is byte-for-byte the
-/// existing v1 `sign_message`.
+/// Sign a message over the canonical v2 payload. Every sign site in the crate
+/// goes through here — the name keeps its `_versioned` suffix so the pairing
+/// with [`verify_message_signature_v2`] stays obvious at the call sites.
 pub(crate) fn sign_message_versioned(
     keypair: &crate::identity::native_identity::NativeKeypair,
     pub_key_b64: &str,
@@ -219,19 +214,19 @@ pub(crate) fn sign_message_versioned(
     extras: &SignedExtras,
     text: &str,
 ) -> (Option<String>, Option<String>) {
-    let payload = if MSG_SIG_V2_SIGNING {
-        message_signing_payload_v2(msg_type, context, sender, ts, extras, text)
-    } else {
-        message_signing_payload(msg_type, context, sender, ts, text)
-    };
+    let payload = message_signing_payload_v2(msg_type, context, sender, ts, extras, text);
     sign_message(keypair, pub_key_b64, &payload)
 }
 
-/// Verify-both (transition window): accept a signature that matches EITHER the
-/// v2 payload (structured fields covered) or the legacy v1 payload (text only).
-/// v2 is tried first; v1 is the fallback that keeps pre-0.8.3 signatures and all
-/// stored history verifying. Reuses `pk_cache` across a batch. A missing
-/// signature returns false, same as v1.
+/// Verify a message signature against the v2 payload — and ONLY the v2 payload.
+///
+/// There is deliberately no v1 fallback (dropped in 0.8.5, rollout step 3). A
+/// fallback to a weaker payload is a downgrade oracle: the attacker, not the
+/// sender, chooses which format is checked, so every structured field the v1
+/// grammar omits (mid / reply_to / file_id / order_us / link-preview digest)
+/// stays graftable on any v1-signed row. Do NOT reintroduce one.
+///
+/// Reuses `pk_cache` across a batch. A missing signature returns false.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn verify_message_signature_v2(
     sender_peer_str: &str,
@@ -245,11 +240,102 @@ pub(crate) fn verify_message_signature_v2(
     pk_cache: &mut PkCache,
 ) -> bool {
     let v2 = message_signing_payload_v2(msg_type, context, sender_peer_str, ts, extras, text);
-    if verify_message_signature_cached(sender_peer_str, sig_b64, pk_b64, &v2, pk_cache) {
-        return true;
+    verify_message_signature_cached(sender_peer_str, sig_b64, pk_b64, &v2, pk_cache)
+}
+
+// -- Signed profiles (0.8.5) --
+//
+// Profile attribution used to come from the TRANSPORT: `ProfileUpdate` has no
+// sender field, so the handler uses the peer the socket reports. Sound — until
+// `ProfileRelay`, which exists so a peer can hand us a cached copy of a THIRD
+// party's profile and carries its own `source_peer_id`. That field was
+// attacker-chosen and the only gate was an `updated_at` comparison the same
+// attacker controls: send `ProfileRelay { source_peer_id: <victim>,
+// display_name: "Admin", updated_at: i64::MAX }` and the victim's display name
+// and avatar are overwritten in our DB permanently — no genuine update can ever
+// beat that timestamp again. It is a plaintext frame, so the relay could do it
+// too.
+//
+// Fix: the profile OWNER signs; relayers forward the signature; receivers
+// verify. The signature is stored alongside the profile so it can be forwarded
+// on the next hop.
+//
+// WHAT IS BOUND, and why not everything: exactly the fields `ProfileRelay`
+// carries. A relayer rebuilds the frame from its own DB, so binding anything it
+// does not forward (banner, showcase board/assets) would make every relayed
+// profile fail to verify. Banner and showcase reach us only over the
+// transport-attested `ProfileUpdate` / `ProfileRequest` paths, where the sender
+// IS the subject. Blobs are bound by CONTENT HASH, not bytes: the announce path
+// is deliberately light (hashes only, no blobs — see
+// `feedback_profile_light_announce_bandwidth_leak`) while the relay path
+// carries real avatar bytes, and a hash verifies identically on both.
+
+/// Canonical payload for a profile signature.
+///
+/// Every field is length-prefixed into a SHA-256 digest rather than joined with
+/// a delimiter: `display_name` / `status` / `about_me` are free text and may
+/// contain any character, so a `:`-joined payload would let one field's content
+/// impersonate the next field's boundary.
+pub(crate) fn profile_signing_payload(
+    peer_id: &str,
+    updated_at: i64,
+    display_name: &str,
+    status: &str,
+    about_me: &str,
+    twitch_username: &str,
+    avatar_hash: &str,
+) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(updated_at.to_le_bytes());
+    for field in [peer_id, display_name, status, about_me, twitch_username, avatar_hash] {
+        h.update((field.len() as u64).to_le_bytes());
+        h.update(field.as_bytes());
     }
-    let v1 = message_signing_payload(msg_type, context, sender_peer_str, ts, text);
-    verify_message_signature_cached(sender_peer_str, sig_b64, pk_b64, &v1, pk_cache)
+    format!("hollow-profile1:{}", hex::encode(h.finalize()))
+}
+
+/// Sign our own profile with the MASTER keypair — profiles are a per-identity
+/// artifact, and every receiver keys them on the master (device→master collapse
+/// happens before the lookup).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn sign_profile(
+    master_keypair: &crate::identity::native_identity::NativeKeypair,
+    pub_key_b64: &str,
+    peer_id: &str,
+    updated_at: i64,
+    display_name: &str,
+    status: &str,
+    about_me: &str,
+    twitch_username: &str,
+    avatar_hash: &str,
+) -> (Option<String>, Option<String>) {
+    let payload = profile_signing_payload(
+        peer_id, updated_at, display_name, status, about_me, twitch_username, avatar_hash,
+    );
+    sign_message(master_keypair, pub_key_b64, &payload)
+}
+
+/// `true` = this profile is authentic for `peer_id`. REQUIRED at every ingest
+/// path (absent is refused, same rule as backfill): the whole point is that a
+/// forwarder cannot assert a third party's profile, and "no signature" is the
+/// cheapest way to be a forwarder with nothing to prove.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn verify_profile_signature(
+    peer_id: &str,
+    updated_at: i64,
+    display_name: &str,
+    status: &str,
+    about_me: &str,
+    twitch_username: &str,
+    avatar_hash: &str,
+    sig_b64: Option<&str>,
+    pk_b64: Option<&str>,
+) -> bool {
+    let payload = profile_signing_payload(
+        peer_id, updated_at, display_name, status, about_me, twitch_username, avatar_hash,
+    );
+    verify_message_signature(peer_id, sig_b64, pk_b64, &payload)
 }
 
 // -- Authenticated Olm key exchange (root of trust, Fix A/B) --
@@ -1493,12 +1579,36 @@ pub(crate) fn verify_message_signature_cached(
         .unwrap_or(false)
 }
 
+/// Backfill enforcement switch (0.8.5). `true` = a sync/fetch item is stored
+/// ONLY when its signature is present AND verifies; `Valid` is the only
+/// acceptable verdict.
+///
+/// It used to be `false` in spirit: `Absent` was tolerated everywhere so that
+/// history predating per-message signing (e2cc8ab, 2026-03-09) would not be
+/// stranded. That tolerance was a message-INJECTION primitive with exactly the
+/// shape of the `hidden_at` hole closed in 0.8.4 — a hostile sync responder
+/// only had to OMIT the signature, and on the channel path the item carries its
+/// own claimed sender (`msg.s`), so an unsigned injection could impersonate any
+/// member. Rows landed in the DB and in archive exports; the "unsigned"
+/// indicator in the UI is a display detail, not a gate.
+///
+/// The only thing the tolerance ever bought was avoiding stranded history and
+/// diverged peers across a deployed fleet. That cost is not worth an open
+/// injection path, so it is gone: pre-signing rows stay where they are and
+/// still display, they simply no longer replicate through sync.
+pub(crate) const REQUIRE_SIGNED_BACKFILL: bool = true;
+
 /// Outcome of checking the signature on a BACKFILLED (sync) message item.
+///
+/// `Absent` and `Forged` are both refused under [`REQUIRE_SIGNED_BACKFILL`],
+/// but they stay DISTINCT variants on purpose: the log line is the only way to
+/// tell "an old peer served pre-signing history" from "someone is injecting
+/// messages at us". Collapsing them into one `bool` would throw that away.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BackfillSig {
-    /// No signature material at all. TOLERATE: history from before per-message
-    /// signing (e2cc8ab, 2026-03-09) is unsigned, and refusing it would strand
-    /// that history and permanently diverge peers.
+    /// No signature material at all — pre-signing history, or an injection
+    /// attempt that simply omitted the signature. Refused; see
+    /// [`REQUIRE_SIGNED_BACKFILL`].
     Absent,
     /// Signature present and it verifies against the claimed sender.
     Valid,
@@ -1507,20 +1617,45 @@ pub(crate) enum BackfillSig {
     Forged,
 }
 
+impl BackfillSig {
+    /// The ONE gate every backfill/fetch call site reads. Keeping it a method
+    /// (rather than each site testing variants) means the enforcement rule is
+    /// greppable and can only be changed in one place.
+    pub(crate) fn is_acceptable(self) -> bool {
+        match self {
+            BackfillSig::Valid => true,
+            BackfillSig::Forged => false,
+            BackfillSig::Absent => !REQUIRE_SIGNED_BACKFILL,
+        }
+    }
+
+    /// Short reason for the rejection log, so support can tell an old peer
+    /// from an attack at a glance.
+    pub(crate) fn reject_reason(self) -> &'static str {
+        match self {
+            BackfillSig::Absent => "NO signature (pre-signing history, or stripped in transit)",
+            BackfillSig::Forged => "signature present but INVALID",
+            BackfillSig::Valid => "accepted",
+        }
+    }
+}
+
 /// Apply the backfill signature rule to one sync item.
 ///
-/// The live-enforce / backfill-tolerate split was originally applied at the
-/// WRONG GRANULARITY — backfill accepted anything, so a sync responder could
-/// hand us messages with invalid signatures and we stored them. The rule the
-/// live path already draws, now carried across:
+/// Callers MUST gate on [`BackfillSig::is_acceptable`], never on
+/// `== BackfillSig::Forged`. As of 0.8.5 backfill matches live ingest:
 ///
 /// ```text
-///   backfill TOLERATES an ABSENT   signature   (pre-signing history)
-///   backfill REJECTS  a PRESENT-but-INVALID one (an attack)
+///   backfill REJECTS an ABSENT signature          (injection primitive)
+///   backfill REJECTS a PRESENT-but-INVALID one    (tampering)
+///   backfill ACCEPTS only Valid
 /// ```
 ///
-/// Do NOT "fix" this by requiring a signature in backfill: that drops all
-/// pre-signing history and diverges peers, which is what tolerate exists for.
+/// The history behind that: this used to tolerate `Absent` so pre-signing rows
+/// (before e2cc8ab, 2026-03-09) kept replicating. Tolerating absence meant an
+/// attacker could inject arbitrary messages — attributed to anyone on the
+/// channel path — by omitting the signature, which is the same shape as the
+/// `hidden_at` hole closed in 0.8.4. See [`REQUIRE_SIGNED_BACKFILL`].
 ///
 /// `edited_at` selects the timestamp the signature was really made over — an
 /// edit is re-signed over the EDIT timestamp and the NEW text
@@ -3093,7 +3228,9 @@ mod tests {
         let a_pk = pk_b64(&a);
         let mut cache = PkCache::new();
 
-        let p1 = message_signing_payload("ch", "srv:chan", &a_id, 1_000, "first");
+        let p1 = message_signing_payload_v2(
+            "ch", "srv:chan", &a_id, 1_000, &SignedExtras::default(), "first",
+        );
         let (sig1, pk1) = sign_message(&a, &a_pk, &p1);
         assert_eq!(
             check_backfill_signature(
@@ -3103,7 +3240,9 @@ mod tests {
             BackfillSig::Valid,
         );
 
-        let p2 = message_signing_payload("ch", "srv:chan", &b_id, 2_000, "attributed to B");
+        let p2 = message_signing_payload_v2(
+            "ch", "srv:chan", &b_id, 2_000, &SignedExtras::default(), "attributed to B",
+        );
         let (sig2, _) = sign_message(&a, &a_pk, &p2);
         assert_eq!(
             check_backfill_signature(
@@ -3115,19 +3254,25 @@ mod tests {
         );
     }
 
-    /// Pre-signing history (before e2cc8ab, 2026-03-09) carries no signature at
-    /// all and MUST keep replicating — requiring one in backfill would strand
-    /// that history and permanently diverge peers.
+    /// An item with NO signature is refused (0.8.5). Omitting the signature was
+    /// the cheapest injection there was: the channel item names its own sender,
+    /// so an unsigned row could impersonate any member and still land in the DB
+    /// and in archive exports.
+    ///
+    /// The verdict stays `Absent` rather than collapsing into `Forged` — the
+    /// two are distinguished in the log so support can tell an old peer serving
+    /// pre-signing history from someone actively injecting.
     #[test]
-    fn backfill_tolerates_unsigned_history() {
+    fn backfill_rejects_unsigned_item() {
         let mut cache = PkCache::new();
-        assert_eq!(
-            check_backfill_signature(
-                "12D3KooWlegacy", "ch", "srv:chan", 1, None, &SignedExtras::default(), "old message",
-                None, None, &mut cache,
-            ),
-            BackfillSig::Absent,
+        let verdict = check_backfill_signature(
+            "12D3KooWlegacy", "ch", "srv:chan", 1, None, &SignedExtras::default(), "old message",
+            None, None, &mut cache,
         );
+        assert_eq!(verdict, BackfillSig::Absent);
+        assert!(!verdict.is_acceptable(), "an unsigned backfill item must not be stored");
+        assert!(!BackfillSig::Forged.is_acceptable());
+        assert!(BackfillSig::Valid.is_acceptable());
     }
 
     /// ...but a signature that is PRESENT and does not verify is tampering, not
@@ -3140,7 +3285,9 @@ mod tests {
         let a_pk = pk_b64(&a);
         let mut cache = PkCache::new();
 
-        let payload = message_signing_payload("dm", "recipient", &a_id, 500, "send 5");
+        let payload = message_signing_payload_v2(
+            "dm", "recipient", &a_id, 500, &SignedExtras::default(), "send 5",
+        );
         let (sig, pk) = sign_message(&a, &a_pk, &payload);
 
         // Same signature, text altered by whoever served the batch.
@@ -3242,30 +3389,43 @@ mod tests {
     /// verifies through verify-both, so stored history and pre-0.8.3 peers keep
     /// working while the fleet is mixed.
     #[test]
-    fn verify_both_accepts_legacy_v1_signature() {
+    fn v1_signature_is_rejected() {
         let a = kp(22);
         let a_id = a.peer_id();
         let a_pk = pk_b64(&a);
         let mut cache = PkCache::new();
 
-        // Signed the OLD way — text only, no structured fields.
+        // Signed the OLD way — text only, no structured fields. This is a
+        // GENUINE signature by the real sender; it is refused anyway, because
+        // the payload it covers leaves mid/reply_to/file_id/order_us/preview
+        // free to be rewritten by whoever serves the message.
         let v1 = message_signing_payload("ch", "srv:chan", &a_id, 1_000, "legacy");
         let (sig, pk) = sign_message(&a, &a_pk, &v1);
 
-        // verify-both accepts it even though the caller supplies v2 extras
-        // (a v1 signer simply didn't cover them).
         let extras = SignedExtras { mid: Some("m"), file_id: Some("f"), ..Default::default() };
-        assert!(verify_message_signature_v2(
-            &a_id, sig.as_deref(), pk.as_deref(), "ch", "srv:chan", 1_000, &extras, "legacy", &mut cache,
-        ));
+        assert!(
+            !verify_message_signature_v2(
+                &a_id, sig.as_deref(), pk.as_deref(), "ch", "srv:chan", 1_000, &extras, "legacy", &mut cache,
+            ),
+            "v1 verification was dropped in 0.8.5 — a v1 signature must not verify",
+        );
+
+        // ...and it stays rejected with NO extras supplied, i.e. there is no
+        // "looks like a v1 message" shape that reopens the fallback.
+        assert!(
+            !verify_message_signature_v2(
+                &a_id, sig.as_deref(), pk.as_deref(), "ch", "srv:chan", 1_000,
+                &SignedExtras::default(), "legacy", &mut cache,
+            ),
+            "an empty-extras v2 payload must not collapse onto the v1 grammar",
+        );
     }
 
-    /// `sign_message_versioned` tracks the flag: while `MSG_SIG_V2_SIGNING` is
-    /// false it signs v1 (byte-for-byte the existing send path), and either way
-    /// verify-both accepts the result — so flipping the flag is safe once the
-    /// verifier has shipped.
+    /// `sign_message_versioned` signs v2 unconditionally, and a v1-only
+    /// verifier must fail that signature — the wire-breaking edge the rollout
+    /// note documents.
     #[test]
-    fn versioned_signer_matches_flag_and_verifies_both_ways() {
+    fn versioned_signer_produces_v2_only() {
         let a = kp(23);
         let a_id = a.peer_id();
         let a_pk = pk_b64(&a);
@@ -3280,26 +3440,93 @@ mod tests {
             &a, &a_pk, "dm", "recipient", &a_id, 500, &extras, "payload",
         );
 
-        // Whatever the flag, verify-both accepts.
         assert!(verify_message_signature_v2(
             &a_id, sig.as_deref(), pk.as_deref(), "dm", "recipient", 500, &extras, "payload", &mut cache,
         ));
 
         let v1 = message_signing_payload("dm", "recipient", &a_id, 500, "payload");
         let (v1_sig, _) = sign_message(&a, &a_pk, &v1);
-        if MSG_SIG_V2_SIGNING {
-            // Flag ON (0.8.3): the signature is v2 — it must NOT equal the v1
-            // signature, and a v1-only verifier must fail it (that is the
-            // wire-breaking edge the rollout note documents).
-            assert_ne!(sig, v1_sig, "flag on must produce a v2 signature");
-            assert!(
-                !verify_message_signature(&a_id, sig.as_deref(), pk.as_deref(), &v1),
-                "a v2 signature must not verify against the v1 payload",
-            );
-        } else {
-            // Flag off: byte-for-byte the legacy v1 signature.
-            assert_eq!(sig, v1_sig, "flag off must produce the legacy v1 signature");
-        }
+        assert_ne!(sig, v1_sig, "signing must produce a v2 signature");
+        assert!(
+            !verify_message_signature(&a_id, sig.as_deref(), pk.as_deref(), &v1),
+            "a v2 signature must not verify against the v1 payload",
+        );
+    }
+
+    // ── Signed profiles (0.8.5) ───────────────────────────────────────────
+
+    /// The hole this closes: `ProfileRelay` lets a peer assert a THIRD party's
+    /// profile (it carries its own `source_peer_id`), in plaintext, with an
+    /// `updated_at` the sender also picks. Only the subject's signature makes
+    /// the claim credible — so a signature must be bound to the subject, to
+    /// every field, and to the timestamp.
+    #[test]
+    fn profile_signature_binds_subject_and_every_field() {
+        let victim = kp(30);
+        let attacker = kp(31);
+        let (victim_id, attacker_id) = (victim.peer_id(), attacker.peer_id());
+        let victim_pk = pk_b64(&victim);
+        let attacker_pk = pk_b64(&attacker);
+
+        let base = || ("Vitalik", "online", "about", "twitchname", "a".repeat(64));
+        let (name, status, about, twitch, avatar_hash) = base();
+        let (sig, pk) = sign_profile(
+            &victim, &victim_pk, &victim_id, 1_000, name, status, about, twitch, &avatar_hash,
+        );
+        let ok = |peer: &str, ts: i64, n: &str, s: &str, a: &str, t: &str, ah: &str| {
+            verify_profile_signature(peer, ts, n, s, a, t, ah, sig.as_deref(), pk.as_deref())
+        };
+        assert!(ok(&victim_id, 1_000, name, status, about, twitch, &avatar_hash));
+
+        // Every signed field is actually covered.
+        assert!(!ok(&victim_id, 1_000, "Admin", status, about, twitch, &avatar_hash));
+        assert!(!ok(&victim_id, 1_000, name, "compromised", about, twitch, &avatar_hash));
+        assert!(!ok(&victim_id, 1_000, name, status, "other", twitch, &avatar_hash));
+        assert!(!ok(&victim_id, 1_000, name, status, about, "someoneelse", &avatar_hash));
+        assert!(!ok(&victim_id, 1_000, name, status, about, twitch, &"b".repeat(64)));
+        // The far-future `updated_at` that made the original attack permanent.
+        assert!(!ok(&victim_id, i64::MAX, name, status, about, twitch, &avatar_hash));
+        // Bound to the SUBJECT: the victim's own profile cannot be re-labelled
+        // as someone else's, and vice versa.
+        assert!(!ok(&attacker_id, 1_000, name, status, about, twitch, &avatar_hash));
+
+        // The actual attack: the attacker signs a profile that claims to be the
+        // victim's. The pk→peer_id binding inside the verify rejects it.
+        let (bad_sig, bad_pk) = sign_profile(
+            &attacker, &attacker_pk, &victim_id, i64::MAX, "Admin", status, about, twitch, &avatar_hash,
+        );
+        assert!(
+            !verify_profile_signature(
+                &victim_id, i64::MAX, "Admin", status, about, twitch, &avatar_hash,
+                bad_sig.as_deref(), bad_pk.as_deref(),
+            ),
+            "a profile must not be attributable to someone who did not sign it",
+        );
+
+        // Unsigned is refused — omitting the signature was the cheapest way in.
+        assert!(!ok_absent(&victim_id, 1_000, name, status, about, twitch, &avatar_hash));
+    }
+
+    fn ok_absent(
+        peer: &str, ts: i64, n: &str, s: &str, a: &str, t: &str, ah: &str,
+    ) -> bool {
+        verify_profile_signature(peer, ts, n, s, a, t, ah, None, None)
+    }
+
+    /// Profile fields are free text, so the payload length-prefixes each one:
+    /// two different field splits that concatenate identically must NOT produce
+    /// the same signature (otherwise a display name could impersonate the next
+    /// field's boundary).
+    #[test]
+    fn profile_payload_is_collision_resistant() {
+        let p1 = profile_signing_payload("peer", 1, "ab", "c", "", "", "");
+        let p2 = profile_signing_payload("peer", 1, "a", "bc", "", "", "");
+        assert_ne!(p1, p2);
+        // And the timestamp is inside the digest, not appended after it.
+        assert_ne!(
+            profile_signing_payload("peer", 1, "n", "", "", "", ""),
+            profile_signing_payload("peer", 2, "n", "", "", "", ""),
+        );
     }
 
     /// The link-preview digest is length-prefixed, so a field-boundary shift
@@ -3327,7 +3554,9 @@ mod tests {
         let mut cache = PkCache::new();
 
         let (orig_ts, edit_ts) = (1_000i64, 2_000i64);
-        let edit_payload = message_signing_payload("ch", "srv:chan", &a_id, edit_ts, "edited text");
+        let edit_payload = message_signing_payload_v2(
+            "ch", "srv:chan", &a_id, edit_ts, &SignedExtras::default(), "edited text",
+        );
         let (sig, pk) = sign_message(&a, &a_pk, &edit_payload);
 
         assert_eq!(

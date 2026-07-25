@@ -787,6 +787,7 @@ class _ImportedDmMessageListState
                     : widget.proofContext,
                 msgType: widget.proofMsgType,
                 fileAttachment: msg.fileAttachment,
+                preverified: msg.archiveSignatureValid,
               ),
             );
           },
@@ -939,6 +940,7 @@ class _ImportedChannelMessageListState
               context: widget.proofContext,
               msgType: widget.proofMsgType,
               fileAttachment: msg.fileAttachment,
+              preverified: msg.archiveSignatureValid,
             ),
           );
         },

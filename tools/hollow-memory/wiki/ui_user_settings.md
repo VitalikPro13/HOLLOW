@@ -474,9 +474,9 @@ A `showHollowDialog` with a 360px container. Shows title, passphrase `HollowText
 
 **Verification flow (`_verify()`):**
 1. Parses JSON, extracts `message`, `sender`, `context`, `signature` objects.
-2. Validates `version == 1`, `protocol == "hollow-proof-v1"`, `algorithm == "Ed25519"`.
+2. Validates `version == 2`, `protocol == "hollow-proof-v2"`, `algorithm == "Ed25519"`. **A `version: 1` proof is REFUSED with an explanatory message (0.8.5)** — its canonical payload covered the text only, so a v1 proof whose reply_to / file_id / order_us / link preview were rewritten would reconstruct cleanly and verify.
 3. Validates required fields: peerId, publicKeyB64, signatureB64, canonicalPayload.
-4. Reconstructs canonical payload from individual fields (`hollow-msg:{type}:{contextId}:{peerId}:{timestampMs}:{text}`) and compares against embedded `canonical_payload` — catches field tampering.
+4. Reconstructs the canonical payload from individual fields (`hollow-msg2:{type}:{contextId}:{peerId}:{ts}:{mid}:{reply_to}:{file_id}:{order_us}:{lp_digest}:{text}` — the one place the grammar is dual-defined) and compares against the embedded `canonical_payload` — catches field tampering.
 5. Calls `network_api.verifyMessageProof()` (Rust FFI Ed25519 verification).
 6. Scrolls result into view via `Scrollable.ensureVisible()`.
 

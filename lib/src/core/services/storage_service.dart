@@ -5,46 +5,15 @@ import 'package:hollow/src/rust/api/storage.dart' as ffi;
 class StorageService {
   Future<void> openMessageStore() => ffi.openMessageStore();
 
-  Future<PlatformInt64> saveMessage({
-    required String peerId,
-    required String text,
-    required bool isMine,
-    required PlatformInt64 timestamp,
-    String? signature,
-    String? publicKey,
-  }) => ffi.saveMessage(
-    peerId: peerId,
-    text: text,
-    isMine: isMine,
-    timestamp: timestamp,
-    signature: signature,
-    publicKey: publicKey,
-  );
+  // `saveMessage` / `saveChannelMessage` were removed in 0.8.5 — they wrote
+  // unsigned, message_id-less rows that no peer would accept through sync, and
+  // nothing ever called them. Message rows come from the node's own signing
+  // send/receive paths.
 
   Future<List<ffi.StoredMessage>> loadMessages({
     required String peerId,
     required int limit,
   }) => ffi.loadMessages(peerId: peerId, limit: limit);
-
-  Future<PlatformInt64> saveChannelMessage({
-    required String serverId,
-    required String channelId,
-    required String senderId,
-    required String text,
-    required bool isMine,
-    required PlatformInt64 timestamp,
-    String? signature,
-    String? publicKey,
-  }) => ffi.saveChannelMessage(
-    serverId: serverId,
-    channelId: channelId,
-    senderId: senderId,
-    text: text,
-    isMine: isMine,
-    timestamp: timestamp,
-    signature: signature,
-    publicKey: publicKey,
-  );
 
   Future<List<ffi.StoredChannelMessage>> loadChannelMessages({
     required String serverId,

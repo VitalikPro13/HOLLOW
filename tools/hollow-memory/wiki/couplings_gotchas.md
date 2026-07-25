@@ -310,7 +310,7 @@ Additionally, `handle_send_file()` skips writing ciphertext to temp file and ski
 
 ### Canonical signing payload must be used at ALL signing sites (v2 since 0.8.3)
 
-**Rule:** All message signing MUST go through `crypto_handler::sign_message_versioned(..., &SignedExtras, text)` and all verification through `verify_message_signature_v2` / `check_backfill_signature` (verify-both: v2 `hollow-msg2:{type}:{context}:{sender}:{ts}:{mid}:{reply_to}:{file_id}:{order_us}:{lp_digest}:{text}` first, legacy v1 `hollow-msg:{type}:{context}:{sender}:{ts}:{text}` fallback). Never sign or verify v1-only.
+**Rule:** All message signing MUST go through `crypto_handler::sign_message_versioned(..., &SignedExtras, text)` and all verification through `verify_message_signature_v2` / `check_backfill_signature`. Payload is v2 ONLY since 0.8.5: `hollow-msg2:{type}:{context}:{sender}:{ts}:{mid}:{reply_to}:{file_id}:{order_us}:{lp_digest}:{text}`. The legacy v1 fallback was REMOVED — never add one back; a verifier that accepts a weaker payload is a downgrade oracle (the attacker picks the format, so every field v1 omits stays graftable). The v1 builder survives only as `#[cfg(test)]`.
 
 **Why:** The verification side reconstructs the same payload — including the structured extras, from the same wire/row fields it persists — and checks the signature against it. Any signing site that constructs the payload differently, or any carrier path that LOSES an extras field (order_us defaulted to ts*1000, lp_digest missing from a sync item), makes verification fail: the message shows UNVERIFIED at best, and sync backfill DROPS it as Forged at worst.
 
@@ -331,7 +331,7 @@ Additionally, `handle_send_file()` skips writing ciphertext to temp file and ski
 **Where:**
 - Build (attach proof): `message_ops::deletion_proof_fields()` reads `message_deletions` via `store.load_deletion_proof()`; sites: `sync_handler.rs:channel_sync_items`, `swarm.rs:build_dm_sync_items`, the swarm.rs public-channel sync responder
 - Apply (verify + store-forward): `sync_handler.rs:apply_sync_item_extras` and the swarm.rs ChannelSyncBatch / DmSyncBatch / DmSiblingSyncBatch arms — all through `apply_verified_*_deletion`, which also ADOPTS the proof (`set_*_hidden_verified`) so the deletion keeps propagating under reject-absent
-- Accepted cost: pre-signing (unsigned) legacy deletions no longer propagate through sync; v1 delete sigs still verify (verify-both)
+- Accepted cost: pre-signing (unsigned) legacy deletions no longer propagate through sync; since 0.8.5 v1 delete sigs no longer verify either
 
 ### Dart timestamps must be hydrated from Rust's signed value
 

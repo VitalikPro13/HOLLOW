@@ -82,21 +82,15 @@ pub fn open_message_store() -> Result<(), String> {
     Ok(())
 }
 
-/// Save a message to the local database.
-#[frb]
-pub fn save_message(
-    peer_id: String,
-    text: String,
-    is_mine: bool,
-    timestamp: i64,
-    signature: Option<String>,
-    public_key: Option<String>,
-) -> Result<i64, String> {
-    let store = get_store();
-    let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
-    let ms = guard.as_ref().ok_or("Message store is not open")?;
-    ms.insert(&peer_id, &text, is_mine, timestamp, signature.as_deref(), public_key.as_deref(), None, None, None, None)
-}
+// REMOVED in 0.8.5: `save_message` / `save_channel_message`.
+//
+// Both were Dart-callable inserts that took an OPTIONAL signature and no
+// message_id — i.e. they could write a row that no peer will ever accept
+// through sync (`REQUIRE_SIGNED_BACKFILL`) and that the mid-based dedup cannot
+// reconcile. Neither had a call site outside a `storage_service.dart` wrapper
+// that nothing called. Message rows are written by the node's own send/receive
+// paths, which sign; leaving an unsigned-insert entry point exported was a
+// loaded gun with no user.
 
 /// Load recent messages for a peer from the local database.
 /// Returns messages ordered oldest-first, up to `limit`.
@@ -693,25 +687,6 @@ pub struct StoredChannelMessage {
     pub file_id: Option<String>,
     /// Link preview for the first URL in this message (Phase 6.75).
     pub link_preview: Option<crate::api::network::LinkPreviewRef>,
-}
-
-/// Save a channel message to the local database.
-#[frb]
-pub fn save_channel_message(
-    server_id: String,
-    channel_id: String,
-    sender_id: String,
-    text: String,
-    is_mine: bool,
-    timestamp: i64,
-    signature: Option<String>,
-    public_key: Option<String>,
-) -> Result<i64, String> {
-    let store = get_store();
-    let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
-    let ms = guard.as_ref().ok_or("Message store is not open")?;
-    ms.insert_channel_message(&server_id, &channel_id, &sender_id, &text, is_mine, timestamp, signature.as_deref(), public_key.as_deref(), None, None, None, None)
-        .map(|n| n as i64)
 }
 
 /// Load recent channel messages from the local database.

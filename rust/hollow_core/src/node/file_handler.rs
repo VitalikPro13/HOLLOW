@@ -23,6 +23,45 @@ use super::ws_stream_transfer;
 /// first or second retry; a genuinely corrupt source won't, so we cap it.
 const FILE_DECRYPT_MAX_RETRIES: u32 = 3;
 
+/// SECURITY (0.8.5): `true` = this REMOTE file-metadata write may proceed.
+///
+/// `insert_file_metadata` is an UPSERT keyed on `file_id` — it deliberately
+/// overwrites name / ext / mime / size / dimensions so a minimal placeholder
+/// row (written by the FCM background-fetch node, which only sees the file_id)
+/// gets filled in when the real FileHeader arrives. With no owner check that
+/// same overwrite was reachable by anyone who could reach an ingest path:
+///
+///   * a friend or server member could send a FileHeader carrying SOMEONE
+///     ELSE'S `file_id` and relabel their attachment (a display-spoofing
+///     primitive — make a file card read `invoice.pdf` over other bytes);
+///   * a sync responder could do it through `file_meta` on a batch item. The
+///     item's v2 signature binds `file_id`, NOT the file_meta blob hanging off
+///     it, so a batch that passes the backfill check can still carry a forged
+///     name / size / sender for that file.
+///
+/// Rule: a file card belongs to the identity that first created it. Writes are
+/// allowed when there is no row yet, or when the incoming sender resolves to
+/// the SAME master as the stored one (device→master collapse is required —
+/// the fetch path stores the friend's master while the live path stores the
+/// sending DEVICE, and both must be able to fill the same row in).
+pub(crate) fn file_meta_write_allowed(
+    store: &crate::storage::MessageStore,
+    file_id: &str,
+    incoming_sender: &str,
+) -> bool {
+    let Ok(Some(existing)) = store.get_file_metadata(file_id) else {
+        return true; // No row yet — nothing to overwrite.
+    };
+    let owner = super::resolver::resolve(&existing.sender_id);
+    if owner == super::resolver::resolve(incoming_sender) {
+        return true;
+    }
+    hollow_log!(
+        "[HOLLOW-SECURITY] REJECTED file metadata write for {file_id} from {incoming_sender} — the card belongs to {owner}"
+    );
+    false
+}
+
 /// Handle NodeCommand::SendFile — the large file sending handler.
 ///
 /// Image conversion (PNG/JPEG→WebP, GIF→animated WebP) is CPU work that used
@@ -2333,14 +2372,18 @@ pub(crate) async fn handle_envelope_file_header(
     };
 
     if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
-        let _ = store.insert_file_metadata(
-            &fid, &name, &ext, &mime,
-            size, chunks, img,
-            w, h,
-            mid.as_deref(), ctx_type, &ctx_id,
-            &sender_peer_id, false, ts,
-            vthumb.as_ref(),
-        );
+        // Owner guard (0.8.5): MLS proves the sender is a group member, not
+        // that this `file_id` is theirs to relabel. See `file_meta_write_allowed`.
+        if file_meta_write_allowed(&store, &fid, &sender_peer_id) {
+            let _ = store.insert_file_metadata(
+                &fid, &name, &ext, &mime,
+                size, chunks, img,
+                w, h,
+                mid.as_deref(), ctx_type, &ctx_id,
+                &sender_peer_id, false, ts,
+                vthumb.as_ref(),
+            );
+        }
     }
 
     // Register pending stream so binary file bytes can be decrypted on arrival.

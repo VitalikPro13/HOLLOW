@@ -199,6 +199,48 @@ pub(crate) fn apply_verified_dm_deletion(
     !already_hidden
 }
 
+/// Guest-preview half: verify a public-channel sync item's CONTENT signature
+/// from the item's own fields. `false` = drop the item entirely.
+///
+/// Public-channel sync is PLAINTEXT, so the relay (or any responder) can
+/// rewrite a batch wholesale — text, sender, reply target, attachment, the
+/// lot. Members already refuse an unverified item at the four backfill sites;
+/// the guest browser used to render whatever arrived, which made the public
+/// preview — the one surface strangers see — the softest one in the app.
+///
+/// Same rule as the member path (`check_backfill_signature` under
+/// [`REQUIRE_SIGNED_BACKFILL`]): signer = `resolve(m.s)`, type "ch", context
+/// "{sid}:{cid}", extras from the item, edited rows verified against their
+/// edit signature. Failures are DROPPED rather than flagged, which keeps the
+/// FFI struct and the guest UI unchanged.
+pub(crate) fn guest_item_accepted(
+    m: &super::types::SyncMessageItem,
+    sid: &str,
+    cid: &str,
+    pk_cache: &mut PkCache,
+) -> bool {
+    let extras = SignedExtras {
+        mid: m.mid.as_deref(),
+        reply_to: m.reply_to.as_deref(),
+        file_id: m.file_id.as_deref(),
+        order_us: m.order_us,
+        lp_digest: m.lp_digest.as_deref(),
+    };
+    let verdict = super::crypto_handler::check_backfill_signature(
+        &super::resolver::resolve(&m.s), "ch", &format!("{sid}:{cid}"),
+        m.ts, m.edited_at, &extras, &m.t,
+        m.sig.as_deref(), m.pk.as_deref(), pk_cache,
+    );
+    if !verdict.is_acceptable() {
+        hollow_log!(
+            "[HOLLOW-SECURITY] DROPPED guest public-channel message in {sid}/{cid} claiming sender {} — {} (mid={:?}, ts={})",
+            m.s, verdict.reject_reason(), m.mid, m.ts
+        );
+        return false;
+    }
+    true
+}
+
 /// Guest-preview half: verify a public-channel sync item's hidden flag from
 /// the item's own fields (guests hold no rows to check against). Returns the
 /// `hidden_at` to honor, or `None` to strip the flag (absent/invalid proof).
@@ -2535,12 +2577,37 @@ pub(crate) async fn handle_envelope_add_reaction(
     }
 }
 
+/// SECURITY: `true` = this SYNCED reaction may be stored. Reactions riding a
+/// sync batch used to be inserted unverified — the item-level backfill check
+/// covers the MESSAGE, not the reaction rows hanging off it, and each reaction
+/// names its own reactor (`r.p`). So a sync responder (or, on a plaintext
+/// public channel, the relay) could attribute any reaction to any member.
+///
+/// Same grammar and signer rule as the live path (`reaction_sig_rejected`):
+/// `reaction:{mid}:{emoji}:{ts}` signed by the reactor's MASTER. Sync items
+/// only ever carry ADDITIONS, so there is no `unreaction:` case here.
+///
+/// Absent is refused alongside invalid — see [`REQUIRE_SIGNED_BACKFILL`].
+pub(crate) fn sync_reaction_accepted(mid: &str, r: &super::types::SyncReactionItem) -> bool {
+    let reactor = super::resolver::resolve(&r.p);
+    let payload = format!("reaction:{}:{}:{}", mid, r.e, r.ts);
+    if verify_message_signature(&reactor, r.sig.as_deref(), r.pk.as_deref(), &payload) {
+        return true;
+    }
+    hollow_log!(
+        "[HOLLOW-SECURITY] REJECTED synced reaction {} on {mid} claiming reactor {reactor} — {}",
+        r.e,
+        if r.sig.is_none() && r.pk.is_none() { "NO signature" } else { "signature INVALID" }
+    );
+    false
+}
+
 /// SECURITY: true = drop this LIVE reaction add/remove — signature missing or
 /// invalid. Reactions sign their own canonical payload
 /// (`{kind}:{mid}:{emoji}:{ts}`, kind = "reaction" | "unreaction"), which
 /// already binds the message id, so a valid signature cannot be replayed onto
-/// another message or emoji. Live ingest only; reactions riding sync batches
-/// are covered by the item-level backfill rule.
+/// another message or emoji. Reactions arriving in a SYNC batch go through
+/// [`sync_reaction_accepted`] instead — same rule, item-local signer.
 pub(crate) fn reaction_sig_rejected(
     reactor: &str,
     kind: &str,
@@ -2818,5 +2885,160 @@ mod tests {
         item.hidden_sig = None;
         item.hidden_pk = None;
         assert_eq!(verified_guest_hidden_at(&item, sid, cid, &mut cache), None);
+    }
+
+    // ── 0.8.5: sync-batch reactions + guest content signatures ────────────
+
+    /// Build a bare channel sync item (no reactions, no hidden flag) whose
+    /// content signature is produced by `signer` over the v2 payload.
+    fn signed_channel_item(
+        signer: &NativeKeypair,
+        claimed_sender: &str,
+        sid: &str,
+        cid: &str,
+        mid: &str,
+        ts: i64,
+        text: &str,
+    ) -> crate::node::types::SyncMessageItem {
+        let extras = SignedExtras {
+            mid: Some(mid), reply_to: None, file_id: None,
+            order_us: Some(ts * 1000), lp_digest: None,
+        };
+        let (sig, pk) = sign_message_versioned(
+            signer, &pk_b64(signer), "ch", &format!("{sid}:{cid}"),
+            claimed_sender, ts, &extras, text,
+        );
+        crate::node::types::SyncMessageItem {
+            s: claimed_sender.to_string(),
+            t: text.to_string(),
+            ts,
+            sig,
+            pk,
+            mid: Some(mid.to_string()),
+            edited_at: None,
+            reply_to: None,
+            file_id: None,
+            file_meta: None,
+            hidden_at: None,
+            hidden_sig: None,
+            hidden_pk: None,
+            order_us: Some(ts * 1000),
+            lp_digest: None,
+            reactions: Vec::new(),
+        }
+    }
+
+    fn reaction_item(
+        signer: Option<&NativeKeypair>,
+        reactor: &str,
+        mid: &str,
+        emoji: &str,
+        ts: i64,
+    ) -> crate::node::types::SyncReactionItem {
+        let (sig, pk) = match signer {
+            Some(k) => sign_message(k, &pk_b64(k), &format!("reaction:{mid}:{emoji}:{ts}")),
+            None => (None, None),
+        };
+        crate::node::types::SyncReactionItem {
+            e: emoji.to_string(), p: reactor.to_string(), ts, sig, pk,
+        }
+    }
+
+    /// Reactions riding a sync batch carry their OWN reactor id, so the
+    /// item-level backfill verdict does not cover them. Each one must verify
+    /// against `reaction:{mid}:{emoji}:{ts}` signed by that reactor.
+    #[test]
+    fn synced_reaction_requires_its_own_signature() {
+        let _g = crate::node::resolver::test_lock();
+        let alice = kp(240);
+        let mallory = kp(241);
+        let (alice_id, mallory_id) = (alice.peer_id(), mallory.peer_id());
+        let mid = "r-mid-1";
+
+        // Alice's genuine reaction.
+        assert!(sync_reaction_accepted(
+            mid, &reaction_item(Some(&alice), &alice_id, mid, "👍", 900),
+        ));
+
+        // Unsigned — the shape that used to be inserted verbatim.
+        assert!(
+            !sync_reaction_accepted(mid, &reaction_item(None, &alice_id, mid, "👍", 900)),
+            "an unsigned synced reaction must not be stored",
+        );
+
+        // Mallory signs, but the item claims Alice reacted: the pk->claimed
+        // reactor binding inside the verify rejects it.
+        let mut impersonation = reaction_item(Some(&mallory), &mallory_id, mid, "💀", 901);
+        impersonation.p = alice_id.clone();
+        assert!(
+            !sync_reaction_accepted(mid, &impersonation),
+            "a reaction must not be attributable to someone who did not sign it",
+        );
+
+        // A real signature replayed onto a DIFFERENT message: the payload binds
+        // the mid, so it cannot be moved.
+        let real = reaction_item(Some(&alice), &alice_id, mid, "👍", 900);
+        assert!(
+            !sync_reaction_accepted("some-other-mid", &real),
+            "a reaction signature must not replay onto another message",
+        );
+
+        // Emoji and timestamp are bound too.
+        let mut swapped = reaction_item(Some(&alice), &alice_id, mid, "👍", 900);
+        swapped.e = "🤡".to_string();
+        assert!(!sync_reaction_accepted(mid, &swapped));
+        let mut restamped = reaction_item(Some(&alice), &alice_id, mid, "👍", 900);
+        restamped.ts = 5_000;
+        assert!(!sync_reaction_accepted(mid, &restamped));
+    }
+
+    /// Guest public-channel preview: content signatures are verified from the
+    /// item's own fields, because public-channel sync is PLAINTEXT and the
+    /// relay can rewrite the batch. Failures drop the whole item.
+    #[test]
+    fn guest_item_requires_valid_content_signature() {
+        let _g = crate::node::resolver::test_lock();
+        let author = kp(242);
+        let mallory = kp(243);
+        let author_id = author.peer_id();
+        let (sid, cid) = ("srv-gp", "chan-gp");
+        let mut cache = PkCache::new();
+
+        let good = signed_channel_item(&author, &author_id, sid, cid, "gp-1", 1_000, "hello");
+        assert!(guest_item_accepted(&good, sid, cid, &mut cache));
+
+        // Relay rewrites the text on an otherwise-valid item.
+        let mut tampered = signed_channel_item(&author, &author_id, sid, cid, "gp-1", 1_000, "hello");
+        tampered.t = "visit evil.example".to_string();
+        assert!(
+            !guest_item_accepted(&tampered, sid, cid, &mut cache),
+            "rewritten text must drop the item",
+        );
+
+        // Relay grafts an attachment onto it — v2 binds file_id.
+        let mut grafted = signed_channel_item(&author, &author_id, sid, cid, "gp-1", 1_000, "hello");
+        grafted.file_id = Some("evil-file".to_string());
+        assert!(!guest_item_accepted(&grafted, sid, cid, &mut cache));
+
+        // Wholly fabricated, unsigned — the pre-0.8.5 guest browser rendered it.
+        let mut unsigned = signed_channel_item(&author, &author_id, sid, cid, "gp-2", 1_100, "fake");
+        unsigned.sig = None;
+        unsigned.pk = None;
+        assert!(
+            !guest_item_accepted(&unsigned, sid, cid, &mut cache),
+            "an unsigned guest item must be dropped",
+        );
+
+        // Mallory signs a message claiming to be from the author.
+        let impersonated =
+            signed_channel_item(&mallory, &author_id, sid, cid, "gp-3", 1_200, "not mine");
+        assert!(
+            !guest_item_accepted(&impersonated, sid, cid, &mut cache),
+            "a message must not be attributable to someone who did not sign it",
+        );
+
+        // Wrong channel context: a real message from another channel cannot be
+        // replayed into this one.
+        assert!(!guest_item_accepted(&good, sid, "other-chan", &mut cache));
     }
 }

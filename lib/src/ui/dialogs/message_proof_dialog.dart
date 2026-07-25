@@ -28,6 +28,18 @@ class MessageProofData {
   final String msgType; // "dm" or "ch"
   final FileAttachment? fileAttachment;
 
+  /// A verdict computed elsewhere, for messages this dialog cannot verify
+  /// itself: imported-archive rows, whose signature the Rust archive loader
+  /// already checked against the full v2 payload. Null = verify here via
+  /// `verifyMessageProofV2` (loads the row from the local DB).
+  ///
+  /// There is deliberately NO Dart-side payload reconstruction any more. The
+  /// v1 grammar ("hollow-msg:...") covered the text only, so rebuilding and
+  /// verifying it here would display a message with a grafted file_id /
+  /// reply_to / link preview as VERIFIED. v1 verification was dropped in
+  /// 0.8.5; a message that cannot be v2-verified shows as unverified.
+  final bool? preverified;
+
   const MessageProofData({
     required this.senderPeerId,
     required this.senderDisplayName,
@@ -39,12 +51,8 @@ class MessageProofData {
     required this.context,
     required this.msgType,
     this.fileAttachment,
+    this.preverified,
   });
-
-  /// Reconstruct the canonical signing payload (must match Rust's
-  /// `message_signing_payload` in swarm.rs).
-  String get canonicalPayload =>
-      'hollow-msg:$msgType:$context:$senderPeerId:$timestampMs:$text';
 
   /// Derive a short fingerprint from the public key for display.
   String? get publicKeyFingerprint {
@@ -63,38 +71,6 @@ class MessageProofData {
     }
   }
 
-  /// Export as a standalone JSON proof that can be verified externally.
-  Map<String, dynamic> toProofJson() => {
-        'version': 1,
-        'protocol': 'hollow-proof-v1',
-        'message': {
-          'text': text,
-          'timestamp_ms': timestampMs,
-          'message_id': messageId,
-        },
-        'sender': {
-          'peer_id': senderPeerId,
-          'public_key_base64': publicKey,
-        },
-        'context': {
-          'type': msgType == 'dm' ? 'direct_message' : 'channel',
-          'id': context,
-        },
-        'signature': {
-          'algorithm': 'Ed25519',
-          'canonical_payload': canonicalPayload,
-          'signature_base64': signature,
-        },
-        'verification': {
-          'instructions': [
-            '1. Base64-decode the public_key to get the protobuf-wrapped Ed25519 pubkey (36 bytes: header 08 01 12 20 + 32-byte key)',
-            '2. Extract the raw 32-byte Ed25519 public key (bytes 4..36)',
-            '3. Base64-decode the signature to get the 64-byte Ed25519 signature',
-            '4. Verify: Ed25519_verify(public_key, signature, canonical_payload.as_bytes())',
-            '5. Derive PeerId: Identity-multihash(protobuf_pubkey) -> Base58btc -> must match sender.peer_id',
-          ],
-        },
-      };
 }
 
 /// Show the message proof dialog.
@@ -120,9 +96,13 @@ class _MessageProofDialogContentState
     with SingleTickerProviderStateMixin {
   bool? _verified;
 
-  /// Versioned verification result (v2 → v1 fallback), when the message has a
-  /// message_id to load the row by. Null = legacy payload-string verification.
+  /// v2 verification result, when the message has a message_id whose row is in
+  /// the local DB. Null = nothing exportable (archive row, or no row found).
   network_api.MessageProofV2? _v2;
+
+  /// A proof can only be copied/exported when Rust produced the canonical v2
+  /// payload for it. Everything else has no payload to put in the file.
+  bool get _canExport => _v2 != null;
   late final AnimationController _staggerController;
   late final List<Animation<double>> _fadeAnims;
   late final List<Animation<Offset>> _slideAnims;
@@ -178,51 +158,50 @@ class _MessageProofDialogContentState
 
   Future<void> _verifySignature() async {
     if (proof.signature == null || proof.publicKey == null) return;
-    // Versioned path (0.8.3): Rust loads the row by message_id, builds the
-    // canonical payload (v2 binds mid/reply_to/file_id/order_us/link-preview
-    // digest) and verifies-both — the grammar stays single-sourced in Rust.
+    // Archive rows carry the loader's verdict — there is no local DB row to
+    // load, and Dart must not rebuild a payload of its own.
+    final pre = proof.preverified;
+    if (pre != null) {
+      setState(() => _verified = pre);
+      return;
+    }
+    // Rust loads the row by message_id, builds the canonical v2 payload (binds
+    // mid/reply_to/file_id/order_us/link-preview digest) and verifies it — the
+    // grammar stays single-sourced in Rust. No v1 fallback since 0.8.5: a
+    // message with no verifiable v2 signature reports unverified, which is the
+    // truth about it.
     final mid = proof.messageId;
-    if (mid != null && mid.isNotEmpty) {
-      try {
-        final r = await network_api.verifyMessageProofV2(
-          msgType: proof.msgType,
-          context: proof.context,
-          senderPeerId: proof.senderPeerId,
-          messageId: mid,
-        );
-        if (mounted) {
-          setState(() {
-            _v2 = r;
-            _verified = r.valid;
-          });
-        }
-        return;
-      } catch (_) {
-        // Row not found (e.g. legacy list entry) — fall through to the
-        // payload-string path below.
-      }
+    if (mid == null || mid.isEmpty) {
+      setState(() => _verified = false);
+      return;
     }
     try {
-      final result = await network_api.verifyMessageProof(
+      final r = await network_api.verifyMessageProofV2(
+        msgType: proof.msgType,
+        context: proof.context,
         senderPeerId: proof.senderPeerId,
-        signatureB64: proof.signature!,
-        publicKeyB64: proof.publicKey!,
-        canonicalPayload: proof.canonicalPayload,
+        messageId: mid,
       );
-      if (mounted) setState(() => _verified = result);
+      if (mounted) {
+        setState(() {
+          _v2 = r;
+          _verified = r.valid;
+        });
+      }
     } catch (_) {
+      // Row not found (e.g. a legacy list entry, or an archive edit-history
+      // sub-entry) — nothing verifiable.
       if (mounted) setState(() => _verified = false);
     }
   }
 
-  /// Exported proof JSON. A v2-verified message exports the v2 envelope (its
-  /// signature covers the structured fields); everything else keeps the exact
-  /// legacy v1 format so existing external verifiers stay compatible.
+  /// Exported proof JSON — always the v2 envelope. Only reachable behind
+  /// [_canExport], so `_v2` is non-null here. The legacy v1 envelope is gone
+  /// (0.8.5): it advertised a canonical payload covering the text only, and
+  /// Hollow itself no longer accepts one.
   String _proofJsonString() {
-    final v2 = _v2;
-    final Map<String, dynamic> body;
-    if (v2 != null && v2.sigVersion == 2) {
-      body = {
+    final v2 = _v2!;
+    final body = <String, dynamic>{
         'version': 2,
         'protocol': 'hollow-proof-v2',
         'message': {
@@ -260,10 +239,7 @@ class _MessageProofDialogContentState
             '6. Derive PeerId: Identity-multihash(protobuf_pubkey) -> Base58btc -> must match sender.peer_id',
           ],
         },
-      };
-    } else {
-      body = proof.toProofJson();
-    }
+    };
     return const JsonEncoder.withIndent('  ').convert(body);
   }
 
@@ -501,11 +477,13 @@ class _MessageProofDialogContentState
                   const SizedBox(height: HollowSpacing.xl),
 
                   // Actions — stacked full-width on phones, row on desktop.
+                  // Copy/Export need the canonical v2 payload from Rust, so
+                  // they key on `_canExport`, not merely "has a signature".
                   _stagger(6, child: isCompact
                       ? Column(
                           crossAxisAlignment: CrossAxisAlignment.stretch,
                           children: [
-                            if (hasSig) ...[
+                            if (_canExport) ...[
                               Row(
                                 children: [
                                   Expanded(
@@ -549,7 +527,7 @@ class _MessageProofDialogContentState
                         )
                       : Row(
                           children: [
-                            if (hasSig)
+                            if (_canExport)
                               HollowButton.ghost(
                                 onPressed: () {
                                   Clipboard.setData(ClipboardData(
@@ -564,7 +542,7 @@ class _MessageProofDialogContentState
                                 child: const Text('Copy Proof'),
                               ),
                             const Spacer(),
-                            if (hasSig) ...[
+                            if (_canExport) ...[
                               HollowButton.ghost(
                                 onPressed: () => _exportProofFile(context),
                                 icon: const Icon(LucideIcons.download,
