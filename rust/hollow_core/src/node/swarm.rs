@@ -5544,12 +5544,12 @@ async fn handle_incoming_request(
                     // verifies. The old `if sig.is_some()` gate was itself the
                     // bypass — strip `sig`/`pk` and verification was skipped
                     // entirely, leaving attribution resting on the relay-reported
-                    // sender id. LIVE ingest only; `ChannelSyncBatch` backfill still
-                    // tolerates unsigned rows so pre-signing history (before e2cc8ab,
-                    // 2026-03-09) keeps syncing rather than diverging. Same
-                    // live-enforce / backfill-tolerate split as the moderation trio.
+                    // sender id. `ChannelSyncBatch` backfill applies the same rule
+                    // since 0.8.5 (`REQUIRE_SIGNED_BACKFILL`); the live-enforce /
+                    // backfill-tolerate split now survives only for the moderation
+                    // trio, where a mute may legitimately postdate synced history.
                     {
-                        // Verify-both (v2 binds the wire's structured fields, v1 legacy).
+                        // v2 only (0.8.5) — binds the wire's structured fields.
                         let lp_digest = link_preview.as_ref().map(crypto_handler::link_preview_digest);
                         let extras = crypto_handler::SignedExtras {
                             mid: mid.as_deref(),
@@ -5894,7 +5894,7 @@ async fn handle_incoming_request(
                         } else {
                             (master_peer_str, &convo_peer)
                         };
-                        // Verify-both (v2 binds the wire's structured fields, v1 legacy).
+                        // v2 only (0.8.5) — binds the wire's structured fields.
                         let lp_digest = link_preview.as_ref().map(crypto_handler::link_preview_digest);
                         let extras = crypto_handler::SignedExtras {
                             mid: mid.as_deref(),

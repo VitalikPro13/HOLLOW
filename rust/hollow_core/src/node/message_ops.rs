@@ -2256,10 +2256,12 @@ pub(crate) async fn handle_envelope_channel_message(
 /// relay-reported sender id. On MLS channels it is defence in depth behind group
 /// membership.
 ///
-/// LIVE ingest only. Sync backfill (`ChannelSyncBatch`, `sync_handler`)
-/// deliberately still tolerates unsigned rows, so history predating per-message
-/// signing (e2cc8ab, 2026-03-09) keeps replicating instead of diverging between
-/// peers. Same live-enforce / backfill-tolerate split the moderation trio uses.
+/// Sync backfill applies the SAME rule as of 0.8.5 (`REQUIRE_SIGNED_BACKFILL`):
+/// it used to tolerate an unsigned row so pre-signing history (e2cc8ab,
+/// 2026-03-09) kept replicating, but tolerating absence was an injection path,
+/// so `BackfillSig::is_acceptable()` now refuses it there too. The
+/// live-enforce / backfill-tolerate split survives ONLY for the moderation trio
+/// (a mute may legitimately postdate the history being synced).
 #[allow(clippy::too_many_arguments)]
 fn channel_sig_rejected(
     sender_peer_id: &str,
@@ -2271,7 +2273,7 @@ fn channel_sig_rejected(
     pk: Option<&str>,
     extras: &SignedExtras,
 ) -> bool {
-    // Verify-both (v2 with the wire's structured fields, then legacy v1).
+    // v2 only (0.8.5) — the wire's structured fields are covered.
     if !verify_message_signature_v2(
         sender_peer_id, sig, pk, "ch", &format!("{}:{}", sid, cid),
         ts, extras, text, &mut PkCache::new(),

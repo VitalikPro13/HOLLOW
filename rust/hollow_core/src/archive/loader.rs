@@ -260,8 +260,10 @@ fn verify_one_message(
         let context = message_signing_context(msg, manifest, is_dm, dm_peer, dm_exporter);
         // For edited messages, the main-row signature uses edited_at timestamp.
         let ts = msg.edited_at.unwrap_or(msg.timestamp);
-        // Verify-both: v2 (structured fields from the archive row) first, then
-        // legacy v1. Edit signatures bind the same full extras as originals,
+        // v2 only (0.8.5): a pre-0.8.3 archive row reports unverified rather
+        // than falling back to the text-only v1 payload, which left the archive's
+        // reply_to / file_id / order_us free to be edited in the export.
+        // Edit signatures bind the same full extras as originals,
         // so the edited branch differs only in the timestamp above.
         let extras = crate::node::crypto_handler::SignedExtras {
             mid: Some(&msg.message_id),

@@ -3311,8 +3311,8 @@ mod tests {
     // ── v2 signing payload (Issue 2.3) ───────────────────────────────────
     //
     // The whole point of v2 is that the signature covers the structured fields,
-    // not just the text. These lock the canonical format + the verify-both
-    // transition semantics before any call site or the Dart mirror is wired.
+    // not just the text. These lock the canonical format and, since 0.8.5,
+    // that v1 is refused rather than accepted as a fallback.
 
     fn lp(title: &str) -> LinkPreviewRef {
         LinkPreviewRef {
@@ -3327,7 +3327,7 @@ mod tests {
         }
     }
 
-    /// A v2 signature verifies through verify-both, and each structured field is
+    /// A v2 signature verifies, and each structured field is
     /// actually covered — flipping any one of them breaks verification.
     #[test]
     fn v2_signature_covers_structured_fields() {
@@ -3347,7 +3347,7 @@ mod tests {
         let payload = message_signing_payload_v2("dm", "recipient", &a_id, 1_000, &extras, "hi");
         let (sig, pk) = sign_message(&a, &a_pk, &payload);
 
-        // Verify-both accepts the v2 signature.
+        // The v2 signature verifies.
         assert!(verify_message_signature_v2(
             &a_id, sig.as_deref(), pk.as_deref(), "dm", "recipient", 1_000, &extras, "hi", &mut cache,
         ));
@@ -3385,9 +3385,9 @@ mod tests {
         ), "text must be covered");
     }
 
-    /// Transition-window guarantee: a legacy v1 signature (text only) still
-    /// verifies through verify-both, so stored history and pre-0.8.3 peers keep
-    /// working while the fleet is mixed.
+    /// The transition window is CLOSED (0.8.5): a legacy v1 signature is
+    /// refused even though it is genuine, because the payload it covers leaves
+    /// the structured fields unbound.
     #[test]
     fn v1_signature_is_rejected() {
         let a = kp(22);
