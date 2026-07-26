@@ -1,3 +1,15 @@
+v0.8.5 - BREAKING CHANGES: security patches, bug fixes, accessibility improvements
+
+NOTE: Previous clients are NOT compatible with the new 0.8.5 because of breaking changes in how encryption and signatures are handled. Please make sure to update your client to the latest version!
+
+SECURITY
+
+- Important security patches and bug fixes
+
+ACCESSIBILITY
+
+- Added in-app font size and layout scale adjustments
+
 v0.8.1 - Noise Suppression, Voice Chain Completion & Screen Share Quality
 
 NOISE SUPPRESSION

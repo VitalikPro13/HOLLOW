@@ -1,5 +1,11 @@
 [
   {
+    "id": "2026-07-25-v085",
+    "date": "July 26, 2026",
+    "title": "v0.8.5 - BREAKING CHANGES: security patches, bug fixes, accessibility improvements",
+    "body": "UPDATE THE CLIENT IMMEDIATLY IF YOU'RE BELOW 0.8.5 VERSION! This release has really important fixes on security and older clients are NOT compatible with this new version, so you can't establish a connection between those! More info about that later. Also, this update includes adding the ability to adjust the font size and layout of the client. Use it in Accessibility -> Settings. Thanks!"
+  },
+  {
     "id": "2026-07-20-v081",
     "date": "July 20, 2026",
     "title": "v0.8.1 - Noise Suppression, Voice Chain Completion & Screen Share Quality",

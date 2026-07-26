@@ -1,17 +1,17 @@
 {
-  "latest": "0.8.1",
+  "latest": "0.8.5",
   "versions": [
     {
-      "version": "0.8.1",
-      "date": "July 20, 2026",
-      "url_windows": "https://anonlisten.com/hollow/releases/hollow-0.8.1-win64.zip",
-      "url_windows_setup": "https://anonlisten.com/hollow/releases/hollow-0.8.1-win64-setup.exe",
-      "url_macos": "https://anonlisten.com/hollow/releases/hollow-0.8.1-macos.zip",
-      "url_macos_dmg": "https://anonlisten.com/hollow/releases/hollow-0.8.1.dmg",
-      "url_linux": "https://anonlisten.com/hollow/releases/hollow-0.8.1-linux-x86_64.flatpak",
-      "url_linux_targz": "https://anonlisten.com/hollow/releases/hollow-0.8.1-linux.tar.gz",
-      "url_android": "https://anonlisten.com/hollow/releases/hollow-0.8.1-android.apk",
-      "notes": "Noise Suppression, Voice Chain Completion & Screen Share Quality"
+      "version": "0.8.5",
+      "date": "July 26, 2026",
+      "url_windows": "https://anonlisten.com/hollow/releases/hollow-0.8.5-win64.zip",
+      "url_windows_setup": "https://anonlisten.com/hollow/releases/hollow-0.8.5-win64-setup.exe",
+      "url_macos": "https://anonlisten.com/hollow/releases/hollow-0.8.5-macos.zip",
+      "url_macos_dmg": "https://anonlisten.com/hollow/releases/hollow-0.8.5.dmg",
+      "url_linux": "https://anonlisten.com/hollow/releases/hollow-0.8.5-linux-x86_64.flatpak",
+      "url_linux_targz": "https://anonlisten.com/hollow/releases/hollow-0.8.5-linux.tar.gz",
+      "url_android": "https://anonlisten.com/hollow/releases/hollow-0.8.5-android.apk",
+      "notes": "BREAKING CHANGES: security patches, bug fixes, accessibility improvements"
     }
   ]
 }
