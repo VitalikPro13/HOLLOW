@@ -20,7 +20,7 @@ Helper: `_bannerColorFromId(String id)` generates a deterministic HSL color from
 
 ## Category Navigation System
 
-`enum _SettingsCategory { profile, appearance, network, storage, audio, shortcuts, security, devices, backup, updates, about }` with a `_SettingsCategoryMeta` extension providing each category's `icon`, `label`, and `searchTerms` (keywords so the rail search matches settings *inside* a category, e.g. "theme"→Appearance, "relay"→Network, "recovery"→Security).
+`enum _SettingsCategory { profile, appearance, accessibility, network, storage, audio, shortcuts, security, devices, backup, updates, about }` with a `_SettingsCategoryMeta` extension providing each category's `icon`, `label`, and `searchTerms` (keywords so the rail search matches settings *inside* a category, e.g. "theme"→Appearance, "relay"→Network, "recovery"→Security).
 
 The old monolithic "System" tab (8 sections) split into **Appearance / Network / Files & Storage / Audio & Video / Shortcuts**; the old "Security" tab (7 sections) split into **Security / Devices / Backup**.
 
@@ -44,7 +44,7 @@ Stateless widget. Props: `icon` (IconData), `label` (String), `isActive` (bool),
 
 ## Dialog Chrome and Layout
 
-`_UserSettingsContent` is a `ConsumerStatefulWidget`. The dialog container: `ConstrainedBox` sized responsively — `maxWidth = min(screenW*0.9, 920)`, `maxHeight = min(screenH*0.86, 680)`, minHeight 420, minWidth 360. Decorated with `hollow.elevated` at 0.96 alpha, accent-tinted border, 24px blur shadow, `clipBehavior: antiAlias`. Structure is a single `Row`: 188px rail column (header + search + category list) | 1px divider | expanded content `Stack` (cards + floating X). No footer — there is no global Save/Cancel.
+`_UserSettingsContent` is a `ConsumerStatefulWidget`. The dialog container: `ConstrainedBox` sized responsively — `maxWidth = min(screenW*0.9, 920)`, `maxHeight = min(screenH*0.86, 680)`, and the minimums YIELD to those maxima — `minHeight = min(420, dialogHeight)`, `minWidth = min(360, dialogWidth)`. **The `min(...)` is load-bearing:** `BoxConstraints` normalises a min that exceeds the max UP, so the old flat `minHeight: 420` made the dialog taller than a short viewport and centre-clipped its close button off screen — the interface-scale lockout of 2026-07-26 (see `project_display_scaling`). Decorated with `hollow.elevated` at 0.96 alpha, accent-tinted border, 24px blur shadow, `clipBehavior: antiAlias`. Structure is a single `Row`: 188px rail column (header + search + category list) | 1px divider | expanded content `Stack` (cards + floating X). No footer — there is no global Save/Cancel.
 
 ---
 
@@ -54,7 +54,9 @@ Stateless widget. Props: `icon` (IconData), `label` (String), `isActive` (bool),
 
 Reduce Motion (formerly "Disable Animations") moved out of Appearance into the new **Accessibility** category (2026-06-24) as a tri-state Auto/On/Off segmented control (`_TriStateSegment`), writing `reduceMotionProvider.notifier.setMode()` → `ReduceMotionController` (which owns both motion statics + ticker; see `services_media_storage.md`). Relay change uses an explicit "Apply & Restart" button (`_applyRelayAndRestart()`) since it requires a process restart.
 
-**Accessibility category** (`_SettingsCategory.accessibility`, between Appearance and Network; icon `LucideIcons.accessibility`): two cards — **Motion** (Reduce Motion tri-state, "Auto follows your system setting") and **Transparency** (Reduce Transparency toggle → `reduceTransparencyProvider`, which drops dialog glass blur to sigma 0 via a `reduceTransparencyFlag` ValueNotifier mirror read in `hollow_dialog.dart`, and skips the background-image panel-opacity override in `app.dart`). Built incrementally — High Contrast / Text Size land in later phases.
+**Accessibility category** (`_SettingsCategory.accessibility`, between Appearance and Network; icon `LucideIcons.accessibility`): three cards — **Display Size**, **Motion** (Reduce Motion tri-state, "Auto follows your system setting") and **Transparency** (Reduce Transparency toggle → `reduceTransparencyProvider`, which drops dialog glass blur to sigma 0 via a `reduceTransparencyFlag` ValueNotifier mirror read in `hollow_dialog.dart`, and skips the background-image panel-opacity override in `app.dart`).
+
+**Display Size card** (issue #20, 2026-07-26) holds `InterfaceScaleControl` + `ChatTextScaleControl` from `settings_shared.dart` — ONE implementation shared with the mobile Accessibility tab — plus a footnote naming the OS setting they stack on and the Ctrl +/−/0 shortcuts. Interface Scale is a whole-app zoom (`UiScale`) and commits on slider RELEASE, because it resizes the dialog it lives in and a live commit would move the track out from under the pointer; keyboard adjustment (no drag) commits immediately. Chat Text Size is a text-only multiplier and commits live, with a sample message row underneath rendered at the chosen size. When the window is too small for the chosen zoom the subtitle says what it was limited to (read from `UiScaleInfo`). High Contrast is the only a11y item still unbuilt.
 
 ### Legacy (pre-2026-06-21) deferred-save fields — REMOVED:
 

@@ -48,6 +48,7 @@ import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/large_file_share_dialog.dart';
 import 'package:hollow/src/ui/components/security_alert_banner.dart';
 import 'package:hollow/src/ui/components/status_dot.dart';
+import 'package:hollow/src/ui/components/ui_scale.dart';
 import 'package:hollow/src/ui/dialogs/message_proof_dialog.dart';
 import 'package:hollow/src/ui/mobile/mobile_active_call_pill.dart';
 import 'package:hollow/src/ui/mobile/mobile_page_route.dart';
@@ -1616,15 +1617,19 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
         ),
       );
     }
-    return _MobileInputBar(
-      controller: _controller,
-      focusNode: _focusNode,
-      onSend: _handleSend,
-      onAttach: _showAttachSheet,
-      onMic: _stagedFilePath != null ? null : _startVoiceRecording,
-      onEmoji: _showEmojiSheet,
-      onChanged: _onTextChanged,
-      hasStagedFile: _stagedFilePath != null,
+    // Chat text scale rides the composer too (parity with the desktop
+    // `chatComposerField`) — reading at 150% and typing at 100% helps nobody.
+    return ChatTextScale(
+      child: _MobileInputBar(
+        controller: _controller,
+        focusNode: _focusNode,
+        onSend: _handleSend,
+        onAttach: _showAttachSheet,
+        onMic: _stagedFilePath != null ? null : _startVoiceRecording,
+        onEmoji: _showEmojiSheet,
+        onChanged: _onTextChanged,
+        hasStagedFile: _stagedFilePath != null,
+      ),
     );
   }
 

@@ -519,11 +519,21 @@ File: `lib/src/core/providers/settings_provider.dart`
 
 All settings providers follow the same pattern: `AsyncNotifierProvider` that loads from `storage_api.loadSetting(key: ...)` in `build()` and persists via `storage_api.saveSetting(key: ..., value: ...)` on change. All use the `app_settings` table in SQLCipher.
 
+**The exception, and when you must take it:** a setting read by the FIRST frame cannot use this pattern. Rust `load_setting` returns `Err("Message store is not open")` until the SQLCipher store opens, so an eager `build()` read parks the provider in `AsyncError` and the saved value is silently lost on every launch (feedback_load_persisted_setting_from_bootstrap_not_build). Those settings are synchronous `Notifier`s with an explicit `load()` called from `HollowShell._bootstrap` — `themeModeProvider`, `accentHueProvider`, `backgroundProvider`, `invisibleModeProvider`, and the display-scale pair below.
+
 ### Minimize to Tray
 Provider: `minimizeToTrayProvider` -- `AsyncNotifierProvider<MinimizeToTrayNotifier, bool>`
 - Key: `'minimize_to_tray'`
 - Default: `true` (minimize to tray on close).
 - `setEnabled(bool value)` -- Persists and updates state.
+
+### Display Scale — interface zoom + chat text size (issue #20, 2026-07-26)
+File: `lib/src/core/providers/display_scale_provider.dart`. Both are synchronous `NotifierProvider<_, double>` loaded from `_bootstrap` (see the exception above), not `AsyncNotifier`s.
+
+- `uiScaleProvider` — key `'ui_scale'`, default 1.0. Range is form-factor dependent: `uiScaleMin`/`uiScaleMax` = 0.75–2.0 desktop, 0.9–1.5 mobile (a 360dp phone at 2.0x would lay out at 180dp — narrower than the Settings list needed to undo it). `setScale` moves state FIRST then persists (so Ctrl +/- lands next frame) and swallows write failures with a log; `nudge(steps)` walks the 5% grid; `reset()` returns to 100%. Consumed by `UiScale` in `app.dart`'s builder, the title-bar `ZoomIndicator`, and `_handleGlobalKey`.
+- `chatTextScaleProvider` — key `'chat_text_scale'`, default 1.0, range 0.8–2.0. Consumed by `ChatTextScale` (message lists, both composers, archive viewer, guest viewer).
+
+Helpers exported alongside: `snapScale`, `scaleDivisions`, `scalePercentLabel`. The APPLIED interface scale is not necessarily the stored one — `effectiveUiScale()` (`ui_scale.dart`) reduces it when the window is too small to show the app at it.
 
 ### Reduce Motion (replaced Disable Animations, 2026-06-24)
 Provider: `reduceMotionProvider` -- `AsyncNotifierProvider<ReduceMotionNotifier, ReduceMotionMode>`

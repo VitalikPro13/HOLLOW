@@ -3,6 +3,7 @@ import 'dart:io' show Platform;
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:hollow/src/ui/components/overlay_anchor.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -133,11 +134,12 @@ void _saveRecents(List<String> recents) {
 /// route would render BEHIND it.
 void _showEmoteContextMenu(
   BuildContext context,
-  Offset position, {
+  Offset globalPosition, {
   required String header,
   required String actionLabel,
   required VoidCallback onAction,
 }) {
+  final position = overlayPositionOf(context, globalPosition);
   final hollow = HollowTheme.of(context);
   const menuWidth = 200.0;
   final screen = MediaQuery.of(context).size;

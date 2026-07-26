@@ -1,6 +1,7 @@
 ﻿import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:hollow/src/ui/components/overlay_anchor.dart';
 import 'package:flutter/services.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
@@ -626,9 +627,7 @@ class _EmojiButton extends StatelessWidget {
   Widget build(BuildContext context) {
     return HollowPressable(
       onTap: () {
-        final box = context.findRenderObject() as RenderBox?;
-        final position = box?.localToGlobal(Offset.zero) ?? Offset.zero;
-        onReaction(position);
+        onReaction(overlayAnchorOf(context));
       },
       semanticLabel: 'Add reaction',
       borderRadius: BorderRadius.circular(hollow.radiusSm),

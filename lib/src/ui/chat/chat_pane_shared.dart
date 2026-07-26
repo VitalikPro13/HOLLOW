@@ -17,6 +17,7 @@ import 'package:hollow/src/ui/chat/staged_link_preview_card.dart';
 import 'package:hollow/src/ui/components/animated_gif_image.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
+import 'package:hollow/src/ui/components/ui_scale.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 
@@ -137,6 +138,10 @@ Widget gifAwareImage(String path, {double? width, double? height}) =>
 /// index slots instead of remounting when a new message shifts every revIndex
 /// by one (full-list blink otherwise — guarded by
 /// test/widget/chat_list_element_reuse_test.dart).
+///
+/// It is also the single chokepoint for the "chat text size" preference
+/// (issue #20): the whole list is wrapped in [ChatTextScale], so DM, channel
+/// and mobile message surfaces scale together and cannot drift apart.
 Widget reversedChatList({
   required BuildContext context,
   Key? listKey,
@@ -174,10 +179,12 @@ Widget reversedChatList({
       itemBuilder: itemBuilder,
     ),
   );
-  if (!selectionArea) return list;
-  return SelectionArea(
-    contextMenuBuilder: (_, _) => const SizedBox.shrink(),
-    child: list,
+  if (!selectionArea) return ChatTextScale(child: list);
+  return ChatTextScale(
+    child: SelectionArea(
+      contextMenuBuilder: (_, _) => const SizedBox.shrink(),
+      child: list,
+    ),
   );
 }
 
@@ -423,7 +430,9 @@ Widget chatInputBarShell(HollowTheme hollow,
 }
 
 /// The composer text field shared by both panes (emote-aware controller,
-/// 5-line cap, 4000-char limit).
+/// 5-line cap, 4000-char limit). Carries the chat text scale too — reading
+/// messages at 150% and typing the reply at 100% helps nobody. The mobile
+/// composer (`_MobileInputBar`) wraps itself the same way.
 Widget chatComposerField(
   HollowTheme hollow, {
   required EmoteComposerController controller,
@@ -431,18 +440,20 @@ Widget chatComposerField(
   required String hintText,
   required ValueChanged<String> onChanged,
 }) {
-  return HollowTextField(
-    controller: controller,
-    focusNode: focusNode,
-    hintText: hintText,
-    autofocus: true,
-    maxLines: 5,
-    minLines: 1,
-    maxLength: 4000,
-    showCounter: false,
-    style: HollowTypography.body.copyWith(color: hollow.textPrimary),
-    borderRadius: hollow.radiusLg,
-    onChanged: onChanged,
+  return ChatTextScale(
+    child: HollowTextField(
+      controller: controller,
+      focusNode: focusNode,
+      hintText: hintText,
+      autofocus: true,
+      maxLines: 5,
+      minLines: 1,
+      maxLength: 4000,
+      showCounter: false,
+      style: HollowTypography.body.copyWith(color: hollow.textPrimary),
+      borderRadius: hollow.radiusLg,
+      onChanged: onChanged,
+    ),
   );
 }
 

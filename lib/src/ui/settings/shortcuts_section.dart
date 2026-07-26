@@ -21,6 +21,9 @@ class ShortcutsSettingsView extends StatelessWidget {
           _ShortcutRow(label: 'Toggle Split View', shortcut: r'Ctrl + Shift + \'),
           _ShortcutRow(label: 'Focus Left Pane', shortcut: 'Ctrl + 1'),
           _ShortcutRow(label: 'Focus Right Pane', shortcut: 'Ctrl + 2'),
+          _ShortcutRow(label: 'Zoom Interface In', shortcut: 'Ctrl + +'),
+          _ShortcutRow(label: 'Zoom Interface Out', shortcut: 'Ctrl + −'),
+          _ShortcutRow(label: 'Reset Zoom', shortcut: 'Ctrl + 0'),
         ],
       ),
       const SettingsCard(

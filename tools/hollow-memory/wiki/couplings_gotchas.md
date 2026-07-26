@@ -408,6 +408,24 @@ Additionally, `handle_send_file()` skips writing ciphertext to temp file and ski
 
 **Where:** All widgets in `lib/src/ui/` that need opacity-based visibility or fade effects.
 
+### Popup anchors must be in OVERLAY space, not window space
+
+**Rule:** Anything that hands a position to an `OverlayEntry` goes through `overlayAnchorOf(context)` / `overlayPositionOf(context, details.globalPosition)` (`lib/src/ui/components/overlay_anchor.dart`). Never a bare `renderBox.localToGlobal(Offset.zero)`, never a raw `details.globalPosition`.
+
+**Why:** the interface scale (`UiScale`, issue #20) puts a `Transform` between the window and the Navigator, so "global" coordinates and the coordinate space an `Overlay` child is positioned in differ by the zoom factor. At 150% a popup anchored with raw global coordinates lands half a screen from its button. The helpers resolve the same `Overlay.of(context)` the popup helpers insert into, so anchor and entry always share one space — and at 100% they return exactly what the old code did, which is why the conversion was safe to do wholesale.
+
+**Where:** 16 sites — tooltip, profile card, server folder, download manager, emoji picker + emote context menu, message action bar, both volume popups, guest context menu, composer emoji anchors. `message_action_bar.dart` and `share_volume_control.dart` already passed `ancestor: overlayBox` and were correct all along.
+
+**Verified NOT affected (do not re-chase):** `DragUpdateDetails.delta` is already child-local under a transform, `CompositedTransformFollower`/`LayerLink` are transform-aware, and `Slider` maps the pointer through `globalToLocal`.
+
+### A root-level Transform must measure its SLOT, not the window
+
+**Rule:** `UiScaleBox` sizes its child from `LayoutBuilder` constraints, never `MediaQuery.size`.
+
+**Why:** on desktop it lives in `Column[WindowTitleBar(32px), Expanded(ClipRect(UiScale))]`, so its paintable slot is 32px shorter than the window. Sizing from the window-level MediaQuery laid out 32px too much app and painted it past the bottom edge — the entire bottom dock disappeared at every scale except 1.0 (where the pass-through path skips the transform, which is what made it look like the feature "only broke at some values"). A constant offset that does not vary with the scale factor is the tell: look for a fixed-size sibling.
+
+**Where:** `lib/src/ui/components/ui_scale.dart`. Pinned by "fills the slot it is given, not the whole window" in `test/widget/ui_scale_test.dart`.
+
 ### HollowTooltip: always use _dismiss() pattern
 
 **Rule:** HollowTooltip must use the `_dismiss()` pattern for closing -- immediate overlay removal with no reverse animation.

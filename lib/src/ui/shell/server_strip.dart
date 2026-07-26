@@ -1,4 +1,5 @@
 ﻿import 'package:flutter/material.dart';
+import 'package:hollow/src/ui/components/overlay_anchor.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/color_utils.dart';
 import 'package:hollow/src/core/providers/archive_provider.dart';
@@ -417,7 +418,7 @@ class _ServerStripState extends ConsumerState<ServerStrip> {
                   onTap: () {
                     final box = context.findRenderObject() as RenderBox?;
                     if (box == null) return;
-                    final pos = box.localToGlobal(Offset.zero);
+                    final pos = overlayAnchorOf(context);
                     showServerFolderPopup(
                       context: context,
                       ref: ref,

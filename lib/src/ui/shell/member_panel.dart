@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:hollow/src/ui/components/overlay_anchor.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
@@ -612,7 +613,7 @@ class _ServerMemberTile extends ConsumerWidget {
         onTap: () {
           final box = context.findRenderObject() as RenderBox?;
           if (box == null) return;
-          final pos = box.localToGlobal(Offset.zero);
+          final pos = overlayAnchorOf(context);
           // Show card to the left of member panel (like Discord)
           showProfileCardPopup(
             context: context,
@@ -734,7 +735,7 @@ class _MemberTile extends ConsumerWidget {
       onTap: () {
         final box = context.findRenderObject() as RenderBox?;
         if (box == null) return;
-        final pos = box.localToGlobal(Offset.zero);
+        final pos = overlayAnchorOf(context);
         // Show card to the left of member panel (like Discord)
         showProfileCardPopup(
           context: context,

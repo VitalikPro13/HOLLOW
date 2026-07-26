@@ -81,6 +81,7 @@ import 'package:hollow/src/rust/api/identity.dart' as identity_api;
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 import 'package:hollow/src/ui/settings/server_settings_panel.dart';
+import 'package:hollow/src/core/providers/display_scale_provider.dart';
 import 'package:hollow/src/core/providers/layout_provider.dart';
 import 'package:hollow/src/core/providers/split_view_provider.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
@@ -893,6 +894,10 @@ class _HollowShellState extends ConsumerState<HollowShell>
     // background image on a fully-local render.
     await ref.read(themeModeProvider.notifier).load();
     await ref.read(accentHueProvider.notifier).load();
+    // Display size (issue #20) — same rule as the theme: loadSetting throws
+    // until the store is open, so these load here, never in build().
+    await ref.read(uiScaleProvider.notifier).load();
+    await ref.read(chatTextScaleProvider.notifier).load();
     await ref.read(backgroundProvider.notifier).load();
     await ref.read(accentPresetsProvider.notifier).load();
     await ref.read(localNicknameProvider.notifier).loadAll();
@@ -1137,6 +1142,29 @@ class _HollowShellState extends ConsumerState<HollowShell>
       final current = ref.read(channelSearchOpenProvider);
       ref.read(channelSearchOpenProvider.notifier).state = !current;
       return true;
+    }
+
+    // Ctrl + / Ctrl − / Ctrl 0 → Interface zoom (issue #20). Shift is
+    // ignored on +/− because "+" is Shift+= on most layouts.
+    if (isCtrl) {
+      final key = event.logicalKey;
+      if (key == LogicalKeyboardKey.equal ||
+          key == LogicalKeyboardKey.add ||
+          key == LogicalKeyboardKey.numpadAdd) {
+        ref.read(uiScaleProvider.notifier).nudge(1);
+        return true;
+      }
+      if (key == LogicalKeyboardKey.minus ||
+          key == LogicalKeyboardKey.numpadSubtract) {
+        ref.read(uiScaleProvider.notifier).nudge(-1);
+        return true;
+      }
+      if (!isShift &&
+          (key == LogicalKeyboardKey.digit0 ||
+              key == LogicalKeyboardKey.numpad0)) {
+        ref.read(uiScaleProvider.notifier).reset();
+        return true;
+      }
     }
 
     // Ctrl+Shift+\ → Toggle split view (dock mode only).

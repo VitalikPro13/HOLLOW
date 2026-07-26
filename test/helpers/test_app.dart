@@ -13,6 +13,7 @@ import 'package:hollow/src/core/providers/background_provider.dart';
 import 'package:hollow/src/core/providers/channel_chat_provider.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
 import 'package:hollow/src/core/providers/chat_provider.dart';
+import 'package:hollow/src/core/providers/display_scale_provider.dart';
 import 'package:hollow/src/core/providers/friends_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/layout_provider.dart';
@@ -35,6 +36,7 @@ import 'package:hollow/src/core/providers/voice_channel_provider.dart';
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 import 'package:hollow/src/core/models/strip_item.dart';
 import 'package:hollow/src/theme/hollow_theme_data.dart';
+import 'package:hollow/src/ui/components/ui_scale.dart';
 import 'package:hollow/src/ui/mobile/mobile_shell.dart';
 import 'package:hollow/src/ui/shell/hollow_shell.dart';
 
@@ -88,6 +90,9 @@ List<Override> hollowTestOverrides({
       layoutModeProvider.overrideWith(() => _MockLayoutModeNotifier()),
       reduceMotionProvider
           .overrideWith(() => _MockReduceMotionNotifier()),
+      uiScaleProvider.overrideWith(() => _MockUiScaleNotifier()),
+      chatTextScaleProvider
+          .overrideWith(() => _MockChatTextScaleNotifier()),
       invisibleModeProvider
           .overrideWith(() => _MockInvisibleModeNotifier()),
       serverStripLayoutProvider
@@ -125,6 +130,7 @@ Future<void> pumpHollowMobile(
   Size viewportSize = const Size(400, 800),
   List<Override> extraOverrides = const [],
   TextScaler textScaler = TextScaler.noScaling,
+  double uiScale = 1.0,
 }) async {
   _setupViewport(tester, viewportSize);
 
@@ -137,9 +143,11 @@ Future<void> pumpHollowMobile(
         theme: HollowThemeData.dark(),
         // a11y Phase 3: tests can pump the shell at an OS text scale (e.g.
         // 2.0×) to assert the hardened layouts don't RenderFlex-overflow.
+        // Same nesting as the real app.dart mobile branch: the text-scale
+        // clamp sits OUTSIDE the interface-scale transform.
         builder: (context, child) => MediaQuery(
           data: MediaQuery.of(context).copyWith(textScaler: textScaler),
-          child: child!,
+          child: UiScaleBox(scale: uiScale, child: child!),
         ),
         home: const MobileShell(),
       ),
@@ -267,6 +275,16 @@ class _MockReduceMotionNotifier extends ReduceMotionNotifier {
   @override
   Future<ReduceMotionMode> build() async =>
       ReduceMotionMode.on; // reduce motion in tests
+}
+
+class _MockUiScaleNotifier extends UiScaleNotifier {
+  @override
+  double build() => kUiScaleDefault;
+}
+
+class _MockChatTextScaleNotifier extends ChatTextScaleNotifier {
+  @override
+  double build() => kChatTextScaleDefault;
 }
 
 class _MockInvisibleModeNotifier extends InvisibleModeNotifier {

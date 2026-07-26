@@ -544,6 +544,13 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
     final dialogWidth = screen.width * 0.9 < 920.0 ? screen.width * 0.9 : 920.0;
     final dialogHeight = screen.height * 0.86 < 680.0 ? screen.height * 0.86 : 680.0;
 
+    // The comfortable minimum must still yield to the viewport. A minimum
+    // LARGER than the max wins in BoxConstraints (min is normalised up), so a
+    // flat `minHeight: 420` in a short viewport pushes the close button off
+    // screen — which is how you lock yourself out at a high interface scale.
+    final dialogMinWidth = dialogWidth < 360.0 ? dialogWidth : 360.0;
+    final dialogMinHeight = dialogHeight < 420.0 ? dialogHeight : 420.0;
+
     final filtered = _filteredCategories;
     // If the active category was filtered out, fall back to the first match so
     // the content area never goes blank while typing.
@@ -557,8 +564,8 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
           constraints: BoxConstraints(
             maxWidth: dialogWidth,
             maxHeight: dialogHeight,
-            minHeight: 420,
-            minWidth: 360,
+            minHeight: dialogMinHeight,
+            minWidth: dialogMinWidth,
           ),
           child: Material(
             color: Colors.transparent,

@@ -88,6 +88,9 @@ class EmoteComposerController extends TextEditingController {
       return super.buildTextSpan(
           context: context, style: style, withComposing: withComposing);
     }
+    // WidgetSpans are opaque to the text scaler, so the inline emote has to
+    // follow the chat text size by hand (same rule as message_text_parser).
+    final emoteSize = MediaQuery.textScalerOf(context).scale(22);
     final children = <InlineSpan>[];
     final run = StringBuffer();
     void flushRun() {
@@ -107,9 +110,10 @@ class EmoteComposerController extends TextEditingController {
       children.add(WidgetSpan(
         alignment: PlaceholderAlignment.middle,
         child: SizedBox(
-          width: 22,
-          height: 22,
-          child: EmoteImage(name: emote.name, hash: emote.hash, size: 22),
+          width: emoteSize,
+          height: emoteSize,
+          child:
+              EmoteImage(name: emote.name, hash: emote.hash, size: emoteSize),
         ),
       ));
     }

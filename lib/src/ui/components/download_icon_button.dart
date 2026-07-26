@@ -1,4 +1,5 @@
 ﻿import 'package:flutter/material.dart';
+import 'package:hollow/src/ui/components/overlay_anchor.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/download_manager_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
@@ -25,8 +26,7 @@ class DownloadIconButton extends ConsumerWidget {
       message: 'Downloads',
       child: HollowPressable(
         onTap: () {
-          final box = context.findRenderObject() as RenderBox?;
-          final pos = box?.localToGlobal(Offset.zero) ?? Offset.zero;
+          final pos = overlayAnchorOf(context);
           showDownloadManagerPopup(
             context: context,
             anchor: Offset(pos.dx, pos.dy - 8),

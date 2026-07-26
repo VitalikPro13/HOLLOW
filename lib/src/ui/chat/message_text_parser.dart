@@ -324,10 +324,15 @@ _TokenMatch? _matchUnderscoreItalic(String text, int i, int depth) {
 // Token → Widget span conversion (cheap, uses live theme + callbacks)
 // ---------------------------------------------------------------------------
 
+/// [scaler] is the ambient text scaler (OS setting x the chat text size
+/// preference). Plain spans get it for free from the enclosing `Text.rich`,
+/// but a [WidgetSpan] is laid out as an opaque box — a custom emote sized off
+/// the raw `style.fontSize` would stay 21px while the words around it grew.
 List<InlineSpan> _tokensToSpans(
   List<_Token> tokens,
   TextStyle style,
   HollowTheme hollow,
+  TextScaler scaler,
 ) {
   final spans = <InlineSpan>[];
   for (final tok in tokens) {
@@ -384,18 +389,21 @@ List<InlineSpan> _tokensToSpans(
           tok.children!,
           style.copyWith(fontWeight: FontWeight.w700),
           hollow,
+          scaler,
         ));
       case _TokenKind.italic:
         spans.addAll(_tokensToSpans(
           tok.children!,
           style.copyWith(fontStyle: FontStyle.italic),
           hollow,
+          scaler,
         ));
       case _TokenKind.strikethrough:
         spans.addAll(_tokensToSpans(
           tok.children!,
           style.copyWith(decoration: TextDecoration.lineThrough),
           hollow,
+          scaler,
         ));
       case _TokenKind.spoiler:
         spans.add(WidgetSpan(
@@ -409,7 +417,7 @@ List<InlineSpan> _tokensToSpans(
           child: EmoteImage(
             name: tok.text,
             hash: tok.extra!,
-            size: (style.fontSize ?? 15) * 1.45,
+            size: scaler.scale(style.fontSize ?? 15) * 1.45,
             fallbackStyle: style,
           ),
         ));
@@ -464,12 +472,14 @@ class MessageText extends StatelessWidget {
     final style = baseStyle ??
         HollowTypography.body.copyWith(color: hollow.textPrimary);
 
+    final scaler = MediaQuery.textScalerOf(context);
+
     if (_codeBlockPattern.hasMatch(text)) {
-      return _buildWithCodeBlocks(text, style, hollow, suffixSpans);
+      return _buildWithCodeBlocks(text, style, hollow, suffixSpans, scaler);
     }
 
     final tokens = _cachedTokenize(text, memberNames: memberNames);
-    final spans = _tokensToSpans(tokens, style, hollow);
+    final spans = _tokensToSpans(tokens, style, hollow, scaler);
     if (suffixSpans != null) spans.addAll(suffixSpans!);
     return Text.rich(TextSpan(children: spans));
   }
@@ -479,6 +489,7 @@ class MessageText extends StatelessWidget {
     TextStyle style,
     HollowTheme hollow,
     List<InlineSpan>? suffixSpans,
+    TextScaler scaler,
   ) {
     final children = <Widget>[];
     int lastEnd = 0;
@@ -490,6 +501,7 @@ class MessageText extends StatelessWidget {
           text.substring(lastEnd, match.start),
           style,
           hollow,
+          scaler,
         );
       }
 
@@ -506,6 +518,7 @@ class MessageText extends StatelessWidget {
         style,
         hollow,
         suffixSpans,
+        scaler,
       );
     }
 
@@ -526,12 +539,13 @@ class MessageText extends StatelessWidget {
     String raw,
     TextStyle style,
     HollowTheme hollow,
+    TextScaler scaler,
   ) {
     final before = raw.trimRight();
     if (before.isNotEmpty) {
       final tokens = _cachedTokenize(before);
       children.add(Text.rich(
-        TextSpan(children: _tokensToSpans(tokens, style, hollow)),
+        TextSpan(children: _tokensToSpans(tokens, style, hollow, scaler)),
       ));
     }
   }
@@ -564,11 +578,12 @@ class MessageText extends StatelessWidget {
     TextStyle style,
     HollowTheme hollow,
     List<InlineSpan>? suffixSpans,
+    TextScaler scaler,
   ) {
     final after = raw.trimLeft();
     if (after.isNotEmpty) {
       final tokens = _cachedTokenize(after);
-      final spans = _tokensToSpans(tokens, style, hollow);
+      final spans = _tokensToSpans(tokens, style, hollow, scaler);
       if (suffixSpans != null) spans.addAll(suffixSpans);
       children.add(Text.rich(TextSpan(children: spans)));
       return null;

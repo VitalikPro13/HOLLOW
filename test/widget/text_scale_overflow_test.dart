@@ -75,4 +75,34 @@ void main() {
       });
     }
   });
+
+  /// Issue #20 — the in-app interface scale narrows the LOGICAL viewport
+  /// (a 360dp phone at 1.5x lays out at 240dp), which stresses the mobile
+  /// shell differently from a text scaler. The mobile ceiling in
+  /// `display_scale_provider.dart` is only defensible if the shell still
+  /// fits there, so pin it: 360x780 is a small real phone (Pixel-class).
+  group('Interface scale — no RenderFlex overflow', () {
+    for (final scale in const [1.25, 1.5]) {
+      testWidgets('MobileShell all tabs fit at ${scale}x interface scale',
+          (tester) async {
+        await pumpHollowMobile(
+          tester,
+          viewportSize: const Size(360, 780),
+          uiScale: scale,
+        );
+
+        expect(find.byType(MobileShell), findsOneWidget);
+        expect(find.byType(MobileNavBar), findsOneWidget);
+
+        for (final tab in const ['Friends', 'Archive', 'Settings', 'Chats']) {
+          await _tapNavTab(tester, tab);
+          expect(
+            tester.takeException(),
+            isNull,
+            reason: '$tab tab overflowed at ${scale}x interface scale',
+          );
+        }
+      });
+    }
+  });
 }

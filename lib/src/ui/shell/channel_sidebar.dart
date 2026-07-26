@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:hollow/src/ui/chat/hollow_link_utils.dart';
 
 import 'package:flutter/material.dart';
+import 'package:hollow/src/ui/components/overlay_anchor.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/models/channel_info.dart';
 import 'package:hollow/src/core/models/chat_message.dart';
@@ -1489,7 +1490,8 @@ class _VoiceParticipantRow extends ConsumerWidget {
   }
 
   void _showVolumePopup(
-      BuildContext context, WidgetRef ref, Offset position) {
+      BuildContext context, WidgetRef ref, Offset globalPosition) {
+    final position = overlayPositionOf(context, globalPosition);
     final hollow = HollowTheme.of(context);
     final overlay = Overlay.of(context);
     final vcState = ref.read(voiceChannelProvider);

@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:hollow/src/ui/components/ui_scale.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/models/channel_chat_message.dart';
 import 'package:hollow/src/core/models/chat_message.dart';
@@ -408,70 +409,73 @@ class _ArchiveMessageListCoreState<T>
       );
     }
 
-    final list = ScrollablePositionedList.builder(
-      itemScrollController: _itemScrollController,
-      itemPositionsListener: _itemPositionsListener,
-      padding: const EdgeInsets.symmetric(
-        vertical: HollowSpacing.sm,
-      ),
-      itemCount: messages.length,
-      itemBuilder: (context, index) {
-        final msg = messages[index];
-        final prev = index > 0 ? messages[index - 1] : null;
+    // Reading surface: honours the chat text size like the live panes do.
+    final Widget list = ChatTextScale(
+      child: ScrollablePositionedList.builder(
+        itemScrollController: _itemScrollController,
+        itemPositionsListener: _itemPositionsListener,
+        padding: const EdgeInsets.symmetric(
+          vertical: HollowSpacing.sm,
+        ),
+        itemCount: messages.length,
+        itemBuilder: (context, index) {
+          final msg = messages[index];
+          final prev = index > 0 ? messages[index - 1] : null;
 
-        final showDate = shouldShowDateSeparator(
-          widget.timestampOf(msg),
-          prev != null ? widget.timestampOf(prev) : null,
-        );
+          final showDate = shouldShowDateSeparator(
+            widget.timestampOf(msg),
+            prev != null ? widget.timestampOf(prev) : null,
+          );
 
-        final showHeader =
-            prev == null || showDate || !widget.groupsWith(msg, prev);
+          final showHeader =
+              prev == null || showDate || !widget.groupsWith(msg, prev);
 
-        final reply = widget.replyPreviewFor(msg);
+          final reply = widget.replyPreviewFor(msg);
 
-        final isCurrentMatch = matchIndices.isNotEmpty &&
-            matchIdx < matchIndices.length &&
-            matchIndices[matchIdx] == index;
+          final isCurrentMatch = matchIndices.isNotEmpty &&
+              matchIdx < matchIndices.length &&
+              matchIndices[matchIdx] == index;
 
-        Widget bubble = widget.bubbleBuilder(msg, showHeader, reply?.$1,
-            reply?.$2, _highlightIndex == index || isCurrentMatch);
+          Widget bubble = widget.bubbleBuilder(msg, showHeader, reply?.$1,
+              reply?.$2, _highlightIndex == index || isCurrentMatch);
 
-        // Deleted message overlay.
-        final hiddenAt = widget.hiddenAtOf(msg);
-        if (hiddenAt != null) {
-          bubble = ArchiveDeletedOverlay(hiddenAt: hiddenAt, child: bubble);
-        }
+          // Deleted message overlay.
+          final hiddenAt = widget.hiddenAtOf(msg);
+          if (hiddenAt != null) {
+            bubble = ArchiveDeletedOverlay(hiddenAt: hiddenAt, child: bubble);
+          }
 
-        // Edit history indicator.
-        final messageId = widget.messageIdOf(msg);
-        final msgEdits = messageId != null ? widget.editsMap[messageId] : null;
-        if (msgEdits != null && msgEdits.isNotEmpty) {
-          bubble = Column(
+          // Edit history indicator.
+          final messageId = widget.messageIdOf(msg);
+          final msgEdits = messageId != null ? widget.editsMap[messageId] : null;
+          if (msgEdits != null && msgEdits.isNotEmpty) {
+            bubble = Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                bubble,
+                EditHistoryIndicator(
+                  edits: msgEdits,
+                  senderPeerId: widget.editSenderPeerIdOf(msg),
+                  proofContext: widget.editProofContextOf(msg),
+                  proofMsgType: widget.proofMsgType,
+                  messageId: messageId,
+                ),
+              ],
+            );
+          }
+
+          // Platform action wrapper (hover actions / long-press).
+          bubble = widget.actionWrapper(context, msg, bubble);
+
+          return Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
+              if (showDate) DateSeparator(date: widget.timestampOf(msg)),
               bubble,
-              EditHistoryIndicator(
-                edits: msgEdits,
-                senderPeerId: widget.editSenderPeerIdOf(msg),
-                proofContext: widget.editProofContextOf(msg),
-                proofMsgType: widget.proofMsgType,
-                messageId: messageId,
-              ),
             ],
           );
-        }
-
-        // Platform action wrapper (hover actions / long-press).
-        bubble = widget.actionWrapper(context, msg, bubble);
-
-        return Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            if (showDate) DateSeparator(date: widget.timestampOf(msg)),
-            bubble,
-          ],
-        );
-      },
+        },
+      ),
     );
 
     if (!widget.desktopChrome) return list;

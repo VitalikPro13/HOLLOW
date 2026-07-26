@@ -1545,6 +1545,14 @@ class _AccessibilityTab extends StatelessWidget {
     return ListView(
       padding: const EdgeInsets.all(HollowSpacing.lg),
       children: const [
+        _SectionLabel(label: 'Display Size'),
+        SizedBox(height: HollowSpacing.sm),
+        InterfaceScaleControl(),
+        SizedBox(height: HollowSpacing.lg),
+        ChatTextScaleControl(),
+        SizedBox(height: HollowSpacing.sm),
+        _DisplaySizeFootnote(),
+        SizedBox(height: HollowSpacing.xl),
         _SectionLabel(label: 'Motion'),
         SizedBox(height: HollowSpacing.sm),
         _ReduceMotionRow(),
@@ -2107,6 +2115,25 @@ class _ReduceTransparencyRow extends ConsumerWidget {
           inactiveTrackColor: hollow.border,
         ),
       ],
+    );
+  }
+}
+
+/// Footnote under the Display Size controls — these stack on top of the OS
+/// setting rather than replacing it.
+class _DisplaySizeFootnote extends StatelessWidget {
+  const _DisplaySizeFootnote();
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+    return Text(
+      'Both stack on top of your device\'s display size and font size '
+      'settings.',
+      style: HollowTypography.caption.copyWith(
+        color: hollow.textSecondary,
+        fontSize: 11,
+      ),
     );
   }
 }

@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:hollow/src/ui/components/overlay_anchor.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/models/channel_chat_message.dart';
@@ -1387,7 +1388,9 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
   /// insert the selection (Unicode emoji or emote token) at the cursor.
   void _openComposerEmojiPicker(BuildContext btnCtx) {
     final box = btnCtx.findRenderObject() as RenderBox?;
-    final anchor = box?.localToGlobal(Offset(box.size.width, 0)) ?? Offset.zero;
+    final anchor = box == null
+        ? Offset.zero
+        : overlayAnchorOf(btnCtx, localOffset: Offset(box.size.width, 0));
     showEmojiPicker(
       context: context,
       anchorPosition: anchor,

@@ -1,12 +1,15 @@
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/providers/display_scale_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/animations/startup_reveal.dart';
 import 'package:hollow/src/ui/annotation/annotation_toggle_button.dart';
+import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:window_manager/window_manager.dart';
 
@@ -55,7 +58,10 @@ class WindowTitleBar extends StatelessWidget {
     }
 
     // Annotate button sits just to the right of the traffic lights.
-    Widget annotate = const AnnotationToggleButton();
+    Widget annotate = const Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [AnnotationToggleButton(), ZoomIndicator()],
+    );
     if (buttonsReveal != null) {
       annotate = FadeTransition(opacity: buttonsReveal, child: annotate);
     }
@@ -117,6 +123,7 @@ class WindowTitleBar extends StatelessWidget {
     Widget buttons = const Row(
       mainAxisSize: MainAxisSize.min,
       children: [
+        ZoomIndicator(),
         AnnotationToggleButton(),
         SizedBox(width: 4),
         _MinimizeButton(),
@@ -141,6 +148,57 @@ class WindowTitleBar extends StatelessWidget {
           const Expanded(child: DragToMoveArea(child: SizedBox.expand())),
           buttons,
         ],
+      ),
+    );
+  }
+}
+
+/// Browser-style zoom readout, shown only while the interface scale is not
+/// 100%. It lives in the title bar because the title bar is the one surface
+/// OUTSIDE the scale transform: whatever the user has done to the interface,
+/// this stays legible, on screen, and one click from 100%. Without it the
+/// only way back is a shortcut you have to already know.
+class ZoomIndicator extends ConsumerWidget {
+  const ZoomIndicator({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final scale = ref.watch(uiScaleProvider);
+    if ((scale - kUiScaleDefault).abs() < 0.001) return const SizedBox.shrink();
+    final hollow = HollowTheme.of(context);
+    // No HollowTooltip here: the title bar sits ABOVE the Navigator, so it
+    // has no Overlay ancestor to host one. The label carries the meaning.
+    return Padding(
+      padding: const EdgeInsets.only(right: HollowSpacing.xs),
+      child: HollowPressable(
+        semanticLabel:
+            'Interface scale ${scalePercentLabel(scale)}, reset to 100%',
+        onTap: () => ref.read(uiScaleProvider.notifier).reset(),
+        borderRadius: BorderRadius.circular(hollow.radiusSm),
+        padding: const EdgeInsets.symmetric(
+          horizontal: HollowSpacing.xs + 2,
+          vertical: 2,
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(LucideIcons.scaling, size: 12, color: hollow.textSecondary),
+            const SizedBox(width: 4),
+            // Fixed chrome band: cap the label so a large OS text scale
+            // can't grow the 32px bar (the a11y P3 label-cap pattern).
+            MediaQuery.withClampedTextScaling(
+              maxScaleFactor: 1.3,
+              child: Text(
+                scalePercentLabel(scale),
+                style: HollowTypography.caption.copyWith(
+                  color: hollow.textSecondary,
+                  fontSize: 11,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }

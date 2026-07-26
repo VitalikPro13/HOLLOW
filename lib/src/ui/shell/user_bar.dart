@@ -1,4 +1,5 @@
 ﻿import 'package:flutter/material.dart';
+import 'package:hollow/src/ui/components/overlay_anchor.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/connection_status_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
@@ -150,8 +151,7 @@ class UserBar extends ConsumerWidget {
                 borderRadius: BorderRadius.circular(hollow.radiusSm),
                 onTap: () {
                   if (localPeerId != null) {
-                    final box = context.findRenderObject() as RenderBox?;
-                    final pos = box?.localToGlobal(Offset.zero) ?? Offset.zero;
+                    final pos = overlayAnchorOf(context);
                     // Show card with bottom edge just above the user bar
                     showProfileCardPopup(
                       context: context,

@@ -10,6 +10,7 @@ import 'package:hollow/src/core/providers/theme_provider.dart';
 import 'package:hollow/src/theme/hollow_colors.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_theme_data.dart';
+import 'package:hollow/src/ui/components/ui_scale.dart';
 import 'package:hollow/src/ui/dialogs/incoming_call_dialog.dart';
 import 'package:hollow/src/ui/mobile/call_proximity_controller.dart';
 import 'package:hollow/src/ui/shell/hollow_shell.dart';
@@ -71,8 +72,14 @@ class HollowApp extends ConsumerWidget {
         // would otherwise linger. Demote focus on any pointer-down WHILE rings
         // are showing; text fields re-acquire focus on their own tap-up (which
         // fires after this), so tapping into an input still works.
-        child = _PointerFocusDismisser(child: child ?? const SizedBox.shrink());
+        final Widget body =
+            _PointerFocusDismisser(child: child ?? const SizedBox.shrink());
 
+        // Interface scale (issue #20) wraps everything the user thinks of as
+        // "the app" — text, icons and spacing zoom together. On desktop the
+        // 32px title bar deliberately stays at OS size, the way browser
+        // chrome does not zoom with the page: on macOS it is aligned to the
+        // native traffic lights, which the OS draws at a fixed offset.
         if (isDesktop) {
           return Material(
             type: MaterialType.transparency,
@@ -84,7 +91,7 @@ class HollowApp extends ConsumerWidget {
                     if (!annotation) const WindowTitleBar(),
                     Expanded(
                       child: ClipRect(
-                        child: child,
+                        child: UiScale(child: body),
                       ),
                     ),
                   ],
@@ -103,15 +110,17 @@ class HollowApp extends ConsumerWidget {
         return MediaQuery.withClampedTextScaling(
           minScaleFactor: 0.8,
           maxScaleFactor: 2.0,
-          child: Stack(
-            children: [
-              child,
-              const IncomingCallOverlay(),
-              // Global earpiece proximity (mobile): blanks the screen on
-              // ear-hold for any active call, not just while the call sheet
-              // is visible. Pure side-effect, renders nothing.
-              const CallProximityController(),
-            ],
+          child: UiScale(
+            child: Stack(
+              children: [
+                body,
+                const IncomingCallOverlay(),
+                // Global earpiece proximity (mobile): blanks the screen on
+                // ear-hold for any active call, not just while the call sheet
+                // is visible. Pure side-effect, renders nothing.
+                const CallProximityController(),
+              ],
+            ),
           ),
         );
       },

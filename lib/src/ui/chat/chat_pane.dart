@@ -2,6 +2,7 @@
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:hollow/src/ui/components/overlay_anchor.dart';
 import 'package:flutter/services.dart';
 import 'package:hollow/src/ui/chat/chat_drop_zone.dart';
 import 'package:hollow/src/ui/chat/chat_input_shortcuts.dart';
@@ -1491,7 +1492,9 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
   /// insert the selection (Unicode emoji or emote token) at the cursor.
   void _openComposerEmojiPicker(BuildContext btnCtx) {
     final box = btnCtx.findRenderObject() as RenderBox?;
-    final anchor = box?.localToGlobal(Offset(box.size.width, 0)) ?? Offset.zero;
+    final anchor = box == null
+        ? Offset.zero
+        : overlayAnchorOf(btnCtx, localOffset: Offset(box.size.width, 0));
     showEmojiPicker(
       context: context,
       anchorPosition: anchor,
@@ -2431,7 +2434,8 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
     });
   }
 
-  void _showVolumePopup(BuildContext context, Offset position) {
+  void _showVolumePopup(BuildContext context, Offset globalPosition) {
+    final position = overlayPositionOf(context, globalPosition);
     final hollow = HollowTheme.of(context);
     final overlay = Overlay.of(context);
     OverlayEntry? entry;

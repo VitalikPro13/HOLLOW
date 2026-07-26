@@ -1,4 +1,5 @@
 ﻿import 'package:flutter/material.dart';
+import 'package:hollow/src/ui/components/overlay_anchor.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/channel_chat_provider.dart';
@@ -504,7 +505,8 @@ class _GuestServerSection extends ConsumerWidget {
     );
   }
 
-  void _showContextMenu(BuildContext context, Offset position) {
+  void _showContextMenu(BuildContext context, Offset globalPosition) {
+    final position = overlayPositionOf(context, globalPosition);
     final hollow = HollowTheme.of(context);
     showDialog<void>(
       context: context,

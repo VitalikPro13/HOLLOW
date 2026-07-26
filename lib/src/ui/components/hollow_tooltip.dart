@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:hollow/src/ui/components/overlay_anchor.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
@@ -93,7 +94,7 @@ class _HollowTooltipState extends State<HollowTooltip>
 
     final renderBox = context.findRenderObject() as RenderBox;
     final size = renderBox.size;
-    final position = renderBox.localToGlobal(Offset.zero);
+    final position = overlayAnchorOf(context);
 
     _entry = OverlayEntry(
       builder: (context) {

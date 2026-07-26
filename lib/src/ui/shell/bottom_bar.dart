@@ -1,4 +1,5 @@
 ﻿import 'package:flutter/material.dart';
+import 'package:hollow/src/ui/components/overlay_anchor.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/color_utils.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
@@ -106,9 +107,7 @@ class _BottomBarState extends ConsumerState<BottomBar> {
             child: HollowPressable(
               onTap: () {
                 if (localPeerId != null) {
-                  final box = context.findRenderObject() as RenderBox?;
-                  final pos =
-                      box?.localToGlobal(Offset.zero) ?? Offset.zero;
+                  final pos = overlayAnchorOf(context);
                   showProfileCardPopup(
                     context: context,
                     ref: ref,
@@ -735,7 +734,7 @@ class _BottomBarState extends ConsumerState<BottomBar> {
                 onTap: () {
                   final box = context.findRenderObject() as RenderBox?;
                   if (box == null) return;
-                  final pos = box.localToGlobal(Offset.zero);
+                  final pos = overlayAnchorOf(context);
                   showServerFolderPopup(
                     context: context,
                     ref: ref,

@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:hollow/src/ui/components/overlay_anchor.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
@@ -55,8 +56,7 @@ void showChatProfile(
     return;
   }
 
-  final box = context.findRenderObject() as RenderBox?;
-  final pos = box?.localToGlobal(Offset.zero) ?? Offset.zero;
+  final pos = overlayAnchorOf(context);
   // Anchor just below the tapped name/avatar.
   showProfileCardPopup(
     context: context,

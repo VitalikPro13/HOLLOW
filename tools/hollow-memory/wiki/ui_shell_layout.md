@@ -281,6 +281,11 @@ Registered globally on `HardwareKeyboard.instance` (not focus-dependent). Regist
 | `Ctrl+Shift+\` | Toggle split view (dock mode only) |
 | `Ctrl+1` | Focus left pane (split view only) |
 | `Ctrl+2` | Focus right pane (split view only) |
+| `Ctrl+=` / `Ctrl++` | Interface zoom in (5% step, `uiScaleProvider.nudge(1)`) |
+| `Ctrl+-` | Interface zoom out |
+| `Ctrl+0` | Reset interface zoom to 100% |
+
+The zoom trio ignores Shift on `+`/`-` (on most layouts `+` IS Shift+`=`) and accepts the numpad variants. It is registered here, on `HardwareKeyboard`, precisely so it still works when the user has zoomed the on-screen controls out of reach.
 
 ## Chat Area Content Resolution
 
@@ -326,8 +331,8 @@ MaterialApp(
             type: MaterialType.transparency,
             child: Column(
               children: [
-                const WindowTitleBar(),
-                Expanded(child: ClipRect(child: child)),
+                if (!annotation) const WindowTitleBar(),
+                Expanded(child: ClipRect(child: UiScale(child: child))),
               ],
             ),
           )
@@ -337,6 +342,8 @@ MaterialApp(
 
 The `ClipRect` around the navigator child prevents `BackdropFilter` blur from dialogs from bleeding up into the title bar area.
 
+`UiScale` (interface zoom, issue #20) wraps the navigator child but NOT the title bar — browser-chrome model, and on macOS the bar is aligned to OS-drawn traffic lights at a fixed offset. Two consequences worth knowing: (1) `UiScaleBox` must measure its own slot via `LayoutBuilder`, never `MediaQuery.size`, because its slot is 32px shorter than the window — sizing from the window pushed exactly the bottom dock off screen at every scale but 1.0; (2) below the transform, window coordinates are NOT overlay coordinates, so popup anchors go through `overlay_anchor.dart`. See `project_display_scaling`.
+
 **WindowTitleBar widget** (`lib/src/ui/shell/window_title_bar.dart`): 32px tall container with `hollow.opaqueBackground` color. Layout: `[Hollow branding] [DragToMoveArea ────] [─] [□] [✕]`. The branding and buttons have their own startup reveal intervals (0.0-0.15 for branding, 0.08-0.20 for buttons).
 
 Widget classes in window_title_bar.dart:
@@ -345,6 +352,7 @@ Widget classes in window_title_bar.dart:
 - **`_MinimizeButton`** — calls `windowManager.minimize()`.
 - **`_MaximizeButton`** — StatefulWidget with `WindowListener` mixin. Tracks maximized state, shows square or columns icon, toggles between `windowManager.maximize()` and `unmaximize()`.
 - **`_CloseButton`** — calls `windowManager.close()`. Hover color is red (#E81123).
+- **`ZoomIndicator`** — browser-style zoom readout, rendered only while `uiScaleProvider != 1.0`; shows e.g. "125%" and resets to 100% on tap. It lives here because the title bar is the one surface OUTSIDE the scale transform, so no zoom can put it out of reach. **It deliberately carries no `HollowTooltip`:** the title bar sits ABOVE the Navigator and therefore has no `Overlay` ancestor — `Overlay.of` there would throw. Same reason `_WindowButton` rolls its own hover instead of using a tooltip.
 
 ## HollowApp — Theme and Background Transparency
 
