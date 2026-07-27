@@ -2,7 +2,6 @@
 import 'package:hollow/src/ui/components/overlay_anchor.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/connection_status_provider.dart';
-import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/room_budget_provider.dart';
@@ -11,6 +10,7 @@ import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
+import 'package:hollow/src/ui/components/connection_visual.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
@@ -40,75 +40,49 @@ class UserBar extends ConsumerWidget {
         ? displayNameForPeer(localProfile, localPeerId)
         : '---';
 
-    // Derive status: mirror channel pane when a server is selected.
-    String statusText;
-    Color statusColor;
-    bool statusPulse;
+    // MY connection state — the same source of truth the Dock bar uses, so the
+    // indicator reads identically in both layouts. It is never derived from
+    // whether OTHER people happen to be online: sitting alone in your own
+    // server is still "Online".
+    final amInvisible = ref.watch(invisibleModeProvider);
+    final overall = ref.watch(overallConnectionProvider);
+    var visual = connectionVisual(hollow, overall, invisible: amInvisible);
 
-    final amInvisible =
-        ref.watch(invisibleModeProvider);
-
-    if (amInvisible) {
-      statusText = 'Invisible';
-      statusColor = hollow.textSecondary;
-      statusPulse = false;
-    } else if (selectedServerId != null) {
-      final syncStatus =
-          ref.watch(serverSyncStatusProvider(selectedServerId));
-      // Multi-device: count members online via ANY of their devices.
-      final onlineIdentities = ref.watch(onlineIdentitiesProvider);
-      final membersAsync =
-          ref.watch(serverMembersProvider(selectedServerId));
-      final onlineCount = membersAsync.when(
-        data: (members) => members
-            .where((m) =>
-                m.peerId != localPeerId &&
-                onlineIdentities.contains(m.peerId))
-            .length,
-        loading: () => 0,
-        error: (_, _) => 0,
-      );
-
-      final effectiveStatus = syncStatus == ServerSyncStatus.idle &&
-              onlineCount == 0
-          ? ServerSyncStatus.connecting
-          : syncStatus;
-
-      switch (effectiveStatus) {
-        case ServerSyncStatus.connecting:
-          statusText = 'Connecting...';
-          statusColor = hollow.textSecondary;
-          statusPulse = true;
-        case ServerSyncStatus.syncing:
-          statusText = 'Syncing...';
-          statusColor = hollow.accentText;
-          statusPulse = true;
-        case ServerSyncStatus.synced:
-        case ServerSyncStatus.idle:
-          statusText = 'Online';
-          statusColor = hollow.success;
-          statusPulse = true;
-        case ServerSyncStatus.retrying:
-          statusText = 'Retrying...';
-          statusColor = hollow.warning;
-          statusPulse = true;
-        case ServerSyncStatus.failed:
-          statusText = 'Sync failed';
-          statusColor = hollow.error;
-          statusPulse = false;
-      }
-    } else {
-      // No server selected — show the REAL relay connection state (node started
-      // + relay WS connected), not just "the local node booted".
-      final overall = ref.watch(overallConnectionProvider);
-      statusText = overall == OverallConnection.connected ? 'Online' : overall.label;
-      statusColor = switch (overall) {
-        OverallConnection.connected => hollow.success,
-        OverallConnection.offline || OverallConnection.error => hollow.warning,
-        _ => hollow.textSecondary,
+    // Connected + a server open: the sync pipeline for THAT server is the more
+    // specific thing to report (it only ever refines "Online", never contradicts
+    // it — a stalled sync can't mean "not connected").
+    if (!amInvisible && overall.isOnline && selectedServerId != null) {
+      final syncStatus = ref.watch(serverSyncStatusProvider(selectedServerId));
+      visual = switch (syncStatus) {
+        ServerSyncStatus.syncing => ConnectionVisual(
+            label: 'Syncing...',
+            color: hollow.accentText,
+            pulse: true,
+            filled: false,
+          ),
+        ServerSyncStatus.retrying => ConnectionVisual(
+            label: 'Retrying...',
+            color: hollow.warning,
+            pulse: true,
+            filled: false,
+          ),
+        ServerSyncStatus.failed => ConnectionVisual(
+            label: 'Sync failed',
+            color: hollow.error,
+            pulse: false,
+            filled: false,
+          ),
+        ServerSyncStatus.idle ||
+        ServerSyncStatus.synced ||
+        ServerSyncStatus.connecting =>
+          visual,
       };
-      statusPulse = overall.isOnline;
     }
+
+    final statusText = visual.label;
+    final statusColor = visual.color;
+    final statusPulse = visual.pulse;
+    final statusFilled = visual.filled;
 
     final roomBudget = ref.watch(roomBudgetProvider);
 
@@ -194,9 +168,11 @@ class UserBar extends ConsumerWidget {
                           color: statusColor,
                           size: 7,
                           pulse: statusPulse,
-                          // Non-pulsing states (sync failed/offline) read as a
-                          // hollow ring — the adjacent status word labels it.
-                          filled: statusPulse,
+                          // Shape cue: only a settled "Online" is a solid disc.
+                          // Everything else is a hollow ring — the adjacent
+                          // status word labels it.
+                          filled: statusFilled,
+                          semanticLabel: statusText,
                         ),
                         const SizedBox(width: HollowSpacing.xs),
                         Text(

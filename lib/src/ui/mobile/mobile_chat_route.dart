@@ -14,6 +14,7 @@ import 'package:hollow/src/core/models/chat_message.dart';
 import 'package:hollow/src/core/models/file_attachment.dart';
 import 'package:hollow/src/core/moderation_format.dart';
 import 'package:hollow/src/core/providers/chat_provider.dart';
+import 'package:hollow/src/core/providers/connection_status_provider.dart';
 import 'package:hollow/src/core/providers/channel_chat_provider.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
 import 'package:hollow/src/core/providers/local_nickname_provider.dart';
@@ -2962,6 +2963,8 @@ class _MobileChannelStatus extends ConsumerWidget {
     final online = ref.watch(onlineIdentitiesProvider);
     final membersAsync = ref.watch(serverMembersProvider(serverId));
     final localPeerId = ref.watch(identityProvider).peerId;
+    // Same rule as desktop: "Offline" describes OUR link, never an empty room.
+    final amOnline = ref.watch(overallConnectionProvider).isOnline;
 
     return membersAsync.when(
       data: (members) {
@@ -2970,12 +2973,14 @@ class _MobileChannelStatus extends ConsumerWidget {
         final isCustomRelay =
             ref.watch(relayDomainProvider) != kDefaultRelayDomain;
         final ConnectionStage stage;
-        if (anyOnline) {
+        if (!amOnline) {
+          stage = ConnectionStage.offline;
+        } else if (anyOnline) {
           stage = ConnectionStage.encrypted;
         } else if (isCustomRelay) {
           stage = ConnectionStage.customNetwork;
         } else {
-          stage = ConnectionStage.offline;
+          stage = ConnectionStage.alone;
         }
         return ConnectionProgress(
           key: ValueKey('mob-chan-conn-$serverId-${stage.index}'),

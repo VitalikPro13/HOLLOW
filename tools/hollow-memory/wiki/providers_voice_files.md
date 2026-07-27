@@ -90,8 +90,9 @@ The `VoiceChannelNotifier` holds significant mutable state beyond the immutable 
 
 **`onLocalJoined(serverId, channelId)`**
 Called by event_provider after the Rust event arrives. This is the real initialization:
+0. **Takes a join generation** (`final gen = ++_joinGen;`). Everything below is awaited, and the user can leave or hop channels straight through it — `_joinSuperseded(gen, svc)` is re-checked before `startAudio`, after it, and between per-peer dials, returning early when this run no longer owns the call. Both `leaveChannel()` and `_teardownCall()` bump `_joinGen`. See memory `feedback_voice_join_generation_guard`.
 1. Updates state with `currentServerId`, `currentChannelId`, `isMuted: false`, `isDeafened: false`, `joinedAt: DateTime.now()`.
-2. Creates `VoiceChannelService` with local peer ID and ICE config.
+2. Creates `VoiceChannelService` with local peer ID and ICE config, and configures it through a LOCAL `svc` handle — never `_service!`, which a leave landing between two awaits nulls (the 0.8.5 "Null check operator used on a null value" crash).
 3. Loads device preferences from `audioInputDeviceProvider`, `audioOutputDeviceProvider`, `cameraDeviceProvider`.
 4. Loads audio quality preset (bitrate, stereo) from `audioQualityProvider`.
 5. Loads mic gain from `micGainProvider` (default 1.0 = "50%", key `mic_gain_v2`) plus `voiceEnhanceProvider` / `voiceEnhanceStrengthProvider` (→ `enhanceStrengthToMakeupDb`) / `voiceEnhanceDynamicProvider` into the service fields. Adds `ref.listen` on all four for live mid-session updates (`updateMicGain` / `updateVoiceEnhance` / `updateVoiceEnhanceStrength` / `updateVoiceEnhanceDynamic`).
@@ -130,7 +131,7 @@ Called by event_provider on the `VoiceChannelLeft` event for the local peer. Two
 
 **`toggleMute()`** -- flips `isMuted`, calls `_service.setMuted()`, broadcasts audio state to all peers.
 
-**`toggleDeafen()`** -- flips `isDeafened` (which also forces mute), calls `_service.setMuted()` and `_service.setDeafened()`, broadcasts audio state.
+**`toggleDeafen()`** -- flips `isDeafened` (which also forces mute), calls `_service.setMuted()` and `_service.setDeafened()` (fire-and-forget, so it carries its own `.catchError`), broadcasts audio state.
 
 **`setPeerVolume(peerId, volume)`** -- stores in `peerVolumes` map, calls `_service.setRemoteVolume()`.
 

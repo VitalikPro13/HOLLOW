@@ -6,6 +6,7 @@ import 'dart:typed_data';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:hollow/src/core/services/frame_cryptor_service.dart';
 import 'package:hollow/src/core/services/ice_route_probe.dart';
+import 'package:hollow/src/core/services/remote_track_volume.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:record/record.dart' as rec;
 
@@ -774,14 +775,24 @@ class VoiceChannelService {
   }
 
   /// Mute/unmute all incoming remote audio (deafen).
+  ///
+  /// Every peer is handled independently: in a mesh, one connection that can't
+  /// be silenced (closing PC, receiver whose track never carried media and so
+  /// isn't in the native registry) must not abandon the peers after it —
+  /// deafen would silence some voices and leave the rest playing, and the
+  /// throw surfaced as a platform error in the crash log.
   Future<void> setDeafened(bool deafened) async {
     final volume = deafened ? 0.0 : 1.0;
-    for (final pc in _peerConnections.values) {
-      final receivers = await pc.getReceivers();
-      for (final r in receivers) {
-        if (r.track?.kind == 'audio') {
-          await Helper.setVolume(volume, r.track!);
+    for (final entry in _peerConnections.entries) {
+      try {
+        final receivers = await entry.value.getReceivers();
+        for (final r in receivers) {
+          if (r.track?.kind == 'audio') {
+            await setRemoteTrackVolume(volume, r.track!);
+          }
         }
+      } catch (e) {
+        _vcLog('[HOLLOW-VC] Deafen skipped for ${entry.key}: $e');
       }
     }
   }
@@ -892,7 +903,7 @@ class VoiceChannelService {
     final receivers = await pc.getReceivers();
     for (final r in receivers) {
       if (r.track?.kind == 'audio') {
-        await Helper.setVolume(volume, r.track!);
+        await setRemoteTrackVolume(volume, r.track!);
         break;
       }
     }

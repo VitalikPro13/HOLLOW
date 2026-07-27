@@ -146,6 +146,34 @@ class _HollowShellState extends ConsumerState<HollowShell>
   late final Animation<double> _bottomBarReveal;
   late final Animation<double> _dockChatReveal;
 
+  // Responsive member panel: below the desktop breakpoint (a small window, or
+  // a normal one at a high interface scale — the scale transform shrinks the
+  // logical width) the panel auto-collapses, and re-opens itself when there's
+  // room again. `_memberPanelWasOpen` is what the user had before the collapse,
+  // so widening never forces open a panel they closed themselves.
+  bool? _wideEnoughForMembers;
+  bool _memberPanelWasOpen = true;
+
+  /// Collapse/restore the member panel as the shell crosses the breakpoint.
+  /// Only fires ON A CROSSING, so it never fights the header toggle: while
+  /// narrow, the user can still open the panel — it just costs chat width.
+  void _syncMemberPanelToWidth(bool wideEnough) {
+    if (_wideEnoughForMembers == wideEnough) return;
+    _wideEnoughForMembers = wideEnough;
+    // Provider writes never happen during build.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      if (!wideEnough) {
+        _memberPanelWasOpen = ref.read(memberPanelProvider);
+        if (_memberPanelWasOpen) {
+          ref.read(memberPanelProvider.notifier).state = false;
+        }
+      } else if (_memberPanelWasOpen && !ref.read(memberPanelProvider)) {
+        ref.read(memberPanelProvider.notifier).state = true;
+      }
+    });
+  }
+
   /// Subscribe the node to a channel's relay topic so live MLS topic-broadcasts
   /// are delivered (the relay only routes a topic message to subscribed sockets).
   /// Includes any unread channels of the same server so @mentions still arrive
@@ -1594,6 +1622,8 @@ class _HollowShellState extends ConsumerState<HollowShell>
           return const MobileShell();
         }
 
+        _syncMemberPanelToWidth(isDesktop);
+
         final isDesktopPlatform =
             Platform.isWindows || Platform.isLinux || Platform.isMacOS;
 
@@ -1622,7 +1652,6 @@ class _HollowShellState extends ConsumerState<HollowShell>
             hollow: hollow,
             isDesktopPlatform: isDesktopPlatform,
             isDesktop: isDesktop,
-            isMobile: isMobile,
             peers: peers,
             lastMessages: lastMessages,
             selectedPeerId: selectedPeerId,
@@ -1671,7 +1700,6 @@ class _HollowShellState extends ConsumerState<HollowShell>
     required HollowTheme hollow,
     required bool isDesktopPlatform,
     required bool isDesktop,
-    required bool isMobile,
     required Map<String, dynamic> peers,
     required Map<String, ChatMessage> lastMessages,
     required String? selectedPeerId,
@@ -1766,11 +1794,14 @@ class _HollowShellState extends ConsumerState<HollowShell>
                     ),
                   ),
                 ),
-                if (isDesktop || !isMobile)
-                  _MemberPanelSlider(
-                    visible: selectedServerId != null && memberPanelOpen && !vcScreenShareFullBleed,
-                    serverId: selectedServerId,
-                  ),
+                // Docked at every width the desktop shell runs at: a narrow
+                // window auto-collapses it (`_syncMemberPanelToWidth`), and
+                // re-opening it has to PUSH the chat over, never cover it —
+                // an overlay would sit on top of the header's own toggle.
+                _MemberPanelSlider(
+                  visible: selectedServerId != null && memberPanelOpen && !vcScreenShareFullBleed,
+                  serverId: selectedServerId,
+                ),
                 HelpPanelSlider(visible: helpPanelOpen),
               ],
             ),
@@ -1980,8 +2011,11 @@ class _HollowShellState extends ConsumerState<HollowShell>
                   ),
                 ),
 
-                // Member panel — hidden during split view and VC screen share
-                if (isDesktop && !splitState.isSplit)
+                // Member panel — hidden during split view and VC screen share.
+                // Width is no longer gated: below the breakpoint it starts
+                // collapsed (`_syncMemberPanelToWidth`) and re-opening it
+                // pushes the chat over, keeping the header's toggle reachable.
+                if (!splitState.isSplit)
                   _MemberPanelSlider(
                     visible:
                         effectiveServerId != null && memberPanelOpen && !vcScreenShareFullBleed,

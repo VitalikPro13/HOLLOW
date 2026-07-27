@@ -5,7 +5,7 @@ import 'package:hollow/src/core/color_utils.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/core/providers/identity_provider.dart';
-import 'package:hollow/src/core/providers/node_provider.dart';
+import 'package:hollow/src/core/providers/connection_status_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/core/providers/notification_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
@@ -16,11 +16,11 @@ import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/server_strip_layout_provider.dart';
 import 'package:hollow/src/core/providers/split_view_provider.dart';
 import 'package:hollow/src/core/providers/unread_provider.dart';
-import 'package:hollow/src/core/models/node_status.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
+import 'package:hollow/src/ui/components/connection_visual.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
@@ -58,7 +58,6 @@ class _BottomBarState extends ConsumerState<BottomBar> {
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
     final identity = ref.watch(identityProvider);
-    final nodeState = ref.watch(nodeProvider);
     final servers = ref.watch(serverListProvider);
     final selectedServerId = ref.watch(selectedServerProvider);
     final notifSettings = ref.watch(notificationSettingsProvider);
@@ -72,15 +71,16 @@ class _BottomBarState extends ConsumerState<BottomBar> {
     final myDisplayName =
         localPeerId != null ? displayNameForPeer(localProfile, localPeerId) : '---';
 
-    // Node status for user panel dot.
+    // Connection dot — the REAL node+relay state, shared with the Classic user
+    // bar so the two layouts can never disagree. The local node status alone
+    // goes "connected" the instant it boots, internet or not.
     final amInvisible =
         ref.watch(invisibleModeProvider);
-    final statusColor = amInvisible
-        ? hollow.textSecondary
-        : _statusColor(hollow, nodeState.status);
-    final statusPulse = amInvisible
-        ? false
-        : nodeState.status == NodeStatus.connected;
+    final visual = connectionVisual(
+      hollow,
+      ref.watch(overallConnectionProvider),
+      invisible: amInvisible,
+    );
 
     // DM unread count for Home button (pre-computed, notification-filtered).
     final dmUnreadTotal = ref.watch(dmUnreadBadgeProvider);
@@ -102,71 +102,77 @@ class _BottomBarState extends ConsumerState<BottomBar> {
         crossAxisAlignment: CrossAxisAlignment.center,
         children: [
           // ── Left: Compact User Panel ──
+          // The dot is the only status surface here (no room for a word), so
+          // the tooltip carries the label the Classic user bar prints.
           SizedBox(
             width: 140,
-            child: HollowPressable(
-              onTap: () {
-                if (localPeerId != null) {
-                  final pos = overlayAnchorOf(context);
-                  showProfileCardPopup(
-                    context: context,
-                    ref: ref,
-                    peerId: localPeerId,
-                    anchor: Offset(pos.dx + 8, pos.dy - 8),
-                    anchorBottom: true,
-                  );
-                }
-              },
-              borderRadius: BorderRadius.zero,
-              padding: const EdgeInsets.symmetric(
-                horizontal: HollowSpacing.md,
-              ),
-              child: Row(
-                children: [
-                  if (localPeerId != null)
-                    HollowAvatar(peerId: localPeerId, size: 28)
-                  else
-                    Container(
-                      width: 28,
-                      height: 28,
-                      decoration: BoxDecoration(
-                        color: hollow.elevated,
-                        borderRadius:
-                            BorderRadius.circular(hollow.radiusMd),
-                      ),
-                    ),
-                  const SizedBox(width: HollowSpacing.sm),
-                  Expanded(
-                    child: Row(
-                      children: [
-                        StatusDot(
-                          color: statusColor,
-                          size: 7,
-                          pulse: statusPulse,
-                          filled: statusPulse,
+            child: HollowTooltip(
+              message: visual.label,
+              child: HollowPressable(
+                onTap: () {
+                  if (localPeerId != null) {
+                    final pos = overlayAnchorOf(context);
+                    showProfileCardPopup(
+                      context: context,
+                      ref: ref,
+                      peerId: localPeerId,
+                      anchor: Offset(pos.dx + 8, pos.dy - 8),
+                      anchorBottom: true,
+                    );
+                  }
+                },
+                borderRadius: BorderRadius.zero,
+                padding: const EdgeInsets.symmetric(
+                  horizontal: HollowSpacing.md,
+                ),
+                child: Row(
+                  children: [
+                    if (localPeerId != null)
+                      HollowAvatar(peerId: localPeerId, size: 28)
+                    else
+                      Container(
+                        width: 28,
+                        height: 28,
+                        decoration: BoxDecoration(
+                          color: hollow.elevated,
+                          borderRadius:
+                              BorderRadius.circular(hollow.radiusMd),
                         ),
-                        const SizedBox(width: 4),
-                        Expanded(
-                          // a11y Phase 3: fixed-height dock chrome — cap the
-                          // label scale (tab-bar norm) so it stays in the bar.
-                          child: MediaQuery.withClampedTextScaling(
-                            maxScaleFactor: 1.3,
-                            child: Text(
-                              myDisplayName,
-                              style: HollowTypography.caption.copyWith(
-                                color: hollow.textPrimary,
-                                fontWeight: FontWeight.w600,
-                                fontSize: 12,
+                      ),
+                    const SizedBox(width: HollowSpacing.sm),
+                    Expanded(
+                      child: Row(
+                        children: [
+                          StatusDot(
+                            color: visual.color,
+                            size: 7,
+                            pulse: visual.pulse,
+                            filled: visual.filled,
+                            semanticLabel: visual.label,
+                          ),
+                          const SizedBox(width: 4),
+                          Expanded(
+                            // a11y Phase 3: fixed-height dock chrome — cap the
+                            // label scale (tab-bar norm) so it stays in the bar.
+                            child: MediaQuery.withClampedTextScaling(
+                              maxScaleFactor: 1.3,
+                              child: Text(
+                                myDisplayName,
+                                style: HollowTypography.caption.copyWith(
+                                  color: hollow.textPrimary,
+                                  fontWeight: FontWeight.w600,
+                                  fontSize: 12,
+                                ),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
                               ),
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
                             ),
                           ),
-                        ),
-                      ],
+                        ],
+                      ),
                     ),
-                  ),
-                ],
+                  ],
+                ),
               ),
             ),
           ),
@@ -759,15 +765,6 @@ class _BottomBarState extends ConsumerState<BottomBar> {
         );
       },
     );
-  }
-
-  Color _statusColor(HollowTheme hollow, NodeStatus status) {
-    return switch (status) {
-      NodeStatus.connected => hollow.success,
-      NodeStatus.starting => hollow.warning,
-      NodeStatus.loading => hollow.textSecondary,
-      NodeStatus.error => hollow.error,
-    };
   }
 }
 

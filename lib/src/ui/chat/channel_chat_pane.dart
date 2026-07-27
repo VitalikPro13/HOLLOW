@@ -14,6 +14,7 @@ import 'package:hollow/src/core/providers/channel_provider.dart';
 import 'package:hollow/src/core/providers/blocked_users_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/chat_provider.dart' show generateMessageId;
+import 'package:hollow/src/core/providers/connection_status_provider.dart';
 import 'package:hollow/src/core/providers/download_manager_provider.dart';
 import 'package:hollow/src/core/providers/file_transfer_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
@@ -1542,6 +1543,12 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
   }
 
   /// Channel header: name, badges, connection status, and pane actions.
+  ///
+  /// Opening the member panel in a narrow window (or at a high interface
+  /// scale) can leave this header only a couple hundred pixels. It sheds its
+  /// non-controls first — the status pill, then the split toggle — because the
+  /// buttons are the only way back out: losing the members toggle behind an
+  /// overflow would strand the panel open.
   Widget _buildHeader(HollowTheme hollow) {
     return Container(
       padding: const EdgeInsets.symmetric(
@@ -1552,7 +1559,11 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
         color: hollow.surface,
         border: Border(bottom: BorderSide(color: hollow.border)),
       ),
-      child: Row(
+      child: LayoutBuilder(builder: (context, constraints) {
+        final width = constraints.maxWidth;
+        final showStatus = width >= 280;
+        final showSplit = width >= 200;
+        return Row(
         children: [
           Icon(_isConference ? LucideIcons.video : LucideIcons.hash,
               size: 20, color: hollow.textSecondary),
@@ -1597,11 +1608,13 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
             const SizedBox(width: HollowSpacing.sm),
             const _NsfwBadge(),
           ],
-          const SizedBox(width: HollowSpacing.md),
-          _ChannelConnectionStatus(
-            serverId: widget.serverId,
-            channelId: widget.channelId,
-          ),
+          if (showStatus) ...[
+            const SizedBox(width: HollowSpacing.md),
+            _ChannelConnectionStatus(
+              serverId: widget.serverId,
+              channelId: widget.channelId,
+            ),
+          ],
           _buildPinnedHeaderButton(hollow),
           const SizedBox(width: HollowSpacing.sm),
           _buildSearchToggleButton(hollow),
@@ -1628,14 +1641,16 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
             ),
           ],
           // Split view toggle (dock mode only)
-          if (!_isConference &&
+          if (showSplit &&
+              !_isConference &&
               (ref.watch(layoutModeProvider).valueOrNull ?? LayoutMode.dock) ==
                   LayoutMode.dock) ...[
             const SizedBox(width: HollowSpacing.sm),
             _buildSplitToggleButton(hollow),
           ],
         ],
-      ),
+        );
+      }),
     );
   }
 
@@ -2675,26 +2690,27 @@ class _ChannelConnectionStatus extends ConsumerWidget {
     final online = ref.watch(onlineIdentitiesProvider);
     final membersAsync = ref.watch(serverMembersProvider(serverId));
     final localPeerId = ref.watch(identityProvider).peerId;
+    // "Offline" is about US, not about the room being empty (issue #23): while
+    // the relay link is up this header must never claim we're offline just
+    // because we're the only one here.
+    final amOnline = ref.watch(overallConnectionProvider).isOnline;
+    final isCustomRelay =
+        ref.watch(relayDomainProvider) != kDefaultRelayDomain;
+
+    ConnectionStage stageFor(bool anyOnline) {
+      if (!amOnline) return ConnectionStage.offline;
+      // With MLS, online members in a WS room are already encrypted (MLS group
+      // broadcast).
+      if (anyOnline) return ConnectionStage.encrypted;
+      if (isCustomRelay) return ConnectionStage.customNetwork;
+      return ConnectionStage.alone;
+    }
 
     return membersAsync.when(
       data: (members) {
-        final otherMembers =
-            members.where((m) => m.peerId != localPeerId).toList();
-
-        final onlineMembers = otherMembers
-            .where((m) => online.contains(m.peerId))
-            .toList();
-
-        // With MLS, online members in a WS room are already encrypted (MLS group broadcast).
-        final isCustomRelay = ref.watch(relayDomainProvider) != kDefaultRelayDomain;
-        final ConnectionStage stage;
-        if (onlineMembers.isNotEmpty) {
-          stage = ConnectionStage.encrypted;
-        } else if (isCustomRelay) {
-          stage = ConnectionStage.customNetwork;
-        } else {
-          stage = ConnectionStage.offline;
-        }
+        final anyOnline = members
+            .any((m) => m.peerId != localPeerId && online.contains(m.peerId));
+        final stage = stageFor(anyOnline);
 
         return Row(
           mainAxisSize: MainAxisSize.min,
@@ -2711,9 +2727,10 @@ class _ChannelConnectionStatus extends ConsumerWidget {
           ],
         );
       },
+      // Members not loaded yet — report our own link, which we already know.
       loading: () => ConnectionProgress(
         key: ValueKey('conn-$serverId'),
-        stage: ConnectionStage.offline,
+        stage: stageFor(false),
       ),
       error: (_, _) => const SizedBox.shrink(),
     );

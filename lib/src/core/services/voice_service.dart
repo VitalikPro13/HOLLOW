@@ -8,6 +8,7 @@ import 'package:flutter_webrtc/flutter_webrtc.dart';
 import '../../rust/api/network.dart' as network_api;
 import 'frame_cryptor_service.dart';
 import 'ice_route_probe.dart';
+import 'remote_track_volume.dart';
 
 /// Log to hollow_debug.log (visible in release builds).
 void _log(String msg) {
@@ -518,7 +519,7 @@ class VoiceService {
     final receivers = await _pc!.getReceivers();
     for (final r in receivers) {
       if (r.track?.kind == 'audio') {
-        await Helper.setVolume(volume, r.track!);
+        await setRemoteTrackVolume(volume, r.track!);
         _log('[HOLLOW-VOICE] Remote audio volume set to '
             '${volume.toStringAsFixed(2)}');
         break;

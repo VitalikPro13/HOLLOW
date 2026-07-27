@@ -1222,6 +1222,11 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     return ConnectionProgress(
       key: ValueKey('dm-conn-${widget.peerId}-${stage.index}'),
       stage: stage,
+      // In a DM header the stage describes THE OTHER PERSON, not our own relay
+      // link — say so, so it can't be read as "you are offline".
+      tooltip: stage == ConnectionStage.offline
+          ? "This person isn't reachable right now"
+          : null,
     );
   }
 

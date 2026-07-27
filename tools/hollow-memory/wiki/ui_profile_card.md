@@ -66,43 +66,34 @@ role renders as a chip like every other role (consistency rule).
 
 ### Providers Read
 - `identityProvider` — local peer ID + mnemonic
-- `nodeProvider` — node-level connection status (`NodeStatus`)
+- `overallConnectionProvider` — node + real relay-WS state; the ONLY source of the connection reading
 - `selectedServerProvider` — currently selected server (for server-specific sync status)
 - `profileProvider` — all user profiles (for local user display name and avatar)
 - `invisibleModeProvider` — whether local user is invisible
 - `serverSyncStatusProvider(serverId)` (conditional) — per-server sync status
-- `peersProvider` (conditional) — connected peers count
-- `serverMembersProvider(serverId)` (conditional) — server member list for online count
 - `roomBudgetProvider` — relay room budget usage
 
 ## Status Derivation Logic
 
-The UserBar derives `statusText`, `statusColor`, and `statusPulse` through a three-tier priority:
+Rewritten 2026-07-27 for GitHub issue #23. The bar used to read `nodeProvider` when no server was selected and, when one WAS, to synthesise `Connecting...` from `syncStatus == idle && onlineCount == 0` — so an empty server of your own read as a dropped connection, and the Dock bar (which read `nodeProvider.status`) disagreed with this one. Both bars now render from ONE helper.
 
-### Tier 1: Invisible Mode
-If `amInvisible` is true:
-- Text: "Invisible"
-- Color: `hollow.textSecondary`
-- Pulse: false
+`connectionVisual(hollow, OverallConnection, {invisible})` in `ui/components/connection_visual.dart` returns a `ConnectionVisual(label, color, pulse, filled)`:
+- `connected` -> "Online", `success`, pulse, FILLED
+- `connecting` / `reconnecting` / `loading` -> `OverallConnection.label`, `textSecondary`, pulse, hollow ring
+- `offline` / `error` -> `.label`, `warning`, no pulse, hollow ring
+- `invisible: true` -> "Invisible", `textSecondary`, no pulse, hollow ring (wins over everything)
 
-### Tier 2: Server Selected
-When `selectedServerId != null`, reads `serverSyncStatusProvider(selectedServerId)` and computes `onlineCount` (members that are connected peers, excluding local user).
+Shape is the non-color cue: only a settled "connected" is a solid dot. `filled` is now independent of `pulse` (they used to be the same flag).
 
-Applies an adjustment: if `syncStatus == idle` and `onlineCount == 0`, overrides effective status to `connecting` (no peers means still finding the server).
+**Refinement tier (UserBar only).** When the reading is already online, not invisible, and a server is selected, `serverSyncStatusProvider` may REFINE it — never contradict it:
+- `syncing` -> "Syncing...", `accentText`, pulse, ring
+- `retrying` -> "Retrying...", `warning`, pulse, ring
+- `failed` -> "Sync failed", `error`, no pulse, ring
+- `idle` / `synced` / `connecting` -> keep "Online"
 
-Status mapping:
-- `connecting` -> "Connecting...", `textSecondary`, pulse
-- `syncing` -> "Syncing...", `accent`, pulse
-- `synced` / `idle` -> "Online", `success`, pulse
-- `retrying` -> "Retrying...", `warning`, pulse
-- `failed` -> "Sync failed", `error`, no pulse
+(`ServerSyncStatus.connecting` has no producer anywhere in the codebase — the deleted `onlineCount` mapping was its only one.)
 
-### Tier 3: No Server Selected
-Falls back to node-level `NodeStatus`:
-- `connected` -> "Online", `success`, pulse
-- `starting` -> "Connecting...", `warning`, no pulse
-- `loading` -> "Loading...", `textSecondary`, no pulse
-- `error` -> "Error", `error`, no pulse
+The `BottomBar` (Dock) user chip uses the same helper for its `StatusDot` and carries `visual.label` in a `HollowTooltip`, since it has no room for the word. `test/connection_visual_test.dart` pins the mapping.
 
 ## Layout Structure
 

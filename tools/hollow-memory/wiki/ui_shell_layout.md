@@ -119,6 +119,8 @@ In `build()`, a `LayoutBuilder` checks `constraints.maxWidth`:
 - **width >= 600 and < 1024** → Tablet (uses dock or classic, with `isDesktop = false`)
 - **width >= 1024** → Desktop (uses dock or classic, with `isDesktop = true`)
 
+**This width is the SCALED width.** The shell sits under `UiScale`'s transform, so it is laid out at `windowSize / interfaceScale` — 1280px at 1.35x is 948 and already under the desktop breakpoint. Raising the zoom crosses these breakpoints exactly like shrinking the window.
+
 For non-mobile, the `layoutModeProvider` value determines which layout method is called:
 - `LayoutMode.dock` → `_buildDockLayout()`
 - `LayoutMode.classic` → `_buildClassicLayout()`
@@ -152,7 +154,7 @@ StartupRevealScope
           ├── Expanded: chat area
           │   └── _chatRevealWrap → RepaintBoundary → AmbientBackground → AnimatedSwitcher → Container
           │       └── ServerSettingsPanel OR _buildChatOrEmpty()
-          └── _MemberPanelSlider (if desktop or tablet, conditional on server selected + panel open + no VC full-bleed)
+          └── _MemberPanelSlider (conditional on server selected + panel open + no VC full-bleed)
 ```
 
 **Voice channel full-bleed detection:** When the selected channel is a voice channel AND the user is in that channel AND screen share or camera is active, the member panel is hidden (`vcScreenShareFullBleed = true`). This gives the video content maximum width.
@@ -173,7 +175,7 @@ StartupRevealScope
       │   ├── Expanded: chat area
       │   │   └── FadeTransition(_dockChatReveal) → AnimatedSwitcher
       │   │       └── _SplitChatArea OR single-pane (RepaintBoundary → AmbientBackground → AnimatedSwitcher → Container)
-      │   └── _MemberPanelSlider (if desktop AND not in split view AND not VC full-bleed)
+      │   └── _MemberPanelSlider (if not in split view; + server selected, panel open, not VC full-bleed)
       └── BottomBar (ClipRect + AnimatedBuilder heightFactor + FadeTransition)
 ```
 
@@ -259,7 +261,14 @@ Row
 
 ## Panel Toggling
 
-**Member panel:** Controlled by `memberPanelProvider` (StateProvider<bool>, default `true`). Toggle via `Ctrl+Shift+M` keyboard shortcut or the users icon button in channel headers. The `_MemberPanelSlider` animates the panel in/out with `HollowDurations.normal` duration. During close animation, it freezes the content by wrapping `MemberPanel` in a `ProviderScope` that overrides `selectedServerProvider` with the cached `_frozenServerId`. This prevents the panel from showing stale "No peers online" state while sliding out.
+**Member panel:** Controlled by `memberPanelProvider` (StateProvider<bool>, default `true`). Toggle via `Ctrl+Shift+M` keyboard shortcut or the users icon button in channel headers. It is docked in BOTH layouts at every width the desktop shell runs at — the old `isDesktop &&` gate in the dock layout is gone (see "Responsive member panel" below). The `_MemberPanelSlider` animates the panel in/out with `HollowDurations.normal` duration. During close animation, it freezes the content by wrapping `MemberPanel` in a `ProviderScope` that overrides `selectedServerProvider` with the cached `_frozenServerId`. This prevents the panel from showing stale "No peers online" state while sliding out.
+
+**Responsive member panel (2026-07-27, GitHub issue #20 follow-up):** `_syncMemberPanelToWidth(isDesktop)` is called from the shell's `LayoutBuilder` (after the mobile early-return, so it never runs for `MobileShell`). It fires **only on a breakpoint CROSSING** — guarded by `bool? _wideEnoughForMembers` — and writes `memberPanelProvider` from an `addPostFrameCallback` (never during build):
+
+- Crossing DOWN: remember the current value in `_memberPanelWasOpen`, then close the panel. The chat keeps the full width by default.
+- Crossing UP: re-open it only if `_memberPanelWasOpen` was true. It can force OPEN but never force closed, so a panel you opened yourself at a narrow width survives widening.
+
+Because it only fires on a crossing, it never fights the header toggle: while narrow you can still open the panel, it just costs chat width. It previously did the opposite — the dock layout DROPPED the panel below 1024 while the header button kept toggling the provider, so the control did nothing visible. An overlay/floating variant was built and rejected: it covered the channel header, which is where the toggle that dismisses it lives.
 
 **Channel sidebar (dock mode):** The `_DockSidebarSlider` shows/hides the sidebar based on whether a server is selected (`selectedServerId != null`). Same clip+align+fade animation pattern. During close, it shows the frozen child widget to prevent content collapse.
 

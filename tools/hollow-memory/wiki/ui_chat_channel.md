@@ -107,20 +107,31 @@ Reversed-list model (2026-07-03 overhaul — see the "Reversed message list" sec
 1. **Hash icon** -- `LucideIcons.hash`, 20px, textSecondary color.
 2. **Channel name** -- `widget.channelName` in `HollowTypography.subheading`, bold.
 3. **NSFW badge** -- `_NsfwBadge` (small red "NSFW" pill), only when `serverIsNsfwProvider(serverId)` is true.
-4. **Connection status** -- `_ChannelConnectionStatus` widget (see below).
+4. **Connection status** -- `_ChannelConnectionStatus` widget (see below). Hidden when the header is under 280px wide.
 5. **Spacer**.
 5. **Pinned messages button** -- only shown when `pinnedIds.isNotEmpty`. Shows pin icon + count. Tooltip shows count. Taps open `_showPinnedMessages()` dialog.
 6. **Search button** -- toggles `channelSearchOpenProvider`. Icon tints accent when search is open.
 7. **Member panel toggle** -- toggles `memberPanelProvider`. Icon tints accent when panel is open.
-8. **Split view toggle** -- only shown in dock layout mode (`layoutModeProvider`). Shows columns icon. When split is active, closes this pane; when not split, opens split. Icon tints accent when split is active.
+8. **Split view toggle** -- only shown in dock layout mode (`layoutModeProvider`) AND when the header is at least 200px wide. Shows columns icon. When split is active, closes this pane; when not split, opens split. Icon tints accent when split is active.
+
+**Narrow-header shed order (2026-07-27).** `_buildHeader` wraps its `Row` in a `LayoutBuilder` and drops content as the chat narrows — status pill below 280px, split toggle below 200px. Opening the member panel in a small window (or at a high interface scale) can leave this header a couple hundred pixels, and the BUTTONS are the only way back out: an overflow that hid the members toggle would strand the panel open. Information goes first, controls go last.
 
 ## Connection and Sync Status Display
 
-`_ChannelConnectionStatus`: Watches `onlineIdentitiesProvider` (NOT raw `peersProvider`), `serverMembersProvider(serverId)`, `identityProvider`, `relayDomainProvider`. Determines connection stage: if any other server member's MASTER identity is online, stage is `ConnectionStage.encrypted` (MLS group = always encrypted). If on a custom (non-default) relay and no online members, stage is `ConnectionStage.customNetwork`. Otherwise `ConnectionStage.offline`. Renders `ConnectionProgress` widget + sync/vault indicators when encrypted.
+`_ChannelConnectionStatus`: Watches `onlineIdentitiesProvider` (NOT raw `peersProvider`), `serverMembersProvider(serverId)`, `identityProvider`, `relayDomainProvider`, and `overallConnectionProvider`. Stage order (`stageFor`), first match wins:
+
+1. **we** are not connected to the relay -> `ConnectionStage.offline`
+2. any other member's MASTER identity is online -> `ConnectionStage.encrypted` (MLS group = always encrypted)
+3. custom (non-default) relay -> `ConnectionStage.customNetwork`
+4. otherwise -> `ConnectionStage.alone`
+
+Renders `ConnectionProgress` + sync/vault indicators when encrypted. The `loading` branch of `membersAsync` reports `stageFor(false)` rather than a flat "Offline" — our own link is already known.
+
+**"Offline" is about US, never about an empty room (2026-07-27, GitHub issue #23).** The header used to fall through to `offline` whenever nobody else was online, so a connected, synced user sitting in a voice channel read "Offline". `ConnectionStage.alone` ("Only you", `LucideIcons.users`) now covers that case and `offline` means the relay link is down. `ConnectionProgress` (`ui/components/connection_progress.dart`) carries a per-stage `HollowTooltip` plus an optional `tooltip:` override — the DM header passes one, because there the same stage describes the PERSON, not our relay. Pinned by `test/widget/connection_progress_test.dart`.
 
 **Multi-device fix (2026-06-21):** members are MASTER-keyed (`ServerState.members`) but presence is DEVICE-keyed, so a raw `connectedPeers.containsKey(m.peerId)` NEVER matched a multi-device member → the header was stuck "Offline". Now uses `onlineIdentitiesProvider` (collapses device→master, also excludes invisible). Same fix applied to `onlineMembersProvider` in `server_provider.dart`.
 
-Mobile has its own equivalent: `_MobileChannelStatus` in `mobile_chat_route.dart` (the mobile channel header gained Encrypted/Offline status + the NSFW badge `_MobileNsfwBadge` on the left, 2026-06-21).
+Mobile has its own equivalent: `_MobileChannelStatus` in `mobile_chat_route.dart` (the mobile channel header gained Encrypted/Offline status + the NSFW badge `_MobileNsfwBadge` on the left, 2026-06-21). It carries the same four-stage order, including `alone`.
 
 `_SyncIndicator`: Watches `serverSyncStatusProvider(serverId)` and `syncProgressProvider[serverId]`. Four states:
 - **syncing** -- accent color spinning refresh icon, label "Syncing N/M..." (or just "Syncing...").

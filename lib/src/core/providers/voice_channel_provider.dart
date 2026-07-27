@@ -306,6 +306,15 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
   /// Guard to prevent concurrent leaveChannel calls and actions during leave.
   bool _leaving = false;
 
+  /// Bumped by every join and every teardown. `onLocalJoined` is a long, fully
+  /// async bring-up (device prefs → audio start → SFrame key → dial existing
+  /// participants) and the user can leave or hop channels straight through it.
+  /// A run that resumes on a stale generation abandons its half-built service
+  /// instead of configuring one nobody owns any more — 0.8.5 crashed there
+  /// instead ("Null check operator used on a null value": the teardown had
+  /// nulled `_service` and the next `_service!` after an await threw).
+  int _joinGen = 0;
+
   /// In-flight teardown (set by the server-forced `onLocalLeft` path, which
   /// can't be awaited by its synchronous caller). A subsequent `joinChannel`
   /// awaits this so a new call's PCs can't start while the old call's mesh is
@@ -450,8 +459,30 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     );
   }
 
+  /// True once this join has been superseded — the user left, was forced out,
+  /// or joined somewhere else while this bring-up was still walking its awaits.
+  ///
+  /// Closing [svc] here is only OUR job when another join replaced the field
+  /// without a teardown; a leave always closes whatever `_service` held (and
+  /// may still be inside that await), so `_service == null` means it is already
+  /// handled — closing again from here would be the double-dispose that
+  /// corrupts the heap on Linux.
+  Future<bool> _joinSuperseded(int gen, VoiceChannelService svc) async {
+    if (gen == _joinGen && identical(_service, svc)) return false;
+    debugPrint('[HOLLOW-VC] Join superseded mid-bring-up — dropping service');
+    final replacement = _service;
+    if (replacement != null && !identical(replacement, svc)) {
+      try {
+        await svc.closeAll();
+      } catch (_) {}
+    }
+    return true;
+  }
+
   /// Called after the local join event arrives to update state and start audio.
   Future<void> onLocalJoined(String serverId, String channelId) async {
+    final gen = ++_joinGen;
+
     // Resolve channel name: try provider first, then fall back to FFI.
     String? channelName = ref.read(channelListProvider)[channelId]?.name;
     if (channelName == null) {
@@ -491,40 +522,47 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
         (ref.read(identityProvider).peerId ?? '');
     final iceConfig = ref.read(iceConfigProvider);
 
-    _service = VoiceChannelService(
+    // Configure through the LOCAL handle, never `_service!`: a leave landing
+    // between two of these awaits nulls the field, and the next `!` would throw.
+    final svc = VoiceChannelService(
       localPeerId: localPeerId,
       iceServers: iceConfig,
     );
+    _service = svc;
 
     // Load device preferences.
-    _service!.preferredAudioInputDeviceId =
+    svc.preferredAudioInputDeviceId =
         await ref.read(audioInputDeviceProvider.future);
-    _service!.preferredAudioOutputDeviceId =
+    svc.preferredAudioOutputDeviceId =
         await ref.read(audioOutputDeviceProvider.future);
-    _service!.preferredCameraDeviceId =
+    svc.preferredCameraDeviceId =
         await ref.read(cameraDeviceProvider.future);
 
     // Load audio quality preset.
     final preset = await ref.read(audioQualityProvider.future);
-    _service!.opusBitrate = preset.bitrate;
-    _service!.opusStereo = preset.stereo;
+    svc.opusBitrate = preset.bitrate;
+    svc.opusStereo = preset.stereo;
 
     // Load mic gain + voice enhancement.
-    _service!.micGain = await ref.read(micGainProvider.future);
-    _service!.voiceEnhance = await ref.read(voiceEnhanceProvider.future);
-    _service!.enhanceMakeupDb = enhanceStrengthToMakeupDb(
+    svc.micGain = await ref.read(micGainProvider.future);
+    svc.voiceEnhance = await ref.read(voiceEnhanceProvider.future);
+    svc.enhanceMakeupDb = enhanceStrengthToMakeupDb(
         await ref.read(voiceEnhanceStrengthProvider.future));
-    _service!.enhanceDynamic =
+    svc.enhanceDynamic =
         await ref.read(voiceEnhanceDynamicProvider.future);
-    _service!.noiseSuppressAi =
+    svc.noiseSuppressAi =
         await ref.read(noiseSuppressAiProvider.future);
-    _service!.noiseSuppressEngine = noiseSuppressEngineToNative(
+    svc.noiseSuppressEngine = noiseSuppressEngineToNative(
         await ref.read(noiseSuppressEngineProvider.future));
+
+    // Every preference above came from an await — bail before we open the mic
+    // if the channel we were joining is already behind us.
+    if (await _joinSuperseded(gen, svc)) return;
 
     // Wire VAD callback. Writes go to the dedicated vcSpeakingProvider (NOT
     // VoiceChannelState) so a speaking flip only rebuilds the glow consumers,
     // never every voiceChannelProvider watcher.
-    _service!.onSpeakingChanged = (speaking) {
+    svc.onSpeakingChanged = (speaking) {
       ref.read(vcSpeakingProvider.notifier).set(speaking);
       // Sidechain for share-audio ducking: anyone talking (self included)
       // pulls received share audio down.
@@ -532,7 +570,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     };
 
     // Wire peer connected callback — send screen share offer once audio PC is ready.
-    _service!.onPeerConnected = (peerId) {
+    svc.onPeerConnected = (peerId) {
       if (_leaving || _stoppingScreenShare) return;
 
       // Ensure the file-transfer data channel (WebRtcService) exists with
@@ -591,7 +629,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     });
 
     // Wire camera video callback.
-    _service!.onRemoteVideoChanged = (peerId, renderer) {
+    svc.onRemoteVideoChanged = (peerId, renderer) {
       if (renderer != null) {
         _remoteCameraRenderers[peerId] = renderer;
       } else {
@@ -604,7 +642,11 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       state = state.copyWith(peerCameraOn: cameras);
     };
 
-    await _service!.startAudio(serverId, channelId);
+    await svc.startAudio(serverId, channelId);
+
+    // The mic is live now — if the channel went away while it was opening,
+    // give it straight back.
+    if (await _joinSuperseded(gen, svc)) return;
 
     // Re-assert the speaker route now that the audio session actually
     // exists. The early _setSpeakerRoute(true) above ran BEFORE the service
@@ -718,18 +760,21 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
         (usesSubgroup ? null : _sframeKeys[_sframeCacheKey(serverId, null)]);
     if (cached != null) {
       debugPrint('[HOLLOW-VC] Applying cached SFrame key (epoch=${cached.epoch}) to new service');
-      await _service!.setSframeKey(cached.epoch, Uint8List.fromList(cached.key));
+      await svc.setSframeKey(cached.epoch, Uint8List.fromList(cached.key));
     } else if (usesSubgroup) {
       // Subgroup key not delivered yet — the Welcome/Commit → MlsEpochChanged
       // (channelId) will rotate it in. Until then this channel has no SFrame key.
       debugPrint('[HOLLOW-VC] Restricted channel $channelId — awaiting subgroup SFrame key');
     }
 
-    // Connect to existing participants in this channel.
+    // Connect to existing participants in this channel. Each dial is a full
+    // PC bring-up, so re-check between them rather than build a mesh into a
+    // channel we've already left.
     final existing = state.getParticipants(serverId, channelId);
     for (final peerId in existing) {
       if (peerId == localPeerId) continue;
-      await _service!.onPeerJoinedMyChannel(peerId);
+      if (await _joinSuperseded(gen, svc)) return;
+      await svc.onPeerJoinedMyChannel(peerId);
     }
   }
 
@@ -846,6 +891,9 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
   Future<void> leaveChannel() async {
     if (!state.isInVoiceChannel || _leaving) return;
     _leaving = true;
+    // Retire the current join immediately: a bring-up still walking its awaits
+    // must stop before the FFI round-trip below, not after it.
+    _joinGen++;
 
     // Capture IDs before any state changes.
     final serverId = state.currentServerId!;
@@ -873,6 +921,9 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
   /// — safe to call when nothing is active. Shared by the user-initiated
   /// `leaveChannel()` and the server-forced leave path in `onLocalLeft()`.
   Future<void> _teardownCall() async {
+    // Also covers the server-FORCED leave, which never goes through
+    // leaveChannel(): whatever join is mid-flight no longer owns this call.
+    _joinGen++;
     try {
       // Dispose local camera renderer.
       if (_localCameraRenderer != null) {
@@ -968,8 +1019,11 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     );
     // Mute our mic when deafened.
     _service?.setMuted(newDeafened || state.isMuted);
-    // Silence all remote audio when deafened.
-    _service?.setDeafened(newDeafened);
+    // Silence all remote audio when deafened. Fire-and-forget, so it carries
+    // its own catch: a sync try/catch around an un-awaited future catches
+    // nothing and the rejection lands in the zone handler.
+    unawaited(_service?.setDeafened(newDeafened).catchError((_) {}) ??
+        Future.value());
     // setDeafened only zeroes WebRTC voice tracks — share audio rides its own
     // data-channel player and must be silenced explicitly.
     ShareAudioLevel.setDeafened(newDeafened);

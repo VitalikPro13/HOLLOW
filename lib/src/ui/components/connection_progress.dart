@@ -2,12 +2,17 @@
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
+import 'package:hollow/src/ui/components/hollow_tooltip.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Connection stage for the status indicator.
 enum ConnectionStage {
-  /// Peer/members offline.
+  /// YOU are not connected — no relay link (or, in a DM header, no session
+  /// with that person). Never used just because nobody else is around.
   offline,
+
+  /// Connected, but nobody else is here yet.
+  alone,
 
   /// Fully encrypted session established.
   encrypted,
@@ -16,54 +21,63 @@ enum ConnectionStage {
   customNetwork,
 }
 
-/// Simple connection status indicator: "Offline", lock + "Encrypted", or "Custom Network".
+/// Header status pill: "Offline", "Only you", lock + "Encrypted", or
+/// "Custom Network".
 class ConnectionProgress extends StatelessWidget {
   final ConnectionStage stage;
 
-  const ConnectionProgress({super.key, required this.stage});
+  /// Overrides the default hover explanation — the same [ConnectionStage] means
+  /// something slightly different in a DM header (the person) and a channel
+  /// header (the relay + the other members).
+  final String? tooltip;
+
+  const ConnectionProgress({super.key, required this.stage, this.tooltip});
 
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
 
-    if (stage == ConnectionStage.encrypted) {
-      return Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(LucideIcons.lock, size: 14, color: hollow.success),
-          const SizedBox(width: HollowSpacing.xs),
-          Text(
-            'Encrypted',
-            style: HollowTypography.caption.copyWith(color: hollow.success),
-          ),
-        ],
-      );
-    }
-
-    if (stage == ConnectionStage.customNetwork) {
-      return Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(LucideIcons.radio, size: 14, color: hollow.warning),
-          const SizedBox(width: HollowSpacing.xs),
-          Text(
-            'Custom Network',
-            style: HollowTypography.caption.copyWith(color: hollow.warning),
-          ),
-        ],
-      );
-    }
-
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Icon(LucideIcons.wifiOff, size: 14, color: hollow.textSecondary),
-        const SizedBox(width: HollowSpacing.xs),
-        Text(
-          'Offline',
-          style: HollowTypography.caption.copyWith(color: hollow.textSecondary),
+    final (IconData icon, String label, Color color, String tip) =
+        switch (stage) {
+      ConnectionStage.encrypted => (
+          LucideIcons.lock,
+          'Encrypted',
+          hollow.success,
+          'End-to-end encrypted — nobody in between can read this',
         ),
-      ],
+      ConnectionStage.customNetwork => (
+          LucideIcons.radio,
+          'Custom Network',
+          hollow.warning,
+          'Connected through a custom relay',
+        ),
+      ConnectionStage.alone => (
+          LucideIcons.users,
+          'Only you',
+          hollow.textSecondary,
+          "You're connected — nobody else is online here right now",
+        ),
+      ConnectionStage.offline => (
+          LucideIcons.wifiOff,
+          'Offline',
+          hollow.textSecondary,
+          'Not connected',
+        ),
+    };
+
+    return HollowTooltip(
+      message: tooltip ?? tip,
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 14, color: color),
+          const SizedBox(width: HollowSpacing.xs),
+          Text(
+            label,
+            style: HollowTypography.caption.copyWith(color: color),
+          ),
+        ],
+      ),
     );
   }
 }
