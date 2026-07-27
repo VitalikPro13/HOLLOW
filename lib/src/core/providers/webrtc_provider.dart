@@ -121,6 +121,12 @@ class WebRtcNotifier extends Notifier<WebRtcState> {
   /// Pass [iceConfigOverride] for STUN-only connections (e.g. Share).
   Future<void> ensureConnection(String peerId, {Map<String, dynamic>? iceConfigOverride}) async {
     final s = service;
+    // Register the Share peer even when we don't dial — a Share SEEDER usually
+    // ends up answering the downloader's offer, and the answer path needs the
+    // STUN-only config so Share bytes never ride the relay.
+    if (iceConfigOverride != null) {
+      s.noteShareIceConfig(peerId, iceConfigOverride);
+    }
     if (s.hasPeerChannel(peerId)) return;
     final peers = Map<String, WebRtcPeerStatus>.from(state.peers);
     peers[peerId] = WebRtcPeerStatus.connecting;

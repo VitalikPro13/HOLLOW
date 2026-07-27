@@ -199,7 +199,7 @@ class MobileSettingsTab extends ConsumerWidget {
         _SettingsNavTile(
           icon: LucideIcons.shieldCheck,
           title: 'Security',
-          subtitle: 'App lock, recovery phrase & proofs',
+          subtitle: 'Call privacy, app lock, recovery phrase & proofs',
           onTap: () => _push(context, 'Security',
               const _SecurityTab(key: ValueKey('security'))),
         ),
@@ -2177,6 +2177,56 @@ class _InvisibleToggleRow extends ConsumerWidget {
   }
 }
 
+/// "Always relay calls" — force every real-time connection through the relay
+/// so co-participants never see this device's IP address. Mirrors the desktop
+/// Security > Call Privacy row; the copy is shared so the two can't drift.
+class _AlwaysRelayCallsRow extends ConsumerWidget {
+  const _AlwaysRelayCallsRow();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final hollow = HollowTheme.of(context);
+    final enabled = ref.watch(alwaysRelayCallsProvider);
+
+    return Row(
+      children: [
+        Icon(LucideIcons.shield, size: 20, color: hollow.textSecondary),
+        const SizedBox(width: HollowSpacing.md),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('Always relay calls', style: HollowTypography.body.copyWith(
+                color: hollow.textPrimary,
+              )),
+              Text(alwaysRelayCallsDescription,
+                  style: HollowTypography.caption.copyWith(
+                    color: hollow.textSecondary, fontSize: 11,
+                  )),
+            ],
+          ),
+        ),
+        Switch(
+          value: enabled,
+          onChanged: (v) async {
+            try {
+              await ref.read(alwaysRelayCallsProvider.notifier).setEnabled(v);
+            } catch (e) {
+              if (context.mounted) {
+                HollowToast.show(context, 'Could not save the setting: $e',
+                    type: HollowToastType.error);
+              }
+            }
+          },
+          activeTrackColor: hollow.accent,
+          activeThumbColor: Colors.white,
+          inactiveTrackColor: hollow.border,
+        ),
+      ],
+    );
+  }
+}
+
 /// Offline message delivery (relay message-availability cache) — opt-in
 /// toggle + retention segment. Mirrors the desktop Network > Offline Delivery
 /// card.
@@ -2956,6 +3006,21 @@ class _SecurityTabState extends ConsumerState<_SecurityTab> {
     return ListView(
       padding: const EdgeInsets.all(HollowSpacing.lg),
       children: [
+        // Call Privacy section
+        const _SectionLabel(label: 'Call Privacy'),
+        const SizedBox(height: HollowSpacing.sm),
+        Container(
+          padding: const EdgeInsets.all(HollowSpacing.md),
+          decoration: BoxDecoration(
+            color: hollow.surface,
+            borderRadius: BorderRadius.circular(hollow.radiusMd),
+            border: Border.all(color: hollow.border),
+          ),
+          child: const _AlwaysRelayCallsRow(),
+        ),
+
+        const SizedBox(height: HollowSpacing.xl),
+
         // App Lock section
         const _SectionLabel(label: 'App Lock'),
         const SizedBox(height: HollowSpacing.sm),

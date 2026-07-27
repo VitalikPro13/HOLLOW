@@ -330,7 +330,18 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
   bool _deviceListenersWired = false;
 
   @override
-  VoiceChannelState build() => const VoiceChannelState();
+  VoiceChannelState build() {
+    // The service snapshots its ICE config at join time and nothing else ever
+    // reassigns it (unlike VoiceService/WebRtcService, which re-read on every
+    // service-getter access). Push updates in instead — otherwise a TURN
+    // credential refresh, or an "Always relay calls" flip made while sitting
+    // in a channel, would still hand DIRECT candidates to every peer who joins
+    // afterwards.
+    ref.listen<Map<String, dynamic>>(iceConfigProvider, (_, next) {
+      _service?.iceServers = next;
+    });
+    return const VoiceChannelState();
+  }
 
   /// Live camera device switch: the service swaps every mesh PC's sender and
   /// returns the fresh capture stream — rebind the self-view to it.

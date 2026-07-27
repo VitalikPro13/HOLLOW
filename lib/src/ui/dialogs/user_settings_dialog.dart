@@ -157,7 +157,8 @@ extension _SettingsCategoryMeta on _SettingsCategory {
         _SettingsCategory.shortcuts => 'shortcuts keyboard keys hotkeys chat input',
         _SettingsCategory.security =>
           'security app lock password device protection keychain recovery phrase '
-              'mnemonic encrypt blocked block unblock report',
+              'mnemonic encrypt blocked block unblock report always relay calls '
+              'ip address turn privacy hide',
         _SettingsCategory.devices =>
           'devices linked multi device link sync revoke remove reset',
         _SettingsCategory.backup => 'backup export proof verify signature',

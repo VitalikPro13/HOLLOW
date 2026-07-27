@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
+import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/core/providers/share_tab_provider.dart';
 import 'package:hollow/src/rust/api/share.dart' as share_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
@@ -116,8 +117,13 @@ class _ShareDashboardState extends ConsumerState<ShareDashboard> {
   /// Yellow advisory strip below the header: Share transfers are STUN-only
   /// (direct P2P, no TURN relay fallback), so a transfer can fail behind
   /// strict/symmetric NATs. Mirrors the archive verification banner styling.
+  ///
+  /// While "Always relay calls" is on it also names the carve-out at the point
+  /// of action — Share is the one path that setting deliberately doesn't cover,
+  /// and a privacy switch with a silent exception is worse than no switch.
   Widget _buildStunWarning(HollowTheme hollow) {
     final color = Colors.amber.shade700;
+    final alwaysRelay = ref.watch(alwaysRelayCallsProvider);
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.symmetric(
@@ -138,7 +144,9 @@ class _ShareDashboardState extends ConsumerState<ShareDashboard> {
             child: Text(
               'Share transfers are direct peer-to-peer (STUN-only, no relay '
               'fallback). Transfers may fail behind strict or symmetric NATs '
-              'if a direct connection can\'t be established.',
+              'if a direct connection can\'t be established.'
+              '${alwaysRelay ? ' "Always relay calls" does not cover Share — '
+                  'the person you share with will see your IP address.' : ''}',
               style: HollowTypography.caption.copyWith(
                 color: color,
                 fontSize: 11,

@@ -9,6 +9,7 @@ import 'package:hollow/src/core/hollow_data_dir.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
 import '../../rust/api/network.dart' as network_api;
+import 'ice_route_probe.dart';
 
 /// Chunk size for WebRTC data channel transfers.
 /// 64KB per message is safe across all platforms (SCTP max is ~256KB).
@@ -133,6 +134,17 @@ class WebRtcService {
   /// Peers connected with STUN-only config (Share). Used to fire the right callback on failure.
   final Set<String> _stunOnlyPeers = {};
 
+  /// STUN-only ICE config remembered per Share peer, so an offer we ANSWER is
+  /// built from the Share config too instead of the general one.
+  ///
+  /// Hollow Share must never pull bytes onto the relay (HOLLOW_PLAN §7A), and
+  /// with "Always relay calls" on, the general config is TURN-only. Entries
+  /// deliberately OUTLIVE the connection: a dropped link is re-offered by the
+  /// remote within a tick, and forgetting on cleanup would put us right back on
+  /// the general config for the reconnect. Keeping it costs no privacy — a peer
+  /// we ever exchanged Share candidates with has already seen this address.
+  final Map<String, Map<String, dynamic>> _shareIceConfig = {};
+
   WebRtcService({
     required this.localPeerId,
     Map<String, dynamic>? iceServers,
@@ -254,9 +266,19 @@ class WebRtcService {
     });
   }
 
+  /// Remember that [peerId] is a Share peer and which STUN-only config it uses,
+  /// so the answer path can reuse it. Safe to call repeatedly.
+  void noteShareIceConfig(String peerId, Map<String, dynamic> config) {
+    _shareIceConfig[peerId] = config;
+  }
+
   /// Initiate a WebRTC connection to a peer (offerer side).
   /// Pass [iceConfigOverride] to use a specific ICE config (e.g. STUN-only for Share).
   Future<void> connectToPeer(String peerId, {Map<String, dynamic>? iceConfigOverride}) async {
+    // Record the Share config BEFORE any early return — we may not end up
+    // dialling (an open channel already exists, or the remote wins the race),
+    // but the answer path still needs to know this is a Share peer.
+    if (iceConfigOverride != null) noteShareIceConfig(peerId, iceConfigOverride);
     // Already connected or connecting.
     if (_connections.containsKey(peerId)) return;
     // Already have an OPEN channel to this person under a device id (the caller
@@ -607,6 +629,7 @@ class WebRtcService {
     _connecting.clear();
     _intentionalClose.clear();
     _stunOnlyPeers.clear();
+    _shareIceConfig.clear();
     _pingSentAt.clear();
     _screenAudioBufferedCache.clear();
     _screenAudioBufferPolling.clear();
@@ -692,7 +715,21 @@ class WebRtcService {
       await _closeConn(prior);
     }
 
-    final pc = await createPeerConnection(iceServers);
+    // Answer a Share peer with the STUN-only Share config instead of the
+    // general one — only while "Always relay calls" is on, so everyone else
+    // keeps today's TURN fallback for strict NATs. Without this a Share SEEDER
+    // (which only ever answers, never dials) would push every uploaded byte
+    // through the relay.
+    final relayOnly = iceServers['iceTransportPolicy'] == 'relay';
+    final answerConfig =
+        (relayOnly ? _shareIceConfig[peerId] : null) ?? iceServers;
+    if (answerConfig != iceServers) {
+      _stunOnlyPeers.add(peerId);
+      _log('[HOLLOW-WEBRTC-DART] Answering $peerId with the STUN-only Share '
+          'config (always-relay is on; Share stays peer-to-peer)');
+    }
+
+    final pc = await createPeerConnection(answerConfig);
     final conn = _PeerConn(
       pc: pc,
       connId: connId, // Use THEIR connId — answers must match
@@ -921,7 +958,7 @@ class WebRtcService {
       String peerId, RTCPeerConnectionState state) {
     _log('[HOLLOW-WEBRTC-DART] PC state: $peerId -> $state');
     if (state == RTCPeerConnectionState.RTCPeerConnectionStateConnected) {
-      Future.delayed(const Duration(seconds: 1), () => _logIceRoute(peerId));
+      _logIceRoute(peerId);
     }
     if (state == RTCPeerConnectionState.RTCPeerConnectionStateFailed) {
       final wasStunOnly = _stunOnlyPeers.remove(peerId);
@@ -938,48 +975,20 @@ class WebRtcService {
   }
 
   Future<void> _logIceRoute(String peerId) async {
-    final conn = _connections[peerId];
-    if (conn == null) return;
-    try {
-      final stats = await conn.pc.getStats();
-      for (final report in stats) {
-        if (report.type == 'candidate-pair' &&
-            report.values['state'] == 'succeeded') {
-          final localId = report.values['localCandidateId'] as String?;
-          final remoteId = report.values['remoteCandidateId'] as String?;
-          String localType = '?';
-          String remoteType = '?';
-          String localProto = '';
-          for (final r in stats) {
-            if (r.type == 'local-candidate' && r.id == localId) {
-              localType = (r.values['candidateType'] as String?) ?? '?';
-              localProto = (r.values['protocol'] as String?) ?? '';
-            }
-            if (r.type == 'remote-candidate' && r.id == remoteId) {
-              remoteType = (r.values['candidateType'] as String?) ?? '?';
-            }
-          }
-          final route = localType == 'relay' || remoteType == 'relay'
-              ? 'TURN (relayed)'
-              : localType == 'srflx' || remoteType == 'srflx'
-                  ? 'STUN (direct P2P)'
-                  : localType == 'host' && remoteType == 'host'
-                      ? 'LAN (direct)'
-                      : 'P2P ($localType/$remoteType)';
-          _log('[HOLLOW-WEBRTC-DART] ICE route to $peerId: $route (local=$localType remote=$remoteType proto=$localProto)');
-          // Tier 3 reachability-aware overlay: feed the route class into the
-          // gossip peer scorer so rotation drifts toward direct peers.
-          final isDirect = localType != 'relay' && remoteType != 'relay';
-          network_api
-              .webrtcRouteReport(peerId: peerId, isDirect: isDirect)
-              .catchError((_) {});
-          return;
-        }
-      }
+    // Resolve the connection per attempt — glare or a reconnect can swap it
+    // out mid-probe, and reporting a route for a superseded PC would feed the
+    // gossip scorer a stale verdict.
+    final route = await probeIceRoute(() => _connections[peerId]?.pc);
+    if (route == null) {
       _log('[HOLLOW-WEBRTC-DART] ICE route to $peerId: no succeeded candidate pair found');
-    } catch (e) {
-      _log('[HOLLOW-WEBRTC-DART] ICE route check failed for $peerId: $e');
+      return;
     }
+    _log('[HOLLOW-WEBRTC-DART] ICE route to $peerId: $route');
+    // Tier 3 reachability-aware overlay: feed the route class into the gossip
+    // peer scorer so rotation drifts toward direct peers.
+    network_api
+        .webrtcRouteReport(peerId: peerId, isDirect: route.isDirect)
+        .catchError((_) {});
   }
 
   void _onDataChannelMessage(String peerId, Uint8List data) {

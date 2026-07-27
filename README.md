@@ -10,7 +10,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/license-AGPL--3.0-blue" alt="License">
-  <img src="https://img.shields.io/badge/platform-Windows%20·%20macOS%20·%20Linux%20·%20Android-0078D4" alt="Platform">
+  <img src="https://img.shields.io/badge/platform-Windows%20·%20macOS%20·%20Linux%20·%20Android%20·%20iOS-0078D4" alt="Platform">
   <img src="https://img.shields.io/badge/encryption-end--to--end-blueviolet" alt="Encryption">
   <a href="https://codecov.io/gh/VitalikPro13/HOLLOW" > 
   <img src="https://codecov.io/gh/VitalikPro13/HOLLOW/graph/badge.svg?token=F0TBC256BF" alt="Rust Coverage"></a>

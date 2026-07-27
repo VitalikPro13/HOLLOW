@@ -856,6 +856,61 @@ class InvisibleModeNotifier extends Notifier<bool> {
 final invisibleModeProvider =
     NotifierProvider<InvisibleModeNotifier, bool>(InvisibleModeNotifier.new);
 
+/// "Always relay calls" — force every real-time peer connection through the
+/// TURN relay so co-participants never learn this device's IP address.
+///
+/// On a direct (host / server-reflexive) ICE path both sides see each other's
+/// addresses; DTLS + SFrame protect content, not network addresses. Turning
+/// this on makes [IceConfigNotifier] emit `iceTransportPolicy: 'relay'`, so
+/// only relay candidates are gathered.
+///
+/// Default OFF — direct paths are the whole point of P2P, and forcing every
+/// call onto the relay costs latency, quality and relay bandwidth. Same
+/// default Signal ships for its equivalent setting.
+///
+/// Synchronous state — loaded eagerly during bootstrap, persisted on toggle.
+class AlwaysRelayCallsNotifier extends Notifier<bool> {
+  @override
+  bool build() => false;
+
+  /// Load persisted value from DB. Called during bootstrap, BEFORE the node
+  /// starts — a peer connection built before this lands would use the wrong
+  /// policy.
+  Future<void> load() async {
+    try {
+      final val = await storage_api.loadSetting(key: 'always_relay_calls');
+      state = val == 'true';
+    } catch (e) {
+      debugPrint('[HOLLOW] alwaysRelayCalls.load() failed: $e');
+    }
+  }
+
+  /// Persist the flag. Deliberately does NOT swallow a save failure — call
+  /// sites await and toast, so a silently-unsaved privacy setting can't happen.
+  Future<void> setEnabled(bool value) async {
+    state = value;
+    await storage_api.saveSetting(
+      key: 'always_relay_calls',
+      value: value.toString(),
+    );
+  }
+}
+
+final alwaysRelayCallsProvider =
+    NotifierProvider<AlwaysRelayCallsNotifier, bool>(
+        AlwaysRelayCallsNotifier.new);
+
+/// Description shown under the "Always relay calls" toggle on desktop AND
+/// mobile — one source of truth so the two can't drift.
+///
+/// The Hollow Share sentence is NOT optional: Share deliberately stays
+/// peer-to-peer even with this on (HOLLOW_PLAN §7A), and a privacy switch with
+/// an undisclosed carve-out is exactly the kind of overclaim worth avoiding.
+const String alwaysRelayCallsDescription =
+    'Routes calls, video, screen share and file transfers through the relay so '
+    'other participants never see your IP address. May reduce quality and '
+    'increase latency. Restart is required.';
+
 /// Offline inbox retention window in DAYS (1 / 3 / 7). Only meaningful while
 /// [offlineInboxProvider] is enabled; the relay clamps server-side too.
 class OfflineInboxRetentionNotifier extends Notifier<int> {

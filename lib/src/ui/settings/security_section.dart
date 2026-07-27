@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/rust/api/identity.dart' as identity_api;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
@@ -94,6 +96,67 @@ Future<String?> askPassphraseDialog(BuildContext context, String title,
       );
     },
   );
+}
+
+/// "Always relay calls" — force every real-time connection through the relay
+/// so co-participants never see this device's IP address.
+///
+/// Its own ConsumerWidget because [SecurityTab] is a plain StatefulWidget with
+/// no `ref`; converting the whole tab for one row isn't worth the churn.
+class AlwaysRelayCallsToggle extends ConsumerWidget {
+  const AlwaysRelayCallsToggle({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final hollow = HollowTheme.of(context);
+    final enabled = ref.watch(alwaysRelayCallsProvider);
+
+    return Row(
+      children: [
+        Icon(LucideIcons.shield, size: 16, color: hollow.textSecondary),
+        const SizedBox(width: HollowSpacing.sm),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Always relay calls',
+                style: HollowTypography.body.copyWith(
+                  color: hollow.textPrimary,
+                  fontSize: 13,
+                ),
+              ),
+              const SizedBox(height: 2),
+              Text(
+                alwaysRelayCallsDescription,
+                style: HollowTypography.caption.copyWith(
+                  color: hollow.textSecondary,
+                  fontSize: 11,
+                ),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(width: HollowSpacing.md),
+        HollowToggle(
+          value: enabled,
+          onChanged: (val) async {
+            try {
+              await ref.read(alwaysRelayCallsProvider.notifier).setEnabled(val);
+            } catch (e) {
+              if (context.mounted) {
+                HollowToast.show(
+                  context,
+                  'Could not save the setting: $e',
+                  type: HollowToastType.error,
+                );
+              }
+            }
+          },
+        ),
+      ],
+    );
+  }
 }
 
 /// Security category — App Lock + Device Protection + Recovery Phrase,
@@ -287,6 +350,13 @@ class _SecurityTabState extends State<SecurityTab> {
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          // ── Call Privacy ──
+          const SettingsSectionLabel(label: 'CALL PRIVACY'),
+          const SizedBox(height: HollowSpacing.sm),
+          const AlwaysRelayCallsToggle(),
+
+          const SizedBox(height: HollowSpacing.xl),
+
           // ── App Lock ──
           const SettingsSectionLabel(label: 'APP LOCK'),
           const SizedBox(height: HollowSpacing.sm),

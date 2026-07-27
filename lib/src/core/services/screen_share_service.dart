@@ -6,6 +6,7 @@ import 'package:flutter_webrtc/flutter_webrtc.dart';
 
 import '../../rust/api/network.dart' as network_api;
 import '../perf_sentinel.dart';
+import 'ice_route_probe.dart';
 import 'screen_audio_capturer.dart';
 import 'mac_sck_screen_audio_capturer.dart';
 import 'mobile_screen_audio_capturer.dart';
@@ -1101,63 +1102,19 @@ class ScreenShareService {
     }
   }
 
-  /// Log which ICE route (TURN/STUN/LAN) the connected PC ended up on, one
-  /// second after connect. Diagnostic only.
+  /// Log which ICE route (TURN/STUN/LAN) the connected PC ended up on.
+  /// Diagnostic only.
   void _scheduleIceRouteLog() {
-    final screenPc = _pc;
-    if (screenPc == null) return;
-    Future.delayed(const Duration(seconds: 1), () async {
-      await _logIceRoute(screenPc);
-    });
+    if (_pc == null) return;
+    _logIceRoute();
   }
 
-  Future<void> _logIceRoute(RTCPeerConnection screenPc) async {
-    try {
-      final stats = await screenPc.getStats();
-      for (final report in stats) {
-        if (report.type == 'candidate-pair' && report.values['state'] == 'succeeded') {
-          final localId = report.values['localCandidateId'] as String?;
-          final remoteId = report.values['remoteCandidateId'] as String?;
-          final (localType, remoteType, proto) =
-              _candidateTypesFor(stats, localId, remoteId);
-          final route = _describeIceRoute(localType, remoteType);
-          _log('[HOLLOW-SCREEN] ICE route: $route (local=$localType remote=$remoteType proto=$proto)');
-          return;
-        }
-      }
-      _log('[HOLLOW-SCREEN] ICE route: no succeeded candidate pair found');
-    } catch (e) {
-      _log('[HOLLOW-SCREEN] ICE route check failed: $e');
-    }
-  }
-
-  /// Resolve (localType, remoteType, proto) for a succeeded candidate pair.
-  (String, String, String) _candidateTypesFor(
-    List<StatsReport> stats,
-    String? localId,
-    String? remoteId,
-  ) {
-    String localType = '?', remoteType = '?', proto = '';
-    for (final r in stats) {
-      if (r.type == 'local-candidate' && r.id == localId) {
-        localType = (r.values['candidateType'] as String?) ?? '?';
-        proto = (r.values['protocol'] as String?) ?? '';
-      }
-      if (r.type == 'remote-candidate' && r.id == remoteId) {
-        remoteType = (r.values['candidateType'] as String?) ?? '?';
-      }
-    }
-    return (localType, remoteType, proto);
-  }
-
-  String _describeIceRoute(String localType, String remoteType) {
-    return localType == 'relay' || remoteType == 'relay'
-        ? 'TURN (relayed)'
-        : localType == 'srflx' || remoteType == 'srflx'
-            ? 'STUN (direct P2P)'
-            : localType == 'host' && remoteType == 'host'
-                ? 'LAN (direct)'
-                : 'P2P ($localType/$remoteType)';
+  Future<void> _logIceRoute() async {
+    // Resolve _pc per attempt — a renegotiation can replace it mid-probe.
+    final route = await probeIceRoute(() => _pc);
+    _log(route == null
+        ? '[HOLLOW-SCREEN] ICE route: no succeeded candidate pair found'
+        : '[HOLLOW-SCREEN] ICE route: $route');
   }
 
   Future<void> _handleRemoteVideoTrack(RTCTrackEvent event) async {

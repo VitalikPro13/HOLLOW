@@ -7,6 +7,7 @@ import 'package:flutter_webrtc/flutter_webrtc.dart';
 
 import '../../rust/api/network.dart' as network_api;
 import 'frame_cryptor_service.dart';
+import 'ice_route_probe.dart';
 
 /// Log to hollow_debug.log (visible in release builds).
 void _log(String msg) {
@@ -1448,8 +1449,7 @@ class VoiceService {
     switch (state) {
       case RTCPeerConnectionState.RTCPeerConnectionStateConnected:
         onConnected?.call(peerId);
-        Future.delayed(
-            const Duration(seconds: 1), () => _logIceRoute(pc, peerId));
+        _logIceRoute(pc, peerId);
       case RTCPeerConnectionState.RTCPeerConnectionStateFailed:
       case RTCPeerConnectionState.RTCPeerConnectionStateClosed:
       case RTCPeerConnectionState.RTCPeerConnectionStateDisconnected:
@@ -1459,55 +1459,14 @@ class VoiceService {
     }
   }
 
-  /// One-second-post-connect diagnostic: log which ICE route (TURN / STUN /
-  /// LAN / P2P) the succeeded candidate pair took.
+  /// Post-connect diagnostic: log which ICE route (TURN / STUN / LAN / P2P)
+  /// the succeeded candidate pair took.
   Future<void> _logIceRoute(RTCPeerConnection pc, String peerId) async {
-    try {
-      final stats = await pc.getStats();
-      for (final report in stats) {
-        if (report.type == 'candidate-pair' &&
-            report.values['state'] == 'succeeded') {
-          final types = _candidatePairTypes(
-              stats,
-              report.values['localCandidateId'] as String?,
-              report.values['remoteCandidateId'] as String?);
-          final localType = types[0], remoteType = types[1], proto = types[2];
-          final route = _describeIceRoute(localType, remoteType);
-          _log('[HOLLOW-VOICE] ICE route to $peerId: $route (local=$localType remote=$remoteType proto=$proto)');
-          return;
-        }
-      }
-      _log('[HOLLOW-VOICE] ICE route to $peerId: no succeeded candidate pair found');
-    } catch (e) {
-      _log('[HOLLOW-VOICE] ICE route check failed: $e');
-    }
+    final route = await probeIceRoute(() => pc);
+    _log(route == null
+        ? '[HOLLOW-VOICE] ICE route to $peerId: no succeeded candidate pair found'
+        : '[HOLLOW-VOICE] ICE route to $peerId: $route');
   }
-
-  /// Resolve [localType, remoteType, proto] for a succeeded candidate pair
-  /// from the full stats list.
-  List<String> _candidatePairTypes(
-      List<StatsReport> stats, String? localId, String? remoteId) {
-    String localType = '?', remoteType = '?', proto = '';
-    for (final r in stats) {
-      if (r.type == 'local-candidate' && r.id == localId) {
-        localType = (r.values['candidateType'] as String?) ?? '?';
-        proto = (r.values['protocol'] as String?) ?? '';
-      }
-      if (r.type == 'remote-candidate' && r.id == remoteId) {
-        remoteType = (r.values['candidateType'] as String?) ?? '?';
-      }
-    }
-    return [localType, remoteType, proto];
-  }
-
-  String _describeIceRoute(String localType, String remoteType) =>
-      localType == 'relay' || remoteType == 'relay'
-          ? 'TURN (relayed)'
-          : localType == 'srflx' || remoteType == 'srflx'
-              ? 'STUN (direct P2P)'
-              : localType == 'host' && remoteType == 'host'
-                  ? 'LAN (direct)'
-                  : 'P2P ($localType/$remoteType)';
 
   // ---------------------------------------------------------------------------
   // Private — Audio

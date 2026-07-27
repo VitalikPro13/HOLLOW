@@ -450,6 +450,10 @@ Voice, video, and screen share video travel over **WebRTC peer-to-peer connectio
 
 For peers behind symmetric NATs (~10-15% of users), a **TURN server** relays the encrypted media. The TURN server sees only SFrame ciphertext.
 
+**Address visibility and the relay-only option.** A successful direct path means the two endpoints have exchanged and probed each other's candidate addresses, so co-participants in a session observe each other's IP addresses. Encryption protects content, not network addresses, and this is inherent to direct peer-to-peer media rather than a property of this system in particular. The exposure is bounded to *participants in a session the user joined*: there is no tracker, no DHT, and no mechanism by which a non-participant or passive observer obtains the address.
+
+For users who prefer to trade latency and quality for address privacy, a per-account setting forces every real-time connection onto the TURN relay, so a co-participant sees only the relay's address. The setting is applied where the ICE configuration is produced rather than at each call site, so it cannot be omitted by one code path; it restricts candidate gathering to relay candidates only, and **fails closed** — if relay credentials are unavailable the connection is not established rather than silently falling back to a direct path. It is **off by default**: relaying all media would forfeit the latency advantage that motivates direct connections and would concentrate every session's bandwidth on relay infrastructure. Hollow Share is deliberately outside its scope (§8.4), and the setting's description states so.
+
 ### 6.5 Call Topologies
 
 - **1:1 calls:** Direct peer-to-peer WebRTC. Lowest latency, no intermediary.
@@ -515,7 +519,7 @@ All images are auto-converted to Balanced WebP on send (~95% smaller than PNG/JP
 
 ## 8. Hollow Share (Private P2P File Distribution)
 
-Share is a chunked, resumable, multi-source P2P file distribution system — conceptually similar to BitTorrent but with end-to-end encryption, no tracker, no IP exposure, and no public DHT.
+Share is a chunked, resumable, multi-source P2P file distribution system — conceptually similar to BitTorrent but with end-to-end encryption, no tracker, and no public DHT. Because transfers are peer-to-peer, the peers in a given swarm see each other's IP addresses; unlike a torrent there is no tracker or DHT from which a non-participant could enumerate them (§8.4).
 
 ### 8.1 Chunk Encryption
 
@@ -555,7 +559,7 @@ hollow://share/<base64url([version: 1 byte][root_hash: 32 bytes][key: 32 bytes])
 
 - **Relay rendezvous:** Peers join a relay room keyed by the root hash. The relay forwards only signaling — zero file bytes ever touch the relay.
 - **STUN-only WebRTC:** Share connections use STUN (no TURN) so share traffic never consumes relay bandwidth. If no peer-to-peer connection can be established, chunks are skipped (not relayed).
-- **No IP exposure:** ICE candidates are exchanged via the encrypted relay, never published to a public DHT.
+- **Address visibility, stated precisely:** ICE candidates are exchanged through the encrypted relay and never published to a public DHT or tracker, so no third party can enumerate the participants in a share. The peers *within* a swarm do observe each other's addresses, which is inherent to any direct peer-to-peer transfer. This is a deliberate trade: the alternative is relaying multi-gigabyte payloads through infrastructure that is funded for messaging and voice.
 - **ISP-invisible:** Looks like normal WebRTC traffic with no protocol fingerprint to throttle.
 
 ### 8.5 Download Protocol
@@ -1127,6 +1131,7 @@ The WebSocket relay handles signaling (SDP offers/answers, ICE candidates). WebR
 - **TURN server:** Self-hosted coturn on the VPS for peers behind symmetric NATs.
 - **Dual-stack (IPv4 + IPv6):** The relay, STUN, and TURN infrastructure all listen on both address families, and clients gather IPv6 ICE candidates wherever the OS provides them. When both peers have IPv6 there is no NAT in the path, so connections that would fail IPv4 hole-punching (symmetric NAT, carrier-grade NAT — common on mobile networks) complete directly instead of falling back to TURN. This benefits exactly the peer pairs most likely to need relayed media otherwise.
 - **Share exception:** Hollow Share connections use STUN-only (no TURN) to ensure share traffic never consumes relay bandwidth.
+- **Optional relay-only mode:** an off-by-default per-account setting restricts candidate gathering to relay candidates for real-time connections, hiding the user's address from co-participants at the cost of latency and quality (§6.4). Share is outside its scope.
 
 ### 14.3 Signaling Flow
 

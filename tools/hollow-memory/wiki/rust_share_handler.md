@@ -8,7 +8,7 @@ Covers `share_handler.rs` -- Phase 7A backend for private, encrypted, zero-track
 
 Hollow Share is a BitTorrent-like file sharing system using:
 - **Relay rooms** for peer discovery and signaling (room ID = `share:{root_hash_hex}`).
-- **WebRTC data channels** for chunk transfer (STUN-only for user shares, TURN-enabled for hidden/channel shares).
+- **WebRTC data channels** for chunk transfer. STUN-only for BOTH user and hidden/channel shares — `streamIceConfigProvider` is a plain alias of `shareIceConfigProvider`, so the `hidden` branch in `event_provider.dart` is a seam for future divergence, not a behavioural difference today. (Caveat: a Share reuses an already-open general hollow-data connection, which does carry TURN — memory `project_share_data_channel_reuse_turn`.)
 - **AES-256-GCM** encryption with per-chunk nonce derivation.
 - **SHA-256** manifest root hash for link integrity + per-chunk hash verification.
 - **Rarest-first** or **sequential** chunk scheduling.
@@ -502,12 +502,14 @@ Both chunk completion handlers maintain a sliding window:
 
 Share chunk transfer requires WebRTC data channels (relay path exists as fallback but logs warnings). The scheduler tick handles connection establishment:
 
-1. Each tick, for each downloading share with known peers, checks if each peer in `peer_have` is in `webrtc_peers`.
+1. Each tick, for **every** share with known peers (seeding as well as downloading), checks if each peer in `peer_have` is in `webrtc_peers`.
 2. For missing connections, emits `NetworkEvent::ShareNeedWebRtc { peer_id, hidden }`.
-3. Dart calls `ensureConnection()` on the peer. Hidden shares use TURN-enabled ICE config (more reliable NAT traversal for channel-file scenarios).
+3. Dart calls `ensureConnection()` on the peer with the STUN-only Share config.
 4. Chunk requests are only sent to peers with active WebRTC connections (the `webrtc_peers.contains()` filter in the needed-chunk collection).
 5. `handle_envelope_share_chunk_request()` skips relay-only peers (`!prefer_webrtc`).
 6. On WebRTC send completion, `handle_webrtc_send_complete()` cleans up temp files using the `{short_root}:{idx}` transfer ID pattern.
+
+**Seeders request links too (2026-07-27).** `request_missing_webrtc_links` runs ABOVE the `have.is_complete()` guard in `tick_schedule_requests`, so a pure seeder also asks Dart for a channel instead of only ever answering the downloader's offer. Before this, the seeder built its peer connection from the general TURN-capable config every time — a §7A hole, and with "Always relay calls" on it would have pushed every uploaded byte through coturn. Order inside the block matters: `peer_have.is_empty()` first, then the link request, then the completeness/manifest/data_file guards.
 
 ---
 

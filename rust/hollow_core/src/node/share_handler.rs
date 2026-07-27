@@ -1205,8 +1205,9 @@ pub async fn tick(
         // 2. Timeout in-flight requests.
         expire_inflight_requests(registry, &root_hash, now);
 
-        // 3. Schedule new chunk requests (skip if messaging is busy or share is
-        // a pure seed with nothing to fetch, or download hasn't started yet).
+        // 3. Request missing WebRTC links + schedule new chunk requests (chunk
+        // scheduling is skipped if messaging is busy, the share is a pure seed
+        // with nothing to fetch, or the download hasn't started yet).
         if messaging_active { continue; }
         tick_schedule_requests(registry, ws_cmd_tx, webrtc_peers, event_tx, &root_hash, now).await;
     }
@@ -1313,8 +1314,10 @@ fn expire_inflight_requests(registry: &mut ShareRegistry, root_hash: &str, now: 
     }
 }
 
-/// Tick phase 3 for one downloading share: pick needed chunks, assign them to
-/// peers (rarest-first, capped per peer), mark them in-flight and send requests.
+/// Tick phase 3 for one share: ask for any missing WebRTC links (seeders
+/// included), then — for a share we're still downloading — pick needed chunks,
+/// assign them to peers (rarest-first, capped per peer), mark them in-flight
+/// and send the requests.
 async fn tick_schedule_requests(
     registry: &mut ShareRegistry,
     ws_cmd_tx: &mpsc::UnboundedSender<WsCommand>,
@@ -1325,13 +1328,21 @@ async fn tick_schedule_requests(
 ) {
     let (room, assignments) = {
         let Some(state) = registry.get(root_hash) else { return; };
+        if state.peer_have.is_empty() { return; }
+
+        // Request WebRTC connections for peers we know about but aren't
+        // connected to. This runs BEFORE the completeness guard on purpose, so
+        // a pure SEEDER asks for the link too. A seeder that only ever answers
+        // an offer builds its peer connection from the general ICE config, and
+        // that config is TURN-capable — with "Always relay calls" on it is
+        // TURN-only — which would drag multi-GB Share payloads onto the relay.
+        // Dialling ourselves means the connection is created with the STUN-only
+        // Share config on both ends (HOLLOW_PLAN §7A).
+        request_missing_webrtc_links(state, webrtc_peers, event_tx).await;
+
         if state.have.is_complete() { return; }
         let Some(ref manifest) = state.manifest else { return; };
         if state.data_file.is_none() { return; }
-        if state.peer_have.is_empty() { return; }
-
-        // Request WebRTC connections for peers we know about but aren't connected to.
-        request_missing_webrtc_links(state, webrtc_peers, event_tx).await;
 
         let needed = collect_needed_chunks(state, webrtc_peers, manifest.chunk_count);
         let assignments = assign_chunks_to_peers(needed, &state.inflight);

@@ -426,7 +426,7 @@ A `Timer`-based cleanup mechanism runs every 5 seconds (scheduled by `_scheduleC
 
 ### Initial State (STUN-only fallback)
 
-On `build()`, state is immediately set to STUN-only config (covers ~85-90% of peers):
+On `build()`, state is composed from the (empty) credential cache and the privacy toggle, which with the toggle off yields a STUN-only config (covers ~85-90% of peers):
 ```
 {
   'iceServers': [
@@ -436,6 +436,18 @@ On `build()`, state is immediately set to STUN-only config (covers ~85-90% of pe
   ]
 }
 ```
+
+### "Always relay calls" — the force-TURN chokepoint (2026-07-27)
+
+`IceConfigNotifier` is the single place the `alwaysRelayCallsProvider` privacy setting is applied, so no consumer can forget it. With the toggle ON, `_compose()` returns TURN entries only plus `'iceTransportPolicy': 'relay'`; the STUN entries are dropped because under that policy they cannot produce a usable candidate. The result: only relay candidates are gathered, so a co-participant never sees this device's address.
+
+- **The credentials are cached in private fields** (`_turnUsername`, `_turnPassword`, `_turnUris`) so a toggle flip can recompose the map without waiting for the next 50-minute refresh.
+- **`build()` uses `ref.listen(alwaysRelayCallsProvider)`, never `ref.watch`.** Watching re-runs `build()`, which resets those fields and silently drops every later connection to STUN-only. This is the non-obvious trap in the file.
+- **Fails closed:** toggle on with no credentials yet yields an empty server list, so the connection does not form rather than quietly taking a direct path. Unreachable in practice — TURN credentials ride the same authenticated relay WS as the signalling needed to place a call.
+- The flag is loaded in the **local-first** bootstrap block of `hollow_shell.dart`, before `nodeProvider.start()`, so no peer connection can be built with the wrong policy.
+- Applies to **new** connections only; toggling mid-call takes effect on the next call. `VoiceChannelNotifier.build()` carries a `ref.listen(iceConfigProvider)` that pushes updates into `VoiceChannelService.iceServers` (a join-time snapshot nothing else reassigns), so peers who join a channel *after* a flip do get the new policy.
+
+See memory `project_always_relay_calls`.
 
 ### TURN Credentials over the Relay WS (2026-07 — replaced the HTTP fetch)
 
@@ -463,3 +475,7 @@ Two additional providers for Share (Phase 7A) traffic that MUST NOT use TURN:
 **`shareIceConfigProvider`** — `Provider<Map<String, dynamic>>` (simple computed, not a Notifier). Returns a const STUN-only config. Used for `RTCPeerConnection` calls whose room ID begins with `share:`. Rationale: Share traffic must not consume relay TURN bandwidth reserved for messaging and voice.
 
 **`streamIceConfigProvider`** — `Provider<Map<String, dynamic>>`. Delegates to `ref.watch(shareIceConfigProvider)`. Used for hidden Share connections (video streaming, large files). Also STUN-only.
+
+Both build their own server list rather than deriving from `iceConfigProvider`, which is what keeps them out of the "Always relay calls" chokepoint above. **Never add TURN entries or an `iceTransportPolicy` to either.**
+
+**Caveat — the STUN-only guarantee is not absolute.** hollow-data runs one peer connection per peer, multiplexing file transfers, screen-share audio, gossip and Share chunks. When a channel to that peer is already open (which it is for anyone you have a session with), `ensureConnection`/`connectToPeer` short-circuit and the Share rides the existing general connection, TURN and all. Open bug, pre-dates the toggle: memory `project_share_data_channel_reuse_turn`.

@@ -5,6 +5,7 @@ import 'dart:typed_data';
 
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:hollow/src/core/services/frame_cryptor_service.dart';
+import 'package:hollow/src/core/services/ice_route_probe.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:record/record.dart' as rec;
 
@@ -1722,7 +1723,7 @@ class VoiceChannelService {
     _vcLog('[HOLLOW-VC] Connection state with $peerId: $state');
     if (state == RTCPeerConnectionState.RTCPeerConnectionStateConnected) {
       onPeerConnected?.call(peerId);
-      Future.delayed(const Duration(seconds: 1), () => _logIceRoute(peerId, pc));
+      _logIceRoute(peerId, pc);
     }
     if (state ==
             RTCPeerConnectionState.RTCPeerConnectionStateFailed ||
@@ -1733,50 +1734,12 @@ class VoiceChannelService {
   }
 
   /// Log which ICE route (TURN/STUN/LAN) the succeeded candidate pair took.
-  /// Diagnostics only — runs 1s after the PC reaches connected.
+  /// Diagnostics only.
   Future<void> _logIceRoute(String peerId, RTCPeerConnection pc) async {
-    try {
-      final stats = await pc.getStats();
-      for (final report in stats) {
-        if (report.type == 'candidate-pair' && report.values['state'] == 'succeeded') {
-          _logCandidatePairRoute(peerId, stats, report);
-          return;
-        }
-      }
-      _vcLog('[HOLLOW-VC] ICE route to $peerId: no succeeded candidate pair found');
-    } catch (e) {
-      _vcLog('[HOLLOW-VC] ICE route check failed: $e');
-    }
-  }
-
-  /// Resolve local/remote candidate types for a succeeded pair and log the
-  /// human-readable route label.
-  void _logCandidatePairRoute(
-      String peerId, List<StatsReport> stats, StatsReport report) {
-    final localId = report.values['localCandidateId'] as String?;
-    final remoteId = report.values['remoteCandidateId'] as String?;
-    String localType = '?', remoteType = '?', proto = '';
-    for (final r in stats) {
-      if (r.type == 'local-candidate' && r.id == localId) {
-        localType = (r.values['candidateType'] as String?) ?? '?';
-        proto = (r.values['protocol'] as String?) ?? '';
-      }
-      if (r.type == 'remote-candidate' && r.id == remoteId) {
-        remoteType = (r.values['candidateType'] as String?) ?? '?';
-      }
-    }
-    final route = _iceRouteLabel(localType, remoteType);
-    _vcLog('[HOLLOW-VC] ICE route to $peerId: $route (local=$localType remote=$remoteType proto=$proto)');
-  }
-
-  String _iceRouteLabel(String localType, String remoteType) {
-    return localType == 'relay' || remoteType == 'relay'
-        ? 'TURN (relayed)'
-        : localType == 'srflx' || remoteType == 'srflx'
-            ? 'STUN (direct P2P)'
-            : localType == 'host' && remoteType == 'host'
-                ? 'LAN (direct)'
-                : 'P2P ($localType/$remoteType)';
+    final route = await probeIceRoute(() => pc);
+    _vcLog(route == null
+        ? '[HOLLOW-VC] ICE route to $peerId: no succeeded candidate pair found'
+        : '[HOLLOW-VC] ICE route to $peerId: $route');
   }
 
   /// onTrack handler: bind SFrame receivers for the new audio/video track,

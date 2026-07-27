@@ -903,6 +903,11 @@ class _HollowShellState extends ConsumerState<HollowShell>
     await ref.read(localNicknameProvider.notifier).loadAll();
     setLocalNicknamesRef(ref.read(localNicknameProvider));
     await ref.read(serverStripLayoutProvider.notifier).loadLayout();
+    // "Always relay calls" must be known BEFORE the node starts: the first
+    // TURN credentials land moments after, and IceConfigNotifier composes the
+    // ICE map from this flag. Loading it later would leave a window where a
+    // peer connection is built with direct candidates.
+    await ref.read(alwaysRelayCallsProvider.notifier).load();
 
     // The conversation/server list is now populated from the local DB — drop
     // the "Unlocking…" spinner. The remaining network phase runs behind the
