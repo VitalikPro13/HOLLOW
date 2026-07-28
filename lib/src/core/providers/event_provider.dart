@@ -574,6 +574,9 @@ class EventStreamNotifier extends Notifier<bool> {
         for (final hash in hashes) {
           ref.invalidate(emoteBytesProvider(hash));
         }
+        // GIF-sized blobs can grow the asset cache quickly — enforce the
+        // cap here too, not just on file downloads.
+        _enforceStorageCaps();
 
       case NetworkEvent_ChannelAdded(
             :final serverId, :final channelId, :final name, :final channelType):
@@ -1929,10 +1932,12 @@ class EventStreamNotifier extends Notifier<bool> {
   void _enforceStorageCaps() {
     final filesCap = ref.read(filesCacheCapProvider).valueOrNull ?? 5120;
     final vaultCap = ref.read(vaultCacheCapProvider).valueOrNull ?? 1024;
+    final assetCap = ref.read(assetCacheCapProvider).valueOrNull ?? 512;
     storage_api
         .enforceStorageCaps(
           filesCapMb: BigInt.from(filesCap),
           vaultCacheCapMb: BigInt.from(vaultCap),
+          assetCapMb: BigInt.from(assetCap),
           exemptPaths: const [],
         )
         .then<void>((freed) {

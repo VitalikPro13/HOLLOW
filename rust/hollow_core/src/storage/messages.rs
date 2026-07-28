@@ -780,6 +780,12 @@ impl MessageStore {
         // -- Migration: content_id column on files (vault ↔ file_id link) --
         migrate(conn, "ALTER TABLE files ADD COLUMN content_id TEXT;");
 
+        // -- Migration: asset rail — emote_blobs generalizes to all content-
+        // addressed asset kinds ('emote' | 'banner' | 'sticker' | 'gif').
+        // The kind is LOCAL bookkeeping (per-kind size caps + eviction
+        // grouping); it never rides the wire.
+        migrate(conn, "ALTER TABLE emote_blobs ADD COLUMN kind TEXT NOT NULL DEFAULT 'emote';");
+
         // -- Verified peers (RAT Files — peer identity verification) --
         ddl(conn, "verified_peers table",
             "CREATE TABLE IF NOT EXISTS verified_peers (
@@ -3612,21 +3618,133 @@ impl MessageStore {
         Ok(())
     }
 
-    // ── Custom emotes (content-addressed blobs + personal set) ───
+    // ── Content-addressed asset blobs (emotes, banners, stickers, GIFs)
+    //    + the personal emote set ───
 
     pub fn save_emote_blob(&self, hash: &str, bytes: &[u8], animated: bool) -> Result<(), String> {
+        self.save_asset_blob(hash, bytes, animated, "emote")
+    }
+
+    /// Cache a content-addressed asset blob. `kind` is one of
+    /// `emote | banner | sticker | gif` (see `node/assets.rs::AssetKind`) —
+    /// local bookkeeping for per-kind caps and eviction, never wire data.
+    pub fn save_asset_blob(
+        &self,
+        hash: &str,
+        bytes: &[u8],
+        animated: bool,
+        kind: &str,
+    ) -> Result<(), String> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as i64)
             .unwrap_or(0);
         self.conn
             .execute(
-                "INSERT INTO emote_blobs (hash, bytes, animated, added_at) VALUES (?1, ?2, ?3, ?4)
+                "INSERT INTO emote_blobs (hash, bytes, animated, added_at, kind)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
                  ON CONFLICT(hash) DO NOTHING",
-                params![hash, bytes, animated as i64, now],
+                params![hash, bytes, animated as i64, now, kind],
             )
-            .map_err(|e| format!("Failed to save emote blob: {e}"))?;
+            .map_err(|e| format!("Failed to save asset blob: {e}"))?;
         Ok(())
+    }
+
+    /// (hash, animated, byte size) of every cached blob of one kind, newest
+    /// first. Metadata only — bytes load per-hash via [`load_emote_blob`].
+    pub fn list_asset_blobs_by_kind(
+        &self,
+        kind: &str,
+    ) -> Result<Vec<(String, bool, u64)>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT hash, animated, LENGTH(bytes) FROM emote_blobs
+                 WHERE kind = ?1 ORDER BY added_at DESC",
+            )
+            .map_err(|e| format!("Failed to prepare asset list: {e}"))?;
+        let rows = stmt
+            .query_map(params![kind], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)? != 0,
+                    row.get::<_, i64>(2)?.max(0) as u64,
+                ))
+            })
+            .map_err(|e| format!("Failed to list asset blobs: {e}"))?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    /// Total bytes + row count of the asset blob cache (all kinds).
+    pub fn asset_blob_usage(&self) -> Result<(u64, u32), String> {
+        self.conn
+            .query_row(
+                "SELECT COALESCE(SUM(LENGTH(bytes)), 0), COUNT(*) FROM emote_blobs",
+                [],
+                |row| Ok((row.get::<_, i64>(0)?.max(0) as u64, row.get::<_, i64>(1)?.max(0) as u32)),
+            )
+            .map_err(|e| format!("Failed to read asset usage: {e}"))
+    }
+
+    /// LRU-evict asset blobs (oldest `added_at` first) until total size is
+    /// under `max_bytes * 0.8` (same hysteresis as the file-cache evictor).
+    /// Hashes in `keep` are never evicted — the caller passes everything
+    /// still referenced by a personal set or replicated CRDT state, so
+    /// eviction can only ever drop blobs that would be re-pulled on demand.
+    /// Returns bytes freed.
+    pub fn evict_asset_blobs(
+        &self,
+        max_bytes: u64,
+        keep: &std::collections::HashSet<String>,
+    ) -> Result<u64, String> {
+        let (total, _) = self.asset_blob_usage()?;
+        if total <= max_bytes {
+            return Ok(0);
+        }
+        let target = (max_bytes as f64 * 0.8) as u64;
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT hash, LENGTH(bytes) FROM emote_blobs ORDER BY added_at ASC",
+            )
+            .map_err(|e| format!("Failed to prepare asset eviction scan: {e}"))?;
+        let rows: Vec<(String, u64)> = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?.max(0) as u64))
+            })
+            .map_err(|e| format!("Failed to scan asset blobs: {e}"))?
+            .filter_map(|r| r.ok())
+            .collect();
+        drop(stmt);
+
+        let mut remaining = total;
+        let mut freed = 0u64;
+        for (hash, size) in rows {
+            if remaining <= target {
+                break;
+            }
+            if keep.contains(&hash) {
+                continue;
+            }
+            if self
+                .conn
+                .execute("DELETE FROM emote_blobs WHERE hash = ?1", params![hash])
+                .is_ok()
+            {
+                remaining = remaining.saturating_sub(size);
+                freed += size;
+            }
+        }
+        Ok(freed)
+    }
+
+    /// Delete every asset blob whose hash is NOT in `keep` (Storage Manager
+    /// "clear" action). Returns bytes freed.
+    pub fn clear_asset_blobs_except(
+        &self,
+        keep: &std::collections::HashSet<String>,
+    ) -> Result<u64, String> {
+        self.evict_asset_blobs(0, keep)
     }
 
     pub fn load_emote_blob(&self, hash: &str) -> Result<Option<Vec<u8>>, String> {

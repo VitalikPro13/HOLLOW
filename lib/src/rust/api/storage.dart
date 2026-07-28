@@ -7,7 +7,7 @@ import '../frb_generated.dart';
 import 'network.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `build_snapshot_bytes`, `derive_db_key_public`, `derive_db_key`, `dir_size_bytes`, `export_backup_bytes`, `get_peer_id`, `get_store`, `import_backup_bytes`, `import_snapshot_bytes`, `pending_link_blob_path`, `pending_link_code_path`, `pending_wipe_marker_path`, `snapshot_state_summary`, `stash_pending_link`, `stored_file_to_ffi`
+// These functions are ignored because they are not marked as `pub`: `build_snapshot_bytes`, `derive_db_key_public`, `derive_db_key`, `dir_size_bytes`, `export_backup_bytes`, `get_peer_id`, `get_store`, `import_backup_bytes`, `import_snapshot_bytes`, `pending_link_blob_path`, `pending_link_code_path`, `pending_wipe_marker_path`, `referenced_asset_hashes`, `snapshot_state_summary`, `stash_pending_link`, `stored_file_to_ffi`
 
 /// Open the encrypted message database. Must be called after identity is loaded.
 /// Typically called once at app start (after `load_or_create_identity`).
@@ -273,6 +273,11 @@ Future<int> resetStaleFiles() =>
 Future<StorageBreakdown> getStorageBreakdown() =>
     RustLib.instance.api.crateApiStorageGetStorageBreakdown();
 
+/// Delete every cached asset blob not referenced by a personal set or a
+/// server's CRDT state (Storage Manager "clear" action). Returns bytes freed.
+Future<BigInt> clearUnreferencedAssetBlobs() =>
+    RustLib.instance.api.crateApiStorageClearUnreferencedAssetBlobs();
+
 /// Delete the file bytes for a single conversation/server (keep the signed
 /// FileHeader rows so messages render as re-downloadable). Returns bytes freed.
 Future<BigInt> clearFileBytesForContext({
@@ -304,16 +309,18 @@ Future<BigInt> evictFilesCache({
 Future<BigInt> clearVaultCache() =>
     RustLib.instance.api.crateApiStorageClearVaultCache();
 
-/// Enforce BOTH cache caps (files/ + vault_cache/). Called after a download
-/// completes so the user-set caps are actually honored (the sliders were no-ops
-/// before this). Returns total bytes freed across both.
+/// Enforce the cache caps (files/ + vault_cache/ + the asset blob cache).
+/// Called after a download completes so the user-set caps are actually
+/// honored (the sliders were no-ops before this). Returns total bytes freed.
 Future<BigInt> enforceStorageCaps({
   required BigInt filesCapMb,
   required BigInt vaultCacheCapMb,
+  required BigInt assetCapMb,
   required List<String> exemptPaths,
 }) => RustLib.instance.api.crateApiStorageEnforceStorageCaps(
   filesCapMb: filesCapMb,
   vaultCacheCapMb: vaultCacheCapMb,
+  assetCapMb: assetCapMb,
   exemptPaths: exemptPaths,
 );
 
@@ -462,6 +469,11 @@ class StorageBreakdown {
 
   /// Actual `du` of the `vault/` (held erasure shards) directory.
   final BigInt vaultShardBytes;
+
+  /// Content-addressed asset blob cache (emotes, stickers, GIFs, banners)
+  /// inside the encrypted DB.
+  final BigInt assetBlobBytes;
+  final int assetBlobCount;
   final List<StorageContextUsage> contexts;
 
   const StorageBreakdown({
@@ -469,6 +481,8 @@ class StorageBreakdown {
     required this.totalDiskBytes,
     required this.vaultCacheBytes,
     required this.vaultShardBytes,
+    required this.assetBlobBytes,
+    required this.assetBlobCount,
     required this.contexts,
   });
 
@@ -478,6 +492,8 @@ class StorageBreakdown {
       totalDiskBytes.hashCode ^
       vaultCacheBytes.hashCode ^
       vaultShardBytes.hashCode ^
+      assetBlobBytes.hashCode ^
+      assetBlobCount.hashCode ^
       contexts.hashCode;
 
   @override
@@ -489,6 +505,8 @@ class StorageBreakdown {
           totalDiskBytes == other.totalDiskBytes &&
           vaultCacheBytes == other.vaultCacheBytes &&
           vaultShardBytes == other.vaultShardBytes &&
+          assetBlobBytes == other.assetBlobBytes &&
+          assetBlobCount == other.assetBlobCount &&
           contexts == other.contexts;
 }
 

@@ -1614,6 +1614,8 @@ class _StorageTab extends StatelessWidget {
         _FilesCacheCapSlider(),
         SizedBox(height: HollowSpacing.lg),
         _CacheCapSlider(),
+        SizedBox(height: HollowSpacing.lg),
+        _AssetCacheCapSlider(),
         SizedBox(height: HollowSpacing.xl),
         _SectionLabel(label: 'Media'),
         SizedBox(height: HollowSpacing.sm),
@@ -2483,6 +2485,53 @@ class _FilesCacheCapSlider extends ConsumerWidget {
               ref.read(filesCacheCapProvider.notifier).setCap(v.round()),
         ),
         Text('Oldest downloads are evicted past this; messages stay re-downloadable',
+            style: HollowTypography.caption.copyWith(
+              color: hollow.textSecondary, fontSize: 11,
+            )),
+      ],
+    );
+  }
+}
+
+class _AssetCacheCapSlider extends ConsumerWidget {
+  const _AssetCacheCapSlider();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final hollow = HollowTheme.of(context);
+    final asyncVal = ref.watch(assetCacheCapProvider);
+    final value = asyncVal.valueOrNull ?? 512;
+
+    final label = value >= 1024
+        ? '${(value / 1024).toStringAsFixed(1)} GB'
+        : '$value MB';
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            Text('Emotes & GIFs Limit',
+                style: HollowTypography.bodySmall.copyWith(
+                  color: hollow.textSecondary,
+                )),
+            Text(label, style: HollowTypography.caption.copyWith(
+              color: hollow.accent, fontWeight: FontWeight.w600,
+            )),
+          ],
+        ),
+        Slider(
+          value: value.toDouble().clamp(64, 4096),
+          min: 64,
+          max: 4096,
+          divisions: 63,
+          activeColor: hollow.accent,
+          inactiveColor: hollow.border,
+          onChanged: (v) =>
+              ref.read(assetCacheCapProvider.notifier).setCap(v.round()),
+        ),
+        Text('Least-recently added emotes, stickers and GIFs are evicted past this',
             style: HollowTypography.caption.copyWith(
               color: hollow.textSecondary, fontSize: 11,
             )),

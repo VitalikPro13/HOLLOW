@@ -64,6 +64,23 @@ void requestEmoteOnce(String hash, {String? serverId, String? peerHint}) {
   } catch (_) {}
 }
 
+/// Pull asset bytes (sticker/GIF/banner) for [hash] from the network, once
+/// per session. [kind] is the db kind string (`sticker` | `gif` | `banner`)
+/// — it sizes the per-blob cap Rust enforces on receipt. Same rail and same
+/// [emoteBytesProvider] cache as emotes (blobs are content-addressed).
+void requestAssetOnce(String hash,
+    {required String kind, String? serverId, String? peerHint}) {
+  if (_requestedHashes.contains(hash)) return;
+  _requestedHashes.add(hash);
+  // try/catch AND catchError — see requestEmoteOnce.
+  try {
+    emotes_api
+        .requestAssets(
+            hashes: [hash], kind: kind, serverId: serverId, peerHint: peerHint)
+        .catchError((_) {});
+  } catch (_) {}
+}
+
 /// Allow a re-pull after new bytes arrive elsewhere or on reconnect-driven
 /// invalidation (called from the event stream when assets land, so a hash
 /// that failed once isn't locked out forever).

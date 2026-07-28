@@ -43,6 +43,7 @@ enum _TokenKind {
   url,
   mention,
   customEmote,
+  asset,
 }
 
 class _Token {
@@ -50,8 +51,9 @@ class _Token {
   final String text;
   final List<_Token>? children; // for nested markup (bold > italic, etc.)
   final String? extra; // customEmote: the content hash
+  final bool block; // asset: token stood alone on its own line
 
-  const _Token(this.kind, this.text, [this.children, this.extra]);
+  const _Token(this.kind, this.text, [this.children, this.extra, this.block = false]);
 }
 
 // ---------------------------------------------------------------------------
@@ -153,6 +155,7 @@ _TokenMatch? _matchTokenAt(
 ) {
   return _matchUrl(text, i) ??
       _matchCustomEmote(text, i) ??
+      _matchAssetToken(text, i) ??
       _matchMention(text, i, memberNames) ??
       // --- **bold** ---
       _matchDoubleMarker(text, i, '**', _TokenKind.bold, depth) ??
@@ -187,6 +190,25 @@ _TokenMatch? _matchCustomEmote(String text, int i) {
           null,
           match.group(2)!,
         ),
+        match.end,
+      );
+    }
+  }
+  return null;
+}
+
+/// `[a:kind:hash:w:h]` — sticker/GIF token. A token standing alone on its
+/// own line renders as a block (large); inline with other text it stays
+/// capped to the line. Tokens with out-of-bound dims fail [parseAssetToken]
+/// and fall through to plain text (same as an old client would render).
+_TokenMatch? _matchAssetToken(String text, int i) {
+  if (text[i] == '[') {
+    final match = assetTokenRegex.matchAsPrefix(text, i);
+    if (match != null && parseAssetToken(match.group(0)!) != null) {
+      final alone = (i == 0 || text[i - 1] == '\n') &&
+          (match.end == text.length || text[match.end] == '\n');
+      return _TokenMatch(
+        _Token(_TokenKind.asset, match.group(0)!, null, null, alone),
         match.end,
       );
     }
@@ -421,6 +443,44 @@ List<InlineSpan> _tokensToSpans(
             fallbackStyle: style,
           ),
         ));
+      case _TokenKind.asset:
+        final asset = parseAssetToken(tok.text);
+        if (asset == null) {
+          // Can't happen (the matcher validates) — degrade like an old client.
+          spans.add(TextSpan(text: tok.text, style: style));
+          break;
+        }
+        final aspect = asset.w / asset.h;
+        if (tok.block) {
+          // Alone on its own line: block render, GIFs up to 480px wide,
+          // stickers up to 160px, never upscaled past the source pixels.
+          // Media follows the interface scale (root UiScale transform), not
+          // the chat TEXT scale — same rule as avatars and file cards.
+          final cap = tok.text.startsWith('[a:g') ? 480.0 : 160.0;
+          spans.add(WidgetSpan(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: 4),
+              child: ChatAssetImage(
+                kind: asset.kind,
+                hash: asset.hash,
+                aspect: aspect,
+                maxWidth: cap < asset.w ? cap : asset.w.toDouble(),
+              ),
+            ),
+          ));
+        } else {
+          // Inline with other text: capped to ~2 line-heights, which DOES
+          // ride the text scaler like the words around it.
+          spans.add(WidgetSpan(
+            alignment: PlaceholderAlignment.middle,
+            child: ChatAssetImage(
+              kind: asset.kind,
+              hash: asset.hash,
+              aspect: aspect,
+              height: scaler.scale(style.fontSize ?? 15) * 2.0,
+            ),
+          ));
+        }
       case _TokenKind.code:
         spans.add(WidgetSpan(
           alignment: PlaceholderAlignment.baseline,

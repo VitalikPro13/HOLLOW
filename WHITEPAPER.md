@@ -786,12 +786,13 @@ CRDT operations are validated on receipt:
 
 **Multi-device note.** Membership entries are keyed by **master** identity (§3), while MLS leaves and transport peer IDs are device-keyed. All role and membership checks resolve a device ID to its master before comparing, so one person is one member regardless of device count, and an authorization check against a device ID never silently fails to match.
 
-### 10.7 Custom Emotes (Content-Addressed Asset Replication)
+### 10.7 Custom Emotes and the Asset Rail (Content-Addressed Asset Replication)
 
-Custom emotes are small images usable inline in messages and as reactions. Their design extends the CRDT model with a content-addressed asset layer:
+Custom emotes are small images usable inline in messages and as reactions. Their design extends the CRDT model with a content-addressed asset layer — the *asset rail* — that also carries the other media kinds built on it (server banners, stickers, GIFs), which differ only in their size bounds:
 
 - **Metadata and bytes are separated.** The replicated CRDT entry (`EmojiAdded`) carries only a name and the SHA-256 hash of the processed image. The image bytes never ride CRDT operations, message envelopes, or relay buffers.
 - **Bytes replicate on demand, peer-to-peer.** A client that must render an unknown hash requests it from a single source — the message sender's devices (direct messages) or one online server member (channels). Any member holding the bytes can serve them: content addressing makes every copy equally trustworthy, because the receiver recomputes the hash (and enforces format and size bounds) before caching. A tampered or substituted image simply fails verification and is discarded.
+- **Only requested bytes are accepted, at the requester's own bounds.** A receiver records, at request time, which hashes it asked for and what kind of asset each was requested *as*; an arriving bundle is accepted only for those hashes, with the size ceiling taken from the locally recorded kind. A peer can neither push unsolicited blobs into another client's store nor smuggle a large blob past a small kind's bound — the sender has no say in which limit applies. Reply bundles are additionally bounded in total size on the serving side.
 - **Wire form degrades gracefully.** An emote appears in message text as a compact token containing its name and hash; a client that predates the feature renders the token as text, and reaction strings accept either a short Unicode emoji or a well-formed token — nothing else.
 - **Third-party catalogs are authoring-time only.** Emotes may be imported from an external catalog (FrankerFaceZ), but the catalog is browsed exclusively through a Hollow-operated caching proxy, and only by the person actively choosing an emote. At import the image is re-encoded and content-addressed; from then on it replicates purely peer-to-peer. **A message recipient never makes an HTTP request to render an emote** — the external service learns nothing about who views which emotes, or that a conversation exists at all, and cannot alter an emote after import (the hash pins the bytes).
 

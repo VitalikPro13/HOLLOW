@@ -192,6 +192,22 @@ impl MockRelay {
         inner.offline.get(peer).map(|v| v.len()).unwrap_or(0)
     }
 
+    /// Test-only: deliver a raw frame to `target` as if `from` had sent it in
+    /// `room`, bypassing the sender's own node logic — simulates a hostile or
+    /// buggy peer pushing an UNSOLICITED protocol message (the real relay
+    /// forwards any authed frame; sender honesty is not a transport guarantee).
+    #[allow(dead_code)]
+    pub(crate) fn inject_direct(&self, room: &str, from: &str, target: &str, data: Vec<u8>) {
+        let inner = self.inner.lock().unwrap();
+        if let Some(conn) = inner.conns.get(target) {
+            let _ = conn.event_tx.send(WsEvent::DirectMessage {
+                room: room.to_string(),
+                from: from.to_string(),
+                data,
+            });
+        }
+    }
+
     /// Mark a node offline (simulate a disconnect): stop delivering to it, drop
     /// it from every room (broadcasting PeerLeft), so peers see it leave. Its
     /// event loop keeps running but receives nothing until it comes back.
@@ -7464,6 +7480,7 @@ async fn server_emote_replicates_and_bytes_pull_on_demand() {
     j.cmd_tx
         .send(NodeCommand::RequestEmotes {
             hashes: vec![hash.clone()],
+            kind: super::assets::AssetKind::Emote,
             server_id: Some(server_id.clone()),
             peer_hint: None,
         })
@@ -7522,6 +7539,168 @@ async fn server_emote_replicates_and_bytes_pull_on_demand() {
     sleep_ms(500).await;
     let j_state = j.server_state(&server_id).expect("J state after removal");
     assert!(j_state.emotes.is_empty(), "EmojiRemoved must converge on J");
+
+    drop(o);
+    drop(j);
+}
+
+// ---------------------------------------------------------------------------
+// Asset rail: the size cap enforced on receipt comes from the kind WE
+// recorded at request time, never from the sender. A 300 KB blob is refused
+// when it was requested as an 'emote' (256 KB cap) and accepted when the
+// same hash is re-requested as a 'gif' (2 MB cap) — the failed receipt must
+// free the request slot so the re-ask isn't throttled away.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn asset_cap_enforced_per_kind() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    const O_MASTER: u8 = 81;
+    const J_MASTER: u8 = 82;
+    let o_master = NativeKeypair::from_secret_bytes(&seed_bytes(O_MASTER)).peer_id();
+    let j_master = NativeKeypair::from_secret_bytes(&seed_bytes(J_MASTER)).peer_id();
+
+    let o = spawn_node_with_friends(&relay, O_MASTER, O_MASTER, &[&j_master]).await;
+    sleep_ms(1500).await;
+    let mut j = spawn_node_with_friends(&relay, J_MASTER, J_MASTER, &[&o_master]).await;
+    sleep_ms(4000).await;
+
+    // O holds a 300 KB blob with a valid WebP container (the wire check is
+    // container magic + content hash — it need not decode).
+    use sha2::{Digest, Sha256};
+    let mut big = Vec::with_capacity(300_012);
+    big.extend_from_slice(b"RIFF");
+    big.extend_from_slice(&300_004u32.to_le_bytes());
+    big.extend_from_slice(b"WEBP");
+    big.resize(300_012, 0u8);
+    let hash = hex::encode(Sha256::digest(&big));
+    o.store()
+        .save_asset_blob(&hash, &big, false, "gif")
+        .expect("owner caches the big blob");
+
+    // --- 1. Requested as an EMOTE (256 KB cap): the reply must be REFUSED. ---
+    drain_events(&mut j);
+    j.cmd_tx
+        .send(NodeCommand::RequestEmotes {
+            hashes: vec![hash.clone()],
+            kind: super::assets::AssetKind::Emote,
+            server_id: None,
+            peer_hint: Some(o_master.clone()),
+        })
+        .await
+        .unwrap();
+    let leaked = wait_event(&mut j, std::time::Duration::from_secs(4), |ev| {
+        matches!(ev, NetworkEvent::EmoteAssetsReceived { hashes } if hashes.contains(&hash))
+    })
+    .await;
+    assert!(!leaked, "a 300 KB blob must be refused at the emote cap");
+    assert!(
+        !j.store().has_emote_blob(&hash).unwrap(),
+        "the over-cap blob must not be cached"
+    );
+
+    // --- 2. Re-requested as a GIF (2 MB cap): accepted byte-exact. ---
+    j.cmd_tx
+        .send(NodeCommand::RequestEmotes {
+            hashes: vec![hash.clone()],
+            kind: super::assets::AssetKind::Gif,
+            server_id: None,
+            peer_hint: Some(o_master.clone()),
+        })
+        .await
+        .unwrap();
+    let got = wait_event(&mut j, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::EmoteAssetsReceived { hashes } if hashes.contains(&hash))
+    })
+    .await;
+    assert!(got, "the same blob must be accepted at the gif cap");
+    sleep_ms(300).await;
+    assert_eq!(
+        j.store().load_emote_blob(&hash).unwrap().as_deref(),
+        Some(big.as_slice()),
+        "pulled gif bytes must match byte-exact"
+    );
+
+    drop(o);
+    drop(j);
+}
+
+// ---------------------------------------------------------------------------
+// Asset rail: an UNSOLICITED EmoteAssets bundle — valid container, valid
+// content hash, from a friend, in a shared room — must be dropped, because
+// the receiver never requested the hash. Without this gate any peer could
+// stuff arbitrary blobs into our encrypted DB at the largest kind's cap.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn asset_request_not_answered_for_unrequested_hash() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    const O_MASTER: u8 = 83;
+    const J_MASTER: u8 = 84;
+    let o_master = NativeKeypair::from_secret_bytes(&seed_bytes(O_MASTER)).peer_id();
+    let j_master = NativeKeypair::from_secret_bytes(&seed_bytes(J_MASTER)).peer_id();
+
+    let mut o = spawn_node_with_friends(&relay, O_MASTER, O_MASTER, &[&j_master]).await;
+    sleep_ms(1500).await;
+    let mut j = spawn_node_with_friends(&relay, J_MASTER, J_MASTER, &[&o_master]).await;
+    sleep_ms(4000).await;
+
+    let server_id = create_server_and_wait(&mut o, "Stuffing Server").await;
+    sleep_ms(300).await;
+    j.cmd_tx
+        .send(NodeCommand::JoinServer {
+            server_id: server_id.clone(),
+            twitch_proof_json: None,
+            nsfw_confirmed: false,
+        })
+        .await
+        .unwrap();
+    let joined = wait_event(&mut j, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
+    })
+    .await;
+    assert!(joined, "J must join the server");
+    sleep_ms(2000).await;
+    drain_events(&mut j);
+
+    // A perfectly valid small WebP bundle J never asked for.
+    use sha2::{Digest, Sha256};
+    let (blob, _) = {
+        let img = image::RgbaImage::from_pixel(16, 16, image::Rgba([10, 200, 90, 255]));
+        let mut png = Vec::new();
+        img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .expect("encode test png");
+        super::image_convert::process_emote_image(&png).expect("process emote")
+    };
+    let hash = hex::encode(Sha256::digest(&blob));
+    let bundle = crate::api::showcase::encode_asset_bundle(&[(hash.clone(), blob)]);
+    let msg = super::types::HavenMessage::EmoteAssets {
+        bundle_json: String::from_utf8(bundle).expect("bundle is JSON"),
+    };
+    let frame = serde_json::to_vec(&msg).expect("serialize EmoteAssets");
+    relay.inject_direct(&server_id, &o.device_id, &j.device_id, frame);
+
+    let stored = wait_event(&mut j, std::time::Duration::from_secs(4), |ev| {
+        matches!(ev, NetworkEvent::EmoteAssetsReceived { hashes } if hashes.contains(&hash))
+    })
+    .await;
+    assert!(!stored, "an unsolicited asset bundle must never emit EmoteAssetsReceived");
+    assert!(
+        !j.store().has_emote_blob(&hash).unwrap(),
+        "an unsolicited asset blob must never be cached"
+    );
 
     drop(o);
     drop(j);

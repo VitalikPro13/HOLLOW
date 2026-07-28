@@ -34,6 +34,8 @@ class StorageSettingsView extends StatelessWidget {
           _FilesCacheCapSlider(),
           SizedBox(height: HollowSpacing.lg),
           _VaultCacheCapSlider(),
+          SizedBox(height: HollowSpacing.lg),
+          _AssetCacheCapSlider(),
         ],
       ),
       SettingsCard(
@@ -121,6 +123,34 @@ class _VaultCacheCapSlider extends ConsumerWidget {
       maxLabel: '10 GB',
       onChanged: (value) =>
           ref.read(vaultCacheCapProvider.notifier).setCap(value.round()),
+    );
+  }
+}
+
+/// Asset blob cache cap slider (emotes, stickers, GIFs). Applies immediately;
+/// enforced whenever new asset bytes land. Assets still used by your personal
+/// set or a server are never evicted.
+class _AssetCacheCapSlider extends ConsumerWidget {
+  const _AssetCacheCapSlider();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final cap = ref.watch(assetCacheCapProvider).valueOrNull ?? 512;
+    return SettingsLabeledSlider(
+      icon: LucideIcons.smile,
+      title: 'Emotes & GIFs Limit',
+      subtitle:
+          '$cap MB — least-recently added emotes, stickers and GIFs are evicted '
+          'when this is exceeded (ones your servers or personal set use are kept)',
+      value: cap.toDouble().clamp(64, 4096),
+      min: 64,
+      max: 4096,
+      divisions: 63,
+      label: cap >= 1024 ? '${(cap / 1024).toStringAsFixed(1)} GB' : '$cap MB',
+      minLabel: '64 MB',
+      maxLabel: '4 GB',
+      onChanged: (value) =>
+          ref.read(assetCacheCapProvider.notifier).setCap(value.round()),
     );
   }
 }

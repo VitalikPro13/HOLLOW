@@ -99,12 +99,14 @@ class _SummaryHeader extends ConsumerWidget {
     final downloads = breakdown.totalDiskBytes.toInt();
     final cache = breakdown.vaultCacheBytes.toInt();
     final shards = breakdown.vaultShardBytes.toInt();
-    final total = downloads + cache + shards;
+    final assets = breakdown.assetBlobBytes.toInt();
+    final total = downloads + cache + shards + assets;
 
     final segments = [
       _UsageSegment('Downloads', downloads, hollow.accent),
       _UsageSegment('Vault cache', cache, hollow.warning),
       _UsageSegment('Held shards', shards, hollow.success),
+      _UsageSegment('Emotes & GIFs', assets, hollow.accentMuted),
     ];
 
     return Column(
@@ -128,7 +130,7 @@ class _SummaryHeader extends ConsumerWidget {
                 ],
               ),
             ),
-            _CleanupMenu(downloads: downloads, cache: cache),
+            _CleanupMenu(downloads: downloads, cache: cache, assets: assets),
           ],
         ),
         const SizedBox(height: HollowSpacing.sm),
@@ -212,15 +214,17 @@ class _LegendChip extends StatelessWidget {
 /// The "⋯" overflow menu holding destructive clear actions, so they're reachable
 /// but out of the way (held shards intentionally absent — read-only).
 class _CleanupMenu extends ConsumerWidget {
-  const _CleanupMenu({required this.downloads, required this.cache});
+  const _CleanupMenu(
+      {required this.downloads, required this.cache, required this.assets});
   final int downloads;
   final int cache;
+  final int assets;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
     final actions = ref.read(storageActionsProvider);
-    final enabled = downloads > 0 || cache > 0;
+    final enabled = downloads > 0 || cache > 0 || assets > 0;
 
     return PopupMenuButton<String>(
       enabled: enabled,
@@ -252,6 +256,15 @@ class _CleanupMenu extends ConsumerWidget {
                   'and re-downloads on demand.',
             );
             if (ok) await actions.clearVaultCache();
+          case 'assets':
+            final ok = await _confirm(
+              context,
+              'Clear unused emotes & GIFs?',
+              'Deletes cached emote, sticker and GIF images that are not part '
+                  'of your personal set or any of your servers. They re-download '
+                  'from peers on demand.',
+            );
+            if (ok) await actions.clearUnreferencedAssets();
         }
       },
       itemBuilder: (ctx) => [
@@ -266,6 +279,12 @@ class _CleanupMenu extends ConsumerWidget {
           enabled: cache > 0,
           child: _menuRow(hollow, LucideIcons.hardDrive,
               'Clear vault cache', formatBytes(cache)),
+        ),
+        PopupMenuItem(
+          value: 'assets',
+          enabled: assets > 0,
+          child: _menuRow(hollow, LucideIcons.smile,
+              'Clear unused emotes & GIFs', formatBytes(assets)),
         ),
       ],
     );

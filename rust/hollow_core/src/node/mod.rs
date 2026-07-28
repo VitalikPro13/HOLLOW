@@ -1,3 +1,4 @@
+pub(crate) mod assets;
 pub(crate) mod blocklist;
 pub(crate) mod conference;
 pub(crate) mod crdt_store;

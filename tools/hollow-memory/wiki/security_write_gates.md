@@ -41,7 +41,7 @@ sender needs no signature.
 
 | Write | Site | Gate |
 |---|---|---|
-| `save_emote_blob` | `emotes::handle_emote_assets` | `decode_asset_bundle` drops any (hash, bytes) pair whose hash ≠ SHA-256(bytes); plus size cap + WebP container check |
+| `save_asset_blob` (all asset kinds: emote/banner/sticker/gif; `save_emote_blob` = the emote-kind shorthand) | `emotes::handle_emote_assets` | REQUESTED-ONLY: the hash must be in swarm's `requested_asset_kinds` map (recorded when WE sent the request, cleared on WS Disconnected) — unsolicited blobs are dropped, so no peer can stuff our DB. The per-blob size cap comes from the RECORDED kind (`AssetKind::recv_cap`), never from anything the sender supplies. Then `decode_asset_bundle` drops any (hash, bytes) pair whose hash ≠ SHA-256(bytes), plus the WebP container check. A requested hash answered with invalid bytes frees its request slot (retry from another holder) |
 | Showcase assets | same codec | same |
 | Vault / Share chunks | `vault`, `share_handler` | manifest root hash |
 

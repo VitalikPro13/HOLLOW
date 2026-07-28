@@ -485,9 +485,12 @@ async fn run_event_loop(
     // Peers we've already triggered sync for this session.
     let mut synced_peers: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-    // Emote hashes already requested THIS connection (pull-once throttle).
+    // Asset hashes already requested THIS connection (pull-once throttle),
+    // each recorded with the kind WE asked for — handle_emote_assets sizes
+    // the receipt cap from this map, never from anything the sender says.
     // Cleared on WS disconnect so a lost reply can be re-pulled after reconnect.
-    let mut requested_emote_hashes: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut requested_asset_kinds: std::collections::HashMap<String, emotes::AssetKind> =
+        std::collections::HashMap::new();
 
     // (server room, channel) pairs whose relay offline catch-up replay already
     // ran THIS connection — fed by both the connect-time sweep (RoomMembers)
@@ -1317,10 +1320,10 @@ async fn run_event_loop(
                         ).await { continue; }
                     }
 
-                    NodeCommand::RequestEmotes { hashes, server_id, peer_hint } => {
+                    NodeCommand::RequestEmotes { hashes, kind, server_id, peer_hint } => {
                         emotes::handle_request_emotes(
-                            &ws_cmd_tx, &ws_room_peers, &mut requested_emote_hashes,
-                            hashes, server_id, peer_hint, &local_peer_str,
+                            &ws_cmd_tx, &ws_room_peers, &mut requested_asset_kinds,
+                            hashes, kind, server_id, peer_hint, &local_peer_str,
                             &db_path, &db_passphrase,
                         );
                     }
@@ -2210,6 +2213,7 @@ async fn run_event_loop(
                                 &mut link_snapshot_requested, &mut pending_sibling_challenges,
                                 &mut pending_friend_accepts, &mut pending_friend_requests,
                                 &mut pending_friend_removals,
+                                &mut requested_asset_kinds,
                                 HavenMessage::CrdtOpBroadcast { server_id, op_json },
                             ).await;
                         }
@@ -2425,7 +2429,7 @@ async fn run_event_loop(
                         let _ = event_tx.send(NetworkEvent::RelayDisconnected).await;
                         ws_room_peers.clear();
                         synced_peers.clear();
-                        requested_emote_hashes.clear();
+                        requested_asset_kinds.clear();
                         relay_catchup_done.clear();
                         key_request_in_flight.clear();
                         key_bundle_sent_to.clear();
@@ -3978,6 +3982,7 @@ async fn run_event_loop(
                                         &mut link_snapshot_requested, &mut pending_sibling_challenges,
                                         &mut pending_friend_accepts, &mut pending_friend_requests,
                                         &mut pending_friend_removals,
+                                        &mut requested_asset_kinds,
                                         msg,
                                     ).await;
                             } else {
@@ -5042,6 +5047,7 @@ async fn handle_incoming_request(
     pending_friend_accepts: &mut HashMap<String, i64>,
     pending_friend_requests: &mut HashMap<String, i64>,
     pending_friend_removals: &mut std::collections::HashSet<String>,
+    requested_asset_kinds: &mut HashMap<String, emotes::AssetKind>,
     request: HavenMessage,
 ) {
 
@@ -11842,7 +11848,7 @@ async fn handle_incoming_request(
 
         HavenMessage::EmoteAssets { bundle_json } => {
             emotes::handle_emote_assets(
-                event_tx, bundle_json,
+                event_tx, requested_asset_kinds, bundle_json,
                 db_path, db_passphrase,
             ).await;
         }

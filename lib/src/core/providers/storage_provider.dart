@@ -65,6 +65,20 @@ class StorageActions {
       _refresh();
     }
   }
+
+  /// Delete cached asset blobs (emotes/stickers/GIFs) not referenced by a
+  /// personal set or a server's CRDT state. Returns bytes freed.
+  Future<int> clearUnreferencedAssets() async {
+    try {
+      final freed = await storage_api.clearUnreferencedAssetBlobs();
+      return freed.toInt();
+    } catch (e) {
+      debugPrint('[HOLLOW-STORAGE] clearUnreferencedAssets failed: $e');
+      return 0;
+    } finally {
+      _refresh();
+    }
+  }
 }
 
 /// Format a byte count as a human-readable size (e.g. "1.4 GB", "320 MB").

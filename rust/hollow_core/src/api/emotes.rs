@@ -102,12 +102,37 @@ pub fn request_emotes(
     server_id: Option<String>,
     peer_hint: Option<String>,
 ) -> Result<(), String> {
+    request_asset_kind(hashes, node::assets::AssetKind::Emote, server_id, peer_hint)
+}
+
+/// Pull asset bytes of any kind (`emote | banner | sticker | gif`). The kind
+/// sizes the per-blob cap enforced on receipt — it is recorded locally at
+/// request time and never trusted from the wire. Fire-and-forget; results
+/// arrive as `EmoteAssetsReceived`.
+#[frb]
+pub fn request_assets(
+    hashes: Vec<String>,
+    kind: String,
+    server_id: Option<String>,
+    peer_hint: Option<String>,
+) -> Result<(), String> {
+    let kind = node::assets::AssetKind::from_db_kind(&kind)
+        .ok_or_else(|| format!("Unknown asset kind: {kind}"))?;
+    request_asset_kind(hashes, kind, server_id, peer_hint)
+}
+
+fn request_asset_kind(
+    hashes: Vec<String>,
+    kind: node::assets::AssetKind,
+    server_id: Option<String>,
+    peer_hint: Option<String>,
+) -> Result<(), String> {
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
     drop(guard);
     let rt = get_runtime();
-    rt.block_on(cmd_tx.send(node::NodeCommand::RequestEmotes { hashes, server_id, peer_hint }))
+    rt.block_on(cmd_tx.send(node::NodeCommand::RequestEmotes { hashes, kind, server_id, peer_hint }))
         .map_err(|e| format!("Failed to send command: {e}"))?;
     Ok(())
 }

@@ -698,6 +698,35 @@ class FilesCacheCapNotifier extends AsyncNotifier<int> {
   }
 }
 
+/// Asset blob cache cap in MB (emotes, stickers, GIFs, banners — the
+/// content-addressed blobs inside the encrypted DB). LRU-evicted past the
+/// cap; hashes still referenced by a personal set or a server's CRDT state
+/// are never evicted. Default: 512 MB.
+final assetCacheCapProvider =
+    AsyncNotifierProvider<AssetCacheCapNotifier, int>(
+        AssetCacheCapNotifier.new);
+
+class AssetCacheCapNotifier extends AsyncNotifier<int> {
+  @override
+  Future<int> build() async {
+    final val = await storage_api.loadSetting(key: 'asset_cache_cap_mb');
+    if (val != null && val.isNotEmpty) {
+      final mb = int.tryParse(val);
+      if (mb != null && mb >= 64) return mb;
+    }
+    return 512;
+  }
+
+  Future<void> setCap(int mb) async {
+    final clamped = mb.clamp(64, 4096);
+    await storage_api.saveSetting(
+      key: 'asset_cache_cap_mb',
+      value: clamped.toString(),
+    );
+    state = AsyncData(clamped);
+  }
+}
+
 // ── Official REALITY tunnel defaults (Hollow's shared Xray on the VPS) ────────
 // Baked in like `kDefaultRelayDomain` so a normal user just flips the toggle —
 // no copy-paste. The fields stay editable for anyone self-hosting their own

@@ -894,6 +894,10 @@ pub struct StorageBreakdown {
     pub vault_cache_bytes: u64,
     /// Actual `du` of the `vault/` (held erasure shards) directory.
     pub vault_shard_bytes: u64,
+    /// Content-addressed asset blob cache (emotes, stickers, GIFs, banners)
+    /// inside the encrypted DB.
+    pub asset_blob_bytes: u64,
+    pub asset_blob_count: u32,
     pub contexts: Vec<StorageContextUsage>,
 }
 
@@ -946,14 +950,62 @@ pub fn get_storage_breakdown() -> Result<StorageBreakdown, String> {
         let dir = crate::identity::data_dir()?.join("vault");
         dir_size_bytes(&dir)
     };
+    let (asset_blob_bytes, asset_blob_count) = ms.asset_blob_usage()?;
 
     Ok(StorageBreakdown {
         total_db_bytes,
         total_disk_bytes,
         vault_cache_bytes,
         vault_shard_bytes,
+        asset_blob_bytes,
+        asset_blob_count,
         contexts,
     })
+}
+
+/// Every asset hash still referenced by a personal set or replicated CRDT
+/// state — eviction and "clear" must never drop these (a personal emote or
+/// a server's active emote/banner would go blank until re-pulled; worse, WE
+/// may be the only online holder for a server we own).
+fn referenced_asset_hashes(ms: &crate::storage::MessageStore) -> std::collections::HashSet<String> {
+    let mut keep = std::collections::HashSet::new();
+    if let Ok(personal) = ms.list_personal_emotes() {
+        for (_, hash, _, _) in personal {
+            keep.insert(hash);
+        }
+    }
+    if let Ok(servers) = ms.load_all_servers() {
+        for (_, state_json) in servers {
+            let Ok(state) =
+                serde_json::from_str::<crate::crdt::server_state::ServerState>(&state_json)
+            else {
+                continue;
+            };
+            for emote in state.emotes.values() {
+                keep.insert(emote.hash.clone());
+            }
+            // Server banner (Phase 2 of the asset rail): settings carry the
+            // blob hash; absent/cleared values are not hex and are skipped.
+            if let Some(reg) = state.settings.get("server_banner") {
+                let v = reg.read().clone();
+                if crate::crdt::valid_emote_hash(&v) {
+                    keep.insert(v);
+                }
+            }
+        }
+    }
+    keep
+}
+
+/// Delete every cached asset blob not referenced by a personal set or a
+/// server's CRDT state (Storage Manager "clear" action). Returns bytes freed.
+#[frb]
+pub fn clear_unreferenced_asset_blobs() -> Result<u64, String> {
+    let store = get_store();
+    let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let ms = guard.as_ref().ok_or("Message store is not open")?;
+    let keep = referenced_asset_hashes(ms);
+    ms.clear_asset_blobs_except(&keep)
 }
 
 /// Delete the file bytes for a single conversation/server (keep the signed
@@ -1054,13 +1106,14 @@ pub fn clear_vault_cache() -> Result<u64, String> {
     Ok(freed)
 }
 
-/// Enforce BOTH cache caps (files/ + vault_cache/). Called after a download
-/// completes so the user-set caps are actually honored (the sliders were no-ops
-/// before this). Returns total bytes freed across both.
+/// Enforce the cache caps (files/ + vault_cache/ + the asset blob cache).
+/// Called after a download completes so the user-set caps are actually
+/// honored (the sliders were no-ops before this). Returns total bytes freed.
 #[frb]
 pub fn enforce_storage_caps(
     files_cap_mb: u64,
     vault_cache_cap_mb: u64,
+    asset_cap_mb: u64,
     exempt_paths: Vec<String>,
 ) -> Result<u64, String> {
     let exempt: std::collections::HashSet<std::path::PathBuf> =
@@ -1088,6 +1141,20 @@ pub fn enforce_storage_caps(
         &exempt,
     )?;
     freed += f2;
+
+    // Asset blob cache (emotes/stickers/GIFs/banners): LRU by added_at,
+    // never evicting hashes still referenced by a personal set or CRDT state.
+    {
+        let store = get_store();
+        if let Ok(guard) = store.lock() {
+            if let Some(ms) = guard.as_ref() {
+                let keep = referenced_asset_hashes(ms);
+                freed += ms
+                    .evict_asset_blobs(asset_cap_mb.saturating_mul(1024 * 1024), &keep)
+                    .unwrap_or(0);
+            }
+        }
+    }
 
     Ok(freed)
 }

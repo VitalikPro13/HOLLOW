@@ -634,9 +634,15 @@ pub(crate) enum NodeCommand {
     /// FFI import; the CRDT op carries metadata only).
     AddServerEmote { server_id: String, name: String, hash: String, animated: bool },
     RemoveServerEmote { server_id: String, name: String },
-    /// Pull emote bytes we don't have. `server_id` targets an online member of
+    /// Pull asset bytes we don't have (emotes, banners, stickers, GIFs —
+    /// `kind` sizes the receipt cap). `server_id` targets an online member of
     /// that server's room; `peer_hint` targets a specific peer (DM sender).
-    RequestEmotes { hashes: Vec<String>, server_id: Option<String>, peer_hint: Option<String> },
+    RequestEmotes {
+        hashes: Vec<String>,
+        kind: super::assets::AssetKind,
+        server_id: Option<String>,
+        peer_hint: Option<String>,
+    },
     SetNickname { server_id: String, peer_id: String, nickname: String },
     SetTwitchUsername { server_id: String, peer_id: String, twitch_username: String },
     NotifyShutdown,

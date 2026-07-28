@@ -6,7 +6,7 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `ffz_query`, `normalize_name`, `parse_ffz_rows`
+// These functions are ignored because they are not marked as `pub`: `ffz_query`, `normalize_name`, `parse_ffz_rows`, `request_asset_kind`
 
 /// Wire token for an emote, as inserted into message text / reactions.
 String emoteToken({required String name, required String hash}) =>
@@ -32,6 +32,22 @@ Future<void> requestEmotes({
   String? peerHint,
 }) => RustLib.instance.api.crateApiEmotesRequestEmotes(
   hashes: hashes,
+  serverId: serverId,
+  peerHint: peerHint,
+);
+
+/// Pull asset bytes of any kind (`emote | banner | sticker | gif`). The kind
+/// sizes the per-blob cap enforced on receipt — it is recorded locally at
+/// request time and never trusted from the wire. Fire-and-forget; results
+/// arrive as `EmoteAssetsReceived`.
+Future<void> requestAssets({
+  required List<String> hashes,
+  required String kind,
+  String? serverId,
+  String? peerHint,
+}) => RustLib.instance.api.crateApiEmotesRequestAssets(
+  hashes: hashes,
+  kind: kind,
   serverId: serverId,
   peerHint: peerHint,
 );
