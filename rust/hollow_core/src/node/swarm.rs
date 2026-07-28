@@ -1423,11 +1423,13 @@ async fn run_event_loop(
                                 .and_then(|b64| if b64.is_empty() { None } else {
                                     base64::engine::general_purpose::STANDARD.decode(&b64).ok()
                                 });
+                            let banner_thumb = super::assets::public_banner_thumb(state, &db_path, &db_passphrase);
                             let _ = event_tx.send(NetworkEvent::PublicChannelListReceived {
                                 server_id: server_id.clone(),
                                 server_name: state.name().to_string(),
                                 channels,
                                 server_avatar: local_avatar,
+                                server_banner_thumb: banner_thumb,
                             }).await;
                         } else {
                             hollow_log!("[HOLLOW-GUEST] Not a member, joining room as guest: {server_id}");
@@ -10966,11 +10968,17 @@ async fn handle_incoming_request(
                     let avatar_b64 = state.settings.get("server_avatar")
                         .map(|reg| reg.read().clone())
                         .unwrap_or_default();
+                    // THUMBNAIL only — this answers strangers pre-join, so the
+                    // full banner blob never rides this path.
+                    let banner_thumb_b64 = super::assets::public_banner_thumb(state, db_path, db_passphrase)
+                        .map(|t| base64::engine::general_purpose::STANDARD.encode(t))
+                        .unwrap_or_default();
                     let resp = HavenMessage::PublicChannelListResponse {
                         server_id: server_id.clone(),
                         server_name: state.name().to_string(),
                         channels,
                         server_avatar_b64: avatar_b64,
+                        server_banner_thumb_b64: banner_thumb_b64,
                     };
                     // Send directly using server_id as room — guests may not be in ws_room_peers
                     if let Ok(data) = serde_json::to_vec(&resp) {
@@ -11101,7 +11109,7 @@ async fn handle_incoming_request(
             }
         }
 
-        HavenMessage::PublicChannelListResponse { server_id, server_name, channels, server_avatar_b64 } => {
+        HavenMessage::PublicChannelListResponse { server_id, server_name, channels, server_avatar_b64, server_banner_thumb_b64 } => {
             if peer_str == local_peer_str { return; }
             if !guest_rooms.contains(&server_id) { return; }
             let entries: Vec<PublicChannelEntryFfi> = channels.into_iter()
@@ -11116,8 +11124,15 @@ async fn handle_incoming_request(
             } else {
                 base64::engine::general_purpose::STANDARD.decode(&server_avatar_b64).ok()
             };
+            // Cap what a stranger's response can hand us: a thumb is ≤40 KB
+            // at authoring, so anything much bigger is hostile padding.
+            let server_banner_thumb = if server_banner_thumb_b64.is_empty() || server_banner_thumb_b64.len() > 80_000 {
+                None
+            } else {
+                base64::engine::general_purpose::STANDARD.decode(&server_banner_thumb_b64).ok()
+            };
             let _ = event_tx.send(NetworkEvent::PublicChannelListReceived {
-                server_id, server_name, channels: entries, server_avatar,
+                server_id, server_name, channels: entries, server_avatar, server_banner_thumb,
             }).await;
         }
 

@@ -798,6 +798,8 @@ Custom emotes are small images usable inline in messages and as reactions. Their
 
 Server emote sets are capped and gated by a dedicated permission bit (§11.2); names and hashes are grammar-validated at every ingest path so the emote registry cannot be used to smuggle markup or oversized data into clients.
 
+**Server banners** follow the same separation: the replicated server state carries only the banner's hash (a `MANAGE_SERVER`-gated setting), and members pull the bytes over the rail like any other asset. The one place a banner is shown to non-members — the pre-join public-server browse — receives a small, still, size-bounded thumbnail generated from the banner, never the full asset, and the receiving client independently enforces that bound before display.
+
 ---
 
 ## 11. Authorization and Permission Model

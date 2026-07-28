@@ -101,6 +101,27 @@ Future<void> clearServerAvatar({required String serverId}) =>
 Future<Uint8List?> getServerAvatar({required String serverId}) =>
     RustLib.instance.api.crateApiCrdtGetServerAvatar(serverId: serverId);
 
+/// Set a server banner (issue #25). Processes the raw image (3:1 center
+/// crop → 960x320 WebP, animated allowed), caches the blob content-addressed
+/// with kind='banner', and writes ONLY the hash into CRDT settings.
+Future<void> setServerBanner({
+  required String serverId,
+  required List<int> rawBytes,
+}) => RustLib.instance.api.crateApiCrdtSetServerBanner(
+  serverId: serverId,
+  rawBytes: rawBytes,
+);
+
+/// Clear a server banner. The blob stays cached until asset-cache eviction
+/// collects it (it drops out of `referenced_asset_hashes`).
+Future<void> clearServerBanner({required String serverId}) =>
+    RustLib.instance.api.crateApiCrdtClearServerBanner(serverId: serverId);
+
+/// Get the server banner. `None` = no banner set (or cleared); `bytes` is
+/// `None` when the hash is known but the blob hasn't been pulled yet.
+Future<ServerBannerData?> getServerBanner({required String serverId}) =>
+    RustLib.instance.api.crateApiCrdtGetServerBanner(serverId: serverId);
+
 /// Join a server via invite link. Connects to the server's signaling room and
 /// requests membership from existing members.
 Future<void> joinServer({
@@ -631,6 +652,37 @@ class MutedMemberFfi {
           peerId == other.peerId &&
           expiresAtMs == other.expiresAtMs &&
           permanent == other.permanent;
+}
+
+/// Server banner as seen locally. The CRDT carries only the hash; bytes
+/// live in the content-addressed asset store (kind='banner') and replicate
+/// via the asset rail — never through the CRDT.
+class ServerBannerData {
+  /// 64-hex SHA-256 of the processed WebP bytes.
+  final String hash;
+  final bool animated;
+
+  /// Cached blob bytes, if we hold them. `None` = pull via
+  /// `request_assets(kind: "banner")` and re-read on `EmoteAssetsReceived`.
+  final Uint8List? bytes;
+
+  const ServerBannerData({
+    required this.hash,
+    required this.animated,
+    this.bytes,
+  });
+
+  @override
+  int get hashCode => hash.hashCode ^ animated.hashCode ^ bytes.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ServerBannerData &&
+          runtimeType == other.runtimeType &&
+          hash == other.hash &&
+          animated == other.animated &&
+          bytes == other.bytes;
 }
 
 /// Server info for FFI (Dart-visible).

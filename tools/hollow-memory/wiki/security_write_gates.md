@@ -43,6 +43,7 @@ sender needs no signature.
 |---|---|---|
 | `save_asset_blob` (all asset kinds: emote/banner/sticker/gif; `save_emote_blob` = the emote-kind shorthand) | `emotes::handle_emote_assets` | REQUESTED-ONLY: the hash must be in swarm's `requested_asset_kinds` map (recorded when WE sent the request, cleared on WS Disconnected) — unsolicited blobs are dropped, so no peer can stuff our DB. The per-blob size cap comes from the RECORDED kind (`AssetKind::recv_cap`), never from anything the sender supplies. Then `decode_asset_bundle` drops any (hash, bytes) pair whose hash ≠ SHA-256(bytes), plus the WebP container check. A requested hash answered with invalid bytes frees its request slot (retry from another holder) |
 | Showcase assets | same codec | same |
+| Server banner blob (`kind='banner'`, asset-rail Phase 2) | same `handle_emote_assets` path | same requested-only gate (1 MB cap from the recorded kind). The CRDT carries ONLY the hash — `settings["server_banner"]` rides `ServerSettingChanged`, MANAGE_SERVER-gated at author AND ingest (`op_allowed`). The pre-join `server_banner_thumb_b64` on `PublicChannelListResponse` is RAM-only (never a store write), decode-refused over 80 KB |
 | Vault / Share chunks | `vault`, `share_handler` | manifest root hash |
 
 ## 3. Gated by owner identity

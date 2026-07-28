@@ -5,6 +5,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/channel_chat_provider.dart';
 import 'package:hollow/src/core/providers/guest_provider.dart';
 import 'package:hollow/src/core/providers/server_avatar_provider.dart';
+import 'package:hollow/src/core/providers/server_banner_provider.dart';
+import 'package:hollow/src/ui/components/animated_gif_image.dart';
 import 'package:hollow/src/core/color_utils.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
@@ -337,6 +339,15 @@ class _GuestServerSection extends ConsumerWidget {
     final memberAvatar = ref.watch(
         serverAvatarProvider.select((m) => m[server.serverId]));
     final avatarBytes = guestAvatar ?? memberAvatar;
+    // Banner: guest thumb (wire) first, then the member-cached full banner.
+    final guestBanner = ref.watch(
+        guestServerBannerProvider.select((m) => m[server.serverId]));
+    final memberBanner = ref.watch(
+        serverBannerProvider.select((m) => m[server.serverId]?.bytes));
+    final bannerRaw = guestBanner ?? memberBanner;
+    final bannerBytes = bannerRaw == null
+        ? null
+        : (bannerRaw is Uint8List ? bannerRaw : Uint8List.fromList(bannerRaw));
 
     return Column(
       mainAxisSize: MainAxisSize.min,
@@ -444,13 +455,39 @@ class _GuestServerSection extends ConsumerWidget {
           ),
         ),
 
-        // Channel list (animated expand/collapse)
+        // Channel list (animated expand/collapse), headed by the banner
+        // when the server has one. The strip stays STILL here (animate:
+        // false) — only the selected server's sidebar header animates.
         AnimatedSize(
           duration: HollowDurations.normal,
           curve: HollowCurves.enter,
           alignment: Alignment.topCenter,
           child: isExpanded
-              ? _buildChannelList(context, hollow)
+              ? Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (bannerBytes != null)
+                      Padding(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: HollowSpacing.sm,
+                          vertical: HollowSpacing.xxs,
+                        ),
+                        child: ClipRRect(
+                          borderRadius:
+                              BorderRadius.circular(hollow.radiusMd),
+                          child: AspectRatio(
+                            aspectRatio: 3,
+                            child: AnimatedGifImage(
+                              bytes: bannerBytes,
+                              fit: BoxFit.cover,
+                              animate: false,
+                            ),
+                          ),
+                        ),
+                      ),
+                    _buildChannelList(context, hollow),
+                  ],
+                )
               : const SizedBox.shrink(),
         ),
       ],

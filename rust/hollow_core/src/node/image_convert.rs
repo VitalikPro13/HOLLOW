@@ -690,11 +690,10 @@ pub fn process_avatar_image(data: &[u8]) -> Result<Vec<u8>, String> {
     let cropped = img.crop_imm(x, y, side, side);
     let resized = cropped.resize_exact(128, 128, FilterType::Lanczos3);
 
-    let mut buf = Vec::new();
-    let mut cursor = std::io::Cursor::new(&mut buf);
-    resized
-        .write_to(&mut cursor, ImageFormat::WebP)
-        .map_err(|e| format!("Failed to encode avatar WebP: {e}"))?;
+    // Lossy, like the showcase encoders: lossless WebP size is
+    // content-dependent, so photographic avatars randomly blew the cap.
+    let rgba = resized.to_rgba8();
+    let buf = encode_lossy_webp_via_animation(rgba.as_raw(), 128, 128, 80.0)?;
 
     if buf.len() > 100_000 {
         return Err("Avatar image too large after processing (>100KB)".into());
@@ -888,7 +887,7 @@ pub fn process_banner_image(data: &[u8]) -> Result<Vec<u8>, String> {
     }
 
     // Target aspect 3:1 — crop the largest 3:1 region from center
-    let (cw, ch) = if w * 1 >= h * 3 {
+    let (cw, ch) = if w >= h * 3 {
         // Image is wider than 3:1 — crop width
         (h * 3, h)
     } else {
@@ -901,15 +900,142 @@ pub fn process_banner_image(data: &[u8]) -> Result<Vec<u8>, String> {
     let cropped = img.crop_imm(x, y, cw, ch);
     let resized = cropped.resize_exact(600, 200, FilterType::Lanczos3);
 
-    let mut buf = Vec::new();
-    let mut cursor = std::io::Cursor::new(&mut buf);
-    resized
-        .write_to(&mut cursor, ImageFormat::WebP)
-        .map_err(|e| format!("Failed to encode banner WebP: {e}"))?;
+    // Lossy for the same reason as avatars/covers: lossless size is
+    // content-dependent, so photographic banners randomly failed to upload.
+    let rgba = resized.to_rgba8();
+    let buf = encode_lossy_webp_via_animation(rgba.as_raw(), 600, 200, 80.0)?;
 
     if buf.len() > 200_000 {
         return Err("Banner image too large after processing (>200KB)".into());
     }
 
+    Ok(buf)
+}
+
+/// Process a raw image into a SERVER banner (content-addressed asset,
+/// `AssetKind::Banner`): 3:1 center crop → 960x320.
+/// - animated GIF → per-frame cropped/resized animated WebP, Q=80, ≤1MB;
+/// - already-animated WebP → accepted AS-IS under the 1MB cap (the image
+///   crate can't re-encode animation; container magic + first-frame decode
+///   are still verified — rendering uses BoxFit.cover, so a non-3:1 source
+///   is a visual crop, not an error);
+/// - anything else → still 960x320 lossy WebP Q=80, ≤150KB.
+///
+/// Returns `(webp_bytes, animated)`.
+pub fn process_server_banner_image(data: &[u8]) -> Result<(Vec<u8>, bool), String> {
+    const BANNER_W: u32 = 960;
+    const BANNER_H: u32 = 320;
+    const MAX_STILL: usize = 150_000;
+    const MAX_ANIMATED: usize = 1_048_576;
+
+    // Largest centered 3:1 region of a (w, h) canvas.
+    fn crop_rect_3to1(w: u32, h: u32) -> (u32, u32, u32, u32) {
+        let (cw, ch) = if w >= h * 3 {
+            (h * 3, h)
+        } else {
+            (w, (w / 3).max(1))
+        };
+        ((w - cw) / 2, (h - ch) / 2, cw, ch)
+    }
+
+    if data.starts_with(b"GIF8") {
+        let decoder = GifDecoder::new(Cursor::new(data))
+            .map_err(|e| format!("Failed to decode GIF: {e}"))?;
+        let frames = decoder
+            .into_frames()
+            .collect_frames()
+            .map_err(|e| format!("Failed to collect GIF frames: {e}"))?;
+        if frames.is_empty() {
+            return Err("GIF has no frames".into());
+        }
+        let (w, h) = (frames[0].buffer().width(), frames[0].buffer().height());
+        if w == 0 || h == 0 {
+            return Err("GIF has zero dimensions".into());
+        }
+        let (x, y, cw, ch) = crop_rect_3to1(w, h);
+        let mut encoder = webp_animation::Encoder::new_with_options(
+            (BANNER_W, BANNER_H),
+            webp_animation::EncoderOptions {
+                encoding_config: Some(webp_animation::EncodingConfig {
+                    quality: 80.0,
+                    encoding_type: webp_animation::EncodingType::Lossy(Default::default()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        )
+        .map_err(|e| format!("Failed to create WebP encoder: {e}"))?;
+        let mut timestamp_ms: i32 = 0;
+        for frame in &frames {
+            let cropped = image::imageops::crop_imm(frame.buffer(), x, y, cw, ch).to_image();
+            let resized = image::imageops::resize(&cropped, BANNER_W, BANNER_H, FilterType::Lanczos3);
+            encoder
+                .add_frame(resized.as_raw(), timestamp_ms)
+                .map_err(|e| format!("Failed to add WebP frame: {e}"))?;
+            let delay: std::time::Duration = frame.delay().into();
+            let delay_ms = delay.as_millis() as i32;
+            timestamp_ms += if delay_ms < 20 { 100 } else { delay_ms };
+        }
+        let webp = encoder
+            .finalize(timestamp_ms)
+            .map_err(|e| format!("Failed to finalize animated WebP: {e}"))?;
+        if webp.len() > MAX_ANIMATED {
+            return Err("Animated banner too large after processing (>1MB)".into());
+        }
+        return Ok((webp.to_vec(), true));
+    }
+
+    // Animated WebP passthrough (verify container + first-frame decode + cap).
+    if data.len() > 20
+        && &data[0..4] == b"RIFF"
+        && &data[8..12] == b"WEBP"
+        && &data[12..16] == b"VP8X"
+        && (data[20] & 0x02) != 0
+    {
+        if data.len() > MAX_ANIMATED {
+            return Err("Animated banner too large (>1MB)".into());
+        }
+        image::load_from_memory(data)
+            .map_err(|e| format!("Failed to decode animated WebP: {e}"))?;
+        return Ok((data.to_vec(), true));
+    }
+
+    let img = image::load_from_memory(data)
+        .map_err(|e| format!("Failed to decode banner image: {e}"))?;
+    let (w, h) = (img.width(), img.height());
+    if w == 0 || h == 0 {
+        return Err("Image has zero dimensions".into());
+    }
+    let (x, y, cw, ch) = crop_rect_3to1(w, h);
+    let cropped = img.crop_imm(x, y, cw, ch);
+    let resized = cropped.resize_exact(BANNER_W, BANNER_H, FilterType::Lanczos3);
+    let rgba = resized.to_rgba8();
+    let buf = encode_lossy_webp_via_animation(rgba.as_raw(), BANNER_W, BANNER_H, 80.0)?;
+    if buf.len() > MAX_STILL {
+        return Err("Banner image too large after processing (>150KB)".into());
+    }
+    Ok((buf, false))
+}
+
+/// Downscale a stored server banner to a 400x133 still thumbnail for the
+/// public-browse wire path (sent to strangers pre-join — never the full
+/// blob). Animated banners contribute their first frame.
+pub fn process_server_banner_thumb(data: &[u8]) -> Result<Vec<u8>, String> {
+    let img = image::load_from_memory(data)
+        .map_err(|e| format!("Failed to decode banner for thumb: {e}"))?;
+    let (w, h) = (img.width(), img.height());
+    if w == 0 || h == 0 {
+        return Err("Banner has zero dimensions".into());
+    }
+    // Same 3:1 center crop as authoring — a passthrough animated WebP may
+    // not be 3:1, and the thumb must match what BoxFit.cover shows.
+    let (cw, ch) = if w >= h * 3 { (h * 3, h) } else { (w, (w / 3).max(1)) };
+    let cropped = img.crop_imm((w - cw) / 2, (h - ch) / 2, cw, ch);
+    let resized = cropped.resize_exact(400, 133, FilterType::Lanczos3);
+    let rgba = resized.to_rgba8();
+    let buf = encode_lossy_webp_via_animation(rgba.as_raw(), 400, 133, 75.0)?;
+    if buf.len() > 40_000 {
+        return Err("Banner thumb too large (>40KB)".into());
+    }
     Ok(buf)
 }

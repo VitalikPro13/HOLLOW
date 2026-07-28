@@ -7,6 +7,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/models/server_info.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/server_avatar_provider.dart';
+import 'package:hollow/src/core/providers/server_banner_provider.dart';
+import 'package:hollow/src/ui/components/animated_gif_image.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
@@ -55,6 +57,9 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
   Uint8List? _stagedIcon;
   bool _iconBusy = false;
   int _iconPickGen = 0;
+  Uint8List? _stagedBanner;
+  bool _bannerBusy = false;
+  int _bannerPickGen = 0;
 
   bool _twitchEnabled = false;
   bool _twitchRequireSub = false;
@@ -360,6 +365,103 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
     }
   }
 
+  /// GIF / animated-WebP magic — animated picks skip the crop dialog (the
+  /// cropper flattens to a still PNG); Rust center-crops 3:1 per frame.
+  static bool _isAnimatedPick(Uint8List bytes) {
+    if (bytes.length > 4 && bytes[0] == 0x47 && bytes[1] == 0x49 && bytes[2] == 0x46 && bytes[3] == 0x38) {
+      return true; // GIF8
+    }
+    return bytes.length > 20 &&
+        bytes[0] == 0x52 && bytes[1] == 0x49 && bytes[2] == 0x46 && bytes[3] == 0x46 && // RIFF
+        bytes[8] == 0x57 && bytes[9] == 0x45 && bytes[10] == 0x42 && bytes[11] == 0x50 && // WEBP
+        bytes[12] == 0x56 && bytes[13] == 0x50 && bytes[14] == 0x38 && bytes[15] == 0x58 && // VP8X
+        (bytes[20] & 0x02) != 0;
+  }
+
+  Future<void> _pickServerBanner() async {
+    final gen = ++_bannerPickGen;
+    final result = await FilePicker.platform.pickFiles(type: FileType.image);
+    if (result == null || result.files.isEmpty) return;
+    final path = result.files.single.path;
+    if (path == null) return;
+    final raw = await File(path).readAsBytes();
+    if (!mounted || gen != _bannerPickGen) return;
+
+    Uint8List toSend;
+    if (_isAnimatedPick(raw)) {
+      if (raw.length > 2 * 1024 * 1024) {
+        HollowToast.show(context, 'Animated banner too large (max 2MB)',
+            type: HollowToastType.error);
+        return;
+      }
+      toSend = raw;
+    } else {
+      final cropped = await showImageCropDialog(
+        context: context,
+        imageBytes: raw,
+        aspectRatio: 3.0,
+        title: 'Crop Server Banner',
+      );
+      if (cropped == null || !mounted || gen != _bannerPickGen) return;
+      toSend = cropped;
+    }
+    // Instant feedback: show the picked bytes NOW; the Rust WebP encode +
+    // CRDT write (a real wall-clock wait) runs behind the spinner.
+    setState(() {
+      _stagedBanner = toSend;
+      _bannerBusy = true;
+    });
+    try {
+      await crdt_api.setServerBanner(
+        serverId: widget.server.serverId,
+        rawBytes: toSend,
+      );
+      if (!mounted || gen != _bannerPickGen) return;
+      // Seed the provider with the bytes we just sent — reading the DB here
+      // races the fire-and-forget CRDT persist ("second upload applies the
+      // first" bug). applyLocalWrite reconciles once the write lands.
+      ref
+          .read(serverBannerProvider.notifier)
+          .applyLocalWrite(widget.server.serverId, toSend);
+      setState(() {
+        _stagedBanner = null;
+        _bannerBusy = false;
+      });
+      HollowToast.show(context, 'Server banner updated',
+          type: HollowToastType.success);
+    } catch (e) {
+      if (!mounted || gen != _bannerPickGen) return;
+      setState(() {
+        _stagedBanner = null;
+        _bannerBusy = false;
+      });
+      HollowToast.show(context, 'Failed to update banner: $e',
+          type: HollowToastType.error);
+    }
+  }
+
+  Future<void> _clearServerBanner() async {
+    _bannerPickGen++;
+    setState(() {
+      _stagedBanner = null;
+      _bannerBusy = false;
+    });
+    try {
+      await crdt_api.clearServerBanner(serverId: widget.server.serverId);
+      if (!mounted) return;
+      ref
+          .read(serverBannerProvider.notifier)
+          .applyLocalWrite(widget.server.serverId, null);
+      HollowToast.show(context, 'Server banner removed',
+          type: HollowToastType.success);
+    } catch (e) {
+      if (mounted) {
+        HollowToast.show(context, 'Failed to remove banner: $e',
+            type: HollowToastType.error);
+      }
+    }
+  }
+
   Future<void> _loadTwitchSettings() async {
     try {
       final sid = widget.server.serverId;
@@ -551,6 +653,88 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
                 if (!hasAvatar) return const SizedBox.shrink();
                 return HollowButton.ghost(
                   onPressed: _clearServerAvatar,
+                  icon: const Icon(LucideIcons.trash2, size: 14),
+                  compact: true,
+                  child: const Text('Remove'),
+                );
+              }),
+            ],
+          ),
+          const SizedBox(height: HollowSpacing.lg),
+
+          // Server Banner (issue #25) — shown at the top of the channel
+          // sidebar. Same optimistic-staging pattern as the icon above.
+          Text(
+            'Server Banner',
+            style:
+                HollowTypography.label.copyWith(color: hollow.textSecondary),
+          ),
+          const SizedBox(height: HollowSpacing.sm),
+          Row(
+            children: [
+              Builder(builder: (_) {
+                final banner = _stagedBanner ??
+                    ref
+                        .watch(serverBannerProvider)[widget.server.serverId]
+                        ?.bytes;
+                final Widget preview;
+                if (banner != null) {
+                  preview = ClipRRect(
+                    borderRadius: BorderRadius.circular(hollow.radiusMd),
+                    child: AnimatedGifImage(
+                      bytes: banner,
+                      width: 144,
+                      height: 48,
+                      fit: BoxFit.cover,
+                    ),
+                  );
+                } else {
+                  preview = Container(
+                    width: 144,
+                    height: 48,
+                    decoration: BoxDecoration(
+                      color: hollow.elevated,
+                      borderRadius: BorderRadius.circular(hollow.radiusMd),
+                    ),
+                    alignment: Alignment.center,
+                    child: Icon(LucideIcons.image,
+                        size: 20, color: hollow.textSecondary),
+                  );
+                }
+                if (!_bannerBusy) return preview;
+                return Stack(
+                  children: [
+                    preview,
+                    Positioned(
+                      right: 2,
+                      bottom: 2,
+                      child: SizedBox(
+                        width: 14,
+                        height: 14,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: hollow.textSecondary,
+                        ),
+                      ),
+                    ),
+                  ],
+                );
+              }),
+              const SizedBox(width: HollowSpacing.md),
+              HollowButton.ghost(
+                onPressed: _pickServerBanner,
+                icon: const Icon(LucideIcons.upload, size: 14),
+                compact: true,
+                child: const Text('Upload'),
+              ),
+              const SizedBox(width: HollowSpacing.sm),
+              Builder(builder: (_) {
+                final hasBanner = ref
+                    .watch(serverBannerProvider)
+                    .containsKey(widget.server.serverId);
+                if (!hasBanner) return const SizedBox.shrink();
+                return HollowButton.ghost(
+                  onPressed: _clearServerBanner,
                   icon: const Icon(LucideIcons.trash2, size: 14),
                   compact: true,
                   child: const Text('Remove'),

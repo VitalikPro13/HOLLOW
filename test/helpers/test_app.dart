@@ -32,6 +32,7 @@ import 'package:hollow/src/core/providers/unread_provider.dart';
 import 'package:hollow/src/core/providers/event_provider.dart';
 import 'package:hollow/src/core/providers/hidden_archive_dm_provider.dart';
 import 'package:hollow/src/core/providers/server_avatar_provider.dart';
+import 'package:hollow/src/core/providers/server_banner_provider.dart';
 import 'package:hollow/src/core/providers/voice_channel_provider.dart';
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 import 'package:hollow/src/core/models/strip_item.dart';
@@ -81,6 +82,8 @@ List<Override> hollowTestOverrides({
           .overrideWith(() => _MockHiddenArchiveDmsNotifier()),
       serverAvatarProvider
           .overrideWith(() => _MockServerAvatarNotifier()),
+      serverBannerProvider
+          .overrideWith(() => _MockServerBannerNotifier()),
       voiceChannelProvider
           .overrideWith(() => _MockVoiceChannelNotifier()),
 
@@ -320,6 +323,11 @@ class _MockHiddenArchiveDmsNotifier extends HiddenArchiveDmsNotifier {
 class _MockServerAvatarNotifier extends ServerAvatarNotifier {
   @override
   Map<String, Uint8List> build() => const {};
+}
+
+class _MockServerBannerNotifier extends ServerBannerNotifier {
+  @override
+  Map<String, ServerBannerEntry> build() => const {};
 }
 
 class _MockVoiceChannelNotifier extends VoiceChannelNotifier {

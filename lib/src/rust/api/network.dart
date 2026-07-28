@@ -1891,6 +1891,7 @@ sealed class NetworkEvent with _$NetworkEvent {
     required String serverName,
     required List<PublicChannelEntryFfi> channels,
     Uint8List? serverAvatar,
+    Uint8List? serverBannerThumb,
   }) = NetworkEvent_PublicChannelListReceived;
   const factory NetworkEvent.publicChannelSyncReceived({
     required String serverId,

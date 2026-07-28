@@ -7707,6 +7707,219 @@ async fn asset_request_not_answered_for_unrequested_hash() {
 }
 
 // ---------------------------------------------------------------------------
+// Server banners (issue #25, asset-rail Phase 2): the CRDT carries ONLY the
+// banner hash in settings["server_banner"]; a joined member sees the setting
+// converge, then pulls the content-addressed BYTES on demand over the asset
+// rail at AssetKind::Banner. Clearing converges too. The command sequence
+// mirrors what the set_server_banner FFI decomposes into: blob into the
+// local store, then UpdateServerSetting writes.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn server_banner_hash_replicates_and_bytes_pull_on_demand() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    const O_MASTER: u8 = 85;
+    const J_MASTER: u8 = 86;
+    let o_master = NativeKeypair::from_secret_bytes(&seed_bytes(O_MASTER)).peer_id();
+    let j_master = NativeKeypair::from_secret_bytes(&seed_bytes(J_MASTER)).peer_id();
+
+    let mut o = spawn_node_with_friends(&relay, O_MASTER, O_MASTER, &[&j_master]).await;
+    sleep_ms(1500).await;
+    let mut j = spawn_node_with_friends(&relay, J_MASTER, J_MASTER, &[&o_master]).await;
+    sleep_ms(4000).await;
+
+    let server_id = create_server_and_wait(&mut o, "Banner Server").await;
+    sleep_ms(300).await;
+    drain_events(&mut o);
+    drain_events(&mut j);
+
+    j.cmd_tx
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
+        .await
+        .unwrap();
+    let joined = wait_event(&mut j, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
+    })
+    .await;
+    assert!(joined, "J must join the server");
+    sleep_ms(3000).await;
+    drain_events(&mut o);
+    drain_events(&mut j);
+
+    // --- 1. Owner processes a banner, caches the blob, writes the hash. ---
+    use sha2::{Digest, Sha256};
+    let (banner_bytes, animated) = {
+        let img = image::RgbaImage::from_pixel(96, 32, image::Rgba([30, 90, 200, 255]));
+        let mut png = Vec::new();
+        img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .expect("encode test png");
+        super::image_convert::process_server_banner_image(&png).expect("process banner")
+    };
+    assert!(!animated, "still banner");
+    let hash = hex::encode(Sha256::digest(&banner_bytes));
+    o.store()
+        .save_asset_blob(&hash, &banner_bytes, false, "banner")
+        .expect("owner caches its own banner blob");
+
+    for (key, value) in [
+        ("server_banner_animated", String::new()),
+        ("server_banner", hash.clone()),
+    ] {
+        o.cmd_tx
+            .send(NodeCommand::UpdateServerSetting {
+                server_id: server_id.clone(),
+                key: key.to_string(),
+                value,
+            })
+            .await
+            .unwrap();
+    }
+    let updated = wait_event(&mut j, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::ServerUpdated { server_id: sid } if *sid == server_id)
+    })
+    .await;
+    assert!(updated, "J must receive ServerUpdated for the banner setting");
+    // Fire-and-forget CrdtStore persist; poll the persisted setting.
+    let mut hash_converged = false;
+    for _ in 0..16 {
+        sleep_ms(500).await;
+        if j.server_setting(&server_id, "server_banner").as_deref() == Some(hash.as_str()) {
+            hash_converged = true;
+            break;
+        }
+    }
+    assert!(hash_converged, "the banner hash must converge to J's settings");
+
+    // --- 2. Bytes never ride the CRDT; J pulls them over the asset rail. ---
+    assert!(
+        !j.store().has_emote_blob(&hash).unwrap(),
+        "J must NOT have the banner bytes yet — the CRDT carries only the hash"
+    );
+    j.cmd_tx
+        .send(NodeCommand::RequestEmotes {
+            hashes: vec![hash.clone()],
+            kind: super::assets::AssetKind::Banner,
+            server_id: Some(server_id.clone()),
+            peer_hint: None,
+        })
+        .await
+        .unwrap();
+    let got_assets = wait_event(&mut j, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::EmoteAssetsReceived { hashes } if hashes.contains(&hash))
+    })
+    .await;
+    assert!(got_assets, "J must receive the banner bytes from the owner");
+    sleep_ms(300).await;
+    assert_eq!(
+        j.store().load_emote_blob(&hash).unwrap().as_deref(),
+        Some(banner_bytes.as_slice()),
+        "pulled banner must match the owner's blob byte-exact (hash-verified)"
+    );
+
+    // --- 3. Clearing converges ("" = cleared, key persists per LWW). ---
+    drain_events(&mut j);
+    o.cmd_tx
+        .send(NodeCommand::UpdateServerSetting {
+            server_id: server_id.clone(),
+            key: "server_banner".to_string(),
+            value: String::new(),
+        })
+        .await
+        .unwrap();
+    let cleared_event = wait_event(&mut j, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::ServerUpdated { server_id: sid } if *sid == server_id)
+    })
+    .await;
+    assert!(cleared_event, "J must receive ServerUpdated for the clear");
+    let mut cleared = false;
+    for _ in 0..16 {
+        sleep_ms(500).await;
+        if j.server_setting(&server_id, "server_banner").as_deref() == Some("") {
+            cleared = true;
+            break;
+        }
+    }
+    assert!(cleared, "the cleared banner must converge to J's settings");
+
+    drop(o);
+    drop(j);
+}
+
+// ---------------------------------------------------------------------------
+// A plain Member cannot write the banner setting: ServerSettingChanged is
+// MANAGE_SERVER-gated at authoring (and the matching ingest gate), so the
+// write dies with the author's own Error event and never reaches the owner.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn banner_write_rejected_without_manage_server() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    const O_MASTER: u8 = 87;
+    const J_MASTER: u8 = 88;
+    let o_master = NativeKeypair::from_secret_bytes(&seed_bytes(O_MASTER)).peer_id();
+    let j_master = NativeKeypair::from_secret_bytes(&seed_bytes(J_MASTER)).peer_id();
+
+    let mut o = spawn_node_with_friends(&relay, O_MASTER, O_MASTER, &[&j_master]).await;
+    sleep_ms(1500).await;
+    let mut j = spawn_node_with_friends(&relay, J_MASTER, J_MASTER, &[&o_master]).await;
+    sleep_ms(4000).await;
+
+    let server_id = create_server_and_wait(&mut o, "Locked Banner Server").await;
+    sleep_ms(300).await;
+    drain_events(&mut o);
+    drain_events(&mut j);
+
+    j.cmd_tx
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
+        .await
+        .unwrap();
+    let joined = wait_event(&mut j, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
+    })
+    .await;
+    assert!(joined, "J must join the server");
+    sleep_ms(3000).await;
+    drain_events(&mut o);
+    drain_events(&mut j);
+
+    let fake_hash = "c".repeat(64);
+    j.cmd_tx
+        .send(NodeCommand::UpdateServerSetting {
+            server_id: server_id.clone(),
+            key: "server_banner".to_string(),
+            value: fake_hash.clone(),
+        })
+        .await
+        .unwrap();
+    let denied = wait_event(&mut j, std::time::Duration::from_secs(5), |ev| {
+        matches!(ev, NetworkEvent::Error { message } if message.contains("Manage Server"))
+    })
+    .await;
+    assert!(denied, "a plain Member's banner write must be refused at authoring");
+
+    sleep_ms(1000).await;
+    assert!(
+        o.server_setting(&server_id, "server_banner").is_none(),
+        "a member-authored banner setting must never reach the owner's state"
+    );
+
+    drop(o);
+    drop(j);
+}
+
+// ---------------------------------------------------------------------------
 // Conferences (reports/CONFERENCES_PLAN.md): the waiting room IS an MLS add.
 // Host starts a meeting (fresh conf group + relay room `conf:{id}`), a knocker
 // broadcasts a join request carrying its KeyPackage, the host admits (MLS add

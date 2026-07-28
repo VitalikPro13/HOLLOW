@@ -24,6 +24,7 @@ import 'package:hollow/src/core/providers/security_alerts_provider.dart';
 import 'package:hollow/src/core/providers/selected_peer_provider.dart';
 import 'package:hollow/src/core/providers/split_view_provider.dart';
 import 'package:hollow/src/core/providers/server_avatar_provider.dart';
+import 'package:hollow/src/core/providers/server_banner_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/server_strip_layout_provider.dart';
 import 'package:hollow/src/core/providers/service_providers.dart';
@@ -566,6 +567,7 @@ class EventStreamNotifier extends Notifier<bool> {
       case NetworkEvent_ServerUpdated(:final serverId):
         debugPrint('[HOLLOW] Server updated: $serverId');
         ref.read(serverAvatarProvider.notifier).loadAvatar(serverId);
+        ref.read(serverBannerProvider.notifier).loadBanner(serverId);
         _refreshServerState(serverId);
 
       case NetworkEvent_EmoteAssetsReceived(:final hashes):
@@ -574,6 +576,7 @@ class EventStreamNotifier extends Notifier<bool> {
         for (final hash in hashes) {
           ref.invalidate(emoteBytesProvider(hash));
         }
+        ref.read(serverBannerProvider.notifier).onAssetsReceived(hashes);
         // GIF-sized blobs can grow the asset cache quickly — enforce the
         // cap here too, not just on file downloads.
         _enforceStorageCaps();
@@ -639,6 +642,7 @@ class EventStreamNotifier extends Notifier<bool> {
         debugPrint('[HOLLOW] Sync completed: $serverId ($opsApplied ops)');
         ref.read(serverListProvider.notifier).onServerUpdated(serverId);
         ref.read(serverAvatarProvider.notifier).loadAvatar(serverId);
+        ref.read(serverBannerProvider.notifier).loadBanner(serverId);
         ref.invalidate(serverMembersProvider(serverId));
         // Reload channels in case they changed while offline.
         if (ref.read(selectedServerProvider) == serverId) {
@@ -1697,13 +1701,19 @@ class EventStreamNotifier extends Notifier<bool> {
 
       // -- Guest sync events (Public Channels Phase 3) --
       case NetworkEvent_PublicChannelListReceived(
-            :final serverId, :final serverName, :final channels, :final serverAvatar):
+            :final serverId, :final serverName, :final channels, :final serverAvatar,
+            :final serverBannerThumb):
         debugPrint('[HOLLOW] Guest: received ${channels.length} public channels for $serverName ($serverId)');
         ref.read(savedGuestServersProvider.notifier).updateServerName(serverId, serverName);
         if (serverAvatar != null && serverAvatar.isNotEmpty) {
           final avatarMap = Map<String, List<int>>.from(ref.read(guestServerAvatarProvider));
           avatarMap[serverId] = serverAvatar;
           ref.read(guestServerAvatarProvider.notifier).state = avatarMap;
+        }
+        if (serverBannerThumb != null && serverBannerThumb.isNotEmpty) {
+          final bannerMap = Map<String, List<int>>.from(ref.read(guestServerBannerProvider));
+          bannerMap[serverId] = serverBannerThumb;
+          ref.read(guestServerBannerProvider.notifier).state = bannerMap;
         }
         ref.read(guestChannelMapProvider.notifier).setChannels(
           serverId,

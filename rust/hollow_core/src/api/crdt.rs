@@ -382,6 +382,72 @@ pub fn get_server_avatar(server_id: String) -> Result<Option<Vec<u8>>, String> {
     Ok(Some(bytes))
 }
 
+/// Server banner as seen locally. The CRDT carries only the hash; bytes
+/// live in the content-addressed asset store (kind='banner') and replicate
+/// via the asset rail — never through the CRDT.
+pub struct ServerBannerData {
+    /// 64-hex SHA-256 of the processed WebP bytes.
+    pub hash: String,
+    pub animated: bool,
+    /// Cached blob bytes, if we hold them. `None` = pull via
+    /// `request_assets(kind: "banner")` and re-read on `EmoteAssetsReceived`.
+    pub bytes: Option<Vec<u8>>,
+}
+
+/// Set a server banner (issue #25). Processes the raw image (3:1 center
+/// crop → 960x320 WebP, animated allowed), caches the blob content-addressed
+/// with kind='banner', and writes ONLY the hash into CRDT settings.
+#[frb]
+pub fn set_server_banner(server_id: String, raw_bytes: Vec<u8>) -> Result<(), String> {
+    let (processed, animated) =
+        crate::node::image_convert::process_server_banner_image(&raw_bytes)?;
+    let hash = {
+        use sha2::{Digest, Sha256};
+        hex::encode(Sha256::digest(&processed))
+    };
+    {
+        let store = super::storage::get_store();
+        let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+        let ms = guard.as_ref().ok_or("Message store is not open")?;
+        ms.save_asset_blob(&hash, &processed, animated, "banner")?;
+    }
+    // Animated flag first so the hash write (which drives UI reloads via
+    // ServerUpdated) lands with its companion already in place.
+    update_server_setting(
+        server_id.clone(),
+        "server_banner_animated".into(),
+        if animated { "1".into() } else { String::new() },
+    )?;
+    update_server_setting(server_id, "server_banner".into(), hash)
+}
+
+/// Clear a server banner. The blob stays cached until asset-cache eviction
+/// collects it (it drops out of `referenced_asset_hashes`).
+#[frb]
+pub fn clear_server_banner(server_id: String) -> Result<(), String> {
+    update_server_setting(server_id.clone(), "server_banner_animated".into(), String::new())?;
+    update_server_setting(server_id, "server_banner".into(), String::new())
+}
+
+/// Get the server banner. `None` = no banner set (or cleared); `bytes` is
+/// `None` when the hash is known but the blob hasn't been pulled yet.
+#[frb]
+pub fn get_server_banner(server_id: String) -> Result<Option<ServerBannerData>, String> {
+    let hash = get_server_setting(server_id.clone(), "server_banner".into())?;
+    // "" = cleared; anything non-hex is not a usable reference either way.
+    if !crate::crdt::valid_emote_hash(&hash) {
+        return Ok(None);
+    }
+    let animated = get_server_setting(server_id, "server_banner_animated".into())? == "1";
+    let bytes = {
+        let store = super::storage::get_store();
+        let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+        let ms = guard.as_ref().ok_or("Message store is not open")?;
+        ms.load_emote_blob(&hash)?
+    };
+    Ok(Some(ServerBannerData { hash, animated, bytes }))
+}
+
 /// Join a server via invite link. Connects to the server's signaling room and
 /// requests membership from existing members.
 #[frb]

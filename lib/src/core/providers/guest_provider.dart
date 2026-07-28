@@ -123,6 +123,10 @@ final guestLoadingProvider = StateProvider<Set<String>>((ref) => {});
 /// Server avatars received from guest sync (key: serverId, value: image bytes).
 final guestServerAvatarProvider = StateProvider<Map<String, List<int>>>((ref) => {});
 
+/// Server banner THUMBNAILS received from guest sync (key: serverId, value:
+/// 400x133 still WebP bytes — pre-join surfaces never get the full banner).
+final guestServerBannerProvider = StateProvider<Map<String, List<int>>>((ref) => {});
+
 /// Guest sender profiles keyed by peer ID (populated from sync responses).
 final guestSenderProfilesProvider = StateProvider<Map<String, GuestSenderProfile>>((ref) => {});
 

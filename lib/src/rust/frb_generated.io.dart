@@ -107,6 +107,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   PushProfile dco_decode_box_autoadd_push_profile(dynamic raw);
 
   @protected
+  ServerBannerData dco_decode_box_autoadd_server_banner_data(dynamic raw);
+
+  @protected
   StoredFileInfo dco_decode_box_autoadd_stored_file_info(dynamic raw);
 
   @protected
@@ -357,6 +360,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   PushProfile? dco_decode_opt_box_autoadd_push_profile(dynamic raw);
 
   @protected
+  ServerBannerData? dco_decode_opt_box_autoadd_server_banner_data(dynamic raw);
+
+  @protected
   StoredFileInfo? dco_decode_opt_box_autoadd_stored_file_info(dynamic raw);
 
   @protected
@@ -397,6 +403,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   SecurityAlertFfi dco_decode_security_alert_ffi(dynamic raw);
+
+  @protected
+  ServerBannerData dco_decode_server_banner_data(dynamic raw);
 
   @protected
   ServerEmote dco_decode_server_emote(dynamic raw);
@@ -573,6 +582,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   PushProfile sse_decode_box_autoadd_push_profile(SseDeserializer deserializer);
+
+  @protected
+  ServerBannerData sse_decode_box_autoadd_server_banner_data(
+    SseDeserializer deserializer,
+  );
 
   @protected
   StoredFileInfo sse_decode_box_autoadd_stored_file_info(
@@ -889,6 +903,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  ServerBannerData? sse_decode_opt_box_autoadd_server_banner_data(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   StoredFileInfo? sse_decode_opt_box_autoadd_stored_file_info(
     SseDeserializer deserializer,
   );
@@ -941,6 +960,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   SecurityAlertFfi sse_decode_security_alert_ffi(SseDeserializer deserializer);
+
+  @protected
+  ServerBannerData sse_decode_server_banner_data(SseDeserializer deserializer);
 
   @protected
   ServerEmote sse_decode_server_emote(SseDeserializer deserializer);
@@ -1162,6 +1184,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_box_autoadd_push_profile(
     PushProfile self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_server_banner_data(
+    ServerBannerData self,
     SseSerializer serializer,
   );
 
@@ -1589,6 +1617,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_opt_box_autoadd_server_banner_data(
+    ServerBannerData? self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_opt_box_autoadd_stored_file_info(
     StoredFileInfo? self,
     SseSerializer serializer,
@@ -1660,6 +1694,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_security_alert_ffi(
     SecurityAlertFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_server_banner_data(
+    ServerBannerData self,
     SseSerializer serializer,
   );
 

@@ -451,7 +451,7 @@ pub(crate) enum NetworkEvent {
     RoomBudgetUpdate { joined: u32, limit: u32 },
     RoomCapHit { room: String },
     // -- Guest sync events (Public Channels Phase 3) --
-    PublicChannelListReceived { server_id: String, server_name: String, channels: Vec<PublicChannelEntryFfi>, server_avatar: Option<Vec<u8>> },
+    PublicChannelListReceived { server_id: String, server_name: String, channels: Vec<PublicChannelEntryFfi>, server_avatar: Option<Vec<u8>>, server_banner_thumb: Option<Vec<u8>> },
     PublicChannelSyncReceived { server_id: String, channel_id: String, messages: Vec<GuestSyncMessageFfi>, has_more: bool, sender_profiles: Vec<SyncSenderProfileFfi> },
     PublicChannelConfigChanged { server_id: String, channel_id: String, is_public: bool, channel_name: String, category: Option<String> },
 }
@@ -1584,6 +1584,10 @@ pub(crate) enum HavenMessage {
         channels: Vec<PublicChannelEntry>,
         #[serde(default)]
         server_avatar_b64: String,
+        /// 400x133 still THUMBNAIL of the server banner — never the full
+        /// blob (this is a pre-join wire path to strangers).
+        #[serde(default)]
+        server_banner_thumb_b64: String,
     },
 
     #[serde(rename = "pub_ch_sync_req")]

@@ -13,6 +13,8 @@ import 'package:hollow/src/core/providers/channel_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/notification_provider.dart';
 import 'package:hollow/src/core/providers/server_avatar_provider.dart';
+import 'package:hollow/src/core/providers/server_banner_provider.dart';
+import 'package:hollow/src/ui/components/animated_gif_image.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
@@ -65,6 +67,9 @@ class _MobileServerSettingsRouteState
   Uint8List? _stagedIcon;
   bool _iconBusy = false;
   int _iconPickGen = 0;
+  Uint8List? _stagedBanner;
+  bool _bannerBusy = false;
+  int _bannerPickGen = 0;
 
   bool _isPrivate = false;
   bool _isNsfw = false;
@@ -375,6 +380,103 @@ class _MobileServerSettingsRouteState
     }
   }
 
+  /// GIF / animated-WebP magic — animated picks skip the crop dialog (the
+  /// cropper flattens to a still PNG); Rust center-crops 3:1 per frame.
+  static bool _isAnimatedPick(Uint8List bytes) {
+    if (bytes.length > 4 && bytes[0] == 0x47 && bytes[1] == 0x49 && bytes[2] == 0x46 && bytes[3] == 0x38) {
+      return true; // GIF8
+    }
+    return bytes.length > 20 &&
+        bytes[0] == 0x52 && bytes[1] == 0x49 && bytes[2] == 0x46 && bytes[3] == 0x46 && // RIFF
+        bytes[8] == 0x57 && bytes[9] == 0x45 && bytes[10] == 0x42 && bytes[11] == 0x50 && // WEBP
+        bytes[12] == 0x56 && bytes[13] == 0x50 && bytes[14] == 0x38 && bytes[15] == 0x58 && // VP8X
+        (bytes[20] & 0x02) != 0;
+  }
+
+  Future<void> _pickBanner() async {
+    final gen = ++_bannerPickGen;
+    final result = await FilePicker.platform.pickFiles(type: FileType.image);
+    if (result == null || result.files.isEmpty) return;
+    final bytes = await result.files.first.xFile.readAsBytes();
+    if (!mounted || gen != _bannerPickGen) return;
+
+    Uint8List toSend;
+    if (_isAnimatedPick(bytes)) {
+      if (bytes.length > 2 * 1024 * 1024) {
+        HollowToast.show(context, 'Animated banner too large (max 2MB)',
+            type: HollowToastType.error);
+        return;
+      }
+      toSend = bytes;
+    } else {
+      final isMobile = Platform.isAndroid || Platform.isIOS;
+      final cropped = isMobile
+          ? await showMobileImageCrop(
+              context: context, imageBytes: bytes,
+              aspectRatio: 3.0, title: 'Crop Server Banner',
+            )
+          : await showImageCropDialog(
+              context: context, imageBytes: bytes,
+              aspectRatio: 3.0, title: 'Crop Server Banner',
+            );
+      if (cropped == null || !mounted || gen != _bannerPickGen) return;
+      toSend = cropped;
+    }
+    setState(() {
+      _stagedBanner = toSend;
+      _bannerBusy = true;
+    });
+    try {
+      await crdt_api.setServerBanner(
+        serverId: widget.serverId,
+        rawBytes: toSend,
+      );
+      if (!mounted || gen != _bannerPickGen) return;
+      // Seed the provider with the bytes we just sent — reading the DB here
+      // races the fire-and-forget CRDT persist ("second upload applies the
+      // first" bug). applyLocalWrite reconciles once the write lands.
+      ref
+          .read(serverBannerProvider.notifier)
+          .applyLocalWrite(widget.serverId, toSend);
+      setState(() {
+        _stagedBanner = null;
+        _bannerBusy = false;
+      });
+      HollowToast.show(context, 'Banner updated',
+          type: HollowToastType.success);
+    } catch (e) {
+      if (!mounted || gen != _bannerPickGen) return;
+      setState(() {
+        _stagedBanner = null;
+        _bannerBusy = false;
+      });
+      HollowToast.show(context, 'Failed to update banner',
+          type: HollowToastType.error);
+    }
+  }
+
+  Future<void> _clearBanner() async {
+    _bannerPickGen++;
+    setState(() {
+      _stagedBanner = null;
+      _bannerBusy = false;
+    });
+    try {
+      await crdt_api.clearServerBanner(serverId: widget.serverId);
+      if (!mounted) return;
+      ref
+          .read(serverBannerProvider.notifier)
+          .applyLocalWrite(widget.serverId, null);
+      HollowToast.show(context, 'Banner removed',
+          type: HollowToastType.success);
+    } catch (e) {
+      if (mounted) {
+        HollowToast.show(context, 'Failed to remove banner',
+            type: HollowToastType.error);
+      }
+    }
+  }
+
   void _confirmDelete() {
     showHollowDialog(
       context: context,
@@ -665,6 +767,64 @@ class _MobileServerSettingsRouteState
                     ),
                   ),
                   const SizedBox(height: HollowSpacing.xl),
+
+                  // Server Banner (admin only, issue #25) — tap to upload,
+                  // long-press to clear; mirrors the avatar tile idiom.
+                  if (canManage) ...[
+                    const _SectionDivider(label: 'Server Banner'),
+                    const SizedBox(height: HollowSpacing.sm),
+                    Builder(builder: (_) {
+                      final bannerEntry = ref
+                          .watch(serverBannerProvider)[widget.serverId];
+                      final banner = _stagedBanner ?? bannerEntry?.bytes;
+                      return GestureDetector(
+                        onTap: _pickBanner,
+                        onLongPress: bannerEntry != null ? _clearBanner : null,
+                        child: Stack(
+                          children: [
+                            Container(
+                              width: double.infinity,
+                              height: 100,
+                              decoration: BoxDecoration(
+                                color: hollow.elevated,
+                                borderRadius:
+                                    BorderRadius.circular(hollow.radiusLg),
+                              ),
+                              clipBehavior: Clip.antiAlias,
+                              child: banner != null
+                                  ? AnimatedGifImage(
+                                      bytes: banner, fit: BoxFit.cover)
+                                  : Center(
+                                      child: Icon(LucideIcons.image,
+                                          size: 24,
+                                          color: hollow.textSecondary),
+                                    ),
+                            ),
+                            if (_bannerBusy)
+                              Positioned(
+                                right: 4,
+                                bottom: 4,
+                                child: SizedBox(
+                                  width: 14,
+                                  height: 14,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                    color: hollow.textSecondary,
+                                  ),
+                                ),
+                              ),
+                          ],
+                        ),
+                      );
+                    }),
+                    const SizedBox(height: HollowSpacing.xs),
+                    Text(
+                      'Tap to change, hold to remove',
+                      style: HollowTypography.caption
+                          .copyWith(color: hollow.textSecondary),
+                    ),
+                    const SizedBox(height: HollowSpacing.xl),
+                  ],
 
                   // Server Name (admin only)
                   if (canManage) ...[

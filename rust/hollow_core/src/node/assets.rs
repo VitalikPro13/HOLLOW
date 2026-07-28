@@ -72,3 +72,21 @@ impl AssetKind {
 /// before base64). Bounds the reply even when a request names many hashes
 /// of blobs we happen to hold at larger kinds' sizes.
 pub(crate) const MAX_BUNDLE_REPLY_BYTES: usize = 8 * 1024 * 1024;
+
+/// 400x133 still thumbnail of a server's banner for the public-browse wire
+/// path, if the server has a banner AND we hold its blob. Opens a fresh
+/// store handle — call only on the rare guest-browse paths, never in a hot
+/// loop (same trade the guest sync responder already makes).
+pub(crate) fn public_banner_thumb(
+    state: &crate::crdt::server_state::ServerState,
+    db_path: &str,
+    db_passphrase: &str,
+) -> Option<Vec<u8>> {
+    let hash = state.settings.get("server_banner").map(|reg| reg.read().clone())?;
+    if !crate::crdt::valid_emote_hash(&hash) {
+        return None;
+    }
+    let store = crate::storage::MessageStore::open(db_path, db_passphrase).ok()?;
+    let bytes = store.load_emote_blob(&hash).ok().flatten()?;
+    super::image_convert::process_server_banner_thumb(&bytes).ok()
+}

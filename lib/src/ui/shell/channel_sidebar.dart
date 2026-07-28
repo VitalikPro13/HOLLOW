@@ -20,6 +20,8 @@ import 'package:hollow/src/ui/dialogs/storage_dashboard_dialog.dart';
 import 'package:hollow/src/ui/animations/startup_reveal.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/friends_provider.dart';
+import 'package:hollow/src/core/providers/member_panel_provider.dart';
+import 'package:hollow/src/core/providers/server_banner_provider.dart';
 import 'package:hollow/src/core/providers/notification_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
@@ -28,6 +30,7 @@ import 'package:hollow/src/core/providers/saved_messages_provider.dart';
 import 'package:hollow/src/core/providers/unread_provider.dart';
 import 'package:hollow/src/core/providers/voice_channel_provider.dart';
 import 'package:hollow/src/core/providers/speaking_provider.dart';
+import 'package:hollow/src/ui/components/animated_gif_image.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/recording_indicator.dart';
 import 'package:hollow/src/ui/components/saved_messages_avatar.dart';
@@ -200,19 +203,126 @@ class ChannelSidebar extends StatelessWidget {
 
   Widget _buildHeader(BuildContext context, HollowTheme hollow) {
     final label = selectedServer?.name ?? 'Direct Messages';
+    final serverId = selectedServer?.serverId;
+
+    return Consumer(
+      builder: (context, ref, _) {
+        final banner = serverId == null
+            ? null
+            : ref.watch(serverBannerProvider.select((m) => m[serverId]));
+
+        // No banner (and always in home/DM mode): the classic 48px header.
+        if (banner == null) {
+          return Container(
+            key: ValueKey('header-$label'),
+            height: 48,
+            // Right = sm so the action icons line up with the channel
+            // header's "+" below (its row is LTRB lg/sm).
+            padding: const EdgeInsets.only(
+              left: HollowSpacing.lg,
+              right: HollowSpacing.sm,
+            ),
+            decoration: BoxDecoration(
+              border: Border(bottom: BorderSide(color: hollow.border)),
+            ),
+            child: _buildHeaderRow(context, hollow),
+          );
+        }
+
+        // Banner header (issue #25): the banner fills a taller header with
+        // the name + actions overlaid on a bottom-up scrim. Animated
+        // banners only play while actually watched: window focused and not
+        // reduce-motion (AnimatedGifImage enforces the latter itself);
+        // selected + mounted are implied — the sidebar renders only the
+        // selected server.
+        final focused = ref.watch(windowFocusedProvider);
+        return SizedBox(
+          // Hash in the key so a banner re-upload crossfades even though
+          // the server label (the old key) is unchanged. No bottom border
+          // here — the scrim fades fully into the surface, and a border on
+          // top of that fade reads as a stray line.
+          key: ValueKey('header-$label-${banner.hash}'),
+          height: 120,
+          child: Stack(
+            // The sidebar Container insets its children by its 1px right
+            // border (BoxDecoration.padding), so an in-bounds banner stops
+            // 1px short and the border color shows as a line against the
+            // image. Banner + scrim bleed 1px right over that column;
+            // Clip.none lets them paint there.
+            clipBehavior: Clip.none,
+            children: [
+              Positioned(
+                left: 0,
+                top: 0,
+                bottom: 0,
+                right: -1,
+                child: AnimatedGifImage(
+                  bytes: banner.bytes,
+                  fit: BoxFit.cover,
+                  animate: focused,
+                  errorWidget: const SizedBox.expand(),
+                ),
+              ),
+              // Bottom-up scrim toward the sidebar surface so the header
+              // text keeps its normal theme contrast. Eased multi-stop
+              // falloff (a coarse 3-stop ramp BANDS on dark themes) that
+              // reaches FULLY opaque surface at the bottom — anything
+              // less leaves a sliver of banner against the solid sidebar
+              // below, which reads as a line across the edge. Stops use
+              // the surface color at alpha 0 — NEVER Colors.transparent
+              // (it lerps through black in light theme).
+              Positioned(
+                left: 0,
+                top: 0,
+                bottom: 0,
+                right: -1,
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      begin: Alignment.topCenter,
+                      end: Alignment.bottomCenter,
+                      colors: [
+                        hollow.surface.withValues(alpha: 0.0),
+                        hollow.surface.withValues(alpha: 0.08),
+                        hollow.surface.withValues(alpha: 0.28),
+                        hollow.surface.withValues(alpha: 0.60),
+                        hollow.surface.withValues(alpha: 0.88),
+                        hollow.surface.withValues(alpha: 1.0),
+                      ],
+                      stops: const [0.28, 0.46, 0.62, 0.78, 0.90, 1.0],
+                    ),
+                  ),
+                ),
+              ),
+              Positioned(
+                left: 0,
+                right: 0,
+                bottom: 0,
+                child: Padding(
+                  // Right = sm so the action icons line up with the
+                  // channel header's "+" below (its row is LTRB lg/sm).
+                  padding: const EdgeInsets.fromLTRB(
+                    HollowSpacing.lg,
+                    HollowSpacing.sm,
+                    HollowSpacing.sm,
+                    HollowSpacing.sm,
+                  ),
+                  child: _buildHeaderRow(context, hollow),
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildHeaderRow(BuildContext context, HollowTheme hollow) {
+    final label = selectedServer?.name ?? 'Direct Messages';
     final headerTextReveal =
         StartupRevealScope.interval(context, 0.25, 0.40);
 
-    return Container(
-      key: ValueKey('header-$label'),
-      height: 48,
-      padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.lg),
-      decoration: BoxDecoration(
-        border: Border(
-          bottom: BorderSide(color: hollow.border),
-        ),
-      ),
-      child: Row(
+    return Row(
         children: [
           Expanded(
             // a11y Phase 3: fixed-height (48px) sidebar header chrome — cap the
@@ -283,8 +393,7 @@ class ChannelSidebar extends StatelessWidget {
             ),
           ],
         ],
-      ),
-    );
+      );
   }
 }
 

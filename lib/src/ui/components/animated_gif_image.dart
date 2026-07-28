@@ -23,6 +23,11 @@ class AnimatedGifImage extends StatefulWidget {
   final BoxFit fit;
   final Widget? errorWidget;
 
+  /// When false, playback pauses on frame 0 (used by surfaces that only
+  /// animate while actually watched, e.g. the server banner gates on window
+  /// focus). Reduce-motion is enforced internally regardless of this flag.
+  final bool animate;
+
   const AnimatedGifImage({
     super.key,
     required this.bytes,
@@ -30,6 +35,7 @@ class AnimatedGifImage extends StatefulWidget {
     this.height,
     this.fit = BoxFit.cover,
     this.errorWidget,
+    this.animate = true,
   });
 
   @override
@@ -51,12 +57,15 @@ class _AnimatedGifImageState extends State<AnimatedGifImage>
     _decode();
     // Reduce-motion treats GIF playback as motion: show the static first
     // frame. React live when the OS / in-app flag flips.
-    ReduceMotionController.instance.effective.addListener(_onReduceMotion);
+    ReduceMotionController.instance.effective.addListener(_syncPlayback);
   }
 
-  void _onReduceMotion() {
+  bool get _shouldPlay =>
+      widget.animate && !ReduceMotionController.instance.isReduced;
+
+  void _syncPlayback() {
     if (!mounted || _frames == null || _frames!.length <= 1) return;
-    if (ReduceMotionController.instance.isReduced) {
+    if (!_shouldPlay) {
       _ticker?.stop();
       if (_currentFrame != 0) setState(() => _currentFrame = 0);
     } else if (_ticker != null && !_ticker!.isActive) {
@@ -76,6 +85,8 @@ class _AnimatedGifImageState extends State<AnimatedGifImage>
       _nextFrameAt = Duration.zero;
       _failed = false;
       _decode();
+    } else if (old.animate != widget.animate) {
+      _syncPlayback();
     }
   }
 
@@ -106,11 +117,11 @@ class _AnimatedGifImageState extends State<AnimatedGifImage>
 
       setState(() => _frames = frames);
 
-      // Start animation if multi-frame (unless reduce-motion: hold frame 0).
+      // Start animation if multi-frame (unless gated: hold frame 0).
       if (frames.length > 1) {
         _nextFrameAt = frames[0].duration;
         _ticker = createTicker(_onTick);
-        if (!ReduceMotionController.instance.isReduced) {
+        if (_shouldPlay) {
           _ticker!.start();
         }
       }
@@ -153,7 +164,7 @@ class _AnimatedGifImageState extends State<AnimatedGifImage>
 
   @override
   void dispose() {
-    ReduceMotionController.instance.effective.removeListener(_onReduceMotion);
+    ReduceMotionController.instance.effective.removeListener(_syncPlayback);
     _disposeFrames();
     super.dispose();
   }
