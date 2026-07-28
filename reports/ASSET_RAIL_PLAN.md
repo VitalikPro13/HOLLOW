@@ -69,16 +69,27 @@ STATUS (updated 2026-07-28, second session — resume at PHASE 3)
   - Tests: harness server_banner_hash_replicates_and_bytes_pull_on_demand
     (+ clear converges) + banner_write_rejected_without_manage_server
     (seed tags 85-88); widget test/widget/banner_header_test.dart.
-* FOLLOW-UP (noticed post-Phase-2, not scheduled): ANIMATED SERVER ICONS.
-  process_avatar_image flattens any GIF to a still 128px WebP at authoring,
-  so no server icon is ever animated on any surface (the strip's
-  Image.memory would animate animated bytes fine). Can't just keep the
-  animation there: the icon is base64 INSIDE settings["server_avatar"] —
-  an animated icon would bloat every ServerState snapshot + sync frame by
-  hundreds of KB. Proper fix = same split as banners: keep the still b64
-  in server_avatar for old clients + the sync thumb, add a
-  server_avatar_anim hash whose blob rides the asset rail; render gated
-  (hover/selected + window focus + reduce-motion). Needs Vitalik's nod.
+* FOLLOW-UP: ANIMATED SERVER ICONS — DONE (2026-07-28, third session).
+  The still b64 stays in settings["server_avatar"] (old clients + sync
+  thumb unchanged); an animated pick ADDITIONALLY writes a
+  settings["server_avatar_anim"] hash whose 128px animated WebP rides the
+  asset rail at new AssetKind::Avatar (recv_cap 512 KB, 4 hashes/request,
+  kind='avatar'). Rust: image_convert::process_server_avatar_anim (square
+  per-frame crop, GIF branch + animated-WebP passthrough) +
+  is_animated_image; set_server_avatar splits still/anim (anim hash
+  written FIRST, still clears it); get_server_avatar_anim ->
+  Option<ServerAvatarAnimData{hash, bytes}}; referenced_asset_hashes pins
+  server_avatar_anim. Dart: server_avatar_anim_provider (banner-notifier
+  clone, kind 'avatar'), shared ui/components/server_icon_image.dart
+  ServerIconImage (anim > still > fallback; animate = (hover || selected)
+  && windowFocused, reduce-motion internal to AnimatedGifImage) used by
+  server_strip (44), bottom_bar dock (38), mobile chats row (44, expanded
+  = watched), both authoring tiles (always-watched); folder cells + guest
+  20px stay still. Authoring: animated picks bypass the crop dialog in
+  overview_tab + mobile_server_settings_route (2 MB pre-check), both seed
+  serverAvatarAnimProvider optimistically; clear wipes both. Tests:
+  harness server_avatar_anim_hash_replicates_and_bytes_pull_on_demand
+  (tags 89/95), widget test/widget/server_icon_anim_test.dart (6 cases).
 * PHASE 3: not started; Klipy registration (Vitalik) needed before/at 3.1.
 * PHASE 4, 5: not started.
 ================================================================================

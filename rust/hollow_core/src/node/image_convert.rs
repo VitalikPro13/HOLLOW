@@ -1039,3 +1039,98 @@ pub fn process_server_banner_thumb(data: &[u8]) -> Result<Vec<u8>, String> {
     }
     Ok(buf)
 }
+
+/// True when the raw bytes are an animated source: GIF, or a WebP whose
+/// VP8X header carries the animation flag. Gates the animated-icon split in
+/// `set_server_avatar` (still inputs never touch the asset rail).
+pub fn is_animated_image(data: &[u8]) -> bool {
+    if data.starts_with(b"GIF8") {
+        return true;
+    }
+    data.len() > 20
+        && &data[0..4] == b"RIFF"
+        && &data[8..12] == b"WEBP"
+        && &data[12..16] == b"VP8X"
+        && (data[20] & 0x02) != 0
+}
+
+/// Process an animated source into the ANIMATED server-icon variant
+/// (content-addressed asset, `AssetKind::Avatar`): square center crop →
+/// 128x128.
+/// - animated GIF → per-frame cropped/resized animated WebP, Q=80, ≤512KB;
+/// - already-animated WebP → accepted AS-IS under the 512KB cap (the image
+///   crate can't re-encode animation; container magic + first-frame decode
+///   are still verified — rendering uses BoxFit.cover, so a non-square
+///   source is a visual crop, not an error).
+///
+/// The still companion in `settings["server_avatar"]` comes from
+/// `process_avatar_image` (frame 0) — this produces ONLY the animated blob.
+pub fn process_server_avatar_anim(data: &[u8]) -> Result<Vec<u8>, String> {
+    const ICON_DIM: u32 = 128;
+    const MAX_ANIMATED: usize = 524_288;
+
+    // Largest centered square of a (w, h) canvas.
+    fn crop_rect_square(w: u32, h: u32) -> (u32, u32, u32, u32) {
+        let side = w.min(h);
+        ((w - side) / 2, (h - side) / 2, side, side)
+    }
+
+    if data.starts_with(b"GIF8") {
+        let decoder = GifDecoder::new(Cursor::new(data))
+            .map_err(|e| format!("Failed to decode GIF: {e}"))?;
+        let frames = decoder
+            .into_frames()
+            .collect_frames()
+            .map_err(|e| format!("Failed to collect GIF frames: {e}"))?;
+        if frames.is_empty() {
+            return Err("GIF has no frames".into());
+        }
+        let (w, h) = (frames[0].buffer().width(), frames[0].buffer().height());
+        if w == 0 || h == 0 {
+            return Err("GIF has zero dimensions".into());
+        }
+        let (x, y, cw, ch) = crop_rect_square(w, h);
+        let mut encoder = webp_animation::Encoder::new_with_options(
+            (ICON_DIM, ICON_DIM),
+            webp_animation::EncoderOptions {
+                encoding_config: Some(webp_animation::EncodingConfig {
+                    quality: 80.0,
+                    encoding_type: webp_animation::EncodingType::Lossy(Default::default()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        )
+        .map_err(|e| format!("Failed to create WebP encoder: {e}"))?;
+        let mut timestamp_ms: i32 = 0;
+        for frame in &frames {
+            let cropped = image::imageops::crop_imm(frame.buffer(), x, y, cw, ch).to_image();
+            let resized = image::imageops::resize(&cropped, ICON_DIM, ICON_DIM, FilterType::Lanczos3);
+            encoder
+                .add_frame(resized.as_raw(), timestamp_ms)
+                .map_err(|e| format!("Failed to add WebP frame: {e}"))?;
+            let delay: std::time::Duration = frame.delay().into();
+            let delay_ms = delay.as_millis() as i32;
+            timestamp_ms += if delay_ms < 20 { 100 } else { delay_ms };
+        }
+        let webp = encoder
+            .finalize(timestamp_ms)
+            .map_err(|e| format!("Failed to finalize animated WebP: {e}"))?;
+        if webp.len() > MAX_ANIMATED {
+            return Err("Animated icon too large after processing (>512KB)".into());
+        }
+        return Ok(webp.to_vec());
+    }
+
+    // Animated WebP passthrough (verify container + first-frame decode + cap).
+    if is_animated_image(data) {
+        if data.len() > MAX_ANIMATED {
+            return Err("Animated icon too large (>512KB)".into());
+        }
+        image::load_from_memory(data)
+            .map_err(|e| format!("Failed to decode animated WebP: {e}"))?;
+        return Ok(data.to_vec());
+    }
+
+    Err("Not an animated image".into())
+}

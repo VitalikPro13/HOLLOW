@@ -984,12 +984,14 @@ fn referenced_asset_hashes(ms: &crate::storage::MessageStore) -> std::collection
             for emote in state.emotes.values() {
                 keep.insert(emote.hash.clone());
             }
-            // Server banner (Phase 2 of the asset rail): settings carry the
+            // Server banner + animated server icon: these settings carry a
             // blob hash; absent/cleared values are not hex and are skipped.
-            if let Some(reg) = state.settings.get("server_banner") {
-                let v = reg.read().clone();
-                if crate::crdt::valid_emote_hash(&v) {
-                    keep.insert(v);
+            for key in ["server_banner", "server_avatar_anim"] {
+                if let Some(reg) = state.settings.get(key) {
+                    let v = reg.read().clone();
+                    if crate::crdt::valid_emote_hash(&v) {
+                        keep.insert(v);
+                    }
                 }
             }
         }

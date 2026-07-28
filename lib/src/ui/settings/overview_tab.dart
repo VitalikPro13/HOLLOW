@@ -6,9 +6,11 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/models/server_info.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
+import 'package:hollow/src/core/providers/server_avatar_anim_provider.dart';
 import 'package:hollow/src/core/providers/server_avatar_provider.dart';
 import 'package:hollow/src/core/providers/server_banner_provider.dart';
 import 'package:hollow/src/ui/components/animated_gif_image.dart';
+import 'package:hollow/src/ui/components/server_icon_image.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
@@ -321,32 +323,51 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
     if (path == null) return;
     final raw = await File(path).readAsBytes();
     if (!mounted || gen != _iconPickGen) return;
-    final cropped = await showImageCropDialog(
-      context: context,
-      imageBytes: raw,
-      aspectRatio: 1.0,
-      title: 'Crop Server Icon',
-    );
-    if (cropped == null || !mounted || gen != _iconPickGen) return;
-    // Instant feedback: show the cropped bytes NOW; the Rust WebP encode +
+
+    Uint8List toSend;
+    final animated = _isAnimatedPick(raw);
+    if (animated) {
+      // Animated picks skip the crop dialog (it flattens to a still PNG);
+      // Rust center-crops square per frame and splits still + anim variants.
+      if (raw.length > 2 * 1024 * 1024) {
+        HollowToast.show(context, 'Animated icon too large (max 2MB)',
+            type: HollowToastType.error);
+        return;
+      }
+      toSend = raw;
+    } else {
+      final cropped = await showImageCropDialog(
+        context: context,
+        imageBytes: raw,
+        aspectRatio: 1.0,
+        title: 'Crop Server Icon',
+      );
+      if (cropped == null || !mounted || gen != _iconPickGen) return;
+      toSend = cropped;
+    }
+    // Instant feedback: show the picked bytes NOW; the Rust WebP encode +
     // CRDT write (a real wall-clock wait) runs behind the spinner.
     setState(() {
-      _stagedIcon = cropped;
+      _stagedIcon = toSend;
       _iconBusy = true;
     });
     try {
       await crdt_api.setServerAvatar(
         serverId: widget.server.serverId,
-        rawBytes: cropped,
+        rawBytes: toSend,
       );
       if (!mounted || gen != _iconPickGen) return;
-      // Seed the provider with the bytes we just sent — reading the DB here
+      // Seed the providers with the bytes we just sent — reading the DB here
       // races the fire-and-forget CRDT persist and returns the PREVIOUS icon
       // ("second upload applies the first" bug). applyLocalWrite reconciles
-      // to the processed bytes once the write lands.
+      // to the processed bytes once the write lands. A still pick clears any
+      // previous animated icon.
       ref
           .read(serverAvatarProvider.notifier)
-          .applyLocalWrite(widget.server.serverId, cropped);
+          .applyLocalWrite(widget.server.serverId, toSend);
+      ref
+          .read(serverAvatarAnimProvider.notifier)
+          .applyLocalWrite(widget.server.serverId, animated ? toSend : null);
       setState(() {
         _stagedIcon = null;
         _iconBusy = false;
@@ -366,7 +387,8 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
   }
 
   /// GIF / animated-WebP magic — animated picks skip the crop dialog (the
-  /// cropper flattens to a still PNG); Rust center-crops 3:1 per frame.
+  /// cropper flattens to a still PNG); Rust center-crops per frame
+  /// (3:1 for banners, square for icons).
   static bool _isAnimatedPick(Uint8List bytes) {
     if (bytes.length > 4 && bytes[0] == 0x47 && bytes[1] == 0x49 && bytes[2] == 0x46 && bytes[3] == 0x38) {
       return true; // GIF8
@@ -557,6 +579,9 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
       ref
           .read(serverAvatarProvider.notifier)
           .applyLocalWrite(widget.server.serverId, null);
+      ref
+          .read(serverAvatarAnimProvider.notifier)
+          .applyLocalWrite(widget.server.serverId, null);
       HollowToast.show(context, 'Server icon removed',
           type: HollowToastType.success);
     } catch (e) {
@@ -596,27 +621,36 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
           Row(
             children: [
               Builder(builder: (_) {
-                // Staged bytes (optimistic pick) win over the provider cache.
-                final avatar = _stagedIcon ??
-                    ref.watch(serverAvatarProvider)[widget.server.serverId];
+                final placeholder = Container(
+                  width: 48,
+                  height: 48,
+                  decoration: BoxDecoration(
+                    color: hollow.elevated,
+                    borderRadius: BorderRadius.circular(hollow.radiusMd),
+                  ),
+                  alignment: Alignment.center,
+                  child: Icon(LucideIcons.image, size: 20, color: hollow.textSecondary),
+                );
                 final Widget icon;
-                if (avatar != null) {
+                if (_stagedIcon != null) {
+                  // Staged bytes (optimistic pick) win over the provider
+                  // cache; AnimatedGifImage previews an animated pick live
+                  // and renders a still pick as-is.
                   icon = ClipRRect(
                     borderRadius: BorderRadius.circular(hollow.radiusMd),
-                    child: Image.memory(avatar,
-                        width: 48, height: 48, fit: BoxFit.cover,
-                        gaplessPlayback: true),
+                    child: AnimatedGifImage(
+                        bytes: _stagedIcon!,
+                        width: 48, height: 48, fit: BoxFit.cover),
                   );
                 } else {
-                  icon = Container(
-                    width: 48,
-                    height: 48,
-                    decoration: BoxDecoration(
-                      color: hollow.elevated,
-                      borderRadius: BorderRadius.circular(hollow.radiusMd),
-                    ),
-                    alignment: Alignment.center,
-                    child: Icon(LucideIcons.image, size: 20, color: hollow.textSecondary),
+                  // The authoring tile counts as watched while the tab is
+                  // open — animate whenever an animated icon exists.
+                  icon = ServerIconImage(
+                    serverId: widget.server.serverId,
+                    size: 48,
+                    isSelected: true,
+                    borderRadius: BorderRadius.circular(hollow.radiusMd),
+                    fallback: placeholder,
                   );
                 }
                 if (!_iconBusy) return icon;

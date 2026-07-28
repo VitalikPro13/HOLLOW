@@ -12,9 +12,11 @@ import 'package:hollow/src/core/moderation_format.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/notification_provider.dart';
+import 'package:hollow/src/core/providers/server_avatar_anim_provider.dart';
 import 'package:hollow/src/core/providers/server_avatar_provider.dart';
 import 'package:hollow/src/core/providers/server_banner_provider.dart';
 import 'package:hollow/src/ui/components/animated_gif_image.dart';
+import 'package:hollow/src/ui/components/server_icon_image.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
@@ -305,37 +307,55 @@ class _MobileServerSettingsRouteState
     final bytes = await result.files.first.xFile.readAsBytes();
     if (!mounted || gen != _iconPickGen) return;
 
-    final isMobile = Platform.isAndroid || Platform.isIOS;
-    final cropped = isMobile
-        ? await showMobileImageCrop(
-            context: context, imageBytes: bytes,
-            aspectRatio: 1.0, title: 'Crop Server Avatar',
-          )
-        : await showImageCropDialog(
-            context: context, imageBytes: bytes,
-            aspectRatio: 1.0, title: 'Crop Server Avatar',
-          );
-    if (cropped == null || !mounted || gen != _iconPickGen) return;
+    Uint8List toSend;
+    final animated = _isAnimatedPick(bytes);
+    if (animated) {
+      // Animated picks skip the crop dialog (it flattens to a still PNG);
+      // Rust center-crops square per frame and splits still + anim variants.
+      if (bytes.length > 2 * 1024 * 1024) {
+        HollowToast.show(context, 'Animated icon too large (max 2MB)',
+            type: HollowToastType.error);
+        return;
+      }
+      toSend = bytes;
+    } else {
+      final isMobile = Platform.isAndroid || Platform.isIOS;
+      final cropped = isMobile
+          ? await showMobileImageCrop(
+              context: context, imageBytes: bytes,
+              aspectRatio: 1.0, title: 'Crop Server Avatar',
+            )
+          : await showImageCropDialog(
+              context: context, imageBytes: bytes,
+              aspectRatio: 1.0, title: 'Crop Server Avatar',
+            );
+      if (cropped == null || !mounted || gen != _iconPickGen) return;
+      toSend = cropped;
+    }
 
-    // Instant feedback: show the cropped bytes NOW; the Rust WebP encode +
+    // Instant feedback: show the picked bytes NOW; the Rust WebP encode +
     // CRDT write (a real wall-clock wait) runs behind the spinner.
     setState(() {
-      _stagedIcon = cropped;
+      _stagedIcon = toSend;
       _iconBusy = true;
     });
     try {
       await crdt_api.setServerAvatar(
         serverId: widget.serverId,
-        rawBytes: cropped,
+        rawBytes: toSend,
       );
       if (!mounted || gen != _iconPickGen) return;
-      // Seed the provider with the bytes we just sent — reading the DB here
+      // Seed the providers with the bytes we just sent — reading the DB here
       // races the fire-and-forget CRDT persist and returns the PREVIOUS
       // avatar ("second upload applies the first" bug). applyLocalWrite
-      // reconciles to the processed bytes once the write lands.
+      // reconciles to the processed bytes once the write lands. A still
+      // pick clears any previous animated icon.
       ref
           .read(serverAvatarProvider.notifier)
-          .applyLocalWrite(widget.serverId, cropped);
+          .applyLocalWrite(widget.serverId, toSend);
+      ref
+          .read(serverAvatarAnimProvider.notifier)
+          .applyLocalWrite(widget.serverId, animated ? toSend : null);
       setState(() {
         _stagedIcon = null;
         _iconBusy = false;
@@ -370,6 +390,9 @@ class _MobileServerSettingsRouteState
       ref
           .read(serverAvatarProvider.notifier)
           .applyLocalWrite(widget.serverId, null);
+      ref
+          .read(serverAvatarAnimProvider.notifier)
+          .applyLocalWrite(widget.serverId, null);
       HollowToast.show(context, 'Avatar cleared',
           type: HollowToastType.success);
     } catch (e) {
@@ -381,7 +404,8 @@ class _MobileServerSettingsRouteState
   }
 
   /// GIF / animated-WebP magic — animated picks skip the crop dialog (the
-  /// cropper flattens to a still PNG); Rust center-crops 3:1 per frame.
+  /// cropper flattens to a still PNG); Rust center-crops per frame
+  /// (3:1 for banners, square for icons).
   static bool _isAnimatedPick(Uint8List bytes) {
     if (bytes.length > 4 && bytes[0] == 0x47 && bytes[1] == 0x49 && bytes[2] == 0x46 && bytes[3] == 0x38) {
       return true; // GIF8
@@ -641,7 +665,6 @@ class _MobileServerSettingsRouteState
     final canManageChannels = (perms & Permission.manageChannels) != 0;
     final isOwner = role == 'owner';
     final serverAvatar = ref.watch(serverAvatarProvider)[widget.serverId];
-    final displayAvatar = _stagedIcon ?? serverAvatar;
 
     if (server == null) {
       return Scaffold(
@@ -719,19 +742,29 @@ class _MobileServerSettingsRouteState
                                 ),
                                 clipBehavior: Clip.antiAlias,
                                 // Staged bytes (optimistic pick) win over the
-                                // provider cache.
-                                child: displayAvatar != null
-                                    ? Image.memory(displayAvatar,
-                                        fit: BoxFit.cover,
-                                        gaplessPlayback: true)
-                                    : Center(
-                                        child: Text(
-                                          server.name.isNotEmpty
-                                              ? server.name[0].toUpperCase()
-                                              : '?',
-                                          style: HollowTypography.display
-                                              .copyWith(
-                                            color: hollow.accent,
+                                // provider cache; AnimatedGifImage previews
+                                // an animated pick live. Otherwise the shared
+                                // icon widget renders the animated variant
+                                // when one exists (authoring tile counts as
+                                // watched).
+                                child: _stagedIcon != null
+                                    ? AnimatedGifImage(
+                                        bytes: _stagedIcon!,
+                                        fit: BoxFit.cover)
+                                    : ServerIconImage(
+                                        serverId: widget.serverId,
+                                        size: 80,
+                                        isSelected: true,
+                                        borderRadius: BorderRadius.zero,
+                                        fallback: Center(
+                                          child: Text(
+                                            server.name.isNotEmpty
+                                                ? server.name[0].toUpperCase()
+                                                : '?',
+                                            style: HollowTypography.display
+                                                .copyWith(
+                                              color: hollow.accent,
+                                            ),
                                           ),
                                         ),
                                       ),

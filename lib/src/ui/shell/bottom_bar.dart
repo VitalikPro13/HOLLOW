@@ -11,7 +11,7 @@ import 'package:hollow/src/core/providers/notification_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/selected_peer_provider.dart';
 import 'package:hollow/src/core/models/strip_item.dart';
-import 'package:hollow/src/core/providers/server_avatar_provider.dart';
+import 'package:hollow/src/ui/components/server_icon_image.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/server_strip_layout_provider.dart';
 import 'package:hollow/src/core/providers/split_view_provider.dart';
@@ -553,23 +553,21 @@ class _BottomBarState extends ConsumerState<BottomBar> {
     final serverUnreads = isServerMuted
         ? 0
         : ref.watch(unreadProvider.select((s) => s.serverUnreadCount(serverId)));
-    final serverAvatar = ref.watch(serverAvatarProvider)[serverId];
     final name = server?.name ?? '';
 
-    Widget serverIconChild = serverAvatar != null
-        ? ClipRRect(
-            borderRadius: BorderRadius.circular(8),
-            child: Image.memory(serverAvatar,
-                width: 38, height: 38, fit: BoxFit.cover),
-          )
-        : Text(
-            _initialsFromName(name.isNotEmpty ? name : serverId),
-            style: const TextStyle(
-              color: Colors.white,
-              fontSize: 14,
-              fontWeight: FontWeight.w600,
-            ),
-          );
+    Widget serverIconChild = ServerIconImage(
+      serverId: serverId,
+      size: 38,
+      isSelected: isSelected || isRightPaneServer,
+      fallback: Text(
+        _initialsFromName(name.isNotEmpty ? name : serverId),
+        style: const TextStyle(
+          color: Colors.white,
+          fontSize: 14,
+          fontWeight: FontWeight.w600,
+        ),
+      ),
+    );
 
     Widget icon = DragTarget<_StripDragData>(
       onWillAcceptWithDetails: (details) {

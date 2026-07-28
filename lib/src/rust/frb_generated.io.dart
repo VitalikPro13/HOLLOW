@@ -107,6 +107,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   PushProfile dco_decode_box_autoadd_push_profile(dynamic raw);
 
   @protected
+  ServerAvatarAnimData dco_decode_box_autoadd_server_avatar_anim_data(
+    dynamic raw,
+  );
+
+  @protected
   ServerBannerData dco_decode_box_autoadd_server_banner_data(dynamic raw);
 
   @protected
@@ -360,6 +365,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   PushProfile? dco_decode_opt_box_autoadd_push_profile(dynamic raw);
 
   @protected
+  ServerAvatarAnimData? dco_decode_opt_box_autoadd_server_avatar_anim_data(
+    dynamic raw,
+  );
+
+  @protected
   ServerBannerData? dco_decode_opt_box_autoadd_server_banner_data(dynamic raw);
 
   @protected
@@ -403,6 +413,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   SecurityAlertFfi dco_decode_security_alert_ffi(dynamic raw);
+
+  @protected
+  ServerAvatarAnimData dco_decode_server_avatar_anim_data(dynamic raw);
 
   @protected
   ServerBannerData dco_decode_server_banner_data(dynamic raw);
@@ -582,6 +595,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   PushProfile sse_decode_box_autoadd_push_profile(SseDeserializer deserializer);
+
+  @protected
+  ServerAvatarAnimData sse_decode_box_autoadd_server_avatar_anim_data(
+    SseDeserializer deserializer,
+  );
 
   @protected
   ServerBannerData sse_decode_box_autoadd_server_banner_data(
@@ -903,6 +921,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  ServerAvatarAnimData? sse_decode_opt_box_autoadd_server_avatar_anim_data(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   ServerBannerData? sse_decode_opt_box_autoadd_server_banner_data(
     SseDeserializer deserializer,
   );
@@ -960,6 +983,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   SecurityAlertFfi sse_decode_security_alert_ffi(SseDeserializer deserializer);
+
+  @protected
+  ServerAvatarAnimData sse_decode_server_avatar_anim_data(
+    SseDeserializer deserializer,
+  );
 
   @protected
   ServerBannerData sse_decode_server_banner_data(SseDeserializer deserializer);
@@ -1184,6 +1212,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_box_autoadd_push_profile(
     PushProfile self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_server_avatar_anim_data(
+    ServerAvatarAnimData self,
     SseSerializer serializer,
   );
 
@@ -1617,6 +1651,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_opt_box_autoadd_server_avatar_anim_data(
+    ServerAvatarAnimData? self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_opt_box_autoadd_server_banner_data(
     ServerBannerData? self,
     SseSerializer serializer,
@@ -1694,6 +1734,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_security_alert_ffi(
     SecurityAlertFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_server_avatar_anim_data(
+    ServerAvatarAnimData self,
     SseSerializer serializer,
   );
 

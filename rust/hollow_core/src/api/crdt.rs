@@ -353,18 +353,44 @@ pub fn update_server_setting(server_id: String, key: String, value: String) -> R
     Ok(())
 }
 
-/// Set a server avatar. Processes the raw image to 128x128 WebP and stores via CRDT.
+/// Set a server avatar. Processes the raw image to a still 128x128 WebP
+/// stored base64 in `settings["server_avatar"]` (old clients + the public
+/// sync thumb read only this). An ANIMATED source (GIF / animated WebP)
+/// additionally produces a 128px animated WebP cached content-addressed
+/// with kind='avatar' — `settings["server_avatar_anim"]` carries ONLY its
+/// hash and the bytes ride the asset rail, never the CRDT.
 #[frb]
 pub fn set_server_avatar(server_id: String, raw_bytes: Vec<u8>) -> Result<(), String> {
     let processed = crate::node::image_convert::process_avatar_image(&raw_bytes)?;
+
+    let anim_hash = if crate::node::image_convert::is_animated_image(&raw_bytes) {
+        let anim = crate::node::image_convert::process_server_avatar_anim(&raw_bytes)?;
+        let hash = {
+            use sha2::{Digest, Sha256};
+            hex::encode(Sha256::digest(&anim))
+        };
+        let store = super::storage::get_store();
+        let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+        let ms = guard.as_ref().ok_or("Message store is not open")?;
+        ms.save_asset_blob(&hash, &anim, true, "avatar")?;
+        hash
+    } else {
+        // A still upload replaces any previous animated icon.
+        String::new()
+    };
+
+    // Anim hash first so the still write (which drives UI reloads via
+    // ServerUpdated) lands with its companion already in place.
+    update_server_setting(server_id.clone(), "server_avatar_anim".into(), anim_hash)?;
     use base64::Engine;
     let b64 = base64::engine::general_purpose::STANDARD.encode(&processed);
     update_server_setting(server_id, "server_avatar".into(), b64)
 }
 
-/// Clear a server avatar.
+/// Clear a server avatar (both the still base64 and any animated-icon hash).
 #[frb]
 pub fn clear_server_avatar(server_id: String) -> Result<(), String> {
+    update_server_setting(server_id.clone(), "server_avatar_anim".into(), String::new())?;
     update_server_setting(server_id, "server_avatar".into(), String::new())
 }
 
@@ -380,6 +406,37 @@ pub fn get_server_avatar(server_id: String) -> Result<Option<Vec<u8>>, String> {
         .decode(&b64)
         .map_err(|e| format!("Invalid server avatar base64: {e}"))?;
     Ok(Some(bytes))
+}
+
+/// Animated server icon as seen locally. The CRDT carries only the hash;
+/// bytes live in the content-addressed asset store (kind='avatar') and
+/// replicate via the asset rail — never through the CRDT. The still icon
+/// is separate (`get_server_avatar`).
+pub struct ServerAvatarAnimData {
+    /// 64-hex SHA-256 of the processed animated WebP bytes.
+    pub hash: String,
+    /// Cached blob bytes, if we hold them. `None` = pull via
+    /// `request_assets(kind: "avatar")` and re-read on `EmoteAssetsReceived`.
+    pub bytes: Option<Vec<u8>>,
+}
+
+/// Get the animated server icon. `None` = the server has no animated icon
+/// (still-only, or cleared); `bytes` is `None` when the hash is known but
+/// the blob hasn't been pulled yet.
+#[frb]
+pub fn get_server_avatar_anim(server_id: String) -> Result<Option<ServerAvatarAnimData>, String> {
+    let hash = get_server_setting(server_id, "server_avatar_anim".into())?;
+    // "" = still-only; anything non-hex is not a usable reference either way.
+    if !crate::crdt::valid_emote_hash(&hash) {
+        return Ok(None);
+    }
+    let bytes = {
+        let store = super::storage::get_store();
+        let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+        let ms = guard.as_ref().ok_or("Message store is not open")?;
+        ms.load_emote_blob(&hash)?
+    };
+    Ok(Some(ServerAvatarAnimData { hash, bytes }))
 }
 
 /// Server banner as seen locally. The CRDT carries only the hash; bytes

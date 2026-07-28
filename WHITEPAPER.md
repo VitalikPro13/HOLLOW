@@ -788,7 +788,7 @@ CRDT operations are validated on receipt:
 
 ### 10.7 Custom Emotes and the Asset Rail (Content-Addressed Asset Replication)
 
-Custom emotes are small images usable inline in messages and as reactions. Their design extends the CRDT model with a content-addressed asset layer — the *asset rail* — that also carries the other media kinds built on it (server banners, stickers, GIFs), which differ only in their size bounds:
+Custom emotes are small images usable inline in messages and as reactions. Their design extends the CRDT model with a content-addressed asset layer — the *asset rail* — that also carries the other media kinds built on it (server banners, animated server icons, stickers, GIFs), which differ only in their size bounds:
 
 - **Metadata and bytes are separated.** The replicated CRDT entry (`EmojiAdded`) carries only a name and the SHA-256 hash of the processed image. The image bytes never ride CRDT operations, message envelopes, or relay buffers.
 - **Bytes replicate on demand, peer-to-peer.** A client that must render an unknown hash requests it from a single source — the message sender's devices (direct messages) or one online server member (channels). Any member holding the bytes can serve them: content addressing makes every copy equally trustworthy, because the receiver recomputes the hash (and enforces format and size bounds) before caching. A tampered or substituted image simply fails verification and is discarded.
@@ -799,6 +799,8 @@ Custom emotes are small images usable inline in messages and as reactions. Their
 Server emote sets are capped and gated by a dedicated permission bit (§11.2); names and hashes are grammar-validated at every ingest path so the emote registry cannot be used to smuggle markup or oversized data into clients.
 
 **Server banners** follow the same separation: the replicated server state carries only the banner's hash (a `MANAGE_SERVER`-gated setting), and members pull the bytes over the rail like any other asset. The one place a banner is shown to non-members — the pre-join public-server browse — receives a small, still, size-bounded thumbnail generated from the banner, never the full asset, and the receiving client independently enforces that bound before display.
+
+**Animated server icons** apply the split retroactively to a field that predates the rail: the small still icon remains inline in replicated server state (older clients and pre-join surfaces keep working unchanged), while an animated upload additionally publishes only the hash of a size-bounded animated variant, whose bytes ride the rail under the same requested-only, receiver-verified rules. Animation never rides state snapshots, sync frames, or pre-join wire paths.
 
 ---
 

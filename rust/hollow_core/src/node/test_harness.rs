@@ -7920,6 +7920,175 @@ async fn banner_write_rejected_without_manage_server() {
 }
 
 // ---------------------------------------------------------------------------
+// Animated server icons (asset-rail follow-up): the still icon stays base64
+// in settings["server_avatar"]; an animated upload ADDITIONALLY writes only
+// a hash into settings["server_avatar_anim"], with the 128px animated WebP
+// blob riding the asset rail at AssetKind::Avatar. A joined member sees the
+// hash converge, pulls the bytes on demand, and a later still upload (anim
+// hash -> "") converges too. Command sequence mirrors what the
+// set_server_avatar FFI decomposes into.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn server_avatar_anim_hash_replicates_and_bytes_pull_on_demand() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    const O_MASTER: u8 = 89;
+    const J_MASTER: u8 = 95;
+    let o_master = NativeKeypair::from_secret_bytes(&seed_bytes(O_MASTER)).peer_id();
+    let j_master = NativeKeypair::from_secret_bytes(&seed_bytes(J_MASTER)).peer_id();
+
+    let mut o = spawn_node_with_friends(&relay, O_MASTER, O_MASTER, &[&j_master]).await;
+    sleep_ms(1500).await;
+    let mut j = spawn_node_with_friends(&relay, J_MASTER, J_MASTER, &[&o_master]).await;
+    sleep_ms(4000).await;
+
+    let server_id = create_server_and_wait(&mut o, "Animated Icon Server").await;
+    sleep_ms(300).await;
+    drain_events(&mut o);
+    drain_events(&mut j);
+
+    j.cmd_tx
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
+        .await
+        .unwrap();
+    let joined = wait_event(&mut j, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
+    })
+    .await;
+    assert!(joined, "J must join the server");
+    sleep_ms(3000).await;
+    drain_events(&mut o);
+    drain_events(&mut j);
+
+    // --- 1. Owner processes an animated GIF icon: still b64 + anim blob. ---
+    use sha2::{Digest, Sha256};
+    let gif_bytes = {
+        let f1 = image::RgbaImage::from_pixel(64, 48, image::Rgba([200, 40, 40, 255]));
+        let f2 = image::RgbaImage::from_pixel(64, 48, image::Rgba([40, 200, 40, 255]));
+        let mut buf = Vec::new();
+        {
+            let mut enc = image::codecs::gif::GifEncoder::new(&mut buf);
+            enc.set_repeat(image::codecs::gif::Repeat::Infinite)
+                .expect("gif repeat");
+            for frame in [f1, f2] {
+                enc.encode_frame(image::Frame::from_parts(
+                    frame,
+                    0,
+                    0,
+                    image::Delay::from_numer_denom_ms(100, 1),
+                ))
+                .expect("encode gif frame");
+            }
+        }
+        buf
+    };
+    assert!(super::image_convert::is_animated_image(&gif_bytes), "test GIF must read as animated");
+    let anim_bytes =
+        super::image_convert::process_server_avatar_anim(&gif_bytes).expect("process anim icon");
+    assert!(
+        super::emotes::webp_is_animated(&anim_bytes),
+        "processed icon must be an ANIMATED WebP"
+    );
+    let still_bytes =
+        super::image_convert::process_avatar_image(&gif_bytes).expect("process still icon");
+    let hash = hex::encode(Sha256::digest(&anim_bytes));
+    o.store()
+        .save_asset_blob(&hash, &anim_bytes, true, "avatar")
+        .expect("owner caches its own anim-icon blob");
+
+    use base64::Engine;
+    let still_b64 = base64::engine::general_purpose::STANDARD.encode(&still_bytes);
+    for (key, value) in [
+        ("server_avatar_anim", hash.clone()),
+        ("server_avatar", still_b64),
+    ] {
+        o.cmd_tx
+            .send(NodeCommand::UpdateServerSetting {
+                server_id: server_id.clone(),
+                key: key.to_string(),
+                value,
+            })
+            .await
+            .unwrap();
+    }
+    let updated = wait_event(&mut j, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::ServerUpdated { server_id: sid } if *sid == server_id)
+    })
+    .await;
+    assert!(updated, "J must receive ServerUpdated for the icon settings");
+    // Fire-and-forget CrdtStore persist; poll the persisted setting.
+    let mut hash_converged = false;
+    for _ in 0..16 {
+        sleep_ms(500).await;
+        if j.server_setting(&server_id, "server_avatar_anim").as_deref() == Some(hash.as_str()) {
+            hash_converged = true;
+            break;
+        }
+    }
+    assert!(hash_converged, "the anim-icon hash must converge to J's settings");
+
+    // --- 2. Bytes never ride the CRDT; J pulls them over the asset rail. ---
+    assert!(
+        !j.store().has_emote_blob(&hash).unwrap(),
+        "J must NOT have the anim-icon bytes yet — the CRDT carries only the hash"
+    );
+    j.cmd_tx
+        .send(NodeCommand::RequestEmotes {
+            hashes: vec![hash.clone()],
+            kind: super::assets::AssetKind::Avatar,
+            server_id: Some(server_id.clone()),
+            peer_hint: None,
+        })
+        .await
+        .unwrap();
+    let got_assets = wait_event(&mut j, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::EmoteAssetsReceived { hashes } if hashes.contains(&hash))
+    })
+    .await;
+    assert!(got_assets, "J must receive the anim-icon bytes from the owner");
+    sleep_ms(300).await;
+    assert_eq!(
+        j.store().load_emote_blob(&hash).unwrap().as_deref(),
+        Some(anim_bytes.as_slice()),
+        "pulled anim icon must match the owner's blob byte-exact (hash-verified)"
+    );
+
+    // --- 3. A still re-upload clears the anim hash; the clear converges. ---
+    drain_events(&mut j);
+    o.cmd_tx
+        .send(NodeCommand::UpdateServerSetting {
+            server_id: server_id.clone(),
+            key: "server_avatar_anim".to_string(),
+            value: String::new(),
+        })
+        .await
+        .unwrap();
+    let cleared_event = wait_event(&mut j, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::ServerUpdated { server_id: sid } if *sid == server_id)
+    })
+    .await;
+    assert!(cleared_event, "J must receive ServerUpdated for the clear");
+    let mut cleared = false;
+    for _ in 0..16 {
+        sleep_ms(500).await;
+        if j.server_setting(&server_id, "server_avatar_anim").as_deref() == Some("") {
+            cleared = true;
+            break;
+        }
+    }
+    assert!(cleared, "the cleared anim hash must converge to J's settings");
+
+    drop(o);
+    drop(j);
+}
+
+// ---------------------------------------------------------------------------
 // Conferences (reports/CONFERENCES_PLAN.md): the waiting room IS an MLS add.
 // Host starts a meeting (fresh conf group + relay room `conf:{id}`), a knocker
 // broadcasts a join request carrying its KeyPackage, the host admits (MLS add

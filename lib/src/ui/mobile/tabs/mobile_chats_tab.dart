@@ -14,7 +14,7 @@ import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/saved_messages_provider.dart';
 import 'package:hollow/src/core/providers/selected_peer_provider.dart';
-import 'package:hollow/src/core/providers/server_avatar_provider.dart';
+import 'package:hollow/src/ui/components/server_icon_image.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/unread_provider.dart';
 import 'package:hollow/src/core/providers/voice_channel_provider.dart';
@@ -808,7 +808,6 @@ class _ServerRow extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
-    final serverAvatar = ref.watch(serverAvatarProvider)[serverId];
 
     return Column(
       mainAxisSize: MainAxisSize.min,
@@ -833,16 +832,21 @@ class _ServerRow extends ConsumerWidget {
                   borderRadius: BorderRadius.circular(hollow.radiusMd),
                 ),
                 clipBehavior: Clip.antiAlias,
-                child: serverAvatar != null
-                    ? Image.memory(serverAvatar, fit: BoxFit.cover)
-                    : Center(
-                        child: Text(
-                          name.isNotEmpty ? name[0].toUpperCase() : '?',
-                          style: HollowTypography.heading.copyWith(
-                            color: hollow.accent,
-                          ),
-                        ),
+                child: ServerIconImage(
+                  serverId: serverId,
+                  size: 44,
+                  // No hover on touch — an expanded row counts as watched.
+                  isSelected: isExpanded,
+                  borderRadius: BorderRadius.zero,
+                  fallback: Center(
+                    child: Text(
+                      name.isNotEmpty ? name[0].toUpperCase() : '?',
+                      style: HollowTypography.heading.copyWith(
+                        color: hollow.accent,
                       ),
+                    ),
+                  ),
+                ),
               ),
               const SizedBox(width: HollowSpacing.md),
               // Server name + member count

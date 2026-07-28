@@ -84,7 +84,12 @@ Future<void> updateServerSetting({
   value: value,
 );
 
-/// Set a server avatar. Processes the raw image to 128x128 WebP and stores via CRDT.
+/// Set a server avatar. Processes the raw image to a still 128x128 WebP
+/// stored base64 in `settings["server_avatar"]` (old clients + the public
+/// sync thumb read only this). An ANIMATED source (GIF / animated WebP)
+/// additionally produces a 128px animated WebP cached content-addressed
+/// with kind='avatar' — `settings["server_avatar_anim"]` carries ONLY its
+/// hash and the bytes ride the asset rail, never the CRDT.
 Future<void> setServerAvatar({
   required String serverId,
   required List<int> rawBytes,
@@ -93,13 +98,19 @@ Future<void> setServerAvatar({
   rawBytes: rawBytes,
 );
 
-/// Clear a server avatar.
+/// Clear a server avatar (both the still base64 and any animated-icon hash).
 Future<void> clearServerAvatar({required String serverId}) =>
     RustLib.instance.api.crateApiCrdtClearServerAvatar(serverId: serverId);
 
 /// Get a server avatar as raw bytes. Returns None if no avatar set.
 Future<Uint8List?> getServerAvatar({required String serverId}) =>
     RustLib.instance.api.crateApiCrdtGetServerAvatar(serverId: serverId);
+
+/// Get the animated server icon. `None` = the server has no animated icon
+/// (still-only, or cleared); `bytes` is `None` when the hash is known but
+/// the blob hasn't been pulled yet.
+Future<ServerAvatarAnimData?> getServerAvatarAnim({required String serverId}) =>
+    RustLib.instance.api.crateApiCrdtGetServerAvatarAnim(serverId: serverId);
 
 /// Set a server banner (issue #25). Processes the raw image (3:1 center
 /// crop → 960x320 WebP, animated allowed), caches the blob content-addressed
@@ -652,6 +663,32 @@ class MutedMemberFfi {
           peerId == other.peerId &&
           expiresAtMs == other.expiresAtMs &&
           permanent == other.permanent;
+}
+
+/// Animated server icon as seen locally. The CRDT carries only the hash;
+/// bytes live in the content-addressed asset store (kind='avatar') and
+/// replicate via the asset rail — never through the CRDT. The still icon
+/// is separate (`get_server_avatar`).
+class ServerAvatarAnimData {
+  /// 64-hex SHA-256 of the processed animated WebP bytes.
+  final String hash;
+
+  /// Cached blob bytes, if we hold them. `None` = pull via
+  /// `request_assets(kind: "avatar")` and re-read on `EmoteAssetsReceived`.
+  final Uint8List? bytes;
+
+  const ServerAvatarAnimData({required this.hash, this.bytes});
+
+  @override
+  int get hashCode => hash.hashCode ^ bytes.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ServerAvatarAnimData &&
+          runtimeType == other.runtimeType &&
+          hash == other.hash &&
+          bytes == other.bytes;
 }
 
 /// Server banner as seen locally. The CRDT carries only the hash; bytes

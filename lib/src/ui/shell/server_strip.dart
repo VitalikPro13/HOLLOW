@@ -8,7 +8,7 @@ import 'package:hollow/src/core/providers/shell_tab.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
 import 'package:hollow/src/core/providers/selected_peer_provider.dart';
 import 'package:hollow/src/core/models/strip_item.dart';
-import 'package:hollow/src/core/providers/server_avatar_provider.dart';
+import 'package:hollow/src/ui/components/server_icon_image.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/server_strip_layout_provider.dart';
 import 'package:hollow/src/ui/components/server_folder_popup.dart';
@@ -276,24 +276,19 @@ class _ServerStripState extends ConsumerState<ServerStrip> {
             .select((s) => s.serverMentionCount(serverId)));
     final name = server?.name ?? '';
 
-    Widget serverIconChild = Builder(builder: (_) {
-      final serverAvatar = ref.watch(serverAvatarProvider)[serverId];
-      if (serverAvatar != null) {
-        return ClipRRect(
-          borderRadius: BorderRadius.circular(8),
-          child: Image.memory(serverAvatar,
-              width: 44, height: 44, fit: BoxFit.cover),
-        );
-      }
-      return Text(
+    Widget serverIconChild = ServerIconImage(
+      serverId: serverId,
+      size: 44,
+      isSelected: isSelected,
+      fallback: Text(
         _initialsFromName(name.isNotEmpty ? name : serverId),
         style: const TextStyle(
           color: Colors.white,
           fontSize: 18,
           fontWeight: FontWeight.w600,
         ),
-      );
-    });
+      ),
+    );
 
     return DragTarget<_StripDragData>(
       onWillAcceptWithDetails: (details) {

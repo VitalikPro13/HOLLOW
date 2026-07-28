@@ -41,6 +41,7 @@ import 'package:hollow/src/core/providers/background_provider.dart';
 import 'package:hollow/src/core/providers/theme_provider.dart';
 import 'package:hollow/src/core/reduce_motion.dart';
 import 'package:hollow/src/core/providers/local_nickname_provider.dart';
+import 'package:hollow/src/core/providers/server_avatar_anim_provider.dart';
 import 'package:hollow/src/core/providers/server_avatar_provider.dart';
 import 'package:hollow/src/core/providers/server_banner_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
@@ -992,9 +993,10 @@ class _HollowShellState extends ConsumerState<HollowShell>
     // (theme/accent/background/nicknames/strip layout already loaded in the
     // local-first phase above, before the network calls.)
 
-    // Load server avatars + banners.
+    // Load server avatars (+ animated icons) + banners.
     final serverIds = ref.read(serverListProvider).keys.toList();
     ref.read(serverAvatarProvider.notifier).loadAll(serverIds);
+    ref.read(serverAvatarAnimProvider.notifier).loadAll(serverIds);
     ref.read(serverBannerProvider.notifier).loadAll(serverIds);
 
     // (profiles + friends + DM previews already loaded above in the local-first

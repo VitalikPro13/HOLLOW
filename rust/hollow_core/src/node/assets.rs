@@ -17,6 +17,10 @@ pub(crate) enum AssetKind {
     Banner,
     Sticker,
     Gif,
+    /// Animated server icon (`settings["server_avatar_anim"]` hash). The
+    /// still icon stays base64 inside `server_avatar` for old clients and
+    /// the public-sync thumb; only the animated variant rides the rail.
+    Avatar,
 }
 
 impl AssetKind {
@@ -27,6 +31,7 @@ impl AssetKind {
             AssetKind::Banner => "banner",
             AssetKind::Sticker => "sticker",
             AssetKind::Gif => "gif",
+            AssetKind::Avatar => "avatar",
         }
     }
 
@@ -36,6 +41,7 @@ impl AssetKind {
             "banner" => Some(AssetKind::Banner),
             "sticker" => Some(AssetKind::Sticker),
             "gif" => Some(AssetKind::Gif),
+            "avatar" => Some(AssetKind::Avatar),
             _ => None,
         }
     }
@@ -53,6 +59,7 @@ impl AssetKind {
             AssetKind::Banner => 1_048_576,   // 1 MB animated / 256 KB still
             AssetKind::Sticker => 524_288,    // 512 KB
             AssetKind::Gif => 2_097_152,      // 2 MB
+            AssetKind::Avatar => 524_288,     // 512 KB (128px animated icon)
         }
     }
 
@@ -64,6 +71,7 @@ impl AssetKind {
             AssetKind::Banner => 2,
             AssetKind::Sticker => 8,
             AssetKind::Gif => 4,
+            AssetKind::Avatar => 4,
         }
     }
 }

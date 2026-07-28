@@ -23,6 +23,7 @@ import 'package:hollow/src/core/providers/peers_provider.dart';
 import 'package:hollow/src/core/providers/security_alerts_provider.dart';
 import 'package:hollow/src/core/providers/selected_peer_provider.dart';
 import 'package:hollow/src/core/providers/split_view_provider.dart';
+import 'package:hollow/src/core/providers/server_avatar_anim_provider.dart';
 import 'package:hollow/src/core/providers/server_avatar_provider.dart';
 import 'package:hollow/src/core/providers/server_banner_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
@@ -568,6 +569,7 @@ class EventStreamNotifier extends Notifier<bool> {
       case NetworkEvent_ServerUpdated(:final serverId):
         debugPrint('[HOLLOW] Server updated: $serverId');
         ref.read(serverAvatarProvider.notifier).loadAvatar(serverId);
+        ref.read(serverAvatarAnimProvider.notifier).loadAnim(serverId);
         ref.read(serverBannerProvider.notifier).loadBanner(serverId);
         _refreshServerState(serverId);
 
@@ -578,6 +580,7 @@ class EventStreamNotifier extends Notifier<bool> {
           ref.invalidate(emoteBytesProvider(hash));
         }
         ref.read(serverBannerProvider.notifier).onAssetsReceived(hashes);
+        ref.read(serverAvatarAnimProvider.notifier).onAssetsReceived(hashes);
         // GIF-sized blobs can grow the asset cache quickly — enforce the
         // cap here too, not just on file downloads.
         _enforceStorageCaps();
@@ -643,6 +646,7 @@ class EventStreamNotifier extends Notifier<bool> {
         debugPrint('[HOLLOW] Sync completed: $serverId ($opsApplied ops)');
         ref.read(serverListProvider.notifier).onServerUpdated(serverId);
         ref.read(serverAvatarProvider.notifier).loadAvatar(serverId);
+        ref.read(serverAvatarAnimProvider.notifier).loadAnim(serverId);
         ref.read(serverBannerProvider.notifier).loadBanner(serverId);
         ref.invalidate(serverMembersProvider(serverId));
         // Reload channels in case they changed while offline.
