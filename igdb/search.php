@@ -16,11 +16,12 @@
 //
 // The ONLY place the Twitch/IGDB app credential lives. Hollow clients call
 // this at AUTHORING time (composing a showcase board). EVERYTHING is cached
-// on our side: images into ./covers/ as static files, metadata into a local
-// SQLite DB (games.db). Repeated searches/picks are answered from OUR
-// database with ZERO upstream traffic (neither IGDB nor Steam). Display in
-// the app is pure P2P off replicated profile data: viewers never hit this
-// endpoint, IGDB, Steam, or anything else.
+// on our side: images into ./covers/ as static files (materialized on first
+// request by fetch.php — never downloaded inline in a search), metadata
+// into a local SQLite DB (games.db). Repeated searches/picks are answered
+// from OUR database with ZERO upstream traffic (neither IGDB nor Steam).
+// Display in the app is pure P2P off replicated profile data: viewers never
+// hit this endpoint, IGDB, Steam, or anything else.
 //
 // Deploy: upload this folder to /public_html/hollow/igdb/ (config.php holds
 // the real credentials and is NOT in git — see config.php.example).
@@ -53,7 +54,6 @@ header('X-Content-Type-Options: nosniff');
 header('Referrer-Policy: no-referrer');
 header('X-Robots-Tag: noindex');
 
-const COVERS_DIR = __DIR__ . '/covers';
 const COVERS_URL = 'https://hollow.anonlisten.com/igdb/covers/';
 const TOKEN_FILE = __DIR__ . '/token.json';
 const DB_FILE    = __DIR__ . '/games.db';
@@ -73,7 +73,10 @@ const SEARCH_TTL = 30 * 24 * 3600; // re-ask upstream after 30 days
 // search rows in v8); company links deduped by KIND (no double globes).
 // v10: card redesign data — Steam review verdict (appreviews summary),
 // time-to-beat (IGDB game_time_to_beats), themes, game modes, franchise.
-const SEARCH_VER = 10;
+// v11: read-through images — cached_image() no longer downloads inline;
+// URLs are returned unconditionally and fetch.php materializes the bytes
+// on first request (a cold search stalled on sequential cover downloads).
+const SEARCH_VER = 11;
 
 // IGDB legacy `category` enum → human tag (fallback; `game_type.type` is
 // the current source — `category` is deprecated and returns empty).
@@ -185,6 +188,16 @@ function db(): PDO {
         try { $pdo->exec('ALTER TABLE game_details ADD COLUMN themes TEXT'); } catch (Throwable $e) {}
         try { $pdo->exec('ALTER TABLE game_details ADD COLUMN modes TEXT'); } catch (Throwable $e) {}
         try { $pdo->exec('ALTER TABLE game_details ADD COLUMN franchise TEXT'); } catch (Throwable $e) {}
+        // Image ids we have handed out (v11 read-through cache): fetch.php
+        // refuses anything not registered here — never an open proxy — and
+        // reads the IGDB size slug to fetch from the row.
+        $pdo->exec('CREATE TABLE IF NOT EXISTS images (
+            image_id TEXT NOT NULL,
+            ext      TEXT NOT NULL,
+            size     TEXT NOT NULL,
+            added_at INTEGER NOT NULL,
+            PRIMARY KEY (image_id, ext)
+        )');
     }
     return $pdo;
 }
@@ -246,23 +259,21 @@ function igdb_query(string $endpoint, string $body): ?array {
     return is_array($j) ? $j : null;
 }
 
-/// Ensure an IGDB image (cover / key art / company logo) sits in ./covers/;
-/// return its URL or null. $size is an IGDB image size slug (t_cover_big /
-/// t_720p / t_logo_med). $ext: 'jpg' for photos, 'png' for logos — IGDB
-/// flattens transparency onto white when serving JPG, so logos MUST be PNG.
+/// URL of an IGDB image (cover / key art / company logo) served through
+/// ./covers/. No download happens here (v11): the id is registered in the
+/// `images` table and fetch.php pulls the bytes on the first request (warm
+/// files never touch PHP — see .htaccess). $size is an IGDB image size slug
+/// (t_cover_big / t_720p / t_logo_med). $ext: 'jpg' for photos, 'png' for
+/// logos — IGDB flattens transparency onto white when serving JPG, so
+/// logos MUST be PNG.
 function cached_image(?string $imageId, string $size = 't_cover_big', string $ext = 'jpg'): ?string {
-    if (!is_string($imageId) || !preg_match('/^[a-z0-9]+$/i', $imageId)) {
+    if (!is_string($imageId) || !preg_match('/^[a-z0-9]{1,40}$/i', $imageId)) {
         return null;
     }
-    $local = COVERS_DIR . "/$imageId.$ext";
-    if (!is_file($local)) {
-        if (!is_dir(COVERS_DIR)) @mkdir(COVERS_DIR, 0755, true);
-        $img = curl_req("https://images.igdb.com/igdb/image/upload/$size/$imageId.$ext");
-        if ($img !== null && strlen($img) > 0 && strlen($img) < 2_000_000) {
-            @file_put_contents($local, $img, LOCK_EX);
-        }
-    }
-    return is_file($local) ? COVERS_URL . "$imageId.$ext" : null;
+    db()->prepare('INSERT INTO images (image_id, ext, size, added_at) VALUES (?, ?, ?, ?)
+        ON CONFLICT(image_id, ext) DO NOTHING')
+        ->execute([$imageId, $ext, $size, time()]);
+    return COVERS_URL . "$imageId.$ext";
 }
 
 /// Steam ships requirements as an HTML blob (<strong>OS:</strong> …<br>). Flatten

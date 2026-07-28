@@ -1,0 +1,22 @@
+# Never serve the database files.
+<FilesMatch "^(ffz\.db|ffz\.db-wal|ffz\.db-shm)$">
+    Require all denied
+</FilesMatch>
+
+# In-progress atomic writes from fetch.php ("<id>.<ext>.tmp.<pid>").
+<FilesMatch "\.tmp\.">
+    Require all denied
+</FilesMatch>
+
+# Cached emote images are immutable — cache hard.
+<IfModule mod_headers.c>
+    <FilesMatch "\.(png|gif|webp)$">
+        Header set Cache-Control "public, max-age=31536000, immutable"
+    </FilesMatch>
+</IfModule>
+
+# Cold images fall through to the read-through cache; warm files are
+# served directly by Apache with no PHP in the path.
+RewriteEngine On
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteRule ^emotes/([0-9]+\.(png|gif|webp))$ fetch.php?f=$1 [L,QSA]

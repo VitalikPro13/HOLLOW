@@ -3,9 +3,20 @@
     Require all denied
 </FilesMatch>
 
+# In-progress atomic writes from fetch.php ("<image_id>.<ext>.tmp.<pid>").
+<FilesMatch "\.tmp\.">
+    Require all denied
+</FilesMatch>
+
 # Cached covers/key art (.jpg) and company logos (.png) are immutable — cache hard.
 <IfModule mod_headers.c>
     <FilesMatch "\.(jpg|png)$">
         Header set Cache-Control "public, max-age=31536000, immutable"
     </FilesMatch>
 </IfModule>
+
+# Cold images fall through to the read-through cache; warm files are
+# served directly by Apache with no PHP in the path.
+RewriteEngine On
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteRule ^covers/([a-zA-Z0-9]+\.(jpg|png))$ fetch.php?f=$1 [L,QSA]

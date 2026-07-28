@@ -22,7 +22,7 @@ const FFZ_ENDPOINT: &str = "https://hollow.anonlisten.com/ffz/search.php";
 /// FFZ emote images must come from here and nowhere else.
 const FFZ_IMAGE_BASE: &str = "https://hollow.anonlisten.com/ffz/emotes/";
 /// Endpoint response-schema version (keep in sync with SEARCH_VER in ffz/search.php).
-const FFZ_SCHEMA_VER: &str = "1";
+const FFZ_SCHEMA_VER: &str = "2";
 
 /// A processed, locally cached emote blob (content-addressed).
 pub struct ProcessedEmote {

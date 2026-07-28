@@ -23,7 +23,7 @@ const COVER_BASE: &str = "https://hollow.anonlisten.com/igdb/covers/";
 /// in the request URL (and therefore never in web-server access logs); POST
 /// also bypasses the hCDN edge cache, so `v` is no longer needed for cache
 /// busting — it's still sent so the endpoint could branch on it someday.
-const ENDPOINT_SCHEMA_VER: &str = "10";
+const ENDPOINT_SCHEMA_VER: &str = "11";
 
 /// One processed showcase image, content-addressed by its hash. The board
 /// JSON references assets by [hash]; the bytes replicate in the profile's
