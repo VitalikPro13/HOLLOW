@@ -1,6 +1,6 @@
 # Hollow Protocol Whitepaper
 
-**Version 0.8.1**\
+**Version 0.8.6**\
 **Author: Vitalii Rovinskyi**\
 *This document was generated with the assistance of Claude (AI). All technical content reflects the author's architecture and design decisions. Some sections may not match the version number shown above until the next release.*
 
@@ -466,6 +466,8 @@ For users who prefer to trade latency and quality for address privacy, a per-acc
 SFrame cryptors must be initialized with the correct key index corresponding to the current MLS epoch (`epoch % 16`). New keys are applied via key rotation (not replacement) to update all existing cryptor indices atomically. The key index is explicitly set per peer after every cryptor creation. Without this, cryptors default to key index 0 and silently fail to decrypt frames encrypted under a non-zero epoch index.
 
 Cryptors are bound to individual RTP senders and receivers. When a renegotiation replaces a media sender mid-call — for example, a live input-device switch — the cryptor pair is re-established on both endpoints (the sender's at the point of the swap, the receiver's when the replacement track arrives), so the new track is encrypted under the same session key with no window in which media falls back to transport-only encryption.
+
+**Failure recovery.** Because SFrame keys derive from MLS group state, two participants whose group states diverge — a missed commit, a delivery race, or an eviction — would otherwise decrypt nothing from each other for the remainder of the call. The media layer therefore treats sustained decryption failure as a signal, not a terminal state: the affected endpoint first re-applies its current key material and re-binds the failing cryptors, then re-derives and re-applies the key from its MLS group, and finally — if failures persist — converges the group itself: a non-authoritative member discards its group state and re-bootstraps from the group authority (the server owner, or the subgroup coordinator for a restricted channel), while the authority removes and re-adds the failing member's leaves, re-keying every participant in the process. Escalation to group surgery is rate-limited and bounded per peer, so a peer that can never converge cannot force unbounded epoch churn on the group. A member whose own leaf is removed by a commit detects the resulting inactive group state and, if it is still a legitimate member, re-bootstraps rather than retaining an unusable group. The recovery ladder means a key-material disagreement degrades to a few seconds of silence followed by convergence, never to indefinitely garbled or lost media.
 
 ### 6.7 SFrame Key Memory Handling
 

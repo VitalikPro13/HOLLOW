@@ -1252,6 +1252,8 @@ class VoiceService {
       _log('[HOLLOW-VOICE] frame cryptor dispose failed (ignored): $e');
     }
     _frameCryptor = null;
+    _cryptorInited = false;
+    _lastSframeHealPing = null;
   }
 
   Future<void> endCall() async {
@@ -1267,6 +1269,17 @@ class VoiceService {
     _useFrontCamera = true;
   }
 
+  /// Fired (throttled) when a cryptor reports a sustained failure state —
+  /// the provider re-applies the call key (heal-lite; the DM key is static,
+  /// so failures are almost always wedged bindings or a lost key apply).
+  void Function()? onSframeHealNeeded;
+  DateTime? _lastSframeHealPing;
+  bool _cryptorInited = false;
+
+  /// Public rebind for the heal path: re-bind the receiver cryptor to the
+  /// newest inbound audio receiver.
+  Future<void> rebindSframeReceivers() => _rebindSframeAudioReceiver(null);
+
   /// Set the SFrame encryption key for this DM call.
   /// Called by CallNotifier after key exchange via signaling.
   Future<void> setSframeKey(String peerId, Uint8List key) async {
@@ -1274,8 +1287,23 @@ class VoiceService {
 
     // Initialize FrameCryptorService if not already done.
     _frameCryptor ??= FrameCryptorService();
-    if (!_frameCryptor!.isEnabled) {
+    if (!_cryptorInited) {
+      _cryptorInited = true;
       await _frameCryptor!.init(sharedKey: true);
+      _frameCryptor!.onCryptorStateChanged =
+          (participantId, kind, isReceiver, st) {
+        if (!FrameCryptorService.isFailureState(st)) return;
+        final now = DateTime.now();
+        if (_lastSframeHealPing != null &&
+            now.difference(_lastSframeHealPing!) < const Duration(seconds: 5)) {
+          return;
+        }
+        _lastSframeHealPing = now;
+        _log('[HOLLOW-VOICE] SFrame cryptor failing ($kind '
+            '${isReceiver ? 'rx' : 'tx'}: $st) — healing');
+        unawaited(rebindSframeReceivers());
+        onSframeHealNeeded?.call();
+      };
     }
     // rotateKey, not setSharedKey: also updates the key index on any existing
     // cryptors (DM keys are fixed at index 0, but a re-keyed call must never

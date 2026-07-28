@@ -242,6 +242,18 @@ class CallNotifier extends Notifier<CallState> {
   CallState build() => const CallState();
 
   void _wireCallbacks() {
+    // SFrame heal-lite: on sustained cryptor failure the service rebinds its
+    // receiver itself and pings us to re-apply the (static) call key — covers
+    // a lost/failed key application without restarting the call.
+    _voiceService!.onSframeHealNeeded = () {
+      final peerId = state.peerId;
+      final keyHex = state.sframeKey;
+      if (peerId == null || keyHex.isEmpty) return;
+      debugPrint('[HOLLOW-CALL] SFrame heal — re-applying call key');
+      _voiceService!
+          .setSframeKey(peerId, _hexToBytes(keyHex))
+          .catchError((_) {});
+    };
     _voiceService!.onConnected = (peerId) {
       debugPrint('[HOLLOW-CALL] Voice connected with $peerId');
       if (state.status == CallStatus.connecting) {

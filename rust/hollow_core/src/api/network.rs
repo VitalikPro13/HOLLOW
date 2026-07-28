@@ -3380,6 +3380,31 @@ pub fn voice_channel_send_signal(
     Ok(())
 }
 
+/// SFrame heal (issue #27): the voice cryptors report sustained decrypt
+/// failures against `peer_id`. Re-emits the current MLS epoch key; with
+/// `escalate` the node also re-bootstraps the MLS group (non-authority) or
+/// removes + re-adds the failing peer's leaves (authority).
+#[frb]
+pub fn voice_sframe_heal(
+    server_id: String,
+    channel_id: String,
+    peer_id: String,
+    escalate: bool,
+) -> Result<(), String> {
+    let node = get_node();
+    let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
+    // Release the global node mutex BEFORE the (possibly waiting) send —
+    // holding it across block_on(send) serializes all other FFI calls.
+    drop(guard);
+    let rt = get_runtime();
+    rt.block_on(cmd_tx.send(node::NodeCommand::VoiceSframeHeal {
+        server_id, channel_id, peer_id, escalate,
+    }))
+    .map_err(|e| format!("Failed to send command: {e}"))?;
+    Ok(())
+}
+
 // -- Gossip relay tree FFI (Phase 5D) --
 
 /// Report data channel keepalive RTT for gossip peer scoring.

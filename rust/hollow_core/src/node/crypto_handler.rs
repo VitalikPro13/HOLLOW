@@ -2022,6 +2022,46 @@ pub(crate) fn request_subgroup_bootstrap(
     }
 }
 
+/// Send our KeyPackage to the server OWNER so we can be (re-)added to the
+/// SERVER-WIDE MLS group. The server-group twin of [`request_subgroup_bootstrap`]:
+/// used when we find ourselves without the group mid-flow (VC join with no
+/// group, SFrame heal escalation). No-op when WE are the owner or the owner is
+/// offline — falls back to the lowest reachable admin-ish member being useless
+/// here: only a group HOLDER can add us, and the owner is the authority.
+/// Returns true when a KeyPackage actually went out (caller may arm cooldowns).
+pub(crate) fn request_server_group_bootstrap(
+    mls: &mut MlsManager,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    server: &crate::crdt::server_state::ServerState,
+    server_id: &str,
+    local_peer: &str,
+) -> bool {
+    let owner = server.members.keys().find(|m| {
+        server.roles.get(*m)
+            .map(|r| *r.read() == crate::crdt::operations::MemberRole::Owner)
+            .unwrap_or(false)
+    });
+    let Some(owner) = owner else { return false };
+    if super::resolver::same_identity(owner, local_peer) { return false; }
+    if !peer_is_reachable(ws_room_peers, owner) { return false; }
+    let kp_bytes = match mls.generate_key_package() {
+        Ok(kp) => kp,
+        Err(e) => { hollow_log!("[HOLLOW-MLS] server-group KP gen failed: {e}"); return false; }
+    };
+    let kp_b64 = base64::engine::general_purpose::STANDARD.encode(&kp_bytes);
+    let data = serde_json::to_vec(&HavenMessage::MlsKeyPackage {
+        server_id: server_id.to_string(),
+        key_package: kp_b64,
+        channel_id: None,
+    }).unwrap_or_default();
+    let sent = send_raw_to_identity(ws_cmd_tx, ws_room_peers, owner, data);
+    if sent > 0 {
+        hollow_log!("[HOLLOW-MLS] Sent server-group KeyPackage to owner {owner} for {server_id} ({sent} device(s))");
+    }
+    sent > 0
+}
+
 /// Reconcile per-channel MLS subgroup membership against the CRDT after a
 /// lifecycle event (role change, visibility change, channel create/delete,
 /// kick/ban/leave). Runs the desired-vs-actual diff for every restricted channel

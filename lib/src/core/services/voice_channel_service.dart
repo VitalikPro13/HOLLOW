@@ -116,6 +116,12 @@ class VoiceChannelService {
   /// SFrame encryption service for voice channel E2EE.
   FrameCryptorService? frameCryptor;
 
+  /// SFrame heal hook: fired on every cryptor state transition, with the
+  /// participant collapsed to the mesh peerId ('screen:X' → X). The provider
+  /// runs the heal ladder off sustained failure states.
+  void Function(String peerId, String kind, bool isReceiver,
+      FrameCryptorState state)? onSframeCryptorState;
+
   // ---------------------------------------------------------------
   //  Camera (video) support
   // ---------------------------------------------------------------
@@ -183,6 +189,14 @@ class VoiceChannelService {
     // Initialize SFrame encryption service.
     frameCryptor = FrameCryptorService();
     await frameCryptor!.init(sharedKey: true);
+    frameCryptor!.onCryptorStateChanged = (participantId, kind, isReceiver, state) {
+      // Screen-share cryptors use participant 'screen:$peerId' — collapse to
+      // the mesh peer so the heal ladder tracks one entry per peer.
+      final peerId = participantId.startsWith('screen:')
+          ? participantId.substring('screen:'.length)
+          : participantId;
+      onSframeCryptorState?.call(peerId, kind, isReceiver, state);
+    };
 
     // AI NS (DFN3): kick the engine and decide the WebRTC-NS fallback BEFORE
     // building constraints (see the matching note in voice_service.dart).
@@ -694,6 +708,25 @@ class VoiceChannelService {
       }
     }
     _vcLog('[HOLLOW-VC] SFrame key set for epoch $epoch, enabled on ${_peerConnections.length} PCs');
+  }
+
+  /// Heal step 1: drop + re-enable [peerId]'s receiver cryptors (audio, and
+  /// video when a renderer exists) and re-assert the key index. Fixes cryptors
+  /// wedged on a dead transceiver or a stale index without touching the PC.
+  Future<void> rebindReceiversFor(String peerId) async {
+    final pc = _peerConnections[peerId];
+    if (pc == null || frameCryptor == null) return;
+    await _rebindSframeReceiver(peerId, pc, null);
+    if (_remoteVideoRenderers.containsKey(peerId)) {
+      try {
+        await frameCryptor!.disableReceiver(peerId, kind: 'video');
+        await _enableSframeReceiverVideo(peerId, pc);
+        await frameCryptor!
+            .setKeyIndexForPeer(peerId, frameCryptor!.currentKeyIndex);
+      } catch (e) {
+        _vcLog('[HOLLOW-VC] SFrame video receiver rebind failed for $peerId: $e');
+      }
+    }
   }
 
   Future<void> closeAll() async {

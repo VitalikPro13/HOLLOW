@@ -135,7 +135,11 @@ Four methods manage per-peer, per-kind SFrame encryption:
 - `_enableSframeSenderVideo(peerId, pc)`: Same as sender but for video track kind `'video'`.
 - `_enableSframeReceiverVideo(peerId, pc)`: Same as receiver but for video.
 
-`VoiceChannelService.setSframeKey(epoch, key)`: Called when MLS epoch key arrives. Uses `epoch % 16` as key ring index (keyRingSize=16). Enables encryption/decryption on all existing PCs for both audio and video.
+`VoiceChannelService.setSframeKey(epoch, key)`: Called when MLS epoch key arrives. Uses `epoch % 16` as key ring index (keyRingSize=16). Enables encryption/decryption on all existing PCs for both audio and video. Since 0.8.6 this genuinely engages (rotateKey sets `isEnabled`; see FrameCryptorService below) — server-VC voice is actually SFrame-encrypted, and a keyless session (MLS-less server) stays symmetric passthrough on all sides.
+
+`VoiceChannelService.rebindReceiversFor(peerId)` (0.8.6, heal step 1): drops + re-enables the peer's receiver cryptors (audio + video when a renderer exists) and re-asserts the key index — fixes cryptors wedged on a dead transceiver or stale index without touching the PC.
+
+`onSframeCryptorState` (0.8.6): service-level hook fired from `frameCryptor.onCryptorStateChanged` with the participant collapsed `'screen:X'` → X; the provider's heal ladder consumes it.
 
 ### Remote Video Track Handling
 
@@ -707,15 +711,21 @@ Wraps flutter_webrtc's `FrameCryptor` + `KeyProvider` APIs for SFrame encryption
 
 `rotateKey(newIndex, newKey)`: Sets new shared key and updates key index on ALL active sender and receiver cryptors. Also updates `currentKeyIndex` field. Used by `setSframeKey()` on MLS epoch change.
 
+**`isEnabled` = "key material present" (0.8.6, issue #27):** `setKey`/`setSharedKey`/`rotateKey` all set `_enabled = true`. Every VC enable path gates on `isEnabled` — historically ONLY `enableForSender` set the flag, so server-VC SFrame never engaged at all until the unguarded screen-share enable flipped it on the SHARER's side only; the next MLS epoch change then made the sharer encrypt while the watcher had no decryptor (ciphertext → Opus decoder = the issue #27 garbage audio). Enables must stay SYMMETRIC across peers — never add an unguarded enable that flips shared state one-sided. See memory `project_sframe_heal_ladder`.
+
 `setKeyIndexForPeer(peerId, index)`: Sets the key index on all sender and receiver cryptors matching the given peerId prefix. Called after creating new cryptors to ensure they use the correct epoch key index.
 
 `currentKeyIndex`: Tracks the active key index. New cryptors must call `setKeyIndex(currentKeyIndex)` after creation — they default to index 0 which may not match the current epoch.
 
 ### Enabling Encryption
 
-`enableForSender(peerId, sender, {kind})`: Creates a sender-side `FrameCryptor` via `frameCryptorFactory.createFrameCryptorForRtpSender()` using AES-GCM algorithm. Keyed by `'$peerId:$kind'` where kind is `'audio'`, `'video'`, `'screen_audio'`, or `'screen_video'`. Registers `onFrameCryptorStateChanged` callback for logging. Enables immediately. Skips if already enabled for that key (dedup). **IMPORTANT:** Call `setKeyIndexForPeer` after this to set the correct key index.
+`enableForSender(peerId, sender, {kind})`: Creates a sender-side `FrameCryptor` via `frameCryptorFactory.createFrameCryptorForRtpSender()` using AES-GCM algorithm. Keyed by `'$peerId:$kind'` where kind is `'audio'`, `'video'`, `'screen_audio'`, or `'screen_video'`. Registers `onFrameCryptorStateChanged` callback for logging + heal. Enables immediately. Skips if already enabled for that key (dedup). **IMPORTANT:** Call `setKeyIndexForPeer` after this to set the correct key index.
 
 `enableForReceiver(peerId, receiver, {kind})`: Same pattern for receiver-side decryption via `frameCryptorFactory.createFrameCryptorForRtpReceiver()`. Keyed by `'$peerId:$kind'`. **IMPORTANT:** Call `setKeyIndexForPeer` after this.
+
+### Failure States → Heal (0.8.6)
+
+`onCryptorStateChanged(participantId, kind, isReceiver, state)`: fired from every cryptor's `onFrameCryptorStateChanged`. `isFailureState(state)` (static) = MissingKey / DecryptionFailed / EncryptionFailed / InternalError. `VoiceChannelService` forwards it (collapsing `'screen:X'` → X) to the provider's heal ladder; `VoiceService` uses it for the DM heal-lite (self-rebind + `onSframeHealNeeded` → CallNotifier re-applies the static call key, 5s throttle). Ok/KeyRatcheted transitions clear the failure tracking.
 
 ### Per-Peer Cleanup
 

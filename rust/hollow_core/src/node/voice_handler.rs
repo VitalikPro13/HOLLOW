@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use base64::Engine;
 use tokio::sync::mpsc;
 
 use crate::crdt::server_state::ServerState;
@@ -421,6 +422,18 @@ async fn emit_vc_sframe_key(
                         state, server_id, channel_id, local_peer_str,
                     );
                 }
+            } else if !super::conference::is_conference_sid(server_id) {
+                // No SERVER group either — every other participant encrypts
+                // with a key we can't derive, so their audio would play as
+                // ciphertext until something re-adds us. Pull ourselves in via
+                // the owner; the Welcome fires MlsEpochChanged (server group).
+                if let Some(state) = server_states.get(server_id) {
+                    hollow_log!("[HOLLOW-VC-SFRAME] Server group {group_key} not held — requesting bootstrap");
+                    super::crypto_handler::request_server_group_bootstrap(
+                        mls_mgr, ws_cmd_tx, ws_room_peers,
+                        state, server_id, local_peer_str,
+                    );
+                }
             }
         }
         None => hollow_log!("[HOLLOW-VC-SFRAME] MLS is None — no SFrame key"),
@@ -445,6 +458,163 @@ async fn export_and_emit_sframe(
             }).await;
         }
         Err(e) => hollow_log!("[HOLLOW-VC-SFRAME] export_secret FAILED: {e}"),
+    }
+}
+
+// ── VoiceSframeHeal (issue #27) ──────────────────────────────────────
+
+/// SFrame heal request from Dart: the voice cryptors report sustained decrypt
+/// failures against `peer_id`, i.e. our key material and theirs disagree.
+///
+/// Non-escalated: re-export + re-emit the current epoch key (covers a lost
+/// `MlsEpochChanged` on the Dart side), or request a bootstrap when we don't
+/// hold the group at all.
+///
+/// Escalated (Dart applies a 60s cooldown): converge a genuinely forked group.
+///   * We are NOT the group authority → drop our group and re-bootstrap from
+///     the authority — the fresh Welcome lands us on their epoch.
+///   * We ARE the authority (owner / subgroup coordinator) → queue a
+///     remove + re-add of the failing peer's leaves; the batch timer commits
+///     (re-keying everyone) and the peer converges via Welcome or its own
+///     commit-fail recovery.
+/// Conferences only ever re-emit — dropping the conf group would drop our
+/// admission to the call itself.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn handle_voice_sframe_heal(
+    server_id: String,
+    channel_id: String,
+    peer_id: String,
+    escalate: bool,
+    mls: &mut Option<MlsManager>,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    server_states: &HashMap<String, ServerState>,
+    pending_mls_removals: &mut HashMap<String, Vec<String>>,
+    mls_bootstrap_requested: &mut HashMap<String, std::time::Instant>,
+    crypto_store: &CryptoStore,
+    local_peer_str: &str,
+    event_tx: &mpsc::Sender<NetworkEvent>,
+) {
+    let Some(mls_mgr) = mls.as_mut() else {
+        hollow_log!("[HOLLOW-VC-SFRAME] HEAL: MLS is None — nothing to heal");
+        return;
+    };
+    let is_conf = super::conference::is_conference_sid(&server_id);
+    let restricted = !is_conf && server_states
+        .get(&server_id)
+        .is_some_and(|s| s.channel_uses_subgroup(&channel_id));
+    let group_key = if restricted {
+        crate::crypto::subgroup_id(&server_id, &channel_id)
+    } else {
+        server_id.clone()
+    };
+    let emit_cid = if restricted { Some(channel_id.clone()) } else { None };
+    hollow_log!("[HOLLOW-VC-SFRAME] HEAL request for {group_key} (escalate={escalate})");
+
+    // Always start with the cheap fix: re-emit whatever key we currently hold
+    // (idempotent on the Dart side), or pull ourselves into the group. A held
+    // but INACTIVE group (we were evicted — e.g. by the authority's heal
+    // remove+re-add) can't export; treat it as group-less.
+    let mut group_usable = mls_mgr.has_group(&group_key);
+    if group_usable && !mls_mgr.is_active(&group_key) {
+        hollow_log!("[HOLLOW-VC-SFRAME] HEAL: group {group_key} held but INACTIVE (evicted) — dropping");
+        mls_mgr.remove_group(&group_key);
+        super::crypto_handler::persist_mls_state(mls_mgr, crypto_store);
+        group_usable = false;
+    }
+    if group_usable {
+        export_and_emit_sframe(mls_mgr, &group_key, &server_id, emit_cid.clone(), event_tx).await;
+    } else if let Some(state) = server_states.get(&server_id) {
+        if !mls_bootstrap_requested.get(&group_key)
+            .is_some_and(|t| t.elapsed() < super::swarm::MLS_BOOTSTRAP_TIMEOUT)
+        {
+            if restricted {
+                super::crypto_handler::request_subgroup_bootstrap(
+                    mls_mgr, ws_cmd_tx, ws_room_peers,
+                    state, &server_id, &channel_id, local_peer_str,
+                );
+                mls_bootstrap_requested.insert(group_key.clone(), std::time::Instant::now());
+            } else if super::crypto_handler::request_server_group_bootstrap(
+                mls_mgr, ws_cmd_tx, ws_room_peers, state, &server_id, local_peer_str,
+            ) {
+                mls_bootstrap_requested.insert(group_key.clone(), std::time::Instant::now());
+            }
+        }
+        return; // no group — nothing further to escalate with
+    }
+
+    if !escalate { return; }
+    if is_conf {
+        hollow_log!("[HOLLOW-VC-SFRAME] HEAL: conference {server_id} — re-emit only");
+        return;
+    }
+    let Some(state) = server_states.get(&server_id) else { return };
+
+    // Who is the authority for this group?
+    let authority: Option<String> = if restricted {
+        super::crypto_handler::elect_subgroup_coordinator(
+            state, &channel_id, local_peer_str, ws_room_peers)
+    } else {
+        state.members.keys().find(|m| {
+            state.roles.get(*m)
+                .map(|r| *r.read() == crate::crdt::operations::MemberRole::Owner)
+                .unwrap_or(false)
+        }).cloned()
+    };
+    let we_are_authority = authority.as_deref()
+        .is_some_and(|a| super::resolver::same_identity(a, local_peer_str));
+
+    if we_are_authority {
+        // Remove + re-add the failing peer's leaves. The batch removal commit
+        // rotates the key for everyone; the peer converges via the re-add
+        // Welcome, or — if its group is forked and can't process the commit —
+        // via its own commit-fail drop-and-rebootstrap recovery.
+        let peer_master = super::resolver::resolve(&peer_id);
+        let leaves = mls_mgr.group_members(&group_key);
+        let mut queued = 0usize;
+        for leaf in &leaves {
+            if super::resolver::same_identity(leaf, &peer_master) {
+                pending_mls_removals.entry(group_key.clone()).or_default().push(leaf.clone());
+                queued += 1;
+            }
+        }
+        // Fresh KeyPackage so the batch timer can re-add them (answered only
+        // when the peer is group-less, i.e. mid-recovery — harmless otherwise).
+        let data = serde_json::to_vec(&HavenMessage::MlsKeyPackageRequest {
+            server_id: server_id.clone(),
+            channel_id: emit_cid,
+        }).unwrap_or_default();
+        send_raw_to_identity(ws_cmd_tx, ws_room_peers, &peer_master, data);
+        hollow_log!("[HOLLOW-VC-SFRAME] HEAL (authority): queued {queued} leaf removal(s) of {peer_master} from {group_key} + requested fresh KeyPackage");
+    } else if let Some(authority) = authority {
+        // Defer to the authority's view of the group: drop ours and get a
+        // fresh Welcome at their epoch. Cooldown-guarded — group surgery.
+        if mls_bootstrap_requested.get(&group_key)
+            .is_some_and(|t| t.elapsed() < super::swarm::MLS_BOOTSTRAP_TIMEOUT)
+        {
+            hollow_log!("[HOLLOW-VC-SFRAME] HEAL: re-bootstrap for {group_key} already in flight");
+            return;
+        }
+        hollow_log!("[HOLLOW-VC-SFRAME] HEAL: dropping {group_key} and re-bootstrapping from {authority}");
+        mls_mgr.remove_group(&group_key);
+        super::crypto_handler::persist_mls_state(mls_mgr, crypto_store);
+        match mls_mgr.generate_key_package() {
+            Ok(kp_bytes) => {
+                let kp_b64 = base64::engine::general_purpose::STANDARD.encode(&kp_bytes);
+                let data = serde_json::to_vec(&HavenMessage::MlsKeyPackage {
+                    server_id: server_id.clone(),
+                    key_package: kp_b64,
+                    channel_id: emit_cid,
+                }).unwrap_or_default();
+                let sent = send_raw_to_identity(ws_cmd_tx, ws_room_peers, &authority, data);
+                if sent > 0 {
+                    mls_bootstrap_requested.insert(group_key.clone(), std::time::Instant::now());
+                }
+            }
+            Err(e) => hollow_log!("[HOLLOW-VC-SFRAME] HEAL: KeyPackage gen failed: {e}"),
+        }
+    } else {
+        hollow_log!("[HOLLOW-VC-SFRAME] HEAL: no reachable authority for {group_key}");
     }
 }
 

@@ -8046,3 +8046,202 @@ async fn synced_dm_deletion_requires_proof() {
     drop(a);
     drop(b);
 }
+
+// ---------------------------------------------------------------------------
+// SFrame heal ladder (issue #27). Two nodes in a server-wide MLS group; the
+// Dart layer detects sustained cryptor failures and fires VoiceSframeHeal.
+// The harness can't drive the media plane, so it verifies the KEY layer:
+//   * non-escalated heal re-emits the CURRENT epoch key (MlsEpochChanged);
+//   * non-authority escalation drops the local group, re-bootstraps from the
+//     owner, and converges leaves + epoch with the owner;
+//   * authority escalation removes + re-adds the failing peer's leaf; the
+//     peer's EVICTION recovery (inactive group → drop + re-bootstrap) pulls
+//     it back in and both converge.
+// ---------------------------------------------------------------------------
+
+/// Shared setup: O = owner creates a server, B joins, wait until BOTH device
+/// leaves are in the server-wide MLS group on both sides.
+async fn setup_sframe_heal_pair(
+    relay: &MockRelay,
+    o_tag: u8,
+    b_tag: u8,
+) -> (TestNode, TestNode, String) {
+    let o_master = NativeKeypair::from_secret_bytes(&seed_bytes(o_tag)).peer_id();
+    let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(b_tag)).peer_id();
+
+    let mut o = spawn_node_with_friends(relay, o_tag, o_tag, &[&b_master]).await;
+    sleep_ms(1500).await;
+    let mut b = spawn_node_with_friends(relay, b_tag, b_tag, &[&o_master]).await;
+    sleep_ms(4000).await;
+    drain_events(&mut o);
+    drain_events(&mut b);
+
+    let server_id = create_server_and_wait(&mut o, "SFrame Heal Server").await;
+    sleep_ms(500).await;
+
+    b.cmd_tx
+        .send(NodeCommand::JoinServer {
+            server_id: server_id.clone(),
+            twitch_proof_json: None,
+            nsfw_confirmed: false,
+        })
+        .await
+        .unwrap();
+    let joined = wait_event(&mut b, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
+    })
+    .await;
+    assert!(joined, "B should join the server");
+
+    // Both device leaves in the group, on BOTH sides (batch adds: 2s timer).
+    let mut ok = false;
+    for _ in 0..12 {
+        sleep_ms(2000).await;
+        let o_leaves = o.mls_members(&server_id).await;
+        let b_leaves = b.mls_members(&server_id).await;
+        if o_leaves.contains(&o.device_id)
+            && o_leaves.contains(&b.device_id)
+            && b_leaves == o_leaves
+        {
+            ok = true;
+            break;
+        }
+    }
+    assert!(ok, "both leaves must join the server-wide MLS group on both sides");
+    drain_events(&mut o);
+    drain_events(&mut b);
+    (o, b, server_id)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
+async fn sframe_heal_reemits_current_epoch_key() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut o, mut b, server_id) = setup_sframe_heal_pair(&relay, 90, 91).await;
+
+    let epoch_before = b.mls_epoch(&server_id).await;
+    assert!(epoch_before.is_some(), "B must hold the group before healing");
+
+    // Non-escalated heal: must RE-EMIT the current key without advancing the epoch.
+    b.cmd_tx
+        .send(NodeCommand::VoiceSframeHeal {
+            server_id: server_id.clone(),
+            channel_id: "general".to_string(),
+            peer_id: o.device_id.clone(),
+            escalate: false,
+        })
+        .await
+        .unwrap();
+    let reemitted = wait_event(&mut b, std::time::Duration::from_secs(5), |ev| {
+        matches!(ev, NetworkEvent::MlsEpochChanged { server_id: sid, channel_id: None, .. } if *sid == server_id)
+    })
+    .await;
+    assert!(reemitted, "non-escalated heal must re-emit MlsEpochChanged");
+    assert_eq!(
+        b.mls_epoch(&server_id).await,
+        epoch_before,
+        "re-emit must not advance the epoch"
+    );
+
+    drop(o);
+    drop(b);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
+async fn sframe_heal_escalation_rebootstraps_non_authority() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut o, mut b, server_id) = setup_sframe_heal_pair(&relay, 92, 93).await;
+
+    let o_epoch_before = o.mls_epoch(&server_id).await.unwrap();
+
+    // B (NOT the owner) escalates: drops its group + KeyPackage → owner. The
+    // owner's batch remove+re-add issues a fresh Welcome; both converge.
+    b.cmd_tx
+        .send(NodeCommand::VoiceSframeHeal {
+            server_id: server_id.clone(),
+            channel_id: "general".to_string(),
+            peer_id: o.device_id.clone(),
+            escalate: true,
+        })
+        .await
+        .unwrap();
+
+    let mut converged = false;
+    for _ in 0..15 {
+        sleep_ms(2000).await;
+        let o_leaves = o.mls_members(&server_id).await;
+        let b_leaves = b.mls_members(&server_id).await;
+        let (oe, be) = (o.mls_epoch(&server_id).await, b.mls_epoch(&server_id).await);
+        if o_leaves.contains(&b.device_id) && b_leaves == o_leaves && oe.is_some() && oe == be {
+            converged = true;
+            break;
+        }
+    }
+    assert!(
+        converged,
+        "after non-authority escalation B must re-join and converge with the owner"
+    );
+    assert!(
+        o.mls_epoch(&server_id).await.unwrap() > o_epoch_before,
+        "the remove+re-add must have rotated the epoch (fresh SFrame key)"
+    );
+
+    drop(o);
+    drop(b);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
+async fn sframe_heal_escalation_authority_removes_and_readds_peer() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut o, mut b, server_id) = setup_sframe_heal_pair(&relay, 94, 95).await;
+
+    let o_epoch_before = o.mls_epoch(&server_id).await.unwrap();
+
+    // O (owner = authority) escalates against B: queues B's leaf removal. The
+    // removal commit EVICTS B (group goes inactive); B's eviction recovery
+    // drops the dead group and re-bootstraps from the owner; the batch re-add
+    // converges both at a fresh epoch.
+    o.cmd_tx
+        .send(NodeCommand::VoiceSframeHeal {
+            server_id: server_id.clone(),
+            channel_id: "general".to_string(),
+            peer_id: b.device_id.clone(),
+            escalate: true,
+        })
+        .await
+        .unwrap();
+
+    let mut converged = false;
+    for _ in 0..15 {
+        sleep_ms(2000).await;
+        let o_leaves = o.mls_members(&server_id).await;
+        let b_leaves = b.mls_members(&server_id).await;
+        let (oe, be) = (o.mls_epoch(&server_id).await, b.mls_epoch(&server_id).await);
+        if o_leaves.contains(&b.device_id) && b_leaves == o_leaves && oe.is_some() && oe == be {
+            converged = true;
+            break;
+        }
+    }
+    assert!(
+        converged,
+        "after authority escalation the failing peer must be evicted, recover, and converge"
+    );
+    assert!(
+        o.mls_epoch(&server_id).await.unwrap() > o_epoch_before,
+        "the authority remove+re-add must have rotated the epoch"
+    );
+
+    drop(o);
+    drop(b);
+}

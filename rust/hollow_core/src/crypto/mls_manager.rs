@@ -572,6 +572,14 @@ impl MlsManager {
         self.groups.contains_key(server_id)
     }
 
+    /// Whether a held group is still ACTIVE. A commit that removes our own
+    /// leaf merges cleanly but leaves the group inactive (use-after-eviction):
+    /// `has_group` stays true while export/encrypt fail forever. Callers use
+    /// this to detect eviction and drop + re-bootstrap instead of wedging.
+    pub fn is_active(&self, server_id: &str) -> bool {
+        self.groups.get(server_id).map(|g| g.is_active()).unwrap_or(false)
+    }
+
     /// All server_ids we currently hold an MLS group for (Step 7 revocation sweeps
     /// every shared server to remove a revoked device's leaf where we coordinate).
     pub fn group_ids(&self) -> Vec<String> {

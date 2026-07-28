@@ -22,11 +22,27 @@ class FrameCryptorService {
   /// Receiver-side frame cryptors: "peerId:kind" -> FrameCryptor.
   final Map<String, FrameCryptor> _receiverCryptors = {};
 
-  /// Whether encryption is active.
+  /// Whether key material has been set (rotateKey / setSharedKey / setKey).
+  /// Enable paths gate on this: cryptors are only useful once a key exists.
   bool _enabled = false;
 
   /// Current key index (set by rotateKey / setSharedKey). New cryptors use this index.
   int currentKeyIndex = 0;
+
+  /// Fired on every cryptor state transition (both directions). Drives the
+  /// SFrame heal ladder: sustained MissingKey / DecryptionFailed /
+  /// InternalError means the peer and we disagree on key material.
+  /// [participantId] is the cryptor's participant (e.g. peerId or
+  /// 'screen:$peerId'), [kind] the track kind key ('audio', 'video',
+  /// 'screen_video', ...), [isReceiver] whether it's a decryptor.
+  void Function(String participantId, String kind, bool isReceiver,
+      FrameCryptorState state)? onCryptorStateChanged;
+
+  static bool isFailureState(FrameCryptorState state) =>
+      state == FrameCryptorState.FrameCryptorStateMissingKey ||
+      state == FrameCryptorState.FrameCryptorStateDecryptionFailed ||
+      state == FrameCryptorState.FrameCryptorStateEncryptionFailed ||
+      state == FrameCryptorState.FrameCryptorStateInternalError;
 
   /// Initialize the KeyProvider. Call once per session before enabling encryption.
   ///
@@ -54,6 +70,7 @@ class FrameCryptorService {
         index: index,
         key: key,
       );
+      _enabled = true; // key material present — cryptors may be created
       _fcLog('[HOLLOW-SFRAME] Key set for $participantId at index $index (${key.length} bytes)');
     } finally {
       // SECURITY (Phase 6.25): Clear key material from memory.
@@ -66,6 +83,7 @@ class FrameCryptorService {
     if (_keyProvider == null) return;
     try {
       await _keyProvider!.setSharedKey(key: key, index: index);
+      _enabled = true; // key material present — cryptors may be created
       _fcLog('[HOLLOW-SFRAME] Shared key set at index $index (${key.length} bytes)');
     } finally {
       // SECURITY (Phase 6.25): Clear key material from memory.
@@ -90,6 +108,7 @@ class FrameCryptorService {
       );
       cryptor.onFrameCryptorStateChanged = (pid, state) {
         _fcLog('[HOLLOW-SFRAME] Sender $pid ($kind) state: $state');
+        onCryptorStateChanged?.call(peerId, kind, false, state);
       };
       await cryptor.setEnabled(true);
       _senderCryptors[key] = cryptor;
@@ -118,6 +137,7 @@ class FrameCryptorService {
       );
       cryptor.onFrameCryptorStateChanged = (pid, state) {
         _fcLog('[HOLLOW-SFRAME] Receiver $pid ($kind) state: $state');
+        onCryptorStateChanged?.call(peerId, kind, true, state);
       };
       await cryptor.setEnabled(true);
       _receiverCryptors[key] = cryptor;
@@ -132,6 +152,13 @@ class FrameCryptorService {
     if (_keyProvider == null) return;
     currentKeyIndex = newIndex;
     await _keyProvider!.setSharedKey(key: newKey, index: newIndex);
+    // CRITICAL: key material present ⇒ cryptors may be created. This flag was
+    // historically only set in enableForSender, and every VC enable path
+    // guards on it — so voice-channel SFrame never engaged until a screen
+    // share flipped it on ONE side, and the first MLS epoch change then made
+    // that side encrypt while the other had no decryptor (issue #27:
+    // ciphertext straight into the Opus decoder = garbage noise).
+    _enabled = true;
     // Update key index on all active cryptors.
     for (final cryptor in _senderCryptors.values) {
       await cryptor.setKeyIndex(newIndex);

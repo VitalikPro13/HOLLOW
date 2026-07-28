@@ -265,6 +265,31 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
   static String _sframeCacheKey(String serverId, String? channelId) =>
       '$serverId ${channelId ?? ''}';
 
+  // ── SFrame heal ladder (issue #27) ──────────────────────────────────────
+  // Sustained MissingKey/DecryptionFailed on a cryptor means we and the peer
+  // disagree on key material. Rather than playing garbage/silence forever:
+  //   step 1: re-apply the cached key + rebind that peer's receiver cryptors
+  //   step 2: ask Rust to re-export + re-emit the current MLS epoch key
+  //   step 3: (cooldown-guarded) MLS re-bootstrap — converges real epoch forks
+
+  /// Cryptor keys ('peer|kind|rx/tx') currently in a failure state → first seen.
+  final Map<String, DateTime> _sframeFailures = {};
+
+  /// Per-peer heal progress: last ladder step run and when.
+  final Map<String, ({int step, DateTime at})> _sframeHealProgress = {};
+
+  /// Global cooldown for step 3 (MLS group surgery is expensive).
+  DateTime? _lastSframeEscalateAt;
+
+  /// Step-3 attempts per peer this session. After [_kMaxSframeEscalations]
+  /// the ladder gives up on that peer — an unhealable peer (e.g. a client
+  /// that never encrypts) must not put the server MLS group through
+  /// remove+re-add surgery every cooldown window forever.
+  final Map<String, int> _sframeEscalations = {};
+  static const int _kMaxSframeEscalations = 2;
+
+  Timer? _sframeHealTimer;
+
   /// Whether a channel is cryptographically isolated in its own MLS subgroup
   /// (per-channel subgroups / "Option B"): restricted visibility AND not a public
   /// channel. Mirrors Rust `ServerState::channel_uses_subgroup`. Such a channel's
@@ -642,6 +667,10 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       state = state.copyWith(peerCameraOn: cameras);
     };
 
+    // Wire the SFrame heal ladder — cryptor failure states drive recovery
+    // instead of playing garbage/silence until the call is restarted.
+    svc.onSframeCryptorState = _onSframeCryptorState;
+
     await svc.startAudio(serverId, channelId);
 
     // The mic is live now — if the channel went away while it was opening,
@@ -833,6 +862,10 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
   Future<void> onRemotePeerLeft(String peerId) async {
     if (_service == null) return;
     await _service!.onPeerLeftMyChannel(peerId);
+    // A gone peer can't heal — drop its ladder state.
+    _sframeFailures.removeWhere((k, _) => k.startsWith('$peerId|'));
+    _sframeHealProgress.remove(peerId);
+    _sframeEscalations.remove(peerId);
     // Clean up screen sharing for this peer.
     await _cleanupPeerScreenShare(peerId);
     // Clean up camera state for this peer.
@@ -921,6 +954,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
   /// — safe to call when nothing is active. Shared by the user-initiated
   /// `leaveChannel()` and the server-forced leave path in `onLocalLeft()`.
   Future<void> _teardownCall() async {
+    _resetSframeHeal();
     // Also covers the server-FORCED leave, which never goes through
     // leaveChannel(): whatever join is mid-flight no longer owns this call.
     _joinGen++;
@@ -1422,10 +1456,14 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       // so the brief window where the VC voices' in-process volume is
       // restored isn't re-captured.
       await _stopMobileShareAudio();
+      final sharePeers = _outgoingScreenShares.keys.toList();
       for (final service in _outgoingScreenShares.values) {
         try { await service.close(); } catch (_) {}
       }
       _outgoingScreenShares.clear();
+      for (final peerId in sharePeers) {
+        await _dropShareCryptors(peerId);
+      }
 
       // Disarm the entire-screen anti-echo voice redirect (restore VC voices +
       // kill the renderer child) now that the capturer is gone.
@@ -1529,7 +1567,11 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     // Close+remove any prior outgoing service for this peer before overwriting
     // the map entry — otherwise the old ScreenShareService (with its live PC +
     // thread-set) is orphaned and can never be closed (leak).
-    await _outgoingScreenShares.remove(peerId)?.close();
+    final priorOutgoing = _outgoingScreenShares.remove(peerId);
+    if (priorOutgoing != null) {
+      await priorOutgoing.close();
+      await _dropShareCryptors(peerId);
+    }
     _outgoingScreenShares[peerId] = service;
 
     try {
@@ -1620,6 +1662,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       // Tear it down so its thread-set can't leak.
       debugPrint('[HOLLOW-VC] _sendScreenShareToPeer($peerId) failed: $e');
       await _outgoingScreenShares.remove(peerId)?.close();
+      await _dropShareCryptors(peerId);
       rethrow;
     }
   }
@@ -1657,8 +1700,13 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     final iceConfig = ref.read(iceConfigProvider);
     final localPeerId = ref.read(identityProvider).peerId ?? '';
 
-    // Close existing incoming service for this peer if any.
-    await _incomingScreenShares[peerId]?.close();
+    // Close existing incoming service for this peer if any (and drop its
+    // cryptors so the new PC's receivers re-enable cleanly).
+    final priorIncoming = _incomingScreenShares.remove(peerId);
+    if (priorIncoming != null) {
+      await priorIncoming.close();
+      await _dropShareCryptors(peerId);
+    }
 
     final service = ScreenShareService(
       localPeerId: localPeerId,
@@ -1846,6 +1894,18 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     }
   }
 
+  /// Drop the SFrame cryptors bound to a (now closing) screen share PC for
+  /// [peerId]. enableFor* is idempotent per (participant, kind) — without this
+  /// a RESTARTED share silently keeps cryptors bound to the dead PC's
+  /// senders/receivers and the new PC's tracks go out/come in untransformed.
+  Future<void> _dropShareCryptors(String peerId) async {
+    try {
+      await _service?.frameCryptor?.disableForPeer('screen:$peerId');
+    } catch (e) {
+      debugPrint('[HOLLOW-VC] dropShareCryptors($peerId) failed: $e');
+    }
+  }
+
   /// Clean up screen share services for a specific peer.
   Future<void> _cleanupPeerScreenShare(String peerId) async {
     // Close incoming screen share from this peer.
@@ -1857,6 +1917,9 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     final outgoing = _outgoingScreenShares.remove(peerId);
     if (outgoing != null) {
       await outgoing.close();
+    }
+    if (incoming != null || outgoing != null) {
+      await _dropShareCryptors(peerId);
     }
     // Update peerScreenSharing map.
     if (state.peerScreenSharing.containsKey(peerId)) {
@@ -1887,6 +1950,10 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     _screenTrackPoller = null;
 
     await _stopMobileShareAudio();
+    final allSharePeers = <String>{
+      ..._outgoingScreenShares.keys,
+      ..._incomingScreenShares.keys,
+    };
     for (final service in _outgoingScreenShares.values) {
       await service.close();
     }
@@ -1896,6 +1963,9 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       await service.close();
     }
     _incomingScreenShares.clear();
+    for (final peerId in allSharePeers) {
+      await _dropShareCryptors(peerId);
+    }
 
     if (_localScreenPreviewRenderer != null) {
       _localScreenPreviewRenderer!.srcObject = null;
@@ -1954,11 +2024,166 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     // key (channelId set) must match the current channel; the server-group key
     // (channelId null) applies to whatever non-restricted channel we're in.
     if (channelId != null && state.currentChannelId != channelId) return;
+    // Mirror guard: a SERVER-GROUP epoch change (e.g. someone joining the
+    // server) must never clobber a restricted channel's SUBGROUP key — that
+    // would re-key this VC onto material every non-qualifying member holds
+    // (and desync anyone who applies the events in a different order).
+    if (channelId == null &&
+        state.currentChannelId != null &&
+        _channelUsesSubgroup(state.currentChannelId!)) {
+      return;
+    }
 
     debugPrint('[HOLLOW-VC] MLS epoch changed: $epoch '
         '(${channelId == null ? "server group" : "subgroup $channelId"}) '
         '— rotating SFrame key');
     await _service!.setSframeKey(epoch, sframeKey);
+
+    // If a screen share started before the FIRST key arrived, its PC has no
+    // cryptors yet — enable them now (idempotent for already-enabled PCs;
+    // rotateKey above already re-indexed existing share cryptors).
+    final fc = _service?.frameCryptor;
+    if (fc != null && fc.isEnabled) {
+      for (final e in _outgoingScreenShares.entries) {
+        if (e.value.pc != null) {
+          await _enableSframeOnScreenSharePc(e.value.pc!, fc, e.key,
+              isSender: true);
+        }
+      }
+      for (final e in _incomingScreenShares.entries) {
+        if (e.value.pc != null) {
+          await _enableSframeOnScreenSharePc(e.value.pc!, fc, e.key,
+              isSender: false);
+        }
+      }
+    }
+  }
+
+  /// Cryptor state transition from the service (participant already collapsed
+  /// to the mesh peerId). Failure states arm the heal timer; recovery states
+  /// clear the tracking.
+  void _onSframeCryptorState(
+      String peerId, String kind, bool isReceiver, FrameCryptorState st) {
+    final key = '$peerId|$kind|${isReceiver ? 'rx' : 'tx'}';
+    if (FrameCryptorService.isFailureState(st)) {
+      _sframeFailures.putIfAbsent(key, () => DateTime.now());
+      _sframeHealTimer ??= Timer.periodic(
+          const Duration(seconds: 2), (_) => _sframeHealTick());
+    } else {
+      // Ok / KeyRatcheted / New — this cryptor recovered.
+      final wasFailing = _sframeFailures.remove(key) != null;
+      if (wasFailing &&
+          !_sframeFailures.keys.any((k) => k.startsWith('$peerId|'))) {
+        debugPrint('[HOLLOW-VC] SFrame healed for $peerId '
+            '(step ${_sframeHealProgress[peerId]?.step ?? 0} was enough)');
+        _sframeHealProgress.remove(peerId);
+        _sframeEscalations.remove(peerId);
+      }
+    }
+  }
+
+  /// Drop all heal tracking (channel leave / service teardown).
+  void _resetSframeHeal() {
+    _sframeHealTimer?.cancel();
+    _sframeHealTimer = null;
+    _sframeFailures.clear();
+    _sframeHealProgress.clear();
+    _sframeEscalations.clear();
+  }
+
+  Future<void> _sframeHealTick() async {
+    if (!state.isInVoiceChannel || _service == null) {
+      _resetSframeHeal();
+      return;
+    }
+    if (_sframeFailures.isEmpty) {
+      _sframeHealTimer?.cancel();
+      _sframeHealTimer = null;
+      return;
+    }
+    final now = DateTime.now();
+    // Earliest failure per peer.
+    final failingPeers = <String, DateTime>{};
+    _sframeFailures.forEach((k, t) {
+      final peer = k.substring(0, k.indexOf('|'));
+      final cur = failingPeers[peer];
+      if (cur == null || t.isBefore(cur)) failingPeers[peer] = t;
+    });
+    for (final e in failingPeers.entries) {
+      final peerId = e.key;
+      // Give normal epoch-rotation races a moment to settle on their own.
+      if (now.difference(e.value) < const Duration(seconds: 2)) continue;
+      final prog = _sframeHealProgress[peerId];
+      if (prog != null && prog.step >= 4) continue; // gave up on this peer
+      if (prog == null) {
+        debugPrint('[HOLLOW-VC] SFrame heal 1/3 for $peerId — '
+            're-applying key + rebinding receivers');
+        await _sframeHealReapply(peerId);
+        _sframeHealProgress[peerId] = (step: 1, at: DateTime.now());
+      } else if (prog.step == 1 &&
+          now.difference(prog.at) >= const Duration(seconds: 4)) {
+        debugPrint('[HOLLOW-VC] SFrame heal 2/3 for $peerId — '
+            'asking Rust to re-emit the MLS key');
+        _sframeHealRust(peerId, escalate: false);
+        _sframeHealProgress[peerId] = (step: 2, at: DateTime.now());
+      } else if (prog.step >= 2 &&
+          now.difference(prog.at) >= const Duration(seconds: 8)) {
+        final attempts = _sframeEscalations[peerId] ?? 0;
+        if (attempts >= _kMaxSframeEscalations) {
+          // Unhealable peer (still failing after repeated group surgery) —
+          // stop; further escalation would just churn the server MLS group.
+          debugPrint('[HOLLOW-VC] SFrame heal for $peerId exhausted '
+              '($attempts escalations) — giving up on this peer');
+          _sframeHealProgress[peerId] = (step: 4, at: DateTime.now());
+          continue;
+        }
+        final cooldownOk = _lastSframeEscalateAt == null ||
+            now.difference(_lastSframeEscalateAt!) >=
+                const Duration(seconds: 60);
+        if (cooldownOk) {
+          debugPrint('[HOLLOW-VC] SFrame heal 3/3 for $peerId — '
+              'requesting MLS re-bootstrap');
+          _lastSframeEscalateAt = DateTime.now();
+          _sframeEscalations[peerId] = attempts + 1;
+          _sframeHealRust(peerId, escalate: true);
+          _sframeHealProgress[peerId] = (step: 3, at: DateTime.now());
+        } else {
+          // Escalation on cooldown — keep cycling the cheap re-emit. This is
+          // also what re-keys US promptly after the authority's heal removed
+          // and re-added our leaves (the !has_group branch re-bootstraps).
+          _sframeHealRust(peerId, escalate: false);
+          _sframeHealProgress[peerId] = (step: 2, at: DateTime.now());
+        }
+      }
+    }
+  }
+
+  /// Heal step 1: re-apply the cached key for the current channel and rebind
+  /// the failing peer's receiver cryptors.
+  Future<void> _sframeHealReapply(String peerId) async {
+    final sid = state.currentServerId;
+    final cid = state.currentChannelId;
+    final svc = _service;
+    if (sid == null || cid == null || svc == null) return;
+    final usesSubgroup = _channelUsesSubgroup(cid);
+    final cached = _sframeKeys[_sframeCacheKey(sid, cid)] ??
+        (usesSubgroup ? null : _sframeKeys[_sframeCacheKey(sid, null)]);
+    if (cached != null) {
+      await svc.setSframeKey(cached.epoch, Uint8List.fromList(cached.key));
+    }
+    await svc.rebindReceiversFor(peerId);
+  }
+
+  /// Heal steps 2/3: hand over to Rust (re-export + re-emit the current MLS
+  /// key; with [escalate] also re-bootstrap the group / re-add the peer).
+  void _sframeHealRust(String peerId, {required bool escalate}) {
+    final sid = state.currentServerId;
+    final cid = state.currentChannelId;
+    if (sid == null || cid == null) return;
+    network_api
+        .voiceSframeHeal(
+            serverId: sid, channelId: cid, peerId: peerId, escalate: escalate)
+        .catchError((_) {});
   }
 
   /// Handle voice channel mode change (mesh <-> gossip).
@@ -2049,6 +2274,14 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
   Future<void> _enableSframeOnScreenSharePc(
       RTCPeerConnection pc, FrameCryptorService frameCryptor,
       String peerId, {required bool isSender}) async {
+    // No key material (MLS-less server) → leave the share PC untransformed on
+    // BOTH sides. A keyless sender cryptor would silently DROP every frame,
+    // and this unguarded enable used to flip the service's enabled flag on
+    // the sharer only — the asymmetry behind issue #27.
+    if (!frameCryptor.isEnabled) {
+      debugPrint('[HOLLOW-VC] No SFrame key yet — share PC stays untransformed (peer=$peerId)');
+      return;
+    }
     try {
       if (isSender) {
         final senders = await pc.getSenders();

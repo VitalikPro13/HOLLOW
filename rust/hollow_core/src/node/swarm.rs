@@ -4,7 +4,7 @@ use std::time::Duration;
 use base64::Engine;
 use tokio::sync::mpsc;
 
-const MLS_BOOTSTRAP_TIMEOUT: Duration = Duration::from_secs(60);
+pub(crate) const MLS_BOOTSTRAP_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// How long an in-flight Olm KeyRequest is considered "live" before the
 /// session-reconciliation sweep is allowed to resend it. The relay never ACKs a
@@ -2058,6 +2058,17 @@ async fn run_event_loop(
                             &ws_cmd_tx, &ws_room_peers,
                             &server_states, &bundle_keypair,
                             &local_peer_str, &event_tx,
+                        ).await;
+                    }
+
+                    NodeCommand::VoiceSframeHeal { server_id, channel_id, peer_id, escalate } => {
+                        voice_handler::handle_voice_sframe_heal(
+                            server_id, channel_id, peer_id, escalate,
+                            &mut mls, &ws_cmd_tx, &ws_room_peers,
+                            &server_states,
+                            &mut pending_mls_removals,
+                            &mut mls_bootstrap_requested,
+                            &crypto_store, &local_peer_str, &event_tx,
                         ).await;
                     }
 
@@ -10257,6 +10268,46 @@ async fn handle_incoming_request(
                     Ok(()) => {
                         persist_mls_state(mls_mgr, crypto_store);
                         hollow_log!("[HOLLOW-MLS] Processed commit for {group_key}");
+
+                        // EVICTION CHECK: a commit that removed OUR OWN leaf merges
+                        // cleanly but leaves the group INACTIVE — export/encrypt fail
+                        // forever while has_group stays true, silently wedging SFrame
+                        // (issue #27's stuck state). If we're still a CRDT member
+                        // (heal-driven remove+re-add, not a kick/ban), drop the dead
+                        // group and re-bootstrap; the Welcome re-keys us.
+                        if !mls_mgr.is_active(&group_key) {
+                            hollow_log!("[HOLLOW-MLS] Commit EVICTED us from {group_key} — dropping inactive group");
+                            mls_mgr.remove_group(&group_key);
+                            persist_mls_state(mls_mgr, crypto_store);
+                            let still_member = server_states.get(&server_id).is_some_and(|s| {
+                                s.members.keys().any(|m| super::resolver::same_identity(m, local_peer_str))
+                            });
+                            if still_member
+                                && !mls_bootstrap_requested.get(&group_key)
+                                    .is_some_and(|t| t.elapsed() < MLS_BOOTSTRAP_TIMEOUT)
+                            {
+                                if let Some(state) = server_states.get(&server_id) {
+                                    let requested = match &cm_channel_id {
+                                        Some(cid) => {
+                                            crate::node::crypto_handler::request_subgroup_bootstrap(
+                                                mls_mgr, ws_cmd_tx, ws_room_peers,
+                                                state, &server_id, cid, local_peer_str,
+                                            );
+                                            true
+                                        }
+                                        None => crate::node::crypto_handler::request_server_group_bootstrap(
+                                            mls_mgr, ws_cmd_tx, ws_room_peers,
+                                            state, &server_id, local_peer_str,
+                                        ),
+                                    };
+                                    if requested {
+                                        mls_bootstrap_requested.insert(group_key.clone(), std::time::Instant::now());
+                                    }
+                                }
+                            }
+                            return;
+                        }
+
                         // Emit epoch change for SFrame key rotation. For a subgroup
                         // (restricted voice channel), route it to that channel's cryptor.
                         if let Ok(sframe_key) = mls_mgr.export_secret(&group_key, "sframe", b"", 32) {

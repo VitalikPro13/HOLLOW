@@ -799,6 +799,22 @@ Future<void> voiceChannelSendSignal({
   payload: payload,
 );
 
+/// SFrame heal (issue #27): the voice cryptors report sustained decrypt
+/// failures against `peer_id`. Re-emits the current MLS epoch key; with
+/// `escalate` the node also re-bootstraps the MLS group (non-authority) or
+/// removes + re-adds the failing peer's leaves (authority).
+Future<void> voiceSframeHeal({
+  required String serverId,
+  required String channelId,
+  required String peerId,
+  required bool escalate,
+}) => RustLib.instance.api.crateApiNetworkVoiceSframeHeal(
+  serverId: serverId,
+  channelId: channelId,
+  peerId: peerId,
+  escalate: escalate,
+);
+
 /// Report data channel keepalive RTT for gossip peer scoring.
 Future<void> webrtcPingReport({required String peerId, required int rttMs}) =>
     RustLib.instance.api.crateApiNetworkWebrtcPingReport(

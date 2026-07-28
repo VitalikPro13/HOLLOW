@@ -756,6 +756,10 @@ pub(crate) enum NodeCommand {
     VoiceChannelJoin { server_id: String, channel_id: String },
     VoiceChannelLeave { server_id: String, channel_id: String },
     VoiceChannelSendSignal { server_id: String, channel_id: String, peer_id: String, signal_type: String, payload: String },
+    /// SFrame heal (issue #27): Dart's cryptors report sustained decrypt
+    /// failures against `peer_id` — re-emit the current MLS key; with
+    /// `escalate` also re-bootstrap the group / re-add the failing peer.
+    VoiceSframeHeal { server_id: String, channel_id: String, peer_id: String, escalate: bool },
     // -- Conference commands (node/conference.rs) --
     ConferenceStart { conf_id: String, waiting_room: bool, access_code_hash: Option<String>, host_display_name: String, host_avatar_hash: String },
     ConferenceEnd { conf_id: String },
@@ -938,6 +942,7 @@ impl NodeCommand {
             Self::VoiceChannelJoin { .. } => "VoiceChannelJoin",
             Self::VoiceChannelLeave { .. } => "VoiceChannelLeave",
             Self::VoiceChannelSendSignal { .. } => "VoiceChannelSendSignal",
+            Self::VoiceSframeHeal { .. } => "VoiceSframeHeal",
             Self::ConferenceStart { .. } => "ConferenceStart",
             Self::ConferenceEnd { .. } => "ConferenceEnd",
             Self::ConferenceRequestJoin { .. } => "ConferenceRequestJoin",
