@@ -2,11 +2,10 @@
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:hollow/src/core/providers/archive_provider.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
 import 'package:hollow/src/core/providers/selected_peer_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
-import 'package:hollow/src/core/providers/share_tab_provider.dart';
+import 'package:hollow/src/core/providers/shell_tab.dart';
 import 'package:hollow/src/core/providers/system_notification_provider.dart';
 import 'package:hollow/src/core/providers/unread_provider.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
@@ -174,8 +173,7 @@ class _NotificationCardWidgetState
     final card = widget.card;
 
     if (card.isDm && card.peerId != null) {
-      ref.read(archiveTabOpenProvider.notifier).state = false;
-      ref.read(shareTabOpenProvider.notifier).state = false;
+      setShellTab(ref.read, null);
       ref.read(selectedPeerProvider.notifier).state = card.peerId;
       ref.read(selectedServerProvider.notifier).state = null;
       ref.read(channelListProvider.notifier).clear();
@@ -190,8 +188,7 @@ class _NotificationCardWidgetState
 
       if (!mounted) return;
 
-      ref.read(archiveTabOpenProvider.notifier).state = false;
-      ref.read(shareTabOpenProvider.notifier).state = false;
+      setShellTab(ref.read, null);
       ref.read(selectedPeerProvider.notifier).state = null;
       ref.read(serverSettingsOpenProvider.notifier).state = false;
       ref.read(channelListProvider.notifier).setChannels(channels);

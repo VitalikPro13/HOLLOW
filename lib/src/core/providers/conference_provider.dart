@@ -2,18 +2,16 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:hollow/src/core/providers/archive_provider.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
 import 'package:hollow/src/core/providers/channel_chat_provider.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/friends_provider.dart';
-import 'package:hollow/src/core/providers/guest_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/selected_peer_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
-import 'package:hollow/src/core/providers/share_tab_provider.dart';
+import 'package:hollow/src/core/providers/shell_tab.dart';
 import 'package:hollow/src/core/providers/split_view_provider.dart';
 import 'package:hollow/src/core/providers/voice_channel_provider.dart';
 import 'package:hollow/src/rust/api/conference.dart' as conference_api;
@@ -195,10 +193,7 @@ class ConferenceNotifier extends Notifier<ConferenceState> {
     if (split.isSplit) {
       ref.read(splitViewProvider.notifier).closeSplit();
     }
-    ref.read(conferenceTabOpenProvider.notifier).state = true;
-    ref.read(guestTabOpenProvider.notifier).state = false;
-    ref.read(shareTabOpenProvider.notifier).state = false;
-    ref.read(archiveTabOpenProvider.notifier).state = false;
+    setShellTab(ref.read, ShellTab.conference);
     ref.read(selectedServerProvider.notifier).state = null;
     ref.read(channelListProvider.notifier).clear();
     ref.read(selectedChannelProvider.notifier).state = null;

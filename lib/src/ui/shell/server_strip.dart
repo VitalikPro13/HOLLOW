@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/color_utils.dart';
 import 'package:hollow/src/core/providers/archive_provider.dart';
 import 'package:hollow/src/core/providers/share_tab_provider.dart';
+import 'package:hollow/src/core/providers/shell_tab.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
 import 'package:hollow/src/core/providers/selected_peer_provider.dart';
 import 'package:hollow/src/core/models/strip_item.dart';
@@ -50,17 +51,20 @@ class _ServerStripState extends ConsumerState<ServerStrip> {
     final dmUnreadTotal = ref.watch(dmUnreadBadgeProvider);
     final archiveOpen = ref.watch(archiveTabOpenProvider);
     final shareOpen = ref.watch(shareTabOpenProvider);
+    // Home is only "selected" when nothing is covering the chat area — any
+    // centre tab counts, including the two this strip has no button for.
+    final homeSelected =
+        selectedServerId == null && !ref.watch(anyShellTabOpenProvider);
 
     Widget homeIcon = _ServerIconWithIndicator(
-      isSelected: selectedServerId == null && !archiveOpen && !shareOpen,
+      isSelected: homeSelected,
       unreadCount: selectedServerId != null ? dmUnreadTotal : 0,
       child: _ServerIcon(
-        isSelected: selectedServerId == null && !archiveOpen && !shareOpen,
+        isSelected: homeSelected,
         backgroundColor: hollow.accent,
         semanticLabel: 'Home',
         onTap: () {
-          ref.read(archiveTabOpenProvider.notifier).state = false;
-          ref.read(shareTabOpenProvider.notifier).state = false;
+          setShellTab(ref.read, null);
           ref.read(selectedServerProvider.notifier).state = null;
           ref.read(channelListProvider.notifier).clear();
           ref.read(selectedChannelProvider.notifier).state = null;
@@ -84,8 +88,12 @@ class _ServerStripState extends ConsumerState<ServerStrip> {
         backgroundColor: hollow.elevated,
         tooltip: 'Share',
         onTap: () {
-          ref.read(shareTabOpenProvider.notifier).state = true;
-          ref.read(archiveTabOpenProvider.notifier).state = false;
+          // Toggles, like every other centre-tab button (issue #28).
+          if (shareOpen) {
+            setShellTab(ref.read, null);
+            return;
+          }
+          setShellTab(ref.read, ShellTab.share);
           ref.read(selectedServerProvider.notifier).state = null;
           ref.read(channelListProvider.notifier).clear();
           ref.read(selectedChannelProvider.notifier).state = null;
@@ -106,12 +114,15 @@ class _ServerStripState extends ConsumerState<ServerStrip> {
         backgroundColor: hollow.elevated,
         tooltip: 'Archive',
         onTap: () {
+          if (archiveOpen) {
+            setShellTab(ref.read, null);
+            return;
+          }
           ref.invalidate(archiveDmListProvider);
           ref.invalidate(archiveChannelListProvider);
           ref.read(archiveSelectedDmProvider.notifier).state = null;
           ref.read(archiveSelectedChannelProvider.notifier).state = null;
-          ref.read(archiveTabOpenProvider.notifier).state = true;
-          ref.read(shareTabOpenProvider.notifier).state = false;
+          setShellTab(ref.read, ShellTab.archive);
           ref.read(selectedServerProvider.notifier).state = null;
           ref.read(channelListProvider.notifier).clear();
           ref.read(selectedChannelProvider.notifier).state = null;
@@ -462,9 +473,10 @@ class _ServerStripState extends ConsumerState<ServerStrip> {
     }
 
     // Batch all provider writes synchronously — single rebuild with
-    // consistent server + channels + selectedChannel state.
-    ref.read(archiveTabOpenProvider.notifier).state = false;
-    ref.read(shareTabOpenProvider.notifier).state = false;
+    // consistent server + channels + selectedChannel state. Closing EVERY
+    // centre tab is part of that: one left open covers the channel we just
+    // selected (issue #28).
+    setShellTab(ref.read, null);
     ref.read(selectedPeerProvider.notifier).state = null;
     ref.read(serverSettingsOpenProvider.notifier).state = false;
     ref.read(channelListProvider.notifier).setChannels(channels);

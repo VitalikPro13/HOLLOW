@@ -1,11 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/guest_provider.dart';
-import 'package:hollow/src/core/providers/archive_provider.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
 import 'package:hollow/src/core/providers/selected_peer_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
-import 'package:hollow/src/core/providers/share_tab_provider.dart';
+import 'package:hollow/src/core/providers/shell_tab.dart';
 import 'package:hollow/src/core/providers/split_view_provider.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
@@ -118,9 +117,7 @@ void _browse(
   // Open the guest panel and expand this server.
   final split = ref.read(splitViewProvider);
   if (split.isSplit) ref.read(splitViewProvider.notifier).closeSplit();
-  ref.read(guestTabOpenProvider.notifier).state = true;
-  ref.read(shareTabOpenProvider.notifier).state = false;
-  ref.read(archiveTabOpenProvider.notifier).state = false;
+  setShellTab(ref.read, ShellTab.guest);
   ref.read(selectedServerProvider.notifier).state = null;
   ref.read(channelListProvider.notifier).clear();
   ref.read(selectedChannelProvider.notifier).state = null;

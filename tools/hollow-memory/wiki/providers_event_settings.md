@@ -759,7 +759,7 @@ A collection of providers managing the Archive tab UI, which gives users access 
 
 ### Tab and Selection State Providers
 
-**`archiveTabOpenProvider`** -- `StateProvider<bool>`, default `false`. Controls whether the Archive tab replaces the main content area.
+**`archiveTabOpenProvider`** -- `StateProvider<bool>`, default `false`. Controls whether the Archive tab replaces the main content area. One of the four mutually exclusive centre tabs — write it only via `setShellTab()` (`shell_tab.dart`); see `ui_shell_layout.md` → Chat Area Content Resolution.
 
 **`archiveSubTabProvider`** -- `StateProvider<ArchiveSubTab>`, default `myData`. Enum: `myData`, `importedArchives`.
 
@@ -1135,7 +1135,7 @@ Providers managing the Public Channel Browser panel — a first-class shell pane
 
 ### Panel & Selection State
 
-**`guestTabOpenProvider`** -- `StateProvider<bool>`, default `false`. Controls panel visibility. Cleared by `_goHome`, `_selectServer`, `_openShare`, `_openArchive`, `_selectFriend`.
+**`guestTabOpenProvider`** -- `StateProvider<bool>`, default `false`. Controls panel visibility. One of the four mutually exclusive centre tabs: written ONLY via `setShellTab()` in `lib/src/core/providers/shell_tab.dart` (guarded by `test/shell_tab_test.dart`), never directly. See `ui_shell_layout.md` → Chat Area Content Resolution.
 
 **`guestExpandedServerProvider`** -- `StateProvider<String?>`. Which server is expanded in the accordion sidebar.
 

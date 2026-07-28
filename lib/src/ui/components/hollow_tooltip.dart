@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 import 'package:hollow/src/ui/components/overlay_anchor.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
@@ -81,10 +83,16 @@ class _HollowTooltipState extends State<HollowTooltip>
   }
 
   /// Immediately kill the tooltip overlay — no animation, no delay.
+  ///
+  /// Never rewinds the controller here: `deactivate()` calls this while the
+  /// framework is mid-build, and moving the VALUE notifies the still-mounted
+  /// [FadeTransition]/[SlideTransition] inside the entry, which is a
+  /// `setState() called during build` crash. `stop()` only fires status
+  /// listeners, which nothing here registers. The rewind happens in
+  /// [_showTooltip] instead, before the next entry is in the tree.
   void _dismiss() {
     _hovering = false;
     _controller.stop();
-    _controller.reset();
     _entry?.remove();
     _entry = null;
   }
@@ -95,75 +103,49 @@ class _HollowTooltipState extends State<HollowTooltip>
     final renderBox = context.findRenderObject() as RenderBox;
     final size = renderBox.size;
     final position = overlayAnchorOf(context);
+    // Safe rewind: no entry is mounted, so there is no listener to rebuild.
+    _controller.value = 0.0;
 
     _entry = OverlayEntry(
       builder: (context) {
         final hollow = HollowTheme.of(context);
-        final screenSize = MediaQuery.of(context).size;
-        const padding = 8.0;
-        const gap = 6.0;
 
-        // Measure tooltip width estimate (rough: 7px per char + padding).
-        final tooltipWidth =
-            (widget.message.length * 7.0 + HollowSpacing.sm * 2 + 4)
-                .clamp(40.0, screenSize.width - padding * 2);
-
-        // Center horizontally on the widget.
-        double left = position.dx + size.width / 2 - tooltipWidth / 2;
-
-        // Clamp horizontal to stay within window.
-        if (left < padding) left = padding;
-        if (left + tooltipWidth > screenSize.width - padding) {
-          left = screenSize.width - tooltipWidth - padding;
-        }
-
-        // Vertical: prefer below, but flip above if it would overflow.
-        final belowY = position.dy + size.height + gap;
-        final aboveY = position.dy - gap;
-        // Estimate tooltip height ~28px.
-        const tooltipHeight = 28.0;
-
-        final bool showBelow;
-        if (widget.preferBelow) {
-          showBelow = belowY + tooltipHeight <= screenSize.height - padding;
-        } else {
-          showBelow = aboveY - tooltipHeight < padding;
-        }
-
-        final double top;
-        if (showBelow) {
-          top = belowY;
-        } else {
-          top = aboveY - tooltipHeight;
-        }
-
-        return Positioned(
-          left: left,
-          top: top,
-          child: FadeTransition(
-            opacity: _opacity,
-            child: SlideTransition(
-              position: _offset,
-              child: Material(
-                color: Colors.transparent,
-                child: Container(
-                  constraints: BoxConstraints(
-                    maxWidth: screenSize.width - padding * 2,
-                  ),
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: HollowSpacing.sm + 2,
-                    vertical: HollowSpacing.xs + 2,
-                  ),
-                  decoration: BoxDecoration(
-                    color: hollow.elevated,
-                    borderRadius:
-                        BorderRadius.circular(hollow.radiusSm),
-                    border: Border.all(color: hollow.border),
-                  ),
-                  child: Text(
-                    widget.message,
-                    style: HollowTypography.caption.copyWith(
-                      color: hollow.textPrimary,
+        return Positioned.fill(
+          // The layout box spans the whole overlay so the delegate can place
+          // the tooltip against the space it MEASURES. It must never take
+          // pointers — the control that is being hovered sits underneath.
+          child: IgnorePointer(
+            child: CustomSingleChildLayout(
+              delegate: _TooltipPositionDelegate(
+                // `positionDependentBox` centres on the target and flips to
+                // the other side when the real tooltip does not fit.
+                target: position + Offset(size.width / 2, size.height / 2),
+                verticalOffset: size.height / 2 + 6,
+                preferBelow: widget.preferBelow,
+              ),
+              child: FadeTransition(
+                opacity: _opacity,
+                child: SlideTransition(
+                  position: _offset,
+                  child: Material(
+                    color: Colors.transparent,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: HollowSpacing.sm + 2,
+                        vertical: HollowSpacing.xs + 2,
+                      ),
+                      decoration: BoxDecoration(
+                        color: hollow.elevated,
+                        borderRadius:
+                            BorderRadius.circular(hollow.radiusSm),
+                        border: Border.all(color: hollow.border),
+                      ),
+                      child: Text(
+                        widget.message,
+                        style: HollowTypography.caption.copyWith(
+                          color: hollow.textPrimary,
+                        ),
+                      ),
                     ),
                   ),
                 ),
@@ -199,3 +181,55 @@ class _HollowTooltipState extends State<HollowTooltip>
     );
   }
 }
+
+/// Places the tooltip against the overlay it actually renders in, using the
+/// tooltip's MEASURED size.
+///
+/// The old code estimated 7px per character and a flat 28px height and
+/// compared them against `MediaQuery.size`. Both were wrong at the bottom of
+/// the window: the desktop title bar makes the overlay shorter than the
+/// window, so a dock-bar tooltip "fit" below its button and rendered off the
+/// bottom edge — the user saw an empty sliver of a box (issue #20). Larger
+/// text made it worse, since a wrapped two-line tooltip is nowhere near 28px.
+/// [size] here is the overlay's own box and [childSize] is the real tooltip,
+/// so neither estimate is needed.
+class _TooltipPositionDelegate extends SingleChildLayoutDelegate {
+  final Offset target;
+  final double verticalOffset;
+  final bool preferBelow;
+
+  const _TooltipPositionDelegate({
+    required this.target,
+    required this.verticalOffset,
+    required this.preferBelow,
+  });
+
+  @override
+  BoxConstraints getConstraintsForChild(BoxConstraints constraints) {
+    // Loose, minus the margin `positionDependentBox` keeps on each side, so a
+    // long label wraps instead of running past the edge.
+    return constraints.loosen().copyWith(
+          maxWidth: math.max(0.0, constraints.maxWidth - _kTooltipMargin * 2),
+        );
+  }
+
+  @override
+  Offset getPositionForChild(Size size, Size childSize) {
+    return positionDependentBox(
+      size: size,
+      childSize: childSize,
+      target: target,
+      verticalOffset: verticalOffset,
+      preferBelow: preferBelow,
+      margin: _kTooltipMargin,
+    );
+  }
+
+  @override
+  bool shouldRelayout(_TooltipPositionDelegate old) =>
+      old.target != target ||
+      old.verticalOffset != verticalOffset ||
+      old.preferBelow != preferBelow;
+}
+
+const double _kTooltipMargin = 8.0;

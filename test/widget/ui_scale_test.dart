@@ -166,6 +166,102 @@ void main() {
     expect(taps, 1);
   });
 
+  testWidgets('the MediaQuery reports the SLOT even at 100%', (tester) async {
+    // Popups clamp themselves against `MediaQuery.size` while positioning
+    // inside the Overlay — which fills this box, not the window. Reporting the
+    // window at 100% put every bottom-anchored popup 32px (the title bar) past
+    // the edge; the dock tooltip rendered off-screen entirely (issue #20).
+    const window = Size(1200, 800);
+    const barHeight = 32.0;
+    late Size seen;
+    tester.view.physicalSize = window;
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Column(
+          children: [
+            const SizedBox(height: barHeight, width: double.infinity),
+            Expanded(
+              child: UiScaleBox(
+                scale: 1.0,
+                child: Builder(
+                  builder: (context) {
+                    seen = MediaQuery.sizeOf(context);
+                    return const SizedBox.expand();
+                  },
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+    expect(seen.height, closeTo(window.height - barHeight, 0.5));
+    expect(seen.width, closeTo(window.width, 0.5));
+  });
+
+  testWidgets('a zoomed-OUT button still receives taps near the edges',
+      (tester) async {
+    // Issue #20 follow-up: below 100% the app lays out LARGER than the window
+    // and is painted back down. Everything past `window * scale` in child
+    // space used to be unhittable — the whole bottom dock and the right end of
+    // the top bar went dead, and the dead strip grew as you zoomed further out.
+    var taps = 0;
+    await pumpScaled(
+      tester,
+      0.75,
+      child: Align(
+        alignment: Alignment.bottomRight,
+        child: GestureDetector(
+          onTap: () => taps++,
+          child: Container(width: 100, height: 40, color: Colors.red),
+        ),
+      ),
+    );
+    // Laid out at 1600x1066: the box sits in that bottom-right corner, painted
+    // back into the window's own bottom-right corner (1125..1200, 770..800).
+    await tester.tapAt(const Offset(1180, 790));
+    expect(taps, 1, reason: 'bottom-right corner is dead at 0.75x');
+  });
+
+  testWidgets('every corner of the window is live at every zoom',
+      (tester) async {
+    // The dock lives along the bottom edge and the friends bar runs to the
+    // right edge, so the corners are exactly where the buttons are.
+    for (final scale in const [0.75, 0.9, 1.0, 1.25, 1.5]) {
+      final tapped = <String>{};
+      Widget corner(String name, Alignment where) => Align(
+            alignment: where,
+            child: GestureDetector(
+              onTap: () => tapped.add(name),
+              child: Container(width: 60, height: 30, color: Colors.red),
+            ),
+          );
+      await pumpScaled(
+        tester,
+        scale,
+        child: Stack(
+          children: [
+            corner('tl', Alignment.topLeft),
+            corner('tr', Alignment.topRight),
+            corner('bl', Alignment.bottomLeft),
+            corner('br', Alignment.bottomRight),
+          ],
+        ),
+      );
+      await tester.tapAt(const Offset(4, 4));
+      await tester.tapAt(const Offset(1196, 4));
+      await tester.tapAt(const Offset(4, 796));
+      await tester.tapAt(const Offset(1196, 796));
+      expect(tapped, {'tl', 'tr', 'bl', 'br'},
+          reason: 'dead corner(s) at ${scale}x');
+    }
+  });
+
   group('MultipliedTextScaler', () {
     test('composes with the platform scaler instead of replacing it', () {
       const scaler = MultipliedTextScaler(

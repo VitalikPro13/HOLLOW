@@ -34,7 +34,7 @@ Ad-hoc meetings between people who share no server and no friendship. A host cre
 
 ## Dart provider (`lib/src/core/providers/conference_provider.dart`)
 
-- `conferenceTabOpenProvider` (Archive/Share tab pattern), `conferenceServerId(id)`, `kConferenceChannelId = 'main'`.
+- `conferenceTabOpenProvider` (Archive/Share tab pattern), `conferenceServerId(id)`, `kConferenceChannelId = 'main'`. It is one of the four exclusive centre tabs: `openTab()` calls `setShellTab(ref.read, ShellTab.conference)` and the FriendsBar button toggles it back off with `setShellTab(ref.read, null)`. NEVER write the boolean directly — the missing clears in both `_selectServer`s are what made the conference dashboard stick over a selected server (issue #28, `shell_tab.dart` + `test/shell_tab_test.dart`).
 - `ConferenceState`: rooms list; active meeting (confId, isHost, lobbyStatus none/waiting/admitted/denied/inCall, denyReason, host peer/name/avatar-hash, waiting list). Meeting CHAT does NOT live here — it rides `channelChatProvider['conf:x:main']`.
 - `requestJoin`: blocks during 1:1 calls; **SELF-CHECK** — own room's link → `startMeeting` instead of knocking (host handler ignores self-knocks; the lobby would hang forever). Wrong-code retry keeps lobby banner info.
 - `startMeeting` → FFI start + `voiceChannelJoin('conf:x','main')`; `onAdmitted` does the same joiner-side. `_clearConfChat(confId)` = clears the RAM chat key AND `voiceChannelProvider.clearServerParticipants(sid)` — called on start/requestJoin(fresh)/end/leave/onEnded/onKicked.

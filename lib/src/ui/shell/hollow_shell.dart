@@ -95,6 +95,7 @@ import 'package:hollow/src/core/providers/app_lifecycle_provider.dart';
 import 'package:hollow/src/core/providers/archive_provider.dart';
 import 'package:hollow/src/core/providers/conference_provider.dart';
 import 'package:hollow/src/core/providers/share_tab_provider.dart';
+import 'package:hollow/src/core/providers/shell_tab.dart';
 import 'package:hollow/src/ui/shell/archive_dashboard.dart';
 import 'package:hollow/src/ui/shell/conference_dashboard.dart';
 import 'package:hollow/src/ui/share/share_dashboard.dart';
@@ -223,9 +224,7 @@ class _HollowShellState extends ConsumerState<HollowShell>
   }
 
   void _openDmFromNotification(String peerId) {
-    ref.read(archiveTabOpenProvider.notifier).state = false;
-    ref.read(shareTabOpenProvider.notifier).state = false;
-    ref.read(conferenceTabOpenProvider.notifier).state = false;
+    setShellTab(ref.read, null);
     ref.read(selectedPeerProvider.notifier).state = peerId;
     ref.read(selectedServerProvider.notifier).state = null;
     ref.read(channelListProvider.notifier).clear();
@@ -239,9 +238,7 @@ class _HollowShellState extends ConsumerState<HollowShell>
     final channels = await ChannelListNotifier.fetchChannels(serverId);
     final layout = await ChannelLayoutNotifier.fetchLayout(serverId);
     if (!mounted) return;
-    ref.read(archiveTabOpenProvider.notifier).state = false;
-    ref.read(shareTabOpenProvider.notifier).state = false;
-    ref.read(conferenceTabOpenProvider.notifier).state = false;
+    setShellTab(ref.read, null);
     ref.read(selectedPeerProvider.notifier).state = null;
     ref.read(serverSettingsOpenProvider.notifier).state = false;
     ref.read(channelListProvider.notifier).setChannels(channels);
@@ -1278,9 +1275,7 @@ class _HollowShellState extends ConsumerState<HollowShell>
       dockMode: dockMode,
       showUserBar: !dockMode,
       onPeerSelected: (peerId) {
-        ref.read(guestTabOpenProvider.notifier).state = false;
-        ref.read(shareTabOpenProvider.notifier).state = false;
-        ref.read(archiveTabOpenProvider.notifier).state = false;
+        setShellTab(ref.read, null);
         ref.read(selectedPeerProvider.notifier).state = peerId;
         // Mark DM as read — use ref.read (not watch) since this is a callback.
         final lastMsg = ref.read(lastDmMessageProvider)[peerId];

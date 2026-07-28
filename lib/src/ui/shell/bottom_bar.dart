@@ -26,8 +26,8 @@ import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
 import 'package:hollow/src/core/providers/archive_provider.dart';
-import 'package:hollow/src/core/providers/conference_provider.dart';
 import 'package:hollow/src/core/providers/share_tab_provider.dart';
+import 'package:hollow/src/core/providers/shell_tab.dart';
 import 'package:hollow/src/ui/components/download_icon_button.dart';
 import 'package:hollow/src/ui/components/server_folder_popup.dart';
 import 'package:hollow/src/ui/components/profile_card_popup.dart';
@@ -189,7 +189,8 @@ class _BottomBarState extends ConsumerState<BottomBar> {
 
                 // Home button (pinned left)
                 _BottomServerIcon(
-                  isSelected: selectedServerId == null && !archiveOpen && !shareOpen,
+                  isSelected: selectedServerId == null &&
+                      !ref.watch(anyShellTabOpenProvider),
                   unreadCount:
                       selectedServerId != null ? dmUnreadTotal : 0,
                   tooltip: 'Home',
@@ -314,13 +315,9 @@ class _BottomBarState extends ConsumerState<BottomBar> {
                     message: 'Browse Public Channels',
                     child: HollowPressable(
                       semanticLabel: 'Browse public channels',
-                      onTap: () {
-                        if (guestOpen) {
-                          ref.read(guestTabOpenProvider.notifier).state = false;
-                        } else {
-                          _openGuestPanel(ref);
-                        }
-                      },
+                      onTap: () => guestOpen
+                          ? setShellTab(ref.read, null)
+                          : _openGuestPanel(ref),
                       borderRadius:
                           BorderRadius.circular(hollow.radiusSm),
                       padding: const EdgeInsets.all(HollowSpacing.xs),
@@ -338,7 +335,12 @@ class _BottomBarState extends ConsumerState<BottomBar> {
                   message: 'Share',
                   child: HollowPressable(
                     semanticLabel: 'Share',
-                    onTap: () => _openShare(ref),
+                    // Every centre-tab button toggles: the accent-coloured
+                    // icon reads as "on", so pressing it again has to take
+                    // you back out (issue #28).
+                    onTap: () => shareOpen
+                        ? setShellTab(ref.read, null)
+                        : _openShare(ref),
                     borderRadius:
                         BorderRadius.circular(hollow.radiusSm),
                     padding: const EdgeInsets.all(HollowSpacing.xs),
@@ -355,7 +357,9 @@ class _BottomBarState extends ConsumerState<BottomBar> {
                   message: 'Archive',
                   child: HollowPressable(
                     semanticLabel: 'Archive',
-                    onTap: () => _openArchive(ref),
+                    onTap: () => archiveOpen
+                        ? setShellTab(ref.read, null)
+                        : _openArchive(ref),
                     borderRadius:
                         BorderRadius.circular(hollow.radiusSm),
                     padding: const EdgeInsets.all(HollowSpacing.xs),
@@ -414,10 +418,7 @@ class _BottomBarState extends ConsumerState<BottomBar> {
     if (split.isSplit) {
       ref.read(splitViewProvider.notifier).closeSplit();
     }
-    ref.read(guestTabOpenProvider.notifier).state = false;
-    ref.read(archiveTabOpenProvider.notifier).state = false;
-    ref.read(shareTabOpenProvider.notifier).state = false;
-    ref.read(conferenceTabOpenProvider.notifier).state = false;
+    setShellTab(ref.read, null);
     ref.read(selectedServerProvider.notifier).state = null;
     ref.read(channelListProvider.notifier).clear();
     ref.read(selectedChannelProvider.notifier).state = null;
@@ -430,10 +431,7 @@ class _BottomBarState extends ConsumerState<BottomBar> {
     if (split.isSplit) {
       ref.read(splitViewProvider.notifier).closeSplit();
     }
-    ref.read(shareTabOpenProvider.notifier).state = true;
-    ref.read(guestTabOpenProvider.notifier).state = false;
-    ref.read(archiveTabOpenProvider.notifier).state = false;
-    ref.read(conferenceTabOpenProvider.notifier).state = false;
+    setShellTab(ref.read, ShellTab.share);
     ref.read(selectedServerProvider.notifier).state = null;
     ref.read(channelListProvider.notifier).clear();
     ref.read(selectedChannelProvider.notifier).state = null;
@@ -450,10 +448,7 @@ class _BottomBarState extends ConsumerState<BottomBar> {
     ref.invalidate(archiveChannelListProvider);
     ref.read(archiveSelectedDmProvider.notifier).state = null;
     ref.read(archiveSelectedChannelProvider.notifier).state = null;
-    ref.read(archiveTabOpenProvider.notifier).state = true;
-    ref.read(guestTabOpenProvider.notifier).state = false;
-    ref.read(shareTabOpenProvider.notifier).state = false;
-    ref.read(conferenceTabOpenProvider.notifier).state = false;
+    setShellTab(ref.read, ShellTab.archive);
     ref.read(selectedServerProvider.notifier).state = null;
     ref.read(channelListProvider.notifier).clear();
     ref.read(selectedChannelProvider.notifier).state = null;
@@ -466,10 +461,7 @@ class _BottomBarState extends ConsumerState<BottomBar> {
     if (split.isSplit) {
       ref.read(splitViewProvider.notifier).closeSplit();
     }
-    ref.read(guestTabOpenProvider.notifier).state = true;
-    ref.read(shareTabOpenProvider.notifier).state = false;
-    ref.read(archiveTabOpenProvider.notifier).state = false;
-    ref.read(conferenceTabOpenProvider.notifier).state = false;
+    setShellTab(ref.read, ShellTab.guest);
     ref.read(selectedServerProvider.notifier).state = null;
     ref.read(channelListProvider.notifier).clear();
     ref.read(selectedChannelProvider.notifier).state = null;
@@ -524,10 +516,10 @@ class _BottomBarState extends ConsumerState<BottomBar> {
     }
 
     // Batch all provider writes synchronously — single rebuild with
-    // consistent server + channels + selectedChannel state.
-    ref.read(guestTabOpenProvider.notifier).state = false;
-    ref.read(archiveTabOpenProvider.notifier).state = false;
-    ref.read(shareTabOpenProvider.notifier).state = false;
+    // consistent server + channels + selectedChannel state. Closing EVERY
+    // centre tab is part of that: one left open covers the channel we just
+    // selected (issue #28).
+    setShellTab(ref.read, null);
     ref.read(selectedPeerProvider.notifier).state = null;
     ref.read(serverSettingsOpenProvider.notifier).state = false;
     ref.read(channelListProvider.notifier).setChannels(channels);

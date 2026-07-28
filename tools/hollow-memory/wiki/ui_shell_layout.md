@@ -303,14 +303,17 @@ The zoom trio ignores Shift on `+`/`-` (on most layouts `+` IS Shift+`=`) and ac
 1. `guestTabOpenProvider == true` → `PublicChannelBrowser` (public channel browser panel)
 2. `shareTabOpenProvider == true` → `ShareDashboard`
 3. `archiveTabOpenProvider == true` → `ArchiveDashboard`
-3. `selectedChannelId != null`:
+4. `conferenceTabOpenProvider == true` → `ConferenceDashboard`
+5. `selectedChannelId != null`:
    - If `channel.channelType == ChannelType.voice` → `VoiceChannelPane` (keyed by `'vc:$channelId'`)
    - Otherwise → `ChannelChatPane` (keyed by `'ch:$channelId'`)
    - Fallback → `_buildChannelPlaceholder()` (shows `#channelName` header + placeholder text)
-4. `selectedPeerId == null`:
+6. `selectedPeerId == null`:
    - Dock mode → `HomeDashboard`
    - Classic mode → `_buildEmptyChat()` (placeholder with message icon)
-5. `selectedPeerId != null` → `ChatPane` (keyed by peer ID)
+7. `selectedPeerId != null` → `ChatPane` (keyed by peer ID)
+
+**Steps 1–4 are ONE exclusive selection spread across four booleans.** Because the first open tab wins, a navigation site that clears three of them leaves the fourth covering whatever it just selected — that was issue #28 (Conferences over a freshly selected server channel). Switch them ONLY through `setShellTab(ref.read, ShellTab.x)` / `setShellTab(ref.read, null)` (`lib/src/core/providers/shell_tab.dart`), which is the one place that knows the full list; watch `anyShellTabOpenProvider` for "something is covering the chat" (the Home button's selected state). A source-scan guard in `test/shell_tab_test.dart` fails if any file outside `shell_tab.dart` writes a `*TabOpenProvider.notifier`.
 
 ## Channel Sidebar Builder
 

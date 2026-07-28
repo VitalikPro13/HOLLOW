@@ -56,9 +56,9 @@ File: `lib/src/ui/shell/server_strip.dart`
 ### Layout Structure (top to bottom)
 
 1. `SizedBox(height: HollowSpacing.md)` — top padding.
-2. **Home icon** — `_ServerIconWithIndicator` wrapping `_ServerIcon`. Selected when `selectedServerId == null && !archiveOpen && !shareOpen`. Shows DM unread count when a server is selected (not when already on home). Background: `hollow.accent`. Displays bold `'H'` text. Tap: clears `archiveTabOpenProvider`, `shareTabOpenProvider`, `selectedServerProvider`, `channelListProvider`, `selectedChannelProvider`, `serverSettingsOpenProvider`.
-3. **Share icon** — `_ServerIconWithIndicator` + `_ServerIcon`. Selected when `shareOpen`. Background: `hollow.elevated`. Displays `LucideIcons.share2` (accent when selected, textSecondary otherwise). Tap: sets `shareTabOpenProvider` true, clears archive/server/channel/settings state.
-4. **Archive icon** — same pattern. Selected when `archiveOpen`. Displays `LucideIcons.archive`. Tap: invalidates `archiveDmListProvider` and `archiveChannelListProvider`, resets archive selection providers, sets `archiveTabOpenProvider` true, clears server/channel/settings state.
+2. **Home icon** — `_ServerIconWithIndicator` wrapping `_ServerIcon`. Selected when `selectedServerId == null && !ref.watch(anyShellTabOpenProvider)` — ANY centre tab counts, including the guest/conference ones this strip has no button for. Shows DM unread count when a server is selected (not when already on home). Background: `hollow.accent`. Displays bold `'H'` text. Tap: `setShellTab(ref.read, null)` + clears `selectedServerProvider`, `channelListProvider`, `selectedChannelProvider`, `serverSettingsOpenProvider`.
+3. **Share icon** — `_ServerIconWithIndicator` + `_ServerIcon`. Selected when `shareOpen`. Background: `hollow.elevated`. Displays `LucideIcons.share2` (accent when selected, textSecondary otherwise). Tap TOGGLES: open → `setShellTab(null)`; closed → `setShellTab(ShellTab.share)` + clears server/channel/settings state.
+4. **Archive icon** — same pattern, and toggles the same way. Selected when `archiveOpen`. Displays `LucideIcons.archive`. When opening: invalidates `archiveDmListProvider` and `archiveChannelListProvider`, resets archive selection providers, `setShellTab(ShellTab.archive)`, clears server/channel/settings state.
 5. **Divider** — 32px wide, 2px tall, `hollow.border` color, rounded.
 6. **Server icon list** — `Expanded` containing `ListView.builder`. Items interleaved with reorder gaps: `gap0, item0, gap1, item1, ..., gapN`. `itemCount = stripLayout.length * 2 + 1`. Even raw indices are `_VerticalReorderGap` widgets; odd raw indices are server or folder icons. Each item gets `Padding(bottom: HollowSpacing.xs)`.
 7. **Add button** — `_ServerIcon` with `LucideIcons.plus` in accent color, tooltip `'Create a server'`. Tap: calls `showCreateServerDialog(context)`. Has bottom padding `HollowSpacing.md`.
@@ -133,14 +133,13 @@ Reads `lastChannelPerServerProvider[serverId]`. If that channel still exists, us
 
 The following writes happen in one synchronous block (one microtask, one rebuild):
 
-1. `archiveTabOpenProvider` = false
-2. `shareTabOpenProvider` = false
-3. `selectedPeerProvider` = null
-4. `serverSettingsOpenProvider` = false
-5. `channelListProvider.notifier.setChannels(channels)` — **CRITICAL**: must come before `selectedChannelProvider`
-6. `channelLayoutProvider.notifier.setLayout(layout)` — **CRITICAL**: must come before `selectedChannelProvider`
-7. `selectedChannelProvider` = channelToSelect
-8. `selectedServerProvider` = serverId
+1. `setShellTab(ref.read, null)` — closes ALL four centre tabs (guest / share / archive / conference) in one call. Clearing them by hand is what caused issue #28: both `_selectServer`s missed `conferenceTabOpenProvider`, so the conference dashboard stayed on top of the server that had just been selected.
+2. `selectedPeerProvider` = null
+3. `serverSettingsOpenProvider` = false
+4. `channelListProvider.notifier.setChannels(channels)` — **CRITICAL**: must come before `selectedChannelProvider`
+5. `channelLayoutProvider.notifier.setLayout(layout)` — **CRITICAL**: must come before `selectedChannelProvider`
+6. `selectedChannelProvider` = channelToSelect
+7. `selectedServerProvider` = serverId
 
 ### Step 4: Persist last channel
 
@@ -191,9 +190,11 @@ Nested `Row` with:
 
 Centered `Row` of `HollowPressable` icon buttons, each wrapped in `HollowTooltip`:
 
-- **Browse Public Channels** — `LucideIcons.globe`. Color: accent when `guestTabOpenProvider`, textSecondary otherwise. Tap: toggles `guestTabOpenProvider` — opens `PublicChannelBrowser` panel (same pattern as Share/Archive). When opening, clears server/channel/peer selection via `_openGuestPanel(ref)`.
-- **Share** — `LucideIcons.share2`. Color: accent when `shareOpen`, textSecondary otherwise. Tap: `_openShare(ref)` — closes split, sets share tab open, clears other state.
-- **Archive** — `LucideIcons.archive`. Color: accent when `archiveOpen`, textSecondary otherwise. Tap: `_openArchive(ref)` — closes split, invalidates archive lists, resets archive selection, sets archive tab open.
+**All three centre-tab buttons TOGGLE** (issue #28): the accent-coloured icon reads as an on/off control, so pressing the lit one calls `setShellTab(ref.read, null)` and drops back to Home. The Conferences button (in `FriendsBar`, not here) behaves the same way.
+
+- **Browse Public Channels** — `LucideIcons.globe`. Color: accent when `guestTabOpenProvider`, textSecondary otherwise. Tap: open → `setShellTab(null)`; closed → `_openGuestPanel(ref)` (opens `PublicChannelBrowser`, clears server/channel/peer selection).
+- **Share** — `LucideIcons.share2`. Color: accent when `shareOpen`, textSecondary otherwise. Tap: open → `setShellTab(null)`; closed → `_openShare(ref)` (closes split, `setShellTab(ShellTab.share)`, clears other state).
+- **Archive** — `LucideIcons.archive`. Color: accent when `archiveOpen`, textSecondary otherwise. Tap: open → `setShellTab(null)`; closed → `_openArchive(ref)` (closes split, invalidates archive lists, resets archive selection, `setShellTab(ShellTab.archive)`).
 - **Download** — `DownloadIconButton(iconSize: 18)` (separate component).
 - **Settings** — `LucideIcons.settings`, textSecondary. Tap: `showUserSettingsDialog(context, ref, openSystemTab: true)`.
 - **Recovery phrase** — `LucideIcons.keyRound`, textSecondary. Only visible when `identity.mnemonic != null`. Tap: `showMnemonicDialog(context, identity.mnemonic!)`.

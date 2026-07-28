@@ -28,6 +28,7 @@ import 'package:hollow/src/core/providers/server_banner_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/server_strip_layout_provider.dart';
 import 'package:hollow/src/core/providers/service_providers.dart';
+import 'package:hollow/src/core/providers/shell_tab.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/sync_progress_provider.dart';
 import 'package:hollow/src/core/providers/typing_provider.dart';
@@ -663,7 +664,11 @@ class EventStreamNotifier extends Notifier<bool> {
         handleTwitchJoinResult(success: true);
         ref.read(serverListProvider.notifier).onServerCreated(serverId, name);
         ref.read(serverStripLayoutProvider.notifier).onServerCreated(serverId);
-        // Auto-select the newly joined server and load its channels
+        // Auto-select the newly joined server and load its channels. Close any
+        // centre tab first — joining straight out of Browse Public Channels is
+        // a normal flow, and the tab would sit on top of the server we just
+        // selected (issue #28).
+        setShellTab(ref.read, null);
         ref.read(selectedServerProvider.notifier).state = serverId;
         ref.read(selectedPeerProvider.notifier).state = null;
         ref.read(serverSettingsOpenProvider.notifier).state = false;

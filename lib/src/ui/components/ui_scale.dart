@@ -3,6 +3,7 @@ import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/display_scale_provider.dart';
 
@@ -86,20 +87,22 @@ class UiScaleBox extends StatelessWidget {
         // Clamp to what this window can actually show, so no combination of
         // zoom + window size can hide the controls that undo the zoom.
         final scale = effectiveUiScale(this.scale, available);
-        // Published either way so the Settings slider can say why it stopped.
-        if ((scale - 1.0).abs() < 0.001) {
-          return UiScaleInfo(
-            requested: this.scale,
-            effective: scale,
-            child: child,
-          );
-        }
+        final isNoop = (scale - 1.0).abs() < 0.001;
 
         // Every measurement below the transform shrinks by the same factor:
         // the viewport, the safe-area padding and the keyboard inset.
         // devicePixelRatio grows instead — one of our logical pixels now
         // covers `scale` more device pixels, which is what keeps
         // `cacheWidth`-style image decoding sharp.
+        //
+        // At 100% this is NOT a no-op, and that is the point: `size` becomes
+        // the SLOT rather than the window. The desktop title bar owns the top
+        // 32px, so everything below here — dialogs sizing themselves, every
+        // popup that clamps itself into the `Overlay` — was working from a
+        // viewport 32px taller than the one it actually renders in, and
+        // anything anchored near the bottom edge got cut off (issue #20:
+        // bottom-dock tooltips rendered below the button and off the screen).
+        // The Overlay fills this box exactly, so this size IS overlay space.
         final scaledSize = available / scale;
         final scaled = mq.copyWith(
           size: scaledSize,
@@ -115,31 +118,132 @@ class UiScaleBox extends StatelessWidget {
           effective: scale,
           child: MediaQuery(
             data: scaled,
-            child: Transform.scale(
-              scale: scale,
-              alignment: Alignment.topLeft,
-              // OverflowBox keeps this widget the size of its slot while
-              // handing the child relaxed constraints, so the SizedBox can
-              // take the smaller (or larger) logical size the transform
-              // expects. Without it the incoming tight constraints would pin
-              // the child to the slot size and the transform would crop.
-              child: OverflowBox(
-                alignment: Alignment.topLeft,
-                minWidth: 0,
-                maxWidth: double.infinity,
-                minHeight: 0,
-                maxHeight: double.infinity,
-                child: SizedBox(
-                  width: scaledSize.width,
-                  height: scaledSize.height,
-                  child: child,
-                ),
-              ),
-            ),
+            // Published either way so the Settings slider can say why it
+            // stopped; at 100% the app is laid out and painted untouched.
+            child: isNoop
+                ? child
+                : _ScaledViewport(
+                    scale: scale,
+                    viewport: available,
+                    child: child,
+                  ),
           ),
         );
       },
     );
+  }
+}
+
+/// The one box that does the zoom: it occupies [viewport] (its slot), lays the
+/// app out at `viewport / scale`, and paints — and hit-tests — it back through
+/// a single scale transform.
+///
+/// **Why this is a render object and not `Transform.scale` over an
+/// `OverflowBox`.** That composition painted correctly but hit-tested wrong
+/// below 100% (issue #20 follow-up). At 0.9x the app lays out LARGER than the
+/// window, and every `RenderBox.hitTest` starts with `size.contains(position)`
+/// — the OverflowBox in between was pinned to the slot by the incoming tight
+/// constraints, so as soon as the inverse transform pushed a pointer past
+/// `slot` in child space the hit test was rejected before it ever reached the
+/// app. The dead strip was the bottom `slot.height * (1 - scale)` and the
+/// right `slot.width * (1 - scale)` of the window: the entire bottom dock and
+/// the right end of the top bar, growing as you zoomed further out.
+///
+/// Here there is nothing in between. This box's own size IS the slot, so every
+/// pointer in the window passes its bounds check, and [hitTestChildren] hands
+/// the child a position through the same matrix used to paint it.
+class _ScaledViewport extends SingleChildRenderObjectWidget {
+  final double scale;
+  final Size viewport;
+
+  const _ScaledViewport({
+    required this.scale,
+    required this.viewport,
+    required super.child,
+  });
+
+  @override
+  _RenderScaledViewport createRenderObject(BuildContext context) =>
+      _RenderScaledViewport(scale: scale, viewport: viewport);
+
+  @override
+  void updateRenderObject(
+    BuildContext context,
+    _RenderScaledViewport renderObject,
+  ) {
+    renderObject
+      ..scale = scale
+      ..viewport = viewport;
+  }
+}
+
+class _RenderScaledViewport extends RenderBox
+    with RenderObjectWithChildMixin<RenderBox> {
+  _RenderScaledViewport({required double scale, required Size viewport})
+      : _scale = scale,
+        _viewport = viewport;
+
+  double _scale;
+  double get scale => _scale;
+  set scale(double value) {
+    if (_scale == value) return;
+    _scale = value;
+    markNeedsLayout();
+  }
+
+  Size _viewport;
+  Size get viewport => _viewport;
+  set viewport(Size value) {
+    if (_viewport == value) return;
+    _viewport = value;
+    markNeedsLayout();
+  }
+
+  Matrix4 get _transform => Matrix4.diagonal3Values(_scale, _scale, 1.0);
+
+  @override
+  Size computeDryLayout(BoxConstraints constraints) =>
+      constraints.constrain(_viewport);
+
+  @override
+  void performLayout() {
+    // Our size is the slot; the app inside is laid out at slot / scale and
+    // painted back up (or down) to fill it exactly.
+    size = constraints.constrain(_viewport);
+    child?.layout(BoxConstraints.tight(size / _scale));
+  }
+
+  @override
+  void paint(PaintingContext context, Offset offset) {
+    final child = this.child;
+    if (child == null) return;
+    layer = context.pushTransform(
+      needsCompositing,
+      offset,
+      _transform,
+      (PaintingContext innerContext, Offset innerOffset) =>
+          innerContext.paintChild(child, innerOffset),
+      oldLayer: layer is TransformLayer ? layer as TransformLayer? : null,
+    );
+  }
+
+  @override
+  bool hitTestChildren(BoxHitTestResult result, {required Offset position}) {
+    final child = this.child;
+    if (child == null) return false;
+    return result.addWithPaintTransform(
+      transform: _transform,
+      position: position,
+      hitTest: (BoxHitTestResult result, Offset transformed) =>
+          child.hitTest(result, position: transformed),
+    );
+  }
+
+  /// Keeps `localToGlobal`/`globalToLocal` and the semantics rects honest —
+  /// which is also what makes `overlay_anchor.dart` land popups correctly.
+  @override
+  void applyPaintTransform(RenderBox child, Matrix4 transform) {
+    transform.multiply(_transform);
   }
 }
 

@@ -1,9 +1,7 @@
 ﻿import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:hollow/src/core/providers/archive_provider.dart';
 import 'package:hollow/src/core/providers/conference_provider.dart';
-import 'package:hollow/src/core/providers/guest_provider.dart';
-import 'package:hollow/src/core/providers/share_tab_provider.dart';
+import 'package:hollow/src/core/providers/shell_tab.dart';
 import 'package:hollow/src/core/providers/favourite_friends_provider.dart';
 import 'package:hollow/src/core/providers/friends_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
@@ -207,8 +205,11 @@ class FriendsBar extends ConsumerWidget {
               message: 'Conferences',
               child: HollowPressable(
                 semanticLabel: 'Conferences',
-                onTap: () =>
-                    ref.read(conferenceProvider.notifier).openTab(),
+                // Toggles: pressing the lit button again is how you get back
+                // to what you were doing (issue #28).
+                onTap: () => conferencesOpen
+                    ? setShellTab(ref.read, null)
+                    : ref.read(conferenceProvider.notifier).openTab(),
                 borderRadius: BorderRadius.circular(hollow.radiusSm),
                 padding: const EdgeInsets.symmetric(
                   horizontal: HollowSpacing.sm,
@@ -261,10 +262,7 @@ class FriendsBar extends ConsumerWidget {
     if (split.isSplit && split.focusedPane == 1) {
       ref.read(splitViewProvider.notifier).navigateRightToPeer(peerId);
     } else {
-      ref.read(guestTabOpenProvider.notifier).state = false;
-      ref.read(archiveTabOpenProvider.notifier).state = false;
-      ref.read(shareTabOpenProvider.notifier).state = false;
-      ref.read(conferenceTabOpenProvider.notifier).state = false;
+      setShellTab(ref.read, null);
       ref.read(selectedPeerProvider.notifier).state = peerId;
       ref.read(selectedServerProvider.notifier).state = null;
       ref.read(channelListProvider.notifier).clear();

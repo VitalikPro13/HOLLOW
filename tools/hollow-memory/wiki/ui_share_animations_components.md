@@ -643,13 +643,14 @@ File: `lib/src/ui/components/hollow_tooltip.dart`
 
 **Dismiss (`_dismiss()`):**
 - **Critical pattern:** Immediate overlay removal, no reverse animation. Prevents orphaned tooltips when parent rebuilds or leaves tree during hover (e.g., call bar buttons disappearing).
-- Stops controller, resets to 0, removes + nulls `_entry`.
+- Stops the controller (status listeners only — safe), removes + nulls `_entry`. It must NOT rewind the controller's value: `deactivate()` runs mid-build and the still-mounted Fade/SlideTransition would `setState() during build`. The rewind (`_controller.value = 0`) happens at the top of `_showTooltip()` instead, before the new entry is in the tree.
 - Called on: hover exit, `deactivate()`, `dispose()`, message change (`didUpdateWidget`).
 
-**Positioning (in OverlayEntry builder):**
-- Tooltip width estimate: `message.length * 7.0 + padding`, clamped to screen bounds.
-- Horizontal: centered on widget, clamped 8px from edges.
-- Vertical: prefers below (`widget position + height + 6px gap`), flips above if would overflow. Estimated height: 28px.
+**Positioning (in OverlayEntry builder) — measured, not estimated (issue #20 fix, 2026-07-28):**
+- `Positioned.fill` → `IgnorePointer` → `CustomSingleChildLayout(delegate: _TooltipPositionDelegate)`. The layout box spans the whole overlay so the delegate sees the real space; `IgnorePointer` keeps it from eating the hover underneath.
+- `_TooltipPositionDelegate` calls Flutter's `positionDependentBox(size: <overlay box>, childSize: <measured tooltip>, target: <anchor centre>, verticalOffset: anchorHeight/2 + 6, preferBelow: widget.preferBelow, margin: 8)`. `getConstraintsForChild` loosens and caps width at `maxWidth - 16` so long labels wrap.
+- The old code estimated `message.length * 7.0` wide and a flat 28px tall and compared them to `MediaQuery.size`. On desktop that is the WINDOW, while the overlay is 32px shorter (title bar), so a bottom-dock tooltip "fit" below its button and rendered off the bottom edge. Both halves are fixed: this delegate, and `UiScale` publishing the slot as `MediaQuery.size`.
+- Every call site uses the default `preferBelow: true`; dock tooltips reach the flip-above path.
 
 **Visual:** `hollow.elevated` background, `radiusSm` corners, `hollow.border` border. Text in `HollowTypography.caption`, `hollow.textPrimary`.
 
