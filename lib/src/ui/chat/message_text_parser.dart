@@ -51,9 +51,15 @@ class _Token {
   final String text;
   final List<_Token>? children; // for nested markup (bold > italic, etc.)
   final String? extra; // customEmote: the content hash
-  final bool block; // asset: token stood alone on its own line
 
-  const _Token(this.kind, this.text, [this.children, this.extra, this.block = false]);
+  /// asset: the token already starts / ends its own line (ignoring horizontal
+  /// whitespace), so the block render needs no synthetic break on that side.
+  /// Always true for every other kind — they never insert breaks.
+  final bool atLineStart;
+  final bool atLineEnd;
+
+  const _Token(this.kind, this.text,
+      [this.children, this.extra, this.atLineStart = true, this.atLineEnd = true]);
 }
 
 // ---------------------------------------------------------------------------
@@ -197,24 +203,44 @@ _TokenMatch? _matchCustomEmote(String text, int i) {
   return null;
 }
 
-/// `[a:kind:hash:w:h]` — sticker/GIF token. A token standing alone on its
-/// own line renders as a block (large); inline with other text it stays
-/// capped to the line. Tokens with out-of-bound dims fail [parseAssetToken]
-/// and fall through to plain text (same as an old client would render).
+/// `[a:kind:hash:w:h]` — sticker/GIF token. ALWAYS renders as a block at the
+/// chat media box (see [assetChatBox]); text sharing the line becomes a
+/// caption above/below it rather than shrinking the media to two
+/// line-heights, matching how image/video attachments carry a caption.
+/// Horizontal whitespace on either side does not count as "sharing the line".
+/// Tokens with out-of-bound dims fail [parseAssetToken] and fall through to
+/// plain text (same as an old client would render).
 _TokenMatch? _matchAssetToken(String text, int i) {
   if (text[i] == '[') {
     final match = assetTokenRegex.matchAsPrefix(text, i);
     if (match != null && parseAssetToken(match.group(0)!) != null) {
-      final alone = (i == 0 || text[i - 1] == '\n') &&
-          (match.end == text.length || text[match.end] == '\n');
+      var before = i;
+      while (before > 0 && _isHSpace(text[before - 1])) {
+        before--;
+      }
+      var after = match.end;
+      while (after < text.length && _isHSpace(text[after])) {
+        after++;
+      }
       return _TokenMatch(
-        _Token(_TokenKind.asset, match.group(0)!, null, null, alone),
+        _Token(
+          _TokenKind.asset,
+          match.group(0)!,
+          null,
+          null,
+          before == 0 || text[before - 1] == '\n',
+          after == text.length || text[after] == '\n',
+        ),
         match.end,
       );
     }
   }
   return null;
 }
+
+bool _isHSpace(String c) => c == ' ' || c == '\t';
+
+final _leadingHSpaces = RegExp(r'^[ \t]+');
 
 // --- @mention ---
 _TokenMatch? _matchMention(String text, int i, Set<String>? memberNames) {
@@ -357,10 +383,19 @@ List<InlineSpan> _tokensToSpans(
   TextScaler scaler,
 ) {
   final spans = <InlineSpan>[];
+  // Set when a block asset just emitted a synthetic trailing newline: the
+  // caption that follows must not start with the space that separated it
+  // from the token.
+  var trimLeadingSpaces = false;
   for (final tok in tokens) {
+    final trimNow = trimLeadingSpaces;
+    trimLeadingSpaces = false;
     switch (tok.kind) {
       case _TokenKind.plain:
-        spans.add(TextSpan(text: tok.text, style: style));
+        spans.add(TextSpan(
+          text: trimNow ? tok.text.replaceFirst(_leadingHSpaces, '') : tok.text,
+          style: style,
+        ));
       case _TokenKind.url:
         spans.add(WidgetSpan(
           alignment: PlaceholderAlignment.baseline,
@@ -450,36 +485,28 @@ List<InlineSpan> _tokensToSpans(
           spans.add(TextSpan(text: tok.text, style: style));
           break;
         }
-        final aspect = asset.w / asset.h;
-        if (tok.block) {
-          // Alone on its own line: block render, GIFs up to 480px wide,
-          // stickers up to 160px, never upscaled past the source pixels.
-          // Media follows the interface scale (root UiScale transform), not
-          // the chat TEXT scale — same rule as avatars and file cards.
-          final cap = tok.text.startsWith('[a:g') ? 480.0 : 160.0;
-          spans.add(WidgetSpan(
-            child: Padding(
-              padding: const EdgeInsets.symmetric(vertical: 4),
-              child: ChatAssetImage(
-                kind: asset.kind,
-                hash: asset.hash,
-                aspect: aspect,
-                maxWidth: cap < asset.w ? cap : asset.w.toDouble(),
-              ),
-            ),
-          ));
-        } else {
-          // Inline with other text: capped to ~2 line-heights, which DOES
-          // ride the text scaler like the words around it.
-          spans.add(WidgetSpan(
-            alignment: PlaceholderAlignment.middle,
+        // Assets ALWAYS render as a block at the image-attachment box, never
+        // shrunk to the line: text sharing the line is a CAPTION, so break
+        // the line around the media instead. Media follows the interface
+        // scale (root UiScale transform), not the chat TEXT scale — same
+        // rule as avatars and file cards.
+        final box = assetChatBox(asset.kind, asset.w, asset.h);
+        if (!tok.atLineStart) spans.add(TextSpan(text: '\n', style: style));
+        spans.add(WidgetSpan(
+          child: Padding(
+            padding: const EdgeInsets.symmetric(vertical: 4),
             child: ChatAssetImage(
               kind: asset.kind,
               hash: asset.hash,
-              aspect: aspect,
-              height: scaler.scale(style.fontSize ?? 15) * 2.0,
+              aspect: asset.w / asset.h,
+              width: box.width,
+              height: box.height,
             ),
-          ));
+          ),
+        ));
+        if (!tok.atLineEnd) {
+          spans.add(TextSpan(text: '\n', style: style));
+          trimLeadingSpaces = true;
         }
       case _TokenKind.code:
         spans.add(WidgetSpan(

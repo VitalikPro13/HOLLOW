@@ -38,6 +38,7 @@ import 'package:hollow/src/ui/chat/channel_message_bubble.dart';
 import 'package:hollow/src/ui/chat/chat_drop_zone.dart';
 import 'package:hollow/src/ui/chat/chat_input_shortcuts.dart';
 import 'package:hollow/src/ui/chat/emoji_picker.dart';
+import 'package:hollow/src/ui/chat/gif_picker.dart';
 import 'package:hollow/src/ui/chat/emote_composer.dart';
 import 'package:hollow/src/ui/chat/emote_image.dart';
 import 'package:hollow/src/core/providers/emote_provider.dart';
@@ -1400,9 +1401,23 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
     );
   }
 
+  /// Open the GIF picker anchored to the composer button; the picked GIF
+  /// arrives as an `[a:g:hash:w:h]` token and stages like an emote.
+  void _openComposerGifPicker(BuildContext btnCtx) {
+    final box = btnCtx.findRenderObject() as RenderBox?;
+    final anchor = box == null
+        ? Offset.zero
+        : overlayAnchorOf(btnCtx, localOffset: Offset(box.size.width, 0));
+    showGifPicker(
+      context: context,
+      anchorPosition: anchor,
+      onSelect: _insertEmojiAtCursor,
+    );
+  }
+
   void _insertEmojiAtCursor(String text) {
-    // Custom-emote tokens become a 1-char placeholder rendered inline as
-    // the actual emote image; Unicode emoji pass through unchanged.
+    // Custom-emote/asset tokens become a 1-char placeholder rendered inline
+    // as the actual image; Unicode emoji pass through unchanged.
     text = _controller.displayTextFor(text);
     final sel = _controller.selection;
     final base = sel.isValid ? sel.baseOffset : _controller.text.length;
@@ -2536,6 +2551,8 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
             ),
           ),
         ),
+        const SizedBox(width: HollowSpacing.xs),
+        composerGifButton(hollow, onOpen: _openComposerGifPicker),
         const SizedBox(width: HollowSpacing.xs),
         composerEmojiButton(hollow, onOpen: _openComposerEmojiPicker),
         const SizedBox(width: HollowSpacing.sm),

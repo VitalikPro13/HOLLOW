@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -75,7 +77,7 @@ class EmoteImage extends ConsumerWidget {
         fit: BoxFit.contain,
         gaplessPlayback: true,
         filterQuality: FilterQuality.medium,
-        errorBuilder: (_, __, ___) => Text(
+        errorBuilder: (_, _, _) => Text(
           ':$name:',
           style: (fallbackStyle ?? const TextStyle())
               .copyWith(color: hollow.textTertiary),
@@ -120,12 +122,34 @@ final assetTokenRegex = RegExp(
   return (kind: m.group(1)!, hash: m.group(2)!, w: w, h: h);
 }
 
+/// Chat media box for a block-rendered asset: fit inside [maxW]x[maxH]
+/// preserving the aspect, and NEVER upscale past the asset's own pixels.
+/// Same rule (and same numbers) as image attachments — see
+/// `file_attachment_widget._buildImagePreview`, 300x250.
+Size fitAssetBox(int srcW, int srcH,
+    {required double maxW, required double maxH}) {
+  if (srcW <= 0 || srcH <= 0) return Size(maxW, maxH);
+  final aspect = srcW / srcH;
+  var w = math.min(maxW, srcW.toDouble());
+  var h = w / aspect;
+  // w <= srcW, so h <= srcH here: clamping height can only shrink further,
+  // never upscale.
+  if (h > maxH) {
+    h = maxH;
+    w = h * aspect;
+  }
+  return Size(w, h);
+}
+
+/// The chat media caps for each asset kind — GIFs match image attachments so
+/// a GIF-with-caption reads exactly like a photo-with-caption.
+Size assetChatBox(String kind, int srcW, int srcH) => kind == 'g'
+    ? fitAssetBox(srcW, srcH, maxW: 300, maxH: 250)
+    : fitAssetBox(srcW, srcH, maxW: 160, maxH: 160);
+
 /// Renders a generalized asset token (sticker/GIF) from the content-addressed
 /// blob cache. The token's w/h reserve the EXACT final box before bytes
 /// arrive — a sized placeholder flips to the image with zero reflow.
-///
-/// Exactly one of [maxWidth] (block render — token alone on its line) or
-/// [height] (inline render, capped to the surrounding line height) is set.
 class ChatAssetImage extends ConsumerWidget {
   /// Token kind: 's' (sticker) or 'g' (GIF).
   final String kind;
@@ -134,21 +158,21 @@ class ChatAssetImage extends ConsumerWidget {
   /// w/h aspect ratio from the token.
   final double aspect;
 
-  /// Block mode: render at up to this width (already capped to the token's
-  /// own pixel width — small assets never upscale).
-  final double? maxWidth;
+  /// Exact display height.
+  final double height;
 
-  /// Inline mode: exact display height; width follows the aspect (capped at
-  /// 4:1 so a wide asset can't swallow the line).
-  final double? height;
+  /// Exact display width. Null = inline mode: the width follows [aspect],
+  /// clamped at 4:1 so a wide asset can't swallow the line. Block callers
+  /// pass a box from [assetChatBox].
+  final double? width;
 
   const ChatAssetImage({
     super.key,
     required this.kind,
     required this.hash,
     required this.aspect,
-    this.maxWidth,
-    this.height,
+    required this.height,
+    this.width,
   });
 
   String get _label => kind == 'g' ? 'GIF' : 'sticker';
@@ -191,45 +215,64 @@ class ChatAssetImage extends ConsumerWidget {
               fit: BoxFit.cover,
               gaplessPlayback: true,
               filterQuality: FilterQuality.medium,
-              errorBuilder: (_, __, ___) => placeholder(),
+              errorBuilder: (_, _, _) => placeholder(),
             ),
           );
 
-    final box = height != null
-        ? SizedBox(
-            height: height,
-            width: height! * aspect.clamp(0.25, 4.0),
-            child: content,
-          )
-        : ConstrainedBox(
-            constraints: BoxConstraints(maxWidth: maxWidth ?? 480),
-            child: AspectRatio(aspectRatio: aspect, child: content),
-          );
+    final box = SizedBox(
+      width: width ?? height * aspect.clamp(0.25, 4.0),
+      height: height,
+      child: content,
+    );
 
     return Semantics(image: true, label: _label, child: box);
   }
 }
 
 /// Inline spans for one-line message previews (notification cards/banners):
-/// plain text with each emote token swapped for an [EmoteImage] sized to the
-/// line. Chat bubbles use the full message parser instead — this is for
-/// surfaces that would otherwise print the raw token.
+/// plain text with each emote token swapped for an [EmoteImage] and each
+/// asset token (GIF/sticker) for a line-sized [ChatAssetImage]. Chat bubbles
+/// use the full message parser instead — this is for surfaces that would
+/// otherwise print the raw token.
 List<InlineSpan> emotePreviewSpans(String text, TextStyle style) {
   final spans = <InlineSpan>[];
+  final matches = [
+    ...emoteTokenRegex.allMatches(text),
+    ...assetTokenRegex.allMatches(text),
+  ]..sort((a, b) => a.start.compareTo(b.start));
   var last = 0;
-  for (final m in emoteTokenRegex.allMatches(text)) {
+  for (final m in matches) {
+    if (m.start < last) continue; // overlap can't happen, but stay safe
     if (m.start > last) {
       spans.add(TextSpan(text: text.substring(last, m.start)));
     }
-    spans.add(WidgetSpan(
-      alignment: PlaceholderAlignment.middle,
-      child: EmoteImage(
-        name: m.group(1)!,
-        hash: m.group(2)!,
-        size: (style.fontSize ?? 14) * 1.35,
-        fallbackStyle: style,
-      ),
-    ));
+    final token = m.group(0)!;
+    final asset = parseAssetToken(token);
+    final emote = asset == null ? parseEmoteToken(token) : null;
+    if (asset != null) {
+      spans.add(WidgetSpan(
+        alignment: PlaceholderAlignment.middle,
+        child: ChatAssetImage(
+          kind: asset.kind,
+          hash: asset.hash,
+          aspect: asset.w / asset.h,
+          height: (style.fontSize ?? 14) * 1.8,
+        ),
+      ));
+    } else if (emote != null) {
+      spans.add(WidgetSpan(
+        alignment: PlaceholderAlignment.middle,
+        child: EmoteImage(
+          name: emote.name,
+          hash: emote.hash,
+          size: (style.fontSize ?? 14) * 1.35,
+          fallbackStyle: style,
+        ),
+      ));
+    } else {
+      // Regex-matched but parse-rejected (out-of-range dims): raw text.
+      spans.add(TextSpan(text: token));
+    }
     last = m.end;
   }
   if (last < text.length) {

@@ -76,6 +76,8 @@ import 'package:hollow/src/ui/dialogs/user_settings_dialog.dart';
 import 'package:hollow/src/ui/dialogs/welcome_dialog.dart';
 import 'package:hollow/src/ui/dialogs/license_key_dialog.dart';
 import 'package:hollow/src/core/providers/license_key_provider.dart';
+import 'package:hollow/src/core/providers/gif_library_provider.dart';
+import 'package:hollow/src/core/providers/gif_provider.dart';
 import 'package:hollow/src/core/providers/relay_domain_provider.dart';
 import 'package:hollow/src/core/providers/relay_status_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
@@ -873,6 +875,17 @@ class _HollowShellState extends ConsumerState<HollowShell>
     final relayDomain = ref.read(relayDomainProvider);
     await network_api.setRelayUrl(domain: relayDomain);
     await ref.read(licenseKeyProvider.notifier).loadCached();
+
+    // GIF proxy override (self-hosters) — push explicitly, like the relay
+    // URL above. Then warm the trending page a little later so the GIF
+    // picker opens with zero spinner (plan: prefetch at app idle).
+    await ref.read(gifProxyUrlProvider.notifier).loadCached();
+    // AFTER the proxy URL: saved GIFs store proxy-RELATIVE media paths and
+    // resolve them against whatever base is active.
+    await ref.read(gifLibraryProvider.notifier).loadCached();
+    Future.delayed(const Duration(seconds: 5), () {
+      if (mounted) ref.read(gifCatalogProvider).prefetchTrending();
+    });
 
     // Anti-censorship proxy: force the (lazy) proxy-config provider to build so
     // its `_push` seeds the Rust global BEFORE start_node() (line ~903) reads it.

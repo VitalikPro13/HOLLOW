@@ -36,6 +36,7 @@ import 'package:hollow/src/ui/chat/hollow_link_utils.dart';
 import 'package:hollow/src/ui/chat/message_bubble.dart';
 import 'package:hollow/src/ui/chat/channel_message_bubble.dart';
 import 'package:hollow/src/ui/chat/emoji_picker.dart';
+import 'package:hollow/src/ui/chat/gif_picker.dart';
 import 'package:hollow/src/ui/chat/emote_composer.dart';
 import 'package:hollow/src/ui/chat/emote_image.dart';
 import 'package:hollow/src/core/providers/emote_provider.dart';
@@ -1059,6 +1060,34 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     );
   }
 
+  /// GIF picker as a bottom sheet; the pick arrives as an `[a:g:hash:w:h]`
+  /// token and stages in the composer like an emote.
+  void _showGifSheet() {
+    _focusNode.unfocus();
+    final hollow = HollowTheme.of(context);
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: hollow.surface,
+      isScrollControlled: true,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(hollow.radiusLg)),
+      ),
+      builder: (_) => SafeArea(
+        child: SizedBox(
+          // 0.62 rather than 0.55: the Popular/Favourites/Recent row costs a
+          // line of chrome, and the grid needs to keep ~2 full rows.
+          height: MediaQuery.sizeOf(context).height * 0.62,
+          child: GifPickerBody(
+            onSelect: (token) {
+              Navigator.pop(context);
+              _insertAtCursor(_controller.displayTextFor(token));
+            },
+          ),
+        ),
+      ),
+    );
+  }
+
   /// Insert [text] (a Unicode emoji or an emote token) at the composer's
   /// cursor, replacing any selection.
   void _insertAtCursor(String text) {
@@ -1134,6 +1163,11 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
               icon: LucideIcons.image,
               label: 'Photo',
               onTap: () => _pickFile(imagesOnly: true),
+            ),
+            row(
+              icon: Icons.gif_box_outlined,
+              label: 'GIF',
+              onTap: _showGifSheet,
             ),
             row(
               icon: LucideIcons.paperclip,

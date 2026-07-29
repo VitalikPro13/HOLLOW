@@ -564,6 +564,30 @@ pub(crate) fn get_runtime() -> &'static tokio::runtime::Runtime {
     })
 }
 
+static HTTP_RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+
+/// Small dedicated runtime for authoring-time website-proxy HTTP (FFZ, IGDB,
+/// GIF search/fetch). ISOLATED from the node runtime ON PURPOSE: reqwest
+/// resolves DNS on its runtime's blocking pool, and the node runtime's pool
+/// (capped at 8 above) is routinely saturated by SQLCipher bursts — on the
+/// shared runtime a picker search could stall for its full 20s timeout
+/// behind unrelated DB work before the request was ever SENT (the "GIF
+/// search never loads" bug, 2026-07-29; reproduced by
+/// `gifs::tests::live_saturated_blocking_pool_smoke`). One worker + a
+/// tiny reaped-in-5s blocking pool — negligible thread budget.
+pub(crate) fn get_http_runtime() -> &'static tokio::runtime::Runtime {
+    HTTP_RUNTIME.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .max_blocking_threads(4)
+            .thread_keep_alive(std::time::Duration::from_secs(5))
+            .thread_name("hollow-http")
+            .enable_all()
+            .build()
+            .expect("Failed to create HTTP runtime")
+    })
+}
+
 /// Convert internal event to FFI event. Also logs Error events to the debug log file.
 fn to_ffi_event(event: node::NetworkEvent) -> NetworkEvent {
     // Log all events to the debug log file so release builds have diagnostics.

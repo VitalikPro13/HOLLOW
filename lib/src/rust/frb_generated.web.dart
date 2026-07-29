@@ -10,6 +10,7 @@ import 'api/archive.dart';
 import 'api/conference.dart';
 import 'api/crdt.dart';
 import 'api/emotes.dart';
+import 'api/gifs.dart';
 import 'api/identity.dart';
 import 'api/network.dart';
 import 'api/screen_audio.dart';
@@ -165,6 +166,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   GameSearchResult dco_decode_game_search_result(dynamic raw);
 
   @protected
+  GifItem dco_decode_gif_item(dynamic raw);
+
+  @protected
+  GifPage dco_decode_gif_page(dynamic raw);
+
+  @protected
   GuestReactionFfi dco_decode_guest_reaction_ffi(dynamic raw);
 
   @protected
@@ -239,6 +246,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<GameSearchResult> dco_decode_list_game_search_result(dynamic raw);
+
+  @protected
+  List<GifItem> dco_decode_list_gif_item(dynamic raw);
 
   @protected
   List<GuestReactionFfi> dco_decode_list_guest_reaction_ffi(dynamic raw);
@@ -459,6 +469,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   StoredFileInfo dco_decode_stored_file_info(dynamic raw);
 
   @protected
+  StoredGif dco_decode_stored_gif(dynamic raw);
+
+  @protected
   StoredMessage dco_decode_stored_message(dynamic raw);
 
   @protected
@@ -661,6 +674,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   GameSearchResult sse_decode_game_search_result(SseDeserializer deserializer);
 
   @protected
+  GifItem sse_decode_gif_item(SseDeserializer deserializer);
+
+  @protected
+  GifPage sse_decode_gif_page(SseDeserializer deserializer);
+
+  @protected
   GuestReactionFfi sse_decode_guest_reaction_ffi(SseDeserializer deserializer);
 
   @protected
@@ -755,6 +774,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<GameSearchResult> sse_decode_list_game_search_result(
     SseDeserializer deserializer,
   );
+
+  @protected
+  List<GifItem> sse_decode_list_gif_item(SseDeserializer deserializer);
 
   @protected
   List<GuestReactionFfi> sse_decode_list_guest_reaction_ffi(
@@ -1037,6 +1059,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   StoredFileInfo sse_decode_stored_file_info(SseDeserializer deserializer);
 
   @protected
+  StoredGif sse_decode_stored_gif(SseDeserializer deserializer);
+
+  @protected
   StoredMessage sse_decode_stored_message(SseDeserializer deserializer);
 
   @protected
@@ -1305,6 +1330,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_gif_item(GifItem self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_gif_page(GifPage self, SseSerializer serializer);
+
+  @protected
   void sse_encode_guest_reaction_ffi(
     GuestReactionFfi self,
     SseSerializer serializer,
@@ -1429,6 +1460,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
     List<GameSearchResult> self,
     SseSerializer serializer,
   );
+
+  @protected
+  void sse_encode_list_gif_item(List<GifItem> self, SseSerializer serializer);
 
   @protected
   void sse_encode_list_guest_reaction_ffi(
@@ -1804,6 +1838,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
     StoredFileInfo self,
     SseSerializer serializer,
   );
+
+  @protected
+  void sse_encode_stored_gif(StoredGif self, SseSerializer serializer);
 
   @protected
   void sse_encode_stored_message(StoredMessage self, SseSerializer serializer);

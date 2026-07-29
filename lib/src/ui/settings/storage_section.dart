@@ -100,13 +100,18 @@ class _SummaryHeader extends ConsumerWidget {
     final cache = breakdown.vaultCacheBytes.toInt();
     final shards = breakdown.vaultShardBytes.toInt();
     final assets = breakdown.assetBlobBytes.toInt();
-    final total = downloads + cache + shards + assets;
+    // Dart-owned disk cache (GIF picker thumbnails) — outside the Rust
+    // breakdown, appended as its own segment.
+    final gifCache =
+        ref.watch(gifThumbCacheSizeProvider).valueOrNull ?? 0;
+    final total = downloads + cache + shards + assets + gifCache;
 
     final segments = [
       _UsageSegment('Downloads', downloads, hollow.accent),
       _UsageSegment('Vault cache', cache, hollow.warning),
       _UsageSegment('Held shards', shards, hollow.success),
       _UsageSegment('Emotes & GIFs', assets, hollow.accentMuted),
+      _UsageSegment('GIF search', gifCache, hollow.textTertiary),
     ];
 
     return Column(
@@ -130,7 +135,11 @@ class _SummaryHeader extends ConsumerWidget {
                 ],
               ),
             ),
-            _CleanupMenu(downloads: downloads, cache: cache, assets: assets),
+            _CleanupMenu(
+                downloads: downloads,
+                cache: cache,
+                assets: assets,
+                gifCache: gifCache),
           ],
         ),
         const SizedBox(height: HollowSpacing.sm),
@@ -215,16 +224,20 @@ class _LegendChip extends StatelessWidget {
 /// but out of the way (held shards intentionally absent — read-only).
 class _CleanupMenu extends ConsumerWidget {
   const _CleanupMenu(
-      {required this.downloads, required this.cache, required this.assets});
+      {required this.downloads,
+      required this.cache,
+      required this.assets,
+      required this.gifCache});
   final int downloads;
   final int cache;
   final int assets;
+  final int gifCache;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
     final actions = ref.read(storageActionsProvider);
-    final enabled = downloads > 0 || cache > 0 || assets > 0;
+    final enabled = downloads > 0 || cache > 0 || assets > 0 || gifCache > 0;
 
     return PopupMenuButton<String>(
       enabled: enabled,
@@ -265,6 +278,9 @@ class _CleanupMenu extends ConsumerWidget {
                   'from peers on demand.',
             );
             if (ok) await actions.clearUnreferencedAssets();
+          case 'gif_cache':
+            // Pure thumbnail cache — no confirm needed, nothing is lost.
+            await actions.clearGifThumbCache();
         }
       },
       itemBuilder: (ctx) => [
@@ -285,6 +301,12 @@ class _CleanupMenu extends ConsumerWidget {
           enabled: assets > 0,
           child: _menuRow(hollow, LucideIcons.smile,
               'Clear unused emotes & GIFs', formatBytes(assets)),
+        ),
+        PopupMenuItem(
+          value: 'gif_cache',
+          enabled: gifCache > 0,
+          child: _menuRow(hollow, LucideIcons.search,
+              'Clear GIF search cache', formatBytes(gifCache)),
         ),
       ],
     );

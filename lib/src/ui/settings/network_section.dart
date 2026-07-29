@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/providers/gif_provider.dart';
 import 'package:hollow/src/core/providers/relay_domain_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
@@ -11,6 +12,7 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
+import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/settings/settings_shared.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -129,6 +131,7 @@ class NetworkSettingsView extends ConsumerWidget {
           ],
         ],
       ),
+      const GifProxySettingsCard(),
       // Anti-censorship (VLESS+REALITY) tunnel — hidden from the UI: the
       // current REALITY transport is non-functional. Kept in the codebase
       // (widget below + Rust proxy_tunnel) for a future transport attempt.
@@ -261,6 +264,126 @@ class NetworkSettingsView extends ConsumerWidget {
           onPressed: onCancelAddRelay,
           child: const Text('Cancel'),
         ),
+      ],
+    );
+  }
+}
+
+/// GIF search proxy card: the picker talks only to Hollow's no-log proxy;
+/// self-hosters point it at their own copy of `gifs/`. Applies immediately
+/// (no restart — the next search reads the new base). Shared by desktop and
+/// mobile settings.
+class GifProxySettingsCard extends ConsumerStatefulWidget {
+  const GifProxySettingsCard({super.key});
+
+  @override
+  ConsumerState<GifProxySettingsCard> createState() =>
+      _GifProxySettingsCardState();
+}
+
+class _GifProxySettingsCardState extends ConsumerState<GifProxySettingsCard> {
+  final _controller = TextEditingController();
+  bool _hydrated = false;
+  bool _busy = false;
+  bool _expanded = false;
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  Future<void> _save(String value) async {
+    setState(() => _busy = true);
+    try {
+      await ref.read(gifProxyUrlProvider.notifier).setUrl(value);
+      if (!mounted) return;
+      _controller.text = ref.read(gifProxyUrlProvider);
+      HollowToast.show(context, 'GIF proxy updated');
+    } catch (e) {
+      if (!mounted) return;
+      HollowToast.show(context, 'Invalid proxy URL — must be https://',
+          type: HollowToastType.error);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+    final current = ref.watch(gifProxyUrlProvider);
+    if (!_hydrated) {
+      _controller.text = current;
+      _hydrated = true;
+      _expanded = current != kDefaultGifProxyUrl;
+    }
+
+    return SettingsCard(
+      title: 'GIF Search',
+      children: [
+        Text(
+          'GIF search goes through Hollow\'s no-log proxy — the provider '
+          'never sees who searches, and message recipients make no web '
+          'requests at all. Only change this if you self-host the proxy.',
+          style: HollowTypography.caption.copyWith(
+            color: hollow.textSecondary,
+            fontSize: 11,
+          ),
+        ),
+        const SizedBox(height: HollowSpacing.sm),
+        Align(
+          alignment: Alignment.centerLeft,
+          child: HollowButton.ghost(
+            compact: true,
+            icon: Icon(
+              _expanded ? LucideIcons.chevronDown : LucideIcons.chevronRight,
+              size: 14,
+            ),
+            onPressed: () => setState(() => _expanded = !_expanded),
+            child: const Text('Advanced (self-hosting)'),
+          ),
+        ),
+        if (_expanded) ...[
+          const SizedBox(height: HollowSpacing.sm),
+          Row(
+            children: [
+              Expanded(
+                child: HollowTextField(
+                  controller: _controller,
+                  hintText: kDefaultGifProxyUrl,
+                  isDense: true,
+                  onChanged: (_) => setState(() {}),
+                ),
+              ),
+              const SizedBox(width: HollowSpacing.sm),
+              HollowButton.filled(
+                compact: true,
+                onPressed: _busy || _controller.text.trim() == current
+                    ? null
+                    : () => _save(_controller.text),
+                child: _busy
+                    ? const SizedBox(
+                        width: 14,
+                        height: 14,
+                        child: CircularProgressIndicator(strokeWidth: 2))
+                    : const Text('Save'),
+              ),
+            ],
+          ),
+          if (current != kDefaultGifProxyUrl) ...[
+            const SizedBox(height: HollowSpacing.xs),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: HollowButton.ghost(
+                compact: true,
+                icon: const Icon(LucideIcons.rotateCcw, size: 14),
+                onPressed: _busy ? null : () => _save(''),
+                child: const Text('Reset to default'),
+              ),
+            ),
+          ],
+        ],
       ],
     );
   }

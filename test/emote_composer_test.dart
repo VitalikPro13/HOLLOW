@@ -48,6 +48,33 @@ void main() {
       c.text = p; // same char, mapping wiped
       expect(c.expandedText(), '');
     });
+
+    test('asset placeholder expands to [a:kind:hash:w:h] wire token', () {
+      final c = EmoteComposerController();
+      final p = c.placeholderForAsset('g', _hashA, 480, 270);
+      expect(p.length, 1);
+      c.text = 'look $p';
+      expect(c.expandedText(), 'look [a:g:$_hashA:480:270]');
+    });
+
+    test('displayTextFor converts asset tokens too', () {
+      final c = EmoteComposerController();
+      final p = c.displayTextFor('[a:g:$_hashB:320:240]');
+      expect(p.length, 1);
+      c.text = p;
+      expect(c.expandedText(), '[a:g:$_hashB:320:240]');
+    });
+
+    test('emotes and assets expand side by side, clear() wipes both', () {
+      final c = EmoteComposerController();
+      final e = c.placeholderFor('pog', _hashA);
+      final a = c.placeholderForAsset('g', _hashB, 100, 100);
+      c.text = '$e$a';
+      expect(c.expandedText(), '[e:pog:$_hashA][a:g:$_hashB:100:100]');
+      c.clear();
+      c.text = '$e$a';
+      expect(c.expandedText(), '');
+    });
   });
 
   group('scanEmoteShortcode', () {

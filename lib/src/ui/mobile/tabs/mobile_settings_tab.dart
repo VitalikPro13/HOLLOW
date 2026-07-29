@@ -38,6 +38,8 @@ import 'package:hollow/src/core/services/app_lock_service.dart';
 import 'package:hollow/src/core/reduce_motion.dart';
 import 'package:hollow/src/rust/api/identity.dart' as identity_api;
 import 'package:hollow/src/rust/api/network.dart' as network_api;
+import 'package:hollow/src/ui/settings/network_section.dart'
+    show GifProxySettingsCard;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 import 'package:hollow/src/rust/api/twitch.dart' as twitch_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
@@ -1308,6 +1310,12 @@ class _NetworkTabState extends ConsumerState<_NetworkTab> {
         const _SectionLabel(label: 'Offline Delivery'),
         const SizedBox(height: HollowSpacing.sm),
         const _OfflineInboxSection(),
+
+        const SizedBox(height: HollowSpacing.xl),
+
+        // ── GIF search proxy (self-hosting) — shared card with desktop;
+        // the card carries its own "GIF Search" title.
+        const GifProxySettingsCard(),
 
         // Anti-censorship (VLESS+REALITY) section hidden from the UI: the
         // current REALITY transport is non-functional. Desktop showed a

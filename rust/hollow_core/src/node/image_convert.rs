@@ -650,6 +650,60 @@ mod tests {
         assert!(result.is_err());
     }
 
+    /// Build a 2-frame animated WebP in memory (the GIF proxy's preferred
+    /// full-variant format) for the decoder-path test.
+    fn make_test_animated_webp(w: u32, h: u32) -> Vec<u8> {
+        use image::{Rgba, RgbaImage};
+        let mut encoder = webp_animation::Encoder::new((w, h)).unwrap();
+        let f1 = RgbaImage::from_pixel(w, h, Rgba([255, 0, 0, 255]));
+        let f2 = RgbaImage::from_pixel(w, h, Rgba([0, 0, 255, 255]));
+        encoder.add_frame(f1.as_raw(), 0).unwrap();
+        encoder.add_frame(f2.as_raw(), 120).unwrap();
+        encoder.finalize(240).unwrap().to_vec()
+    }
+
+    #[test]
+    fn gif_for_send_reencodes_and_downsizes_gif() {
+        let gif = make_test_gif(600, 300);
+        let (webp, w, h, animated) = process_gif_for_send(&gif).expect("process");
+        assert_eq!(&webp[0..4], b"RIFF");
+        assert_eq!(&webp[8..12], b"WEBP");
+        assert_eq!((w, h), (480, 240));
+        assert!(animated);
+        assert!(webp.len() <= 2_097_152);
+    }
+
+    #[test]
+    fn gif_for_send_reencodes_animated_webp_no_passthrough() {
+        let src = make_test_animated_webp(600, 600);
+        let (webp, w, h, animated) = process_gif_for_send(&src).expect("process");
+        // Re-encoded, never passed through: dims must have shrunk to the cap.
+        assert_eq!((w, h), (480, 480));
+        assert!(animated);
+        assert_eq!(&webp[0..4], b"RIFF");
+    }
+
+    #[test]
+    fn gif_for_send_small_input_keeps_dims() {
+        let src = make_test_animated_webp(200, 100);
+        let (_, w, h, animated) = process_gif_for_send(&src).expect("process");
+        assert_eq!((w, h), (200, 100));
+        assert!(animated);
+    }
+
+    #[test]
+    fn gif_for_send_still_input_is_single_frame() {
+        let png = make_test_png(700, 350);
+        let (webp, w, h, animated) = process_gif_for_send(&png).expect("process");
+        assert_eq!((w, h), (480, 240));
+        assert!(!animated);
+        assert_eq!(&webp[0..4], b"RIFF");
+    }
+
+    #[test]
+    fn gif_for_send_rejects_garbage() {
+        assert!(process_gif_for_send(b"definitely not an image").is_err());
+    }
 }
 
 /// Convert a WebP file to another format (for "Save As").
@@ -1133,4 +1187,163 @@ pub fn process_server_avatar_anim(data: &[u8]) -> Result<Vec<u8>, String> {
     }
 
     Err("Not an animated image".into())
+}
+
+/// Encode pre-sized RGBA frames (frame, duration-ms) as a lossy animated WebP.
+fn encode_animation_frames(
+    frames: &[(image::RgbaImage, i32)],
+    dims: (u32, u32),
+    quality: f32,
+) -> Result<Vec<u8>, String> {
+    let mut encoder = webp_animation::Encoder::new_with_options(
+        dims,
+        webp_animation::EncoderOptions {
+            encoding_config: Some(webp_animation::EncodingConfig {
+                quality,
+                encoding_type: webp_animation::EncodingType::Lossy(Default::default()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+    )
+    .map_err(|e| format!("Failed to create WebP encoder: {e}"))?;
+    let mut timestamp_ms: i32 = 0;
+    for (rgba, duration_ms) in frames {
+        encoder
+            .add_frame(rgba.as_raw(), timestamp_ms)
+            .map_err(|e| format!("Failed to add WebP frame: {e}"))?;
+        timestamp_ms += (*duration_ms).max(1);
+    }
+    encoder
+        .finalize(timestamp_ms)
+        .map(|d| d.to_vec())
+        .map_err(|e| format!("Failed to finalize animated WebP: {e}"))
+}
+
+/// Process a picked GIF (downloaded from the GIF proxy's `full` variant) into
+/// the send format: ≤480px animated WebP, ≤2 MB (== `AssetKind::Gif` receipt
+/// cap). Unlike the emote/icon paths there is NO animated-WebP passthrough:
+/// the proxy prefers hd-slot animated WebP sources, which routinely exceed
+/// both bounds — and re-encoding at authoring IS the sanitization step.
+/// Animated WebP decodes via `webp_animation::Decoder`, GIF via the image
+/// crate; frames are resized during decode so source-resolution frames are
+/// never all held at once. A quality-then-dimension walk-down retries until
+/// the encode fits the cap.
+///
+/// Returns `(webp_bytes, width, height, animated)` of the encoded asset.
+pub fn process_gif_for_send(data: &[u8]) -> Result<(Vec<u8>, u32, u32, bool), String> {
+    const MAX_DIM: u32 = 480;
+    const MAX_BYTES: usize = 2_097_152;
+    const MAX_FRAMES: usize = 300;
+    // Quality drops first (cheap wins), then dimensions. Smaller rungs derive
+    // from the 480px frames rather than re-decoding the source.
+    const LADDER: [(u32, f32); 4] = [(480, 80.0), (480, 65.0), (400, 55.0), (320, 45.0)];
+
+    fn fit_dims(w: u32, h: u32, max_dim: u32) -> (u32, u32) {
+        if w.max(h) > max_dim {
+            let scale = max_dim as f32 / w.max(h) as f32;
+            (
+                ((w as f32 * scale).max(1.0)) as u32,
+                ((h as f32 * scale).max(1.0)) as u32,
+            )
+        } else {
+            (w, h)
+        }
+    }
+
+    let mut frames: Vec<(image::RgbaImage, i32)> = Vec::new();
+    let mut target: Option<(u32, u32)> = None;
+
+    if data.starts_with(b"GIF8") {
+        let decoder = GifDecoder::new(Cursor::new(data))
+            .map_err(|e| format!("Failed to decode GIF: {e}"))?;
+        for frame in decoder.into_frames() {
+            let frame = frame.map_err(|e| format!("Failed to decode GIF frame: {e}"))?;
+            if frames.len() >= MAX_FRAMES {
+                return Err("GIF is too long to send".into());
+            }
+            let (w, h) = (frame.buffer().width(), frame.buffer().height());
+            if w == 0 || h == 0 {
+                return Err("GIF has zero dimensions".into());
+            }
+            let (nw, nh) = *target.get_or_insert_with(|| fit_dims(w, h, MAX_DIM));
+            let rgba = if (w, h) != (nw, nh) {
+                image::imageops::resize(frame.buffer(), nw, nh, FilterType::Lanczos3)
+            } else {
+                frame.buffer().clone()
+            };
+            let delay: std::time::Duration = frame.delay().into();
+            let delay_ms = delay.as_millis() as i32;
+            frames.push((rgba, if delay_ms < 20 { 100 } else { delay_ms }));
+        }
+    } else if is_animated_image(data) {
+        let decoder = webp_animation::Decoder::new(data)
+            .map_err(|e| format!("Failed to decode animated WebP: {e:?}"))?;
+        // Decoder timestamps are cumulative end-of-frame times.
+        let mut prev_ts: i32 = 0;
+        for frame in decoder.into_iter() {
+            if frames.len() >= MAX_FRAMES {
+                return Err("GIF is too long to send".into());
+            }
+            let (w, h) = frame.dimensions();
+            if w == 0 || h == 0 {
+                return Err("Animated WebP has zero dimensions".into());
+            }
+            let src = image::RgbaImage::from_raw(w, h, frame.data().to_vec())
+                .ok_or("Animated WebP frame has unexpected size")?;
+            let (nw, nh) = *target.get_or_insert_with(|| fit_dims(w, h, MAX_DIM));
+            let rgba = if (w, h) != (nw, nh) {
+                image::imageops::resize(&src, nw, nh, FilterType::Lanczos3)
+            } else {
+                src
+            };
+            let duration_ms = (frame.timestamp() - prev_ts).max(1);
+            prev_ts = frame.timestamp();
+            frames.push((rgba, duration_ms));
+        }
+    } else {
+        // Still source (e.g. a still WebP full variant) — single-frame asset.
+        let img = image::load_from_memory(data)
+            .map_err(|e| format!("Failed to decode image: {e}"))?;
+        let (w, h) = (img.width(), img.height());
+        if w == 0 || h == 0 {
+            return Err("Image has zero dimensions".into());
+        }
+        let (nw, nh) = fit_dims(w, h, MAX_DIM);
+        let resized = if (w, h) != (nw, nh) {
+            img.resize_exact(nw, nh, FilterType::Lanczos3)
+        } else {
+            img
+        };
+        frames.push((resized.to_rgba8(), 0));
+    }
+
+    if frames.is_empty() {
+        return Err("GIF has no frames".into());
+    }
+    let animated = frames.len() > 1;
+    let (base_w, base_h) = (frames[0].0.width(), frames[0].0.height());
+
+    for (max_dim, quality) in LADDER {
+        let (nw, nh) = fit_dims(base_w, base_h, max_dim);
+        let scaled;
+        let attempt: &[(image::RgbaImage, i32)] = if (nw, nh) != (base_w, base_h) {
+            scaled = frames
+                .iter()
+                .map(|(f, d)| (image::imageops::resize(f, nw, nh, FilterType::Lanczos3), *d))
+                .collect::<Vec<_>>();
+            &scaled
+        } else {
+            &frames
+        };
+        let bytes = if animated {
+            encode_animation_frames(attempt, (nw, nh), quality)?
+        } else {
+            encode_lossy_webp_via_animation(attempt[0].0.as_raw(), nw, nh, quality)?
+        };
+        if bytes.len() <= MAX_BYTES {
+            return Ok((bytes, nw, nh, animated));
+        }
+    }
+    Err("GIF is too large to send even after conversion".into())
 }

@@ -476,6 +476,40 @@ Widget composerEmojiButton(HollowTheme hollow,
   );
 }
 
+/// GIF-picker button for the composer row — a "GIF" text badge (no icon set
+/// carries a GIF glyph). [onOpen] receives the button's own BuildContext so
+/// the picker can anchor to it.
+Widget composerGifButton(HollowTheme hollow,
+    {required void Function(BuildContext btnCtx) onOpen}) {
+  return Builder(
+    builder: (btnCtx) => HollowPressable(
+      semanticLabel: 'Insert GIF',
+      onTap: () => onOpen(btnCtx),
+      borderRadius: BorderRadius.circular(hollow.radiusMd),
+      padding: const EdgeInsets.all(HollowSpacing.sm),
+      child: Container(
+        height: 20,
+        padding: const EdgeInsets.symmetric(horizontal: 3),
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          border: Border.all(color: hollow.textSecondary, width: 1.5),
+          borderRadius: BorderRadius.circular(5),
+        ),
+        child: Text(
+          'GIF',
+          style: HollowTypography.caption.copyWith(
+            color: hollow.textSecondary,
+            fontSize: 9,
+            fontWeight: FontWeight.w800,
+            letterSpacing: 0.5,
+            height: 1.0,
+          ),
+        ),
+      ),
+    ),
+  );
+}
+
 /// The chat-overlay pin toggle shown at the edge of the screen-share chat
 /// overlay (DM pane and voice channel pane).
 class ChatOverlayToggleButton extends StatelessWidget {

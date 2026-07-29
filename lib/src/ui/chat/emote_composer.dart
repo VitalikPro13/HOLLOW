@@ -14,7 +14,8 @@ import 'emote_image.dart';
 ///   drawn as the actual emote image via [buildTextSpan] — the 1-char ↔
 ///   1-WidgetSpan match is what keeps caret/selection math correct (a widget
 ///   standing in for the full 70-char wire token would desync them).
-///   [expandedText] produces the real `[e:name:hash]` tokens at send time.
+///   [expandedText] produces the real `[e:name:hash]` / `[a:kind:hash:w:h]`
+///   tokens at send time (assets — GIFs/stickers — use the same mechanism).
 /// - [EmoteAutocomplete] is the `:` shortcode overlay (mention-overlay
 ///   pattern): typing `:na` suggests custom emotes and Unicode emoji.
 
@@ -28,6 +29,16 @@ class ComposerEmote {
   const ComposerEmote(this.name, this.hash);
 }
 
+/// A generic asset (GIF/sticker) staged in the composer — same 1-char
+/// placeholder mechanism as emotes, expanding to `[a:kind:hash:w:h]`.
+class ComposerAsset {
+  final String kind; // 'g' GIF | 's' sticker
+  final String hash;
+  final int w;
+  final int h;
+  const ComposerAsset(this.kind, this.hash, this.w, this.h);
+}
+
 /// First Unicode private-use codepoint; placeholders are allocated upward.
 const int _puaBase = 0xE000;
 const int _puaLast = 0xF8FF;
@@ -36,6 +47,7 @@ bool _isPua(int codeUnit) => codeUnit >= _puaBase && codeUnit <= _puaLast;
 
 class EmoteComposerController extends TextEditingController {
   final Map<String, ComposerEmote> _emotes = {};
+  final Map<String, ComposerAsset> _assets = {};
   int _nextPua = _puaBase;
 
   /// Register an emote and return its 1-char placeholder for insertion.
@@ -45,24 +57,43 @@ class EmoteComposerController extends TextEditingController {
     return char;
   }
 
-  /// Convert a picker/autocomplete result into composer display text:
-  /// custom-emote wire tokens become a registered placeholder char,
-  /// anything else (Unicode emoji) passes through unchanged.
-  String displayTextFor(String emoji) {
-    final emote = parseEmoteToken(emoji);
-    if (emote == null) return emoji;
-    return placeholderFor(emote.name, emote.hash);
+  /// Register a GIF/sticker asset and return its 1-char placeholder.
+  String placeholderForAsset(String kind, String hash, int w, int h) {
+    final char = String.fromCharCode(_nextPua++);
+    _assets[char] = ComposerAsset(kind, hash, w, h);
+    return char;
   }
 
-  /// The outgoing message text: placeholders expanded to `[e:name:hash]`
-  /// wire tokens. Unmapped private-use characters (pasted from elsewhere)
-  /// are stripped.
+  /// Convert a picker/autocomplete result into composer display text:
+  /// custom-emote and asset wire tokens become a registered placeholder
+  /// char, anything else (Unicode emoji) passes through unchanged.
+  String displayTextFor(String emoji) {
+    final emote = parseEmoteToken(emoji);
+    if (emote != null) return placeholderFor(emote.name, emote.hash);
+    final asset = parseAssetToken(emoji);
+    if (asset != null) {
+      return placeholderForAsset(asset.kind, asset.hash, asset.w, asset.h);
+    }
+    return emoji;
+  }
+
+  /// The outgoing message text: placeholders expanded to `[e:name:hash]` /
+  /// `[a:kind:hash:w:h]` wire tokens. Unmapped private-use characters
+  /// (pasted from elsewhere) are stripped.
   String expandedText() {
     final buf = StringBuffer();
     for (final code in text.codeUnits) {
       if (_isPua(code)) {
-        final emote = _emotes[String.fromCharCode(code)];
-        if (emote != null) buf.write('[e:${emote.name}:${emote.hash}]');
+        final key = String.fromCharCode(code);
+        final emote = _emotes[key];
+        if (emote != null) {
+          buf.write('[e:${emote.name}:${emote.hash}]');
+          continue;
+        }
+        final asset = _assets[key];
+        if (asset != null) {
+          buf.write('[a:${asset.kind}:${asset.hash}:${asset.w}:${asset.h}]');
+        }
       } else {
         buf.writeCharCode(code);
       }
@@ -73,6 +104,7 @@ class EmoteComposerController extends TextEditingController {
   @override
   void clear() {
     _emotes.clear();
+    _assets.clear();
     _nextPua = _puaBase;
     super.clear();
   }
@@ -84,13 +116,15 @@ class EmoteComposerController extends TextEditingController {
     required bool withComposing,
   }) {
     final value = text;
-    if (_emotes.isEmpty || !value.codeUnits.any(_isPua)) {
+    if ((_emotes.isEmpty && _assets.isEmpty) ||
+        !value.codeUnits.any(_isPua)) {
       return super.buildTextSpan(
           context: context, style: style, withComposing: withComposing);
     }
     // WidgetSpans are opaque to the text scaler, so the inline emote has to
     // follow the chat text size by hand (same rule as message_text_parser).
     final emoteSize = MediaQuery.textScalerOf(context).scale(22);
+    final assetHeight = MediaQuery.textScalerOf(context).scale(36);
     final children = <InlineSpan>[];
     final run = StringBuffer();
     void flushRun() {
@@ -100,8 +134,10 @@ class EmoteComposerController extends TextEditingController {
     }
 
     for (final code in value.codeUnits) {
-      final emote = _isPua(code) ? _emotes[String.fromCharCode(code)] : null;
-      if (emote == null) {
+      final key = _isPua(code) ? String.fromCharCode(code) : null;
+      final emote = key == null ? null : _emotes[key];
+      final asset = key == null ? null : _assets[key];
+      if (emote == null && asset == null) {
         run.writeCharCode(code);
         continue;
       }
@@ -109,12 +145,19 @@ class EmoteComposerController extends TextEditingController {
       // Exactly one placeholder per mapped char keeps offsets aligned.
       children.add(WidgetSpan(
         alignment: PlaceholderAlignment.middle,
-        child: SizedBox(
-          width: emoteSize,
-          height: emoteSize,
-          child:
-              EmoteImage(name: emote.name, hash: emote.hash, size: emoteSize),
-        ),
+        child: emote != null
+            ? SizedBox(
+                width: emoteSize,
+                height: emoteSize,
+                child: EmoteImage(
+                    name: emote.name, hash: emote.hash, size: emoteSize),
+              )
+            : ChatAssetImage(
+                kind: asset!.kind,
+                hash: asset.hash,
+                aspect: asset.h == 0 ? 1.0 : asset.w / asset.h,
+                height: assetHeight,
+              ),
       ));
     }
     flushRun();

@@ -5,7 +5,7 @@ Covers GitHub issues #25 (server banners), #26 (GIF picker), #29 (stickers),
 plus a retrofit of the existing FFZ + IGDB website endpoints.
 ================================================================================
 
-STATUS (updated 2026-07-28, second session — resume at PHASE 3)
+STATUS (updated 2026-07-29, sixth session — PHASES 0-4 DONE, resume at PHASE 5)
 --------------------------------------------------------------------------------
 (This file was tmp2.txt in the repo root; moved here to be durable.)
 * PHASE 0: DONE. Deployed to Hostinger, live-verified (cold FFZ search
@@ -159,8 +159,196 @@ STATUS (updated 2026-07-28, second session — resume at PHASE 3)
     Website deploy is Vitalik's manual step, same batch as the endpoint.
   - 3.3 attribution ("Search KLIPY" placeholder + "Powered by KLIPY" mark)
     is picker UI — moved to Phase 4 where that UI exists.
-* PHASE 4, 5: not started. Phase 4 needs no Klipy key in the app — the
-  proxy owns it; the per-user direct-key setting (4.2) stays optional.
+* PHASE 4 (GIF picker, issue #26): DONE (2026-07-29, fifth session).
+  Deviations/extras vs the plan text below:
+  - api/gifs.rs: gif_search(q,page) / gif_trending(page) / gif_categories()
+    / gif_fetch_and_store(id) -> StoredGif{hash,w,h,animated}. Proxy base is
+    CONFIGURABLE via set_gif_proxy_url (https-only, trailing-slash
+    normalized — the slash IS the prefix-guard boundary); item still/sm URLs
+    are prefix-checked at parse (foreign rows dropped, mirrors FFZ);
+    gif_fetch_and_store takes an ID (validated ^[A-Za-z0-9_-]{1,100}$) and
+    builds {base}f/{id} itself — structurally incapable of generic fetching.
+    Rating param NOT sent (server defaults pg); no client rating UI yet.
+  - image_convert::process_gif_for_send: NO animated-WebP passthrough —
+    full.php prefers hd-slot animated WebP (live check: 752 KB webp), which
+    breaks both the ≤480px and ≤2MB bounds, and re-encode IS sanitization.
+    First use of webp_animation::Decoder (was dep-only); GIF via GifDecoder;
+    frames resized DURING decode (never all source-res frames in RAM,
+    MAX_FRAMES 300); quality-then-dimension walk-down (480/Q80 → 480/Q65 →
+    400/Q55 → 320/Q45) until ≤2MB (== AssetKind::Gif.recv_cap()).
+  - Composer: EmoteComposerController gained a parallel ComposerAsset map —
+    placeholderForAsset(), displayTextFor() now maps [a:...] tokens too,
+    expandedText() emits them, buildTextSpan renders inline ChatAssetImage
+    at 36px. The 1-PUA-char ↔ 1-WidgetSpan invariant holds for assets.
+  - Picker (gif_picker.dart): overlay clone of the emoji shell (360x440) +
+    reusable GifPickerBody. Trending prefetched at BOOT (hollow_shell, +5s
+    idle) into a session GifCatalog (gif_provider.dart) with a sync peek()
+    — a warm open renders with literally zero spinner frames. Debounce
+    250ms re-checks the seq BEFORE issuing the request (a superseded query
+    never reaches the proxy's rate valve — the widget test caught the naive
+    version leaking). Manual 2-col masonry from item w/h (aspect clamped
+    0.6..2.5, cover-cropped); animation = sm variant via AnimatedGifImage,
+    desktop on HOVER, mobile while in viewport ±1 row (cell positions are
+    known from our own masonry math; reduce-motion internal to the widget).
+    Category chips (tap = search) on the trending view; pagination ≤5 pages
+    (bounds the non-lazy masonry). Pick = in-cell spinner (picking guard) →
+    gif_fetch_and_store → [a:g:hash:w:h] via the panes' _insertEmojiAtCursor.
+  - Thumb disk cache: core/services/gif_thumb_cache.dart — app-cache-dir
+    disk LRU (200 MB by mtime, 90% hysteresis, atomic tmp+rename) + small
+    RAM tier + inflight dedup; only ever fed Rust-guarded URLs. Storage
+    Manager gained a Dart-computed 5th segment "GIF search" +
+    "Clear GIF search cache" cleanup item (gifThumbCacheSizeProvider).
+  - Settings: gifProxyUrlProvider (SQLCipher-persisted, pushed at boot like
+    the relay URL) + GifProxySettingsCard (network_section.dart, collapsed
+    "Advanced (self-hosting)") shared by desktop Network settings AND
+    mobile settings tab. 4.2's per-user direct Klipy key: DEFERRED, not
+    dropped — a user asked for it, so it stays on the list. Do NOT sell it as
+    a privacy win: with your own key Klipy sees YOUR IP and every search under
+    one stable key (a profile); through the shared proxy they see one server
+    IP, an unsegmented firehose, and a random per-request customer_id. It is
+    "who would you rather be seen by", and the setting copy must say plainly
+    that enabling it sends your IP to Klipy. The genuinely private escape
+    hatch — set_gif_proxy_url + the Advanced (self-hosting) card — shipped.
+  - Buttons: composerGifButton = a "GIF" text badge (neither icon set has a
+    GIF glyph) left of the emoji button in both desktop panes; mobile = a
+    GIF row in the [+] attach sheet → 55%-height bottom sheet.
+  - 4.5: the ONE real gap found was emotePreviewSpans (in-app notification
+    cards rendered asset tokens as raw wire text) — now merged-scan renders
+    ChatAssetImage inline; out-of-range-dims tokens degrade to raw text.
+    Plain-text surfaces (emoteTokensToShortcodes, Dart+Rust incl.
+    push_enrich) were already asset-aware since Phase 1 — verified, no
+    change needed.
+  - Tests: 9 new Rust (parse/URL-guard/base-normalization in gifs.rs + 5
+    process_gif_for_send incl. an in-memory animated-WebP decoder round
+    trip), 3 composer asset tests, 3 picker widget tests (fake catalog via
+    gifCatalogProvider override). Suites at session end: 504 Rust / 177
+    Flutter green; flutter analyze zero new warnings. Live-verified against
+    the deployed proxy same day: trending/categories contract exact,
+    f/<id> = 752 KB image/webp RIFF.
+  - PERF FIX round 1 (same day, after Vitalik's first run: "popular slow,
+    search never finishes") — client-side download hygiene: GifThumbCache
+    = ONE shared keep-alive HttpClient + 4-slot FIFO download semaphore
+    (was: 30+ unbounded parallel downloads, fresh TLS each; also protects
+    Hostinger's PHP workers; on download exception the client is recreated
+    so wedged keep-alive sockets can't brick future downloads); stills
+    load viewport-gated (±1 screen); pagination requires
+    maxScrollExtent > 0 (`pixels > maxScrollExtent - 300` is true on
+    EVERY tick when content fits the viewport → silently pulled 5 pages);
+    scroll setState throttled to 40px; GifCatalog page/categories get a
+    25s hard timeout (a lost future can never pin the spinner + the
+    inflight-dedup key forever); error state gained a Retry button; boot
+    prefetch also warms the first 10 trending stills. Correct fixes, but
+    NOT the root cause —
+  - PERF FIX round 2 = THE ROOT CAUSE (still broken after round 1):
+    `gif_query` did `get_runtime().block_on(reqwest…)` — reqwest resolves
+    DNS via spawn_blocking ON ITS RUNTIME, and the node runtime caps
+    max_blocking_threads(8), which SQLCipher bursts saturate in the live
+    app. The HTTP request then waited the full 20s timeout WITHOUT EVER
+    BEING SENT. Every layer was fast in isolation (empty pool) — only the
+    running app failed. Reproduced deterministically: 8 pool sleepers →
+    trending = 20s stall + "error sending request". FIX: dedicated
+    `get_http_runtime()` (api/network.rs — 1 worker, own blocking pool,
+    5s reap) for ALL website-proxy HTTP: gifs.rs, emotes.rs (FFZ had the
+    same LATENT bug — its tab is just used at quiet moments), showcase.rs.
+    Verified: saturation test now 282ms (kept as
+    gifs::tests::live_saturated_blocking_pool_smoke, #[ignore] live-net);
+    REAL-APP verified via instrumented release (boot prefetch 195ms,
+    picker open WARM/instant, live typed search answered by Rust in
+    113ms). Diagnostics kept in release builds: [HOLLOW-GIF] (Rust),
+    [HOLLOW-GIF-UI]/[HOLLOW-GIF-THUMB] (Dart via logFromDart);
+    hollow_debug.log lives NEXT TO THE EXE. Rule memory:
+    feedback_http_runtime_isolation. Necessary fix (deterministic repro),
+    but STILL not sufficient —
+  - PERF FIX round 3 = THE ACTUAL RENDER BUG, FIXED (2026-07-29, sixth
+    session). It was never FRB: it was a self-referential `whenComplete`
+    in OUR Dart, in two places.
+
+        // GifCatalog.page() and GifThumbCache.load(), both:
+        final future = <work>.then(...).whenComplete(() => _inflight.remove(key));
+        _inflight[key] = future;   // <-- the map now holds `future` ITSELF
+
+    `Map.remove` RETURNS the removed value, the arrow body returns it, and
+    `Future.whenComplete` defers its own completion until an
+    action-returned Future completes. The action returns the very future
+    being completed, so it waits on itself: PERMANENT DEADLOCK. The inner
+    `.then` still runs — which is why `_pages` warmed and a REOPENED
+    picker painted instantly — while every caller's `.then` (the picker's
+    `_runQuery`, the boot prefetch, `_GifCellState._loadStill`) never
+    fired. `.timeout(25s)` sits UPSTREAM of the deadlock and so could
+    never fire either. Exactly matches the 15:49 log: 4 searches answered
+    by Rust, zero "[HOLLOW-GIF-UI] ... done/ERROR" lines, thumbs
+    downloaded but cells blank on first open.
+    FIX = block bodies (`whenComplete(() { map.remove(k); })`) at
+    gif_provider.dart:page() and gif_thumb_cache.dart:load(). Note
+    `categories()` was ALWAYS fine: `() => _categoriesInflight = null` is
+    an assignment expression, which evaluates to null, not to a Future —
+    that one-character-class difference is the whole bug.
+    Also fixed alongside: `GifThumbCache._cacheDir()` memoized a FAILED
+    lookup forever (one transient miss disabled the disk tier for the
+    session) — it now clears `_dirFuture` before rethrowing.
+    WHY THE SUITE WAS GREEN THROUGH IT: all 3 picker widget tests fake
+    `page()` wholesale, so the chain that contained the bug never ran.
+    GifCatalog gained a `@protected fetchPage`/`fetchCategories` raw-FFI
+    seam; tests now fake THAT and exercise the real cache/in-flight/
+    timeout wrapper. New regression cover (10 tests, each verified to
+    FAIL against the arrow form): test/gif_catalog_test.dart (7),
+    test/gif_thumb_cache_test.dart (2), plus "picker: renders results
+    through the REAL catalog chain" in test/widget/gif_picker_test.dart.
+    The unit files MUST stay plain `test()` — under `testWidgets`'
+    FakeAsync a permanent hang is indistinguishable from waiting, which
+    is why the earlier isolate2 hang got written off as a FakeAsync
+    artifact. It was this bug.
+    Suite at session end: 187 Flutter green, flutter analyze clean. Pure
+    Dart — no Rust change, no FFI codegen, no relay/endpoint deploy.
+    Rule memory: feedback_whencomplete_self_wait.
+* PHASE 4 FOLLOW-UP (same day, after Vitalik's first working run): SIZING +
+  LIBRARY. Two complaints, both fixed.
+  - SIZING. Block assets rendered up to 480px wide with NO height cap, so a
+    portrait GIF filled the viewport; the same GIF with text on its line
+    dropped to ~2 line-heights. Both are gone: an asset token now ALWAYS
+    renders as a block at `assetChatBox()` (emote_image.dart) — GIFs fit
+    300x250, the exact box image attachments use, stickers 160x160, never
+    upscaled past the source pixels. Text sharing the line is a CAPTION:
+    `_matchAssetToken` records atLineStart/atLineEnd (horizontal whitespace
+    does not count as sharing) and the span builder injects a synthetic
+    newline on whichever side needs one, trimming the leading spaces of the
+    caption that follows. `ChatAssetImage` lost `maxWidth`/AspectRatio for an
+    explicit width+height pair (width null = inline mode, used by
+    notification previews + the composer).
+  - PICKER TABS. The prefilled category chips are gone (`gif_categories()`
+    FFI + `GifCatalog.categories()` stay — the proxy endpoint is fine, the
+    picker just no longer uses them). Browse is now Popular (default) /
+    Favourites / Recent, shown only while the search field is empty; typing
+    still overrides everything. `_networkView` = search non-empty OR Popular;
+    `_runQuery()` bumps the seq unconditionally so a Popular reply in flight
+    can never land on a library tab.
+  - LIBRARY (`core/providers/gif_library_provider.dart`): SavedGif +
+    GifCollection + GifLibrary, one JSON blob in the encrypted settings store
+    (`gif_library`), loaded in hollow_shell's boot sequence right AFTER the
+    proxy URL. Recents cap 60 (newest first, deduped, written on pick),
+    favourites cap 500, lists cap 20 / 32-char names. CRITICAL: SavedGif
+    stores media paths RELATIVE to the proxy base and rebuilds them against
+    the live base on read — a stored absolute URL is a stored fetch target,
+    and this keeps the Rust-side origin guarantee true across the local
+    store; it also means a self-hoster who moves proxies keeps favourites.
+    Decode is tolerant per row (garbage never takes the library with it).
+  - STAR + MENUS. Every cell has a corner star (hover-revealed on desktop,
+    always shown once favourited so the grid reads at a glance; always shown
+    on mobile). Right-click / long-press opens `showGifMenu` — a TOPMOST
+    OverlayEntry, because the picker is itself a raw OverlayEntry and a
+    dialog route renders BEHIND it — carrying favourite toggle, per-list
+    membership, and "remove from recent". Lists sort FAVOURITES only;
+    unfavouriting evicts from every list. Creating/renaming a list uses an
+    INLINE field in the panel for the same z-order reason. Star icons are
+    Material's filled/outline pair (neither Lucide nor Atlas ships a plain
+    filled star, and fill IS the signal) — same precedent as the composer's
+    "GIF" text badge. Mobile sheet 0.55 -> 0.62 height to pay for the tab row.
+  - Tests: test/gif_library_test.dart (11), 6 new picker widget tests
+    (tabs replaced the chips, star -> Favourites, empty hints, recents order,
+    late Popular reply cannot land on a library tab, lists), and
+    asset_token_render_test rewritten around the box maths (8). Suite 209
+    Flutter green, analyze clean. Pure Dart again — no Rust, no codegen.
+* PHASE 5: not started.
 ================================================================================
 
 DECISIONS ALREADY LOCKED (from the design discussion — do not re-litigate)

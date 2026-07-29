@@ -11,7 +11,7 @@ use base64::Engine;
 use flutter_rust_bridge::frb;
 use sha2::{Digest, Sha256};
 
-use super::network::get_runtime;
+use super::network::get_http_runtime;
 use super::storage::get_store;
 
 /// Base URL of the Hollow website's cached IGDB endpoint.
@@ -70,7 +70,7 @@ pub fn showcase_game_search(query: String) -> Result<Vec<GameSearchResult>, Stri
     if q.is_empty() {
         return Ok(vec![]);
     }
-    let rt = get_runtime();
+    let rt = get_http_runtime();
     rt.block_on(async move {
         let client = reqwest::Client::new();
         let resp = client
@@ -116,7 +116,7 @@ pub fn showcase_game_details(game_id: i64) -> Result<Option<GameCardDetails>, St
     if game_id <= 0 {
         return Ok(None);
     }
-    let rt = get_runtime();
+    let rt = get_http_runtime();
     rt.block_on(async move {
         let client = reqwest::Client::new();
         let resp = client
@@ -172,7 +172,7 @@ fn fetch_cdn_image(url: String) -> Result<Vec<u8>, String> {
     if !url.starts_with(COVER_BASE) {
         return Err("Image URL is not on the Hollow CDN".into());
     }
-    let rt = get_runtime();
+    let rt = get_http_runtime();
     rt.block_on(async move {
         let client = reqwest::Client::new();
         let resp = client
