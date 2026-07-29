@@ -1,6 +1,6 @@
 # Hollow — Privacy Policy
 
-**Last updated: July 10, 2026**
+**Last updated: July 29, 2026**
 
 Hollow is built on one principle: your conversations are yours. We cannot read your messages, listen to your calls, or identify you. This policy explains exactly what data exists, where it exists, and what we can and cannot access.
 
@@ -97,6 +97,12 @@ Your use of Twitch is governed by [Twitch's own privacy policy](https://www.twit
 
 If you add game cards to your profile showcase, your game search queries are sent through our web server to the IGDB game database (operated by Twitch) and, for some games, Steam's public store data, to fetch game details and artwork. Your device never contacts IGDB or Steam directly, and these lookups happen only while you are editing your own profile. Search terms travel in the request body rather than the URL, so they do not appear in standard web-server access logs, and the request carries no Hollow identity — a search can never be linked to your account. Our server keeps an anonymous cache of game data and search terms (never who searched, or from where) so repeated searches don't reach IGDB at all. The resulting artwork is embedded into your encrypted profile data — people who view your profile never contact IGDB, Steam, or our web server.
 
+## Emote and GIF search (optional)
+
+Hollow's emote picker can search the FrankerFaceZ emote catalog, and its GIF picker searches the KLIPY GIF library. Both searches go through our web server, which acts as a caching proxy — your device never contacts FrankerFaceZ, KLIPY, or their content networks directly, and these lookups happen only while you are actively browsing a picker. Search terms travel in the request body rather than the URL, so they do not appear in standard web-server access logs, and the request carries no Hollow identity — a search can never be linked to your account. Our server keeps an anonymous cache of search terms and results (never who searched, or from where) so repeated searches are served without contacting the provider at all. The requests our server does forward to KLIPY carry a freshly generated random identifier each time, stored nowhere — KLIPY sees an unlinkable stream of queries coming from our server, never your IP address or search history. The proxy's source code is published in the Hollow repository, so these claims are auditable.
+
+When you pick an emote or GIF, your device downloads the image once through the same proxy and re-encodes it locally; from then on it travels inside your end-to-end encrypted messages like any other media. People who receive your messages never contact our web server, FrankerFaceZ, or KLIPY — receiving a message triggers no network request to anyone.
+
 ## Law enforcement and government requests
 
 We are committed to transparency about any requests we receive.
@@ -131,7 +137,7 @@ This data never leaves your device in an unencrypted form. If you delete the Hol
 
 Hollow does not integrate with any analytics, advertising, or tracking services. Hollow is a native desktop and mobile application — it does not use cookies or any web-based tracking technology.
 
-The only third parties Hollow ever communicates with are the ones described in this policy: Google/Apple push services on mobile (wake signals only, no content), and — only if you choose to use the corresponding optional features — Twitch (verification) and IGDB/Steam via our proxy (game showcase).
+The only third parties Hollow ever communicates with are the ones described in this policy: Google/Apple push services on mobile (wake signals only, no content), and — only if you choose to use the corresponding optional features — Twitch (verification), IGDB/Steam via our proxy (game showcase), and FrankerFaceZ/KLIPY via our proxy (emote and GIF search).
 
 If you download Hollow from a third-party platform (e.g., GitHub), that platform's own privacy policy governs your interaction with their service.
 

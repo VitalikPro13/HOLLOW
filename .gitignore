@@ -170,3 +170,8 @@ igdb/config.php
 igdb/token.json
 igdb/games.db*
 igdb/covers/
+
+# GIF proxy endpoint: source is tracked, secrets/runtime state never
+gifs/config.php
+gifs/gifs.db*
+gifs/m/

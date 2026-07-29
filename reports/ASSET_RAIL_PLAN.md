@@ -90,8 +90,77 @@ STATUS (updated 2026-07-28, second session — resume at PHASE 3)
   serverAvatarAnimProvider optimistically; clear wipes both. Tests:
   harness server_avatar_anim_hash_replicates_and_bytes_pull_on_demand
   (tags 89/95), widget test/widget/server_icon_anim_test.dart (6 cases).
-* PHASE 3: not started; Klipy registration (Vitalik) needed before/at 3.1.
-* PHASE 4, 5: not started.
+* PHASE 3: DONE (2026-07-29, fourth session) — DEPLOYED + LIVE-VERIFIED
+  against real Klipy same day: 405 on GET; trending/search return real
+  items; cold still generated in ~200ms (real RIFF/WEBP); warm re-serve
+  ~100ms immutable via Apache; sm/full stream (269 KB / 752 KB webp);
+  unknown-id 404; config.php/gifs.db/sweep.php all 403. ONE live bug
+  found+fixed: real categories shape is data:{locale, categories:
+  [{category,query,preview_url}]} — BOTH Klipy demo apps model an
+  outdated flat string list; parser fixed (names only — preview_url
+  points at Klipy's CDN and never leaves the server), SEARCH_VER 1→2
+  flushes the poisoned cached row; re-uploaded + live-verified (35 real
+  category names). Sweep cron: Vitalik's hPanel attempt never registered
+  (API list came back empty) — created via Hostinger API instead, uid
+  zj14IQFyxk, "0 * * * *", path verified against the subdomain docroot
+  (/home/u388188406/domains/anonlisten.com/public_html/hollow/gifs/).
+  Deviations/extras vs the plan text below:
+  - gifs/ lives in THIS repo (canonical, like ffz/ + igdb/ after Phase 0),
+    not !hollow-website. Files: search.php, fetch.php, full.php, sweep.php,
+    .htaccess, config.php.example. .gitignore covers config.php / gifs.db* /
+    m/. The no-log claim is auditable in the public repo per the plan.
+  - Klipy shapes confirmed from their PUBLISHED CLIENT MODELS (KLIPY-com
+    demo-app DTOs), not a live key: response = {result, data:{data:[],
+    current_page, per_page, has_next}}; item = {slug, title, blur_preview,
+    type, file:{hd|md|sm|xs × gif|webp|mp4 → {url,w,h,size}}}; ads arrive
+    as type:"ad" (stripped); categories = flat string list. Params: q,
+    page, per_page (8..50), rating (g|pg|pg-13|r). One live smoke test
+    after deploy is still wanted to confirm nothing drifted.
+  - Media URLs are flat + extensioned (Apache needs real filenames for the
+    warm path): /gifs/m/<id>.still.webp, /gifs/m/<id>.sm.<ext> (ext is
+    per-item — some items lack a webp variant; recorded in the registry,
+    requests for any other ext are 404), /gifs/f/<id> = full.php (send-time
+    source, never on disk, 1h shared-cache header, hd→xs best-first,
+    25 MB cap with walk-down on oversize).
+  - Klipy has NO still format — stills are GENERATED server-side:
+    first frame via GD from the GIF variant (Imagick fallback for
+    webp-only items), scaled to ≤150px, WebP Q80; degraded fallback =
+    animated sm webp verbatim (never a broken image).
+  - items registry gained sm_ext; queries table carries has_next + ver
+    (SEARCH_VER=1). qkey embeds rating+per_page+page. mp4-only (clip)
+    items and malformed slugs dropped at ingest.
+  - Abuse valve: 150 req / 5 min fixed window keyed by
+    sha256(random-daily-salt | ip) prefix; salt regenerated + table wiped
+    on day rotation; inline prune keeps the table minutes-deep.
+  - customer_id = random UUID per upstream request (per plan); no ad-*
+    params; upstream failure sets 60s backoff (429 honors Retry-After,
+    5..3600s clamp); stale-beats-nothing serving during backoff.
+  - GIFS_BASE_URL comes from config.php, never the Host header
+    (self-hosters change one constant; Host is client-controlled).
+  - Single-flight releases its lock BEFORE emitting — PHP finally does NOT
+    run on exit(), the plan's naive shape would leak the lock 20s.
+  - sweep.php: CLI-only (+ .htaccess denied), 4 GB cap, hysteresis to 90%,
+    LRU by max(atime,mtime) (degrades to FIFO on noatime — eviction cost is
+    one CDN re-fetch), prunes ratelimit/inflight/queries/items rows,
+    WAL-checkpoints.
+  - VERIFIED locally end-to-end (portable PHP 8.3 + mock Klipy upstream):
+    405 on GET; exact normalized contract; ad/clip/bad-slug stripping;
+    " CAT " → "cat" cache collapse (1 upstream hit); trending; categories;
+    empty-result negative cache; sm passthrough byte-identical; still is a
+    real generated RIFF/WEBP; warm disk re-serve; ext-mismatch + unknown-id
+    404s; full prefers hd webp; valve trips at exactly 150 then 429s with
+    zero upstream leakage; dead upstream → empty + backoff_until stamped,
+    cached queries still serve; sweep runs clean.
+  - 3.4 legal: privacy policy gained "Emote and GIF search (optional)" in
+    BOTH copies (repo legal/ + website Svelte route) + the third-party
+    enumeration line now names FrankerFaceZ/KLIPY; Last updated bumped to
+    2026-07-29. NOTE: the FFZ proxy was never disclosed before — this
+    closes that gap too. Terms untouched (no proxy references there).
+    Website deploy is Vitalik's manual step, same batch as the endpoint.
+  - 3.3 attribution ("Search KLIPY" placeholder + "Powered by KLIPY" mark)
+    is picker UI — moved to Phase 4 where that UI exists.
+* PHASE 4, 5: not started. Phase 4 needs no Klipy key in the app — the
+  proxy owns it; the per-user direct-key setting (4.2) stays optional.
 ================================================================================
 
 DECISIONS ALREADY LOCKED (from the design discussion — do not re-litigate)

@@ -1,0 +1,15 @@
+<?php
+// Copy to config.php and fill in the Klipy API key
+// (klipy.com/developers → the Hollow application).
+// config.php is gitignored — NEVER commit the real value.
+//
+// The key lives ONLY here, server-side. It is never sent to clients and
+// never appears in handed-out URLs (Klipy puts the key in the URL path,
+// which is exactly why the app must not talk to Klipy directly).
+const KLIPY_API_KEY = 'YOUR_API_KEY';
+
+// Public base URL of THIS folder, with trailing slash. Handed-out media
+// URLs are built from this constant — never from the Host header (a
+// client-controlled Host must not steer another client's fetches).
+// Self-hosters change this to their own origin.
+const GIFS_BASE_URL = 'https://hollow.anonlisten.com/gifs/';
