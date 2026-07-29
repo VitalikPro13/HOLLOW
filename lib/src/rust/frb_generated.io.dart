@@ -222,6 +222,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  List<bool> dco_decode_list_bool(dynamic raw);
+
+  @protected
   List<ChannelFfi> dco_decode_list_channel_ffi(dynamic raw);
 
   @protected
@@ -742,6 +745,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<ArchiveReactionRemovalFfi> sse_decode_list_archive_reaction_removal_ffi(
     SseDeserializer deserializer,
   );
+
+  @protected
+  List<bool> sse_decode_list_bool(SseDeserializer deserializer);
 
   @protected
   List<ChannelFfi> sse_decode_list_channel_ffi(SseDeserializer deserializer);
@@ -1413,6 +1419,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
     List<ArchiveReactionRemovalFfi> self,
     SseSerializer serializer,
   );
+
+  @protected
+  void sse_encode_list_bool(List<bool> self, SseSerializer serializer);
 
   @protected
   void sse_encode_list_channel_ffi(

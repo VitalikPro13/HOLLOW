@@ -24,6 +24,7 @@ gifs_api.GifItem _item(String id, [String title = '']) => gifs_api.GifItem(
       title: title,
       stillUrl: '${kDefaultGifProxyUrl}m/$id.still.webp',
       smUrl: '${kDefaultGifProxyUrl}m/$id.sm.webp',
+      fullUrl: '${kDefaultGifProxyUrl}f/$id',
     );
 
 gifs_api.GifPage _page(List<gifs_api.GifItem> items) => gifs_api.GifPage(
@@ -32,14 +33,16 @@ gifs_api.GifPage _page(List<gifs_api.GifItem> items) => gifs_api.GifPage(
 class _FakeCatalog extends GifCatalog {
   final pending = <String, Completer<gifs_api.GifPage>>{};
   final queries = <String>[];
+  final ratings = <String>[];
 
   @override
-  gifs_api.GifPage? peek(String query, int page) => null;
+  gifs_api.GifPage? peek(String query, int page, String rating) => null;
 
   @override
-  Future<gifs_api.GifPage> page(String query, int page) {
+  Future<gifs_api.GifPage> page(String query, int page, String rating) {
     final key = '${query.trim().toLowerCase()}|$page';
     queries.add(key);
+    ratings.add(rating);
     final c = pending.putIfAbsent(key, Completer.new);
     return c.future;
   }
@@ -58,7 +61,7 @@ class _SeamCatalog extends GifCatalog {
   final fetches = <String>[];
 
   @override
-  Future<gifs_api.GifPage> fetchPage(String query, int page) {
+  Future<gifs_api.GifPage> fetchPage(String query, int page, String rating) {
     fetches.add('$query|$page');
     return pending.putIfAbsent('$query|$page', Completer.new).future;
   }
@@ -253,10 +256,31 @@ void main() {
     expect(find.text('reactions'), findsNothing);
     expect(find.text('cats'), findsNothing);
 
-    // Searching replaces the browse tabs with results.
+    // Searching does NOT remove the tabs — a row that vanishes as you type
+    // shifts the grid and hides where you came from. They just go unselected.
     await tester.enterText(find.byType(TextField).first, 'dog');
     await tester.pump(const Duration(milliseconds: 400));
-    expect(find.text('Popular'), findsNothing);
+    expect(find.text('Popular'), findsOneWidget);
+    expect(find.text('Favourites'), findsOneWidget);
+    expect(find.text('Recent'), findsOneWidget);
+  });
+
+  testWidgets('picker: tapping a tab is how you leave a search',
+      (tester) async {
+    final catalog = _FakeCatalog();
+    await _openWith(tester, _container(catalog));
+
+    await tester.enterText(find.byType(TextField).first, 'dog');
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(catalog.queries, contains('dog|1'));
+
+    // Popular is ALREADY the active tab — tapping it while searching must
+    // still act (clear the field), not early-return as a no-op.
+    await tester.tap(find.text('Popular'));
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.widgetWithText(TextField, 'dog'), findsNothing,
+        reason: 'the search field clears');
+    expect(catalog.queries.last, '|1', reason: 'back on trending');
   });
 
   testWidgets('picker: starring a GIF files it under Favourites',

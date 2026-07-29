@@ -2539,7 +2539,10 @@ class _AssetCacheCapSlider extends ConsumerWidget {
           onChanged: (v) =>
               ref.read(assetCacheCapProvider.notifier).setCap(v.round()),
         ),
-        Text('Least-recently added emotes, stickers and GIFs are evicted past this',
+        Text(
+            'Least-recently added emotes, stickers and GIFs are evicted past '
+            'this. Separate from this: the GIF search cache is capped at '
+            '200 MB, with the oldest thumbnails evicted past that.',
             style: HollowTypography.caption.copyWith(
               color: hollow.textSecondary, fontSize: 11,
             )),

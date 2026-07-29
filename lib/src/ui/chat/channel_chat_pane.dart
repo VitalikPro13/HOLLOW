@@ -1412,6 +1412,9 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
       context: context,
       anchorPosition: anchor,
       onSelect: _insertEmojiAtCursor,
+      // Conferences have no CRDT NSFW flag — they are the participants' own
+      // room, so they use the user's rating like a DM does.
+      serverId: _isConference ? null : widget.serverId,
     );
   }
 

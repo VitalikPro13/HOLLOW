@@ -269,10 +269,10 @@ class NetworkSettingsView extends ConsumerWidget {
   }
 }
 
-/// GIF search proxy card: the picker talks only to Hollow's no-log proxy;
-/// self-hosters point it at their own copy of `gifs/`. Applies immediately
-/// (no restart — the next search reads the new base). Shared by desktop and
-/// mobile settings.
+/// GIF search card: content rating, plus the two ways to change WHERE
+/// results come from — a self-hosted copy of `gifs/`, or the user's own
+/// Klipy API key (direct mode). Everything applies immediately; the next
+/// search reads the new source. Shared by desktop and mobile settings.
 class GifProxySettingsCard extends ConsumerStatefulWidget {
   const GifProxySettingsCard({super.key});
 
@@ -283,13 +283,20 @@ class GifProxySettingsCard extends ConsumerStatefulWidget {
 
 class _GifProxySettingsCardState extends ConsumerState<GifProxySettingsCard> {
   final _controller = TextEditingController();
+  final _keyController = TextEditingController();
+  final _hostsController = TextEditingController();
   bool _hydrated = false;
   bool _busy = false;
+  bool _keyBusy = false;
+  bool _hostsBusy = false;
   bool _expanded = false;
+  bool _keyVisible = false;
 
   @override
   void dispose() {
     _controller.dispose();
+    _keyController.dispose();
+    _hostsController.dispose();
     super.dispose();
   }
 
@@ -309,27 +316,104 @@ class _GifProxySettingsCardState extends ConsumerState<GifProxySettingsCard> {
     }
   }
 
+  Future<void> _saveKey(String value) async {
+    setState(() => _keyBusy = true);
+    try {
+      await ref.read(gifApiKeyProvider.notifier).setKey(value);
+      if (!mounted) return;
+      _keyController.text = ref.read(gifApiKeyProvider);
+      HollowToast.show(
+          context,
+          value.trim().isEmpty
+              ? 'Back to the Hollow proxy'
+              : 'Using your own Klipy key');
+    } catch (e) {
+      if (!mounted) return;
+      HollowToast.show(context, 'That does not look like a Klipy API key',
+          type: HollowToastType.error);
+    } finally {
+      if (mounted) setState(() => _keyBusy = false);
+    }
+  }
+
+  Future<void> _saveHosts(List<String> hosts) async {
+    setState(() => _hostsBusy = true);
+    try {
+      await ref.read(gifMediaHostsProvider.notifier).setHosts(hosts);
+      if (!mounted) return;
+      _hostsController.text = ref.read(gifMediaHostsProvider).join(', ');
+      HollowToast.show(context, 'Allowed media hosts updated');
+    } catch (e) {
+      if (!mounted) return;
+      HollowToast.show(context, 'That is not a valid host name',
+          type: HollowToastType.error);
+    } finally {
+      if (mounted) setState(() => _hostsBusy = false);
+    }
+  }
+
+  Widget _caption(HollowTheme hollow, String text) => Text(
+        text,
+        style: HollowTypography.caption
+            .copyWith(color: hollow.textSecondary, fontSize: 11),
+      );
+
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
     final current = ref.watch(gifProxyUrlProvider);
+    final apiKey = ref.watch(gifApiKeyProvider);
+    final direct = ref.watch(gifDirectModeProvider);
+    final rating = ref.watch(gifRatingProvider);
+    final ratings =
+        ref.watch(gifRatingsProvider).valueOrNull ?? const [kDefaultGifRating];
+    final hosts = ref.watch(gifMediaHostsProvider);
     if (!_hydrated) {
       _controller.text = current;
+      _keyController.text = apiKey;
+      _hostsController.text = hosts.join(', ');
       _hydrated = true;
-      _expanded = current != kDefaultGifProxyUrl;
+      _expanded = current != kDefaultGifProxyUrl || apiKey.isNotEmpty;
     }
 
     return SettingsCard(
       title: 'GIF Search',
       children: [
-        Text(
-          'GIF search goes through Hollow\'s no-log proxy — the provider '
-          'never sees who searches, and message recipients make no web '
-          'requests at all. Only change this if you self-host the proxy.',
-          style: HollowTypography.caption.copyWith(
-            color: hollow.textSecondary,
-            fontSize: 11,
-          ),
+        _caption(
+          hollow,
+          direct
+              ? 'Searches go straight to KLIPY with your own API key, so '
+                  'KLIPY sees your IP address and your searches. Message '
+                  'recipients still make no web requests — a picked GIF is '
+                  're-encoded and sent as encrypted bytes either way.'
+              : 'GIF search goes through Hollow\'s no-log proxy — the '
+                  'provider never sees who searches, and message recipients '
+                  'make no web requests at all.',
+        ),
+        const SizedBox(height: HollowSpacing.md),
+        SettingsSectionLabel(label: 'Content rating'),
+        const SizedBox(height: HollowSpacing.xs),
+        TriStateSegment<String>(
+          value: ratings.contains(rating) ? rating : ratings.first,
+          options: [for (final r in ratings) (r, r.toUpperCase())],
+          onChanged: (r) => ref.read(gifRatingProvider.notifier).setRating(r),
+        ),
+        const SizedBox(height: HollowSpacing.xs),
+        _caption(
+          hollow,
+          'Applies to search and trending. Servers that are not marked NSFW '
+          'cap results at PG-13 regardless of this setting.',
+        ),
+        const SizedBox(height: HollowSpacing.md),
+        SettingsToggleRow(
+          icon: LucideIcons.play,
+          label: 'Play GIFs automatically',
+          subtitle: 'Animate every GIF on screen in the picker. Turn this off '
+              'to load still frames instead and use less data — on desktop, '
+              'hovering a GIF still plays it.',
+          value: ref.watch(gifAutoplayProvider),
+          onChanged: (v) =>
+              ref.read(gifAutoplayProvider.notifier).setEnabled(v),
         ),
         const SizedBox(height: HollowSpacing.sm),
         Align(
@@ -340,12 +424,161 @@ class _GifProxySettingsCardState extends ConsumerState<GifProxySettingsCard> {
               _expanded ? LucideIcons.chevronDown : LucideIcons.chevronRight,
               size: 14,
             ),
-            onPressed: () => setState(() => _expanded = !_expanded),
-            child: const Text('Advanced (self-hosting)'),
+            onPressed: () {
+              setState(() => _expanded = !_expanded);
+              // Re-read what the last searches were refused, so the blocked
+              // host hints below are current whenever the section opens.
+              if (_expanded) ref.invalidate(gifBlockedHostsProvider);
+            },
+            child: const Text('Advanced (own API key, self-hosting)'),
           ),
         ),
         if (_expanded) ...[
           const SizedBox(height: HollowSpacing.sm),
+          SettingsSectionLabel(label: 'Your own KLIPY API key'),
+          const SizedBox(height: HollowSpacing.xs),
+          _caption(
+            hollow,
+            'Optional. With your own key the app talks to KLIPY directly and '
+            'skips Hollow\'s proxy: your own rate limit, no dependency on '
+            'our server. It is not more private — KLIPY sees your IP and '
+            'every search under one key, where the shared proxy shows them '
+            'one server and a random id per request. Get a key at '
+            'klipy.com/developers.',
+          ),
+          const SizedBox(height: HollowSpacing.xs),
+          Row(
+            children: [
+              Expanded(
+                child: HollowTextField(
+                  controller: _keyController,
+                  hintText: 'Paste your KLIPY API key',
+                  isDense: true,
+                  obscureText: !_keyVisible,
+                  onChanged: (_) => setState(() {}),
+                ),
+              ),
+              const SizedBox(width: HollowSpacing.xs),
+              HollowButton.ghost(
+                compact: true,
+                semanticLabel:
+                    _keyVisible ? 'Hide API key' : 'Show API key',
+                icon: Icon(
+                    _keyVisible ? LucideIcons.eyeOff : LucideIcons.eye,
+                    size: 14),
+                onPressed: () => setState(() => _keyVisible = !_keyVisible),
+                child: const SizedBox.shrink(),
+              ),
+              const SizedBox(width: HollowSpacing.xs),
+              HollowButton.filled(
+                compact: true,
+                onPressed: _keyBusy || _keyController.text.trim() == apiKey
+                    ? null
+                    : () => _saveKey(_keyController.text),
+                child: _keyBusy
+                    ? const SizedBox(
+                        width: 14,
+                        height: 14,
+                        child: CircularProgressIndicator(strokeWidth: 2))
+                    : const Text('Save'),
+              ),
+            ],
+          ),
+          if (apiKey.isNotEmpty) ...[
+            const SizedBox(height: HollowSpacing.xs),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: HollowButton.ghost(
+                compact: true,
+                icon: const Icon(LucideIcons.rotateCcw, size: 14),
+                onPressed: _keyBusy
+                    ? null
+                    : () {
+                        _keyController.clear();
+                        _saveKey('');
+                      },
+                child: const Text('Remove key (back to the Hollow proxy)'),
+              ),
+            ),
+          ],
+          if (direct) ...[
+            const SizedBox(height: HollowSpacing.md),
+            SettingsSectionLabel(label: 'Allowed media hosts'),
+            const SizedBox(height: HollowSpacing.xs),
+            _caption(
+              hollow,
+              'Comma-separated. Direct mode only: the app refuses to load GIF '
+              'images from any other host, so a KLIPY CDN change can be fixed '
+              'here without waiting for an app update. Subdomains are '
+              'included.',
+            ),
+            const SizedBox(height: HollowSpacing.xs),
+            Row(
+              children: [
+                Expanded(
+                  child: HollowTextField(
+                    controller: _hostsController,
+                    hintText: hosts.join(', '),
+                    isDense: true,
+                    onChanged: (_) => setState(() {}),
+                  ),
+                ),
+                const SizedBox(width: HollowSpacing.sm),
+                HollowButton.filled(
+                  compact: true,
+                  onPressed: _hostsBusy ||
+                          _hostsController.text.trim() == hosts.join(', ')
+                      ? null
+                      : () => _saveHosts(_hostsController.text.split(',')),
+                  child: _hostsBusy
+                      ? const SizedBox(
+                          width: 14,
+                          height: 14,
+                          child: CircularProgressIndicator(strokeWidth: 2))
+                      : const Text('Save'),
+                ),
+              ],
+            ),
+            ...ref.watch(gifBlockedHostsProvider).maybeWhen(
+                  data: (blocked) => [
+                    for (final host
+                        in blocked.where((h) => !hosts.contains(h))) ...[
+                      const SizedBox(height: HollowSpacing.xs),
+                      Row(
+                        children: [
+                          Icon(LucideIcons.shieldAlert,
+                              size: 13, color: hollow.textTertiary),
+                          const SizedBox(width: HollowSpacing.xs),
+                          Expanded(
+                            child: Text(
+                              'Blocked images from $host',
+                              style: HollowTypography.caption.copyWith(
+                                  color: hollow.textTertiary, fontSize: 11),
+                            ),
+                          ),
+                          HollowButton.ghost(
+                            compact: true,
+                            onPressed: _hostsBusy
+                                ? null
+                                : () => _saveHosts([...hosts, host]),
+                            child: const Text('Allow'),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ],
+                  orElse: () => const <Widget>[],
+                ),
+          ],
+          const SizedBox(height: HollowSpacing.md),
+          SettingsSectionLabel(label: 'Self-hosted proxy'),
+          const SizedBox(height: HollowSpacing.xs),
+          _caption(
+            hollow,
+            'Only if you run your own copy of the gifs/ endpoint. Ignored '
+            'while an API key above is set.',
+          ),
+          const SizedBox(height: HollowSpacing.xs),
           Row(
             children: [
               Expanded(

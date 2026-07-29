@@ -876,15 +876,24 @@ class _HollowShellState extends ConsumerState<HollowShell>
     await network_api.setRelayUrl(domain: relayDomain);
     await ref.read(licenseKeyProvider.notifier).loadCached();
 
-    // GIF proxy override (self-hosters) — push explicitly, like the relay
-    // URL above. Then warm the trending page a little later so the GIF
-    // picker opens with zero spinner (plan: prefetch at app idle).
+    // GIF source settings — push explicitly, like the relay URL above:
+    // proxy override (self-hosters), the user's own Klipy key (direct mode),
+    // its media allowlist, and the content rating.
     await ref.read(gifProxyUrlProvider.notifier).loadCached();
-    // AFTER the proxy URL: saved GIFs store proxy-RELATIVE media paths and
-    // resolve them against whatever base is active.
+    await ref.read(gifApiKeyProvider.notifier).loadCached();
+    await ref.read(gifMediaHostsProvider.notifier).loadCached();
+    await ref.read(gifRatingProvider.notifier).loadCached();
+    await ref.read(gifAutoplayProvider.notifier).loadCached();
+    // AFTER the source settings: saved GIFs store proxy-RELATIVE media paths
+    // (or, for direct-mode picks, absolute CDN URLs) and resolve against
+    // whatever source is active.
     await ref.read(gifLibraryProvider.notifier).loadCached();
+    // Then warm the trending page a little later so the GIF picker opens
+    // with zero spinner (plan: prefetch at app idle).
     Future.delayed(const Duration(seconds: 5), () {
-      if (mounted) ref.read(gifCatalogProvider).prefetchTrending();
+      if (mounted) {
+        ref.read(gifCatalogProvider).prefetchTrending(ref.read(gifRatingProvider));
+      }
     });
 
     // Anti-censorship proxy: force the (lazy) proxy-config provider to build so

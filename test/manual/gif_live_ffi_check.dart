@@ -16,19 +16,19 @@ void main() {
     );
 
     var t = DateTime.now();
-    final trending = await gifs_api.gifTrending(page: 1);
+    final trending = await gifs_api.gifTrending(page: 1, rating: 'pg');
     // ignore: avoid_print
     print('trending: ${trending.items.length} items in '
         '${DateTime.now().difference(t).inMilliseconds}ms');
 
     t = DateTime.now();
-    final search = await gifs_api.gifSearch(query: 'cat', page: 1);
+    final search = await gifs_api.gifSearch(query: 'cat', page: 1, rating: 'pg');
     // ignore: avoid_print
     print('search "cat": ${search.items.length} items in '
         '${DateTime.now().difference(t).inMilliseconds}ms');
 
     t = DateTime.now();
-    final search2 = await gifs_api.gifSearch(query: 'party time', page: 1);
+    final search2 = await gifs_api.gifSearch(query: 'party time', page: 1, rating: 'pg');
     // ignore: avoid_print
     print('search "party time": ${search2.items.length} items in '
         '${DateTime.now().difference(t).inMilliseconds}ms');

@@ -18,6 +18,7 @@ gifs_api.GifItem _item(String id, {int w = 200, int h = 150, String? still}) =>
       title: 'title $id',
       stillUrl: still ?? '$_base' 'm/$id.still.webp',
       smUrl: '$_base' 'm/$id.sm.webp',
+      fullUrl: '$_base' 'f/$id',
     );
 
 GifLibraryNotifier _notifier(ProviderContainer c) =>
@@ -41,12 +42,29 @@ void main() {
       expect(moved.stillUrl, 'https://gifs.example.org/m/abc.still.webp');
     });
 
-    test('refuses an item whose URLs are not under the base', () {
-      expect(SavedGif.fromItem(_item('abc'), 'https://other.example/'), isNull);
-      // A row that slipped past the base check but has a bogus path shape.
+    test('keeps off-base https URLs whole (a direct-mode pick)', () {
+      // Direct mode: Klipy CDN paths are opaque and cannot be rebuilt from an
+      // id, so the absolute URL is stored as-is. Rust host-checked it at parse
+      // time, and GifLibraryNotifier.revalidate re-checks it against the
+      // CURRENT configuration on every source change.
+      final saved = SavedGif.fromItem(_item('abc'), 'https://other.example/')!;
+      expect(saved.stillPath, '${_base}m/abc.still.webp');
+      expect(saved.toItem('https://other.example/').stillUrl,
+          '${_base}m/abc.still.webp',
+          reason: 'an absolute location ignores the base');
+    });
+
+    test('refuses a bogus relative path shape', () {
+      // Under the base, so it must satisfy the m/<id>.<variant>.<ext> shape.
       expect(
         SavedGif.fromItem(
             _item('abc', still: '${_base}evil/../etc.still.webp'), _base),
+        isNull,
+      );
+      // Not under the base and not https either — neither form fits.
+      expect(
+        SavedGif.fromItem(_item('abc', still: 'http://evil.example/x.webp'),
+            'https://other.example/'),
         isNull,
       );
     });
@@ -74,12 +92,33 @@ void main() {
       );
     });
 
-    test('a stored absolute foreign URL can never survive a decode', () {
-      // Hand-written row with an off-origin path: the shape check rejects it,
-      // so the thumbnail cache is never handed a foreign host.
+    test('a plaintext-http location can never survive a decode', () {
+      // https-or-relative is the whole vocabulary: anything else is refused
+      // before the thumbnail cache could ever be handed it.
       const raw =
-          '{"favorites":[{"id":"a","w":1,"h":1,"p":"https://evil.example/x.webp","s":"m/a.sm.webp"}]}';
+          '{"favorites":[{"id":"a","w":1,"h":1,"p":"http://evil.example/x.webp","s":"m/a.sm.webp"}]}';
       expect(GifLibrary.decode(raw).favorites, isEmpty);
+    });
+
+    test('an absolute location decodes but stays hidden until permitted', () {
+      // Direct-mode rows survive the round trip (dropping them would lose a
+      // user's favourites on a mode switch)…
+      const raw =
+          '{"favorites":[{"id":"a","w":1,"h":1,"p":"https://static.klipy.com/a.jpg","s":"https://static.klipy.com/a.webp"}]}';
+      final lib = GifLibrary.decode(raw);
+      expect(lib.favorites.single.id, 'a');
+      expect(lib.visibleFavorites.single.id, 'a');
+
+      // …but the moment Rust says that location may not be fetched in the
+      // current configuration — going back to the proxy is exactly that case
+      // — nothing renders it, and nothing is deleted either.
+      final hidden = lib.copyWith(
+          hiddenLocations: const {'https://static.klipy.com/a.jpg'});
+      expect(hidden.visibleFavorites, isEmpty);
+      expect(hidden.favoritesIn(null), isEmpty);
+      expect(hidden.favorites.single.id, 'a', reason: 'hidden, not dropped');
+      expect(hidden.encode(), lib.encode(),
+          reason: 'visibility is never persisted');
     });
   });
 

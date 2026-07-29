@@ -8,6 +8,7 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 import '../../core/providers/gif_library_provider.dart';
 import '../../core/providers/gif_provider.dart';
 import '../../core/providers/member_panel_provider.dart';
+import '../../core/providers/server_provider.dart';
 import '../../core/services/gif_thumb_cache.dart';
 import '../../rust/api/gifs.dart' as gifs_api;
 import '../../rust/api/network.dart' as network_api;
@@ -27,10 +28,15 @@ import '../components/overlay_anchor.dart';
 /// ≤480px content-addressed WebP blob (Rust `gif_fetch_and_store`) and hands
 /// the caller an `[a:g:hash:w:h]` wire token — callers treat it as an opaque
 /// string, exactly like emoji picks.
+/// [serverId] is the server the composer belongs to, when there is one. It
+/// only feeds the content-rating clamp (a server not flagged NSFW caps
+/// results at pg-13); DMs and conferences pass null and use the user's own
+/// setting.
 void showGifPicker({
   required BuildContext context,
   required Offset anchorPosition,
   required void Function(String token) onSelect,
+  String? serverId,
 }) {
   final overlay = Overlay.of(context);
   late OverlayEntry entry;
@@ -47,6 +53,7 @@ void showGifPicker({
   entry = OverlayEntry(
     builder: (ctx) => _GifPickerOverlay(
       anchorPosition: anchorPosition,
+      serverId: serverId,
       onSelect: (token) {
         final first = !removed;
         teardown();
@@ -63,11 +70,13 @@ class _GifPickerOverlay extends StatelessWidget {
   final Offset anchorPosition;
   final void Function(String token) onSelect;
   final VoidCallback onDismiss;
+  final String? serverId;
 
   const _GifPickerOverlay({
     required this.anchorPosition,
     required this.onSelect,
     required this.onDismiss,
+    this.serverId,
   });
 
   @override
@@ -121,7 +130,7 @@ class _GifPickerOverlay extends StatelessWidget {
               ),
               child: ClipRRect(
                 borderRadius: BorderRadius.circular(hollow.radiusMd),
-                child: GifPickerBody(onSelect: onSelect),
+                child: GifPickerBody(onSelect: onSelect, serverId: serverId),
               ),
             ),
           ),
@@ -143,7 +152,11 @@ enum GifPickerTab { popular, favorites, recent }
 class GifPickerBody extends ConsumerStatefulWidget {
   final void Function(String token) onSelect;
 
-  const GifPickerBody({super.key, required this.onSelect});
+  /// Server the composer belongs to, when there is one — feeds the content
+  /// rating clamp only (see [showGifPicker]).
+  final String? serverId;
+
+  const GifPickerBody({super.key, required this.onSelect, this.serverId});
 
   @override
   ConsumerState<GifPickerBody> createState() => _GifPickerBodyState();
@@ -181,6 +194,17 @@ class _GifPickerBodyState extends ConsumerState<GifPickerBody> {
   /// True when the grid is showing proxy results rather than the local
   /// library — search always wins over the selected tab.
   bool get _networkView => _search.isNotEmpty || _tab == GifPickerTab.popular;
+
+  /// Rating for the next request: the user's setting, clamped for a server
+  /// that is not flagged NSFW. `ref.read` — this is called from callbacks,
+  /// and build() listens for changes separately.
+  String get _rating {
+    final rating = ref.read(gifRatingProvider);
+    final sid = widget.serverId;
+    if (sid == null) return rating;
+    final nsfw = ref.read(serverIsNsfwProvider(sid)).valueOrNull ?? false;
+    return clampGifRating(rating, serverAllowsNsfw: nsfw);
+  }
 
   /// Release-visible diagnostics (hollow_debug.log). Never logs query TEXT —
   /// only lengths/counts/timings.
@@ -226,7 +250,10 @@ class _GifPickerBodyState extends ConsumerState<GifPickerBody> {
   }
 
   void _selectTab(GifPickerTab tab) {
-    if (_tab == tab) return;
+    // While searching, even the ALREADY-selected tab is a real action: it is
+    // how you leave the search.
+    final searching = _search.isNotEmpty;
+    if (_tab == tab && !searching) return;
     setState(() {
       _tab = tab;
       _collectionId = null;
@@ -234,9 +261,16 @@ class _GifPickerBodyState extends ConsumerState<GifPickerBody> {
       _scrollOffset = 0;
     });
     _resetScroll();
-    // Bumps the seq either way, so a Popular request still in flight can
-    // never land on top of a library view.
-    _runQuery();
+    if (searching) {
+      // Clearing the field fires the controller listener, which sets _search
+      // and runs the query against the tab assigned above — calling
+      // _runQuery here too would issue a second, immediately-superseded one.
+      _searchController.clear();
+    } else {
+      // Bumps the seq either way, so a Popular request still in flight can
+      // never land on top of a library view.
+      _runQuery();
+    }
   }
 
   void _resetScroll() {
@@ -261,11 +295,12 @@ class _GifPickerBodyState extends ConsumerState<GifPickerBody> {
       return;
     }
     final catalog = ref.read(gifCatalogProvider);
+    final rating = _rating;
     final t0 = DateTime.now();
 
     // A warm cache page (trending is prefetched at boot) renders with no
     // spinner frame at all — the plan's "opening must never show a spinner".
-    final warm = catalog.peek(q, 1);
+    final warm = catalog.peek(q, 1, rating);
     if (warm != null) {
       _dbg('query seq=$seq len=${q.length} WARM ${warm.items.length} items');
       setState(() {
@@ -289,7 +324,7 @@ class _GifPickerBodyState extends ConsumerState<GifPickerBody> {
         await Future.delayed(const Duration(milliseconds: 250));
         if (!mounted || seq != _querySeq) return null;
       }
-      return catalog.page(q, 1);
+      return catalog.page(q, 1, rating);
     }
 
     run().then((p) {
@@ -335,7 +370,7 @@ class _GifPickerBodyState extends ConsumerState<GifPickerBody> {
     final seq = _querySeq;
     final next = _page + 1;
     setState(() => _loadingMore = true);
-    ref.read(gifCatalogProvider).page(_search, next).then((p) {
+    ref.read(gifCatalogProvider).page(_search, next, _rating).then((p) {
       if (!mounted || seq != _querySeq) return;
       setState(() {
         _loadingMore = false;
@@ -356,7 +391,11 @@ class _GifPickerBodyState extends ConsumerState<GifPickerBody> {
     final t0 = DateTime.now();
     setState(() => _pickingId = item.id);
     try {
-      final stored = await gifs_api.gifFetchAndStore(id: item.id);
+      // sourceUrl matters only in direct mode, and only for a favourite
+      // whose variants are no longer in Rust's session registry. Proxy mode
+      // ignores it outright and builds its own URL.
+      final stored = await gifs_api.gifFetchAndStore(
+          id: item.id, sourceUrl: item.fullUrl);
       _dbg('pick ok in ${DateTime.now().difference(t0).inMilliseconds}ms');
       // Record BEFORE the callback: onSelect tears the picker down.
       ref.read(gifLibraryProvider.notifier).noteUsed(item);
@@ -375,6 +414,19 @@ class _GifPickerBodyState extends ConsumerState<GifPickerBody> {
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
+    // Rating changes (Settings, or a clamp resolving once the server's NSFW
+    // flag loads) must re-issue the current query — results are cached per
+    // rating, so the old grid would otherwise just sit there. ref.listen
+    // belongs in build(); registering it in initState silently no-ops. The
+    // re-query is deferred a frame because _runQuery calls setState and a
+    // listener can fire inside someone else's build.
+    void requery(_, __) => WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) _runQuery();
+        });
+    ref.listen(gifRatingProvider, requery);
+    if (widget.serverId != null) {
+      ref.listen(serverIsNsfwProvider(widget.serverId!), requery);
+    }
     return Column(
       children: [
         Padding(
@@ -391,7 +443,10 @@ class _GifPickerBodyState extends ConsumerState<GifPickerBody> {
             autofocus: !(Platform.isAndroid || Platform.isIOS),
           ),
         ),
-        if (_search.isEmpty) _tabRow(hollow) else const SizedBox(height: 6),
+        // The tabs stay PUT while searching — they just lose their selected
+        // state (see _tabChip). A row that vanishes under you as you type
+        // moves the content beneath it and hides where you came from.
+        _tabRow(hollow),
         Divider(height: 1, color: hollow.border),
         Expanded(child: _content(hollow)),
         Padding(
@@ -427,7 +482,9 @@ class _GifPickerBodyState extends ConsumerState<GifPickerBody> {
   }
 
   Widget _tabChip(HollowTheme hollow, GifPickerTab tab, String label) {
-    final selected = _tab == tab;
+    // Searching is its own view, so NOTHING is selected while the field has
+    // text — tapping a tab is how you get back out (see _selectTab).
+    final selected = _tab == tab && _search.isEmpty;
     return HollowPressable(
       onTap: () => _selectTab(tab),
       semanticLabel: '$label GIFs tab',
@@ -679,7 +736,7 @@ class _GifPickerBodyState extends ConsumerState<GifPickerBody> {
   // --- Recent ---------------------------------------------------------------
 
   Widget _recentView(HollowTheme hollow) {
-    final recents = ref.watch(gifLibraryProvider).recents;
+    final recents = ref.watch(gifLibraryProvider).visibleRecents;
     final base = ref.watch(gifProxyUrlProvider);
     if (recents.isEmpty) {
       return _emptyHint(
@@ -712,7 +769,7 @@ class _GifPickerBodyState extends ConsumerState<GifPickerBody> {
         final cellH = colW / aspect;
         final c = colTops[0] <= colTops[1] ? 0 : 1;
         final top = colTops[c];
-        // "Visible viewport + ~1 row" gate for mobile grid animation.
+        // "Visible viewport + ~1 row" gate — this is what autoplays.
         final visible = top < _scrollOffset + viewport + cellH &&
             top + cellH > _scrollOffset - cellH;
         // Stills load only near the viewport (±1 screen) — an off-screen
@@ -1063,8 +1120,18 @@ class _GifCellState extends ConsumerState<_GifCell> {
     final focused = ref.watch(windowFocusedProvider);
     final isFavorite = ref.watch(
         gifLibraryProvider.select((l) => l.isFavorite(widget.item.id)));
+    // AUTOPLAY (default): anything actually in the viewport animates, on
+    // every platform. Bounded on three sides — only VISIBLE cells (not the
+    // ±1-screen still-preload margin), only while the window is focused, and
+    // AnimatedGifImage freezes itself under reduce-motion.
+    //
+    // OFF falls back to hover-to-play, which on mobile means stills only —
+    // that IS the point, since the setting's real cost is data: autoplay
+    // fetches the animated variant for everything on screen where hover
+    // fetches one. Either way the still paints first and the animation swaps
+    // in as it lands.
     final wantsAnim =
-        (_isMobile ? widget.visible : _hovering) && focused;
+        focused && (ref.watch(gifAutoplayProvider) ? widget.visible : _hovering);
     if (wantsAnim) _loadSm();
 
     final Widget image;

@@ -29,6 +29,22 @@ const kMaxGifListNameLength = 32;
 final _mediaPathRe =
     RegExp(r'^m/[A-Za-z0-9_-]{1,100}\.(?:still|sm)\.[a-z0-9]{2,5}$');
 
+/// The pick-time source path shape, also from gifs/.htaccess: `f/<id>`.
+final _fullPathRe = RegExp(r'^f/[A-Za-z0-9_-]{1,100}$');
+
+/// DIRECT MODE is the exception to the rule above: Klipy CDN paths are opaque
+/// and cannot be rebuilt from an id, so those rows store the absolute https
+/// URL Rust already host-checked at parse time. The guard moves rather than
+/// disappearing — [GifLibraryNotifier.revalidate] re-asks Rust which stored
+/// locations may be fetched in the CURRENT configuration, and rows it refuses
+/// are hidden (never deleted: switch back and they return). The case that
+/// matters: a CDN URL saved with your own key must NOT be fetched after you
+/// go back to the proxy, which is the whole point of the proxy.
+bool _isAbsoluteMedia(String v) => v.startsWith('https://');
+
+bool _validMediaLocation(String v, [RegExp? relativeShape]) =>
+    _isAbsoluteMedia(v) || (relativeShape ?? _mediaPathRe).hasMatch(v);
+
 /// One GIF remembered locally. Carries exactly what the picker grid needs, so
 /// favourites render without ever re-querying the proxy.
 class SavedGif {
@@ -37,9 +53,15 @@ class SavedGif {
   final int h;
   final String title;
 
-  /// Proxy-relative media paths (see [_mediaPathRe]).
+  /// Proxy-relative media paths (see [_mediaPathRe]) — or, for direct-mode
+  /// picks, absolute https CDN URLs (see [_isAbsoluteMedia]).
   final String stillPath;
   final String smPath;
+
+  /// Where the full-quality bytes come from when this row is SENT. Carried
+  /// because direct mode's in-RAM variant registry only covers the current
+  /// session: without it, sending a favourite saved last week would fail.
+  final String fullPath;
 
   const SavedGif({
     required this.id,
@@ -48,20 +70,25 @@ class SavedGif {
     required this.title,
     required this.stillPath,
     required this.smPath,
+    required this.fullPath,
   });
 
-  /// Null when the item's URLs are not under [base] — Rust already refuses
-  /// foreign rows at parse time, so this only fires if the proxy base changed
-  /// between the search and the pick.
+  /// Under [base] → stored relative. Otherwise absolute (a direct-mode pick;
+  /// Rust host-checked it at parse time). Null when neither shape fits — for
+  /// proxy rows that means the base changed between the search and the pick.
   static SavedGif? fromItem(gifs_api.GifItem item, String base) {
-    if (!item.stillUrl.startsWith(base) || !item.smUrl.startsWith(base)) {
-      return null;
+    String? location(String url, {RegExp? relativeShape}) {
+      if (url.startsWith(base)) {
+        final rel = url.substring(base.length);
+        return (relativeShape ?? _mediaPathRe).hasMatch(rel) ? rel : null;
+      }
+      return _isAbsoluteMedia(url) ? url : null;
     }
-    final still = item.stillUrl.substring(base.length);
-    final sm = item.smUrl.substring(base.length);
-    if (!_mediaPathRe.hasMatch(still) || !_mediaPathRe.hasMatch(sm)) {
-      return null;
-    }
+
+    final still = location(item.stillUrl);
+    final sm = location(item.smUrl);
+    final full = location(item.fullUrl, relativeShape: _fullPathRe);
+    if (still == null || sm == null || full == null) return null;
     return SavedGif(
       id: item.id,
       w: item.w,
@@ -69,17 +96,30 @@ class SavedGif {
       title: item.title,
       stillPath: still,
       smPath: sm,
+      fullPath: full,
     );
   }
 
-  gifs_api.GifItem toItem(String base) => gifs_api.GifItem(
-        id: id,
-        w: w,
-        h: h,
-        title: title,
-        stillUrl: '$base$stillPath',
-        smUrl: '$base$smPath',
-      );
+  /// The stored locations as fetchable URLs — what [GifLibraryNotifier]
+  /// hands to Rust for a permission verdict.
+  List<String> resolvedUrls(String base) => [
+        _isAbsoluteMedia(stillPath) ? stillPath : '$base$stillPath',
+        _isAbsoluteMedia(smPath) ? smPath : '$base$smPath',
+        _isAbsoluteMedia(fullPath) ? fullPath : '$base$fullPath',
+      ];
+
+  gifs_api.GifItem toItem(String base) {
+    final urls = resolvedUrls(base);
+    return gifs_api.GifItem(
+      id: id,
+      w: w,
+      h: h,
+      title: title,
+      stillUrl: urls[0],
+      smUrl: urls[1],
+      fullUrl: urls[2],
+    );
+  }
 
   Map<String, Object?> toJson() => {
         'id': id,
@@ -88,6 +128,7 @@ class SavedGif {
         't': title,
         'p': stillPath,
         's': smPath,
+        'f': fullPath,
       };
 
   /// Tolerant by design: one unreadable row must never take the library with
@@ -101,8 +142,14 @@ class SavedGif {
     final sm = raw['s'];
     if (id is! String || id.isEmpty) return null;
     if (w is! int || h is! int || w <= 0 || h <= 0) return null;
-    if (still is! String || !_mediaPathRe.hasMatch(still)) return null;
-    if (sm is! String || !_mediaPathRe.hasMatch(sm)) return null;
+    if (still is! String || !_validMediaLocation(still)) return null;
+    if (sm is! String || !_validMediaLocation(sm)) return null;
+    // Rows written before the pick-source was carried (proxy-only builds)
+    // rebuild it from the id — the endpoint shape is ours.
+    final rawFull = raw['f'];
+    final full = rawFull is String && _validMediaLocation(rawFull, _fullPathRe)
+        ? rawFull
+        : 'f/$id';
     final title = raw['t'];
     return SavedGif(
       id: id,
@@ -111,6 +158,7 @@ class SavedGif {
       title: title is String ? title : '',
       stillPath: still,
       smPath: sm,
+      fullPath: full,
     );
   }
 }
@@ -151,34 +199,56 @@ class GifLibrary {
   final List<SavedGif> favorites;
   final List<GifCollection> collections;
 
+  /// Stored media locations Rust refuses to fetch in the CURRENT
+  /// configuration. NEVER persisted and never removed from the lists above:
+  /// a row hidden because you dropped your Klipy key reappears when you put
+  /// it back. See [GifLibraryNotifier.revalidate].
+  final Set<String> hiddenLocations;
+
   const GifLibrary({
     this.recents = const [],
     this.favorites = const [],
     this.collections = const [],
+    this.hiddenLocations = const {},
   });
 
   static const empty = GifLibrary();
+
+  bool _shown(SavedGif g) =>
+      !hiddenLocations.contains(g.stillPath) &&
+      !hiddenLocations.contains(g.smPath) &&
+      !hiddenLocations.contains(g.fullPath);
+
+  /// Rows the picker may actually render — everything below the UI should
+  /// use these, not the raw lists (which stay whole for persistence).
+  List<SavedGif> get visibleRecents =>
+      hiddenLocations.isEmpty ? recents : recents.where(_shown).toList();
+
+  List<SavedGif> get visibleFavorites =>
+      hiddenLocations.isEmpty ? favorites : favorites.where(_shown).toList();
 
   bool isFavorite(String id) => favorites.any((g) => g.id == id);
 
   /// Favourites in [collectionId], in favourites order. Null id = all.
   List<SavedGif> favoritesIn(String? collectionId) {
-    if (collectionId == null) return favorites;
+    if (collectionId == null) return visibleFavorites;
     final i = collections.indexWhere((c) => c.id == collectionId);
     if (i < 0) return const [];
     final ids = collections[i].gifIds.toSet();
-    return favorites.where((g) => ids.contains(g.id)).toList();
+    return favorites.where((g) => ids.contains(g.id) && _shown(g)).toList();
   }
 
   GifLibrary copyWith({
     List<SavedGif>? recents,
     List<SavedGif>? favorites,
     List<GifCollection>? collections,
+    Set<String>? hiddenLocations,
   }) =>
       GifLibrary(
         recents: recents ?? this.recents,
         favorites: favorites ?? this.favorites,
         collections: collections ?? this.collections,
+        hiddenLocations: hiddenLocations ?? this.hiddenLocations,
       );
 
   String encode() => jsonEncode({
@@ -214,9 +284,53 @@ class GifLibrary {
 
 class GifLibraryNotifier extends Notifier<GifLibrary> {
   @override
-  GifLibrary build() => GifLibrary.empty;
+  GifLibrary build() {
+    // Changing the GIF SOURCE flips which stored rows may be fetched at all
+    // (see [revalidate]). ref.listen in build() is the registration point —
+    // an initState-style hook would silently no-op here.
+    ref.listen(gifDirectModeProvider, (_, _) => revalidate());
+    ref.listen(gifMediaHostsProvider, (_, _) => revalidate());
+    ref.listen(gifProxyUrlProvider, (_, _) => revalidate());
+    return GifLibrary.empty;
+  }
 
   String get _base => ref.read(gifProxyUrlProvider);
+
+  /// Ask Rust which stored media locations may be fetched right now — the
+  /// proxy base, the user's own key and the media allowlist all feed that
+  /// answer — and hide the rest. Nothing is deleted; see
+  /// [GifLibrary.hiddenLocations].
+  Future<void> revalidate() async {
+    try {
+      final base = _base;
+      final rows = [...state.recents, ...state.favorites];
+      if (rows.isEmpty) {
+        if (state.hiddenLocations.isNotEmpty) {
+          state = state.copyWith(hiddenLocations: const {});
+        }
+        return;
+      }
+      // Resolved URL -> stored location, so verdicts map back to rows.
+      final byUrl = <String, String>{};
+      for (final g in rows) {
+        final urls = g.resolvedUrls(base);
+        byUrl[urls[0]] = g.stillPath;
+        byUrl[urls[1]] = g.smPath;
+        byUrl[urls[2]] = g.fullPath;
+      }
+      final urls = byUrl.keys.toList();
+      final verdicts = await gifs_api.gifMediaUrlsPermitted(urls: urls);
+      final hidden = <String>{};
+      for (var i = 0; i < urls.length && i < verdicts.length; i++) {
+        if (!verdicts[i]) hidden.add(byUrl[urls[i]]!);
+      }
+      final same = hidden.length == state.hiddenLocations.length &&
+          hidden.containsAll(state.hiddenLocations);
+      if (!same) state = state.copyWith(hiddenLocations: hidden);
+    } catch (_) {
+      // Non-fatal: a failed check leaves visibility exactly as it was.
+    }
+  }
 
   /// Read the persisted library. Called from the shell's post-unlock boot
   /// sequence (the settings store is not open before that), right after the
@@ -227,6 +341,7 @@ class GifLibraryNotifier extends Notifier<GifLibrary> {
       final raw = await storage_api.loadSetting(key: _kLibrarySettingKey);
       if (raw == null || raw.isEmpty) return;
       state = GifLibrary.decode(raw);
+      await revalidate();
     } catch (_) {
       // Non-fatal: an unreadable library just starts empty.
     }

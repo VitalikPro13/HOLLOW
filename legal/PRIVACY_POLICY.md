@@ -103,6 +103,8 @@ Hollow's emote picker can search the FrankerFaceZ emote catalog, and its GIF pic
 
 When you pick an emote or GIF, your device downloads the image once through the same proxy and re-encodes it locally; from then on it travels inside your end-to-end encrypted messages like any other media. People who receive your messages never contact our web server, FrankerFaceZ, or KLIPY — receiving a message triggers no network request to anyone.
 
+**Using your own KLIPY API key.** Settings › Network lets you enter your own KLIPY API key, which turns off the proxy for GIF search: your device then contacts KLIPY and its content network directly. If you do that, KLIPY sees your IP address and your searches, tied together by your key — we describe this in the setting itself, because it is a trade rather than an upgrade. It is off by default and nothing about it changes the rule above: a picked GIF is still re-encoded locally and still travels as encrypted bytes, and people who receive your messages still make no network requests. The same applies if you point Hollow at your own self-hosted copy of the proxy.
+
 ## Law enforcement and government requests
 
 We are committed to transparency about any requests we receive.
@@ -137,7 +139,7 @@ This data never leaves your device in an unencrypted form. If you delete the Hol
 
 Hollow does not integrate with any analytics, advertising, or tracking services. Hollow is a native desktop and mobile application — it does not use cookies or any web-based tracking technology.
 
-The only third parties Hollow ever communicates with are the ones described in this policy: Google/Apple push services on mobile (wake signals only, no content), and — only if you choose to use the corresponding optional features — Twitch (verification), IGDB/Steam via our proxy (game showcase), and FrankerFaceZ/KLIPY via our proxy (emote and GIF search).
+The only third parties Hollow ever communicates with are the ones described in this policy: Google/Apple push services on mobile (wake signals only, no content), and — only if you choose to use the corresponding optional features — Twitch (verification), IGDB/Steam via our proxy (game showcase), and FrankerFaceZ/KLIPY via our proxy (emote and GIF search), or KLIPY directly if you supply your own API key.
 
 If you download Hollow from a third-party platform (e.g., GitHub), that platform's own privacy policy governs your interaction with their service.
 

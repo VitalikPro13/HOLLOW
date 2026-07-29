@@ -201,14 +201,68 @@ STATUS (updated 2026-07-29, sixth session — PHASES 0-4 DONE, resume at PHASE 5
   - Settings: gifProxyUrlProvider (SQLCipher-persisted, pushed at boot like
     the relay URL) + GifProxySettingsCard (network_section.dart, collapsed
     "Advanced (self-hosting)") shared by desktop Network settings AND
-    mobile settings tab. 4.2's per-user direct Klipy key: DEFERRED, not
-    dropped — a user asked for it, so it stays on the list. Do NOT sell it as
+    mobile settings tab. 4.2's per-user direct Klipy key: DONE in the sixth
+    session (2026-07-29) — see PHASE 4.2 DIRECT MODE below. Do NOT sell it as
     a privacy win: with your own key Klipy sees YOUR IP and every search under
     one stable key (a profile); through the shared proxy they see one server
     IP, an unsegmented firehose, and a random per-request customer_id. It is
-    "who would you rather be seen by", and the setting copy must say plainly
+    "who would you rather be seen by", and the setting copy says plainly
     that enabling it sends your IP to Klipy. The genuinely private escape
     hatch — set_gif_proxy_url + the Advanced (self-hosting) card — shipped.
+* PHASE 4.2 DIRECT MODE + content rating (2026-07-29, sixth session): DONE.
+  - Rust api/gifs.rs is now TWO MODES behind one normalized GifPage contract:
+    proxy (default, unchanged) and direct (`set_gif_api_key` — a key present
+    IS direct mode, one piece of state, no "enabled but no key" break).
+    Direct mode owns a Rust copy of search.php's normalization (ad rows
+    stripped, SIZE_SLOTS walk, mp4-only rows dropped) — the real cost of the
+    feature: a provider swap stays a PHP change for proxy users but becomes
+    an app release for direct-mode users. Klipy has no still format; its
+    `jpg` variant IS a static frame, so the stills-in-the-grid bandwidth
+    model survives. customer_id stays random per request (their ad products
+    want a durable id — we do not run ads).
+  - MEDIA HOST ALLOWLIST (direct mode only, `set_gif_media_hosts`, default
+    `klipy.com` suffix-matched → covers api./static./static2.). Editable in
+    Settings because a CDN move would otherwise need an app release; every
+    refused host is REMEMBERED (`gif_blocked_media_hosts`) and offered in the
+    card with an Allow button, so the failure mode is a two-tap fix instead
+    of a mystery empty grid. url_host() takes everything after the LAST '@'
+    (a "static.klipy.com@evil.example" URL resolves to evil.example) and
+    refuses plaintext http outright.
+  - CONTENT RATING is a per-CALL parameter, not a Rust global: Dart owns the
+    policy (user setting → clamped to pg-13 inside servers not flagged NSFW,
+    DMs/conferences pass through) and the rating is part of the GifCatalog
+    cache key, so a rating change can never serve results fetched under the
+    previous one. gif_search/gif_trending signatures gained it.
+  - GifItem gained `full_url` (the proxy always returned "full"; we were
+    dropping it). Without it, direct mode could not re-send a FAVOURITE from
+    an earlier session — the variant registry is per-session RAM. Proxy mode
+    ignores the caller's source outright and still builds {base}f/{id};
+    direct mode consults it ONLY on a registry miss and ONLY through the
+    allowlist. SavedGif carries it as a third location.
+  - SavedGif locations are now relative-OR-absolute: Klipy CDN paths are
+    opaque and cannot be rebuilt from an id. The guard MOVED rather than
+    disappearing — `gif_media_urls_permitted` answers "may I fetch this in
+    the CURRENT configuration", and rows it refuses are HIDDEN, never
+    deleted (GifLibrary.hiddenLocations, never persisted). The case that
+    matters: a CDN URL saved with your own key must not be fetched after you
+    go back to the proxy, which is the whole point of the proxy.
+  - POST-TEST TWEAKS (same session, after Vitalik ran it): default rating
+    PG -> PG-13 (app-side only; search.php's 'pg' stays as the floor for
+    pre-feature clients); the browse tabs no longer VANISH while searching,
+    they just go unselected, and tapping one clears the field (including the
+    already-active tab, which used to early-return as a no-op); GIF cells
+    AUTOPLAY on desktop instead of animating on hover only, behind
+    `gifAutoplayProvider` (ON by default, toggle in the same card) —
+    `wantsAnim = focused && (autoplay ? widget.visible : _hovering)`, still
+    bounded by viewport, window focus, and reduce-motion. It is a DATA
+    setting first: autoplay fetches the animated variant for every cell on
+    screen, and that lands in GifThumbCache's own 200 MB disk LRU (the
+    "GIF search" storage segment), which the 512 MB asset-blob cap does not
+    cover.
+  - Tests: 14 Rust in gifs.rs (Klipy parse + ad-strip + host guard + url_host
+    tricks + key/rating/host validation + registry eviction + pick-candidate
+    fallback) and 215 Flutter green; a live direct-mode smoke sits behind
+    #[ignore] + HOLLOW_KLIPY_KEY.
   - Buttons: composerGifButton = a "GIF" text badge (neither icon set has a
     GIF glyph) left of the emoji button in both desktop panes; mobile = a
     GIF row in the [+] attach sheet → 55%-height bottom sheet.

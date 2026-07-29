@@ -141,7 +141,9 @@ class _AssetCacheCapSlider extends ConsumerWidget {
       title: 'Emotes & GIFs Limit',
       subtitle:
           '$cap MB — least-recently added emotes, stickers and GIFs are evicted '
-          'when this is exceeded (ones your servers or personal set use are kept)',
+          'when this is exceeded (ones your servers or personal set use are kept). '
+          'Separate from this: the GIF search cache is capped at 200 MB, with '
+          'the oldest thumbnails evicted past that.',
       value: cap.toDouble().clamp(64, 4096),
       min: 64,
       max: 4096,

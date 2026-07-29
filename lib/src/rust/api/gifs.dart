@@ -6,44 +6,121 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `gif_proxy_base`, `gif_query_page`, `gif_query`, `parse_gif_page`, `proxy_base_store`, `valid_gif_id`
+// These functions are ignored because they are not marked as `pub`: `api_key_store`, `blocked_hosts_store`, `clear_direct_registry`, `clear`, `direct_pick_bytes`, `direct_query`, `direct_src_store`, `get`, `gif_api_key`, `gif_page`, `gif_proxy_base`, `insert`, `klipy_pick`, `klipy_variant_in_slot`, `media_hosts_store`, `media_hosts`, `media_url_allowed`, `media_url_ok`, `normalized_rating`, `parse_gif_page`, `parse_klipy_page`, `proxy_base_store`, `proxy_pick_bytes`, `proxy_query`, `random_customer_id`, `url_host`, `valid_api_key`, `valid_gif_id`, `valid_media_host`
+// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `DirectRegistry`
+// These functions are ignored (category: IgnoreBecauseOwnerTyShouldIgnore): `default`
 
 /// Configure the GIF proxy base URL (None/empty = back to the default).
 /// Persisted on the Dart side and pushed at startup, like `set_relay_url`.
 Future<void> setGifProxyUrl({String? base}) =>
     RustLib.instance.api.crateApiGifsSetGifProxyUrl(base: base);
 
-/// Search GIFs via the website's no-log proxy. Authoring only.
-Future<GifPage> gifSearch({required String query, required int page}) =>
-    RustLib.instance.api.crateApiGifsGifSearch(query: query, page: page);
+/// Set (or clear, with None/empty) the user's own Klipy API key. A key
+/// present IS direct mode — one piece of state, so there is no "enabled but
+/// no key" way to be broken.
+Future<void> setGifApiKey({String? key}) =>
+    RustLib.instance.api.crateApiGifsSetGifApiKey(key: key);
+
+/// True while a user-supplied Klipy key is active (direct mode).
+Future<bool> gifDirectMode() =>
+    RustLib.instance.api.crateApiGifsGifDirectMode();
+
+/// Replace the direct-mode media host allowlist (empty = back to defaults).
+/// Entries are suffix-matched: "klipy.com" allows "static2.klipy.com".
+Future<void> setGifMediaHosts({required List<String> hosts}) =>
+    RustLib.instance.api.crateApiGifsSetGifMediaHosts(hosts: hosts);
+
+/// The shipped default allowlist — Dart reads it rather than mirroring it
+/// (same rule as `default_role_permissions`).
+Future<List<String>> defaultGifMediaHosts() =>
+    RustLib.instance.api.crateApiGifsDefaultGifMediaHosts();
+
+/// Hosts whose media we refused since the last settings change. Surfaced in
+/// Settings so a CDN move is a two-tap fix instead of a mystery empty grid.
+Future<List<String>> gifBlockedMediaHosts() =>
+    RustLib.instance.api.crateApiGifsGifBlockedMediaHosts();
+
+/// Per-URL verdicts, in input order: may the client fetch this media URL in
+/// the CURRENT configuration? Always true under the active proxy base; in
+/// direct mode also true for allowlisted hosts.
+///
+/// The saved GIF library asks this about the absolute URLs it stores for
+/// direct-mode picks. Going back to proxy mode MUST hide them: fetching a
+/// Klipy CDN URL while in proxy mode would defeat the entire point of proxy
+/// mode, and a stale favourite is not a licence to do it. Dart asks rather
+/// than duplicating the rule (same reason as `default_role_permissions`).
+Future<List<bool>> gifMediaUrlsPermitted({required List<String> urls}) =>
+    RustLib.instance.api.crateApiGifsGifMediaUrlsPermitted(urls: urls);
+
+/// The default content rating. Dart owns rating POLICY (user setting, then
+/// clamped for non-NSFW servers) and passes the result per call, so a rating
+/// change can never serve results cached under another rating.
+Future<String> defaultGifRating() =>
+    RustLib.instance.api.crateApiGifsDefaultGifRating();
+
+/// Ratings the picker may offer, mildest first.
+Future<List<String>> gifRatings() =>
+    RustLib.instance.api.crateApiGifsGifRatings();
+
+/// Search GIFs. Authoring only. `rating` is one of `gif_ratings()`; anything
+/// else falls back to the default rather than being sent upstream.
+Future<GifPage> gifSearch({
+  required String query,
+  required int page,
+  required String rating,
+}) => RustLib.instance.api.crateApiGifsGifSearch(
+  query: query,
+  page: page,
+  rating: rating,
+);
 
 /// Trending GIFs — the picker's default (empty-search) view.
-Future<GifPage> gifTrending({required int page}) =>
-    RustLib.instance.api.crateApiGifsGifTrending(page: page);
+Future<GifPage> gifTrending({required int page, required String rating}) =>
+    RustLib.instance.api.crateApiGifsGifTrending(page: page, rating: rating);
 
-/// Category names for the browse chips (server-cached for 7 days).
+/// Category names for the browse chips (proxy caches them for 7 days).
 Future<List<String>> gifCategories() =>
     RustLib.instance.api.crateApiGifsGifCategories();
 
-/// Download a picked GIF's full-quality source through the proxy, re-encode
-/// it into the ≤480px/≤2MB send format, and cache it as a `kind='gif'` asset
-/// blob. Takes an ID and builds the URL itself — never a caller-supplied URL.
-Future<StoredGif> gifFetchAndStore({required String id}) =>
-    RustLib.instance.api.crateApiGifsGifFetchAndStore(id: id);
+/// Download a picked GIF's full-quality source, re-encode it into the
+/// ≤480px/≤2MB send format, and cache it as a `kind='gif'` asset blob.
+///
+/// PROXY MODE ignores `source_url` entirely and builds `{base}f/{id}` — the
+/// fetcher is structurally incapable of being pointed anywhere else.
+///
+/// DIRECT MODE resolves the variants OUR OWN parse registered for `id`, and
+/// only if that RAM registry has no entry — a favourite saved in an earlier
+/// session, which is the one case the registry cannot cover — falls back to
+/// `source_url`, and then only if it passes the media host allowlist. That
+/// allowlist is the guard in direct mode either way: every URL there comes
+/// from Klipy's opaque CDN, so provenance cannot be re-derived, only
+/// constrained.
+Future<StoredGif> gifFetchAndStore({required String id, String? sourceUrl}) =>
+    RustLib.instance.api.crateApiGifsGifFetchAndStore(
+      id: id,
+      sourceUrl: sourceUrl,
+    );
 
-/// One GIF search/browse result. All URLs point at OUR proxy, never at the
-/// upstream provider — rows with foreign URLs are dropped at parse time.
+/// One GIF search/browse result. In proxy mode all URLs point at OUR proxy;
+/// in direct mode at an allowlisted Klipy CDN host. Rows failing either
+/// guard are dropped at parse time.
 class GifItem {
   final String id;
   final int w;
   final int h;
   final String title;
 
-  /// First-frame still WebP (~150px) — the grid default.
+  /// Still frame (~150px) — the grid default.
   final String stillUrl;
 
   /// Small animated variant (~150px WebP or GIF) — hover/viewport preview.
   final String smUrl;
+
+  /// Best-quality source, used at PICK time only. Carried on the item so a
+  /// favourite saved in a direct-mode session can still be sent months
+  /// later, when the in-RAM variant registry is long gone — see
+  /// `gif_fetch_and_store`.
+  final String fullUrl;
 
   const GifItem({
     required this.id,
@@ -52,6 +129,7 @@ class GifItem {
     required this.title,
     required this.stillUrl,
     required this.smUrl,
+    required this.fullUrl,
   });
 
   @override
@@ -61,7 +139,8 @@ class GifItem {
       h.hashCode ^
       title.hashCode ^
       stillUrl.hashCode ^
-      smUrl.hashCode;
+      smUrl.hashCode ^
+      fullUrl.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -73,18 +152,19 @@ class GifItem {
           h == other.h &&
           title == other.title &&
           stillUrl == other.stillUrl &&
-          smUrl == other.smUrl;
+          smUrl == other.smUrl &&
+          fullUrl == other.fullUrl;
 }
 
-/// One page of the proxy's normalized search/trending response.
+/// One page of the normalized search/trending response.
 class GifPage {
   final List<GifItem> items;
   final int page;
   final bool hasNext;
 
   /// Unix seconds until which the proxy's upstream is cooling down
-  /// (0 = healthy). An empty page with a non-zero value means "retry
-  /// later", not "no results".
+  /// (0 = healthy, and always 0 in direct mode). An empty page with a
+  /// non-zero value means "retry later", not "no results".
   final PlatformInt64 backoffUntil;
 
   const GifPage({

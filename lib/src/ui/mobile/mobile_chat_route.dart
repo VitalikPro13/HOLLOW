@@ -1082,6 +1082,11 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
               Navigator.pop(context);
               _insertAtCursor(_controller.displayTextFor(token));
             },
+            // Null in a DM or a conference — the rating clamp only applies
+            // to real servers (see showGifPicker).
+            serverId: (widget.serverId?.startsWith('conf:') ?? true)
+                ? null
+                : widget.serverId,
           ),
         ),
       ),
