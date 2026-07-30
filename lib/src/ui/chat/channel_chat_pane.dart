@@ -39,6 +39,7 @@ import 'package:hollow/src/ui/chat/chat_drop_zone.dart';
 import 'package:hollow/src/ui/chat/chat_input_shortcuts.dart';
 import 'package:hollow/src/ui/chat/emoji_picker.dart';
 import 'package:hollow/src/ui/chat/gif_picker.dart';
+import 'package:hollow/src/ui/chat/sticker_picker.dart';
 import 'package:hollow/src/ui/chat/emote_composer.dart';
 import 'package:hollow/src/ui/chat/emote_image.dart';
 import 'package:hollow/src/core/providers/emote_provider.dart';
@@ -1418,6 +1419,22 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
     );
   }
 
+  /// Open the sticker picker anchored to the composer button; the pick
+  /// arrives as an `[a:s:hash:w:h]` token and stages like an emote. Several
+  /// in a row tile into a mosaic once sent.
+  void _openComposerStickerPicker(BuildContext btnCtx) {
+    final box = btnCtx.findRenderObject() as RenderBox?;
+    final anchor = box == null
+        ? Offset.zero
+        : overlayAnchorOf(btnCtx, localOffset: Offset(box.size.width, 0));
+    showStickerPicker(
+      context: context,
+      anchorPosition: anchor,
+      onSelect: _insertEmojiAtCursor,
+      serverId: _isConference ? null : widget.serverId,
+    );
+  }
+
   void _insertEmojiAtCursor(String text) {
     // Custom-emote/asset tokens become a 1-char placeholder rendered inline
     // as the actual image; Unicode emoji pass through unchanged.
@@ -2053,7 +2070,8 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
       onCopyImage: _copyImageFor(context, msg),
       onInfo: _infoFor(context, msg),
       child: _buildBubble(msg, index, showHeader, messages, replyIndexById,
-          localMentionName, localMentionNick),
+          localMentionName, localMentionNick,
+          _tilingAt(messages, index, showHeader, links)),
     );
     return dateSeparatedChatRow(
       rowKey: msg.messageId ?? index,
@@ -2061,6 +2079,40 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
       prevTimestamp: index > 0 ? messages[index - 1].timestamp : null,
       showHeader: showHeader,
       child: wrapper,
+    );
+  }
+
+  /// Sticker tiling for the row at [index] — see `stickerTilingFor`.
+  /// `showHeader` IS "not grouped with the previous". Grouping compares
+  /// MASTER identities, exactly like the header rule above.
+  ({bool prev, bool next}) _tilingAt(
+    List<ChannelChatMessage> messages,
+    int index,
+    bool showHeader,
+    DeviceLinkState links,
+  ) {
+    bool candidate(ChannelChatMessage m) => stickerTileCandidate(
+          text: m.text,
+          hasReply: m.replyToMid != null,
+          hasReactions: m.reactions.isNotEmpty,
+          hasFile: m.fileAttachment != null,
+          isEdited: m.editedAt != null,
+        );
+    final next = index + 1 < messages.length ? messages[index + 1] : null;
+    return stickerTilingFor(
+      selfIsSticker: candidate(messages[index]),
+      prevIsSticker: index > 0 && candidate(messages[index - 1]),
+      groupedWithPrev: !showHeader,
+      nextIsSticker: next != null && candidate(next),
+      groupedWithNext: next != null &&
+          shouldGroup(
+            currentIsMe: false,
+            previousIsMe: false,
+            currentTime: next.timestamp,
+            previousTime: messages[index].timestamp,
+            currentSenderId: links.identityOf(next.senderId),
+            previousSenderId: links.identityOf(messages[index].senderId),
+          ),
     );
   }
 
@@ -2072,6 +2124,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
     Map<String, int> replyIndexById,
     String localMentionName,
     String? localMentionNick,
+    ({bool prev, bool next}) tiling,
   ) {
     String? replySender;
     String? replyText;
@@ -2118,6 +2171,8 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
       onToggleReaction: msg.messageId != null
           ? (emoji) => _toggleReaction(msg, emoji)
           : null,
+      tileWithPrev: tiling.prev,
+      tileWithNext: tiling.next,
     );
   }
 
@@ -2556,6 +2611,8 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
         ),
         const SizedBox(width: HollowSpacing.xs),
         composerGifButton(hollow, onOpen: _openComposerGifPicker),
+        composerStickerButton(hollow,
+            onOpen: _openComposerStickerPicker),
         const SizedBox(width: HollowSpacing.xs),
         composerEmojiButton(hollow, onOpen: _openComposerEmojiPicker),
         const SizedBox(width: HollowSpacing.sm),

@@ -45,6 +45,7 @@ import 'package:hollow/src/core/providers/server_avatar_anim_provider.dart';
 import 'package:hollow/src/core/providers/server_avatar_provider.dart';
 import 'package:hollow/src/core/providers/server_banner_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
+import 'package:hollow/src/core/providers/sticker_provider.dart';
 import 'package:hollow/src/core/providers/server_strip_layout_provider.dart';
 import 'package:hollow/src/core/providers/notification_provider.dart';
 import 'package:hollow/src/core/providers/system_notification_provider.dart';
@@ -888,6 +889,10 @@ class _HollowShellState extends ConsumerState<HollowShell>
     // (or, for direct-mode picks, absolute CDN URLs) and resolve against
     // whatever source is active.
     await ref.read(gifLibraryProvider.notifier).loadCached();
+    // Sticker recents. No source coupling here — a sticker's bytes are
+    // already a local content-addressed blob, so unlike the GIF library
+    // there is nothing to resolve against a proxy base.
+    await ref.read(stickerRecentsProvider.notifier).loadCached();
     // Then warm the trending page a little later so the GIF picker opens
     // with zero spinner (plan: prefetch at app idle).
     Future.delayed(const Duration(seconds: 5), () {

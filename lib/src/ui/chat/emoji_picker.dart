@@ -3,6 +3,7 @@ import 'dart:io' show Platform;
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:hollow/src/ui/components/edge_scroll_row.dart';
 import 'package:hollow/src/ui/components/overlay_anchor.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -432,7 +433,12 @@ class _EmojiPickerBodyState extends ConsumerState<EmojiPickerBody> {
         Padding(
           padding: const EdgeInsets.symmetric(
               horizontal: HollowSpacing.sm, vertical: 6),
-          child: Row(
+          // EdgeScrollRow, not a bare Row: four chips in a 360px panel
+          // overflow at a larger-text setting, and a bare Row would clip the
+          // FFZ tab out of reach entirely (the GIF and sticker pickers
+          // already scroll their tab rows).
+          child: EdgeScrollRow(
+            semanticLabel: 'tabs',
             children: [
               _tabChip(_PickerTab.emoji, 'Emoji'),
               const SizedBox(width: 4),

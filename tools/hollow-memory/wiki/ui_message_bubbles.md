@@ -911,6 +911,10 @@ The red recording dot pulses between 35% and 100% opacity on a 900ms cycle.
 
 Message grouping is not handled inside the bubble widgets themselves. The `showHeader` parameter is determined by the parent chat pane (e.g., `ChatPane`, `ChannelChatPane`). The standard grouping rule is: consecutive messages from the same sender within a short time window share a group. The first message in a group gets `showHeader: true` (avatar + name + timestamp), subsequent messages get `showHeader: false` (indented text only, padding reduced from 4px to 2px vertical).
 
+### Sticker tiling (`tileWithPrev` / `tileWithNext`, asset-rail Phase 5)
+
+Both bubbles take two more flags from the pane, decided the same way `showHeader` is. When this row AND its neighbour are both nothing-but-a-sticker-run (`stickerTileCandidate` — and carrying no reply, reaction, file or edit marker that would sit in the seam) AND already grouped, the seam between them is drawn CONTINUOUS: the row padding goes to 0 on that side, the block asset drops its own padding to match, and `stickerRunRadius` squares the corners there. Three stickers sent one after another become one tall image — the point of a multi-part pack. Both flags default false, so every other message renders exactly as before. Decided by `stickerTilingFor` in `chat_pane_shared.dart`; full map in wiki `emotes.md` > "Sticker Mosaics".
+
 ---
 
 ## Key Integration Points

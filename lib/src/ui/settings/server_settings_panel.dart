@@ -6,6 +6,7 @@ import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
+import 'package:hollow/src/ui/components/edge_scroll_row.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/settings/channels_tab.dart';
 import 'package:hollow/src/ui/settings/danger_zone_tab.dart';
@@ -259,10 +260,13 @@ class _ServerSettingsPanelState extends ConsumerState<ServerSettingsPanel> {
             // high text scale the row of tabs can outgrow the panel width, so
             // it scrolls instead of overflowing. Each label is also scale-
             // capped (load-bearing chrome, iOS/Android tab-bar norm).
-            child: SingleChildScrollView(
-              scrollDirection: Axis.horizontal,
-              child: Row(
-                children: List.generate(tabs.length, (i) {
+            // EdgeScrollRow rather than a bare scroller: overflowing tabs
+            // were unreachable on a desktop with a plain wheel mouse (no
+            // drag affordance, no gesture). Arrows + wheel-to-pan appear
+            // only while there IS overflow.
+            child: EdgeScrollRow(
+              semanticLabel: 'settings tabs',
+              children: List.generate(tabs.length, (i) {
                   final tab = tabs[i];
                   final isSelected = i == _selectedTab;
                   return _TabButton(
@@ -273,7 +277,6 @@ class _ServerSettingsPanelState extends ConsumerState<ServerSettingsPanel> {
                     onTap: () => setState(() => _selectedTab = i),
                   );
                 }),
-              ),
             ),
           ),
         ),

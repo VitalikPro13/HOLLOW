@@ -210,33 +210,82 @@ _TokenMatch? _matchCustomEmote(String text, int i) {
 /// Horizontal whitespace on either side does not count as "sharing the line".
 /// Tokens with out-of-bound dims fail [parseAssetToken] and fall through to
 /// plain text (same as an old client would render).
+///
+/// STICKER RUNS: consecutive sticker tokens separated only by horizontal
+/// whitespace are absorbed into ONE token whose `text` is the whole run
+/// source, so [ChatAssetRun] can draw them edge to edge and a pack authored
+/// as several pieces reads as one image. GIFs never join a run — each stays
+/// its own block at the photo box, which is what a GIF-with-caption needs.
 _TokenMatch? _matchAssetToken(String text, int i) {
-  if (text[i] == '[') {
-    final match = assetTokenRegex.matchAsPrefix(text, i);
-    if (match != null && parseAssetToken(match.group(0)!) != null) {
-      var before = i;
-      while (before > 0 && _isHSpace(text[before - 1])) {
-        before--;
+  if (text[i] != '[') return null;
+  final match = assetTokenRegex.matchAsPrefix(text, i);
+  if (match == null) return null;
+  final first = parseAssetToken(match.group(0)!);
+  if (first == null) return null;
+
+  var end = match.end;
+  if (first.kind == 's') {
+    while (true) {
+      var j = end;
+      while (j < text.length && _isHSpace(text[j])) {
+        j++;
       }
-      var after = match.end;
-      while (after < text.length && _isHSpace(text[after])) {
-        after++;
-      }
-      return _TokenMatch(
-        _Token(
-          _TokenKind.asset,
-          match.group(0)!,
-          null,
-          null,
-          before == 0 || text[before - 1] == '\n',
-          after == text.length || text[after] == '\n',
-        ),
-        match.end,
-      );
+      final next = assetTokenRegex.matchAsPrefix(text, j);
+      if (next == null) break;
+      final asset = parseAssetToken(next.group(0)!);
+      if (asset == null || asset.kind != 's') break;
+      end = next.end;
     }
   }
-  return null;
+
+  var before = i;
+  while (before > 0 && _isHSpace(text[before - 1])) {
+    before--;
+  }
+  var after = end;
+  while (after < text.length && _isHSpace(text[after])) {
+    after++;
+  }
+  return _TokenMatch(
+    _Token(
+      _TokenKind.asset,
+      text.substring(i, end),
+      null,
+      null,
+      before == 0 || text[before - 1] == '\n',
+      after == text.length || text[after] == '\n',
+    ),
+    end,
+  );
 }
+
+/// Every well-formed asset in a run token's source, in order.
+List<ChatAsset> parseAssetRun(String runSource) {
+  final out = <ChatAsset>[];
+  for (final m in assetTokenRegex.allMatches(runSource)) {
+    final a = parseAssetToken(m.group(0)!);
+    if (a != null) out.add(a);
+  }
+  return out;
+}
+
+/// Whether [text] is nothing but a sticker run — the condition for tiling
+/// this message into its neighbours. Shared by both chat panes and the
+/// mobile route so their grouping rules cannot drift.
+bool isStickerOnlyMessage(String text) {
+  final trimmed = text.trim();
+  if (trimmed.isEmpty) return false;
+  final assets = parseAssetRun(trimmed);
+  if (assets.isEmpty || assets.any((a) => a.kind != 's')) return false;
+  // Nothing but tokens and horizontal whitespace: strip the tokens and see
+  // if anything is left.
+  return trimmed.replaceAll(assetTokenRegex, '').trim().isEmpty;
+}
+
+/// Which seams of a block asset are continued by a neighbouring message.
+typedef AssetTiling = ({bool top, bool bottom});
+
+const AssetTiling _noTiling = (top: false, bottom: false);
 
 bool _isHSpace(String c) => c == ' ' || c == '\t';
 
@@ -381,6 +430,7 @@ List<InlineSpan> _tokensToSpans(
   TextStyle style,
   HollowTheme hollow,
   TextScaler scaler,
+  AssetTiling tiling,
 ) {
   final spans = <InlineSpan>[];
   // Set when a block asset just emitted a synthetic trailing newline: the
@@ -447,6 +497,7 @@ List<InlineSpan> _tokensToSpans(
           style.copyWith(fontWeight: FontWeight.w700),
           hollow,
           scaler,
+          tiling,
         ));
       case _TokenKind.italic:
         spans.addAll(_tokensToSpans(
@@ -454,6 +505,7 @@ List<InlineSpan> _tokensToSpans(
           style.copyWith(fontStyle: FontStyle.italic),
           hollow,
           scaler,
+          tiling,
         ));
       case _TokenKind.strikethrough:
         spans.addAll(_tokensToSpans(
@@ -461,6 +513,7 @@ List<InlineSpan> _tokensToSpans(
           style.copyWith(decoration: TextDecoration.lineThrough),
           hollow,
           scaler,
+          tiling,
         ));
       case _TokenKind.spoiler:
         spans.add(WidgetSpan(
@@ -479,8 +532,8 @@ List<InlineSpan> _tokensToSpans(
           ),
         ));
       case _TokenKind.asset:
-        final asset = parseAssetToken(tok.text);
-        if (asset == null) {
+        final assets = parseAssetRun(tok.text);
+        if (assets.isEmpty) {
           // Can't happen (the matcher validates) — degrade like an old client.
           spans.add(TextSpan(text: tok.text, style: style));
           break;
@@ -490,17 +543,23 @@ List<InlineSpan> _tokensToSpans(
         // the line around the media instead. Media follows the interface
         // scale (root UiScale transform), not the chat TEXT scale — same
         // rule as avatars and file cards.
-        final box = assetChatBox(asset.kind, asset.w, asset.h);
+        //
+        // A run of stickers draws gapless, and when the neighbouring MESSAGE
+        // continues the run its padding on that side goes to zero too, so
+        // the seam survives the message boundary.
+        final tileTop = tiling.top && tok.atLineStart;
+        final tileBottom = tiling.bottom && tok.atLineEnd;
         if (!tok.atLineStart) spans.add(TextSpan(text: '\n', style: style));
         spans.add(WidgetSpan(
           child: Padding(
-            padding: const EdgeInsets.symmetric(vertical: 4),
-            child: ChatAssetImage(
-              kind: asset.kind,
-              hash: asset.hash,
-              aspect: asset.w / asset.h,
-              width: box.width,
-              height: box.height,
+            padding: EdgeInsets.only(
+              top: tileTop ? 0 : 4,
+              bottom: tileBottom ? 0 : 4,
+            ),
+            child: ChatAssetRun(
+              assets: assets,
+              tileTop: tileTop,
+              tileBottom: tileBottom,
             ),
           ),
         ));
@@ -545,12 +604,20 @@ class MessageText extends StatelessWidget {
   final List<InlineSpan>? suffixSpans;
   final Set<String>? memberNames;
 
+  /// Seams continued by the previous/next MESSAGE. Set by the bubbles when
+  /// this and its neighbour are both sticker-only messages from the same
+  /// author in the same group — the block asset then drops its padding and
+  /// squares its corners on that side, so three stickers sent in a row tile
+  /// into one image.
+  final AssetTiling tiling;
+
   const MessageText(
     this.text, {
     super.key,
     this.baseStyle,
     this.suffixSpans,
     this.memberNames,
+    this.tiling = _noTiling,
   });
 
   @override
@@ -566,7 +633,7 @@ class MessageText extends StatelessWidget {
     }
 
     final tokens = _cachedTokenize(text, memberNames: memberNames);
-    final spans = _tokensToSpans(tokens, style, hollow, scaler);
+    final spans = _tokensToSpans(tokens, style, hollow, scaler, tiling);
     if (suffixSpans != null) spans.addAll(suffixSpans!);
     return Text.rich(TextSpan(children: spans));
   }
@@ -632,7 +699,7 @@ class MessageText extends StatelessWidget {
     if (before.isNotEmpty) {
       final tokens = _cachedTokenize(before);
       children.add(Text.rich(
-        TextSpan(children: _tokensToSpans(tokens, style, hollow, scaler)),
+        TextSpan(children: _tokensToSpans(tokens, style, hollow, scaler, _noTiling)),
       ));
     }
   }
@@ -670,7 +737,7 @@ class MessageText extends StatelessWidget {
     final after = raw.trimLeft();
     if (after.isNotEmpty) {
       final tokens = _cachedTokenize(after);
-      final spans = _tokensToSpans(tokens, style, hollow, scaler);
+      final spans = _tokensToSpans(tokens, style, hollow, scaler, _noTiling);
       if (suffixSpans != null) spans.addAll(suffixSpans);
       children.add(Text.rich(TextSpan(children: spans)));
       return null;
@@ -685,8 +752,13 @@ Widget buildMessageText(
   TextStyle? baseStyle,
   List<InlineSpan>? suffixSpans,
   Set<String>? memberNames,
+  AssetTiling tiling = _noTiling,
 }) {
-  return MessageText(text, baseStyle: baseStyle, suffixSpans: suffixSpans, memberNames: memberNames);
+  return MessageText(text,
+      baseStyle: baseStyle,
+      suffixSpans: suffixSpans,
+      memberNames: memberNames,
+      tiling: tiling);
 }
 
 Future<void> _openUrl(String url) async {

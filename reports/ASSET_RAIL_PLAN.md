@@ -5,8 +5,12 @@ Covers GitHub issues #25 (server banners), #26 (GIF picker), #29 (stickers),
 plus a retrofit of the existing FFZ + IGDB website endpoints.
 ================================================================================
 
-STATUS (updated 2026-07-29, sixth session — PHASES 0-4 DONE, resume at PHASE 5)
+STATUS (updated 2026-07-30, seventh session — ALL PHASES 0-5 DONE)
 --------------------------------------------------------------------------------
+THE EPIC IS COMPLETE. Phase 5 (stickers, issue #29) shipped this session;
+what remains is the deploy + live smoke listed at the bottom of the PHASE 5
+block, and the follow-ups in "Known Follow-ups" of wiki emotes.md.
+
 (This file was tmp2.txt in the repo root; moved here to be durable.)
 * PHASE 0: DONE. Deployed to Hostinger, live-verified (cold FFZ search
   3-6s -> ~470ms; warm images ~36ms served by Apache). Commit b58ea7d.
@@ -402,7 +406,116 @@ STATUS (updated 2026-07-29, sixth session — PHASES 0-4 DONE, resume at PHASE 5
     late Popular reply cannot land on a library tab, lists), and
     asset_token_render_test rewritten around the box maths (8). Suite 209
     Flutter green, analyze clean. Pure Dart again — no Rust, no codegen.
-* PHASE 5: not started.
+* PHASE 5 (stickers, issue #29): DONE (2026-07-30, seventh session). Full map:
+  wiki emotes.md > "Stickers" + "Sticker Mosaics". Deviations/extras vs the
+  plan text below:
+  - IDENTITY IS THE HASH, not the name. The plan assumed a name-keyed set
+    like emotes; that is wrong for stickers. An emote is TYPED as `:name:` so
+    its name must be unique, while a sticker is only ever picked visually —
+    so the name is a label two stickers may share, and `pack` groups them.
+    Hence `ServerState.stickers: HashMap<hash, StickerInfo>` and
+    `personal_stickers PRIMARY KEY (pack, hash)`, not the planned
+    `personal_stickers (name/pack/hash/added_at)`. There is NO name prompt on
+    upload either (the emote flow's `pickAndNameEmote` has one because the
+    name IS the identity there) — `pickAndProcessSticker` just processes.
+  - Permission: reuses MANAGE_EMOTES as recommended, no new bit, and reuses
+    `sync_handler::handle_emote_op` rather than a twin handler.
+  - process_sticker_for_send shares `process_asset_for_send` with
+    process_gif_for_send (bounds/ladder/label are the only differences)
+    rather than being a third copy of that machinery.
+  - ALPHA is the load-bearing detail nobody wrote down: a sticker is a
+    cut-out, and a still matted onto black is a visible defect. Two traps
+    found and handled — (1) fetch.php's GD still path now states
+    imagealphablending(false)+imagesavealpha(true) explicitly (current libgd
+    happens to carry it anyway; imagescale historically did not, and it is
+    two calls to stop depending on that); (2) VERIFYING alpha in Rust is
+    misleading because every asset we emit is a WebP ANIMATION container
+    (ANMF) even for a still, and `image::load_from_memory` reports alpha 255
+    for those — decode with `webp_animation::Decoder`. That cost a red
+    harness assertion on perfectly good bytes before it was understood.
+  - KLIPY STICKERS: api/gifs.rs generalized over `MediaKind` (Gif|Sticker),
+    so both kinds share the two modes, the URL guards, the media-host
+    allowlist and the rating clamp. Sticker ids carry a `~` prefix EVERYWHERE
+    (proxy items table, media URLs, direct-mode registry) because Klipy slugs
+    are per-catalog and a GIF and a sticker can share one — without it the
+    second parse overwrites the first's row and a GIF's media URL starts
+    serving sticker bytes. GIF ids stay BARE: saved favourites store
+    proxy-relative paths, so re-namespacing GIFs would 404 all of them.
+    GIF cache keys are unchanged (kns is empty for gifs), so shipping this
+    costs nobody a cold grid.
+  - Proxy verified locally end-to-end against a mock Klipy on a second port
+    (PHP's dev server is single-threaded — one server cannot call itself):
+    405 on GET; kind absent = gifs (back-compat); the same upstream slug
+    yields `sharedslug` and `~sharedslug` as two distinct registry rows with
+    their own titles and CDN hosts; ad rows stripped; mp4-only rows dropped;
+    cold still generated as a real VP8X/ALPH WebP with the cut-out intact;
+    warm re-serve from disk; f/<id> serves per-kind; unknown id, unknown
+    ext and unknown KIND all refused (an unknown kind falls back to gifs and
+    is NEVER forwarded upstream); categories cached per kind; "Cat " and
+    "cat" still collapse to one upstream call.
+  - MOSAICS: adjacency rule as chosen — a maximal run of sticker tokens
+    separated only by horizontal whitespace becomes ONE token drawn gapless
+    at a SHARED height, and sticker-only messages grouped with the same
+    author tile across the message boundary (padding zeroed, seam corners
+    squared) at all three panes. A run too crowded to read (<44px) wraps at
+    natural size rather than going microscopic. GIFs never join a run.
+  - PICKER PLACEMENT IS PROVISIONAL by Vitalik's call ("do the own button
+    until we think on what to do with all the buttons"): it ships behind a
+    third composer button, but StickerPickerBody is host-agnostic so folding
+    it into the emoji or GIF panel later is a change of host, not of picker.
+  - Recents are `{hash,w,h}` rows only — a sticker's bytes are already a
+    local content-addressed blob, so the whole GIF-library problem of storing
+    media paths, rebuilding them against a proxy base and re-authorizing them
+    on a source change simply does not exist here. No favourites tab either:
+    the personal vault IS the favourites list, and the KLIPY tab's
+    "Save to my stickers" is the import (same shape as FFZ → personal set).
+  - The picker builds its token in DART (`[a:s:$hash:$w:$h]`), not via
+    `stickers_api.stickerToken` — that is a SYNC FFI call and throws outright
+    when the bridge is not up. The GIF picker already did it this way.
+  - Tests: harness `sticker_set_replicates_and_converges_on_removal` (tags
+    96/97 — metadata replication, byte pull at the Sticker kind, cut-out
+    survival, permission refusal, removal convergence); 5 Rust in
+    image_convert + 5 in gifs.rs (namespace collision, prefix validation,
+    proxy full-URL fallback, kind→asset-kind mapping) + 3 in stickers.rs;
+    Flutter 21 in asset_token_render_test (runs/tiling/predicates), 8 in
+    sticker_picker_test, 5 in edge_scroll_row_test.
+  - STILL TO DO (deploy, Vitalik's step): upload gifs/*.php + .htaccess to
+    Hostinger, then a live smoke — kind=stickers trending returns `~`-prefixed
+    ids, m/~<id>.still.webp is a real transparent WebP, f/~<id> streams, and
+    GIF results are byte-identical to before.
+* PHASE 5 FOLLOW-UP — HORIZONTAL SCROLLERS: DONE. The reported bug (GIF
+  Favourites lists overflowing a popup with no way to reach them on a plain
+  wheel mouse) plus a sweep of every other horizontal scroller.
+  - New `ui/components/edge_scroll_row.dart`: `EdgeScrollRow` adds edge arrow
+    buttons, wheel-to-pan and edge fades, ONLY while the content actually
+    overflows (nothing appears in the common case). `EdgeScrollRow.builder`
+    is the same thing for a LAZY list or a scroller you build yourself.
+  - FOUR things the first cut got wrong, all found by TESTING rather than
+    reading — each one looked right in the source (details in
+    `feedback_horizontal_scroller_reachability`):
+    (1) it only re-checked overflow when the CHILD COUNT changed, so a strip
+    that started out fitting never grew arrows when you narrowed the window
+    — which is exactly how the Server Settings tabs stayed unreachable after
+    the "fix"; the answer is `NotificationListener<ScrollMetricsNotification>`
+    synced POST-FRAME. (2) arrows overlaid the content, which is fine over a
+    chip but not over the dock's `_ReorderGap` drop zones at both ends — they
+    are siblings now. (3) sibling arrows take width, so showing one grows
+    `maxScrollExtent` and can re-trigger the other; once overflowing BOTH
+    slots stay occupied (the unusable one dims) so an arrow changing state
+    never changes layout. (4) an outer `Center` stops working once the
+    scroller sits in an `Expanded`, which silently LEFT-ALIGNED the dock's
+    server strip — `EdgeScrollRow(center: true)` centres the content inside
+    the viewport instead (min-width = viewport), so it is centred while it
+    fits and scrolls normally once it does not.
+  - Applied to: GIF picker lists + tab row, sticker picker tabs + pack chips,
+    server-settings tab strip, archive channel strip, friends bar, dock
+    server strip, and — found in the sweep — the EMOJI picker tabs and the
+    friends-manager tabs, which were bare `Row`s that would OVERFLOW rather
+    than scroll at a larger text setting (a worse failure than the original
+    bug: the last tab is clipped out of existence).
+  - Deliberately untouched: `mobile_source_switch_pill` (mobile-only, touch
+    drag already works). After the sweep there are no bare horizontal
+    scrollers or scrollable tab bars left in `lib/`.
 ================================================================================
 
 DECISIONS ALREADY LOCKED (from the design discussion — do not re-litigate)

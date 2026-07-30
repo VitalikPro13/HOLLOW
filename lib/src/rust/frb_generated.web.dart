@@ -17,6 +17,7 @@ import 'api/screen_audio.dart';
 import 'api/share.dart';
 import 'api/showcase.dart';
 import 'api/simple.dart';
+import 'api/stickers.dart';
 import 'api/storage.dart';
 import 'api/twitch.dart';
 import 'api/updater.dart';
@@ -275,6 +276,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<PersonalEmote> dco_decode_list_personal_emote(dynamic raw);
 
   @protected
+  List<PersonalSticker> dco_decode_list_personal_sticker(dynamic raw);
+
+  @protected
   List<int> dco_decode_list_prim_u_32_loose(dynamic raw);
 
   @protected
@@ -302,6 +306,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<ServerFfi> dco_decode_list_server_ffi(dynamic raw);
+
+  @protected
+  List<ServerSticker> dco_decode_list_server_sticker(dynamic raw);
 
   @protected
   List<SettingEntry> dco_decode_list_setting_entry(dynamic raw);
@@ -409,7 +416,13 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   PersonalEmote dco_decode_personal_emote(dynamic raw);
 
   @protected
+  PersonalSticker dco_decode_personal_sticker(dynamic raw);
+
+  @protected
   ProcessedEmote dco_decode_processed_emote(dynamic raw);
+
+  @protected
+  ProcessedSticker dco_decode_processed_sticker(dynamic raw);
 
   @protected
   ProtectionStatus dco_decode_protection_status(dynamic raw);
@@ -440,6 +453,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   ServerFfi dco_decode_server_ffi(dynamic raw);
+
+  @protected
+  ServerSticker dco_decode_server_sticker(dynamic raw);
 
   @protected
   SettingEntry dco_decode_setting_entry(dynamic raw);
@@ -816,6 +832,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  List<PersonalSticker> sse_decode_list_personal_sticker(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   List<int> sse_decode_list_prim_u_32_loose(SseDeserializer deserializer);
 
   @protected
@@ -847,6 +868,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<ServerFfi> sse_decode_list_server_ffi(SseDeserializer deserializer);
+
+  @protected
+  List<ServerSticker> sse_decode_list_server_sticker(
+    SseDeserializer deserializer,
+  );
 
   @protected
   List<SettingEntry> sse_decode_list_setting_entry(
@@ -990,7 +1016,13 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   PersonalEmote sse_decode_personal_emote(SseDeserializer deserializer);
 
   @protected
+  PersonalSticker sse_decode_personal_sticker(SseDeserializer deserializer);
+
+  @protected
   ProcessedEmote sse_decode_processed_emote(SseDeserializer deserializer);
+
+  @protected
+  ProcessedSticker sse_decode_processed_sticker(SseDeserializer deserializer);
 
   @protected
   ProtectionStatus sse_decode_protection_status(SseDeserializer deserializer);
@@ -1027,6 +1059,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   ServerFfi sse_decode_server_ffi(SseDeserializer deserializer);
+
+  @protected
+  ServerSticker sse_decode_server_sticker(SseDeserializer deserializer);
 
   @protected
   SettingEntry sse_decode_setting_entry(SseDeserializer deserializer);
@@ -1513,6 +1548,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_list_personal_sticker(
+    List<PersonalSticker> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_list_prim_u_32_loose(
     List<int> self,
     SseSerializer serializer,
@@ -1560,6 +1601,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_list_server_ffi(
     List<ServerFfi> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_server_sticker(
+    List<ServerSticker> self,
     SseSerializer serializer,
   );
 
@@ -1744,8 +1791,20 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_personal_emote(PersonalEmote self, SseSerializer serializer);
 
   @protected
+  void sse_encode_personal_sticker(
+    PersonalSticker self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_processed_emote(
     ProcessedEmote self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_processed_sticker(
+    ProcessedSticker self,
     SseSerializer serializer,
   );
 
@@ -1799,6 +1858,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_server_ffi(ServerFfi self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_server_sticker(ServerSticker self, SseSerializer serializer);
 
   @protected
   void sse_encode_setting_entry(SettingEntry self, SseSerializer serializer);

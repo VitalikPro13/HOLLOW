@@ -20,6 +20,7 @@ import '../components/hollow_button.dart';
 import '../components/hollow_pressable.dart';
 import '../components/hollow_text_field.dart';
 import '../components/hollow_toast.dart';
+import '../components/edge_scroll_row.dart';
 import '../components/overlay_anchor.dart';
 
 /// The GIF picker (issue #26): Popular / Favourites / Recent plus search
@@ -463,21 +464,20 @@ class _GifPickerBodyState extends ConsumerState<GifPickerBody> {
 
   Widget _tabRow(HollowTheme hollow) {
     // Scrollable so a larger-text setting can never overflow the 360px
-    // panel; with three short labels it never actually scrolls.
-    return SizedBox(
+    // panel; with three short labels it never actually scrolls, and
+    // EdgeScrollRow shows nothing until it does.
+    return EdgeScrollRow(
       height: 34,
-      child: ListView(
-        scrollDirection: Axis.horizontal,
-        padding: const EdgeInsets.symmetric(
-            horizontal: HollowSpacing.sm, vertical: 5),
-        children: [
-          _tabChip(hollow, GifPickerTab.popular, 'Popular'),
-          const SizedBox(width: 4),
-          _tabChip(hollow, GifPickerTab.favorites, 'Favourites'),
-          const SizedBox(width: 4),
-          _tabChip(hollow, GifPickerTab.recent, 'Recent'),
-        ],
-      ),
+      semanticLabel: 'tabs',
+      padding: const EdgeInsets.symmetric(
+          horizontal: HollowSpacing.sm, vertical: 5),
+      children: [
+        _tabChip(hollow, GifPickerTab.popular, 'Popular'),
+        const SizedBox(width: 4),
+        _tabChip(hollow, GifPickerTab.favorites, 'Favourites'),
+        const SizedBox(width: 4),
+        _tabChip(hollow, GifPickerTab.recent, 'Recent'),
+      ],
     );
   }
 
@@ -579,13 +579,17 @@ class _GifPickerBodyState extends ConsumerState<GifPickerBody> {
 
   Widget _listChips(HollowTheme hollow, GifLibrary library) {
     if (_listEditId != null) return _listNameField(hollow);
-    return SizedBox(
+    // EdgeScrollRow, not a bare horizontal ListView: past a handful of lists
+    // the chips overflow the 360px panel, and on a desktop with a plain
+    // wheel mouse a bare scroller has no affordance and no gesture — the
+    // extra lists were simply unreachable. Arrows + wheel-to-pan appear only
+    // while there IS overflow.
+    return EdgeScrollRow(
       height: 34,
-      child: ListView(
-        scrollDirection: Axis.horizontal,
-        padding: const EdgeInsets.symmetric(
-            horizontal: HollowSpacing.sm, vertical: 5),
-        children: [
+      semanticLabel: 'lists',
+      padding: const EdgeInsets.symmetric(
+          horizontal: HollowSpacing.sm, vertical: 5),
+      children: [
           _listChip(hollow, null, 'All'),
           for (final c in library.collections) ...[
             const SizedBox(width: 4),
@@ -611,8 +615,7 @@ class _GifPickerBodyState extends ConsumerState<GifPickerBody> {
                   size: 12, color: hollow.textSecondary),
             ),
           ),
-        ],
-      ),
+      ],
     );
   }
 

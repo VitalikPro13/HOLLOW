@@ -39,6 +39,12 @@ class ChannelMessageBubble extends ConsumerWidget {
   final VoidCallback? onReplyTap;
   final void Function(String emoji)? onToggleReaction;
 
+  /// This message and its neighbour are BOTH sticker-only and grouped, so the
+  /// seam between them is drawn continuous: no row padding, no corner
+  /// rounding, no gap. See [stickerTilingFor] for how the panes decide.
+  final bool tileWithPrev;
+  final bool tileWithNext;
+
   const ChannelMessageBubble({
     super.key,
     required this.message,
@@ -51,6 +57,8 @@ class ChannelMessageBubble extends ConsumerWidget {
     this.isMentioned = false,
     this.onReplyTap,
     this.onToggleReaction,
+    this.tileWithPrev = false,
+    this.tileWithNext = false,
   });
 
   @override
@@ -176,6 +184,7 @@ class ChannelMessageBubble extends ConsumerWidget {
             message.text,
             context,
             memberNames: memberNames,
+            tiling: (top: tileWithPrev, bottom: tileWithNext),
             suffixSpans: isEdited
                 ? [
                     TextSpan(
@@ -249,9 +258,11 @@ class ChannelMessageBubble extends ConsumerWidget {
       return AnimatedContainer(
         duration: const Duration(milliseconds: 400),
         curve: Curves.easeOut,
-        padding: const EdgeInsets.only(
+        padding: EdgeInsets.only(
           top: 4,
-          bottom: 4,
+          // A group header never tiles upward (the run starts here), but it
+          // can tile into the continuation below it.
+          bottom: tileWithNext ? 0 : 4,
           left: HollowSpacing.md,
           right: HollowSpacing.md,
         ),
@@ -322,13 +333,14 @@ class ChannelMessageBubble extends ConsumerWidget {
       );
     }
 
-    // Continuation message — indented, no avatar/name.
+    // Continuation message — indented, no avatar/name. A tiled seam drops the
+    // row padding on that side; the block asset drops its own to match.
     return AnimatedContainer(
       duration: const Duration(milliseconds: 400),
       curve: Curves.easeOut,
-      padding: const EdgeInsets.only(
-        top: 2,
-        bottom: 2,
+      padding: EdgeInsets.only(
+        top: tileWithPrev ? 0 : 2,
+        bottom: tileWithNext ? 0 : 2,
         left: HollowSpacing.md + indent,
         right: HollowSpacing.md,
       ),

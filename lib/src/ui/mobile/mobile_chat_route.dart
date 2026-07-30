@@ -37,6 +37,7 @@ import 'package:hollow/src/ui/chat/message_bubble.dart';
 import 'package:hollow/src/ui/chat/channel_message_bubble.dart';
 import 'package:hollow/src/ui/chat/emoji_picker.dart';
 import 'package:hollow/src/ui/chat/gif_picker.dart';
+import 'package:hollow/src/ui/chat/sticker_picker.dart';
 import 'package:hollow/src/ui/chat/emote_composer.dart';
 import 'package:hollow/src/ui/chat/emote_image.dart';
 import 'package:hollow/src/core/providers/emote_provider.dart';
@@ -1111,6 +1112,37 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
   /// Attach menu (Telegram-style): one [+] button opens this Photo / File sheet,
   /// so the composer doesn't crowd two separate icons into the row on small
   /// screens. Each row reuses the existing `_pickFile` flow.
+  /// Sticker picker as a bottom sheet; the pick arrives as an
+  /// `[a:s:hash:w:h]` token and stages in the composer like an emote. Kept
+  /// OPEN across picks (unlike the GIF sheet) because a mosaic is several
+  /// stickers in one message — the sheet closes on the scrim or a swipe.
+  void _showStickerSheet() {
+    _focusNode.unfocus();
+    final hollow = HollowTheme.of(context);
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: hollow.surface,
+      isScrollControlled: true,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(hollow.radiusLg)),
+      ),
+      builder: (_) => SafeArea(
+        child: SizedBox(
+          height: MediaQuery.sizeOf(context).height * 0.62,
+          child: StickerPickerBody(
+            onSelect: (token) =>
+                _insertAtCursor(_controller.displayTextFor(token)),
+            // Null in a DM or a conference — the rating clamp and the Server
+            // tab only apply to real servers.
+            serverId: (widget.serverId?.startsWith('conf:') ?? true)
+                ? null
+                : widget.serverId,
+          ),
+        ),
+      ),
+    );
+  }
+
   void _showAttachSheet() {
     final hollow = HollowTheme.of(context);
     Widget row({
@@ -1173,6 +1205,11 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
               icon: Icons.gif_box_outlined,
               label: 'GIF',
               onTap: _showGifSheet,
+            ),
+            row(
+              icon: LucideIcons.sticker,
+              label: 'Sticker',
+              onTap: _showStickerSheet,
             ),
             row(
               icon: LucideIcons.paperclip,
@@ -1865,6 +1902,26 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     _scrollToBottom();
   }
 
+  /// Sticker-run tiling candidates (see `stickerTileCandidate`). The two
+  /// message types carry the same fields under different classes, so this is
+  /// one predicate written twice rather than one generic that would need a
+  /// shared interface neither model has.
+  bool _dmTileCandidate(ChatMessage m) => stickerTileCandidate(
+        text: m.text,
+        hasReply: m.replyToMid != null,
+        hasReactions: m.reactions.isNotEmpty,
+        hasFile: m.fileAttachment != null,
+        isEdited: m.editedAt != null,
+      );
+
+  bool _channelTileCandidate(ChannelChatMessage m) => stickerTileCandidate(
+        text: m.text,
+        hasReply: m.replyToMid != null,
+        hasReactions: m.reactions.isNotEmpty,
+        hasFile: m.fileAttachment != null,
+        isEdited: m.editedAt != null,
+      );
+
   Widget _buildDmRow(
       List<ChatMessage> messages, int revIndex, Map<String, int> indexById) {
     // Reversed builder index → chronological; all row logic below stays
@@ -1915,6 +1972,21 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
       }
     }
 
+    final next = index + 1 < messages.length ? messages[index + 1] : null;
+    final tiling = stickerTilingFor(
+      selfIsSticker: _dmTileCandidate(msg),
+      prevIsSticker: prev != null && _dmTileCandidate(prev),
+      groupedWithPrev: !showHeader,
+      nextIsSticker: next != null && _dmTileCandidate(next),
+      groupedWithNext: next != null &&
+          shouldGroup(
+            currentIsMe: next.isMe,
+            previousIsMe: msg.isMe,
+            currentTime: next.timestamp,
+            previousTime: msg.timestamp,
+          ),
+    );
+
     final bubble = LongPressMessage(
       onLongPress: () => _showDmActions(msg, senderName, localPeerId),
       child: MessageBubble(
@@ -1926,6 +1998,8 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
         onToggleReaction: msg.messageId != null
             ? (emoji) => _toggleDmReaction(msg, emoji)
             : null,
+        tileWithPrev: tiling.prev,
+        tileWithNext: tiling.next,
       ),
     );
 
@@ -2092,6 +2166,23 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
       }
     }
 
+    final next = index + 1 < messages.length ? messages[index + 1] : null;
+    final tiling = stickerTilingFor(
+      selfIsSticker: _channelTileCandidate(msg),
+      prevIsSticker: prev != null && _channelTileCandidate(prev),
+      groupedWithPrev: !showHeader,
+      nextIsSticker: next != null && _channelTileCandidate(next),
+      groupedWithNext: next != null &&
+          shouldGroup(
+            currentIsMe: next.isMe,
+            previousIsMe: msg.isMe,
+            currentTime: next.timestamp,
+            previousTime: msg.timestamp,
+            currentSenderId: links.identityOf(next.senderId),
+            previousSenderId: curSender,
+          ),
+    );
+
     final bubble = LongPressMessage(
       onLongPress: () => _showChannelActions(msg, senderName, localPeerId),
       child: ChannelMessageBubble(
@@ -2104,6 +2195,8 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
         onToggleReaction: msg.messageId != null
             ? (emoji) => _toggleChannelReaction(msg, emoji)
             : null,
+        tileWithPrev: tiling.prev,
+        tileWithNext: tiling.next,
       ),
     );
 

@@ -171,6 +171,8 @@ Self-contained: every op carries its own server, author, timestamp, and payload.
 **Custom emotes (2026-07-10):**
 - `EmojiAdded { name: String, hash: String, animated: bool }` — adds/replaces a server emote (metadata ONLY — `hash` is SHA-256 hex of the WebP blob; bytes replicate via EmoteRequest/EmoteAssets, never the CRDT). Replace-on-same-name; NEW names refused past `MAX_SERVER_EMOTES = 50` so replicas converge. Ingest validates `crdt::valid_emote_name` (2-24 `[a-z0-9_]`) + `valid_emote_hash` (64 lowercase hex) + `Permission::MANAGE_EMOTES`.
 - `EmojiRemoved { name: String }` — removes from `emotes`.
+- `StickerAdded { hash, name, pack, animated, w, h }` — adds/replaces a server sticker (asset-rail Phase 5). Keyed by HASH, not name: a sticker is picked visually and never typed, so its name is a label two stickers may share and `pack` is what groups them. Same metadata-only rule as emotes (bytes ride the asset rail at `AssetKind::Sticker`). Replace-on-same-hash; NEW hashes refused past `MAX_SERVER_STICKERS = 50` so replicas converge. Ingest validates `valid_emote_hash`, `valid_sticker_label` on BOTH name and pack (≤32 chars, no control characters), `1..=4096` dims (a row we could not build an `[a:s:hash:w:h]` token for has no business replicating) + `Permission::MANAGE_EMOTES` — no new permission bit.
+- `StickerRemoved { hash: String }` — removes from `stickers`.
 
 **Tolerant batch parsing:** `operations.rs:parse_ops_tolerant(json)` — sync-batch ops deserialize INDIVIDUALLY (per-item `from_value`), so a batch containing a NEWER client's unknown payload variant skips just that op. Used at ALL THREE sync-batch sites (sync_handler MLS SyncResp, swarm MLS SyncResp, swarm plaintext SyncResponse). Before this, one unknown variant failed the whole `Vec<CrdtOp>` parse and permanently wedged older clients' server sync.
 
@@ -237,6 +239,7 @@ The complete replicated state of a Hollow server. Every field is either an add-w
 | `labels` | `HashMap<String, LabelInfo>` | Add-wins, remove deletes | `#[serde(default)]` |
 | `label_assignments` | `HashMap<String, Vec<String>>` | Add/remove set per peer | `#[serde(default)]` |
 | `emotes` | `HashMap<String, EmoteInfo>` | Keyed by NAME; replace-on-add, remove deletes; cap 50 at apply | `#[serde(default)]` |
+| `stickers` | `HashMap<String, StickerInfo>` | Keyed by content HASH (a sticker is picked, never typed, so its name is not an identity); replace-on-add, remove deletes; cap `MAX_SERVER_STICKERS = 50` at apply | `#[serde(default)]` |
 | `deleted` | `bool` | Tombstone latch (set by `ServerDeleted`, Step 9D); UI hides it; shell retained to serve the op | `#[serde(default)]` |
 | `op_log` | `Vec<CrdtOp>` | Append-only (compacted at 1000) | Required |
 | `hlc` | `Option<Hlc>` | Transient (not serialized) | `#[serde(skip)]` |

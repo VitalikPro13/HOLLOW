@@ -1,3 +1,3 @@
 pub(crate) mod messages;
 
-pub(crate) use messages::{MessageStore, ProfileProof};
+pub(crate) use messages::{MessageStore, PersonalStickerRow, ProfileProof};

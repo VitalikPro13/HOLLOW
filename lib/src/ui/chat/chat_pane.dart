@@ -8,6 +8,7 @@ import 'package:hollow/src/ui/chat/chat_drop_zone.dart';
 import 'package:hollow/src/ui/chat/chat_input_shortcuts.dart';
 import 'package:hollow/src/ui/chat/emoji_picker.dart';
 import 'package:hollow/src/ui/chat/gif_picker.dart';
+import 'package:hollow/src/ui/chat/sticker_picker.dart';
 import 'package:hollow/src/ui/chat/emote_composer.dart';
 import 'package:hollow/src/ui/chat/emote_image.dart';
 import 'package:hollow/src/core/providers/emote_provider.dart';
@@ -1522,6 +1523,21 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     );
   }
 
+  /// Open the sticker picker anchored to the composer button; the pick
+  /// arrives as an `[a:s:hash:w:h]` token and stages like an emote. Several
+  /// in a row tile into a mosaic once sent.
+  void _openComposerStickerPicker(BuildContext btnCtx) {
+    final box = btnCtx.findRenderObject() as RenderBox?;
+    final anchor = box == null
+        ? Offset.zero
+        : overlayAnchorOf(btnCtx, localOffset: Offset(box.size.width, 0));
+    showStickerPicker(
+      context: context,
+      anchorPosition: anchor,
+      onSelect: _insertEmojiAtCursor,
+    );
+  }
+
   void _insertEmojiAtCursor(String text) {
     // Custom-emote/asset tokens become a 1-char placeholder rendered inline
     // as the actual image; Unicode emoji pass through unchanged.
@@ -1760,7 +1776,7 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
       onInfo: _infoFor(context, msg),
       child: _buildBubble(
           msg, index, showHeader, messages, replyIndexById, profiles,
-          localPeerId),
+          localPeerId, _tilingAt(messages, index, showHeader)),
     );
     return dateSeparatedChatRow(
       rowKey: msg.messageId ?? index,
@@ -1768,6 +1784,34 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
       prevTimestamp: index > 0 ? messages[index - 1].timestamp : null,
       showHeader: showHeader,
       child: wrapper,
+    );
+  }
+
+  /// Sticker tiling for the row at [index]: it and its neighbour are both
+  /// nothing-but-stickers and already grouped, so the seam between them is
+  /// drawn continuous. `showHeader` IS "not grouped with the previous".
+  ({bool prev, bool next}) _tilingAt(
+      List<ChatMessage> messages, int index, bool showHeader) {
+    bool candidate(ChatMessage m) => stickerTileCandidate(
+          text: m.text,
+          hasReply: m.replyToMid != null,
+          hasReactions: m.reactions.isNotEmpty,
+          hasFile: m.fileAttachment != null,
+          isEdited: m.editedAt != null,
+        );
+    final next = index + 1 < messages.length ? messages[index + 1] : null;
+    return stickerTilingFor(
+      selfIsSticker: candidate(messages[index]),
+      prevIsSticker: index > 0 && candidate(messages[index - 1]),
+      groupedWithPrev: !showHeader,
+      nextIsSticker: next != null && candidate(next),
+      groupedWithNext: next != null &&
+          shouldGroup(
+            currentIsMe: next.isMe,
+            previousIsMe: messages[index].isMe,
+            currentTime: next.timestamp,
+            previousTime: messages[index].timestamp,
+          ),
     );
   }
 
@@ -1779,6 +1823,7 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     Map<String, int> replyIndexById,
     Map<String, storage_api.UserProfile> profiles,
     String localPeerId,
+    ({bool prev, bool next}) tiling,
   ) {
     String? replySender;
     String? replyText;
@@ -1810,6 +1855,8 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
       onToggleReaction: msg.messageId != null
           ? (emoji) => _toggleReaction(msg, emoji)
           : null,
+      tileWithPrev: tiling.prev,
+      tileWithNext: tiling.next,
     );
   }
 
@@ -2089,6 +2136,8 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
         ),
         const SizedBox(width: HollowSpacing.xs),
         composerGifButton(hollow, onOpen: _openComposerGifPicker),
+        composerStickerButton(hollow,
+            onOpen: _openComposerStickerPicker),
         const SizedBox(width: HollowSpacing.xs),
         composerEmojiButton(hollow, onOpen: _openComposerEmojiPicker),
         const SizedBox(width: HollowSpacing.sm),

@@ -634,6 +634,16 @@ pub(crate) enum NodeCommand {
     /// FFI import; the CRDT op carries metadata only).
     AddServerEmote { server_id: String, name: String, hash: String, animated: bool },
     RemoveServerEmote { server_id: String, name: String },
+    AddServerSticker {
+        server_id: String,
+        hash: String,
+        name: String,
+        pack: String,
+        animated: bool,
+        w: u32,
+        h: u32,
+    },
+    RemoveServerSticker { server_id: String, hash: String },
     /// Pull asset bytes we don't have (emotes, banners, stickers, GIFs —
     /// `kind` sizes the receipt cap). `server_id` targets an online member of
     /// that server's room; `peer_hint` targets a specific peer (DM sender).
@@ -889,6 +899,8 @@ impl NodeCommand {
             Self::UnassignLabel { .. } => "UnassignLabel",
             Self::AddServerEmote { .. } => "AddServerEmote",
             Self::RemoveServerEmote { .. } => "RemoveServerEmote",
+            Self::AddServerSticker { .. } => "AddServerSticker",
+            Self::RemoveServerSticker { .. } => "RemoveServerSticker",
             Self::RequestEmotes { .. } => "RequestEmotes",
             Self::SetNickname { .. } => "SetNickname",
             Self::SetTwitchUsername { .. } => "SetTwitchUsername",

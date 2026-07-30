@@ -146,6 +146,89 @@ Every notification surface must run message text through one of two `emote_image
 
 **Picker keyboard (mobile):** the search field's autofocus is DESKTOP-ONLY (`autofocus: !(Platform.isAndroid || Platform.isIOS)`) — on mobile it summoned the software keyboard over the sheet (and defeated the composer's pre-open `unfocus()` in `_showEmojiSheet`). Search focuses on tap.
 
+## Stickers (issue #29, asset-rail Phase 5, 2026-07-30)
+
+The last phase of the asset epic, and mostly plumbing — the rail already had
+`AssetKind::Sticker` (512 KB receipt cap, 8 hashes/request) and the
+`[a:s:hash:w:h]` token from Phase 1.
+
+**Identity is the HASH, not the name.** An emote is TYPED as `:name:` so its
+name has to be unique; a sticker is only ever picked visually, so its name is
+a label two stickers may share, and packs group them. That decision drives the
+whole schema: `ServerState.stickers: HashMap<hash, StickerInfo>` and
+`personal_stickers PRIMARY KEY (pack, hash)`.
+
+- **Processing** — `image_convert::process_sticker_for_send` → ≤512px, ≤512 KB
+  (== the receipt cap), animation kept, ALPHA PRESERVED. Shares
+  `process_asset_for_send` with `process_gif_for_send`; only the bounds,
+  quality ladder and error label differ. TRAP when verifying alpha: every
+  asset we emit is a WebP ANIMATION container (`ANMF`) even for a still, and
+  `image::load_from_memory` reports alpha 255 for those — decode with
+  `webp_animation::Decoder` (see `sticker_keeps_its_cut_out`).
+- **Personal vault** — `personal_stickers (pack, hash, name, animated, w, h,
+  source, added_at)`, free-form packs (`""` = ungrouped), caps 50 packs / 120
+  per pack / 600 total. `api/stickers.rs` owns add/remove/list + pack
+  rename (merges on collision) and delete. Local-only, like personal emotes.
+- **Server packs** — `CrdtPayload::StickerAdded { hash, name, pack, animated,
+  w, h }` / `StickerRemoved { hash }` → `ServerState.stickers`
+  (`#[serde(default)]`, `MAX_SERVER_STICKERS = 50` at authoring AND apply).
+  Reuses `Permission::MANAGE_EMOTES` — no new bit — and reuses
+  `sync_handler::handle_emote_op`. Both ingest matrices validate hash/labels
+  and the 1..=4096 dims (a row we could not build a token for has no business
+  replicating). `ServerState::stickers_list()` sorts pack → name → hash so
+  the order is TOTAL (two stickers can share a name).
+- **KLIPY stickers** — `api/gifs.rs` is now generic over `MediaKind`
+  (Gif | Sticker): same two modes, same URL guards, same allowlist and
+  rating clamp. **ID NAMESPACE:** Klipy slugs are per-catalog, so a GIF and a
+  sticker can carry the SAME slug while both registries key on id alone —
+  sticker ids therefore carry a leading `~` everywhere (proxy `items` table,
+  media URLs, the direct-mode variant registry). GIF ids stay BARE on
+  purpose: the saved GIF library stores proxy-relative media paths, so
+  re-namespacing GIFs would 404 every saved favourite. `~` is URL-unreserved
+  and outside the slug charset. Proxy side: `search.php?kind=stickers`,
+  `fetch.php`/`full.php`/`.htaccess` accept the optional prefix, GIF cache
+  keys unchanged (`kns` is empty for gifs) so shipping stickers costs nobody
+  a cold grid.
+- **Picker** — `ui/chat/sticker_picker.dart`: `showStickerPicker` overlay +
+  a host-agnostic `StickerPickerBody` (tabs Server / Mine / KLIPY / Recent).
+  Placement behind its own composer button is PROVISIONAL — Vitalik wants to
+  rethink the emoji/GIF/sticker button row, so the body is deliberately
+  reusable and moving it later is a change of host, not of picker. A pick
+  INSERTS at the cursor and the panel STAYS OPEN (a mosaic is several
+  stickers in one message). `StickerCatalog extends GifCatalog`, overriding
+  only the raw-FFI seam — one copy of the cache/in-flight/timeout wrapper
+  whose block-body `whenComplete` is load-bearing.
+- **Recents** — `sticker_recents` setting, just `{hash, w, h}` rows. Unlike
+  the GIF library there is NO media URL to store, rebuild against a proxy
+  base, or re-authorize on a source change: a sticker's bytes are already a
+  local content-addressed blob.
+- **Token built in DART** at the picker (`'[a:s:$hash:$w:$h]'`), not through
+  `stickers_api.stickerToken` — that is a SYNC FFI call and a sync bridge
+  call throws outright when the bridge is not up. Same as the GIF picker.
+
+## Sticker Mosaics (the Telegram tiling effect)
+
+Adjacency rule, no new data — so it works for ANY sticker, including KLIPY
+ones, and pack authors get the effect by drawing pieces that line up.
+
+- **Within a message**: `_matchAssetToken` greedily absorbs a maximal run of
+  STICKER tokens separated only by horizontal whitespace into ONE token;
+  `ChatAssetRun` draws them gapless with a SHARED height (each piece keeps
+  its aspect within it, never upscaled past its own pixels) so a designed
+  pack seams cleanly. Too many to fit readably (< 44px) → wraps at natural
+  size instead of going microscopic. GIFs never join a run — each stays its
+  own block at the photo box, which is what a GIF-with-caption needs.
+- **Across messages**: `stickerTileCandidate` (sticker-only text, and no
+  reply / reaction / file / edit marker to sit in the seam) +
+  `stickerTilingFor` (both rows qualify AND are already grouped) →
+  `tileWithPrev`/`tileWithNext` on both bubbles, which zero the row padding
+  and the asset's own padding on that side and square the seam corners.
+  Wired at all three panes (chat_pane, channel_chat_pane, mobile_chat_route).
+- **Corners**: `stickerRunRadius` rounds only the run's OUTER edges — an
+  inner rounded corner would notch the seam exactly where it must vanish.
+
 ## Known Follow-ups
 
-Stickers (same stack, bigger caps, standalone render); personal-emote sibling sync.
+Personal-emote and personal-sticker sibling sync; sticker pack import/export
+(explicitly out of scope for v1); revisit the composer button row (emoji /
+GIF / sticker is three buttons on a narrow phone).

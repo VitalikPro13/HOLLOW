@@ -1,5 +1,14 @@
-//! GIF picker — search/trending/categories, plus the pick-time fetch and
-//! transcode into an asset-rail blob.
+//! The Klipy catalog client — search/trending/categories, plus the pick-time
+//! fetch and transcode into an asset-rail blob.
+//!
+//! It serves TWO media kinds off one code path ([MediaKind]): GIFs, and the
+//! stickers `api/stickers.rs` exposes to Dart. They differ only in the
+//! upstream path segment, the id namespace, and which transcoder the pick
+//! runs through — everything below (the two modes, the URL guards, the
+//! allowlist, the rating handling) is shared, so a fix to one is a fix to
+//! both. The normalized [GifItem] / [GifPage] / [StoredGif] shapes carry
+//! both kinds; they keep their GIF-era names because renaming them would
+//! churn every shipped call site for a cosmetic gain.
 //!
 //! TWO MODES, one contract. The app codes to the normalized [GifPage] shape
 //! either way:
@@ -360,6 +369,12 @@ fn normalized_rating(raw: &str) -> String {
     }
 }
 
+/// Same clamp, for the sticker FFI in `api/stickers.rs` — an unknown rating
+/// falls back to the default rather than reaching upstream.
+pub(crate) fn normalized_rating_for(raw: &str) -> String {
+    normalized_rating(raw)
+}
+
 // ─── URL guards ─────────────────────────────────────────────────────────────
 
 /// Host of an https URL, lowercased. None for anything else — plaintext http
@@ -406,11 +421,72 @@ fn media_url_ok(url: &str) -> bool {
     false
 }
 
-/// Klipy slug shape, mirroring the proxy's ingest validation.
+// ─── Media kinds ────────────────────────────────────────────────────────────
+
+/// Which Klipy catalog a call targets. Everything else about the two modes is
+/// shared.
+///
+/// THE ID NAMESPACE IS THE LOAD-BEARING PART. Klipy slugs are per-catalog, so
+/// a GIF and a sticker can carry the same slug — and both the proxy's `items`
+/// registry and this module's direct-mode variant registry are keyed by bare
+/// id. Sticker ids therefore get a `~` prefix everywhere they are handed out
+/// (registry keys, media URLs, saved-library rows). GIF ids stay BARE on
+/// purpose: the saved GIF library stores media paths relative to the proxy
+/// base, so re-namespacing GIFs would 404 every favourite anyone has saved.
+/// `~` is unreserved in URLs (RFC 3986) and outside the slug charset, so it
+/// cannot collide with a real slug.
+#[frb(ignore)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MediaKind {
+    Gif,
+    Sticker,
+}
+
+impl MediaKind {
+    /// Path segment under `{root}/{key}/` in direct mode, and the `kind`
+    /// param proxy mode sends to search.php.
+    fn upstream_segment(self) -> &'static str {
+        match self {
+            MediaKind::Gif => "gifs",
+            MediaKind::Sticker => "stickers",
+        }
+    }
+
+    /// Namespace prefix on ids of this kind. See the type doc.
+    fn id_prefix(self) -> &'static str {
+        match self {
+            MediaKind::Gif => "",
+            MediaKind::Sticker => "~",
+        }
+    }
+
+    /// The `emote_blobs.kind` a pick of this kind is stored under.
+    fn asset_kind(self) -> &'static str {
+        match self {
+            MediaKind::Gif => "gif",
+            MediaKind::Sticker => "sticker",
+        }
+    }
+
+    /// Human label for log lines and error messages.
+    fn label(self) -> &'static str {
+        match self {
+            MediaKind::Gif => "GIF",
+            MediaKind::Sticker => "Sticker",
+        }
+    }
+}
+
+/// Klipy slug shape, mirroring the proxy's ingest validation, plus the
+/// optional `~` sticker namespace prefix (see [MediaKind]). Accepting the
+/// prefix HERE rather than per-kind is deliberate: `sticker_fetch_and_store`
+/// and `gif_fetch_and_store` both build their own URL from the id, so a
+/// mismatched prefix can only ever produce a 404, never a wrong fetch.
 fn valid_gif_id(id: &str) -> bool {
-    !id.is_empty()
-        && id.len() <= 100
-        && id
+    let bare = id.strip_prefix('~').unwrap_or(id);
+    !bare.is_empty()
+        && bare.len() <= 100
+        && bare
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
@@ -572,10 +648,11 @@ fn random_customer_id() -> String {
 
 fn direct_query(
     key: &str,
+    kind: MediaKind,
     path: &str,
     params: Vec<(&'static str, String)>,
 ) -> Result<serde_json::Value, String> {
-    let url = format!("{KLIPY_API_ROOT}{key}/gifs/{path}");
+    let url = format!("{KLIPY_API_ROOT}{key}/{}/{path}", kind.upstream_segment());
     let rt = get_http_runtime();
     rt.block_on(async move {
         let client = reqwest::Client::new();
@@ -643,7 +720,7 @@ fn klipy_variant_in_slot(slot_obj: &serde_json::Value, fmts: &[&str]) -> Option<
 /// Item shape: { slug, title, type, file: { hd|md|sm|xs: { gif|webp|jpg|mp4:
 /// {url,width,height,size} } } }. Ads arrive as { type:"ad", … } — dropped,
 /// exactly like the proxy does.
-fn parse_klipy_page(v: &serde_json::Value) -> Result<GifPage, String> {
+fn parse_klipy_page(v: &serde_json::Value, kind: MediaKind) -> Result<GifPage, String> {
     if v.get("result").and_then(|r| r.as_bool()) != Some(true) {
         let msg = v
             .get("message")
@@ -664,10 +741,14 @@ fn parse_klipy_page(v: &serde_json::Value) -> Result<GifPage, String> {
         if e.get("type").and_then(|t| t.as_str()) == Some("ad") {
             continue;
         }
-        let Some(id) = e.get("slug").and_then(|s| s.as_str()) else {
+        let Some(slug) = e.get("slug").and_then(|s| s.as_str()) else {
             continue;
         };
-        if !valid_gif_id(id) {
+        // The upstream slug is BARE; everything downstream of this parse
+        // (registry key, item id, saved-library row) uses the namespaced
+        // form, so a sticker and a GIF sharing a slug stay distinct.
+        let id = format!("{}{slug}", kind.id_prefix());
+        if !valid_gif_id(&id) {
             continue;
         }
         let Some(file) = e.get("file") else { continue };
@@ -691,10 +772,10 @@ fn parse_klipy_page(v: &serde_json::Value) -> Result<GifPage, String> {
             continue;
         }
         if let Ok(mut reg) = direct_src_store().lock() {
-            reg.insert(id, file.clone());
+            reg.insert(&id, file.clone());
         }
         items.push(GifItem {
-            id: id.to_string(),
+            id,
             w,
             h,
             title: e
@@ -726,15 +807,21 @@ fn parse_klipy_page(v: &serde_json::Value) -> Result<GifPage, String> {
 // ─── Public API ─────────────────────────────────────────────────────────────
 
 /// Search / trending dispatch. `query` empty = trending.
-fn gif_page(query: Option<String>, page: u32, rating: &str) -> Result<GifPage, String> {
+pub(crate) fn media_page(
+    kind: MediaKind,
+    query: Option<String>,
+    page: u32,
+    rating: &str,
+) -> Result<GifPage, String> {
     let page = page.max(1);
     let mode = if query.is_some() { "search" } else { "trending" };
+    let what = kind.upstream_segment();
     let t0 = std::time::Instant::now();
     let direct = gif_api_key();
-    // Mode only — NEVER the query text (privacy: search text stays out of
-    // logs, ours included).
+    // Mode + kind only — NEVER the query text (privacy: search text stays out
+    // of logs, ours included).
     crate::hollow_log!(
-        "[HOLLOW-GIF] query start mode={mode} via={}",
+        "[HOLLOW-GIF] query start kind={what} mode={mode} via={}",
         if direct.is_some() { "direct" } else { "proxy" }
     );
 
@@ -752,7 +839,7 @@ fn gif_page(query: Option<String>, page: u32, rating: &str) -> Result<GifPage, S
                 }
                 None => "trending",
             };
-            direct_query(key, path, params).and_then(|v| parse_klipy_page(&v))
+            direct_query(key, kind, path, params).and_then(|v| parse_klipy_page(&v, kind))
         }
         None => {
             let mut params: Vec<(&'static str, String)> = vec![
@@ -760,6 +847,9 @@ fn gif_page(query: Option<String>, page: u32, rating: &str) -> Result<GifPage, S
                 ("per_page", "30".to_string()),
                 ("rating", rating.to_string()),
                 ("v", GIF_SCHEMA_VER.to_string()),
+                // Absent/"gifs" = the GIF catalog, so a proxy older than the
+                // sticker feature keeps answering GIF requests unchanged.
+                ("kind", what.to_string()),
             ];
             match &query {
                 Some(q) => params.push(("q", q.clone())),
@@ -771,12 +861,12 @@ fn gif_page(query: Option<String>, page: u32, rating: &str) -> Result<GifPage, S
 
     match &result {
         Ok(p) => crate::hollow_log!(
-            "[HOLLOW-GIF] query ok mode={mode} items={} in {}ms",
+            "[HOLLOW-GIF] query ok kind={what} mode={mode} items={} in {}ms",
             p.items.len(),
             t0.elapsed().as_millis()
         ),
         Err(e) => crate::hollow_log!(
-            "[HOLLOW-GIF] query FAILED mode={mode} in {}ms: {e}",
+            "[HOLLOW-GIF] query FAILED kind={what} mode={mode} in {}ms: {e}",
             t0.elapsed().as_millis()
         ),
     }
@@ -796,23 +886,49 @@ pub fn gif_search(query: String, page: u32, rating: String) -> Result<GifPage, S
             backoff_until: 0,
         });
     }
-    gif_page(Some(q), page, &normalized_rating(&rating))
+    media_page(MediaKind::Gif, Some(q), page, &normalized_rating(&rating))
 }
 
 /// Trending GIFs — the picker's default (empty-search) view.
 #[frb]
 pub fn gif_trending(page: u32, rating: String) -> Result<GifPage, String> {
-    gif_page(None, page, &normalized_rating(&rating))
+    media_page(MediaKind::Gif, None, page, &normalized_rating(&rating))
+}
+
+/// The shared search entry point for [MediaKind::Sticker] (see
+/// `api/stickers.rs`, which owns the sticker-facing FFI). An empty or
+/// over-long query answers with an empty page rather than reaching upstream.
+pub(crate) fn media_search(
+    kind: MediaKind,
+    query: String,
+    page: u32,
+    rating: String,
+) -> Result<GifPage, String> {
+    let q = query.trim().to_string();
+    if q.is_empty() || q.chars().count() > 64 {
+        return Ok(GifPage {
+            items: vec![],
+            page: 1,
+            has_next: false,
+            backoff_until: 0,
+        });
+    }
+    media_page(kind, Some(q), page, &normalized_rating(&rating))
 }
 
 /// Category names for the browse chips (proxy caches them for 7 days).
 #[frb]
 pub fn gif_categories() -> Result<Vec<String>, String> {
+    media_categories(MediaKind::Gif)
+}
+
+pub(crate) fn media_categories(kind: MediaKind) -> Result<Vec<String>, String> {
     let v = match gif_api_key() {
-        Some(key) => direct_query(&key, "categories", vec![])?,
+        Some(key) => direct_query(&key, kind, "categories", vec![])?,
         None => proxy_query(vec![
             ("categories", "1".to_string()),
             ("v", GIF_SCHEMA_VER.to_string()),
+            ("kind", kind.upstream_segment().to_string()),
         ])?,
     };
     if v.get("result").and_then(|r| r.as_bool()) != Some(true) {
@@ -866,21 +982,36 @@ pub fn gif_categories() -> Result<Vec<String>, String> {
 /// constrained.
 #[frb]
 pub fn gif_fetch_and_store(id: String, source_url: Option<String>) -> Result<StoredGif, String> {
+    media_fetch_and_store(MediaKind::Gif, id, source_url)
+}
+
+/// Pick-time fetch + transcode for either kind. The only kind-dependent
+/// parts are the transcoder (a sticker gets 512px/512 KB with alpha, a GIF
+/// 480px/2 MB) and the asset-blob kind it lands under.
+pub(crate) fn media_fetch_and_store(
+    kind: MediaKind,
+    id: String,
+    source_url: Option<String>,
+) -> Result<StoredGif, String> {
     if !valid_gif_id(&id) {
-        return Err("Invalid GIF id".into());
+        return Err(format!("Invalid {} id", kind.label()));
     }
     let t0 = std::time::Instant::now();
     let raw = match gif_api_key() {
-        Some(_) => direct_pick_bytes(&id, source_url.as_deref())?,
+        Some(_) => direct_pick_bytes(kind, &id, source_url.as_deref())?,
         None => proxy_pick_bytes(&id)?,
     };
     let dl_ms = t0.elapsed().as_millis();
-    let (webp, w, h, animated) = crate::node::image_convert::process_gif_for_send(&raw)
-        .inspect_err(|e| {
-            crate::hollow_log!("[HOLLOW-GIF] fetch transcode FAILED: {e}");
-        })?;
+    let convert = match kind {
+        MediaKind::Gif => crate::node::image_convert::process_gif_for_send,
+        MediaKind::Sticker => crate::node::image_convert::process_sticker_for_send,
+    };
+    let (webp, w, h, animated) = convert(&raw).inspect_err(|e| {
+        crate::hollow_log!("[HOLLOW-GIF] fetch transcode FAILED: {e}");
+    })?;
     crate::hollow_log!(
-        "[HOLLOW-GIF] fetch ok: {} raw -> {} webp {}x{} (dl {dl_ms}ms, total {}ms)",
+        "[HOLLOW-GIF] fetch ok kind={}: {} raw -> {} webp {}x{} (dl {dl_ms}ms, total {}ms)",
+        kind.upstream_segment(),
         raw.len(),
         webp.len(),
         w,
@@ -891,7 +1022,7 @@ pub fn gif_fetch_and_store(id: String, source_url: Option<String>) -> Result<Sto
     let store = get_store();
     let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let ms = guard.as_ref().ok_or("Message store is not open")?;
-    ms.save_asset_blob(&hash, &webp, animated, "gif")?;
+    ms.save_asset_blob(&hash, &webp, animated, kind.asset_kind())?;
     Ok(StoredGif {
         hash,
         w,
@@ -966,10 +1097,17 @@ fn direct_pick_candidates(id: &str, source_url: Option<&str>) -> Vec<String> {
     candidates
 }
 
-fn direct_pick_bytes(id: &str, source_url: Option<&str>) -> Result<Vec<u8>, String> {
+fn direct_pick_bytes(
+    kind: MediaKind,
+    id: &str,
+    source_url: Option<&str>,
+) -> Result<Vec<u8>, String> {
     let candidates = direct_pick_candidates(id, source_url);
     if candidates.is_empty() {
-        return Err("That GIF has no downloadable variant".into());
+        return Err(format!(
+            "That {} has no downloadable variant",
+            kind.label().to_lowercase()
+        ));
     }
 
     let rt = get_http_runtime();
@@ -1179,7 +1317,7 @@ mod tests {
         ))
         .unwrap();
 
-        let page = parse_klipy_page(&v).unwrap();
+        let page = parse_klipy_page(&v, MediaKind::Gif).unwrap();
         let ids: Vec<&str> = page.items.iter().map(|i| i.id.as_str()).collect();
         assert_eq!(ids, vec!["ok_1", "ok_2"], "ad, foreign host and mp4-only row must all drop");
         assert_eq!(page.page, 3);
@@ -1201,6 +1339,87 @@ mod tests {
     }
 
     #[test]
+    fn gif_ids_accept_the_sticker_namespace_prefix() {
+        assert!(valid_gif_id("~abc_DEF-123"));
+        // Only ONE leading prefix, and never a bare prefix.
+        assert!(!valid_gif_id("~"));
+        assert!(!valid_gif_id("~~abc"));
+        // Still nowhere else in the id.
+        assert!(!valid_gif_id("ab~c"));
+        assert!(!valid_gif_id(&format!("~{}", "x".repeat(101))));
+    }
+
+    /// The reason the `~` namespace exists: Klipy slugs are per-catalog, so
+    /// the SAME slug can arrive from both. Without the prefix the second
+    /// parse would overwrite the first's registry entry and a GIF's media URL
+    /// would start serving sticker bytes.
+    #[test]
+    fn sticker_and_gif_sharing_a_slug_stay_distinct() {
+        let _g = settings_lock();
+        reset_settings();
+        clear_direct_registry();
+        let page_json = |host: &str| {
+            serde_json::from_str::<serde_json::Value>(&format!(
+                r#"{{"result":true,"data":{{"current_page":1,"has_next":false,
+                     "data":[{}]}}}}"#,
+                klipy_item("shared", host, true)
+            ))
+            .unwrap()
+        };
+
+        let gifs = parse_klipy_page(&page_json("static.klipy.com"), MediaKind::Gif).unwrap();
+        let stickers =
+            parse_klipy_page(&page_json("static2.klipy.com"), MediaKind::Sticker).unwrap();
+        assert_eq!(gifs.items[0].id, "shared");
+        assert_eq!(stickers.items[0].id, "~shared");
+
+        // Both registry entries survive, each pointing at its own CDN host.
+        let reg = direct_src_store().lock().unwrap();
+        assert!(reg.get("shared").is_some(), "GIF entry must survive");
+        assert!(reg.get("~shared").is_some(), "sticker entry must survive");
+        drop(reg);
+        let gif_pick = direct_pick_candidates("shared", None);
+        let sticker_pick = direct_pick_candidates("~shared", None);
+        assert!(gif_pick.iter().all(|u| u.contains("static.klipy.com")));
+        assert!(sticker_pick.iter().all(|u| u.contains("static2.klipy.com")));
+        reset_settings();
+    }
+
+    /// Proxy mode: the id arrives ALREADY namespaced from search.php, and the
+    /// derived `full` URL must keep the prefix or it resolves to the GIF.
+    #[test]
+    fn proxy_sticker_rows_keep_the_prefix_through_the_full_url_fallback() {
+        let base = "https://hollow.anonlisten.com/gifs/";
+        let v: serde_json::Value = serde_json::from_str(&format!(
+            r#"{{"result":true,
+                "items":[{{"id":"~shared","w":320,"h":320,"title":"s",
+                  "still":"{base}m/~shared.still.webp","sm":"{base}m/~shared.sm.webp"}}],
+                "page":1,"has_next":false}}"#
+        ))
+        .unwrap();
+        let page = parse_gif_page(&v, base).unwrap();
+        assert_eq!(page.items[0].id, "~shared");
+        assert_eq!(page.items[0].full_url, format!("{base}f/~shared"));
+    }
+
+    #[test]
+    fn media_kinds_map_to_upstream_and_asset_kinds() {
+        assert_eq!(MediaKind::Gif.upstream_segment(), "gifs");
+        assert_eq!(MediaKind::Sticker.upstream_segment(), "stickers");
+        assert_eq!(MediaKind::Gif.asset_kind(), "gif");
+        assert_eq!(MediaKind::Sticker.asset_kind(), "sticker");
+        // The asset kinds must be ones the rail actually knows, or a pick
+        // would be stored under a kind nothing can request back.
+        for k in [MediaKind::Gif, MediaKind::Sticker] {
+            assert!(
+                crate::node::assets::AssetKind::from_db_kind(k.asset_kind()).is_some(),
+                "{} is not a known AssetKind",
+                k.asset_kind()
+            );
+        }
+    }
+
+    #[test]
     fn direct_picks_prefer_the_registry_and_fall_back_once() {
         let _g = settings_lock();
         reset_settings();
@@ -1211,7 +1430,7 @@ mod tests {
             klipy_item("ok_1", "static.klipy.com", true)
         ))
         .unwrap();
-        parse_klipy_page(&v).unwrap();
+        parse_klipy_page(&v, MediaKind::Gif).unwrap();
 
         // Registry hit: best quality first, and the caller's URL is not even
         // consulted.
@@ -1235,10 +1454,10 @@ mod tests {
     fn klipy_errors_and_empty_shapes_are_survivable() {
         let v: serde_json::Value =
             serde_json::from_str(r#"{"result":false,"message":"invalid key"}"#).unwrap();
-        let err = parse_klipy_page(&v).err().expect("must fail");
+        let err = parse_klipy_page(&v, MediaKind::Gif).err().expect("must fail");
         assert!(err.contains("invalid key"), "got: {err}");
         let v: serde_json::Value = serde_json::from_str(r#"{"result":true,"data":{}}"#).unwrap();
-        let page = parse_klipy_page(&v).unwrap();
+        let page = parse_klipy_page(&v, MediaKind::Gif).unwrap();
         assert!(page.items.is_empty());
         assert_eq!(page.page, 1);
         assert!(!page.has_next);

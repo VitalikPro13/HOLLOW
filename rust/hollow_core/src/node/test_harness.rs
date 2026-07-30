@@ -7545,6 +7545,194 @@ async fn server_emote_replicates_and_bytes_pull_on_demand() {
 }
 
 // ---------------------------------------------------------------------------
+// Server sticker packs (asset-rail Phase 5): StickerAdded replicates the
+// hash-keyed metadata to a joined member, who pulls the BYTES on demand at
+// AssetKind::Sticker; a member without MANAGE_EMOTES is refused; a sticker
+// whose transparency must survive the round trip does; StickerRemoved
+// converges. The emote twin above is the model — what differs is that
+// stickers are keyed by HASH (never by name), carry pack/w/h, and ride a
+// larger per-kind receipt cap.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn sticker_set_replicates_and_converges_on_removal() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    const O_MASTER: u8 = 96;
+    const J_MASTER: u8 = 97;
+    let o_master = NativeKeypair::from_secret_bytes(&seed_bytes(O_MASTER)).peer_id();
+    let j_master = NativeKeypair::from_secret_bytes(&seed_bytes(J_MASTER)).peer_id();
+
+    let mut o = spawn_node_with_friends(&relay, O_MASTER, O_MASTER, &[&j_master]).await;
+    sleep_ms(1500).await;
+    let mut j = spawn_node_with_friends(&relay, J_MASTER, J_MASTER, &[&o_master]).await;
+    sleep_ms(4000).await;
+
+    let server_id = create_server_and_wait(&mut o, "Sticker Server").await;
+    sleep_ms(300).await;
+    drain_events(&mut o);
+    drain_events(&mut j);
+
+    j.cmd_tx
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
+        .await
+        .unwrap();
+    let joined = wait_event(&mut j, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
+    })
+    .await;
+    assert!(joined, "J must join the server");
+    sleep_ms(3000).await;
+    drain_events(&mut o);
+    drain_events(&mut j);
+
+    // --- 1. Owner processes + registers a sticker; metadata replicates. ---
+    use sha2::{Digest, Sha256};
+    // A CUT-OUT source: transparent left half, opaque right half. A sticker
+    // that comes back matted is a visible defect, so the alpha is asserted
+    // after the pull rather than assumed.
+    let (sticker_bytes, w, h, animated) = {
+        let mut img = image::RgbaImage::from_pixel(256, 256, image::Rgba([0, 0, 0, 0]));
+        for y in 0..256u32 {
+            for x in 128..256u32 {
+                img.put_pixel(x, y, image::Rgba([40, 200, 90, 255]));
+            }
+        }
+        let mut png = Vec::new();
+        img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .expect("encode test png");
+        super::image_convert::process_sticker_for_send(&png).expect("process sticker")
+    };
+    assert!(!animated, "still sticker");
+    assert_eq!((w, h), (256, 256), "a 256px source is not upscaled to the 512 cap");
+    assert!(
+        sticker_bytes.len() <= super::assets::AssetKind::Sticker.recv_cap(),
+        "authoring must produce something the receipt cap will accept"
+    );
+    let hash = hex::encode(Sha256::digest(&sticker_bytes));
+    o.store()
+        .save_asset_blob(&hash, &sticker_bytes, false, "sticker")
+        .expect("owner caches its own sticker blob");
+
+    o.cmd_tx
+        .send(NodeCommand::AddServerSticker {
+            server_id: server_id.clone(),
+            hash: hash.clone(),
+            name: "wave".to_string(),
+            pack: "greetings".to_string(),
+            animated: false,
+            w,
+            h,
+        })
+        .await
+        .unwrap();
+    let updated = wait_event(&mut j, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::ServerUpdated { server_id: sid } if *sid == server_id)
+    })
+    .await;
+    assert!(updated, "J must receive ServerUpdated for the sticker add");
+    sleep_ms(500).await;
+
+    let j_state = j.server_state(&server_id).expect("J holds the server state");
+    let sticker = j_state.stickers.get(&hash).expect("sticker metadata replicated to J");
+    assert_eq!(sticker.name, "wave");
+    assert_eq!(sticker.pack, "greetings");
+    assert_eq!((sticker.w, sticker.h), (w, h), "dims ride the CRDT so the cell can be reserved");
+
+    // --- 2. J pulls the bytes on demand, at the STICKER kind. ---
+    assert!(
+        !j.store().has_emote_blob(&hash).unwrap(),
+        "J must NOT have the bytes yet — they never ride the CRDT"
+    );
+    j.cmd_tx
+        .send(NodeCommand::RequestEmotes {
+            hashes: vec![hash.clone()],
+            kind: super::assets::AssetKind::Sticker,
+            server_id: Some(server_id.clone()),
+            peer_hint: None,
+        })
+        .await
+        .unwrap();
+    let got_assets = wait_event(&mut j, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::EmoteAssetsReceived { hashes } if hashes.contains(&hash))
+    })
+    .await;
+    assert!(got_assets, "J must receive the sticker bytes from the owner");
+    sleep_ms(300).await;
+    let pulled = j.store().load_emote_blob(&hash).unwrap().expect("bytes cached on J");
+    assert_eq!(
+        pulled.as_slice(),
+        sticker_bytes.as_slice(),
+        "pulled bytes must match byte-exact (hash-verified)"
+    );
+    // The cut-out survived authoring + replication. Decoded through
+    // webp_animation, NOT the image crate — every asset we emit is an ANMF
+    // container and the image crate reports alpha 255 for those (see the
+    // note on image_convert::process_sticker_for_send).
+    let frame = webp_animation::Decoder::new(&pulled)
+        .expect("decode replicated sticker")
+        .into_iter()
+        .next()
+        .expect("at least one frame");
+    let px = |x: u32, y: u32| frame.data()[((y * w + x) * 4 + 3) as usize];
+    assert_eq!(px(4, 4), 0, "the transparent half must stay transparent");
+    assert_eq!(px(w - 4, 4), 255, "the opaque half must stay opaque");
+
+    // --- 3. A plain Member's StickerAdded is REJECTED (no MANAGE_EMOTES). ---
+    drain_events(&mut o);
+    j.cmd_tx
+        .send(NodeCommand::AddServerSticker {
+            server_id: server_id.clone(),
+            hash: hash.clone(),
+            name: "sneaky".to_string(),
+            pack: String::new(),
+            animated: false,
+            w,
+            h,
+        })
+        .await
+        .unwrap();
+    let denied = wait_event(&mut j, std::time::Duration::from_secs(5), |ev| {
+        matches!(ev, NetworkEvent::Error { message } if message.contains("cannot manage emotes"))
+    })
+    .await;
+    assert!(denied, "member without MANAGE_EMOTES must be refused at authoring");
+    sleep_ms(500).await;
+    let o_state = o.server_state(&server_id).expect("owner state");
+    assert_eq!(
+        o_state.stickers.get(&hash).map(|s| s.name.as_str()),
+        Some("wave"),
+        "a member-authored sticker op must never reach the owner's state"
+    );
+
+    // --- 4. StickerRemoved converges. ---
+    drain_events(&mut j);
+    o.cmd_tx
+        .send(NodeCommand::RemoveServerSticker {
+            server_id: server_id.clone(),
+            hash: hash.clone(),
+        })
+        .await
+        .unwrap();
+    let removed = wait_event(&mut j, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::ServerUpdated { server_id: sid } if *sid == server_id)
+    })
+    .await;
+    assert!(removed, "J must receive ServerUpdated for the sticker removal");
+    sleep_ms(500).await;
+    let j_state = j.server_state(&server_id).expect("J state after removal");
+    assert!(j_state.stickers.is_empty(), "StickerRemoved must converge on J");
+
+    drop(o);
+    drop(j);
+}
+
+// ---------------------------------------------------------------------------
 // Asset rail: the size cap enforced on receipt comes from the kind WE
 // recorded at request time, never from the sender. A 300 KB blob is refused
 // when it was requested as an 'emote' (256 KB cap) and accepted when the

@@ -180,7 +180,7 @@ Nested `Row` with:
 
 2. **Vertical divider** — 2px wide, 24px tall, `hollow.border`, `HollowSpacing.sm` horizontal margin.
 
-3. **Server icons** — `Expanded` > `Center` > `SingleChildScrollView(horizontal)` > `Row(mainAxisSize: min)`. Interleaved with `_ReorderGap` widgets (one before first, one after each item). Uses `Builder` per item to get a local `BuildContext` for render object access. Pattern-matches `StripItem` to call `_buildServerIcon()` or `_buildFolderIcon()`.
+3. **Server icons** — `Expanded` > `EdgeScrollRow(center: true)` (2026-07-30; was `Center` > `SingleChildScrollView(horizontal)` > `Row(min)`). Centred while the icons fit, then arrows + wheel-panning once they overflow — before that, servers past the edge were unreachable on a plain wheel mouse. `center: true` rather than an outer `Center`: the arrow slots make the internal row take full width, so an outer Center has nothing to centre and the strip silently LEFT-ALIGNS. The arrows are siblings of the scroller, not an overlay, so they never cover the `_ReorderGap` drop zones at either end. Interleaved with `_ReorderGap` widgets (one before first, one after each item). Uses `Builder` per item to get a local `BuildContext` for render object access. Pattern-matches `StripItem` to call `_buildServerIcon()` or `_buildFolderIcon()`.
 
 4. **Vertical divider** — same as above.
 

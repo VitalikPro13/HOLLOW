@@ -9,6 +9,7 @@ pub mod screen_audio;
 pub mod share;
 pub mod showcase;
 pub mod simple;
+pub mod stickers;
 pub mod storage;
 pub mod twitch;
 pub mod updater;

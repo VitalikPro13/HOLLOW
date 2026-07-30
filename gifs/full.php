@@ -44,8 +44,10 @@ function curl_fetch(string $url, ?int &$status = null): ?string {
     return $body === false ? null : $body;
 }
 
+// Optional `~` = the sticker id namespace (see search.php). The registry
+// lookup below is what authorizes the fetch either way.
 $id = (string)($_GET['id'] ?? '');
-if (!preg_match('/^[A-Za-z0-9_-]{1,100}$/', $id)) deny(404);
+if (!preg_match('/^~?[A-Za-z0-9_-]{1,100}$/', $id)) deny(404);
 
 $pdo = new PDO('sqlite:' . DB_FILE);
 $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);

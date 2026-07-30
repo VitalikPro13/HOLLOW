@@ -12,6 +12,7 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/chat/emote_composer.dart';
 import 'package:hollow/src/ui/chat/hollow_link_utils.dart';
+import 'package:hollow/src/ui/chat/message_text_parser.dart';
 import 'package:hollow/src/ui/chat/staged_hollow_link_card.dart';
 import 'package:hollow/src/ui/chat/staged_link_preview_card.dart';
 import 'package:hollow/src/ui/components/animated_gif_image.dart';
@@ -48,6 +49,41 @@ bool shouldGroup({
   }
   return currentTime.difference(previousTime).inMinutes.abs() < 5;
 }
+
+/// Whether a message may tile into its neighbours: it is nothing but a
+/// sticker run, and nothing else is attached that would sit in the seam.
+/// A reply header, a reaction bar, an "(edited)" suffix or a file card all
+/// need the row's own padding back.
+bool stickerTileCandidate({
+  required String text,
+  required bool hasReply,
+  required bool hasReactions,
+  required bool hasFile,
+  required bool isEdited,
+}) =>
+    !hasReply &&
+    !hasReactions &&
+    !hasFile &&
+    !isEdited &&
+    isStickerOnlyMessage(text);
+
+/// Which seams of a message are continued by its neighbours. A run tiles
+/// only where BOTH rows are candidates and the rows are already grouped
+/// (same author, within the grouping window) — the same rule that decides
+/// whether the avatar repeats.
+({bool prev, bool next}) stickerTilingFor({
+  required bool selfIsSticker,
+  required bool prevIsSticker,
+  required bool groupedWithPrev,
+  required bool nextIsSticker,
+  required bool groupedWithNext,
+}) =>
+    selfIsSticker
+        ? (
+            prev: prevIsSticker && groupedWithPrev,
+            next: nextIsSticker && groupedWithNext,
+          )
+        : (prev: false, next: false);
 
 /// Whether a date separator should be shown between two timestamps.
 bool shouldShowDateSeparator(DateTime current, DateTime? previous) {
@@ -505,6 +541,30 @@ Widget composerGifButton(HollowTheme hollow,
             height: 1.0,
           ),
         ),
+      ),
+    ),
+  );
+}
+
+/// Sticker-picker button for the composer row. [onOpen] receives the button's
+/// own BuildContext so the picker can anchor to it.
+///
+/// A third composer button is PROVISIONAL — the row is getting crowded and
+/// Vitalik wants to rethink emoji/GIF/sticker placement as a whole. Until
+/// then this is the discoverable option, and `StickerPickerBody` is
+/// host-agnostic so moving the panel later touches only its host.
+Widget composerStickerButton(HollowTheme hollow,
+    {required void Function(BuildContext btnCtx) onOpen}) {
+  return Builder(
+    builder: (btnCtx) => HollowPressable(
+      semanticLabel: 'Insert sticker',
+      onTap: () => onOpen(btnCtx),
+      borderRadius: BorderRadius.circular(hollow.radiusMd),
+      padding: const EdgeInsets.all(HollowSpacing.sm),
+      child: Icon(
+        LucideIcons.sticker,
+        color: hollow.textSecondary,
+        size: 20,
       ),
     ),
   );

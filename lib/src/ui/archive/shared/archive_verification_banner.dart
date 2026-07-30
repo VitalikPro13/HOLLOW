@@ -3,6 +3,7 @@ import 'package:hollow/src/rust/api/archive.dart' as archive_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
+import 'package:hollow/src/ui/components/edge_scroll_row.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -119,8 +120,10 @@ class ArchiveChannelSelector extends StatelessWidget {
         color: hollow.surface,
         border: Border(bottom: BorderSide(color: hollow.border)),
       ),
-      child: ListView(
-        scrollDirection: Axis.horizontal,
+      // EdgeScrollRow: past a handful of channels the strip overflowed with
+      // no way to reach the rest on a wheel mouse.
+      child: EdgeScrollRow(
+        semanticLabel: 'channels',
         children: channels.map((ch) {
           final isActive = ch.channelId == activeChannelId;
           return Padding(

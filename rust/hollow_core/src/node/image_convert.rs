@@ -462,6 +462,34 @@ mod tests {
         buf
     }
 
+    /// A cut-out source: fully transparent left half, opaque green right
+    /// half — the shape of a real sticker.
+    fn make_cutout_png(w: u32, h: u32) -> Vec<u8> {
+        let mut img = image::RgbaImage::from_pixel(w, h, image::Rgba([0, 0, 0, 0]));
+        for y in 0..h {
+            for x in (w / 2)..w {
+                img.put_pixel(x, y, image::Rgba([40, 200, 90, 255]));
+            }
+        }
+        let mut buf = Vec::new();
+        img.write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
+            .expect("encode test png");
+        buf
+    }
+
+    /// Alpha of one pixel, read through the decoder that actually
+    /// understands our animation containers. `image::load_from_memory`
+    /// reports 255 for every pixel of an ANMF WebP — see the note on
+    /// [process_sticker_for_send].
+    fn alpha_at(webp: &[u8], x: u32, y: u32, w: u32) -> u8 {
+        let frame = webp_animation::Decoder::new(webp)
+            .expect("decode webp")
+            .into_iter()
+            .next()
+            .expect("at least one frame");
+        frame.data()[((y * w + x) * 4 + 3) as usize]
+    }
+
     #[test]
     fn webp_preview_encodes_smaller_image() {
         let png = make_test_png(200, 100);
@@ -703,6 +731,59 @@ mod tests {
     #[test]
     fn gif_for_send_rejects_garbage() {
         assert!(process_gif_for_send(b"definitely not an image").is_err());
+    }
+
+    // ── Stickers ──────────────────────────────────────────────────────
+
+    #[test]
+    fn sticker_for_send_fits_its_own_box_and_cap() {
+        let png = make_test_png(1400, 700);
+        let (webp, w, h, animated) = process_sticker_for_send(&png).expect("process");
+        // 512, not the GIF pipeline's 480 — same helper, different bounds.
+        assert_eq!((w, h), (512, 256));
+        assert!(!animated);
+        assert_eq!(&webp[0..4], b"RIFF");
+        assert!(
+            webp.len() <= crate::node::assets::AssetKind::Sticker.recv_cap(),
+            "authoring must land under the kind's receipt cap, else it could \
+             never be pulled back: {} bytes",
+            webp.len()
+        );
+    }
+
+    #[test]
+    fn sticker_for_send_never_upscales() {
+        let png = make_test_png(200, 120);
+        let (_, w, h, _) = process_sticker_for_send(&png).expect("process");
+        assert_eq!((w, h), (200, 120));
+    }
+
+    /// The one that matters: a cut-out must still be a cut-out afterwards.
+    /// Decoded through `webp_animation` — `image::load_from_memory` reports
+    /// 255 for every pixel of an ANMF container (see the fn doc).
+    #[test]
+    fn sticker_keeps_its_cut_out() {
+        let png = make_cutout_png(256, 256);
+        let (webp, w, h, _) = process_sticker_for_send(&png).expect("process");
+        assert_eq!((w, h), (256, 256));
+        assert_eq!(alpha_at(&webp, 4, 4, w), 0, "transparent half must stay transparent");
+        assert_eq!(alpha_at(&webp, w - 4, 4, w), 255, "opaque half must stay opaque");
+    }
+
+    #[test]
+    fn animated_sticker_stays_animated_and_bounded() {
+        let src = make_test_animated_webp(900, 900);
+        let (webp, w, h, animated) = process_sticker_for_send(&src).expect("process");
+        assert_eq!((w, h), (512, 512));
+        assert!(animated);
+        assert!(webp.len() <= crate::node::assets::AssetKind::Sticker.recv_cap());
+    }
+
+    #[test]
+    fn sticker_for_send_rejects_garbage() {
+        let err = process_sticker_for_send(b"not an image").expect_err("must fail");
+        // The label must name what the USER picked, not the shared helper.
+        assert!(!err.contains("GIF"), "got: {err}");
     }
 }
 
@@ -1222,22 +1303,66 @@ fn encode_animation_frames(
 
 /// Process a picked GIF (downloaded from the GIF proxy's `full` variant) into
 /// the send format: ≤480px animated WebP, ≤2 MB (== `AssetKind::Gif` receipt
-/// cap). Unlike the emote/icon paths there is NO animated-WebP passthrough:
-/// the proxy prefers hd-slot animated WebP sources, which routinely exceed
-/// both bounds — and re-encoding at authoring IS the sanitization step.
-/// Animated WebP decodes via `webp_animation::Decoder`, GIF via the image
-/// crate; frames are resized during decode so source-resolution frames are
-/// never all held at once. A quality-then-dimension walk-down retries until
-/// the encode fits the cap.
+/// cap).
 ///
 /// Returns `(webp_bytes, width, height, animated)` of the encoded asset.
 pub fn process_gif_for_send(data: &[u8]) -> Result<(Vec<u8>, u32, u32, bool), String> {
-    const MAX_DIM: u32 = 480;
-    const MAX_BYTES: usize = 2_097_152;
-    const MAX_FRAMES: usize = 300;
-    // Quality drops first (cheap wins), then dimensions. Smaller rungs derive
-    // from the 480px frames rather than re-decoding the source.
+    // Quality drops first (cheap wins), then dimensions.
     const LADDER: [(u32, f32); 4] = [(480, 80.0), (480, 65.0), (400, 55.0), (320, 45.0)];
+    process_asset_for_send(data, 480, 2_097_152, &LADDER, "GIF")
+}
+
+/// Process a sticker — an upload the user picked, or a Klipy sticker's source
+/// — into the send format: ≤512px animated WebP, ≤512 KB (==
+/// `AssetKind::Sticker` receipt cap).
+///
+/// Stickers lean harder on quality than GIFs do (they ARE the message, and
+/// they are usually flat art that compresses well), so the ladder starts at
+/// Q85 and only then walks down.
+///
+/// TRANSPARENCY SURVIVES, and that is load-bearing — a cut-out matted onto
+/// black is a visible defect, not a nuance. libwebp carries alpha in its own
+/// plane at `alpha_quality: 100` by default, and
+/// [encode_lossy_webp_via_animation] keeps those defaults.
+///
+/// One trap when verifying that: every asset this module emits is a WebP
+/// ANIMATION container (`ANMF`), even a single-frame still — deliberate, so
+/// only one libwebp-sys variant links into the binary. The `image` crate's
+/// WebP decoder reports alpha 255 for those, so a test that checks alpha via
+/// `image::load_from_memory` will "fail" on perfectly good bytes. Decode
+/// with `webp_animation::Decoder` (what Skia effectively does on the Flutter
+/// side) — see `sticker_keeps_its_cut_out`.
+///
+/// Returns `(webp_bytes, width, height, animated)` of the encoded asset.
+pub fn process_sticker_for_send(data: &[u8]) -> Result<(Vec<u8>, u32, u32, bool), String> {
+    const LADDER: [(u32, f32); 5] = [
+        (512, 85.0),
+        (512, 70.0),
+        (448, 60.0),
+        (384, 50.0),
+        (320, 45.0),
+    ];
+    process_asset_for_send(data, 512, 524_288, &LADDER, "Sticker")
+}
+
+/// Shared transcode for the block-rendered asset kinds (GIFs, stickers).
+///
+/// Unlike the emote/icon paths there is NO animated-WebP passthrough: the
+/// sources these are fed (a GIF proxy's hd-slot WebP, an arbitrary user
+/// upload) routinely exceed both bounds — and re-encoding at authoring IS the
+/// sanitization step. Animated WebP decodes via `webp_animation::Decoder`,
+/// GIF via the image crate; frames are resized DURING decode so
+/// source-resolution frames are never all held at once. `ladder` is walked in
+/// order until an encode fits `max_bytes`; `label` names the kind in error
+/// messages the user will actually read.
+fn process_asset_for_send(
+    data: &[u8],
+    max_dim: u32,
+    max_bytes: usize,
+    ladder: &[(u32, f32)],
+    label: &str,
+) -> Result<(Vec<u8>, u32, u32, bool), String> {
+    const MAX_FRAMES: usize = 300;
 
     fn fit_dims(w: u32, h: u32, max_dim: u32) -> (u32, u32) {
         if w.max(h) > max_dim {
@@ -1260,13 +1385,13 @@ pub fn process_gif_for_send(data: &[u8]) -> Result<(Vec<u8>, u32, u32, bool), St
         for frame in decoder.into_frames() {
             let frame = frame.map_err(|e| format!("Failed to decode GIF frame: {e}"))?;
             if frames.len() >= MAX_FRAMES {
-                return Err("GIF is too long to send".into());
+                return Err(format!("{label} is too long to send"));
             }
             let (w, h) = (frame.buffer().width(), frame.buffer().height());
             if w == 0 || h == 0 {
                 return Err("GIF has zero dimensions".into());
             }
-            let (nw, nh) = *target.get_or_insert_with(|| fit_dims(w, h, MAX_DIM));
+            let (nw, nh) = *target.get_or_insert_with(|| fit_dims(w, h, max_dim));
             let rgba = if (w, h) != (nw, nh) {
                 image::imageops::resize(frame.buffer(), nw, nh, FilterType::Lanczos3)
             } else {
@@ -1283,7 +1408,7 @@ pub fn process_gif_for_send(data: &[u8]) -> Result<(Vec<u8>, u32, u32, bool), St
         let mut prev_ts: i32 = 0;
         for frame in decoder.into_iter() {
             if frames.len() >= MAX_FRAMES {
-                return Err("GIF is too long to send".into());
+                return Err(format!("{label} is too long to send"));
             }
             let (w, h) = frame.dimensions();
             if w == 0 || h == 0 {
@@ -1291,7 +1416,7 @@ pub fn process_gif_for_send(data: &[u8]) -> Result<(Vec<u8>, u32, u32, bool), St
             }
             let src = image::RgbaImage::from_raw(w, h, frame.data().to_vec())
                 .ok_or("Animated WebP frame has unexpected size")?;
-            let (nw, nh) = *target.get_or_insert_with(|| fit_dims(w, h, MAX_DIM));
+            let (nw, nh) = *target.get_or_insert_with(|| fit_dims(w, h, max_dim));
             let rgba = if (w, h) != (nw, nh) {
                 image::imageops::resize(&src, nw, nh, FilterType::Lanczos3)
             } else {
@@ -1309,7 +1434,7 @@ pub fn process_gif_for_send(data: &[u8]) -> Result<(Vec<u8>, u32, u32, bool), St
         if w == 0 || h == 0 {
             return Err("Image has zero dimensions".into());
         }
-        let (nw, nh) = fit_dims(w, h, MAX_DIM);
+        let (nw, nh) = fit_dims(w, h, max_dim);
         let resized = if (w, h) != (nw, nh) {
             img.resize_exact(nw, nh, FilterType::Lanczos3)
         } else {
@@ -1319,13 +1444,13 @@ pub fn process_gif_for_send(data: &[u8]) -> Result<(Vec<u8>, u32, u32, bool), St
     }
 
     if frames.is_empty() {
-        return Err("GIF has no frames".into());
+        return Err(format!("{label} has no frames"));
     }
     let animated = frames.len() > 1;
     let (base_w, base_h) = (frames[0].0.width(), frames[0].0.height());
 
-    for (max_dim, quality) in LADDER {
-        let (nw, nh) = fit_dims(base_w, base_h, max_dim);
+    for &(rung_dim, quality) in ladder {
+        let (nw, nh) = fit_dims(base_w, base_h, rung_dim);
         let scaled;
         let attempt: &[(image::RgbaImage, i32)] = if (nw, nh) != (base_w, base_h) {
             scaled = frames
@@ -1341,9 +1466,12 @@ pub fn process_gif_for_send(data: &[u8]) -> Result<(Vec<u8>, u32, u32, bool), St
         } else {
             encode_lossy_webp_via_animation(attempt[0].0.as_raw(), nw, nh, quality)?
         };
-        if bytes.len() <= MAX_BYTES {
+        if bytes.len() <= max_bytes {
             return Ok((bytes, nw, nh, animated));
         }
     }
-    Err("GIF is too large to send even after conversion".into())
+    Err(format!(
+        "{label} is too large to send even after conversion"
+    ))
 }
+

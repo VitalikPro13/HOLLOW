@@ -9,6 +9,7 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/chat/emoji_picker.dart';
 import 'package:hollow/src/ui/chat/emote_image.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/settings/emotes_tab.dart' show ServerStickersSection;
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -161,6 +162,13 @@ class MobileEmotesRoute extends ConsumerWidget {
                           canManage: canManage,
                           onRemove: () => _removeEmote(context, ref, e.name),
                         )),
+                  const SizedBox(height: HollowSpacing.xl),
+                  Divider(height: 1, color: hollow.border),
+                  const SizedBox(height: HollowSpacing.lg),
+                  // The SAME widget the desktop tab renders — mobile parity
+                  // by construction rather than by a second copy.
+                  ServerStickersSection(
+                      serverId: serverId, canManage: canManage),
                 ],
               ),
             ),

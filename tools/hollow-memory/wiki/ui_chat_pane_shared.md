@@ -7,6 +7,8 @@ Primary file: `lib/src/ui/chat/chat_pane_shared.dart` (~660 lines). Created 2026
 ## Moved helpers (were top-level in chat_pane.dart)
 
 - `shouldGroup()` -- same-sender-within-5-min message grouping (DMs compare `isMe`; channels also `senderId`).
+- `stickerTileCandidate()` / `stickerTilingFor()` -- whether a row may tile into its neighbours (sticker-only text, nothing else in the seam) and which seams actually tile. Feeds `tileWithPrev`/`tileWithNext` on both bubbles from all THREE panes; see wiki `emotes.md` > "Sticker Mosaics".
+- `composerStickerButton()` -- third composer button beside emoji and GIF. PROVISIONAL placement: the button row is being rethought, so `StickerPickerBody` is host-agnostic and moving the panel is a change of host, not of picker.
 - `shouldShowDateSeparator()` -- calendar-day change check.
 - `DateSeparator` -- horizontal-rule date label ("Today"/"Yesterday"/"Month Day, Year").
 - `TypingIndicatorBar` / `TypingDots` -- typing bar (1-3 names or "Several people"), dots ride `SharedTickers.typingDots`.

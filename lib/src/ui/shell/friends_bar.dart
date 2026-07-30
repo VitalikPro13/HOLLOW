@@ -20,6 +20,7 @@ import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
+import 'package:hollow/src/ui/components/edge_scroll_row.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
@@ -134,7 +135,15 @@ class FriendsBar extends ConsumerWidget {
                       ),
                     ),
                   )
-                : ListView.builder(
+                // .builder, not the children: form — this list is LAZY and a
+                // long friends list must stay that way. Arrows + wheel appear
+                // only while it overflows; before this, friends past the edge
+                // were unreachable on a plain wheel mouse.
+                : EdgeScrollRow.builder(
+                    semanticLabel: 'friends',
+                    builder: (context, scrollController) =>
+                        ListView.builder(
+                    controller: scrollController,
                     scrollDirection: Axis.horizontal,
                     itemCount: displayList.length,
                     padding: const EdgeInsets.symmetric(
@@ -161,7 +170,7 @@ class FriendsBar extends ConsumerWidget {
                         onTap: () => _selectFriend(ref, friend.peerId),
                       );
                     },
-                  ),
+                  )),
           ),
 
           // Vertical divider (mirrors the left side for symmetry)
@@ -406,7 +415,11 @@ class _FriendsManagerState extends ConsumerState<_FriendsManager> {
                   bottom: BorderSide(color: hollow.border),
                 ),
               ),
-              child: Row(
+              // Five labelled tabs with counts and badges — a bare Row
+              // overflows at a larger-text setting and clips "Add Friend"
+              // out of reach.
+              child: EdgeScrollRow(
+                semanticLabel: 'tabs',
                 children: [
                   _TabButton(
                     label: 'Friends',

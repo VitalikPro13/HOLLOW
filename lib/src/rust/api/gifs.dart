@@ -6,8 +6,9 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `api_key_store`, `blocked_hosts_store`, `clear_direct_registry`, `clear`, `direct_pick_bytes`, `direct_query`, `direct_src_store`, `get`, `gif_api_key`, `gif_page`, `gif_proxy_base`, `insert`, `klipy_pick`, `klipy_variant_in_slot`, `media_hosts_store`, `media_hosts`, `media_url_allowed`, `media_url_ok`, `normalized_rating`, `parse_gif_page`, `parse_klipy_page`, `proxy_base_store`, `proxy_pick_bytes`, `proxy_query`, `random_customer_id`, `url_host`, `valid_api_key`, `valid_gif_id`, `valid_media_host`
-// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `DirectRegistry`
+// These functions are ignored because they are not marked as `pub`: `api_key_store`, `asset_kind`, `blocked_hosts_store`, `clear_direct_registry`, `clear`, `direct_pick_bytes`, `direct_pick_candidates`, `direct_query`, `direct_src_store`, `get`, `gif_api_key`, `gif_proxy_base`, `id_prefix`, `insert`, `klipy_pick`, `klipy_variant_in_slot`, `label`, `media_categories`, `media_fetch_and_store`, `media_hosts_store`, `media_hosts`, `media_page`, `media_search`, `media_url_allowed`, `media_url_ok`, `normalized_rating_for`, `normalized_rating`, `parse_gif_page`, `parse_klipy_page`, `proxy_base_store`, `proxy_pick_bytes`, `proxy_query`, `random_customer_id`, `upstream_segment`, `url_host`, `valid_api_key`, `valid_gif_id`, `valid_media_host`
+// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `DirectRegistry`, `MediaKind`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `clone`, `eq`, `fmt`
 // These functions are ignored (category: IgnoreBecauseOwnerTyShouldIgnore): `default`
 
 /// Configure the GIF proxy base URL (None/empty = back to the default).

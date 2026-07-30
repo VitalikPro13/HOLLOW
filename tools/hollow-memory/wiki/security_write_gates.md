@@ -45,6 +45,7 @@ sender needs no signature.
 | Showcase assets | same codec | same |
 | Server banner blob (`kind='banner'`, asset-rail Phase 2) | same `handle_emote_assets` path | same requested-only gate (1 MB cap from the recorded kind). The CRDT carries ONLY the hash — `settings["server_banner"]` rides `ServerSettingChanged`, MANAGE_SERVER-gated at author AND ingest (`op_allowed`). The pre-join `server_banner_thumb_b64` on `PublicChannelListResponse` is RAM-only (never a store write), decode-refused over 80 KB |
 | Animated server icon blob (`kind='avatar'`, asset-rail follow-up) | same `handle_emote_assets` path | same requested-only gate (512 KB cap from the recorded kind). The CRDT carries ONLY the hash — `settings["server_avatar_anim"]` rides `ServerSettingChanged`, MANAGE_SERVER-gated at author AND ingest. The still icon stays base64 in `settings["server_avatar"]` (unchanged pre-existing path); nothing animated rides pre-join wire paths |
+| Server sticker blob (`kind='sticker'`, asset-rail Phase 5) | same `handle_emote_assets` path | same requested-only gate (512 KB cap from the recorded kind). The CRDT carries ONLY the hash — `CrdtPayload::StickerAdded/StickerRemoved`, `MANAGE_EMOTES`-gated at author AND ingest (`op_allowed` validates `op.author`, the 64-hex hash, both ≤32-char control-free labels, and 1..=4096 dims). `MAX_SERVER_STICKERS = 50` enforced at authoring AND apply so replicas converge on the same refusal. No pre-join wire path carries stickers |
 | Vault / Share chunks | `vault`, `share_handler` | manifest root hash |
 
 ## 3. Gated by owner identity
@@ -125,6 +126,9 @@ Now the owner signs, relayers forward the signature, receivers verify:
 Listed so a future sweep does not have to re-derive that they are safe:
 `set_peer_verified` / `remove_peer_verified` (`api/verification.rs`, user
 action), `add_personal_emote` / `remove_personal_emote` (`api/emotes.rs`),
+`add_personal_sticker` / `remove_personal_sticker` /
+`remove_personal_sticker_pack` / `rename_personal_sticker_pack`
+(`api/stickers.rs`, user action on a local-only vault),
 `upsert_conference` / `delete_conference` (`api/conference.rs`),
 `set_olm_key_pin` (`security_alerts`, local bookkeeping), `mark_file_complete` /
 `mark_chunk_received` (local download path), `prune_*` (local retention).

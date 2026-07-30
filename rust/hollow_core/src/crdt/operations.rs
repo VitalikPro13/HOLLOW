@@ -188,6 +188,28 @@ pub enum CrdtPayload {
     EmojiRemoved {
         name: String,
     },
+
+    // Sticker packs (server sticker set)
+    /// Add (or replace, same hash) a sticker in the server's set. Same
+    /// METADATA-ONLY rule as emotes — `hash` addresses the processed WebP and
+    /// the bytes replicate on demand over the asset rail at
+    /// `AssetKind::Sticker`.
+    ///
+    /// Keyed by HASH, not by name: a sticker is picked visually and never
+    /// typed, so its name is a label two stickers may share. `pack` groups
+    /// them in the picker (`""` = the server's default pack) and `w`/`h` let
+    /// the picker reserve the right cell before any bytes arrive.
+    StickerAdded {
+        hash: String,
+        name: String,
+        pack: String,
+        animated: bool,
+        w: u32,
+        h: u32,
+    },
+    StickerRemoved {
+        hash: String,
+    },
 }
 
 /// Tolerant sync-batch parse: each op deserializes INDIVIDUALLY, so a batch

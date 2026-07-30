@@ -18,6 +18,7 @@ import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
 import 'package:hollow/src/core/providers/chat_provider.dart';
 import 'package:hollow/src/core/providers/emote_provider.dart';
+import 'package:hollow/src/core/providers/sticker_provider.dart';
 import 'package:hollow/src/core/providers/node_provider.dart';
 import 'package:hollow/src/core/providers/peers_provider.dart';
 import 'package:hollow/src/core/providers/security_alerts_provider.dart';
@@ -234,6 +235,7 @@ class EventStreamNotifier extends Notifier<bool> {
     ref.read(serverListProvider.notifier).onServerUpdated(serverId);
     ref.invalidate(serverMembersProvider(serverId));
     ref.invalidate(serverEmotesProvider(serverId));
+    ref.invalidate(serverStickersProvider(serverId));
     ref.invalidate(serverIsNsfwProvider(serverId));
     ref.invalidate(myPermissionsProvider(serverId));
     ref.invalidate(myRoleProvider(serverId));

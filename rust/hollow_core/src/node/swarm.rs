@@ -1320,6 +1320,24 @@ async fn run_event_loop(
                         ).await { continue; }
                     }
 
+                    NodeCommand::AddServerSticker { server_id, hash, name, pack, animated, w, h } => {
+                        if sync_handler::handle_emote_op(
+                            &mut server_states, &mut mls, &event_tx, &ws_cmd_tx,
+                            &ws_room_peers, &mut gossip_overlays, &bundle_keypair, &local_peer_str,
+                            server_id, CrdtPayload::StickerAdded { hash, name, pack, animated, w, h },
+                            &crypto_store, &crdt_store,
+                        ).await { continue; }
+                    }
+
+                    NodeCommand::RemoveServerSticker { server_id, hash } => {
+                        if sync_handler::handle_emote_op(
+                            &mut server_states, &mut mls, &event_tx, &ws_cmd_tx,
+                            &ws_room_peers, &mut gossip_overlays, &bundle_keypair, &local_peer_str,
+                            server_id, CrdtPayload::StickerRemoved { hash },
+                            &crypto_store, &crdt_store,
+                        ).await { continue; }
+                    }
+
                     NodeCommand::RequestEmotes { hashes, kind, server_id, peer_hint } => {
                         emotes::handle_request_emotes(
                             &ws_cmd_tx, &ws_room_peers, &mut requested_asset_kinds,

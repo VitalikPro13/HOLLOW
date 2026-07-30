@@ -1,4 +1,5 @@
 ﻿import 'package:flutter/material.dart';
+import 'package:hollow/src/ui/components/edge_scroll_row.dart';
 import 'package:hollow/src/ui/components/overlay_anchor.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/color_utils.dart';
@@ -218,14 +219,21 @@ class _BottomBarState extends ConsumerState<BottomBar> {
                   ),
                 ),
 
-                // Server icons (centered in available space)
+                // Server icons, CENTRED in the available space until there
+                // are too many, then scrollable with arrows + wheel.
+                //
+                // `center: true` rather than an outer `Center`: the arrow
+                // slots make EdgeScrollRow's own row take the full width, so
+                // an outer Center would have nothing to centre (that is
+                // exactly how this strip briefly ended up left-aligned).
+                // The arrows are SIBLINGS of the scroller, which is what
+                // makes them safe here — an overlay would sit on top of the
+                // _ReorderGap drop zones at both ends.
                 Expanded(
-                  child: Center(
-                    child: SingleChildScrollView(
-                      scrollDirection: Axis.horizontal,
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
+                  child: EdgeScrollRow(
+                      semanticLabel: 'servers',
+                      center: true,
+                      children: [
                           // Reorder drop zone before first item
                           _ReorderGap(index: 0, hollow: hollow, onAccept: (data) {
                             ref.read(serverStripLayoutProvider.notifier).reorder(data.sourceIndex, 0);
@@ -266,10 +274,7 @@ class _BottomBarState extends ConsumerState<BottomBar> {
                               ref.read(serverStripLayoutProvider.notifier).reorder(data.sourceIndex, i + 1);
                             }),
                           ],
-                        ],
-                      ),
-                    ),
-                  ),
+                      ]),
                 ),
 
                 Container(

@@ -56,6 +56,46 @@ pub struct EmoteInfo {
 /// replicas converge on the same refusal).
 pub const MAX_SERVER_EMOTES: usize = 50;
 
+/// A sticker of a server's set. METADATA ONLY, same as [EmoteInfo] — the
+/// bytes are content-addressed by `hash` and replicate on demand over the
+/// asset rail at `AssetKind::Sticker`.
+///
+/// `w`/`h` are carried so the picker (and the `[a:s:hash:w:h]` token the
+/// composer writes) can reserve the exact cell before any bytes land.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct StickerInfo {
+    pub hash: String,
+    #[serde(default)]
+    pub name: String,
+    /// Group label inside the server's set (`""` = the default pack).
+    #[serde(default)]
+    pub pack: String,
+    #[serde(default)]
+    pub animated: bool,
+    #[serde(default)]
+    pub w: u32,
+    #[serde(default)]
+    pub h: u32,
+}
+
+/// Hard cap on stickers per server (authoring AND apply, like emotes).
+/// Deliberately the same number as emotes even though the blobs are ~20x
+/// bigger: a member opening the sticker picker pulls the bytes of whatever
+/// scrolls into view, so the ceiling is a bandwidth decision as much as a
+/// storage one.
+pub const MAX_SERVER_STICKERS: usize = 50;
+
+/// Max characters in a sticker's label or pack name. Stickers are picked
+/// visually and never typed, so unlike emote names these are free-form —
+/// bounded, and rejected outright if they carry control characters.
+pub const MAX_STICKER_LABEL: usize = 32;
+
+/// Grammar for a sticker label / pack name: short, no control characters.
+/// Empty is legal (an unnamed sticker in the default pack).
+pub fn valid_sticker_label(s: &str) -> bool {
+    s.chars().count() <= MAX_STICKER_LABEL && !s.chars().any(|c| c.is_control())
+}
+
 /// Who can see a channel.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ChannelVisibility {
@@ -159,6 +199,11 @@ pub struct ServerState {
     /// pre-existing persisted ServerState loads with an empty set.
     #[serde(default)]
     pub emotes: HashMap<String, EmoteInfo>,
+    /// Sticker set, keyed by content HASH (a sticker is picked, never typed,
+    /// so its name is not an identity). `#[serde(default)]` so every
+    /// pre-existing persisted ServerState loads with an empty set.
+    #[serde(default)]
+    pub stickers: HashMap<String, StickerInfo>,
     /// Tombstone latch (Step "server sync hardening"): set true by a `ServerDeleted`
     /// op. The state shell + op_log are RETAINED (not removed) so this node keeps
     /// serving the deletion op to reconnecting peers via normal grow-only sync.
@@ -190,7 +235,7 @@ impl ServerState {
             server_id, name, channels, members, roles, nicknames,
             twitch_usernames, pinned_messages, channel_layout, storage_pledges,
             settings, role_permissions, banned_members, muted_members, labels,
-            label_assignments, emotes, deleted,
+            label_assignments, emotes, stickers, deleted,
             op_log: _, hlc: _, op_log_dedup: _,
         } = self;
         ServerState {
@@ -211,6 +256,7 @@ impl ServerState {
             labels: labels.clone(),
             label_assignments: label_assignments.clone(),
             emotes: emotes.clone(),
+            stickers: stickers.clone(),
             deleted: *deleted,
             op_log: Vec::new(),
             hlc: None,
@@ -274,6 +320,7 @@ impl ServerState {
             labels: HashMap::new(),
             label_assignments: HashMap::new(),
             emotes: HashMap::new(),
+            stickers: HashMap::new(),
             deleted: false,
             op_log: Vec::new(),
             hlc: Some(hlc),
@@ -776,6 +823,30 @@ impl ServerState {
             CrdtPayload::EmojiRemoved { name } => {
                 self.emotes.remove(name);
             }
+
+            CrdtPayload::StickerAdded { hash, name, pack, animated, w, h } => {
+                // Same convergence rule as emotes: replacing an existing
+                // entry always applies, a NEW one only under the cap, so
+                // replicas refuse identically regardless of arrival order.
+                let is_new = !self.stickers.contains_key(hash);
+                if !is_new || self.stickers.len() < MAX_SERVER_STICKERS {
+                    self.stickers.insert(
+                        hash.clone(),
+                        StickerInfo {
+                            hash: hash.clone(),
+                            name: name.clone(),
+                            pack: pack.clone(),
+                            animated: *animated,
+                            w: *w,
+                            h: *h,
+                        },
+                    );
+                }
+            }
+
+            CrdtPayload::StickerRemoved { hash } => {
+                self.stickers.remove(hash);
+            }
         }
 
         // Append to op log (sorted insert by HLC for deterministic ordering)
@@ -1135,6 +1206,22 @@ impl ServerState {
             CrdtPayload::EmojiRemoved { .. } => {
                 (sender_perms & Permission::MANAGE_EMOTES) != 0
             }
+            // Stickers reuse MANAGE_EMOTES rather than adding a permission
+            // bit — same authoring surface, same audience.
+            CrdtPayload::StickerAdded { hash, name, pack, w, h, .. } => {
+                (sender_perms & Permission::MANAGE_EMOTES) != 0
+                    && super::valid_emote_hash(hash)
+                    && valid_sticker_label(name)
+                    && valid_sticker_label(pack)
+                    // Dimensions ride the `[a:s:hash:w:h]` token, whose
+                    // grammar tops out at 4 digits — a row we could not
+                    // render a token for has no business replicating.
+                    && (1..=4096).contains(w)
+                    && (1..=4096).contains(h)
+            }
+            CrdtPayload::StickerRemoved { .. } => {
+                (sender_perms & Permission::MANAGE_EMOTES) != 0
+            }
             // Only the Owner can delete a server (tombstone).
             CrdtPayload::ServerDeleted { .. } => sender_role == MemberRole::Owner,
             CrdtPayload::ServerCreated { .. } => true,
@@ -1187,6 +1274,20 @@ impl ServerState {
     pub fn emotes_list(&self) -> Vec<&EmoteInfo> {
         let mut list: Vec<_> = self.emotes.values().collect();
         list.sort_by(|a, b| a.name.cmp(&b.name));
+        list
+    }
+
+    /// Get all stickers, pack-major then by name, then by hash so the order
+    /// is total and identical on every replica (two stickers can share a
+    /// name, so name alone would not be a stable sort key).
+    pub fn stickers_list(&self) -> Vec<&StickerInfo> {
+        let mut list: Vec<_> = self.stickers.values().collect();
+        list.sort_by(|a, b| {
+            a.pack
+                .cmp(&b.pack)
+                .then_with(|| a.name.cmp(&b.name))
+                .then_with(|| a.hash.cmp(&b.hash))
+        });
         list
     }
 

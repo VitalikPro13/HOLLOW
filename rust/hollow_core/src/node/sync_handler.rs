@@ -1567,13 +1567,17 @@ pub(crate) async fn handle_label_op(
     ).await
 }
 
-// ── 10e2. Custom emote operations ───────────────────────────────────
+// ── 10e2. Custom emote + sticker operations ─────────────────────────
 
-/// Author an EmojiAdded / EmojiRemoved op. Mirrors [handle_label_op]
-/// (apply → CrdtStore persist → ServerUpdated → MLS broadcast + plaintext
-/// twin). The emote BYTES never ride the CRDT — the caller stored them in
-/// the local emote blob cache before issuing the command; members pull them
-/// on demand via EmoteRequest.
+/// Author an EmojiAdded/EmojiRemoved or StickerAdded/StickerRemoved op.
+/// Mirrors [handle_label_op] (apply → CrdtStore persist → ServerUpdated →
+/// MLS broadcast + plaintext twin). The BYTES never ride the CRDT — the
+/// caller stored them in the local asset blob cache before issuing the
+/// command; members pull them on demand via EmoteRequest.
+///
+/// Both families share `Permission::MANAGE_EMOTES` (one authoring surface,
+/// one audience — no new permission bit), which is why one handler serves
+/// them.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_emote_op(
     server_states: &mut ServerStates,
@@ -1605,6 +1609,25 @@ pub(crate) async fn handle_emote_op(
                 return deny(event_tx, &format!(
                     "Emote limit reached ({} per server)",
                     crate::crdt::server_state::MAX_SERVER_EMOTES
+                )).await;
+            }
+        }
+
+        if let CrdtPayload::StickerAdded { hash, name, pack, w, h, .. } = &payload {
+            if !crate::crdt::valid_emote_hash(hash)
+                || !crate::crdt::server_state::valid_sticker_label(name)
+                || !crate::crdt::server_state::valid_sticker_label(pack)
+                || !(1..=4096).contains(w)
+                || !(1..=4096).contains(h)
+            {
+                return deny(event_tx, "Invalid sticker").await;
+            }
+            if !state.stickers.contains_key(hash)
+                && state.stickers.len() >= crate::crdt::server_state::MAX_SERVER_STICKERS
+            {
+                return deny(event_tx, &format!(
+                    "Sticker limit reached ({} per server)",
+                    crate::crdt::server_state::MAX_SERVER_STICKERS
                 )).await;
             }
         }
@@ -2219,7 +2242,9 @@ async fn emit_crdt_apply_event(
             | CrdtPayload::LabelAssigned { .. }
             | CrdtPayload::LabelUnassigned { .. }
             | CrdtPayload::EmojiAdded { .. }
-            | CrdtPayload::EmojiRemoved { .. } => {
+            | CrdtPayload::EmojiRemoved { .. }
+            | CrdtPayload::StickerAdded { .. }
+            | CrdtPayload::StickerRemoved { .. } => {
                 let _ = event_tx.send(NetworkEvent::ServerUpdated {
                     server_id: sid.clone(),
                 }).await;

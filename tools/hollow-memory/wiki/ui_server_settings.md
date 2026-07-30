@@ -30,7 +30,7 @@ Each tab is a record `({IconData icon, String label, bool isDanger})`. The Dange
 
 **Layout structure:**
 1. **Header bar** (48px) -- settings icon, "Server Settings -- {serverName}" title with ellipsis, close button (X icon). Close button calls `onClose` if provided, otherwise sets `serverSettingsOpenProvider` to false.
-2. **Tab bar** (40px) -- horizontal `Row` of `_TabButton` widgets on `hollow.surface` background with bottom border.
+2. **Tab bar** (40px) -- `EdgeScrollRow` of `_TabButton` widgets on `hollow.surface` background with bottom border. Arrows + wheel-panning appear only while the tabs overflow (a narrow panel or a larger text setting); before 2026-07-30 the overflowing tabs were unreachable on a plain wheel mouse.
 3. **Tab content** -- `AnimatedSwitcher` with `HollowDurations.normal` crossfade, `Stack` layout builder for overlap during transition.
 
 **`_TabButton`:** `HollowPressable` with `subtle: true`. Shows icon (14px) + label text. Selected state: accent color (or error for danger), `FontWeight.w600`. Unselected: `hollow.textSecondary`, `FontWeight.w400`.

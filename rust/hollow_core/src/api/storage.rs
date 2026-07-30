@@ -974,6 +974,11 @@ fn referenced_asset_hashes(ms: &crate::storage::MessageStore) -> std::collection
             keep.insert(hash);
         }
     }
+    if let Ok(stickers) = ms.list_personal_stickers() {
+        for row in stickers {
+            keep.insert(row.hash);
+        }
+    }
     if let Ok(servers) = ms.load_all_servers() {
         for (_, state_json) in servers {
             let Ok(state) =
@@ -983,6 +988,9 @@ fn referenced_asset_hashes(ms: &crate::storage::MessageStore) -> std::collection
             };
             for emote in state.emotes.values() {
                 keep.insert(emote.hash.clone());
+            }
+            for sticker in state.stickers.values() {
+                keep.insert(sticker.hash.clone());
             }
             // Server banner + animated server icon: these settings carry a
             // blob hash; absent/cleared values are not hex and are skipped.

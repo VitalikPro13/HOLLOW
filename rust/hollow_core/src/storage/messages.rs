@@ -145,6 +145,23 @@ pub(crate) struct StoredFile {
     pub video_thumb: Option<crate::node::VideoThumbRef>,
 }
 
+/// One sticker of the user's personal vault. `pack` is a free-form group
+/// name (`""` = the default, ungrouped pack) and `(pack, hash)` is the row
+/// identity — see the `personal_stickers` DDL for why that, and not the name.
+#[derive(Clone, Debug)]
+pub(crate) struct PersonalStickerRow {
+    pub pack: String,
+    pub hash: String,
+    pub name: String,
+    pub animated: bool,
+    pub w: u32,
+    pub h: u32,
+    /// `"upload"` | `"klipy:<id>"` — provenance only, never fetched at
+    /// display time (the bytes are already local and content-addressed).
+    pub source: String,
+    pub added_at: i64,
+}
+
 /// Encrypted SQLite message store.
 pub(crate) struct MessageStore {
     conn: Connection,
@@ -672,6 +689,24 @@ impl MessageStore {
                 animated INTEGER NOT NULL DEFAULT 0,
                 source   TEXT NOT NULL DEFAULT '',
                 added_at INTEGER NOT NULL DEFAULT 0
+            )"),
+            // The user's own sticker vault, grouped into named packs. Keyed
+            // by (pack, hash) rather than by name the way emotes are: an
+            // emote is TYPED as `:name:` so its name has to be unique, while
+            // a sticker is only ever picked visually — the name is a label,
+            // and adding the same image to a pack twice is a no-op instead of
+            // an error. Bytes live in emote_blobs under kind='sticker'.
+            ("personal_stickers table",
+             "CREATE TABLE IF NOT EXISTS personal_stickers (
+                pack     TEXT NOT NULL DEFAULT '',
+                hash     TEXT NOT NULL,
+                name     TEXT NOT NULL DEFAULT '',
+                animated INTEGER NOT NULL DEFAULT 0,
+                w        INTEGER NOT NULL DEFAULT 0,
+                h        INTEGER NOT NULL DEFAULT 0,
+                source   TEXT NOT NULL DEFAULT '',
+                added_at INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (pack, hash)
             )"),
             // MLS identity (singleton row, id=1).
             ("mls_identity table",
@@ -3825,6 +3860,111 @@ impl MessageStore {
             })
             .map_err(|e| format!("Failed to query personal emotes: {e}"))?;
         collect_rows(rows, "personal emote")
+    }
+
+    // ── Personal sticker vault ────────────────────────────────────
+
+    /// One row of the personal sticker vault.
+    /// `(pack, hash, name, animated, w, h, source, added_at)`.
+    pub fn add_personal_sticker(&self, row: &PersonalStickerRow) -> Result<(), String> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        self.conn
+            .execute(
+                "INSERT INTO personal_stickers
+                     (pack, hash, name, animated, w, h, source, added_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                 ON CONFLICT(pack, hash) DO UPDATE SET
+                     name = excluded.name, animated = excluded.animated,
+                     w = excluded.w, h = excluded.h, source = excluded.source",
+                params![
+                    row.pack,
+                    row.hash,
+                    row.name,
+                    row.animated as i64,
+                    row.w as i64,
+                    row.h as i64,
+                    row.source,
+                    now
+                ],
+            )
+            .map_err(|e| format!("Failed to add sticker: {e}"))?;
+        Ok(())
+    }
+
+    pub fn remove_personal_sticker(&self, pack: &str, hash: &str) -> Result<(), String> {
+        self.conn
+            .execute(
+                "DELETE FROM personal_stickers WHERE pack = ?1 AND hash = ?2",
+                params![pack, hash],
+            )
+            .map_err(|e| format!("Failed to remove sticker: {e}"))?;
+        Ok(())
+    }
+
+    /// Delete a whole pack. Blobs stay in the cache — they are
+    /// content-addressed and may still be referenced by a sent message; the
+    /// LRU reclaims them once nothing points at them.
+    pub fn remove_personal_sticker_pack(&self, pack: &str) -> Result<(), String> {
+        self.conn
+            .execute(
+                "DELETE FROM personal_stickers WHERE pack = ?1",
+                params![pack],
+            )
+            .map_err(|e| format!("Failed to remove sticker pack: {e}"))?;
+        Ok(())
+    }
+
+    /// Move every sticker of `from` into `to` (pack rename). Rows already in
+    /// `to` with the same hash win, so a rename onto an existing pack merges
+    /// instead of failing the unique constraint.
+    pub fn rename_personal_sticker_pack(&self, from: &str, to: &str) -> Result<(), String> {
+        self.conn
+            .execute(
+                "UPDATE OR REPLACE personal_stickers SET pack = ?2 WHERE pack = ?1",
+                params![from, to],
+            )
+            .map_err(|e| format!("Failed to rename sticker pack: {e}"))?;
+        Ok(())
+    }
+
+    /// The whole vault, pack-major and oldest-first inside each pack —
+    /// upload order IS pack order, which is what makes a multi-part pack
+    /// readable in the picker.
+    pub fn list_personal_stickers(&self) -> Result<Vec<PersonalStickerRow>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT pack, hash, name, animated, w, h, source, added_at
+                 FROM personal_stickers ORDER BY pack ASC, added_at ASC",
+            )
+            .map_err(|e| format!("Failed to prepare sticker query: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(PersonalStickerRow {
+                    pack: row.get::<_, String>(0)?,
+                    hash: row.get::<_, String>(1)?,
+                    name: row.get::<_, String>(2)?,
+                    animated: row.get::<_, i64>(3)? != 0,
+                    w: row.get::<_, i64>(4)?.max(0) as u32,
+                    h: row.get::<_, i64>(5)?.max(0) as u32,
+                    source: row.get::<_, String>(6)?,
+                    added_at: row.get::<_, i64>(7)?,
+                })
+            })
+            .map_err(|e| format!("Failed to query stickers: {e}"))?;
+        collect_rows(rows, "sticker")
+    }
+
+    /// Row count, for the authoring-side vault cap.
+    pub fn personal_sticker_count(&self) -> Result<u32, String> {
+        self.conn
+            .query_row("SELECT COUNT(*) FROM personal_stickers", [], |row| {
+                Ok(row.get::<_, i64>(0)?.max(0) as u32)
+            })
+            .map_err(|e| format!("Failed to count stickers: {e}"))
     }
 
     // ── App Settings ──────────────────────────────────────────────

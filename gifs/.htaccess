@@ -18,7 +18,10 @@
 # Cold media falls through to the read-through cache; warm files are served
 # directly by Apache with no PHP in the path. The full (send-time) variant
 # is always PHP — it is deliberately never on disk.
+#
+# The optional leading `~` is the sticker id namespace (see search.php) —
+# GIF ids stay bare so already-saved favourites keep resolving.
 RewriteEngine On
 RewriteCond %{REQUEST_FILENAME} !-f
-RewriteRule ^m/([A-Za-z0-9_-]+\.(?:still|sm)\.(?:webp|gif))$ fetch.php?f=$1 [L,QSA]
-RewriteRule ^f/([A-Za-z0-9_-]+)$ full.php?id=$1 [L,QSA]
+RewriteRule ^m/(~?[A-Za-z0-9_-]+\.(?:still|sm)\.(?:webp|gif))$ fetch.php?f=$1 [L,QSA]
+RewriteRule ^f/(~?[A-Za-z0-9_-]+)$ full.php?id=$1 [L,QSA]

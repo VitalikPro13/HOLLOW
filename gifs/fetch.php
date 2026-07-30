@@ -101,17 +101,29 @@ function serve_bytes(string $local, string $ext, string $bytes): void {
 /// First frame of $bytes → WebP still, ≤STILL_WIDTH wide. GD first (reads
 /// GIF frame 1 natively), Imagick as fallback (also handles animated WebP
 /// input). Null when neither can — the caller degrades to the animated sm.
+///
+/// ALPHA IS EXPLICIT. It hardly mattered for GIFs (mostly opaque
+/// rectangles), but a sticker IS a cut-out, so a still matted onto black is
+/// a visible defect rather than a nuance. Current libgd happens to carry the
+/// transparent index through imagecreatefromstring + imagescale on its own —
+/// verified — but that is an input-and-version-dependent default, and
+/// imagescale historically dropped the flags. Stating it costs two calls.
 function make_still(string $bytes, bool $isGif): ?string {
     if ($isGif && function_exists('imagecreatefromstring') && function_exists('imagewebp')) {
         $im = @imagecreatefromstring($bytes);
         if ($im !== false) {
             @imagepalettetotruecolor($im);
+            @imagealphablending($im, false);
+            @imagesavealpha($im, true);
             $w = imagesx($im);
             if ($w > STILL_WIDTH) {
                 $scaled = @imagescale($im, STILL_WIDTH);
                 if ($scaled !== false) {
                     imagedestroy($im);
                     $im = $scaled;
+                    // imagescale returns a NEW image with default flags.
+                    @imagealphablending($im, false);
+                    @imagesavealpha($im, true);
                 }
             }
             ob_start();
@@ -132,6 +144,10 @@ function make_still(string $bytes, bool $isGif): ?string {
             }
             $frame->setImageFormat('webp');
             $frame->setImageCompressionQuality(80);
+            // No alpha call here on purpose: WebP output carries the source's
+            // alpha channel, and the ALPHACHANNEL_* constants differ across
+            // ImageMagick 6/7 — an undefined one is a Throwable, which this
+            // catch would swallow into the degraded path.
             $out = $frame->getImageBlob();
             $im->clear();
             if (is_string($out) && $out !== '') return $out;
@@ -142,8 +158,11 @@ function make_still(string $bytes, bool $isGif): ?string {
     return null;
 }
 
+// The optional leading `~` is the sticker id namespace search.php hands out
+// (see its ID NAMESPACING note) — the registry lookup below is still what
+// authorizes the fetch, the prefix is just part of the id.
 $f = (string)($_GET['f'] ?? '');
-if (!preg_match('/^([A-Za-z0-9_-]{1,100})\.(still|sm)\.(webp|gif)$/', $f, $m)) deny(404);
+if (!preg_match('/^(~?[A-Za-z0-9_-]{1,100})\.(still|sm)\.(webp|gif)$/', $f, $m)) deny(404);
 $id = $m[1];
 $variant = $m[2];
 $reqExt = $m[3];

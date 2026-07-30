@@ -743,3 +743,37 @@ let _ = state.apply_op(&op);
 **Fix (deployed 2026-06-15):** (1) `handle_auth` SUPERSEDES a stale duplicate (mark `superseded`, evict its rooms+socket, `end(1000,"superseded")`); (2) `cleanup_peer`/`leave_room` are socket-aware (`expected_ws`) — only tear down a slot that STILL points at the closing socket; (3) buffer a DM for a connected-but-not-yet-in-room target (the WS-auth→room-join race) instead of dropping it. Client `PeerLeft`/`RoomMembers` logic was already correct — it was being fed a lie. **Companion (presence stale on OWN restart):** `ingest_device_list` emits `DeviceListUpdated` even on a redundant re-ingest, so Dart's `deviceLinkProvider` (warmed once at startup, racing the Rust resolver warm) re-pulls the map on every reconnect — removed the need for manual Device List resets.
 
 **Where:** `relay-uws/src/ws_handler.cpp` (`handle_auth`, `cleanup_peer`, `leave_room`, `handle_direct`/`handle_binary_direct_msg`) + `state.h` (`superseded` flag); `rust/hollow_core/src/node/crypto_handler.rs` (`ingest_device_list` nothing_new path), `social.rs` (`send_own_profile_to_peer` de-gate). See memory `feedback_relay_ghost_connection_eviction`, `project_ws_presence_churn`.
+
+
+## Horizontal strips: EdgeScrollRow (2026-07-30)
+
+A bare `SingleChildScrollView(scrollDirection: Axis.horizontal)` is UNREACHABLE
+on a desktop with a plain wheel mouse — Flutter routes the vertical wheel to
+the nearest VERTICAL scrollable, and nothing on screen says the strip scrolls.
+Use `ui/components/edge_scroll_row.dart`: `EdgeScrollRow(children:)`,
+`EdgeScrollRow.builder(builder:)` for a lazy list, or `wheelToScroll` /
+`WheelScrollable` when the strip cannot give up width for arrows.
+
+Four traps, all of which looked fine in the source and only showed up under
+test:
+1. **Re-check overflow on RESIZE**, not on child count — narrowing the window
+   changes the extents, not the children. `NotificationListener<ScrollMetrics
+   Notification>`, synced POST-FRAME (metrics arrive during layout, when
+   setState cannot run).
+2. **Arrows are SIBLINGS of the scroller**, never an overlay — an overlay
+   covers the dock's `_ReorderGap` drop zones, which sit exactly at both ends.
+3. **Once overflowing, BOTH arrow slots stay occupied** (the unusable one
+   dims). Sibling arrows take width, so showing one grows `maxScrollExtent`
+   and can re-trigger the other — a flip-flop.
+4. **An outer `Center` stops working** once the scroller sits in an
+   `Expanded`. Use `EdgeScrollRow(center: true)`, which gives the CONTENT a
+   min-width of the viewport so it centres itself and quietly becomes a no-op
+   once the content is wider. This silently left-aligned the dock server strip
+   until it was caught.
+
+Also watch for bare `Row`s of tabs/chips that would OVERFLOW rather than
+scroll at a larger text setting — worse than the original bug, because the
+last tab is clipped out of existence. The emoji picker and friends-manager tab
+rows were both like that.
+
+Regression cover: `test/widget/edge_scroll_row_test.dart`.

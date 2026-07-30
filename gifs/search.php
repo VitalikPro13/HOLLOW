@@ -1,15 +1,25 @@
 <?php
-// Hollow — GIF search proxy (Klipy upstream), fully write-through cached.
-// POST only (GET rejected — keeps search text out of access logs).
+// Hollow — GIF + sticker search proxy (Klipy upstream), fully write-through
+// cached. POST only (GET rejected — keeps search text out of access logs).
 // THREE MODES:
 //
-//   q=<text>     GIF search. Rows cached 24 h per (query, rating, page).
+//   q=<text>     Search. Rows cached 24 h per (kind, query, rating, page).
 //   trending=1   Trending grid (the picker's default view). Cached 1 h.
 //   categories=1 Category names. Cached 7 d.
 //
-// Common params: page, per_page (8..50), rating (g|pg|pg-13|r, default pg —
-// enforced server-side; the client may raise it, NSFW-off servers force it
-// back down in the app), ver (reserved schema cache-buster).
+// Common params: kind (gifs|stickers, default gifs — absent means gifs so a
+// client older than the sticker feature keeps working untouched), page,
+// per_page (8..50), rating (g|pg|pg-13|r, default pg — enforced server-side;
+// the client may raise it, NSFW-off servers force it back down in the app),
+// ver (reserved schema cache-buster).
+//
+// ID NAMESPACING — Klipy slugs are per-catalog, so a GIF and a sticker can
+// carry the SAME slug while `items` is keyed by id alone. Sticker ids are
+// therefore stored and handed out with a leading `~`; GIF ids stay bare so
+// every media path already saved in a client's favourites keeps resolving.
+// `~` is unreserved in URLs (RFC 3986) and outside the slug charset, so it
+// can never collide with a real slug. fetch.php, full.php and .htaccess all
+// accept the optional prefix.
 //
 // NORMALIZED RESPONSE — this is the contract the app codes to; everything
 // Klipy-specific stays in this file so swapping providers is a PHP change,
@@ -86,6 +96,11 @@ const EMPTY_TTL      = 3600;           // negative cache — typos must not re-h
 const CATEGORIES_KEY = "\x00categories";
 const RATINGS        = ['g', 'pg', 'pg-13', 'r'];
 const DEFAULT_RATING = 'pg';
+// Upstream catalogs we proxy, and the id prefix each one's rows carry.
+// Anything not in here is refused rather than forwarded — the kind lands in
+// an upstream URL path segment.
+const KINDS          = ['gifs' => '', 'stickers' => '~'];
+const DEFAULT_KIND   = 'gifs';
 // Abuse valve: fixed window per salted-ip-hash. Generous — a debounced
 // picker session is tens of requests, not hundreds.
 const RATE_WINDOW    = 300;
@@ -236,14 +251,17 @@ function curl_req(string $url, ?int &$status = null, ?array &$headers = null): ?
     return $body;
 }
 
-/// One Klipy API call with backoff handling. $path is relative to the gifs
-/// endpoint root. Returns the decoded inner "data" object, or null.
-function klipy_query(string $path, array $params): ?array {
+/// One Klipy API call with backoff handling. $kind selects the catalog
+/// segment ('gifs' | 'stickers'), $path the operation under it. Returns the
+/// decoded inner "data" object, or null.
+function klipy_query(string $kind, string $path, array $params): ?array {
     if (in_backoff()) return null;
     // Random one-shot customer id — see the PRIVACY header block.
     $params['customer_id'] = bin2hex(random_bytes(16));
+    // $kind is whitelist-checked at request parse; never interpolate a raw
+    // param into a URL path.
     $url = 'https://api.klipy.com/api/v1/' . rawurlencode(KLIPY_API_KEY)
-         . '/gifs/' . $path . '?' . http_build_query($params);
+         . '/' . $kind . '/' . $path . '?' . http_build_query($params);
     $body = curl_req($url, $status, $headers);
     if ($status === 429) {
         $retry = (int)($headers['retry-after'] ?? 60);
@@ -274,13 +292,16 @@ function variant(array $file, string $slot, string $fmt): ?array {
     return (is_array($v) && is_string($v['url'] ?? null) && $v['url'] !== '') ? $v : null;
 }
 
-/// Normalize one Klipy item into a registry row + response row.
+/// Normalize one Klipy item into a registry row + response row. `$prefix`
+/// namespaces the id by catalog (see the ID NAMESPACING note up top).
 /// No download happens here — URLs are handed out unconditionally and
 /// fetch.php / full.php materialize bytes on first request.
-function ingest_item(array $e, int $now): ?array {
+function ingest_item(array $e, int $now, string $prefix): ?array {
     if (($e['type'] ?? '') === 'ad') return null;
-    $id = (string)($e['slug'] ?? '');
-    if (!preg_match('/^[A-Za-z0-9_-]{1,100}$/', $id)) return null;
+    $slug = (string)($e['slug'] ?? '');
+    // Validate the BARE slug: the prefix is ours, not the provider's.
+    if (!preg_match('/^[A-Za-z0-9_-]{1,100}$/', $slug)) return null;
+    $id = $prefix . $slug;
     $file = $e['file'] ?? null;
     if (!is_array($file)) return null;
 
@@ -422,7 +443,9 @@ function wait_for_flight(string $qkey, int $ttl, int $page): void {
 /// ingest, cache, emit. All emits happen AFTER the lock release — PHP's
 /// `finally` does not run on exit(), so emitting inside the try would leak
 /// the inflight row until its 20s stale timeout.
-function fetch_and_serve(string $qkey, int $ttl, string $path, array $params, int $page): void {
+function fetch_and_serve(
+    string $qkey, int $ttl, string $kind, string $path, array $params, int $page
+): void {
     if (!acquire_flight($qkey)) {
         wait_for_flight($qkey, $ttl, $page); // exits
     }
@@ -430,13 +453,14 @@ function fetch_and_serve(string $qkey, int $ttl, string $path, array $params, in
     $out = [];
     $ids = [];
     $hasNext = false;
+    $prefix = KINDS[$kind];
     try {
-        $data = klipy_query($path, $params);
+        $data = klipy_query($kind, $path, $params);
         if ($data !== null) {
             $now = time();
             foreach (($data['data'] ?? []) as $e) {
                 if (!is_array($e)) continue;
-                $row = ingest_item($e, $now);
+                $row = ingest_item($e, $now, $prefix);
                 if ($row !== null) {
                     $out[] = $row;
                     $ids[] = $row['id'];
@@ -464,10 +488,16 @@ $perPage = (int)(param('per_page') ?: '24');
 $perPage = max(8, min(50, $perPage));
 $rating = param('rating');
 if (!in_array($rating, RATINGS, true)) $rating = DEFAULT_RATING;
+$kind = param('kind');
+if (!isset(KINDS[$kind])) $kind = DEFAULT_KIND;
+// Cache-key namespace. Empty for gifs ON PURPOSE: every GIF row already in
+// the cache stays valid, so shipping stickers costs nobody a cold grid.
+$kns = $kind === DEFAULT_KIND ? '' : "$kind:";
 
 // ═══ MODE C: categories=1 — category names, effectively static. ═══
 if (param('categories') !== '') {
-    $hit = cached_row(CATEGORIES_KEY);
+    $catKey = $kns . CATEGORIES_KEY;
+    $hit = cached_row($catKey);
     $cached = $hit ? (json_decode((string)$hit['ids'], true) ?: []) : [];
     // An empty cached list is a FAILED fetch, not a real answer — hold it
     // only for the negative-cache window, never the full 7 days.
@@ -487,7 +517,7 @@ if (param('categories') !== '') {
     // preview_url points at Klipy's CDN, and clients must never talk to
     // anything but our proxy. Flat string lists (the shape Klipy's demo
     // apps still model) are tolerated in case the API varies.
-    $data = klipy_query('categories', []);
+    $data = klipy_query($kind, 'categories', []);
     $names = [];
     $list = is_array($data['categories'] ?? null) ? $data['categories'] : ($data ?? []);
     foreach ($list as $c) {
@@ -496,7 +526,7 @@ if (param('categories') !== '') {
         if ($n !== '') $names[] = mb_substr($n, 0, 64);
     }
     if ($names || !$cached) {
-        store_query(CATEGORIES_KEY, $names, false);
+        store_query($catKey, $names, false);
     } else {
         $names = $cached; // keep stale over empty
     }
@@ -507,13 +537,13 @@ if (param('categories') !== '') {
 
 // ═══ MODE B: trending=1 — the picker's default view. ═══
 if (param('trending') !== '') {
-    $qkey = "t:$rating:$perPage:$page";
+    $qkey = "t:$kns$rating:$perPage:$page";
     serve_cached_items($qkey, TRENDING_TTL, $page);
-    fetch_and_serve($qkey, TRENDING_TTL, 'trending',
+    fetch_and_serve($qkey, TRENDING_TTL, $kind, 'trending',
         ['page' => $page, 'per_page' => $perPage, 'rating' => $rating], $page);
 }
 
-// ═══ MODE A: q= — GIF search. ═══
+// ═══ MODE A: q= — search. ═══
 $q = param('q');
 if ($q === '' || mb_strlen($q) > 64) {
     emit_items([], $page, false);
@@ -524,8 +554,8 @@ if ($q === '' || mb_strlen($q) > 64) {
 $norm = mb_strtolower(trim(preg_replace('/\s+/u', ' ', $q)));
 $stripped = preg_replace('/[\p{P}\p{S}]+$/u', '', $norm);
 if (is_string($stripped) && trim($stripped) !== '') $norm = trim($stripped);
-$qkey = "s:$rating:$perPage:$page:$norm";
+$qkey = "s:$kns$rating:$perPage:$page:$norm";
 
 serve_cached_items($qkey, SEARCH_TTL, $page);
-fetch_and_serve($qkey, SEARCH_TTL, 'search',
+fetch_and_serve($qkey, SEARCH_TTL, $kind, 'search',
     ['q' => $norm, 'page' => $page, 'per_page' => $perPage, 'rating' => $rating], $page);
