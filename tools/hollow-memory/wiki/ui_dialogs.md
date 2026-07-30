@@ -196,7 +196,7 @@ Uses `HollowDialog` with title "Your Recovery Phrase".
 
 ## ScreenShareDialog -- Screen/Window Source Selection
 
-**File:** `lib/src/ui/dialogs/screen_share_dialog.dart` (463 lines)
+**File:** `lib/src/ui/dialogs/screen_share_dialog.dart` (609 lines)
 **Trigger:** Screen share button in voice channel controls.
 **Entry point:** `showScreenShareDialog(BuildContext context)` -- returns `Future<ScreenShareSelection?>`.
 
@@ -228,14 +228,14 @@ Uses `HollowDialog` with title "Your Recovery Phrase".
 - Subscribes to `desktopCapturer.onAdded`, `.onRemoved`, `.onThumbnailChanged` streams
 
 **`_loadSources()`:**
-- Calls `desktopCapturer.getSources(types: [SourceType.Screen, SourceType.Window])`
-- Starts 3-second periodic `desktopCapturer.updateSources()` timer
+- Calls `desktopCapturer.getSources(types: DesktopCaptureSupport.sourceTypes)` -- Screen + Window everywhere except a Wayland session, which has no window capturer at all (issue #30; see `services_voice_webrtc.md` "Linux session gating")
+- Starts 3-second periodic `desktopCapturer.updateSources()` timer, same type list
 
 **`_filteredSources`:** Filters `_sources` by current tab type (Screen vs Window).
 
 **Layout (680x560 max):**
 - Title: "Share Your Screen"
-- Tabs row: "Screens" / "Windows" -- `_buildTab()` pills
+- Tabs row: "Screens" / "Windows" -- `_buildTab()` pills, rendered only when `DesktopCaptureSupport.canShareWindows`; on Wayland the row is replaced by a caption ("whole screens only, your desktop asks which one to share") so no tab sits permanently empty
 - Source grid: `GridView.builder`, crossAxisCount 2 for screens / 3 for windows, 16:10 aspect ratio
 - Each tile (`_buildSourceTile`): thumbnail image (or desktop icon placeholder), name label, accent border when selected
 - Resolution pills row: all `ScreenShareResolution` values as `_buildPill()` chips

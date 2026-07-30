@@ -5,6 +5,7 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
+import 'package:hollow/src/core/services/desktop_capture_support.dart';
 import 'package:hollow/src/core/services/macos_version.dart';
 import 'package:hollow/src/core/services/screen_share_service.dart'
     show ScreenContentProfile;
@@ -172,7 +173,7 @@ class _ScreenShareDialogState extends State<_ScreenShareDialog> {
         } catch (_) {}
       }
       final sources = await desktopCapturer.getSources(
-        types: [SourceType.Screen, SourceType.Window],
+        types: DesktopCaptureSupport.sourceTypes,
       );
       if (!mounted) return;
 
@@ -186,8 +187,7 @@ class _ScreenShareDialogState extends State<_ScreenShareDialog> {
       // Refresh thumbnails periodically.
       _refreshTimer?.cancel();
       _refreshTimer = Timer.periodic(const Duration(seconds: 3), (_) {
-        desktopCapturer.updateSources(
-            types: [SourceType.Screen, SourceType.Window]);
+        desktopCapturer.updateSources(types: DesktopCaptureSupport.sourceTypes);
       });
     } catch (e) {
       if (!mounted) return;
@@ -246,18 +246,29 @@ class _ScreenShareDialogState extends State<_ScreenShareDialog> {
                   ),
                   const SizedBox(height: HollowSpacing.md),
 
-                  // Tabs: Screens / Windows
-                  Row(
-                    children: [
-                      _buildTab(hollow, 'Screens', _showScreens, () {
-                        setState(() => _showScreens = true);
-                      }),
-                      const SizedBox(width: HollowSpacing.sm),
-                      _buildTab(hollow, 'Windows', !_showScreens, () {
-                        setState(() => _showScreens = false);
-                      }),
-                    ],
-                  ),
+                  // Tabs: Screens / Windows. A Wayland session has no window
+                  // capturer at all (DesktopCaptureSupport), so the tab is
+                  // dropped instead of sitting empty forever.
+                  if (DesktopCaptureSupport.canShareWindows)
+                    Row(
+                      children: [
+                        _buildTab(hollow, 'Screens', _showScreens, () {
+                          setState(() => _showScreens = true);
+                        }),
+                        const SizedBox(width: HollowSpacing.sm),
+                        _buildTab(hollow, 'Windows', !_showScreens, () {
+                          setState(() => _showScreens = false);
+                        }),
+                      ],
+                    )
+                  else
+                    Text(
+                      'Wayland session: whole screens only. Your desktop asks '
+                      'which one to share.',
+                      style: HollowTypography.caption.copyWith(
+                        color: hollow.textTertiary,
+                      ),
+                    ),
                   const SizedBox(height: HollowSpacing.md),
 
                   // Source grid

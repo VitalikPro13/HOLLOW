@@ -70,6 +70,11 @@ target_link_libraries(${PLUGIN_NAME} PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/libwebrtc/lib/libwebrtc.so"
 )
 
+# dlopen/dlsym — flutter_screen_capture.cc probes for a usable X display before
+# it lets libwebrtc build an X11 desktop capturer (issue #30). Folded into libc
+# since glibc 2.34, so this is empty on modern distros and correct on older ones.
+target_link_libraries(${PLUGIN_NAME} PRIVATE ${CMAKE_DL_LIBS})
+
 # List of absolute paths to libraries that should be bundled with the plugin
 set(flutter_webrtc_bundled_libraries
   "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/libwebrtc/lib/libwebrtc.so"

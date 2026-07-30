@@ -152,6 +152,7 @@ packages/flutter_webrtc/third_party/**
 !packages/flutter_webrtc/third_party/libwebrtc/BUILDING.md
 !packages/flutter_webrtc/third_party/libwebrtc/hollow-screencast.patch
 !packages/flutter_webrtc/third_party/libwebrtc/hollow-core-audio.patch
+!packages/flutter_webrtc/third_party/libwebrtc/hollow-wayland-desktop-capture.patch
 !packages/flutter_webrtc/third_party/libwebrtc/include/
 !packages/flutter_webrtc/third_party/libwebrtc/include/**
 !packages/flutter_webrtc/third_party/libwebrtc/lib/

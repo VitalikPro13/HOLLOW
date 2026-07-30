@@ -17,7 +17,94 @@
 #include "rtc_audio_source.h"
 #include "rtc_audio_track.h"
 
+#if defined(__linux__) && !defined(__ANDROID__)
+#include <dlfcn.h>
+
+#include <cstdlib>
+#include <cstring>
+#endif
+
 namespace flutter_webrtc_plugin {
+
+#if defined(__linux__) && !defined(__ANDROID__)
+namespace {
+
+// HOLLOW (issue #30): predict whether libwebrtc can build a desktop capturer
+// for a given source type on THIS session, because the wrapper doesn't check.
+//
+// libwebrtc m144 picks a Linux capturer like this
+// (modules/desktop_capture/{screen,window}_capturer_linux.cc):
+//
+//   options.allow_pipewire() && wayland session && pipewire loads
+//                                      -> BaseCapturerPipeWire (xdg portal)
+//   !wayland session                   -> {Screen,Window}CapturerX11
+//                                         (itself nullptr with no X display)
+//   otherwise                          -> nullptr
+//
+// and the wrapper (rtc_desktop_media_list_impl.cc, rtc_desktop_capturer_impl.cc)
+// sets allow_pipewire ONLY for kScreen, then calls capturer_->Start() with no
+// null check. So on ANY Wayland session, asking for a WINDOW media list
+// dereferences a null capturer and the whole app dies with SIGSEGV inside
+// libwebrtc.so — the crash from issue #30. Note the X11 path is skipped
+// outright under Wayland, so XWayland being up doesn't save it.
+//
+// Screens are fine under Wayland (portal/PipeWire); windows are unavailable
+// until the wrapper enables PipeWire for kWindow too — that fix lives in
+// third_party/libwebrtc/hollow-wayland-desktop-capture.patch and needs a
+// libwebrtc rebuild, so keep the two in sync.
+bool RunningUnderWayland() {
+  const char* session = std::getenv("XDG_SESSION_TYPE");
+  if (!session || std::strncmp(session, "wayland", 7) != 0) return false;
+  const char* wayland_display = std::getenv("WAYLAND_DISPLAY");
+  return wayland_display && *wayland_display;
+}
+
+// Whether Xlib can actually open the display libwebrtc's X11 capturers need.
+// DISPLAY being set is NOT enough — it survives into sessions whose XWayland
+// server isn't running, and libwebrtc turns a failed XOpenDisplay into the same
+// null capturer. Probed for real, once: the answer can't change while the
+// process lives. libX11 stays loaded on purpose (unloading it under a running
+// GTK/GDK X11 backend buys nothing and costs a mapping).
+bool HasUsableX11Display() {
+  static const bool usable = [] {
+    const char* display = std::getenv("DISPLAY");
+    if (!display || !*display) return false;
+    void* xlib = dlopen("libX11.so.6", RTLD_LAZY | RTLD_LOCAL);
+    if (!xlib) return false;
+    auto x_open =
+        reinterpret_cast<void* (*)(const char*)>(dlsym(xlib, "XOpenDisplay"));
+    auto x_close = reinterpret_cast<int (*)(void*)>(dlsym(xlib, "XCloseDisplay"));
+    if (!x_open) return false;
+    void* dpy = x_open(nullptr);
+    if (!dpy) return false;
+    if (x_close) x_close(dpy);
+    return true;
+  }();
+  return usable;
+}
+
+// Whether libwebrtc's PipeWire backend can load at all. It dlopens exactly
+// this soname (modules/portal/pipewire_utils.cc); when that fails on a Wayland
+// session even CreateScreenCapturer() comes back null, because the X11
+// fallback is unreachable there. Handle stays open on purpose — libwebrtc is
+// about to load the same library.
+bool HasPipeWire() {
+  static const bool present =
+      dlopen("libpipewire-0.3.so.0", RTLD_LAZY | RTLD_LOCAL) != nullptr;
+  return present;
+}
+
+bool DesktopTypeSupported(DesktopType type) {
+  if (RunningUnderWayland()) {
+    // The portal covers screens, and only while PipeWire itself loads. The
+    // wrapper never enables the portal for windows.
+    return type == DesktopType::kScreen && HasPipeWire();
+  }
+  return HasUsableX11Display();
+}
+
+}  // namespace
+#endif
 
 FlutterScreenCapture::FlutterScreenCapture(FlutterWebRTCBase* base)
     : base_(base) {}
@@ -39,6 +126,21 @@ bool FlutterScreenCapture::BuildDesktopSourcesList(const EncodableList& types,
       // std::cout << "Unknown type " << type_str << std::endl;
       return false;
     }
+#if defined(__linux__) && !defined(__ANDROID__)
+    // HOLLOW (issue #30): never ask libwebrtc for a capture type this session
+    // can't produce — building that media list dereferences a null capturer
+    // and takes the app down with SIGSEGV. Skipping one type leaves the others
+    // intact, so a Wayland user still gets their screens.
+    if (!DesktopTypeSupported(desktop_type)) {
+      std::cout << " desktop source type '" << type_str
+                << "' unavailable on this session (wayland="
+                << (RunningUnderWayland() ? "yes" : "no")
+                << ", pipewire=" << (HasPipeWire() ? "yes" : "no")
+                << ", x11=" << (HasUsableX11Display() ? "yes" : "no")
+                << ") - skipping" << std::endl;
+      continue;
+    }
+#endif
     scoped_refptr<RTCDesktopMediaList> source_list;
     auto it = medialist_.find(desktop_type);
     if (it != medialist_.end()) {

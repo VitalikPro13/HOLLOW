@@ -571,10 +571,18 @@ The screen track is added via **`addTransceiver` with the cap in init `sendEncod
 
 The share dialog (`screen_share_dialog.dart`) also locks resolution presets to what a connected display can produce (`_computeAvailableResolutions` via `platformDispatcher.displays`, orientation-agnostic, any-display rule).
 
+### Linux session gating (issue #30)
+
+libwebrtc m144 builds a Linux desktop capturer from the SESSION, not from the request (`modules/desktop_capture/{screen,window}_capturer_linux.cc`): PipeWire/xdg-portal iff `allow_pipewire && IsRunningUnderWayland() && libpipewire loads`, the X11 capturer ONLY when the session is not Wayland, `nullptr` otherwise. The C++ wrapper enables `allow_pipewire` for SCREENS only and then calls `capturer_->Start()` with no null check, so a WINDOW media list on any Wayland session dereferenced null and killed the process the moment the picker opened.
+
+Gate lives in ONE place, `flutter_screen_capture.cc::BuildDesktopSourcesList`: it mirrors that decision (Wayland -> screens, and only while `libpipewire-0.3.so.0` dlopens; otherwise probe `XOpenDisplay`, since `DISPLAY` can be set with no server behind it) and `continue`s past a type this session can't produce, so one unavailable type never costs the others. That covers every Dart caller at once. Dart mirrors it in `DesktopCaptureSupport` (`core/services/desktop_capture_support.dart`) purely for UI honesty: `sourceTypes` for enumeration, `canShareWindows` to drop the picker's Windows tab.
+
+Wayland therefore shares whole screens only, chosen through the desktop's own portal dialog (which prompts once per media list — picker open, then share start). Window sharing there needs `allow_pipewire` for `kWindow` in the wrapper AND a portal-first picker; the null-safety half is written as `third_party/libwebrtc/hollow-wayland-desktop-capture.patch`, pending a libwebrtc rebuild. X11 sessions are unchanged and still enumerate individual windows.
+
 ### Outgoing Screen Share
 
 `ScreenShareService.createOffer(sourceId, width, height, fps, {shareAudio})`:
-1. Calls `desktopCapturer.getSources()` to refresh source list
+1. Calls `desktopCapturer.getSources(types: DesktopCaptureSupport.sourceTypes)` to refresh the source list — `sourceTypes` drops `SourceType.Window` on a Wayland session, where libwebrtc has no window capturer to build (see Linux session gating below)
 2. Calls `navigator.mediaDevices.getDisplayMedia()` with source ID, frame rate, width, height, and audio flag — width/height in mandatory constraints trigger native capture on Windows/macOS
 3. Validates video tracks exist (security check)
 4. Creates local self-preview renderer

@@ -6,6 +6,7 @@ import 'package:flutter_webrtc/flutter_webrtc.dart';
 
 import '../../rust/api/network.dart' as network_api;
 import '../perf_sentinel.dart';
+import 'desktop_capture_support.dart';
 import 'ice_route_probe.dart';
 import 'screen_audio_capturer.dart';
 import 'mac_sck_screen_audio_capturer.dart';
@@ -308,7 +309,7 @@ class ScreenShareService {
     // desktop-only; mobile captures THE screen (MediaProjection / ReplayKit).
     if (!Platform.isAndroid && !Platform.isIOS) {
       await desktopCapturer.getSources(
-          types: [SourceType.Screen, SourceType.Window]);
+          types: DesktopCaptureSupport.sourceTypes);
     }
 
     // macOS system-audio routing:
@@ -975,7 +976,7 @@ class ScreenShareService {
   /// Get available screen/window sources for the picker dialog.
   static Future<List<DesktopCapturerSource>> getDesktopSources() async {
     return desktopCapturer.getSources(
-      types: [SourceType.Screen, SourceType.Window],
+      types: DesktopCaptureSupport.sourceTypes,
     );
   }
 

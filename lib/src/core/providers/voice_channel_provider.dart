@@ -14,6 +14,7 @@ import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/recording_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/core/providers/speaking_provider.dart';
+import 'package:hollow/src/core/services/desktop_capture_support.dart';
 import 'package:hollow/src/core/services/frame_cryptor_service.dart';
 import 'package:hollow/src/core/services/macos_version.dart';
 import 'package:hollow/src/core/services/mobile_screen_audio_capturer.dart';
@@ -1317,7 +1318,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       });
     } else {
       await desktopCapturer.getSources(
-          types: [SourceType.Screen, SourceType.Window]);
+          types: DesktopCaptureSupport.sourceTypes);
       // On Windows and Linux, audio goes via data channel (not a WebRTC audio
       // track) so never request audio in getDisplayMedia — the old
       // WASAPI→AudioSource path crashes on Windows and yields nothing on Linux.

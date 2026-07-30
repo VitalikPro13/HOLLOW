@@ -36,6 +36,17 @@ contains these changes, so all platforms must apply them for parity.
    app can switch text/motion encoding profiles at runtime. Reached from Dart
    via `Helper.setVideoContentHint` → plugin method `videoTrackSetContentHint`.
 
+**[`hollow-wayland-desktop-capture.patch`](hollow-wayland-desktop-capture.patch)**
+— **PENDING, not in the vendored binaries.** Null-safety for the wrapper's
+desktop capturers: on any Wayland session `CreateWindowCapturer()` returns
+nullptr (the X11 fallback is skipped there and `allow_pipewire` is set for
+screens only) and the wrapper calls `capturer_->Start()` on it, so opening the
+share picker SIGSEGV'd inside `libwebrtc.so` (issue #30). Until the next
+rebuild the app protects itself in the plugin instead — `flutter_screen_capture.cc`
+skips capture types the session can't produce. Apply this patch in step 2
+below, fold it into `hollow-screencast.patch`, and delete it once the binaries
+carry it.
+
 Related but *not* in the binary: the flutter_webrtc plugin's
 `updateRtpParameters` (`common/cpp/src/flutter_peerconnection.cc`) must call
 `parameters->set_encodings(params)` after mutating encodings — the wrapper's
@@ -125,6 +136,7 @@ git apply --ignore-whitespace /path/to/hollow-core-audio.patch
 git clone https://github.com/webrtc-sdk/libwebrtc.git wrapper
 cd wrapper && git checkout be9743f && git remote remove origin
 git apply /path/to/hollow-screencast.patch
+git apply /path/to/hollow-wayland-desktop-capture.patch   # while still pending
 cd ..
 # copy the wrapper INTO the WebRTC tree (exclude .git)
 rsync -a --exclude=.git wrapper/ src/libwebrtc/      # Windows: robocopy wrapper src\libwebrtc /E /XD .git
