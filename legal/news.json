@@ -1,5 +1,11 @@
 [
   {
+    "id": "2026-07-30-v090",
+    "date": "July 30, 2026",
+    "title": "v0.9 - GIFs, Stickers, Server Banners & Voice Encryption Fix (BREAKING for voice channels)",
+    "body": "Hello! One BREAKING change in voice channel encryption, so make sure to upgrade your client for the fix to apply! Besides it, GIFs with stickers are now available through KLIPY, and you can even bring your own API key if you want. Servers now support banners (both static and animated) and also support for animated icons. The system for media was reworked for better support overall. Check out the [changelog](https://github.com/VitalikPro13/HOLLOW/blob/main/changelog.txt) for details and enjoy! Shoutout to everybody who creates issues on bugs and suggestions, you're the best!"
+  },
+  {
     "id": "2026-07-25-v085",
     "date": "July 26, 2026",
     "title": "v0.8.5 - BREAKING CHANGES: security patches, bug fixes, accessibility improvements",

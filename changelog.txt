@@ -1,3 +1,65 @@
+v0.9 - GIFs, Stickers, Server Banners & Voice Encryption Fix (BREAKING for voice channels)
+
+BREAKING CHANGE: Server voice channels are NOT compatible between 0.9 and 0.8.5 or older. Encryption in voice channels was never actually engaged on older builds (issue #27), and fixing it changes when keys are applied. Everyone in a voice channel needs to be on 0.9. Messages, DM calls and everything else are unaffected.
+
+GIFS (issue #26)
+
+- New GIF picker in the message box: Popular, search, and your own Favourites and Recent. Favourites sort into lists you name yourself
+- Picking a GIF re-encodes it locally and sends it as encrypted bytes like any other attachment, so whoever receives it never makes a request to KLIPY or anyone else to display it
+- Search runs through a Hollow proxy that keeps no logs: KLIPY sees one server and a random id per request, never you
+- Optional own-key mode (Settings > Network): paste your own KLIPY API key and the app talks to KLIPY directly, for your own rate limit and zero dependency on our server. This is not a privacy win and the setting says so plainly, since KLIPY then sees your IP address and every search you make under one stable key
+- In own-key mode the app only loads media from an allowlist of hosts you control, and anything it refuses is remembered and offered in Settings with an Allow button, so a CDN move never needs an app update
+- Content rating filter (G / PG / PG-13 / R, default PG-13). Servers not marked NSFW cap results at PG-13
+- GIFs autoplay in the grid while visible, behind a toggle that is on by default. The GIF search cache has its own 200 MB limit, separate from the emote and sticker cap
+
+STICKERS (issue #29)
+
+- Sticker packs on your servers (covered by the existing Manage Emotes permission) plus a personal vault that works in every chat, DMs included
+- Search KLIPY's sticker catalog from the same picker. Transparency is preserved end to end, so a cut-out sticker still reads as a cut-out instead of arriving on a white box
+- Stickers sent next to each other tile into a gapless mosaic, whether that is several in one message or several messages in a row from the same person
+- A sticker is identified by its contents rather than its name, so two stickers can share a label and the pack is what groups them. There is no naming prompt on upload
+
+SERVERS
+
+- Server banners (issue #25): a wide image across the top of the channel list, animated GIF or WebP supported. Owners and Admins set it in Server Settings, on desktop and mobile
+- Animated server icons: the icon in your server strip can move now. The still frame stays in the server state and the animation replicates separately, so someone on an older client still sees a correct static icon
+- Banners, icons, emotes, stickers and GIFs now share one store underneath, addressed by content. Image bytes never ride the relay's message path, and members pull only what they are missing
+- Hardening: image data another client sends that we never asked for is now refused outright instead of being cached
+
+VOICE & CALLS
+
+- Fixed garbage or one-way audio in server voice channels (issue #27). Encryption in voice channels was never engaging: starting a screen share flipped it on for the sharer alone, and the next key change left them encrypting while everyone else had no way to decrypt, so one side heard noise and the other heard silence. Voice encryption now engages for every participant from the moment they join
+- Added a self-healing ladder behind it. If a participant's keys go stale the app re-applies them, then re-sends the current key, then rebuilds the group's encryption, instead of leaving the channel broken until everyone reconnects
+- Fixed a case where an encryption update that removed your own device left you unable to send or receive in that server until a restart
+- Fixed deafen leaving some people in a group call still audible: one failing volume write used to abort the whole loop partway through
+- Fixed a crash when leaving a voice channel while it was still connecting
+- Screen shares that are stopped and restarted now re-encrypt cleanly instead of coming back silent
+- Fixed the app dying on Linux the moment the screen share picker opened in a Wayland session (issue #30). Wayland hands out no window list at all, so the picker now offers whole screens only and your desktop asks which one to share. X11 sessions are unchanged and still list individual windows. Wayland window picker is a follow-up to do
+
+PRIVACY
+
+- New "Always relay calls" toggle (Settings > Security), off by default. On a direct connection the other people in a call learn your IP address, because encryption protects the contents of a call and not the network path. Turning this on forces every real-time connection through the relay, so participants only ever see the relay's address
+- The toggle now also applies to a voice channel you are already in. It used to be read once when you joined, so everyone who joined afterwards was still handed direct connections
+
+INTERFACE
+
+- Fixed dead clicks and off-screen tooltips at interface scales below 100% (issue #20). The bottom dock and the right end of the friends bar stopped responding to the mouse, and the dead strip grew the further you zoomed out
+- Fixed the Browse / Share / Archive / Conferences tabs getting stuck (issue #28): a conference could not be closed, and clicking a server selected it underneath while the conference dashboard stayed on top. All four buttons now toggle, so pressing the lit one takes you back out
+- Fixed the connection indicator disagreeing with itself (issue #23). The dock said Online while the same account's server header said Connecting forever, and the channel header said Offline whenever nobody else happened to be around. Both bars now read from one source, sync progress can refine that reading but never contradict it, and an empty room says "Only you" instead of "Offline". Offline now genuinely means your own connection is down
+- Fixed the members panel button doing nothing at higher interface scales. The panel stays available at every width the desktop layout runs at, and remembers whether you had it open
+- Tooltips now measure themselves instead of estimating, so they sit correctly at large text sizes
+- Horizontal strips that a plain wheel mouse could not reach (GIF favourite lists, Server Settings tabs, the server strip in the dock, the emoji picker and friends manager tabs) now show arrows and pan on the wheel whenever they overflow
+- A GIF or sticker sent with text now renders at full size with the text as a caption underneath, instead of shrinking the image down to the height of the line
+
+STORAGE
+
+- Files & Storage gains an asset cache section with its own cap (default 512 MB, desktop and mobile) and a clear-unreferenced action. Clearing never drops a sticker or emote your own sets or your servers still reference
+
+PERFORMANCE
+
+- Emote and game searches are much faster. Images are no longer downloaded inline with the results: a cold FrankerFaceZ search took 3 to 6 seconds before it returned anything and now takes about half a second, with the curated set appearing instantly
+- Fixed website lookups (emote and game search) sometimes waiting out their full timeout without ever being sent, when the database was busy at the same time
+
 v0.8.5 - BREAKING CHANGES: security patches, bug fixes, accessibility improvements
 
 NOTE: Previous clients are NOT compatible with the new 0.8.5 because of breaking changes in how encryption and signatures are handled. Please make sure to update your client to the latest version!
