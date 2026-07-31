@@ -947,6 +947,15 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
         result.success(null);
         break;
       }
+      case "getCaptureLevel": {
+        // Hollow fork: live mic loudness for the speaking indicator (#37).
+        if (captureGainProcessor != null) {
+          result.success(captureGainProcessor.captureLevel());
+        } else {
+          result.success(new java.util.HashMap<String, Object>());
+        }
+        break;
+      }
       case "getNoiseSuppressAiActive": {
         // Hollow fork: DFN status snapshot for the Dart WebRTC-NS fallback.
         if (captureGainProcessor != null) {

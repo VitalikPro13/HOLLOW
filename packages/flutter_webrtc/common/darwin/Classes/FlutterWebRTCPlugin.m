@@ -1655,6 +1655,13 @@ static __weak id<RTCAudioDeviceModuleDelegate> gAudioDeviceModuleObserver = nil;
               postFilterBeta:pfBeta != nil ? [pfBeta floatValue] : 0.0f];
     }
     result(nil);
+  } else if ([@"getCaptureLevel" isEqualToString:call.method]) {
+    // Hollow fork: live mic loudness for the speaking indicator (issue #37).
+    if (_captureGainProcessor != nil) {
+      result([_captureGainProcessor captureLevel]);
+    } else {
+      result(@{});
+    }
   } else if ([@"getNoiseSuppressAiActive" isEqualToString:call.method]) {
     // Hollow fork: DFN status snapshot for the Dart WebRTC-NS fallback.
     if (_captureGainProcessor != nil) {

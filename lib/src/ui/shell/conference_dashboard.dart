@@ -1340,8 +1340,11 @@ class _ParticipantRow extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
     final name = isSelf ? 'You' : conferenceDisplayName(ref, peerId);
-    final speaking =
-        ref.watch(vcSpeakingProvider.select((s) => s.contains(peerId)));
+    // Self reads the dedicated local flag — the set is device-id keyed and a
+    // self membership test silently missed. See [vcLocalSpeakingProvider].
+    final speaking = isSelf
+        ? ref.watch(vcLocalSpeakingProvider)
+        : ref.watch(vcSpeakingProvider.select((s) => s.contains(peerId)));
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: HollowSpacing.xs),
       child: Row(
@@ -1540,8 +1543,10 @@ class _ParticipantTile extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
     // Membership select: only THIS tile rebuilds when its speaking flips.
-    final speaking =
-        ref.watch(vcSpeakingProvider.select((s) => s.contains(peerId)));
+    // Self reads the dedicated local flag — see [vcLocalSpeakingProvider].
+    final speaking = isSelf
+        ? ref.watch(vcLocalSpeakingProvider)
+        : ref.watch(vcSpeakingProvider.select((s) => s.contains(peerId)));
     final muted = isSelf
         ? vcState.isMuted
         : (vcState.peerAudioStates[peerId]?.isMuted ?? false);

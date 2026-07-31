@@ -169,7 +169,10 @@ Contents (left to right in a `Row`):
 
 Visual feedback for voice activity detection (VAD):
 
-- **Camera grid tiles**: `_buildVideoTile()` watches `vcSpeakingProvider.select((s) => s.contains(peerId))` (per-peer membership select; speaking lives in `speaking_provider.dart` since 2026-07, not VoiceChannelState). If speaking, the tile container gets a 2px accent-color border via `Border.all(color: hollow.accent, width: 2)`.
+- **Camera grid tiles**: `_buildVideoTile()` branches on whose tile it is (speaking lives in `speaking_provider.dart` since 2026-07, not VoiceChannelState):
+  - REMOTE peers -- `vcSpeakingProvider.select((s) => s.contains(peerId))`, a per-peer membership select so one tile rebuilds per flip.
+  - OUR OWN tile -- `vcLocalSpeakingProvider`, a plain bool. **Never test the set for ourselves.** `vcSpeakingProvider` is keyed by the ROUTABLE DEVICE id while call sites routinely hold the MASTER id, so a self membership test silently missed and the self indicator never lit (issue #37). The service reports `onSpeakingChanged(Set<String> remotePeers, bool localSpeaking)` -- same shape as the 1:1 call path's `(local, remote)`.
+  - If speaking, the tile container gets a 2px accent border via `Border.all(color: hollow.accent, width: 2)`.
 - **No other speaking indicators in VoiceChannelPane itself** -- the member sidebar shows speaking state for audio-only mode via the member panel provider.
 
 ## Providers Read by This Widget

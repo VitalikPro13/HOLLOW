@@ -168,6 +168,19 @@ class FlutterCaptureGainProcessor
   // supplying one) — status-getter diagnostic mirror of the audio-thread
   // value the gate stage consumes.
   float DfnVad() const { return dfn_vad_.load(std::memory_order_relaxed); }
+  // Capture loudness of the live mic, dBFS, as a decaying peak-hold of the
+  // per-frame RMS (-100 = silence/not yet measured). Measured every frame
+  // in BOTH enhance modes, right after the AI denoiser, so it reflects the
+  // audio actually heading out. This is what the speaking indicator reads
+  // (issue #37): getStats carries no outgoing audio level on desktop, and
+  // the old `record`-package meter opened a second mic handle that Linux
+  // (PipeWire, no `parecord`) could not open at all.
+  //
+  // Peak-hold rather than a bare frame value: the UI polls at ~5 Hz and a
+  // raw 10 ms RMS would let whole syllables fall between polls.
+  float CaptureLevelDb() const {
+    return level_db_.load(std::memory_order_relaxed);
+  }
   // Raw capture shape as last seen by Process() (stored unconditionally,
   // even with DFN off) — lets the status getter say exactly WHY a format
   // was rejected instead of a bare formatOk=false.
@@ -253,6 +266,9 @@ class FlutterCaptureGainProcessor
   // a thin sentinel wrapper around this so the whole-chain cost is measured
   // across every early return. Audio thread only.
   void ProcessChain(int num_bands, int buffer_size, float* buffer);
+  // Frame RMS -> decaying peak-hold in level_db_ (see CaptureLevelDb).
+  void MeasureCaptureLevel(int num_bands, int buffer_size,
+                           const float* buffer);
 
   std::atomic<float> gain_;
   std::atomic<bool> enhance_;
@@ -275,6 +291,9 @@ class FlutterCaptureGainProcessor
   std::atomic<int> last_buffer_size_{0};
   std::atomic<float> dfn_vad_{-1.0f};
   bool dfn_format_logged_ = false;
+  // Capture level meter (see CaptureLevelDb). Audio thread is the single
+  // writer; the platform thread reads it from the method channel.
+  std::atomic<float> level_db_{-100.0f};
   // -- Performance sentinel state (see Process()). Quiet by default: each
   // anomaly logs ONCE (latched bool); counters ride the status map. Atomics
   // because the status getter reads from the platform thread; the audio

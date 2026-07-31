@@ -165,6 +165,35 @@ class NativeAudioManagement {
     }
   }
 
+  /// Live microphone loudness from the capture post-processor (Hollow fork
+  /// addition) — the source for speaking indicators.
+  ///
+  /// Returns `levelDb` (double — a decaying peak-hold of the capture RMS in
+  /// dBFS; -100 means silence) and `vad` (double — the AI denoiser's voice
+  /// probability 0..1, or -1 when it isn't running). Measured on the audio
+  /// thread right after the denoiser and BEFORE the voice chain, so it
+  /// follows the voice rather than the auto-level servo's output target.
+  ///
+  /// This exists because getStats is not a usable source for the LOCAL
+  /// level: `audioLevel` is only specified on media-source and inbound-rtp,
+  /// and desktop reports no outgoing level at all. Process-global, so one
+  /// call covers DM calls and voice channels, and it works with no peer
+  /// connected. Returns an empty map on web/unsupported.
+  static Future<Map<String, dynamic>> getCaptureLevel() async {
+    if (kIsWeb) return const {};
+    try {
+      final res = await WebRTC.invokeMethod('getCaptureLevel');
+      if (res is Map) {
+        return res.map((k, v) => MapEntry(k.toString(), v));
+      }
+      return const {};
+    } on PlatformException {
+      return const {};
+    } on MissingPluginException {
+      return const {};
+    }
+  }
+
   /// Begin out-of-process rendering of the given REMOTE audio tracks (Hollow
   /// fork, Windows only). Each track's decoded PCM is tapped via an
   /// AudioTrackSink and forwarded to a child `render-pcm` process that plays it,

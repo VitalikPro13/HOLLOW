@@ -16,6 +16,7 @@ import 'package:hollow/src/ui/components/call_duration_text.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/share_volume_control.dart';
+import 'package:hollow/src/ui/components/speaking_border.dart';
 import 'package:hollow/src/ui/mobile/mobile_screen_share_sheet.dart';
 import 'package:hollow/src/ui/mobile/mobile_sheet_drag.dart';
 import 'package:hollow/src/ui/mobile/mobile_source_switch_pill.dart';
@@ -364,6 +365,18 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
               ),
             ),
           ),
+        // Speaking ring on whatever is currently big. Its owner follows the
+        // source: our own camera when we're full-screen, otherwise the remote
+        // (their camera, their screen share, or their avatar placeholder).
+        Positioned.fill(
+          child: Consumer(builder: (context, ref, _) {
+            final speaking = ref.watch(callSpeakingProvider);
+            return SpeakingRing(
+              isSpeaking: showLocalFull ? speaking.local : speaking.remote,
+              borderRadius: BorderRadius.zero,
+            );
+          }),
+        ),
         // Local PiP — portrait proportioned (3:4)
         if (showLocalPip)
           Positioned(
@@ -395,13 +408,26 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
                 ),
                 child: ClipRRect(
                   borderRadius: BorderRadius.circular(11),
-                  child: RepaintBoundary(
-                    child: RTCVideoView(
-                      localRenderer,
-                      mirror: call.isFrontCamera,
-                      objectFit: RTCVideoViewObjectFit
-                          .RTCVideoViewObjectFitCover,
-                    ),
+                  child: Stack(
+                    fit: StackFit.expand,
+                    children: [
+                      RepaintBoundary(
+                        child: RTCVideoView(
+                          localRenderer,
+                          mirror: call.isFrontCamera,
+                          objectFit: RTCVideoViewObjectFit
+                              .RTCVideoViewObjectFitCover,
+                        ),
+                      ),
+                      Consumer(builder: (context, ref, _) {
+                        return SpeakingRing(
+                          isSpeaking: ref.watch(
+                              callSpeakingProvider.select((s) => s.local)),
+                          borderRadius: BorderRadius.circular(11),
+                          borderWidth: 2,
+                        );
+                      }),
+                    ],
                   ),
                 ),
               ),

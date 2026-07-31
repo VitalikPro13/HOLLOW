@@ -7,8 +7,8 @@ import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:hollow/src/core/services/frame_cryptor_service.dart';
 import 'package:hollow/src/core/services/ice_route_probe.dart';
 import 'package:hollow/src/core/services/remote_track_volume.dart';
+import 'package:hollow/src/core/services/local_speaking_detector.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
-import 'package:record/record.dart' as rec;
 
 void _vcLog(String msg) {
   network_api.logFromDart(message: msg);
@@ -96,13 +96,15 @@ class VoiceChannelService {
   /// Previous totalAudioEnergy per peer for delta calculation.
   final Map<String, double> _prevEnergy = {};
 
-  /// Local mic amplitude monitor (record package — same as Settings mic test).
-  rec.AudioRecorder? _localVadRecorder;
-  StreamSubscription<rec.Amplitude>? _localVadAmpSub;
+  /// Are WE talking? Kept OUT of [_speakingPeers] deliberately — that set is
+  /// keyed by routable device ids and the UI holds master ids, so "are we in
+  /// the set" was never a reliable question. See [_pollAudioLevels].
   bool _localSpeaking = false;
 
-  /// Callback when speaking peers change.
-  void Function(Set<String> speakingPeers)? onSpeakingChanged;
+  /// Callback when speaking state changes: the REMOTE peers currently
+  /// speaking, and whether WE are.
+  void Function(Set<String> speakingPeers, bool localSpeaking)?
+      onSpeakingChanged;
 
   /// Gossip mode: if true, only connect to gossipNeighbors (not all participants).
   bool gossipMode = false;
@@ -258,9 +260,8 @@ class VoiceChannelService {
       } catch (_) {}
     }
 
-    // Start VAD polling (remote peers via getStats, local via record package).
+    // Start VAD polling (local + remote peers, both via getStats).
     _startVadTimer();
-    _startLocalVad();
   }
 
   /// Initiate WebRTC connection to a peer who is already in the channel.
@@ -780,13 +781,13 @@ class VoiceChannelService {
     _channelId = null;
     _speakingPeers.clear();
     _prevEnergy.clear();
+    _localSpeakingDetector.reset();
     _forwardedSources.clear();
     _pendingCameraReneg.clear();
     gossipMode = false;
     gossipNeighbors = {};
     await frameCryptor?.dispose();
     frameCryptor = null;
-    await _stopLocalVad();
   }
 
   // ---------------------------------------------------------------
@@ -1197,8 +1198,9 @@ class VoiceChannelService {
   /// Live mid-session microphone switch across the whole mesh. Captures a
   /// fresh stream, swaps every PC's audio sender via removeTrack + addTrack
   /// (NEVER replaceTrack — silently fails on Windows libwebrtc), re-binds
-  /// SFrame per peer, renegotiates each stable PC, and restarts the local
-  /// VAD recorder (it holds its own handle on the old device).
+  /// SFrame per peer, and renegotiates each stable PC. VAD needs no attention
+  /// across the swap: it reads the level off whatever track the PCs are
+  /// currently sending.
   Future<void> setAudioInputDevice(String? deviceId) async {
     preferredAudioInputDeviceId = deviceId;
     if (_localAudioStream == null) return; // next session uses it
@@ -1234,10 +1236,6 @@ class VoiceChannelService {
     if (oldStream != null) {
       await _disposeReplacedMicStream(oldStream);
     }
-
-    // The local VAD recorder (record package) holds the OLD device — restart.
-    await _stopLocalVad();
-    await _startLocalVad();
 
     _vcLog('[HOLLOW-VC] Mic switched live to ${deviceId ?? "default"}');
   }
@@ -1608,88 +1606,121 @@ class VoiceChannelService {
   Future<void> _pollAudioLevels() async {
     final newSpeaking = <String>{};
 
-    // Local speech: detected by the record package amplitude monitor.
-    if (!_isMuted && _localSpeaking) {
-      newSpeaking.add(localPeerId);
-    }
+    // LOCAL: the native capture meter — one process-global read, no peer
+    // connection required, so it also lights up while you are alone in the
+    // channel. See [LocalSpeakingDetector] for why not getStats/`record`.
+    //
+    // Reported as its OWN flag rather than as our peer id inside the set,
+    // mirroring the 1:1 call path: the set is keyed by ROUTABLE device ids
+    // and the UI often holds the MASTER id, so a membership test for
+    // ourselves silently missed and the self indicator never lit.
+    var newLocal = await _localSpeakingDetector.poll(muted: _isMuted);
 
-    // Check each remote peer's inbound audio via getStats.
+    // REMOTE: one getStats pass per peer connection. Where the plugin has no
+    // capture meter (an app updated ahead of its native side) the same pass
+    // also carries the old outgoing-level guess.
+    var wantLocal = !_isMuted && !_localSpeakingDetector.hasMeter;
+
     for (final entry in _peerConnections.entries) {
-      final speaking = await _checkInboundAudio(entry.value, entry.key);
-      if (speaking) newSpeaking.add(entry.key);
+      final levels = await _checkAudioLevels(entry.value, entry.key,
+          wantLocal: wantLocal);
+      if (levels.remote) newSpeaking.add(entry.key);
+      if (levels.localReported) {
+        wantLocal = false;
+        if (levels.local) newLocal = true;
+      }
     }
 
     // Only notify if changed.
-    if (!_setEquals(newSpeaking, _speakingPeers)) {
+    if (newLocal != _localSpeaking ||
+        !_setEquals(newSpeaking, _speakingPeers)) {
+      _localSpeaking = newLocal;
       _speakingPeers
         ..clear()
         ..addAll(newSpeaking);
-      onSpeakingChanged?.call(Set.of(_speakingPeers));
+      onSpeakingChanged?.call(Set.of(_speakingPeers), _localSpeaking);
     }
   }
 
-  /// Start local mic amplitude monitoring via the record package.
-  /// Same approach as the Test Microphone feature in User Settings.
-  Future<void> _startLocalVad() async {
-    try {
-      _localVadRecorder = rec.AudioRecorder();
-      final stream = await _localVadRecorder!.startStream(
-        rec.RecordConfig(
-          encoder: rec.AudioEncoder.pcm16bits,
-          numChannels: 1,
-          sampleRate: 16000,
-          device: preferredAudioInputDeviceId != null
-              ? rec.InputDevice(id: preferredAudioInputDeviceId!, label: '')
-              : null,
-        ),
-      );
-      // Drain PCM data — we only need amplitude.
-      stream.listen((_) {});
+  /// One-shot diagnostic, twin of the one in `voice_service.dart` — see its
+  /// comment. Logged once per session so a single test run settles whether
+  /// this platform's getStats carries an outgoing audio level at all.
+  bool _vadStatsLogged = false;
 
-      _localVadAmpSub = _localVadRecorder!
-          .onAmplitudeChanged(const Duration(milliseconds: 150))
-          .listen((amp) {
-        // dBFS -60..0 → 0.0..1.0
-        const minDb = -60.0;
-        final clamped = amp.current.clamp(minDb, 0.0);
-        final level = (clamped - minDb) / (0.0 - minDb);
-        _localSpeaking = level > 0.30;
-      });
-    } catch (e) {
-      _vcLog('[HOLLOW-VC] Local VAD start failed: $e');
+  /// Our own speaking state, from the native capture meter (issue #37).
+  final _localSpeakingDetector = LocalSpeakingDetector();
+
+  void _logVadStatsOnce(List<StatsReport> stats) {
+    if (_vadStatsLogged) return;
+    _vadStatsLogged = true;
+    final lines = <String>[];
+    for (final report in stats) {
+      if (report.values['kind'] != 'audio') continue;
+      if (report.type != 'media-source' &&
+          report.type != 'outbound-rtp' &&
+          report.type != 'inbound-rtp') {
+        continue;
+      }
+      lines.add('${report.type}: audioLevel=${report.values['audioLevel']} '
+          'totalAudioEnergy=${report.values['totalAudioEnergy']} '
+          'keys=${report.values.keys.join(",")}');
     }
+    _vcLog('[HOLLOW-VAD-DIAG] '
+        '${lines.isEmpty ? "no audio reports" : lines.join(" | ")}');
   }
 
-  Future<void> _stopLocalVad() async {
-    await _localVadAmpSub?.cancel();
-    _localVadAmpSub = null;
-    final recorder = _localVadRecorder;
-    _localVadRecorder = null;
-    if (recorder != null) {
-      // Await stop+dispose — the `record` plugin holds a native capture
-      // stream/thread; fire-and-forget leaks it across rapid leave/rejoin.
-      try {
-        await recorder.stop();
-      } catch (_) {}
-      try {
-        await recorder.dispose();
-      } catch (_) {}
-    }
-    _localSpeaking = false;
-  }
-
-  Future<bool> _checkInboundAudio(
-      RTCPeerConnection pc, String peerId) async {
+  /// One getStats pass over [pc]: that peer's inbound audio, plus — when
+  /// [wantLocal] — our own outgoing level from the same report set.
+  ///
+  /// Local detection deliberately rides the peer connection instead of a
+  /// second mic handle. The old path opened a `record` AudioRecorder purely
+  /// to read amplitude; `record_linux` shells out to `parecord`, which isn't
+  /// installed on PipeWire systems, so the constructor threw and every Linux
+  /// user's OWN speaking indicator stayed dark while remote peers' worked
+  /// (issue #37). Reading the level off the PC also puts voice channels on
+  /// the exact same detector and threshold as 1:1 calls
+  /// (`voice_service.dart::_pollVad`), which the two paths previously
+  /// disagreed on: `record` reports PEAK dBFS pre-processing, getStats
+  /// reports RMS post-processing, so the same voice tripped them differently.
+  ///
+  /// [localReported] distinguishes "this PC says we're silent" from "this PC
+  /// carried no outgoing audio report at all" — only the former ends the
+  /// search, so a receive-only or not-yet-flowing PC falls through to the
+  /// next one instead of pinning us silent.
+  Future<({bool remote, bool local, bool localReported})> _checkAudioLevels(
+    RTCPeerConnection pc,
+    String peerId, {
+    required bool wantLocal,
+  }) async {
+    var remote = false;
+    var local = false;
+    var localReported = false;
     try {
       final stats = await pc.getStats();
+      _logVadStatsOnce(stats);
       for (final report in stats) {
-        if (report.type == 'inbound-rtp' &&
-            report.values['kind'] == 'audio') {
-          return _detectSpeech(report.values, 'in-$peerId');
+        if (report.values['kind'] != 'audio') continue;
+        switch (report.type) {
+          case 'inbound-rtp':
+            remote = _detectSpeech(report.values, 'in-$peerId');
+          // Local: media-source carries audioLevel on Android, outbound-rtp
+          // on desktop. Take either — same as the 1:1 call path. They keep
+          // SEPARATE energy keys so the totalAudioEnergy fallback of one
+          // can't consume the other's delta within a single poll.
+          case 'media-source':
+            if (wantLocal) {
+              local |= _detectSpeech(report.values, 'out-src');
+              localReported = true;
+            }
+          case 'outbound-rtp':
+            if (wantLocal) {
+              local |= _detectSpeech(report.values, 'out-rtp');
+              localReported = true;
+            }
         }
       }
     } catch (_) {}
-    return false;
+    return (remote: remote, local: local, localReported: localReported);
   }
 
   /// Detect speech from an RTP stats report using totalAudioEnergy delta

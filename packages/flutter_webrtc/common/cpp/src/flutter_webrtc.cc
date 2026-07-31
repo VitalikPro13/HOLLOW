@@ -772,6 +772,23 @@ void FlutterWebRTC::HandleMethodCall(
       }
     }
     result->Success();
+  } else if (method_call.method_name().compare("getCaptureLevel") == 0) {
+    // Hollow fork: live mic loudness for the speaking indicator (issue #37).
+    // Deliberately its OWN call and not part of the status map above — this
+    // one is polled several times a second during a call, so it stays a
+    // couple of atomic loads with nothing else attached.
+    //
+    // levelDb: decaying peak-hold of the capture RMS, dBFS (-100 = silence).
+    // vad: DFN/RNNoise voice probability 0..1, or -1 when the denoiser is
+    // not running. Dart prefers the VAD when it is there and falls back to
+    // thresholding levelDb otherwise.
+    EncodableMap res;
+    auto* proc = capture_gain_processor();
+    res[EncodableValue("levelDb")] = EncodableValue(
+        proc ? static_cast<double>(proc->CaptureLevelDb()) : -100.0);
+    res[EncodableValue("vad")] = EncodableValue(
+        proc ? static_cast<double>(proc->DfnVad()) : -1.0);
+    result->Success(EncodableValue(res));
   } else if (method_call.method_name().compare("getNoiseSuppressAiActive") ==
              0) {
     // Hollow fork: DFN status snapshot so Dart can fall back to WebRTC NS

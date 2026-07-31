@@ -10,7 +10,8 @@ import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/chat/channel_message_bubble.dart';
-import 'package:hollow/src/ui/chat/chat_pane.dart' show shouldGroup;
+import 'package:hollow/src/ui/chat/chat_pane.dart'
+    show shouldGroup, chatSelectionArea, selectionMustBeScopedToRows;
 import 'package:hollow/src/ui/chat/message_action_bar.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
@@ -68,6 +69,9 @@ class _GuestChatPaneState extends ConsumerState<GuestChatPane> {
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
+    // Issue #35: scale the selection scope with the interface scale — see
+    // [selectionMustBeScopedToRows].
+    final perRowSelection = selectionMustBeScopedToRows(context);
     final key = '${widget.serverId}:${widget.channelId}';
     final messages =
         ref.watch(channelChatProvider.select((s) => s[key])) ?? [];
@@ -202,10 +206,12 @@ class _GuestChatPaneState extends ConsumerState<GuestChatPane> {
                         return false;
                       },
                       child: ChatTextScale(
-                        child: SelectionArea(
-                          contextMenuBuilder: (_, __) =>
-                              const SizedBox.shrink(),
-                          child: ScrollConfiguration(
+                        // Issue #35: when the interface scale is not 100% the
+                        // SelectionArea moves to the ROWS below — see
+                        // [selectionMustBeScopedToRows].
+                        child: _listSelectionWrap(
+                          perRowSelection,
+                          ScrollConfiguration(
                             behavior: ScrollConfiguration.of(context)
                                 .copyWith(scrollbars: false),
                             child: ScrollablePositionedList.builder(
@@ -266,7 +272,7 @@ class _GuestChatPaneState extends ConsumerState<GuestChatPane> {
                                           filtered[msgIndex - 1].senderId,
                                     );
 
-                                return MessageHoverWrapper(
+                                final row = MessageHoverWrapper(
                                   isMe: false,
                                   messageId: msg.messageId,
                                   currentText: msg.text,
@@ -304,6 +310,9 @@ class _GuestChatPaneState extends ConsumerState<GuestChatPane> {
                                     showHeader: showHeader,
                                   ),
                                 );
+                                return perRowSelection
+                                    ? chatSelectionArea(child: row)
+                                    : row;
                               },
                             ),
                           ),
@@ -341,6 +350,11 @@ class _GuestChatPaneState extends ConsumerState<GuestChatPane> {
       ],
     );
   }
+
+  /// Selection wraps the whole list only when it is safe to (issue #35);
+  /// otherwise each row carries its own and this is a pass-through.
+  Widget _listSelectionWrap(bool perRowSelection, Widget list) =>
+      perRowSelection ? list : chatSelectionArea(child: list);
 
   String _senderName(String senderId) {
     // Check guest sender profiles first (populated from sync responses)

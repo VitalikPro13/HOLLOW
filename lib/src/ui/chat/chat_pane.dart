@@ -91,7 +91,9 @@ export 'package:hollow/src/ui/chat/chat_pane_shared.dart'
         shouldShowDateSeparator,
         DateSeparator,
         TypingIndicatorBar,
-        TypingDots;
+        TypingDots,
+        chatSelectionArea,
+        selectionMustBeScopedToRows;
 
 /// Whether the DM profile panel is visible.
 final dmProfilePanelProvider = StateProvider<bool>((ref) => true);
@@ -2599,6 +2601,34 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
     overlay.insert(entry!);
   }
 
+  /// Puts the speaking ring on a call video tile (issue #37). The ring is an
+  /// overlay INSIDE the tile's clip, so it lights the rectangle the camera
+  /// occupies without changing the layout — the video texture is never
+  /// resized by a VAD flip. The scoped [Consumer] + `.select` keeps a flip to
+  /// this one layer instead of rebuilding the whole call panel 1-4x/second.
+  Widget _speakingWrapped({
+    required bool local,
+    required BorderRadius radius,
+    required Widget child,
+    double borderWidth = 2.5,
+  }) {
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        child,
+        Consumer(builder: (context, ref, _) {
+          final speaking = ref.watch(callSpeakingProvider
+              .select((s) => local ? s.local : s.remote));
+          return SpeakingRing(
+            isSpeaking: speaking,
+            borderRadius: radius,
+            borderWidth: borderWidth,
+          );
+        }),
+      ],
+    );
+  }
+
   /// Default: two equal video rectangles side by side. Click to expand.
   Widget _buildSideBySideVideo(
     HollowTheme hollow,
@@ -2623,33 +2653,37 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
                 borderRadius: BorderRadius.circular(hollow.radiusSm),
               ),
               clipBehavior: Clip.antiAlias,
-              child: hasLocalVideo && localRenderer != null
-                  ? RepaintBoundary(
-                      child: RTCVideoView(
-                        localRenderer,
-                        mirror: true,
-                        objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
-                      ),
-                    )
-                  : Center(
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          HollowAvatar(
-                            peerId: ref.read(identityProvider).peerId ?? '',
-                            size: 48,
-                          ),
-                          const SizedBox(height: HollowSpacing.xs),
-                          Text(
-                            'You',
-                            style: HollowTypography.caption.copyWith(
-                              color: hollow.textSecondary,
-                              fontSize: 11,
+              child: _speakingWrapped(
+                local: true,
+                radius: BorderRadius.circular(hollow.radiusSm),
+                child: hasLocalVideo && localRenderer != null
+                    ? RepaintBoundary(
+                        child: RTCVideoView(
+                          localRenderer,
+                          mirror: true,
+                          objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
+                        ),
+                      )
+                    : Center(
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            HollowAvatar(
+                              peerId: ref.read(identityProvider).peerId ?? '',
+                              size: 48,
                             ),
-                          ),
-                        ],
+                            const SizedBox(height: HollowSpacing.xs),
+                            Text(
+                              'You',
+                              style: HollowTypography.caption.copyWith(
+                                color: hollow.textSecondary,
+                                fontSize: 11,
+                              ),
+                            ),
+                          ],
+                        ),
                       ),
-                    ),
+              ),
             ),
           ),
         ),
@@ -2666,32 +2700,36 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
                 borderRadius: BorderRadius.circular(hollow.radiusSm),
               ),
               clipBehavior: Clip.antiAlias,
-              child: hasRemoteVideo && remoteRenderer != null
-                  ? RepaintBoundary(
-                      child: RTCVideoView(
-                        remoteRenderer,
-                        objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
-                      ),
-                    )
-                  : Center(
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          HollowAvatar(
-                            peerId: widget.peerId,
-                            size: 48,
-                          ),
-                          const SizedBox(height: HollowSpacing.xs),
-                          Text(
-                            displayName,
-                            style: HollowTypography.caption.copyWith(
-                              color: hollow.textSecondary,
-                              fontSize: 11,
+              child: _speakingWrapped(
+                local: false,
+                radius: BorderRadius.circular(hollow.radiusSm),
+                child: hasRemoteVideo && remoteRenderer != null
+                    ? RepaintBoundary(
+                        child: RTCVideoView(
+                          remoteRenderer,
+                          objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
+                        ),
+                      )
+                    : Center(
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            HollowAvatar(
+                              peerId: widget.peerId,
+                              size: 48,
                             ),
-                          ),
-                        ],
+                            const SizedBox(height: HollowSpacing.xs),
+                            Text(
+                              displayName,
+                              style: HollowTypography.caption.copyWith(
+                                color: hollow.textSecondary,
+                                fontSize: 11,
+                              ),
+                            ),
+                          ],
+                        ),
                       ),
-                    ),
+              ),
             ),
           ),
         ),
@@ -2724,15 +2762,19 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
           // when the user expands; letterbox bars are preferable to cropping
           // someone's face/body out of the recording.
           Positioned.fill(
-            child: mainRenderer != null
-                ? RepaintBoundary(
-                    child: RTCVideoView(
-                      mainRenderer,
-                      mirror: isLocalExpanded,
-                      objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
-                    ),
-                  )
-                : Container(color: hollow.elevated),
+            child: _speakingWrapped(
+              local: isLocalExpanded,
+              radius: BorderRadius.zero,
+              child: mainRenderer != null
+                  ? RepaintBoundary(
+                      child: RTCVideoView(
+                        mainRenderer,
+                        mirror: isLocalExpanded,
+                        objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
+                      ),
+                    )
+                  : Container(color: hollow.elevated),
+            ),
           ),
 
           // PiP (bottom right)
@@ -2755,11 +2797,16 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
                 ),
                 child: ClipRRect(
                   borderRadius: BorderRadius.circular(7),
-                  child: RepaintBoundary(
-                    child: RTCVideoView(
-                      pipRenderer,
-                      mirror: !isLocalExpanded,
-                      objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+                  child: _speakingWrapped(
+                    local: !isLocalExpanded,
+                    radius: BorderRadius.circular(7),
+                    borderWidth: 2,
+                    child: RepaintBoundary(
+                      child: RTCVideoView(
+                        pipRenderer,
+                        mirror: !isLocalExpanded,
+                        objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+                      ),
                     ),
                   ),
                 ),

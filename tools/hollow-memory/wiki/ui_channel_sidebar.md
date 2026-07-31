@@ -196,15 +196,14 @@ Renders as `FadeTransition(opacity: _controller, child: child)`.
 For self, reads `vcState.isMuted` and `vcState.isDeafened` directly. For remote peers, reads `vcState.getPeerAudioState(peerId)`.
 
 **Media state detection:**
-- `speaking` -- `vcSpeakingProvider` membership-select on `peerId`.
+- `speaking` -- self: `vcLocalSpeakingProvider` (a plain bool); remote: `vcSpeakingProvider` membership-select on `peerId`. **Never test the set for ourselves** -- it is keyed by the ROUTABLE DEVICE id while this row may hold the MASTER id, so a self membership test silently missed (issue #37).
 - `isScreenSharing` -- self: `vcState.isScreenSharing`; remote: `vcState.peerScreenSharing[peerId] ?? false`.
 - `isCameraOn` -- self: `vcState.isCameraOn`; remote: `vcState.peerCameraOn[peerId] ?? false`.
 
 **Row layout:**
-- `HollowAvatar` (18px) with profile avatar bytes.
+- `SpeakingAvatarOutline` wrapping `HollowAvatar` (18px) -- the speaking cue is an accent outline hugging the avatar, drawn OUTSIDE its edge and costing ZERO layout (see `speaking_border.dart`). It replaced a trailing teal `_SpeakingDot` in 2026-07: the cue now sits on the thing it identifies and a long display name cannot push it out of view.
 - Display name in `HollowTypography.caption`, `hollow.textSecondary`, with ellipsis overflow.
 - Trailing status icons (all 12px, with 2px left padding each):
-  - `_SpeakingDot` -- teal dot, fades in/out based on `speaking`.
   - Screen sharing icon -- `LucideIcons.monitor`, green. Conditionally rendered.
   - Camera icon -- `LucideIcons.video`, `hollow.accent`. Conditionally rendered.
   - Muted icon -- `LucideIcons.micOff`, `hollow.error`. Conditionally rendered.
@@ -228,13 +227,16 @@ The slider's `onChanged` calls `voiceChannelProvider.notifier.setPeerVolume(peer
 
 **Note:** This uses raw `OverlayEntry` which is flagged as problematic inside `SelectionArea` per project conventions. However, this popup appears on right-click within the sidebar (not inside a `SelectionArea`), so it is acceptable here.
 
-## _SpeakingDot -- Voice Activity Indicator
+## Voice Activity Indicator
 
-`file:_SpeakingDot` extends `StatelessWidget`. Props: `visible` (bool).
+REMOVED 2026-07 (issue #37): the trailing teal `_SpeakingDot` is gone. The cue is now an accent outline around the participant's avatar, via `SpeakingAvatarOutline` from `lib/src/ui/components/speaking_border.dart`.
 
-Renders an `AnimatedOpacity` (opacity 1.0 when visible, 0.0 when not, duration `HollowDurations.fast`) containing a 7x7 teal circle (`Colors.teal`, `BoxShape.circle`). Left padding of 2px.
+Three speaking widgets exist; pick by context:
+- `SpeakingRing` -- VIDEO tiles. Overlay on top, inside edge. **Never give it a `boxShadow`**: a shadow on a decoration with no background paints a FILLED blurred rect, which washes the whole tile.
+- `SpeakingBorder` -- avatars WITH room around them (mobile's clustered `MobileSpeakingAvatar`). Pads the child outward; grows by `2 * (padding + borderWidth)`.
+- `SpeakingAvatarOutline` -- avatars in DENSE rows (this sidebar). A sibling painted BEHIND the avatar, inset negatively by one border width inside a `Clip.none` Stack: zero layout cost, and the ring's inner edge lands exactly on the avatar edge (no gap). Radius is `radiusMd + borderWidth` so it stays concentric with the avatar's corner.
 
-No pulsing animation -- the dot is steady while shown, and fades in/out on transitions.
+An outline drawn INSIDE the avatar bounds lands on the avatar art and vanishes against a green avatar -- it must be outside. Guarded by `test/widget/speaking_avatar_outline_test.dart`.
 
 ## _HomeContent -- DM Friends List
 

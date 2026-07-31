@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:hollow/src/ui/chat/hollow_link_utils.dart';
 
 import 'package:flutter/material.dart';
+import 'package:hollow/src/ui/components/speaking_border.dart';
 import 'package:hollow/src/ui/components/overlay_anchor.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/models/channel_info.dart';
@@ -1521,10 +1522,13 @@ class _VoiceParticipantRow extends ConsumerWidget {
       isDeafened = peerState.isDeafened;
     }
 
-    // Membership-select: this row only rebuilds when ITS peer's speaking bit
-    // flips, not on every VAD change in the channel.
-    final speaking =
-        ref.watch(vcSpeakingProvider.select((s) => s.contains(peerId)));
+    // Our own row reads the dedicated local flag; remote rows membership-
+    // select so a row only rebuilds when ITS peer's bit flips. Testing the
+    // set for OURSELVES is what silently failed before: the set is keyed by
+    // routable device ids, this row can hold either form.
+    final speaking = isSelf
+        ? ref.watch(vcLocalSpeakingProvider)
+        : ref.watch(vcSpeakingProvider.select((s) => s.contains(peerId)));
     final isRemote = !isSelf;
     final isScreenSharing = isSelf
         ? vcState.isScreenSharing
@@ -1546,9 +1550,18 @@ class _VoiceParticipantRow extends ConsumerWidget {
         padding: const EdgeInsets.symmetric(vertical: 1),
         child: Row(
           children: [
-            HollowAvatar(
-                peerId: master,
-                size: 18),
+            // Speaking cue = an outline hugging the avatar, replacing the
+            // teal dot that used to sit at the far end of the row: the cue
+            // sits on the thing it identifies, and a long name can't push it
+            // out of view. SpeakingAvatarOutline, not SpeakingBorder — this
+            // row is dense, so the outline must not take layout space or
+            // stand a gap off the avatar (see its doc comment).
+            SpeakingAvatarOutline(
+              isSpeaking: speaking,
+              size: 18,
+              radius: hollow.radiusMd,
+              child: HollowAvatar(peerId: master, size: 18),
+            ),
             const SizedBox(width: HollowSpacing.xs),
             Expanded(
               child: Text(
@@ -1559,8 +1572,6 @@ class _VoiceParticipantRow extends ConsumerWidget {
                 overflow: TextOverflow.ellipsis,
               ),
             ),
-            // Speaking indicator — teal dot, fades in/out.
-            _SpeakingDot(visible: speaking),
             // Screen sharing indicator — green monitor icon.
             if (isScreenSharing)
               const Padding(
@@ -1697,28 +1708,5 @@ class _VoiceParticipantRow extends ConsumerWidget {
   }
 }
 
-/// Teal dot that fades in when [visible] and fades out when not.
-/// No pulsing — steady while shown.
-class _SpeakingDot extends StatelessWidget {
-  final bool visible;
-  const _SpeakingDot({required this.visible});
-
-  @override
-  Widget build(BuildContext context) {
-    return AnimatedOpacity(
-      opacity: visible ? 1.0 : 0.0,
-      duration: HollowDurations.fast,
-      child: Padding(
-        padding: const EdgeInsets.only(left: 2),
-        child: Container(
-          width: 7,
-          height: 7,
-          decoration: const BoxDecoration(
-            color: Colors.teal,
-            shape: BoxShape.circle,
-          ),
-        ),
-      ),
-    );
-  }
-}
+// The speaking cue for a participant row is an outline AROUND the avatar
+// (SpeakingBorder), not a separate dot — see _VoiceParticipantRow.

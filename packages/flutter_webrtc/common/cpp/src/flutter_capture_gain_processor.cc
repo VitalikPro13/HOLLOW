@@ -704,9 +704,54 @@ void FlutterCaptureGainProcessor::Process(int num_bands, int /*num_frames*/,
   }
 }
 
+// Capture level meter decay: how fast the peak-hold falls once you stop
+// talking. 40 dB/s empties the hold in ~1.5 s from a speech peak, which is
+// slow enough that a ~5 Hz UI poll never misses a syllable and fast enough
+// that the indicator drops with the voice rather than trailing it.
+constexpr float kLevelDecayDbPerFrame = 0.4f;  // 40 dB/s at 10 ms frames
+constexpr float kLevelFloorDb = -100.0f;
+
+// Frame RMS -> decaying peak-hold, in dBFS. Runs in BOTH enhance modes and
+// while muted: the caller decides what mute means (the app already gates the
+// speaking indicator on its own mute flag, and freezing the meter here would
+// strand it at the last pre-mute value).
+//
+// Measured right after the denoiser and before the chain, so the number is
+// the voice as captured — independent of where the servo has currently set
+// the trim, which by design drives every mic to the same output level and
+// would flatten exactly the differences a VAD needs.
+void FlutterCaptureGainProcessor::MeasureCaptureLevel(int num_bands,
+                                                      int buffer_size,
+                                                      const float* buffer) {
+  // Same shape rule as the chain below: a fullband mono frame is the real
+  // capture; anything else, measure the first band/channel segment only.
+  const bool fullband_mono = buffer_size == sample_rate_ / 100;
+  const int seg_len = fullband_mono
+                          ? buffer_size
+                          : (num_bands > 1 ? buffer_size / num_bands
+                                           : buffer_size);
+  float held = level_db_.load(std::memory_order_relaxed);
+  held -= kLevelDecayDbPerFrame;
+  if (seg_len > 0) {
+    double sumsq = 0.0;
+    for (int i = 0; i < seg_len; ++i) {
+      const double v = static_cast<double>(buffer[i]);
+      sumsq += v * v;
+    }
+    const float rms =
+        static_cast<float>(std::sqrt(sumsq / static_cast<double>(seg_len)));
+    const float rms_db =
+        20.0f * std::log10(std::max(rms, kLogFloor) / kFullScale);
+    if (rms_db > held) held = rms_db;  // instant attack
+  }
+  if (held < kLevelFloorDb) held = kLevelFloorDb;
+  level_db_.store(held, std::memory_order_relaxed);
+}
+
 void FlutterCaptureGainProcessor::ProcessChain(int num_bands, int buffer_size,
                                                float* buffer) {
   ProcessDfn(num_bands, buffer_size, buffer);
+  MeasureCaptureLevel(num_bands, buffer_size, buffer);
   const float gain = gain_.load(std::memory_order_relaxed);
   const bool enhance = enhance_.load(std::memory_order_relaxed);
   const bool dynamic = dynamic_.load(std::memory_order_relaxed);

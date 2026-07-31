@@ -10,6 +10,7 @@ import 'package:hollow/src/core/providers/speaking_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
+import 'package:hollow/src/ui/components/speaking_border.dart';
 import 'package:hollow/src/ui/components/call_duration_text.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/share_volume_control.dart';
@@ -226,7 +227,14 @@ class _MobileVoiceChannelRouteState
     // cluster, never this whole voice-channel Scaffold.
     return Center(
       child: Consumer(builder: (context, ref, _) {
-        final speakingSet = ref.watch(vcSpeakingProvider);
+        // Self comes from the dedicated local flag and is re-keyed under the
+        // id THIS list uses. The set is keyed by routable DEVICE ids, while
+        // the self entry above is inserted as the MASTER id — which is why a
+        // plain membership test never lit our own avatar.
+        final speakingSet = {
+          ...ref.watch(vcSpeakingProvider),
+          if (ref.watch(vcLocalSpeakingProvider)) localPeerId,
+        };
         return MobileClusteredAvatars(
           participants: participants,
           speakingSet: speakingSet,
@@ -431,16 +439,35 @@ class _MobileVoiceChannelRouteState
                 height: tileH,
                 child: ClipRRect(
                   borderRadius: BorderRadius.circular(hollow.radiusMd),
-                  child: renderer != null
-                      ? RepaintBoundary(
-                          child: RTCVideoView(
-                            renderer,
-                            mirror: isLocal && vcState.isFrontCamera,
-                            objectFit: RTCVideoViewObjectFit
-                                .RTCVideoViewObjectFitCover,
-                          ),
-                        )
-                      : Container(color: hollow.surface),
+                  child: Stack(
+                    fit: StackFit.expand,
+                    children: [
+                      renderer != null
+                          ? RepaintBoundary(
+                              child: RTCVideoView(
+                                renderer,
+                                mirror: isLocal && vcState.isFrontCamera,
+                                objectFit: RTCVideoViewObjectFit
+                                    .RTCVideoViewObjectFitCover,
+                              ),
+                            )
+                          : Container(color: hollow.surface),
+                      // Parity with the desktop VC grid: the tile rim lights
+                      // while that participant talks. Self reads the local
+                      // flag; see [vcLocalSpeakingProvider].
+                      Consumer(builder: (context, ref, _) {
+                        final speaking = isLocal
+                            ? ref.watch(vcLocalSpeakingProvider)
+                            : ref.watch(vcSpeakingProvider
+                                .select((s) => s.contains(peerId)));
+                        return SpeakingRing(
+                          isSpeaking: speaking,
+                          borderRadius:
+                              BorderRadius.circular(hollow.radiusMd),
+                        );
+                      }),
+                    ],
+                  ),
                 ),
               );
             }).toList(),

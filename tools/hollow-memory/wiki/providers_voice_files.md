@@ -23,7 +23,7 @@ All fields are immutable; updates go through `copyWith()`.
 | `isMuted` | `bool` | `false` | Local mic muted. |
 | `isDeafened` | `bool` | `false` | Local deafened (muted + no audio output). |
 | `peerAudioStates` | `Map<String, PeerAudioState>` | `{}` | Remote peer mute/deafen state, keyed by peer_id. |
-| (speaking) | — | — | MOVED (2026-07): speaking peers live in `vcSpeakingProvider` (`speaking_provider.dart`, Set<String> with setEquals guard) so 1-4Hz VAD flips don't rebuild every voiceChannelProvider watcher. Reset alongside `clearCurrent`. |
+| (speaking) | — | — | MOVED (2026-07): REMOTE speaking peers live in `vcSpeakingProvider` (`speaking_provider.dart`, Set<String> with setEquals guard) so 1-4Hz VAD flips don't rebuild every voiceChannelProvider watcher; OUR OWN speaking is `vcLocalSpeakingProvider` (bool) — the set is DEVICE-id keyed and self tests silently missed (issue #37). Both reset alongside `clearCurrent`. |
 | `peerVolumes` | `Map<String, double>` | `{}` | Per-peer volume overrides, 0.0-2.0 range (default 1.0). |
 | `voiceMode` | `String` | `'mesh'` | Current topology: `"mesh"` (direct PCs to all) or `"gossip"` (PCs to neighbors only). |
 | `gossipNeighbors` | `Set<String>` | `{}` | Peer IDs of gossip neighbors (gossip mode only). |
@@ -41,7 +41,7 @@ All fields are immutable; updates go through `copyWith()`.
 - `getParticipants(serverId, channelId)` -- returns `Set<String>` of peer IDs in a specific channel.
 - `isInVoiceChannel` -- true if `currentChannelId != null`.
 - `getPeerAudioState(peerId)` -- returns `PeerAudioState` (defaults to unmuted/undeafened).
-- (speaking checks: `ref.watch(vcSpeakingProvider.select((s) => s.contains(peerId)))` — no longer on VoiceChannelState.)
+- (speaking checks: remote `ref.watch(vcSpeakingProvider.select((s) => s.contains(peerId)))`, self `ref.watch(vcLocalSpeakingProvider)` — no longer on VoiceChannelState. NEVER membership-test the set for ourselves.)
 - `getPeerVolume(peerId)` -- returns saved volume or 1.0.
 - `isScreenShareActive` -- true if any local or remote screen share is active.
 - `isCameraActive` -- true if any local or remote camera is active.
@@ -97,7 +97,7 @@ Called by event_provider after the Rust event arrives. This is the real initiali
 4. Loads audio quality preset (bitrate, stereo) from `audioQualityProvider`.
 5. Loads mic gain from `micGainProvider` (default 1.0 = "50%", key `mic_gain_v2`) plus `voiceEnhanceProvider` / `voiceEnhanceStrengthProvider` (→ `enhanceStrengthToMakeupDb`) / `voiceEnhanceDynamicProvider` into the service fields. Adds `ref.listen` on all four for live mid-session updates (`updateMicGain` / `updateVoiceEnhance` / `updateVoiceEnhanceStrength` / `updateVoiceEnhanceDynamic`).
 6. Wires service callbacks:
-   - `onSpeakingChanged` -- writes `vcSpeakingProvider` (NOT state — see speaking_provider.dart).
+   - `onSpeakingChanged(Set<String> remotePeers, bool localSpeaking)` -- writes `vcSpeakingProvider` + `vcLocalSpeakingProvider` (NOT state — see speaking_provider.dart).
    - `onPeerConnected` -- when an audio PC connects, sends screen share offer if local is sharing (deferred send to ensure MLS is ready).
    - `onRemoteVideoChanged` -- manages `_remoteCameraRenderers` map and updates `peerCameraOn` state.
 6. Calls `_service.startAudio(serverId, channelId)`.
@@ -690,6 +690,11 @@ Denoise at the HEAD of the native capture post-processor (post-AEC, the Krisp sl
 - **Native (ABI v3):** `rust/hollow_dfn` — `EngineKind` (0=RNNoise, 1=DFN3, never renumber), `Adapter` (direct 48k, 16k polyphase resample pair in `resample.rs`, dormant 3-band merge/split in `split_band.rs` — a line-by-line WebRTC ThreeBandFilterBank port, C++-oracle-verified, ~12 dB round-trip SNR is the bank's own ceiling) + `hollow_core/src/dfn_ffi.rs` (`hollow_dfn_create_engine`/`process_ex`/`last_vad`; rc 4 = unsupported shape → formatOk latch, NOT bail). Per-port runtime binding unchanged (GetModuleHandleW / own dlopen / RTLD_DEFAULT / DfnBridge JNI). Realtime watchdog (EMA >6 ms → latched session bypass). DSP porting trap: usize index arithmetic from C++ needs `wrapping_sub` — a trailing negative intermediate panics in DEBUG builds only (phones under `flutter run`).
 - **RNNoise VAD → chain speech gate:** the engine's free per-frame voice probability (via `hollow_dfn_last_vad`, `vad_presence_` in each port) REPLACES the upward-compression stage's SNR+modulation presence while actively denoising — smoothstep kVadZeroProb 0.40 .. kVadFullProb 0.75 (3 ports, keep in sync) — breath (~0.1–0.4) no longer gets boosted. Fallback to the legacy gates on -1 (AI-NS off / DFN3 / bailed); legacy gate STATE stays warm for converged mid-call fallback. Downward gate untouched.
 - **Diagnostics (iron rule: frames>0 or the field test didn't happen):** `Helper.getNoiseSuppressAiActive()` → `available/enabled/ready/bailed/formatOk/active` + `frames/emaMs/engine/vad` + raw shape `rate/channels/bands/bufferSize` + performance sentinels `chainEmaMs/captureGaps/worstGapMs` (2026-07-18: smoothed WHOLE-chain cost per 10 ms frame, and >30 ms inter-Process() gap count/worst — the release-reliable surface for the native audio sentinels); services log the map at every capture and reconcile into hollow_debug.log. `vad: -1` = the chain gate is running on fallback gating. Reference 48k-fullband chain cost ≈3.1 ms EMA (Pixel), 16k Windows ≈0.09 ms.
+- **Capture level meter → speaking indicators (2026-07-31, issue #37, 3 ports KEEP IN SYNC):** `MeasureCaptureLevel()` runs in `ProcessChain()` right after the denoiser and BEFORE the chain — frame RMS into a decaying peak-hold (40 dB/s), dBFS, in an atomic `level_db_` (-100 = silence/no frames yet). Surfaced by `Helper.getCaptureLevel()` → `{levelDb, vad}` (its OWN method channel, not the status map — it is polled ~5 Hz during a call). Consumed by `LocalSpeakingDetector` (`lib/src/core/services/local_speaking_detector.dart`), which prefers the DFN/RNNoise `vad` when running and otherwise thresholds `levelDb` against `speakingFloorDb = -45`; both thresholds are DART constants so they retune without a native rebuild.
+  - Measured pre-chain deliberately: post-chain the servo drives every mic to the same -16 dBFS target and flattens the discrimination a VAD needs.
+  - **NEVER read the LOCAL level from getStats** — `audioLevel` is only specified on `media-source` and `inbound-rtp`; Windows reports `outbound-rtp.audioLevel = null` (log-verified). Remote peers still come from `inbound-rtp` and are fine. The pre-2026-07-31 `record`-package meter opened a SECOND mic handle and failed outright on both PipeWire (`parecord` absent) and Vitalik's Windows box (`No audio recording device was found`).
+  - **Known limit:** alone in a channel there is no PeerConnection, libwebrtc never starts the ADM, so no frames reach the meter and the self indicator stays dark. Our `RTCAudioDevice` wrapper exposes no `StartRecording`, so activating it means a wider libwebrtc wrapper or a throwaway loopback PC — judged not worth it.
+  - Harness-verifiable without a device build: compile the real `.cc` with the two documented `hollow_dfn` stubs; a -20 dBFS sine must read -23.01 dBFS and the hold must fall 4 dB per 100 ms.
 - **Performance sentinels in the ports (2026-07-18, 3 ports KEEP IN SYNC):** `Process()` is now a thin wrapper (capture-gap detector + whole-chain cost EMA, log-once latches, never bails) around the renamed `ProcessChain()`; audio-track ops go through `runAudioTrackOp()` (Java) / `HollowRunAudioTrackOp()` (darwin) / `HollowAudioOpQueue` (desktop C++, added 2026-07-19 with the dispose-path fix) which log enqueue→run >500 ms once per episode. Full map: memory `project_perf_sentinels`.
 
 ## Share-Audio Level: ShareAudioLevel Bus, Ducking, Servo Freezes (2026-07-17)

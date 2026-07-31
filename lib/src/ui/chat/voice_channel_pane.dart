@@ -367,10 +367,13 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
     final peerProfile =
         ref.watch(profileProvider.select((p) => p[displayId]));
     final name = isLocal ? 'You' : displayNameForPeer(peerProfile, displayId);
-    // Membership-select: this tile only rebuilds when ITS peer's speaking bit
-    // flips, not on every VAD change in the channel.
-    final isSpeaking =
-        ref.watch(vcSpeakingProvider.select((s) => s.contains(peerId)));
+    // Our own tile reads the dedicated local flag; remote tiles membership-
+    // select so a tile only rebuilds when ITS peer's bit flips. Testing the
+    // set for OURSELVES silently missed — it is keyed by routable device ids
+    // while this tile may hold the master id.
+    final isSpeaking = isLocal
+        ? ref.watch(vcLocalSpeakingProvider)
+        : ref.watch(vcSpeakingProvider.select((s) => s.contains(peerId)));
 
     return GestureDetector(
       onTap: canTap

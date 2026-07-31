@@ -153,6 +153,12 @@ public class CaptureGainProcessor
     // Crackle insurance.
     private static final float DENORMAL = 1e-15f;
     private static final float LOG_FLOOR = 1e-9f;
+    // Capture level meter (issue #37): how fast the peak-hold falls once you
+    // stop talking. 40 dB/s empties it in ~1.5 s from a speech peak — slow
+    // enough that a ~5 Hz UI poll never misses a syllable, fast enough that
+    // the indicator drops with the voice. KEEP IN SYNC with the other ports.
+    private static final float LEVEL_DECAY_DB_PER_FRAME = 0.4f;
+    private static final float LEVEL_FLOOR_DB = -100.0f;
 
     private static final int MAX_CHANNELS = 2;
     private static final int NUM_EQ_STAGES = 7; // hp1, hp2, shelf, 4 peaks
@@ -194,6 +200,10 @@ public class CaptureGainProcessor
     private float vadPresence = -1f;
     // Status-getter diagnostic mirror.
     private volatile float dfnVad = -1f;
+    // Capture loudness for the speaking indicator (issue #37): decaying
+    // peak-hold of the frame RMS in dBFS. Single audio-thread writer;
+    // the platform thread reads it via captureLevel().
+    private volatile float levelDb = -100f;
     // -- Performance sentinels (see process()). Quiet by default: each
     // anomaly logs ONCE (latched boolean); counters ride the status map.
     // volatile: single audio-thread writer, status getter reads from the
@@ -377,6 +387,20 @@ public class CaptureGainProcessor
             }
             dfnCreateInFlight.set(false);
         }, "hollow-dfn-load").start();
+    }
+
+    /**
+     * Live mic loudness for the speaking indicator (issue #37):
+     * {levelDb: decaying peak-hold of the capture RMS in dBFS, -100 =
+     * silence, vad: DFN/RNNoise voice probability 0..1, -1 when the
+     * denoiser is off}. Polled several times a second during a call, so it
+     * stays two volatile reads and is NOT folded into the status map.
+     */
+    public java.util.Map<String, Object> captureLevel() {
+        final java.util.HashMap<String, Object> res = new java.util.HashMap<>();
+        res.put("levelDb", (double) levelDb);
+        res.put("vad", (double) dfnVad);
+        return res;
     }
 
     /** DFN status snapshot for the Dart WebRTC-NS fallback logic. */
@@ -570,6 +594,34 @@ public class CaptureGainProcessor
      * is a thin sentinel wrapper around this so the whole-chain cost is
      * measured across every early return.
      */
+    /**
+     * Capture level meter — port of FlutterCaptureGainProcessor::
+     * MeasureCaptureLevel. Frame RMS into a decaying peak-hold, dBFS,
+     * measured after the denoiser and before the chain so it tracks the
+     * voice rather than the servo's output target. Feeds the speaking
+     * indicator (issue #37). KEEP THE CONSTANTS IN SYNC with the other ports.
+     */
+    private void measureCaptureLevel(int numBands, FloatBuffer fb, int count) {
+        final boolean fullbandMono = count == sampleRate / 100;
+        final int segLen =
+                fullbandMono ? count : (numBands > 1 ? count / numBands : count);
+        float held = levelDb - LEVEL_DECAY_DB_PER_FRAME;
+        if (segLen > 0) {
+            double sumsq = 0.0;
+            for (int i = 0; i < segLen; i++) {
+                final double v = fb.get(i);
+                sumsq += v * v;
+            }
+            final float rms = (float) Math.sqrt(sumsq / (double) segLen);
+            final float rmsDb = (float) (20.0
+                    * Math.log10(Math.max(rms, LOG_FLOOR) / FULL_SCALE));
+            if (rmsDb > held) {
+                held = rmsDb;  // instant attack
+            }
+        }
+        levelDb = Math.max(held, LEVEL_FLOOR_DB);
+    }
+
     private void processChain(int numBands, int numFrames, ByteBuffer buffer) {
         final float g = gain;
         final boolean enh = enhance;
@@ -590,6 +642,7 @@ public class CaptureGainProcessor
         // AI noise suppression (DFN3) — HEAD of the chain, post-APM-AEC,
         // both enhance modes AND the legacy path (see the C++ port).
         maybeProcessDfn(numBands, buffer, count);
+        measureCaptureLevel(numBands, fb, count);
 
         // Layout truth (2026-07-18 Pixel field test — the CRITICAL note in
         // maybeProcessDfn has the wrapper-source receipts): the buffer is

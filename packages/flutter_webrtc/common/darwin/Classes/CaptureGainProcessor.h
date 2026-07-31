@@ -71,6 +71,13 @@ NS_ASSUME_NONNULL_BEGIN
  *  ready/bailed/formatOk/active (NSNumber bools). */
 - (NSDictionary<NSString *, NSNumber *> *)noiseSuppressAiStatus;
 
+/** Live mic loudness for the speaking indicator (issue #37):
+ *  {levelDb: decaying peak-hold of the capture RMS in dBFS, -100 = silence,
+ *   vad: DFN/RNNoise voice probability 0..1, -1 when the denoiser is off}.
+ *  Polled several times a second during a call — two atomic loads, nothing
+ *  else attached, which is why it is not part of noiseSuppressAiStatus. */
+- (NSDictionary<NSString *, NSNumber *> *)captureLevel;
+
 @end
 
 NS_ASSUME_NONNULL_END

@@ -11,7 +11,12 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/archive/shared/archive_shared_widgets.dart';
 import 'package:hollow/src/ui/chat/channel_message_bubble.dart';
 import 'package:hollow/src/ui/chat/chat_pane.dart'
-    show shouldGroup, shouldShowDateSeparator, DateSeparator;
+    show
+        shouldGroup,
+        shouldShowDateSeparator,
+        DateSeparator,
+        chatSelectionArea,
+        selectionMustBeScopedToRows;
 import 'package:hollow/src/ui/chat/message_action_bar.dart';
 import 'package:hollow/src/ui/chat/message_bubble.dart';
 import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
@@ -409,6 +414,13 @@ class _ArchiveMessageListCoreState<T>
       );
     }
 
+    // Issue #35: the same scaled-viewport selection bug the live panes hit —
+    // wrapping the SelectionArea around a scrolling list makes a click jump
+    // the viewport and an edge drag never stop. See
+    // [selectionMustBeScopedToRows].
+    final perRowSelection =
+        widget.desktopChrome && selectionMustBeScopedToRows(context);
+
     // Reading surface: honours the chat text size like the live panes do.
     final Widget list = ChatTextScale(
       child: ScrollablePositionedList.builder(
@@ -467,13 +479,14 @@ class _ArchiveMessageListCoreState<T>
           // Platform action wrapper (hover actions / long-press).
           bubble = widget.actionWrapper(context, msg, bubble);
 
-          return Column(
+          final row = Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               if (showDate) DateSeparator(date: widget.timestampOf(msg)),
               bubble,
             ],
           );
+          return perRowSelection ? chatSelectionArea(child: row) : row;
         },
       ),
     );
@@ -496,10 +509,9 @@ class _ArchiveMessageListCoreState<T>
                   }
                   return false;
                 },
-                child: SelectionArea(
-                  contextMenuBuilder: (_, _) => const SizedBox.shrink(),
-                  child: list,
-                ),
+                child: perRowSelection
+                    ? list
+                    : chatSelectionArea(child: list),
               ),
             ),
           ),

@@ -450,6 +450,11 @@ static double HollowDfnNowMs(void) {
   float _vadPresence;
   // Status-getter diagnostic mirror.
   _Atomic(float) _dfnVad;
+  // Capture loudness for the speaking indicator (issue #37): decaying
+  // peak-hold of the frame RMS in dBFS. Single audio-thread writer, read
+  // from the platform thread by getCaptureLevel. KEEP IN SYNC with the C++
+  // and Java ports.
+  _Atomic(float) _levelDb;
   BOOL _dfnFormatLogged;
   // -- Performance sentinels (see audioProcessingProcess:). Quiet by
   // default: each anomaly logs ONCE (latched BOOL); counters ride the
@@ -507,6 +512,7 @@ static double HollowDfnNowMs(void) {
     atomic_init(&_lastChannels, 0);
     _vadPresence = -1.0f;
     atomic_init(&_dfnVad, -1.0f);
+    atomic_init(&_levelDb, -100.0f);
     _dfnFormatLogged = NO;
     atomic_init(&_chainMsEma, 0.0f);
     atomic_init(&_chainFrames, 0);
@@ -579,6 +585,14 @@ static double HollowDfnNowMs(void) {
         atomic_store_explicit(&strongSelf->_dfnCreateInFlight, NO,
                               memory_order_release);
       });
+}
+
+- (NSDictionary<NSString *, NSNumber *> *)captureLevel {
+  return @{
+    @"levelDb" : @((double)atomic_load_explicit(&_levelDb,
+                                                memory_order_relaxed)),
+    @"vad" : @((double)atomic_load_explicit(&_dfnVad, memory_order_relaxed)),
+  };
 }
 
 - (NSDictionary<NSString *, NSNumber *> *)noiseSuppressAiStatus {
@@ -899,6 +913,32 @@ static double HollowDfnNowMs(void) {
 // The actual per-frame chain (AI-NS + gain/enhance stages).
 // audioProcessingProcess: is a thin sentinel wrapper around this so the
 // whole-chain cost is measured across every early return.
+// Capture level meter — port of FlutterCaptureGainProcessor::
+// MeasureCaptureLevel. Frame RMS into a decaying peak-hold, dBFS, measured
+// after the denoiser and before the chain so the number tracks the voice
+// rather than the servo's output target. Feeds the speaking indicator
+// (issue #37). Keep the constants in sync with the C++ port.
+- (void)measureCaptureLevel:(RTC_OBJC_TYPE(RTCAudioBuffer) *)audioBuffer
+                     frames:(int)frames {
+  static const float kLevelDecayDbPerFrame = 0.4f;  // 40 dB/s at 10 ms
+  static const float kLevelFloorDb = -100.0f;
+  float held = atomic_load_explicit(&_levelDb, memory_order_relaxed);
+  held -= kLevelDecayDbPerFrame;
+  const float *samples = [audioBuffer rawBufferForChannel:0];
+  if (samples != NULL && frames > 0) {
+    double sumsq = 0.0;
+    for (int i = 0; i < frames; i++) {
+      const double v = (double)samples[i];
+      sumsq += v * v;
+    }
+    const float rms = (float)sqrt(sumsq / (double)frames);
+    const float rmsDb = 20.0f * log10f(fmaxf(rms, kLogFloor) / kFullScale);
+    if (rmsDb > held) held = rmsDb;  // instant attack
+  }
+  if (held < kLevelFloorDb) held = kLevelFloorDb;
+  atomic_store_explicit(&_levelDb, held, memory_order_relaxed);
+}
+
 - (void)processChain:(RTC_OBJC_TYPE(RTCAudioBuffer) *)audioBuffer {
   const float gain = atomic_load_explicit(&_gain, memory_order_relaxed);
   const BOOL enhance = atomic_load_explicit(&_enhance, memory_order_relaxed);
@@ -916,6 +956,7 @@ static double HollowDfnNowMs(void) {
   // only 48 kHz mono 10 ms frames are processable; anything else passes
   // through and flips the format flag for the Dart fallback logic.
   [self maybeProcessDfn:audioBuffer frames:frames channels:channels];
+  [self measureCaptureLevel:audioBuffer frames:frames];
 
   if (!enhance) {
     // Legacy path — identical to the shipped flat-gain processor.

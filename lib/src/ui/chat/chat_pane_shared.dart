@@ -166,6 +166,44 @@ Widget gifAwareImage(String path, {double? width, double? height}) =>
         : Image.file(File(path),
             width: width, height: height, fit: BoxFit.cover);
 
+/// Whether a [SelectionArea] wrapped AROUND a scrolling message list would
+/// misbehave, so it must be scoped to the ROWS instead (issue #35).
+///
+/// Upstream cause, not ours: `_ScrollableSelectionContainerDelegate` (Flutter
+/// 3.44 scrollable.dart) infers the selection edge by adding the scroll delta
+/// in LOCAL space — `box.localToGlobal(local.translate(deltaToOrigin))` — then
+/// subtracting the same delta in GLOBAL space. Our root `UiScale` transform
+/// sits between the two, so the round trip leaves an error of
+/// `scrollOffset * (scale - 1)`: exactly zero at 100%, and growing with how far
+/// back the conversation is scrolled. Once that phantom edge lands in the 100px
+/// auto-scroll zone, `EdgeDraggingAutoScroller` starts — and nothing in the
+/// framework stops it on pointer-up (only a `pending` child result or `dispose`
+/// calls `stopAutoScroll`), so it keeps running after the mouse is released.
+/// A plain left-click jumped the viewport; a drag toward the top edge never
+/// stopped. Long conversations full of stickers and GIFs scroll furthest,
+/// which is why the report singled them out.
+///
+/// Scoping selection to the row removes the Scrollable from between the
+/// `SelectableRegion` and the selectables, so that delegate never exists. The
+/// cost is cross-message drag-selection, so it is spent ONLY where the bug is
+/// real: at 100% the list keeps one SelectionArea and today's behaviour.
+/// Delete this and go back to the unconditional wrap once upstream fixes the
+/// transform math — guarded by test/widget/chat_selection_autoscroll_test.dart.
+bool selectionMustBeScopedToRows(BuildContext context) {
+  final scale = UiScaleInfo.maybeOf(context)?.effective ?? 1.0;
+  return (scale - 1.0).abs() >= 0.001;
+}
+
+/// The chat surfaces' [SelectionArea] — no context menu (message actions own
+/// that). [key] must forward the wrapped row's key when this is used per-row
+/// inside a list builder: the wrapper is the widget the sliver sees, and
+/// `findChildIndexCallback` reads that key.
+Widget chatSelectionArea({Key? key, required Widget child}) => SelectionArea(
+      key: key,
+      contextMenuBuilder: (_, _) => const SizedBox.shrink(),
+      child: child,
+    );
+
 /// The reversed chat list shell — this is where the vendored-list iron rules
 /// live for BOTH panes (see feedback_reverse_chat_lists): `reverse: true`
 /// with the newest message at builder index 0 pinned to the bottom edge (no
@@ -192,6 +230,10 @@ Widget reversedChatList({
   bool selectionArea = true,
   EdgeInsets padding = const EdgeInsets.symmetric(vertical: HollowSpacing.sm),
 }) {
+  // Issue #35: scoped to the rows when scaled — see
+  // [selectionMustBeScopedToRows].
+  final perRowSelection = selectionArea && selectionMustBeScopedToRows(context);
+
   final list = ScrollConfiguration(
     behavior: ScrollConfiguration.of(context).copyWith(scrollbars: false),
     child: ScrollablePositionedList.builder(
@@ -212,16 +254,20 @@ Widget reversedChatList({
         if (i == null) return null;
         return itemCount - 1 - i;
       },
-      itemBuilder: itemBuilder,
+      itemBuilder: perRowSelection
+          ? (context, revIndex) {
+              final row = itemBuilder(context, revIndex);
+              // Forward the row's ValueKey: the wrapper is the widget the
+              // sliver sees, and findChildIndexCallback above reads that key
+              // to MOVE rows across index slots instead of remounting them
+              // (guarded by chat_list_element_reuse_test.dart).
+              return chatSelectionArea(key: row.key, child: row);
+            }
+          : itemBuilder,
     ),
   );
-  if (!selectionArea) return ChatTextScale(child: list);
-  return ChatTextScale(
-    child: SelectionArea(
-      contextMenuBuilder: (_, _) => const SizedBox.shrink(),
-      child: list,
-    ),
-  );
+  if (!selectionArea || perRowSelection) return ChatTextScale(child: list);
+  return ChatTextScale(child: chatSelectionArea(child: list));
 }
 
 /// One keyed chat-row shell: optional date separator above, extra top padding

@@ -588,11 +588,12 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     // Wire VAD callback. Writes go to the dedicated vcSpeakingProvider (NOT
     // VoiceChannelState) so a speaking flip only rebuilds the glow consumers,
     // never every voiceChannelProvider watcher.
-    svc.onSpeakingChanged = (speaking) {
+    svc.onSpeakingChanged = (speaking, localSpeaking) {
       ref.read(vcSpeakingProvider.notifier).set(speaking);
+      ref.read(vcLocalSpeakingProvider.notifier).set(localSpeaking);
       // Sidechain for share-audio ducking: anyone talking (self included)
       // pulls received share audio down.
-      ShareAudioLevel.setSpeaking(speaking.isNotEmpty);
+      ShareAudioLevel.setSpeaking(speaking.isNotEmpty || localSpeaking);
     };
 
     // Wire peer connected callback — send screen share offer once audio PC is ready.
@@ -1035,6 +1036,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     state = state.copyWith(clearCurrent: true);
     // Speaking state lives outside this state object — clear it with the rest.
     ref.read(vcSpeakingProvider.notifier).reset();
+    ref.read(vcLocalSpeakingProvider.notifier).reset();
   }
 
   void toggleMute() {

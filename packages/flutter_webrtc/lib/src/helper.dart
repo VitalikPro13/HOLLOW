@@ -237,6 +237,15 @@ class Helper {
   static Future<Map<String, dynamic>> getNoiseSuppressAiActive() =>
       NativeAudioManagement.getNoiseSuppressAiActive();
 
+  /// Live microphone loudness for speaking indicators (Hollow fork
+  /// addition): `levelDb` (decaying peak-hold of the capture RMS in dBFS,
+  /// -100 = silence) and `vad` (AI-denoiser voice probability 0..1, -1 when
+  /// it isn't running). Read off the capture post-processor, so it works
+  /// with no peer connected and on platforms whose getStats carries no
+  /// outgoing audio level. Empty map on web.
+  static Future<Map<String, dynamic>> getCaptureLevel() =>
+      NativeAudioManagement.getCaptureLevel();
+
   /// Start a native PCM player for received screen-share audio (Hollow fork,
   /// mobile). Plays 48 kHz stereo int16 PCM on the media output path, OUTSIDE
   /// the WebRTC voice session so the call's AEC/AGC can't mangle the shared

@@ -359,6 +359,16 @@ Additionally, `handle_send_file()` skips writing ciphertext to temp file and ski
 
 **Correct approach:** Use `showDialog(barrierColor: Colors.transparent, ...)` which creates a new route that sits above `SelectionArea` in the widget tree. The dialog route has its own gesture arena that does not conflict with `SelectionArea`.
 
+### Never wrap SelectionArea AROUND a scrolling message list
+
+**Rule:** Scope selection to the ROWS whenever the interface scale is not 100%. `reversedChatList` (and `archive_message_list.dart`, `guest_chat_pane.dart`) branch on `selectionMustBeScopedToRows(context)` and wrap each row in `chatSelectionArea()` instead of the list.
+
+**Why:** Flutter 3.44's `_ScrollableSelectionContainerDelegate` (`widgets/scrollable.dart`) infers the selection edge by adding the scroll delta in LOCAL space — `box.localToGlobal(local.translate(deltaToOrigin))` — then subtracting the same delta in GLOBAL space. Our root `UiScale` transform sits between the two, leaving an error of `scrollOffset * (scale - 1)`: exactly zero at 100%, growing with how far back the conversation is scrolled. Once that phantom edge lands in the 100px auto-scroll zone, `EdgeDraggingAutoScroller` starts, and NOTHING stops it on pointer-up (only a `pending` child result or `dispose` call `stopAutoScroll`). Issue #35: a plain left-click jumped the chat; a drag toward the top edge never stopped. Scoping selection to the row removes the Scrollable from between the `SelectableRegion` and the selectables, so the delegate never exists.
+
+**Cost:** no cross-message drag-selection, which is why it is spent ONLY when scaled — at 100% the list keeps one SelectionArea. Revert to the unconditional wrap once upstream fixes the transform math.
+
+**Testing it:** the list must be scrolled by DRAGGING. `ItemScrollController.jumpTo` re-anchors `ScrollablePositionedList` and leaves `position.pixels` near zero, and the error is proportional to exactly that number — a jumpTo-based setup reproduces nothing and gives a false all-clear. Guard: `test/widget/chat_selection_autoscroll_test.dart`.
+
 ### SelectionArea steals TextSpan taps
 
 **Rule:** Use `WidgetSpan` + `GestureDetector` instead of `TextSpan` with `recognizer` inside `SelectionArea`.

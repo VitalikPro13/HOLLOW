@@ -8,6 +8,7 @@ import 'package:flutter_webrtc/flutter_webrtc.dart';
 import '../../rust/api/network.dart' as network_api;
 import 'frame_cryptor_service.dart';
 import 'ice_route_probe.dart';
+import 'local_speaking_detector.dart';
 import 'remote_track_volume.dart';
 
 /// Log to hollow_debug.log (visible in release builds).
@@ -1090,6 +1091,7 @@ class VoiceService {
     _vadTimer?.cancel();
     _vadTimer = null;
     _prevEnergy.clear();
+    _localSpeakingDetector.reset();
     if (_localSpeaking || _remoteSpeaking) {
       _localSpeaking = false;
       _remoteSpeaking = false;
@@ -1097,29 +1099,62 @@ class VoiceService {
     }
   }
 
+  /// One-shot diagnostic: issue #37 showed the LOCAL speaking indicator never
+  /// lighting on Windows even with a peer connected, which points at getStats
+  /// simply not carrying an outgoing audio level on this platform (the spec
+  /// puts `audioLevel` on media-source and inbound-rtp; outbound-rtp is NOT
+  /// required to have it). Logged once per call so a single test run settles
+  /// what is actually available instead of another round of inference.
+  bool _vadStatsLogged = false;
+
+  /// Our own speaking state, from the native capture meter (issue #37).
+  final _localSpeakingDetector = LocalSpeakingDetector();
+
+  void _logVadStatsOnce(List<StatsReport> stats) {
+    if (_vadStatsLogged) return;
+    _vadStatsLogged = true;
+    final lines = <String>[];
+    for (final report in stats) {
+      if (report.values['kind'] != 'audio') continue;
+      if (report.type != 'media-source' &&
+          report.type != 'outbound-rtp' &&
+          report.type != 'inbound-rtp') {
+        continue;
+      }
+      lines.add('${report.type}: audioLevel=${report.values['audioLevel']} '
+          'totalAudioEnergy=${report.values['totalAudioEnergy']} '
+          'keys=${report.values.keys.join(",")}');
+    }
+    _log('[HOLLOW-VAD-DIAG] '
+        '${lines.isEmpty ? "no audio reports" : lines.join(" | ")}');
+  }
+
   Future<void> _pollVad() async {
     if (_pc == null) return;
-    bool newLocal = false;
     bool newRemote = false;
+
+    // LOCAL: the native capture meter, never getStats — see
+    // [LocalSpeakingDetector] for why. Muting is handled inside it.
+    bool newLocal = await _localSpeakingDetector.poll(muted: _isMuted);
 
     try {
       final stats = await _pc!.getStats();
+      _logVadStatsOnce(stats);
       for (final report in stats) {
-        // Local: try media-source first (has audioLevel on Android),
-        // fall back to outbound-rtp (has it on desktop).
-        if (!newLocal &&
-            report.type == 'media-source' &&
-            report.values['kind'] == 'audio') {
-          newLocal = _detectSpeech(report.values, 'out-local');
-        }
-        if (!newLocal &&
-            report.type == 'outbound-rtp' &&
-            report.values['kind'] == 'audio') {
-          newLocal = _detectSpeech(report.values, 'out-local');
-        }
+        // REMOTE: inbound-rtp genuinely carries audioLevel everywhere.
         if (report.type == 'inbound-rtp' &&
             report.values['kind'] == 'audio') {
           newRemote = _detectSpeech(report.values, 'in-remote');
+        }
+        // Fallback for a plugin build without the capture meter (an app
+        // updated ahead of its native side): the old getStats guess is
+        // better than an indicator that never lights.
+        if (!_localSpeakingDetector.hasMeter &&
+            !newLocal &&
+            !_isMuted &&
+            (report.type == 'media-source' || report.type == 'outbound-rtp') &&
+            report.values['kind'] == 'audio') {
+          newLocal = _detectSpeech(report.values, 'out-local');
         }
       }
     } catch (_) {}
