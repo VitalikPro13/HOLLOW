@@ -40,7 +40,7 @@ The sidebar uses two startup reveal animations from `StartupRevealScope`:
 - `sidebarReveal` at interval `(0.12, 0.30)` -- wraps the entire sidebar in a `RevealClip` with `Axis.horizontal` + `Alignment.centerLeft` so it clips open from the left edge.
 - `userBarReveal` at interval `(0.50, 0.60)` -- wraps the `UserBar` in a combined `FadeTransition` + `SlideTransition` (slides up from `Offset(0, 0.5)`).
 
-The main container is a `Container` with `hollow.surface` background color, a right `BorderSide` (vertical divider), and a `Column` of:
+The main container is a `Container` with `hollow.surface` background color, a right `BorderSide` (vertical divider), and — inside a `LayoutBuilder`, which measures the column so the banner header can size itself against it — a `Column` of:
 1. Header (animated crossfade between server name and "Direct Messages")
 2. Content area (animated crossfade between `_ServerContent` and `_HomeContent`)
 3. `VoiceChannelPanel` (always present, self-hides when not in a voice channel)
@@ -50,7 +50,15 @@ Both the header and the content use `AnimatedSwitcher` for crossfade transitions
 
 ## Header Area -- Server Name, Icons, and DM Label
 
-`file:ChannelSidebar._buildHeader()` renders a 48px-high `Container` with a bottom border. Inside is a `Row` containing:
+`file:ChannelSidebar._buildHeader(context, hollow, bannerHeight)` has two shapes:
+
+**No banner** (always in home/DM mode, and for servers with no banner bytes): a 48px-high `Container` with a bottom border, keyed `ValueKey('header-$label')`.
+
+**Banner header** (issue #25): a `SizedBox` of `bannerHeight`, keyed `ValueKey('header-$label-${banner.hash}')` so a re-upload crossfades even when the label is unchanged. Holds the `AnimatedGifImage` under a bottom-up scrim, with the name + action row overlaid.
+
+**`bannerHeaderHeight(available)` — why the banner height is not a constant (issue #37, 2026-07-31).** The interface zoom lays the app out at `viewport / scale`, so raising the zoom does not just magnify the sidebar, it SHORTENS it: on 1080p the sidebar column is ~905 logical px at 100% but only ~401 at 200%. A flat 120px banner therefore went from 13% of the column to 30%, and stacked with the voice panel over half the sidebar was chrome — which is why the reported 200% screenshot fits three channels. The function returns `min(120, max(72, available * 0.22))`; 120/0.22 ≈ 545, so it is INERT at any normal desktop height and engages only on a genuinely short column. Guarded by `test/widget/banner_header_test.dart`.
+
+Inside either shape is a `Row` containing:
 
 1. `TypewriterText` (from reveal_widgets) showing either the server name or "Direct Messages". Uses `HollowTypography.subheading`, `FontWeight.w600`, with `TextOverflow.ellipsis`. The typewriter animation is driven by `headerTextReveal` from `StartupRevealScope.interval(context, 0.25, 0.40)`.
 
@@ -201,13 +209,15 @@ For self, reads `vcState.isMuted` and `vcState.isDeafened` directly. For remote 
 - `isCameraOn` -- self: `vcState.isCameraOn`; remote: `vcState.peerCameraOn[peerId] ?? false`.
 
 **Row layout:**
-- `SpeakingAvatarOutline` wrapping `HollowAvatar` (18px) -- the speaking cue is an accent outline hugging the avatar, drawn OUTSIDE its edge and costing ZERO layout (see `speaking_border.dart`). It replaced a trailing teal `_SpeakingDot` in 2026-07: the cue now sits on the thing it identifies and a long display name cannot push it out of view.
-- Display name in `HollowTypography.caption`, `hollow.textSecondary`, with ellipsis overflow.
-- Trailing status icons (all 12px, with 2px left padding each):
+- `SpeakingAvatarOutline` wrapping `HollowAvatar` (`kVoiceParticipantAvatarSize` = 22px) -- the speaking cue is an accent outline hugging the avatar, drawn OUTSIDE its edge and costing ZERO layout (see `speaking_border.dart`). It replaced a trailing teal `_SpeakingDot` in 2026-07: the cue now sits on the thing it identifies and a long display name cannot push it out of view.
+- Display name in `HollowTypography.label` (13px), `hollow.textSecondary`, with ellipsis overflow.
+- Trailing status icons (all `kVoiceParticipantIconSize` = 14px, with `HollowSpacing.xxs` left padding each):
   - Screen sharing icon -- `LucideIcons.monitor`, green. Conditionally rendered.
   - Camera icon -- `LucideIcons.video`, `hollow.accent`. Conditionally rendered.
   - Muted icon -- `LucideIcons.micOff`, `hollow.error`. Conditionally rendered.
   - Deafened icon -- `LucideIcons.headphones`, `hollow.error`. Conditionally rendered.
+
+**Sizing rationale (issue #37, 2026-07-31):** these were 18px avatar / `caption` (11px) / 12px icons — the smallest thing in the app, sitting directly under a 14px channel name and beside 28px/12px member-panel rows. The interface zoom cannot correct that: it multiplies every size by the same factor, so 11-next-to-14 stays 11-next-to-14 at 200%. It was a RATIO problem inside the panel, not a scaling one. The constants live at the top of `channel_sidebar.dart` and are guarded by `test/widget/banner_header_test.dart`.
 
 **Right-click volume popup:**
 For remote peers (`isRemote`), `GestureDetector.onSecondaryTapUp` calls `_showVolumePopup()`.

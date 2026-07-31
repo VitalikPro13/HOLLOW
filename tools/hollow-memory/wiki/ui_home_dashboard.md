@@ -13,11 +13,15 @@ Source files:
 `home_dashboard.dart:HomeDashboard` is a `ConsumerWidget` rendering a three-column horizontal layout inside a `Container` with `hollow.background` color and `HollowSpacing.xl` padding on all sides.
 
 **Three columns:**
-- Left: `_ProfileColumn` — fixed width 240px
+- Left: `_ProfileColumn` — natural width 240px, inside a `_ScrollableColumn`
 - Center: `_RecentConversationsColumn` — `Expanded`, fills remaining space
-- Right: `_NetworkColumn` — fixed width 260px
+- Right: `_NetworkColumn` — natural width 260px, inside a `_ScrollableColumn`; DROPPED entirely below 720 logical px of dashboard width
 
 Columns are separated by 1px vertical dividers (`hollow.border` color) with `HollowSpacing.lg` horizontal padding on each side.
+
+**`dashboardColumnWidths(available)` — responsive widths (issue #37, 2026-07-31).** A `LayoutBuilder` sits OUTSIDE the padding (the function subtracts the padding and dividers itself). The interface zoom shrinks the viewport horizontally too (`window / scale`), and 240 + 260 of fixed column plus dividers does not fit at ~640 logical — 200% zoom on a 1280px window. Both side columns scale together (so the layout stays balanced instead of one collapsing) down to a floor of **0.85**, below which the Network column drops out rather than every card inside it breaking. The 0.85 floor is measured, not taste: at 0.62 the relay `StatBar`s, the stats rows and the conversation header all overflowed on their own — the columns fit at the cost of their contents. Dropping a column mirrors the member panel's existing width-driven auto-hide.
+
+**`_ScrollableColumn` — why the side columns scroll.** Only the centre column had a `ListView`; the side columns were plain `Column`s, so at high zoom (a 1596x991 window at 165% gives the dashboard ~580 logical px of height) the profile column's stats card and the network column's news + online counter were clipped by the shell's `ClipRect` with no scrollbar and no way down. Each side column is now `LayoutBuilder` > `Scrollbar` > `SingleChildScrollView` > `ConstrainedBox(minHeight: constraints.maxHeight)` > `IntrinsicHeight`. The `minHeight` + `IntrinsicHeight` pair is load-bearing: the network column contains a flexible `_NewsPanel`, and a flex child inside an unbounded scroll view is a hard error. The scrollbar uses the DEFAULT fade (matching the Recent Conversations list) — `thumbVisibility: true` pins it permanently and reads as a stuck UI element.
 
 **Startup reveal animations:** Each column gets a staggered fade + slide-up reveal via `StartupRevealScope.interval()`:
 - Left column: interval `(0.30, 0.55)`
@@ -51,7 +55,7 @@ When `StartupRevealScope.interval()` returns non-null, each column is wrapped in
    - Online (`isOnline && !amInvisible`): dot color `hollow.success`, pulse enabled, text "Online"
    - Offline: dot color `hollow.textSecondary`, no pulse, text "Offline"
 
-4. **Twitch badge (conditional):** `FutureBuilder<String?>` calling `twitch_api.twitchGetUsername()`. If username is non-null and non-empty, shows a tappable badge with Twitch purple (#9146FF) background at 15% opacity, `SimpleIcons.twitch` icon (11px), and username text (10px, w600). Tap opens `https://twitch.tv/$username` in external browser via `launchUrl`.
+4. **Twitch badge (conditional):** reads `_twitchUsernameProvider` (a file-private `FutureProvider` wrapping `twitch_api.twitchGetUsername()`). **Was a `FutureBuilder` with the future built inline in `build()`, which creates a new future — and so fires a fresh FFI call — on EVERY rebuild of a column that rebuilds on every connection-status tick.** The provider also routes a failure into `AsyncError` instead of throwing out of `build()`. If username is non-null and non-empty, shows a tappable badge with Twitch purple (#9146FF) background at 15% opacity, `SimpleIcons.twitch` icon (11px), and username text (10px, w600). Tap opens `https://twitch.tv/$username` in external browser via `launchUrl`.
 
 5. **Custom status text (conditional):** If `profile.status` is non-empty, displays italic text (12px) in `hollow.textSecondary`, center-aligned, max 2 lines with ellipsis.
 
@@ -151,7 +155,9 @@ If no accepted friends exist, shows "No friends added" caption.
 
 **Relay Server section:** `_SectionLabel` "RELAY SERVER" followed by `_RelayStatsCard`.
 
-**News section:** `_SectionLabel` "NEWS" followed by `Expanded` `_NewsPanel`.
+**News section:** `_SectionLabel` "NEWS" followed by `_NewsPanel` inside `Flexible` > `ConstrainedBox(minHeight: 140, maxHeight: 280)`.
+
+**Why not a bare `Expanded` (2026-07-31).** The panel is meant to absorb this column's slack and scroll its posts INTERNALLY, and with a loose `Flexible` fit it still does whenever there is room. The two bounds only matter under the column's outer scroll view: `IntrinsicHeight` makes every flex child contribute its FULL intrinsic height, so an unbounded `Expanded` contributed both posts un-scrolled, inflated the column past the viewport, and handed the scrolling to the OUTER bar even on a tall window — the panel then never collapsed into its own scrollbar. `maxHeight` caps that intrinsic contribution (`RenderConstrainedBox` runs the child's intrinsic through its constraints); `minHeight` stops the panel being squeezed to nothing on a short column. Verified by measuring `maxScrollExtent` on every `Scrollable`: at 1280x800 exactly one scrolls (the news panel), at 967x581 the column adds its own and the panel still scrolls internally.
 
 **Online Users (bottom):** Row with `LucideIcons.users` (13px), "Online" text, `_ShimmerDivider` (fills center), and `relayStats.onlineUsers` count (12px, w600).
 
@@ -324,9 +330,19 @@ Used for "Encrypted" (success green, `LucideIcons.shieldCheck`) and "Offline" (t
 2. **Add Friend button:** `HollowTooltip(message: 'Add Friend')` wrapping `HollowPressable` with `LucideIcons.userPlus` (18px, `hollow.textSecondary`). Tap calls `_showAddFriendDialog()`.
 3. Vertical divider: 1px wide, 24px tall, `hollow.border` color, `HollowSpacing.sm` horizontal margin.
 4. **Friends list (Expanded):** If `displayList` is empty, shows "No friends yet" caption. Otherwise, horizontal `ListView.builder` rendering `_FriendChip` widgets with `HollowSpacing.xs` horizontal padding.
+5. **Right-hand group** (each `HollowTooltip` > `HollowPressable`, 18px icon, accent when active):
+   - **Saved messages** — `LucideIcons.bookmark`. Active when `savedMessagesPeerIdProvider == selectedPeerProvider`. Tap calls `_toggleSavedMessages`.
+   - **Conferences** — `LucideIcons.video`. Active on `conferenceTabOpenProvider`. Tap toggles: `setShellTab(read, null)` when lit, else `conferenceProvider.notifier.openTab()`.
+   - **Help** — `LucideIcons.circleHelp`, toggles `helpPanelOpenProvider`.
+
+**Every strip button that lights up must also un-light (2026-07-31).** The accent colour reads as an on/off control, so pressing the lit button has to take you back out. Audit by ICON STATE, not by whether the thing it opens is a centre tab — Saved messages was the last hold-out and only ever selected, so pressing it again re-selected the same peer and looked dead. The two need different machinery for the same feel: **Conferences is a centre TAB layered over the selection**, so off = one `setShellTab(read, null)` and whatever was underneath reappears; **Saved messages IS the selection**, so there is nothing underneath and off has to mean Home. Pinned by `test/widget/friends_bar_toggle_test.dart`.
+
+**Saved-messages toggle (`_toggleSavedMessages`):** in split view with `focusedPane == 1` it forwards to `_selectFriend` (that press targets the right pane, so there is no global lit state to toggle). Otherwise, if `selectedPeerProvider == savedId` it calls `_clearToHome`, else `_selectFriend`.
+
+**`_clearToHome`:** the exact inverse of `_selectFriend`'s non-split branch — same providers, peer cleared instead of set. Deliberately does NOT close an open split: the press that lit the button didn't open one.
 
 **Friend selection (`_selectFriend`):** Checks `splitViewProvider` — if split mode is active and focus is on pane 1 (right), calls `navigateRightToPeer(peerId)`. Otherwise:
-- Sets `archiveTabOpenProvider` and `shareTabOpenProvider` to false
+- Calls `setShellTab(ref.read, null)` — closes every centre tab at once (see `feedback_shell_centre_tabs_exclusive`)
 - Sets `selectedPeerProvider` to peerId
 - Clears `selectedServerProvider`, `channelListProvider`, `selectedChannelProvider`, `serverSettingsOpenProvider`
 - Calls `unreadProvider.notifier.markDmSeen(peerId, null)`

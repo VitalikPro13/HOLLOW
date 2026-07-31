@@ -64,6 +64,11 @@ role renders as a chip like every other role (consistency rule).
 
 `UserBar` is a `ConsumerWidget` that renders the local user's identity and connection status at the bottom of the channel sidebar. It mirrors Discord's bottom-left user panel.
 
+### Layout and OS Text Scaling
+The bar is `BoxConstraints(minHeight: 52)` — **min-height, not a fixed 52** (the a11y Phase 3 chrome-bar pattern). Its label stack is capped at `MediaQuery.withClampedTextScaling(maxScaleFactor: 1.3)`, and the status word sits in a `Flexible` with ellipsis.
+
+Both of those were finished 2026-07-31. `app.dart` deliberately applies NO text-scale clamp on desktop ("full OS scaling already flows through"), so a Windows user with Accessibility > Text size at 125%+ was already running Hollow scaled with nothing verifying it — and this bar broke: 36px of horizontal overflow (the status word was a bare `Text` squeezed beside the avatar and three trailing icons in a 240px sidebar — it fired even at 1.0x with a long status like "Connecting…") and 2px vertical (name + status stacked in a hard `height: 52`). `FriendsBar`, `BottomBar` and `MemberPanel` were all measured clean at 2.0x. Pinned by `test/widget/desktop_text_scale_overflow_test.dart`.
+
 ### Providers Read
 - `identityProvider` — local peer ID + mnemonic
 - `overallConnectionProvider` — node + real relay-WS state; the ONLY source of the connection reading

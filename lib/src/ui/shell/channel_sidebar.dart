@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:math' as math;
 
 import 'package:hollow/src/ui/chat/hollow_link_utils.dart';
 
@@ -47,6 +48,60 @@ import 'package:hollow/src/ui/shell/voice_channel_panel.dart';
 import 'package:hollow/src/ui/sidebar/peer_card.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
+
+/// Full height of the server banner header (issue #25) when the sidebar has
+/// room for it. Below [kBannerHeaderMinHeight] worth of pressure it yields —
+/// see [bannerHeaderHeight].
+const double kBannerHeaderHeight = 120;
+
+/// The banner never shrinks past this: the server name + action icons still
+/// have to read, and the borderless fallback header is already 48.
+const double kBannerHeaderMinHeight = 72;
+
+/// Share of the sidebar column the banner may occupy once space is tight.
+/// 120/0.22 ≈ 545, so this is inert at any normal desktop height and only
+/// engages when the column is genuinely short.
+const double _kBannerHeaderMaxFraction = 0.22;
+
+/// How tall the banner header should be in a sidebar column of [available]
+/// logical pixels.
+///
+/// **Why this is not a constant.** The interface zoom lays the whole app out
+/// at `viewport / scale` (`ui_scale.dart`), so raising the zoom does not just
+/// magnify the sidebar — it *shortens* it. On 1080p the sidebar column is
+/// ~905 logical px at 100% but only ~401 at 200%, and a flat 120px banner
+/// goes from 13% of the column to 30% of it. Stack the voice panel on top of
+/// that and over half the sidebar is chrome, which is why issue #37's 200%
+/// screenshot fits three channels. A fixed slice of a viewport that shrinks
+/// with zoom is not a fixed slice — it grows.
+///
+/// Returns the full [kBannerHeaderHeight] whenever the column can afford it,
+/// so nothing changes at ordinary window sizes.
+double bannerHeaderHeight(double available) {
+  if (!available.isFinite || available <= 0) return kBannerHeaderHeight;
+  return math.min(
+    kBannerHeaderHeight,
+    math.max(kBannerHeaderMinHeight, available * _kBannerHeaderMaxFraction),
+  );
+}
+
+/// Avatar edge for a voice-channel participant row.
+///
+/// **Why this is not 18.** Issue #37: "the channel list on the left icons and
+/// names are ever so tiny". These rows were the smallest thing in the app —
+/// an 18px avatar under a 28px one everywhere else, and `caption` (11px) text
+/// directly beneath a `body` (14px) channel name. The interface zoom cannot
+/// fix that, because zoom multiplies every size by the same factor: 11-next-
+/// to-14 stays 11-next-to-14 at 200%. It was a RATIO problem inside the
+/// panel, not a scaling one. 22/13 keeps the rows subordinate to the channel
+/// name above them while landing in the same range as every other person row
+/// (member panel and chat both use 28px avatars with 13px names).
+const double kVoiceParticipantAvatarSize = 22;
+
+/// Status glyphs (screen share / camera / mute / deafen) on a participant
+/// row. Sized with the avatar above, not left at 12 — they carry state a user
+/// scans for at a glance, and they were the first thing to disappear.
+const double kVoiceParticipantIconSize = 14;
 
 /// Channel / DM sidebar (240px). Supports two modes:
 ///
@@ -145,52 +200,62 @@ class ChannelSidebar extends StatelessWidget {
           right: BorderSide(color: hollow.border),
         ),
       ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // Header — crossfade between server name and "Direct Messages"
-          AnimatedSwitcher(
-            duration: HollowDurations.fast,
-            child: _buildHeader(context, hollow),
-          ),
+      // The banner header is the only fixed-height slice of this column, and
+      // the column itself SHRINKS with the interface zoom (everything below
+      // `UiScale` lays out at `viewport / scale`). Measure what we actually
+      // got so the header can yield instead of eating the channel list —
+      // see `bannerHeaderHeight`.
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final bannerHeight = bannerHeaderHeight(constraints.maxHeight);
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // Header — crossfade between server name and "Direct Messages"
+              AnimatedSwitcher(
+                duration: HollowDurations.fast,
+                child: _buildHeader(context, hollow, bannerHeight),
+              ),
 
-          // Content — crossfade between server channels and home/DM view
-          Expanded(
-            child: AnimatedSwitcher(
-              duration: HollowDurations.normal,
-              switchInCurve: HollowCurves.enter,
-              switchOutCurve: HollowCurves.exit,
-              child: selectedServer != null
-                  ? _ServerContent(
-                      key: ValueKey('server-${selectedServer!.serverId}'),
-                      hollow: hollow,
-                      serverId: selectedServer!.serverId,
-                      channels: channels,
-                      selectedChannelId: selectedChannelId,
-                      onChannelSelected: onChannelSelected,
-                      onCreateChannel: onCreateChannel,
-                      canManageChannels: canManageChannels,
-                      channelLayoutJson: channelLayoutJson,
-                    )
-                  : _HomeContent(
-                      key: const ValueKey('home'),
-                      hollow: hollow,
-                      peers: peers,
-                      selectedPeerId: selectedPeerId,
-                      nodeStatus: nodeStatus,
-                      onPeerSelected: onPeerSelected,
-                      lastMessage: lastMessage,
-                      formatTime: formatTime,
-                    ),
-            ),
-          ),
+              // Content — crossfade between server channels and home/DM view
+              Expanded(
+                child: AnimatedSwitcher(
+                  duration: HollowDurations.normal,
+                  switchInCurve: HollowCurves.enter,
+                  switchOutCurve: HollowCurves.exit,
+                  child: selectedServer != null
+                      ? _ServerContent(
+                          key: ValueKey('server-${selectedServer!.serverId}'),
+                          hollow: hollow,
+                          serverId: selectedServer!.serverId,
+                          channels: channels,
+                          selectedChannelId: selectedChannelId,
+                          onChannelSelected: onChannelSelected,
+                          onCreateChannel: onCreateChannel,
+                          canManageChannels: canManageChannels,
+                          channelLayoutJson: channelLayoutJson,
+                        )
+                      : _HomeContent(
+                          key: const ValueKey('home'),
+                          hollow: hollow,
+                          peers: peers,
+                          selectedPeerId: selectedPeerId,
+                          nodeStatus: nodeStatus,
+                          onPeerSelected: onPeerSelected,
+                          lastMessage: lastMessage,
+                          formatTime: formatTime,
+                        ),
+                ),
+              ),
 
-          // Voice channel controls (visible when in a voice channel)
-          const VoiceChannelPanel(),
+              // Voice channel controls (visible when in a voice channel)
+              const VoiceChannelPanel(),
 
-          // User bar at bottom (hidden in dock mode)
-          ?userBar,
-        ],
+              // User bar at bottom (hidden in dock mode)
+              ?userBar,
+            ],
+          );
+        },
       ),
     );
 
@@ -202,7 +267,8 @@ class ChannelSidebar extends StatelessWidget {
     );
   }
 
-  Widget _buildHeader(BuildContext context, HollowTheme hollow) {
+  Widget _buildHeader(
+      BuildContext context, HollowTheme hollow, double bannerHeight) {
     final label = selectedServer?.name ?? 'Direct Messages';
     final serverId = selectedServer?.serverId;
 
@@ -243,7 +309,7 @@ class ChannelSidebar extends StatelessWidget {
           // here — the scrim fades fully into the surface, and a border on
           // top of that fade reads as a stray line.
           key: ValueKey('header-$label-${banner.hash}'),
-          height: 120,
+          height: bannerHeight,
           child: Stack(
             // The sidebar Container insets its children by its 1px right
             // border (BoxDecoration.padding), so an in-bounds banner stops
@@ -1547,7 +1613,7 @@ class _VoiceParticipantRow extends ConsumerWidget {
               _showVolumePopup(context, ref, details.globalPosition)
           : null,
       child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 1),
+        padding: const EdgeInsets.symmetric(vertical: HollowSpacing.xxs),
         child: Row(
           children: [
             // Speaking cue = an outline hugging the avatar, replacing the
@@ -1558,15 +1624,16 @@ class _VoiceParticipantRow extends ConsumerWidget {
             // stand a gap off the avatar (see its doc comment).
             SpeakingAvatarOutline(
               isSpeaking: speaking,
-              size: 18,
+              size: kVoiceParticipantAvatarSize,
               radius: hollow.radiusMd,
-              child: HollowAvatar(peerId: master, size: 18),
+              child: HollowAvatar(
+                  peerId: master, size: kVoiceParticipantAvatarSize),
             ),
-            const SizedBox(width: HollowSpacing.xs),
+            const SizedBox(width: HollowSpacing.sm),
             Expanded(
               child: Text(
                 name,
-                style: HollowTypography.caption.copyWith(
+                style: HollowTypography.label.copyWith(
                   color: hollow.textSecondary,
                 ),
                 overflow: TextOverflow.ellipsis,
@@ -1575,28 +1642,28 @@ class _VoiceParticipantRow extends ConsumerWidget {
             // Screen sharing indicator — green monitor icon.
             if (isScreenSharing)
               const Padding(
-                padding: EdgeInsets.only(left: 2),
+                padding: EdgeInsets.only(left: HollowSpacing.xxs),
                 child: Icon(LucideIcons.monitor,
-                    size: 12, color: Colors.green),
+                    size: kVoiceParticipantIconSize, color: Colors.green),
               ),
             // Camera indicator — accent video icon.
             if (isCameraOn)
               Padding(
-                padding: const EdgeInsets.only(left: 2),
+                padding: const EdgeInsets.only(left: HollowSpacing.xxs),
                 child: Icon(LucideIcons.video,
-                    size: 12, color: hollow.accent),
+                    size: kVoiceParticipantIconSize, color: hollow.accent),
               ),
             if (isMuted)
               Padding(
-                padding: const EdgeInsets.only(left: 2),
-                child:
-                    Icon(LucideIcons.micOff, size: 12, color: hollow.error),
+                padding: const EdgeInsets.only(left: HollowSpacing.xxs),
+                child: Icon(LucideIcons.micOff,
+                    size: kVoiceParticipantIconSize, color: hollow.error),
               ),
             if (isDeafened)
               Padding(
-                padding: const EdgeInsets.only(left: 2),
+                padding: const EdgeInsets.only(left: HollowSpacing.xxs),
                 child: Icon(LucideIcons.headphones,
-                    size: 12, color: hollow.error),
+                    size: kVoiceParticipantIconSize, color: hollow.error),
               ),
             if (isRecording)
               const Padding(

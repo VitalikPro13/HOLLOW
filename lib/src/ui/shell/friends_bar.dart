@@ -189,9 +189,13 @@ class FriendsBar extends ConsumerWidget {
               message: 'Saved messages',
               child: HollowPressable(
                 semanticLabel: 'Saved messages',
+                // Toggles, like Conferences beside it: pressing the lit
+                // button again puts the centre pane back to Home. Every
+                // other button on this strip that lights up also unlights,
+                // so the one that didn't read as a dead press.
                 onTap: savedId == null
                     ? null
-                    : () => _selectFriend(ref, savedId),
+                    : () => _toggleSavedMessages(ref, savedId),
                 borderRadius: BorderRadius.circular(hollow.radiusSm),
                 padding: const EdgeInsets.symmetric(
                   horizontal: HollowSpacing.sm,
@@ -266,6 +270,43 @@ class FriendsBar extends ConsumerWidget {
     );
   }
 
+  /// Saved messages behaves like the Conferences button next to it: press to
+  /// show, press again to put it away.
+  ///
+  /// The two need different machinery for the same feel. Conferences is a
+  /// centre TAB layered over whatever is selected, so closing it is one
+  /// `setShellTab(null)` and the selection underneath re-appears. Saved
+  /// messages IS the selection — opening it replaces what was there — so
+  /// there is nothing underneath to reveal and "away" means Home.
+  void _toggleSavedMessages(WidgetRef ref, String savedId) {
+    final split = ref.read(splitViewProvider);
+    // In split view the right pane is its own context: the button targets
+    // that pane rather than the global selection, so there is no global
+    // "lit" state to toggle off. Same branch `_selectFriend` takes.
+    if (split.isSplit && split.focusedPane == 1) {
+      _selectFriend(ref, savedId);
+      return;
+    }
+    if (ref.read(selectedPeerProvider) == savedId) {
+      _clearToHome(ref);
+      return;
+    }
+    _selectFriend(ref, savedId);
+  }
+
+  /// The exact inverse of [_selectFriend]'s non-split branch — same providers,
+  /// peer cleared instead of set. Deliberately does NOT close an open split:
+  /// the press that lit this button didn't open one, so putting it away
+  /// shouldn't tear one down.
+  void _clearToHome(WidgetRef ref) {
+    setShellTab(ref.read, null);
+    ref.read(selectedPeerProvider.notifier).state = null;
+    ref.read(selectedServerProvider.notifier).state = null;
+    ref.read(channelListProvider.notifier).clear();
+    ref.read(selectedChannelProvider.notifier).state = null;
+    ref.read(serverSettingsOpenProvider.notifier).state = false;
+  }
+
   void _selectFriend(WidgetRef ref, String peerId) {
     final split = ref.read(splitViewProvider);
     if (split.isSplit && split.focusedPane == 1) {
@@ -291,7 +332,17 @@ class FriendsBar extends ConsumerWidget {
       barrierColor: Colors.black.withValues(alpha: 0.5),
       transitionDuration: HollowDurations.normal,
       pageBuilder: (context, anim1, anim2) {
-        return const Center(child: _FriendsManager());
+        // Padding, not just Center: the interface zoom shrinks the logical
+        // viewport (`window / scale`), so at 200% on 1080p this 520x480 popup
+        // is laid out inside ~960x504. Flutter's constraint enforcement stops
+        // it overflowing, but without a margin it clamps flush to the window
+        // edges and loses the rounded border that tells you it's a popup.
+        return const Center(
+          child: Padding(
+            padding: EdgeInsets.all(HollowSpacing.lg),
+            child: _FriendsManager(),
+          ),
+        );
       },
       transitionBuilder: (context, anim1, anim2, child) {
         return FadeTransition(

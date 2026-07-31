@@ -238,53 +238,61 @@ void _showLegalDocument(
     builder: (ctx) => Material(
       color: Colors.transparent,
       child: Center(
-        child: Container(
-          width: 640,
-          height: 520,
-          decoration: BoxDecoration(
-            color: hollow.surface,
-            borderRadius: BorderRadius.circular(16),
-            border: Border.all(color: hollow.border),
-          ),
-          child: Column(
-            children: [
-              // Header
-              Padding(
-                padding: const EdgeInsets.fromLTRB(24, 20, 12, 0),
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: Text(
-                        title,
-                        style: HollowTypography.heading.copyWith(
-                          color: hollow.textPrimary,
-                          fontSize: 18,
+        // The interface zoom shrinks the logical viewport, so this 640x520
+        // sheet can exceed the screen (1080p at 200% is ~960x504). Keep a
+        // margin so the clamped result still looks like a dialog.
+        child: Padding(
+          padding: const EdgeInsets.all(HollowSpacing.lg),
+          child: Container(
+            width: 640,
+            height: 520,
+            decoration: BoxDecoration(
+              color: hollow.surface,
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(color: hollow.border),
+            ),
+            child: Column(
+              children: [
+                // Header
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(24, 20, 12, 0),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          title,
+                          style: HollowTypography.heading.copyWith(
+                            color: hollow.textPrimary,
+                            fontSize: 18,
+                          ),
                         ),
                       ),
-                    ),
-                    HollowPressable(
-                      onTap: () => Navigator.of(ctx).pop(),
-                      semanticLabel: 'Close',
-                      child: Padding(
-                        padding: const EdgeInsets.all(8),
-                        child: Icon(LucideIcons.x, size: 18,
-                            color: hollow.textSecondary),
+                      HollowPressable(
+                        onTap: () => Navigator.of(ctx).pop(),
+                        semanticLabel: 'Close',
+                        child: Padding(
+                          padding: const EdgeInsets.all(8),
+                          child: Icon(LucideIcons.x, size: 18,
+                              color: hollow.textSecondary),
+                        ),
                       ),
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
-              ),
-              const SizedBox(height: 12),
-              Container(height: 1, color: hollow.border.withValues(alpha: 0.5)),
-              // Body — rendered markdown
-              Expanded(
-                child: legalMarkdownView(
-                  hollow,
-                  body,
-                  padding: const EdgeInsets.all(24),
+                const SizedBox(height: 12),
+                Container(
+                    height: 1,
+                    color: hollow.border.withValues(alpha: 0.5)),
+                // Body — rendered markdown
+                Expanded(
+                  child: legalMarkdownView(
+                    hollow,
+                    body,
+                    padding: const EdgeInsets.all(24),
+                  ),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
         ),
       ),

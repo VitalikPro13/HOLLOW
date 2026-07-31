@@ -75,101 +75,192 @@ class HomeDashboard extends ConsumerWidget {
     final rightReveal =
         StartupRevealScope.interval(context, 0.40, 0.65);
 
-    Widget leftCol = SizedBox(
-      width: 240,
-      child: _ProfileColumn(hollow: hollow),
-    );
-    Widget centerCol = Expanded(
-      child: _RecentConversationsColumn(hollow: hollow),
-    );
-    Widget rightCol = SizedBox(
-      width: 260,
-      child: _NetworkColumn(hollow: hollow),
-    );
+    // Each column's content, reveal wrapper included; the widths are decided
+    // per-layout below (see `sideColumnWidths`).
+    Widget revealed(Widget child, Animation<double>? reveal) {
+      if (reveal == null) return child;
+      return FadeTransition(
+        opacity: reveal,
+        child: SlideTransition(
+          position: Tween<Offset>(
+            begin: const Offset(0, 0.08),
+            end: Offset.zero,
+          ).animate(reveal),
+          child: child,
+        ),
+      );
+    }
 
-    // Apply fade + slide-up reveal to each column.
-    if (leftReveal != null) {
-      leftCol = SizedBox(
-        width: 240,
-        child: FadeTransition(
-          opacity: leftReveal,
-          child: SlideTransition(
-            position: Tween<Offset>(
-              begin: const Offset(0, 0.08),
-              end: Offset.zero,
-            ).animate(leftReveal),
-            child: _ProfileColumn(hollow: hollow),
+    final leftContent =
+        revealed(_ProfileColumn(hollow: hollow), leftReveal);
+    final centerCol = Expanded(
+      child: revealed(
+          _RecentConversationsColumn(hollow: hollow), centerReveal),
+    );
+    final rightContent =
+        revealed(_NetworkColumn(hollow: hollow), rightReveal);
+    Widget divider() => Padding(
+          padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.lg),
+          child: Container(
+            width: 1,
+            height: double.infinity,
+            color: hollow.border,
           ),
-        ),
-      );
-    }
-    if (centerReveal != null) {
-      centerCol = Expanded(
-        child: FadeTransition(
-          opacity: centerReveal,
-          child: SlideTransition(
-            position: Tween<Offset>(
-              begin: const Offset(0, 0.08),
-              end: Offset.zero,
-            ).animate(centerReveal),
-            child: _RecentConversationsColumn(hollow: hollow),
-          ),
-        ),
-      );
-    }
-    if (rightReveal != null) {
-      rightCol = SizedBox(
-        width: 260,
-        child: FadeTransition(
-          opacity: rightReveal,
-          child: SlideTransition(
-            position: Tween<Offset>(
-              begin: const Offset(0, 0.08),
-              end: Offset.zero,
-            ).animate(rightReveal),
-            child: _NetworkColumn(hollow: hollow),
-          ),
-        ),
-      );
-    }
+        );
 
     return Container(
       color: hollow.background,
-      child: Padding(
-        padding: const EdgeInsets.all(HollowSpacing.xl),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            leftCol,
-
-            // Divider
-            Padding(
-              padding: const EdgeInsets.symmetric(
-                horizontal: HollowSpacing.lg,
-              ),
-              child: Container(
-                width: 1,
-                height: double.infinity,
-                color: hollow.border,
-              ),
+      // Outside the padding on purpose — `sideColumnWidths` subtracts the
+      // padding and dividers itself, so it needs the full width.
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final widths = dashboardColumnWidths(constraints.maxWidth);
+          return Padding(
+            padding: const EdgeInsets.all(HollowSpacing.xl),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                _ScrollableColumn(width: widths.left, child: leftContent),
+                divider(),
+                centerCol,
+                if (widths.right case final rightWidth?) ...[
+                  divider(),
+                  _ScrollableColumn(
+                      width: rightWidth, child: rightContent),
+                ],
+              ],
             ),
+          );
+        },
+      ),
+    );
+  }
+}
 
-            centerCol,
+/// Height band for the news panel in the network column. [_kNewsPanelMin] is
+/// enough to read a post heading plus the start of its body; [_kNewsPanelMax]
+/// exists to bound what the panel contributes to the column's intrinsic
+/// height — see the comment at its use site.
+const double _kNewsPanelMin = 140;
+const double _kNewsPanelMax = 280;
 
-            // Divider
-            Padding(
-              padding: const EdgeInsets.symmetric(
-                horizontal: HollowSpacing.lg,
-              ),
-              child: Container(
-                width: 1,
-                height: double.infinity,
-                color: hollow.border,
-              ),
+/// Natural widths of the two fixed dashboard columns, and the width the
+/// centre conversation list needs before they start giving ground.
+const double _kLeftColumnWidth = 240;
+const double _kRightColumnWidth = 260;
+const double _kCentreColumnMin = 200;
+
+/// How far the side columns may shrink before the layout gives up a column
+/// instead. Squeezing harder than this does not degrade gracefully — at 0.62
+/// the relay `StatBar`s, the stats rows and the conversation header all start
+/// overflowing on their own, so the columns would fit at the cost of their
+/// contents.
+const double _kSideColumnMinFactor = 0.85;
+
+/// Below this the dashboard drops to two columns. Three need
+/// 204 + 221 of side column, two dividers and the outer padding, and still
+/// leave the conversation list something to live in.
+const double _kThreeColumnMin = 720;
+
+/// The dashboard layout for a given width.
+///
+/// The zoom shrinks the viewport horizontally as well as vertically
+/// (`window / scale`), and 240 + 260 of fixed column plus dividers does not
+/// fit once the dashboard is ~640 wide — 200% zoom on a 1280px window. The
+/// side columns give ground together so the layout stays balanced, and below
+/// [_kThreeColumnMin] the Network column drops out entirely rather than every
+/// card inside it breaking. That mirrors the member panel, which already
+/// auto-hides when the shell gets narrow.
+({double left, double? right}) dashboardColumnWidths(double available) {
+  // Outer padding (xl each side) + two dividers, each lg padding either side.
+  const divider = HollowSpacing.lg * 2 + 1;
+  const chrome = HollowSpacing.xl * 2 + divider * 2;
+  if (!available.isFinite) {
+    return (left: _kLeftColumnWidth, right: _kRightColumnWidth);
+  }
+  if (available < _kThreeColumnMin) {
+    // Two columns: profile + conversations, one divider between them.
+    final free = available - HollowSpacing.xl * 2 - divider;
+    return (left: _kLeftColumnWidth.clamp(0.0, free - _kCentreColumnMin), right: null);
+  }
+  final free = available - chrome;
+  const natural = _kLeftColumnWidth + _kRightColumnWidth;
+  if (free - natural >= _kCentreColumnMin) {
+    return (left: _kLeftColumnWidth, right: _kRightColumnWidth);
+  }
+  final factor =
+      ((free - _kCentreColumnMin) / natural).clamp(_kSideColumnMinFactor, 1.0);
+  return (
+    left: _kLeftColumnWidth * factor,
+    right: _kRightColumnWidth * factor,
+  );
+}
+
+/// The linked Twitch name for the profile badge.
+///
+/// Was `FutureBuilder(future: twitchGetUsername())` built inline, which
+/// creates a NEW future — and so fires a fresh FFI call — on every rebuild of
+/// the profile column, and this column rebuilds on every connection-status
+/// tick. A provider caches it and, as a bonus, routes a failure into
+/// `AsyncError` instead of throwing out of `build()`.
+final _twitchUsernameProvider =
+    FutureProvider<String?>((ref) => twitch_api.twitchGetUsername());
+
+/// A fixed-width dashboard column that scrolls once it outgrows the viewport.
+///
+/// The two side columns were plain [Column]s — only the centre one had a
+/// [ListView] — so they simply got clipped by the shell's `ClipRect` with no
+/// scrollbar and nothing to say more was there. That is invisible at 100%
+/// (the dashboard fits) and unmissable once the interface zoom shrinks the
+/// logical viewport: at 165% on a 1596x991 window the dashboard has ~580
+/// logical px of height, and the profile column's "Your Stats" card and the
+/// network column's news section fall off the bottom.
+///
+/// The scrollbar uses the DEFAULT fade behaviour, matching the Recent
+/// Conversations list beside it — `thumbVisibility: true` pinned it on screen
+/// permanently, which read as a stuck UI element rather than a hint.
+class _ScrollableColumn extends StatefulWidget {
+  final double width;
+  final Widget child;
+
+  const _ScrollableColumn({required this.width, required this.child});
+
+  @override
+  State<_ScrollableColumn> createState() => _ScrollableColumnState();
+}
+
+class _ScrollableColumnState extends State<_ScrollableColumn> {
+  final _controller = ScrollController();
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      width: widget.width,
+      child: LayoutBuilder(
+        builder: (context, constraints) => Scrollbar(
+          controller: _controller,
+          child: SingleChildScrollView(
+            controller: _controller,
+            // minHeight + IntrinsicHeight, not a bare scroll view. The
+            // network column ends in `Expanded(_NewsPanel)` — it is MEANT to
+            // absorb the slack on a tall window and scroll internally — and
+            // an Expanded inside an unbounded scroll view is a hard error
+            // ("RenderFlex children have non-zero flex but incoming height
+            // constraints are unbounded"). This keeps the column exactly as
+            // it is whenever it fits, and lets it fall back to its intrinsic
+            // height — news panel at its natural size — when it does not,
+            // which is the case that needed a scrollbar.
+            child: ConstrainedBox(
+              constraints: BoxConstraints(minHeight: constraints.maxHeight),
+              child: IntrinsicHeight(child: widget.child),
             ),
-
-            rightCol,
-          ],
+          ),
         ),
       ),
     );
@@ -200,6 +291,7 @@ class _ProfileColumn extends ConsumerWidget {
     final isOnline = ref.watch(overallConnectionProvider).isOnline;
     final amInvisible =
         ref.watch(invisibleModeProvider);
+    final twitchUsername = ref.watch(_twitchUsernameProvider).valueOrNull;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.center,
@@ -262,25 +354,19 @@ class _ProfileColumn extends ConsumerWidget {
         ),
 
         // Twitch badge
-        FutureBuilder<String?>(
-          future: twitch_api.twitchGetUsername(),
-          builder: (context, snap) {
-            final username = snap.data;
-            if (username == null || username.isEmpty) {
-              return const SizedBox.shrink();
-            }
-            return Padding(
-              padding: const EdgeInsets.only(top: HollowSpacing.sm),
-              child: HollowFocusRing(
-                enabled: true,
-                onActivate: () => launchUrl(
-                  Uri.parse('https://twitch.tv/$username'),
-                  mode: LaunchMode.externalApplication,
-                ),
-                borderRadius: BorderRadius.circular(6),
-                child: GestureDetector(
+        if (twitchUsername != null && twitchUsername.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.only(top: HollowSpacing.sm),
+            child: HollowFocusRing(
+              enabled: true,
+              onActivate: () => launchUrl(
+                Uri.parse('https://twitch.tv/$twitchUsername'),
+                mode: LaunchMode.externalApplication,
+              ),
+              borderRadius: BorderRadius.circular(6),
+              child: GestureDetector(
                 onTap: () => launchUrl(
-                  Uri.parse('https://twitch.tv/$username'),
+                  Uri.parse('https://twitch.tv/$twitchUsername'),
                   mode: LaunchMode.externalApplication,
                 ),
                 child: Container(
@@ -297,7 +383,7 @@ class _ProfileColumn extends ConsumerWidget {
                           size: 11, color: Color(0xFF9146FF)),
                       const SizedBox(width: 4),
                       Text(
-                        username,
+                        twitchUsername,
                         style: HollowTypography.caption.copyWith(
                           color: const Color(0xFF9146FF),
                           fontWeight: FontWeight.w600,
@@ -308,10 +394,8 @@ class _ProfileColumn extends ConsumerWidget {
                   ),
                 ),
               ),
-              ),
-            );
-          },
-        ),
+            ),
+          ),
 
         // Custom status
         if (statusText.isNotEmpty) ...[
@@ -611,11 +695,18 @@ class _RecentConversationsColumn extends ConsumerWidget {
               Icon(LucideIcons.messageCircle, size: 18,
                   color: hollow.textSecondary),
               const SizedBox(width: HollowSpacing.sm),
-              Text(
-                'Recent Conversations',
-                style: HollowTypography.subheading.copyWith(
-                  color: hollow.textPrimary,
-                  fontWeight: FontWeight.w600,
+              // Flexible: this column is the Expanded one, so the zoom
+              // squeezes it first — a bare Text here overflowed by 162px
+              // once the viewport reached ~800 logical wide.
+              Flexible(
+                child: Text(
+                  'Recent Conversations',
+                  style: HollowTypography.subheading.copyWith(
+                    color: hollow.textPrimary,
+                    fontWeight: FontWeight.w600,
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
                 ),
               ),
             ],
@@ -1064,7 +1155,30 @@ class _NetworkColumn extends ConsumerWidget {
 
         const SizedBox(height: HollowSpacing.lg),
 
-        Expanded(child: _NewsPanel(hollow: hollow)),
+        // Flexible + a bounded box, not a bare `Expanded`.
+        //
+        // The panel is meant to absorb this column's slack and scroll its
+        // posts INTERNALLY, and it still does whenever there is room: loose
+        // fit hands it everything left over and its own Column fills it.
+        //
+        // The two bounds matter under the column's outer scroll view. `max`
+        // caps what this contributes to the column's INTRINSIC height —
+        // without it the intrinsic includes both posts at full un-scrolled
+        // height, which inflates the column past the viewport and hands the
+        // scrolling to the outer bar even on a tall window (the panel then
+        // never collapses into its own scrollbar, which is the regression).
+        // `min` is the other end: when the column really is too short, the
+        // panel stops at a usable size and the outer scroll takes over,
+        // instead of being squeezed to nothing the way it was in the report.
+        Flexible(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(
+              minHeight: _kNewsPanelMin,
+              maxHeight: _kNewsPanelMax,
+            ),
+            child: _NewsPanel(hollow: hollow),
+          ),
+        ),
 
         const SizedBox(height: HollowSpacing.sm),
 

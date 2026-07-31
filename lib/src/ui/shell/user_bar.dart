@@ -92,7 +92,11 @@ class UserBar extends ConsumerWidget {
         if (roomBudget.usage > 0.5)
           _RoomBudgetBar(budget: roomBudget),
         Container(
-      height: 52,
+      // min-height, not a fixed 52: the a11y Phase 3 pattern for chrome bars.
+      // Even with the label scale capped at 1.3 below, name + status stacked
+      // in a hard 52px box overflowed by 2px at any OS text size >= 1.3 —
+      // which desktop passes through unclamped.
+      constraints: const BoxConstraints(minHeight: 52),
       padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.sm + 2),
       decoration: BoxDecoration(
         color: hollow.opaqueBackground,
@@ -175,10 +179,19 @@ class UserBar extends ConsumerWidget {
                           semanticLabel: statusText,
                         ),
                         const SizedBox(width: HollowSpacing.xs),
-                        Text(
-                          statusText,
-                          style: HollowTypography.caption.copyWith(
-                            color: hollow.textSecondary,
+                        // Flexible + ellipsis: a bare Text here overflowed
+                        // the 240px sidebar by 36px once the OS text size
+                        // grew a long status ("Connecting…", "Reconnecting…")
+                        // past the room left beside the avatar and the three
+                        // trailing icons.
+                        Flexible(
+                          child: Text(
+                            statusText,
+                            style: HollowTypography.caption.copyWith(
+                              color: hollow.textSecondary,
+                            ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
                           ),
                         ),
                       ],

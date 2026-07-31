@@ -2699,31 +2699,38 @@ void _showServerSettingsDialog(BuildContext context, ServerInfo server) {
     transitionDuration: HollowDurations.normal,
     pageBuilder: (context, anim1, anim2) {
       return Center(
-        child: Material(
-          color: Colors.transparent,
-          child: Container(
-            width: 800,
-            height: 600,
-            clipBehavior: Clip.antiAlias,
-            decoration: BoxDecoration(
-              color: HollowTheme.of(context).background,
-              borderRadius: BorderRadius.circular(
-                HollowTheme.of(context).radiusLg,
-              ),
-              border: Border.all(
-                color: HollowTheme.of(context).border,
-              ),
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withValues(alpha: 0.3),
-                  blurRadius: 24,
-                  offset: const Offset(0, 8),
+        // The zoom shrinks the logical viewport, so this 800x600 panel can be
+        // TALLER than the screen it opens on (1080p at 200% is ~960x504).
+        // The enforce clamp keeps it on-screen; the padding keeps a margin so
+        // it still reads as a dialog rather than a takeover.
+        child: Padding(
+          padding: const EdgeInsets.all(HollowSpacing.lg),
+          child: Material(
+            color: Colors.transparent,
+            child: Container(
+              width: 800,
+              height: 600,
+              clipBehavior: Clip.antiAlias,
+              decoration: BoxDecoration(
+                color: HollowTheme.of(context).background,
+                borderRadius: BorderRadius.circular(
+                  HollowTheme.of(context).radiusLg,
                 ),
-              ],
-            ),
-            child: ServerSettingsPanel(
-              server: server,
-              onClose: () => Navigator.of(context).pop(),
+                border: Border.all(
+                  color: HollowTheme.of(context).border,
+                ),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withValues(alpha: 0.3),
+                    blurRadius: 24,
+                    offset: const Offset(0, 8),
+                  ),
+                ],
+              ),
+              child: ServerSettingsPanel(
+                server: server,
+                onClose: () => Navigator.of(context).pop(),
+              ),
             ),
           ),
         ),
