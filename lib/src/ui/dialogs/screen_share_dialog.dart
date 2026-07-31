@@ -110,6 +110,14 @@ class _ScreenShareDialogState extends State<_ScreenShareDialog> {
   bool _loading = true;
   bool _showScreens = true; // true = screens tab, false = windows tab
   Timer? _refreshTimer;
+
+  /// Wayland portal-first mode: no enumeration, no thumbnails — the desktop's
+  /// own xdg-desktop-portal dialog picks the screen/window at capture start.
+  final bool _portalMode = DesktopCaptureSupport.usePortalPicker;
+
+  /// Portal mode only: true = the user wants a fresh portal prompt instead of
+  /// silently re-sharing what the last grant covered.
+  bool _portalFresh = false;
   late final List<ScreenShareResolution> _availableResolutions =
       _computeAvailableResolutions();
 
@@ -139,6 +147,15 @@ class _ScreenShareDialogState extends State<_ScreenShareDialog> {
     // displays (e.g. a 720p laptop offers 360p/480p/720p, defaults to 720p).
     if (!_availableResolutions.contains(_resolution)) {
       _resolution = _availableResolutions.last;
+    }
+
+    // Portal mode never enumerates: merely building a desktop media list on
+    // Wayland pops the desktop's own portal dialog (and windows can't be
+    // listed at all). The single portal entry needs no sources, no thumbnail
+    // refresh timer and no source listeners.
+    if (_portalMode) {
+      _loading = false;
+      return;
     }
     _loadSources();
 
@@ -246,10 +263,15 @@ class _ScreenShareDialogState extends State<_ScreenShareDialog> {
                   ),
                   const SizedBox(height: HollowSpacing.md),
 
-                  // Tabs: Screens / Windows. A Wayland session has no window
-                  // capturer at all (DesktopCaptureSupport), so the tab is
-                  // dropped instead of sitting empty forever.
-                  if (DesktopCaptureSupport.canShareWindows)
+                  // Portal-first Wayland picker: ONE entry, no thumbnail
+                  // grid — the desktop's own xdg-desktop-portal dialog is
+                  // where the user picks a screen or a window, right after
+                  // pressing Share. Everything else keeps the enumerated
+                  // Screens/Windows tabs.
+                  if (_portalMode) ...[
+                    _buildPortalSection(hollow),
+                    const SizedBox(height: HollowSpacing.md),
+                  ] else ...[
                     Row(
                       children: [
                         _buildTab(hollow, 'Screens', _showScreens, () {
@@ -260,56 +282,49 @@ class _ScreenShareDialogState extends State<_ScreenShareDialog> {
                           setState(() => _showScreens = false);
                         }),
                       ],
-                    )
-                  else
-                    Text(
-                      'Wayland session: whole screens only. Your desktop asks '
-                      'which one to share.',
-                      style: HollowTypography.caption.copyWith(
-                        color: hollow.textTertiary,
-                      ),
                     ),
-                  const SizedBox(height: HollowSpacing.md),
+                    const SizedBox(height: HollowSpacing.md),
 
-                  // Source grid
-                  Expanded(
-                    child: _loading
-                        ? Center(
-                            child: CircularProgressIndicator(
-                              color: hollow.accent,
-                              strokeWidth: 2,
-                            ),
-                          )
-                        : sources.isEmpty
-                            ? Center(
-                                child: Text(
-                                  _showScreens
-                                      ? 'No screens found'
-                                      : 'No windows found',
-                                  style: HollowTypography.body.copyWith(
-                                    color: hollow.textSecondary,
-                                  ),
-                                ),
-                              )
-                            : GridView.builder(
-                                gridDelegate:
-                                    SliverGridDelegateWithFixedCrossAxisCount(
-                                  crossAxisCount: _showScreens ? 2 : 3,
-                                  mainAxisSpacing: HollowSpacing.sm,
-                                  crossAxisSpacing: HollowSpacing.sm,
-                                  childAspectRatio: 16 / 10,
-                                ),
-                                itemCount: sources.length,
-                                itemBuilder: (context, index) {
-                                  final source = sources[index];
-                                  final isSelected =
-                                      source.id == _selectedSourceId;
-                                  return _buildSourceTile(
-                                      hollow, source, isSelected);
-                                },
+                    // Source grid
+                    Expanded(
+                      child: _loading
+                          ? Center(
+                              child: CircularProgressIndicator(
+                                color: hollow.accent,
+                                strokeWidth: 2,
                               ),
-                  ),
-                  const SizedBox(height: HollowSpacing.md),
+                            )
+                          : sources.isEmpty
+                              ? Center(
+                                  child: Text(
+                                    _showScreens
+                                        ? 'No screens found'
+                                        : 'No windows found',
+                                    style: HollowTypography.body.copyWith(
+                                      color: hollow.textSecondary,
+                                    ),
+                                  ),
+                                )
+                              : GridView.builder(
+                                  gridDelegate:
+                                      SliverGridDelegateWithFixedCrossAxisCount(
+                                    crossAxisCount: _showScreens ? 2 : 3,
+                                    mainAxisSpacing: HollowSpacing.sm,
+                                    crossAxisSpacing: HollowSpacing.sm,
+                                    childAspectRatio: 16 / 10,
+                                  ),
+                                  itemCount: sources.length,
+                                  itemBuilder: (context, index) {
+                                    final source = sources[index];
+                                    final isSelected =
+                                        source.id == _selectedSourceId;
+                                    return _buildSourceTile(
+                                        hollow, source, isSelected);
+                                  },
+                                ),
+                    ),
+                    const SizedBox(height: HollowSpacing.md),
+                  ],
 
                   // Content profile pills — tunes the encoder for what's
                   // being shared. Switching also snaps the fps default
@@ -412,6 +427,18 @@ class _ScreenShareDialogState extends State<_ScreenShareDialog> {
                             ),
                           ],
                         ),
+                        if (_portalMode && _shareAudio) ...[
+                          const SizedBox(height: HollowSpacing.xs),
+                          Text(
+                            'On Wayland, audio is captured system-wide '
+                            '(Hollow\'s own audio excluded) — even when the '
+                            'portal shares a single window.',
+                            style: HollowTypography.caption.copyWith(
+                              color: hollow.textTertiary,
+                              fontSize: 11,
+                            ),
+                          ),
+                        ],
                         if (audioBlocked) ...[
                           const SizedBox(height: HollowSpacing.xs),
                           Text(
@@ -441,7 +468,35 @@ class _ScreenShareDialogState extends State<_ScreenShareDialog> {
                       ),
                       const SizedBox(width: HollowSpacing.sm),
                       HollowButton.filled(
-                        onPressed: _selectedSourceId != null
+                        onPressed: _portalMode
+                            ? () {
+                                // Portal-first: the id is the sentinel the
+                                // native side maps onto the generic PipeWire
+                                // capturer. A fresh pick bumps the restore
+                                // generation so the portal prompts again.
+                                if (_portalFresh) {
+                                  DesktopCaptureSupport.bumpPortalGeneration();
+                                }
+                                final portalId =
+                                    DesktopCaptureSupport.portalSourceId;
+                                network_api.logFromDart(
+                                  message: '[SCREEN-AUDIO] Share confirmed: '
+                                      'portal id=$portalId '
+                                      'audio=$_shareAudio',
+                                );
+                                Navigator.pop(
+                                  context,
+                                  ScreenShareSelection(
+                                    sourceId: portalId,
+                                    width: _resolution.width,
+                                    height: _resolution.height,
+                                    fps: _fps.value,
+                                    shareAudio: _shareAudio,
+                                    profile: _profile,
+                                  ),
+                                );
+                              }
+                            : _selectedSourceId != null
                             ? () {
                                 final selectedSource = _sources[_selectedSourceId!];
                                 // For a WINDOW source the source id IS the HWND
@@ -487,6 +542,85 @@ class _ScreenShareDialogState extends State<_ScreenShareDialog> {
           ),
         ),
       ),
+    );
+  }
+
+  /// The Wayland portal-first section: one explanatory entry instead of a
+  /// thumbnail grid, plus — once a grant likely exists — the choice between
+  /// silently re-sharing the previous pick and forcing a fresh portal prompt.
+  Widget _buildPortalSection(HollowTheme hollow) {
+    final canReuse = DesktopCaptureSupport.portalGrantLikely;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Container(
+          padding: const EdgeInsets.all(HollowSpacing.md),
+          decoration: BoxDecoration(
+            color: hollow.surface,
+            borderRadius: BorderRadius.circular(hollow.radiusSm),
+            border: Border.all(color: hollow.border),
+          ),
+          child: Row(
+            children: [
+              Icon(
+                Icons.desktop_windows_outlined,
+                color: hollow.textSecondary,
+                size: 28,
+              ),
+              const SizedBox(width: HollowSpacing.md),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Screen or window',
+                      style: HollowTypography.body.copyWith(
+                        color: hollow.textPrimary,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      'Press Share and your desktop opens its own dialog — '
+                      'pick a whole screen or a single window there.',
+                      style: HollowTypography.caption.copyWith(
+                        color: hollow.textTertiary,
+                        fontSize: 11,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+        if (canReuse) ...[
+          const SizedBox(height: HollowSpacing.sm),
+          Row(
+            children: [
+              _buildPill(
+                'Same as last time',
+                !_portalFresh,
+                () => setState(() => _portalFresh = false),
+              ),
+              _buildPill(
+                'Pick something new',
+                _portalFresh,
+                () => setState(() => _portalFresh = true),
+              ),
+            ],
+          ),
+          const SizedBox(height: HollowSpacing.xs),
+          Text(
+            _portalFresh
+                ? 'The system dialog will ask again.'
+                : 'Reshares what you shared before, without asking again.',
+            style: HollowTypography.caption.copyWith(
+              color: hollow.textTertiary,
+              fontSize: 11,
+            ),
+          ),
+        ],
+      ],
     );
   }
 

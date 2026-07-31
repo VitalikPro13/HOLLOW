@@ -1319,8 +1319,13 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
         'audio': false,
       });
     } else {
-      await desktopCapturer.getSources(
-          types: DesktopCaptureSupport.sourceTypes);
+      // A Wayland portal-first share MUST NOT re-enumerate: the native side
+      // resolves the sentinel id without a source list, and enumerating here
+      // would pop an extra xdg-desktop-portal dialog.
+      if (!DesktopCaptureSupport.isPortalSourceId(sourceId)) {
+        await desktopCapturer.getSources(
+            types: DesktopCaptureSupport.sourceTypes);
+      }
       // On Windows and Linux, audio goes via data channel (not a WebRTC audio
       // track) so never request audio in getDisplayMedia — the old
       // WASAPI→AudioSource path crashes on Windows and yields nothing on Linux.
@@ -1338,6 +1343,11 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
         },
         'audio': getDisplayAudio,
       });
+      // The portal grant now exists (or was just re-used) — the next share
+      // this run can offer "same as last time" without a portal prompt.
+      if (DesktopCaptureSupport.isPortalSourceId(sourceId)) {
+        DesktopCaptureSupport.portalGrantLikely = true;
+      }
     }
 
     // Create local preview renderer so the sharer can see their own screen.

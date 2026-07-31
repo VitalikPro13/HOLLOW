@@ -307,7 +307,12 @@ class ScreenShareService {
 
     // Capture screen (+ optional system audio). Source enumeration is
     // desktop-only; mobile captures THE screen (MediaProjection / ReplayKit).
-    if (!Platform.isAndroid && !Platform.isIOS) {
+    // A Wayland portal-first share MUST NOT re-enumerate: the native side
+    // resolves the sentinel id without a source list, and enumerating here
+    // would pop an extra xdg-desktop-portal dialog.
+    if (!Platform.isAndroid &&
+        !Platform.isIOS &&
+        !DesktopCaptureSupport.isPortalSourceId(sourceId)) {
       await desktopCapturer.getSources(
           types: DesktopCaptureSupport.sourceTypes);
     }
@@ -453,6 +458,11 @@ class ScreenShareService {
         },
         'audio': getDisplayAudio,
       });
+      // The portal grant now exists (or was just re-used) — the next share
+      // this run can offer "same as last time" without a portal prompt.
+      if (DesktopCaptureSupport.isPortalSourceId(sourceId)) {
+        DesktopCaptureSupport.portalGrantLikely = true;
+      }
     }
   }
 

@@ -224,18 +224,19 @@ Uses `HollowDialog` with title "Your Recovery Phrase".
 - `_refreshTimer` -- periodic thumbnail refresh every 3s
 
 **initState:**
-- Calls `_loadSources()`
-- Subscribes to `desktopCapturer.onAdded`, `.onRemoved`, `.onThumbnailChanged` streams
+- Wayland (`DesktopCaptureSupport.usePortalPicker`): skips enumeration entirely — no `_loadSources()`, no listeners, no refresh timer (each of those pops an xdg-desktop-portal dialog of its own)
+- Otherwise calls `_loadSources()` and subscribes to `desktopCapturer.onAdded`, `.onRemoved`, `.onThumbnailChanged` streams
 
 **`_loadSources()`:**
-- Calls `desktopCapturer.getSources(types: DesktopCaptureSupport.sourceTypes)` -- Screen + Window everywhere except a Wayland session, which has no window capturer at all (issue #30; see `services_voice_webrtc.md` "Linux session gating")
+- Calls `desktopCapturer.getSources(types: DesktopCaptureSupport.sourceTypes)` (issue #30; see `services_voice_webrtc.md` "Linux session gating")
 - Starts 3-second periodic `desktopCapturer.updateSources()` timer, same type list
 
 **`_filteredSources`:** Filters `_sources` by current tab type (Screen vs Window).
 
 **Layout (680x560 max):**
 - Title: "Share Your Screen"
-- Tabs row: "Screens" / "Windows" -- `_buildTab()` pills, rendered only when `DesktopCaptureSupport.canShareWindows`; on Wayland the row is replaced by a caption ("whole screens only, your desktop asks which one to share") so no tab sits permanently empty
+- Wayland portal-first mode replaces the tabs + grid with `_buildPortalSection()`: ONE "Screen or window" entry (desktop icon, caption "Press Share and your desktop opens its own dialog"), plus — once `DesktopCaptureSupport.portalGrantLikely` — "Same as last time" / "Pick something new" pills (`_portalFresh`; the fresh pick bumps the restore generation on Share). Share button is always enabled there; it pops `ScreenShareSelection(sourceId: DesktopCaptureSupport.portalSourceId, ...)` with pid/hwnd 0. A caption under the audio toggle warns that Wayland audio is captured system-wide (minus Hollow) even for a window pick.
+- Tabs row (non-portal): "Screens" / "Windows" -- `_buildTab()` pills
 - Source grid: `GridView.builder`, crossAxisCount 2 for screens / 3 for windows, 16:10 aspect ratio
 - Each tile (`_buildSourceTile`): thumbnail image (or desktop icon placeholder), name label, accent border when selected
 - Resolution pills row: all `ScreenShareResolution` values as `_buildPill()` chips

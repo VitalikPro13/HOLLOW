@@ -48,10 +48,15 @@ namespace {
 // libwebrtc.so — the crash from issue #30. Note the X11 path is skipped
 // outright under Wayland, so XWayland being up doesn't save it.
 //
-// Screens are fine under Wayland (portal/PipeWire); windows are unavailable
-// until the wrapper enables PipeWire for kWindow too — that fix lives in
-// third_party/libwebrtc/hollow-wayland-desktop-capture.patch and needs a
-// libwebrtc rebuild, so keep the two in sync.
+// Screens are fine under Wayland (portal/PipeWire); window ENUMERATION stays
+// unavailable there on purpose — every media list that touches the portal
+// pops an xdg-desktop-portal dialog at picker-open time. Window sharing on
+// Wayland instead rides the portal-first path in GetDisplayMedia below (the
+// "wayland-portal:<generation>" deviceId sentinel): no enumeration, ONE
+// portal prompt that offers screens AND windows. The wrapper's null-safety +
+// kAnyScreenContent support are folded into
+// third_party/libwebrtc/hollow-screencast.patch; this predicate stays as the
+// enumeration gate and as belt-and-braces against stale binaries.
 bool RunningUnderWayland() {
   const char* session = std::getenv("XDG_SESSION_TYPE");
   if (!session || std::strncmp(session, "wayland", 7) != 0) return false;
@@ -443,16 +448,53 @@ void FlutterScreenCapture::GetDisplayMedia(
     video_constraints = GetValue<EncodableMap>(it->second);
   }
 
-  scoped_refptr<MediaSource> source;
-  for (auto src : sources_) {
-    if (src->id().std_string() == source_id) {
-      source = src;
+  // HOLLOW (issue #30 follow-up — Wayland window sharing): the Dart picker
+  // sends deviceId "wayland-portal:<generation>" instead of an enumerated
+  // source id. No media list is built (building one pops an xdg-desktop-portal
+  // dialog just to enumerate); capture starts on webrtc's GENERIC PipeWire
+  // capturer, so the ONE portal prompt lets the user pick a screen OR a
+  // window. <generation> feeds the restore-token bucket: reusing the same
+  // generation silently restores the previous pick for the rest of the process
+  // lifetime, while a bumped generation forces a fresh portal prompt (the
+  // picker's "share something else" entry).
+  bool wayland_portal = false;
+  int64_t portal_restore_id = 0;
+  (void)portal_restore_id;
+#if defined(__linux__) && !defined(__ANDROID__)
+  constexpr char kWaylandPortalPrefix[] = "wayland-portal:";
+  if (source_id.compare(0, sizeof(kWaylandPortalPrefix) - 1,
+                        kWaylandPortalPrefix) == 0) {
+    if (!RunningUnderWayland() || !HasPipeWire()) {
+      result->Error("Bad Arguments",
+                    "wayland-portal capture needs a Wayland session with "
+                    "PipeWire");
+      return;
     }
+    int64_t generation = 0;
+    try {
+      generation =
+          std::stoll(source_id.substr(sizeof(kWaylandPortalPrefix) - 1));
+    } catch (...) {
+    }
+    // High base so it can never collide with RestoreTokenManager's own
+    // incrementing source ids (one per capturer/media list, starting at 1).
+    portal_restore_id = 1000000000LL + generation;
+    wayland_portal = true;
   }
+#endif
 
-  if (!source.get()) {
-    result->Error("Bad Arguments", "source not found!");
-    return;
+  scoped_refptr<MediaSource> source;
+  if (!wayland_portal) {
+    for (auto src : sources_) {
+      if (src->id().std_string() == source_id) {
+        source = src;
+      }
+    }
+
+    if (!source.get()) {
+      result->Error("Bad Arguments", "source not found!");
+      return;
+    }
   }
 
   const char* video_source_label = "screen_capture_input";
@@ -546,8 +588,15 @@ void FlutterScreenCapture::GetDisplayMedia(
 
   // Fallback: use libwebrtc's desktop capturer (Linux, or if native failed).
   if (!using_native_capturer) {
+    // HOLLOW: the portal-first path has no MediaSource — it goes through the
+    // wrapper's appended CreateDesktopCapturer(type, source_id, show_cursor)
+    // with kAnyScreenContent (see the wayland_portal block above).
     scoped_refptr<RTCDesktopCapturer> desktop_capturer =
-        base_->desktop_device_->CreateDesktopCapturer(source);
+        wayland_portal
+            ? base_->desktop_device_->CreateDesktopCapturer(
+                  DesktopType::kAnyScreenContent, portal_restore_id,
+                  /*show_cursor=*/true)
+            : base_->desktop_device_->CreateDesktopCapturer(source);
 
     if (!desktop_capturer.get()) {
       result->Error("Bad Arguments", "CreateDesktopCapturer failed!");
@@ -560,7 +609,14 @@ void FlutterScreenCapture::GetDisplayMedia(
         desktop_capturer, video_source_label,
         base_->ParseMediaConstraints(video_constraints));
 
-    desktop_capturer->Start(uint32_t(fps));
+    // HOLLOW: with the null-safe wrapper a session without a usable backend
+    // reports CS_FAILED here instead of crashing — surface it instead of
+    // handing Dart a dead track.
+    if (desktop_capturer->Start(uint32_t(fps)) ==
+        RTCDesktopCapturer::CaptureState::CS_FAILED) {
+      result->Error("Bad Arguments", "desktop capture failed to start!");
+      return;
+    }
   }
 
   scoped_refptr<RTCVideoTrack> track =

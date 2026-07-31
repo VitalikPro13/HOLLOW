@@ -35,17 +35,25 @@ contains these changes, so all platforms must apply them for parity.
    (`include/rtc_video_track.h` + impl). Exposes the W3C contentHint so the
    app can switch text/motion encoding profiles at runtime. Reached from Dart
    via `Helper.setVideoContentHint` → plugin method `videoTrackSetContentHint`.
-
-**[`hollow-wayland-desktop-capture.patch`](hollow-wayland-desktop-capture.patch)**
-— **PENDING, not in the vendored binaries.** Null-safety for the wrapper's
-desktop capturers: on any Wayland session `CreateWindowCapturer()` returns
-nullptr (the X11 fallback is skipped there and `allow_pipewire` is set for
-screens only) and the wrapper calls `capturer_->Start()` on it, so opening the
-share picker SIGSEGV'd inside `libwebrtc.so` (issue #30). Until the next
-rebuild the app protects itself in the plugin instead — `flutter_screen_capture.cc`
-skips capture types the session can't produce. Apply this patch in step 2
-below, fold it into `hollow-screencast.patch`, and delete it once the binaries
-carry it.
+3. **Desktop-capturer null-safety** (issue #30). On any Wayland session
+   `CreateWindowCapturer()` returns nullptr (the X11 fallback is skipped there
+   and `allow_pipewire` was set for screens only) and the wrapper used to call
+   `capturer_->Start()` on it, so opening the share picker SIGSEGV'd inside
+   `libwebrtc.so`. A missing backend now becomes an empty source list /
+   `CS_FAILED` start. The plugin additionally predicts what the session can
+   produce (`flutter_screen_capture.cc`) so the crash never armed even against
+   the pre-fix binaries.
+4. **Wayland portal-first capture** (issue #30 follow-up — window sharing).
+   `DesktopType` gains `kAnyScreenContent`, and `RTCDesktopDevice` gains an
+   appended-virtual `CreateDesktopCapturer(DesktopType, int64_t source_id,
+   bool show_cursor)` that builds webrtc's *generic* capturer
+   (`BaseCapturerPipeWire` with `CaptureType::kAnyScreenContent`) without any
+   media list: ONE xdg-desktop-portal prompt where the user picks a screen OR
+   a window. `source_id` is the caller's restore-token bucket — webrtc's
+   `RestoreTokenManager` banks the portal token under it, so re-sharing with
+   the same id skips the portal prompt for the rest of the process lifetime,
+   and a fresh id forces a fresh prompt. Reached from the plugin's
+   `GetDisplayMedia` via the `wayland-portal:<generation>` deviceId sentinel.
 
 Related but *not* in the binary: the flutter_webrtc plugin's
 `updateRtpParameters` (`common/cpp/src/flutter_peerconnection.cc`) must call
@@ -136,7 +144,6 @@ git apply --ignore-whitespace /path/to/hollow-core-audio.patch
 git clone https://github.com/webrtc-sdk/libwebrtc.git wrapper
 cd wrapper && git checkout be9743f && git remote remove origin
 git apply /path/to/hollow-screencast.patch
-git apply /path/to/hollow-wayland-desktop-capture.patch   # while still pending
 cd ..
 # copy the wrapper INTO the WebRTC tree (exclude .git)
 rsync -a --exclude=.git wrapper/ src/libwebrtc/      # Windows: robocopy wrapper src\libwebrtc /E /XD .git

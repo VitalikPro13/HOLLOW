@@ -109,7 +109,11 @@ struct SdpParseError {
   string description;
 };
 
-enum DesktopType { kScreen, kWindow };
+// HOLLOW: kAnyScreenContent appended (keep existing values stable) — a
+// portal-first capture where xdg-desktop-portal itself lets the user pick a
+// screen OR a window in one dialog (Wayland). Never produced by media lists;
+// only meaningful to RTCDesktopDevice::CreateDesktopCapturer(DesktopType, ...).
+enum DesktopType { kScreen, kWindow, kAnyScreenContent };
 
 struct RTCAudioOptions {
   RTCAudioOptions() {}

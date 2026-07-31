@@ -1,5 +1,31 @@
+diff --git a/include/rtc_desktop_device.h b/include/rtc_desktop_device.h
+index 7d69aae..a1b4881 100644
+--- a/include/rtc_desktop_device.h
++++ b/include/rtc_desktop_device.h
+@@ -18,6 +18,21 @@ class RTCDesktopDevice : public RefCountInterface {
+   virtual scoped_refptr<RTCDesktopMediaList> GetDesktopMediaList(
+       DesktopType type) = 0;
+ 
++  // HOLLOW (appended virtual — keep LAST so pre-existing vtable slots stay
++  // valid against older prebuilt binaries): create a capturer WITHOUT a
++  // MediaSource from an enumerated media list. The one real user is the
++  // Wayland portal-first share path (type == kAnyScreenContent): building a
++  // media list on Wayland pops an xdg-desktop-portal dialog just to
++  // enumerate, so the picker skips enumeration and starts capture directly —
++  // the portal dialog itself is the picker (screens AND windows).
++  // source_id is a caller-chosen stable id: webrtc's RestoreTokenManager
++  // banks the portal restore token under it, so a later capture with the
++  // SAME id restores the previous selection without re-prompting (within
++  // this process), while a NEW id forces a fresh portal prompt. Returns
++  // nullptr when the session has no backend for the requested type.
++  virtual scoped_refptr<RTCDesktopCapturer> CreateDesktopCapturer(
++      DesktopType type, int64_t source_id, bool show_cursor) = 0;
++
+  protected:
+   virtual ~RTCDesktopDevice() {}
+ };
 diff --git a/include/rtc_types.h b/include/rtc_types.h
-index d3123a2..5d21ac0 100644
+index d3123a2..e1873e2 100644
 --- a/include/rtc_types.h
 +++ b/include/rtc_types.h
 @@ -11,6 +11,8 @@
@@ -11,6 +37,19 @@ index d3123a2..5d21ac0 100644
  #include "base/fixed_size_function.h"
  #include "base/portable.h"
  #include "base/refcount.h"
+@@ -107,7 +109,11 @@ struct SdpParseError {
+   string description;
+ };
+ 
+-enum DesktopType { kScreen, kWindow };
++// HOLLOW: kAnyScreenContent appended (keep existing values stable) — a
++// portal-first capture where xdg-desktop-portal itself lets the user pick a
++// screen OR a window in one dialog (Wayland). Never produced by media lists;
++// only meaningful to RTCDesktopDevice::CreateDesktopCapturer(DesktopType, ...).
++enum DesktopType { kScreen, kWindow, kAnyScreenContent };
+ 
+ struct RTCAudioOptions {
+   RTCAudioOptions() {}
 diff --git a/include/rtc_video_track.h b/include/rtc_video_track.h
 index 46850c5..b77ba9e 100644
 --- a/include/rtc_video_track.h
@@ -57,6 +96,195 @@ index be024c8..843e98d 100644
   private:
    webrtc::VideoSourceInterface<webrtc::VideoFrame>* source() override {
      return static_cast<RTCDesktopCapturerImpl*>(capturer_.get());
+diff --git a/src/rtc_desktop_capturer_impl.cc b/src/rtc_desktop_capturer_impl.cc
+index 9ebf17e..db50375 100644
+--- a/src/rtc_desktop_capturer_impl.cc
++++ b/src/rtc_desktop_capturer_impl.cc
+@@ -18,6 +18,7 @@
+ 
+ #include "api/sequence_checker.h"
+ #include "rtc_base/checks.h"
++#include "rtc_base/logging.h"
+ #include "third_party/libyuv/include/libyuv.h"
+ #ifdef WEBRTC_WIN
+ #include "modules/desktop_capture/win/window_capture_utils.h"
+@@ -44,22 +45,49 @@ RTCDesktopCapturerImpl::RTCDesktopCapturerImpl(
+   options_.set_allow_directx_capturer(true);
+ #endif
+ #ifdef WEBRTC_LINUX
+-  if (type == kScreen) {
++  // HOLLOW: PipeWire for screens (the shipping Wayland screen-share path) and
++  // for kAnyScreenContent (portal-first: ONE xdg-desktop-portal prompt that
++  // offers screens AND windows). Window ENUMERATION stays X11-only on
++  // purpose — see rtc_desktop_media_list_impl.cc.
++  if (type == kScreen || type == kAnyScreenContent) {
+     options_.set_allow_pipewire(true);
+   }
+ #endif
+   thread_->BlockingCall([this, type, showCursor] {
+-    if (type == kScreen) {
+-      if (showCursor) {
+-        capturer_ = std::make_unique<webrtc::DesktopAndCursorComposer>(
+-            webrtc::DesktopCapturer::CreateScreenCapturer(options_), options_);
+-      } else {
+-        capturer_ = webrtc::DesktopAndCursorComposer::CreateWithoutMouseCursorMonitor(
+-                webrtc::DesktopCapturer::CreateScreenCapturer(options_));
+-      }
++    // HOLLOW: build the raw capturer first so a null one can be REJECTED. The
++    // factories return nullptr whenever no backend fits the session (window
++    // capture on Wayland is the common one: screen_capturer_linux.cc and
++    // window_capturer_linux.cc skip the X11 fallback there entirely, and the
++    // portal path is only reachable with allow_pipewire). Feeding that null
++    // into DesktopAndCursorComposer only defers the SIGSEGV to Start().
++    std::unique_ptr<webrtc::DesktopCapturer> raw_capturer;
++    switch (type) {
++      case kScreen:
++        raw_capturer = webrtc::DesktopCapturer::CreateScreenCapturer(options_);
++        break;
++      case kWindow:
++        raw_capturer = webrtc::DesktopCapturer::CreateWindowCapturer(options_);
++        break;
++      case kAnyScreenContent:
++        // Wayland portal-first: the portal dialog itself is the picker.
++        raw_capturer = webrtc::DesktopCapturer::CreateGenericCapturer(options_);
++        break;
++    }
++    if (!raw_capturer) {
++      RTC_LOG(LS_ERROR) << "RTCDesktopCapturerImpl: no desktop capturer for "
++                        << (type == kScreen   ? "screen"
++                            : type == kWindow ? "window"
++                                              : "any-content")
++                        << " capture on this session";
++      return;
++    }
++    if (type != kWindow && !showCursor) {
++      capturer_ =
++          webrtc::DesktopAndCursorComposer::CreateWithoutMouseCursorMonitor(
++              std::move(raw_capturer));
+     } else {
+       capturer_ = std::make_unique<webrtc::DesktopAndCursorComposer>(
+-          webrtc::DesktopCapturer::CreateWindowCapturer(options_), options_);
++          std::move(raw_capturer), options_);
+     }
+   });
+ }
+@@ -99,6 +127,13 @@ RTCDesktopCapturerImpl::CaptureState RTCDesktopCapturerImpl::Start(
+     capture_delay_ = uint32_t(1000.0 / fps);
+   }
+ 
++  // HOLLOW: the constructor leaves this null when the session has no capturer
++  // backend for this source type. Fail the start instead of crashing.
++  if (!capturer_) {
++    capture_state_ = CS_FAILED;
++    return capture_state_;
++  }
++
+   if (source_id_ != -1) {
+     if (!capturer_->SelectSource(source_id_)) {
+       capture_state_ = CS_FAILED;
+diff --git a/src/rtc_desktop_device_impl.cc b/src/rtc_desktop_device_impl.cc
+index 2c512dc..1c021ea 100644
+--- a/src/rtc_desktop_device_impl.cc
++++ b/src/rtc_desktop_device_impl.cc
+@@ -29,4 +29,19 @@ scoped_refptr<RTCDesktopMediaList> RTCDesktopDeviceImpl::GetDesktopMediaList(
+   return desktop_media_lists_[type];
+ }
+ 
++scoped_refptr<RTCDesktopCapturer> RTCDesktopDeviceImpl::CreateDesktopCapturer(
++    DesktopType type, int64_t source_id, bool show_cursor) {
++  // HOLLOW: no media list involved — synthesize a standalone MediaSource so
++  // capturer->source() stays non-null for observers. The Wayland portal-first
++  // share path lands here (type == kAnyScreenContent): the xdg-desktop-portal
++  // dialog does the actual picking, and source_id is the caller's stable
++  // restore-token bucket (see rtc_desktop_device.h).
++  webrtc::DesktopCapturer::Source src;
++  src.id = source_id;
++  src.title = "Desktop";
++  return new RefCountedObject<RTCDesktopCapturerImpl>(
++      type, source_id, signaling_thread_,
++      new RefCountedObject<MediaSourceImpl>(nullptr, src, type), show_cursor);
++}
++
+ }  // namespace libwebrtc
+diff --git a/src/rtc_desktop_device_impl.h b/src/rtc_desktop_device_impl.h
+index f37a84a..732c39b 100644
+--- a/src/rtc_desktop_device_impl.h
++++ b/src/rtc_desktop_device_impl.h
+@@ -25,6 +25,9 @@ class RTCDesktopDeviceImpl : public RTCDesktopDevice {
+   scoped_refptr<RTCDesktopMediaList> GetDesktopMediaList(
+       DesktopType type) override;
+ 
++  scoped_refptr<RTCDesktopCapturer> CreateDesktopCapturer(
++      DesktopType type, int64_t source_id, bool show_cursor) override;
++
+  private:
+   webrtc::Thread* signaling_thread_ = nullptr;
+   std::map<DesktopType, scoped_refptr<RTCDesktopMediaListImpl>>
+diff --git a/src/rtc_desktop_media_list_impl.cc b/src/rtc_desktop_media_list_impl.cc
+index a777bcb..9cbec5c 100644
+--- a/src/rtc_desktop_media_list_impl.cc
++++ b/src/rtc_desktop_media_list_impl.cc
+@@ -18,6 +18,7 @@
+ 
+ #include "internal/jpeg_util.h"
+ #include "rtc_base/checks.h"
++#include "rtc_base/logging.h"
+ #include "third_party/libyuv/include/libyuv.h"
+ 
+ #ifdef WEBRTC_WIN
+@@ -53,6 +54,18 @@ RTCDesktopMediaListImpl::RTCDesktopMediaListImpl(DesktopType type,
+     } else {
+       capturer_ = webrtc::DesktopCapturer::CreateWindowCapturer(options_);
+     }
++    // HOLLOW: nullptr means no capturer backend fits this session. Under
++    // Wayland that is EVERY window list (window_capturer_linux.cc only reaches
++    // the X11 fallback when the session is not Wayland, and allow_pipewire is
++    // set for screens only), so this used to SIGSEGV on the media-list thread
++    // and take the whole app down the moment a picker opened. Leave capturer_
++    // null and let the list stay empty; every method below tolerates it.
++    if (!capturer_) {
++      RTC_LOG(LS_ERROR) << "RTCDesktopMediaListImpl: no desktop capturer for "
++                        << (type == kScreen ? "screen" : "window")
++                        << " enumeration on this session";
++      return;
++    }
+     capturer_->Start(callback_.get());
+   });
+ }
+@@ -61,6 +74,10 @@ RTCDesktopMediaListImpl::~RTCDesktopMediaListImpl() { thread_->Stop(); }
+ 
+ int32_t RTCDesktopMediaListImpl::UpdateSourceList(bool force_reload,
+                                                   bool get_thumbnail) {
++  // HOLLOW: no capturer for this source type on this session (see the ctor) —
++  // there is nothing to enumerate and nothing to notify about.
++  if (!capturer_) return 0;
++
+   if (force_reload) {
+     for (auto source : sources_) {
+       if (observer_) {
+@@ -158,6 +175,10 @@ int32_t RTCDesktopMediaListImpl::UpdateSourceList(bool force_reload,
+ 
+ bool RTCDesktopMediaListImpl::GetThumbnail(scoped_refptr<MediaSource> source,
+                                            bool notify) {
++  // HOLLOW: see the ctor — capturer_ stays null when the session has no
++  // backend for this source type.
++  if (!capturer_) return false;
++
+   thread_->PostTask([this, source, notify] {
+     MediaSourceImpl* source_impl = static_cast<MediaSourceImpl*>(source.get());
+     if (capturer_->SelectSource(source_impl->source_id())) {
+@@ -184,7 +205,10 @@ scoped_refptr<MediaSource> RTCDesktopMediaListImpl::GetSource(int index) {
+ }
+ 
+ bool MediaSourceImpl::UpdateThumbnail() {
+-  return mediaList_->GetThumbnail(this);
++  // HOLLOW: standalone sources synthesized by
++  // RTCDesktopDeviceImpl::CreateDesktopCapturer(type, source_id, ...) have no
++  // owning media list — there is nothing to refresh a thumbnail from.
++  return mediaList_ ? mediaList_->GetThumbnail(this) : false;
+ }
+ 
+ #ifdef WEBRTC_WIN
 diff --git a/src/rtc_video_track_impl.cc b/src/rtc_video_track_impl.cc
 index 0c3d78b..2cb3f78 100644
 --- a/src/rtc_video_track_impl.cc
