@@ -7,6 +7,7 @@ import 'package:hollow/src/core/hollow_data_dir.dart';
 
 import 'package:record/record.dart' as rec;
 
+import 'package:hollow/src/core/services/linux_pulse_capture.dart';
 import 'package:hollow/src/core/services/video_thumbnail_service.dart';
 
 /// Fixed encoding profile for voice messages.
@@ -49,6 +50,7 @@ class VoiceMessageRecorder {
 
   StreamSubscription<rec.Amplitude>? _ampSub;
   StreamSubscription<Uint8List>? _pcmSub;
+  LinuxPulseCapture? _pulse;
   Timer? _elapsedTimer;
   DateTime? _startedAt;
   String? _outPath;
@@ -62,7 +64,10 @@ class VoiceMessageRecorder {
   /// [RecorderFfmpegMissingException] if the bundled ffmpeg can't be found
   /// (desktop only — mobile uses native Opus encoder).
   Future<void> start({String? preferredDeviceId}) async {
-    if (!await _recorder.hasPermission()) {
+    // Linux never touches the `record` plugin (its capture shells out to
+    // `parecord`, absent on PipeWire) and has no mic permission prompt —
+    // capture goes through libpulse-simple instead.
+    if (!Platform.isLinux && !await _recorder.hasPermission()) {
       throw const RecorderPermissionException();
     }
 
@@ -143,39 +148,83 @@ class VoiceMessageRecorder {
 
     _ffmpeg!.stdout.drain<void>();
 
-    final stream = await _recorder.startStream(
-      rec.RecordConfig(
-        encoder: rec.AudioEncoder.pcm16bits,
-        numChannels: 1,
-        sampleRate: _sampleRate,
+    if (Platform.isLinux) {
+      final pulse = await LinuxPulseCapture.start(
         device: (preferredDeviceId != null && preferredDeviceId.isNotEmpty)
-            ? rec.InputDevice(id: preferredDeviceId, label: '')
+            ? preferredDeviceId
             : null,
-      ),
-    );
-    _started = true;
-    _startedAt = DateTime.now();
+        sampleRate: _sampleRate,
+        channels: 1,
+      );
+      _pulse = pulse;
+      _started = true;
+      _startedAt = DateTime.now();
 
-    _pcmSub = stream.listen((chunk) {
-      final proc = _ffmpeg;
-      if (proc == null) return;
-      try {
-        proc.stdin.add(chunk);
-      } catch (_) {}
-    });
+      // Chunks arrive every ~100 ms, so they double as the level-meter tick.
+      _pcmSub = pulse.chunks.listen((chunk) {
+        final proc = _ffmpeg;
+        if (proc != null) {
+          try {
+            proc.stdin.add(chunk);
+          } catch (_) {}
+        }
+        if (!_disposed) {
+          _ampController.add(_levelFromPcm16(chunk));
+        }
+      }, onError: (Object e) {
+        _log('[VoiceRecorder] pulse capture error: $e');
+      });
+    } else {
+      final stream = await _recorder.startStream(
+        rec.RecordConfig(
+          encoder: rec.AudioEncoder.pcm16bits,
+          numChannels: 1,
+          sampleRate: _sampleRate,
+          device: (preferredDeviceId != null && preferredDeviceId.isNotEmpty)
+              ? rec.InputDevice(id: preferredDeviceId, label: '')
+              : null,
+        ),
+      );
+      _started = true;
+      _startedAt = DateTime.now();
 
-    _ampSub = _recorder.onAmplitudeChanged(_ampInterval).listen((amp) {
-      if (_disposed) return;
-      const minDb = -60.0;
-      final clamped = amp.current.clamp(minDb, 0.0);
-      final level = (clamped - minDb) / (0.0 - minDb);
-      _ampController.add(level);
-    });
+      _pcmSub = stream.listen((chunk) {
+        final proc = _ffmpeg;
+        if (proc == null) return;
+        try {
+          proc.stdin.add(chunk);
+        } catch (_) {}
+      });
+
+      _ampSub = _recorder.onAmplitudeChanged(_ampInterval).listen((amp) {
+        if (_disposed) return;
+        const minDb = -60.0;
+        final clamped = amp.current.clamp(minDb, 0.0);
+        final level = (clamped - minDb) / (0.0 - minDb);
+        _ampController.add(level);
+      });
+    }
     _elapsedTimer = Timer.periodic(_ampInterval, (_) {
       final start = _startedAt;
       if (start == null || _disposed) return;
       _elapsedController.add(DateTime.now().difference(start));
     });
+  }
+
+  /// Same dBFS (-60..0) → 0..1 mapping the `record` amplitude path uses,
+  /// computed from a raw PCM16LE chunk's RMS.
+  static double _levelFromPcm16(Uint8List chunk) {
+    final samples =
+        Int16List.view(chunk.buffer, chunk.offsetInBytes, chunk.length >> 1);
+    if (samples.isEmpty) return 0.0;
+    double sum = 0;
+    for (final s in samples) {
+      sum += (s * s).toDouble();
+    }
+    final rms = math.sqrt(sum / samples.length) / 32768.0;
+    const minDb = -60.0;
+    final db = rms <= 0 ? minDb : 20.0 * math.log(rms) / math.ln10;
+    return (db.clamp(minDb, 0.0) - minDb) / (0.0 - minDb);
   }
 
   /// Stop the recording and return the finished file path + duration.
@@ -281,9 +330,16 @@ class VoiceMessageRecorder {
     _ampSub = null;
     _elapsedTimer?.cancel();
     _elapsedTimer = null;
-    try {
-      await _recorder.stop();
-    } catch (_) {}
+    final pulse = _pulse;
+    _pulse = null;
+    if (pulse != null) {
+      await pulse.stop();
+    }
+    if (!Platform.isLinux) {
+      try {
+        await _recorder.stop();
+      } catch (_) {}
+    }
   }
 
   static Future<String> _buildTempPath() async {

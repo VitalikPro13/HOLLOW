@@ -88,15 +88,25 @@ class _IncomingCallOverlayState extends ConsumerState<IncomingCallOverlay>
   Future<void> _startRingtone() async {
     // Await the async provider to ensure it's loaded from SQLCipher.
     final ringtonePath = await ref.read(ringtonePathProvider.future);
-    if (ringtonePath == null || ringtonePath.isEmpty) return;
-    if (!File(ringtonePath).existsSync()) return;
-
     final volume = await ref.read(ringtoneVolumeProvider.future);
-
     final startSec = await ref.read(ringtoneStartProvider.future);
     final endSec = await ref.read(ringtoneEndProvider.future);
+    // The call may have been answered/declined while the providers loaded.
+    if (!mounted || !_wasVisible) return;
+
+    final hasCustom = ringtonePath != null &&
+        ringtonePath.isNotEmpty &&
+        File(ringtonePath).existsSync();
     final clipDuration = endSec - startSec;
-    if (clipDuration <= 0) return;
+
+    if (!hasCustom || clipDuration <= 0) {
+      // Bundled default ringtone: loop the whole file, no trim range applies.
+      _ringtonePlayer = AudioPlayer();
+      await _ringtonePlayer!.setVolume(volume);
+      await _ringtonePlayer!.setReleaseMode(ReleaseMode.loop);
+      await _ringtonePlayer!.play(AssetSource('sounds/default_ringtone.wav'));
+      return;
+    }
 
     _ringtonePlayer = AudioPlayer();
     await _ringtonePlayer!.setVolume(volume);

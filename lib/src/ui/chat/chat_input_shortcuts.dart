@@ -26,7 +26,10 @@ KeyEventResult handleChatInputKey(
     return KeyEventResult.ignored;
   }
 
-  final isCtrl = HardwareKeyboard.instance.isControlPressed;
+  // AltGr registers as Ctrl+Alt on Windows — a held Alt means the user is
+  // typing a layout character (e.g. AZERTY € = AltGr+E), not a shortcut.
+  final isCtrl = HardwareKeyboard.instance.isControlPressed &&
+      !HardwareKeyboard.instance.isAltPressed;
   final isShift = HardwareKeyboard.instance.isShiftPressed;
 
   // Enter to send, Shift+Enter for newline.

@@ -437,14 +437,15 @@ Uses `SingleTickerProviderStateMixin` for animation.
 - `_slideAnim` -- slide from `Offset(0, -1)` to `Offset.zero` with `HollowCurves.enter`
 - `_fadeAnim` -- fade 0 -> 1 with `HollowCurves.enter`
 - `_wasVisible` -- tracks previous visibility for enter/exit transitions
-- `_ringtonePlayer` -- `AudioPlayer?` for custom ringtone playback
+- `_ringtonePlayer` -- `AudioPlayer?` for ringtone playback (custom file or bundled default)
 - `_countdownTimer` -- 30-second countdown `Timer.periodic`
 - `_secondsLeft` -- int, starts at 30, decrements each second
 - Cached display info (survives exit animation): `_cachedPeerId`, `_cachedDisplayName`, `_cachedAvatarBytes`, `_cachedIsVideoCall`
 
 **Ringtone playback (`_startRingtone`):**
-- Reads `ringtonePathProvider`, `ringtoneVolumeProvider`, `ringtoneStartProvider`, `ringtoneEndProvider`
-- Plays from start offset, loops within clip range via `onPositionChanged` listener
+- Reads `ringtonePathProvider`, `ringtoneVolumeProvider`, `ringtoneStartProvider`, `ringtoneEndProvider`; after the awaits, bails if the call already ended (`!mounted || !_wasVisible` — a quick decline during the SQLCipher loads must not leave a ringtone playing forever)
+- Custom path set AND file on disk AND trim range valid → plays from start offset, loops within clip range via `onPositionChanged` listener
+- Otherwise (never set, cleared, file deleted, degenerate trim) → bundled default `AssetSource('sounds/default_ringtone.wav')` with `ReleaseMode.loop`, full clip (issue #39; an unset ringtone is never silent anymore)
 
 **Visibility logic (in `build`):**
 - When `isVisible` becomes true: forward animation, start ringtone, start countdown
@@ -882,7 +883,7 @@ Values: `profile`, `system`, `security`, `updates`, `about`
 
 **`_BackgroundPicker`:** Set/Change/Remove buttons, opens image picker -> 16:9 crop dialog, darken opacity slider (0.4 - 1.0) when background is set.
 
-**`_AudioDeviceSettings`:** Enumerates devices via `win32audio.Audio.enumDevices()` (input/output) and `flutter_webrtc.navigator.mediaDevices.enumerateDevices()` (cameras). Dropdown rows for mic, speaker, camera, audio quality preset. Mic test button using `record` package with amplitude visualization. Ringtone picker: file selection + volume slider + trim button opening `_RingtoneClipEditorDialog`.
+**`_AudioDeviceSettings`:** Enumerates devices via `win32audio.Audio.enumDevices()` (input/output) and `flutter_webrtc.navigator.mediaDevices.enumerateDevices()` (cameras). Dropdown rows for mic, speaker, camera, audio quality preset. Mic test = WebRTC loopback echo test (getUserMedia + local PC pair; audible self-monitor + `getCaptureLevel` meter — no `record` package). Ringtone picker: file selection + volume slider + trim button opening `_RingtoneClipEditorDialog`; unset = bundled default ringtone.
 
 **`_RingtoneClipEditorDialog`:** RangeSlider for start/end clip (max 30s), preview playback with progress bar, save persists to `ringtoneStartProvider`/`ringtoneEndProvider`.
 

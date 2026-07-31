@@ -8,7 +8,9 @@ One-shot voice message recorder with platform-specific encoding paths. Used by `
 
 ### Platform paths
 
-**Desktop (Windows/macOS/Linux):** Captures raw PCM16LE via `record` package `startStream()` and pipes through bundled ffmpeg (libopus) to encode Opus/OGG. Needed because Windows Media Foundation lacks Opus MFT.
+**Desktop (Windows/macOS):** Captures raw PCM16LE via `record` package `startStream()` and pipes through bundled ffmpeg (libopus) to encode Opus/OGG. Needed because Windows Media Foundation lacks Opus MFT.
+
+**Desktop (Linux):** Same ffmpeg pipeline, but PCM capture comes from `LinuxPulseCapture` (`lib/src/core/services/linux_pulse_capture.dart`) — libpulse-simple over dart:ffi (`pa_simple_new/read/free`), blocking reads in a dedicated isolate, `fragsize` tuned to 100 ms chunks. `record_linux` shells out to `parecord`, absent on PipeWire systems; the libpulse CLIENT libs are always present and pipewire-pulse serves the same protocol. Device id = the pulse source name from `audioInputDeviceProvider`; a stale device falls back to the default source. Amplitude is computed from chunk RMS (same -60..0 dBFS → 0..1 mapping). `start()` also skips `record`'s `hasPermission()` on Linux.
 
 **Mobile (Android/iOS):** Uses `record` package native `AudioEncoder.opus` with file-based `start()`. Android's `MediaRecorder` supports native Opus. No ffmpeg needed (not bundled on mobile).
 
@@ -37,9 +39,9 @@ One-shot voice message recorder with platform-specific encoding paths. Used by `
 4. Spawns ffmpeg as a child process reading raw PCM16LE from stdin and encoding libopus to the `.ogg` output file. Args: `-f s16le -ar 16000 -ac 1 -i pipe:0 -c:a libopus -b:a 24k -vbr on -application voip -y <outPath>`.
 5. Sets up a `Completer<int>` for ffmpeg exit code tracking.
 6. Pipes ffmpeg stderr to `_stderrBuf` (StringBuffer) for error logging. Drains stdout to prevent pipe blocking.
-7. Starts PCM capture via `_recorder.startStream()` with the configured `RecordConfig`. If `preferredDeviceId` is provided and non-empty, it is passed as an `InputDevice`.
-8. Forwards PCM chunks from the recorder stream directly to ffmpeg's stdin.
-9. Starts amplitude monitoring via `_recorder.onAmplitudeChanged(_ampInterval)` -- normalizes dB values from range [-60, 0] to [0.0, 1.0] and emits on the `amplitudes` stream.
+7. Starts PCM capture: Linux via `LinuxPulseCapture.start()` (see Platform paths), Windows/macOS via `_recorder.startStream()` with the configured `RecordConfig`. If `preferredDeviceId` is provided and non-empty, it is passed along (pulse source name on Linux / `InputDevice` elsewhere).
+8. Forwards PCM chunks from the capture stream directly to ffmpeg's stdin.
+9. Amplitude: Linux computes it from each 100 ms PCM chunk's RMS; Windows/macOS use `_recorder.onAmplitudeChanged(_ampInterval)`. Both normalize dB [-60, 0] to [0.0, 1.0] and emit on the `amplitudes` stream.
 10. Starts an elapsed timer (100ms periodic) that emits wall-clock duration on the `elapsed` stream.
 
 **stop() -> VoiceRecordingResult?**

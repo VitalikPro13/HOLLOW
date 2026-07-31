@@ -638,11 +638,11 @@ let _ = state.apply_op(&op);
 
 ### record package Linux backend requires parecord
 
-**Rule:** The `record` Dart package (`record_linux` v1.3.0) shells out to `parecord` from `pulseaudio-utils`. This is not installed on PipeWire-only systems (modern Ubuntu 24.04+, Fedora).
+**Rule:** The `record` Dart package (`record_linux` v1.3.0) shells out to `parecord` from `pulseaudio-utils`. This is not installed on PipeWire-only systems (modern Ubuntu 24.04+, Fedora). Anything that must work on Linux has to capture via WebRTC `getUserMedia` instead (libwebrtc talks to PipeWire directly).
 
-**Why:** Mic test in Settings crashes with `ProcessException: No such file or directory`. Voice calls are unaffected — libwebrtc talks to PipeWire directly through its own audio device module.
+**Why:** Any `record` capture crashes with `ProcessException: No such file or directory` on PipeWire. Voice calls are unaffected — libwebrtc uses its own audio device module.
 
-**Where:** `lib/src/ui/dialogs/user_settings_dialog.dart:_startMicTest()`. Needs a Linux-specific path using WebRTC `getUserMedia` instead of the `record` package.
+**Where:** As of 2026-07-31 (issue #40) NOTHING runs `record` on Linux anymore: the Settings mic test (`lib/src/ui/settings/audio_section.dart:_startMicTest()`) does getUserMedia + a local loopback PeerConnection pair (starts the ADM so `Helper.getCaptureLevel()` meters, and plays the mic back through the selected output), and voice messages (`voice_message_recorder.dart`) branch on `Platform.isLinux` into `linux_pulse_capture.dart` — libpulse-simple over dart:ffi in an isolate (the client libs are always present; pipewire-pulse serves the same protocol; verified on the Ubuntu24 VM which has pipewire-pulse and no parecord). `record` remains for mobile + Windows/macOS desktop capture only.
 
 ### Flatpak must use --socket=x11, not fallback-x11
 

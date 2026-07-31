@@ -166,7 +166,9 @@ class _AnnotationOverlayLayerState extends State<_AnnotationOverlayLayer> {
       return KeyEventResult.ignored;
     }
     final isMeta = HardwareKeyboard.instance.isMetaPressed;
-    final isCtrl = HardwareKeyboard.instance.isControlPressed;
+    // AltGr registers as Ctrl+Alt on Windows — don't treat it as Ctrl.
+    final isCtrl = HardwareKeyboard.instance.isControlPressed &&
+        !HardwareKeyboard.instance.isAltPressed;
     final isShift = HardwareKeyboard.instance.isShiftPressed;
 
     if (event.logicalKey == LogicalKeyboardKey.escape) {

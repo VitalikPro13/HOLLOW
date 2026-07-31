@@ -1176,7 +1176,11 @@ class _HollowShellState extends ConsumerState<HollowShell>
   bool _handleGlobalKey(KeyEvent event) {
     if (event is! KeyDownEvent) return false;
 
-    final isCtrl = HardwareKeyboard.instance.isControlPressed;
+    // AltGr registers as Ctrl+Alt on Windows — a held Alt means the user is
+    // typing a layout character (AZERTY @ = AltGr+à, issue #43), never one of
+    // our Ctrl shortcuts. Returning true here would suppress the WM_CHAR.
+    final isCtrl = HardwareKeyboard.instance.isControlPressed &&
+        !HardwareKeyboard.instance.isAltPressed;
     final isShift = HardwareKeyboard.instance.isShiftPressed;
 
     // Ctrl+, → Open settings dialog.
