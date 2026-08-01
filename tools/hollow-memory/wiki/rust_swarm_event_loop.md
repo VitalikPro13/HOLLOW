@@ -108,11 +108,14 @@ loop {
         _ = gossip_eviction_timer.tick()   => { /* Gossip dedup eviction (60s) */ }
         _ = gossip_exchange_timer.tick()   => { /* Gossip peer exchange (2 min) */ }
         _ = share_tick_timer.tick()        => { /* Share scheduler (50ms) */ }
+        _ = grant_sweep_timer.tick()       => { /* Temp channel-grant expiry sweep (30s prod, 2s cfg(test)) */ }
     }
 }
 ```
 
 All timers consume their immediate first tick during initialization so they do not fire at time=0.
+
+**`grant_sweep_timer` (issue #32):** the grant predicate is LAZY (an expired grant already reads as denied); the sweep enacts consequences. A watermark (`grant_sweep_last_ms`, starts 0 so offline-expired grants reconcile once on the first tick) selects only (server, channel)s with a grant expiring inside `(last, now]`; each fires one `reconcile_subgroups_for_server(Some(cid))` (MLS leaf eviction), `auto_leave_invisible_voice_channels`, and a `ServerUpdated` so the expired member's own UI re-evaluates `me_can_see`.
 
 ## NodeCommand Dispatch (Dart FFI to Rust)
 

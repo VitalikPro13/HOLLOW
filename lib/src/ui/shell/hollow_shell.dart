@@ -2554,16 +2554,14 @@ class _RightPaneSidebarState extends ConsumerState<_RightPaneSidebar> {
   Future<void> _loadChannels(String serverId) async {
     _loadedServerId = serverId;
     try {
-      final channels =
-          await crdt_api.getServerChannels(serverId: serverId);
-      final map = <String, ChannelInfo>{};
-      for (final ch in channels) {
-        map[ch.channelId] = ChannelInfo(
-          channelId: ch.channelId,
-          name: ch.name,
-          category: ch.category,
-        );
-      }
+      // Full mapping (not a name-only rebuild) so meCanSee filters here too —
+      // the split-view right pane must hide restricted channels like the main
+      // sidebar does.
+      final all = await ChannelListNotifier.fetchChannels(serverId);
+      final map = <String, ChannelInfo>{
+        for (final e in all.entries)
+          if (e.value.meCanSee) e.key: e.value,
+      };
       final layoutJson =
           await crdt_api.getChannelLayout(serverId: serverId);
       if (mounted) {

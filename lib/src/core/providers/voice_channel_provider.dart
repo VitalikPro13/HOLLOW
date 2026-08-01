@@ -298,7 +298,12 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
   bool _channelUsesSubgroup(String channelId) {
     final ch = ref.read(channelListProvider)[channelId];
     if (ch == null) return false;
-    return !ch.isPublic && ch.visibility != 'everyone';
+    // Label-gated channels are subgrouped too. The Rust handler stamps the
+    // tier to admin whenever a label gate turns on, but this is a KEY-DOMAIN
+    // decision — never rely on the stamp; mirror Rust's channel_uses_subgroup
+    // exactly.
+    return !ch.isPublic &&
+        (ch.visibility != 'everyone' || ch.visibilityLabels.isNotEmpty);
   }
 
   /// Shared screen capture stream (captured once, shared across outgoing PCs).

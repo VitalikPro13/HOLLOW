@@ -160,21 +160,17 @@ final archiveDmListProvider =
 /// All servers with their channels that have message history.
 final archiveChannelListProvider =
     FutureProvider<List<ArchiveChannelGroup>>((ref) async {
-  const rolePriority = {'owner': 3, 'admin': 2, 'moderator': 1, 'member': 0};
   final servers = await crdt_api.getJoinedServers();
   final groups = <ArchiveChannelGroup>[];
   for (final server in servers) {
-    final myRole = await crdt_api.getMyRole(serverId: server.serverId);
-    final myPriority = rolePriority[myRole] ?? 0;
     final channels =
         await crdt_api.getServerChannels(serverId: server.serverId);
     final entries = <ArchiveChannelEntry>[];
     for (final ch in channels) {
       if (ch.channelType == 'voice') continue;
-      // Filter by channel visibility — same logic as visibleChannelsProvider
-      final vis = ch.visibility;
-      if (vis == 'moderator' && myPriority < 1) continue;
-      if (vis == 'admin' && myPriority < 2) continue;
+      // Filter by the Rust-computed access predicate (tier + label gates +
+      // grants) — same source as visibleChannelsProvider.
+      if (!ch.meCanSee) continue;
       final count = await storage_api.countChannelMessagesFfi(
         serverId: server.serverId,
         channelId: ch.channelId,

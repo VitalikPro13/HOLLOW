@@ -620,13 +620,19 @@ pub(crate) enum NodeCommand {
     UnmuteMember { server_id: String, peer_id: String },
     SetChannelSlowMode { server_id: String, channel_id: String, seconds: u32 },
     SetChannelMediaOnly { server_id: String, channel_id: String, media_only: bool },
+    // -- Label-gated access + temporary grants (issue #32) --
+    SetChannelVisibilityLabels { server_id: String, channel_id: String, labels: Vec<String> },
+    SetChannelPostingLabels { server_id: String, channel_id: String, labels: Vec<String> },
+    /// `expires_at` epoch ms; `u64::MAX` = until revoked.
+    GrantChannelAccess { server_id: String, channel_id: String, peer_id: String, expires_at: u64 },
+    RevokeChannelAccess { server_id: String, channel_id: String, peer_id: String },
     // -- Guest sync commands (Public Channels Phase 3) --
     RequestPublicChannels { server_id: String },
     RequestPublicChannelSync { server_id: String, channel_id: String, before_timestamp: Option<i64> },
     LeaveGuestRoom { server_id: String },
-    CreateLabel { server_id: String, name: String, color: String },
+    CreateLabel { server_id: String, name: String, color: String, access: bool },
     DeleteLabel { server_id: String, label_id: String },
-    UpdateLabel { server_id: String, label_id: String, name: String, color: String },
+    UpdateLabel { server_id: String, label_id: String, name: String, color: String, access: bool },
     AssignLabel { server_id: String, label_id: String, peer_id: String },
     UnassignLabel { server_id: String, label_id: String, peer_id: String },
     // -- Custom emotes --
@@ -889,6 +895,10 @@ impl NodeCommand {
             Self::UnmuteMember { .. } => "UnmuteMember",
             Self::SetChannelSlowMode { .. } => "SetChannelSlowMode",
             Self::SetChannelMediaOnly { .. } => "SetChannelMediaOnly",
+            Self::SetChannelVisibilityLabels { .. } => "SetChannelVisibilityLabels",
+            Self::SetChannelPostingLabels { .. } => "SetChannelPostingLabels",
+            Self::GrantChannelAccess { .. } => "GrantChannelAccess",
+            Self::RevokeChannelAccess { .. } => "RevokeChannelAccess",
             Self::RequestPublicChannels { .. } => "RequestPublicChannels",
             Self::RequestPublicChannelSync { .. } => "RequestPublicChannelSync",
             Self::LeaveGuestRoom { .. } => "LeaveGuestRoom",

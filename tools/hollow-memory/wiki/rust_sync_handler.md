@@ -275,23 +275,12 @@ Standard broadcast pattern (MLS or plaintext fallback).
 Parameters include a raw `CrdtPayload` (the specific label variant) rather than separate handlers per operation.
 
 Handles these CrdtPayload variants:
-- `LabelCreated { label_id, name, color, icon, position }` — requires `MANAGE_ROLES`
+- `LabelCreated { label_id, name, color, access }` — requires `MANAGE_ROLES`
 - `LabelDeleted { label_id }` — requires `MANAGE_ROLES`
-- `LabelUpdated { label_id, name, color, icon, position }` — requires `MANAGE_ROLES`
-- `LabelAssigned { peer_id, label_id }` — self-assign allowed, otherwise requires `MANAGE_ROLES`
-- `LabelUnassigned { peer_id, label_id }` — self-unassign allowed, otherwise requires `MANAGE_ROLES`
+- `LabelUpdated { label_id, name, color, access: Option<bool> }` — requires `MANAGE_ROLES` (`access: None` preserves the stored flag)
+- `LabelAssigned` / `LabelUnassigned { peer_id, label_id }` — self-toggle allowed ONLY for an existing COSMETIC label, otherwise `MANAGE_ROLES`
 
-Self-toggle logic:
-```rust
-let is_self_toggle = match &payload {
-    CrdtPayload::LabelAssigned { peer_id, .. }
-    | CrdtPayload::LabelUnassigned { peer_id, .. } => peer_id == &local_peer,
-    _ => false,
-};
-if !is_self_toggle && !state.has_permission(&local_peer, Permission::MANAGE_ROLES) {
-    // denied
-}
-```
+Self-toggle logic (issue #32 lockdown — access labels gate channels, so self-assign would be privilege escalation): the gate is `state.can_self_toggle_label(local_peer, peer_id, label_id)` — same-identity AND the label exists AND `!access` (unknown ids fail closed). `op_allowed` uses the SAME helper at ingest so the two gates cannot drift.
 
 Emits: `NetworkEvent::ServerUpdated { server_id }`
 
@@ -319,7 +308,17 @@ CrdtPayload: `ChannelVisibilityChanged { channel_id, visibility }` — `visibili
 
 Emits: `NetworkEvent::ServerUpdated { server_id }`
 
-**Per-channel MLS subgroups (Option B, 2026-06-22):** channel visibility is now CRYPTOGRAPHICALLY enforced for restricted text channels. When a channel becomes restricted (`channel_uses_subgroup` true) the handler does NOT itself build the subgroup — it applies the CRDT op + emits ServerUpdated, and the swarm.rs `SetChannelVisibility` arm calls `crypto_handler::reconcile_subgroups_for_server(... Some(channel_id))` (coordinator-gated) to create + populate the subgroup (pulling qualifying members' KeyPackages). When a channel becomes `Everyone` again, this handler tears the subgroup down locally (`mls.remove_group(subgroup_id)`). The reconciler also runs on `handle_change_role` (role shifts who qualifies) and on received CRDT ops in `handle_envelope_crdt_op` / `handle_incoming_request` (RoleChanged/ChannelVisibilityChanged/MemberRemoved/MemberBanned) so the ACTUAL subgroup coordinator acts even when another member authored the op. Kick/ban/leave drop the identity from all subgroups (`remove_identity_from_subgroups`). See `project_per_channel_mls_subgroups` memory.
+**Per-channel MLS subgroups (Option B, 2026-06-22):** channel visibility is now CRYPTOGRAPHICALLY enforced for restricted text channels. When a channel becomes restricted (`channel_uses_subgroup` true) the handler does NOT itself build the subgroup — it applies the CRDT op + emits ServerUpdated, and the swarm.rs `SetChannelVisibility` arm calls `crypto_handler::reconcile_subgroups_for_server(... Some(channel_id))` (coordinator-gated) to create + populate the subgroup (pulling qualifying members' KeyPackages). When a channel becomes `Everyone` again, this handler tears the subgroup down locally (`mls.remove_group(subgroup_id)`). The reconciler also runs on `handle_change_role` (role shifts who qualifies), on the label command arms (Assign/Unassign/Delete/Update — labels can gate channels, `only_channel = None`), on the grant/visibility-labels command arms (`Some(cid)`), on received CRDT ops in `handle_envelope_crdt_op` / `handle_incoming_request` (RoleChanged/ChannelVisibilityChanged/MemberRemoved/MemberBanned + the #32 set: ChannelVisibilityLabelsChanged/ChannelGrantSet/ChannelGrantRevoked/Label*), and on the 30s `grant_sweep_timer` when a grant expires. Kick/ban/leave drop the identity from all subgroups (`remove_identity_from_subgroups`). See `project_per_channel_mls_subgroups` + `project_channel_access_labels_grants` memories.
+
+**Issue #32 pairing:** picking a plain tier while `visibility_labels` is non-empty makes this handler ALSO author a `ChannelVisibilityLabelsChanged{[]}` clearing op (the UI presents tier + labels as ONE selector).
+
+## handle_set_channel_visibility_labels() / handle_set_channel_posting_labels()
+
+Issue #32. Set (empty vec = clear) the label gate. When the gate turns ON, a plain `ChannelVisibilityChanged{"admin"}` (resp. `ChannelPostingChanged{"admin"}`) stamp is authored FIRST — pre-#32 clients drop the unknown labels op but honor the stamp, so the channel fails closed. Both ops come from one node's HLC in sequence, so replicas converge regardless of arrival order. Permission `MANAGE_CHANNELS`; visibility variant mirrors the subgroup teardown hook; posting never affects subgrouping (no reconcile).
+
+## handle_grant_channel_access() / handle_revoke_channel_access()
+
+Issue #32. `ChannelGrantSet { channel_id, peer_id, expires_at }` / `ChannelGrantRevoked`. Authoring-side friendly validation (channel exists, target is a member — stricter than ingest is the safe asymmetry). Permission `MANAGE_CHANNELS`; standard `author_broadcast_op` MlsFirst; the swarm arms reconcile the channel's subgroup afterwards.
 
 ## handle_set_channel_posting()
 
@@ -327,11 +326,11 @@ Emits: `NetworkEvent::ServerUpdated { server_id }`
 
 Permission: `Permission::MANAGE_CHANNELS`
 
-CrdtPayload: `ChannelPostingChanged { channel_id, posting }` — `posting` is a String (e.g., "everyone", "moderator_only", "admin_only").
+CrdtPayload: `ChannelPostingChanged { channel_id, posting }` — `posting` is a String ("everyone" | "moderator" | "admin").
 
 Emits: `NetworkEvent::ServerUpdated { server_id }`
 
-Same UI-only enforcement caveat as visibility.
+Posting is enforced send-side (`can_post_in_channel` at the send gates) — not at ingest, by design. Clears `posting_labels` (authors the empty-labels op) when a plain tier is picked while a label gate was set.
 
 ## handle_change_role_permissions()
 

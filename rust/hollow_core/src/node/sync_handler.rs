@@ -1546,11 +1546,16 @@ pub(crate) async fn handle_label_op(
     crypto_store: &CryptoStore,
     crdt_store: &CrdtStore,
 ) -> bool {
-    // Self-assign/unassign: any member can toggle their own labels.
-    // All other label ops require MANAGE_ROLES.
+    // Self-assign/unassign: any member can toggle their own COSMETIC labels.
+    // Access labels (and unknown label ids) require MANAGE_ROLES even on
+    // yourself — they gate channels, so self-assignment would be privilege
+    // escalation. Shared rule with op_allowed via can_self_toggle_label so
+    // the authoring gate and the ingest gate can never drift.
     let is_self_toggle = match &payload {
-        CrdtPayload::LabelAssigned { peer_id, .. }
-        | CrdtPayload::LabelUnassigned { peer_id, .. } => peer_id == local_peer_str,
+        CrdtPayload::LabelAssigned { label_id, peer_id }
+        | CrdtPayload::LabelUnassigned { label_id, peer_id } => server_states
+            .get(&server_id)
+            .is_some_and(|s| s.can_self_toggle_label(local_peer_str, peer_id, label_id)),
         _ => false,
     };
     let gate = if is_self_toggle { OpGate::Always } else { OpGate::Perm(Permission::MANAGE_ROLES) };
@@ -1676,6 +1681,30 @@ pub(crate) async fn handle_set_channel_visibility(
         return true;
     }
 
+    // Picking a plain tier on a label-gated channel also clears the label
+    // gate (the UI presents them as ONE selector; leaving a stale label list
+    // behind would silently keep gating on new clients while old clients
+    // honored the tier). Authored second → HLC-later → wins everywhere.
+    let had_labels = server_states
+        .get(&server_id)
+        .and_then(|s| s.channels.get(&channel_id))
+        .is_some_and(|ch| !ch.visibility_labels.is_empty());
+    if had_labels {
+        if author_broadcast_op(
+            server_states, event_tx, ws_cmd_tx, ws_room_peers, gossip_overlays, local_peer_str,
+            &server_id,
+            OpGate::Perm(Permission::MANAGE_CHANNELS),
+            Some("Permission denied: cannot manage channels"),
+            CrdtPayload::ChannelVisibilityLabelsChanged { channel_id: channel_id.clone(), labels: Vec::new() },
+            &format!("Clearing channel {channel_id} visibility label gate"),
+            NetworkEvent::ServerUpdated { server_id: server_id.clone() },
+            OpBroadcast::MlsFirst { mls, crypto_store },
+            crdt_store,
+        ).await {
+            return true;
+        }
+    }
+
     // Per-channel MLS subgroup (Option B): if the channel is no longer
     // restricted (now Everyone/public), tear down its subgroup locally —
     // messages revert to the server-wide group. (Becoming restricted is
@@ -1711,13 +1740,233 @@ pub(crate) async fn handle_set_channel_posting(
     crypto_store: &CryptoStore,
     crdt_store: &CrdtStore,
 ) -> bool {
-    author_broadcast_op(
+    if author_broadcast_op(
         server_states, event_tx, ws_cmd_tx, ws_room_peers, gossip_overlays, local_peer_str,
         &server_id,
         OpGate::Perm(Permission::MANAGE_CHANNELS),
         Some("Permission denied: cannot manage channels"),
         CrdtPayload::ChannelPostingChanged { channel_id: channel_id.clone(), posting: posting.clone() },
         &format!("Setting channel {channel_id} posting to {posting}"),
+        NetworkEvent::ServerUpdated { server_id: server_id.clone() },
+        OpBroadcast::MlsFirst { mls, crypto_store },
+        crdt_store,
+    ).await {
+        return true;
+    }
+
+    // Same one-selector rule as visibility: a plain posting tier clears any
+    // posting label gate.
+    let had_labels = server_states
+        .get(&server_id)
+        .and_then(|s| s.channels.get(&channel_id))
+        .is_some_and(|ch| !ch.posting_labels.is_empty());
+    if had_labels {
+        return author_broadcast_op(
+            server_states, event_tx, ws_cmd_tx, ws_room_peers, gossip_overlays, local_peer_str,
+            &server_id,
+            OpGate::Perm(Permission::MANAGE_CHANNELS),
+            Some("Permission denied: cannot manage channels"),
+            CrdtPayload::ChannelPostingLabelsChanged { channel_id: channel_id.clone(), labels: Vec::new() },
+            &format!("Clearing channel {channel_id} posting label gate"),
+            NetworkEvent::ServerUpdated { server_id: server_id.clone() },
+            OpBroadcast::MlsFirst { mls, crypto_store },
+            crdt_store,
+        ).await;
+    }
+    false
+}
+
+// ── 10f-1b. Label-gated access + temporary grants (issue #32) ────────
+
+/// Set (or clear, empty vec) the visibility label gate. When the gate turns
+/// ON, a plain `ChannelVisibilityChanged{"admin"}` stamp is authored FIRST:
+/// clients that predate the labels op drop it but honor the stamp, so the
+/// channel fails closed (hidden from non-admins) instead of open. Both ops
+/// come from our HLC in sequence, so every replica converges on
+/// tier=admin + labels=L regardless of arrival order.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn handle_set_channel_visibility_labels(
+    server_states: &mut ServerStates,
+    mls: &mut Option<MlsManager>,
+    event_tx: &EventTx,
+    ws_cmd_tx: &WsCmdTx,
+    ws_room_peers: &WsRoomPeers,
+    gossip_overlays: &mut GossipOverlays,
+    local_peer_str: &str,
+    server_id: String,
+    channel_id: String,
+    labels: Vec<String>,
+    crypto_store: &CryptoStore,
+    crdt_store: &CrdtStore,
+) -> bool {
+    let needs_admin_stamp = !labels.is_empty()
+        && server_states
+            .get(&server_id)
+            .and_then(|s| s.channels.get(&channel_id))
+            .is_some_and(|ch| ch.visibility != crate::crdt::server_state::ChannelVisibility::AdminPlus);
+    if needs_admin_stamp {
+        if author_broadcast_op(
+            server_states, event_tx, ws_cmd_tx, ws_room_peers, gossip_overlays, local_peer_str,
+            &server_id,
+            OpGate::Perm(Permission::MANAGE_CHANNELS),
+            Some("Permission denied: cannot manage channels"),
+            CrdtPayload::ChannelVisibilityChanged { channel_id: channel_id.clone(), visibility: "admin".to_string() },
+            &format!("Stamping channel {channel_id} visibility to admin (label-gate fallback)"),
+            NetworkEvent::ServerUpdated { server_id: server_id.clone() },
+            OpBroadcast::MlsFirst { mls, crypto_store },
+            crdt_store,
+        ).await {
+            return true; // gate denied — abort before the labels op
+        }
+    }
+
+    if author_broadcast_op(
+        server_states, event_tx, ws_cmd_tx, ws_room_peers, gossip_overlays, local_peer_str,
+        &server_id,
+        OpGate::Perm(Permission::MANAGE_CHANNELS),
+        Some("Permission denied: cannot manage channels"),
+        CrdtPayload::ChannelVisibilityLabelsChanged { channel_id: channel_id.clone(), labels: labels.clone() },
+        &format!("Setting channel {channel_id} visibility labels ({} entries)", labels.len()),
+        NetworkEvent::ServerUpdated { server_id: server_id.clone() },
+        OpBroadcast::MlsFirst { mls, crypto_store },
+        crdt_store,
+    ).await {
+        return true;
+    }
+
+    // Defensive teardown mirror of handle_set_channel_visibility: if the
+    // channel ended up fully unrestricted (labels cleared while the tier is
+    // Everyone), drop its subgroup locally.
+    if let Some(state) = server_states.get(&server_id)
+        && !state.channel_uses_subgroup(&channel_id)
+        && let Some(mls_mgr) = mls.as_mut()
+    {
+        let group_key = crate::crypto::subgroup_id(&server_id, &channel_id);
+        if mls_mgr.has_group(&group_key) {
+            hollow_log!("[HOLLOW-MLS] Channel {channel_id} no longer restricted — removing subgroup {group_key}");
+            mls_mgr.remove_group(&group_key);
+            crate::node::crypto_handler::persist_mls_state(mls_mgr, crypto_store);
+        }
+    }
+    false
+}
+
+/// Set (or clear) the posting label gate. Same old-client stamp pairing as
+/// the visibility twin (`ChannelPostingChanged{"admin"}`) — old clients
+/// enforce posting send-side, so without the stamp they would let anyone
+/// post into a label-gated channel. Posting never affects subgrouping, so
+/// there is no reconcile/teardown here.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn handle_set_channel_posting_labels(
+    server_states: &mut ServerStates,
+    mls: &mut Option<MlsManager>,
+    event_tx: &EventTx,
+    ws_cmd_tx: &WsCmdTx,
+    ws_room_peers: &WsRoomPeers,
+    gossip_overlays: &mut GossipOverlays,
+    local_peer_str: &str,
+    server_id: String,
+    channel_id: String,
+    labels: Vec<String>,
+    crypto_store: &CryptoStore,
+    crdt_store: &CrdtStore,
+) -> bool {
+    let needs_admin_stamp = !labels.is_empty()
+        && server_states
+            .get(&server_id)
+            .and_then(|s| s.channels.get(&channel_id))
+            .is_some_and(|ch| ch.posting != crate::crdt::server_state::ChannelPosting::AdminPlus);
+    if needs_admin_stamp {
+        if author_broadcast_op(
+            server_states, event_tx, ws_cmd_tx, ws_room_peers, gossip_overlays, local_peer_str,
+            &server_id,
+            OpGate::Perm(Permission::MANAGE_CHANNELS),
+            Some("Permission denied: cannot manage channels"),
+            CrdtPayload::ChannelPostingChanged { channel_id: channel_id.clone(), posting: "admin".to_string() },
+            &format!("Stamping channel {channel_id} posting to admin (label-gate fallback)"),
+            NetworkEvent::ServerUpdated { server_id: server_id.clone() },
+            OpBroadcast::MlsFirst { mls, crypto_store },
+            crdt_store,
+        ).await {
+            return true;
+        }
+    }
+
+    author_broadcast_op(
+        server_states, event_tx, ws_cmd_tx, ws_room_peers, gossip_overlays, local_peer_str,
+        &server_id,
+        OpGate::Perm(Permission::MANAGE_CHANNELS),
+        Some("Permission denied: cannot manage channels"),
+        CrdtPayload::ChannelPostingLabelsChanged { channel_id: channel_id.clone(), labels: labels.clone() },
+        &format!("Setting channel {channel_id} posting labels ({} entries)", labels.len()),
+        NetworkEvent::ServerUpdated { server_id: server_id.clone() },
+        OpBroadcast::MlsFirst { mls, crypto_store },
+        crdt_store,
+    ).await
+}
+
+/// Grant a member time-boxed access to one channel. Authoring-side friendly
+/// validation (channel exists, target is a member) is STRICTER than ingest —
+/// the safe asymmetry (looser-than-ingest would fork).
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn handle_grant_channel_access(
+    server_states: &mut ServerStates,
+    mls: &mut Option<MlsManager>,
+    event_tx: &EventTx,
+    ws_cmd_tx: &WsCmdTx,
+    ws_room_peers: &WsRoomPeers,
+    gossip_overlays: &mut GossipOverlays,
+    local_peer_str: &str,
+    server_id: String,
+    channel_id: String,
+    peer_id: String,
+    expires_at: u64,
+    crypto_store: &CryptoStore,
+    crdt_store: &CrdtStore,
+) -> bool {
+    if let Some(state) = server_states.get(&server_id) {
+        if !state.channels.contains_key(&channel_id) {
+            return deny(event_tx, "Channel not found").await;
+        }
+        if !state.is_member(&peer_id) {
+            return deny(event_tx, "Not a member of this server").await;
+        }
+    }
+    author_broadcast_op(
+        server_states, event_tx, ws_cmd_tx, ws_room_peers, gossip_overlays, local_peer_str,
+        &server_id,
+        OpGate::Perm(Permission::MANAGE_CHANNELS),
+        Some("Permission denied: cannot manage channels"),
+        CrdtPayload::ChannelGrantSet { channel_id: channel_id.clone(), peer_id, expires_at },
+        &format!("Granting temporary access to channel {channel_id}"),
+        NetworkEvent::ServerUpdated { server_id: server_id.clone() },
+        OpBroadcast::MlsFirst { mls, crypto_store },
+        crdt_store,
+    ).await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn handle_revoke_channel_access(
+    server_states: &mut ServerStates,
+    mls: &mut Option<MlsManager>,
+    event_tx: &EventTx,
+    ws_cmd_tx: &WsCmdTx,
+    ws_room_peers: &WsRoomPeers,
+    gossip_overlays: &mut GossipOverlays,
+    local_peer_str: &str,
+    server_id: String,
+    channel_id: String,
+    peer_id: String,
+    crypto_store: &CryptoStore,
+    crdt_store: &CrdtStore,
+) -> bool {
+    author_broadcast_op(
+        server_states, event_tx, ws_cmd_tx, ws_room_peers, gossip_overlays, local_peer_str,
+        &server_id,
+        OpGate::Perm(Permission::MANAGE_CHANNELS),
+        Some("Permission denied: cannot manage channels"),
+        CrdtPayload::ChannelGrantRevoked { channel_id: channel_id.clone(), peer_id },
+        &format!("Revoking temporary access to channel {channel_id}"),
         NetworkEvent::ServerUpdated { server_id: server_id.clone() },
         OpBroadcast::MlsFirst { mls, crypto_store },
         crdt_store,
@@ -2236,6 +2485,10 @@ async fn emit_crdt_apply_event(
             | CrdtPayload::ChannelPostingChanged { .. }
             | CrdtPayload::ChannelSlowModeChanged { .. }
             | CrdtPayload::ChannelMediaOnlyChanged { .. }
+            | CrdtPayload::ChannelVisibilityLabelsChanged { .. }
+            | CrdtPayload::ChannelPostingLabelsChanged { .. }
+            | CrdtPayload::ChannelGrantSet { .. }
+            | CrdtPayload::ChannelGrantRevoked { .. }
             | CrdtPayload::LabelCreated { .. }
             | CrdtPayload::LabelDeleted { .. }
             | CrdtPayload::LabelUpdated { .. }

@@ -137,6 +137,8 @@ Self-contained: every op carries its own server, author, timestamp, and payload.
 - `ChannelRenamed { channel_id: String, new_name: String }` — updates channel name in place. No LWW — last applied wins.
 - `ChannelVisibilityChanged { channel_id: String, visibility: String }` — sets who can see the channel. Values: `"everyone"`, `"moderator"`, `"admin"`.
 - `ChannelPostingChanged { channel_id: String, posting: String }` — sets who can post. Same value set.
+- `ChannelVisibilityLabelsChanged { channel_id, labels: Vec<String> }` / `ChannelPostingLabelsChanged { channel_id, labels }` (issue #32) — set/clear the label gate for that dimension. Non-empty REPLACES the tier ladder (holders of ANY listed label, plus Admin+/Owner). The authoring handler pairs a non-empty gate with a `ChannelVisibilityChanged{"admin"}` (resp. posting) stamp FIRST so pre-#32 clients fail closed; a plain tier pick authors an empty-labels clearing op. Gate: `MANAGE_CHANNELS` at author + ingest.
+- `ChannelGrantSet { channel_id, peer_id, expires_at: u64 }` / `ChannelGrantRevoked { channel_id, peer_id }` (issue #32) — temporary per-member channel access (visibility AND posting; mute unaffected). `expires_at` epoch ms, `u64::MAX` = until revoked. Stored in `ServerState.channel_grants: HashMap<channel_id, HashMap<master, AdminLwwReg<u64>>>` — LWW per entry, LAZY expiry (predicate compares now_ms), pruned ONLY in the Revoked arm (mirrors MemberMuted/Unmuted; NOT pruned on ChannelRemoved — breaks commutativity, dangling rows are inert). Gate: `MANAGE_CHANNELS`.
 - `ChannelLayoutUpdated { layout_json: String }` — replaces the entire channel layout ordering. The JSON string is deserialized to `Vec<ChannelLayoutItem>`. Last applied wins (no LWW merge, just overwrite).
 - `ChannelPublicChanged { channel_id: String, is_public: bool }` — toggles whether a channel uses plaintext (public) or MLS-encrypted (private) message transport. When `is_public` is true, messages are Ed25519-signed but NOT MLS-encrypted — they are broadcast as plaintext `HavenMessage` variants readable by all room participants. Applied via direct field set on `ChannelInfo.is_public`.
 
@@ -161,12 +163,13 @@ Self-contained: every op carries its own server, author, timestamp, and payload.
 **Storage (Phase 4 vault):**
 - `StoragePledgeChanged { peer_id: String, pledge_bytes: u64 }` — sets how much disk space a member pledges for vault shards. AdminLwwReg merge.
 
-**Labels (Phase 6.75 cosmetic roles):**
-- `LabelCreated { label_id: String, name: String, color: String }` — creates a cosmetic label. Uses `or_insert_with` — first creator wins for the same label_id.
-- `LabelDeleted { label_id: String }` — removes the label from `labels` and strips it from all members' `label_assignments`.
-- `LabelUpdated { label_id: String, name: String, color: String }` — updates name and color of an existing label. No LWW — last applied wins.
+**Labels (Phase 6.75; access flag issue #32):**
+- `LabelCreated { label_id, name, color, access: bool (#[serde(default)]) }` — creates a label. `access: true` = access-bearing (can gate channels, never self-assignable). Uses `or_insert_with` — first creator wins.
+- `LabelDeleted { label_id: String }` — removes the label from `labels` and strips it from all members' `label_assignments`. A deleted label still referenced by a channel gate = FAIL-CLOSED lockout (nobody below Admin passes; the dangling id stays in the gate list).
+- `LabelUpdated { label_id, name, color, access: Option<bool> (#[serde(default)]) }` — updates an existing label. `access: None` = PRESERVE the stored flag (a client that predates the field must never silently demote an access label back to self-service). No LWW — last applied wins.
 - `LabelAssigned { label_id: String, peer_id: String }` — adds label to a member's assignment list if not already present.
 - `LabelUnassigned { label_id: String, peer_id: String }` — removes label from a member's assignment list. Cleans up empty entries.
+- **Self-toggle lockdown:** `op_allowed` and `handle_label_op` share `ServerState::can_self_toggle_label(actor, target, label_id)` — self-assign/unassign allowed ONLY for an EXISTING label with `access == false`; access labels and UNKNOWN ids (fail-closed) require `MANAGE_ROLES`.
 
 **Custom emotes (2026-07-10):**
 - `EmojiAdded { name: String, hash: String, animated: bool }` — adds/replaces a server emote (metadata ONLY — `hash` is SHA-256 hex of the WebP blob; bytes replicate via EmoteRequest/EmoteAssets, never the CRDT). Replace-on-same-name; NEW names refused past `MAX_SERVER_EMOTES = 50` so replicas converge. Ingest validates `crdt::valid_emote_name` (2-24 `[a-z0-9_]`) + `valid_emote_hash` (64 lowercase hex) + `Permission::MANAGE_EMOTES`.
@@ -263,10 +266,12 @@ The complete replicated state of a Hollow server. Every field is either an add-w
 - `visibility: ChannelVisibility` (`#[serde(default)]`)
 - `posting: ChannelPosting` (`#[serde(default)]`)
 - `is_public: bool` (`#[serde(default)]`) — when true, channel messages use plaintext transport instead of MLS encryption
+- `slow_mode: u32`, `media_only: bool` (`#[serde(default)]`)
+- `visibility_labels: Vec<String>`, `posting_labels: Vec<String>` (`#[serde(default)]`, issue #32) — label gates; non-empty REPLACES the tier ladder for that dimension
 
 **`MemberInfo`** — `{ peer_id: String, display_name: String }`.
 
-**`LabelInfo`** — `{ label_id: String, name: String, color: String }`. Cosmetic tag/badge.
+**`LabelInfo`** — `{ label_id, name, color, access: bool (#[serde(default)]) }`. Cosmetic tag/badge; `access: true` = channel-gating, staff-assigned only.
 
 ### Construction
 
@@ -340,19 +345,17 @@ The core convergence function. Every mutation to ServerState goes through this s
 
 ### Channel Access Control
 
-**`server_state.rs:ServerState::can_see_channel(peer_id, channel_id)`** — Owner sees everything. Otherwise checks `ChannelVisibility`:
-- `Everyone`: always visible.
-- `ModeratorPlus`: requires role priority >= Moderator (1).
-- `AdminPlus`: requires role priority >= Admin (2).
+**`server_state.rs:ServerState::can_see_channel(peer_id, channel_id)`** — delegates to `can_see_channel_at(peer, cid, now_ms)` (tests control time). Evaluation order (issue #32):
+1. Owner → always true.
+2. Unexpired temporary grant (`has_channel_grant`, master-collapsed) → true.
+3. `visibility_labels` non-empty → role priority >= Admin (implicit) OR member holds ANY listed label (`label_assignments`, master-keyed raw lookup — the predicate resolves device→master itself; `get_member_labels` does NOT and must not be reused here).
+4. Else the tier ladder: `Everyone` always / `ModeratorPlus` >= 1 / `AdminPlus` >= 2.
 
-**`server_state.rs:ServerState::can_post_in_channel(peer_id, channel_id)`** — Owner can post anywhere. Otherwise checks `ChannelPosting`:
-- `Everyone`: requires `SEND_MESSAGES` permission.
-- `ModeratorPlus`: requires role priority >= Moderator.
-- `AdminPlus`: requires role priority >= Admin.
+**`server_state.rs:ServerState::can_post_in_channel(peer_id, channel_id)`** — same shape via `can_post_in_channel_at` with `posting_labels`/`ChannelPosting`; the `Everyone` tier additionally requires the `SEND_MESSAGES` bit; a grant confers posting too. Mute is a SEPARATE check at send/ingest sites, never folded in.
 
 **`server_state.rs:ServerState::is_channel_public(channel_id) -> bool`** — Returns `true` if the channel has `is_public: true`. Returns `false` if channel not found. Used by `message_ops.rs` send handlers to decide between plaintext and MLS transport.
 
-**Important:** Channel visibility/posting is UI-filtered only. All members still receive all messages via the server-wide MLS group. True enforcement requires per-channel MLS subgroups (not yet implemented).
+**Cryptographic enforcement:** `channel_uses_subgroup(cid)` = `!is_public && (visibility != Everyone || !visibility_labels.is_empty())`. Such channels are encrypted under their own MLS subgroup (`"{server}#{channel}"`) whose membership `reconcile_subgroups_for_server` keeps equal to the set of members passing `can_see_channel` — so tier, label and grant gating are all key-enforced, not UI-only.
 
 ### Query Helpers
 
@@ -367,7 +370,9 @@ The core convergence function. Every mutation to ServerState goes through this s
 - `server_state.rs:ServerState::total_pledged_bytes()` — sum of all storage pledges.
 - `server_state.rs:ServerState::min_pledge_mb()` — reads `settings["min_pledge_mb"]`, defaults to 512.
 - `server_state.rs:ServerState::labels_list()` — returns `Vec<&LabelInfo>` sorted by name (stable ordering for UI).
-- `server_state.rs:ServerState::get_member_labels(peer_id)` — resolves label_ids to LabelInfo references.
+- `server_state.rs:ServerState::get_member_labels(peer_id)` — resolves label_ids to LabelInfo references (raw lookup, NO device→master collapse).
+- `server_state.rs:ServerState::channel_grants_list(channel_id, now_ms)` — active (unexpired) grants as `(master, expires_at)`; expired rows linger until revoke, mirroring `muted_list`.
+- `server_state.rs:ServerState::can_self_toggle_label(actor, target, label_id)` — the shared self-assign rule (see Labels above).
 
 ### Utility
 

@@ -260,8 +260,10 @@ Three sealed classes represent layout items:
 - Drag handle (gripVertical icon)
 - Folder icon in accent color
 - Category name in uppercase, accent color, bold, letter-spacing 0.8
+- ShieldCheck icon button -> **category bulk-apply** (issue #32): `_bulkApplyAccess(index, name)` forward-scans `_layout` from the category's INDEX (never its name — duplicates legal) to the next Category/Separator, skips public channels, opens `showCategoryBulkAccessDialog` (`category_bulk_access_dialog.dart` — per-dimension toggle cards + tier-or-Custom chips), then stamps each channel SEQUENTIALLY with per-channel optimistic+revert and a summary toast that never implies rollback. Posting skipped for voice channels. No Rust support — pure Dart over the per-channel setters.
 - Pencil icon button -> rename
 - Trash icon button -> delete
+- All three wrapped in `HollowTooltip`s
 
 **`_ChannelRow`:** Determines `isUnderCategory` by scanning backwards through `_layout` for the nearest `CategoryItem` (a `SeparatorItem` breaks scope). If under a category, shows tree connector (`_TreeConnectorPainter` -- vertical + horizontal line, `isLast` variant for the L-shaped connector).
 
@@ -272,8 +274,10 @@ Row contains:
   - Channel icon (hash for text, volume2 for voice)
   - Channel name
   - **Public toggle** (globe icon) -- `HollowPressable` toggle button. When `is_public` is true: accent-tinted globe icon with filled background. When false: neutral globe icon. Tap calls `crdt_api.setChannelPublic(serverId, channelId, !isPublic)` with **optimistic update** via `channelListProvider.updateChannel()` BEFORE the FFI call. Only shown for text channels. Public channels send messages as Ed25519-signed plaintext (not MLS-encrypted).
-  - **Visibility `_AccessChip`** (eye icon) -- `PopupMenuButton` cycling through `'everyone'` / `'moderator'` / `'admin'`
+  - **Visibility `_AccessChip`** (eye icon) -- `PopupMenuButton` over `'everyone'` / `'moderator'` / `'admin'` / `'Custom…'` (issue #32 — opens `showAccessLabelPicker`, access labels only)
   - **Posting `_AccessChip`** (messageSquare icon) -- same options
+  - **Temporary access** (userPlus icon, `if (!isPublic)`, in the RIGHT action cluster after the globe) -- opens `showChannelGrantsDialog` (`channel_grants_dialog.dart`): active grants with `…peerid · remaining` captions + revoke, and a `MemberSearchPicker` → duration flow (`kGrantDurationOptions` 15m/1h/24h/Until revoked)
+  - Every icon/chip in the row is wrapped in a `HollowTooltip`
   - **Slow-mode `_SlowModeChip`** (timer icon, text channels only) -- `PopupMenuButton<int>` over `kSlowModeOptions` (Off/5s/10s/30s/1m/5m/15m/1h). Warning-tinted when active; labels via `slowModeDurationLabel()` from `lib/src/core/moderation_format.dart`. Optimistic update then `crdt_api.setChannelSlowMode()`. Moderator+ are exempt from the limit.
   - **Media-only toggle** (image icon, text channels only) -- `HollowPressable`, accent when on. Optimistic update then `crdt_api.setChannelMediaOnly()`. Media-only channels accept only images/GIFs/videos (captions allowed); the chat input filters the file picker to `kMediaOnlyExtensions` and blocks text-only sends + voice recordings with a toast.
   - Rename button (pencil icon)
@@ -283,7 +287,9 @@ Row contains:
 - `'everyone'` -> "All" (neutral styling)
 - `'moderator'` -> "Mod+" (warning color background)
 - `'admin'` -> "Admin+" (warning color background)
+- Label gate active (`gateLabels` non-empty) -> shows the label NAME (1 label) or "N labels" with a shieldCheck glyph, warning styling; the menu highlights Custom
 - On select: applies **optimistic update** via `channelListProvider.updateChannel()` BEFORE calling `crdt_api.setChannelVisibility()` or `crdt_api.setChannelPosting()` -- CRDT operations. The optimistic update is needed because CrdtStore is fire-and-forget via mpsc, so the DB write may not be flushed when `ServerUpdated` fires (causing stale reads without the optimistic path).
+- Picking a plain tier on a label-gated channel shows a confirm ("Remove label requirement?") then clears the gate (optimistic mirrors the Rust handler's clearing op); picking Custom opens the label multi-select and mirrors the Rust Admin+ tier stamp optimistically. Mobile parity: `_MobileAccessChip` + the long-press sheet's 4th "Custom…" option + a `Temporary Access` action row.
 
 **Save/Discard bar:** Only shown when `_dirty`. Two buttons:
 - "Discard" (`HollowButton.ghost`) -- sets `_loaded = false`, calls `_loadLayout()` to reload from DB
@@ -469,12 +475,10 @@ Source: `lib/src/ui/settings/labels_tab.dart` (469 lines). `ConsumerStatefulWidg
 
 Shown when `labels.isNotEmpty`. Header: "Pick your labels" with description "Tap to add or remove labels from your profile".
 
-**Label chips:** `Wrap` of `GestureDetector` containers:
-- Selected: colored background (alpha 0.25), colored border, check icon
-- Unselected: elevated background, neutral border, circle icon
-- Tap calls `_toggleSelfLabel(labelId)`:
-  - If already assigned: `crdt_api.unassignLabel(serverId, labelId, peerId)`, removes from `_myLabelIds`
-  - If not assigned: `crdt_api.assignLabel(serverId, labelId, peerId)`, adds to `_myLabelIds`
+**Label chips:** `Wrap` of shared `LabelChip` widgets (`ui/components/label_visuals.dart` — also home of `kLabelPresetColors`, `parseLabelColor`, `shortPeerIdSuffix`, `LabelTypeChip`):
+- Selected: colored background (alpha 0.25), colored border, check icon; access labels carry a shieldCheck glyph
+- **ACCESS labels render LOCKED** (issue #32): dimmed via AnimatedOpacity, lock icon, desktop tooltip / tap-toast "Access labels are assigned by staff" — visible, never hidden; activation announces instead of no-oping
+- Cosmetic tap calls `_toggleSelfLabel(labelId)` (assign/unassign FFI). Self-assign of access labels is also refused Rust-side.
 
 ### Management Section (MANAGE_ROLES permission required)
 
@@ -483,36 +487,32 @@ Gated by `canManage = myPermissionsProvider & Permission.manageRoles != 0`.
 **Header row:** Settings icon + "Manage Labels" title + "New" filled button.
 
 **Label list:** Each label in an elevated row with:
-- Color swatch (14px circle)
+- Color swatch (14px circle) + shieldCheck glyph for access labels
 - Label name in label color, bold
-- Assign button (userPlus icon) -> `_showAssignDialog(label)`
-- Delete button (trash icon, red) -> `_deleteLabel(labelId)`
+- Assign (userPlus) -> `showLabelAssignDialog`; Edit (pencil) -> `_showLabelDialog(existing:)`; Delete (trash, red) -> `_deleteLabel`
+- All three in `HollowTooltip`s
 
-### Create Label Dialog
+### Create / Edit Label Dialog
 
-`_showCreateDialog()`: `showHollowDialog` with `StatefulBuilder`.
-- `HollowTextField` for label name, autofocus
-- Color picker: `Wrap` of 9 preset color circles (28px), selected one has white 2px border
-- Cancel/Create buttons
-- On create: calls `_createLabel(name, color)` which converts color to hex, calls `crdt_api.createLabel(serverId, name, hex)`, waits 100ms, reloads labels
+`_showLabelDialog({existing})`: `showHollowDialog` with `StatefulBuilder` (create AND edit share it).
+- `HollowTextField` for label name (prefilled on edit)
+- Color picker: `Wrap` of `kLabelPresetColors` circles (28px), selected one has white 2px border
+- **Type row (issue #32):** two `LabelTypeChip`s — Cosmetic (tag icon, "Anyone can add it to their own profile.") vs Access (shieldCheck, "Can gate channels; only staff can assign it."), default Cosmetic
+- Cancel + Create/Save; calls `crdt_api.createLabel(..., access:)` or `updateLabel(..., access:)`, waits 100ms, reloads
 
 ### Delete Label
 
-`_deleteLabel(labelId)`: Directly calls `crdt_api.deleteLabel(serverId, labelId)`, waits 100ms, reloads labels. No confirmation dialog.
+`_deleteLabel(labelId)`: Directly calls `crdt_api.deleteLabel(serverId, labelId)`, waits 100ms, reloads labels. No confirmation dialog. Deleting a label still referenced by a channel gate = fail-closed lockout on that channel.
 
-### Assign Dialog
+### Assign Dialog (redesigned issue #32)
 
-`_AssignDialog`: `ConsumerStatefulWidget` taking `serverId`, `LabelFfi label`, `VoidCallback onDone`.
+`showLabelAssignDialog(context, serverId:, label:, onDone:)` (public entry point; used by the tab, tests and the screenshot harness).
 
-**State:** `_assignedPeerIds` (Set of peer IDs that have this label).
+**Display:** explainer line + a bordered card wrapping `MemberSearchPicker` (`ui/components/member_search_picker.dart` — THE shared searchable member list, also used by the mobile Assign dialog and the grants dialog): search field (live filter over display name / nickname / raw peer id), rows = `HollowAvatar(28)` + name + `shortPeerIdSuffix` (`…T7iS4F`) in textTertiary — disambiguates same-name/same-avatar members — + checkSquare/square trailing icon in the label's color. 'No members match' empty state.
 
-`_loadAssignments()`: Reads `serverMembersProvider`, scans each member's labels for matching `labelId`.
+**Seeding:** selection seeds ONCE from the first `serverMembersProvider` data via `ref.listen` + a `_seeded` guard — a one-shot read could render everyone unchecked on a cold open, and without the guard the post-toggle refetch would revert optimistic checkmarks.
 
-**Display:** `HollowDialog` titled "Assign '{name}'", 320x300 `ListView`:
-- Each member as `ListTile` with dense layout
-- Leading: 10px circle (filled with label color if assigned, transparent with border if not)
-- Title: display name resolved via `serverDisplayNameFor`
-- Tap toggles assignment via `crdt_api.assignLabel` / `crdt_api.unassignLabel`, invalidates `serverMembersProvider`
+Tap toggles assignment via `crdt_api.assignLabel` / `crdt_api.unassignLabel`, invalidates `serverMembersProvider`.
 - "Done" button calls `onDone()` then pops
 
 ## NotificationsTab -- Notification Settings

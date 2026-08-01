@@ -2555,6 +2555,11 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
     final mute = ref.watch(myMuteStatusProvider(widget.serverId)).valueOrNull;
     final canPost = ref.watch(canPostInChannelProvider(
         (serverId: widget.serverId, channelId: widget.channelId)));
+    // Keeps the grant-expiry timer alive while this channel is open: a
+    // lapsed temporary grant emits no network event, so this provider's
+    // timer is what reloads the channel list and evicts us.
+    ref.watch(myChannelGrantProvider(
+        (serverId: widget.serverId, channelId: widget.channelId)));
     if (!canPost || mute != null) {
       return Container(
         padding: const EdgeInsets.symmetric(

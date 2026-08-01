@@ -478,10 +478,13 @@ class _BottomBarState extends ConsumerState<BottomBar> {
     final split = ref.read(splitViewProvider);
     if (split.isSplit && split.focusedPane == 1) {
       // Navigate right pane to server — load channels directly from FFI
-      // to avoid overwriting the global channelListProvider.
+      // to avoid overwriting the global channelListProvider. Restricted
+      // channels the local user can't see must never be auto-selected.
       try {
         final channels =
-            await crdt_api.getServerChannels(serverId: serverId);
+            (await crdt_api.getServerChannels(serverId: serverId))
+                .where((c) => c.meCanSee)
+                .toList();
         final lastChannels = ref.read(lastChannelPerServerProvider);
         final lastChannel = lastChannels[serverId];
         String? channelToSelect;

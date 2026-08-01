@@ -234,6 +234,7 @@ class EventStreamNotifier extends Notifier<bool> {
   void _refreshServerState(String serverId) {
     ref.read(serverListProvider.notifier).onServerUpdated(serverId);
     ref.invalidate(serverMembersProvider(serverId));
+    ref.invalidate(serverLabelsProvider(serverId));
     ref.invalidate(serverEmotesProvider(serverId));
     ref.invalidate(serverStickersProvider(serverId));
     ref.invalidate(serverIsNsfwProvider(serverId));
@@ -261,7 +262,6 @@ class EventStreamNotifier extends Notifier<bool> {
   /// regardless of whether the Rust force-leave event lands. Re-checks on a short
   /// ramp because role/channel state lands via the fire-and-forget CrdtStore.
   void _evictVoiceIfInvisible(String serverId) {
-    const rolePriority = {'owner': 3, 'admin': 2, 'moderator': 1, 'member': 0};
     const delays = [Duration(milliseconds: 150), Duration(milliseconds: 600),
         Duration(milliseconds: 1400)];
     for (final d in delays) {
@@ -276,22 +276,10 @@ class EventStreamNotifier extends Notifier<bool> {
         if (channels == null) return; // not loaded yet — a later tick re-checks
         final ch = channels[cid];
         // Channel gone (deleted / we were kicked so we hold no channels) OR
-        // visibility now excludes us → leave.
-        final myRole = ref.read(myRoleProvider(serverId)).valueOrNull ?? 'member';
-        final priority = rolePriority[myRole] ?? 0;
-        bool canSee;
-        if (ch == null) {
-          canSee = false;
-        } else {
-          switch (ch.visibility) {
-            case 'moderator':
-              canSee = priority >= 1;
-            case 'admin':
-              canSee = priority >= 2;
-            default:
-              canSee = true;
-          }
-        }
+        // the Rust-computed predicate (tier + label gates + grants) now
+        // excludes us → leave. This snapshot re-reads post-ramp, so meCanSee
+        // is fresh.
+        final canSee = ch?.meCanSee ?? false;
         if (!canSee) {
           debugPrint('[HOLLOW-VC] Lost visibility to active voice channel $cid — hanging up');
           ref.read(voiceChannelProvider.notifier).leaveChannel();

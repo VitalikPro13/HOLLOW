@@ -1681,6 +1681,12 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
         serverId: widget.serverId!,
         channelId: widget.channelId!,
       )));
+      // Keeps the grant-expiry timer alive while this channel is open (a
+      // lapsed temporary grant emits no network event).
+      ref.watch(myChannelGrantProvider((
+        serverId: widget.serverId!,
+        channelId: widget.channelId!,
+      )));
       final muteText = muteBannerText(
           ref.watch(myMuteStatusProvider(widget.serverId!)).valueOrNull);
       if (!canPost || muteText != null) {

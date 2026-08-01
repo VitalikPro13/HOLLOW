@@ -12,6 +12,11 @@ pub struct ServerFfi {
 }
 
 /// Channel info for FFI (Dart-visible).
+///
+/// `me_can_see` / `me_can_post` are computed HERE with the full Rust
+/// predicate (tier ladder + label gates + unexpired grants + SEND_MESSAGES
+/// bit) so Dart never re-implements the access ladder. Mute is NOT folded
+/// into `me_can_post` — it stays a separate signal (`get_muted_members`).
 pub struct ChannelFfi {
     pub channel_id: String,
     pub name: String,
@@ -22,6 +27,19 @@ pub struct ChannelFfi {
     pub is_public: bool,
     pub slow_mode: u32,
     pub media_only: bool,
+    pub visibility_labels: Vec<String>,
+    pub posting_labels: Vec<String>,
+    pub me_can_see: bool,
+    pub me_can_post: bool,
+}
+
+/// A temporary channel access grant for FFI (Dart-visible). `permanent` =
+/// until revoked; otherwise `expires_at_ms` is the epoch-ms expiry. Mirrors
+/// [MutedMemberFfi].
+pub struct ChannelGrantFfi {
+    pub peer_id: String,
+    pub expires_at_ms: i64,
+    pub permanent: bool,
 }
 
 /// A muted member for FFI (Dart-visible). `permanent` = no expiry;
@@ -42,11 +60,13 @@ pub struct MemberFfi {
     pub labels: Vec<LabelFfi>,
 }
 
-/// Label info for FFI (Dart-visible).
+/// Label info for FFI (Dart-visible). `access` labels gate channels and are
+/// assigned only by MANAGE_ROLES holders (never self-service).
 pub struct LabelFfi {
     pub label_id: String,
     pub name: String,
     pub color: String,
+    pub access: bool,
 }
 
 /// Storage stats for a server, returned to Dart via FFI.
@@ -196,6 +216,17 @@ pub fn get_server_channels(server_id: String) -> Result<Vec<ChannelFfi>, String>
         serde_json::from_str::<crate::crdt::server_state::ServerState>(&state_json)
             .map_err(|e| format!("Failed to parse server state: {e}"))?;
 
+    // Local master for the me_can_see/me_can_post computation (same load
+    // pattern as get_joined_servers). None (no identity yet) fails closed.
+    let me = crate::identity::load_existing_identity()
+        .ok()
+        .flatten()
+        .map(|id| id.keypair.peer_id());
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+
     let channels = state
         .channels_list()
         .into_iter()
@@ -222,6 +253,14 @@ pub fn get_server_channels(server_id: String) -> Result<Vec<ChannelFfi>, String>
                 is_public: ch.is_public,
                 slow_mode: ch.slow_mode,
                 media_only: ch.media_only,
+                visibility_labels: ch.visibility_labels.clone(),
+                posting_labels: ch.posting_labels.clone(),
+                me_can_see: me.as_deref()
+                    .map(|m| state.can_see_channel_at(m, &ch.channel_id, now_ms))
+                    .unwrap_or(false),
+                me_can_post: me.as_deref()
+                    .map(|m| state.can_post_in_channel_at(m, &ch.channel_id, now_ms))
+                    .unwrap_or(false),
             }
         })
         .collect();
@@ -257,6 +296,7 @@ pub fn get_server_members(server_id: String) -> Result<Vec<MemberFfi>, String> {
                     label_id: l.label_id.clone(),
                     name: l.name.clone(),
                     color: l.color.clone(),
+                    access: l.access,
                 })
                 .collect(),
         })
@@ -780,9 +820,10 @@ pub fn delete_server(server_id: String) -> Result<(), String> {
     Ok(())
 }
 
-/// Create a new label (cosmetic role) in a server.
+/// Create a new label in a server. `access: true` makes it an access label
+/// (gates channels, never self-assignable).
 #[frb]
-pub fn create_label(server_id: String, name: String, color: String) -> Result<(), String> {
+pub fn create_label(server_id: String, name: String, color: String, access: bool) -> Result<(), String> {
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
@@ -790,7 +831,7 @@ pub fn create_label(server_id: String, name: String, color: String) -> Result<()
     // holding it across block_on(send) serializes all other FFI calls.
     drop(guard);
     let rt = get_runtime();
-    rt.block_on(cmd_tx.send(node::NodeCommand::CreateLabel { server_id, name, color }))
+    rt.block_on(cmd_tx.send(node::NodeCommand::CreateLabel { server_id, name, color, access }))
         .map_err(|e| format!("Failed to send command: {e}"))?;
     Ok(())
 }
@@ -810,9 +851,9 @@ pub fn delete_label(server_id: String, label_id: String) -> Result<(), String> {
     Ok(())
 }
 
-/// Update a label's name and color.
+/// Update a label's name, color and access flag.
 #[frb]
-pub fn update_label(server_id: String, label_id: String, name: String, color: String) -> Result<(), String> {
+pub fn update_label(server_id: String, label_id: String, name: String, color: String, access: bool) -> Result<(), String> {
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
@@ -820,7 +861,7 @@ pub fn update_label(server_id: String, label_id: String, name: String, color: St
     // holding it across block_on(send) serializes all other FFI calls.
     drop(guard);
     let rt = get_runtime();
-    rt.block_on(cmd_tx.send(node::NodeCommand::UpdateLabel { server_id, label_id, name, color }))
+    rt.block_on(cmd_tx.send(node::NodeCommand::UpdateLabel { server_id, label_id, name, color, access }))
         .map_err(|e| format!("Failed to send command: {e}"))?;
     Ok(())
 }
@@ -868,7 +909,110 @@ pub fn get_server_labels(server_id: String) -> Result<Vec<LabelFfi>, String> {
         label_id: l.label_id.clone(),
         name: l.name.clone(),
         color: l.color.clone(),
+        access: l.access,
     }).collect())
+}
+
+/// Set (or clear, empty vec) the visibility label gate for a channel. The
+/// Rust handler also stamps the legacy tier to Admin+ when the gate turns
+/// on (old-client fail-closed fallback).
+#[frb]
+pub fn set_channel_visibility_labels(server_id: String, channel_id: String, labels: Vec<String>) -> Result<(), String> {
+    let node = get_node();
+    let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
+    // Release the global node mutex BEFORE the (possibly waiting) send —
+    // holding it across block_on(send) serializes all other FFI calls.
+    drop(guard);
+    let rt = get_runtime();
+    rt.block_on(cmd_tx.send(node::NodeCommand::SetChannelVisibilityLabels { server_id, channel_id, labels }))
+        .map_err(|e| format!("Failed to send command: {e}"))?;
+    Ok(())
+}
+
+/// Set (or clear, empty vec) the posting label gate for a channel.
+#[frb]
+pub fn set_channel_posting_labels(server_id: String, channel_id: String, labels: Vec<String>) -> Result<(), String> {
+    let node = get_node();
+    let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
+    // Release the global node mutex BEFORE the (possibly waiting) send —
+    // holding it across block_on(send) serializes all other FFI calls.
+    drop(guard);
+    let rt = get_runtime();
+    rt.block_on(cmd_tx.send(node::NodeCommand::SetChannelPostingLabels { server_id, channel_id, labels }))
+        .map_err(|e| format!("Failed to send command: {e}"))?;
+    Ok(())
+}
+
+/// Grant a member temporary access to a channel. `duration_secs <= 0` =
+/// until revoked (same convention as mute_member).
+#[frb]
+pub fn grant_channel_access(server_id: String, channel_id: String, peer_id: String, duration_secs: i64) -> Result<(), String> {
+    let node = get_node();
+    let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
+    // Release the global node mutex BEFORE the (possibly waiting) send —
+    // holding it across block_on(send) serializes all other FFI calls.
+    drop(guard);
+
+    let expires_at: u64 = if duration_secs <= 0 {
+        u64::MAX
+    } else {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        now_ms.saturating_add((duration_secs as u64).saturating_mul(1000))
+    };
+
+    let rt = get_runtime();
+    rt.block_on(cmd_tx.send(node::NodeCommand::GrantChannelAccess { server_id, channel_id, peer_id, expires_at }))
+        .map_err(|e| format!("Failed to send command: {e}"))?;
+    Ok(())
+}
+
+/// Revoke a member's temporary channel access.
+#[frb]
+pub fn revoke_channel_access(server_id: String, channel_id: String, peer_id: String) -> Result<(), String> {
+    let node = get_node();
+    let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
+    // Release the global node mutex BEFORE the (possibly waiting) send —
+    // holding it across block_on(send) serializes all other FFI calls.
+    drop(guard);
+    let rt = get_runtime();
+    rt.block_on(cmd_tx.send(node::NodeCommand::RevokeChannelAccess { server_id, channel_id, peer_id }))
+        .map_err(|e| format!("Failed to send command: {e}"))?;
+    Ok(())
+}
+
+/// Active temporary grants for a channel (expired entries filtered out).
+#[frb]
+pub fn get_channel_grants(server_id: String, channel_id: String) -> Result<Vec<ChannelGrantFfi>, String> {
+    let store_guard = super::storage::get_store().lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let store = store_guard.as_ref().ok_or("Message store is not open")?;
+    let state_json = store.load_server_state(&server_id)?.ok_or(format!("Server {server_id} not found"))?;
+    let state = serde_json::from_str::<crate::crdt::server_state::ServerState>(&state_json)
+        .map_err(|e| format!("Failed to parse server state: {e}"))?;
+
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+
+    Ok(state
+        .channel_grants_list(&channel_id, now_ms)
+        .into_iter()
+        .map(|(peer_id, expires_at)| {
+            let permanent = expires_at == u64::MAX;
+            ChannelGrantFfi {
+                peer_id,
+                expires_at_ms: if permanent { 0 } else { expires_at as i64 },
+                permanent,
+            }
+        })
+        .collect())
 }
 
 /// Set the visibility mode for a channel (everyone/moderator/admin).

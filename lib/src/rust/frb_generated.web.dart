@@ -134,6 +134,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   ChannelFfi dco_decode_channel_ffi(dynamic raw);
 
   @protected
+  ChannelGrantFfi dco_decode_channel_grant_ffi(dynamic raw);
+
+  @protected
   ConferenceInfo dco_decode_conference_info(dynamic raw);
 
   @protected
@@ -229,6 +232,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<ChannelFfi> dco_decode_list_channel_ffi(dynamic raw);
+
+  @protected
+  List<ChannelGrantFfi> dco_decode_list_channel_grant_ffi(dynamic raw);
 
   @protected
   List<ConferenceInfo> dco_decode_list_conference_info(dynamic raw);
@@ -666,6 +672,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   ChannelFfi sse_decode_channel_ffi(SseDeserializer deserializer);
 
   @protected
+  ChannelGrantFfi sse_decode_channel_grant_ffi(SseDeserializer deserializer);
+
+  @protected
   ConferenceInfo sse_decode_conference_info(SseDeserializer deserializer);
 
   @protected
@@ -775,6 +784,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<ChannelFfi> sse_decode_list_channel_ffi(SseDeserializer deserializer);
+
+  @protected
+  List<ChannelGrantFfi> sse_decode_list_channel_grant_ffi(
+    SseDeserializer deserializer,
+  );
 
   @protected
   List<ConferenceInfo> sse_decode_list_conference_info(
@@ -1336,6 +1350,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_channel_ffi(ChannelFfi self, SseSerializer serializer);
 
   @protected
+  void sse_encode_channel_grant_ffi(
+    ChannelGrantFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_conference_info(
     ConferenceInfo self,
     SseSerializer serializer,
@@ -1479,6 +1499,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_list_channel_ffi(
     List<ChannelFfi> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_channel_grant_ffi(
+    List<ChannelGrantFfi> self,
     SseSerializer serializer,
   );
 

@@ -1,5 +1,6 @@
 ﻿import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/models/channel_info.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
 import 'package:hollow/src/core/providers/notification_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
@@ -22,8 +23,14 @@ class NotificationsTab extends ConsumerWidget {
     final hollow = HollowTheme.of(context);
     final notifState = ref.watch(notificationSettingsProvider);
     final notifNotifier = ref.read(notificationSettingsProvider.notifier);
-    final channels =
+    // Only channels the local user can see — listing restricted channel
+    // names to a non-privileged member would leak their existence.
+    final allChannels =
         ref.watch(serverChannelsProvider(serverId)).valueOrNull ?? {};
+    final channels = <String, ChannelInfo>{
+      for (final e in allChannels.entries)
+        if (e.value.meCanSee) e.key: e.value,
+    };
     final serverLevel = notifState.serverLevels[serverId] ??
         NotificationLevel.all;
 

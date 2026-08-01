@@ -40,6 +40,10 @@ class ChannelListNotifier extends Notifier<Map<String, ChannelInfo>> {
         isPublic: ch.isPublic,
         slowModeSecs: ch.slowMode,
         mediaOnly: ch.mediaOnly,
+        visibilityLabels: ch.visibilityLabels,
+        postingLabels: ch.postingLabels,
+        meCanSee: ch.meCanSee,
+        meCanPost: ch.meCanPost,
       );
     }
     return map;
@@ -83,7 +87,9 @@ class ChannelListNotifier extends Notifier<Map<String, ChannelInfo>> {
     state = Map.of(state)..remove(channelId);
   }
 
-  /// Called when a ChannelRenamed event arrives.
+  /// Called when a ChannelRenamed event arrives. copyWith keeps every other
+  /// property — rebuilding the record from scratch used to silently reset
+  /// visibility/posting/isPublic until the next full reload.
   void onChannelRenamed(String serverId, String channelId, String newName) {
     final selectedServer = ref.read(selectedServerProvider);
     if (selectedServer != serverId) return;
@@ -92,11 +98,7 @@ class ChannelListNotifier extends Notifier<Map<String, ChannelInfo>> {
     if (existing == null) return;
 
     final updated = Map.of(state);
-    updated[channelId] = ChannelInfo(
-      channelId: channelId,
-      name: newName,
-      category: existing.category,
-    );
+    updated[channelId] = existing.copyWith(name: newName);
     state = updated;
   }
 
@@ -120,44 +122,23 @@ final serverChannelsProvider = FutureProvider.autoDispose
 });
 
 /// Channels filtered by the user's visibility permissions.
-/// Hides channels the user's role can't see based on the channel's visibility mode.
+/// `meCanSee` is computed Rust-side with the FULL predicate (tier ladder +
+/// label gates + temporary grants) — never re-implement the ladder here.
 final visibleChannelsProvider = Provider<Map<String, ChannelInfo>>((ref) {
   final channels = ref.watch(channelListProvider);
   final selectedServer = ref.watch(selectedServerProvider);
   if (selectedServer == null) return channels;
 
-  final myRole = ref.watch(myRoleProvider(selectedServer)).valueOrNull ?? 'member';
-  const rolePriority = {'owner': 3, 'admin': 2, 'moderator': 1, 'member': 0};
-  final priority = rolePriority[myRole] ?? 0;
-
-  return Map.fromEntries(channels.entries.where((e) {
-    final vis = e.value.visibility;
-    if (vis == 'everyone') return true;
-    if (vis == 'moderator') return priority >= 1;
-    if (vis == 'admin') return priority >= 2;
-    return true;
-  }));
+  return Map.fromEntries(channels.entries.where((e) => e.value.meCanSee));
 });
 
-/// Whether the user can post in a specific channel (checks channel posting mode + SEND_MESSAGES).
+/// Whether the user can post in a specific channel. `meCanPost` folds in the
+/// posting tier/labels/grants AND the SEND_MESSAGES bit Rust-side; mute stays
+/// a separate signal (myMuteStatusProvider) checked at the composers.
 final canPostInChannelProvider =
     Provider.family<bool, ({String serverId, String channelId})>((ref, args) {
   final channels = ref.watch(channelListProvider);
-  final ch = channels[args.channelId];
-  if (ch == null) return true;
-
-  final perms = ref.watch(myPermissionsProvider(args.serverId)).valueOrNull ?? Permission.all;
-  if (perms & Permission.sendMessages == 0) return false;
-
-  final myRole = ref.watch(myRoleProvider(args.serverId)).valueOrNull ?? 'member';
-  const rolePriority = {'owner': 3, 'admin': 2, 'moderator': 1, 'member': 0};
-  final priority = rolePriority[myRole] ?? 0;
-
-  final posting = ch.posting;
-  if (posting == 'everyone') return true;
-  if (posting == 'moderator') return priority >= 1;
-  if (posting == 'admin') return priority >= 2;
-  return true;
+  return channels[args.channelId]?.meCanPost ?? true;
 });
 
 /// Active mutes for a server (what the Members tab's muted section shows).
@@ -199,6 +180,74 @@ final myMuteStatusProvider = FutureProvider.autoDispose
     }
   } catch (_) {
     // Node not running / server unknown — treat as not muted.
+  }
+  return null;
+});
+
+/// Active temporary grants for one channel (what the grants dialog shows).
+/// Self-invalidates just past the earliest non-permanent expiry so
+/// remaining-time labels refresh without an op (grant expiry emits none —
+/// same pattern as myMuteStatusProvider). Re-fetched when the dialog listens
+/// to serverChannelsProvider invalidation via the ServerUpdated ramp.
+final channelGrantsProvider = FutureProvider.autoDispose
+    .family<List<crdt_api.ChannelGrantFfi>,
+        ({String serverId, String channelId})>((ref, args) async {
+  List<crdt_api.ChannelGrantFfi> grants;
+  try {
+    grants = await crdt_api.getChannelGrants(
+        serverId: args.serverId, channelId: args.channelId);
+  } catch (_) {
+    return const [];
+  }
+  final now = DateTime.now().millisecondsSinceEpoch;
+  int? soonest;
+  for (final g in grants) {
+    if (g.permanent) continue;
+    final remaining = g.expiresAtMs - now;
+    if (remaining > 0 && (soonest == null || remaining < soonest)) {
+      soonest = remaining;
+    }
+  }
+  if (soonest != null) {
+    final t = Timer(Duration(milliseconds: soonest + 500),
+        () => ref.invalidateSelf());
+    ref.onDispose(t.cancel);
+  }
+  return grants;
+});
+
+/// MY active grant for a channel (null = none). Master-keyed like mutes.
+/// On MY grant's expiry this also reloads the channel list so `meCanSee`/
+/// `meCanPost` flip and the shell evicts me — expiry produces NO network
+/// event, so without this timer the channel would linger until the next
+/// ServerUpdated. Composers watch this to keep the timer alive while viewing.
+final myChannelGrantProvider = FutureProvider.autoDispose
+    .family<crdt_api.ChannelGrantFfi?,
+        ({String serverId, String channelId})>((ref, args) async {
+  final myDeviceId = await ref.watch(localDevicePeerIdProvider.future);
+  if (myDeviceId == null) return null;
+  final myMaster = ref.watch(deviceLinkProvider).identityOf(myDeviceId);
+  try {
+    final grants = await crdt_api.getChannelGrants(
+        serverId: args.serverId, channelId: args.channelId);
+    for (final g in grants) {
+      if (g.peerId != myMaster && g.peerId != myDeviceId) continue;
+      if (!g.permanent) {
+        final remaining =
+            g.expiresAtMs - DateTime.now().millisecondsSinceEpoch;
+        if (remaining <= 0) return null;
+        final t = Timer(Duration(milliseconds: remaining + 500), () {
+          // Reload so meCanSee re-evaluates (the grant just lapsed).
+          ref.read(channelListProvider.notifier).loadForServer(args.serverId);
+          ref.invalidate(serverChannelsProvider(args.serverId));
+          ref.invalidateSelf();
+        });
+        ref.onDispose(t.cancel);
+      }
+      return g;
+    }
+  } catch (_) {
+    // Node not running / server unknown — treat as no grant.
   }
   return null;
 });

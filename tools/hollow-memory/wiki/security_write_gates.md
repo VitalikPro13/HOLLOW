@@ -70,6 +70,8 @@ and sender.
 |---|---|
 | `insert_crdt_op`, server state mutations | `ServerState::op_allowed` validates `op.author`, never the peer that delivered it |
 | `delete_server_state` | `ServerDeleted` tombstone, owner-author validated at EVERY ingest |
+| `ChannelVisibilityLabelsChanged` / `ChannelPostingLabelsChanged` / `ChannelGrantSet` / `ChannelGrantRevoked` (issue #32) | `MANAGE_CHANNELS` on `op.author` at author AND ingest — same arm as the other channel-property ops |
+| `LabelAssigned` / `LabelUnassigned` | self-toggle allowed ONLY for an EXISTING label with `access == false` (`ServerState::can_self_toggle_label`, shared by `handle_label_op` and `op_allowed` so the gates cannot drift); ACCESS labels gate channels, so self-assign would be privilege escalation — they require `MANAGE_ROLES`, and an UNKNOWN label_id fails closed. `LabelUpdated.access` is `Option<bool>` on the wire: `None` (a client that predates the field) PRESERVES the stored flag, so an old client's recolor can never silently demote an access label back to self-service |
 
 ## 5. Gated by a master signature
 

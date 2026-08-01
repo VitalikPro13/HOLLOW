@@ -18,13 +18,16 @@ Every function in these modules follows one of two patterns:
 Fields: `server_id: String`, `name: String`, `member_count: u32`, `channel_count: u32`. Returned by `get_joined_servers()`.
 
 ### ChannelFfi
-Fields: `channel_id: String`, `name: String`, `category: Option<String>`, `channel_type: String` ("text" or "voice"), `visibility: String` ("everyone"/"moderator"/"admin"), `posting: String` ("everyone"/"moderator"/"admin"), `is_public: bool` (whether the channel uses plaintext transport). Returned by `get_server_channels()`. Maps from `ChannelType`, `ChannelVisibility`, `ChannelPosting` enums to string representations.
+Fields: `channel_id: String`, `name: String`, `category: Option<String>`, `channel_type: String` ("text" or "voice"), `visibility: String` ("everyone"/"moderator"/"admin"), `posting: String` ("everyone"/"moderator"/"admin"), `is_public: bool` (whether the channel uses plaintext transport), `slow_mode: u32`, `media_only: bool`, and (issue #32) `visibility_labels: Vec<String>`, `posting_labels: Vec<String>`, **`me_can_see: bool`, `me_can_post: bool`** — computed in `get_server_channels()` via `can_see_channel_at`/`can_post_in_channel_at` with the local master + now_ms (fails closed with no identity; mute NOT folded in). Dart consumes these instead of re-implementing the ladder. Returned by `get_server_channels()`.
 
 ### MemberFfi
 Fields: `peer_id: String`, `display_name: String`, `role: String`, `nickname: String`, `twitch_username: String`, `labels: Vec<LabelFfi>`. Returned by `get_server_members()`. Role comes from `state.get_role()`, nickname from `state.get_nickname()`, twitch from `state.get_twitch_username()`, labels from `state.get_member_labels()`.
 
 ### LabelFfi
-Fields: `label_id: String`, `name: String`, `color: String`. Used in `MemberFfi.labels` and returned by `get_server_labels()`.
+Fields: `label_id: String`, `name: String`, `color: String`, `access: bool` (issue #32 — access labels gate channels, staff-assigned only). Used in `MemberFfi.labels` and returned by `get_server_labels()`.
+
+### ChannelGrantFfi
+Fields: `peer_id: String`, `expires_at_ms: i64`, `permanent: bool` (issue #32; mirrors MutedMemberFfi). Returned by `get_channel_grants()` (active grants only — expired rows filtered).
 
 ### StorageStatsFfi
 Fields: `total_pledged_bytes: u64`, `total_used_bytes: u64`, `my_pledge_bytes: u64`, `my_used_bytes: u64`, `member_count: u32`, `min_pledge_mb: u64`. Returned by `get_storage_stats()`.
@@ -142,22 +145,36 @@ Signature: `fn set_twitch_username(server_id: String, peer_id: String, twitch_us
 
 ## Labels (crdt.rs) -- Command Dispatch
 
-All label mutations send NodeCommands. Labels are cosmetic roles (separate from power roles).
+All label mutations send NodeCommands. Labels are cosmetic OR access-bearing roles (issue #32; separate from power roles).
 
 ### crdt.rs:create_label()
-Signature: `fn create_label(server_id: String, name: String, color: String) -> Result<(), String>`. Sends `NodeCommand::CreateLabel`. The label_id is generated server-side.
+Signature: `fn create_label(server_id: String, name: String, color: String, access: bool) -> Result<(), String>`. Sends `NodeCommand::CreateLabel`. The label_id is generated server-side.
 
 ### crdt.rs:delete_label()
 Signature: `fn delete_label(server_id: String, label_id: String) -> Result<(), String>`. Sends `NodeCommand::DeleteLabel`.
 
 ### crdt.rs:update_label()
-Signature: `fn update_label(server_id: String, label_id: String, name: String, color: String) -> Result<(), String>`. Sends `NodeCommand::UpdateLabel`.
+Signature: `fn update_label(server_id: String, label_id: String, name: String, color: String, access: bool) -> Result<(), String>`. Sends `NodeCommand::UpdateLabel` (wire op carries `access: Some(bool)`; `None` on the wire = preserve, for pre-#32 authors).
 
 ### crdt.rs:assign_label()
-Signature: `fn assign_label(server_id: String, label_id: String, peer_id: String) -> Result<(), String>`. Sends `NodeCommand::AssignLabel`.
+Signature: `fn assign_label(server_id: String, label_id: String, peer_id: String) -> Result<(), String>`. Sends `NodeCommand::AssignLabel`. Self-assign is refused Rust-side for access labels.
 
 ### crdt.rs:unassign_label()
 Signature: `fn unassign_label(server_id: String, label_id: String, peer_id: String) -> Result<(), String>`. Sends `NodeCommand::UnassignLabel`.
+
+## Channel Access Gates + Temporary Grants (crdt.rs, issue #32)
+
+### crdt.rs:set_channel_visibility_labels() / set_channel_posting_labels()
+Signatures: `fn set_channel_*_labels(server_id, channel_id, labels: Vec<String>) -> Result<(), String>`. Empty vec = clear the gate back to tier mode. Non-empty also stamps the legacy tier to Admin+ (handler-side, old-client fallback).
+
+### crdt.rs:grant_channel_access()
+Signature: `fn grant_channel_access(server_id, channel_id, peer_id, duration_secs: i64) -> Result<(), String>`. `<= 0` = until revoked (`u64::MAX`), else `now_ms + secs*1000` — exact mute_member math.
+
+### crdt.rs:revoke_channel_access()
+Signature: `fn revoke_channel_access(server_id, channel_id, peer_id) -> Result<(), String>`.
+
+### crdt.rs:get_channel_grants()
+**Direct DB read.** Signature: `fn get_channel_grants(server_id, channel_id) -> Result<Vec<ChannelGrantFfi>, String>`. Via `state.channel_grants_list(cid, now_ms)` — expired entries filtered.
 
 ## Server Settings and Avatar (crdt.rs)
 

@@ -755,6 +755,50 @@ impl TestNode {
         Some(state.channels.get(channel_id)?.slow_mode)
     }
 
+    /// A channel's visibility label gate (label ids; empty = no gate). None
+    /// if the channel/server is unknown.
+    pub(crate) fn channel_visibility_labels(&self, server_id: &str, channel_id: &str) -> Option<Vec<String>> {
+        let state = self.server_state(server_id)?;
+        Some(state.channels.get(channel_id)?.visibility_labels.clone())
+    }
+
+    /// A channel's posting label gate (label ids; empty = no gate).
+    pub(crate) fn channel_posting_labels(&self, server_id: &str, channel_id: &str) -> Option<Vec<String>> {
+        let state = self.server_state(server_id)?;
+        Some(state.channels.get(channel_id)?.posting_labels.clone())
+    }
+
+    /// The label ids assigned to a member (raw master-keyed lookup, sorted).
+    pub(crate) fn member_label_ids(&self, server_id: &str, master: &str) -> Vec<String> {
+        let mut ids = self
+            .server_state(server_id)
+            .and_then(|s| s.label_assignments.get(master).cloned())
+            .unwrap_or_default();
+        ids.sort();
+        ids
+    }
+
+    /// A label's access flag (None = label unknown).
+    pub(crate) fn label_access(&self, server_id: &str, label_id: &str) -> Option<bool> {
+        self.server_state(server_id)?
+            .labels
+            .get(label_id)
+            .map(|l| l.access)
+    }
+
+    /// Whether `peer` holds an unexpired temporary grant for the channel
+    /// RIGHT NOW — the moving part `can_see_channel`/`can_post_in_channel`
+    /// evaluate (mirrors `is_muted_now`).
+    pub(crate) fn has_grant_now(&self, server_id: &str, channel_id: &str, peer: &str) -> bool {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        self.server_state(server_id)
+            .map(|s| s.has_channel_grant(peer, channel_id, now))
+            .unwrap_or(false)
+    }
+
     /// A channel's media-only flag as the UI reads it.
     pub(crate) fn channel_media_only(&self, server_id: &str, channel_id: &str) -> Option<bool> {
         let state = self.server_state(server_id)?;
@@ -3955,6 +3999,630 @@ async fn restricted_channel_subgroup_enforces_visibility() {
         !owner_sub_leaves3.contains(&a.device_id),
         "after demotion A's leaf must be removed from the subgroup, got {owner_sub_leaves3:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Label-gated channel access (issue #32). A channel gated on an ACCESS label is
+// encrypted under its own MLS subgroup; only label holders (plus Admin+/Owner)
+// are leaves. The gate op is paired with a legacy `visibility: admin` stamp
+// (old-client fail-closed fallback) — both must replicate. Assigning the label
+// admits the member (KeyPackage pull → Welcome); unassigning evicts the leaf;
+// picking a plain tier clears the gate everywhere and tears the subgroup down.
+// ---------------------------------------------------------------------------
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
+async fn label_gated_channel_subgroup_and_fallback() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    // O = owner, V = plain member who will receive the VIP label, M = stays out.
+    const O_MASTER: u8 = 103;
+    const V_MASTER: u8 = 104;
+    const M_MASTER: u8 = 105;
+    let o_master = NativeKeypair::from_secret_bytes(&seed_bytes(O_MASTER)).peer_id();
+    let v_master = NativeKeypair::from_secret_bytes(&seed_bytes(V_MASTER)).peer_id();
+    let m_master = NativeKeypair::from_secret_bytes(&seed_bytes(M_MASTER)).peer_id();
+
+    let mut o = spawn_node_with_friends(&relay, O_MASTER, O_MASTER, &[&v_master, &m_master]).await;
+    sleep_ms(1500).await;
+    let mut v = spawn_node_with_friends(&relay, V_MASTER, V_MASTER, &[&o_master, &m_master]).await;
+    sleep_ms(1500).await;
+    let mut m = spawn_node_with_friends(&relay, M_MASTER, M_MASTER, &[&o_master, &v_master]).await;
+    sleep_ms(5000).await;
+    drain_events(&mut o);
+    drain_events(&mut v);
+    drain_events(&mut m);
+
+    let server_id = create_server_and_wait(&mut o, "Label Gate Server").await;
+    sleep_ms(500).await;
+    for (node, who) in [(&mut v, "V"), (&mut m, "M")] {
+        node.cmd_tx
+            .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
+            .await
+            .unwrap();
+        let joined = wait_event(node, std::time::Duration::from_secs(8), |ev| {
+            matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
+        })
+        .await;
+        assert!(joined, "{who} should join the server");
+        sleep_ms(2500).await;
+    }
+    sleep_ms(4000).await;
+    drain_events(&mut o);
+    drain_events(&mut v);
+    drain_events(&mut m);
+
+    // --- Channel + access label. ---
+    o.cmd_tx
+        .send(NodeCommand::CreateChannel {
+            server_id: server_id.clone(),
+            name: "vip-lounge".to_string(),
+            category: None,
+            channel_type: "text".to_string(),
+        })
+        .await
+        .unwrap();
+    let mut vip_cid = None;
+    let made = wait_event(&mut o, std::time::Duration::from_secs(5), |ev| {
+        if let NetworkEvent::ChannelAdded { channel_id, name, .. } = ev {
+            if name == "vip-lounge" { vip_cid = Some(channel_id.clone()); return true; }
+        }
+        false
+    })
+    .await;
+    assert!(made, "owner should create the channel");
+    let vip_cid = vip_cid.expect("channel id");
+    sleep_ms(2000).await;
+
+    o.cmd_tx
+        .send(NodeCommand::CreateLabel {
+            server_id: server_id.clone(),
+            name: "VIP".to_string(),
+            color: "#f0f".to_string(),
+            access: true,
+        })
+        .await
+        .unwrap();
+    // The label id is minted in the swarm — read it back from the CRDT.
+    let mut vip_label = None;
+    for _ in 0..20 {
+        sleep_ms(250).await;
+        if let Some(state) = o.server_state(&server_id) {
+            if let Some(l) = state.labels.values().find(|l| l.name == "VIP") {
+                vip_label = Some(l.label_id.clone());
+                break;
+            }
+        }
+    }
+    let vip_label = vip_label.expect("VIP label should exist on the owner");
+    assert_eq!(o.label_access(&server_id, &vip_label), Some(true));
+
+    // --- Gate the channel on the label. ---
+    o.cmd_tx
+        .send(NodeCommand::SetChannelVisibilityLabels {
+            server_id: server_id.clone(),
+            channel_id: vip_cid.clone(),
+            labels: vec![vip_label.clone()],
+        })
+        .await
+        .unwrap();
+    sleep_ms(6000).await; // stamp + gate ops fan out; owner founds the subgroup
+
+    // Gate + legacy admin stamp replicated to ALL nodes (the stamp is what an
+    // old client would honor).
+    for (node, who) in [(&o, "O"), (&v, "V"), (&m, "M")] {
+        assert_eq!(
+            node.channel_visibility(&server_id, &vip_cid).as_deref(),
+            Some("admin"),
+            "{who}: legacy tier must be stamped to admin"
+        );
+        assert_eq!(
+            node.channel_visibility_labels(&server_id, &vip_cid).as_deref(),
+            Some(&[vip_label.clone()][..]),
+            "{who}: visibility label gate must replicate"
+        );
+    }
+    assert!(!v.can_see_channel(&server_id, &vip_cid, &v_master), "V has no label yet");
+    assert!(!m.can_see_channel(&server_id, &vip_cid, &m_master));
+
+    let subgroup = crate::crypto::subgroup_id(&server_id, &vip_cid);
+    let owner_leaves = o.mls_members(&subgroup).await;
+    assert!(owner_leaves.contains(&o.device_id), "owner holds the subgroup leaf");
+    assert!(!owner_leaves.contains(&v.device_id), "V must not be a leaf pre-label");
+    assert!(!owner_leaves.contains(&m.device_id), "M must not be a leaf");
+
+    // Not decryptable by V pre-label.
+    drain_events(&mut v);
+    o.cmd_tx
+        .send(NodeCommand::SendChannelMessage {
+            server_id: server_id.clone(),
+            channel_id: vip_cid.clone(),
+            text: "vip only #1".to_string(),
+            message_id: "vip-msg-1".to_string(),
+            reply_to_mid: None,
+            link_preview: None,
+        })
+        .await
+        .unwrap();
+    let v_got = wait_event(&mut v, std::time::Duration::from_secs(4), |ev| {
+        matches!(ev, NetworkEvent::ChannelMessageReceived { text, .. } if text == "vip only #1")
+    })
+    .await;
+    assert!(!v_got, "V must NOT decrypt the gated message before holding the label");
+
+    // --- Assign the label → V is admitted to the subgroup and decrypts. ---
+    o.cmd_tx
+        .send(NodeCommand::AssignLabel {
+            server_id: server_id.clone(),
+            label_id: vip_label.clone(),
+            peer_id: v_master.clone(),
+        })
+        .await
+        .unwrap();
+    sleep_ms(6000).await; // assign fans out; reconcile pulls V's KP; batch commits
+
+    assert!(v.can_see_channel(&server_id, &vip_cid, &v_master), "label holder sees the channel");
+    let owner_leaves2 = o.mls_members(&subgroup).await;
+    assert!(
+        owner_leaves2.contains(&v.device_id),
+        "labeled V must be a subgroup leaf, got {owner_leaves2:?}"
+    );
+    assert!(
+        v.mls_members(&subgroup).await.contains(&v.device_id),
+        "V must hold the subgroup itself"
+    );
+
+    drain_events(&mut v);
+    drain_events(&mut m);
+    o.cmd_tx
+        .send(NodeCommand::SendChannelMessage {
+            server_id: server_id.clone(),
+            channel_id: vip_cid.clone(),
+            text: "vip only #2".to_string(),
+            message_id: "vip-msg-2".to_string(),
+            reply_to_mid: None,
+            link_preview: None,
+        })
+        .await
+        .unwrap();
+    let v_got2 = wait_event(&mut v, std::time::Duration::from_secs(5), |ev| {
+        matches!(ev, NetworkEvent::ChannelMessageReceived { text, .. } if text == "vip only #2")
+    })
+    .await;
+    assert!(v_got2, "labeled V must decrypt the gated message");
+    let m_got2 = wait_event(&mut m, std::time::Duration::from_secs(2), |ev| {
+        matches!(ev, NetworkEvent::ChannelMessageReceived { text, .. } if text == "vip only #2")
+    })
+    .await;
+    assert!(!m_got2, "unlabeled M must still not decrypt");
+
+    // --- Unassign → V's leaf is evicted. ---
+    o.cmd_tx
+        .send(NodeCommand::UnassignLabel {
+            server_id: server_id.clone(),
+            label_id: vip_label.clone(),
+            peer_id: v_master.clone(),
+        })
+        .await
+        .unwrap();
+    sleep_ms(6000).await;
+    let owner_leaves3 = o.mls_members(&subgroup).await;
+    assert!(
+        !owner_leaves3.contains(&v.device_id),
+        "unassigned V's leaf must be removed, got {owner_leaves3:?}"
+    );
+    assert!(!v.can_see_channel(&server_id, &vip_cid, &v_master));
+
+    // --- Picking a plain tier clears the gate everywhere + tears down. ---
+    o.cmd_tx
+        .send(NodeCommand::SetChannelVisibility {
+            server_id: server_id.clone(),
+            channel_id: vip_cid.clone(),
+            visibility: "everyone".to_string(),
+        })
+        .await
+        .unwrap();
+    let mut cleared_everywhere = false;
+    for _ in 0..20 {
+        sleep_ms(500).await;
+        let all_clear = [&o, &v, &m].iter().all(|n| {
+            n.channel_visibility(&server_id, &vip_cid).as_deref() == Some("everyone")
+                && n.channel_visibility_labels(&server_id, &vip_cid)
+                    .is_some_and(|l| l.is_empty())
+        });
+        if all_clear { cleared_everywhere = true; break; }
+    }
+    assert!(cleared_everywhere, "tier pick must clear the label gate on every node");
+    assert!(m.can_see_channel(&server_id, &vip_cid, &m_master), "everyone sees again");
+    assert!(
+        o.mls_members(&subgroup).await.is_empty(),
+        "subgroup must be torn down once the channel is unrestricted"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Access labels are NOT self-assignable (that would be privilege escalation —
+// the label gates channels). The authoring gate refuses locally and the
+// `op_allowed` ingest gate refuses remotely; cosmetic labels keep self-service.
+// ---------------------------------------------------------------------------
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
+async fn access_label_self_assign_locked() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    const O_MASTER: u8 = 106;
+    const M_MASTER: u8 = 107;
+    let o_master = NativeKeypair::from_secret_bytes(&seed_bytes(O_MASTER)).peer_id();
+    let m_master = NativeKeypair::from_secret_bytes(&seed_bytes(M_MASTER)).peer_id();
+
+    let mut o = spawn_node_with_friends(&relay, O_MASTER, O_MASTER, &[&m_master]).await;
+    sleep_ms(1500).await;
+    let mut m = spawn_node_with_friends(&relay, M_MASTER, M_MASTER, &[&o_master]).await;
+    sleep_ms(4000).await;
+    drain_events(&mut o);
+    drain_events(&mut m);
+
+    let server_id = create_server_and_wait(&mut o, "Lockdown Server").await;
+    sleep_ms(500).await;
+    m.cmd_tx
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
+        .await
+        .unwrap();
+    let joined = wait_event(&mut m, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
+    })
+    .await;
+    assert!(joined, "M should join");
+    sleep_ms(3000).await;
+
+    // Owner creates one access label and one cosmetic label.
+    for (name, access) in [("Staff", true), ("Fun", false)] {
+        o.cmd_tx
+            .send(NodeCommand::CreateLabel {
+                server_id: server_id.clone(),
+                name: name.to_string(),
+                color: "#fff".to_string(),
+                access,
+            })
+            .await
+            .unwrap();
+    }
+    let mut staff_label = None;
+    let mut fun_label = None;
+    for _ in 0..20 {
+        sleep_ms(250).await;
+        if let Some(state) = m.server_state(&server_id) {
+            staff_label = state.labels.values().find(|l| l.name == "Staff").map(|l| l.label_id.clone());
+            fun_label = state.labels.values().find(|l| l.name == "Fun").map(|l| l.label_id.clone());
+            if staff_label.is_some() && fun_label.is_some() { break; }
+        }
+    }
+    let staff_label = staff_label.expect("Staff label replicated to M");
+    let fun_label = fun_label.expect("Fun label replicated to M");
+    assert_eq!(m.label_access(&server_id, &staff_label), Some(true));
+    drain_events(&mut m);
+
+    // M tries to self-assign the ACCESS label → refused at authoring.
+    m.cmd_tx
+        .send(NodeCommand::AssignLabel {
+            server_id: server_id.clone(),
+            label_id: staff_label.clone(),
+            peer_id: m_master.clone(),
+        })
+        .await
+        .unwrap();
+    let denied = wait_event(&mut m, std::time::Duration::from_secs(4), |ev| {
+        matches!(ev, NetworkEvent::Error { message } if message.contains("cannot manage labels"))
+    })
+    .await;
+    assert!(denied, "self-assigning an access label must be refused with an Error event");
+    sleep_ms(2000).await;
+    assert!(
+        o.member_label_ids(&server_id, &m_master).is_empty(),
+        "the refused access-label assignment must not land on the owner"
+    );
+    assert!(
+        m.member_label_ids(&server_id, &m_master).is_empty(),
+        "the refused assignment must not land locally either"
+    );
+
+    // Cosmetic self-assign still works and replicates.
+    m.cmd_tx
+        .send(NodeCommand::AssignLabel {
+            server_id: server_id.clone(),
+            label_id: fun_label.clone(),
+            peer_id: m_master.clone(),
+        })
+        .await
+        .unwrap();
+    let mut fun_on_owner = false;
+    for _ in 0..20 {
+        sleep_ms(500).await;
+        if o.member_label_ids(&server_id, &m_master).contains(&fun_label) {
+            fun_on_owner = true;
+            break;
+        }
+    }
+    assert!(fun_on_owner, "cosmetic self-assign must replicate to the owner");
+
+    // A MANAGE_ROLES holder (owner) CAN assign the access label to M.
+    o.cmd_tx
+        .send(NodeCommand::AssignLabel {
+            server_id: server_id.clone(),
+            label_id: staff_label.clone(),
+            peer_id: m_master.clone(),
+        })
+        .await
+        .unwrap();
+    let mut staff_on_m = false;
+    for _ in 0..20 {
+        sleep_ms(500).await;
+        if m.member_label_ids(&server_id, &m_master).contains(&staff_label) {
+            staff_on_m = true;
+            break;
+        }
+    }
+    assert!(staff_on_m, "owner-assigned access label must replicate to M");
+}
+
+// ---------------------------------------------------------------------------
+// Temporary channel access grants — MLS lifecycle. A grant admits a plain
+// Member to a restricted channel's subgroup (decryptable); revoking evicts the
+// leaf and hides the channel again.
+// ---------------------------------------------------------------------------
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
+async fn channel_grant_lifecycle_mls() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    const O_MASTER: u8 = 108;
+    const M_MASTER: u8 = 109;
+    let o_master = NativeKeypair::from_secret_bytes(&seed_bytes(O_MASTER)).peer_id();
+    let m_master = NativeKeypair::from_secret_bytes(&seed_bytes(M_MASTER)).peer_id();
+
+    let mut o = spawn_node_with_friends(&relay, O_MASTER, O_MASTER, &[&m_master]).await;
+    sleep_ms(1500).await;
+    let mut m = spawn_node_with_friends(&relay, M_MASTER, M_MASTER, &[&o_master]).await;
+    sleep_ms(4000).await;
+    drain_events(&mut o);
+    drain_events(&mut m);
+
+    let server_id = create_server_and_wait(&mut o, "Grant Server").await;
+    sleep_ms(500).await;
+    m.cmd_tx
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
+        .await
+        .unwrap();
+    let joined = wait_event(&mut m, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
+    })
+    .await;
+    assert!(joined, "M should join");
+    sleep_ms(3000).await;
+
+    // Restricted channel M cannot see.
+    o.cmd_tx
+        .send(NodeCommand::CreateChannel {
+            server_id: server_id.clone(),
+            name: "war-room".to_string(),
+            category: None,
+            channel_type: "text".to_string(),
+        })
+        .await
+        .unwrap();
+    let mut cid = None;
+    let made = wait_event(&mut o, std::time::Duration::from_secs(5), |ev| {
+        if let NetworkEvent::ChannelAdded { channel_id, name, .. } = ev {
+            if name == "war-room" { cid = Some(channel_id.clone()); return true; }
+        }
+        false
+    })
+    .await;
+    assert!(made);
+    let cid = cid.expect("channel id");
+    sleep_ms(2000).await;
+    o.cmd_tx
+        .send(NodeCommand::SetChannelVisibility {
+            server_id: server_id.clone(),
+            channel_id: cid.clone(),
+            visibility: "admin".to_string(),
+        })
+        .await
+        .unwrap();
+    sleep_ms(6000).await;
+    assert!(!m.can_see_channel(&server_id, &cid, &m_master));
+    let subgroup = crate::crypto::subgroup_id(&server_id, &cid);
+    assert!(!o.mls_members(&subgroup).await.contains(&m.device_id));
+
+    // Grant M open-ended access → admitted to the subgroup, decrypts.
+    o.cmd_tx
+        .send(NodeCommand::GrantChannelAccess {
+            server_id: server_id.clone(),
+            channel_id: cid.clone(),
+            peer_id: m_master.clone(),
+            expires_at: u64::MAX,
+        })
+        .await
+        .unwrap();
+    sleep_ms(6000).await;
+    assert!(m.has_grant_now(&server_id, &cid, &m_master), "grant must replicate to M");
+    assert!(m.can_see_channel(&server_id, &cid, &m_master), "granted M sees the channel");
+    let leaves = o.mls_members(&subgroup).await;
+    assert!(leaves.contains(&m.device_id), "granted M must be a subgroup leaf, got {leaves:?}");
+
+    drain_events(&mut m);
+    o.cmd_tx
+        .send(NodeCommand::SendChannelMessage {
+            server_id: server_id.clone(),
+            channel_id: cid.clone(),
+            text: "guest pass".to_string(),
+            message_id: "grant-msg-1".to_string(),
+            reply_to_mid: None,
+            link_preview: None,
+        })
+        .await
+        .unwrap();
+    let m_got = wait_event(&mut m, std::time::Duration::from_secs(5), |ev| {
+        matches!(ev, NetworkEvent::ChannelMessageReceived { text, .. } if text == "guest pass")
+    })
+    .await;
+    assert!(m_got, "granted M must decrypt the restricted message");
+
+    // Revoke → leaf evicted, channel hidden again.
+    o.cmd_tx
+        .send(NodeCommand::RevokeChannelAccess {
+            server_id: server_id.clone(),
+            channel_id: cid.clone(),
+            peer_id: m_master.clone(),
+        })
+        .await
+        .unwrap();
+    sleep_ms(6000).await;
+    assert!(!m.has_grant_now(&server_id, &cid, &m_master), "revoke must replicate");
+    assert!(!m.can_see_channel(&server_id, &cid, &m_master));
+    let leaves2 = o.mls_members(&subgroup).await;
+    assert!(!leaves2.contains(&m.device_id), "revoked M's leaf must be evicted, got {leaves2:?}");
+}
+
+// ---------------------------------------------------------------------------
+// Temporary grant EXPIRY. The predicate denies lazily the instant the clock
+// passes `expires_at` (NO revoke op — mute precedent); the cfg(test) 2s sweep
+// then drives the MLS leaf removal so the member also loses the key material.
+// ---------------------------------------------------------------------------
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
+async fn channel_grant_expiry_sweep() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    const O_MASTER: u8 = 111;
+    const M_MASTER: u8 = 112;
+    let o_master = NativeKeypair::from_secret_bytes(&seed_bytes(O_MASTER)).peer_id();
+    let m_master = NativeKeypair::from_secret_bytes(&seed_bytes(M_MASTER)).peer_id();
+
+    let mut o = spawn_node_with_friends(&relay, O_MASTER, O_MASTER, &[&m_master]).await;
+    sleep_ms(1500).await;
+    let mut m = spawn_node_with_friends(&relay, M_MASTER, M_MASTER, &[&o_master]).await;
+    sleep_ms(4000).await;
+    drain_events(&mut o);
+    drain_events(&mut m);
+
+    let server_id = create_server_and_wait(&mut o, "Expiry Server").await;
+    sleep_ms(500).await;
+    m.cmd_tx
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
+        .await
+        .unwrap();
+    let joined = wait_event(&mut m, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
+    })
+    .await;
+    assert!(joined, "M should join");
+    sleep_ms(3000).await;
+
+    o.cmd_tx
+        .send(NodeCommand::CreateChannel {
+            server_id: server_id.clone(),
+            name: "airlock".to_string(),
+            category: None,
+            channel_type: "text".to_string(),
+        })
+        .await
+        .unwrap();
+    let mut cid = None;
+    let made = wait_event(&mut o, std::time::Duration::from_secs(5), |ev| {
+        if let NetworkEvent::ChannelAdded { channel_id, name, .. } = ev {
+            if name == "airlock" { cid = Some(channel_id.clone()); return true; }
+        }
+        false
+    })
+    .await;
+    assert!(made);
+    let cid = cid.expect("channel id");
+    sleep_ms(2000).await;
+    o.cmd_tx
+        .send(NodeCommand::SetChannelVisibility {
+            server_id: server_id.clone(),
+            channel_id: cid.clone(),
+            visibility: "admin".to_string(),
+        })
+        .await
+        .unwrap();
+    sleep_ms(6000).await;
+    let subgroup = crate::crypto::subgroup_id(&server_id, &cid);
+
+    // 10-second grant: long enough for the subgroup admission to complete,
+    // short enough to observe the expiry inside the test.
+    let expires_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+        + 10_000;
+    o.cmd_tx
+        .send(NodeCommand::GrantChannelAccess {
+            server_id: server_id.clone(),
+            channel_id: cid.clone(),
+            peer_id: m_master.clone(),
+            expires_at,
+        })
+        .await
+        .unwrap();
+    sleep_ms(6000).await; // grant fans out; reconcile admits M; batch commits
+    assert!(m.has_grant_now(&server_id, &cid, &m_master), "grant active mid-window");
+    assert!(m.can_see_channel(&server_id, &cid, &m_master));
+    assert!(
+        o.mls_members(&subgroup).await.contains(&m.device_id),
+        "granted M must be admitted to the subgroup before expiry"
+    );
+
+    // Wait past expiry: the predicate flips immediately with NO revoke op.
+    sleep_ms(5000).await; // now ≥ 11s after the grant
+    assert!(!m.has_grant_now(&server_id, &cid, &m_master), "expired grant reads as denied (lazy)");
+    assert!(!m.can_see_channel(&server_id, &cid, &m_master));
+
+    // The 2s cfg(test) sweep + 2s MLS batch then evict M's leaf.
+    let mut evicted = false;
+    for _ in 0..12 {
+        sleep_ms(1000).await;
+        if !o.mls_members(&subgroup).await.contains(&m.device_id) {
+            evicted = true;
+            break;
+        }
+    }
+    assert!(evicted, "the expiry sweep must remove M's subgroup leaf");
+
+    // A fresh message is not decryptable by the expired guest.
+    drain_events(&mut m);
+    o.cmd_tx
+        .send(NodeCommand::SendChannelMessage {
+            server_id: server_id.clone(),
+            channel_id: cid.clone(),
+            text: "after hours".to_string(),
+            message_id: "expiry-msg-1".to_string(),
+            reply_to_mid: None,
+            link_preview: None,
+        })
+        .await
+        .unwrap();
+    let m_got = wait_event(&mut m, std::time::Duration::from_secs(4), |ev| {
+        matches!(ev, NetworkEvent::ChannelMessageReceived { text, .. } if text == "after hours")
+    })
+    .await;
+    assert!(!m_got, "expired guest must not decrypt fresh messages");
 }
 
 // ---------------------------------------------------------------------------

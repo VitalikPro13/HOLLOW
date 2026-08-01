@@ -33,12 +33,17 @@ pub enum ChannelLayoutItem {
     Separator,
 }
 
-/// A cosmetic label (tag) that can be assigned to members.
+/// A label (tag) that can be assigned to members. Cosmetic by default;
+/// `access: true` makes it a security boundary: it can gate channels
+/// (`ChannelInfo::visibility_labels`/`posting_labels`) and is therefore
+/// never self-assignable — only MANAGE_ROLES holders assign it.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct LabelInfo {
     pub label_id: String,
     pub name: String,
     pub color: String,
+    #[serde(default)]
+    pub access: bool,
 }
 
 /// A custom server emote. METADATA ONLY — the image bytes are content-
@@ -152,6 +157,15 @@ pub struct ChannelInfo {
     /// may be posted; standalone text and other file types are rejected.
     #[serde(default)]
     pub media_only: bool,
+    /// Label gate for visibility (issue #32). Non-empty REPLACES the tier
+    /// ladder: holders of ANY listed label (plus Admin+/Owner) see the
+    /// channel. Always authored alongside a `visibility: AdminPlus` stamp so
+    /// clients that predate this field fail closed.
+    #[serde(default)]
+    pub visibility_labels: Vec<String>,
+    /// Label gate for posting; same semantics as `visibility_labels`.
+    #[serde(default)]
+    pub posting_labels: Vec<String>,
 }
 
 /// Metadata for a member within a server.
@@ -191,6 +205,12 @@ pub struct ServerState {
     /// epoch ms. `u64::MAX` = permanent, `0` = unmuted (pruned on unmute).
     #[serde(default)]
     pub muted_members: HashMap<String, AdminLwwReg<u64>>,
+    /// Temporary channel access grants: channel_id -> master peer_id -> expiry
+    /// epoch ms. `u64::MAX` = until revoked, `0` = revoked (pruned only in the
+    /// ChannelGrantRevoked arm). Modeled exactly on `muted_members`: LWW per
+    /// entry, lazy expiry at read time, no background pruning.
+    #[serde(default)]
+    pub channel_grants: HashMap<String, HashMap<String, AdminLwwReg<u64>>>,
     #[serde(default)]
     pub labels: HashMap<String, LabelInfo>,
     #[serde(default)]
@@ -234,8 +254,8 @@ impl ServerState {
         let ServerState {
             server_id, name, channels, members, roles, nicknames,
             twitch_usernames, pinned_messages, channel_layout, storage_pledges,
-            settings, role_permissions, banned_members, muted_members, labels,
-            label_assignments, emotes, stickers, deleted,
+            settings, role_permissions, banned_members, muted_members,
+            channel_grants, labels, label_assignments, emotes, stickers, deleted,
             op_log: _, hlc: _, op_log_dedup: _,
         } = self;
         ServerState {
@@ -253,6 +273,7 @@ impl ServerState {
             role_permissions: role_permissions.clone(),
             banned_members: banned_members.clone(),
             muted_members: muted_members.clone(),
+            channel_grants: channel_grants.clone(),
             labels: labels.clone(),
             label_assignments: label_assignments.clone(),
             emotes: emotes.clone(),
@@ -284,6 +305,8 @@ impl ServerState {
                 is_public: false,
                 slow_mode: 0,
                 media_only: false,
+                visibility_labels: Vec::new(),
+                posting_labels: Vec::new(),
             },
         );
 
@@ -317,6 +340,7 @@ impl ServerState {
             role_permissions: HashMap::new(),
             banned_members: HashMap::new(),
             muted_members: HashMap::new(),
+            channel_grants: HashMap::new(),
             labels: HashMap::new(),
             label_assignments: HashMap::new(),
             emotes: HashMap::new(),
@@ -395,6 +419,10 @@ impl ServerState {
         changed |= fold_lww(&mut self.storage_pledges, &resolve);
         changed |= fold_lww(&mut self.banned_members, &resolve);
         changed |= fold_lww(&mut self.muted_members, &resolve);
+        // channel_grants: per-channel inner maps are master-keyed like mutes.
+        for regs in self.channel_grants.values_mut() {
+            changed |= fold_lww(regs, &resolve);
+        }
 
         // label_assignments: Vec<label_id> per member — union under master.
         {
@@ -552,6 +580,8 @@ impl ServerState {
                         is_public: false,
                         slow_mode: 0,
                         media_only: false,
+                        visibility_labels: Vec::new(),
+                        posting_labels: Vec::new(),
                     }
                 });
             }
@@ -631,6 +661,45 @@ impl ServerState {
             CrdtPayload::ChannelMediaOnlyChanged { channel_id, media_only } => {
                 if let Some(ch) = self.channels.get_mut(channel_id) {
                     ch.media_only = *media_only;
+                }
+            }
+
+            CrdtPayload::ChannelVisibilityLabelsChanged { channel_id, labels } => {
+                if let Some(ch) = self.channels.get_mut(channel_id) {
+                    ch.visibility_labels = labels.clone();
+                }
+            }
+
+            CrdtPayload::ChannelPostingLabelsChanged { channel_id, labels } => {
+                if let Some(ch) = self.channels.get_mut(channel_id) {
+                    ch.posting_labels = labels.clone();
+                }
+            }
+
+            CrdtPayload::ChannelGrantSet { channel_id, peer_id, expires_at } => {
+                let priority = self.author_priority(&op.author);
+                let per_chan = self.channel_grants.entry(channel_id.clone()).or_default();
+                let entry = per_chan.entry(peer_id.clone()).or_insert_with(|| {
+                    AdminLwwReg::new(*expires_at, op.hlc.clone(), priority)
+                });
+                let remote = AdminLwwReg::new(*expires_at, op.hlc.clone(), priority);
+                entry.merge(&remote);
+            }
+
+            CrdtPayload::ChannelGrantRevoked { channel_id, peer_id } => {
+                let priority = self.author_priority(&op.author);
+                let per_chan = self.channel_grants.entry(channel_id.clone()).or_default();
+                let entry = per_chan.entry(peer_id.clone()).or_insert_with(|| {
+                    AdminLwwReg::new(0u64, op.hlc.clone(), priority)
+                });
+                let remote = AdminLwwReg::new(0u64, op.hlc.clone(), priority);
+                entry.merge(&remote);
+                // Prune (mirrors MemberUnmuted): only this arm can flip a
+                // register to 0, so the sweep lives only here. A newer grant
+                // wins the merge above and survives the retain.
+                per_chan.retain(|_, reg| *reg.read() != 0);
+                if per_chan.is_empty() {
+                    self.channel_grants.remove(channel_id);
                 }
             }
 
@@ -762,12 +831,13 @@ impl ServerState {
                 self.muted_members.retain(|_, reg| *reg.read() != 0);
             }
 
-            CrdtPayload::LabelCreated { label_id, name, color } => {
+            CrdtPayload::LabelCreated { label_id, name, color, access } => {
                 self.labels.entry(label_id.clone()).or_insert_with(|| {
                     LabelInfo {
                         label_id: label_id.clone(),
                         name: name.clone(),
                         color: color.clone(),
+                        access: *access,
                     }
                 });
             }
@@ -779,10 +849,16 @@ impl ServerState {
                 }
             }
 
-            CrdtPayload::LabelUpdated { label_id, name, color } => {
+            CrdtPayload::LabelUpdated { label_id, name, color, access } => {
                 if let Some(label) = self.labels.get_mut(label_id) {
                     label.name = name.clone();
                     label.color = color.clone();
+                    // None = the author predates the flag — PRESERVE it. An
+                    // old client recoloring an access label must not silently
+                    // demote it to cosmetic (that re-opens self-assignment).
+                    if let Some(a) = access {
+                        label.access = *a;
+                    }
                 }
             }
 
@@ -1186,7 +1262,11 @@ impl ServerState {
             | CrdtPayload::ChannelPostingChanged { .. }
             | CrdtPayload::ChannelPublicChanged { .. }
             | CrdtPayload::ChannelSlowModeChanged { .. }
-            | CrdtPayload::ChannelMediaOnlyChanged { .. } => {
+            | CrdtPayload::ChannelMediaOnlyChanged { .. }
+            | CrdtPayload::ChannelVisibilityLabelsChanged { .. }
+            | CrdtPayload::ChannelPostingLabelsChanged { .. }
+            | CrdtPayload::ChannelGrantSet { .. }
+            | CrdtPayload::ChannelGrantRevoked { .. } => {
                 (sender_perms & Permission::MANAGE_CHANNELS) != 0
             }
             CrdtPayload::LabelCreated { .. }
@@ -1194,9 +1274,14 @@ impl ServerState {
             | CrdtPayload::LabelUpdated { .. } => {
                 (sender_perms & Permission::MANAGE_ROLES) != 0
             }
-            CrdtPayload::LabelAssigned { peer_id, .. }
-            | CrdtPayload::LabelUnassigned { peer_id, .. } => {
-                peer_id == &op.author || (sender_perms & Permission::MANAGE_ROLES) != 0
+            CrdtPayload::LabelAssigned { label_id, peer_id }
+            | CrdtPayload::LabelUnassigned { label_id, peer_id } => {
+                // Self-toggle only for existing COSMETIC labels; access
+                // labels and unknown label ids require MANAGE_ROLES. Same
+                // rule as the authoring gate via can_self_toggle_label —
+                // ingest weaker than send is a fork generator.
+                self.can_self_toggle_label(&op.author, peer_id, label_id)
+                    || (sender_perms & Permission::MANAGE_ROLES) != 0
             }
             CrdtPayload::EmojiAdded { name, hash, .. } => {
                 (sender_perms & Permission::MANAGE_EMOTES) != 0
@@ -1303,18 +1388,76 @@ impl ServerState {
             .unwrap_or_default()
     }
 
-    /// Check if a peer can see a channel.
+    /// Unexpired temporary grant for (channel, member)? Grants are
+    /// master-keyed; collapse a device id first (like `is_muted`).
+    pub fn has_channel_grant(&self, peer_id: &str, channel_id: &str, now_ms: u64) -> bool {
+        let key = super::resolve_identity(peer_id);
+        self.channel_grants
+            .get(channel_id)
+            .and_then(|m| m.get(&key))
+            .map(|reg| *reg.read() > now_ms)
+            .unwrap_or(false)
+    }
+
+    /// Active grants for a channel at `now_ms` as (master peer_id, expiry ms)
+    /// pairs. Expired entries are skipped (they linger until revoke,
+    /// mirroring `muted_list`).
+    pub fn channel_grants_list(&self, channel_id: &str, now_ms: u64) -> Vec<(String, u64)> {
+        self.channel_grants
+            .get(channel_id)
+            .map(|m| {
+                m.iter()
+                    .filter(|(_, reg)| *reg.read() > now_ms)
+                    .map(|(pid, reg)| (pid.clone(), *reg.read()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Does the member (already master-collapsed) hold ANY of the listed
+    /// label ids? Raw `label_assignments` lookup — callers must resolve
+    /// device→master first (`get_member_labels` does not, so don't reuse it
+    /// in predicates). `LabelDeleted` strips assignments, so a deleted label
+    /// can never satisfy a gate (fail-closed).
+    fn holds_any_label(&self, master: &str, wanted: &[String]) -> bool {
+        self.label_assignments
+            .get(master)
+            .is_some_and(|held| wanted.iter().any(|w| held.contains(w)))
+    }
+
+    /// Shared self-toggle rule for LabelAssigned/Unassigned — used by BOTH
+    /// the authoring gate (handle_label_op) and `op_allowed`, so the two can
+    /// never drift. Self-toggle is allowed only for an EXISTING label that is
+    /// NOT access-bearing; unknown label ids are refused (fail-closed — an
+    /// assignment racing ahead of its LabelCreated cannot be classified, and
+    /// letting it through would let anyone pre-claim a future access label).
+    pub fn can_self_toggle_label(&self, actor: &str, target_peer: &str, label_id: &str) -> bool {
+        super::resolve_identity(actor) == super::resolve_identity(target_peer)
+            && self.labels.get(label_id).is_some_and(|l| !l.access)
+    }
+
+    /// Check if a peer can see a channel (at the current wall clock).
     pub fn can_see_channel(&self, peer_id: &str, channel_id: &str) -> bool {
-        let role = self.get_role(peer_id);
+        self.can_see_channel_at(peer_id, channel_id, epoch_ms_now())
+    }
+
+    /// Visibility predicate at an explicit `now_ms` (tests control time).
+    /// Owner always sees. An unexpired grant sees. A non-empty label gate
+    /// REPLACES the tier ladder: Admin+ implicit, else any listed label.
+    pub fn can_see_channel_at(&self, peer_id: &str, channel_id: &str, now_ms: u64) -> bool {
+        let master = super::resolve_identity(peer_id);
+        let role = self.get_role(&master);
         if role == MemberRole::Owner { return true; }
-        if let Some(ch) = self.channels.get(channel_id) {
-            match ch.visibility {
-                ChannelVisibility::Everyone => true,
-                ChannelVisibility::ModeratorPlus => role.priority() >= MemberRole::Moderator.priority(),
-                ChannelVisibility::AdminPlus => role.priority() >= MemberRole::Admin.priority(),
-            }
-        } else {
-            false
+        let Some(ch) = self.channels.get(channel_id) else { return false; };
+        if self.has_channel_grant(&master, channel_id, now_ms) { return true; }
+        if !ch.visibility_labels.is_empty() {
+            return role.priority() >= MemberRole::Admin.priority()
+                || self.holds_any_label(&master, &ch.visibility_labels);
+        }
+        match ch.visibility {
+            ChannelVisibility::Everyone => true,
+            ChannelVisibility::ModeratorPlus => role.priority() >= MemberRole::Moderator.priority(),
+            ChannelVisibility::AdminPlus => role.priority() >= MemberRole::Admin.priority(),
         }
     }
 
@@ -1322,18 +1465,29 @@ impl ServerState {
         self.channels.get(channel_id).map_or(false, |ch| ch.is_public)
     }
 
-    /// Check if a peer can post in a channel.
+    /// Check if a peer can post in a channel (at the current wall clock).
     pub fn can_post_in_channel(&self, peer_id: &str, channel_id: &str) -> bool {
-        let role = self.get_role(peer_id);
+        self.can_post_in_channel_at(peer_id, channel_id, epoch_ms_now())
+    }
+
+    /// Posting predicate at an explicit `now_ms`. Same shape as visibility;
+    /// the Everyone tier keeps the SEND_MESSAGES permission check, and a
+    /// grant confers posting too (mute stays a SEPARATE check at the send
+    /// and ingest sites — never folded in here).
+    pub fn can_post_in_channel_at(&self, peer_id: &str, channel_id: &str, now_ms: u64) -> bool {
+        let master = super::resolve_identity(peer_id);
+        let role = self.get_role(&master);
         if role == MemberRole::Owner { return true; }
-        if let Some(ch) = self.channels.get(channel_id) {
-            match ch.posting {
-                ChannelPosting::Everyone => self.has_permission(peer_id, Permission::SEND_MESSAGES),
-                ChannelPosting::ModeratorPlus => role.priority() >= MemberRole::Moderator.priority(),
-                ChannelPosting::AdminPlus => role.priority() >= MemberRole::Admin.priority(),
-            }
-        } else {
-            false
+        let Some(ch) = self.channels.get(channel_id) else { return false; };
+        if self.has_channel_grant(&master, channel_id, now_ms) { return true; }
+        if !ch.posting_labels.is_empty() {
+            return role.priority() >= MemberRole::Admin.priority()
+                || self.holds_any_label(&master, &ch.posting_labels);
+        }
+        match ch.posting {
+            ChannelPosting::Everyone => self.has_permission(&master, Permission::SEND_MESSAGES),
+            ChannelPosting::ModeratorPlus => role.priority() >= MemberRole::Moderator.priority(),
+            ChannelPosting::AdminPlus => role.priority() >= MemberRole::Admin.priority(),
         }
     }
 
@@ -1360,7 +1514,9 @@ impl ServerState {
     /// hold the key. `Everyone` channels and public channels do NOT use a subgroup.
     pub fn channel_uses_subgroup(&self, channel_id: &str) -> bool {
         self.channels.get(channel_id).is_some_and(|ch| {
-            !ch.is_public && ch.visibility != ChannelVisibility::Everyone
+            !ch.is_public
+                && (ch.visibility != ChannelVisibility::Everyone
+                    || !ch.visibility_labels.is_empty())
         })
     }
 
@@ -1370,10 +1526,22 @@ impl ServerState {
     pub fn subgroup_channel_ids(&self) -> Vec<String> {
         self.channels
             .values()
-            .filter(|ch| !ch.is_public && ch.visibility != ChannelVisibility::Everyone)
+            .filter(|ch| {
+                !ch.is_public
+                    && (ch.visibility != ChannelVisibility::Everyone
+                        || !ch.visibility_labels.is_empty())
+            })
             .map(|ch| ch.channel_id.clone())
             .collect()
     }
+}
+
+/// Current wall clock in epoch ms (the time base for mute + grant expiry).
+fn epoch_ms_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 /// Truncate a peer ID to a short display name.
@@ -1418,6 +1586,17 @@ mod tests {
                 peer_id: id.into(),
                 role,
                 priority: 3,
+            });
+            let _ = s.apply_op(&op);
+        }
+        // Labels for the assign/unassign rows: one cosmetic, one access-bearing
+        // (self-toggle is only legal for EXISTING cosmetic labels).
+        for (lid, access) in [("l1", false), ("lacc", true)] {
+            let op = s.create_op(CrdtPayload::LabelCreated {
+                label_id: lid.into(),
+                name: lid.into(),
+                color: "#fff".into(),
+                access,
             });
             let _ = s.apply_op(&op);
         }
@@ -1474,13 +1653,29 @@ mod tests {
             ("admin", CrdtPayload::ChannelPublicChanged { channel_id: "c".into(), is_public: true }, true),
             ("alice", CrdtPayload::ChannelSlowModeChanged { channel_id: "c".into(), seconds: 5 }, false),
             ("admin", CrdtPayload::ChannelMediaOnlyChanged { channel_id: "c".into(), media_only: true }, true),
-            // Labels: create/delete/update need MANAGE_ROLES; assign is self-or-MANAGE_ROLES.
-            ("admin", CrdtPayload::LabelCreated { label_id: "l1".into(), name: "L".into(), color: "#fff".into() }, true),
-            ("alice", CrdtPayload::LabelUpdated { label_id: "l1".into(), name: "L".into(), color: "#fff".into() }, false),
+            // Labels: create/delete/update need MANAGE_ROLES; assign is
+            // self-or-MANAGE_ROLES — but self ONLY for existing cosmetic
+            // labels (access labels gate channels; self-assign would be
+            // privilege escalation, and unknown ids fail closed).
+            ("admin", CrdtPayload::LabelCreated { label_id: "l9".into(), name: "L".into(), color: "#fff".into(), access: false }, true),
+            ("alice", CrdtPayload::LabelUpdated { label_id: "l1".into(), name: "L".into(), color: "#fff".into(), access: None }, false),
             ("alice", CrdtPayload::LabelDeleted { label_id: "l1".into() }, false),
             ("alice", CrdtPayload::LabelAssigned { label_id: "l1".into(), peer_id: "alice".into() }, true),
             ("alice", CrdtPayload::LabelAssigned { label_id: "l1".into(), peer_id: "bob".into() }, false),
+            ("alice", CrdtPayload::LabelAssigned { label_id: "lacc".into(), peer_id: "alice".into() }, false),
+            ("alice", CrdtPayload::LabelUnassigned { label_id: "lacc".into(), peer_id: "alice".into() }, false),
+            ("alice", CrdtPayload::LabelAssigned { label_id: "ghost".into(), peer_id: "alice".into() }, false),
+            ("admin", CrdtPayload::LabelAssigned { label_id: "lacc".into(), peer_id: "bob".into() }, true),
             ("admin", CrdtPayload::LabelUnassigned { label_id: "l1".into(), peer_id: "bob".into() }, true),
+            // Label gates + grants: MANAGE_CHANNELS.
+            ("admin", CrdtPayload::ChannelVisibilityLabelsChanged { channel_id: "c".into(), labels: vec!["lacc".into()] }, true),
+            ("alice", CrdtPayload::ChannelVisibilityLabelsChanged { channel_id: "c".into(), labels: vec!["lacc".into()] }, false),
+            ("admin", CrdtPayload::ChannelPostingLabelsChanged { channel_id: "c".into(), labels: vec![] }, true),
+            ("moder", CrdtPayload::ChannelPostingLabelsChanged { channel_id: "c".into(), labels: vec![] }, false),
+            ("admin", CrdtPayload::ChannelGrantSet { channel_id: "c".into(), peer_id: "bob".into(), expires_at: u64::MAX }, true),
+            ("alice", CrdtPayload::ChannelGrantSet { channel_id: "c".into(), peer_id: "bob".into(), expires_at: u64::MAX }, false),
+            ("admin", CrdtPayload::ChannelGrantRevoked { channel_id: "c".into(), peer_id: "bob".into() }, true),
+            ("moder", CrdtPayload::ChannelGrantRevoked { channel_id: "c".into(), peer_id: "bob".into() }, false),
             // Emotes: MANAGE_EMOTES + grammar validation at ingest.
             ("admin", CrdtPayload::EmojiAdded { name: "pog".into(), hash: "a".repeat(64), animated: false }, true),
             ("admin", CrdtPayload::EmojiAdded { name: "Bad Name".into(), hash: "a".repeat(64), animated: false }, false),
@@ -2053,19 +2248,34 @@ mod tests {
             label_id: "lbl-1".into(),
             name: "VIP".into(),
             color: "#ff0000".into(),
+            access: true,
         });
         state.apply_op(&op).unwrap();
         assert_eq!(state.labels.len(), 1);
         assert_eq!(state.labels["lbl-1"].name, "VIP");
+        assert!(state.labels["lbl-1"].access);
 
+        // access: None (an old client's update) preserves the stored flag.
         let op = state.create_op(CrdtPayload::LabelUpdated {
             label_id: "lbl-1".into(),
             name: "MVP".into(),
             color: "#00ff00".into(),
+            access: None,
         });
         state.apply_op(&op).unwrap();
         assert_eq!(state.labels["lbl-1"].name, "MVP");
         assert_eq!(state.labels["lbl-1"].color, "#00ff00");
+        assert!(state.labels["lbl-1"].access, "access: None must PRESERVE the flag");
+
+        // access: Some(false) explicitly demotes to cosmetic.
+        let op = state.create_op(CrdtPayload::LabelUpdated {
+            label_id: "lbl-1".into(),
+            name: "MVP".into(),
+            color: "#00ff00".into(),
+            access: Some(false),
+        });
+        state.apply_op(&op).unwrap();
+        assert!(!state.labels["lbl-1"].access);
 
         let op = state.create_op(CrdtPayload::LabelDeleted {
             label_id: "lbl-1".into(),
@@ -2082,6 +2292,7 @@ mod tests {
             label_id: "lbl-1".into(),
             name: "VIP".into(),
             color: "#ff0000".into(),
+            access: false,
         });
         state.apply_op(&op).unwrap();
 
@@ -2116,6 +2327,7 @@ mod tests {
             label_id: "lbl-1".into(),
             name: "VIP".into(),
             color: "#ff0000".into(),
+            access: false,
         });
         state.apply_op(&op).unwrap();
         let op = state.create_op(CrdtPayload::LabelAssigned {
@@ -2130,6 +2342,196 @@ mod tests {
         });
         state.apply_op(&op).unwrap();
         assert!(state.get_member_labels("owner").is_empty());
+    }
+
+    // --- Label-gated channel access + temporary grants (issue #32) ---
+
+    /// owner + admin + mod + member + vipper (a plain member holding the
+    /// access label "vip"), one text channel "ch".
+    fn label_gate_fixture() -> ServerState {
+        let mut s = ServerState::new("s1".into(), "Test".into(), "owner".into());
+        for (id, role) in [
+            ("admin", Some(MemberRole::Admin)),
+            ("mod", Some(MemberRole::Moderator)),
+            ("member", None),
+            ("vipper", None),
+        ] {
+            let op = s.create_op(CrdtPayload::MemberAdded {
+                peer_id: id.into(),
+                display_name: id.into(),
+            });
+            s.apply_op(&op).unwrap();
+            if let Some(r) = role {
+                let op = s.create_op(CrdtPayload::RoleChanged {
+                    peer_id: id.into(),
+                    role: r,
+                    priority: MemberRole::Owner.priority(),
+                });
+                s.apply_op(&op).unwrap();
+            }
+        }
+        let op = s.create_op(CrdtPayload::ChannelAdded {
+            channel_id: "ch".into(),
+            name: "ch".into(),
+            category: None,
+            channel_type: "text".into(),
+        });
+        s.apply_op(&op).unwrap();
+        let op = s.create_op(CrdtPayload::LabelCreated {
+            label_id: "vip".into(),
+            name: "VIP".into(),
+            color: "#fff".into(),
+            access: true,
+        });
+        s.apply_op(&op).unwrap();
+        let op = s.create_op(CrdtPayload::LabelAssigned {
+            label_id: "vip".into(),
+            peer_id: "vipper".into(),
+        });
+        s.apply_op(&op).unwrap();
+        s
+    }
+
+    #[test]
+    fn label_gate_replaces_visibility_tier() {
+        let mut s = label_gate_fixture();
+        // Gate on VIP while the tier stays Everyone — the gate must REPLACE
+        // the ladder, not AND with it.
+        let op = s.create_op(CrdtPayload::ChannelVisibilityLabelsChanged {
+            channel_id: "ch".into(),
+            labels: vec!["vip".into()],
+        });
+        s.apply_op(&op).unwrap();
+        let now = 1_000u64;
+        assert!(!s.can_see_channel_at("member", "ch", now));
+        assert!(
+            !s.can_see_channel_at("mod", "ch", now),
+            "moderators have NO implicit access to label-gated channels"
+        );
+        assert!(s.can_see_channel_at("admin", "ch", now), "Admin+ implicit");
+        assert!(s.can_see_channel_at("owner", "ch", now));
+        assert!(s.can_see_channel_at("vipper", "ch", now), "label holder sees");
+        // A label-gated channel is cryptographically isolated.
+        assert!(s.channel_uses_subgroup("ch"));
+        assert!(s.subgroup_channel_ids().contains(&"ch".to_string()));
+        // Clearing the gate reverts to the tier ladder.
+        let op = s.create_op(CrdtPayload::ChannelVisibilityLabelsChanged {
+            channel_id: "ch".into(),
+            labels: vec![],
+        });
+        s.apply_op(&op).unwrap();
+        assert!(s.can_see_channel_at("member", "ch", now));
+        assert!(!s.channel_uses_subgroup("ch"));
+    }
+
+    #[test]
+    fn label_gate_posting() {
+        let mut s = label_gate_fixture();
+        let op = s.create_op(CrdtPayload::ChannelPostingLabelsChanged {
+            channel_id: "ch".into(),
+            labels: vec!["vip".into()],
+        });
+        s.apply_op(&op).unwrap();
+        let now = 1_000u64;
+        assert!(!s.can_post_in_channel_at("member", "ch", now));
+        assert!(!s.can_post_in_channel_at("mod", "ch", now));
+        assert!(s.can_post_in_channel_at("admin", "ch", now));
+        assert!(s.can_post_in_channel_at("vipper", "ch", now));
+        // Posting gate does not affect visibility or subgrouping.
+        assert!(s.can_see_channel_at("member", "ch", now));
+        assert!(!s.channel_uses_subgroup("ch"));
+        // Ungated Everyone posting still requires the SEND_MESSAGES bit.
+        let op = s.create_op(CrdtPayload::ChannelPostingLabelsChanged {
+            channel_id: "ch".into(),
+            labels: vec![],
+        });
+        s.apply_op(&op).unwrap();
+        assert!(s.can_post_in_channel_at("member", "ch", now));
+        let op = s.create_op(CrdtPayload::RolePermissionsChanged {
+            role: "member".into(),
+            permissions: 0,
+        });
+        s.apply_op(&op).unwrap();
+        assert!(!s.can_post_in_channel_at("member", "ch", now));
+    }
+
+    #[test]
+    fn label_deleted_while_gating_fails_closed() {
+        let mut s = label_gate_fixture();
+        let op = s.create_op(CrdtPayload::ChannelVisibilityLabelsChanged {
+            channel_id: "ch".into(),
+            labels: vec!["vip".into()],
+        });
+        s.apply_op(&op).unwrap();
+        assert!(s.can_see_channel_at("vipper", "ch", 1_000));
+        // Deleting the label strips assignments → the dangling gate id can
+        // never match again: LOCKOUT (fail-closed), not fail-open.
+        let op = s.create_op(CrdtPayload::LabelDeleted { label_id: "vip".into() });
+        s.apply_op(&op).unwrap();
+        assert!(!s.can_see_channel_at("vipper", "ch", 1_000));
+        assert!(s.can_see_channel_at("admin", "ch", 1_000));
+        assert!(
+            s.channels["ch"].visibility_labels.contains(&"vip".to_string()),
+            "dangling gate id stays until an admin rewrites the list"
+        );
+        assert!(s.channel_uses_subgroup("ch"));
+    }
+
+    #[test]
+    fn channel_grant_lifecycle() {
+        let mut s = label_gate_fixture();
+        // Restrict the channel to Admin+ so only the grant can admit "member".
+        let op = s.create_op(CrdtPayload::ChannelVisibilityChanged {
+            channel_id: "ch".into(),
+            visibility: "admin".into(),
+        });
+        s.apply_op(&op).unwrap();
+        assert!(!s.can_see_channel_at("member", "ch", 1_000));
+
+        // Timed grant: visible (and postable) before expiry, denied after —
+        // with NO revoke op (lazy expiry, mirroring mutes).
+        let op = s.create_op(CrdtPayload::ChannelGrantSet {
+            channel_id: "ch".into(),
+            peer_id: "member".into(),
+            expires_at: 5_000,
+        });
+        s.apply_op(&op).unwrap();
+        assert!(s.can_see_channel_at("member", "ch", 4_999));
+        assert!(s.can_post_in_channel_at("member", "ch", 4_999));
+        assert!(s.has_channel_grant("member", "ch", 4_999));
+        assert!(!s.can_see_channel_at("member", "ch", 5_000));
+        assert!(!s.has_channel_grant("member", "ch", 5_000));
+        // Expired rows linger but the list reader filters them.
+        assert!(s.channel_grants_list("ch", 5_000).is_empty());
+        assert_eq!(s.channel_grants_list("ch", 4_999).len(), 1);
+
+        // A newer grant wins LWW regardless of apply order.
+        let mut b = s.clone();
+        let set_short = s.create_op(CrdtPayload::ChannelGrantSet {
+            channel_id: "ch".into(),
+            peer_id: "member".into(),
+            expires_at: 6_000,
+        });
+        let set_long = s.create_op(CrdtPayload::ChannelGrantSet {
+            channel_id: "ch".into(),
+            peer_id: "member".into(),
+            expires_at: u64::MAX,
+        });
+        s.apply_op(&set_short).unwrap();
+        s.apply_op(&set_long).unwrap();
+        b.apply_op(&set_long).unwrap();
+        b.apply_op(&set_short).unwrap();
+        assert!(s.can_see_channel_at("member", "ch", u64::MAX - 1), "permanent grant");
+        assert!(b.can_see_channel_at("member", "ch", u64::MAX - 1), "same result in reverse order");
+
+        // Revoke prunes the row (and the empty per-channel map).
+        let op = s.create_op(CrdtPayload::ChannelGrantRevoked {
+            channel_id: "ch".into(),
+            peer_id: "member".into(),
+        });
+        s.apply_op(&op).unwrap();
+        assert!(!s.can_see_channel_at("member", "ch", 1_000));
+        assert!(!s.channel_grants.contains_key("ch"));
     }
 
     // --- Bans ---
@@ -2634,6 +3036,19 @@ mod tests {
         assert!(state.twitch_usernames.is_empty());
         assert!(state.pinned_messages.is_empty());
         assert!(state.channel_layout.is_empty());
+        assert!(state.channel_grants.is_empty());
+
+        // A channel and a label serialized by a pre-issue-#32 build parse
+        // with the safe defaults (no gates, cosmetic).
+        let ch: ChannelInfo = serde_json::from_str(
+            r#"{"channel_id":"c1","name":"general","category":null}"#,
+        ).unwrap();
+        assert!(ch.visibility_labels.is_empty());
+        assert!(ch.posting_labels.is_empty());
+        let label: LabelInfo = serde_json::from_str(
+            r##"{"label_id":"l1","name":"VIP","color":"#fff"}"##,
+        ).unwrap();
+        assert!(!label.access);
     }
 
     // --- Wrong server_id rejected ---
@@ -2658,6 +3073,7 @@ mod tests {
                 label_id: id.into(),
                 name: name.into(),
                 color: "#000".into(),
+                access: false,
             });
             state.apply_op(&op).unwrap();
         }

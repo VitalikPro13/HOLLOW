@@ -29,6 +29,9 @@ import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/hollow_toggle.dart';
 import 'package:hollow/src/core/brand_icons.dart';
 import 'package:hollow/src/ui/dialogs/create_channel_dialog.dart';
+import 'package:hollow/src/ui/settings/access_label_picker.dart';
+import 'package:hollow/src/ui/settings/category_bulk_access_dialog.dart';
+import 'package:hollow/src/ui/settings/channel_grants_dialog.dart';
 import 'package:hollow/src/ui/mobile/mobile_image_crop_route.dart';
 import 'package:hollow/src/ui/mobile/mobile_page_route.dart';
 import 'package:hollow/src/ui/mobile/mobile_storage_route.dart';
@@ -1371,8 +1374,13 @@ class _NotificationSection extends ConsumerWidget {
     final hollow = HollowTheme.of(context);
     final notifState = ref.watch(notificationSettingsProvider);
     final notifNotifier = ref.read(notificationSettingsProvider.notifier);
-    final channels =
+    // Only channels the local user can see (restricted names must not leak).
+    final allChannels =
         ref.watch(serverChannelsProvider(serverId)).valueOrNull ?? {};
+    final channels = <String, ChannelInfo>{
+      for (final e in allChannels.entries)
+        if (e.value.meCanSee) e.key: e.value,
+    };
     final serverLevel = notifState.serverLevels[serverId] ?? NotificationLevel.all;
 
     return Column(
@@ -1905,13 +1913,16 @@ class _ChannelLayoutEditorState extends ConsumerState<_ChannelLayoutEditor> {
   }
 
   /// Set who can SEE a channel (everyone / moderator / admin). Mirrors desktop's
-  /// visibility _AccessChip: optimistic local update then the CRDT op.
+  /// visibility _AccessChip: optimistic local update then the CRDT op. The
+  /// Rust tier handler clears any label gate — mirrored optimistically.
   Future<void> _setChannelVisibility(String channelId, String visibility) {
     final prev = _channels[channelId]?.visibility ?? 'everyone';
+    final prevLabels =
+        _channels[channelId]?.visibilityLabels ?? const <String>[];
     return _commitChannelProp(
       channelId,
-      (ch) => ch.copyWith(visibility: visibility),
-      (ch) => ch.copyWith(visibility: prev),
+      (ch) => ch.copyWith(visibility: visibility, visibilityLabels: const []),
+      (ch) => ch.copyWith(visibility: prev, visibilityLabels: prevLabels),
       () => crdt_api.setChannelVisibility(
         serverId: widget.serverId,
         channelId: channelId,
@@ -1924,15 +1935,166 @@ class _ChannelLayoutEditorState extends ConsumerState<_ChannelLayoutEditor> {
   /// desktop's posting _AccessChip.
   Future<void> _setChannelPosting(String channelId, String posting) {
     final prev = _channels[channelId]?.posting ?? 'everyone';
+    final prevLabels =
+        _channels[channelId]?.postingLabels ?? const <String>[];
     return _commitChannelProp(
       channelId,
-      (ch) => ch.copyWith(posting: posting),
-      (ch) => ch.copyWith(posting: prev),
+      (ch) => ch.copyWith(posting: posting, postingLabels: const []),
+      (ch) => ch.copyWith(posting: prev, postingLabels: prevLabels),
       () => crdt_api.setChannelPosting(
         serverId: widget.serverId,
         channelId: channelId,
         posting: posting,
       ),
+    );
+  }
+
+  /// Category bulk-apply (mirrors desktop channels_tab): forward-scan the
+  /// live layout from the category's INDEX (never its name — duplicates are
+  /// legal) to the next Category/Separator, then stamp each channel
+  /// sequentially with per-channel optimistic+revert and a summary toast
+  /// that never implies rollback of ops that already landed.
+  Future<void> _bulkApplyAccess(int categoryIndex, String categoryName) async {
+    final targetIds = <String>[];
+    for (var i = categoryIndex + 1; i < _layout.length; i++) {
+      final item = _layout[i];
+      if (item is CategoryItem || item is SeparatorItem) break;
+      if (item is ChannelItem) {
+        final info = _channels[item.channelId];
+        // Public channels have no access gates (plaintext by design).
+        if (info != null && !info.isPublic) targetIds.add(item.channelId);
+      }
+    }
+    if (targetIds.isEmpty) {
+      HollowToast.show(context, 'No channels in this category');
+      return;
+    }
+
+    final result = await showCategoryBulkAccessDialog(
+      context,
+      serverId: widget.serverId,
+      categoryName: categoryName,
+      channelCount: targetIds.length,
+    );
+    if (result == null || !mounted) return;
+
+    final failed = <String>[];
+    for (final id in targetIds) {
+      final info = _channels[id];
+      if (info == null) continue;
+      final prev = info;
+      try {
+        if (result.changeVisibility) {
+          if (result.visLabels.isNotEmpty) {
+            if (mounted) {
+              setState(() => _channels[id] = prev.copyWith(
+                  visibilityLabels: result.visLabels, visibility: 'admin'));
+            }
+            await crdt_api.setChannelVisibilityLabels(
+              serverId: widget.serverId,
+              channelId: id,
+              labels: result.visLabels,
+            );
+          } else {
+            if (mounted) {
+              setState(() => _channels[id] = prev.copyWith(
+                  visibility: result.visMode, visibilityLabels: const []));
+            }
+            await crdt_api.setChannelVisibility(
+              serverId: widget.serverId,
+              channelId: id,
+              visibility: result.visMode,
+            );
+          }
+        }
+        if (result.changePosting && info.channelType != ChannelType.voice) {
+          final cur = _channels[id] ?? prev;
+          if (result.postLabels.isNotEmpty) {
+            if (mounted) {
+              setState(() => _channels[id] = cur.copyWith(
+                  postingLabels: result.postLabels, posting: 'admin'));
+            }
+            await crdt_api.setChannelPostingLabels(
+              serverId: widget.serverId,
+              channelId: id,
+              labels: result.postLabels,
+            );
+          } else {
+            if (mounted) {
+              setState(() => _channels[id] = cur.copyWith(
+                  posting: result.postMode, postingLabels: const []));
+            }
+            await crdt_api.setChannelPosting(
+              serverId: widget.serverId,
+              channelId: id,
+              posting: result.postMode,
+            );
+          }
+        }
+      } catch (_) {
+        if (mounted) setState(() => _channels[id] = prev);
+        failed.add(prev.name);
+      }
+    }
+    if (!mounted) return;
+    if (failed.isEmpty) {
+      HollowToast.show(
+          context, 'Access applied to ${targetIds.length} channels',
+          type: HollowToastType.success);
+    } else {
+      HollowToast.show(
+          context,
+          'Applied to ${targetIds.length - failed.length} of '
+          '${targetIds.length} channels — failed: '
+          '${failed.map((n) => '#$n').join(', ')}',
+          type: HollowToastType.error);
+    }
+  }
+
+  /// Open the access-label picker for a channel's visibility or posting gate
+  /// (the "Custom…" chip entry). Mirrors desktop _editGateLabels, including
+  /// the Rust-side Admin+ tier stamp reflected optimistically.
+  Future<void> _editGateLabels(String channelId,
+      {required bool forVisibility}) async {
+    final info = _channels[channelId];
+    final initial = (forVisibility
+            ? info?.visibilityLabels
+            : info?.postingLabels) ??
+        const <String>[];
+    final picked = await showAccessLabelPicker(
+      context: context,
+      serverId: widget.serverId,
+      title: forVisibility ? 'Custom visibility' : 'Custom posting',
+      initial: initial.toSet(),
+    );
+    if (picked == null || !mounted) return;
+    final labels = picked.toList();
+    final prevLabels = List<String>.from(initial);
+    final prevVis = info?.visibility ?? 'everyone';
+    final prevPost = info?.posting ?? 'everyone';
+    await _commitChannelProp(
+      channelId,
+      (ch) => forVisibility
+          ? ch.copyWith(
+              visibilityLabels: labels,
+              visibility: labels.isEmpty ? prevVis : 'admin')
+          : ch.copyWith(
+              postingLabels: labels,
+              posting: labels.isEmpty ? prevPost : 'admin'),
+      (ch) => forVisibility
+          ? ch.copyWith(visibilityLabels: prevLabels, visibility: prevVis)
+          : ch.copyWith(postingLabels: prevLabels, posting: prevPost),
+      () => forVisibility
+          ? crdt_api.setChannelVisibilityLabels(
+              serverId: widget.serverId,
+              channelId: channelId,
+              labels: labels,
+            )
+          : crdt_api.setChannelPostingLabels(
+              serverId: widget.serverId,
+              channelId: channelId,
+              labels: labels,
+            ),
     );
   }
 
@@ -2270,6 +2432,14 @@ class _ChannelLayoutEditorState extends ConsumerState<_ChannelLayoutEditor> {
               ),
             ),
             HollowPressable(
+              onTap: () => _bulkApplyAccess(index, item.name),
+              semanticLabel:
+                  'Apply access settings to all channels in category',
+              padding: const EdgeInsets.all(HollowSpacing.xs),
+              child: Icon(LucideIcons.shieldCheck,
+                  size: 16, color: hollow.textSecondary),
+            ),
+            HollowPressable(
               onTap: () => _renameCategory(index, item.name),
               semanticLabel: 'Rename category',
               padding: const EdgeInsets.all(HollowSpacing.xs),
@@ -2373,14 +2543,42 @@ class _ChannelLayoutEditorState extends ConsumerState<_ChannelLayoutEditor> {
                     _MobileAccessChip(
                       icon: LucideIcons.eye,
                       value: ch?.visibility ?? 'everyone',
+                      gateLabels: ch?.visibilityLabels ?? const [],
+                      allLabels: ref
+                              .watch(serverLabelsProvider(widget.serverId))
+                              .valueOrNull ??
+                          const [],
                       onChanged: (v) =>
                           _setChannelVisibility(item.channelId, v),
+                      onCustomPressed: () => _editGateLabels(
+                          item.channelId, forVisibility: true),
                     ),
                     const SizedBox(width: HollowSpacing.sm),
                     _MobileAccessChip(
                       icon: LucideIcons.messageSquare,
                       value: ch?.posting ?? 'everyone',
+                      gateLabels: ch?.postingLabels ?? const [],
+                      allLabels: ref
+                              .watch(serverLabelsProvider(widget.serverId))
+                              .valueOrNull ??
+                          const [],
                       onChanged: (v) => _setChannelPosting(item.channelId, v),
+                      onCustomPressed: () => _editGateLabels(
+                          item.channelId, forVisibility: false),
+                    ),
+                    const SizedBox(width: HollowSpacing.sm),
+                    HollowPressable(
+                      onTap: () => showChannelGrantsDialog(
+                        context,
+                        serverId: widget.serverId,
+                        channelId: item.channelId,
+                        channelName: ch?.name ?? item.channelId,
+                      ),
+                      semanticLabel: 'Manage temporary access for channel',
+                      borderRadius: BorderRadius.circular(hollow.radiusSm),
+                      padding: const EdgeInsets.all(HollowSpacing.xs),
+                      child: Icon(LucideIcons.userPlus,
+                          size: 14, color: hollow.textSecondary),
                     ),
                   ],
                 ),
@@ -2549,24 +2747,42 @@ class _MobileSlowModeChip extends StatelessWidget {
 class _MobileAccessChip extends StatelessWidget {
   final IconData icon;
   final String value;
+  final List<String> gateLabels;
+  final List<crdt_api.LabelFfi> allLabels;
   final Future<void> Function(String) onChanged;
+  final VoidCallback onCustomPressed;
 
   const _MobileAccessChip({
     required this.icon,
     required this.value,
     required this.onChanged,
+    required this.onCustomPressed,
+    this.gateLabels = const [],
+    this.allLabels = const [],
   });
 
-  String get _label => switch (value) {
-        'moderator' => 'Mod+',
-        'admin' => 'Admin+',
-        _ => 'All',
-      };
+  bool get _gated => gateLabels.isNotEmpty;
+
+  String get _label {
+    if (_gated) {
+      if (gateLabels.length == 1) {
+        final match =
+            allLabels.where((l) => l.labelId == gateLabels.first).firstOrNull;
+        return match?.name ?? '1 label';
+      }
+      return '${gateLabels.length} labels';
+    }
+    return switch (value) {
+      'moderator' => 'Mod+',
+      'admin' => 'Admin+',
+      _ => 'All',
+    };
+  }
 
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
-    final isRestricted = value != 'everyone';
+    final isRestricted = _gated || value != 'everyone';
 
     return PopupMenuButton<String>(
       tooltip: '',
@@ -2577,11 +2793,18 @@ class _MobileAccessChip extends StatelessWidget {
         borderRadius: BorderRadius.circular(hollow.radiusMd),
         side: BorderSide(color: hollow.border),
       ),
-      onSelected: onChanged,
+      onSelected: (v) {
+        if (v == 'custom') {
+          onCustomPressed();
+        } else {
+          onChanged(v);
+        }
+      },
       itemBuilder: (_) => [
         _item('everyone', 'Everyone', hollow),
         _item('moderator', 'Mod+', hollow),
         _item('admin', 'Admin+', hollow),
+        _item('custom', 'Custom…', hollow),
       ],
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
@@ -2594,16 +2817,21 @@ class _MobileAccessChip extends StatelessWidget {
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(icon,
+            Icon(_gated ? LucideIcons.shieldCheck : icon,
                 size: 12,
                 color: isRestricted ? hollow.warning : hollow.textSecondary),
             const SizedBox(width: 4),
-            Text(
-              _label,
-              style: HollowTypography.caption.copyWith(
-                fontSize: 11,
-                color: isRestricted ? hollow.warning : hollow.textSecondary,
-                fontWeight: FontWeight.w500,
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 100),
+              child: Text(
+                _label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: HollowTypography.caption.copyWith(
+                  fontSize: 11,
+                  color: isRestricted ? hollow.warning : hollow.textSecondary,
+                  fontWeight: FontWeight.w500,
+                ),
               ),
             ),
           ],
@@ -2613,7 +2841,7 @@ class _MobileAccessChip extends StatelessWidget {
   }
 
   PopupMenuItem<String> _item(String val, String label, HollowTheme hollow) {
-    final selected = val == value;
+    final selected = val == 'custom' ? _gated : (!_gated && val == value);
     return PopupMenuItem(
       value: val,
       child: Text(

@@ -459,6 +459,9 @@ class _ProfileCardBodyState extends ConsumerState<ProfileCardBody> {
       chips.add(_ProfileChip(
         text: label.name,
         color: parseProfileLabelColor(label.color),
+        // Access labels (channel-gating, staff-assigned) carry a shield so
+        // they read differently from cosmetic tags.
+        icon: label.access ? LucideIcons.shieldCheck : null,
         compact: _compact,
       ));
     }

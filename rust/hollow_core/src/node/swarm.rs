@@ -985,6 +985,19 @@ async fn run_event_loop(
     let mut peer_liveness_timer = tokio::time::interval(Duration::from_secs(60));
     peer_liveness_timer.tick().await; // consume immediate first tick
 
+    // Temporary channel-grant expiry sweep. The predicate is lazy (an expired
+    // grant already reads as denied); this timer drives the CONSEQUENCES:
+    // MLS subgroup leaf removal (coordinator-gated, idempotent), voice
+    // eviction, and a ServerUpdated so the expired member's own UI refreshes.
+    // cfg(test) shortens the period so the harness can observe expiry without
+    // 30-second waits.
+    let grant_sweep_secs: u64 = if cfg!(test) { 2 } else { 30 };
+    let mut grant_sweep_timer = tokio::time::interval(Duration::from_secs(grant_sweep_secs));
+    grant_sweep_timer.tick().await; // consume immediate first tick
+    // Last-tick watermark; 0 so the FIRST tick reconciles grants that expired
+    // while this node was offline (one-time, idempotent).
+    let mut grant_sweep_last_ms: u64 = 0;
+
     // TURN credential refresh: relay credentials last 1h; re-request at 50min
     // so long-lived sessions never expire mid-call. A fresh set is also
     // requested on every WsEvent::Connected, so this only matters for
@@ -1252,7 +1265,7 @@ async fn run_event_loop(
                         ).await { continue; }
                     }
 
-                    NodeCommand::CreateLabel { server_id, name, color } => {
+                    NodeCommand::CreateLabel { server_id, name, color, access } => {
                         let label_id = format!("lbl-{}", hex::encode(&{
                             let mut buf = [0u8; 4];
                             getrandom::fill(&mut buf).expect("RNG");
@@ -1261,45 +1274,86 @@ async fn run_event_loop(
                         if sync_handler::handle_label_op(
                             &mut server_states, &mut mls, &event_tx, &ws_cmd_tx,
                             &ws_room_peers, &mut gossip_overlays, &bundle_keypair, &local_peer_str,
-                            server_id, CrdtPayload::LabelCreated { label_id, name, color },
+                            server_id, CrdtPayload::LabelCreated { label_id, name, color, access },
                             &crypto_store, &crdt_store,
                         ).await { continue; }
                     }
 
+                    // Delete/update/assign/unassign can all shift who qualifies
+                    // for a label-gated channel — reconcile subgroups after each
+                    // (all channels: one label can gate many). Runs even on a
+                    // permission-denied handler result, matching the ChangeRole
+                    // precedent (reconcile is coordinator-gated + idempotent).
                     NodeCommand::DeleteLabel { server_id, label_id } => {
-                        if sync_handler::handle_label_op(
+                        let sid = server_id.clone();
+                        let handled = sync_handler::handle_label_op(
                             &mut server_states, &mut mls, &event_tx, &ws_cmd_tx,
                             &ws_room_peers, &mut gossip_overlays, &bundle_keypair, &local_peer_str,
                             server_id, CrdtPayload::LabelDeleted { label_id },
                             &crypto_store, &crdt_store,
-                        ).await { continue; }
+                        ).await;
+                        if let (Some(mls_mgr), Some(state)) = (mls.as_mut(), server_states.get(&sid)) {
+                            crate::node::crypto_handler::reconcile_subgroups_for_server(
+                                mls_mgr, &ws_cmd_tx, &ws_room_peers,
+                                &mut pending_mls_key_packages, &mut pending_mls_removals,
+                                state, &sid, &local_peer_str, None,
+                            );
+                        }
+                        if handled { continue; }
                     }
 
-                    NodeCommand::UpdateLabel { server_id, label_id, name, color } => {
-                        if sync_handler::handle_label_op(
+                    NodeCommand::UpdateLabel { server_id, label_id, name, color, access } => {
+                        let sid = server_id.clone();
+                        let handled = sync_handler::handle_label_op(
                             &mut server_states, &mut mls, &event_tx, &ws_cmd_tx,
                             &ws_room_peers, &mut gossip_overlays, &bundle_keypair, &local_peer_str,
-                            server_id, CrdtPayload::LabelUpdated { label_id, name, color },
+                            server_id, CrdtPayload::LabelUpdated { label_id, name, color, access: Some(access) },
                             &crypto_store, &crdt_store,
-                        ).await { continue; }
+                        ).await;
+                        if let (Some(mls_mgr), Some(state)) = (mls.as_mut(), server_states.get(&sid)) {
+                            crate::node::crypto_handler::reconcile_subgroups_for_server(
+                                mls_mgr, &ws_cmd_tx, &ws_room_peers,
+                                &mut pending_mls_key_packages, &mut pending_mls_removals,
+                                state, &sid, &local_peer_str, None,
+                            );
+                        }
+                        if handled { continue; }
                     }
 
                     NodeCommand::AssignLabel { server_id, label_id, peer_id } => {
-                        if sync_handler::handle_label_op(
+                        let sid = server_id.clone();
+                        let handled = sync_handler::handle_label_op(
                             &mut server_states, &mut mls, &event_tx, &ws_cmd_tx,
                             &ws_room_peers, &mut gossip_overlays, &bundle_keypair, &local_peer_str,
                             server_id, CrdtPayload::LabelAssigned { label_id, peer_id },
                             &crypto_store, &crdt_store,
-                        ).await { continue; }
+                        ).await;
+                        if let (Some(mls_mgr), Some(state)) = (mls.as_mut(), server_states.get(&sid)) {
+                            crate::node::crypto_handler::reconcile_subgroups_for_server(
+                                mls_mgr, &ws_cmd_tx, &ws_room_peers,
+                                &mut pending_mls_key_packages, &mut pending_mls_removals,
+                                state, &sid, &local_peer_str, None,
+                            );
+                        }
+                        if handled { continue; }
                     }
 
                     NodeCommand::UnassignLabel { server_id, label_id, peer_id } => {
-                        if sync_handler::handle_label_op(
+                        let sid = server_id.clone();
+                        let handled = sync_handler::handle_label_op(
                             &mut server_states, &mut mls, &event_tx, &ws_cmd_tx,
                             &ws_room_peers, &mut gossip_overlays, &bundle_keypair, &local_peer_str,
                             server_id, CrdtPayload::LabelUnassigned { label_id, peer_id },
                             &crypto_store, &crdt_store,
-                        ).await { continue; }
+                        ).await;
+                        if let (Some(mls_mgr), Some(state)) = (mls.as_mut(), server_states.get(&sid)) {
+                            crate::node::crypto_handler::reconcile_subgroups_for_server(
+                                mls_mgr, &ws_cmd_tx, &ws_room_peers,
+                                &mut pending_mls_key_packages, &mut pending_mls_removals,
+                                state, &sid, &local_peer_str, None,
+                            );
+                        }
+                        if handled { continue; }
                     }
 
                     NodeCommand::AddServerEmote { server_id, name, hash, animated } => {
@@ -1411,6 +1465,75 @@ async fn run_event_loop(
                             server_id, channel_id, seconds,
                             &crypto_store, &crdt_store,
                         ).await { continue; }
+                    }
+
+                    NodeCommand::SetChannelVisibilityLabels { server_id, channel_id, labels } => {
+                        let sid = server_id.clone();
+                        let cid = channel_id.clone();
+                        let handled = sync_handler::handle_set_channel_visibility_labels(
+                            &mut server_states, &mut mls, &event_tx, &ws_cmd_tx,
+                            &ws_room_peers, &mut gossip_overlays, &local_peer_str,
+                            server_id, channel_id, labels,
+                            &crypto_store, &crdt_store,
+                        ).await;
+                        // A gated channel needs its subgroup populated with the
+                        // label holders (and pruned of everyone else).
+                        if let (Some(mls_mgr), Some(state)) = (mls.as_mut(), server_states.get(&sid)) {
+                            crate::node::crypto_handler::reconcile_subgroups_for_server(
+                                mls_mgr, &ws_cmd_tx, &ws_room_peers,
+                                &mut pending_mls_key_packages, &mut pending_mls_removals,
+                                state, &sid, &local_peer_str, Some(&cid),
+                            );
+                        }
+                        if handled { continue; }
+                    }
+
+                    NodeCommand::SetChannelPostingLabels { server_id, channel_id, labels } => {
+                        // Posting never affects subgrouping — no reconcile.
+                        if sync_handler::handle_set_channel_posting_labels(
+                            &mut server_states, &mut mls, &event_tx, &ws_cmd_tx,
+                            &ws_room_peers, &mut gossip_overlays, &local_peer_str,
+                            server_id, channel_id, labels,
+                            &crypto_store, &crdt_store,
+                        ).await { continue; }
+                    }
+
+                    NodeCommand::GrantChannelAccess { server_id, channel_id, peer_id, expires_at } => {
+                        let sid = server_id.clone();
+                        let cid = channel_id.clone();
+                        let handled = sync_handler::handle_grant_channel_access(
+                            &mut server_states, &mut mls, &event_tx, &ws_cmd_tx,
+                            &ws_room_peers, &mut gossip_overlays, &local_peer_str,
+                            server_id, channel_id, peer_id, expires_at,
+                            &crypto_store, &crdt_store,
+                        ).await;
+                        if let (Some(mls_mgr), Some(state)) = (mls.as_mut(), server_states.get(&sid)) {
+                            crate::node::crypto_handler::reconcile_subgroups_for_server(
+                                mls_mgr, &ws_cmd_tx, &ws_room_peers,
+                                &mut pending_mls_key_packages, &mut pending_mls_removals,
+                                state, &sid, &local_peer_str, Some(&cid),
+                            );
+                        }
+                        if handled { continue; }
+                    }
+
+                    NodeCommand::RevokeChannelAccess { server_id, channel_id, peer_id } => {
+                        let sid = server_id.clone();
+                        let cid = channel_id.clone();
+                        let handled = sync_handler::handle_revoke_channel_access(
+                            &mut server_states, &mut mls, &event_tx, &ws_cmd_tx,
+                            &ws_room_peers, &mut gossip_overlays, &local_peer_str,
+                            server_id, channel_id, peer_id,
+                            &crypto_store, &crdt_store,
+                        ).await;
+                        if let (Some(mls_mgr), Some(state)) = (mls.as_mut(), server_states.get(&sid)) {
+                            crate::node::crypto_handler::reconcile_subgroups_for_server(
+                                mls_mgr, &ws_cmd_tx, &ws_room_peers,
+                                &mut pending_mls_key_packages, &mut pending_mls_removals,
+                                state, &sid, &local_peer_str, Some(&cid),
+                            );
+                        }
+                        if handled { continue; }
                     }
 
                     NodeCommand::SetChannelMediaOnly { server_id, channel_id, media_only } => {
@@ -4815,6 +4938,53 @@ async fn run_event_loop(
                         peers: check_peers,
                         rooms: Vec::new(),
                     });
+                }
+            }
+
+            // Temporary channel-grant expiry sweep: the predicate already
+            // denies an expired grant lazily; this enacts the crypto/UI
+            // consequences. Only (server, channel)s with a grant whose expiry
+            // fell INSIDE the (last_tick, now] window fire — each expiry
+            // triggers exactly one reconcile; long-expired rows (lazy,
+            // unpruned) never re-fire after the first tick.
+            _ = grant_sweep_timer.tick() => {
+                arm_started = Some(("timer", "grant_sweep", std::time::Instant::now()));
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64;
+                let mut expired: Vec<(String, Vec<String>)> = Vec::new();
+                for (sid, state) in server_states.iter() {
+                    let cids: Vec<String> = state.channel_grants.iter()
+                        .filter(|(_, grants)| grants.values().any(|reg| {
+                            let e = *reg.read();
+                            e != u64::MAX && e > grant_sweep_last_ms && e <= now_ms
+                        }))
+                        .map(|(cid, _)| cid.clone())
+                        .collect();
+                    if !cids.is_empty() { expired.push((sid.clone(), cids)); }
+                }
+                grant_sweep_last_ms = now_ms;
+                for (sid, cids) in expired {
+                    hollow_log!("[HOLLOW-CRDT] Channel grant(s) expired in {sid}: {} channel(s)", cids.len());
+                    if let (Some(mls_mgr), Some(state)) = (mls.as_mut(), server_states.get(&sid)) {
+                        for cid in &cids {
+                            crate::node::crypto_handler::reconcile_subgroups_for_server(
+                                mls_mgr, &ws_cmd_tx, &ws_room_peers,
+                                &mut pending_mls_key_packages, &mut pending_mls_removals,
+                                state, &sid, &local_peer_str, Some(cid),
+                            );
+                        }
+                    }
+                    voice_handler::auto_leave_invisible_voice_channels(
+                        &mut mls, &ws_cmd_tx, &ws_room_peers, &server_states,
+                        &bundle_keypair, &crypto_store,
+                        &mut voice_channel_participants, &mut voice_channel_gossip_mode,
+                        &gossip_overlays, &local_peer_str, &sid, &event_tx,
+                    ).await;
+                    let _ = event_tx.send(NetworkEvent::ServerUpdated {
+                        server_id: sid.clone(),
+                    }).await;
                 }
             }
         }
@@ -8480,11 +8650,22 @@ async fn handle_incoming_request(
                             | CrdtPayload::ChannelVisibilityChanged { .. }
                             | CrdtPayload::MemberRemoved { .. }
                             | CrdtPayload::MemberBanned { .. }
+                            | CrdtPayload::ChannelVisibilityLabelsChanged { .. }
+                            | CrdtPayload::ChannelGrantSet { .. }
+                            | CrdtPayload::ChannelGrantRevoked { .. }
+                            | CrdtPayload::LabelAssigned { .. }
+                            | CrdtPayload::LabelUnassigned { .. }
+                            | CrdtPayload::LabelDeleted { .. }
+                            | CrdtPayload::LabelUpdated { .. }
                     );
                     if affects_subgroups {
-                        let only = if let CrdtPayload::ChannelVisibilityChanged { channel_id, .. } = &op.payload {
-                            Some(channel_id.clone())
-                        } else { None };
+                        let only = match &op.payload {
+                            CrdtPayload::ChannelVisibilityChanged { channel_id, .. }
+                            | CrdtPayload::ChannelVisibilityLabelsChanged { channel_id, .. }
+                            | CrdtPayload::ChannelGrantSet { channel_id, .. }
+                            | CrdtPayload::ChannelGrantRevoked { channel_id, .. } => Some(channel_id.clone()),
+                            _ => None,
+                        };
                         if let (Some(mls_mgr), Some(state)) = (mls.as_mut(), server_states.get(&server_id)) {
                             crate::node::crypto_handler::reconcile_subgroups_for_server(
                                 mls_mgr, ws_cmd_tx, ws_room_peers,
@@ -9432,21 +9613,30 @@ async fn handle_incoming_request(
                                 // plaintext (we now send both); whichever wins the race
                                 // applies it and the other no-ops — so BOTH paths must run
                                 // the reconcile/auto-leave, else neither fires when MLS wins.
-                                let affects_subgroups = serde_json::from_str::<crate::crdt::operations::CrdtOp>(&op_json)
-                                    .ok()
+                                let sniffed_op = serde_json::from_str::<crate::crdt::operations::CrdtOp>(&op_json).ok();
+                                let affects_subgroups = sniffed_op.as_ref()
                                     .map(|o| matches!(
                                         o.payload,
                                         crate::crdt::operations::CrdtPayload::RoleChanged { .. }
                                             | crate::crdt::operations::CrdtPayload::ChannelVisibilityChanged { .. }
                                             | crate::crdt::operations::CrdtPayload::MemberRemoved { .. }
                                             | crate::crdt::operations::CrdtPayload::MemberBanned { .. }
+                                            | crate::crdt::operations::CrdtPayload::ChannelVisibilityLabelsChanged { .. }
+                                            | crate::crdt::operations::CrdtPayload::ChannelGrantSet { .. }
+                                            | crate::crdt::operations::CrdtPayload::ChannelGrantRevoked { .. }
+                                            | crate::crdt::operations::CrdtPayload::LabelAssigned { .. }
+                                            | crate::crdt::operations::CrdtPayload::LabelUnassigned { .. }
+                                            | crate::crdt::operations::CrdtPayload::LabelDeleted { .. }
+                                            | crate::crdt::operations::CrdtPayload::LabelUpdated { .. }
                                     ))
                                     .unwrap_or(false);
                                 let only_cid = if affects_subgroups {
-                                    serde_json::from_str::<crate::crdt::operations::CrdtOp>(&op_json).ok().and_then(|o| {
-                                        if let crate::crdt::operations::CrdtPayload::ChannelVisibilityChanged { channel_id, .. } = o.payload {
-                                            Some(channel_id)
-                                        } else { None }
+                                    sniffed_op.and_then(|o| match o.payload {
+                                        crate::crdt::operations::CrdtPayload::ChannelVisibilityChanged { channel_id, .. }
+                                        | crate::crdt::operations::CrdtPayload::ChannelVisibilityLabelsChanged { channel_id, .. }
+                                        | crate::crdt::operations::CrdtPayload::ChannelGrantSet { channel_id, .. }
+                                        | crate::crdt::operations::CrdtPayload::ChannelGrantRevoked { channel_id, .. } => Some(channel_id),
+                                        _ => None,
                                     })
                                 } else { None };
 

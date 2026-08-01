@@ -142,6 +142,13 @@ final serverMembersProvider =
   (ref, serverId) => crdt_api.getServerMembers(serverId: serverId),
 );
 
+/// All labels defined in a server (cosmetic + access). Invalidated on
+/// ServerUpdated via the event provider (label CRUD emits it).
+final serverLabelsProvider =
+    FutureProvider.autoDispose.family<List<crdt_api.LabelFfi>, String>(
+  (ref, serverId) => crdt_api.getServerLabels(serverId: serverId),
+);
+
 /// Whether a server is flagged NSFW (from CRDT settings). Drives the header
 /// badge. Invalidated on ServerUpdated so it reflects a live toggle.
 final serverIsNsfwProvider = FutureProvider.family<bool, String>(

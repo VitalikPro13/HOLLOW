@@ -12,20 +12,11 @@ import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
+import 'package:hollow/src/ui/components/hollow_tooltip.dart';
+import 'package:hollow/src/ui/components/label_visuals.dart';
+import 'package:hollow/src/ui/components/member_search_picker.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:lucide_icons_flutter/lucide_icons.dart';
-
-const _presetColors = <Color>[
-  Color(0xFFEF4444), Color(0xFFF97316), Color(0xFFEAB308),
-  Color(0xFF22C55E), Color(0xFF06B6D4), Color(0xFF3B82F6),
-  Color(0xFF8B5CF6), Color(0xFFEC4899), Color(0xFF78909C),
-];
-
-Color _parseColor(String hex) {
-  final cleaned = hex.replaceAll('#', '');
-  if (cleaned.length == 6) return Color(int.parse('FF$cleaned', radix: 16));
-  return const Color(0xFF78909C);
-}
 
 /// Labels tab — everyone can self-assign labels, MANAGE_ROLES holders can create/delete/manage.
 class LabelsTab extends ConsumerStatefulWidget {
@@ -92,20 +83,28 @@ class _LabelsTabState extends ConsumerState<LabelsTab> {
     }
   }
 
-  void _showCreateDialog() {
-    var name = '';
-    var selectedColor = _presetColors.first;
+  /// Create (existing == null) or edit a label. The Cosmetic/Access choice
+  /// is part of the same dialog: access labels gate channels and are only
+  /// assignable by staff.
+  void _showLabelDialog({crdt_api.LabelFfi? existing}) {
+    var name = existing?.name ?? '';
+    var selectedColor = existing != null
+        ? parseLabelColor(existing.color)
+        : kLabelPresetColors.first;
+    var access = existing?.access ?? false;
+    final nameController = TextEditingController(text: name);
 
     showHollowDialog(
       context: context,
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, setDialogState) => HollowDialog(
-          title: 'Create Label',
+          title: existing == null ? 'Create Label' : 'Edit Label',
           content: Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               HollowTextField(
+                controller: nameController,
                 hintText: 'Label name',
                 autofocus: true,
                 onChanged: (v) => name = v,
@@ -116,7 +115,7 @@ class _LabelsTabState extends ConsumerState<LabelsTab> {
               Wrap(
                 spacing: 8,
                 runSpacing: 8,
-                children: _presetColors.map((c) {
+                children: kLabelPresetColors.map((c) {
                   final isSelected = c == selectedColor;
                   return HollowFocusRing(
                     enabled: true,
@@ -136,6 +135,38 @@ class _LabelsTabState extends ConsumerState<LabelsTab> {
                   );
                 }).toList(),
               ),
+              const SizedBox(height: HollowSpacing.md),
+              Text('Type', style: HollowTypography.label),
+              const SizedBox(height: HollowSpacing.sm),
+              Row(
+                children: [
+                  LabelTypeChip(
+                    icon: LucideIcons.tag,
+                    text: 'Cosmetic',
+                    selected: !access,
+                    onTap: () => setDialogState(() => access = false),
+                  ),
+                  const SizedBox(width: HollowSpacing.sm),
+                  LabelTypeChip(
+                    icon: LucideIcons.shieldCheck,
+                    text: 'Access',
+                    selected: access,
+                    onTap: () => setDialogState(() => access = true),
+                  ),
+                ],
+              ),
+              const SizedBox(height: HollowSpacing.sm),
+              Builder(builder: (ctx) {
+                final hollow = HollowTheme.of(ctx);
+                return Text(
+                  access
+                      ? 'Can gate channels; only staff can assign it.'
+                      : 'Anyone can add it to their own profile.',
+                  style: HollowTypography.bodySmall.copyWith(
+                    color: hollow.textSecondary,
+                  ),
+                );
+              }),
             ],
           ),
           actions: [
@@ -146,9 +177,9 @@ class _LabelsTabState extends ConsumerState<LabelsTab> {
             HollowButton.filled(
               onPressed: () {
                 Navigator.of(ctx).pop();
-                _createLabel(name.trim(), selectedColor);
+                _saveLabel(existing, name.trim(), selectedColor, access);
               },
-              child: const Text('Create'),
+              child: Text(existing == null ? 'Create' : 'Save'),
             ),
           ],
         ),
@@ -156,11 +187,22 @@ class _LabelsTabState extends ConsumerState<LabelsTab> {
     );
   }
 
-  Future<void> _createLabel(String name, Color color) async {
+  Future<void> _saveLabel(
+      crdt_api.LabelFfi? existing, String name, Color color, bool access) async {
     if (name.isEmpty) return;
     try {
       final hex = '#${color.toARGB32().toRadixString(16).padLeft(8, '0').substring(2)}';
-      await crdt_api.createLabel(serverId: widget.serverId, name: name, color: hex);
+      if (existing == null) {
+        await crdt_api.createLabel(
+            serverId: widget.serverId, name: name, color: hex, access: access);
+      } else {
+        await crdt_api.updateLabel(
+            serverId: widget.serverId,
+            labelId: existing.labelId,
+            name: name,
+            color: hex,
+            access: access);
+      }
       await Future.delayed(const Duration(milliseconds: 100));
       _loadLabels();
     } catch (e) {
@@ -183,13 +225,11 @@ class _LabelsTabState extends ConsumerState<LabelsTab> {
   }
 
   void _showAssignDialog(crdt_api.LabelFfi label) {
-    showHollowDialog(
-      context: context,
-      builder: (ctx) => _AssignDialog(
-        serverId: widget.serverId,
-        label: label,
-        onDone: _loadLabels,
-      ),
+    showLabelAssignDialog(
+      context,
+      serverId: widget.serverId,
+      label: label,
+      onDone: _loadLabels,
     );
   }
 
@@ -198,7 +238,7 @@ class _LabelsTabState extends ConsumerState<LabelsTab> {
     final hollow = HollowTheme.of(context);
 
     // Reload when server state updates from remote peers (create/delete labels)
-    ref.listen(serverMembersProvider(widget.serverId), (_, __) => _loadLabels());
+    ref.listen(serverMembersProvider(widget.serverId), (_, _) => _loadLabels());
 
     final labels = _labels;
     final canManage =
@@ -236,49 +276,25 @@ class _LabelsTabState extends ConsumerState<LabelsTab> {
             spacing: 8,
             runSpacing: 8,
             children: labels.map((l) {
-              final c = _parseColor(l.color);
               final selected = _myLabelIds.contains(l.labelId);
-              return HollowFocusRing(
-                enabled: true,
-                onActivate: () => _toggleSelfLabel(l.labelId),
-                borderRadius: BorderRadius.circular(hollow.radiusMd),
-                child: GestureDetector(
-                  onTap: () => _toggleSelfLabel(l.labelId),
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-                    decoration: BoxDecoration(
-                      color: selected ? c.withValues(alpha: 0.25) : hollow.elevated,
-                      borderRadius: BorderRadius.circular(hollow.radiusMd),
-                      border: Border.all(
-                        color: selected ? c : hollow.border,
-                      ),
-                    ),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(
-                          selected ? LucideIcons.check : LucideIcons.circle,
-                          size: 12,
-                          color: c,
-                        ),
-                        const SizedBox(width: 6),
-                        // Larger Text (a11y P3): label names are free-form user
-                        // content — ellipsize so a long name can't overflow the
-                        // chip Row at high text scale.
-                        Flexible(
-                          child: Text(
-                            l.name,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: HollowTypography.body.copyWith(
-                              color: selected ? c : hollow.textPrimary,
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
+              // Access labels are staff-assigned: locked look, activation
+              // ANNOUNCES why instead of silently no-oping.
+              if (l.access) {
+                return HollowTooltip(
+                  message: 'Access labels are assigned by staff',
+                  child: LabelChip(
+                    label: l,
+                    selected: selected,
+                    locked: true,
+                    onTap: () => HollowToast.show(
+                        context, 'Access labels are assigned by staff'),
                   ),
-                ),
+                );
+              }
+              return LabelChip(
+                label: l,
+                selected: selected,
+                onTap: () => _toggleSelfLabel(l.labelId),
               );
             }).toList(),
           ),
@@ -299,7 +315,7 @@ class _LabelsTabState extends ConsumerState<LabelsTab> {
               const Spacer(),
               HollowButton.filled(
                 compact: true,
-                onPressed: _showCreateDialog,
+                onPressed: _showLabelDialog,
                 icon: const Icon(LucideIcons.plus),
                 child: const Text('New'),
               ),
@@ -332,33 +348,59 @@ class _LabelsTabState extends ConsumerState<LabelsTab> {
                       Container(
                         width: 14, height: 14,
                         decoration: BoxDecoration(
-                          color: _parseColor(label.color), shape: BoxShape.circle),
+                          color: parseLabelColor(label.color), shape: BoxShape.circle),
                       ),
+                      if (label.access) ...[
+                        const SizedBox(width: HollowSpacing.xs),
+                        HollowTooltip(
+                          message: 'Access label — gates channels',
+                          child: Icon(LucideIcons.shieldCheck, size: 14,
+                              color: parseLabelColor(label.color)),
+                        ),
+                      ],
                       const SizedBox(width: HollowSpacing.sm),
                       Expanded(
                         child: Text(
                           label.name,
                           style: HollowTypography.body.copyWith(
-                            color: _parseColor(label.color),
+                            color: parseLabelColor(label.color),
                             fontWeight: FontWeight.w600),
                         ),
                       ),
-                      HollowPressable(
-                        semanticLabel: 'Assign label',
-                        onTap: () => _showAssignDialog(label),
-                        borderRadius: BorderRadius.circular(hollow.radiusSm),
-                        padding: const EdgeInsets.all(HollowSpacing.xs),
-                        child: Icon(LucideIcons.userPlus, size: 14,
-                            color: hollow.textSecondary),
+                      HollowTooltip(
+                        message: 'Assign to members',
+                        child: HollowPressable(
+                          semanticLabel: 'Assign to members',
+                          onTap: () => _showAssignDialog(label),
+                          borderRadius: BorderRadius.circular(hollow.radiusSm),
+                          padding: const EdgeInsets.all(HollowSpacing.xs),
+                          child: Icon(LucideIcons.userPlus, size: 14,
+                              color: hollow.textSecondary),
+                        ),
                       ),
                       const SizedBox(width: HollowSpacing.xs),
-                      HollowPressable(
-                        semanticLabel: 'Delete label',
-                        onTap: () => _deleteLabel(label.labelId),
-                        borderRadius: BorderRadius.circular(hollow.radiusSm),
-                        padding: const EdgeInsets.all(HollowSpacing.xs),
-                        child: Icon(LucideIcons.trash2, size: 14,
-                            color: hollow.error),
+                      HollowTooltip(
+                        message: 'Edit label',
+                        child: HollowPressable(
+                          semanticLabel: 'Edit label',
+                          onTap: () => _showLabelDialog(existing: label),
+                          borderRadius: BorderRadius.circular(hollow.radiusSm),
+                          padding: const EdgeInsets.all(HollowSpacing.xs),
+                          child: Icon(LucideIcons.pencil, size: 14,
+                              color: hollow.textSecondary),
+                        ),
+                      ),
+                      const SizedBox(width: HollowSpacing.xs),
+                      HollowTooltip(
+                        message: 'Delete label',
+                        child: HollowPressable(
+                          semanticLabel: 'Delete label',
+                          onTap: () => _deleteLabel(label.labelId),
+                          borderRadius: BorderRadius.circular(hollow.radiusSm),
+                          padding: const EdgeInsets.all(HollowSpacing.xs),
+                          child: Icon(LucideIcons.trash2, size: 14,
+                              color: hollow.error),
+                        ),
                       ),
                     ],
                   ),
@@ -368,6 +410,25 @@ class _LabelsTabState extends ConsumerState<LabelsTab> {
       ],
     );
   }
+}
+
+/// Opens the "Assign <label>" member picker. Public so widget tests and the
+/// screenshot harness can drive the dialog without pumping the full Labels
+/// tab (whose load path calls FFI directly).
+Future<void> showLabelAssignDialog(
+  BuildContext context, {
+  required String serverId,
+  required crdt_api.LabelFfi label,
+  VoidCallback? onDone,
+}) {
+  return showHollowDialog(
+    context: context,
+    builder: (_) => _AssignDialog(
+      serverId: serverId,
+      label: label,
+      onDone: onDone ?? () {},
+    ),
+  );
 }
 
 class _AssignDialog extends ConsumerStatefulWidget {
@@ -388,6 +449,12 @@ class _AssignDialog extends ConsumerStatefulWidget {
 class _AssignDialogState extends ConsumerState<_AssignDialog> {
   Set<String> _assignedPeerIds = {};
 
+  /// Seed the checkmarks ONCE from the first member data we see. Never
+  /// re-derived after that: _toggle invalidates serverMembersProvider and the
+  /// refetch can race the queued CRDT write (read-after-write returns the
+  /// PREVIOUS value), which would visually revert an optimistic toggle.
+  bool _seeded = false;
+
   @override
   void initState() {
     super.initState();
@@ -396,15 +463,17 @@ class _AssignDialogState extends ConsumerState<_AssignDialog> {
 
   void _loadAssignments() {
     final membersAsync = ref.read(serverMembersProvider(widget.serverId));
-    membersAsync.whenData((members) {
-      final assigned = <String>{};
-      for (final m in members) {
-        if (m.labels.any((l) => l.labelId == widget.label.labelId)) {
-          assigned.add(m.peerId);
-        }
-      }
-      if (mounted) setState(() => _assignedPeerIds = assigned);
-    });
+    membersAsync.whenData(_seedAssignments);
+  }
+
+  void _seedAssignments(List<crdt_api.MemberFfi> members) {
+    if (_seeded) return;
+    _seeded = true;
+    final assigned = <String>{
+      for (final m in members)
+        if (m.labels.any((l) => l.labelId == widget.label.labelId)) m.peerId,
+    };
+    if (mounted) setState(() => _assignedPeerIds = assigned);
   }
 
   Future<void> _toggle(String peerId) async {
@@ -438,41 +507,61 @@ class _AssignDialogState extends ConsumerState<_AssignDialog> {
     final hollow = HollowTheme.of(context);
     final membersAsync = ref.watch(serverMembersProvider(widget.serverId));
     final profiles = ref.watch(profileProvider);
-    final color = _parseColor(widget.label.color);
+    final color = parseLabelColor(widget.label.color);
+
+    // Members may still be loading when the dialog opens — seed the
+    // checkmarks from the first data that arrives (once; see _seeded).
+    ref.listen(serverMembersProvider(widget.serverId), (_, next) {
+      next.whenData(_seedAssignments);
+    });
 
     return HollowDialog(
       title: 'Assign "${widget.label.name}"',
-      content: SizedBox(
-        width: 320,
-        height: 300,
-        child: membersAsync.when(
-          data: (members) => ListView.builder(
-            shrinkWrap: true,
-            itemCount: members.length,
-            itemBuilder: (_, i) {
-              final m = members[i];
-              final isAssigned = _assignedPeerIds.contains(m.peerId);
-              final name = serverDisplayNameFor(profiles, m.peerId,
-                  nickname: m.nickname);
-              return ListTile(
-                dense: true,
-                leading: Container(
-                  width: 10, height: 10,
-                  decoration: BoxDecoration(
-                    color: isAssigned ? color : Colors.transparent,
-                    shape: BoxShape.circle,
-                    border: Border.all(color: color, width: 1.5),
-                  ),
-                ),
-                title: Text(name,
-                    style: HollowTypography.body.copyWith(color: hollow.textPrimary)),
-                onTap: () => _toggle(m.peerId),
-              );
-            },
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'Tap a member to add or remove the label. Changes apply '
+            'immediately.',
+            style: HollowTypography.bodySmall.copyWith(
+              color: hollow.textSecondary,
+            ),
           ),
-          loading: () => const Center(child: CircularProgressIndicator()),
-          error: (e, _) => Text('Error: $e'),
-        ),
+          const SizedBox(height: HollowSpacing.lg),
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(HollowSpacing.lg),
+            decoration: BoxDecoration(
+              color: hollow.surface.withValues(alpha: 0.4),
+              borderRadius: BorderRadius.circular(hollow.radiusMd),
+              border: Border.all(color: hollow.border),
+            ),
+            child: membersAsync.when(
+              data: (members) => MemberSearchPicker(
+                members: members,
+                maxListHeight: 280,
+                nameOf: (m) => serverDisplayNameFor(profiles, m.peerId,
+                    nickname: m.nickname),
+                trailingOf: (m) {
+                  final isAssigned = _assignedPeerIds.contains(m.peerId);
+                  return Icon(
+                    isAssigned ? LucideIcons.checkSquare : LucideIcons.square,
+                    size: 20,
+                    color: isAssigned ? color : hollow.textSecondary,
+                    semanticLabel: isAssigned ? 'Assigned' : 'Not assigned',
+                  );
+                },
+                onTapMember: (m) => _toggle(m.peerId),
+              ),
+              loading: () => const Padding(
+                padding: EdgeInsets.symmetric(vertical: HollowSpacing.lg),
+                child: Center(child: CircularProgressIndicator()),
+              ),
+              error: (e, _) => Text('Error: $e'),
+            ),
+          ),
+        ],
       ),
       actions: [
         HollowButton.filled(

@@ -968,12 +968,6 @@ class _ChannelListState extends ConsumerState<_ChannelList> {
   }
 
   Future<void> _loadChannels() async {
-    // Read the local user's role FIRST so we can hide channels their tier can't
-    // see — same cryptographic+UI rule desktop's visibleChannelsProvider applies.
-    // Without this, the Chats-tab list showed ALL channels regardless of
-    // visibility (and never refreshed on a live visibility/role change).
-    final roleStr = await crdt_api.getMyRole(serverId: widget.serverId)
-        .catchError((_) => 'member');
     final results = await Future.wait([
       ChannelListNotifier.fetchChannels(widget.serverId),
       ChannelLayoutNotifier.fetchLayout(widget.serverId),
@@ -982,29 +976,21 @@ class _ChannelListState extends ConsumerState<_ChannelList> {
     final channelMap = results[0] as Map<String, ChannelInfo>;
     final layoutJson = results[1] as String;
     setState(() {
-      _displayItems = _buildDisplayItems(channelMap, layoutJson, roleStr);
+      _displayItems = _buildDisplayItems(channelMap, layoutJson);
       _loading = false;
     });
-  }
-
-  /// Visibility filter mirroring desktop `visibleChannelsProvider`.
-  static bool _roleCanSee(String visibility, int priority) {
-    if (visibility == 'moderator') return priority >= 1;
-    if (visibility == 'admin') return priority >= 2;
-    return true; // 'everyone' / unknown → visible
   }
 
   List<_DisplayItem> _buildDisplayItems(
     Map<String, ChannelInfo> allChannels,
     String layoutJson,
-    String roleStr,
   ) {
-    const rolePriority = {'owner': 3, 'admin': 2, 'moderator': 1, 'member': 0};
-    final priority = rolePriority[roleStr] ?? 0;
-    // Hide channels this user's role can't see (matches desktop).
+    // Hide channels the local user can't see. `meCanSee` is computed
+    // Rust-side with the full predicate (tier + label gates + grants) —
+    // matches desktop's visibleChannelsProvider without a hand-rolled ladder.
     final channels = <String, ChannelInfo>{
       for (final e in allChannels.entries)
-        if (_roleCanSee(e.value.visibility, priority)) e.key: e.value,
+        if (e.value.meCanSee) e.key: e.value,
     };
 
     final items = <_DisplayItem>[];

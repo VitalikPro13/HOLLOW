@@ -8,6 +8,8 @@ import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
+import 'package:hollow/src/ui/settings/access_label_picker.dart';
+import 'package:hollow/src/ui/settings/channel_grants_dialog.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -58,12 +60,16 @@ class _ChannelActionsSheetState extends State<_ChannelActionsSheet> {
   _SheetView _view = _SheetView.actions;
   late String _visibility;
   late String _posting;
+  late List<String> _visibilityLabels;
+  late List<String> _postingLabels;
 
   @override
   void initState() {
     super.initState();
     _visibility = widget.channel.visibility;
     _posting = widget.channel.posting;
+    _visibilityLabels = List.of(widget.channel.visibilityLabels);
+    _postingLabels = List.of(widget.channel.postingLabels);
   }
 
   @override
@@ -92,9 +98,13 @@ class _ChannelActionsSheetState extends State<_ChannelActionsSheet> {
               _SheetView.actions => _buildActionsView(hollow),
               _SheetView.deleteConfirm => _buildDeleteConfirmView(hollow),
               _SheetView.visibility => _buildAccessView(
-                  hollow, 'Visibility', _visibility, _setVisibility),
+                  hollow, 'Visibility', _visibility, _setVisibility,
+                  gateLabels: _visibilityLabels,
+                  onCustom: () => _editGateLabels(forVisibility: true)),
               _SheetView.posting => _buildAccessView(
-                  hollow, 'Who Can Post', _posting, _setPosting),
+                  hollow, 'Who Can Post', _posting, _setPosting,
+                  gateLabels: _postingLabels,
+                  onCustom: () => _editGateLabels(forVisibility: false)),
             },
           ),
           const SizedBox(height: HollowSpacing.sm),
@@ -140,15 +150,33 @@ class _ChannelActionsSheetState extends State<_ChannelActionsSheet> {
           _ActionRow(
             icon: LucideIcons.eye,
             label: 'Visibility',
-            trailing: _accessLabel(_visibility),
+            trailing: _visibilityLabels.isNotEmpty
+                ? '${_visibilityLabels.length} label${_visibilityLabels.length == 1 ? '' : 's'}'
+                : _accessLabel(_visibility),
             onTap: () => setState(() => _view = _SheetView.visibility),
           ),
           _ActionRow(
             icon: LucideIcons.messageSquare,
             label: 'Who Can Post',
-            trailing: _accessLabel(_posting),
+            trailing: _postingLabels.isNotEmpty
+                ? '${_postingLabels.length} label${_postingLabels.length == 1 ? '' : 's'}'
+                : _accessLabel(_posting),
             onTap: () => setState(() => _view = _SheetView.posting),
           ),
+          if (!widget.channel.isPublic)
+            _ActionRow(
+              icon: LucideIcons.userPlus,
+              label: 'Temporary Access',
+              onTap: () {
+                Navigator.pop(context);
+                showChannelGrantsDialog(
+                  context,
+                  serverId: widget.serverId,
+                  channelId: widget.channel.channelId,
+                  channelName: widget.channel.name,
+                );
+              },
+            ),
           const SizedBox(height: HollowSpacing.sm),
           Divider(
             height: 1,
@@ -300,8 +328,11 @@ class _ChannelActionsSheetState extends State<_ChannelActionsSheet> {
     HollowTheme hollow,
     String title,
     String currentValue,
-    void Function(String) onSelect,
-  ) {
+    void Function(String) onSelect, {
+    required List<String> gateLabels,
+    required VoidCallback onCustom,
+  }) {
+    final gated = gateLabels.isNotEmpty;
     return Column(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -316,21 +347,74 @@ class _ChannelActionsSheetState extends State<_ChannelActionsSheet> {
         const SizedBox(height: HollowSpacing.sm),
         _AccessOptionRow(
           label: 'Everyone',
-          isSelected: currentValue == 'everyone',
+          isSelected: !gated && currentValue == 'everyone',
           onTap: () => onSelect('everyone'),
         ),
         _AccessOptionRow(
           label: 'Moderator+',
-          isSelected: currentValue == 'moderator',
+          isSelected: !gated && currentValue == 'moderator',
           onTap: () => onSelect('moderator'),
         ),
         _AccessOptionRow(
           label: 'Admin+',
-          isSelected: currentValue == 'admin',
+          isSelected: !gated && currentValue == 'admin',
           onTap: () => onSelect('admin'),
+        ),
+        _AccessOptionRow(
+          label: gated
+              ? 'Custom (${gateLabels.length} label${gateLabels.length == 1 ? '' : 's'})'
+              : 'Custom…',
+          isSelected: gated,
+          onTap: onCustom,
         ),
       ],
     );
+  }
+
+  /// Open the access-label picker for this channel (Custom mode). Mirrors
+  /// desktop: setting labels stamps the legacy tier to Admin+ Rust-side.
+  Future<void> _editGateLabels({required bool forVisibility}) async {
+    final initial = forVisibility ? _visibilityLabels : _postingLabels;
+    final picked = await showAccessLabelPicker(
+      context: context,
+      serverId: widget.serverId,
+      title: forVisibility ? 'Custom visibility' : 'Custom posting',
+      initial: initial.toSet(),
+    );
+    if (picked == null || !mounted) return;
+    final labels = picked.toList();
+    try {
+      if (forVisibility) {
+        await crdt_api.setChannelVisibilityLabels(
+          serverId: widget.serverId,
+          channelId: widget.channel.channelId,
+          labels: labels,
+        );
+      } else {
+        await crdt_api.setChannelPostingLabels(
+          serverId: widget.serverId,
+          channelId: widget.channel.channelId,
+          labels: labels,
+        );
+      }
+    } catch (_) {
+      if (mounted) {
+        HollowToast.show(context, 'Could not update channel',
+            type: HollowToastType.error);
+      }
+      return;
+    }
+    if (!mounted) return;
+    setState(() {
+      if (forVisibility) {
+        _visibilityLabels = labels;
+        if (labels.isNotEmpty) _visibility = 'admin';
+      } else {
+        _postingLabels = labels;
+        if (labels.isNotEmpty) _posting = 'admin';
+      }
+    });
+    widget.onChanged?.call();
   }
 
   Future<void> _doDelete() async {
@@ -354,6 +438,11 @@ class _ChannelActionsSheetState extends State<_ChannelActionsSheet> {
   }
 
   Future<void> _setVisibility(String value) async {
+    // A plain tier clears any label gate (Rust authors the clearing op too).
+    if (_visibilityLabels.isNotEmpty &&
+        !await _confirmClearLabelGate(value)) {
+      return;
+    }
     try {
       await crdt_api.setChannelVisibility(
         serverId: widget.serverId,
@@ -368,11 +457,17 @@ class _ChannelActionsSheetState extends State<_ChannelActionsSheet> {
       return;
     }
     if (!mounted) return;
-    setState(() => _visibility = value);
+    setState(() {
+      _visibility = value;
+      _visibilityLabels = const [];
+    });
     widget.onChanged?.call();
   }
 
   Future<void> _setPosting(String value) async {
+    if (_postingLabels.isNotEmpty && !await _confirmClearLabelGate(value)) {
+      return;
+    }
     try {
       await crdt_api.setChannelPosting(
         serverId: widget.serverId,
@@ -387,8 +482,40 @@ class _ChannelActionsSheetState extends State<_ChannelActionsSheet> {
       return;
     }
     if (!mounted) return;
-    setState(() => _posting = value);
+    setState(() {
+      _posting = value;
+      _postingLabels = const [];
+    });
     widget.onChanged?.call();
+  }
+
+  /// Widening access by dropping a label gate deserves a confirm (parity
+  /// with desktop channels_tab).
+  Future<bool> _confirmClearLabelGate(String tier) async {
+    final confirmed = await showHollowDialog<bool>(
+      context: context,
+      builder: (ctx) => HollowDialog(
+        title: 'Remove label requirement?',
+        content: Text(
+          '#${widget.channel.name} will use tier-based access '
+          '(${_accessLabel(tier)}) instead of its access labels.',
+          style: HollowTypography.body.copyWith(
+            color: HollowTheme.of(ctx).textSecondary,
+          ),
+        ),
+        actions: [
+          HollowButton.ghost(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel'),
+          ),
+          HollowButton.filled(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Remove'),
+          ),
+        ],
+      ),
+    );
+    return confirmed ?? false;
   }
 
   static String _accessLabel(String value) {

@@ -7,12 +7,13 @@ import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
-import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
+import 'package:hollow/src/ui/components/label_visuals.dart';
+import 'package:hollow/src/ui/components/member_search_picker.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 class MobileLabelsRoute extends ConsumerStatefulWidget {
@@ -28,12 +29,6 @@ class _MobileLabelsRouteState extends ConsumerState<MobileLabelsRoute> {
   List<crdt_api.LabelFfi> _labels = [];
   List<crdt_api.MemberFfi> _members = [];
   bool _loading = true;
-
-  static const _presetColors = [
-    Color(0xFFE53935), Color(0xFFFB8C00), Color(0xFFFDD835),
-    Color(0xFF43A047), Color(0xFF00ACC1), Color(0xFF1E88E5),
-    Color(0xFF8E24AA), Color(0xFFEC407A), Color(0xFF78909C),
-  ];
 
   @override
   void initState() {
@@ -95,7 +90,7 @@ class _MobileLabelsRouteState extends ConsumerState<MobileLabelsRoute> {
                   ),
                   if (canManage)
                     HollowPressable(
-                      onTap: () => _showCreateDialog(context),
+                      onTap: () => _showLabelDialog(context),
                       semanticLabel: 'Create label',
                       borderRadius: BorderRadius.circular(hollow.radiusMd),
                       padding: const EdgeInsets.all(HollowSpacing.sm),
@@ -144,6 +139,8 @@ class _MobileLabelsRouteState extends ConsumerState<MobileLabelsRoute> {
                                 members: _members,
                                 serverId: widget.serverId,
                                 onReload: _reload,
+                                onEdit: (label) => _showLabelDialog(
+                                    context, existing: label),
                               ),
                             ],
                           ],
@@ -155,9 +152,14 @@ class _MobileLabelsRouteState extends ConsumerState<MobileLabelsRoute> {
     );
   }
 
-  void _showCreateDialog(BuildContext context) {
-    final nameController = TextEditingController();
-    var selectedColor = _presetColors[5]; // default blue
+  /// Create (existing == null) or edit a label, with the Cosmetic/Access
+  /// choice (access labels gate channels and are staff-assigned only).
+  void _showLabelDialog(BuildContext context, {crdt_api.LabelFfi? existing}) {
+    final nameController = TextEditingController(text: existing?.name ?? '');
+    var selectedColor = existing != null
+        ? parseLabelColor(existing.color)
+        : kLabelPresetColors[5]; // default blue
+    var access = existing?.access ?? false;
 
     showHollowDialog(
       context: context,
@@ -165,7 +167,7 @@ class _MobileLabelsRouteState extends ConsumerState<MobileLabelsRoute> {
         builder: (ctx, setDialogState) {
           final hollow = HollowTheme.of(ctx);
           return HollowDialog(
-            title: 'New Label',
+            title: existing == null ? 'New Label' : 'Edit Label',
             content: Column(
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -185,7 +187,7 @@ class _MobileLabelsRouteState extends ConsumerState<MobileLabelsRoute> {
                 Wrap(
                   spacing: HollowSpacing.sm,
                   runSpacing: HollowSpacing.sm,
-                  children: _presetColors.map((c) => GestureDetector(
+                  children: kLabelPresetColors.map((c) => GestureDetector(
                     onTap: () => setDialogState(() => selectedColor = c),
                     child: Container(
                       width: 32, height: 32,
@@ -198,6 +200,37 @@ class _MobileLabelsRouteState extends ConsumerState<MobileLabelsRoute> {
                       ),
                     ),
                   )).toList(),
+                ),
+                const SizedBox(height: HollowSpacing.lg),
+                Text('Type', style: HollowTypography.caption.copyWith(
+                  color: hollow.textSecondary,
+                )),
+                const SizedBox(height: HollowSpacing.sm),
+                Row(
+                  children: [
+                    LabelTypeChip(
+                      icon: LucideIcons.tag,
+                      text: 'Cosmetic',
+                      selected: !access,
+                      onTap: () => setDialogState(() => access = false),
+                    ),
+                    const SizedBox(width: HollowSpacing.sm),
+                    LabelTypeChip(
+                      icon: LucideIcons.shieldCheck,
+                      text: 'Access',
+                      selected: access,
+                      onTap: () => setDialogState(() => access = true),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: HollowSpacing.sm),
+                Text(
+                  access
+                      ? 'Can gate channels; only staff can assign it.'
+                      : 'Anyone can add it to their own profile.',
+                  style: HollowTypography.caption.copyWith(
+                    color: hollow.textSecondary,
+                  ),
                 ),
               ],
             ),
@@ -213,24 +246,33 @@ class _MobileLabelsRouteState extends ConsumerState<MobileLabelsRoute> {
                   Navigator.pop(ctx);
                   try {
                     final hex = '#${selectedColor.toARGB32().toRadixString(16).substring(2)}';
-                    await crdt_api.createLabel(
-                      serverId: widget.serverId, name: name, color: hex,
-                    );
+                    if (existing == null) {
+                      await crdt_api.createLabel(
+                        serverId: widget.serverId, name: name, color: hex,
+                        access: access,
+                      );
+                    } else {
+                      await crdt_api.updateLabel(
+                        serverId: widget.serverId, labelId: existing.labelId,
+                        name: name, color: hex, access: access,
+                      );
+                    }
                     await _reload();
                     // `context` is the helper's parameter, not this State's —
                     // guard the element actually used for the toast.
                     if (context.mounted) {
-                      HollowToast.show(context, 'Label created',
+                      HollowToast.show(context,
+                          existing == null ? 'Label created' : 'Label updated',
                           type: HollowToastType.success);
                     }
                   } catch (e) {
                     if (context.mounted) {
-                      HollowToast.show(context, 'Failed to create label',
+                      HollowToast.show(context, 'Failed to save label',
                           type: HollowToastType.error);
                     }
                   }
                 },
-                child: const Text('Create'),
+                child: Text(existing == null ? 'Create' : 'Save'),
               ),
             ],
           );
@@ -238,13 +280,6 @@ class _MobileLabelsRouteState extends ConsumerState<MobileLabelsRoute> {
       ),
     );
   }
-}
-
-Color _parseLabelColor(String hex) {
-  final cleaned = hex.replaceFirst('#', '');
-  if (cleaned.length == 6) return Color(int.parse('FF$cleaned', radix: 16));
-  if (cleaned.length == 8) return Color(int.parse(cleaned, radix: 16));
-  return const Color(0xFF78909C);
 }
 
 class _SelfAssignSection extends StatelessWidget {
@@ -282,8 +317,19 @@ class _SelfAssignSection extends StatelessWidget {
           spacing: HollowSpacing.sm,
           runSpacing: HollowSpacing.sm,
           children: labels.map((label) {
-            final color = _parseLabelColor(label.color);
+            final color = parseLabelColor(label.color);
             final isAssigned = myLabelIds.contains(label.labelId);
+            // Access labels are staff-assigned; activation announces why
+            // instead of silently no-oping.
+            if (label.access) {
+              return LabelChip(
+                label: label,
+                selected: isAssigned,
+                locked: true,
+                onTap: () => HollowToast.show(
+                    context, 'Access labels are assigned by staff'),
+              );
+            }
             return HollowPressable(
               onTap: () async {
                 try {
@@ -350,12 +396,14 @@ class _ManageSection extends ConsumerWidget {
   final List<crdt_api.MemberFfi> members;
   final String serverId;
   final VoidCallback onReload;
+  final void Function(crdt_api.LabelFfi) onEdit;
 
   const _ManageSection({
     required this.labels,
     required this.members,
     required this.serverId,
     required this.onReload,
+    required this.onEdit,
   });
 
   @override
@@ -383,10 +431,15 @@ class _ManageSection extends ConsumerWidget {
                 Container(
                   width: 16, height: 16,
                   decoration: BoxDecoration(
-                    color: _parseLabelColor(label.color),
+                    color: parseLabelColor(label.color),
                     shape: BoxShape.circle,
                   ),
                 ),
+                if (label.access) ...[
+                  const SizedBox(width: HollowSpacing.xs),
+                  Icon(LucideIcons.shieldCheck, size: 15,
+                      color: parseLabelColor(label.color)),
+                ],
                 const SizedBox(width: HollowSpacing.md),
                 Expanded(
                   child: Text(label.name, style: HollowTypography.body.copyWith(
@@ -399,6 +452,14 @@ class _ManageSection extends ConsumerWidget {
                   borderRadius: BorderRadius.circular(hollow.radiusSm),
                   padding: const EdgeInsets.all(HollowSpacing.xs),
                   child: Icon(LucideIcons.userPlus, size: 16, color: hollow.textSecondary),
+                ),
+                const SizedBox(width: HollowSpacing.xs),
+                HollowPressable(
+                  onTap: () => onEdit(label),
+                  semanticLabel: 'Edit label',
+                  borderRadius: BorderRadius.circular(hollow.radiusSm),
+                  padding: const EdgeInsets.all(HollowSpacing.xs),
+                  child: Icon(LucideIcons.pencil, size: 16, color: hollow.textSecondary),
                 ),
                 const SizedBox(width: HollowSpacing.xs),
                 HollowPressable(
@@ -477,44 +538,32 @@ class _AssignDialogState extends ConsumerState<_AssignDialog> {
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
     final profiles = ref.watch(profileProvider);
-    final color = _parseLabelColor(widget.label.color);
+    final color = parseLabelColor(widget.label.color);
 
     return HollowDialog(
       title: 'Assign "${widget.label.name}"',
-      content: SizedBox(
-        width: double.maxFinite,
-        height: 300,
-        child: ListView.builder(
-          itemCount: widget.members.length,
-          itemBuilder: (context, index) {
-            final m = widget.members[index];
-            final name = displayNameFor(profiles, m.peerId);
+      content: Container(
+        width: double.infinity,
+        padding: const EdgeInsets.all(HollowSpacing.lg),
+        decoration: BoxDecoration(
+          color: hollow.surface.withValues(alpha: 0.4),
+          borderRadius: BorderRadius.circular(hollow.radiusMd),
+          border: Border.all(color: hollow.border),
+        ),
+        child: MemberSearchPicker(
+          members: widget.members,
+          maxListHeight: 300,
+          nameOf: (m) => displayNameFor(profiles, m.peerId),
+          trailingOf: (m) {
             final isAssigned = _assigned.contains(m.peerId);
-
-            return HollowPressable(
-              onTap: () => _toggle(m.peerId),
-              subtle: true,
-              padding: const EdgeInsets.symmetric(
-                horizontal: HollowSpacing.sm, vertical: HollowSpacing.sm,
-              ),
-              child: Row(
-                children: [
-                  HollowAvatar(peerId: m.peerId, size: 32),
-                  const SizedBox(width: HollowSpacing.md),
-                  Expanded(
-                    child: Text(name, style: HollowTypography.body.copyWith(
-                      color: hollow.textPrimary,
-                    )),
-                  ),
-                  Icon(
-                    isAssigned ? LucideIcons.checkSquare : LucideIcons.square,
-                    size: 20,
-                    color: isAssigned ? color : hollow.textSecondary,
-                  ),
-                ],
-              ),
+            return Icon(
+              isAssigned ? LucideIcons.checkSquare : LucideIcons.square,
+              size: 20,
+              color: isAssigned ? color : hollow.textSecondary,
+              semanticLabel: isAssigned ? 'Assigned' : 'Not assigned',
             );
           },
+          onTapMember: (m) => _toggle(m.peerId),
         ),
       ),
       actions: [

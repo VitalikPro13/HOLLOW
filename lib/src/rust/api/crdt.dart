@@ -244,15 +244,18 @@ Future<List<String>> getPinnedMessages({
 Future<void> deleteServer({required String serverId}) =>
     RustLib.instance.api.crateApiCrdtDeleteServer(serverId: serverId);
 
-/// Create a new label (cosmetic role) in a server.
+/// Create a new label in a server. `access: true` makes it an access label
+/// (gates channels, never self-assignable).
 Future<void> createLabel({
   required String serverId,
   required String name,
   required String color,
+  required bool access,
 }) => RustLib.instance.api.crateApiCrdtCreateLabel(
   serverId: serverId,
   name: name,
   color: color,
+  access: access,
 );
 
 /// Delete a label from a server.
@@ -262,17 +265,19 @@ Future<void> deleteLabel({required String serverId, required String labelId}) =>
       labelId: labelId,
     );
 
-/// Update a label's name and color.
+/// Update a label's name, color and access flag.
 Future<void> updateLabel({
   required String serverId,
   required String labelId,
   required String name,
   required String color,
+  required bool access,
 }) => RustLib.instance.api.crateApiCrdtUpdateLabel(
   serverId: serverId,
   labelId: labelId,
   name: name,
   color: color,
+  access: access,
 );
 
 /// Assign a label to a member.
@@ -300,6 +305,64 @@ Future<void> unassignLabel({
 /// Get all labels defined in a server.
 Future<List<LabelFfi>> getServerLabels({required String serverId}) =>
     RustLib.instance.api.crateApiCrdtGetServerLabels(serverId: serverId);
+
+/// Set (or clear, empty vec) the visibility label gate for a channel. The
+/// Rust handler also stamps the legacy tier to Admin+ when the gate turns
+/// on (old-client fail-closed fallback).
+Future<void> setChannelVisibilityLabels({
+  required String serverId,
+  required String channelId,
+  required List<String> labels,
+}) => RustLib.instance.api.crateApiCrdtSetChannelVisibilityLabels(
+  serverId: serverId,
+  channelId: channelId,
+  labels: labels,
+);
+
+/// Set (or clear, empty vec) the posting label gate for a channel.
+Future<void> setChannelPostingLabels({
+  required String serverId,
+  required String channelId,
+  required List<String> labels,
+}) => RustLib.instance.api.crateApiCrdtSetChannelPostingLabels(
+  serverId: serverId,
+  channelId: channelId,
+  labels: labels,
+);
+
+/// Grant a member temporary access to a channel. `duration_secs <= 0` =
+/// until revoked (same convention as mute_member).
+Future<void> grantChannelAccess({
+  required String serverId,
+  required String channelId,
+  required String peerId,
+  required PlatformInt64 durationSecs,
+}) => RustLib.instance.api.crateApiCrdtGrantChannelAccess(
+  serverId: serverId,
+  channelId: channelId,
+  peerId: peerId,
+  durationSecs: durationSecs,
+);
+
+/// Revoke a member's temporary channel access.
+Future<void> revokeChannelAccess({
+  required String serverId,
+  required String channelId,
+  required String peerId,
+}) => RustLib.instance.api.crateApiCrdtRevokeChannelAccess(
+  serverId: serverId,
+  channelId: channelId,
+  peerId: peerId,
+);
+
+/// Active temporary grants for a channel (expired entries filtered out).
+Future<List<ChannelGrantFfi>> getChannelGrants({
+  required String serverId,
+  required String channelId,
+}) => RustLib.instance.api.crateApiCrdtGetChannelGrants(
+  serverId: serverId,
+  channelId: channelId,
+);
 
 /// Set the visibility mode for a channel (everyone/moderator/admin).
 Future<void> setChannelVisibility({
@@ -522,6 +585,11 @@ Future<String> vaultDownloadFile({
 );
 
 /// Channel info for FFI (Dart-visible).
+///
+/// `me_can_see` / `me_can_post` are computed HERE with the full Rust
+/// predicate (tier ladder + label gates + unexpired grants + SEND_MESSAGES
+/// bit) so Dart never re-implements the access ladder. Mute is NOT folded
+/// into `me_can_post` — it stays a separate signal (`get_muted_members`).
 class ChannelFfi {
   final String channelId;
   final String name;
@@ -532,6 +600,10 @@ class ChannelFfi {
   final bool isPublic;
   final int slowMode;
   final bool mediaOnly;
+  final List<String> visibilityLabels;
+  final List<String> postingLabels;
+  final bool meCanSee;
+  final bool meCanPost;
 
   const ChannelFfi({
     required this.channelId,
@@ -543,6 +615,10 @@ class ChannelFfi {
     required this.isPublic,
     required this.slowMode,
     required this.mediaOnly,
+    required this.visibilityLabels,
+    required this.postingLabels,
+    required this.meCanSee,
+    required this.meCanPost,
   });
 
   @override
@@ -555,7 +631,11 @@ class ChannelFfi {
       posting.hashCode ^
       isPublic.hashCode ^
       slowMode.hashCode ^
-      mediaOnly.hashCode;
+      mediaOnly.hashCode ^
+      visibilityLabels.hashCode ^
+      postingLabels.hashCode ^
+      meCanSee.hashCode ^
+      meCanPost.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -570,23 +650,59 @@ class ChannelFfi {
           posting == other.posting &&
           isPublic == other.isPublic &&
           slowMode == other.slowMode &&
-          mediaOnly == other.mediaOnly;
+          mediaOnly == other.mediaOnly &&
+          visibilityLabels == other.visibilityLabels &&
+          postingLabels == other.postingLabels &&
+          meCanSee == other.meCanSee &&
+          meCanPost == other.meCanPost;
 }
 
-/// Label info for FFI (Dart-visible).
+/// A temporary channel access grant for FFI (Dart-visible). `permanent` =
+/// until revoked; otherwise `expires_at_ms` is the epoch-ms expiry. Mirrors
+/// [MutedMemberFfi].
+class ChannelGrantFfi {
+  final String peerId;
+  final PlatformInt64 expiresAtMs;
+  final bool permanent;
+
+  const ChannelGrantFfi({
+    required this.peerId,
+    required this.expiresAtMs,
+    required this.permanent,
+  });
+
+  @override
+  int get hashCode =>
+      peerId.hashCode ^ expiresAtMs.hashCode ^ permanent.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ChannelGrantFfi &&
+          runtimeType == other.runtimeType &&
+          peerId == other.peerId &&
+          expiresAtMs == other.expiresAtMs &&
+          permanent == other.permanent;
+}
+
+/// Label info for FFI (Dart-visible). `access` labels gate channels and are
+/// assigned only by MANAGE_ROLES holders (never self-service).
 class LabelFfi {
   final String labelId;
   final String name;
   final String color;
+  final bool access;
 
   const LabelFfi({
     required this.labelId,
     required this.name,
     required this.color,
+    required this.access,
   });
 
   @override
-  int get hashCode => labelId.hashCode ^ name.hashCode ^ color.hashCode;
+  int get hashCode =>
+      labelId.hashCode ^ name.hashCode ^ color.hashCode ^ access.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -595,7 +711,8 @@ class LabelFfi {
           runtimeType == other.runtimeType &&
           labelId == other.labelId &&
           name == other.name &&
-          color == other.color;
+          color == other.color &&
+          access == other.access;
 }
 
 /// Member info for FFI (Dart-visible).

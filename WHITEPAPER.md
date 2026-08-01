@@ -323,7 +323,7 @@ MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519
 
 ### 5.2 Group Lifecycle
 
-**One MLS group per server, plus a subgroup per restricted channel.** By default all channels within a server share a single server-wide MLS group, with channel routing handled at the application layer. A channel with a *restricted* visibility tier (Moderator-and-above or Admin-and-above, and not a public plaintext channel) is instead encrypted under its OWN dedicated MLS subgroup, whose membership is exactly the set of members whose role satisfies the tier. Because a non-qualifying member is never a member of that subgroup, it never holds the decryption key and never receives a decryptable copy of those messages — channel visibility for restricted text channels is therefore a cryptographic boundary, not merely an application-layer filter. Subgroup membership is reconciled automatically on the events that change who qualifies (role change, visibility change, join, kick, ban, leave): a deterministically elected subgroup coordinator (the lowest-id online member who both still qualifies and already holds the subgroup) issues the add/remove commits, advancing the subgroup epoch for forward secrecy. A member removed from a subgroup retains only the messages it already legitimately received.
+**One MLS group per server, plus a subgroup per restricted channel.** By default all channels within a server share a single server-wide MLS group, with channel routing handled at the application layer. A channel with *restricted* visibility (a Moderator-and-above or Admin-and-above tier, or a non-empty access-label gate — see §11.4 — and not a public plaintext channel) is instead encrypted under its OWN dedicated MLS subgroup, whose membership is exactly the set of members passing the channel's visibility predicate (tier, label gate, or unexpired temporary grant). Because a non-qualifying member is never a member of that subgroup, it never holds the decryption key and never receives a decryptable copy of those messages — channel visibility for restricted text channels is therefore a cryptographic boundary, not merely an application-layer filter. Subgroup membership is reconciled automatically on the events that change who qualifies (role change, visibility or label-gate change, label assignment/removal, grant issuance/revocation/expiry, join, kick, ban, leave): a deterministically elected subgroup coordinator (the lowest-id online member who both still qualifies and already holds the subgroup) issues the add/remove commits, advancing the subgroup epoch for forward secrecy. A member removed from a subgroup retains only the messages it already legitimately received.
 
 **Creating a server:**
 1. Creator generates an MLS KeyPackage and creates a new MlsGroup.
@@ -421,7 +421,7 @@ SFrame key = MLS group.export_secret("sframe", context=[], key_length=32)
 
 Each MLS epoch produces a unique 32-byte SFrame key. When the epoch advances (member join/leave), the SFrame key rotates automatically.
 
-**Restricted voice channels** (visibility above the base tier, non-public) derive their SFrame key from the channel's *own* per-channel MLS subgroup rather than the server-wide group — the same Option B subgroup that encrypts the channel's text (see §5, Per-Channel Subgroups). Because only members whose role satisfies the channel's visibility tier hold the subgroup, a non-qualifying member cannot derive the channel's SFrame key and therefore cannot decode its audio/video/screen-share frames. Voice-channel access for a restricted channel is thus a cryptographic boundary, not merely a server-side authorization check: the key is the gate. A member who is demoted, removed, or loses access mid-call triggers a subgroup epoch advance (remove-commit), which re-keys the remaining participants for forward secrecy and the now-unauthorized member is dropped from the call.
+**Restricted voice channels** (visibility above the base tier, non-public) derive their SFrame key from the channel's *own* per-channel MLS subgroup rather than the server-wide group — the same Option B subgroup that encrypts the channel's text (see §5, Per-Channel Subgroups). Because only members passing the channel's visibility predicate (tier, label gate, or unexpired grant — §11.4) hold the subgroup, a non-qualifying member cannot derive the channel's SFrame key and therefore cannot decode its audio/video/screen-share frames. Voice-channel access for a restricted channel is thus a cryptographic boundary, not merely a server-side authorization check: the key is the gate. A member who is demoted, removed, or loses access mid-call triggers a subgroup epoch advance (remove-commit), which re-keys the remaining participants for forward secrecy and the now-unauthorized member is dropped from the call.
 
 **1:1 DM calls:** A random 32-byte key is generated per call and transmitted inside the Olm-encrypted `CallInvite` message.
 
@@ -744,10 +744,10 @@ CrdtOp {
 | Category | Operations |
 |----------|-----------|
 | Server | ServerCreated, ServerRenamed, ServerSettingChanged (includes retention settings), ServerDeleted |
-| Channels | ChannelAdded, ChannelRemoved, ChannelRenamed, ChannelVisibilityChanged, ChannelPostingChanged, ChannelLayoutUpdated |
+| Channels | ChannelAdded, ChannelRemoved, ChannelRenamed, ChannelVisibilityChanged, ChannelPostingChanged, ChannelVisibilityLabelsChanged, ChannelPostingLabelsChanged, ChannelGrantSet, ChannelGrantRevoked, ChannelLayoutUpdated |
 | Members | MemberAdded, MemberRemoved, MemberBanned, MemberUnbanned, NicknameChanged, TwitchUsernameChanged |
 | Roles | RoleChanged (owner/admin/moderator/member), RolePermissionsChanged |
-| Labels | LabelCreated, LabelDeleted, LabelUpdated, LabelAssigned, LabelUnassigned |
+| Labels | LabelCreated, LabelDeleted, LabelUpdated, LabelAssigned, LabelUnassigned (cosmetic vs access labels — §11.1) |
 | Emotes and stickers | EmojiAdded, EmojiRemoved, StickerAdded, StickerRemoved (metadata only — see Custom Emotes below) |
 | Messages | MessagePinned, MessageUnpinned |
 | Storage | StoragePledgeChanged |
@@ -823,7 +823,10 @@ Hollow implements a **two-layer role system**:
 | Moderator | 1 | Kick members, send messages, read messages |
 | Member | 0 | Send messages, read messages |
 
-**Cosmetic labels** (unlimited): Decorative tags with a name and color, assigned to members for display. Labels never affect permissions — they are purely visual.
+**Labels** (unlimited) come in two kinds, distinguished by a per-label `access` flag:
+
+- **Cosmetic labels**: decorative tags with a name and color, assigned to members for display. They never affect permissions, and any member may add or remove them on themselves.
+- **Access labels**: labels that may be referenced by a channel's access gate (§11.4). Because holding one confers channel access, access labels are never self-assignable — assignment requires the `MANAGE_ROLES` permission, and this is enforced identically at the authoring node and at every ingesting node through one shared predicate, so the two gates cannot diverge. A label-update operation carries its access flag as an optional field where *absent means preserve*: a client predating the flag can recolor or rename a label but can never silently demote an access label back to self-service.
 
 ### 11.2 Permission Bits
 
@@ -859,16 +862,24 @@ Each channel has two independent access control settings, stored as CRDT values:
 - `Everyone` — all server members
 - `ModeratorPlus` — Moderator rank and above
 - `AdminPlus` — Admin rank and above
+- **Label gate** — a set of access-label identifiers; when non-empty it replaces the tier ladder: the channel is visible to holders of *any* listed label, plus Admins and the Owner implicitly
 
 **Posting** (who can post in the channel):
 - `Everyone` — anyone with `SEND_MESSAGES` permission
 - `ModeratorPlus` — Moderator rank and above
 - `AdminPlus` — Admin rank and above
+- **Label gate** — same semantics as the visibility label gate
+
+For interoperability with clients that predate label gates, turning a gate on also stamps the corresponding legacy tier to `AdminPlus` in the same authoring sequence (the two operations share one node's hybrid logical clock, so every replica converges on the same combined state regardless of arrival order). An older client drops the unknown gate operation but honors the stamp, so a gated channel *fails closed* — hidden from non-admins — rather than open.
+
+**Temporary access grants.** A holder of `MANAGE_CHANNELS` may grant an individual member time-boxed access to one channel (visibility and posting; server-wide mutes still apply). Each grant is a last-writer-wins register keyed by (channel, member) carrying an expiry timestamp, with a sentinel value meaning *until revoked* — the same replication shape as timed mutes. Expiry is evaluated lazily by the access predicate, so access ends the moment the deadline passes with no revocation message required; a periodic sweep then performs the cryptographic consequence, removing the member's leaf from the channel's MLS subgroup and re-keying the remaining members. Grants were chosen to be time-based rather than presence-based deliberately: in a distributed system presence is per-relay and transient, and keying access to it would churn group membership on every reconnect.
+
+The full visibility predicate is therefore evaluated in order: Owner always; an unexpired grant; the label gate (Admin-and-above implicit, or any listed label held); otherwise the tier ladder. All evaluation collapses a device identifier to its master identity first.
 
 ### 11.5 Enforcement Model
 
 **Cryptographically enforced** (Rust backend):
-- Channel visibility (restricted text channels): a Moderator-and-above or Admin-and-above text channel is encrypted under its own MLS subgroup (see §5.2). Only members whose role satisfies the tier are subgroup members and hold the key; everyone else never receives a decryptable copy. This is a confidentiality boundary, not a UI filter.
+- Channel visibility (restricted text channels): a text channel with a restricted tier *or* a label gate is encrypted under its own MLS subgroup (see §5.2). Only members passing the full visibility predicate — tier, label gate, or unexpired grant — are subgroup members and hold the key; everyone else never receives a decryptable copy. This is a confidentiality boundary, not a UI filter. Subgroup membership is re-reconciled on every event that changes who qualifies, including label assignment/removal/deletion, grant issuance/revocation, and grant expiry.
 - Message sending: `can_post_in_channel()` checked before broadcast. Unauthorized messages are rejected with an error.
 - Role changes: hierarchy validation prevents privilege escalation.
 - Kick/ban: rank check prevents members from kicking peers of equal or higher rank.

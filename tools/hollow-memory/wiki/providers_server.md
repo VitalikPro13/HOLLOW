@@ -222,9 +222,8 @@ Invalidated by the Dart event handler on:
 - `RoleChanged` events that affect the local user
 
 ### Downstream Dependents
-- `visibleChannelsProvider` watches `myRoleProvider(selectedServer)` for channel visibility filtering
-- `canPostInChannelProvider` watches `myRoleProvider(serverId)` for posting permission
 - Server settings UI reads this to determine what settings tabs/actions to show
+- (Since issue #32, `visibleChannelsProvider`/`canPostInChannelProvider` no longer watch this — they read the Rust-computed `meCanSee`/`meCanPost` on ChannelInfo)
 
 ---
 
@@ -394,26 +393,15 @@ Provider<Map<String, ChannelInfo>>
 
 File: `lib/src/core/providers/channel_provider.dart`
 
-Filters the `channelListProvider` based on the user's role and each channel's `visibility` mode.
+Filters the `channelListProvider` on `ChannelInfo.meCanSee` — a Rust-computed field on `ChannelFfi` evaluated with the FULL access predicate (tier ladder + label gates + unexpired temporary grants). Issue #32 DELETED the old Dart role-priority ladder here (and its fail-open on unknown visibility values): **Dart must never re-implement the access ladder** — every consumer reads `meCanSee`/`meCanPost`.
 
 ### Dependencies (watched)
-1. `channelListProvider` — the full channel map
+1. `channelListProvider` — the full channel map (meCanSee mapped in `fetchChannels`, the only mapping site)
 2. `selectedServerProvider` — current server ID
-3. `myRoleProvider(selectedServer)` — the user's role string
-
-### Role Priority Mapping
-```
-owner: 3, admin: 2, moderator: 1, member: 0
-```
-
-### Filtering Logic
-For each channel entry:
-- `visibility == "everyone"` -> always visible
-- `visibility == "moderator"` -> visible if role priority >= 1 (moderator, admin, owner)
-- `visibility == "admin"` -> visible if role priority >= 2 (admin, owner)
-- Any other value -> visible (permissive default)
 
 If `selectedServer` is `null`, returns the unfiltered channel map.
+
+Other `meCanSee` consumers: mobile Chats-tab `_buildDisplayItems`, `archiveChannelListProvider`, voice eviction in event_provider, split-view right-pane sidebar, bottom_bar split-pane channel pick, both notification-override lists (restricted channel names must not leak). Grant expiry emits NO event — `myChannelGrantProvider` (watched by both composers) runs a self-invalidating Timer that reloads channels when MY grant lapses.
 
 ### Important Note (UPDATED 2026-06-22 — Option B Phase 1 live)
 For RESTRICTED text channels (visibility != everyone, non-public) this UI filter is now backed by a real cryptographic boundary: those channels are MLS-encrypted under a per-channel subgroup (`subgroup_id(server, channel)`), so a non-qualifying member never receives a decryptable copy. This provider is still the UI layer (defense-in-depth + what the sidebar shows); the cryptographic enforcement is the subgroup. `Everyone` channels remain on the server-wide group. See `project_per_channel_mls_subgroups` memory.
@@ -431,12 +419,10 @@ Provider.family<bool, ({String serverId, String channelId})>
 
 File: `lib/src/core/providers/channel_provider.dart`
 
-Determines whether the local user can post in a specific channel. Takes a named record argument with `serverId` and `channelId`.
+Determines whether the local user can post in a specific channel. Takes a named record argument with `serverId` and `channelId`. Since issue #32 it simply reads `ChannelInfo.meCanPost` (Rust folds in the posting tier/labels/grants AND the SEND_MESSAGES bit); unknown channel → `true` (historical fail-open; the Rust send gate re-checks). Mute stays a separate signal (`myMuteStatusProvider`) checked at the composers.
 
 ### Dependencies (watched)
-1. `channelListProvider` — to look up the channel's `posting` mode
-2. `myPermissionsProvider(serverId)` — the user's permission bitmask
-3. `myRoleProvider(serverId)` — the user's role string
+1. `channelListProvider` — to look up the channel's `meCanPost`
 
 ### Logic (ordered)
 1. Look up channel in `channelListProvider`. If not found, return `true` (permissive).

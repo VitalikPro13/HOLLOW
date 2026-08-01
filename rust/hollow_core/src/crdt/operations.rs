@@ -109,19 +109,27 @@ pub enum CrdtPayload {
         permissions: u32,
     },
 
-    // Labels — cosmetic roles (Phase 6.75)
+    // Labels — cosmetic roles (Phase 6.75); `access` labels additionally gate
+    // channels (issue #32) and are never self-assignable.
     LabelCreated {
         label_id: String,
         name: String,
         color: String,
+        #[serde(default)]
+        access: bool,
     },
     LabelDeleted {
         label_id: String,
     },
+    /// `access: None` = preserve the stored flag — a client that predates the
+    /// field must not silently strip access-status off a label (that would
+    /// re-open self-assignment on a security boundary).
     LabelUpdated {
         label_id: String,
         name: String,
         color: String,
+        #[serde(default)]
+        access: Option<bool>,
     },
     LabelAssigned {
         label_id: String,
@@ -144,6 +152,31 @@ pub enum CrdtPayload {
     ChannelPublicChanged {
         channel_id: String,
         is_public: bool,
+    },
+    /// Label-gated visibility (issue #32). Non-empty = only holders of ANY
+    /// listed label (plus Admin+/Owner) see the channel; empty = back to the
+    /// tier ladder. Authored paired with a ChannelVisibilityChanged{"admin"}
+    /// stamp so clients that predate this op still hide the channel.
+    ChannelVisibilityLabelsChanged {
+        channel_id: String,
+        labels: Vec<String>,
+    },
+    /// Label-gated posting; same semantics as the visibility twin.
+    ChannelPostingLabelsChanged {
+        channel_id: String,
+        labels: Vec<String>,
+    },
+    /// Time-boxed per-member channel access (visibility + posting).
+    /// `expires_at` = epoch ms; `u64::MAX` = until revoked. LWW per
+    /// (channel, member), mirroring MemberMuted.
+    ChannelGrantSet {
+        channel_id: String,
+        peer_id: String,
+        expires_at: u64,
+    },
+    ChannelGrantRevoked {
+        channel_id: String,
+        peer_id: String,
     },
 
     // Ban system (Phase 6.75)
@@ -407,6 +440,7 @@ mod tests {
                 label_id: "lbl-1".into(),
                 name: "VIP".into(),
                 color: "#ff0000".into(),
+                access: true,
             },
         };
         let json = serde_json::to_string(&op).unwrap();
@@ -414,12 +448,33 @@ mod tests {
         assert_eq!(deserialized.server_id, "srv-1");
         assert_eq!(deserialized.author, "peer_a");
         match &deserialized.payload {
-            CrdtPayload::LabelCreated { label_id, name, color } => {
+            CrdtPayload::LabelCreated { label_id, name, color, access } => {
                 assert_eq!(label_id, "lbl-1");
                 assert_eq!(name, "VIP");
                 assert_eq!(color, "#ff0000");
+                assert!(access);
             }
             _ => panic!("Wrong payload variant after deserialization"),
+        }
+    }
+
+    /// Old-client wire compat: label ops WITHOUT the `access` field parse
+    /// with the safe defaults (Created → false, Updated → None = preserve).
+    #[test]
+    fn label_ops_missing_access_field_default() {
+        let created: CrdtPayload = serde_json::from_str(
+            r##"{"LabelCreated":{"label_id":"l1","name":"VIP","color":"#fff"}}"##,
+        ).unwrap();
+        match created {
+            CrdtPayload::LabelCreated { access, .. } => assert!(!access),
+            _ => panic!("wrong variant"),
+        }
+        let updated: CrdtPayload = serde_json::from_str(
+            r##"{"LabelUpdated":{"label_id":"l1","name":"VIP","color":"#fff"}}"##,
+        ).unwrap();
+        match updated {
+            CrdtPayload::LabelUpdated { access, .. } => assert_eq!(access, None),
+            _ => panic!("wrong variant"),
         }
     }
 }
