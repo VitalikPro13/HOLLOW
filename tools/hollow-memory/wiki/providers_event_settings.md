@@ -664,7 +664,7 @@ Provider: `notificationSettingsProvider` -- `NotifierProvider<NotificationSettin
 
 ### NotificationLevel Enum
 - `all` -- Notify on all messages.
-- `mentions` -- Only notify on replies/mentions.
+- `mentions` -- Only notify on @you/@everyone mentions and replies to YOUR OWN messages (`reply_to_own`, Rust-computed at ingest — never gate on `replyToMid`, a non-nullable `''`-when-absent String whose `!= null` check was the #42 tautology; see `feedback_mentions_only_reply_to_own`).
 - `nothing` -- Muted.
 
 ### ChannelNotificationLevel Enum
@@ -1166,6 +1166,10 @@ Providers managing the Public Channel Browser panel — a first-class shell pane
 ### Startup
 
 `autoJoinGuestRooms(ref)` -- called from `node_provider.dart` after `eventStreamProvider.start()`. Joins WS rooms for all saved servers with `realtime` or `onLaunch` fetch mode.
+
+### Guest file attachments (0.9.1)
+
+Guest messages carry `FileAttachment` metadata (never bytes): sync builds it from `GuestSyncMessageFfi.file_meta` in `event_provider`; the LIVE public file path emits `FileHeaderReceived` right after the row and `channelChatProvider.attachFileMeta()` patches the RAM row (no-op if the row already has one — member rows reload from DB). The guest pane (`guest_chat_pane.dart`) auto-fetches IMAGES near the viewport (300 ms debounce, once per file per session) and exposes a Download hover action for other types — both via `crdt_api.requestPublicFile(serverId, fileId, peerHint)`, the GATED public-file path (Rust picks ONE room peer; see `security_write_gates.md` §7). Completion lights the card up through `fileTransferProvider`; a completed file offers Save As. Owner preview: the local sync branch includes `disk_path` from our own files row, so our own public channels render images instantly with zero fetching, and the local branch pages the LATEST 50 (it used to fetch the oldest 50 — cold-started owners landed at the top of history).
 
 ## Duplicate-aware receive events + gated unread recompute (2026-07-03)
 

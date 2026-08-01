@@ -942,6 +942,7 @@ pub(crate) async fn handle_send_channel_message(
             file_id: None,
             link_preview: link_preview.clone(),
             order_us: Some(order_us),
+            file_meta: None,
         };
         send_public_channel_msg(ws_cmd_tx, &server_id, &msg)
     } else {
@@ -967,6 +968,15 @@ pub(crate) async fn handle_send_channel_message(
         ).await
     };
 
+    // Replied-to message's author (MASTER id, from our own store) — shared by
+    // the room hint and the offline push fan-out so mentions-only receivers can
+    // gate on "reply to ME", not "reply to anyone" (#42). One store open.
+    let reply_author: Option<String> = reply_to_mid.as_deref().and_then(|mid| {
+        crate::storage::MessageStore::open(db_path, db_passphrase)
+            .ok()
+            .and_then(|s| s.get_channel_message_sender(mid))
+    });
+
     // Broadcast notification hint via SendToRoom (reaches all room members, even unsubscribed).
     {
         let hint = HavenMessage::ChannelNotificationHint {
@@ -976,6 +986,7 @@ pub(crate) async fn handle_send_channel_message(
             has_everyone,
             mentioned_names: mentioned_names.clone(),
             is_reply: reply_to_mid.is_some(),
+            reply_to_sender: reply_author.clone(),
         };
         if let Ok(hint_bytes) = serde_json::to_vec(&hint) {
             let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendToRoom {
@@ -988,9 +999,8 @@ pub(crate) async fn handle_send_channel_message(
     // ── Offline-member push fan-out (channel push notifications) ─────────
     queue_offline_channel_push(
         olm, ws_cmd_tx, ws_room_peers, server, local_peer_str,
-        &server_id, &channel_id, reply_to_mid.as_deref(),
+        &server_id, &channel_id, reply_author.as_deref(),
         has_everyone, &mentioned_names, &offline_wire_bytes,
-        db_path, db_passphrase,
     );
 
     // Persist locally with same timestamp as sent.
@@ -1135,7 +1145,8 @@ fn channel_mention_meta(text: &str) -> (bool, Vec<String>) {
 /// Serialize + broadcast one public-channel `HavenMessage` to the server room
 /// (plaintext — no MLS/Olm; guests receive it too, still Ed25519-signed).
 /// Returns the wire bytes for the offline 0x09 push fan-out.
-fn send_public_channel_msg(
+/// `pub(crate)` — file_handler's public-channel file send uses it too.
+pub(crate) fn send_public_channel_msg(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     server_id: &str,
     msg: &HavenMessage,
@@ -1265,12 +1276,10 @@ fn queue_offline_channel_push(
     local_peer_str: &str,
     server_id: &str,
     channel_id: &str,
-    reply_to_mid: Option<&str>,
+    reply_author: Option<&str>,
     has_everyone: bool,
     mentioned_names: &[String],
     offline_wire_bytes: &Option<Vec<u8>>,
-    db_path: &str,
-    db_passphrase: &str,
 ) {
     // `server.members` is MASTER-keyed (Step 6). Pick masters who are NOT
     // reachable by ANY of their devices, and who aren't us.
@@ -1286,19 +1295,13 @@ fn queue_offline_channel_push(
     if offline_members.is_empty() {
         return;
     }
-    // A reply mentions the replied-to message's author.
-    let reply_author: Option<String> = reply_to_mid.and_then(|mid| {
-        crate::storage::MessageStore::open(db_path, db_passphrase)
-            .ok()
-            .and_then(|s| s.get_channel_message_sender(mid))
-    });
     hollow_log!(
         "[HOLLOW-PUSH] Channel push fan-out: {} offline member(s) for {}/{}",
         offline_members.len(), server_id, channel_id
     );
     for member in offline_members {
         let mentioned = member_is_mentioned(
-            server, member, has_everyone, reply_author.as_deref(), mentioned_names,
+            server, member, has_everyone, reply_author, mentioned_names,
         );
         // Expand the offline MASTER member into its real DEVICE ids — the
         // relay keys the push token + offline buffer by DEVICE id (Step 9A).
@@ -2212,7 +2215,7 @@ pub(crate) async fn handle_envelope_channel_message(
         }
     }
 
-    let Some(is_new) = persist_incoming_channel_message(
+    let Some((is_new, reply_author)) = persist_incoming_channel_message(
         &sid, &cid, &sender_peer_id, &text, is_mine, ts,
         sig.as_deref(), pk.as_deref(), mid.as_deref(),
         reply_to.as_deref(), file_id.as_deref(), order_us,
@@ -2229,6 +2232,8 @@ pub(crate) async fn handle_envelope_channel_message(
     // the row first without emitting; suppressing the live event too left
     // the open pane stale until re-entry. Dart dedups by message_id and
     // skips unread/notifications when `duplicate`.
+    let reply_to_own = reply_author
+        .is_some_and(|a| super::resolver::same_identity(&a, local_peer));
     let _ = event_tx.send(NetworkEvent::ChannelMessageReceived {
         server_id: sid,
         channel_id: cid,
@@ -2240,6 +2245,7 @@ pub(crate) async fn handle_envelope_channel_message(
         link_preview,
         signature: sig,
         public_key: pk,
+        reply_to_own,
         duplicate: !is_new,
     }).await;
 }
@@ -2379,8 +2385,12 @@ fn persist_incoming_channel_message(
     link_preview: &Option<LinkPreviewRef>,
     db_path: &str,
     db_passphrase: &str,
-) -> Option<bool> {
+) -> Option<(bool, Option<String>)> {
     let store = crate::storage::MessageStore::open(db_path, db_passphrase).ok()?;
+    // Replied-to message's author (MASTER id) — the caller turns this into the
+    // event's `reply_to_own` so mentions-only gates on "reply to ME" (#42).
+    // Same store open as the insert; absent parent row = None.
+    let reply_author = reply_to.and_then(|m| store.get_channel_message_sender(m));
     let already = mid
         .map(|m| store.channel_message_exists(m))
         .unwrap_or(false);
@@ -2399,7 +2409,7 @@ fn persist_incoming_channel_message(
             }
         }
     }
-    Some(is_new)
+    Some((is_new, reply_author))
 }
 
 /// Handle `MessageEnvelope::EditMessage` (MLS-decrypted path).

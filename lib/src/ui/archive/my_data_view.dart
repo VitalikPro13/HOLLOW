@@ -36,7 +36,9 @@ class MyDataView extends ConsumerWidget {
           width: 280,
           child: Container(
             decoration: BoxDecoration(
-              color: hollow.opaqueBackground,
+              // Transparency-aware (same fix as the guest sidebar, #44) —
+              // opaqueBackground is for fixed chrome bars only.
+              color: hollow.surface,
               border: Border(right: BorderSide(color: hollow.border)),
             ),
             child: const ArchiveConversationList(),

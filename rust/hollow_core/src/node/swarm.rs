@@ -492,6 +492,14 @@ async fn run_event_loop(
     let mut requested_asset_kinds: std::collections::HashMap<String, emotes::AssetKind> =
         std::collections::HashMap::new();
 
+    // Guest public-file downloads: file_id -> (server_id, requested-at). The
+    // receipt cap for plaintext `PublicFileHeader`s — only headers answering a
+    // request WE made (fresh, matching server) are accepted, mirroring
+    // `requested_asset_kinds`. An unsolicited header would otherwise register
+    // a decrypt key + let a stranger stream bytes onto our disk.
+    let mut pending_public_file_requests: std::collections::HashMap<String, (String, std::time::Instant)> =
+        std::collections::HashMap::new();
+
     // (server room, channel) pairs whose relay offline catch-up replay already
     // ran THIS connection — fed by both the connect-time sweep (RoomMembers)
     // and the channel-open hook (SubscribeChannels). Cleared on
@@ -1440,6 +1448,12 @@ async fn run_event_loop(
                         ).await { continue; }
                     }
 
+                    NodeCommand::GetServerStateSnapshot { server_id, reply } => {
+                        // Live read of the ENFORCING copy — see the variant doc.
+                        // A dropped receiver (FFI timeout) is fine to ignore.
+                        let _ = reply.send(server_states.get(&server_id).cloned());
+                    }
+
                     NodeCommand::MuteMember { server_id, peer_id, expires_at } => {
                         if sync_handler::handle_mute_member(
                             &mut server_states, &mut mls, &event_tx, &ws_cmd_tx,
@@ -1551,7 +1565,7 @@ async fn run_event_loop(
                         if server_states.contains_key(&server_id) {
                             let state = &server_states[&server_id];
                             let channels: Vec<PublicChannelEntryFfi> = state.channels.values()
-                                .filter(|ch| ch.is_public && ch.channel_type == crate::crdt::server_state::ChannelType::Text)
+                                .filter(|ch| ch.effective_public())
                                 .map(|ch| PublicChannelEntryFfi {
                                     channel_id: ch.channel_id.clone(),
                                     name: ch.name.clone(),
@@ -1591,12 +1605,23 @@ async fn run_event_loop(
                                 let messages_result = if let Some(before_ts) = before_timestamp {
                                     store.get_channel_messages_before(&server_id, &channel_id, before_ts, limit)
                                 } else {
-                                    store.get_channel_messages_since(&server_id, &channel_id, 0, limit)
+                                    // Initial request: LATEST messages, mirroring the
+                                    // remote responder. `messages_since(0)` returned the
+                                    // OLDEST 50, so an owner cold-starting into their own
+                                    // public channel landed at the START of history (the
+                                    // shared member store usually masked it — until the
+                                    // member pane had loaded, the wrong window showed).
+                                    store.get_channel_messages_before(&server_id, &channel_id, i64::MAX, limit)
                                 };
                                 if let Ok(msgs) = messages_result {
                                     let has_more = msgs.len() as i32 >= limit;
                                     let msg_ids: Vec<String> = msgs.iter().filter_map(|m| m.message_id.clone()).collect();
                                     let reactions_map = store.load_reactions_for_sync(&msg_ids).unwrap_or_default();
+                                    // File metadata for the cards — same batch
+                                    // lookup the guest-serving responder does, so
+                                    // the owner's preview equals the guest view.
+                                    let file_ids: Vec<&str> = msgs.iter().filter_map(|m| m.file_id.as_deref()).collect();
+                                    let file_meta_map = store.get_file_metadata_batch(&file_ids).unwrap_or_default();
                                     let ffi_messages: Vec<GuestSyncMessageFfi> = msgs.iter().map(|m| {
                                         let reactions = m.message_id.as_ref()
                                             .and_then(|mid| reactions_map.get(mid))
@@ -1604,6 +1629,22 @@ async fn run_event_loop(
                                                 emoji: e.clone(), peer_id: p.clone(), added_at: *ts,
                                             }).collect())
                                             .unwrap_or_default();
+                                        let file_meta = m.file_id.as_deref()
+                                            .and_then(|fid| file_meta_map.get(fid))
+                                            .map(|f| GuestFileMetaFfi {
+                                                file_id: f.file_id.clone(),
+                                                file_name: f.file_name.clone(),
+                                                file_ext: f.file_ext.clone(),
+                                                mime_type: f.mime_type.clone(),
+                                                size_bytes: f.size_bytes,
+                                                is_image: f.is_image,
+                                                width: f.width,
+                                                height: f.height,
+                                                // Our own disk — the owner preview
+                                                // renders instantly, no peer fetch.
+                                                disk_path: f.disk_path.clone()
+                                                    .filter(|_| f.completed_at.is_some()),
+                                            });
                                         GuestSyncMessageFfi {
                                             sender_id: m.sender_id.clone(),
                                             text: m.text.clone(),
@@ -1615,6 +1656,7 @@ async fn run_event_loop(
                                             reply_to: m.reply_to_mid.clone(),
                                             hidden_at: m.hidden_at,
                                             reactions,
+                                            file_meta,
                                         }
                                     }).collect();
                                     // Build sender profiles from local state
@@ -2116,6 +2158,36 @@ async fn run_event_loop(
                         );
                     }
 
+                    NodeCommand::RequestPublicFile { server_id, file_id, peer_hint } => {
+                        // Guest download: pick ONE live room peer (hint first —
+                        // usually the message sender; else any other peer, which
+                        // may be another guest that simply won't answer — the UI
+                        // retries). Mirrors the emote-rail peer pick.
+                        let target = ws_room_peers.get(&server_id).and_then(|peers| {
+                            peer_hint
+                                .filter(|h| peers.contains(h))
+                                .or_else(|| {
+                                    peers.iter().find(|p| *p != &local_peer_str).cloned()
+                                })
+                        });
+                        match target {
+                            Some(t) => {
+                                pending_public_file_requests.insert(
+                                    file_id.clone(),
+                                    (server_id.clone(), std::time::Instant::now()),
+                                );
+                                hollow_log!("[HOLLOW-GUEST] Requesting public file {file_id} in {server_id} from {t}");
+                                super::crypto_handler::send_message_to_peer(
+                                    &ws_cmd_tx, &ws_room_peers, &t,
+                                    HavenMessage::FileRequest { file_id, chunks: Vec::new(), offset: 0 },
+                                );
+                            }
+                            None => {
+                                hollow_log!("[HOLLOW-GUEST] No room peer to serve public file {file_id} in {server_id}");
+                            }
+                        }
+                    }
+
                     // -- WebRTC commands (Phase 5A) --
                     NodeCommand::WebRtcPeerConnected { peer_id } => {
                         voice_handler::handle_webrtc_peer_connected(
@@ -2357,6 +2429,7 @@ async fn run_event_loop(
                                 &mut pending_friend_accepts, &mut pending_friend_requests,
                                 &mut pending_friend_removals,
                                 &mut requested_asset_kinds,
+                                &mut pending_public_file_requests,
                                 HavenMessage::CrdtOpBroadcast { server_id, op_json },
                             ).await;
                         }
@@ -2573,6 +2646,7 @@ async fn run_event_loop(
                         ws_room_peers.clear();
                         synced_peers.clear();
                         requested_asset_kinds.clear();
+                        pending_public_file_requests.clear();
                         relay_catchup_done.clear();
                         key_request_in_flight.clear();
                         key_bundle_sent_to.clear();
@@ -4126,6 +4200,7 @@ async fn run_event_loop(
                                         &mut pending_friend_accepts, &mut pending_friend_requests,
                                         &mut pending_friend_removals,
                                         &mut requested_asset_kinds,
+                                        &mut pending_public_file_requests,
                                         msg,
                                     ).await;
                             } else {
@@ -5238,6 +5313,7 @@ async fn handle_incoming_request(
     pending_friend_requests: &mut HashMap<String, i64>,
     pending_friend_removals: &mut std::collections::HashSet<String>,
     requested_asset_kinds: &mut HashMap<String, emotes::AssetKind>,
+    pending_public_file_requests: &mut HashMap<String, (String, std::time::Instant)>,
     request: HavenMessage,
 ) {
 
@@ -5791,7 +5867,13 @@ async fn handle_incoming_request(
                     // to swallow DISTINCT identical-text messages landing in
                     // the same millisecond, dropping the second message.
                     let mut is_new = true;
+                    let mut reply_to_own = false;
                     if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+                        // Reply-to-ME flag for the mentions-only notification
+                        // gate (#42) — parent row's author vs our identity.
+                        reply_to_own = reply_to.as_deref()
+                            .and_then(|m| store.get_channel_message_sender(m))
+                            .is_some_and(|a| super::resolver::same_identity(&a, &local_peer_str));
                         let already = mid.as_deref()
                             .map(|m| store.channel_message_exists(m))
                             .unwrap_or(false);
@@ -5835,6 +5917,7 @@ async fn handle_incoming_request(
                             link_preview,
                             signature: sig,
                             public_key: pk,
+                            reply_to_own,
                             duplicate: !is_new,
                         })
                         .await;
@@ -8578,8 +8661,12 @@ async fn handle_incoming_request(
                             let _ = event_tx.send(NetworkEvent::ServerUpdated {
                                 server_id: server_id.clone(),
                             }).await;
-                            // Broadcast to room (including guests) so public channel browsers see the change
-                            if let Some(ch) = state.channels.get(channel_id) {
+                            // Broadcast to room (including guests) so public channel browsers see the change.
+                            // Text only (#44) — a voice-channel announce put a ghost entry in
+                            // browsers that the next list refresh dropped.
+                            if let Some(ch) = state.channels.get(channel_id)
+                                .filter(|c| c.channel_type == crate::crdt::server_state::ChannelType::Text)
+                            {
                                 let notify = HavenMessage::PublicChannelConfigChanged {
                                     server_id: server_id.clone(),
                                     channel_id: channel_id.clone(),
@@ -11093,7 +11180,7 @@ async fn handle_incoming_request(
             let _ = event_tx.send(NetworkEvent::LinkPushComplete { bytes: 0 }).await;
         }
 
-        HavenMessage::PublicChannelMessage { server_id, channel_id, text, ts, sig, pk, mid, reply_to, file_id, link_preview, order_us } => {
+        HavenMessage::PublicChannelMessage { server_id, channel_id, text, ts, sig, pk, mid, reply_to, file_id, link_preview, order_us, file_meta } => {
             if peer_str == local_peer_str { return; }
             // Multi-device: the relay frame author (`peer_str`) is the sender's
             // DEVICE id, but a public channel message is SIGNED by — and must be
@@ -11108,11 +11195,36 @@ async fn handle_incoming_request(
             let sender_master = super::resolver::resolve(peer_str);
             message_ops::handle_envelope_channel_message(
                 &event_tx, &bundle_keypair, server_states.get(&server_id), &local_peer_str,
-                sender_master,
-                server_id, channel_id, text, ts, sig, pk,
-                Some(mid), reply_to, file_id, link_preview, order_us,
+                sender_master.clone(),
+                server_id.clone(), channel_id.clone(), text, ts, sig, pk,
+                Some(mid.clone()), reply_to, file_id.clone(), link_preview, order_us,
                 &db_path, &db_passphrase,
             ).await;
+            // GUEST live file card: we can't decrypt the MLS FileHeader that
+            // follows, so the plaintext message carries display metadata.
+            // Members ignore it (server state present = MLS header is their
+            // source); the v2 signature binds `file_id`, not this blob, so
+            // require the blob to describe exactly the signed file_id.
+            if server_states.get(&server_id).is_none() && guest_rooms.contains(&server_id) {
+                if let Some(fm) = file_meta
+                    .filter(|fm| file_id.as_deref() == Some(fm.fid.as_str()))
+                {
+                    let _ = event_tx.send(NetworkEvent::FileHeaderReceived {
+                        file_id: fm.fid,
+                        file_name: fm.name,
+                        size_bytes: fm.size,
+                        is_image: fm.img,
+                        width: fm.w,
+                        height: fm.h,
+                        message_id: mid,
+                        sender_id: sender_master,
+                        server_id,
+                        channel_id,
+                        video_thumb: None,
+                        share_ref: None,
+                    }).await;
+                }
+            }
         }
 
         HavenMessage::PublicChannelEdit { server_id, channel_id, mid, text, ts, sig, pk } => {
@@ -11165,7 +11277,7 @@ async fn handle_incoming_request(
             if peer_str == local_peer_str { return; }
             if let Some(state) = server_states.get(&server_id) {
                 let channels: Vec<PublicChannelEntry> = state.channels.values()
-                    .filter(|ch| ch.is_public && ch.channel_type == crate::crdt::server_state::ChannelType::Text)
+                    .filter(|ch| ch.effective_public())
                     .map(|ch| PublicChannelEntry {
                         channel_id: ch.channel_id.clone(),
                         name: ch.name.clone(),
@@ -11374,6 +11486,26 @@ async fn handle_incoming_request(
                     // No mid = nothing a reaction signature could bind to.
                     None => Vec::new(),
                 };
+                // Attachment metadata → file card (metadata only, never bytes).
+                // The item's v2 signature binds `file_id` but NOT the file_meta
+                // blob, so require the blob to describe exactly the signed
+                // file_id — a rewriting responder can then only change cosmetic
+                // fields (name/size), never attach someone else's file id.
+                let file_meta = m.file_meta
+                    .filter(|fm| m.file_id.as_deref() == Some(fm.fid.as_str()))
+                    .map(|fm| GuestFileMetaFfi {
+                        file_id: fm.fid,
+                        file_name: fm.name,
+                        file_ext: fm.ext,
+                        mime_type: fm.mime,
+                        size_bytes: fm.size,
+                        is_image: fm.img,
+                        width: fm.w,
+                        height: fm.h,
+                        // Wire path: never a disk path (a responder's path is
+                        // meaningless here; bytes ride the gated request).
+                        disk_path: None,
+                    });
                 ffi_messages.push(GuestSyncMessageFfi {
                     sender_id: m.s,
                     text: m.t,
@@ -11385,6 +11517,7 @@ async fn handle_incoming_request(
                     reply_to: m.reply_to,
                     hidden_at,
                     reactions,
+                    file_meta,
                 });
             }
             let ffi_profiles: Vec<SyncSenderProfileFfi> = sender_profiles.into_iter().map(|(pid, p)| {
@@ -11404,10 +11537,52 @@ async fn handle_incoming_request(
             }).await;
         }
 
-        HavenMessage::ChannelNotificationHint { server_id, channel_id, message_id, has_everyone, mentioned_names, is_reply } => {
+        HavenMessage::PublicFileHeader {
+            file_id, name, ext, mime, size, img, w, h, mid, sid, cid, ts, aes_key, aes_nonce,
+        } => {
+            // SECURITY receipt cap (mirrors `requested_asset_kinds`): accept
+            // ONLY a fresh header answering a request WE made, for the server
+            // we made it in, and only while browsing that server as a guest.
+            // An unsolicited plaintext header would register a decrypt key and
+            // let a stranger stream arbitrary bytes onto our disk.
+            let Some((req_sid, req_at)) = pending_public_file_requests.remove(&file_id) else {
+                hollow_log!("[HOLLOW-SECURITY] REJECTED unsolicited PublicFileHeader for {file_id} from {peer_str}");
+                return;
+            };
+            if req_sid != sid
+                || !guest_rooms.contains(&sid)
+                || req_at.elapsed() > std::time::Duration::from_secs(120)
+            {
+                hollow_log!("[HOLLOW-SECURITY] REJECTED PublicFileHeader for {file_id} from {peer_str} — stale or server mismatch");
+                return;
+            }
+            // Same ingest as an Olm FileHeader: 34 MB default size cap (no
+            // server state as a guest), metadata row, pending-stream key
+            // registration, FileHeaderReceived for the transfer UI. The
+            // sender recorded here is the RESPONDER — that is who streams.
+            file_handler::handle_envelope_file_header(
+                server_states, pending_file_streams, pending_shard_streams,
+                early_file_streams, bundle_keypair, event_tx,
+                &sid, peer_str.to_string(),
+                file_id, name, ext, mime, size, 0, img, w, h,
+                mid, Some(sid.clone()), Some(cid), ts,
+                Some(aes_key), Some(aes_nonce),
+                None, None,
+                ws_cmd_tx, ws_room_peers,
+                db_path, db_passphrase,
+            ).await;
+        }
+
+        HavenMessage::ChannelNotificationHint { server_id, channel_id, message_id, has_everyone, mentioned_names, is_reply: _, reply_to_sender } => {
+            // Reply-to-ME only — the wire's bare `is_reply` fired the
+            // mentions-only level on every reply to anyone (#42). Hints from
+            // pre-0.9.1 senders carry no author → false (never over-notify).
+            let is_reply_to_own = reply_to_sender
+                .as_deref()
+                .is_some_and(|s| super::resolver::same_identity(s, local_peer_str));
             let _ = event_tx.send(NetworkEvent::ChannelNotificationHint {
                 server_id, channel_id, from_peer: peer_str.to_string(),
-                message_id, has_everyone, mentioned_names, is_reply,
+                message_id, has_everyone, mentioned_names, is_reply_to_own,
             }).await;
         }
 
@@ -11628,12 +11803,55 @@ async fn handle_incoming_request(
 
         // File request — respond with file chunks via Olm.
         HavenMessage::FileRequest { file_id, chunks, offset } => {
-            
+
             use crate::node::file_transfer;
             hollow_log!("[HOLLOW-FILE] FileRequest from {peer_str} for {file_id}");
 
             if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
                 if let Ok(Some(file_meta)) = store.get_file_metadata(&file_id) {
+                        // SECURITY: serving used to be UNGATED — any peer that
+                        // learned a file_id (guests see them in plaintext public
+                        // messages) could pull ANY file we hold, DM attachments
+                        // included. Serve only:
+                        //   * DM files      -> the conversation counterparty or
+                        //                      our own sibling devices
+                        //   * channel files -> server members; PUBLIC (text)
+                        //                      channels -> anyone (guest browser)
+                        // `requester_is_member` also picks the header transport
+                        // below: Olm for members/DM parties, plaintext public
+                        // header for guests (who may hold no Olm session).
+                        if crate::node::blocklist::is_blocked(peer_str) {
+                            hollow_log!("[HOLLOW-SECURITY] REJECTED FileRequest from {peer_str} — blocked");
+                            return;
+                        }
+                        let requester_master = super::resolver::resolve(peer_str);
+                        let (requester_is_member, public_ok) = match file_meta.context_type.as_str() {
+                            "dm" => (
+                                super::resolver::same_identity(peer_str, local_peer_str)
+                                    || super::resolver::same_identity(peer_str, &file_meta.context_id),
+                                false,
+                            ),
+                            "channel" => {
+                                let mut parts = file_meta.context_id.splitn(2, ':');
+                                match (parts.next(), parts.next()) {
+                                    (Some(sid), Some(cid)) => match server_states.get(sid) {
+                                        Some(s) => (
+                                            s.is_member(&requester_master),
+                                            s.is_channel_public(cid),
+                                        ),
+                                        // We hold the file but no longer hold the
+                                        // server state — fail closed.
+                                        None => (false, false),
+                                    },
+                                    _ => (false, false),
+                                }
+                            }
+                            _ => (false, false),
+                        };
+                        if !requester_is_member && !public_ok {
+                            hollow_log!("[HOLLOW-SECURITY] REJECTED FileRequest from {peer_str} for {file_id} — not entitled ({} file)", file_meta.context_type);
+                            return;
+                        }
                         if let Some(ref disk_path) = file_meta.disk_path {
                             if let Ok(file_data) = std::fs::read(disk_path) {
                                 // AES-encrypt and stream the file.
@@ -11664,42 +11882,68 @@ async fn handle_incoming_request(
                                         } else {
                                             (None, None)
                                         };
-                                        let header = MessageEnvelope::FileHeader {
-                                            inner: Box::new(FileHeaderPayload {
-                                                fid: file_id.clone(),
-                                                name: file_meta.file_name.clone(),
-                                                ext: file_meta.file_ext.clone(),
-                                                mime: file_meta.mime_type.clone(),
-                                                size: file_meta.size_bytes,
-                                                chunks: 0,
-                                                img: file_meta.is_image,
-                                                w: file_meta.width,
-                                                h: file_meta.height,
-                                                mid: file_meta.message_id.clone(),
-                                                sid: resp_sid,
-                                                cid: resp_cid,
-                                                ts: file_meta.created_at,
-                                                sig: None,
-                                                pk: None,
-                                                aes_key: Some(hex::encode(enc.key)),
-                                                aes_nonce: Some(hex::encode(enc.nonce)),
-                                                target: None,
-                                                vthumb: file_meta.video_thumb.clone(),
-                                                share_ref: None,
-                                                // Bytes re-serve for an EXISTING message row —
-                                                // no sentinel insert happens (no inline_bytes),
-                                                // so no ordering stamp to carry.
-                                                order_us: None,
-                                                inline_bytes: None,
-                                            }),
-                                        };
-                                        // Send FileHeader via Olm (targeted) + SendDirect.
+                                        if requester_is_member {
+                                            // Members / DM parties: Olm-wrapped header (existing path).
+                                            let header = MessageEnvelope::FileHeader {
+                                                inner: Box::new(FileHeaderPayload {
+                                                    fid: file_id.clone(),
+                                                    name: file_meta.file_name.clone(),
+                                                    ext: file_meta.file_ext.clone(),
+                                                    mime: file_meta.mime_type.clone(),
+                                                    size: file_meta.size_bytes,
+                                                    chunks: 0,
+                                                    img: file_meta.is_image,
+                                                    w: file_meta.width,
+                                                    h: file_meta.height,
+                                                    mid: file_meta.message_id.clone(),
+                                                    sid: resp_sid,
+                                                    cid: resp_cid,
+                                                    ts: file_meta.created_at,
+                                                    sig: None,
+                                                    pk: None,
+                                                    aes_key: Some(hex::encode(enc.key)),
+                                                    aes_nonce: Some(hex::encode(enc.nonce)),
+                                                    target: None,
+                                                    vthumb: file_meta.video_thumb.clone(),
+                                                    share_ref: None,
+                                                    // Bytes re-serve for an EXISTING message row —
+                                                    // no sentinel insert happens (no inline_bytes),
+                                                    // so no ordering stamp to carry.
+                                                    order_us: None,
+                                                    inline_bytes: None,
+                                                }),
+                                            };
+                                            // Send FileHeader via Olm (targeted) + SendDirect.
                                             let header_json = serde_json::to_string(&header).unwrap_or_default();
                                             send_encrypted_message(
                                                 olm, crypto_store,
                                                 &peer_str, &header_json, event_tx,
                                                 ws_cmd_tx, ws_room_peers,
                                             ).await;
+                                        } else {
+                                            // Non-member on a PUBLIC channel (guest browser):
+                                            // plaintext header — the guest may hold no Olm
+                                            // session, and the content is public anyway.
+                                            super::crypto_handler::send_message_to_peer(
+                                                ws_cmd_tx, ws_room_peers, peer_str,
+                                                HavenMessage::PublicFileHeader {
+                                                    file_id: file_id.clone(),
+                                                    name: file_meta.file_name.clone(),
+                                                    ext: file_meta.file_ext.clone(),
+                                                    mime: file_meta.mime_type.clone(),
+                                                    size: file_meta.size_bytes,
+                                                    img: file_meta.is_image,
+                                                    w: file_meta.width,
+                                                    h: file_meta.height,
+                                                    mid: file_meta.message_id.clone(),
+                                                    sid: resp_sid.clone().unwrap_or_default(),
+                                                    cid: resp_cid.clone().unwrap_or_default(),
+                                                    ts: file_meta.created_at,
+                                                    aes_key: hex::encode(enc.key),
+                                                    aes_nonce: hex::encode(enc.nonce),
+                                                },
+                                            );
+                                        }
 
                                             if offset > 0 {
                                                 // Resumed transfer: skip FileHeader, stream from offset via WS.

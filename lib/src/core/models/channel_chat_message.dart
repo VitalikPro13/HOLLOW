@@ -78,4 +78,5 @@ class ChannelChatMessage {
       archiveSignatureValid: archiveSignatureValid,
     );
   }
+
 }

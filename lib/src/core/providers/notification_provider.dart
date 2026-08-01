@@ -11,7 +11,7 @@ enum NotificationLevel {
   /// Notify on all messages.
   all,
 
-  /// Only notify on replies to your messages.
+  /// Only notify on mentions (@you, @everyone) and replies to YOUR messages.
   mentions,
 
   /// No notifications (muted).

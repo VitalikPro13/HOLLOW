@@ -6,6 +6,8 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
+// These functions are ignored because they are not marked as `pub`: `channels_from_state`, `live_server_state`
+
 /// Create a new server. Returns the server_id.
 Future<String> createServer({required String name}) =>
     RustLib.instance.api.crateApiCrdtCreateServer(name: name);
@@ -36,7 +38,15 @@ Future<void> removeChannel({
 Future<List<ServerFfi>> getJoinedServers() =>
     RustLib.instance.api.crateApiCrdtGetJoinedServers();
 
-/// Get channels for a specific server. Reads from the local DB.
+/// Get channels for a specific server.
+///
+/// Prefers a LIVE clone of the event loop's in-memory state (the copy that
+/// ENFORCES — request/reply over `GetServerStateSnapshot`): the CrdtStore
+/// flush is async fire-and-forget and `ServerUpdated` fires BEFORE it lands,
+/// so the old DB-snapshot read racing a fresh toggle write returned the
+/// PREVIOUS value and reverted optimistic UI (#44 "toggle twice to stick").
+/// Falls back to the persisted DB snapshot when the node isn't running (or
+/// the reply times out) so early-startup callers keep working.
 Future<List<ChannelFfi>> getServerChannels({required String serverId}) =>
     RustLib.instance.api.crateApiCrdtGetServerChannels(serverId: serverId);
 
@@ -411,6 +421,19 @@ Future<void> requestPublicChannelSync({
   serverId: serverId,
   channelId: channelId,
   beforeTimestamp: beforeTimestamp,
+);
+
+/// Guest download of a PUBLIC-channel file (guest mode): asks one room peer
+/// for the bytes. Progress/completion arrive via the normal FileProgress /
+/// FileCompleted events keyed by `file_id`.
+Future<void> requestPublicFile({
+  required String serverId,
+  required String fileId,
+  String? peerHint,
+}) => RustLib.instance.api.crateApiCrdtRequestPublicFile(
+  serverId: serverId,
+  fileId: fileId,
+  peerHint: peerHint,
 );
 
 /// Leave a guest-mode WS room.

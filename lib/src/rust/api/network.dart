@@ -979,6 +979,61 @@ class FetchedMessage {
           channelId == other.channelId;
 }
 
+/// FFI-facing file metadata for a guest message (metadata only, no bytes).
+class GuestFileMetaFfi {
+  final String fileId;
+  final String fileName;
+  final String fileExt;
+  final String mimeType;
+  final BigInt sizeBytes;
+  final bool isImage;
+  final int? width;
+  final int? height;
+
+  /// Set ONLY when previewing our own server (local branch) and the file is
+  /// complete on OUR disk — the card renders it without any peer fetch.
+  final String? diskPath;
+
+  const GuestFileMetaFfi({
+    required this.fileId,
+    required this.fileName,
+    required this.fileExt,
+    required this.mimeType,
+    required this.sizeBytes,
+    required this.isImage,
+    this.width,
+    this.height,
+    this.diskPath,
+  });
+
+  @override
+  int get hashCode =>
+      fileId.hashCode ^
+      fileName.hashCode ^
+      fileExt.hashCode ^
+      mimeType.hashCode ^
+      sizeBytes.hashCode ^
+      isImage.hashCode ^
+      width.hashCode ^
+      height.hashCode ^
+      diskPath.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is GuestFileMetaFfi &&
+          runtimeType == other.runtimeType &&
+          fileId == other.fileId &&
+          fileName == other.fileName &&
+          fileExt == other.fileExt &&
+          mimeType == other.mimeType &&
+          sizeBytes == other.sizeBytes &&
+          isImage == other.isImage &&
+          width == other.width &&
+          height == other.height &&
+          diskPath == other.diskPath;
+}
+
 /// FFI-facing guest reaction.
 class GuestReactionFfi {
   final String emoji;
@@ -1017,6 +1072,9 @@ class GuestSyncMessageFfi {
   final PlatformInt64? hiddenAt;
   final List<GuestReactionFfi> reactions;
 
+  /// Attachment metadata (never bytes) — Dart builds the file card from it.
+  final GuestFileMetaFfi? fileMeta;
+
   const GuestSyncMessageFfi({
     required this.senderId,
     required this.text,
@@ -1028,6 +1086,7 @@ class GuestSyncMessageFfi {
     this.replyTo,
     this.hiddenAt,
     required this.reactions,
+    this.fileMeta,
   });
 
   @override
@@ -1041,7 +1100,8 @@ class GuestSyncMessageFfi {
       editedAt.hashCode ^
       replyTo.hashCode ^
       hiddenAt.hashCode ^
-      reactions.hashCode;
+      reactions.hashCode ^
+      fileMeta.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -1057,7 +1117,8 @@ class GuestSyncMessageFfi {
           editedAt == other.editedAt &&
           replyTo == other.replyTo &&
           hiddenAt == other.hiddenAt &&
-          reactions == other.reactions;
+          reactions == other.reactions &&
+          fileMeta == other.fileMeta;
 }
 
 /// FFI-facing link preview for a URL embedded in a message.
@@ -1247,6 +1308,7 @@ sealed class NetworkEvent with _$NetworkEvent {
     LinkPreviewRef? linkPreview,
     String? signature,
     String? publicKey,
+    required bool replyToOwn,
     required bool duplicate,
   }) = NetworkEvent_ChannelMessageReceived;
   const factory NetworkEvent.messageSent({
@@ -1476,7 +1538,10 @@ sealed class NetworkEvent with _$NetworkEvent {
     required String messageId,
     required bool hasEveryone,
     required List<String> mentionedNames,
-    required bool isReply,
+
+    /// True only when the message replies to one of OUR messages. Hints
+    /// from pre-0.9.1 senders carry no reply author, so this stays false.
+    required bool isReplyToOwn,
   }) = NetworkEvent_ChannelNotificationHint;
   const factory NetworkEvent.typingStarted({
     required String peerId,

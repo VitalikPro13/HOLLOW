@@ -999,8 +999,14 @@ class _CategoryRow extends StatelessWidget {
           children: [
             ReorderableDragStartListener(
               index: index,
-              child: Icon(LucideIcons.gripVertical,
-                  size: 16, color: hollow.textSecondary),
+              child: HollowTooltip(
+                message: 'Drag to reorder',
+                child: Semantics(
+                  label: 'Drag to reorder category',
+                  child: Icon(LucideIcons.gripVertical,
+                      size: 16, color: hollow.textSecondary),
+                ),
+              ),
             ),
             const SizedBox(width: HollowSpacing.sm),
             Icon(LucideIcons.folder, size: 16, color: hollow.accent),
@@ -1152,8 +1158,14 @@ class _ChannelRow extends StatelessWidget {
                 children: [
                   ReorderableDragStartListener(
                     index: index,
-                    child: Icon(LucideIcons.gripVertical,
-                        size: 16, color: hollow.textSecondary),
+                    child: HollowTooltip(
+                      message: 'Drag to reorder',
+                      child: Semantics(
+                        label: 'Drag to reorder channel',
+                        child: Icon(LucideIcons.gripVertical,
+                            size: 16, color: hollow.textSecondary),
+                      ),
+                    ),
                   ),
                   const SizedBox(width: HollowSpacing.sm),
                   Icon(isVoice ? LucideIcons.volume2 : LucideIcons.hash,
@@ -1193,7 +1205,7 @@ class _ChannelRow extends StatelessWidget {
                   if (!isVoice) ...[
                     const SizedBox(width: 4),
                     HollowTooltip(
-                      message: 'Slow mode',
+                      message: 'Minimum delay between each member\'s messages',
                       child: _SlowModeChip(
                         seconds: slowModeSecs,
                         onChanged: onSlowModeChanged,
@@ -1202,8 +1214,8 @@ class _ChannelRow extends StatelessWidget {
                     const SizedBox(width: 4),
                     HollowTooltip(
                       message: mediaOnly
-                          ? 'Media-only (on)'
-                          : 'Media-only (off)',
+                          ? 'Media-only is on — only images, GIFs and videos can be posted'
+                          : 'Restrict this channel to images, GIFs and videos only',
                       child: HollowPressable(
                         onTap: onMediaOnlyToggled,
                         semanticLabel: mediaOnly
@@ -1219,28 +1231,33 @@ class _ChannelRow extends StatelessWidget {
                         ),
                       ),
                     ),
-                  ],
-                  const SizedBox(width: 4),
-                  HollowTooltip(
-                    message: isPublic ? 'Public channel (on)' : 'Public channel (off)',
-                    child: HollowPressable(
-                      onTap: onPublicToggled,
-                      semanticLabel: isPublic
-                          ? 'Make channel private, currently public'
-                          : 'Make channel public, currently private',
-                      borderRadius: BorderRadius.circular(hollow.radiusSm),
-                      padding: const EdgeInsets.all(HollowSpacing.xs),
-                      child: Icon(
-                        LucideIcons.globe,
-                        size: 14,
-                        color: isPublic ? hollow.accent : hollow.textSecondary,
+                    // Public toggle is TEXT-ONLY (#44): a public voice channel
+                    // is rejected by Rust and would only ghost-flash in the
+                    // browser (its list responders filter voice out).
+                    const SizedBox(width: 4),
+                    HollowTooltip(
+                      message: isPublic
+                          ? 'Public — anyone can read this channel without joining the server'
+                          : 'Publish this channel — anyone will be able to read it without joining',
+                      child: HollowPressable(
+                        onTap: onPublicToggled,
+                        semanticLabel: isPublic
+                            ? 'Make channel private, currently public'
+                            : 'Make channel public, currently private',
+                        borderRadius: BorderRadius.circular(hollow.radiusSm),
+                        padding: const EdgeInsets.all(HollowSpacing.xs),
+                        child: Icon(
+                          LucideIcons.globe,
+                          size: 14,
+                          color: isPublic ? hollow.accent : hollow.textSecondary,
+                        ),
                       ),
                     ),
-                  ),
+                  ],
                   if (!isPublic) ...[
                     const SizedBox(width: HollowSpacing.xs),
                     HollowTooltip(
-                      message: 'Temporary access',
+                      message: 'Give a member time-limited access to this channel',
                       child: HollowPressable(
                         onTap: onManageGrants,
                         semanticLabel: 'Manage temporary access for channel',
@@ -1306,8 +1323,14 @@ class _SeparatorRow extends StatelessWidget {
         children: [
           ReorderableDragStartListener(
             index: index,
-            child: Icon(LucideIcons.gripVertical,
-                size: 16, color: hollow.textSecondary),
+            child: HollowTooltip(
+              message: 'Drag to reorder',
+              child: Semantics(
+                label: 'Drag to reorder separator',
+                child: Icon(LucideIcons.gripVertical,
+                    size: 16, color: hollow.textSecondary),
+              ),
+            ),
           ),
           const SizedBox(width: HollowSpacing.sm),
           Expanded(
@@ -1317,12 +1340,15 @@ class _SeparatorRow extends StatelessWidget {
             ),
           ),
           const SizedBox(width: HollowSpacing.sm),
-          HollowPressable(
-            onTap: onDelete,
-            semanticLabel: 'Delete separator',
-            borderRadius: BorderRadius.circular(hollow.radiusSm),
-            padding: const EdgeInsets.all(HollowSpacing.xs),
-            child: Icon(LucideIcons.x, size: 12, color: hollow.textSecondary),
+          HollowTooltip(
+            message: 'Delete separator',
+            child: HollowPressable(
+              onTap: onDelete,
+              semanticLabel: 'Delete separator',
+              borderRadius: BorderRadius.circular(hollow.radiusSm),
+              padding: const EdgeInsets.all(HollowSpacing.xs),
+              child: Icon(LucideIcons.x, size: 12, color: hollow.textSecondary),
+            ),
           ),
         ],
       ),

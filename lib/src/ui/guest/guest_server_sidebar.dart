@@ -96,7 +96,10 @@ class _GuestServerSidebarState extends ConsumerState<GuestServerSidebar> {
 
     return Container(
       decoration: BoxDecoration(
-        color: hollow.opaqueBackground,
+        // Transparency-aware like every content sidebar (#44) —
+        // `opaqueBackground` is reserved for fixed chrome bars and made this
+        // pane a solid slab next to see-through neighbours.
+        color: hollow.surface,
         border: Border(right: BorderSide(color: hollow.border)),
       ),
       child: Column(

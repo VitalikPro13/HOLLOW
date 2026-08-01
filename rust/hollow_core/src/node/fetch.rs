@@ -519,6 +519,9 @@ fn try_process_channel_msg(
         HavenMessage::PublicChannelMessage {
             server_id, channel_id, text, ts, sig, pk, mid, reply_to, file_id,
             link_preview, order_us,
+            // Guest display metadata — irrelevant to the push-fetch path
+            // (members store metadata from the MLS FileHeader instead).
+            file_meta: _,
         } => {
             // Public channels: signed plaintext. The relay-attested frame author
             // (`from`) is the sender's DEVICE id, but the message is signed by — and

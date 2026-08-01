@@ -130,7 +130,7 @@ pub enum NetworkEvent {
     RoomCleared,
     Listening { address: String },
     MessageReceived { from_peer: String, text: String, timestamp: i64, message_id: String, reply_to_mid: String, link_preview: Option<LinkPreviewRef>, signature: Option<String>, public_key: Option<String>, is_own: bool, duplicate: bool },
-    ChannelMessageReceived { server_id: String, channel_id: String, from_peer: String, text: String, timestamp: i64, message_id: String, reply_to_mid: String, link_preview: Option<LinkPreviewRef>, signature: Option<String>, public_key: Option<String>, duplicate: bool },
+    ChannelMessageReceived { server_id: String, channel_id: String, from_peer: String, text: String, timestamp: i64, message_id: String, reply_to_mid: String, link_preview: Option<LinkPreviewRef>, signature: Option<String>, public_key: Option<String>, reply_to_own: bool, duplicate: bool },
     MessageSent { to_peer: String, message_id: String, timestamp: i64, signature: Option<String>, public_key: Option<String> },
     ChannelMessageSent { server_id: String, channel_id: String, message_id: String, timestamp: i64, signature: Option<String>, public_key: Option<String> },
     MessageSendFailed { to_peer: String, error: String },
@@ -207,7 +207,10 @@ pub enum NetworkEvent {
     ChannelNotificationHint {
         server_id: String, channel_id: String, from_peer: String,
         message_id: String,
-        has_everyone: bool, mentioned_names: Vec<String>, is_reply: bool,
+        has_everyone: bool, mentioned_names: Vec<String>,
+        /// True only when the message replies to one of OUR messages. Hints
+        /// from pre-0.9.1 senders carry no reply author, so this stays false.
+        is_reply_to_own: bool,
     },
     // -- Typing indicator events (Phase 3.5) --
     TypingStarted { peer_id: String, server_id: String, channel_id: String },
@@ -436,6 +439,23 @@ pub struct GuestSyncMessageFfi {
     pub reply_to: Option<String>,
     pub hidden_at: Option<i64>,
     pub reactions: Vec<GuestReactionFfi>,
+    /// Attachment metadata (never bytes) — Dart builds the file card from it.
+    pub file_meta: Option<GuestFileMetaFfi>,
+}
+
+/// FFI-facing file metadata for a guest message (metadata only, no bytes).
+pub struct GuestFileMetaFfi {
+    pub file_id: String,
+    pub file_name: String,
+    pub file_ext: String,
+    pub mime_type: String,
+    pub size_bytes: u64,
+    pub is_image: bool,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    /// Set ONLY when previewing our own server (local branch) and the file is
+    /// complete on OUR disk — the card renders it without any peer fetch.
+    pub disk_path: Option<String>,
 }
 
 /// FFI-facing guest reaction.
@@ -788,8 +808,8 @@ fn to_ffi_event(event: node::NetworkEvent) -> NetworkEvent {
         node::NetworkEvent::MessageReceived { from_peer, text, timestamp, message_id, reply_to_mid, link_preview, signature, public_key, is_own, duplicate } => {
             NetworkEvent::MessageReceived { from_peer, text, timestamp, message_id, reply_to_mid, link_preview: link_preview.map(Into::into), signature, public_key, is_own, duplicate }
         }
-        node::NetworkEvent::ChannelMessageReceived { server_id, channel_id, from_peer, text, timestamp, message_id, reply_to_mid, link_preview, signature, public_key, duplicate } => {
-            NetworkEvent::ChannelMessageReceived { server_id, channel_id, from_peer, text, timestamp, message_id, reply_to_mid, link_preview: link_preview.map(Into::into), signature, public_key, duplicate }
+        node::NetworkEvent::ChannelMessageReceived { server_id, channel_id, from_peer, text, timestamp, message_id, reply_to_mid, link_preview, signature, public_key, reply_to_own, duplicate } => {
+            NetworkEvent::ChannelMessageReceived { server_id, channel_id, from_peer, text, timestamp, message_id, reply_to_mid, link_preview: link_preview.map(Into::into), signature, public_key, reply_to_own, duplicate }
         }
         node::NetworkEvent::MessageSent { to_peer, message_id, timestamp, signature, public_key } => {
             NetworkEvent::MessageSent { to_peer, message_id, timestamp, signature, public_key }
@@ -935,10 +955,10 @@ fn to_ffi_event(event: node::NetworkEvent) -> NetworkEvent {
             NetworkEvent::BandwidthLimited
         }
         node::NetworkEvent::ChannelNotificationHint {
-            server_id, channel_id, from_peer, message_id, has_everyone, mentioned_names, is_reply,
+            server_id, channel_id, from_peer, message_id, has_everyone, mentioned_names, is_reply_to_own,
         } => {
             NetworkEvent::ChannelNotificationHint {
-                server_id, channel_id, from_peer, message_id, has_everyone, mentioned_names, is_reply,
+                server_id, channel_id, from_peer, message_id, has_everyone, mentioned_names, is_reply_to_own,
             }
         }
         node::NetworkEvent::TypingStarted { peer_id, server_id, channel_id } => {
@@ -1232,6 +1252,17 @@ fn to_ffi_event(event: node::NetworkEvent) -> NetworkEvent {
                     reactions: m.reactions.into_iter().map(|r| GuestReactionFfi {
                         emoji: r.emoji, peer_id: r.peer_id, added_at: r.added_at,
                     }).collect(),
+                    file_meta: m.file_meta.map(|fm| GuestFileMetaFfi {
+                        file_id: fm.file_id,
+                        file_name: fm.file_name,
+                        file_ext: fm.file_ext,
+                        mime_type: fm.mime_type,
+                        size_bytes: fm.size_bytes,
+                        is_image: fm.is_image,
+                        width: fm.width,
+                        height: fm.height,
+                        disk_path: fm.disk_path,
+                    }),
                 }).collect(),
                 sender_profiles: sender_profiles.into_iter().map(|p| SyncSenderProfileFfi {
                     peer_id: p.peer_id, name: p.name, avatar: p.avatar,

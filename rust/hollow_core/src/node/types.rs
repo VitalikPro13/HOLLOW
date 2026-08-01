@@ -146,6 +146,10 @@ pub(crate) enum NetworkEvent {
         /// notifications when true (replays would double-count/re-notify).
         duplicate: bool },
     ChannelMessageReceived { server_id: String, channel_id: String, from_peer: String, text: String, timestamp: i64, message_id: String, reply_to_mid: String, link_preview: Option<LinkPreviewRef>, signature: Option<String>, public_key: Option<String>,
+        /// True when `reply_to_mid` points at a message WE authored (parent row's
+        /// `is_mine`, resolved at ingest). Dart's mentions-only notification gate
+        /// reads this — `reply_to_mid` alone means "a reply to anyone".
+        reply_to_own: bool,
         /// Same contract as [`NetworkEvent::MessageReceived::duplicate`].
         duplicate: bool },
     MessageSent { to_peer: String, message_id: String, timestamp: i64, signature: Option<String>, public_key: Option<String> },
@@ -248,7 +252,11 @@ pub(crate) enum NetworkEvent {
     ChannelNotificationHint {
         server_id: String, channel_id: String, from_peer: String,
         message_id: String,
-        has_everyone: bool, mentioned_names: Vec<String>, is_reply: bool,
+        has_everyone: bool, mentioned_names: Vec<String>,
+        /// True only when the message replies to one of OUR messages (compared
+        /// against the wire hint's `reply_to_sender`). Hints from pre-0.9.1
+        /// senders can't tell us the reply author, so this stays false there.
+        is_reply_to_own: bool,
     },
     // -- Typing indicator events (Phase 3.5) --
     TypingStarted { peer_id: String, server_id: String, channel_id: String },
@@ -505,6 +513,29 @@ pub(crate) struct GuestSyncMessageFfi {
     pub reply_to: Option<String>,
     pub hidden_at: Option<i64>,
     pub reactions: Vec<GuestReactionFfi>,
+    /// Attachment metadata (name/size/type only — never bytes). The wire's
+    /// `SyncFileMetaItem` already carried this; it used to be dropped here,
+    /// leaving guests a raw `[file:<id>]` token instead of a file card.
+    pub file_meta: Option<GuestFileMetaFfi>,
+}
+
+/// FFI-visible file metadata for a guest message. Metadata ONLY — a guest
+/// obtains bytes separately via the gated public-file request path.
+#[derive(Clone)]
+pub(crate) struct GuestFileMetaFfi {
+    pub file_id: String,
+    pub file_name: String,
+    pub file_ext: String,
+    pub mime_type: String,
+    pub size_bytes: u64,
+    pub is_image: bool,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    /// LOCAL branch only (owner/member previewing their own server): the
+    /// completed file's path on OUR disk, so the card renders instantly with
+    /// no peer fetch. Never populated from the wire — a responder's path is
+    /// meaningless (and none rides `SyncFileMetaItem` anyway).
+    pub disk_path: Option<String>,
 }
 
 /// FFI-visible guest reaction.
@@ -616,6 +647,16 @@ pub(crate) enum NodeCommand {
     SetChannelVisibility { server_id: String, channel_id: String, visibility: String },
     SetChannelPosting { server_id: String, channel_id: String, posting: String },
     SetChannelPublic { server_id: String, channel_id: String, is_public: bool },
+    /// Request/reply: a LIVE clone of one server's in-memory CRDT state.
+    /// `get_server_channels` prefers this over the persisted snapshot —
+    /// enforcement reads the in-memory copy while the CrdtStore flush is
+    /// async fire-and-forget, so a DB read racing a fresh toggle write
+    /// returned the PREVIOUS value and reverted optimistic UI (#44
+    /// "toggle twice to make it stick"). `None` = server unknown.
+    GetServerStateSnapshot {
+        server_id: String,
+        reply: tokio::sync::oneshot::Sender<Option<crate::crdt::server_state::ServerState>>,
+    },
     MuteMember { server_id: String, peer_id: String, expires_at: u64 },
     UnmuteMember { server_id: String, peer_id: String },
     SetChannelSlowMode { server_id: String, channel_id: String, seconds: u32 },
@@ -629,6 +670,12 @@ pub(crate) enum NodeCommand {
     // -- Guest sync commands (Public Channels Phase 3) --
     RequestPublicChannels { server_id: String },
     RequestPublicChannelSync { server_id: String, channel_id: String, before_timestamp: Option<i64> },
+    /// Guest download of a PUBLIC-channel file: sends a FileRequest to ONE
+    /// room peer (peer_hint preferred when live — usually the sender) and
+    /// arms the `pending_public_file_requests` receipt cap. ONE target only —
+    /// each holder re-encrypts with its own AES key, so a fan-out poisons the
+    /// single header key (see handle_request_file).
+    RequestPublicFile { server_id: String, file_id: String, peer_hint: Option<String> },
     LeaveGuestRoom { server_id: String },
     CreateLabel { server_id: String, name: String, color: String, access: bool },
     DeleteLabel { server_id: String, label_id: String },
@@ -891,6 +938,7 @@ impl NodeCommand {
             Self::SetChannelVisibility { .. } => "SetChannelVisibility",
             Self::SetChannelPosting { .. } => "SetChannelPosting",
             Self::SetChannelPublic { .. } => "SetChannelPublic",
+            Self::GetServerStateSnapshot { .. } => "GetServerStateSnapshot",
             Self::MuteMember { .. } => "MuteMember",
             Self::UnmuteMember { .. } => "UnmuteMember",
             Self::SetChannelSlowMode { .. } => "SetChannelSlowMode",
@@ -901,6 +949,7 @@ impl NodeCommand {
             Self::RevokeChannelAccess { .. } => "RevokeChannelAccess",
             Self::RequestPublicChannels { .. } => "RequestPublicChannels",
             Self::RequestPublicChannelSync { .. } => "RequestPublicChannelSync",
+            Self::RequestPublicFile { .. } => "RequestPublicFile",
             Self::LeaveGuestRoom { .. } => "LeaveGuestRoom",
             Self::CreateLabel { .. } => "CreateLabel",
             Self::DeleteLabel { .. } => "DeleteLabel",
@@ -1506,8 +1555,15 @@ pub(crate) enum HavenMessage {
         has_everyone: bool,
         #[serde(default)]
         mentioned_names: Vec<String>,
+        /// Kept for pre-0.9.1 receivers (any-reply flag); new receivers gate on
+        /// `reply_to_sender` instead — a bare "is a reply" made the mentions-only
+        /// level fire on every reply to anyone.
         #[serde(default)]
         is_reply: bool,
+        /// MASTER id of the replied-to message's author (sender looks it up in
+        /// its own store). Receivers compare against their own identity.
+        #[serde(default)]
+        reply_to_sender: Option<String>,
     },
 
     // -- Public channels (Phase 7B) --
@@ -1537,6 +1593,13 @@ pub(crate) enum HavenMessage {
         /// pre-0.8.3 sender (their signatures are v1 and don't cover it).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         order_us: Option<i64>,
+        /// Attachment metadata for GUESTS (0.9.1+): guests can't decrypt the
+        /// MLS FileHeader, so a public-channel FILE post carries its metadata
+        /// here (never bytes). The v2 signature binds `file_id`, not this
+        /// blob — receivers require `file_meta.fid == file_id` and members
+        /// ignore it entirely (their metadata comes from the MLS header).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        file_meta: Option<SyncFileMetaItem>,
     },
 
     #[serde(rename = "pub_ch_edit")]
@@ -1685,6 +1748,35 @@ pub(crate) enum HavenMessage {
         /// Byte offset to resume from (0 = start from beginning).
         #[serde(default)]
         offset: u64,
+    },
+
+    /// Plaintext FileHeader answering a FileRequest from a NON-member for a
+    /// file in a PUBLIC channel (guest browser downloads). Members get the
+    /// Olm-wrapped `MessageEnvelope::FileHeader` instead; this variant exists
+    /// because a guest may hold no Olm session with the responder. Carrying
+    /// the per-request AES key in plaintext is consistent with the public
+    /// trust model — the relay already sees public-channel content itself.
+    /// Receivers accept it ONLY for a file they explicitly requested
+    /// (`pending_public_file_requests` receipt cap) from a guest room.
+    #[serde(rename = "pub_file_hdr")]
+    PublicFileHeader {
+        file_id: String,
+        name: String,
+        ext: String,
+        mime: String,
+        size: u64,
+        img: bool,
+        #[serde(default)]
+        w: Option<u32>,
+        #[serde(default)]
+        h: Option<u32>,
+        #[serde(default)]
+        mid: Option<String>,
+        sid: String,
+        cid: String,
+        ts: i64,
+        aes_key: String,
+        aes_nonce: String,
     },
 
     /// "Do you have this file?"

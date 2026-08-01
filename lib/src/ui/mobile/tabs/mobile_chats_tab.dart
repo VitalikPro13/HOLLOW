@@ -1444,6 +1444,18 @@ class _ChannelRow extends StatelessWidget {
               overflow: TextOverflow.ellipsis,
             ),
           ),
+          // Public indicator (#44) — mirrors the desktop sidebar row.
+          if (channel.isPublic) ...[
+            const SizedBox(width: HollowSpacing.xs),
+            Semantics(
+              label: 'Public channel',
+              child: Icon(
+                LucideIcons.globe,
+                size: 11,
+                color: hollow.textTertiary,
+              ),
+            ),
+          ],
           if (isVoice && voiceParticipants > 0) ...[
             const SizedBox(width: HollowSpacing.sm),
             Container(

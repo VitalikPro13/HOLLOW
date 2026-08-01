@@ -3,7 +3,6 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
-import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/member_panel_provider.dart';
 import 'package:hollow/src/core/providers/app_lifecycle_provider.dart';
 import 'package:hollow/src/core/providers/notification_provider.dart';
@@ -192,13 +191,16 @@ class SystemNotificationNotifier
     }
   }
 
-  /// Show a notification for a new channel message.
+  /// Show a notification for a new channel message. `isMention` is computed
+  /// ONCE at the event gate (event_provider) and passed in — this method used
+  /// to re-derive it from a drifted copy of the check whose `replyToMid !=
+  /// null` clause was a tautology that neutered "Mentions only" (#42).
   Future<void> notifyChannel({
     required String serverId,
     required String channelId,
     required String fromPeerId,
     required String text,
-    required String? replyToMid,
+    required bool isMention,
     String? channelName,
     String? messageId,
   }) async {
@@ -207,18 +209,7 @@ class SystemNotificationNotifier
         notifSettings.effectiveChannelLevel(serverId, channelId);
 
     if (level == NotificationLevel.nothing) return;
-    if (level == NotificationLevel.mentions) {
-      final localPeerId = ref.read(identityProvider).peerId ?? '';
-      final profiles = ref.read(profileProvider);
-      final localName = displayNameFor(profiles, localPeerId);
-      final localNick =
-          ref.read(serverNicknamesProvider(serverId))[localPeerId];
-      final isMentioned = text.contains('@everyone') ||
-          text.contains('@$localName') ||
-          (localNick != null && text.contains('@$localNick')) ||
-          replyToMid != null;
-      if (!isMentioned) return;
-    }
+    if (level == NotificationLevel.mentions && !isMention) return;
 
     final profiles = ref.read(profileProvider);
     final senderName = displayNameFor(profiles, fromPeerId);

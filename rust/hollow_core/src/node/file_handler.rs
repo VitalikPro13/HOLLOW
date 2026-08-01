@@ -1230,7 +1230,47 @@ async fn send_channel_file(
     // Restricted channels (Option B) encrypt under the per-channel
     // subgroup — the room sees ciphertext either way, identical to
     // message_ops' text sends.
-    broadcast_channel_caption_mls(mls, server_states, ws_cmd_tx, crypto_store, sid, cid, &envelope);
+    //
+    // PUBLIC channels mirror message_ops' text branch instead: plaintext
+    // `PublicChannelMessage` (guests receive it too), carrying `file_meta` so
+    // guests can render the file card live — they can't decrypt the MLS
+    // FileHeader that follows. Members ignore `file_meta` (MLS header is
+    // their metadata source) and dedup the row by message_id.
+    let is_public_channel = server_states
+        .get(sid)
+        .is_some_and(|s| s.is_channel_public(cid));
+    if is_public_channel {
+        let msg = HavenMessage::PublicChannelMessage {
+            server_id: sid.to_string(),
+            channel_id: cid.to_string(),
+            text: signing_payload_text.to_string(),
+            ts: timestamp,
+            sig: sig.clone(),
+            pk: pk.clone(),
+            mid: message_id.to_string(),
+            reply_to: None,
+            file_id: Some(file_id.to_string()),
+            link_preview: None,
+            order_us: Some(order_us),
+            file_meta: Some(super::types::SyncFileMetaItem {
+                fid: file_id.to_string(),
+                name: original_name.to_string(),
+                ext: final_ext.to_string(),
+                mime: final_mime.to_string(),
+                size: file_size,
+                img: is_image,
+                w: width,
+                h: height,
+                mid: Some(message_id.to_string()),
+                ts: timestamp,
+                sender: local_peer.to_string(),
+                vthumb: vthumb.clone(),
+            }),
+        };
+        super::message_ops::send_public_channel_msg(ws_cmd_tx, sid, &msg);
+    } else {
+        broadcast_channel_caption_mls(mls, server_states, ws_cmd_tx, crypto_store, sid, cid, &envelope);
+    }
 
     // Send FileHeader + file bytes via stream to connected peers.
     // Skip full-file streaming in erasure coding mode (6+ members) —

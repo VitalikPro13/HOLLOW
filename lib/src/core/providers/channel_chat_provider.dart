@@ -661,6 +661,24 @@ class ChannelChatNotifier
     }
   }
 
+  /// Attach file metadata to an in-RAM row that has none yet. Guest live
+  /// path: a public-channel file post's metadata arrives (FileHeaderReceived)
+  /// right after the message row, which was stored without an attachment —
+  /// without this the guest bubble renders the raw `[file:<id>]` token.
+  /// No-op when the row is absent or already carries an attachment (member
+  /// rows are rebuilt from the DB by `_reloadChatForFile` regardless).
+  void attachFileMeta(String serverId, String channelId, String messageId,
+      FileAttachment attachment) {
+    final key = '$serverId:$channelId';
+    final list = state[key];
+    if (list == null) return;
+    final idx = list.indexWhere((m) => m.messageId == messageId);
+    if (idx < 0 || list[idx].fileAttachment != null) return;
+    final updated = [...list];
+    updated[idx] = list[idx].copyWith(fileAttachment: attachment);
+    state = {...state, key: updated};
+  }
+
   void setGuestMessages(String serverId, String channelId,
       List<ChannelChatMessage> messages) {
     final key = '$serverId:$channelId';

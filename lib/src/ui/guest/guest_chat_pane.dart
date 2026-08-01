@@ -1,8 +1,15 @@
-﻿import 'package:flutter/material.dart';
+﻿import 'dart:async';
+import 'dart:io';
+
+import 'package:file_picker/file_picker.dart';
+import 'package:flutter/material.dart';
 import 'package:hollow/src/ui/components/ui_scale.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/models/channel_chat_message.dart';
+import 'package:hollow/src/core/models/file_attachment.dart';
 import 'package:hollow/src/core/providers/channel_chat_provider.dart';
+import 'package:hollow/src/core/providers/file_transfer_provider.dart';
 import 'package:hollow/src/core/providers/guest_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
@@ -43,6 +50,13 @@ class _GuestChatPaneState extends ConsumerState<GuestChatPane> {
   final _searchController = TextEditingController();
   int _prevMessageCount = 0;
 
+  /// File ids already requested this session (images auto-fetch once; the
+  /// Download hover action re-requests explicitly).
+  final Set<String> _requestedFiles = {};
+  List<ChannelChatMessage> _lastVisibleList = const [];
+  Timer? _viewportDebounce;
+  bool _isPicking = false;
+
   @override
   void initState() {
     super.initState();
@@ -50,12 +64,120 @@ class _GuestChatPaneState extends ConsumerState<GuestChatPane> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _jumpToBottom();
     });
+    // Auto-fetch IMAGES near the viewport (guest policy: images auto, other
+    // file types on demand via the Download action) — mirrors the member
+    // pane's viewport sweep, but through the gated public-file request path.
+    _itemPositionsListener.itemPositions.addListener(_onViewportChanged);
   }
 
   @override
   void dispose() {
+    _viewportDebounce?.cancel();
+    _itemPositionsListener.itemPositions.removeListener(_onViewportChanged);
     _searchController.dispose();
     super.dispose();
+  }
+
+  void _onViewportChanged() {
+    _viewportDebounce?.cancel();
+    _viewportDebounce = Timer(const Duration(milliseconds: 300), () {
+      if (!mounted) return;
+      final positions = _itemPositionsListener.itemPositions.value;
+      final list = _lastVisibleList;
+      if (positions.isEmpty || list.isEmpty) return;
+      // Builder indices are REVERSED (newest = 0); map to chronological and
+      // widen by 15 rows each side like the member sweep.
+      var lo = list.length, hi = -1;
+      for (final p in positions) {
+        final msgIndex = list.length - 1 - p.index;
+        if (msgIndex < 0 || msgIndex >= list.length) continue;
+        if (msgIndex < lo) lo = msgIndex;
+        if (msgIndex > hi) hi = msgIndex;
+      }
+      if (hi < 0) return;
+      lo = (lo - 15).clamp(0, list.length - 1);
+      hi = (hi + 15).clamp(0, list.length - 1);
+      final transfers = ref.read(fileTransferProvider);
+      for (var i = lo; i <= hi; i++) {
+        final msg = list[i];
+        final att = msg.fileAttachment;
+        if (att == null || !att.isImage) continue;
+        if (att.isComplete || att.diskPath != null) continue;
+        final transfer = transfers[att.fileId];
+        if (transfer?.isComplete == true || transfer?.isDownloading == true) {
+          continue;
+        }
+        if (!_requestedFiles.add(att.fileId)) continue;
+        crdt_api.requestPublicFile(
+          serverId: widget.serverId,
+          fileId: att.fileId,
+          peerHint: msg.senderId,
+        ).catchError((_) {});
+      }
+    });
+  }
+
+  /// Download hover action: Save As when the bytes are already on disk,
+  /// otherwise request them from a room peer (gated public-file path).
+  Future<void> _downloadFor(ChannelChatMessage msg) async {
+    final att = msg.fileAttachment;
+    if (att == null) return;
+    final transfer = ref.read(fileTransferProvider)[att.fileId];
+    final diskPath = att.diskPath ?? transfer?.diskPath;
+    if (diskPath != null && File(diskPath).existsSync()) {
+      await _saveAs(diskPath, att);
+      return;
+    }
+    if (transfer?.isDownloading == true) {
+      if (mounted) {
+        HollowToast.show(context, 'File is already downloading...',
+            type: HollowToastType.info);
+      }
+      return;
+    }
+    if (mounted) {
+      HollowToast.show(context, 'Requesting file from peers...',
+          type: HollowToastType.info);
+    }
+    _requestedFiles.add(att.fileId);
+    try {
+      await crdt_api.requestPublicFile(
+        serverId: widget.serverId,
+        fileId: att.fileId,
+        peerHint: msg.senderId,
+      );
+    } catch (e) {
+      if (mounted) {
+        HollowToast.show(context, 'File request failed: $e',
+            type: HollowToastType.error);
+      }
+    }
+  }
+
+  Future<void> _saveAs(String sourcePath, FileAttachment att) async {
+    if (_isPicking) return;
+    _isPicking = true;
+    try {
+      final savePath = await FilePicker.platform.saveFile(
+        dialogTitle: 'Save file',
+        fileName: att.fileName,
+        type: FileType.custom,
+        allowedExtensions: [att.fileExt],
+      );
+      if (savePath == null) return;
+      await File(sourcePath).copy(savePath);
+      if (mounted) {
+        HollowToast.show(context, 'File saved',
+            type: HollowToastType.success);
+      }
+    } catch (e) {
+      if (mounted) {
+        HollowToast.show(context, 'Save failed: $e',
+            type: HollowToastType.error);
+      }
+    } finally {
+      _isPicking = false;
+    }
   }
 
   void _jumpToBottom() {
@@ -91,6 +213,11 @@ class _GuestChatPaneState extends ConsumerState<GuestChatPane> {
             ?.name ??
         widget.channelId));
 
+    // Attachments render as file cards for guests too: metadata rides the
+    // guest sync / live public message, and bytes come through the gated
+    // public-file request path (images auto-fetch near the viewport, other
+    // types via the Download hover action). Owner preview (member rows with
+    // a diskPath) now matches what guests can actually obtain.
     final visible = messages.where((m) => m.hiddenAt == null).toList();
     final filtered = _searchQuery.isEmpty
         ? visible
@@ -98,6 +225,9 @@ class _GuestChatPaneState extends ConsumerState<GuestChatPane> {
             .where(
                 (m) => m.text.toLowerCase().contains(_searchQuery.toLowerCase()))
             .toList();
+    // The viewport sweep maps builder indices over the list the builder
+    // renders — keep them in lockstep (search narrows both).
+    _lastVisibleList = filtered;
 
     return Column(
       children: [
@@ -304,6 +434,9 @@ class _GuestChatPaneState extends ConsumerState<GuestChatPane> {
                                       ),
                                     );
                                   },
+                                  onDownload: msg.fileAttachment == null
+                                      ? null
+                                      : () => _downloadFor(msg),
                                   child: ChannelMessageBubble(
                                     message: msg,
                                     serverId: widget.serverId,

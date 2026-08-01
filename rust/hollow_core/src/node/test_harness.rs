@@ -7542,6 +7542,238 @@ async fn channel_file_request_reroutes_to_online_holder_when_sender_offline() {
 }
 
 // ---------------------------------------------------------------------------
+// FileRequest gate + guest public downloads (0.9.1). Serving used to be
+// UNGATED — any peer that learned a file_id could pull ANY file. Now:
+//   1. a NON-member requesting a file from a PRIVATE channel is refused
+//      (no header, no bytes, no row);
+//   2. once the channel is PUBLIC, guest sync carries the file's metadata
+//      (SyncFileMetaItem → GuestSyncMessageFfi — it used to be dropped);
+//   3. RequestPublicFile serves the guest the actual bytes via the plaintext
+//      PublicFileHeader + WS stream (receipt-cap armed);
+//   4. a file posted live into a public channel reaches the guest as a
+//      plaintext PublicChannelMessage + metadata FileHeaderReceived.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
+async fn file_request_gate_refuses_stranger_and_serves_guest_public() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    const O_MASTER: u8 = 230;
+    const G_MASTER: u8 = 231; // stranger/guest — no friendship, never a member
+    let o_master = NativeKeypair::from_secret_bytes(&seed_bytes(O_MASTER)).peer_id();
+
+    let mut o = spawn_node_with_friends(&relay, O_MASTER, O_MASTER, &[]).await;
+    sleep_ms(1200).await;
+    let mut g = spawn_node_with_friends(&relay, G_MASTER, G_MASTER, &[]).await;
+    sleep_ms(1200).await;
+
+    let server_id = create_server_and_wait(&mut o, "Gate Server").await;
+    let general = general_channel_of(&server_id);
+    sleep_ms(500).await;
+
+    // O posts a file while #general is PRIVATE.
+    let contents: &[u8] = b"gated bytes - guests only once public";
+    let src = global_tmp.path().join("gated.txt");
+    std::fs::write(&src, contents).expect("write src file");
+    drain_events(&mut o);
+    o.cmd_tx
+        .send(NodeCommand::SendFile(Box::new(super::types::SendFilePayload {
+            peer_id: None,
+            server_id: Some(server_id.clone()),
+            channel_id: Some(general.clone()),
+            file_path: src.to_str().unwrap().to_string(),
+            message_id: "gate-file-1".to_string(),
+            message_text: String::new(),
+            vthumb: None,
+            override_width: None,
+            override_height: None,
+            share_ref: None,
+        })))
+        .await
+        .unwrap();
+    let mut got_fid: Option<String> = None;
+    wait_event(&mut o, std::time::Duration::from_secs(8), |ev| {
+        if let NetworkEvent::FileCompleted { file_id, .. } = ev {
+            got_fid = Some(file_id.clone());
+        }
+        got_fid.is_some()
+    })
+    .await;
+    let fid = got_fid.expect("sender-side FileCompleted carries the file id");
+
+    // G joins the WS room as a GUEST (not-a-member branch of
+    // RequestPublicChannels) so direct sends to O can route.
+    g.cmd_tx
+        .send(NodeCommand::RequestPublicChannels { server_id: server_id.clone() })
+        .await
+        .unwrap();
+    sleep_ms(2500).await; // room join + presence settle
+    drain_events(&mut g);
+
+    // 1. PRIVATE channel: the stranger's request must be REFUSED.
+    g.cmd_tx
+        .send(NodeCommand::RequestFile {
+            file_id: fid.clone(),
+            peer_id: o_master.clone(),
+            chunks: vec![],
+        })
+        .await
+        .unwrap();
+    let leaked = wait_event(&mut g, std::time::Duration::from_secs(5), |ev| {
+        matches!(ev, NetworkEvent::FileCompleted { file_id, .. } if *file_id == fid)
+            || matches!(ev, NetworkEvent::FileHeaderReceived { file_id, .. } if *file_id == fid)
+    })
+    .await;
+    assert!(!leaked, "a non-member must NOT be served a private-channel file");
+    assert!(
+        g.file_meta(&fid).map(|m| m.completed_at.is_none()).unwrap_or(true),
+        "no bytes may have landed on the stranger's disk"
+    );
+
+    // O publishes #general.
+    o.cmd_tx
+        .send(NodeCommand::SetChannelPublic {
+            server_id: server_id.clone(),
+            channel_id: general.clone(),
+            is_public: true,
+        })
+        .await
+        .unwrap();
+    sleep_ms(2000).await;
+    drain_events(&mut g);
+
+    // 2. Guest sync now carries the attachment's metadata.
+    g.cmd_tx
+        .send(NodeCommand::RequestPublicChannelSync {
+            server_id: server_id.clone(),
+            channel_id: general.clone(),
+            before_timestamp: None,
+        })
+        .await
+        .unwrap();
+    let mut synced_meta = false;
+    wait_event(&mut g, std::time::Duration::from_secs(8), |ev| {
+        if let NetworkEvent::PublicChannelSyncReceived { messages, .. } = ev {
+            synced_meta = messages.iter().any(|m| {
+                m.file_meta.as_ref().is_some_and(|fm| {
+                    fm.file_id == fid && fm.file_name == "gated.txt" && !fm.is_image
+                })
+            });
+        }
+        synced_meta
+    })
+    .await;
+    assert!(synced_meta, "guest sync must carry file metadata for the card");
+
+    // 3. The gated public download serves the bytes.
+    drain_events(&mut g);
+    g.cmd_tx
+        .send(NodeCommand::RequestPublicFile {
+            server_id: server_id.clone(),
+            file_id: fid.clone(),
+            peer_hint: None,
+        })
+        .await
+        .unwrap();
+    let g_done = wait_event(&mut g, std::time::Duration::from_secs(10), |ev| {
+        matches!(ev, NetworkEvent::FileCompleted { file_id, .. } if *file_id == fid)
+    })
+    .await;
+    assert!(g_done, "guest must receive the public-channel file bytes");
+    sleep_ms(300).await;
+    let meta = g.file_meta(&fid).expect("guest persisted the files row");
+    let disk = meta.disk_path.expect("guest's completed file has a disk path");
+    assert_eq!(std::fs::read(&disk).unwrap(), contents, "guest holds the original bytes");
+
+    // 4. A file posted LIVE into the now-public channel reaches the guest as
+    // a plaintext message + metadata header (no MLS involved).
+    let live_src = global_tmp.path().join("live.txt");
+    std::fs::write(&live_src, b"live public file").expect("write live src");
+    drain_events(&mut g);
+    o.cmd_tx
+        .send(NodeCommand::SendFile(Box::new(super::types::SendFilePayload {
+            peer_id: None,
+            server_id: Some(server_id.clone()),
+            channel_id: Some(general.clone()),
+            file_path: live_src.to_str().unwrap().to_string(),
+            message_id: "gate-file-live".to_string(),
+            message_text: "live caption".to_string(),
+            vthumb: None,
+            override_width: None,
+            override_height: None,
+            share_ref: None,
+        })))
+        .await
+        .unwrap();
+    let mut live_row = false;
+    let mut live_meta = false;
+    wait_event(&mut g, std::time::Duration::from_secs(8), |ev| {
+        if matches!(ev, NetworkEvent::ChannelMessageReceived { text, .. } if text == "live caption") {
+            live_row = true;
+        }
+        if matches!(ev, NetworkEvent::FileHeaderReceived { file_name, .. } if file_name == "live.txt") {
+            live_meta = true;
+        }
+        live_row && live_meta
+    })
+    .await;
+    assert!(live_row, "guest must receive the live public file message");
+    assert!(live_meta, "guest must receive the live file's metadata header");
+
+    // 5. Owner-preview window: the LOCAL sync branch (member browsing their
+    // own public channel) must return the LATEST page, mirroring the remote
+    // responder — `messages_since(0)` returned the OLDEST 50, landing a
+    // cold-started owner at the top of history. Push the channel past one
+    // page and check the local sync window.
+    for i in 0..55 {
+        o.cmd_tx
+            .send(NodeCommand::SendChannelMessage {
+                server_id: server_id.clone(),
+                channel_id: general.clone(),
+                text: format!("filler-{i}"),
+                message_id: format!("gate-filler-{i}"),
+                reply_to_mid: None,
+                link_preview: None,
+            })
+            .await
+            .unwrap();
+        // Distinct ms timestamps — the page query orders by `timestamp`, and
+        // 55 same-ms rows would make the window cut arbitrary (flaky).
+        sleep_ms(10).await;
+    }
+    sleep_ms(3000).await; // let the sends persist
+    drain_events(&mut o);
+    o.cmd_tx
+        .send(NodeCommand::RequestPublicChannelSync {
+            server_id: server_id.clone(),
+            channel_id: general.clone(),
+            before_timestamp: None,
+        })
+        .await
+        .unwrap();
+    let mut window_ok = false;
+    wait_event(&mut o, std::time::Duration::from_secs(8), |ev| {
+        if let NetworkEvent::PublicChannelSyncReceived { messages, .. } = ev {
+            let has_newest = messages.iter().any(|m| m.text == "filler-54");
+            let has_oldest = messages.iter().any(|m| m.text == "filler-0");
+            window_ok = has_newest && !has_oldest;
+            return true;
+        }
+        false
+    })
+    .await;
+    assert!(window_ok, "owner preview must load the LATEST page, not the oldest");
+
+    drop(o);
+    drop(g);
+}
+
+// ---------------------------------------------------------------------------
 // SELF-DM ("Saved messages", 2026-07): a DM whose recipient is our OWN master
 // is a notes-to-self thread. The send path stores it locally (keyed on our own
 // master) exactly like any DM, but `fan_out_dm_envelope` must SKIP the

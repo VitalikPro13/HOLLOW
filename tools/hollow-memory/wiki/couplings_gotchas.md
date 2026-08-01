@@ -126,6 +126,8 @@ Current variants that correctly emit `ServerUpdated`: `ServerSettingChanged`, `S
 
 **Correct approach:** Call `channelListProvider.updateChannel()` with the new property value immediately, then fire the FFI call. The 50ms delay in `_refreshServerState` lets CrdtStore flush before the server-state reload.
 
+**Structural fix (0.9.1):** `get_server_channels` no longer races the flush at all — it round-trips `NodeCommand::GetServerStateSnapshot` (oneshot reply) to read the LIVE in-memory `ServerState` (the copy that enforces), with the DB-snapshot read kept only as the node-down/timeout fallback (3 s → degrade, never hang). Display and enforcement now read the same copy; the optimistic-update rule above still applies for instant feedback.
+
 ### serde(default) is mandatory on all new persisted fields
 
 **Rule:** ALWAYS add `#[serde(default)]` to ANY new field added to `ServerState` or any struct stored as JSON in SQLCipher.

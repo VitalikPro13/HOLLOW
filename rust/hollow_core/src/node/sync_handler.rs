@@ -1990,6 +1990,21 @@ pub(crate) async fn handle_set_channel_public(
     crypto_store: &CryptoStore,
     crdt_store: &CrdtStore,
 ) -> bool {
+    // Voice channels can never be public (#44): the browser's list responders
+    // filter them out (the toggle produced an appear-then-vanish ghost) and a
+    // public voice channel flips its SFrame key domain. Desktop/mobile hide
+    // the toggle; this covers stale UIs and any other caller.
+    if server_states
+        .get(&server_id)
+        .and_then(|s| s.channels.get(&channel_id))
+        .is_some_and(|ch| ch.channel_type != crate::crdt::server_state::ChannelType::Text)
+    {
+        hollow_log!("[HOLLOW-CRDT] REFUSED set_channel_public on non-text channel {channel_id}");
+        let _ = event_tx.send(NetworkEvent::Error {
+            message: "Voice channels cannot be made public".to_string(),
+        }).await;
+        return true;
+    }
     if author_broadcast_op(
         server_states, event_tx, ws_cmd_tx, ws_room_peers, gossip_overlays, local_peer_str,
         &server_id,
@@ -2451,7 +2466,11 @@ async fn emit_crdt_apply_event(
                 let _ = event_tx.send(NetworkEvent::ServerUpdated {
                     server_id: sid.clone(),
                 }).await;
-                if let Some(ch) = state.channels.get(channel_id) {
+                // Text only (#44) — announcing a voice channel put a ghost
+                // entry in browsers that the next list refresh dropped.
+                if let Some(ch) = state.channels.get(channel_id)
+                    .filter(|c| c.channel_type == crate::crdt::server_state::ChannelType::Text)
+                {
                     let notify = HavenMessage::PublicChannelConfigChanged {
                         server_id: sid.clone(),
                         channel_id: channel_id.clone(),

@@ -203,9 +203,20 @@ pub fn get_joined_servers() -> Result<Vec<ServerFfi>, String> {
     Ok(result)
 }
 
-/// Get channels for a specific server. Reads from the local DB.
+/// Get channels for a specific server.
+///
+/// Prefers a LIVE clone of the event loop's in-memory state (the copy that
+/// ENFORCES — request/reply over `GetServerStateSnapshot`): the CrdtStore
+/// flush is async fire-and-forget and `ServerUpdated` fires BEFORE it lands,
+/// so the old DB-snapshot read racing a fresh toggle write returned the
+/// PREVIOUS value and reverted optimistic UI (#44 "toggle twice to stick").
+/// Falls back to the persisted DB snapshot when the node isn't running (or
+/// the reply times out) so early-startup callers keep working.
 #[frb]
 pub fn get_server_channels(server_id: String) -> Result<Vec<ChannelFfi>, String> {
+    if let Some(state) = live_server_state(&server_id) {
+        return Ok(channels_from_state(&state));
+    }
     let store_guard = super::storage::get_store().lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let store = store_guard.as_ref().ok_or("Message store is not open")?;
     let state_json = store
@@ -215,7 +226,40 @@ pub fn get_server_channels(server_id: String) -> Result<Vec<ChannelFfi>, String>
     let state =
         serde_json::from_str::<crate::crdt::server_state::ServerState>(&state_json)
             .map_err(|e| format!("Failed to parse server state: {e}"))?;
+    Ok(channels_from_state(&state))
+}
 
+/// Live in-memory `ServerState` clone from the running event loop, or `None`
+/// when the node is down, the server is unknown, or the reply doesn't arrive
+/// within 3s (a wedged loop must degrade to the DB read, not hang the UI).
+fn live_server_state(server_id: &str) -> Option<crate::crdt::server_state::ServerState> {
+    let node = get_node();
+    let cmd_tx = {
+        let guard = node.lock().ok()?;
+        guard.as_ref()?.cmd_tx.clone()
+        // Guard dropped before the blocking send (never hold the global node
+        // mutex across block_on — it serializes all other FFI calls).
+    };
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    let rt = get_runtime();
+    rt.block_on(async {
+        cmd_tx
+            .send(node::NodeCommand::GetServerStateSnapshot {
+                server_id: server_id.to_string(),
+                reply: reply_tx,
+            })
+            .await
+            .ok()?;
+        tokio::time::timeout(std::time::Duration::from_secs(3), reply_rx)
+            .await
+            .ok()?
+            .ok()?
+    })
+}
+
+/// Shared `ServerState` → `Vec<ChannelFfi>` mapping for the live and
+/// DB-snapshot paths of [`get_server_channels`].
+fn channels_from_state(state: &crate::crdt::server_state::ServerState) -> Vec<ChannelFfi> {
     // Local master for the me_can_see/me_can_post computation (same load
     // pattern as get_joined_servers). None (no identity yet) fails closed.
     let me = crate::identity::load_existing_identity()
@@ -227,7 +271,7 @@ pub fn get_server_channels(server_id: String) -> Result<Vec<ChannelFfi>, String>
         .unwrap_or_default()
         .as_millis() as u64;
 
-    let channels = state
+    state
         .channels_list()
         .into_iter()
         .map(|ch| {
@@ -250,7 +294,10 @@ pub fn get_server_channels(server_id: String) -> Result<Vec<ChannelFfi>, String>
                     ChannelPosting::ModeratorPlus => "moderator".to_string(),
                     ChannelPosting::AdminPlus => "admin".to_string(),
                 },
-                is_public: ch.is_public,
+                // EFFECTIVE flag — voice channels are never public (#44), so a
+                // stale CRDT `is_public` on one never reaches Dart (the Dart
+                // subgroup mirror + all UI read this field).
+                is_public: ch.effective_public(),
                 slow_mode: ch.slow_mode,
                 media_only: ch.media_only,
                 visibility_labels: ch.visibility_labels.clone(),
@@ -263,9 +310,7 @@ pub fn get_server_channels(server_id: String) -> Result<Vec<ChannelFfi>, String>
                     .unwrap_or(false),
             }
         })
-        .collect();
-
-    Ok(channels)
+        .collect()
 }
 
 /// Get members for a specific server. Reads from the local DB.
@@ -1124,6 +1169,35 @@ pub fn request_public_channel_sync(
             server_id,
             channel_id,
             before_timestamp,
+        }),
+    )
+    .map_err(|e| format!("Failed to send command: {e}"))?;
+
+    Ok(())
+}
+
+/// Guest download of a PUBLIC-channel file (guest mode): asks one room peer
+/// for the bytes. Progress/completion arrive via the normal FileProgress /
+/// FileCompleted events keyed by `file_id`.
+#[frb]
+pub fn request_public_file(
+    server_id: String,
+    file_id: String,
+    peer_hint: Option<String>,
+) -> Result<(), String> {
+    let node = get_node();
+    let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
+    // Release the global node mutex BEFORE the (possibly waiting) send —
+    // holding it across block_on(send) serializes all other FFI calls.
+    drop(guard);
+
+    let rt = get_runtime();
+    rt.block_on(
+        cmd_tx.send(node::NodeCommand::RequestPublicFile {
+            server_id,
+            file_id,
+            peer_hint,
         }),
     )
     .map_err(|e| format!("Failed to send command: {e}"))?;

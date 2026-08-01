@@ -168,6 +168,19 @@ pub struct ChannelInfo {
     pub posting_labels: Vec<String>,
 }
 
+impl ChannelInfo {
+    /// Whether this channel is EFFECTIVELY public. Voice channels can never be
+    /// public (#44): only their text chat would be browsable, the browser's
+    /// list responders already filter them out (appear-then-vanish), and a
+    /// public voice channel silently changes the SFrame key domain
+    /// (`channel_uses_subgroup`). A stale/malicious `is_public` on a voice
+    /// channel is neutralized HERE rather than by a migration op — every read
+    /// must go through this, never the raw flag.
+    pub fn effective_public(&self) -> bool {
+        self.is_public && self.channel_type == ChannelType::Text
+    }
+}
+
 /// Metadata for a member within a server.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct MemberInfo {
@@ -648,7 +661,11 @@ impl ServerState {
 
             CrdtPayload::ChannelPublicChanged { channel_id, is_public } => {
                 if let Some(ch) = self.channels.get_mut(channel_id) {
-                    ch.is_public = *is_public;
+                    // Voice channels can never be public (#44) — drop the flag
+                    // at apply so a pre-guard client's op can't wedge one in.
+                    if ch.channel_type == ChannelType::Text {
+                        ch.is_public = *is_public;
+                    }
                 }
             }
 
@@ -1258,9 +1275,18 @@ impl ServerState {
             CrdtPayload::MemberUnmuted { .. } => {
                 (sender_perms & Permission::KICK_MEMBERS) != 0
             }
+            CrdtPayload::ChannelPublicChanged { channel_id, .. } => {
+                // MANAGE_CHANNELS + text channels only — voice channels can
+                // never be public (#44). Unknown channel id passes (apply is a
+                // no-op there); the apply guard is the backstop.
+                (sender_perms & Permission::MANAGE_CHANNELS) != 0
+                    && self
+                        .channels
+                        .get(channel_id)
+                        .map_or(true, |ch| ch.channel_type == ChannelType::Text)
+            }
             CrdtPayload::ChannelVisibilityChanged { .. }
             | CrdtPayload::ChannelPostingChanged { .. }
-            | CrdtPayload::ChannelPublicChanged { .. }
             | CrdtPayload::ChannelSlowModeChanged { .. }
             | CrdtPayload::ChannelMediaOnlyChanged { .. }
             | CrdtPayload::ChannelVisibilityLabelsChanged { .. }
@@ -1461,8 +1487,10 @@ impl ServerState {
         }
     }
 
+    /// Effective public flag — voice channels are never public (#44), even if
+    /// a stale CRDT still carries `is_public = true` for one.
     pub fn is_channel_public(&self, channel_id: &str) -> bool {
-        self.channels.get(channel_id).map_or(false, |ch| ch.is_public)
+        self.channels.get(channel_id).map_or(false, |ch| ch.effective_public())
     }
 
     /// Check if a peer can post in a channel (at the current wall clock).
@@ -1514,7 +1542,7 @@ impl ServerState {
     /// hold the key. `Everyone` channels and public channels do NOT use a subgroup.
     pub fn channel_uses_subgroup(&self, channel_id: &str) -> bool {
         self.channels.get(channel_id).is_some_and(|ch| {
-            !ch.is_public
+            !ch.effective_public()
                 && (ch.visibility != ChannelVisibility::Everyone
                     || !ch.visibility_labels.is_empty())
         })
@@ -1527,7 +1555,7 @@ impl ServerState {
         self.channels
             .values()
             .filter(|ch| {
-                !ch.is_public
+                !ch.effective_public()
                     && (ch.visibility != ChannelVisibility::Everyone
                         || !ch.visibility_labels.is_empty())
             })
@@ -2705,6 +2733,40 @@ mod tests {
         });
         state.apply_op(&op).unwrap();
         assert!(!state.is_channel_public(&general_id));
+    }
+
+    /// Voice channels can never be public (#44): the op is refused at
+    /// op_allowed, dropped at apply, and even a stale persisted flag is
+    /// neutralized by the effective read.
+    #[test]
+    fn voice_channel_never_public() {
+        let mut state = ServerState::new("s1".into(), "Test".into(), "owner".into());
+        let op = state.create_op(CrdtPayload::ChannelAdded {
+            channel_id: "ch-vc".into(),
+            name: "Voice".into(),
+            category: None,
+            channel_type: "voice".into(),
+        });
+        state.apply_op(&op).unwrap();
+
+        // op_allowed refuses it even for the owner.
+        let public_op = state.create_op(CrdtPayload::ChannelPublicChanged {
+            channel_id: "ch-vc".into(),
+            is_public: true,
+        });
+        assert!(!state.op_allowed(&public_op));
+
+        // Apply (a pre-guard client's op) leaves the raw flag untouched.
+        state.apply_op(&public_op).unwrap();
+        assert!(!state.channels["ch-vc"].is_public);
+        assert!(!state.is_channel_public("ch-vc"));
+
+        // A stale persisted flag (pre-0.9.1 state snapshot) is neutralized by
+        // the effective read — and the channel still counts as a subgroup
+        // candidate when restricted (SFrame key domain must not flip).
+        state.channels.get_mut("ch-vc").unwrap().is_public = true;
+        assert!(!state.is_channel_public("ch-vc"));
+        assert!(!state.channels["ch-vc"].effective_public());
     }
 
     #[test]

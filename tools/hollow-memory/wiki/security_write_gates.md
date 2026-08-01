@@ -141,6 +141,23 @@ channel row with no signature. Harmless today (Dart can only write to its own
 DB), but it is the one path that could reintroduce unsigned rows, so it should
 be deleted rather than left as a loaded gun.
 
+## 7. File SERVING gate + guest file ingest (0.9.1)
+
+Serving is a READ, but it belongs in this enumeration: it was the one
+remote-reachable disclosure path with **no gate at all** — any authenticated
+peer that learned a `file_id` (guests see them in plaintext public messages)
+could pull ANY file we hold, DM attachments included.
+
+| Path | Gate |
+|---|---|
+| `HavenMessage::FileRequest` serving (`swarm.rs`, before the disk read) | Blocklist refused. Then by the stored row's context: `dm` → requester must be the conversation counterparty or our own sibling (`same_identity`); `channel` → `is_member(resolved master)` OR `is_channel_public(cid)` (effective — voice never public); unknown context / missing server state fails CLOSED. `requester_is_member` also picks the header transport: Olm `FileHeader` for members/DM parties, plaintext `HavenMessage::PublicFileHeader` for non-members on public channels (they may hold no Olm session; the content is public — the relay already sees it) |
+| `PublicFileHeader` ingest (registers the stream decrypt key → bytes land on disk → `insert_file_metadata`) | REQUESTED-ONLY, mirroring the asset rail: accepted only when `pending_public_file_requests` holds the file_id with a matching server, < 120 s old, and the server is in `guest_rooms` (entry removed on receipt; map cleared on WS disconnect). An unsolicited plaintext header would otherwise register a decrypt key and let a stranger stream arbitrary bytes onto our disk. Armed exclusively by `NodeCommand::RequestPublicFile` |
+
+Guest-side sync/live `file_meta` blobs are display-only and never DB writes; the
+v2 item signature binds `file_id`, not the blob, so receivers require
+`fm.fid == item.file_id` (same reasoning as the §3 owner guard). Harness
+coverage: `file_request_gate_refuses_stranger_and_serves_guest_public`.
+
 ---
 
 ## Related

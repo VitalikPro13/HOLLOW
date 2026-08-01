@@ -58,6 +58,7 @@ import 'package:hollow/src/core/providers/room_budget_provider.dart';
 import 'package:hollow/src/core/providers/guest_provider.dart';
 import 'package:hollow/src/core/providers/temporary_nickname_provider.dart';
 import 'package:hollow/src/core/models/channel_chat_message.dart';
+import 'package:hollow/src/core/models/file_attachment.dart';
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 import 'package:hollow/src/ui/app.dart' show hollowNavigatorKey;
 import 'package:hollow/src/ui/components/hollow_toast.dart';
@@ -450,7 +451,7 @@ class EventStreamNotifier extends Notifier<bool> {
         }
 
       case NetworkEvent_ChannelMessageReceived(
-            :final serverId, :final channelId, :final fromPeer, :final text, :final timestamp, :final messageId, :final replyToMid, :final linkPreview, :final signature, :final publicKey, :final duplicate):
+            :final serverId, :final channelId, :final fromPeer, :final text, :final timestamp, :final messageId, :final replyToMid, :final linkPreview, :final signature, :final publicKey, :final replyToOwn, :final duplicate):
         ref.read(channelChatProvider.notifier).receiveMessage(
               serverId, channelId, fromPeer, text, timestamp, messageId, replyToMid,
               linkPreview: linkPreview,
@@ -491,10 +492,14 @@ class EventStreamNotifier extends Notifier<bool> {
             ref.read(profileProvider), localPeerId);
         final localNick =
             ref.read(serverNicknamesProvider(serverId))[localPeerId];
+        // `replyToOwn` (Rust-computed: parent row's author is US) — never
+        // `replyToMid`, which is a non-nullable String ('' when not a reply);
+        // the old `replyToMid != null` was a tautology that made EVERY message
+        // count as a mention, so "Mentions only" behaved like "All" (#42).
         final isMentioned = text.contains('@everyone') ||
             text.contains('@$localName') ||
             (localNick != null && text.contains('@$localNick')) ||
-            replyToMid != null;
+            replyToOwn;
         final isMentionFiltered = channelNotifLevel == NotificationLevel.mentions && !isMentioned;
         if (!isChannelMuted && !isMentionFiltered && !senderMasterBlocked) {
           ref.read(unreadProvider.notifier).onChannelMessage(
@@ -513,7 +518,7 @@ class EventStreamNotifier extends Notifier<bool> {
             !isMentionFiltered &&
             !senderMasterBlocked) {
           _notifyChannelWithName(
-              serverId, channelId, fromPeer, text, replyToMid, messageId);
+              serverId, channelId, fromPeer, text, isMentioned, messageId);
         }
 
       case NetworkEvent_SessionEstablished(:final peerId):
@@ -1050,7 +1055,7 @@ class EventStreamNotifier extends Notifier<bool> {
       case NetworkEvent_ChannelNotificationHint(
             :final serverId, :final channelId, :final fromPeer,
             :final messageId,
-            :final hasEveryone, :final mentionedNames, :final isReply):
+            :final hasEveryone, :final mentionedNames, :final isReplyToOwn):
         // Ignore own hints.
         final localPeerId = ref.read(identityProvider).peerId ?? '';
         if (fromPeer == localPeerId) break;
@@ -1079,7 +1084,7 @@ class EventStreamNotifier extends Notifier<bool> {
         final isMentioned = hasEveryone ||
             mentionedNames.contains(localName) ||
             (localNick != null && mentionedNames.contains(localNick)) ||
-            isReply;
+            isReplyToOwn;
         if (channelNotifLevel == NotificationLevel.mentions && !isMentioned) break;
         // Use the real message ID (not a synthetic hint- ID).
         final hintMid = messageId.isNotEmpty
@@ -1127,14 +1132,14 @@ class EventStreamNotifier extends Notifier<bool> {
       case NetworkEvent_FileHeaderReceived(
             :final fileId, :final fileName, :final sizeBytes,
             :final isImage, :final width, :final height,
-            messageId: _, senderId: _,
-            :final serverId, channelId: _,
+            :final messageId, senderId: _,
+            :final serverId, :final channelId,
             :final videoThumb,
             :final shareRootHash, :final shareKeyHex):
         debugPrint('[HOLLOW] File header: $fileId ($fileName, $sizeBytes bytes)${shareRootHash != null ? ' [share-backed]' : ''}');
         // In erasure coding mode (6+ members), file data comes via vault shards,
         // not P2P streaming — so don't mark as "downloading".
-        final isVaultMode = serverId != null &&
+        final isVaultMode = serverId.isNotEmpty &&
             (ref.read(serverMembersProvider(serverId)).valueOrNull?.length ?? 0) >= 6;
         ref.read(fileTransferProvider.notifier).onFileHeaderReceived(
               fileId: fileId,
@@ -1147,6 +1152,28 @@ class EventStreamNotifier extends Notifier<bool> {
               videoThumb: videoThumb,
               shareRootHash: shareRootHash,
             );
+        // Guest live path: the public-channel file message's metadata arrives
+        // as this event right after the row itself — attach it so the card
+        // renders (a RAM-only no-op for rows that already carry one; member
+        // rows are rebuilt from the DB by _reloadChatForFile below anyway).
+        if (serverId.isNotEmpty && channelId.isNotEmpty && messageId.isNotEmpty) {
+          final dotExt = fileName.contains('.') ? fileName.split('.').last : '';
+          ref.read(channelChatProvider.notifier).attachFileMeta(
+                serverId, channelId, messageId,
+                FileAttachment(
+                  fileId: fileId,
+                  fileName: fileName,
+                  fileExt: dotExt,
+                  mimeType: '',
+                  sizeBytes: sizeBytes.toInt(),
+                  isImage: isImage,
+                  width: width?.toInt(),
+                  height: height?.toInt(),
+                  totalChunks: 0,
+                  videoThumb: videoThumb,
+                ),
+              );
+        }
         _reloadChatForFile(fileId);
 
         if (shareRootHash != null && shareKeyHex != null) {
@@ -1739,6 +1766,28 @@ class EventStreamNotifier extends Notifier<bool> {
           for (final r in m.reactions) {
             reactions.putIfAbsent(r.emoji, () => []).add(r.peerId);
           }
+          // Metadata attachment — the card renders name/size/type; bytes
+          // arrive via requestPublicFile and light it up through
+          // fileTransferProvider state. `diskPath` is set ONLY when
+          // previewing our own server (the file is already on OUR disk), so
+          // the owner's preview renders instantly with no peer fetch.
+          final fm = m.fileMeta;
+          final attachment = fm == null
+              ? null
+              : FileAttachment(
+                  fileId: fm.fileId,
+                  fileName: fm.fileName,
+                  fileExt: fm.fileExt,
+                  mimeType: fm.mimeType,
+                  sizeBytes: fm.sizeBytes.toInt(),
+                  isImage: fm.isImage,
+                  width: fm.width?.toInt(),
+                  height: fm.height?.toInt(),
+                  totalChunks: 0,
+                  chunksReceived: 0,
+                  isComplete: fm.diskPath != null,
+                  diskPath: fm.diskPath,
+                );
           return ChannelChatMessage(
             senderId: m.senderId,
             text: m.text,
@@ -1755,6 +1804,7 @@ class EventStreamNotifier extends Notifier<bool> {
                 : null,
             replyToMid: m.replyTo,
             reactions: reactions,
+            fileAttachment: attachment,
           );
         }).toList();
         ref.read(channelChatProvider.notifier).setGuestMessages(
@@ -1979,9 +2029,11 @@ class EventStreamNotifier extends Notifier<bool> {
   }
 
   /// When a session is (re-)established with a peer, clear any "Sync failed"
-  /// Resolve channel name and show notification (async helper).
+  /// Resolve channel name and show notification (async helper). `isMention`
+  /// is the ONE authoritative mention decision (computed at the event gate) —
+  /// notifyChannel used to re-derive it with a drifted copy of the check (#42).
   Future<void> _notifyChannelWithName(String serverId, String channelId,
-      String fromPeer, String text, String? replyToMid, String messageId) async {
+      String fromPeer, String text, bool isMention, String messageId) async {
     String? chName = ref.read(channelListProvider)[channelId]?.name;
     if (chName == null) {
       try {
@@ -1998,7 +2050,7 @@ class EventStreamNotifier extends Notifier<bool> {
           channelId: channelId,
           fromPeerId: fromPeer,
           text: text,
-          replyToMid: replyToMid,
+          isMention: isMention,
           channelName: chName,
           messageId: messageId,
         );

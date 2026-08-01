@@ -70,7 +70,7 @@ All UI uses custom Hollow widgets — no Material defaults: **HollowPressable** 
 - **Temp nicknames:** relay-scoped RAM claims; reset on `RelayDisconnected`. `project_temporary_nicknames`.
 - **Deep links:** `hollow://` on all 6 platforms via `DeepLinkService` (init pre-runApp, buffers until shell ready). Invites COPY `webServerInviteLink()` (FRAGMENT url — id never hits server logs); ALL link input bars parse via `inviteIdFromInput`/`classifyHollowLink`; Windows forward = NO-ARG `SendAppLinkToInstance()` in main.cpp. `project_deep_linking`.
 - **Window chrome:** `window_manager` + `setAsFrameless()`, 32px `WindowTitleBar` — lives in `MaterialApp.builder` ABOVE the Navigator (never inside HollowShell); Navigator child wrapped in `ClipRect` against `BackdropFilter` blur bleed.
-- **Logging:** `hollow_log!` → stderr + `hollow_debug.log` (release-safe, rotated); `hollow_crash.log` = Flutter/platform errors.
+- **Logging:** `hollow_log!` → stderr + rotated `hollow_debug.log`; `hollow_crash.log` = Flutter errors.
 - **Performance sentinels:** quiet-by-default anomaly loggers, grep `[SENTINEL]` in hollow_debug.log; direct-channel call sites use `timedChannelCall`. `project_perf_sentinels`.
 - **Relay:** uWebSockets C++ (`relay-uws/`) on OVH VPS, TLS 443, dual-stack. NO rate limits/soft backpressure; NEVER lower `maxPayloadLength` (64MB). Topic routing `0x07` (channel_id), broadcast `0x03`. `feedback_relay_rules`, `feedback_relay_no_metadata_logging`.
 - **CRITICAL — relay per-IP accounting goes through `ip_limit_key()`** (v4 addr / v6 **/64**; unmap v4-MAPPED `::ffff:…` FIRST — naive /64 truncation collapses ALL v4 into ONE bucket). 10 GB/day counts binary BOTH directions; exhaustion = explicit `1008 "bandwidth_limit"` close, never silent. `project_relay_bandwidth_enforcement`, `project_relay_ipv6`.
@@ -139,7 +139,7 @@ All UI uses custom Hollow widgets — no Material defaults: **HollowPressable** 
 - **Storage Manager:** "Files & Storage" dashboard (`storage_section.dart` + `storage_provider.dart` + `api/storage.rs`); caps ENFORCED via `enforce_storage_caps` on `FileCompleted`. `project_storage_manager`.
 - **MLS coordinator model:** deterministic election (lowest online peer_id), server-group ops PREFER the OWNER; recovery targets the coordinator. **Commits broadcast via `broadcast_mls_commit`** (ONE SendToRoom + wire epoch guard), NEVER per-device loops; plaintext CRDT twin via `broadcast_crdt_op_to_members`. `feedback_owner_coordinator_mls_recovery`.
 - **CRITICAL — `get_missing_file_ids()` checks DISK, not just DB** (directory→HashSet) — files can exist without a valid `completed_at`.
-- **Public channels:** per-channel `is_public` in the CRDT; skip MLS — plaintext `PublicChannelMessage` via SendToRoom, still Ed25519-signed; send handlers branch on `is_channel_public()`; broadcast = public + "Admin+" posting; browser in `bottom_bar.dart`. `project_public_channels`.
+- **CRITICAL — public channels:** sends branch on `is_channel_public()` → plaintext signed `PublicChannelMessage` (file sends too). Voice channels NEVER public — read via `effective_public()` only. FileRequest serving is GATED (DM parties/members; public = anyone); guest bytes ride plaintext `PublicFileHeader` ONLY against the receipt cap. `project_public_channels`, wiki `security_write_gates` §7.
 - **CRITICAL — conferences are VIRTUAL SERVERS:** `conf:{id}` = WS room = MLS group = server_id (channel `"main"`); admission IS the MLS add; chat = RAM-only, NEVER persisted; guards branch on `is_conference_sid`. wiki `conferences`.
 - **CRITICAL — unread counts compare MILLISECOND timestamps only** (never rowid/order_us — Dart marks seen from a ms-sorted `.last`); `recomputeServerUnread` gated on `newMessageCount > 0`. `feedback_unread_ghost_ms_seen`.
 - **CRITICAL — relay topic subscriptions are PER-SOCKET:** ws_client replays them on every reconnect; `MobileChatRoute.initState` subscribes on every channel open; desktop's subscribe-listener microtask-defers past the selection batch (channel is written BEFORE server). `feedback_channel_topic_subscriptions`.
@@ -177,9 +177,9 @@ All UI uses custom Hollow widgets — no Material defaults: **HollowPressable** 
 - **CRITICAL — Windows annotation mode:** `window_manager` maximize/unmaximize only — never raw Win32 or `setFullScreen`. `feedback_annotation_window_management`.
 
 ## Semantic Memory Search (hollow-memory MCP)
-- **Tool:** `memory_search(query, limit=5)` — semantic search across memory, wiki, plan/whitepaper docs. ALWAYS search before arguing, designing, or re-investigating.
-- **Wiki:** `tools/hollow-memory/wiki/` — ~40 machine-optimized files; keep in sync during `/compush`.
-- **Reindex:** run `memory_reindex()` after modifying any indexed file.
+- `memory_search(query)` — memory+wiki+plan/whitepaper. ALWAYS search before arguing, designing, or re-investigating.
+- Wiki: `tools/hollow-memory/wiki/` — keep in sync during `/compush`.
+- `memory_reindex()` after modifying any indexed file.
 
 ## Rules
 - Never commit secrets, keys, or credentials.

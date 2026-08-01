@@ -904,6 +904,10 @@ Individual channels can be marked as **public** via a per-channel `is_public` bo
 - `PublicChannelSyncResponse` includes `sender_profiles: HashMap<String, SyncSenderProfile>` — display name + 64×64 WebP avatar thumbnail per unique sender, resolved from the responding peer's local profile database.
 - Real-time updates: `PublicChannelConfigChanged` HavenMessage broadcast via `SendToRoom` when a channel's public flag changes. Guests receive new messages in real time because `SendToRoom` delivers to all peers in the room, including guests.
 
+**Scope:** Only text channels may be public. A voice channel's public flag is refused at authoring and at ingest, and ignored at every read — publishing one would expose its text sidebar to history sync and silently move the channel out of its per-channel media-encryption key domain.
+
+**File attachments:** Public message history and live public messages carry attachment *metadata* only (name, size, type, dimensions) — never bytes. Bytes are fetched on demand from a peer in the room, and the serving peer enforces an access predicate before reading anything from disk: direct-message files are served only to the two conversation parties (and the holder's own linked devices); channel files only to server members — or to anyone while the file's channel is public. Because the sender's identity on the transport never proves entitlement to a file identifier, this predicate is evaluated against the serving peer's own record of where the file belongs. For public-channel files the response's per-request transfer key travels in plaintext, consistent with the content itself being relay-readable; a receiver accepts such a response only for a file it explicitly requested from that server, so a third party cannot push unsolicited content onto a client's disk.
+
 **Broadcast channels:** A public channel with posting set to `AdminPlus` functions as a broadcast/announcement channel — publicly readable, admin-only posting.
 
 ### 11.7 Moderation Primitives

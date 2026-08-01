@@ -1294,6 +1294,19 @@ class _ChannelTile extends ConsumerWidget {
                 overflow: TextOverflow.ellipsis,
               ),
             ),
+            // Public indicator (#44): members had no way to tell which
+            // channels are readable by anyone via the public browser.
+            if (channel.isPublic) ...[
+              HollowTooltip(
+                message: 'Public — anyone can read this channel without joining',
+                child: Icon(
+                  LucideIcons.globe,
+                  size: 12,
+                  color: hollow.textTertiary,
+                ),
+              ),
+              const SizedBox(width: HollowSpacing.xs),
+            ],
             if (mentionCount > 0)
               Container(
                 padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
