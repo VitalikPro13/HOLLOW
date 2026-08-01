@@ -785,6 +785,40 @@ mod tests {
         // The label must name what the USER picked, not the shared helper.
         assert!(!err.contains("GIF"), "got: {err}");
     }
+
+    // ── `.hollow-pack` import validation (issue #36) ──────────────────
+
+    #[test]
+    fn validate_accepts_what_we_encode_and_reports_true_dims() {
+        // A still and an animation must both round-trip, and the dims must
+        // come from the DECODE — a pack manifest never gets to assert them.
+        let (still, w, h, _) =
+            process_sticker_for_send(&make_cutout_png(300, 200)).expect("process");
+        assert_eq!(validate_sticker_blob(&still), Ok((w, h, false)));
+
+        let (anim, aw, ah, _) =
+            process_sticker_for_send(&make_test_animated_webp(400, 400)).expect("process");
+        assert_eq!(validate_sticker_blob(&anim), Ok((aw, ah, true)));
+    }
+
+    #[test]
+    fn validate_rejects_non_webp_and_garbage() {
+        assert!(validate_sticker_blob(b"not an image").is_err());
+        assert!(validate_sticker_blob(&[]).is_err());
+        // A PNG is a perfectly good image and still not a sticker blob —
+        // accepting one would put un-sanitized bytes on the asset rail.
+        assert!(validate_sticker_blob(&make_test_png(64, 64)).is_err());
+    }
+
+    #[test]
+    fn validate_rejects_oversized_bytes() {
+        // Over the AssetKind::Sticker receipt cap: refuse before decoding, so
+        // a decompression bomb never gets a decoder pointed at it.
+        let mut fake = b"RIFF____WEBP".to_vec();
+        fake.resize(524_289, 0);
+        let err = validate_sticker_blob(&fake).expect_err("must fail");
+        assert!(err.contains("512 KB"), "got: {err}");
+    }
 }
 
 /// Convert a WebP file to another format (for "Save As").
@@ -1187,6 +1221,67 @@ pub fn is_animated_image(data: &[u8]) -> bool {
         && &data[8..12] == b"WEBP"
         && &data[12..16] == b"VP8X"
         && (data[20] & 0x02) != 0
+}
+
+/// Validate an ALREADY-ENCODED sticker blob and report its true
+/// `(width, height, animated)`. For `.hollow-pack` imports.
+///
+/// Deliberately does NOT re-encode. A sticker's identity is the SHA-256 of
+/// its bytes, so re-encoding would mint a different hash and orphan every
+/// `[a:s:hash:w:h]` token already sent against the original — the blob has to
+/// round-trip byte-identically or it is not the same sticker.
+///
+/// That makes this the whole trust boundary for imported bytes, so it is
+/// strict: WebP container magic, the `AssetKind::Sticker` receipt cap, a real
+/// decode, and dimensions read out of the DECODED image rather than taken
+/// from the manifest. A manifest that lies about w/h is a layout bomb — those
+/// two numbers go straight into the wire token.
+pub fn validate_sticker_blob(data: &[u8]) -> Result<(u32, u32, bool), String> {
+    const MAX_STICKER_BYTES: usize = 524_288; // == AssetKind::Sticker recv_cap
+    const MAX_FRAMES: usize = 300;
+
+    if data.len() > MAX_STICKER_BYTES {
+        return Err("Sticker is over the 512 KB limit".into());
+    }
+    if data.len() < 16 || &data[0..4] != b"RIFF" || &data[8..12] != b"WEBP" {
+        return Err("Sticker is not a WebP image".into());
+    }
+
+    // Everything Hollow emits is an ANMF container even for a still, so the
+    // animation decoder is the common path; a plain still WebP from some
+    // other producer falls back to the image crate.
+    let (w, h, frames) = match webp_animation::Decoder::new(data) {
+        Ok(decoder) => {
+            let mut dims: Option<(u32, u32)> = None;
+            let mut frames = 0usize;
+            for frame in decoder.into_iter() {
+                frames += 1;
+                if frames > MAX_FRAMES {
+                    return Err("Sticker has too many frames".into());
+                }
+                if dims.is_none() {
+                    dims = Some(frame.dimensions());
+                }
+            }
+            let (w, h) = dims.ok_or("Sticker has no frames")?;
+            (w, h, frames)
+        }
+        Err(_) => {
+            let img = image::load_from_memory(data)
+                .map_err(|e| format!("Sticker failed to decode: {e}"))?;
+            (img.width(), img.height(), 1)
+        }
+    };
+
+    if w == 0 || h == 0 {
+        return Err("Sticker has zero dimensions".into());
+    }
+    // The authoring bound, re-checked: an oversized sticker would render at
+    // its own pixels and blow past the chat box.
+    if w > 512 || h > 512 {
+        return Err("Sticker is over 512px".into());
+    }
+    Ok((w, h, frames > 1))
 }
 
 /// Process an animated source into the ANIMATED server-icon variant

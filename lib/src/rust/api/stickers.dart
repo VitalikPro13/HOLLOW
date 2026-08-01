@@ -7,7 +7,8 @@ import '../frb_generated.dart';
 import 'gifs.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `clean_label`, `send_command`
+// These functions are ignored because they are not marked as `pub`: `clean_label`, `pack_signature_is_valid`, `pack_signing_payload`, `read_pack_manifest`, `send_command`
+// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `PackItem`, `PackManifest`
 
 /// Wire token for a sticker, as inserted into message text.
 String stickerToken({required String hash, required int w, required int h}) =>
@@ -148,6 +149,39 @@ Future<StoredGif> stickerFetchAndStore({
   sourceUrl: sourceUrl,
 );
 
+/// Export one personal pack as a `.hollow-pack` file. Returns its size.
+Future<BigInt> exportPersonalStickerPack({
+  required String pack,
+  required String outputPath,
+}) => RustLib.instance.api.crateApiStickersExportPersonalStickerPack(
+  pack: pack,
+  outputPath: outputPath,
+);
+
+/// Read a `.hollow-pack` manifest without importing anything.
+Future<StickerPackPreview> previewStickerPack({required String path}) =>
+    RustLib.instance.api.crateApiStickersPreviewStickerPack(path: path);
+
+/// Import a `.hollow-pack` into the personal vault under [into_pack] (empty =
+/// the name the file carries).
+///
+/// Every byte here is attacker-controlled, so nothing in the manifest is
+/// trusted for anything load-bearing:
+///   * the blob is keyed by the hash we COMPUTE, and an entry whose bytes do
+///     not hash to their claimed name is rejected outright;
+///   * `w`/`h` are re-derived from the decoded image, because those two
+///     numbers go straight into the wire token;
+///   * entry paths are never joined — the hash names the file we read;
+///   * the vault caps are enforced per row, so a huge pack fills up to the
+///     limit and reports the remainder as rejected rather than failing whole.
+Future<StickerPackImportResult> importStickerPack({
+  required String path,
+  required String intoPack,
+}) => RustLib.instance.api.crateApiStickersImportStickerPack(
+  path: path,
+  intoPack: intoPack,
+);
+
 /// One sticker of the user's personal vault.
 class PersonalSticker {
   /// Free-form group name; `""` is the default (ungrouped) pack.
@@ -264,4 +298,82 @@ class ServerSticker {
           animated == other.animated &&
           w == other.w &&
           h == other.h;
+}
+
+/// Outcome of an import. Partial by design: hitting a vault cap part-way
+/// through must keep what already landed and SAY so, not roll back the lot.
+class StickerPackImportResult {
+  final String pack;
+  final int added;
+
+  /// Already in the pack — re-importing is idempotent, not an error.
+  final int skipped;
+
+  /// Failed validation or would not fit under the caps.
+  final int rejected;
+
+  const StickerPackImportResult({
+    required this.pack,
+    required this.added,
+    required this.skipped,
+    required this.rejected,
+  });
+
+  @override
+  int get hashCode =>
+      pack.hashCode ^ added.hashCode ^ skipped.hashCode ^ rejected.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is StickerPackImportResult &&
+          runtimeType == other.runtimeType &&
+          pack == other.pack &&
+          added == other.added &&
+          skipped == other.skipped &&
+          rejected == other.rejected;
+}
+
+/// What a `.hollow-pack` says about itself, for the in-chat card and the
+/// import confirmation — read WITHOUT touching the vault.
+class StickerPackPreview {
+  final String pack;
+
+  /// Master peer_id of whoever exported it, `""` when unsigned or forged.
+  final String author;
+
+  /// True only when the signature verifies against `author`. Display only.
+  final bool authorVerified;
+
+  /// Stickers the file claims to carry.
+  ///
+  /// CLAIMS, not a promise: the count comes from the manifest and every
+  /// entry still has to survive import validation. No thumbnail ships with
+  /// this on purpose — previewing would mean handing un-validated bytes to
+  /// an image decoder before we have checked a single one of them.
+  final int count;
+
+  const StickerPackPreview({
+    required this.pack,
+    required this.author,
+    required this.authorVerified,
+    required this.count,
+  });
+
+  @override
+  int get hashCode =>
+      pack.hashCode ^
+      author.hashCode ^
+      authorVerified.hashCode ^
+      count.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is StickerPackPreview &&
+          runtimeType == other.runtimeType &&
+          pack == other.pack &&
+          author == other.author &&
+          authorVerified == other.authorVerified &&
+          count == other.count;
 }

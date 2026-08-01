@@ -210,3 +210,132 @@ class StickerRecentsNotifier extends Notifier<List<RecentSticker>> {
 final stickerRecentsProvider =
     NotifierProvider<StickerRecentsNotifier, List<RecentSticker>>(
         StickerRecentsNotifier.new);
+
+// ── Last picker tab (issue #36) ───────────────────────────────────────
+
+const _kLastTabSettingKey = 'sticker_last_tab';
+
+/// The tab the sticker picker was last left on, so it reopens where the user
+/// left it instead of always landing on Server/Mine.
+///
+/// Stored as the enum's bare NAME rather than its index: an index silently
+/// re-points at a different tab the moment the enum gains or reorders a case,
+/// and the picker's tab set is not finished changing (the composer button row
+/// is still an open question). An unknown name reads back as null, which the
+/// picker resolves to its own default.
+///
+/// The enum itself lives with the picker in the UI layer — core has no
+/// business knowing what tabs exist, only how to remember one.
+class StickerLastTabNotifier extends Notifier<String?> {
+  @override
+  String? build() => null;
+
+  /// Called from the shell's post-unlock boot sequence, alongside recents —
+  /// the settings store is not open before that.
+  Future<void> loadCached() async {
+    try {
+      final raw = await storage_api.loadSetting(key: _kLastTabSettingKey);
+      if (raw == null || raw.isEmpty) return;
+      state = raw;
+    } catch (_) {
+      // Non-fatal: an unreadable value just falls back to the default tab.
+    }
+  }
+
+  void noteTab(String name) {
+    if (state == name) return;
+    state = name;
+    // Fire-and-forget, same as recents: an un-awaited FFI future needs
+    // .catchError or the rejection reaches the zone crash handler.
+    try {
+      storage_api
+          .saveSetting(key: _kLastTabSettingKey, value: name)
+          .catchError((_) {});
+    } catch (_) {}
+  }
+}
+
+final stickerLastTabProvider =
+    NotifierProvider<StickerLastTabNotifier, String?>(
+        StickerLastTabNotifier.new);
+
+// ── Declared packs (issue #36) ────────────────────────────────────────
+
+const _kDeclaredPacksKey = 'sticker_packs';
+const _kMaxDeclaredPacks = 50; // matches MAX_PERSONAL_PACKS in Rust
+
+/// Pack names the user has CREATED, whether or not any sticker sits in one
+/// yet.
+///
+/// A pack is a column on `personal_stickers`, so Rust only knows the packs
+/// that currently have rows — which makes "create a pack, then fill it"
+/// impossible to express there: the empty pack would vanish the instant it
+/// was made. This is the local list of names, unioned with the packs derived
+/// from rows at render time. A pack that has rows does NOT need to be in here
+/// (imports and older data never were), so the union is the source of truth
+/// and this is only what keeps an EMPTY one alive.
+///
+/// Local-only, like the vault it labels. Never CRDT or wire state.
+class StickerPacksNotifier extends Notifier<List<String>> {
+  @override
+  List<String> build() => const [];
+
+  /// Called from the shell's post-unlock boot sequence — the settings store
+  /// is not open before that.
+  Future<void> loadCached() async {
+    try {
+      final raw = await storage_api.loadSetting(key: _kDeclaredPacksKey);
+      if (raw == null || raw.isEmpty) return;
+      final decoded = jsonDecode(raw);
+      if (decoded is! List) return;
+      state = decoded
+          .whereType<String>()
+          .map((s) => s.trim())
+          .where((s) => s.isNotEmpty)
+          .toSet()
+          .take(_kMaxDeclaredPacks)
+          .toList();
+    } catch (_) {
+      // Non-fatal: the packs that have rows still show up.
+    }
+  }
+
+  /// Returns false when the name is empty or already taken (caller toasts).
+  bool declare(String name) {
+    final clean = name.trim();
+    if (clean.isEmpty || state.length >= _kMaxDeclaredPacks) return false;
+    if (state.any((p) => p.toLowerCase() == clean.toLowerCase())) return false;
+    state = [...state, clean];
+    _persist();
+    return true;
+  }
+
+  void rename(String from, String to) {
+    final clean = to.trim();
+    if (clean.isEmpty) return;
+    state = [
+      for (final p in state)
+        if (p == from) clean else p,
+    ];
+    _persist();
+  }
+
+  void forget(String name) {
+    state = state.where((p) => p != name).toList();
+    _persist();
+  }
+
+  /// Fire-and-forget, same as recents: an un-awaited FFI future needs
+  /// .catchError or the rejection reaches the zone crash handler.
+  void _persist() {
+    try {
+      storage_api
+          .saveSetting(key: _kDeclaredPacksKey, value: jsonEncode(state))
+          .catchError((_) {});
+    } catch (_) {}
+  }
+}
+
+final stickerPacksProvider =
+    NotifierProvider<StickerPacksNotifier, List<String>>(
+        StickerPacksNotifier.new);

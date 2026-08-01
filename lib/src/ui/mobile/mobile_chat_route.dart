@@ -811,7 +811,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     }
   }
 
-  Future<void> _handleSend() async {
+  Future<void> _handleSend({bool refocus = true}) async {
     _dismissEmotePanel();
     // Expand inline-emote placeholders to [e:name:hash] wire tokens.
     final text = _controller.expandedText().trim();
@@ -823,9 +823,14 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     if (text.isEmpty && filePath == null) return;
     if (_blockedBySlowMode()) return;
     if (!_passesMediaOnlyGate(filePath, fileName)) return;
+    if (exceedsAssetLimit(text)) {
+      HollowToast.show(context, kAssetLimitMessage,
+          type: HollowToastType.error);
+      return;
+    }
     _controller.clear();
     _lastTypingSent = null;
-    _focusNode.requestFocus();
+    if (refocus) _focusNode.requestFocus();
     final replyMid = _replyToMessageId;
     _urlDebounce?.cancel();
     _clearComposerState();
@@ -1079,10 +1084,8 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
           // line of chrome, and the grid needs to keep ~2 full rows.
           height: MediaQuery.sizeOf(context).height * 0.62,
           child: GifPickerBody(
-            onSelect: (token) {
-              Navigator.pop(context);
-              _insertAtCursor(_controller.displayTextFor(token));
-            },
+            // Sends and stays open, mirroring the sticker sheet (issue #36).
+            onSelect: _sendAsset,
             // Null in a DM or a conference — the rating clamp only applies
             // to real servers (see showGifPicker).
             serverId: (widget.serverId?.startsWith('conf:') ?? true)
@@ -1096,7 +1099,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
 
   /// Insert [text] (a Unicode emoji or an emote token) at the composer's
   /// cursor, replacing any selection.
-  void _insertAtCursor(String text) {
+  void _insertAtCursor(String text, {bool refocus = true}) {
     final sel = _controller.selection;
     final base = sel.isValid ? sel.baseOffset : _controller.text.length;
     final newText = _controller.text.replaceRange(
@@ -1106,16 +1109,42 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     );
     _controller.text = newText;
     _controller.selection = TextSelection.collapsed(offset: base + text.length);
-    _focusNode.requestFocus();
+    if (refocus) _focusNode.requestFocus();
+  }
+
+  /// Send-on-click (issue #36) — see `chat_pane.dart:_sendAsset`. Focus
+  /// staying put matters most here: the sheet is already open over the
+  /// composer, and refocusing would raise the software keyboard on top of it
+  /// on every single pick.
+  Future<void> _sendAsset(String token) async {
+    _insertAtCursor(_controller.displayTextFor(token), refocus: false);
+    await _handleSend(refocus: false);
+  }
+
+  /// Send an already-written file straight into this conversation with no
+  /// save dialog — the "Share pack to this chat" path (issue #36).
+  ///
+  /// The file is NOT deleted afterwards: our own bubble keeps pointing at it
+  /// (the pack card reads its manifest from disk), so it lives out its life
+  /// in the temp directory the OS already sweeps.
+  Future<void> _shareFileToChat(String path, String fileName) async {
+    if (!mounted) return;
+    await _sendFileMessage(
+      filePath: path,
+      fileName: fileName,
+      sizeBytes: File(path).lengthSync(),
+      isImage: false,
+      text: '',
+      errorToast: 'Failed to share pack',
+    );
   }
 
   /// Attach menu (Telegram-style): one [+] button opens this Photo / File sheet,
   /// so the composer doesn't crowd two separate icons into the row on small
   /// screens. Each row reuses the existing `_pickFile` flow.
-  /// Sticker picker as a bottom sheet; the pick arrives as an
-  /// `[a:s:hash:w:h]` token and stages in the composer like an emote. Kept
-  /// OPEN across picks (unlike the GIF sheet) because a mosaic is several
-  /// stickers in one message — the sheet closes on the scrim or a swipe.
+  /// Sticker picker as a bottom sheet. A pick SENDS immediately and the sheet
+  /// stays OPEN (unlike the GIF sheet), so a vertical mosaic is just repeated
+  /// taps — the sheet closes on the scrim or a swipe.
   void _showStickerSheet() {
     _focusNode.unfocus();
     final hollow = HollowTheme.of(context);
@@ -1130,8 +1159,8 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
         child: SizedBox(
           height: MediaQuery.sizeOf(context).height * 0.62,
           child: StickerPickerBody(
-            onSelect: (token) =>
-                _insertAtCursor(_controller.displayTextFor(token)),
+            onSelect: _sendAsset,
+            onSharePack: _shareFileToChat,
             // Null in a DM or a conference — the rating clamp and the Server
             // tab only apply to real servers.
             serverId: (widget.serverId?.startsWith('conf:') ?? true)

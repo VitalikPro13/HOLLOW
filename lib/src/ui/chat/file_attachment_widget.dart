@@ -12,6 +12,7 @@ import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/chat/audio_message_bubble.dart';
+import 'package:hollow/src/ui/chat/sticker_pack_card.dart';
 import 'package:hollow/src/ui/chat/video_message_bubble.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -80,6 +81,18 @@ class FileAttachmentWidget extends ConsumerWidget {
     // Phase 6.75: Audio preview — inline playback card.
     if (_isAudioAttachment()) {
       return AudioMessageBubble(attachment: attachment);
+    }
+
+    // A shared sticker pack is an ordinary file on the wire — only its face
+    // in the feed differs, so it gets an "add this pack" card instead of a
+    // generic row. Nothing about the transfer changes (issue #36).
+    if (isStickerPackFile(attachment.fileName)) {
+      return StickerPackCard(
+        // Gate on isComplete: a half-written pack would fail to parse and
+        // show a bogus error rather than "Downloading…".
+        diskPath: isComplete ? diskPath : null,
+        fileName: attachment.fileName,
+      );
     }
 
     if (attachment.isImage) {

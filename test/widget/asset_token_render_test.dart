@@ -6,6 +6,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hollow/src/core/providers/emote_provider.dart';
 import 'package:hollow/src/theme/hollow_theme_data.dart';
 import 'package:hollow/src/ui/chat/emote_image.dart';
+import 'package:hollow/src/ui/components/ui_scale.dart';
 import 'package:hollow/src/ui/chat/chat_pane_shared.dart';
 import 'package:hollow/src/ui/chat/message_text_parser.dart';
 
@@ -148,79 +149,116 @@ void main() {
     expect(find.textContaining('[a:g:', findRichText: true), findsOneWidget);
   });
 
-  // ── Sticker runs (the Telegram tiling effect) ─────────────────────────
+  // ── One sticker per message (issue #36) ───────────────────────────────
+  //
+  // Horizontal runs are gone: nothing sent since 0.9.3 can carry more than
+  // one sticker, and the pre-0.9.3 messages that can must degrade to plain
+  // full-size blocks rather than shrinking to share a line.
 
-  group('sticker runs', () {
+  group('one sticker per message', () {
     String run(int n, {String sep = ''}) => List.generate(
         n, (i) => '[a:s:${_h(i + 1)}:200:200]').join(sep);
 
-    testWidgets('adjacent stickers tile edge to edge with no gap',
-        (tester) async {
-      await _pump(tester, run(3), {});
-      final rects = _runRects(tester);
-      expect(rects, hasLength(3));
-      // Same row, same height, and each starts exactly where the last ended.
-      expect(rects[0].top, closeTo(rects[1].top, 0.01));
-      expect(rects[1].top, closeTo(rects[2].top, 0.01));
-      expect(rects[0].height, closeTo(rects[1].height, 0.01));
-      expect(rects[1].left, closeTo(rects[0].right, 0.01));
-      expect(rects[2].left, closeTo(rects[1].right, 0.01));
-    });
-
-    testWidgets('a space between stickers is not a gap', (tester) async {
-      await _pump(tester, run(3, sep: '  '), {});
-      final rects = _runRects(tester);
-      expect(rects, hasLength(3));
-      expect(rects[1].left, closeTo(rects[0].right, 0.01),
-          reason: 'horizontal whitespace inside a run is absorbed');
-    });
-
-    testWidgets('a GIF never joins a run — each stays its own block',
-        (tester) async {
-      await _pump(
-          tester, '[a:g:${_h(1)}:200:200][a:g:${_h(2)}:200:200]', {});
-      final rects = _runRects(tester);
-      expect(rects, hasLength(2));
-      expect(rects[1].top, greaterThanOrEqualTo(rects[0].bottom),
-          reason: 'GIFs stack, they do not tile');
-    });
-
-    testWidgets('a run shrinks to fit one line rather than wrapping',
-        (tester) async {
-      // 5 x 200px stickers want 800px at the 160 box; the pane is 420.
-      await _pump(tester, run(5), {}, width: 420);
-      final rects = _runRects(tester);
-      expect(rects, hasLength(5));
-      for (final r in rects) {
-        expect(r.top, closeTo(rects.first.top, 0.01),
-            reason: 'all five stay on one line');
-      }
-      expect(rects.last.right, lessThanOrEqualTo(420.5));
-      expect(rects.first.height, lessThan(160),
-          reason: 'the shared height shrank to make them fit');
-    });
-
-    testWidgets('a run too crowded to read wraps instead of shrinking',
-        (tester) async {
-      await _pump(tester, run(12), {}, width: 300);
-      final rects = _runRects(tester);
-      expect(rects, hasLength(12));
-      expect(rects.any((r) => r.top > rects.first.top), isTrue,
-          reason: 'wrapped to a second line rather than going microscopic');
-      expect(rects.first.height, greaterThanOrEqualTo(44));
-    });
-
-    testWidgets('a single sticker still uses the plain 160 box',
-        (tester) async {
+    testWidgets('a single sticker uses the plain 160 box', (tester) async {
       await _pump(tester, run(1), {});
       expect(_assetSize(tester), const Size(160, 160));
     });
 
-    testWidgets('a caption still breaks the line around a run',
+    testWidgets('adjacent stickers stack at FULL size, never shrunk',
         (tester) async {
-      await _pump(tester, '${run(2)} nice', {});
-      expect(_runRects(tester), hasLength(2));
+      await _pump(tester, run(3), {});
+      final rects = _runRects(tester);
+      expect(rects, hasLength(3));
+      for (final r in rects) {
+        expect(r.size, const Size(160, 160),
+            reason: 'no shared height, so nothing shrinks to fit a line');
+      }
+      expect(rects[1].top, greaterThanOrEqualTo(rects[0].bottom));
+      expect(rects[2].top, greaterThanOrEqualTo(rects[1].bottom));
+    });
+
+    testWidgets('stacked stickers do not open a blank line between them',
+        (tester) async {
+      await _pump(tester, run(2), {});
+      final rects = _runRects(tester);
+      expect(rects, hasLength(2));
+      // One line break between the blocks, not two: the gap is the blocks'
+      // own 4px padding, nothing more.
+      expect(rects[1].top - rects[0].bottom, lessThan(20),
+          reason: 'a doubled newline would leave a full empty line here');
+    });
+
+    testWidgets('a narrow pane still never shrinks a sticker', (tester) async {
+      // 5 x 200px stickers wanted 800px as a run; the pane is 420. Under the
+      // old shared-height rule they shrank to fit. Now they just stack.
+      await _pump(tester, run(5), {}, width: 420);
+      final rects = _runRects(tester);
+      expect(rects, hasLength(5));
+      for (final r in rects) {
+        expect(r.height, 160);
+      }
+    });
+
+    testWidgets('a space between stickers changes nothing', (tester) async {
+      await _pump(tester, run(3, sep: '  '), {});
+      final rects = _runRects(tester);
+      expect(rects, hasLength(3));
+      for (final r in rects) {
+        expect(r.size, const Size(160, 160));
+      }
+    });
+
+    testWidgets('GIFs stack the same way', (tester) async {
+      await _pump(
+          tester, '[a:g:${_h(1)}:200:200][a:g:${_h(2)}:200:200]', {});
+      final rects = _runRects(tester);
+      expect(rects, hasLength(2));
+      expect(rects[1].top, greaterThanOrEqualTo(rects[0].bottom));
+    });
+
+    testWidgets('a caption still breaks the line around the sticker',
+        (tester) async {
+      await _pump(tester, '${run(1)} nice', {});
+      expect(_assetSize(tester), const Size(160, 160));
       expect(find.textContaining('nice', findRichText: true), findsOneWidget);
+    });
+  });
+
+  group('the send-side limit', () {
+    test('counts every well-formed block asset, sticker or GIF', () {
+      expect(countBlockAssetTokens(''), 0);
+      expect(countBlockAssetTokens('hi'), 0);
+      expect(countBlockAssetTokens('[a:s:${_h(1)}:200:200]'), 1);
+      expect(countBlockAssetTokens('[a:s:${_h(1)}:200:200] hi'), 1);
+      // GIFs share the sticker budget — they are the same visual class.
+      expect(countBlockAssetTokens('[a:g:${_h(1)}:200:200]'), 1);
+      // Out-of-bounds dims never parsed, so they never counted.
+      expect(countBlockAssetTokens('[a:s:${_h(1)}:5000:10]'), 0);
+      // Inline emotes are NOT block assets and must never be capped.
+      expect(countBlockAssetTokens('[e:kappa:${_h(1)}]'), 0);
+    });
+
+    test('refuses a second asset however it was typed', () {
+      final sticker = '[a:s:${_h(1)}:200:200]';
+      final sticker2 = '[a:s:${_h(2)}:200:200]';
+      final gif = '[a:g:${_h(3)}:200:200]';
+
+      expect(exceedsAssetLimit(sticker), isFalse);
+      expect(exceedsAssetLimit(gif), isFalse);
+      expect(exceedsAssetLimit('$sticker caption'), isFalse);
+
+      // Neither picker can produce these; a paste can.
+      expect(exceedsAssetLimit('$sticker$sticker2'), isTrue);
+      expect(exceedsAssetLimit('$sticker  $sticker2'), isTrue);
+      expect(exceedsAssetLimit('$sticker\n$sticker2'), isTrue);
+      // Stacked GIFs were the second half of the complaint.
+      expect(exceedsAssetLimit('$gif$gif'), isTrue);
+      // And one of each still stacks two blocks, so it is still refused.
+      expect(exceedsAssetLimit('$sticker$gif'), isTrue);
+
+      // Emotes are inline and uncapped — a message may carry many.
+      expect(
+          exceedsAssetLimit('$sticker [e:a:${_h(4)}] [e:b:${_h(5)}]'), isFalse);
     });
   });
 
@@ -236,28 +274,125 @@ void main() {
       await _pump(tester, token, {}, tiling: (top: true, bottom: true));
       final tiled = tester.getRect(find.byType(ChatAssetImage));
 
-      // Same media box; it just sits 4px higher with the padding gone.
-      expect(tiled.size, untiled.size);
+      // It sits higher with the padding gone…
       expect(tiled.top, lessThan(untiled.top));
+      // …and the LAYOUT box is identical. The painted rect is deliberately a
+      // device pixel taller on each tiled edge (the seam bleed), so compare
+      // the box the layout actually reserves, not the pixels drawn into it.
+      final block = tester.widget<SizedBox>(find
+          .descendant(
+            of: find.byType(ChatAssetBlock),
+            matching: find.byType(SizedBox),
+          )
+          .first);
+      expect(Size(block.width!, block.height!), untiled.size);
     });
 
-    test('corner rounding is outer-edges-only across a run', () {
-      // The radius rule itself — a middle piece must be square on every
-      // corner or the seam gets notched.
+    /// Two tiled sticker messages stacked, as the panes build them.
+    Future<void> pumpTiledPair(WidgetTester tester,
+        {double uiScale = 1.0}) async {
+      const token = '[a:s:'
+          '0000000000000000000000000000000000000000000000000000000000000000'
+          ':512:512]';
+      final container = ProviderContainer(overrides: [
+        emoteBytesProvider.overrideWith((ref, hash) async => _kTinyPng),
+      ]);
+      addTearDown(container.dispose);
+      await tester.pumpWidget(
+        UncontrolledProviderScope(
+          container: container,
+          child: MaterialApp(
+            theme: HollowThemeData.dark(),
+            home: Scaffold(
+              body: UiScaleBox(
+                scale: uiScale,
+                child: const SizedBox(
+                  width: 800,
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      MessageText(token, tiling: (top: false, bottom: true)),
+                      MessageText(token, tiling: (top: true, bottom: false)),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+    }
+
+    testWidgets('the tiled seam is never a gap — the media OVERLAPS',
+        (tester) async {
+      // Two things were wrong. The paragraph put a ~5px line box around a
+      // 160px sticker (fixed by skipping Text.rich); then, even touching
+      // exactly, the two antialiased clip edges composited to `1-αβ` and let
+      // the background through at some zooms and not others. The media now
+      // overruns its layout box by a device pixel on a tiled edge.
+      await pumpTiledPair(tester);
+
+      final rects = _runRects(tester);
+      expect(rects, hasLength(2));
+      expect(rects[1].top, lessThan(rects[0].bottom),
+          reason: 'exactly touching is not enough — they must overlap');
+
+      // The LAYOUT box must be untouched, or every row below would shift.
+      final layout = tester
+          .widgetList<SizedBox>(find.descendant(
+            of: find.byType(ChatAssetBlock).first,
+            matching: find.byType(SizedBox),
+          ))
+          .first;
+      expect(layout.height, 160.0);
+      expect(layout.width, 160.0);
+    });
+
+    testWidgets('the overlap survives every interface zoom', (tester) async {
+      // The bug report's exact symptom: fine at 100%, a line at 105%, smaller
+      // at 110%, gone at 115%, back at 125%. Whatever the zoom, the two
+      // stickers must never merely abut.
+      for (final scale in const [1.0, 1.05, 1.10, 1.15, 1.20, 1.25, 1.5]) {
+        await pumpTiledPair(tester, uiScale: scale);
+        final rects = _runRects(tester);
+        expect(rects, hasLength(2), reason: 'at ${scale}x');
+        expect(rects[1].top, lessThan(rects[0].bottom),
+            reason: 'a seam reopened at ${scale}x');
+      }
+    });
+
+    testWidgets('an UNtiled sticker is never stretched', (tester) async {
+      // The bleed is only for a seam; a lone sticker must stay pixel-exact.
+      await _pump(tester, '[a:s:$_hash:512:512]', {});
+      expect(_assetSize(tester), const Size(160, 160));
+    });
+
+    testWidgets('a captioned sticker still goes through the paragraph',
+        (tester) async {
+      // The fast path must not swallow real text.
+      await _pump(tester, '[a:s:$_hash:200:200] look', {});
+      expect(find.byType(ChatAssetImage), findsOneWidget);
+      expect(find.textContaining('look', findRichText: true), findsOneWidget);
+    });
+
+    test('corner rounding squares only the tiled seams', () {
+      // The radius rule itself — a sticker in the MIDDLE of a vertical run
+      // must be square top and bottom or the seams get notched.
       const r = 8.0;
-      final middle = stickerRunRadius(
-          first: false, last: false, tileTop: false, tileBottom: false);
+      final untiled = stickerRunRadius(tileTop: false, tileBottom: false);
+      expect(untiled, BorderRadius.circular(r));
+
+      final middle = stickerRunRadius(tileTop: true, tileBottom: true);
       expect(middle, BorderRadius.zero);
 
-      final only = stickerRunRadius(
-          first: true, last: true, tileTop: false, tileBottom: false);
-      expect(only, BorderRadius.circular(r));
-
       // Tiling downward squares the bottom corners so the seam is invisible.
-      final tilesDown = stickerRunRadius(
-          first: true, last: true, tileTop: false, tileBottom: true);
+      final tilesDown = stickerRunRadius(tileTop: false, tileBottom: true);
       expect(tilesDown.topLeft, const Radius.circular(r));
+      expect(tilesDown.topRight, const Radius.circular(r));
       expect(tilesDown.bottomLeft, Radius.zero);
+      expect(tilesDown.bottomRight, Radius.zero);
     });
   });
 

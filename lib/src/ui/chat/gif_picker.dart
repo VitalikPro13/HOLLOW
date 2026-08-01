@@ -55,11 +55,10 @@ void showGifPicker({
     builder: (ctx) => _GifPickerOverlay(
       anchorPosition: anchorPosition,
       serverId: serverId,
-      onSelect: (token) {
-        final first = !removed;
-        teardown();
-        if (first) onSelect(token);
-      },
+      // A pick SENDS and the panel STAYS OPEN, mirroring the sticker picker
+      // (issue #36) — picking used to tear the overlay down here, which made
+      // sending two GIFs two round trips through the composer button.
+      onSelect: onSelect,
       onDismiss: teardown,
     ),
   );
@@ -398,7 +397,6 @@ class _GifPickerBodyState extends ConsumerState<GifPickerBody> {
       final stored = await gifs_api.gifFetchAndStore(
           id: item.id, sourceUrl: item.fullUrl);
       _dbg('pick ok in ${DateTime.now().difference(t0).inMilliseconds}ms');
-      // Record BEFORE the callback: onSelect tears the picker down.
       ref.read(gifLibraryProvider.notifier).noteUsed(item);
       if (!mounted) return;
       widget.onSelect('[a:g:${stored.hash}:${stored.w}:${stored.h}]');
@@ -406,9 +404,13 @@ class _GifPickerBodyState extends ConsumerState<GifPickerBody> {
       _dbg('pick ERROR in ${DateTime.now().difference(t0).inMilliseconds}ms: '
           '$e');
       if (!mounted) return;
-      setState(() => _pickingId = null);
       HollowToast.show(context, 'Could not add GIF',
           type: HollowToastType.error);
+    } finally {
+      // The panel now SURVIVES the pick, so this has to be cleared on the
+      // success path too — it used to ride out on the teardown, and leaving
+      // it set would freeze every later pick behind `if (_pickingId != null)`.
+      if (mounted) setState(() => _pickingId = null);
     }
   }
 

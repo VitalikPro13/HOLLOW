@@ -144,10 +144,6 @@ Size fitAssetBox(int srcW, int srcH,
 /// Longest side a chat sticker is drawn at when it stands alone.
 const double kStickerChatBox = 160;
 
-/// Below this a tiled run is unreadable, so it wraps to a second line at full
-/// size instead of shrinking further.
-const double _kMinRunHeight = 44;
-
 /// The chat media caps for each asset kind — GIFs match image attachments so
 /// a GIF-with-caption reads exactly like a photo-with-caption.
 Size assetChatBox(String kind, int srcW, int srcH) => kind == 'g'
@@ -157,121 +153,105 @@ Size assetChatBox(String kind, int srcW, int srcH) => kind == 'g'
 /// One asset parsed out of an `[a:kind:hash:w:h]` token.
 typedef ChatAsset = ({String kind, String hash, int w, int h});
 
-/// Corner rounding for one member of a sticker run. Only the run's OUTER
-/// edges are rounded — an inner corner would carve a notch out of a
-/// multi-part sticker exactly where the seam is supposed to be invisible.
-/// [tileTop]/[tileBottom] extend that to the seams BETWEEN messages.
+/// Corner rounding for one sticker in a VERTICAL run — consecutive
+/// sticker-only messages that tile into each other. Only the run's outer
+/// edges are rounded; a rounded corner at a seam would carve a notch out of
+/// the tiling exactly where it is supposed to vanish.
+///
+/// Horizontal runs are gone (issue #36, one sticker per message), so the only
+/// seams left are the ones between messages.
 BorderRadius stickerRunRadius({
-  required bool first,
-  required bool last,
   required bool tileTop,
   required bool tileBottom,
   double radius = 8,
 }) {
   Radius r(bool on) => Radius.circular(on ? radius : 0);
   return BorderRadius.only(
-    topLeft: r(first && !tileTop),
-    bottomLeft: r(first && !tileBottom),
-    topRight: r(last && !tileTop),
-    bottomRight: r(last && !tileBottom),
+    topLeft: r(!tileTop),
+    topRight: r(!tileTop),
+    bottomLeft: r(!tileBottom),
+    bottomRight: r(!tileBottom),
   );
 }
 
-/// The height every piece of a run is drawn at, so a designed multi-part pack
-/// lines up into one image. Null = the run cannot fit on one line at a
-/// readable size and should wrap at natural size instead.
+/// One asset token drawn as a block at its chat media box.
 ///
-/// Pieces keep their own aspect within that shared height, and the height
-/// never exceeds any piece's own pixels — a mosaic must not be upscaled into
-/// mush just because there is room.
-double? sharedRunHeight(List<ChatAsset> assets, double maxWidth) {
-  if (assets.isEmpty) return null;
-  var totalAspect = 0.0;
-  var naturalCap = kStickerChatBox;
-  for (final a in assets) {
-    if (a.w <= 0 || a.h <= 0) return null;
-    totalAspect += a.w / a.h;
-    naturalCap = math.min(naturalCap, a.h.toDouble());
-  }
-  if (totalAspect <= 0) return null;
-  final height = math.min(naturalCap, maxWidth / totalAspect);
-  return height >= _kMinRunHeight ? height : null;
-}
-
-/// A run of adjacent stickers, drawn edge to edge with no gap so a pack
-/// authored as several pieces reads as ONE image — the Telegram trick, which
-/// is an emergent property of tight stacking rather than a declared feature.
-///
-/// [tileTop]/[tileBottom] say the neighbouring MESSAGE continues the run, so
-/// the seam carries across messages too.
-class ChatAssetRun extends StatelessWidget {
-  final List<ChatAsset> assets;
+/// Stickers are capped at ONE per message (issue #36), so there is no
+/// horizontal run and nothing ever shrinks to make room for a neighbour: a
+/// sticker is always drawn at [kStickerChatBox], a GIF at the photo box.
+/// [tileTop]/[tileBottom] say the neighbouring MESSAGE continues a vertical
+/// sticker run, which squares the seam corners and bleeds the media across
+/// the join (see [_seamBleed]).
+class ChatAssetBlock extends StatelessWidget {
+  final ChatAsset asset;
   final bool tileTop;
   final bool tileBottom;
 
-  const ChatAssetRun({
+  const ChatAssetBlock({
     super.key,
-    required this.assets,
+    required this.asset,
     this.tileTop = false,
     this.tileBottom = false,
   });
 
-  Widget _piece(ChatAsset a, Size box, {required bool first, required bool last}) =>
-      ChatAssetImage(
-        kind: a.kind,
-        hash: a.hash,
-        aspect: a.w / a.h,
-        width: box.width,
-        height: box.height,
-        borderRadius: stickerRunRadius(
-          first: first,
-          last: last,
-          tileTop: tileTop,
-          tileBottom: tileBottom,
-        ),
-      );
+  /// How far the media overruns its layout box on a tiled edge, in this
+  /// subtree's logical pixels — exactly ONE device pixel.
+  ///
+  /// Two tiles that abut *exactly* still show a seam, and that is not a
+  /// layout bug: each rounded-clip edge is antialiased, so where they meet
+  /// the compositor gives `1-αβ` coverage rather than 1, leaving up to 25%
+  /// of the background showing through. Whether it shows at all depends on
+  /// where the shared edge lands within a device pixel, which is why the line
+  /// appeared at 105%, vanished at 115% and came back at 125% — at some zooms
+  /// the edge lands on a pixel boundary (α=0) and at others dead centre
+  /// (α=0.5, worst case).
+  ///
+  /// Overlapping by a full device pixel puts that antialiased edge INSIDE the
+  /// neighbour's opaque body instead of against the background, so it
+  /// composites to solid at every zoom. The cost is ~0.6% of vertical stretch
+  /// on a 160px sticker, across artwork that is continuous by construction.
+  ///
+  /// `devicePixelRatioOf` is the right measure at any zoom because
+  /// `UiScaleBox` folds the zoom factor INTO the ratio it publishes — one of
+  /// our logical pixels really does cover `dpr * scale` device pixels here.
+  static double _seamBleed(BuildContext context) =>
+      1.0 / MediaQuery.devicePixelRatioOf(context);
 
   @override
   Widget build(BuildContext context) {
-    if (assets.isEmpty) return const SizedBox.shrink();
-    if (assets.length == 1) {
-      final a = assets.first;
-      final box = assetChatBox(a.kind, a.w, a.h);
-      return _piece(a, box, first: true, last: true);
-    }
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final maxW = constraints.maxWidth.isFinite
-            ? constraints.maxWidth
-            : kStickerChatBox * assets.length;
-        final height = sharedRunHeight(assets, maxW);
-        if (height == null) {
-          // Too many to seam readably: fall back to wrapping at natural size.
-          // Still gapless, so short rows keep tiling.
-          return Wrap(
-            spacing: 0,
-            runSpacing: 0,
-            children: [
-              for (final a in assets)
-                _piece(a, assetChatBox(a.kind, a.w, a.h),
-                    first: true, last: true),
-            ],
-          );
-        }
-        return Row(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            for (var i = 0; i < assets.length; i++)
-              _piece(
-                assets[i],
-                Size(height * (assets[i].w / assets[i].h), height),
-                first: i == 0,
-                last: i == assets.length - 1,
-              ),
-          ],
+    final box = assetChatBox(asset.kind, asset.w, asset.h);
+    final radius = stickerRunRadius(tileTop: tileTop, tileBottom: tileBottom);
+
+    Widget image(double height) => ChatAssetImage(
+          kind: asset.kind,
+          hash: asset.hash,
+          aspect: asset.w / asset.h,
+          width: box.width,
+          height: height,
+          borderRadius: radius,
         );
-      },
+
+    if (!tileTop && !tileBottom) return image(box.height);
+
+    final bleed = _seamBleed(context);
+    final overTop = tileTop ? bleed : 0.0;
+    final overBottom = tileBottom ? bleed : 0.0;
+
+    // The LAYOUT box is untouched — only the paint overruns — so the rows
+    // above and below keep their exact positions and nothing reflows.
+    return SizedBox(
+      width: box.width,
+      height: box.height,
+      child: Stack(
+        clipBehavior: Clip.none,
+        children: [
+          Positioned(
+            top: -overTop,
+            left: 0,
+            child: image(box.height + overTop + overBottom),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -295,8 +275,8 @@ class ChatAssetImage extends ConsumerWidget {
   /// pass a box from [assetChatBox].
   final double? width;
 
-  /// Corner rounding. Members of a [ChatAssetRun] pass an outer-edges-only
-  /// radius so the seams between tiled pieces stay square.
+  /// Corner rounding. [ChatAssetBlock] squares the edges that sit against a
+  /// tiled neighbouring message so the seam stays invisible.
   final BorderRadius? borderRadius;
 
   const ChatAssetImage({

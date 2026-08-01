@@ -194,41 +194,172 @@ whole schema: `ServerState.stickers: HashMap<hash, StickerInfo>` and
   Placement behind its own composer button is PROVISIONAL — Vitalik wants to
   rethink the emoji/GIF/sticker button row, so the body is deliberately
   reusable and moving it later is a change of host, not of picker. A pick
-  INSERTS at the cursor and the panel STAYS OPEN (a mosaic is several
-  stickers in one message). `StickerCatalog extends GifCatalog`, overriding
-  only the raw-FFI seam — one copy of the cache/in-flight/timeout wrapper
-  whose block-body `whenComplete` is load-bearing.
+  SENDS immediately and the panel STAYS OPEN (see "One Sticker Per Message").
+  `StickerCatalog extends GifCatalog`, overriding only the raw-FFI seam — one
+  copy of the cache/in-flight/timeout wrapper whose block-body `whenComplete`
+  is load-bearing.
 - **Recents** — `sticker_recents` setting, just `{hash, w, h}` rows. Unlike
   the GIF library there is NO media URL to store, rebuild against a proxy
   base, or re-authorize on a source change: a sticker's bytes are already a
-  local content-addressed blob.
+  local content-addressed blob. The last tab is persisted alongside it
+  (`sticker_last_tab`, stored as the enum NAME — an index silently re-points
+  when the enum changes; `server` falls back to `mine` in a DM).
 - **Token built in DART** at the picker (`'[a:s:$hash:$w:$h]'`), not through
   `stickers_api.stickerToken` — that is a SYNC FFI call and a sync bridge
   call throws outright when the bridge is not up. Same as the GIF picker.
 
-## Sticker Mosaics (the Telegram tiling effect)
+## One Block Asset Per Message (issue #36, 0.9.3)
 
-Adjacency rule, no new data — so it works for ANY sticker, including KLIPY
-ones, and pack authors get the effect by drawing pieces that line up.
+Horizontal mosaics are GONE. Nobody builds a horizontal mosaic out of
+512px stickers — the shared-height run just read as "my stickers shrank when
+I sent a few" — so stickers follow Telegram/Discord: one per message. **GIFs
+follow the sticker**, not the other way round.
 
-- **Within a message**: `_matchAssetToken` greedily absorbs a maximal run of
-  STICKER tokens separated only by horizontal whitespace into ONE token;
-  `ChatAssetRun` draws them gapless with a SHARED height (each piece keeps
-  its aspect within it, never upscaled past its own pixels) so a designed
-  pack seams cleanly. Too many to fit readably (< 44px) → wraps at natural
-  size instead of going microscopic. GIFs never join a run — each stays its
-  own block at the photo box, which is what a GIF-with-caption needs.
-- **Across messages**: `stickerTileCandidate` (sticker-only text, and no
-  reply / reaction / file / edit marker to sit in the seam) +
-  `stickerTilingFor` (both rows qualify AND are already grouped) →
-  `tileWithPrev`/`tileWithNext` on both bubbles, which zero the row padding
-  and the asset's own padding on that side and square the seam corners.
-  Wired at all three panes (chat_pane, channel_chat_pane, mobile_chat_route).
-- **Corners**: `stickerRunRadius` rounds only the run's OUTER edges — an
-  inner rounded corner would notch the seam exactly where it must vanish.
+- **ONE budget, not one each.** `exceedsAssetLimit` counts stickers AND GIFs
+  together (`countBlockAssetTokens`): they are the same visual class, and a
+  per-kind cap would still let a sticker and a GIF stack. Inline emotes are
+  not block assets and are never capped.
+- **Send-on-click, both pickers**: `onSelect` reaches the host's `_sendAsset`,
+  which inserts the token and immediately `_handleSend`s. Empty composer → the
+  message is just the asset; text already typed rides along as a caption in
+  the SAME message (the Discord half of the rule). Wired at all three hosts.
+- **Both panels STAY OPEN.** `showGifPicker` used to `teardown()` before
+  invoking `onSelect`; that is gone. Consequence: `_pick`'s `_pickingId` must
+  now be cleared in a `finally` — it used to ride out on the teardown, and
+  leaving it set freezes every later pick behind `if (_pickingId != null)`.
+- **Focus never returns to the composer** on that path (`refocus: false`
+  through `_insertEmojiAtCursor`/`_insertAtCursor` → `_handleSend`). On mobile
+  the sheet sits over the composer, and refocusing raises the software
+  keyboard on top of it on every single pick.
+- **The cap is enforced at SEND, not at receive**, in `chat_pane_shared.dart`
+  (one place, all three panes) over the EXPANDED wire text, so a hand-pasted
+  `[a:s:…]`/`[a:g:…]` is caught too. It fails visibly with a toast and the
+  composer intact — never silently trims what the user wrote.
+- **Receive stays tolerant.** 0.9.0–0.9.2 shipped runs, so those messages
+  exist: `_matchAssetToken` no longer absorbs neighbours, and multiple tokens
+  render as consecutive FULL-SIZE blocks. `_endsWithNewline` stops the two
+  adjacent blocks from each adding a break and opening a blank line.
+
+## Sticker Mosaics (vertical, across messages)
+
+The surviving form, and the popular one. Adjacency rule, no new data — works
+for ANY sticker including KLIPY ones.
+
+- `stickerTileCandidate` (sticker-only text, and no reply / reaction / file /
+  edit marker to sit in the seam) + `stickerTilingFor` (both rows qualify AND
+  are already grouped) → `tileWithPrev`/`tileWithNext` on both bubbles, which
+  zero the row padding and the asset's own padding on that side and square the
+  seam corners. Wired at all three panes.
+- **Corners**: `stickerRunRadius(tileTop:, tileBottom:)` squares only the
+  edges that sit against a tiled neighbour — a rounded corner there would
+  notch the seam exactly where it must vanish.
+- **CRITICAL — an asset-only message SKIPS the text paragraph.** Zeroed
+  padding was not enough to close the seam: `Text.rich` gives the line holding
+  a WidgetSpan the font's own ascent and descent, so a 160px sticker sat in a
+  ~165px line box (measured: 3.6px above, 1.4px below) and two tiled halves of
+  one drawing landed 1px apart — a visible line straight through the artwork.
+  `blockAssetsOnlyMessage` detects a message with no text and
+  `_assetOnlyBody` renders the widget directly. Gap is now exactly 0.0, pinned
+  by a test.
+  - Only for EXACTLY ONE asset and no `suffixSpans`. A pre-0.9.3 multi-asset
+    message stays on the paragraph — stacking those in a Column reports an
+    overflow inside any height-constrained box, which the paragraph does not.
+    "(edited)" is real text, and an edited message never tiles anyway.
+  - `Align(heightFactor: 1)` is load-bearing twice over: a message row hands
+    down a TIGHT width, so without Align the media stretches across the pane;
+    and without `heightFactor` Align fills the offered height and CENTRES the
+    media in it, silently eating the very 4px difference tiling removes.
+- **CRITICAL — touching exactly is STILL not enough; tiled media OVERLAPS by
+  one device pixel** (`ChatAssetBlock._seamBleed`). Two abutting rounded clips
+  are each antialiased, so the compositor gives their shared edge `1-αβ`
+  coverage instead of 1 and up to 25% of the background shows through. Whether
+  it shows depends on where the edge lands inside a device pixel, which is why
+  the line appeared at 105%, shrank at 110%, vanished at 115% and returned at
+  125%. The fix puts that antialiased edge INSIDE the neighbour's opaque body:
+  `1.0 / MediaQuery.devicePixelRatioOf(context)` — correct at any zoom because
+  `UiScaleBox` folds the zoom factor INTO the devicePixelRatio it publishes.
+  Only the PAINT overruns (a `Stack` with a negatively-positioned child); the
+  layout box is untouched, or every row below would shift. A zoom sweep test
+  pins it. Never "fix" a seam by only zeroing padding — measure at 1.05x.
+
+## Sticker Packs are FILES (`.hollow-pack`, issue #36)
+
+**There is no pack link, and that is architectural, not stylistic.** Hollow
+has nowhere to host bytes. A server invite works because the link carries only
+an ID and the join happens over the relay into a room the inviter is already
+in; a pack has no room behind it, so any URL would mean either serving
+strangers from the author's node (a discovery surface we refuse to build) or a
+CDN (a central server we refuse to run). Sending the file into a DM or channel
+reuses the entire encrypted transfer path and adds zero discovery.
+
+It is also the more private primitive: a live vault link would tell the author
+who added them and let them push new bytes later; a file is a one-time copy
+with no ongoing relationship. And it is the personal vault's ONLY backup story
+— `personal_stickers` is local-only, so a reinstall loses it otherwise.
+
+- **Container** (ZIP, modelled on `.hollow-shards`): `manifest.json`
+  `{format_version, pack, author, author_pubkey_b64, created_at, items[],
+  sig_b64}` + `blobs/<hash>.webp`, stored uncompressed (WebP already is).
+- **Import re-derives everything** (`import_sticker_pack`): SHA-256 recomputed
+  and required to match (the blob is keyed by the hash WE compute); `w`/`h`
+  re-read from the decoded image and the manifest's ignored, because those two
+  numbers go straight into the wire token; `validate_sticker_blob` checks WebP
+  magic, the 512 KB receipt cap and 512px before any decode. Entry paths are
+  never joined — the hash names the file. Caps are enforced per row, so a
+  large pack fills to the limit and REPORTS the remainder (added / skipped /
+  rejected) rather than failing whole.
+- **Never re-encode on import.** A sticker's identity is the SHA-256 of its
+  bytes, so a transcode would mint a new hash and orphan every token already
+  sent against the original.
+- **The signature is ATTRIBUTION ONLY.** It binds pubkey → claimed author the
+  way `verify_device_list` does, and covers pack name, author, and every
+  item's hash and dims in order. A missing or bad one means "no byline", never
+  "refuse" — anyone may author a pack and no authority could say otherwise.
+- **No pre-import thumbnail** — previewing would hand un-validated bytes to an
+  image decoder before a single check has run.
+- **UI**: import via "Add pack" on the Mine tab, a file picker filtered to
+  `.hollow-pack` + `.zip` (a pack IS a zip, and one that has been through a
+  mail client often comes back renamed). A received pack renders as
+  `StickerPackCard` instead of a generic file row. Mobile export takes the
+  temp-file detour — `saveFile` REQUIRES `bytes:` on Android/iOS.
+
+## Making a Pack (issue #36)
+
+Sharing packs was useless until you could BUILD one — before this the pack
+column could only ever be set at upload time.
+
+- **Packs behave like GIF favourite lists**, and the table already allowed it:
+  `personal_stickers` is keyed on `(pack, hash)`, so one sticker can sit in
+  several packs at once. Adding never moves it out of where it was.
+- **Declared packs** (`sticker_packs` setting, `stickerPacksProvider`): a pack
+  is a COLUMN on the rows, so an EMPTY one has nowhere to exist in the
+  database and would vanish the moment it was created. This local name list is
+  unioned with the packs derived from rows at render time. Rows are still the
+  source of truth — imports and pre-0.9.3 data were never declared — so this
+  only keeps an empty pack alive. Rename and delete must update BOTH, or an
+  emptied pack returns under its old name.
+- **Creating refuses a duplicate name** (case-insensitively) while RENAMING
+  onto an existing pack still merges: merging is the only sane reading of a
+  rename, but silently merging a *new* pack into an existing one destroys the
+  distinction the user was drawing.
+- **The "All" view dedupes by hash.** Two rows for one sticker in two packs
+  reads as a duplicate rather than as membership.
+- **Cell menu** — "Add to pack…" opens a SECOND `showGifMenu` listing every
+  pack the sticker is not already in, plus "New pack…". That nesting works
+  only because `showGifMenu` calls `dismiss()` BEFORE `item.onTap()`; the
+  first menu's full-screen barrier would otherwise eat the next tap.
+  Leaving one pack and deleting everywhere are separate items on purpose —
+  conflating them is how people lose artwork.
+- **"Share to this chat"** exports to a temp `.hollow-pack` and hands it to
+  the host's `onSharePack`, which stages+sends it like a finished voice
+  recording. The temp file is NOT deleted: our own bubble keeps reading its
+  manifest from disk. The action hides itself when the host passes no
+  callback. "Save pack to file…" remains the escape hatch.
+- **One-tap save on KLIPY cells** (`onSave` badge) mirrors the GIF grid's
+  star. Saving used to be buried in a right-click menu, which is not a
+  gesture that exists on a phone.
 
 ## Known Follow-ups
 
-Personal-emote and personal-sticker sibling sync; sticker pack import/export
-(explicitly out of scope for v1); revisit the composer button row (emoji /
-GIF / sticker is three buttons on a narrow phone).
+Personal-emote and personal-sticker sibling sync; revisit the composer button
+row (emoji / GIF / sticker is three buttons on a narrow phone).

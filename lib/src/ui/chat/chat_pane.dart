@@ -684,7 +684,7 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     }
   }
 
-  Future<void> _handleSend() async {
+  Future<void> _handleSend({bool refocus = true}) async {
     _emoteAutocomplete.dismiss();
     if (_stagedFilePath != null) {
       await _sendStagedFile();
@@ -693,9 +693,14 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     // Expand inline-emote placeholders to [e:name:hash] wire tokens.
     final text = _controller.expandedText().trim();
     if (text.isEmpty) return;
+    if (exceedsAssetLimit(text)) {
+      HollowToast.show(context, kAssetLimitMessage,
+          type: HollowToastType.error);
+      return;
+    }
     _controller.clear();
     _lastTypingSent = null;
-    _focusNode.requestFocus();
+    if (refocus) _focusNode.requestFocus();
     final replyMid = _replyToMessageId;
     // Capture staged preview BEFORE clearing state.
     final preview = _stagedPreview;
@@ -823,6 +828,23 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
       _isRecordingVoice = false;
       _stagedFilePath = result.filePath;
       _stagedFileName = 'Voice message.ogg';
+      _stagedFileIsImage = false;
+    });
+    await _sendStagedFile();
+  }
+
+  /// Send an already-written file straight into this conversation, with no
+  /// save dialog — the "Share pack to this chat" path (issue #36). Stages and
+  /// sends in one go, exactly like a finished voice recording.
+  ///
+  /// The file is NOT deleted afterwards: our own bubble keeps pointing at it
+  /// (the pack card reads its manifest from disk), so it lives out its life in
+  /// the temp directory the OS already sweeps.
+  Future<void> _shareFileToChat(String path, String fileName) async {
+    if (!mounted) return;
+    setState(() {
+      _stagedFilePath = path;
+      _stagedFileName = fileName;
       _stagedFileIsImage = false;
     });
     await _sendStagedFile();
@@ -1521,13 +1543,12 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     showGifPicker(
       context: context,
       anchorPosition: anchor,
-      onSelect: _insertEmojiAtCursor,
+      onSelect: _sendAsset,
     );
   }
 
-  /// Open the sticker picker anchored to the composer button; the pick
-  /// arrives as an `[a:s:hash:w:h]` token and stages like an emote. Several
-  /// in a row tile into a mosaic once sent.
+  /// Open the sticker picker anchored to the composer button. A pick SENDS
+  /// immediately (see [_sendAsset]) and the panel stays open.
   void _openComposerStickerPicker(BuildContext btnCtx) {
     final box = btnCtx.findRenderObject() as RenderBox?;
     final anchor = box == null
@@ -1536,11 +1557,27 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     showStickerPicker(
       context: context,
       anchorPosition: anchor,
-      onSelect: _insertEmojiAtCursor,
+      onSelect: _sendAsset,
+      onSharePack: _shareFileToChat,
     );
   }
 
-  void _insertEmojiAtCursor(String text) {
+  /// Send-on-click (issue #36): a sticker or GIF leaves its picker as a
+  /// MESSAGE, not as composer content, the way Telegram and Discord do it.
+  /// Text already in the composer rides along in the same message as a
+  /// caption (the Discord half), so the caption path survives without costing
+  /// a click, and both panels stay open so sending several is just repeated
+  /// clicks.
+  ///
+  /// Focus deliberately stays where it is: pulling it back to the composer
+  /// summons the software keyboard over the picker sheet on mobile, on every
+  /// single pick.
+  Future<void> _sendAsset(String token) async {
+    _insertEmojiAtCursor(token, refocus: false);
+    await _handleSend(refocus: false);
+  }
+
+  void _insertEmojiAtCursor(String text, {bool refocus = true}) {
     // Custom-emote/asset tokens become a 1-char placeholder rendered inline
     // as the actual image; Unicode emoji pass through unchanged.
     text = _controller.displayTextFor(text);
@@ -1553,7 +1590,7 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     );
     _controller.text = newText;
     _controller.selection = TextSelection.collapsed(offset: base + text.length);
-    _focusNode.requestFocus();
+    if (refocus) _focusNode.requestFocus();
   }
 
   /// Builds the message list + typing + reply bar + input bar.

@@ -250,4 +250,135 @@ void main() {
     expect(find.byType(ChatAssetImage), findsOneWidget);
     expect(catalog.calls, 0, reason: 'a local filter must not hit the proxy');
   });
+
+  // ── Pack creation and management (issue #36) ────────────────────────
+
+  testWidgets('a created pack gets a chip before it holds anything',
+      (tester) async {
+    // The whole point of declared packs: a pack is a COLUMN on the rows, so
+    // an empty one has nowhere to live in the database and would vanish the
+    // instant it was made.
+    final container = await _pump(tester, mine: [_mine(1)]);
+    await tester.tap(find.text('Mine'));
+    await tester.pump();
+    expect(find.text('winter'), findsNothing);
+
+    container.read(stickerPacksProvider.notifier).declare('winter');
+    await tester.pump();
+    expect(find.text('winter'), findsOneWidget);
+
+    // Selecting it shows the empty-pack hint, not "no matches".
+    await tester.tap(find.text('winter'));
+    await tester.pump();
+    expect(find.byType(ChatAssetImage), findsNothing);
+    expect(find.textContaining('This pack is empty'), findsOneWidget);
+  });
+
+  testWidgets('the All view shows a multi-pack sticker exactly once',
+      (tester) async {
+    // personal_stickers is keyed on (pack, hash), so one sticker in two packs
+    // is two ROWS — rendering both reads as a duplicate rather than as
+    // membership.
+    await _pump(tester, mine: [
+      _mine(1, pack: 'autumn'),
+      _mine(1, pack: 'winter'),
+      _mine(2),
+    ]);
+    await tester.tap(find.text('Mine'));
+    await tester.pump();
+    expect(find.byType(ChatAssetImage), findsNWidgets(2));
+
+    // …and still appears under each pack it belongs to.
+    await tester.tap(find.text('autumn'));
+    await tester.pump();
+    expect(find.byType(ChatAssetImage), findsOneWidget);
+    await tester.tap(find.text('winter'));
+    await tester.pump();
+    expect(find.byType(ChatAssetImage), findsOneWidget);
+  });
+
+  testWidgets('Share to this chat only appears when there is a chat to share to',
+      (tester) async {
+    await _pump(tester, mine: [_mine(1, pack: 'autumn')]);
+    await tester.tap(find.text('Mine'));
+    await tester.pump();
+    await tester.longPress(find.text('autumn'));
+    await tester.pumpAndSettle();
+    expect(find.text('Share to this chat'), findsNothing,
+        reason: 'no onSharePack host means nowhere to send it');
+    expect(find.text('Save pack to file…'), findsOneWidget);
+  });
+
+  testWidgets('Add to pack opens a second menu listing the packs it is not in',
+      (tester) async {
+    // Two-level menus only work because showGifMenu dismisses the first menu
+    // BEFORE running the item's onTap — otherwise the second would open
+    // behind a full-screen barrier that eats the next tap.
+    final container = await _pump(tester, mine: [
+      _mine(1, pack: 'autumn'),
+      _mine(2, pack: 'winter'),
+    ]);
+    container.read(stickerPacksProvider.notifier).declare('spring');
+    await tester.tap(find.text('Mine'));
+    await tester.pump();
+
+    await tester.longPress(find.byType(ChatAssetImage).first);
+    await tester.pumpAndSettle();
+    expect(find.text('Add to pack…'), findsOneWidget);
+
+    await tester.tap(find.text('Add to pack…'));
+    await tester.pumpAndSettle();
+
+    // These exist ONLY in the menu.
+    expect(find.text('Add to pack'), findsOneWidget, reason: 'menu header');
+    expect(find.text('New pack…'), findsOneWidget);
+
+    // The chip row stays visible behind the menu, so a pack the menu OFFERS
+    // is found twice (chip + menu entry) and one it withholds only once.
+    // 'autumn' is where this sticker already lives, so it must not be offered.
+    expect(find.text('winter'), findsNWidgets(2));
+    expect(find.text('spring'), findsNWidgets(2));
+    expect(find.text('autumn'), findsOneWidget,
+        reason: 'the pack it is already in is not offered again');
+  });
+
+  group('declared packs', () {
+    test('reject a duplicate name rather than silently merging', () {
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+      final packs = container.read(stickerPacksProvider.notifier);
+
+      expect(packs.declare('autumn'), isTrue);
+      expect(packs.declare('autumn'), isFalse);
+      // Case-insensitive: two packs differing only in case are the same pack
+      // to a human, and merging one into the other would lose the split they
+      // were drawing.
+      expect(packs.declare('AUTUMN'), isFalse);
+      expect(packs.declare(' autumn '), isFalse);
+      expect(container.read(stickerPacksProvider), ['autumn']);
+    });
+
+    test('ignore an empty name', () {
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+      final packs = container.read(stickerPacksProvider.notifier);
+      expect(packs.declare(''), isFalse);
+      expect(packs.declare('   '), isFalse);
+      expect(container.read(stickerPacksProvider), isEmpty);
+    });
+
+    test('rename and forget keep the list in step', () {
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+      final packs = container.read(stickerPacksProvider.notifier);
+
+      packs.declare('autumn');
+      packs.declare('winter');
+      packs.rename('autumn', 'fall');
+      expect(container.read(stickerPacksProvider), ['fall', 'winter']);
+
+      packs.forget('fall');
+      expect(container.read(stickerPacksProvider), ['winter']);
+    });
+  });
 }

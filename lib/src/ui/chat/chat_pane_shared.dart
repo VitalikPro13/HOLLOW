@@ -67,6 +67,24 @@ bool stickerTileCandidate({
     !isEdited &&
     isStickerOnlyMessage(text);
 
+/// The one-block-asset-per-message rule (issue #36), shared by all three send
+/// paths so it cannot drift between them.
+///
+/// Stickers and GIFs are the same visual class — a big block of media at a
+/// fixed box — so they share one budget rather than one each: a message
+/// carries at most ONE of either. Stacking them was the actual complaint, and
+/// a per-kind cap would still allow a sticker and a GIF to stack.
+///
+/// Both pickers can only ever emit one per send, so this exists for the path
+/// they do not own: a hand-typed or pasted `[a:s:…]` / `[a:g:…]`. Check it
+/// against the EXPANDED wire text, and fail the send visibly with the
+/// composer intact rather than silently trimming what the user wrote.
+bool exceedsAssetLimit(String expandedText) =>
+    countBlockAssetTokens(expandedText) > 1;
+
+/// User-facing reason for a refused send, so all three panes say it the same.
+const String kAssetLimitMessage = 'One sticker or GIF per message';
+
 /// Which seams of a message are continued by its neighbours. A run tiles
 /// only where BOTH rows are candidates and the rows are already grouped
 /// (same author, within the grouping window) — the same rule that decides

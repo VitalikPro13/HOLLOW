@@ -211,33 +211,21 @@ _TokenMatch? _matchCustomEmote(String text, int i) {
 /// Tokens with out-of-bound dims fail [parseAssetToken] and fall through to
 /// plain text (same as an old client would render).
 ///
-/// STICKER RUNS: consecutive sticker tokens separated only by horizontal
-/// whitespace are absorbed into ONE token whose `text` is the whole run
-/// source, so [ChatAssetRun] can draw them edge to edge and a pack authored
-/// as several pieces reads as one image. GIFs never join a run — each stays
-/// its own block at the photo box, which is what a GIF-with-caption needs.
+/// ONE STICKER PER MESSAGE (issue #36): stickers no longer absorb their
+/// horizontal neighbours into a shared-height run. Every asset token is its
+/// own full-size block, so several in one message stack at natural size
+/// instead of shrinking to fit — which is all a pre-0.9.3 client's mosaic
+/// degrades to, and nothing sent since is capable of producing one. Mosaics
+/// live on VERTICALLY, across consecutive sticker-only messages
+/// ([isStickerOnlyMessage] + `stickerTilingFor`), which is the form people
+/// actually use.
 _TokenMatch? _matchAssetToken(String text, int i) {
   if (text[i] != '[') return null;
   final match = assetTokenRegex.matchAsPrefix(text, i);
   if (match == null) return null;
-  final first = parseAssetToken(match.group(0)!);
-  if (first == null) return null;
+  if (parseAssetToken(match.group(0)!) == null) return null;
 
-  var end = match.end;
-  if (first.kind == 's') {
-    while (true) {
-      var j = end;
-      while (j < text.length && _isHSpace(text[j])) {
-        j++;
-      }
-      final next = assetTokenRegex.matchAsPrefix(text, j);
-      if (next == null) break;
-      final asset = parseAssetToken(next.group(0)!);
-      if (asset == null || asset.kind != 's') break;
-      end = next.end;
-    }
-  }
-
+  final end = match.end;
   var before = i;
   while (before > 0 && _isHSpace(text[before - 1])) {
     before--;
@@ -259,27 +247,63 @@ _TokenMatch? _matchAssetToken(String text, int i) {
   );
 }
 
-/// Every well-formed asset in a run token's source, in order.
-List<ChatAsset> parseAssetRun(String runSource) {
+/// Every well-formed asset token in [source], in order.
+List<ChatAsset> parseAssetTokens(String source) {
   final out = <ChatAsset>[];
-  for (final m in assetTokenRegex.allMatches(runSource)) {
+  for (final m in assetTokenRegex.allMatches(source)) {
     final a = parseAssetToken(m.group(0)!);
     if (a != null) out.add(a);
   }
   return out;
 }
 
-/// Whether [text] is nothing but a sticker run — the condition for tiling
-/// this message into its neighbours. Shared by both chat panes and the
-/// mobile route so their grouping rules cannot drift.
+/// How many well-formed BLOCK ASSET tokens [source] carries — stickers and
+/// GIFs together, since both draw as a block and the send guard caps their
+/// combined count at one (issue #36). Counted over the expanded wire text, so
+/// a hand-pasted raw token is caught the same as a picked one.
+int countBlockAssetTokens(String source) => parseAssetTokens(source).length;
+
+/// The block assets of a message that is NOTHING BUT block assets, or null if
+/// there is any real text alongside them.
+///
+/// This is the render fast-path, and it is what makes a vertical mosaic
+/// seamless: `Text.rich` gives the line holding a WidgetSpan the font's own
+/// ascent and descent, so a 160px sticker sits inside a ~165px line box
+/// (measured: 3.6px above, 1.4px below). Two tiled messages then land a
+/// hairline apart no matter how much padding is zeroed. A message with no
+/// text has no reason to be a paragraph at all.
+///
+/// Broader than [isStickerOnlyMessage] on purpose: that one decides TILING,
+/// which GIFs must never join, while this only decides how to lay a message
+/// out.
+List<ChatAsset>? blockAssetsOnlyMessage(String text) {
+  final trimmed = text.trim();
+  if (trimmed.isEmpty) return null;
+  final assets = parseAssetTokens(trimmed);
+  if (assets.isEmpty) return null;
+  if (trimmed.replaceAll(assetTokenRegex, '').trim().isNotEmpty) return null;
+  return assets;
+}
+
+/// Whether [text] is nothing but stickers — the condition for tiling this
+/// message into its neighbours. Shared by both chat panes and the mobile
+/// route so their grouping rules cannot drift.
 bool isStickerOnlyMessage(String text) {
   final trimmed = text.trim();
   if (trimmed.isEmpty) return false;
-  final assets = parseAssetRun(trimmed);
+  final assets = parseAssetTokens(trimmed);
   if (assets.isEmpty || assets.any((a) => a.kind != 's')) return false;
   // Nothing but tokens and horizontal whitespace: strip the tokens and see
   // if anything is left.
   return trimmed.replaceAll(assetTokenRegex, '').trim().isEmpty;
+}
+
+/// Whether the spans built so far already end in a line break, so a block
+/// asset does not add a second one and open a blank line.
+bool _endsWithNewline(List<InlineSpan> spans) {
+  if (spans.isEmpty) return false;
+  final last = spans.last;
+  return last is TextSpan && (last.text?.endsWith('\n') ?? false);
 }
 
 /// Which seams of a block asset are continued by a neighbouring message.
@@ -532,8 +556,8 @@ List<InlineSpan> _tokensToSpans(
           ),
         ));
       case _TokenKind.asset:
-        final assets = parseAssetRun(tok.text);
-        if (assets.isEmpty) {
+        final asset = parseAssetToken(tok.text);
+        if (asset == null) {
           // Can't happen (the matcher validates) — degrade like an old client.
           spans.add(TextSpan(text: tok.text, style: style));
           break;
@@ -544,20 +568,27 @@ List<InlineSpan> _tokensToSpans(
         // scale (root UiScale transform), not the chat TEXT scale — same
         // rule as avatars and file cards.
         //
-        // A run of stickers draws gapless, and when the neighbouring MESSAGE
-        // continues the run its padding on that side goes to zero too, so
-        // the seam survives the message boundary.
+        // When the neighbouring MESSAGE continues a vertical sticker run, the
+        // padding on that side goes to zero so the seam survives the message
+        // boundary.
         final tileTop = tiling.top && tok.atLineStart;
         final tileBottom = tiling.bottom && tok.atLineEnd;
-        if (!tok.atLineStart) spans.add(TextSpan(text: '\n', style: style));
+        // Two ADJACENT block assets each want a break on the side they share,
+        // which would open a blank line between them. Only the first one is
+        // needed. Reachable solely through pre-0.9.3 messages that carry a
+        // sticker run (or a hand-pasted pair) — nothing sent since can, but
+        // those messages still have to read cleanly.
+        if (!tok.atLineStart && !_endsWithNewline(spans)) {
+          spans.add(TextSpan(text: '\n', style: style));
+        }
         spans.add(WidgetSpan(
           child: Padding(
             padding: EdgeInsets.only(
               top: tileTop ? 0 : 4,
               bottom: tileBottom ? 0 : 4,
             ),
-            child: ChatAssetRun(
-              assets: assets,
+            child: ChatAssetBlock(
+              asset: asset,
               tileTop: tileTop,
               tileBottom: tileBottom,
             ),
@@ -632,10 +663,58 @@ class MessageText extends StatelessWidget {
       return _buildWithCodeBlocks(text, style, hollow, suffixSpans, scaler);
     }
 
+    // No text at all → no paragraph. Wrapping a bare sticker in Text.rich
+    // pads it with the font's ascent and descent, which is exactly the
+    // hairline that used to show between two tiled halves of one drawing.
+    // Only when there is no suffix either: "(edited)" is real text, and an
+    // edited message never tiles anyway (stickerTileCandidate excludes it).
+    if (suffixSpans == null) {
+      final assets = blockAssetsOnlyMessage(text);
+      // Exactly ONE asset — which is everything any client can send now, and
+      // the only shape that tiles. A pre-0.9.3 multi-asset message stays on
+      // the paragraph: it renders correctly there already, and stacking those
+      // in a Column would report an overflow inside any height-constrained
+      // box, which the paragraph simply does not do.
+      if (assets != null && assets.length == 1) {
+        return _assetOnlyBody(assets.first);
+      }
+    }
+
     final tokens = _cachedTokenize(text, memberNames: memberNames);
     final spans = _tokensToSpans(tokens, style, hollow, scaler, tiling);
     if (suffixSpans != null) spans.addAll(suffixSpans!);
     return Text.rich(TextSpan(children: spans));
+  }
+
+  /// A message that is one block asset and nothing else, laid out as a bare
+  /// widget so the media touches its own bounds exactly.
+  ///
+  /// The outer padding is the seam: zero on a side a neighbouring message
+  /// continues, 4px otherwise.
+  Widget _assetOnlyBody(ChatAsset asset) {
+    final body = ChatAssetBlock(
+      asset: asset,
+      tileTop: tiling.top,
+      tileBottom: tiling.bottom,
+    );
+    return Padding(
+      padding: EdgeInsets.only(
+        top: tiling.top ? 0 : 4,
+        bottom: tiling.bottom ? 0 : 4,
+      ),
+      // Align, not a bare child: a message row hands down a TIGHT width, and
+      // the media must keep its own box inside it rather than being stretched
+      // across the pane. Text.rich used to absorb that on the asset's behalf.
+      //
+      // `heightFactor: 1` is load-bearing — without it Align fills whatever
+      // height it is offered and CENTRES the media in it, which silently ate
+      // the 4px padding difference that tiling is supposed to remove.
+      child: Align(
+        alignment: AlignmentDirectional.centerStart,
+        heightFactor: 1,
+        child: body,
+      ),
+    );
   }
 
   Widget _buildWithCodeBlocks(

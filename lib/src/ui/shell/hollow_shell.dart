@@ -893,6 +893,8 @@ class _HollowShellState extends ConsumerState<HollowShell>
     // already a local content-addressed blob, so unlike the GIF library
     // there is nothing to resolve against a proxy base.
     await ref.read(stickerRecentsProvider.notifier).loadCached();
+    await ref.read(stickerLastTabProvider.notifier).loadCached();
+    await ref.read(stickerPacksProvider.notifier).loadCached();
     // Then warm the trending page a little later so the GIF picker opens
     // with zero spinner (plan: prefetch at app idle).
     Future.delayed(const Duration(seconds: 5), () {

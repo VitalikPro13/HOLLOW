@@ -471,6 +471,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   ShowcaseAsset dco_decode_showcase_asset(dynamic raw);
 
   @protected
+  StickerPackImportResult dco_decode_sticker_pack_import_result(dynamic raw);
+
+  @protected
+  StickerPackPreview dco_decode_sticker_pack_preview(dynamic raw);
+
+  @protected
   StorageBreakdown dco_decode_storage_breakdown(dynamic raw);
 
   @protected
@@ -1077,6 +1083,16 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   ShowcaseAsset sse_decode_showcase_asset(SseDeserializer deserializer);
+
+  @protected
+  StickerPackImportResult sse_decode_sticker_pack_import_result(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  StickerPackPreview sse_decode_sticker_pack_preview(
+    SseDeserializer deserializer,
+  );
 
   @protected
   StorageBreakdown sse_decode_storage_breakdown(SseDeserializer deserializer);
@@ -1877,6 +1893,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_showcase_asset(ShowcaseAsset self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_sticker_pack_import_result(
+    StickerPackImportResult self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_sticker_pack_preview(
+    StickerPackPreview self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_storage_breakdown(

@@ -367,6 +367,370 @@ pub fn sticker_fetch_and_store(
     gifs::media_fetch_and_store(MediaKind::Sticker, id, source_url)
 }
 
+// ── Pack sharing: the `.hollow-pack` file (issue #36) ─────────────────
+//
+// A pack is shared as a FILE, never as a link, and that is an architectural
+// answer rather than a stylistic one: Hollow has nowhere to host bytes. A
+// server invite works because the link carries only an ID and the join
+// happens over the relay into a room the inviter is already in; a pack has no
+// room behind it, so a URL would mean either serving strangers from the
+// author's node (a discovery surface we refuse to build) or a CDN (a central
+// server we refuse to run). Dropping the file into a DM or a channel reuses
+// the whole encrypted transfer path and adds no discovery whatsoever.
+//
+// It is also strictly the more private primitive. A live "vault link" would
+// tell the author who added them and let them push new bytes later; a file is
+// a one-time copy with no ongoing relationship in either direction. And it
+// doubles as the personal vault's only backup story — `personal_stickers` is
+// local-only, so today a reinstall loses it.
+//
+// Container (ZIP, modelled on `.hollow-shards` in api/archive.rs):
+//   manifest.json  { format_version, pack, author, created_at, items[], sig }
+//   blobs/<hash>.webp
+//
+// The author signature is ATTRIBUTION ONLY. It never gates the import, and a
+// missing or bad one means "do not show a byline", never "refuse" — anyone
+// may author a pack, and there is no authority that could say otherwise.
+
+const PACK_FORMAT_VERSION: u32 = 1;
+
+/// One sticker in a `.hollow-pack` manifest.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PackItem {
+    hash: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    animated: bool,
+    w: u32,
+    h: u32,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PackManifest {
+    format_version: u32,
+    pack: String,
+    #[serde(default)]
+    author: String,
+    #[serde(default)]
+    author_pubkey_b64: String,
+    #[serde(default)]
+    created_at: u64,
+    items: Vec<PackItem>,
+    #[serde(default)]
+    sig_b64: String,
+}
+
+/// What a `.hollow-pack` says about itself, for the in-chat card and the
+/// import confirmation — read WITHOUT touching the vault.
+pub struct StickerPackPreview {
+    pub pack: String,
+    /// Master peer_id of whoever exported it, `""` when unsigned or forged.
+    pub author: String,
+    /// True only when the signature verifies against `author`. Display only.
+    pub author_verified: bool,
+    /// Stickers the file claims to carry.
+    ///
+    /// CLAIMS, not a promise: the count comes from the manifest and every
+    /// entry still has to survive import validation. No thumbnail ships with
+    /// this on purpose — previewing would mean handing un-validated bytes to
+    /// an image decoder before we have checked a single one of them.
+    pub count: u32,
+}
+
+/// Outcome of an import. Partial by design: hitting a vault cap part-way
+/// through must keep what already landed and SAY so, not roll back the lot.
+pub struct StickerPackImportResult {
+    pub pack: String,
+    pub added: u32,
+    /// Already in the pack — re-importing is idempotent, not an error.
+    pub skipped: u32,
+    /// Failed validation or would not fit under the caps.
+    pub rejected: u32,
+}
+
+/// Canonical bytes the author signs. Covers the pack name, the author, and
+/// every item's hash and dims in manifest order, so nothing inside can be
+/// reordered, retitled or resized after signing.
+fn pack_signing_payload(pack: &str, author: &str, items: &[PackItem]) -> String {
+    let mut s = format!("hollow-pack:v{PACK_FORMAT_VERSION}:{pack}:{author}");
+    for it in items {
+        s.push_str(&format!(":{}:{}:{}", it.hash, it.w, it.h));
+    }
+    s
+}
+
+/// Export one personal pack as a `.hollow-pack` file. Returns its size.
+#[frb]
+pub fn export_personal_sticker_pack(
+    pack: String,
+    output_path: String,
+) -> Result<u64, String> {
+    use std::io::Write;
+
+    let pack = pack.trim().to_string();
+    let store = get_store();
+    let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let ms = guard.as_ref().ok_or("Message store is not open")?;
+
+    let rows: Vec<_> = ms
+        .list_personal_stickers()?
+        .into_iter()
+        .filter(|r| r.pack == pack)
+        .collect();
+    if rows.is_empty() {
+        return Err("That pack has no stickers".into());
+    }
+
+    // Collect bytes first: a row whose blob was evicted cannot be exported,
+    // and a pack file with a dangling manifest entry is worse than a smaller
+    // one.
+    let mut blobs: Vec<(String, Vec<u8>)> = Vec::new();
+    let mut items: Vec<PackItem> = Vec::new();
+    for r in &rows {
+        let Some(bytes) = ms.load_emote_blob(&r.hash)? else {
+            continue;
+        };
+        items.push(PackItem {
+            hash: r.hash.clone(),
+            name: r.name.clone(),
+            animated: r.animated,
+            w: r.w,
+            h: r.h,
+        });
+        blobs.push((r.hash.clone(), bytes));
+    }
+    if items.is_empty() {
+        return Err("None of that pack's images are still cached".into());
+    }
+
+    let id = crate::identity::load_or_create_identity()?;
+    let payload = pack_signing_payload(&pack, &id.peer_id, &items);
+    let sig = id.keypair.sign(payload.as_bytes());
+    let manifest = PackManifest {
+        format_version: PACK_FORMAT_VERSION,
+        pack: pack.clone(),
+        author: id.peer_id.clone(),
+        author_pubkey_b64: {
+            use base64::Engine;
+            base64::engine::general_purpose::STANDARD
+                .encode(id.keypair.public_key_protobuf())
+        },
+        created_at: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+        items,
+        sig_b64: {
+            use base64::Engine;
+            base64::engine::general_purpose::STANDARD.encode(sig)
+        },
+    };
+    let manifest_bytes = serde_json::to_vec_pretty(&manifest)
+        .map_err(|e| format!("Failed to serialize pack manifest: {e}"))?;
+
+    let mut zip_buf = std::io::Cursor::new(Vec::new());
+    {
+        let mut zip = zip::ZipWriter::new(&mut zip_buf);
+        // WebP is already compressed; Deflate would only burn CPU.
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+
+        zip.start_file("manifest.json", options)
+            .map_err(|e| format!("Zip error: {e}"))?;
+        zip.write_all(&manifest_bytes)
+            .map_err(|e| format!("Zip write error: {e}"))?;
+
+        for (hash, bytes) in &blobs {
+            zip.start_file(format!("blobs/{hash}.webp"), options)
+                .map_err(|e| format!("Zip error: {e}"))?;
+            zip.write_all(bytes)
+                .map_err(|e| format!("Zip write error: {e}"))?;
+        }
+        zip.finish().map_err(|e| format!("Zip finish error: {e}"))?;
+    }
+
+    let bytes = zip_buf.into_inner();
+    let size = bytes.len() as u64;
+    std::fs::write(&output_path, &bytes)
+        .map_err(|e| format!("Failed to write pack: {e}"))?;
+    Ok(size)
+}
+
+/// Read a `.hollow-pack` manifest without importing anything.
+#[frb]
+pub fn preview_sticker_pack(path: String) -> Result<StickerPackPreview, String> {
+    let manifest = read_pack_manifest(&path)?;
+    let verified = pack_signature_is_valid(&manifest);
+    Ok(StickerPackPreview {
+        pack: manifest.pack,
+        author: if verified {
+            manifest.author.clone()
+        } else {
+            String::new()
+        },
+        author_verified: verified,
+        count: manifest.items.len() as u32,
+    })
+}
+
+fn read_pack_manifest(path: &str) -> Result<PackManifest, String> {
+    use std::io::Read;
+
+    let zip_bytes =
+        std::fs::read(path).map_err(|e| format!("Failed to read pack: {e}"))?;
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(&zip_bytes))
+        .map_err(|e| format!("Not a valid pack file: {e}"))?;
+    let mut raw = String::new();
+    archive
+        .by_name("manifest.json")
+        .map_err(|_| "Pack is missing its manifest".to_string())?
+        .read_to_string(&mut raw)
+        .map_err(|e| format!("Failed to read pack manifest: {e}"))?;
+    let manifest: PackManifest = serde_json::from_str(&raw)
+        .map_err(|e| format!("Failed to parse pack manifest: {e}"))?;
+    if manifest.format_version > PACK_FORMAT_VERSION {
+        return Err("That pack was made by a newer version of Hollow".into());
+    }
+    Ok(manifest)
+}
+
+/// Attribution check. False for anything unsigned, malformed or mismatched —
+/// and false NEVER blocks an import, it only withholds the byline.
+fn pack_signature_is_valid(manifest: &PackManifest) -> bool {
+    use base64::Engine;
+    use crate::identity::native_identity::NativeKeypair;
+    let b64 = base64::engine::general_purpose::STANDARD;
+
+    if manifest.author.is_empty() || manifest.sig_b64.is_empty() {
+        return false;
+    }
+    let (Ok(pk), Ok(sig)) = (
+        b64.decode(&manifest.author_pubkey_b64),
+        b64.decode(&manifest.sig_b64),
+    ) else {
+        return false;
+    };
+    // Bind pubkey → claimed author, exactly as the device-list check does;
+    // without this anyone could sign with their own key and claim any name.
+    match NativeKeypair::peer_id_from_pubkey_protobuf(&pk) {
+        Some(derived) if derived == manifest.author => {}
+        _ => return false,
+    }
+    let payload = pack_signing_payload(&manifest.pack, &manifest.author, &manifest.items);
+    NativeKeypair::verify_peer_signature(&pk, &sig, payload.as_bytes()).unwrap_or(false)
+}
+
+/// Import a `.hollow-pack` into the personal vault under [into_pack] (empty =
+/// the name the file carries).
+///
+/// Every byte here is attacker-controlled, so nothing in the manifest is
+/// trusted for anything load-bearing:
+///   * the blob is keyed by the hash we COMPUTE, and an entry whose bytes do
+///     not hash to their claimed name is rejected outright;
+///   * `w`/`h` are re-derived from the decoded image, because those two
+///     numbers go straight into the wire token;
+///   * entry paths are never joined — the hash names the file we read;
+///   * the vault caps are enforced per row, so a huge pack fills up to the
+///     limit and reports the remainder as rejected rather than failing whole.
+#[frb]
+pub fn import_sticker_pack(
+    path: String,
+    into_pack: String,
+) -> Result<StickerPackImportResult, String> {
+    use std::io::Read;
+
+    let manifest = read_pack_manifest(&path)?;
+    let target = {
+        let requested = into_pack.trim();
+        let name = if requested.is_empty() {
+            manifest.pack.trim()
+        } else {
+            requested
+        };
+        clean_label(name)?
+    };
+
+    let zip_bytes =
+        std::fs::read(&path).map_err(|e| format!("Failed to read pack: {e}"))?;
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(&zip_bytes))
+        .map_err(|e| format!("Not a valid pack file: {e}"))?;
+
+    let mut added = 0u32;
+    let mut skipped = 0u32;
+    let mut rejected = 0u32;
+
+    for item in &manifest.items {
+        if !crate::crdt::valid_emote_hash(&item.hash) {
+            rejected += 1;
+            continue;
+        }
+        // The hash names the entry — an attacker-supplied path is never
+        // joined, so there is no traversal surface at all.
+        let mut bytes = Vec::new();
+        let read_ok = archive
+            .by_name(&format!("blobs/{}.webp", item.hash))
+            .map(|mut f| f.read_to_end(&mut bytes))
+            .is_ok();
+        if !read_ok || bytes.is_empty() {
+            rejected += 1;
+            continue;
+        }
+        // Content-address check: the bytes ARE the identity.
+        let actual = hex::encode(Sha256::digest(&bytes));
+        if actual != item.hash {
+            rejected += 1;
+            continue;
+        }
+        let Ok((w, h, animated)) =
+            crate::node::image_convert::validate_sticker_blob(&bytes)
+        else {
+            rejected += 1;
+            continue;
+        };
+        // A label is cosmetic; a bad one is not worth losing the sticker
+        // over, so fall back to unnamed rather than rejecting.
+        let name = clean_label(&item.name).unwrap_or_default();
+
+        {
+            let store = get_store();
+            let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+            let ms = guard.as_ref().ok_or("Message store is not open")?;
+            if ms
+                .list_personal_stickers()?
+                .iter()
+                .any(|r| r.pack == target && r.hash == actual)
+            {
+                skipped += 1;
+                continue;
+            }
+            ms.save_asset_blob(&actual, &bytes, animated, "sticker")?;
+        }
+
+        // Re-uses the ordinary add path, so the vault caps, the blob-presence
+        // check and the label rules are enforced in exactly one place.
+        match add_personal_sticker(
+            target.clone(),
+            actual,
+            name,
+            animated,
+            w,
+            h,
+            "pack".to_string(),
+        ) {
+            Ok(()) => added += 1,
+            Err(_) => rejected += 1,
+        }
+    }
+
+    Ok(StickerPackImportResult {
+        pack: target,
+        added,
+        skipped,
+        rejected,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -403,5 +767,111 @@ mod tests {
         assert_eq!(l.len(), 5);
         assert_eq!(l[0], MAX_SERVER_STICKERS as u32);
         assert_eq!(l[4], MAX_STICKER_LABEL as u32);
+    }
+
+    // ── `.hollow-pack` (issue #36) ────────────────────────────────────
+
+    use crate::identity::native_identity::NativeKeypair;
+
+    fn item(hash_seed: u8, w: u32, h: u32) -> PackItem {
+        PackItem {
+            hash: hex::encode([hash_seed; 32]),
+            name: "piece".into(),
+            animated: false,
+            w,
+            h,
+        }
+    }
+
+    fn signed_manifest(kp: &NativeKeypair, pack: &str, items: Vec<PackItem>) -> PackManifest {
+        use base64::Engine;
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let author = kp.peer_id();
+        let sig = kp.sign(pack_signing_payload(pack, &author, &items).as_bytes());
+        PackManifest {
+            format_version: PACK_FORMAT_VERSION,
+            pack: pack.into(),
+            author,
+            author_pubkey_b64: b64.encode(kp.public_key_protobuf()),
+            created_at: 0,
+            items,
+            sig_b64: b64.encode(sig),
+        }
+    }
+
+    #[test]
+    fn signing_payload_binds_every_item_and_its_dims() {
+        let a = pack_signing_payload("p", "author", &[item(1, 512, 512)]);
+        // Reordering, resizing or renaming the pack must all change it —
+        // otherwise the signature covers nothing that matters.
+        assert_ne!(
+            a,
+            pack_signing_payload("p", "author", &[item(1, 512, 256)])
+        );
+        assert_ne!(
+            a,
+            pack_signing_payload("p", "author", &[item(2, 512, 512)])
+        );
+        assert_ne!(a, pack_signing_payload("q", "author", &[item(1, 512, 512)]));
+        assert_ne!(a, pack_signing_payload("p", "other", &[item(1, 512, 512)]));
+        assert_ne!(
+            pack_signing_payload("p", "a", &[item(1, 8, 8), item(2, 8, 8)]),
+            pack_signing_payload("p", "a", &[item(2, 8, 8), item(1, 8, 8)]),
+            "item ORDER is signed"
+        );
+    }
+
+    #[test]
+    fn a_genuine_signature_verifies() {
+        let kp = NativeKeypair::from_secret_bytes(&[7u8; 32]);
+        let m = signed_manifest(&kp, "autumn", vec![item(1, 512, 512)]);
+        assert!(pack_signature_is_valid(&m));
+    }
+
+    #[test]
+    fn tampering_after_signing_loses_the_byline() {
+        let kp = NativeKeypair::from_secret_bytes(&[7u8; 32]);
+
+        // Swapping in a different sticker.
+        let mut m = signed_manifest(&kp, "autumn", vec![item(1, 512, 512)]);
+        m.items[0].hash = hex::encode([9u8; 32]);
+        assert!(!pack_signature_is_valid(&m));
+
+        // Lying about the dims that build the wire token.
+        let mut m = signed_manifest(&kp, "autumn", vec![item(1, 512, 512)]);
+        m.items[0].w = 4096;
+        assert!(!pack_signature_is_valid(&m));
+
+        // Renaming the pack.
+        let mut m = signed_manifest(&kp, "autumn", vec![item(1, 512, 512)]);
+        m.pack = "winter".into();
+        assert!(!pack_signature_is_valid(&m));
+    }
+
+    #[test]
+    fn a_forged_author_cannot_borrow_someone_elses_name() {
+        // Sign with our own key, then claim to be somebody else. The
+        // pubkey→peer_id binding is what stops this.
+        let mine = NativeKeypair::from_secret_bytes(&[7u8; 32]);
+        let theirs = NativeKeypair::from_secret_bytes(&[8u8; 32]);
+        let mut m = signed_manifest(&mine, "autumn", vec![item(1, 512, 512)]);
+        m.author = theirs.peer_id();
+        assert!(!pack_signature_is_valid(&m));
+    }
+
+    #[test]
+    fn unsigned_packs_are_simply_unattributed() {
+        // Not an error — anyone may author a pack, and there is no authority
+        // that could say otherwise. It just gets no byline.
+        let m = PackManifest {
+            format_version: PACK_FORMAT_VERSION,
+            pack: "autumn".into(),
+            author: String::new(),
+            author_pubkey_b64: String::new(),
+            created_at: 0,
+            items: vec![item(1, 512, 512)],
+            sig_b64: String::new(),
+        };
+        assert!(!pack_signature_is_valid(&m));
     }
 }

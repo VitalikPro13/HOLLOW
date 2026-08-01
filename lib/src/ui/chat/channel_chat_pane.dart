@@ -945,7 +945,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
     }
   }
 
-  Future<void> _handleSend() async {
+  Future<void> _handleSend({bool refocus = true}) async {
     _dismissMentionOverlay();
     _emoteAutocomplete.dismiss();
     if (_blockedBySlowMode()) return;
@@ -965,9 +965,14 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
       );
       return;
     }
+    if (exceedsAssetLimit(text)) {
+      HollowToast.show(context, kAssetLimitMessage,
+          type: HollowToastType.error);
+      return;
+    }
     _controller.clear();
     _lastTypingSent = null;
-    _focusNode.requestFocus();
+    if (refocus) _focusNode.requestFocus();
     final replyMid = _replyToMessageId;
     // Capture staged preview BEFORE clearing state.
     final preview = _stagedPreview;
@@ -1108,6 +1113,23 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
       _isRecordingVoice = false;
       _stagedFilePath = result.filePath;
       _stagedFileName = 'Voice message.ogg';
+      _stagedFileIsImage = false;
+    });
+    await _sendStagedFile();
+  }
+
+  /// Send an already-written file straight into this channel, with no save
+  /// dialog — the "Share pack to this chat" path (issue #36). Stages and
+  /// sends in one go, exactly like a finished voice recording.
+  ///
+  /// The file is NOT deleted afterwards: our own bubble keeps pointing at it
+  /// (the pack card reads its manifest from disk), so it lives out its life in
+  /// the temp directory the OS already sweeps.
+  Future<void> _shareFileToChat(String path, String fileName) async {
+    if (!mounted) return;
+    setState(() {
+      _stagedFilePath = path;
+      _stagedFileName = fileName;
       _stagedFileIsImage = false;
     });
     await _sendStagedFile();
@@ -1412,16 +1434,15 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
     showGifPicker(
       context: context,
       anchorPosition: anchor,
-      onSelect: _insertEmojiAtCursor,
+      onSelect: _sendAsset,
       // Conferences have no CRDT NSFW flag — they are the participants' own
       // room, so they use the user's rating like a DM does.
       serverId: _isConference ? null : widget.serverId,
     );
   }
 
-  /// Open the sticker picker anchored to the composer button; the pick
-  /// arrives as an `[a:s:hash:w:h]` token and stages like an emote. Several
-  /// in a row tile into a mosaic once sent.
+  /// Open the sticker picker anchored to the composer button. A pick SENDS
+  /// immediately (see [_sendAsset]) and the panel stays open.
   void _openComposerStickerPicker(BuildContext btnCtx) {
     final box = btnCtx.findRenderObject() as RenderBox?;
     final anchor = box == null
@@ -1430,12 +1451,22 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
     showStickerPicker(
       context: context,
       anchorPosition: anchor,
-      onSelect: _insertEmojiAtCursor,
+      onSelect: _sendAsset,
+      onSharePack: _shareFileToChat,
       serverId: _isConference ? null : widget.serverId,
     );
   }
 
-  void _insertEmojiAtCursor(String text) {
+  /// Send-on-click (issue #36) — see `chat_pane.dart:_sendAsset` for the
+  /// rationale. Text already in the composer rides along as a caption, the
+  /// picker stays open, and focus stays put so mobile does not raise the
+  /// keyboard over the sheet on every pick.
+  Future<void> _sendAsset(String token) async {
+    _insertEmojiAtCursor(token, refocus: false);
+    await _handleSend(refocus: false);
+  }
+
+  void _insertEmojiAtCursor(String text, {bool refocus = true}) {
     // Custom-emote/asset tokens become a 1-char placeholder rendered inline
     // as the actual image; Unicode emoji pass through unchanged.
     text = _controller.displayTextFor(text);
@@ -1448,7 +1479,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
     );
     _controller.text = newText;
     _controller.selection = TextSelection.collapsed(offset: base + text.length);
-    _focusNode.requestFocus();
+    if (refocus) _focusNode.requestFocus();
   }
 
   @override
