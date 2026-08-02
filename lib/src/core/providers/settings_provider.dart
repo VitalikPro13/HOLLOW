@@ -730,6 +730,16 @@ int _effectiveAutoDownloadMb(
   return global;
 }
 
+/// True when [fileName] is a recorded voice message. Voice notes are exempt
+/// from the auto-download gate on every path (they behave like text). Matches
+/// both the UI display name and the recorder's temp basename that actually
+/// rides the wire (`voice_{stamp}_{rand}.ogg`) — keep in sync with the Rust
+/// twin `file_handler::is_voice_message_name`.
+bool isVoiceMessageFile(String fileName) {
+  return fileName == 'Voice message.ogg' ||
+      (fileName.startsWith('voice_') && fileName.endsWith('.ogg'));
+}
+
 /// Vault cache size cap in MB. Files downloaded from server channels are
 /// LRU-evicted when the cache exceeds this limit. Default: 1024 MB (1 GB).
 final vaultCacheCapProvider =

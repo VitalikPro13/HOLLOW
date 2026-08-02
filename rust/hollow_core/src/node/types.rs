@@ -282,6 +282,10 @@ pub(crate) enum NetworkEvent {
         video_thumb: Option<VideoThumbRef>,
         /// Hidden Share back-reference for large files / progressive video streaming.
         share_ref: Option<ShareRef>,
+        /// Tiny base64 WebP placeholder thumbnail (blurred under the Download
+        /// button for gated/undownloaded images). None for non-images and
+        /// pre-0.9.4 senders.
+        thumb_b64: Option<String>,
     },
     FileProgress {
         file_id: String,
@@ -565,6 +569,15 @@ pub(crate) struct SendFilePayload {
     pub override_width: Option<u32>,
     pub override_height: Option<u32>,
     pub share_ref: Option<ShareRef>,
+    /// True for recorded voice messages (auto-download-gate exemption rides
+    /// the FileHeader as `voice`; the wire name is the recorder's temp
+    /// basename, so the flag must come from Dart).
+    pub voice: bool,
+    /// Video poster frame extracted by Dart (ffmpeg first-frame WebP).
+    /// Rust re-encodes it small+lossy into `FileHeaderPayload::thumb` and
+    /// falls back to its dimensions when the ffmpeg stderr probe produced
+    /// none — so receivers always render the right aspect + a real poster.
+    pub poster: Option<Vec<u8>>,
 }
 
 /// Internal re-entry payload: an image SendFile whose WebP/GIF conversion ran
@@ -585,6 +598,11 @@ pub(crate) struct SendFileConvertedPayload {
     pub final_ext: String,
     pub width: Option<u32>,
     pub height: Option<u32>,
+    /// Tiny base64 WebP placeholder thumbnail generated on the blocking pool
+    /// alongside the conversion (see FileHeaderPayload::thumb).
+    pub thumb: Option<String>,
+    /// Voice-message flag carried through from SendFilePayload.
+    pub voice: bool,
 }
 
 /// Internal re-entry payload: erasure coding + local shard writes for a vault
@@ -798,6 +816,10 @@ pub(crate) enum NodeCommand {
         peer_id: String,
         chunks: Vec<u32>,
     },
+    /// The auto-download config changed (set_auto_download_config FFI) —
+    /// re-advertise `auto_dl_pref` to every connected DM peer / sibling so
+    /// senders stop (or resume) pushing file bytes to us accordingly.
+    ReadvertiseAutoDlPref,
     // -- Vault shard distribution (Phase 4) --
     VaultDownloadFile { server_id: String, content_id: String },
     VaultUploadFile(Box<VaultUploadFilePayload>),
@@ -1004,6 +1026,7 @@ impl NodeCommand {
             Self::SendFile(..) => "SendFile",
             Self::SendFileConverted(..) => "SendFileConverted",
             Self::RequestFile { .. } => "RequestFile",
+            Self::ReadvertiseAutoDlPref => "ReadvertiseAutoDlPref",
             Self::VaultDownloadFile { .. } => "VaultDownloadFile",
             Self::VaultUploadFile(..) => "VaultUploadFile",
             Self::VaultUploadPrepared(..) => "VaultUploadPrepared",
@@ -1725,6 +1748,20 @@ pub(crate) enum HavenMessage {
         status: String,
     },
 
+    /// Per-device auto-download preference advert (issue #41 pre-negotiation).
+    /// Sent to DM-room peers on join and on settings change so the SENDER can
+    /// skip pushing file bytes a gated receiver would only discard. `mb` is the
+    /// advertiser's effective threshold for the conversation with the TARGET
+    /// device's identity (0 = auto-download off there); to own siblings it is
+    /// the global threshold. Plaintext by the same precedent as `typing` /
+    /// `status_update` — a single small number, no content. Best-effort: the
+    /// receive-side gate remains the enforcement; unknown pref = push as before.
+    #[serde(rename = "auto_dl_pref")]
+    AutoDownloadPref {
+        #[serde(default)]
+        mb: u32,
+    },
+
     /// Response to a sync probe: the peer's latest timestamp for the channel.
     #[serde(rename = "ch_sync_probe_resp")]
     ChannelSyncProbeResponse {
@@ -2261,6 +2298,20 @@ pub(crate) struct FileHeaderPayload {
     /// (bytes stream separately) and for non-image / large files.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inline_bytes: Option<String>,
+    /// Tiny blurred-placeholder thumbnail for images: base64 lossy WebP,
+    /// max dimension ~32 px (a few hundred bytes). Rendered blurred under the
+    /// manual Download button when the auto-download gate keeps the real bytes
+    /// off disk (issue #41 carry-over). Same envelope-borne-thumbnail pattern
+    /// as LinkPreviewRef. Receivers cap its size and only honor it for images.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thumb: Option<String>,
+    /// True for recorded voice messages. Voice notes are tiny and
+    /// conversational — they are exempt from the auto-download gate on every
+    /// receive path. Pre-0.9.4 senders don't set this; receivers ALSO match
+    /// the recorder's filename pattern (`voice_{stamp}_{rand}.ogg`) as a
+    /// legacy fallback (see `is_voice_message_name`).
+    #[serde(default)]
+    pub voice: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3017,6 +3068,10 @@ pub(crate) struct SyncFileMetaItem {
     /// Present when this file is a thumbnail for a vault-stored video.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vthumb: Option<VideoThumbRef>,
+    /// Tiny base64 WebP placeholder thumbnail (see FileHeaderPayload::thumb) —
+    /// lets sync-backfilled cards render the blurred placeholder too.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thumb: Option<String>,
 }
 
 /// Back-reference from a thumbnail image (sent via the image P2P path) to the

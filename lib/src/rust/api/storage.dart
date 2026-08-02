@@ -660,6 +660,11 @@ class StoredFileInfo {
   /// Persisted share AES key (hex) paired with `share_root_hash`.
   final String? shareKeyHex;
 
+  /// Tiny base64 WebP placeholder thumbnail — rendered blurred under the
+  /// Download button while the real bytes are gated/undownloaded (issue #41
+  /// carry-over).
+  final String? thumbB64;
+
   const StoredFileInfo({
     required this.fileId,
     required this.fileName,
@@ -683,6 +688,7 @@ class StoredFileInfo {
     this.videoThumb,
     this.shareRootHash,
     this.shareKeyHex,
+    this.thumbB64,
   });
 
   @override
@@ -708,7 +714,8 @@ class StoredFileInfo {
       expiredAt.hashCode ^
       videoThumb.hashCode ^
       shareRootHash.hashCode ^
-      shareKeyHex.hashCode;
+      shareKeyHex.hashCode ^
+      thumbB64.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -736,7 +743,8 @@ class StoredFileInfo {
           expiredAt == other.expiredAt &&
           videoThumb == other.videoThumb &&
           shareRootHash == other.shareRootHash &&
-          shareKeyHex == other.shareKeyHex;
+          shareKeyHex == other.shareKeyHex &&
+          thumbB64 == other.thumbB64;
 }
 
 /// A message returned to Dart from the local database.

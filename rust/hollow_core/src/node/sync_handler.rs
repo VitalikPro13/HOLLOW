@@ -412,6 +412,7 @@ pub(crate) fn channel_sync_items(
                 ts: f.created_at,
                 sender: f.sender_id.clone(),
                 vthumb: f.video_thumb.clone(),
+                thumb: f.thumb_b64.clone(),
             })
         });
         // Deletion proof rides with the hidden flag (REJECT-ABSENT on apply).
@@ -3024,12 +3025,13 @@ fn apply_sync_item_extras(
         .filter(|fm| super::file_handler::file_meta_write_allowed(store, &fm.fid, &fm.sender))
     {
         let ctx_id = format!("{sid}:{cid}");
+        let thumb = super::file_handler::accept_header_thumb(fm.thumb.clone(), fm.img, &fm.mime);
         let _ = store.insert_file_metadata(
             &fm.fid, &fm.name, &fm.ext, &fm.mime,
             fm.size, 0, fm.img, fm.w, fm.h,
             fm.mid.as_deref(), "channel", &ctx_id,
             &fm.sender, is_mine, fm.ts,
-            fm.vthumb.as_ref(),
+            fm.vthumb.as_ref(), thumb.as_deref(),
         );
         events.push(NetworkEvent::FileHeaderReceived {
             file_id: fm.fid.clone(), file_name: fm.name.clone(),
@@ -3040,6 +3042,7 @@ fn apply_sync_item_extras(
             server_id: sid.to_string(), channel_id: cid.to_string(),
             video_thumb: fm.vthumb.clone(),
             share_ref: None,
+            thumb_b64: thumb,
         });
     }
     if let Some(mid) = &msg.mid {

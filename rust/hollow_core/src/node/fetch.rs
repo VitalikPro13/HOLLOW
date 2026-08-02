@@ -73,6 +73,13 @@ pub(crate) async fn run_fetch(
     let relay_url = format!("wss://{relay_domain}/ws");
     let room = fetch_room_code(server_room, local_master, sender_peer_id);
 
+    // AUTO-DOWNLOAD GATE (issue #41 carry-over): this headless process never
+    // receives the Dart `set_auto_download_config` push (the FCM isolate runs
+    // in a fresh process), so load the persisted settings from the SQLCipher
+    // settings table directly — otherwise the process-global default (169 MB
+    // permissive) writes inline images the live node would have gated.
+    load_auto_download_conf_from_settings(db_path, db_passphrase);
+
     hollow_log!(
         "[HOLLOW-FETCH] Connecting to {relay_url} (fetch mode) for {} room {room}",
         if server_room.is_some() { "server" } else { "DM" }
@@ -1032,6 +1039,32 @@ fn handle_file_header(
     db_path: &str,
     db_passphrase: &str,
 ) -> Option<FetchedDm> {
+    if p.inline_bytes.is_some() && p.aes_key.is_some() && p.aes_nonce.is_some() {
+        // AUTO-DOWNLOAD GATE (issue #41 carry-over): honor the same config as
+        // the live node (loaded from the settings table at fetch start).
+        // Gated: keep the sentinel MESSAGE row + metadata so the card renders
+        // with a manual Download button, but never write the bytes.
+        let auto_ok = crate::node::file_handler::auto_download_allows(
+            p.size, &p.name, &format!("dm:{convo}"), p.voice,
+        );
+        if !auto_ok {
+            let msg_text = format!("[file:{}]", p.fid);
+            persist_inline_image(convo, local_master, &p, &msg_text, None, db_path, db_passphrase);
+            hollow_log!(
+                "[HOLLOW-FETCH] Auto-download gate dropped inline image bytes for {} (dm:{convo}) — message kept",
+                p.fid
+            );
+            return Some(FetchedDm {
+                from_peer: convo.to_string(),
+                text: msg_text,
+                timestamp: p.ts,
+                message_id: p.mid.clone().unwrap_or_default(),
+                image_path: None,
+                server_id: None,
+                channel_id: None,
+            });
+        }
+    }
     if let (Some(b64), Some(key_hex), Some(nonce_hex)) =
         (p.inline_bytes.as_ref(), p.aes_key.as_ref(), p.aes_nonce.as_ref())
     {
@@ -1051,7 +1084,7 @@ fn handle_file_header(
                 // — otherwise the image file lands on disk with no
                 // message referencing it and renders as nothing.
                 let msg_text = format!("[file:{}]", p.fid);
-                persist_inline_image(convo, local_master, &p, &msg_text, &disk_str, db_path, db_passphrase);
+                persist_inline_image(convo, local_master, &p, &msg_text, Some(&disk_str), db_path, db_passphrase);
                 hollow_log!(
                     "[HOLLOW-FETCH] wrote inline image {} ({} bytes) -> {}",
                     p.fid, plaintext.len(), disk_str
@@ -1075,6 +1108,34 @@ fn handle_file_header(
     None
 }
 
+/// Load the auto-download config from the persisted settings table so the
+/// fetch node's gate matches the live node's (issue #41 carry-over). Absent /
+/// malformed settings fall back to the same defaults the Dart providers use
+/// (169 MB permissive, no overrides).
+fn load_auto_download_conf_from_settings(db_path: &str, db_passphrase: &str) {
+    let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) else {
+        return;
+    };
+    let threshold = store
+        .load_setting("auto_download_threshold_mb")
+        .ok()
+        .flatten()
+        .and_then(|s| s.trim().parse::<u32>().ok())
+        .filter(|mb| *mb == 0 || *mb >= 34)
+        .unwrap_or(169);
+    let overrides = store
+        .load_setting("auto_download_overrides")
+        .ok()
+        .flatten()
+        .and_then(|s| serde_json::from_str::<std::collections::HashMap<String, bool>>(&s).ok())
+        .unwrap_or_default();
+    hollow_log!(
+        "[HOLLOW-FETCH] Auto-download config loaded: {threshold} MB, {} override(s)",
+        overrides.len()
+    );
+    crate::node::file_handler::set_auto_download_conf(threshold, overrides);
+}
+
 /// Base64-decode + AES-decrypt the inlined image bytes from a FileHeader.
 fn decrypt_inline_image(b64: &str, key_hex: &str, nonce_hex: &str) -> Option<Vec<u8>> {
     base64::engine::general_purpose::STANDARD
@@ -1095,12 +1156,14 @@ fn decrypt_inline_image(b64: &str, key_hex: &str, nonce_hex: &str) -> Option<Vec
 }
 
 /// Persist the message row + file metadata for an inlined image FileHeader.
+/// `disk_str` = Some(path) marks the file complete on disk; None = the bytes
+/// were gated (auto-download off) — rows only, card renders a Download button.
 fn persist_inline_image(
     convo: &str,
     local_master: &str,
     p: &FileHeaderPayload,
     msg_text: &str,
-    disk_str: &str,
+    disk_str: Option<&str>,
     db_path: &str,
     db_passphrase: &str,
 ) {
@@ -1140,14 +1203,18 @@ fn persist_inline_image(
         // row (Step 5.1 DM-file context rule).
         // Owner guard (0.8.5) — see `file_handler::file_meta_write_allowed`.
         if crate::node::file_handler::file_meta_write_allowed(&store, &p.fid, convo) {
+            let thumb =
+                crate::node::file_handler::accept_header_thumb(p.thumb.clone(), p.img, &p.mime);
             let _ = store.insert_file_metadata(
                 &p.fid, &p.name, &p.ext, &p.mime,
                 p.size, 0, p.img, p.w, p.h,
                 p.mid.as_deref(), "dm", convo,
                 convo, false, p.ts,
-                p.vthumb.as_ref(),
+                p.vthumb.as_ref(), thumb.as_deref(),
             );
         }
-        let _ = store.mark_file_complete(&p.fid, disk_str);
+        if let Some(disk_str) = disk_str {
+            let _ = store.mark_file_complete(&p.fid, disk_str);
+        }
     }
 }

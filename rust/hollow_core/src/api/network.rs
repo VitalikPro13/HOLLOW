@@ -237,6 +237,9 @@ pub enum NetworkEvent {
         /// Hidden Share back-reference for large files / progressive video streaming.
         share_root_hash: Option<String>,
         share_key_hex: Option<String>,
+        /// Tiny base64 WebP placeholder thumbnail — rendered blurred under the
+        /// Download button for gated/undownloaded images (issue #41 carry-over).
+        thumb_b64: Option<String>,
     },
     FileProgress {
         file_id: String,
@@ -974,13 +977,14 @@ fn to_ffi_event(event: node::NetworkEvent) -> NetworkEvent {
             NetworkEvent::MessageUnpinned { server_id, channel_id, message_id }
         }
         // -- File transfer events --
-        node::NetworkEvent::FileHeaderReceived { file_id, file_name, size_bytes, is_image, width, height, message_id, sender_id, server_id, channel_id, video_thumb, share_ref } => {
+        node::NetworkEvent::FileHeaderReceived { file_id, file_name, size_bytes, is_image, width, height, message_id, sender_id, server_id, channel_id, video_thumb, share_ref, thumb_b64 } => {
             NetworkEvent::FileHeaderReceived {
                 file_id, file_name, size_bytes, is_image, width, height,
                 message_id, sender_id, server_id, channel_id,
                 video_thumb: video_thumb.map(VideoThumbRef::from),
                 share_root_hash: share_ref.as_ref().map(|r| r.root_hash.clone()),
                 share_key_hex: share_ref.map(|r| r.key),
+                thumb_b64,
             }
         }
         node::NetworkEvent::FileProgress { file_id, chunks_received, total_chunks } => {
@@ -1309,6 +1313,17 @@ pub fn set_auto_download_config(
             .map_err(|e| format!("Invalid overrides JSON: {e}"))?
     };
     crate::node::file_handler::set_auto_download_conf(threshold_mb, overrides);
+    // Pre-negotiation (issue #41 carry-over): tell connected DM peers /
+    // siblings the new preference so they stop (or resume) pushing file bytes
+    // to us. Best-effort — fine if the node isn't running yet (the bootstrap
+    // push happens before start_node; peers learn the pref on room join).
+    if let Ok(guard) = get_node().lock() {
+        if let Some(state) = guard.as_ref() {
+            let _ = state
+                .cmd_tx
+                .try_send(node::NodeCommand::ReadvertiseAutoDlPref);
+        }
+    }
     Ok(())
 }
 
@@ -3126,6 +3141,14 @@ pub fn stop_node() -> Result<(), String> {
 ///           dimensions here so the FileHeader carries them and receivers can
 ///           render the bubble at the correct aspect ratio. Ignored for image
 ///           files (Rust extracts those dimensions itself).
+/// `is_voice`: true for recorded voice messages — the FileHeader carries a
+///           `voice` flag exempting them from the receiver's auto-download
+///           gate (the wire name is the recorder's temp basename, so Dart
+///           must say so explicitly).
+/// `poster_bytes`: for videos, the ffmpeg-extracted first-frame image (any
+///           format the image crate decodes). Rust re-encodes it into the
+///           FileHeader's small `thumb` poster and uses its dimensions when
+///           `override_width`/`height` are absent.
 #[frb]
 pub fn send_file(
     peer_id: Option<String>,
@@ -3139,6 +3162,8 @@ pub fn send_file(
     override_height: Option<u32>,
     share_root_hash: Option<String>,
     share_key_hex: Option<String>,
+    is_voice: Option<bool>,
+    poster_bytes: Option<Vec<u8>>,
 ) -> Result<(), String> {
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
@@ -3168,6 +3193,10 @@ pub fn send_file(
                 override_width,
                 override_height,
                 share_ref,
+                voice: is_voice.unwrap_or(false),
+                // Defensive cap: a poster is a single extracted frame — a few
+                // hundred KB of lossless WebP at most. Drop anything absurd.
+                poster: poster_bytes.filter(|p| !p.is_empty() && p.len() <= 8 * 1024 * 1024),
             }))),
     )
     .map_err(|e| format!("Failed to send command: {e}"))?;

@@ -32,11 +32,14 @@ const FILE_DECRYPT_MAX_RETRIES: u32 = 3;
 // default threshold in that case). Default-permissive (169 MB) when Dart never
 // pushed — matches the Dart-side default so old flows keep working.
 //
-// The gate is receive-side only: pull paths (missing-file sweeps, share
-// auto-start) are gated in Dart before any request is made; pushed streams
-// are declined at FileHeader time (metadata kept for the card, no pending
-// stream registered, late bytes deleted). A sender-side pre-negotiation so
-// pushed bytes never ride the wire at all is future work.
+// Pull paths (missing-file sweeps, share auto-start) are gated in Dart before
+// any request is made; pushed streams are declined at FileHeader time
+// (metadata kept for the card, no pending stream registered, late bytes
+// deleted). Since 0.9.4 there is ALSO sender-side pre-negotiation: receivers
+// advertise their effective threshold via `HavenMessage::AutoDownloadPref` and
+// senders consult `peer_auto_dl` in `send_dm_file_to_device`, sending a
+// metadata-only header instead of streaming bytes a gated receiver would
+// discard. The receive-side gate stays as the enforcement (old senders).
 pub(crate) struct AutoDownloadConf {
     pub threshold_mb: u32,
     pub overrides: HashMap<String, bool>,
@@ -63,6 +66,16 @@ pub(crate) fn set_auto_download_conf(threshold_mb: u32, overrides: HashMap<Strin
     }
 }
 
+/// The GLOBAL auto-download threshold in MB (no per-conversation override
+/// applied). Advertised to our own siblings, whose mirrored pushes span every
+/// conversation so no single override key applies. 0 = off.
+pub(crate) fn global_auto_download_mb() -> u32 {
+    auto_download_conf()
+        .lock()
+        .map(|c| c.threshold_mb)
+        .unwrap_or(AUTO_DOWNLOAD_DEFAULT_MB)
+}
+
 /// The effective auto-download threshold in MB for a conversation
 /// (`dm:{master}` / `server:{server_id}`). 0 = never auto-download.
 pub(crate) fn effective_auto_download_mb(context_key: &str) -> u32 {
@@ -78,17 +91,87 @@ pub(crate) fn effective_auto_download_mb(context_key: &str) -> u32 {
     }
 }
 
+/// `true` when a filename matches a recorded voice message. The wire name is
+/// the recorder temp file's basename (`voice_{stamp}_{rand}.ogg` — see
+/// voice_message_recorder.dart), NOT the "Voice message.ogg" display name the
+/// UI shows (network_api.sendFile has no filename parameter). Matched as a
+/// LEGACY fallback for pre-0.9.4 senders that don't set the header's `voice`
+/// flag; keep the pattern in sync with the Dart twin `isVoiceMessageFile`.
+pub(crate) fn is_voice_message_name(file_name: &str) -> bool {
+    file_name == "Voice message.ogg"
+        || (file_name.starts_with("voice_") && file_name.ends_with(".ogg"))
+}
+
 /// `true` = a PUSHED file transfer of `size` bytes may auto-register its
-/// stream in this conversation. Voice messages are exempt — they are tiny,
-/// conversational, and the recorder names them exactly "Voice message.ogg"
-/// (the header carries no dedicated flag; keep this in sync with
-/// `_stageVoiceMessage` on the Dart side).
-pub(crate) fn auto_download_allows(size: u64, file_name: &str, context_key: &str) -> bool {
-    if file_name == "Voice message.ogg" {
+/// stream in this conversation. Voice messages are exempt — they are tiny and
+/// conversational; `voice` is the header flag (0.9.4+), the filename pattern
+/// covers older senders.
+pub(crate) fn auto_download_allows(size: u64, file_name: &str, context_key: &str, voice: bool) -> bool {
+    if voice || is_voice_message_name(file_name) {
         return true;
     }
     let mb = effective_auto_download_mb(context_key) as u64;
     mb > 0 && size <= mb * 1024 * 1024
+}
+
+/// Advertise our auto-download preference to one peer DEVICE (issue #41
+/// pre-negotiation). Counterparty devices get the effective threshold for the
+/// conversation with their identity (their per-conversation override applies);
+/// our own siblings get the global threshold (their mirrored pushes span every
+/// conversation, so no single override key applies).
+pub(crate) fn advertise_auto_dl_pref_to_peer(
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    local_peer_str: &str,
+    peer_str: &str,
+) {
+    let mb = if crate::node::resolver::same_identity(peer_str, local_peer_str) {
+        global_auto_download_mb()
+    } else {
+        let master = crate::node::resolver::resolve(peer_str);
+        effective_auto_download_mb(&format!("dm:{master}"))
+    };
+    send_message_to_peer(
+        ws_cmd_tx, ws_room_peers, peer_str,
+        HavenMessage::AutoDownloadPref { mb },
+    );
+}
+
+/// Re-advertise the auto-download preference to every connected DM-room peer
+/// and sibling after a settings change (NodeCommand::ReadvertiseAutoDlPref).
+/// Best-effort — a device we only share a server room with never receives an
+/// advert and keeps getting the pre-negotiation-free push (its own receive
+/// gate still enforces).
+pub(crate) fn advertise_auto_dl_pref_to_all(
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    local_peer_str: &str,
+    device_peer_id: &str,
+) {
+    let mut advertised: std::collections::HashSet<&String> = std::collections::HashSet::new();
+    for (room, peers) in ws_room_peers {
+        for peer in peers {
+            if peer == device_peer_id || peer == local_peer_str || advertised.contains(peer) {
+                continue;
+            }
+            let is_sibling = crate::node::resolver::same_identity(peer, local_peer_str);
+            let is_dm_room = *room
+                == crate::node::types::dm_room_code(
+                    local_peer_str,
+                    &crate::node::resolver::resolve(peer),
+                );
+            if is_sibling || is_dm_room {
+                advertise_auto_dl_pref_to_peer(ws_cmd_tx, ws_room_peers, local_peer_str, peer);
+                advertised.insert(peer);
+            }
+        }
+    }
+    if !advertised.is_empty() {
+        hollow_log!(
+            "[HOLLOW-FILE] Re-advertised auto-download pref to {} peer device(s)",
+            advertised.len()
+        );
+    }
 }
 
 /// SECURITY (0.8.5): `true` = this REMOTE file-metadata write may proceed.
@@ -149,6 +232,8 @@ pub(crate) async fn handle_send_file(
     override_width: Option<u32>,
     override_height: Option<u32>,
     share_ref: Option<super::types::ShareRef>,
+    voice: bool,
+    poster: Option<Vec<u8>>,
     cmd_tx: &mpsc::Sender<super::types::NodeCommand>,
     event_tx: &mpsc::Sender<NetworkEvent>,
     server_states: &HashMap<String, ServerState>,
@@ -165,6 +250,7 @@ pub(crate) async fn handle_send_file(
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     webrtc_peers: &std::collections::HashSet<String>,
     pending_webrtc_sends: &mut HashMap<String, (String, ws_stream_transfer::StreamKind, String, PathBuf, u64)>,
+    peer_auto_dl: &HashMap<String, u32>,
     gossip_overlays: &mut HashMap<String, gossip::GossipOverlay>,
     db_path: &str,
     db_passphrase: &str,
@@ -253,9 +339,29 @@ pub(crate) async fn handle_send_file(
         // messages/CRDT/call signaling in the meantime.
         spawn_image_conversion(
             peer_id, server_id, channel_id, message_id, message_text,
-            vthumb, share_ref, original_name, is_image,
+            vthumb, share_ref, original_name, is_image, voice,
             file_data, original_ext, override_width, override_height,
             cmd_tx.clone(), db_path, db_passphrase,
+        );
+        return;
+    }
+
+    // ffmpeg's stderr probe can fail (0x0 dims) — treat zero as absent so the
+    // poster-derived fallback below can take over.
+    let override_width = override_width.filter(|v| *v > 0);
+    let override_height = override_height.filter(|v| *v > 0);
+
+    // Video (or any non-image) send with a Dart-extracted poster frame:
+    // encode the wire poster off the event loop — the same spawn_blocking
+    // re-entry hop the image conversion uses — then resume at
+    // finish_send_file via SendFileConverted.
+    if !is_image && let Some(poster_bytes) = poster.filter(|p| !p.is_empty()) {
+        spawn_video_poster_encode(
+            peer_id, server_id, channel_id, message_id, message_text,
+            vthumb, share_ref, original_name, voice,
+            std::mem::take(&mut file_data), original_ext,
+            override_width, override_height, poster_bytes,
+            cmd_tx.clone(),
         );
         return;
     }
@@ -269,16 +375,137 @@ pub(crate) async fn handle_send_file(
         peer_id, server_id, channel_id, message_id, message_text,
         vthumb, share_ref, original_name, is_image,
         final_data, final_ext, override_width, override_height,
+        None, voice,
         event_tx, server_states, bundle_keypair, device_keypair, pub_key_b64, local_peer_str,
         device_peer_id, olm, crypto_store, mls,
         ws_cmd_tx, ws_room_peers, webrtc_peers, pending_webrtc_sends,
-        gossip_overlays, db_path, db_passphrase,
+        peer_auto_dl, gossip_overlays, db_path, db_passphrase,
     ).await;
+}
+
+/// Poster-encode hop for video sends: `encode_video_poster` decodes and
+/// re-encodes an image on the blocking pool (a lossless 480p ffmpeg frame is
+/// a real decode), then re-enters the event loop with the UNCHANGED file
+/// bytes plus the poster thumb and poster-derived dimension fallback.
+#[allow(clippy::too_many_arguments)]
+fn spawn_video_poster_encode(
+    peer_id: Option<String>,
+    server_id: Option<String>,
+    channel_id: Option<String>,
+    message_id: String,
+    message_text: String,
+    vthumb: Option<VideoThumbRef>,
+    share_ref: Option<super::types::ShareRef>,
+    original_name: String,
+    voice: bool,
+    file_data: Vec<u8>,
+    original_ext: String,
+    override_width: Option<u32>,
+    override_height: Option<u32>,
+    poster_bytes: Vec<u8>,
+    cmd_tx: mpsc::Sender<super::types::NodeCommand>,
+) {
+    tokio::spawn(async move {
+        let encoded = tokio::task::spawn_blocking(move || encode_video_poster(&poster_bytes))
+            .await
+            .ok()
+            .flatten();
+        let (thumb, poster_w, poster_h) = match encoded {
+            Some((b64, w, h)) => (Some(b64), Some(w), Some(h)),
+            None => (None, None, None),
+        };
+        // Real source dims when the probe worked; else the poster's own
+        // (scaled, aspect-true) dims so receivers still size the bubble right.
+        let width = override_width.or(poster_w);
+        let height = override_height.or(poster_h);
+        let _ = cmd_tx
+            .send(super::types::NodeCommand::SendFileConverted(Box::new(
+                super::types::SendFileConvertedPayload {
+                    peer_id, server_id, channel_id, message_id, message_text,
+                    vthumb, share_ref, original_name, is_image: false,
+                    final_data: file_data, final_ext: original_ext,
+                    width, height, thumb, voice,
+                },
+            )))
+            .await;
+    });
+}
+
+/// Max side of the blurred-placeholder thumbnail riding an IMAGE FileHeader
+/// (issue #41 carry-over). 32 px lossy WebP ≈ a few hundred bytes.
+const FILE_THUMB_MAX_DIM: u32 = 32;
+/// Max ENCODED size of a video poster riding the FileHeader `thumb` field
+/// (crisp preview frame, up to 400 px). The relay's offline rings are
+/// count-capped / byte-budgeted (1 MB per channel topic), so ~24 KB per
+/// video message is a comfortable share.
+const VIDEO_POSTER_MAX_BYTES: usize = 24 * 1024;
+/// Receive-side cap on the base64 `thumb` field — bounds both the image
+/// blur thumb (a few hundred bytes) and the video poster (≤24 KB binary ≈
+/// 32 KB base64). Anything larger is a malformed/hostile header.
+pub(crate) const FILE_THUMB_MAX_B64_LEN: usize = 48 * 1024;
+
+/// Receive-side acceptance filter for the envelope-borne `thumb`: images get
+/// the tiny blur placeholder, videos the poster frame — anything else (or an
+/// oversized blob) is dropped before it can reach the DB/UI. ONE helper so
+/// every ingest path (Olm, MLS, sync batches, guest live, fetch node) stays
+/// in lockstep.
+pub(crate) fn accept_header_thumb(thumb: Option<String>, img: bool, mime: &str) -> Option<String> {
+    thumb.filter(|t| {
+        (img || mime.starts_with("video/"))
+            && !t.is_empty()
+            && t.len() <= FILE_THUMB_MAX_B64_LEN
+    })
+}
+
+/// Encode a video poster frame (any decodable image bytes) into the bounded
+/// lossy WebP that rides the FileHeader. Steps down through smaller max
+/// dimensions until the encoded size fits the wire budget. Returns
+/// `(base64, poster_w, poster_h)` — the dimensions are aspect-true to the
+/// source video, so they double as the header w/h fallback when the ffmpeg
+/// stderr probe yielded none.
+fn encode_video_poster(data: &[u8]) -> Option<(String, u32, u32)> {
+    for max_dim in [400u32, 320, 256] {
+        if let Ok((bytes, w, h)) = image_convert::convert_to_webp_preview(data, max_dim) {
+            if !bytes.is_empty() && bytes.len() <= VIDEO_POSTER_MAX_BYTES {
+                return Some((
+                    base64::engine::general_purpose::STANDARD.encode(&bytes),
+                    w,
+                    h,
+                ));
+            }
+        }
+    }
+    None
+}
+
+/// Tiny blurred-placeholder thumbnail from the ORIGINAL image bytes (decoded
+/// once more on the blocking pool — the conversion path may produce animated
+/// WebP the `image` crate can't re-decode). None on any failure: the
+/// placeholder simply renders without a blur preview.
+fn generate_file_thumb(original_data: &[u8]) -> Option<String> {
+    let (bytes, _, _) = image_convert::convert_to_webp_preview(original_data, FILE_THUMB_MAX_DIM).ok()?;
+    if bytes.is_empty() || bytes.len() > FILE_THUMB_MAX_B64_LEN / 2 {
+        return None;
+    }
+    Some(base64::engine::general_purpose::STANDARD.encode(&bytes))
 }
 
 /// The moved step-4 conversion block: runs on the blocking pool, never the
 /// event loop. Fallbacks mirror the original inline behavior exactly.
 fn convert_image_for_send(
+    file_data: Vec<u8>,
+    original_ext: &str,
+    webp_quality: image_convert::WebpQuality,
+    override_width: Option<u32>,
+    override_height: Option<u32>,
+) -> (Vec<u8>, String, Option<u32>, Option<u32>, Option<String>) {
+    // Placeholder thumb first, from the ORIGINAL bytes (issue #41 carry-over).
+    let thumb = generate_file_thumb(&file_data);
+    let (data, ext, w, h) = convert_image_data(file_data, original_ext, webp_quality, override_width, override_height);
+    (data, ext, w, h, thumb)
+}
+
+fn convert_image_data(
     mut file_data: Vec<u8>,
     original_ext: &str,
     webp_quality: image_convert::WebpQuality,
@@ -410,6 +637,7 @@ fn spawn_image_conversion(
     share_ref: Option<super::types::ShareRef>,
     original_name: String,
     is_image: bool,
+    voice: bool,
     file_data: Vec<u8>,
     original_ext: String,
     override_width: Option<u32>,
@@ -430,13 +658,13 @@ fn spawn_image_conversion(
             convert_image_for_send(file_data, &original_ext, webp_quality, override_width, override_height)
         })
         .await;
-        let (final_data, final_ext, width, height) = match converted {
+        let (final_data, final_ext, width, height, thumb) = match converted {
             Ok(t) => t,
             Err(e) => {
                 // spawn_blocking join failure (panic in codec) — surface as a
                 // failed send via the resume handler's empty-data guard.
                 hollow_log!("[HOLLOW-FILE] Conversion task panicked: {e}");
-                (Vec::new(), String::new(), None, None)
+                (Vec::new(), String::new(), None, None, None)
             }
         };
         let _ = cmd_tx
@@ -445,6 +673,7 @@ fn spawn_image_conversion(
                     peer_id, server_id, channel_id, message_id, message_text,
                     vthumb, share_ref, original_name, is_image,
                     final_data, final_ext, width, height,
+                    thumb, voice,
                 },
             )))
             .await;
@@ -469,6 +698,8 @@ pub(crate) async fn finish_send_file(
     final_ext: String,
     width: Option<u32>,
     height: Option<u32>,
+    thumb: Option<String>,
+    voice: bool,
     event_tx: &mpsc::Sender<NetworkEvent>,
     server_states: &HashMap<String, ServerState>,
     bundle_keypair: &crate::identity::native_identity::NativeKeypair,
@@ -484,6 +715,7 @@ pub(crate) async fn finish_send_file(
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     webrtc_peers: &std::collections::HashSet<String>,
     pending_webrtc_sends: &mut HashMap<String, (String, ws_stream_transfer::StreamKind, String, PathBuf, u64)>,
+    peer_auto_dl: &HashMap<String, u32>,
     gossip_overlays: &mut HashMap<String, gossip::GossipOverlay>,
     db_path: &str,
     db_passphrase: &str,
@@ -543,7 +775,7 @@ pub(crate) async fn finish_send_file(
         &file_id, &original_name, &final_ext, &final_mime,
         file_size, total_chunks, is_image, width, height,
         &message_id, ctx_type, &ctx_id, &local_peer, timestamp,
-        vthumb.as_ref(), store_full_file, &final_path,
+        vthumb.as_ref(), thumb.as_deref(), store_full_file, &final_path,
     );
 
     // Emit FileCompleted on the sender side too, so the
@@ -607,6 +839,8 @@ pub(crate) async fn finish_send_file(
             width,
             height,
             vthumb: &vthumb,
+            thumb: &thumb,
+            voice,
             message_text: &message_text,
             local_peer_str,
             total_chunks,
@@ -616,7 +850,7 @@ pub(crate) async fn finish_send_file(
         send_dm_file_fanout(
             &peer_str, &msg, device_peer_id,
             olm, crypto_store, event_tx, ws_cmd_tx, ws_room_peers,
-            webrtc_peers, pending_webrtc_sends,
+            webrtc_peers, pending_webrtc_sends, peer_auto_dl,
         ).await;
     } else if let (Some(sid), Some(cid)) = (server_id, channel_id) {
         // Channel path — broadcast via MLS.
@@ -624,7 +858,7 @@ pub(crate) async fn finish_send_file(
             &sid, &cid, &signing_payload_text, timestamp, &sig, &pk,
             &message_id, &file_id, order_us, &final_data,
             &original_name, &final_ext, &final_mime, file_size,
-            is_image, width, height, &vthumb, &share_ref, &local_peer,
+            is_image, width, height, &vthumb, &thumb, voice, &share_ref, &local_peer,
             event_tx, server_states, olm, crypto_store, mls,
             ws_cmd_tx, ws_room_peers, webrtc_peers, pending_webrtc_sends,
             gossip_overlays, db_path, db_passphrase,
@@ -697,6 +931,7 @@ fn persist_sent_file_row(
     local_peer: &str,
     timestamp: i64,
     vthumb: Option<&VideoThumbRef>,
+    thumb: Option<&str>,
     store_full_file: bool,
     final_path: &std::path::Path,
 ) {
@@ -707,7 +942,7 @@ fn persist_sent_file_row(
             width, height,
             Some(message_id), ctx_type, ctx_id,
             local_peer, true, timestamp,
-            vthumb,
+            vthumb, thumb,
         );
         if store_full_file {
             let _ = store.mark_file_complete(
@@ -761,6 +996,10 @@ struct DmFileMsg<'a> {
     width: Option<u32>,
     height: Option<u32>,
     vthumb: &'a Option<VideoThumbRef>,
+    /// Tiny base64 WebP blurred-placeholder thumbnail (issue #41 carry-over).
+    thumb: &'a Option<String>,
+    /// Recorded voice message — exempt from all auto-download gating.
+    voice: bool,
     message_text: &'a str,
     local_peer_str: &'a str,
     total_chunks: u32,
@@ -805,6 +1044,8 @@ fn build_dm_file_header(
             share_ref: None,
             order_us: Some(msg.order_us),
             inline_bytes,
+            thumb: msg.thumb.clone(),
+            voice: msg.voice,
         }),
     }
 }
@@ -832,6 +1073,7 @@ async fn send_dm_file_fanout(
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     webrtc_peers: &std::collections::HashSet<String>,
     pending_webrtc_sends: &mut HashMap<String, (String, ws_stream_transfer::StreamKind, String, PathBuf, u64)>,
+    peer_auto_dl: &HashMap<String, u32>,
 ) {
     let recipient_master = crate::node::resolver::resolve(peer_str);
     // Self-DM ("Saved messages"): local store + FileCompleted already
@@ -852,8 +1094,24 @@ async fn send_dm_file_fanout(
         send_dm_file_to_device(
             target, &recipient_master, &dm_room_f, msg,
             olm, crypto_store, event_tx, ws_cmd_tx, ws_room_peers,
-            webrtc_peers, pending_webrtc_sends,
+            webrtc_peers, pending_webrtc_sends, peer_auto_dl,
         ).await;
+    }
+}
+
+/// Sender-side pre-negotiation (issue #41 carry-over): `true` when the target
+/// device ADVERTISED an auto-download preference this push would violate —
+/// stream nothing, send a metadata-only header instead. Voice notes are never
+/// gated (mirrors `auto_download_allows`). No advert = push as before (old
+/// client, or the advert hasn't arrived yet); the receiver's own gate still
+/// enforces in that case — this check only saves the wasted bytes.
+fn receiver_pref_declines(peer_auto_dl: &HashMap<String, u32>, peer_str: &str, msg: &DmFileMsg<'_>) -> bool {
+    if msg.voice || is_voice_message_name(msg.original_name) {
+        return false;
+    }
+    match peer_auto_dl.get(peer_str) {
+        Some(mb) => *mb == 0 || msg.file_size > (*mb as u64) * 1024 * 1024,
+        None => false,
     }
 }
 
@@ -949,6 +1207,7 @@ async fn send_dm_file_to_device(
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     webrtc_peers: &std::collections::HashSet<String>,
     pending_webrtc_sends: &mut HashMap<String, (String, ws_stream_transfer::StreamKind, String, PathBuf, u64)>,
+    peer_auto_dl: &HashMap<String, u32>,
 ) {
     // Per-device companion DM envelope: a sibling self-echo carries `convo`
     // (recipient master) so it files under the right thread; the recipient's
@@ -1011,16 +1270,62 @@ async fn send_dm_file_to_device(
 
         // Only send file data if peer is reachable right now.
         // If offline, the file_id is in the message — sync will request it later.
-        if reachable {
+        if reachable && receiver_pref_declines(peer_auto_dl, peer_str, msg) {
+            // Sender-side pre-negotiation (issue #41 carry-over): this device
+            // ADVERTISED a threshold this push would violate — its gate would
+            // decline the header and discard every byte anyway. Send the
+            // metadata-only header instead (no AES material → no pending
+            // stream registers, the card renders with a manual Download
+            // button, and the explicit FileRequest pull works as usual).
+            hollow_log!(
+                "[HOLLOW-FILE] Receiver pref gates {} ({} bytes) for {peer_str} — sending metadata-only header, no bytes",
+                msg.file_id, msg.file_size
+            );
+            let header = build_dm_file_header(
+                msg, msg.sig.clone(), msg.pk.clone(),
+                None, None, None,
+            );
+            let header_json = serde_json::to_string(&header).unwrap_or_default();
+            send_encrypted_message(
+                olm, crypto_store,
+                peer_str, &header_json, event_tx,
+                ws_cmd_tx, ws_room_peers,
+            ).await;
+        } else if reachable {
             stream_dm_file_live(
                 peer_str, msg, olm, crypto_store, event_tx,
                 ws_cmd_tx, ws_room_peers, webrtc_peers, pending_webrtc_sends,
             ).await;
         } else if msg.is_image {
-            send_offline_dm_image(
-                peer_str, dm_room_f, &envelope_json, msg,
-                olm, crypto_store, event_tx, ws_cmd_tx,
-            ).await;
+            if receiver_pref_declines(peer_auto_dl, peer_str, msg) {
+                // Sender-side pre-negotiation, offline-image variant: the
+                // device advertised a gating threshold before it went offline —
+                // don't inline the bytes into the relay buffer it would only
+                // discard. Buffer the companion envelope FIRST (caption or
+                // "[file:...]" sentinel — a metadata-only header creates no
+                // message row on receive, unlike the inline-bytes header),
+                // then the metadata-only card. Mirrors the non-image offline
+                // path's caption-then-meta order; both sends ride
+                // send_encrypted_text_to_peer so the Olm ratchet has no gap.
+                hollow_log!(
+                    "[HOLLOW-FILE] Receiver pref gates offline image {} for {peer_str} — buffering metadata-only card",
+                    msg.file_id
+                );
+                crate::node::crypto_handler::send_encrypted_text_to_peer(
+                    olm, crypto_store,
+                    peer_str, dm_room_f.to_string(), &envelope_json, event_tx,
+                    ws_cmd_tx,
+                ).await;
+                send_offline_dm_file_meta(
+                    peer_str, dm_room_f, msg,
+                    olm, crypto_store, event_tx, ws_cmd_tx,
+                ).await;
+            } else {
+                send_offline_dm_image(
+                    peer_str, dm_room_f, &envelope_json, msg,
+                    olm, crypto_store, event_tx, ws_cmd_tx,
+                ).await;
+            }
         } else {
             send_offline_dm_file_meta(
                 peer_str, dm_room_f, msg,
@@ -1251,6 +1556,8 @@ async fn send_channel_file(
     width: Option<u32>,
     height: Option<u32>,
     vthumb: &Option<VideoThumbRef>,
+    thumb: &Option<String>,
+    voice: bool,
     share_ref: &Option<super::types::ShareRef>,
     local_peer: &str,
     event_tx: &mpsc::Sender<NetworkEvent>,
@@ -1333,6 +1640,7 @@ async fn send_channel_file(
                 ts: timestamp,
                 sender: local_peer.to_string(),
                 vthumb: vthumb.clone(),
+                thumb: thumb.clone(),
             }),
         };
         super::message_ops::send_public_channel_msg(ws_cmd_tx, sid, &msg);
@@ -1382,6 +1690,8 @@ async fn send_channel_file(
             share_ref: share_ref.clone(),
             order_us: Some(order_us),
             inline_bytes: None,
+            thumb: thumb.clone(),
+            voice,
         }),
     };
     let header_json = serde_json::to_string(&header).unwrap_or_default();
@@ -2454,6 +2764,8 @@ pub(crate) async fn handle_envelope_file_header(
     aes_nonce: Option<String>,
     vthumb: Option<VideoThumbRef>,
     share_ref: Option<super::types::ShareRef>,
+    thumb: Option<String>,
+    voice: bool,
     requested_file_receipts: &mut HashMap<String, std::time::Instant>,
     declined_file_ids: &mut std::collections::HashSet<String>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
@@ -2492,6 +2804,10 @@ pub(crate) async fn handle_envelope_file_header(
         _ => server_id.to_string(),
     };
 
+    // Envelope-borne thumb: image blur placeholder or video poster,
+    // size-capped — see accept_header_thumb.
+    let thumb = accept_header_thumb(thumb, img, &mime);
+
     if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
         // Owner guard (0.8.5): MLS proves the sender is a group member, not
         // that this `file_id` is theirs to relabel. See `file_meta_write_allowed`.
@@ -2502,7 +2818,7 @@ pub(crate) async fn handle_envelope_file_header(
                 w, h,
                 mid.as_deref(), ctx_type, &ctx_id,
                 &sender_peer_id, false, ts,
-                vthumb.as_ref(),
+                vthumb.as_ref(), thumb.as_deref(),
             );
             // Persist the share back-reference (issue #41) so a manual
             // download can rejoin the share swarm after a restart.
@@ -2519,7 +2835,7 @@ pub(crate) async fn handle_envelope_file_header(
     // re-requests WITHOUT a receipt).
     let auto_ok = explicitly_requested
         || pending_file_streams.contains_key(&fid)
-        || auto_download_allows(size, &name, &format!("server:{server_id}"));
+        || auto_download_allows(size, &name, &format!("server:{server_id}"), voice);
     if !auto_ok && share_ref.is_none() && aes_key.is_some() {
         declined_file_ids.insert(fid.clone());
         if let Some((temp_path, _, _)) = early_file_streams.remove(&fid) {
@@ -2558,6 +2874,7 @@ pub(crate) async fn handle_envelope_file_header(
         channel_id: cid.unwrap_or_default(),
         video_thumb: vthumb,
         share_ref,
+        thumb_b64: thumb,
     }).await;
 }
 

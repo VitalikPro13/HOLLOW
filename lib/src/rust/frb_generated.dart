@@ -1009,6 +1009,8 @@ abstract class RustLibApi extends BaseApi {
     int? overrideHeight,
     String? shareRootHash,
     String? shareKeyHex,
+    bool? isVoice,
+    Uint8List? posterBytes,
   });
 
   Future<void> crateApiNetworkSendFriendRequest({required String peerId});
@@ -9238,6 +9240,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     int? overrideHeight,
     String? shareRootHash,
     String? shareKeyHex,
+    bool? isVoice,
+    Uint8List? posterBytes,
   }) {
     return handler.executeNormal(
       NormalTask(
@@ -9254,6 +9258,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           sse_encode_opt_box_autoadd_u_32(overrideHeight, serializer);
           sse_encode_opt_String(shareRootHash, serializer);
           sse_encode_opt_String(shareKeyHex, serializer);
+          sse_encode_opt_box_autoadd_bool(isVoice, serializer);
+          sse_encode_opt_list_prim_u_8_strict(posterBytes, serializer);
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
@@ -9278,6 +9284,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           overrideHeight,
           shareRootHash,
           shareKeyHex,
+          isVoice,
+          posterBytes,
         ],
         apiImpl: this,
       ),
@@ -9298,6 +9306,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       "overrideHeight",
       "shareRootHash",
       "shareKeyHex",
+      "isVoice",
+      "posterBytes",
     ],
   );
 
@@ -13982,6 +13992,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           videoThumb: dco_decode_opt_box_autoadd_video_thumb_ref(raw[11]),
           shareRootHash: dco_decode_opt_String(raw[12]),
           shareKeyHex: dco_decode_opt_String(raw[13]),
+          thumbB64: dco_decode_opt_String(raw[14]),
         );
       case 62:
         return NetworkEvent_FileProgress(
@@ -14908,8 +14919,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   StoredFileInfo dco_decode_stored_file_info(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 22)
-      throw Exception('unexpected arr length: expect 22 but see ${arr.length}');
+    if (arr.length != 23)
+      throw Exception('unexpected arr length: expect 23 but see ${arr.length}');
     return StoredFileInfo(
       fileId: dco_decode_String(arr[0]),
       fileName: dco_decode_String(arr[1]),
@@ -14933,6 +14944,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       videoThumb: dco_decode_opt_box_autoadd_video_thumb_ref(arr[19]),
       shareRootHash: dco_decode_opt_String(arr[20]),
       shareKeyHex: dco_decode_opt_String(arr[21]),
+      thumbB64: dco_decode_opt_String(arr[22]),
     );
   }
 
@@ -17101,6 +17113,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         );
         var var_shareRootHash = sse_decode_opt_String(deserializer);
         var var_shareKeyHex = sse_decode_opt_String(deserializer);
+        var var_thumbB64 = sse_decode_opt_String(deserializer);
         return NetworkEvent_FileHeaderReceived(
           fileId: var_fileId,
           fileName: var_fileName,
@@ -17115,6 +17128,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           videoThumb: var_videoThumb,
           shareRootHash: var_shareRootHash,
           shareKeyHex: var_shareKeyHex,
+          thumbB64: var_thumbB64,
         );
       case 62:
         var var_fileId = sse_decode_String(deserializer);
@@ -18417,6 +18431,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     );
     var var_shareRootHash = sse_decode_opt_String(deserializer);
     var var_shareKeyHex = sse_decode_opt_String(deserializer);
+    var var_thumbB64 = sse_decode_opt_String(deserializer);
     return StoredFileInfo(
       fileId: var_fileId,
       fileName: var_fileName,
@@ -18440,6 +18455,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       videoThumb: var_videoThumb,
       shareRootHash: var_shareRootHash,
       shareKeyHex: var_shareKeyHex,
+      thumbB64: var_thumbB64,
     );
   }
 
@@ -20393,6 +20409,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         videoThumb: final videoThumb,
         shareRootHash: final shareRootHash,
         shareKeyHex: final shareKeyHex,
+        thumbB64: final thumbB64,
       ):
         sse_encode_i_32(61, serializer);
         sse_encode_String(fileId, serializer);
@@ -20408,6 +20425,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         sse_encode_opt_box_autoadd_video_thumb_ref(videoThumb, serializer);
         sse_encode_opt_String(shareRootHash, serializer);
         sse_encode_opt_String(shareKeyHex, serializer);
+        sse_encode_opt_String(thumbB64, serializer);
       case NetworkEvent_FileProgress(
         fileId: final fileId,
         chunksReceived: final chunksReceived,
@@ -21588,6 +21606,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_opt_box_autoadd_video_thumb_ref(self.videoThumb, serializer);
     sse_encode_opt_String(self.shareRootHash, serializer);
     sse_encode_opt_String(self.shareKeyHex, serializer);
+    sse_encode_opt_String(self.thumbB64, serializer);
   }
 
   @protected

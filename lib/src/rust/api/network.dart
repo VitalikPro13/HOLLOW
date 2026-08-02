@@ -640,6 +640,14 @@ Future<void> stopNode() => RustLib.instance.api.crateApiNetworkStopNode();
 ///           dimensions here so the FileHeader carries them and receivers can
 ///           render the bubble at the correct aspect ratio. Ignored for image
 ///           files (Rust extracts those dimensions itself).
+/// `is_voice`: true for recorded voice messages — the FileHeader carries a
+///           `voice` flag exempting them from the receiver's auto-download
+///           gate (the wire name is the recorder's temp basename, so Dart
+///           must say so explicitly).
+/// `poster_bytes`: for videos, the ffmpeg-extracted first-frame image (any
+///           format the image crate decodes). Rust re-encodes it into the
+///           FileHeader's small `thumb` poster and uses its dimensions when
+///           `override_width`/`height` are absent.
 Future<void> sendFile({
   String? peerId,
   String? serverId,
@@ -652,6 +660,8 @@ Future<void> sendFile({
   int? overrideHeight,
   String? shareRootHash,
   String? shareKeyHex,
+  bool? isVoice,
+  Uint8List? posterBytes,
 }) => RustLib.instance.api.crateApiNetworkSendFile(
   peerId: peerId,
   serverId: serverId,
@@ -664,6 +674,8 @@ Future<void> sendFile({
   overrideHeight: overrideHeight,
   shareRootHash: shareRootHash,
   shareKeyHex: shareKeyHex,
+  isVoice: isVoice,
+  posterBytes: posterBytes,
 );
 
 /// Request file chunks from a specific peer.
@@ -1593,6 +1605,10 @@ sealed class NetworkEvent with _$NetworkEvent {
     /// Hidden Share back-reference for large files / progressive video streaming.
     String? shareRootHash,
     String? shareKeyHex,
+
+    /// Tiny base64 WebP placeholder thumbnail — rendered blurred under the
+    /// Download button for gated/undownloaded images (issue #41 carry-over).
+    String? thumbB64,
   }) = NetworkEvent_FileHeaderReceived;
   const factory NetworkEvent.fileProgress({
     required String fileId,

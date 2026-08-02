@@ -148,6 +148,9 @@ class FileTransferNotifier
 
   /// Initiate a file send.
   /// [memberCount] is the server's member count — if >= 6, also triggers vault upload.
+  /// [isVoice] marks a recorded voice message — the FileHeader carries a
+  /// `voice` flag exempting it from the receiver's auto-download gate (the
+  /// wire name is the recorder's temp basename, so Rust can't tell).
   Future<void> sendFile({
     String? peerId,
     String? serverId,
@@ -156,6 +159,7 @@ class FileTransferNotifier
     required String messageId,
     String messageText = '',
     int memberCount = 0,
+    bool isVoice = false,
   }) async {
     // Extract filename for display.
     final parts = filePath.replaceAll('\\', '/').split('/');
@@ -245,9 +249,16 @@ class FileTransferNotifier
         messageText: messageText,
         vthumb: null,
         // For videos, pass the source dimensions so the FileHeader carries
-        // them to receivers. None for non-videos (Rust extracts image dims itself).
+        // them to receivers. None for non-videos (Rust extracts image dims
+        // itself). ffmpeg's stderr probe can yield 0x0 — Rust falls back to
+        // the poster frame's own dimensions in that case.
         overrideWidth: videoThumb?.sourceWidth,
         overrideHeight: videoThumb?.sourceHeight,
+        isVoice: isVoice,
+        // Poster frame for the receiver's bubble: Rust re-encodes it small
+        // and rides it on the FileHeader so the video shows a real preview
+        // (correct aspect included) before any bytes are downloaded.
+        posterBytes: videoThumb?.webpBytes,
       );
 
       // For 6+ member servers (non-video): also trigger vault upload
@@ -450,6 +461,7 @@ class FileTransferNotifier
         overrideHeight: ctx.videoThumb?.sourceHeight,
         shareRootHash: decoded.rootHash,
         shareKeyHex: keyHex,
+        posterBytes: ctx.videoThumb?.webpBytes,
       );
     }).catchError((e) {
       debugPrint('[HOLLOW] Failed to send share-backed file: $e');

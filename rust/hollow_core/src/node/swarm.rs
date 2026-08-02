@@ -515,6 +515,14 @@ async fn run_event_loop(
     let mut declined_file_ids: std::collections::HashSet<String> =
         std::collections::HashSet::new();
 
+    // Auto-download preferences ADVERTISED by peer devices (issue #41
+    // pre-negotiation): device peer_id -> effective threshold MB for pushes
+    // from us (0 = off). Consulted by the DM file fan-out so we skip streaming
+    // bytes a gated receiver would only discard. Connection state — cleared on
+    // WsEvent::Disconnected; peers re-advertise when they rejoin our rooms.
+    let mut peer_auto_dl: std::collections::HashMap<String, u32> =
+        std::collections::HashMap::new();
+
     // (server room, channel) pairs whose relay offline catch-up replay already
     // ran THIS connection — fed by both the connect-time sweep (RoomMembers)
     // and the channel-open hook (SubscribeChannels). Cleared on
@@ -2128,15 +2136,16 @@ async fn run_event_loop(
 
                     // -- File sharing (Phase 3.5) --
                     NodeCommand::SendFile(box_payload) => {
-                        let SendFilePayload { peer_id, server_id, channel_id, file_path, message_id, message_text, vthumb, override_width, override_height, share_ref } = *box_payload;
+                        let SendFilePayload { peer_id, server_id, channel_id, file_path, message_id, message_text, vthumb, override_width, override_height, share_ref, voice, poster } = *box_payload;
                         file_handler::handle_send_file(
                             peer_id, server_id, channel_id, file_path, message_id, message_text,
-                            vthumb, override_width, override_height, share_ref,
+                            vthumb, override_width, override_height, share_ref, voice, poster,
                             &cmd_tx,
                             &event_tx, &server_states, &bundle_keypair, &device_keypair, &pub_key_b64, &local_peer_str,
                             &device_peer_id,
                             &mut olm, &crypto_store, &mut mls,
                             &ws_cmd_tx, &ws_room_peers, &webrtc_peers, &mut pending_webrtc_sends,
+                            &peer_auto_dl,
                             &mut gossip_overlays,
                             &db_path, &db_passphrase,
                         ).await;
@@ -2148,19 +2157,29 @@ async fn run_event_loop(
                         let SendFileConvertedPayload {
                             peer_id, server_id, channel_id, message_id, message_text,
                             vthumb, share_ref, original_name, is_image,
-                            final_data, final_ext, width, height,
+                            final_data, final_ext, width, height, thumb, voice,
                         } = *box_payload;
                         file_handler::finish_send_file(
                             peer_id, server_id, channel_id, message_id, message_text,
                             vthumb, share_ref, original_name, is_image,
-                            final_data, final_ext, width, height,
+                            final_data, final_ext, width, height, thumb, voice,
                             &event_tx, &server_states, &bundle_keypair, &device_keypair, &pub_key_b64, &local_peer_str,
                             &device_peer_id,
                             &mut olm, &crypto_store, &mut mls,
                             &ws_cmd_tx, &ws_room_peers, &webrtc_peers, &mut pending_webrtc_sends,
+                            &peer_auto_dl,
                             &mut gossip_overlays,
                             &db_path, &db_passphrase,
                         ).await;
+                    }
+
+                    // Auto-download config changed (issue #41 pre-negotiation):
+                    // re-advertise our per-conversation preference to every
+                    // connected DM peer / sibling so senders adjust immediately.
+                    NodeCommand::ReadvertiseAutoDlPref => {
+                        file_handler::advertise_auto_dl_pref_to_all(
+                            &ws_cmd_tx, &ws_room_peers, &local_peer_str, &device_peer_id,
+                        );
                     }
 
                     NodeCommand::RequestFile { file_id, peer_id: peer_id_str, chunks } => {
@@ -2464,6 +2483,7 @@ async fn run_event_loop(
                                 &mut pending_public_file_requests,
                                 &mut requested_file_receipts,
                                 &mut declined_file_ids,
+                                &mut peer_auto_dl,
                                 HavenMessage::CrdtOpBroadcast { server_id, op_json },
                             ).await;
                         }
@@ -2686,6 +2706,9 @@ async fn run_event_loop(
                         // declined_file_ids intentionally survives — it reflects the
                         // auto-download setting, not connection state.
                         requested_file_receipts.clear();
+                        // Advertised auto-download prefs are connection state:
+                        // peers re-advertise on rejoin (issue #41 pre-negotiation).
+                        peer_auto_dl.clear();
                         relay_catchup_done.clear();
                         key_request_in_flight.clear();
                         key_bundle_sent_to.clear();
@@ -2886,6 +2909,17 @@ async fn run_event_loop(
                                         is_invisible,
                                         &db_path, &db_passphrase,
                                     );
+
+                                    // Auto-download pre-negotiation (issue #41): tell a
+                                    // DM-room counterparty / our own sibling our effective
+                                    // threshold so it can skip pushing bytes we'd discard.
+                                    if super::resolver::same_identity(&peer_id, &local_peer_str)
+                                        || room == dm_room_code(&local_peer_str, &super::resolver::resolve(&peer_id))
+                                    {
+                                        file_handler::advertise_auto_dl_pref_to_peer(
+                                            &ws_cmd_tx, &ws_room_peers, &local_peer_str, &peer_id,
+                                        );
+                                    }
 
                                     // Multi-device (Phase 6): a peer in OUR OWN inbox room
                                     // (`inbox:{master}`) MIGHT be our own other device — but the
@@ -3412,6 +3446,16 @@ async fn run_event_loop(
                                         is_invisible,
                                         &db_path, &db_passphrase,
                                     );
+
+                                    // Auto-download pre-negotiation (issue #41) — the
+                                    // RoomMembers twin of the PeerJoined advertise.
+                                    if super::resolver::same_identity(pid_str, &local_peer_str)
+                                        || room == dm_room_code(&local_peer_str, &super::resolver::resolve(pid_str))
+                                    {
+                                        file_handler::advertise_auto_dl_pref_to_peer(
+                                            &ws_cmd_tx, &ws_room_peers, &local_peer_str, pid_str,
+                                        );
+                                    }
 
                                     // Request their profile if we don't have it.
                                     {
@@ -4258,6 +4302,7 @@ async fn run_event_loop(
                                         &mut pending_public_file_requests,
                                         &mut requested_file_receipts,
                                         &mut declined_file_ids,
+                                        &mut peer_auto_dl,
                                         msg,
                                     ).await;
                             } else {
@@ -5237,6 +5282,7 @@ fn build_dm_sync_items(
                 ts: f.created_at,
                 sender: f.sender_id.clone(),
                 vthumb: f.video_thumb.clone(),
+                thumb: f.thumb_b64.clone(),
             })
         });
         // Deletion proof rides with the hidden flag (REJECT-ABSENT on apply).
@@ -5377,6 +5423,7 @@ async fn handle_incoming_request(
     pending_public_file_requests: &mut HashMap<String, (String, std::time::Instant)>,
     requested_file_receipts: &mut HashMap<String, std::time::Instant>,
     declined_file_ids: &mut std::collections::HashSet<String>,
+    peer_auto_dl: &mut HashMap<String, u32>,
     request: HavenMessage,
 ) {
 
@@ -6100,6 +6147,7 @@ async fn handle_incoming_request(
                                     fm.mid.as_deref(), "channel", &ctx_id,
                                     &fm.sender, msg.s == local_peer, fm.ts,
                                     fm.vthumb.as_ref(),
+                                    file_handler::accept_header_thumb(fm.thumb.clone(), fm.img, &fm.mime).as_deref(),
                                 );
                                 let _ = event_tx.send(NetworkEvent::FileHeaderReceived {
                                     file_id: fm.fid.clone(),
@@ -6114,6 +6162,7 @@ async fn handle_incoming_request(
                                     channel_id: cid.clone(),
                                     video_thumb: fm.vthumb.clone(),
                                     share_ref: None,
+                                    thumb_b64: file_handler::accept_header_thumb(fm.thumb.clone(), fm.img, &fm.mime),
                                 }).await;
                             }
 
@@ -6517,6 +6566,7 @@ async fn handle_incoming_request(
                                     fm.mid.as_deref(), "dm", &convo_peer,
                                     &fm.sender, false, fm.ts,
                                     fm.vthumb.as_ref(),
+                                    file_handler::accept_header_thumb(fm.thumb.clone(), fm.img, &fm.mime).as_deref(),
                                 );
                                 let _ = event_tx.send(NetworkEvent::FileHeaderReceived {
                                     file_id: fm.fid.clone(),
@@ -6531,6 +6581,7 @@ async fn handle_incoming_request(
                                     channel_id: convo_peer.clone(),
                                     video_thumb: fm.vthumb.clone(),
                                     share_ref: None,
+                                    thumb_b64: file_handler::accept_header_thumb(fm.thumb.clone(), fm.img, &fm.mime),
                                 }).await;
                             }
 
@@ -6745,6 +6796,7 @@ async fn handle_incoming_request(
                                     fm.mid.as_deref(), "dm", &convo_peer,
                                     &fm.sender, false, fm.ts,
                                     fm.vthumb.as_ref(),
+                                    file_handler::accept_header_thumb(fm.thumb.clone(), fm.img, &fm.mime).as_deref(),
                                 );
                                 let _ = event_tx.send(NetworkEvent::FileHeaderReceived {
                                     file_id: fm.fid.clone(),
@@ -6759,6 +6811,7 @@ async fn handle_incoming_request(
                                     channel_id: convo_peer.clone(),
                                     video_thumb: fm.vthumb.clone(),
                                     share_ref: None,
+                                    thumb_b64: file_handler::accept_header_thumb(fm.thumb.clone(), fm.img, &fm.mime),
                                 }).await;
                             }
 
@@ -7120,7 +7173,10 @@ async fn handle_incoming_request(
                 }
                 // -- File transfer receive handlers --
                 Ok(MessageEnvelope::FileHeader { inner }) => {
-                    let FileHeaderPayload { fid, name, ext, mime, size, chunks, img, w, h, mid, sid, cid, ts, sig, pk, aes_key, aes_nonce, vthumb, share_ref, order_us, inline_bytes, .. } = *inner;
+                    let FileHeaderPayload { fid, name, ext, mime, size, chunks, img, w, h, mid, sid, cid, ts, sig, pk, aes_key, aes_nonce, vthumb, share_ref, order_us, inline_bytes, thumb, voice, .. } = *inner;
+                    // Envelope-borne thumb: image blur placeholder or video
+                    // poster, size-capped — see accept_header_thumb.
+                    let thumb = file_handler::accept_header_thumb(thumb, img, &mime);
                     use crate::node::file_transfer;
                     hollow_log!("[HOLLOW-FILE] FileHeader received: {fid} ({name}, {size} bytes, {chunks} chunks, share_ref={})", share_ref.is_some());
 
@@ -7219,7 +7275,7 @@ async fn handle_incoming_request(
                                 w, h,
                                 mid.as_deref(), ctx_type, &ctx_id,
                                 &peer_str, false, ts,
-                                vthumb.as_ref(),
+                                vthumb.as_ref(), thumb.as_deref(),
                             );
                             // Persist the share back-reference (issue #41) so a
                             // manual download can rejoin the share swarm after a
@@ -7289,7 +7345,7 @@ async fn handle_incoming_request(
                     };
                     let auto_ok = explicitly_requested
                         || pending_file_streams.contains_key(&fid)
-                        || file_handler::auto_download_allows(size, &name, &auto_dl_key);
+                        || file_handler::auto_download_allows(size, &name, &auto_dl_key, voice);
 
                     let mut inline_done = false;
                     if !already_complete && share_ref.is_none() {
@@ -7482,6 +7538,7 @@ async fn handle_incoming_request(
                         channel_id: cid_str,
                         video_thumb: vthumb,
                         share_ref,
+                        thumb_b64: thumb,
                     }).await;
                 }
                 Ok(MessageEnvelope::FileChunk { fid, idx, data }) => {
@@ -9808,13 +9865,14 @@ async fn handle_incoming_request(
                                 ).await;
                             }
                             MessageEnvelope::FileHeader { inner } => {
-                                let FileHeaderPayload { fid, name, ext, mime, size, chunks, img, w, h, mid, sid, cid, ts, aes_key, aes_nonce, vthumb, share_ref, .. } = *inner;
+                                let FileHeaderPayload { fid, name, ext, mime, size, chunks, img, w, h, mid, sid, cid, ts, aes_key, aes_nonce, vthumb, share_ref, thumb, voice, .. } = *inner;
                                 file_handler::handle_envelope_file_header(
                                     server_states, pending_file_streams, pending_shard_streams,
                                     early_file_streams, bundle_keypair, event_tx,
                                     &server_id, sender_peer_id,
                                     fid, name, ext, mime, size, chunks, img, w, h,
                                     mid, sid, cid, ts, aes_key, aes_nonce, vthumb, share_ref,
+                                    thumb, voice,
                                     requested_file_receipts, declined_file_ids,
                                     ws_cmd_tx, ws_room_peers,
                                     db_path, db_passphrase,
@@ -11345,6 +11403,8 @@ async fn handle_incoming_request(
                 if let Some(fm) = file_meta
                     .filter(|fm| file_id.as_deref() == Some(fm.fid.as_str()))
                 {
+                    let thumb_b64 =
+                        file_handler::accept_header_thumb(fm.thumb.clone(), fm.img, &fm.mime);
                     let _ = event_tx.send(NetworkEvent::FileHeaderReceived {
                         file_id: fm.fid,
                         file_name: fm.name,
@@ -11358,6 +11418,7 @@ async fn handle_incoming_request(
                         channel_id,
                         video_thumb: None,
                         share_ref: None,
+                        thumb_b64,
                     }).await;
                 }
             }
@@ -11495,6 +11556,7 @@ async fn handle_incoming_request(
                                     ts: f.created_at,
                                     sender: m.sender_id.clone(),
                                     vthumb: f.video_thumb.clone(),
+                                    thumb: f.thumb_b64.clone(),
                                 })
                             });
                             // Deletion proof rides with the hidden flag — guests
@@ -11704,6 +11766,7 @@ async fn handle_incoming_request(
                 mid, Some(sid.clone()), Some(cid), ts,
                 Some(aes_key), Some(aes_nonce),
                 None, None,
+                None, false,
                 requested_file_receipts, declined_file_ids,
                 ws_cmd_tx, ws_room_peers,
                 db_path, db_passphrase,
@@ -11752,6 +11815,16 @@ async fn handle_incoming_request(
                 peer_id: peer_str.to_string(),
                 status,
             }).await;
+        }
+
+        HavenMessage::AutoDownloadPref { mb } => {
+            // Auto-download pre-negotiation (issue #41): remember this DEVICE's
+            // advertised threshold so our DM file fan-out can skip streaming
+            // bytes it would discard. Clamp to the settings slider's ceiling —
+            // a larger value is malformed, not a real preference.
+            let mb = mb.min(2048);
+            hollow_log!("[HOLLOW-FILE] Peer {peer_str} advertised auto-download pref: {mb} MB");
+            peer_auto_dl.insert(peer_str.to_string(), mb);
         }
 
         HavenMessage::ProfileUpdate { display_name, status, about_me, updated_at, avatar_b64, banner_b64, is_invisible: peer_invisible, twitch_username, device_list, avatar_hash, banner_hash, showcase_board, showcase_assets_b64, showcase_assets_hash, profile_sig, profile_pk } => {
@@ -12048,6 +12121,11 @@ async fn handle_incoming_request(
                                                     // so no ordering stamp to carry.
                                                     order_us: None,
                                                     inline_bytes: None,
+                                                    thumb: file_meta.thumb_b64.clone(),
+                                                    // Explicit-pull response — the receiver's
+                                                    // receipt bypasses the gate; no voice flag
+                                                    // is persisted to rehydrate from.
+                                                    voice: false,
                                                 }),
                                             };
                                             // Send FileHeader via Olm (targeted) + SendDirect.

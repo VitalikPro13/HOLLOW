@@ -982,6 +982,9 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
             messageId: messageId,
             messageText: text,
             memberCount: members?.length ?? 0,
+            // The display name is the voice-recorder signal; the wire carries
+            // a dedicated flag (auto-download-gate exemption, issue #41).
+            isVoice: fileName == _kVoiceMessageName,
           );
     } catch (e) {
       if (mounted) {

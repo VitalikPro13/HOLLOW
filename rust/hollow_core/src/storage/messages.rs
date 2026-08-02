@@ -146,6 +146,10 @@ pub(crate) struct StoredFile {
     /// Share back-reference for share-backed (>34 MB) files, persisted so a
     /// manual download can rejoin the share swarm after a restart (issue #41).
     pub share_ref: Option<crate::node::ShareRef>,
+    /// Tiny base64 WebP placeholder thumbnail riding the FileHeader (issue #41
+    /// carry-over) — rendered blurred under the Download button while the real
+    /// bytes are gated/undownloaded. `thumb_b64` column.
+    pub thumb_b64: Option<String>,
 }
 
 /// One sticker of the user's personal vault. `pack` is a free-form group
@@ -269,7 +273,7 @@ fn dm_message_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredMessag
 }
 
 /// Column list every files query selects, in [`stored_file_from_row`] order.
-const FILE_COLS: &str = "file_id, file_name, file_ext, mime_type, size_bytes, chunk_count, chunks_received, is_image, width, height, message_id, context_type, context_id, sender_id, is_mine, created_at, completed_at, disk_path, hidden_at, video_thumb_json, expired_at, share_ref_json";
+const FILE_COLS: &str = "file_id, file_name, file_ext, mime_type, size_bytes, chunk_count, chunks_received, is_image, width, height, message_id, context_type, context_id, sender_id, is_mine, created_at, completed_at, disk_path, hidden_at, video_thumb_json, expired_at, share_ref_json, thumb_b64";
 
 /// Map one row selected via [`FILE_COLS`] to a StoredFile.
 fn stored_file_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredFile> {
@@ -298,6 +302,7 @@ fn stored_file_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredFile>
         share_ref: row
             .get::<_, Option<String>>(21)?
             .and_then(|s| serde_json::from_str(&s).ok()),
+        thumb_b64: row.get(22)?,
     })
 }
 
@@ -774,6 +779,11 @@ impl MessageStore {
         // share swarm — the fallback FileRequest path re-serves the bytes with
         // share_ref: None and the requester's own 34 MB cap rejects them.
         migrate(conn, "ALTER TABLE files ADD COLUMN share_ref_json TEXT;");
+
+        // -- Migration: tiny base64 WebP placeholder thumbnail riding the
+        // FileHeader (issue #41 carry-over) — rendered blurred under the
+        // Download button while the real bytes are gated/undownloaded.
+        migrate(conn, "ALTER TABLE files ADD COLUMN thumb_b64 TEXT;");
 
         ddl(conn, "file_chunks table",
             "CREATE TABLE IF NOT EXISTS file_chunks (
@@ -4241,6 +4251,7 @@ impl MessageStore {
         is_mine: bool,
         created_at: i64,
         video_thumb: Option<&crate::node::VideoThumbRef>,
+        thumb_b64: Option<&str>,
     ) -> Result<(), String> {
         let vthumb_json = video_thumb
             .and_then(|v| serde_json::to_string(v).ok());
@@ -4259,8 +4270,8 @@ impl MessageStore {
                  (file_id, file_name, file_ext, mime_type, size_bytes,
                   chunk_count, is_image, width, height, message_id,
                   context_type, context_id, sender_id, is_mine, created_at,
-                  video_thumb_json)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+                  video_thumb_json, thumb_b64)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
                  ON CONFLICT(file_id) DO UPDATE SET
                    file_name      = excluded.file_name,
                    file_ext       = excluded.file_ext,
@@ -4271,13 +4282,14 @@ impl MessageStore {
                    width          = excluded.width,
                    height         = excluded.height,
                    message_id     = COALESCE(files.message_id, excluded.message_id),
-                   video_thumb_json = COALESCE(excluded.video_thumb_json, files.video_thumb_json)",
+                   video_thumb_json = COALESCE(excluded.video_thumb_json, files.video_thumb_json),
+                   thumb_b64      = COALESCE(excluded.thumb_b64, files.thumb_b64)",
                 params![
                     file_id, file_name, file_ext, mime_type,
                     size_bytes as i64, chunk_count, is_image as i32,
                     width.map(|w| w as i64), height.map(|h| h as i64),
                     message_id, context_type, context_id, sender_id,
-                    is_mine as i32, created_at, vthumb_json,
+                    is_mine as i32, created_at, vthumb_json, thumb_b64,
                 ],
             )
             .map_err(|e| format!("Failed to insert file metadata: {e}"))?;
@@ -5360,7 +5372,7 @@ mod tests {
         store
             .insert_file_metadata(
                 file_id, file_id, "bin", "application/octet-stream", size,
-                1, false, None, None, None, ctype, cid, "sender", false, 1000, None,
+                1, false, None, None, None, ctype, cid, "sender", false, 1000, None, None,
             )
             .unwrap();
         store.mark_file_complete(file_id, disk_path).unwrap();
@@ -5378,7 +5390,7 @@ mod tests {
         store
             .insert_file_metadata(
                 "f4", "f4", "bin", "application/octet-stream", 999,
-                1, false, None, None, None, "dm", "alice", "sender", false, 1000, None,
+                1, false, None, None, None, "dm", "alice", "sender", false, 1000, None, None,
             )
             .unwrap();
 

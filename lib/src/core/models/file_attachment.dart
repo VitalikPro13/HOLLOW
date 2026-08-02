@@ -25,6 +25,10 @@ class FileAttachment {
   /// (whose response our own size cap would reject). Issue #41.
   final String? shareRootHash;
   final String? shareKeyHex;
+  /// Tiny base64 WebP placeholder thumbnail riding the FileHeader (issue #41
+  /// carry-over) — rendered blurred under the Download button while the real
+  /// image bytes are gated/undownloaded.
+  final String? thumbB64;
 
   const FileAttachment({
     required this.fileId,
@@ -43,6 +47,7 @@ class FileAttachment {
     this.expiredAt,
     this.shareRootHash,
     this.shareKeyHex,
+    this.thumbB64,
   });
 
   bool get isExpired => expiredAt != null;
@@ -66,6 +71,7 @@ class FileAttachment {
     int? expiredAt,
     String? shareRootHash,
     String? shareKeyHex,
+    String? thumbB64,
   }) {
     return FileAttachment(
       fileId: fileId,
@@ -84,6 +90,7 @@ class FileAttachment {
       expiredAt: expiredAt ?? this.expiredAt,
       shareRootHash: shareRootHash ?? this.shareRootHash,
       shareKeyHex: shareKeyHex ?? this.shareKeyHex,
+      thumbB64: thumbB64 ?? this.thumbB64,
     );
   }
 }

@@ -886,6 +886,9 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
           filePath: filePath,
           messageId: messageId,
           messageText: messageText,
+          // The display name is the voice-recorder signal; the wire carries a
+          // dedicated flag (auto-download-gate exemption, issue #41).
+          isVoice: fileName == 'Voice message.ogg',
         );
 
     // Clean up voice recording temp files after successful send.

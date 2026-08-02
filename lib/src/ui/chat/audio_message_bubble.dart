@@ -32,7 +32,12 @@ import 'package:hollow/src/ui/components/hollow_pressable.dart';
 class AudioMessageBubble extends ConsumerStatefulWidget {
   final FileAttachment attachment;
 
-  const AudioMessageBubble({super.key, required this.attachment});
+  /// Manual-download hook (issue #41 carry-over): when the audio bytes are
+  /// not on disk yet, the dead play button becomes a live download button
+  /// that triggers this callback (same flow as the image placeholder).
+  final VoidCallback? onDownload;
+
+  const AudioMessageBubble({super.key, required this.attachment, this.onDownload});
 
   @override
   ConsumerState<AudioMessageBubble> createState() =>
@@ -315,20 +320,36 @@ class _AudioMessageBubbleState extends ConsumerState<AudioMessageBubble> {
 
   Widget _buildIdle(HollowTheme hollow, bool isComplete, bool isDownloading, String? vaultPhase, int bytesReceived) {
     final canPlay = _canPlay() && isComplete;
+    // Undownloaded and idle (issue #41 carry-over): the play button would be
+    // a dead dimmed control — make it a live download button instead.
+    final showDownload = !canPlay &&
+        !isComplete &&
+        !isDownloading &&
+        vaultPhase == null &&
+        widget.onDownload != null;
     final durationText = _probedDurationMs != null
         ? _formatDuration(_probedDurationMs!)
         : null;
 
     return Row(
       children: [
-        // Play button.
-        _PlayButton(
-          icon: _preparing ? LucideIcons.loader2 : LucideIcons.play,
-          color: canPlay
-              ? hollow.accent
-              : hollow.accent.withValues(alpha: 0.4),
-          onTap: canPlay ? _onPlayTapped : null,
-        ),
+        // Play button (or download button while the bytes aren't local).
+        if (showDownload)
+          _PlayButton(
+            icon: LucideIcons.download,
+            color: hollow.accent,
+            onTap: widget.onDownload,
+            isPlay: false,
+            semanticLabel: 'Download ${widget.attachment.fileName}',
+          )
+        else
+          _PlayButton(
+            icon: _preparing ? LucideIcons.loader2 : LucideIcons.play,
+            color: canPlay
+                ? hollow.accent
+                : hollow.accent.withValues(alpha: 0.4),
+            onTap: canPlay ? _onPlayTapped : null,
+          ),
         const SizedBox(width: HollowSpacing.md),
         // File name + metadata row.
         Expanded(
@@ -518,18 +539,21 @@ class _PlayButton extends StatelessWidget {
   final Color color;
   final VoidCallback? onTap;
   final bool isPlay;
+  final String? semanticLabel;
 
   const _PlayButton({
     required this.icon,
     required this.color,
     this.onTap,
     this.isPlay = true,
+    this.semanticLabel,
   });
 
   @override
   Widget build(BuildContext context) {
     return HollowPressable(
       onTap: onTap,
+      semanticLabel: semanticLabel,
       borderRadius: BorderRadius.circular(18),
       child: Container(
         width: 36,

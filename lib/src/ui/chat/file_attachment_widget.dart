@@ -1,4 +1,7 @@
-﻿import 'dart:io';
+﻿import 'dart:convert' show base64Decode;
+import 'dart:io';
+import 'dart:typed_data' show Uint8List;
+import 'dart:ui' show ImageFilter;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -86,13 +89,18 @@ class FileAttachmentWidget extends ConsumerWidget {
     // Two cases handled by VideoMessageBubble:
     //  (a) vault video — videoThumb is set, attachment is the .webp thumbnail
     //  (b) direct P2P video — DM or <6 server, file is on disk locally
+    // The bubble owns EVERY state — poster from the header thumb, download
+    // button while the bytes aren't local, progress, then play — so the video
+    // keeps one face instead of hopping between a placeholder and the bubble.
     if (_isVideoAttachment()) {
-      return VideoMessageBubble(attachment: attachment);
+      return VideoMessageBubble(attachment: attachment, onDownload: onDownload);
     }
 
-    // Phase 6.75: Audio preview — inline playback card.
+    // Phase 6.75: Audio preview — inline playback card. The bubble owns its
+    // undownloaded state: the play button becomes a download button (issue
+    // #41 carry-over).
     if (_isAudioAttachment()) {
-      return AudioMessageBubble(attachment: attachment);
+      return AudioMessageBubble(attachment: attachment, onDownload: onDownload);
     }
 
     // A shared sticker pack is an ordinary file on the wire — only its face
@@ -295,24 +303,48 @@ class FileAttachmentWidget extends ConsumerWidget {
     );
   }
 
-  Widget _buildImagePreview(
-      BuildContext context, HollowTheme hollow, bool isComplete, String? diskPath, bool isDownloading, double progress, int bytesReceived, String? vaultPhase, VoidCallback onDownload) {
-    // Calculate display size maintaining aspect ratio.
-    const maxWidth = 300.0;
-    const maxHeight = 250.0;
+  /// Max preview box for images/videos in the chat feed.
+  static const _previewMaxWidth = 300.0;
+  static const _previewMaxHeight = 250.0;
 
-    double displayWidth = maxWidth;
-    double displayHeight = maxHeight;
+  /// Display box for the preview/placeholder, aspect-corrected from the
+  /// attachment's intrinsic dimensions (full box when unknown). Shared by the
+  /// image preview and the undownloaded-video placeholder route.
+  ({double w, double h}) _displayBoxSize() {
+    double displayWidth = _previewMaxWidth;
+    double displayHeight = _previewMaxHeight;
     if (attachment.width != null && attachment.height != null && attachment.height! > 0) {
       final aspect = attachment.width! / attachment.height!;
-      if (aspect > maxWidth / maxHeight) {
-        displayWidth = maxWidth;
-        displayHeight = maxWidth / aspect;
+      if (aspect > _previewMaxWidth / _previewMaxHeight) {
+        displayWidth = _previewMaxWidth;
+        displayHeight = _previewMaxWidth / aspect;
       } else {
-        displayHeight = maxHeight;
-        displayWidth = maxHeight * aspect;
+        displayHeight = _previewMaxHeight;
+        displayWidth = _previewMaxHeight * aspect;
       }
     }
+    return (w: displayWidth, h: displayHeight);
+  }
+
+  /// Decoded envelope-borne placeholder thumbnail (issue #41 carry-over) —
+  /// a ~32 px WebP, so the per-build decode cost is negligible.
+  Uint8List? _thumbBytes() {
+    final b64 = attachment.thumbB64;
+    if (b64 == null || b64.isEmpty) return null;
+    try {
+      return base64Decode(b64);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Widget _buildImagePreview(
+      BuildContext context, HollowTheme hollow, bool isComplete, String? diskPath, bool isDownloading, double progress, int bytesReceived, String? vaultPhase, VoidCallback onDownload) {
+    const maxWidth = _previewMaxWidth;
+    const maxHeight = _previewMaxHeight;
+    final box = _displayBoxSize();
+    final displayWidth = box.w;
+    final displayHeight = box.h;
 
     if (isComplete && diskPath != null && File(diskPath).existsSync()) {
       final isGif = attachment.fileExt.toLowerCase() == 'gif';
@@ -367,6 +399,41 @@ class FileAttachmentWidget extends ConsumerWidget {
 
   Widget _buildPlaceholder(
       HollowTheme hollow, double width, double height, bool isDownloading, double progress, int bytesReceived, String? vaultPhase, {VoidCallback? onDownload}) {
+    // Placeholder box shell: when the header carried a tiny thumbnail (issue
+    // #41 carry-over), it renders BLURRED under the content with a
+    // theme-correct scrim so the download button / progress labels keep
+    // contrast; otherwise the flat surface box as before.
+    final thumbBytes = _thumbBytes();
+    Widget shell(Widget child) => Container(
+          width: width,
+          height: height,
+          clipBehavior: Clip.antiAlias,
+          decoration: BoxDecoration(
+            color: hollow.surface,
+            borderRadius: BorderRadius.circular(hollow.radiusSm),
+            border: Border.all(color: hollow.border),
+          ),
+          child: thumbBytes == null
+              ? child
+              : Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    ImageFiltered(
+                      imageFilter: ImageFilter.blur(
+                          sigmaX: 10, sigmaY: 10, tileMode: TileMode.clamp),
+                      child: Image.memory(
+                        thumbBytes,
+                        fit: BoxFit.cover,
+                        gaplessPlayback: true,
+                        errorBuilder: (_, e, st) => const SizedBox.shrink(),
+                      ),
+                    ),
+                    ColoredBox(color: hollow.surface.withValues(alpha: 0.45)),
+                    child,
+                  ],
+                ),
+        );
+
     // Idle (not downloading, no partial progress) + a download hook = the
     // pressable placeholder (issue #41): image dimensions box with a download
     // button in it instead of a dead rectangle.
@@ -375,15 +442,8 @@ class FileAttachmentWidget extends ConsumerWidget {
         onTap: onDownload,
         semanticLabel: 'Download ${attachment.fileName}',
         borderRadius: BorderRadius.circular(hollow.radiusSm),
-        child: Container(
-          width: width,
-          height: height,
-          decoration: BoxDecoration(
-            color: hollow.surface,
-            borderRadius: BorderRadius.circular(hollow.radiusSm),
-            border: Border.all(color: hollow.border),
-          ),
-          child: Column(
+        child: shell(
+          Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
               Container(
@@ -423,15 +483,8 @@ class FileAttachmentWidget extends ConsumerWidget {
         ),
       );
     }
-    return Container(
-      width: width,
-      height: height,
-      decoration: BoxDecoration(
-        color: hollow.surface,
-        borderRadius: BorderRadius.circular(hollow.radiusSm),
-        border: Border.all(color: hollow.border),
-      ),
-      child: Column(
+    return shell(
+      Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
           if (isDownloading) ...[

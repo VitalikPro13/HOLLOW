@@ -1135,7 +1135,7 @@ class EventStreamNotifier extends Notifier<bool> {
             :final messageId, senderId: _,
             :final serverId, :final channelId,
             :final videoThumb,
-            :final shareRootHash, :final shareKeyHex):
+            :final shareRootHash, :final shareKeyHex, :final thumbB64):
         debugPrint('[HOLLOW] File header: $fileId ($fileName, $sizeBytes bytes)${shareRootHash != null ? ' [share-backed]' : ''}');
         // In erasure coding mode (6+ members), file data comes via vault shards,
         // not P2P streaming — so don't mark as "downloading".
@@ -1173,6 +1173,7 @@ class EventStreamNotifier extends Notifier<bool> {
                   videoThumb: videoThumb,
                   shareRootHash: shareRootHash,
                   shareKeyHex: shareKeyHex,
+                  thumbB64: thumbB64,
                 ),
               );
         }
@@ -1989,11 +1990,22 @@ class EventStreamNotifier extends Notifier<bool> {
     await Future.delayed(const Duration(seconds: 1));
     try {
       // Auto-download off for this DM (#41): the sweep IS the auto-download
-      // for offline-sent files — skip it entirely; every file card offers a
-      // manual Download button instead.
-      if (effectiveAutoDownloadMbRead(ref, 'dm:$peerId') == 0) return;
-      final missingIds =
+      // for offline-sent files — skip it; every file card offers a manual
+      // Download button instead. VOICE NOTES stay exempt (they behave like
+      // text), so a gated sweep still pulls those and nothing else.
+      final gated = effectiveAutoDownloadMbRead(ref, 'dm:$peerId') == 0;
+      var missingIds =
           await storage_api.getMissingFileIdsForDm(peerId: peerId);
+      if (gated) {
+        final voiceIds = <String>[];
+        for (final id in missingIds) {
+          final info = await storage_api.getFileMetadata(fileId: id);
+          if (info != null && isVoiceMessageFile(info.fileName)) {
+            voiceIds.add(id);
+          }
+        }
+        missingIds = voiceIds;
+      }
       if (missingIds.isEmpty) return;
       // ONE source per sweep: the conversation peer (friend) when reachable —
       // the canonical holder — else an online sibling device that backfilled

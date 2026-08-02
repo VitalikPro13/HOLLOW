@@ -195,11 +195,20 @@ class VideoThumbnailService {
       // -i <video>               input
       // -vf scale=-2:H           scale to height H, width auto (even)
       // -frames:v 1              output one frame
+      // -update 1                single-image output (no %d pattern needed)
       // -c:v libwebp             use libwebp encoder
       // -lossless 1              lossless mode (matches Hollow image pipeline)
       // -compression_level 6     max compression effort
-      // -pred mixed              best WebP prediction
-      // <out>                    output file (extension drives muxer)
+      // -f image2                explicit muxer — the bundled MINIMAL ffmpeg
+      //                          (vendor/ffmpeg, --disable-everything) has no
+      //                          `webp` muxer, so the .webp extension can't
+      //                          drive the format guess
+      //
+      // CRITICAL — flags must exist in the MINIMAL build: `-pred mixed` was
+      // rejected with "Unrecognized option" by the n7.1 minimal build, which
+      // silently killed EVERY thumbnail extraction (and with it video
+      // dimensions + posters). Test any new flag against the bundled binary,
+      // not a system ffmpeg.
       final result = await Process.run(
         ffmpeg,
         [
@@ -208,10 +217,11 @@ class VideoThumbnailService {
           '-i', videoPath,
           '-vf', 'scale=-2:$targetHeight',
           '-frames:v', '1',
+          '-update', '1',
           '-c:v', 'libwebp',
           '-lossless', '1',
           '-compression_level', '6',
-          '-pred', 'mixed',
+          '-f', 'image2',
           outPath,
         ],
         stdoutEncoding: null, // raw bytes
@@ -220,7 +230,10 @@ class VideoThumbnailService {
 
       if (result.exitCode != 0) {
         final stderrStr = _bytesToString(result.stderr);
-        _log('[VideoThumbnail] ffmpeg exit ${result.exitCode}: ${_truncate(stderrStr, 500)}');
+        // Log the TAIL of stderr — ffmpeg prints its version banner + build
+        // config first, so a head-truncated log shows only the banner and
+        // hides the actual error (exactly how the -pred failure went unseen).
+        _log('[VideoThumbnail] ffmpeg exit ${result.exitCode}: ${_tail(stderrStr, 500)}');
         return null;
       }
 
@@ -280,8 +293,8 @@ class VideoThumbnailService {
     return bytes?.toString() ?? '';
   }
 
-  static String _truncate(String s, int max) =>
-      s.length <= max ? s : '${s.substring(0, max)}...';
+  static String _tail(String s, int max) =>
+      s.length <= max ? s : '...${s.substring(s.length - max)}';
 
   /// Parses ffmpeg's stderr probe output for duration + source video dimensions.
   ///

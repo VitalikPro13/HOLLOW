@@ -2425,6 +2425,8 @@ async fn dm_file_transfer_completes_and_decrypts() {
             override_width: None,
             override_height: None,
             share_ref: None,
+            voice: false,
+            poster: None,
         })))
         .await
         .unwrap();
@@ -2518,6 +2520,8 @@ async fn dm_auto_download_off_declines_push_then_manual_request_completes() {
             override_width: None,
             override_height: None,
             share_ref: None,
+            voice: false,
+            poster: None,
         })))
         .await
         .unwrap();
@@ -2571,6 +2575,304 @@ async fn dm_auto_download_off_declines_push_then_manual_request_completes() {
 
     // Restore the permissive default for the rest of the suite.
     super::file_handler::set_auto_download_conf(169, std::collections::HashMap::new());
+}
+
+/// Issue #41 carry-over — sender-side pre-negotiation. When the RECEIVER's
+/// gating preference is advertised BEFORE the send (here: conf seeded before
+/// the nodes connect, so the on-join `auto_dl_pref` advert carries 0), the
+/// sender never streams the bytes at all: the receiver gets a METADATA-ONLY
+/// header (no AES material → no pending stream, no decline sentinel — the
+/// old path discarded fully-transmitted bytes instead). The manual
+/// RequestFile pull then completes normally.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
+async fn dm_receiver_pref_prenegotiation_skips_push_bytes() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    const A_MASTER: u8 = 103;
+    const B_MASTER: u8 = 104;
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
+    let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
+
+    // Gate B's side of the conversation BEFORE anything connects, so B's
+    // on-join advert to A already says 0 (the conf is process-global; the
+    // override key only matches B's view of the conversation, so A's own
+    // receive gate is unaffected).
+    let gate_key = format!("dm:{a_master}");
+    super::file_handler::set_auto_download_conf(
+        169,
+        std::collections::HashMap::from([(gate_key.clone(), false)]),
+    );
+
+    let mut a = spawn_node_with_friends(&relay, A_MASTER, A_MASTER, &[&b_master]).await;
+    sleep_ms(1200).await;
+    let mut b = spawn_node_with_friends(&relay, B_MASTER, B_MASTER, &[&a_master]).await;
+    sleep_ms(4000).await; // Olm confirm + auto_dl_pref adverts exchange
+    assert_eq!(a.olm_status(&b.device_id).await, "confirmed");
+    drain_events(&mut a);
+    drain_events(&mut b);
+
+    let src = global_tmp.path().join("preneg.bin");
+    let contents: &[u8] = b"pre-negotiated file contents that must not ride the wire";
+    std::fs::write(&src, contents).expect("write src file");
+
+    a.cmd_tx
+        .send(NodeCommand::SendFile(Box::new(super::types::SendFilePayload {
+            peer_id: Some(b.master_id.clone()),
+            server_id: None,
+            channel_id: None,
+            file_path: src.to_str().unwrap().to_string(),
+            message_id: "preneg-file-msg-1".to_string(),
+            message_text: String::new(),
+            vthumb: None,
+            override_width: None,
+            override_height: None,
+            share_ref: None,
+            voice: false,
+            poster: None,
+        })))
+        .await
+        .unwrap();
+
+    // The metadata-only header still lands (card renders)...
+    let mut got_fid = None;
+    let header = wait_event(&mut b, std::time::Duration::from_secs(5), |ev| {
+        if let NetworkEvent::FileHeaderReceived { file_id, file_name, .. } = ev {
+            if file_name.starts_with("preneg") {
+                got_fid = Some(file_id.clone());
+                return true;
+            }
+        }
+        false
+    })
+    .await;
+    assert!(header, "pre-negotiated send must still deliver the metadata card");
+    let fid = got_fid.expect("file id from header");
+
+    // ...but NEITHER bytes NOR the decline sentinel follow: the sender never
+    // streamed, so there is nothing for the receive gate to discard. (The old
+    // receive-side-only path emits FileFailed{auto_download_off} here.)
+    let byte_activity = wait_event(&mut b, std::time::Duration::from_secs(3), |ev| {
+        matches!(ev, NetworkEvent::FileCompleted { file_id, .. } if *file_id == fid)
+            || matches!(
+                ev,
+                NetworkEvent::FileFailed { file_id, error }
+                    if *file_id == fid && error == "auto_download_off"
+            )
+    })
+    .await;
+    assert!(
+        !byte_activity,
+        "pre-negotiation must keep the bytes (and the decline sentinel) off the wire"
+    );
+    let meta = b.file_meta(&fid).expect("metadata row persisted from the meta-only header");
+    assert!(meta.completed_at.is_none(), "no bytes may land without a manual pull");
+
+    // Manual pull still works: the explicit-request receipt bypasses the gate.
+    b.cmd_tx
+        .send(NodeCommand::RequestFile {
+            file_id: fid.clone(),
+            peer_id: a.master_id.clone(),
+            chunks: Vec::new(),
+        })
+        .await
+        .unwrap();
+    let done = wait_event(&mut b, std::time::Duration::from_secs(5), |ev| {
+        matches!(ev, NetworkEvent::FileCompleted { file_id, .. } if *file_id == fid)
+    })
+    .await;
+    assert!(done, "manual RequestFile must complete after a pre-negotiated skip");
+    sleep_ms(200).await;
+    let meta = b.file_meta(&fid).expect("files row after manual download");
+    let disk = meta.disk_path.expect("completed file has a disk path");
+    assert_eq!(
+        std::fs::read(&disk).expect("read the received file"),
+        contents,
+        "manually pulled file decrypts to the original contents"
+    );
+
+    super::file_handler::set_auto_download_conf(169, std::collections::HashMap::new());
+}
+
+/// Issue #41 carry-over — voice messages are exempt from the auto-download
+/// gate END TO END: with the conversation gated on the receiver (and that
+/// preference advertised to the sender), a voice-flagged send still streams
+/// and auto-completes. Also covers the legacy filename pattern — the wire
+/// name is the recorder's temp basename (`voice_{stamp}_{rand}.ogg`), which
+/// the old literal "Voice message.ogg" check never matched.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
+async fn dm_voice_message_bypasses_auto_download_gate() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    const A_MASTER: u8 = 105;
+    const B_MASTER: u8 = 106;
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
+    let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
+
+    // Gate the conversation before connect — the advert says 0, and B's own
+    // receive gate is off for this DM. Voice must sail through both.
+    super::file_handler::set_auto_download_conf(
+        169,
+        std::collections::HashMap::from([(format!("dm:{a_master}"), false)]),
+    );
+
+    let mut a = spawn_node_with_friends(&relay, A_MASTER, A_MASTER, &[&b_master]).await;
+    sleep_ms(1200).await;
+    let mut b = spawn_node_with_friends(&relay, B_MASTER, B_MASTER, &[&a_master]).await;
+    sleep_ms(4000).await;
+    assert_eq!(a.olm_status(&b.device_id).await, "confirmed");
+    drain_events(&mut a);
+    drain_events(&mut b);
+
+    // The recorder's real temp basename shape rides the wire.
+    let src = global_tmp.path().join("voice_1730000000000_12345.ogg");
+    let contents: &[u8] = b"opus-ish voice note bytes";
+    std::fs::write(&src, contents).expect("write src file");
+
+    a.cmd_tx
+        .send(NodeCommand::SendFile(Box::new(super::types::SendFilePayload {
+            peer_id: Some(b.master_id.clone()),
+            server_id: None,
+            channel_id: None,
+            file_path: src.to_str().unwrap().to_string(),
+            message_id: "voice-file-msg-1".to_string(),
+            message_text: String::new(),
+            vthumb: None,
+            override_width: None,
+            override_height: None,
+            share_ref: None,
+            voice: true,
+            poster: None,
+        })))
+        .await
+        .unwrap();
+
+    // Voice auto-completes despite the gated conversation.
+    let mut got_fid = None;
+    let header = wait_event(&mut b, std::time::Duration::from_secs(5), |ev| {
+        if let NetworkEvent::FileHeaderReceived { file_id, file_name, .. } = ev {
+            if file_name.starts_with("voice_") {
+                got_fid = Some(file_id.clone());
+                return true;
+            }
+        }
+        false
+    })
+    .await;
+    assert!(header, "voice note header must arrive");
+    let fid = got_fid.expect("file id from header");
+    let done = wait_event(&mut b, std::time::Duration::from_secs(5), |ev| {
+        matches!(ev, NetworkEvent::FileCompleted { file_id, .. } if *file_id == fid)
+    })
+    .await;
+    assert!(done, "voice notes are exempt from the auto-download gate");
+    sleep_ms(200).await;
+    let meta = b.file_meta(&fid).expect("voice files row");
+    let disk = meta.disk_path.expect("completed voice note has a disk path");
+    assert_eq!(
+        std::fs::read(&disk).expect("read the received voice note"),
+        contents,
+        "voice note decrypts to the original contents"
+    );
+
+    super::file_handler::set_auto_download_conf(169, std::collections::HashMap::new());
+}
+
+/// Video poster pipeline: a DM video send with Dart-supplied poster bytes
+/// (the ffmpeg-extracted frame) delivers a FileHeader whose `thumb_b64`
+/// carries the re-encoded lossy poster AND whose width/height fall back to
+/// the poster's own dimensions when the ffmpeg probe supplied none — so the
+/// receiver's bubble renders a real preview at the correct aspect before a
+/// single video byte is local.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
+async fn dm_video_send_carries_poster_thumb_and_dims() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    const A_MASTER: u8 = 107;
+    const B_MASTER: u8 = 108;
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
+    let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
+
+    let mut a = spawn_node_with_friends(&relay, A_MASTER, A_MASTER, &[&b_master]).await;
+    sleep_ms(1200).await;
+    let mut b = spawn_node_with_friends(&relay, B_MASTER, B_MASTER, &[&a_master]).await;
+    sleep_ms(4000).await;
+    assert_eq!(a.olm_status(&b.device_id).await, "confirmed");
+    drain_events(&mut a);
+    drain_events(&mut b);
+
+    // Fake "video" bytes + a real 64x36 (16:9) PNG poster frame.
+    let src = global_tmp.path().join("clip.mp4");
+    let contents: &[u8] = b"not really h264 but streams all the same";
+    std::fs::write(&src, contents).expect("write src file");
+    let poster_png = {
+        let img = image::RgbaImage::from_pixel(64, 36, image::Rgba([40, 90, 160, 255]));
+        let mut buf = Vec::new();
+        img.write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
+            .expect("encode poster png");
+        buf
+    };
+
+    a.cmd_tx
+        .send(NodeCommand::SendFile(Box::new(super::types::SendFilePayload {
+            peer_id: Some(b.master_id.clone()),
+            server_id: None,
+            channel_id: None,
+            file_path: src.to_str().unwrap().to_string(),
+            message_id: "video-file-msg-1".to_string(),
+            message_text: String::new(),
+            vthumb: None,
+            // No probe dims — the header must fall back to the poster's own.
+            override_width: None,
+            override_height: None,
+            share_ref: None,
+            voice: false,
+            poster: Some(poster_png),
+        })))
+        .await
+        .unwrap();
+
+    let mut got = None;
+    let header = wait_event(&mut b, std::time::Duration::from_secs(5), |ev| {
+        if let NetworkEvent::FileHeaderReceived { file_id, file_name, width, height, thumb_b64, .. } = ev {
+            if file_name.starts_with("clip") {
+                got = Some((file_id.clone(), *width, *height, thumb_b64.clone()));
+                return true;
+            }
+        }
+        false
+    })
+    .await;
+    assert!(header, "video header must arrive");
+    let (fid, w, h, thumb) = got.expect("header fields");
+    let thumb = thumb.expect("header must carry the re-encoded poster thumb");
+    assert!(thumb.len() <= super::file_handler::FILE_THUMB_MAX_B64_LEN);
+    // Poster-derived dimension fallback: 64x36 source poster, no upscale.
+    assert_eq!((w, h), (Some(64), Some(36)), "header w/h fall back to poster dims");
+    // The poster also persists on the receiver's files row for later reloads.
+    let done = wait_event(&mut b, std::time::Duration::from_secs(5), |ev| {
+        matches!(ev, NetworkEvent::FileCompleted { file_id, .. } if *file_id == fid)
+    })
+    .await;
+    assert!(done, "video transfer completes");
+    sleep_ms(200).await;
+    let meta = b.file_meta(&fid).expect("receiver files row");
+    assert_eq!(meta.thumb_b64.as_deref(), Some(thumb.as_str()), "poster persisted in thumb_b64");
+    assert_eq!((meta.width, meta.height), (Some(64), Some(36)));
 }
 
 // ---------------------------------------------------------------------------
@@ -7443,6 +7745,8 @@ async fn channel_relay_catchup_delivers_file_message_and_header() {
             override_width: None,
             override_height: None,
             share_ref: None,
+            voice: false,
+            poster: None,
         })))
         .await
         .unwrap();
@@ -7568,6 +7872,8 @@ async fn channel_file_request_reroutes_to_online_holder_when_sender_offline() {
             override_width: None,
             override_height: None,
             share_ref: None,
+            voice: false,
+            poster: None,
         })))
         .await
         .unwrap();
@@ -7700,6 +8006,8 @@ async fn file_request_gate_refuses_stranger_and_serves_guest_public() {
             override_width: None,
             override_height: None,
             share_ref: None,
+            voice: false,
+            poster: None,
         })))
         .await
         .unwrap();
@@ -7814,6 +8122,8 @@ async fn file_request_gate_refuses_stranger_and_serves_guest_public() {
             override_width: None,
             override_height: None,
             share_ref: None,
+            voice: false,
+            poster: None,
         })))
         .await
         .unwrap();

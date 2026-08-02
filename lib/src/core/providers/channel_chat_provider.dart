@@ -354,6 +354,7 @@ class ChannelChatNotifier
                 expiredAt: info.expiredAt?.toInt(),
                 shareRootHash: info.shareRootHash,
                 shareKeyHex: info.shareKeyHex,
+                thumbB64: info.thumbB64,
               );
             }
           } catch (_) {}
@@ -624,8 +625,9 @@ class ChannelChatNotifier
       int firstVisible, int lastVisible) async {
     // Auto-download off for this server (#41): the viewport sweep IS the
     // auto-download for channel files — skip it; file cards offer a manual
-    // Download button instead.
-    if (effectiveAutoDownloadMbRead(ref, 'server:$serverId') == 0) return;
+    // Download button instead. VOICE NOTES stay exempt (they behave like
+    // text), so the per-file loop below still pulls those.
+    final gated = effectiveAutoDownloadMbRead(ref, 'server:$serverId') == 0;
     final start = (firstVisible - 15).clamp(0, messages.length - 1);
     final end = (lastVisible + 15).clamp(0, messages.length - 1);
     // Candidates come from THIS server's online members (master-keyed) —
@@ -639,6 +641,7 @@ class ChannelChatNotifier
       final msg = messages[i];
       final att = msg.fileAttachment;
       if (att == null || att.isComplete || att.diskPath != null) continue;
+      if (gated && !isVoiceMessageFile(att.fileName)) continue;
       if (_requestedFileIds.contains(att.fileId)) continue;
       final transfer = ref.read(fileTransferProvider)[att.fileId];
       if (transfer != null && (transfer.isDownloading || transfer.isComplete)) continue;

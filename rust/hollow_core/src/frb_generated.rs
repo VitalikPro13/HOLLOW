@@ -8412,6 +8412,8 @@ fn wire__crate__api__network__send_file_impl(
             let api_override_height = <Option<u32>>::sse_decode(&mut deserializer);
             let api_share_root_hash = <Option<String>>::sse_decode(&mut deserializer);
             let api_share_key_hex = <Option<String>>::sse_decode(&mut deserializer);
+            let api_is_voice = <Option<bool>>::sse_decode(&mut deserializer);
+            let api_poster_bytes = <Option<Vec<u8>>>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
                 transform_result_sse::<_, String>((move || {
@@ -8427,6 +8429,8 @@ fn wire__crate__api__network__send_file_impl(
                         api_override_height,
                         api_share_root_hash,
                         api_share_key_hex,
+                        api_is_voice,
+                        api_poster_bytes,
                     )?;
                     Ok(output_ok)
                 })())
@@ -13887,6 +13891,7 @@ impl SseDecode for crate::api::network::NetworkEvent {
                     <Option<crate::api::network::VideoThumbRef>>::sse_decode(deserializer);
                 let mut var_shareRootHash = <Option<String>>::sse_decode(deserializer);
                 let mut var_shareKeyHex = <Option<String>>::sse_decode(deserializer);
+                let mut var_thumbB64 = <Option<String>>::sse_decode(deserializer);
                 return crate::api::network::NetworkEvent::FileHeaderReceived {
                     file_id: var_fileId,
                     file_name: var_fileName,
@@ -13901,6 +13906,7 @@ impl SseDecode for crate::api::network::NetworkEvent {
                     video_thumb: var_videoThumb,
                     share_root_hash: var_shareRootHash,
                     share_key_hex: var_shareKeyHex,
+                    thumb_b64: var_thumbB64,
                 };
             }
             62 => {
@@ -15324,6 +15330,7 @@ impl SseDecode for crate::api::storage::StoredFileInfo {
             <Option<crate::api::network::VideoThumbRef>>::sse_decode(deserializer);
         let mut var_shareRootHash = <Option<String>>::sse_decode(deserializer);
         let mut var_shareKeyHex = <Option<String>>::sse_decode(deserializer);
+        let mut var_thumbB64 = <Option<String>>::sse_decode(deserializer);
         return crate::api::storage::StoredFileInfo {
             file_id: var_fileId,
             file_name: var_fileName,
@@ -15347,6 +15354,7 @@ impl SseDecode for crate::api::storage::StoredFileInfo {
             video_thumb: var_videoThumb,
             share_root_hash: var_shareRootHash,
             share_key_hex: var_shareKeyHex,
+            thumb_b64: var_thumbB64,
         };
     }
 }
@@ -17835,6 +17843,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::network::NetworkEvent {
                 video_thumb,
                 share_root_hash,
                 share_key_hex,
+                thumb_b64,
             } => [
                 61.into_dart(),
                 file_id.into_into_dart().into_dart(),
@@ -17850,6 +17859,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::network::NetworkEvent {
                 video_thumb.into_into_dart().into_dart(),
                 share_root_hash.into_into_dart().into_dart(),
                 share_key_hex.into_into_dart().into_dart(),
+                thumb_b64.into_into_dart().into_dart(),
             ]
             .into_dart(),
             crate::api::network::NetworkEvent::FileProgress {
@@ -19207,6 +19217,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::storage::StoredFileInfo {
             self.video_thumb.into_into_dart().into_dart(),
             self.share_root_hash.into_into_dart().into_dart(),
             self.share_key_hex.into_into_dart().into_dart(),
+            self.thumb_b64.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -20936,6 +20947,7 @@ impl SseEncode for crate::api::network::NetworkEvent {
                 video_thumb,
                 share_root_hash,
                 share_key_hex,
+                thumb_b64,
             } => {
                 <i32>::sse_encode(61, serializer);
                 <String>::sse_encode(file_id, serializer);
@@ -20951,6 +20963,7 @@ impl SseEncode for crate::api::network::NetworkEvent {
                 <Option<crate::api::network::VideoThumbRef>>::sse_encode(video_thumb, serializer);
                 <Option<String>>::sse_encode(share_root_hash, serializer);
                 <Option<String>>::sse_encode(share_key_hex, serializer);
+                <Option<String>>::sse_encode(thumb_b64, serializer);
             }
             crate::api::network::NetworkEvent::FileProgress {
                 file_id,
@@ -22106,6 +22119,7 @@ impl SseEncode for crate::api::storage::StoredFileInfo {
         <Option<crate::api::network::VideoThumbRef>>::sse_encode(self.video_thumb, serializer);
         <Option<String>>::sse_encode(self.share_root_hash, serializer);
         <Option<String>>::sse_encode(self.share_key_hex, serializer);
+        <Option<String>>::sse_encode(self.thumb_b64, serializer);
     }
 }
 

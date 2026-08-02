@@ -328,6 +328,7 @@ class ChatNotifier extends Notifier<Map<String, List<ChatMessage>>> {
               expiredAt: info.expiredAt?.toInt(),
               shareRootHash: info.shareRootHash,
               shareKeyHex: info.shareKeyHex,
+              thumbB64: info.thumbB64,
             );
           }
         } catch (_) {}

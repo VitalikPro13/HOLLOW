@@ -1186,6 +1186,9 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
           messageId: messageId,
           messageText: messageText,
           memberCount: members?.length ?? 0,
+          // The display name is the voice-recorder signal; the wire carries a
+          // dedicated flag (auto-download-gate exemption, issue #41).
+          isVoice: fileName == 'Voice message.ogg',
         );
     _recomputeSlowMode();
 

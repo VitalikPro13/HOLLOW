@@ -1,5 +1,7 @@
 ﻿import 'dart:async';
+import 'dart:convert' show base64Decode;
 import 'dart:io';
+import 'dart:typed_data' show Uint8List;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -51,7 +53,13 @@ import 'package:hollow/src/ui/components/hollow_pressable.dart';
 class VideoMessageBubble extends ConsumerStatefulWidget {
   final FileAttachment attachment;
 
-  const VideoMessageBubble({super.key, required this.attachment});
+  /// Manual-download hook (issue #41 carry-over): while the video bytes are
+  /// not local, the center control is a download button that triggers this
+  /// callback — the bubble is the single face for every state (poster →
+  /// download → progress → play), never a separate placeholder widget.
+  final VoidCallback? onDownload;
+
+  const VideoMessageBubble({super.key, required this.attachment, this.onDownload});
 
   @override
   ConsumerState<VideoMessageBubble> createState() => _VideoMessageBubbleState();
@@ -81,6 +89,17 @@ class _VideoMessageBubbleState extends ConsumerState<VideoMessageBubble> {
   String? _localThumbPath;
   bool _thumbExtractStarted = false;
 
+  /// Envelope-borne poster frame (FileHeader `thumb`, issue #41 carry-over):
+  /// decoded once so the bubble shows a real preview before any video bytes
+  /// are local. The locally-extracted thumbnail (once the file lands on
+  /// disk) supersedes it — that one is full 480p.
+  Uint8List? _posterBytes;
+
+  /// Intrinsic poster dimensions — the display-aspect fallback when the
+  /// header carried no width/height (pre-0.9.4 sender or failed ffmpeg
+  /// probe). Decoded async from [_posterBytes].
+  Size? _posterDims;
+
   network_api.VideoThumbRef? get _vthumb => widget.attachment.videoThumb;
 
   /// Unique key for this bubble in the "currently playing" provider —
@@ -94,6 +113,7 @@ class _VideoMessageBubbleState extends ConsumerState<VideoMessageBubble> {
     // Vault videos already have a thumbnail image at attachment.diskPath, so
     // we skip them.
     _maybeExtractLocalThumb();
+    _decodePoster();
   }
 
   @override
@@ -105,6 +125,36 @@ class _VideoMessageBubbleState extends ConsumerState<VideoMessageBubble> {
     if (_localThumbPath == null) {
       _maybeExtractLocalThumb();
     }
+    if (old.attachment.thumbB64 != widget.attachment.thumbB64) {
+      _posterBytes = null;
+      _posterDims = null;
+      _decodePoster();
+    }
+  }
+
+  /// Decode the header poster: bytes synchronously (tiny base64), intrinsic
+  /// dimensions async — only needed when the attachment carries no w/h.
+  void _decodePoster() {
+    final b64 = widget.attachment.thumbB64;
+    if (b64 == null || b64.isEmpty) return;
+    Uint8List bytes;
+    try {
+      bytes = base64Decode(b64);
+    } catch (_) {
+      return;
+    }
+    _posterBytes = bytes;
+    final hasDims = widget.attachment.width != null &&
+        widget.attachment.height != null &&
+        widget.attachment.height! > 0;
+    if (hasDims) return;
+    decodeImageFromList(bytes).then((img) {
+      final dims = Size(img.width.toDouble(), img.height.toDouble());
+      img.dispose();
+      if (mounted && dims.height > 0) {
+        setState(() => _posterDims = dims);
+      }
+    }).catchError((_) {});
   }
 
   @override
@@ -360,13 +410,18 @@ class _VideoMessageBubbleState extends ConsumerState<VideoMessageBubble> {
   /// which lands in the same FileHeader fields. So both image and video
   /// bubbles can use one source of truth.
   ///
-  /// Falls back to 16:9 if dimensions aren't available (shouldn't happen for
-  /// videos sent by Phase 6.75 clients, but handles old clients gracefully).
+  /// Falls back to the header poster's intrinsic aspect (scaled frame,
+  /// aspect-true to the source video), then 16:9, when the attachment
+  /// carries no dimensions (old client / failed ffmpeg probe).
   Size _resolveDisplaySize() {
     const maxWidth = 320.0;
     const maxHeight = 260.0;
-    final srcW = widget.attachment.width;
-    final srcH = widget.attachment.height;
+    double? srcW = widget.attachment.width?.toDouble();
+    double? srcH = widget.attachment.height?.toDouble();
+    if ((srcW == null || srcH == null || srcH <= 0) && _posterDims != null) {
+      srcW = _posterDims!.width;
+      srcH = _posterDims!.height;
+    }
     if (srcW != null && srcH != null && srcH > 0) {
       final aspect = srcW / srcH;
       double w, h;
@@ -380,6 +435,35 @@ class _VideoMessageBubbleState extends ConsumerState<VideoMessageBubble> {
       return Size(w, h);
     }
     return const Size(maxWidth, maxWidth * 9 / 16);
+  }
+
+  /// Poster/background layer stack shared by the thumbnail and preparing
+  /// states: local extracted thumbnail (full 480p once the bytes are on
+  /// disk) > header poster (≤400 px, arrives with the FileHeader) > a dark
+  /// gradient — never a flat black slab.
+  Widget _posterLayer(String? thumbPath) {
+    if (thumbPath != null) {
+      return Image.file(
+        File(thumbPath),
+        fit: BoxFit.cover,
+        gaplessPlayback: true,
+        errorBuilder: (_, e, s) => _posterFallbackLayer(),
+      );
+    }
+    return _posterFallbackLayer();
+  }
+
+  Widget _posterFallbackLayer() {
+    final poster = _posterBytes;
+    if (poster != null) {
+      return Image.memory(
+        poster,
+        fit: BoxFit.cover,
+        gaplessPlayback: true,
+        errorBuilder: (_, e, s) => const _VideoBackdrop(),
+      );
+    }
+    return const _VideoBackdrop();
   }
 
   // ─── Thumbnail mode ───────────────────────────────────────────────
@@ -396,12 +480,18 @@ class _VideoMessageBubbleState extends ConsumerState<VideoMessageBubble> {
     final isShareBacked = transfer?.shareRootHash != null;
     final isDownloading = transfer != null &&
         !transfer.isComplete &&
-        transfer.totalChunks > 0;
+        !transfer.declined &&
+        (transfer.isDownloading || transfer.totalChunks > 0);
     final progress = isDownloading ? transfer.progress : 0.0;
     final noSeeders = isShareBacked &&
         !transfer!.isComplete &&
         (transfer.seeders ?? -1) == 0 &&
         transfer.chunksReceived == 0;
+    // No local bytes, nothing in flight → the center control is a download
+    // button (issue #41 carry-over: undownloaded videos used to render an
+    // inert play button over a black slab).
+    final showDownload =
+        !canPlay && !isDownloading && !noSeeders && widget.onDownload != null;
     // Show "Keep & Seed" if the file lives in vault_cache/ (cached channel download).
     final resolvedDiskPath = transfer?.diskPath ?? widget.attachment.diskPath;
     final isInVaultCache = resolvedDiskPath != null &&
@@ -410,25 +500,28 @@ class _VideoMessageBubbleState extends ConsumerState<VideoMessageBubble> {
         (isInVaultCache ? _findShareRootHash(resolvedDiskPath!) : null);
     final showKeepAndSeed = shareRoot != null && isInVaultCache;
 
+    final tapAction = canPlay
+        ? _onPlayTapped
+        : (showDownload ? () => widget.onDownload!() : null);
+    final semanticLabel = canPlay
+        ? 'Play ${widget.attachment.fileName}'
+        : 'Download ${widget.attachment.fileName}';
+
     return HollowFocusRing(
-      enabled: canPlay,
-      onActivate: canPlay ? _onPlayTapped : null,
+      enabled: tapAction != null,
+      onActivate: tapAction,
       borderRadius: BorderRadius.circular(hollow.radiusSm),
       child: MouseRegion(
-      cursor: canPlay ? SystemMouseCursors.click : MouseCursor.defer,
+      cursor: tapAction != null ? SystemMouseCursors.click : MouseCursor.defer,
       child: GestureDetector(
-        onTap: canPlay ? _onPlayTapped : null,
+        onTap: tapAction,
+        child: Semantics(
+        button: tapAction != null,
+        label: semanticLabel,
         child: Stack(
           fit: StackFit.expand,
           children: [
-            if (thumbPath != null)
-              Image.file(
-                File(thumbPath),
-                fit: BoxFit.cover,
-                errorBuilder: (_, e, s) => Container(color: Colors.black),
-              )
-            else
-              Container(color: Colors.black),
+            _posterLayer(thumbPath),
             if (noSeeders)
               Container(
                 color: Colors.black.withValues(alpha: 0.65),
@@ -445,22 +538,30 @@ class _VideoMessageBubbleState extends ConsumerState<VideoMessageBubble> {
                   ),
                 ),
               )
-            else
-              // Play button — always visible (during download = tap to stream).
+            else if (isDownloading && !canPlay)
+              // Bytes in flight and not yet streamable — progress ring in the
+              // same circle the play/download button occupies. (Sequential
+              // share downloads become playable mid-flight and show the play
+              // button + bottom progress bar instead.)
               Center(
-                child: Container(
-                  width: 64,
-                  height: 64,
-                  decoration: BoxDecoration(
-                    color: Colors.black.withValues(alpha: 0.55),
-                    shape: BoxShape.circle,
-                    border: Border.all(
-                      color: Colors.white.withValues(alpha: 0.85),
-                      width: 2,
+                child: _CenterCircle(
+                  child: Padding(
+                    padding: const EdgeInsets.all(16),
+                    child: CircularProgressIndicator(
+                      value: progress > 0 ? progress.clamp(0.0, 1.0) : null,
+                      strokeWidth: 3,
+                      valueColor: const AlwaysStoppedAnimation(Colors.white),
+                      backgroundColor: Colors.white24,
                     ),
                   ),
-                  child: const Icon(
-                    LucideIcons.play,
+                ),
+              )
+            else
+              // Play when the bytes are local/streamable, download otherwise.
+              Center(
+                child: _CenterCircle(
+                  child: Icon(
+                    canPlay ? LucideIcons.play : LucideIcons.download,
                     color: Colors.white,
                     size: 28,
                   ),
@@ -518,6 +619,7 @@ class _VideoMessageBubbleState extends ConsumerState<VideoMessageBubble> {
               ),
           ],
         ),
+        ),
       ),
       ),
     );
@@ -544,14 +646,7 @@ class _VideoMessageBubbleState extends ConsumerState<VideoMessageBubble> {
     return Stack(
       fit: StackFit.expand,
       children: [
-        if (thumbPath != null)
-          Image.file(
-            File(thumbPath),
-            fit: BoxFit.cover,
-            errorBuilder: (_, e, s) => Container(color: Colors.black),
-          )
-        else
-          Container(color: Colors.black),
+        _posterLayer(thumbPath),
         Container(color: Colors.black.withValues(alpha: 0.5)),
         Column(
           mainAxisAlignment: MainAxisAlignment.center,
@@ -1129,6 +1224,52 @@ class _KeepAndSeedButtonState extends ConsumerState<_KeepAndSeedButton> {
 }
 
 // ════ Helpers ═════════════════════════════════════════════════════════════
+
+/// The single 64 px scrim circle every center control (play / download /
+/// progress ring) lives in — one shape across all bubble states, so the
+/// control swap never reads as a different widget.
+class _CenterCircle extends StatelessWidget {
+  final Widget child;
+
+  const _CenterCircle({required this.child});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: 64,
+      height: 64,
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: 0.55),
+        shape: BoxShape.circle,
+        border: Border.all(
+          color: Colors.white.withValues(alpha: 0.85),
+          width: 2,
+        ),
+      ),
+      child: Center(child: child),
+    );
+  }
+}
+
+/// Background for a video bubble with no poster available (old sender, no
+/// ffmpeg): a subtle dark gradient instead of a flat black slab. Kept dark
+/// in both themes — the white-on-scrim center controls need the contrast.
+class _VideoBackdrop extends StatelessWidget {
+  const _VideoBackdrop();
+
+  @override
+  Widget build(BuildContext context) {
+    return const DecoratedBox(
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [Color(0xFF23252B), Color(0xFF101114)],
+        ),
+      ),
+    );
+  }
+}
 
 class _Badge extends StatelessWidget {
   final String text;

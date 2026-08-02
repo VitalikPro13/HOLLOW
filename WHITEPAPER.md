@@ -511,11 +511,19 @@ The entire file is encrypted as a single unit. The AES key and nonce are transmi
 1. **WebRTC data channel** (direct P2P) — preferred. ~9 MB/s throughput (depends on the Internet connection speed).
 2. **WebSocket relay streaming** — fallback when WebRTC is unavailable. Relay forwards the encrypted bytes without reading them.
 
-File metadata (name, size, AES key, nonce) always travels through the encrypted channel (Olm/MLS via relay). Only the encrypted file bytes use the WebRTC data channel. This separation ensures that even if the P2P connection is compromised, the encryption key is not exposed.
+File metadata (name, size, AES key, nonce, and — for images and videos — a small preview thumbnail) always travels through the encrypted channel (Olm/MLS via relay). Only the encrypted file bytes use the WebRTC data channel. This separation ensures that even if the P2P connection is compromised, the encryption key is not exposed.
 
 ### 7.3 Image Processing
 
 All images are auto-converted to Balanced WebP on send (~95% smaller than PNG/JPEG; similar quality). Metadata (EXIF, GPS, camera info) is stripped before transmission. Configurable quality tiers: Lossless (100%), Balanced (50%), Small (30%).
+
+Image sends additionally embed a tiny (≤32 px) placeholder thumbnail inside the encrypted `FileHeader`; video sends embed a size-bounded poster frame the same way. Receivers enforce an independent size cap on this field before storing or displaying it. Because the thumbnail rides the same encrypted envelope as the rest of the file metadata, it reveals nothing to the relay.
+
+### 7.4 Receiver Download Consent
+
+Automatic downloading is a receiver-side policy (a global size threshold with per-conversation overrides; zero disables it). Enforcement is local: a receiver whose policy rejects a transfer keeps the encrypted metadata (so the message still renders, with the embedded thumbnail as its preview) but never stores the file bytes; an explicit manual request always overrides the policy for exactly the requested file.
+
+As an optimization, a device may advertise its effective threshold for a conversation to its DM peers so that a compliant sender skips transmitting bytes the receiver would discard. This advertisement is a single size value carried in a plaintext control message (comparable to a typing indicator); it contains no content and is advisory only — enforcement never depends on it, and a sender that ignores it merely wastes its own bandwidth against the receiver's local policy. Voice messages, being small and conversational, are exempt from the policy on both sides.
 
 ---
 

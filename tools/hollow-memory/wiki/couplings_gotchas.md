@@ -255,9 +255,15 @@ final iceServers = turnUris.map((uri) => {
 
 ### A pushed file stream cannot be declined mid-flight (issue #41)
 
-**Rule:** The auto-download gate is receive-side only — never add a "decline" wire message expecting it to cancel a push, and never rely on receiver-side signaling to save the pushed bytes.
+**Rule:** Never add a "decline" wire message expecting it to cancel a push in flight, and never rely on receiver-side signaling to save already-pushed bytes. The only way to keep bytes off the wire is to decide BEFORE the push — which is what pre-negotiation does (0.9.4): receivers advertise `auto_dl_pref` on DM-room join, senders consult `peer_auto_dl` and send a metadata-only header to gated devices.
 
-**Why:** `ws_stream_send` queues the ENTIRE file into the unbounded WS command channel within a single event-loop turn; any response from the receiver is processed after the last chunk is already queued. The gate therefore: (a) prevents all PULL transfers before any request (Dart sweeps + share auto-start), (b) discards pushed bytes on arrival (metadata kept, `declined_file_ids` RAM set, `FileFailed("auto_download_off")` sentinel pins the Dart UI on its Download button). Progress must be suppressed in BOTH runtimes — the Rust stream-progress poll AND `webrtc_provider.dart`'s data-channel receive (which reports progress from Dart, bypassing anything Rust does). Full architecture: memory `project_autodownload_gate`.
+**Why:** `ws_stream_send` queues the ENTIRE file into the unbounded WS command channel within a single event-loop turn; any response from the receiver is processed after the last chunk is already queued. For old senders (no advert received), the receive gate still: (a) prevents all PULL transfers before any request (Dart sweeps + share auto-start), (b) discards pushed bytes on arrival (metadata kept, `declined_file_ids` RAM set, `FileFailed("auto_download_off")` sentinel pins the Dart UI on its Download button). Progress must be suppressed in BOTH runtimes — the Rust stream-progress poll AND `webrtc_provider.dart`'s data-channel receive (which reports progress from Dart, bypassing anything Rust does). Full architecture: memory `project_autodownload_gate`.
+
+### ffmpeg flags must be tested against the BUNDLED minimal build
+
+**Rule:** Any new flag in an ffmpeg invocation (`VideoThumbnailService`, audio transcode/probe, voice recorder) must be verified against `vendor/ffmpeg`'s minimal build, never a system ffmpeg.
+
+**Why:** The minimal build (`--disable-everything --enable-small`) rejected `-pred mixed` outright and has no `webp` muxer (output format can't be guessed from a `.webp` extension — needs explicit `-f image2 -update 1`). This silently killed every video thumbnail/dimension/poster extraction for months; the failure log truncated stderr from the head, showing only the version banner. Error logs for subprocess ffmpeg must log the stderr TAIL. See memory `project_ffmpeg_minimal_build`.
 
 ### Explicit file requests carry a receipt that bypasses the size cap
 

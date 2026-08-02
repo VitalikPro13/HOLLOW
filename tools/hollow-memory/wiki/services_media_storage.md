@@ -258,10 +258,12 @@ Static-only service that extracts first-frame thumbnails from video files using 
    - `-ss 00:00:00.5` seek 0.5s (avoids black first frames)
    - `-i <videoPath>` input
    - `-vf scale=-2:<targetHeight>` scale to target height, auto-width (even number)
-   - `-frames:v 1` one frame only
-   - `-c:v libwebp -lossless 1 -compression_level 6 -pred mixed` lossless WebP with max compression
+   - `-frames:v 1 -update 1` one frame, single-image output
+   - `-c:v libwebp -lossless 1 -compression_level 6` lossless WebP
+   - `-f image2` explicit muxer — the bundled MINIMAL ffmpeg has no `webp` muxer, so the `.webp` extension cannot drive the format guess
+   - **CRITICAL: every flag must exist in the minimal build** — `-pred mixed` was silently killing all extractions ("Unrecognized option"); test new flags against the bundled binary, never a system ffmpeg
 5. 10-second timeout. On timeout, logs and returns null.
-6. On non-zero exit, logs truncated stderr (first 500 chars) and returns null.
+6. On non-zero exit, logs the stderr TAIL (last 500 chars — the head is just the version banner and hides the real error) and returns null.
 7. Reads the output WebP file. Returns null if empty or missing.
 8. Parses ffmpeg stderr for source video metadata (duration, dimensions) via `_parseFfmpegStderr()`.
 9. Returns `VideoThumbnailResult(webpBytes, durationMs, sourceWidth, sourceHeight)`.

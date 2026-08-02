@@ -52,7 +52,8 @@ sender needs no signature.
 
 | Write | Sites | Gate |
 |---|---|---|
-| `insert_file_metadata` | 3 sync batches, `sync_handler`, Olm FileHeader, MLS FileHeader, `fetch.rs` | 0.8.5: `file_handler::file_meta_write_allowed` — the UPSERT may only be performed by the identity that owns the card (device→master collapsed). See below |
+| `insert_file_metadata` | 3 sync batches, `sync_handler`, Olm FileHeader, MLS FileHeader, `fetch.rs` | 0.8.5: `file_handler::file_meta_write_allowed` — the UPSERT may only be performed by the identity that owns the card (device→master collapsed). See below. 0.9.4 added the `thumb_b64` column (blurred-placeholder thumbnail): remote-controlled bytes, so EVERY ingest site filters it to `img && len <= FILE_THUMB_MAX_B64_LEN` (32 KB b64) before the write, and the SQL COALESCEs so a thumb-less re-header can't blank a stored one |
+| `peer_auto_dl` (RAM, not the store) | `HavenMessage::AutoDownloadPref` arm | advertised value clamped to 0..=2048 MB; worst case a peer lies about its own preference and we push/skip bytes to THAT peer — no cross-peer effect, cleared on disconnect |
 
 **Why this one needed a gate.** `insert_file_metadata` is an UPSERT keyed on
 `file_id` that deliberately overwrites name/ext/mime/size/dimensions, so the FCM

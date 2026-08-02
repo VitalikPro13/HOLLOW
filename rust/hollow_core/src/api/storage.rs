@@ -757,6 +757,10 @@ pub struct StoredFileInfo {
     pub share_root_hash: Option<String>,
     /// Persisted share AES key (hex) paired with `share_root_hash`.
     pub share_key_hex: Option<String>,
+    /// Tiny base64 WebP placeholder thumbnail — rendered blurred under the
+    /// Download button while the real bytes are gated/undownloaded (issue #41
+    /// carry-over).
+    pub thumb_b64: Option<String>,
 }
 
 fn stored_file_to_ffi(f: crate::storage::messages::StoredFile) -> StoredFileInfo {
@@ -783,6 +787,7 @@ fn stored_file_to_ffi(f: crate::storage::messages::StoredFile) -> StoredFileInfo
         video_thumb: f.video_thumb.map(crate::api::network::VideoThumbRef::from),
         share_root_hash: f.share_ref.as_ref().map(|s| s.root_hash.clone()),
         share_key_hex: f.share_ref.map(|s| s.key),
+        thumb_b64: f.thumb_b64,
     }
 }
 
