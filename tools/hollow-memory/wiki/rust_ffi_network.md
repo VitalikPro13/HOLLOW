@@ -203,7 +203,24 @@ Pure crypto function — no node state needed. Delegates to `crate::node::verify
 
 `network.rs:fetch_link_preview(url: String)` -> `Result<LinkPreviewRef, String>`
 
-Fetches OpenGraph metadata for a URL on the shared Tokio runtime via `rt.block_on(crate::node::link_preview::fetch_link_preview(&url))`. Sender-side only — privacy invariant. Converts internal type to FFI `LinkPreviewRef`. Caller should treat errors as "no preview available."
+Fetches OpenGraph metadata for a URL on **`get_http_runtime()`** — the dedicated HTTP runtime, never the node runtime. An authoring fetch is arbitrary third-party I/O on an unknown-latency host; parking it on the node runtime lets a slow site compete with the SQLCipher blocking pool. Same rule the GIF / FFZ / IGDB / sticker fetchers follow. Sender-side only — privacy invariant. Converts internal type to FFI `LinkPreviewRef`. Caller should treat errors as "no preview available."
+
+The FFI `LinkPreviewRef` is FLAT (`kind`, `author`, `videoUrl`, `videoW`, `videoH` alongside the base fields) while the node type boxes those behind `rich: Option<Box<RichCard>>`. The two `From` impls pack/unpack — see `feedback_type_growth_blows_tokio_stack` for why the node side must stay boxed.
+
+## attach_channel_link_preview() / attach_dm_link_preview()
+
+`network.rs:attach_channel_link_preview(server_id, channel_id, message_id, preview)` -> `Result<(), String>`
+`network.rs:attach_dm_link_preview(peer_id, message_id, preview)` -> `Result<(), String>`
+
+Attach (or clear, with `preview: None`) a link preview on a message that was ALREADY sent, without editing it (issue #45). Sends `NodeCommand::AttachChannelLinkPreview` / `AttachDmLinkPreview`.
+
+Exists for the send-beats-fetch race: the compose box debounces 600 ms before fetching OG data, so a fast sender used to lose the card entirely. The row is re-signed over its unchanged text/timestamp with the new preview digest, so it keeps verifying through signed sync backfill; `edited_at` is deliberately untouched, so no "(edited)" badge appears. Only the message's author can attach — the command is dropped otherwise. See `security_write_gates.md` for the ingest gate.
+
+## set_embed_proxy_url()
+
+`network.rs:set_embed_proxy_url(base: Option<String>)` -> `Result<(), String>`
+
+Configures an optional proxy for the social-post lookups (X, TikTok). Validates https + non-empty host, then stores into `node::link_preview::set_embed_proxy_base`. **Empty/None = direct, which is the default and what ships** — there is no Hollow-operated enrichment service. Persisted Dart-side by `embedProxyUrlProvider` and pushed at startup, mirroring `set_gif_proxy_url`.
 
 ## Messaging Functions
 

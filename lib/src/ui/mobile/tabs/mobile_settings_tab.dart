@@ -39,7 +39,7 @@ import 'package:hollow/src/core/reduce_motion.dart';
 import 'package:hollow/src/rust/api/identity.dart' as identity_api;
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/ui/settings/network_section.dart'
-    show GifProxySettingsCard;
+    show GifProxySettingsCard, LinkPreviewSettingsCard;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 import 'package:hollow/src/rust/api/twitch.dart' as twitch_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
@@ -1316,6 +1316,12 @@ class _NetworkTabState extends ConsumerState<_NetworkTab> {
         // ── GIF search proxy (self-hosting) — shared card with desktop;
         // the card carries its own "GIF Search" title.
         const GifProxySettingsCard(),
+
+        const SizedBox(height: HollowSpacing.xl),
+
+        // ── Link previews (issue #45) — shared card with desktop; carries
+        // its own "Link Previews" title.
+        const LinkPreviewSettingsCard(),
 
         // Anti-censorship (VLESS+REALITY) section hidden from the UI: the
         // current REALITY transport is non-functional. Desktop showed a

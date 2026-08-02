@@ -30,6 +30,79 @@ import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 // (mobile routes, archive viewers).
 // ---------------------------------------------------------------------------
 
+/// Bookkeeping for a link preview whose fetch was still in flight when the
+/// user hit send (issue #45).
+///
+/// The compose box debounces 600 ms after the last keystroke and then fetches
+/// OG metadata. Anyone who types a URL and sends immediately beat that fetch,
+/// and the result used to be discarded by the stale-guard in `_fetchPreview`
+/// — which is the whole "I never get link previews" complaint. The fetch was
+/// always still running; nothing was listening for it.
+///
+/// [arm] records which message the in-flight fetch belongs to, and [claim]
+/// hands that message id back exactly once when the fetch lands. All three
+/// compose panes share this so the behavior cannot drift between them.
+class LatePreviewAttacher {
+  ({String url, String messageId})? _pending;
+
+  /// Remember that [messageId] was sent while [url]'s fetch was in flight.
+  /// Only one is tracked: a newer send supersedes an older pending one,
+  /// matching the single-staged-preview model the composer already has.
+  void arm(String url, String messageId) {
+    _pending = (url: url, messageId: messageId);
+  }
+
+  /// Forget any pending attach (pane disposed, preview dismissed).
+  void disarm() => _pending = null;
+
+  /// The message id waiting on [url], or null if nothing is. Consumes the
+  /// record, so a duplicate completion cannot attach twice.
+  String? claim(String url) {
+    final pending = _pending;
+    if (pending == null || pending.url != url) return null;
+    _pending = null;
+    return pending.messageId;
+  }
+
+  /// Whether an attach is currently pending — exposed for tests.
+  bool get isArmed => _pending != null;
+}
+
+/// The URL a just-sent message still owes a card for, or null if none.
+///
+/// A send outruns its preview two ways, and the slower one is the rarer one:
+///
+///  1. the debounced fetch is in flight — `stagedLoading` is true;
+///  2. the fetch NEVER STARTED, because the user typed the URL and hit Enter
+///     inside the 600 ms debounce window, so `_handleSend` cancelled the
+///     timer before it fired.
+///
+/// (2) is what "I paste a link and send" actually looks like, so handling
+/// only (1) would leave the common case exactly as broken as before.
+///
+/// Returns null when a card is already staged (it rides the message), when
+/// previews are off, or for a Hollow deep link — those render from a locally
+/// parsed card and must never trigger a fetch.
+String? pendingPreviewUrl({
+  required bool previewsEnabled,
+  required bool alreadyStaged,
+  required bool stagedLoading,
+  required String? stagedUrl,
+  required String text,
+  required RegExp urlRegex,
+}) {
+  if (!previewsEnabled || alreadyStaged) return null;
+  final url = stagedLoading ? stagedUrl : urlRegex.firstMatch(text)?.group(0);
+  if (url == null) return null;
+  // `hollow://` never goes near the network — the scheme check covers every
+  // link shape, including ones `extractHollowLinks` doesn't recognise, and
+  // the composer's URL regex matches the scheme on purpose.
+  if (url.startsWith('hollow://') || extractHollowLinks(url).isNotEmpty) {
+    return null;
+  }
+  return url;
+}
+
 /// Whether two consecutive messages should be grouped (same sender, within 5 min).
 bool shouldGroup({
   required bool currentIsMe,

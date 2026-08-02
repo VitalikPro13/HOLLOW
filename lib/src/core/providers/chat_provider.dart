@@ -23,7 +23,10 @@ class ChatNotifier extends Notifier<Map<String, List<ChatMessage>>> {
 
   /// Send a message to a peer (FFI + update state).
   /// DB persistence happens in Rust (SendMessage handler) with Rust-generated timestamp.
-  Future<void> sendMessage(String peerId, String text,
+  ///
+  /// Returns the generated message id so a caller that sent before its link
+  /// preview finished fetching can attach the card afterwards (issue #45).
+  Future<String> sendMessage(String peerId, String text,
       {String? replyToMid, network_api.LinkPreviewRef? linkPreview}) async {
     final networkService = ref.read(networkServiceProvider);
     final messageId = generateMessageId();
@@ -53,6 +56,7 @@ class ChatNotifier extends Notifier<Map<String, List<ChatMessage>>> {
     // so after a restart `recomputeDmUnread` could light the unread pill on a
     // conversation where OUR message is the newest (the self-message pill bug).
     ref.read(unreadProvider.notifier).markDmSeen(peerId, messageId);
+    return messageId;
   }
 
   /// Receive a message from a peer (from network events).
@@ -149,6 +153,44 @@ class ChatNotifier extends Notifier<Map<String, List<ChatMessage>>> {
       editedAt: editedAt,
       signature: signature,
       publicKey: publicKey,
+    );
+    final updated = Map.of(state);
+    updated[peerId] = updatedList;
+    state = updated;
+  }
+
+  /// Attach (or clear) a link preview on a DM we already sent (issue #45).
+  /// Rethrows so the caller can decide whether a failure is worth surfacing —
+  /// a late card that never lands is cosmetic, so the compose panes swallow it.
+  Future<void> attachLinkPreview(
+      String peerId, String messageId, network_api.LinkPreviewRef? preview) async {
+    await network_api.attachDmLinkPreview(
+      peerId: peerId,
+      messageId: messageId,
+      preview: preview,
+    );
+    // UI update happens via the DmLinkPreviewUpdated event.
+  }
+
+  /// Apply a late link preview to an in-memory message. Never touches
+  /// `editedAt` — a card arriving after the send is not an edit, and the
+  /// bubble must not grow an "(edited)" badge because of it.
+  void applyLinkPreview(
+      String peerId, String messageId, network_api.LinkPreviewRef? preview) {
+    final current = state[peerId];
+    if (current == null) return;
+
+    final idx = current.indexWhere((m) => m.messageId == messageId);
+    if (idx == -1) return;
+    // Re-applying the same card (duplicate frame, sibling echo) is a no-op
+    // rather than a pointless rebuild of the whole list. LinkPreviewRef has
+    // generated value equality, and null == null covers the clear case.
+    if (current[idx].linkPreview == preview) return;
+
+    final updatedList = List<ChatMessage>.from(current);
+    updatedList[idx] = updatedList[idx].copyWith(
+      linkPreview: preview,
+      clearLinkPreview: preview == null,
     );
     final updated = Map.of(state);
     updated[peerId] = updatedList;

@@ -218,9 +218,14 @@ Future<MessageProofV2> verifyMessageProofV2({
 );
 
 /// Fetch OpenGraph metadata for a URL and return a link preview the sender
-/// can embed in their next outgoing message. Runs on the shared Tokio
-/// runtime. Fails silently at every step — the caller should treat errors
-/// as "no preview" and send the message as plain text.
+/// can embed in their next outgoing message. Fails silently at every step —
+/// the caller should treat errors as "no preview" and send the message as
+/// plain text.
+///
+/// Runs on the dedicated HTTP runtime, never the node runtime: an authoring
+/// fetch is arbitrary third-party I/O on an unknown-latency host, and parking
+/// it on the node runtime lets a slow site compete with the SQLCipher
+/// blocking pool. Same rule the GIF / FFZ / IGDB / sticker fetchers follow.
 ///
 /// **Privacy:** This MUST only be called on the sender side. Receivers
 /// render the preview from embedded data and never fetch the URL. See
@@ -285,6 +290,54 @@ Future<void> editDmMessage({
   peerId: peerId,
   messageId: messageId,
   newText: newText,
+);
+
+/// Configure the social-preview proxy base URL (None/empty = direct, the
+/// default). Persisted on the Dart side and pushed at startup, like
+/// [`crate::api::gifs::set_gif_proxy_url`].
+///
+/// Empty is not a degraded mode: X and TikTok lookups go straight to the
+/// upstream public APIs, which is what ships. Setting this hands those
+/// lookups to a service that speaks the same normalized shape, for anyone who
+/// would rather the upstream never saw their IP at all. Issue #45.
+Future<void> setEmbedProxyUrl({String? base}) =>
+    RustLib.instance.api.crateApiNetworkSetEmbedProxyUrl(base: base);
+
+/// Attach (or clear) a link preview on a channel message that was ALREADY
+/// sent, without editing it.
+///
+/// This exists for the send-beat-the-fetch race: the compose box fetches OG
+/// metadata in the background, and a fast sender used to lose the card
+/// entirely. Call this when the fetch lands after the send. `preview: None`
+/// clears the card, which is what an edit that removed the URL wants.
+///
+/// The row is re-signed over its unchanged text/timestamp with the new
+/// preview digest, so it keeps verifying. `edited_at` is untouched: a late
+/// card must not make the bubble say "(edited)".
+///
+/// Only the message's author can attach — the command is dropped otherwise.
+/// Issue #45.
+Future<void> attachChannelLinkPreview({
+  required String serverId,
+  required String channelId,
+  required String messageId,
+  LinkPreviewRef? preview,
+}) => RustLib.instance.api.crateApiNetworkAttachChannelLinkPreview(
+  serverId: serverId,
+  channelId: channelId,
+  messageId: messageId,
+  preview: preview,
+);
+
+/// DM twin of [`attach_channel_link_preview`]. Issue #45.
+Future<void> attachDmLinkPreview({
+  required String peerId,
+  required String messageId,
+  LinkPreviewRef? preview,
+}) => RustLib.instance.api.crateApiNetworkAttachDmLinkPreview(
+  peerId: peerId,
+  messageId: messageId,
+  preview: preview,
 );
 
 /// Delete (hide) a channel message. Broadcasts the deletion to all server members.
@@ -1179,6 +1232,23 @@ class LinkPreviewRef {
   /// Thumbnail height after resize.
   final int? thumbH;
 
+  /// `"large"` = social-post layout (image on top), `None` = compact row.
+  final String? kind;
+
+  /// Post author line, e.g. `"Jane Doe (@jane)"`. Social adapters only.
+  final String? author;
+
+  /// Where the post's video lives: either a direct `.mp4`/`.webm` (plays
+  /// inline on tap) or the media page itself (opens in the browser). Never
+  /// fetched to render the card, never autoplayed.
+  final String? videoUrl;
+
+  /// Video width, for the card's aspect ratio.
+  final int? videoW;
+
+  /// Video height, for the card's aspect ratio.
+  final int? videoH;
+
   const LinkPreviewRef({
     required this.url,
     required this.title,
@@ -1188,6 +1258,11 @@ class LinkPreviewRef {
     this.thumbWebpB64,
     this.thumbW,
     this.thumbH,
+    this.kind,
+    this.author,
+    this.videoUrl,
+    this.videoW,
+    this.videoH,
   });
 
   @override
@@ -1199,7 +1274,12 @@ class LinkPreviewRef {
       siteName.hashCode ^
       thumbWebpB64.hashCode ^
       thumbW.hashCode ^
-      thumbH.hashCode;
+      thumbH.hashCode ^
+      kind.hashCode ^
+      author.hashCode ^
+      videoUrl.hashCode ^
+      videoW.hashCode ^
+      videoH.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -1213,7 +1293,12 @@ class LinkPreviewRef {
           siteName == other.siteName &&
           thumbWebpB64 == other.thumbWebpB64 &&
           thumbW == other.thumbW &&
-          thumbH == other.thumbH;
+          thumbH == other.thumbH &&
+          kind == other.kind &&
+          author == other.author &&
+          videoUrl == other.videoUrl &&
+          videoW == other.videoW &&
+          videoH == other.videoH;
 }
 
 /// Result of a versioned Message Proof verification — see
@@ -1471,6 +1556,21 @@ sealed class NetworkEvent with _$NetworkEvent {
     String? signature,
     String? publicKey,
   }) = NetworkEvent_DmMessageEdited;
+
+  /// A link preview landed on an existing message (issue #45). NOT an edit:
+  /// `edited_at` is untouched, so the bubble must not gain an "(edited)"
+  /// badge. `preview: None` means the card was cleared.
+  const factory NetworkEvent.channelLinkPreviewUpdated({
+    required String serverId,
+    required String channelId,
+    required String messageId,
+    LinkPreviewRef? preview,
+  }) = NetworkEvent_ChannelLinkPreviewUpdated;
+  const factory NetworkEvent.dmLinkPreviewUpdated({
+    required String peerId,
+    required String messageId,
+    LinkPreviewRef? preview,
+  }) = NetworkEvent_DmLinkPreviewUpdated;
   const factory NetworkEvent.channelMessageDeleted({
     required String serverId,
     required String channelId,

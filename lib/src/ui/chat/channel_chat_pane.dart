@@ -10,6 +10,7 @@ import 'package:hollow/src/core/moderation_format.dart';
 import 'package:hollow/src/core/reduce_motion.dart';
 import 'package:hollow/src/core/models/file_attachment.dart';
 import 'package:hollow/src/core/providers/channel_chat_provider.dart';
+import 'package:hollow/src/core/providers/link_preview_settings_provider.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
 import 'package:hollow/src/core/providers/blocked_users_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
@@ -129,6 +130,8 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
   network_api.LinkPreviewRef? _stagedPreview;
   bool _stagedPreviewLoading = false;
   HollowLink? _stagedHollowLink;
+  /// Sent-before-the-fetch-landed bookkeeping (issue #45).
+  final LatePreviewAttacher _latePreview = LatePreviewAttacher();
   Timer? _urlDebounce;
   static final RegExp _urlRegex = RegExp(r'(?:https?|hollow)://[^\s<>"' "'" r')\]}]+');
 
@@ -277,6 +280,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
     _dismissMentionOverlay();
     _emoteAutocomplete.dismiss();
     _urlDebounce?.cancel();
+    _latePreview.disarm();
     _slowModeTimer?.cancel();
     _fileRequestDebounce?.cancel();
     _itemPositionsListener.itemPositions.removeListener(_onScrollPositionChanged);
@@ -824,6 +828,8 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
   /// URL was removed, clear the staged preview.
   void _detectUrl() {
     if (!mounted) return;
+    // Previews off: never touch the pasted URL at all (issue #45).
+    if (!ref.read(linkPreviewsEnabledProvider)) return;
     final text = _controller.text;
     final match = _urlRegex.firstMatch(text);
     final url = match?.group(0);
@@ -861,19 +867,38 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
   Future<void> _fetchPreview(String url) async {
     try {
       final preview = await network_api.fetchLinkPreview(url: url);
-      if (!mounted || _stagedPreviewUrl != url) return;
+      if (!mounted) return;
+      // The send raced this fetch — land the card on the sent message rather
+      // than discarding the result (issue #45).
+      final lateMid = _latePreview.claim(url);
+      if (lateMid != null) _attachPreview(lateMid, preview);
+      if (_stagedPreviewUrl != url) return;
       setState(() {
         _stagedPreview = preview;
         _stagedPreviewLoading = false;
       });
     } catch (_) {
-      if (!mounted || _stagedPreviewUrl != url) return;
+      if (!mounted) return;
+      _latePreview.claim(url); // nothing fetched, nothing to attach
+      if (_stagedPreviewUrl != url) return;
       setState(() {
         _stagedPreviewUrl = null;
         _stagedPreview = null;
         _stagedPreviewLoading = false;
       });
     }
+  }
+
+  /// Land a card on an already-sent message. Quiet on failure — the send
+  /// itself already succeeded on screen, and a missing card is cosmetic.
+  void _attachPreview(String messageId, network_api.LinkPreviewRef? preview) {
+    ref
+        .read(channelChatProvider.notifier)
+        .attachLinkPreview(
+            widget.serverId, widget.channelId, messageId, preview)
+        .catchError((Object e) {
+      debugPrint('[HOLLOW] Late link preview attach failed: $e');
+    });
   }
 
   /// Extensions the chat renders inline — the only types a media-only
@@ -952,6 +977,16 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
     if (_blockedBySlowMode()) return;
     // If a file is staged, send it (with optional text).
     if (_stagedFilePath != null) {
+      // A file send has nowhere to put a preview — FileHeaderPayload has no
+      // link_preview slot — so the staged card is dropped. Clear it here or
+      // it stays on screen attached to a message that never carried it.
+      _urlDebounce?.cancel();
+      setState(() {
+        _stagedPreviewUrl = null;
+        _stagedPreview = null;
+        _stagedPreviewLoading = false;
+        _stagedHollowLink = null;
+      });
       await _sendStagedFile();
       return;
     }
@@ -975,8 +1010,19 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
     _lastTypingSent = null;
     if (refocus) _focusNode.requestFocus();
     final replyMid = _replyToMessageId;
-    // Capture staged preview BEFORE clearing state.
+    // Capture staged preview BEFORE clearing state. Still fetching means
+    // there is nothing to capture — remember the URL and attach the card
+    // when it lands (issue #45).
     final preview = _stagedPreview;
+    final wasLoading = _stagedPreviewLoading;
+    final pendingUrl = pendingPreviewUrl(
+      previewsEnabled: ref.read(linkPreviewsEnabledProvider),
+      alreadyStaged: preview != null,
+      stagedLoading: wasLoading,
+      stagedUrl: _stagedPreviewUrl,
+      text: text,
+      urlRegex: _urlRegex,
+    );
     _urlDebounce?.cancel();
     setState(() {
       _replyToMessageId = null;
@@ -989,10 +1035,15 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
       _stagedHollowLink = null;
     });
     try {
-      await ref
+      final sentMid = await ref
           .read(channelChatProvider.notifier)
           .sendMessage(widget.serverId, widget.channelId, text,
               replyToMid: replyMid, linkPreview: preview);
+      if (pendingUrl != null) {
+        _latePreview.arm(pendingUrl, sentMid);
+        // Nothing is in flight when the debounce never fired — start it now.
+        if (!wasLoading) _fetchPreview(pendingUrl);
+      }
     } catch (_) {
       // The provider only adds the bubble AFTER the network send, so a
       // failure here would otherwise vanish silently (composer already
@@ -2263,6 +2314,38 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
       if (!mounted) return;
       HollowToast.show(context, 'Failed to save changes',
           type: HollowToastType.error);
+      return;
+    }
+    if (!mounted) return;
+    _resyncPreviewAfterEdit(messageId, newText);
+  }
+
+  /// Keep the card honest after an edit (issue #45) — see the DM twin in
+  /// chat_pane.dart.
+  Future<void> _resyncPreviewAfterEdit(String messageId, String newText) async {
+    if (!ref.read(linkPreviewsEnabledProvider)) return;
+    final key = '${widget.serverId}:${widget.channelId}';
+    final msgs =
+        ref.read(channelChatProvider)[key] ?? const <ChannelChatMessage>[];
+    final idx = msgs.indexWhere((m) => m.messageId == messageId);
+    final oldUrl = idx == -1 ? null : msgs[idx].linkPreview?.url;
+    final newUrl = _urlRegex.firstMatch(newText)?.group(0);
+
+    if (newUrl == oldUrl) return;
+    if (newUrl == null) {
+      _attachPreview(messageId, null);
+      return;
+    }
+    if (extractHollowLinks(newUrl).isNotEmpty) {
+      if (oldUrl != null) _attachPreview(messageId, null);
+      return;
+    }
+    try {
+      final preview = await network_api.fetchLinkPreview(url: newUrl);
+      if (!mounted) return;
+      _attachPreview(messageId, preview);
+    } catch (_) {
+      // Leave the existing card rather than blanking it on a transient fail.
     }
   }
 

@@ -17,6 +17,7 @@ import 'package:hollow/src/core/models/chat_message.dart';
 import 'package:hollow/src/core/providers/banner_provider.dart';
 import 'package:hollow/src/core/providers/chat_provider.dart';
 import 'package:hollow/src/core/providers/event_provider.dart';
+import 'package:hollow/src/core/providers/link_preview_settings_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/models/file_attachment.dart';
 import 'package:hollow/src/core/providers/download_manager_provider.dart';
@@ -404,6 +405,8 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
   network_api.LinkPreviewRef? _stagedPreview;
   bool _stagedPreviewLoading = false;
   HollowLink? _stagedHollowLink;
+  /// Sent-before-the-fetch-landed bookkeeping (issue #45).
+  final LatePreviewAttacher _latePreview = LatePreviewAttacher();
   Timer? _urlDebounce;
   static final RegExp _urlRegex = RegExp(r'(?:https?|hollow)://[^\s<>"' "'" r')\]}]+');
   Timer? _overlayHideTimer;
@@ -527,6 +530,7 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
   void dispose() {
     _overlayHideTimer?.cancel();
     _urlDebounce?.cancel();
+    _latePreview.disarm();
     _emoteAutocomplete.dismiss();
     _itemPositionsListener.itemPositions.removeListener(_onScrollPositionChanged);
     _controller.dispose();
@@ -629,6 +633,9 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
   /// URL was removed, clear the staged preview.
   void _detectUrl() {
     if (!mounted) return;
+    // Previews off: never touch the pasted URL at all (issue #45). Hollow
+    // deep links still resolve — those are parsed locally, no request.
+    if (!ref.read(linkPreviewsEnabledProvider)) return;
     final text = _controller.text;
     final match = _urlRegex.firstMatch(text);
     final url = match?.group(0);
@@ -666,15 +673,24 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
   Future<void> _fetchPreview(String url) async {
     try {
       final preview = await network_api.fetchLinkPreview(url: url);
+      if (!mounted) return;
+      // The send raced this fetch. Land the card on the message that already
+      // went out instead of discarding the result (issue #45).
+      final lateMid = _latePreview.claim(url);
+      if (lateMid != null) _attachPreview(lateMid, preview);
       // Bail out if the user changed the URL (or dismissed it) while we
       // were fetching.
-      if (!mounted || _stagedPreviewUrl != url) return;
+      if (_stagedPreviewUrl != url) return;
       setState(() {
         _stagedPreview = preview;
         _stagedPreviewLoading = false;
       });
     } catch (_) {
-      if (!mounted || _stagedPreviewUrl != url) return;
+      if (!mounted) return;
+      // A failed fetch has nothing to attach — drop the pending record so a
+      // later unrelated fetch can't inherit it.
+      _latePreview.claim(url);
+      if (_stagedPreviewUrl != url) return;
       // Failed silently — keep the URL but drop the staged card entirely.
       setState(() {
         _stagedPreviewUrl = null;
@@ -684,9 +700,32 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     }
   }
 
+  /// Land a card on an already-sent message. Deliberately quiet on failure:
+  /// the user's action (the send) already succeeded and is on screen, and a
+  /// card that never arrives is cosmetic — a toast here would be noise about
+  /// something they never asked for.
+  void _attachPreview(String messageId, network_api.LinkPreviewRef? preview) {
+    ref
+        .read(chatProvider.notifier)
+        .attachLinkPreview(widget.peerId, messageId, preview)
+        .catchError((Object e) {
+      debugPrint('[HOLLOW] Late link preview attach failed: $e');
+    });
+  }
+
   Future<void> _handleSend({bool refocus = true}) async {
     _emoteAutocomplete.dismiss();
     if (_stagedFilePath != null) {
+      // A file send has nowhere to put a preview — FileHeaderPayload has no
+      // link_preview slot — so the staged card is dropped. Clear it here or
+      // it stays on screen attached to a message that never carried it.
+      _urlDebounce?.cancel();
+      setState(() {
+        _stagedPreviewUrl = null;
+        _stagedPreview = null;
+        _stagedPreviewLoading = false;
+        _stagedHollowLink = null;
+      });
       await _sendStagedFile();
       return;
     }
@@ -702,8 +741,19 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     _lastTypingSent = null;
     if (refocus) _focusNode.requestFocus();
     final replyMid = _replyToMessageId;
-    // Capture staged preview BEFORE clearing state.
+    // Capture staged preview BEFORE clearing state. When the fetch is still
+    // in flight there is nothing to capture — remember the URL instead, and
+    // attach the card when it lands (issue #45).
     final preview = _stagedPreview;
+    final wasLoading = _stagedPreviewLoading;
+    final pendingUrl = pendingPreviewUrl(
+      previewsEnabled: ref.read(linkPreviewsEnabledProvider),
+      alreadyStaged: preview != null,
+      stagedLoading: wasLoading,
+      stagedUrl: _stagedPreviewUrl,
+      text: text,
+      urlRegex: _urlRegex,
+    );
     _urlDebounce?.cancel();
     setState(() {
       _replyToMessageId = null;
@@ -716,10 +766,15 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
       _stagedHollowLink = null;
     });
     try {
-      await ref
+      final sentMid = await ref
           .read(chatProvider.notifier)
           .sendMessage(widget.peerId, text,
               replyToMid: replyMid, linkPreview: preview);
+      if (pendingUrl != null) {
+        _latePreview.arm(pendingUrl, sentMid);
+        // Nothing is in flight when the debounce never fired — start it now.
+        if (!wasLoading) _fetchPreview(pendingUrl);
+      }
     } catch (_) {
       // The provider only adds the bubble AFTER the network send, so a
       // failure here would otherwise vanish silently (composer already
@@ -1954,6 +2009,38 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
       if (!mounted) return;
       HollowToast.show(context, 'Failed to save changes',
           type: HollowToastType.error);
+      return;
+    }
+    if (!mounted) return;
+    _resyncPreviewAfterEdit(messageId, newText);
+  }
+
+  /// Keep the card honest after an edit (issue #45): editing the URL out of a
+  /// message used to leave its old card sitting under the new text.
+  Future<void> _resyncPreviewAfterEdit(String messageId, String newText) async {
+    if (!ref.read(linkPreviewsEnabledProvider)) return;
+    final msgs = ref.read(chatProvider)[widget.peerId] ?? const <ChatMessage>[];
+    final idx = msgs.indexWhere((m) => m.messageId == messageId);
+    final oldUrl = idx == -1 ? null : msgs[idx].linkPreview?.url;
+    final newUrl = _urlRegex.firstMatch(newText)?.group(0);
+
+    if (newUrl == oldUrl) return; // Same link, same card.
+    if (newUrl == null) {
+      _attachPreview(messageId, null); // URL gone — clear the card.
+      return;
+    }
+    // Hollow deep links render from a locally parsed card, never a fetch.
+    if (extractHollowLinks(newUrl).isNotEmpty) {
+      if (oldUrl != null) _attachPreview(messageId, null);
+      return;
+    }
+    try {
+      final preview = await network_api.fetchLinkPreview(url: newUrl);
+      if (!mounted) return;
+      _attachPreview(messageId, preview);
+    } catch (_) {
+      // Nothing fetched: leave whatever card the row already had rather than
+      // blanking it on a transient network failure.
     }
   }
 

@@ -56,6 +56,10 @@ class ChatMessage {
     Map<String, List<String>>? reactions,
     FileAttachment? fileAttachment,
     network_api.LinkPreviewRef? linkPreview,
+    /// Drop the card entirely. Needed because a null `linkPreview` reads as
+    /// "leave it alone" here, and an edit that removes the URL has to be able
+    /// to say "there is no card now" (issue #45).
+    bool clearLinkPreview = false,
     String? signature,
     String? publicKey,
   }) {
@@ -71,7 +75,7 @@ class ChatMessage {
       replyToMid: replyToMid,
       reactions: reactions ?? this.reactions,
       fileAttachment: fileAttachment ?? this.fileAttachment,
-      linkPreview: linkPreview ?? this.linkPreview,
+      linkPreview: clearLinkPreview ? null : (linkPreview ?? this.linkPreview),
       archiveSignatureValid: archiveSignatureValid,
     );
   }

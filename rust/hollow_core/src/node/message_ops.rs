@@ -1640,6 +1640,294 @@ fn rewrite_pending_entry_if_edited(
     }
 }
 
+// ── 4b. AttachChannelLinkPreview / AttachDmLinkPreview (issue #45) ───
+//
+// A card that arrives AFTER its message was sent. The compose box fetches OG
+// metadata in the background while the user types; sending before it lands
+// used to bin the result, which is why a fast sender never got cards. These
+// handlers land it on the row instead.
+//
+// This is emphatically NOT an edit. The text is untouched, `edited_at` stays
+// null, and no "(edited)" badge appears. What it does share with an edit is
+// the signature obligation: the v2 payload binds `lp_digest`, so changing a
+// row's preview without re-signing would break `verify_message_proof_v2` and
+// stop the row replicating through signed sync backfill. Every attach
+// therefore re-signs the WHOLE message payload — same text, same ts, same
+// reply_to/file_id/order_us — with the new digest, and ships that signature
+// alongside the card.
+
+/// The re-signature for an attach, plus the row facts the caller needs to
+/// broadcast it. `None` = the row is missing, so there is nothing to attach.
+struct AttachSig {
+    /// The timestamp the signature binds: the row's `edited_at` when it has
+    /// one, else its original `timestamp`. Must match what every verifier
+    /// reconstructs (see `verify_message_proof_v2`), or the row goes
+    /// unverified the moment a card lands on it.
+    ts: i64,
+    sig: Option<String>,
+    pk: Option<String>,
+}
+
+/// Re-sign message `mid` for a preview change. `msg_type`/`context` are the
+/// same discriminators the original send used ("ch" + "sid:cid", or "dm" +
+/// peer id), and `row` is the CURRENT row, so the only thing that moves is
+/// the link-preview digest.
+#[allow(clippy::too_many_arguments)]
+fn sign_attached_preview(
+    row: &crate::storage::messages::MessageSigRow,
+    preview: Option<&LinkPreviewRef>,
+    bundle_keypair: &crate::identity::native_identity::NativeKeypair,
+    pub_key_b64: &str,
+    msg_type: &str,
+    context: &str,
+    signer: &str,
+    mid: &str,
+) -> AttachSig {
+    let lp_digest = preview.map(link_preview_digest);
+    let extras = SignedExtras {
+        mid: Some(mid),
+        reply_to: row.reply_to_mid.as_deref(),
+        file_id: row.file_id.as_deref(),
+        order_us: row.order_us,
+        lp_digest: lp_digest.as_deref(),
+    };
+    let ts = row.edited_at.unwrap_or(row.timestamp);
+    let (sig, pk) = sign_message_versioned(
+        bundle_keypair, pub_key_b64, msg_type, context, signer, ts, &extras, &row.text,
+    );
+    AttachSig { ts, sig, pk }
+}
+
+/// Serialize a preview for the `link_preview_json` column. `None` clears it.
+fn preview_column(preview: Option<&LinkPreviewRef>) -> Option<String> {
+    preview.and_then(|lp| serde_json::to_string(lp).ok())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn handle_attach_channel_link_preview(
+    olm: &mut OlmManager,
+    crypto_store: &CryptoStore,
+    mls: &mut Option<MlsManager>,
+    server_states: &HashMap<String, ServerState>,
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, HashSet<String>>,
+    bundle_keypair: &crate::identity::native_identity::NativeKeypair,
+    pub_key_b64: &str,
+    local_peer_str: &str,
+    server_id: String,
+    channel_id: String,
+    message_id: String,
+    preview: Option<Box<LinkPreviewRef>>,
+    db_path: &str,
+    db_passphrase: &str,
+) {
+    hollow_log!("[HOLLOW-SWARM] AttachChannelLinkPreview {message_id} in {server_id}/{channel_id}");
+
+    let Some(server) = server_states.get(&server_id) else {
+        let _ = event_tx.send(NetworkEvent::Error {
+            message: format!("Unknown server {server_id}"),
+        }).await;
+        return;
+    };
+
+    // Muted members can't author content through this path either — same gate
+    // the edit handler applies, for the same reason.
+    if let Some(message) = muted_send_error(server, local_peer_str) {
+        let _ = event_tx.send(NetworkEvent::Error { message }).await;
+        return;
+    }
+
+    let lp = preview.as_deref();
+    let lp_json = preview_column(lp);
+    let ctx = format!("{server_id}:{channel_id}");
+
+    let mut attached: Option<AttachSig> = None;
+    if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+        // Local-author op: we may only re-sign our OWN row. Remote ingest has
+        // its own check; this one stops a UI bug from minting a signature over
+        // somebody else's message with our key.
+        let sender = store.get_channel_message_sender(&message_id);
+        let author_is_us = sender
+            .as_deref()
+            .map(|s| super::resolver::same_identity(s, local_peer_str))
+            .unwrap_or(false);
+        if !author_is_us {
+            hollow_log!("[HOLLOW-LP] Refusing to attach preview to {message_id} — not ours (sender {sender:?})");
+            return;
+        }
+        let Some(row) = store.get_channel_message_sig_row(&message_id) else {
+            return;
+        };
+        let signed = sign_attached_preview(
+            &row, lp, bundle_keypair, pub_key_b64, "ch", &ctx,
+            &super::resolver::resolve(local_peer_str), &message_id,
+        );
+        let _ = store.update_channel_link_preview_and_sig(
+            &message_id, lp_json.as_deref(),
+            signed.sig.as_deref(), signed.pk.as_deref(),
+        );
+        attached = Some(signed);
+    }
+    let Some(signed) = attached else { return };
+
+    if server.is_channel_public(&channel_id) {
+        let msg = HavenMessage::PublicLinkPreviewSet {
+            server_id: server_id.clone(),
+            channel_id: channel_id.clone(),
+            mid: message_id.clone(),
+            lp: preview.clone(),
+            ts: signed.ts,
+            sig: signed.sig.clone(),
+            pk: signed.pk.clone(),
+        };
+        send_public_channel_msg(ws_cmd_tx, &server_id, &msg);
+    } else {
+        let envelope = MessageEnvelope::LinkPreviewSet {
+            mid: message_id.clone(),
+            lp: preview.clone(),
+            ts: signed.ts,
+            sig: signed.sig.clone(),
+            pk: signed.pk.clone(),
+            sid: Some(server_id.clone()),
+            cid: Some(channel_id.clone()),
+        };
+        broadcast_channel_envelope(
+            olm, crypto_store, mls, event_tx, ws_cmd_tx, ws_room_peers,
+            server, local_peer_str, &server_id, &channel_id, &envelope,
+            "Link preview attach encrypt failed, falling back to Olm",
+            /*bootstrap_subgroup*/ true,
+        ).await;
+    }
+
+    let _ = event_tx.send(NetworkEvent::ChannelLinkPreviewUpdated {
+        server_id,
+        channel_id,
+        message_id,
+        preview: preview.map(|b| *b),
+    }).await;
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn handle_attach_dm_link_preview(
+    olm: &mut OlmManager,
+    crypto_store: &CryptoStore,
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, HashSet<String>>,
+    pending_messages: &mut HashMap<String, Vec<String>>,
+    key_request_in_flight: &mut HashMap<String, std::time::Instant>,
+    bundle_keypair: &crate::identity::native_identity::NativeKeypair,
+    pub_key_b64: &str,
+    local_peer_str: &str,
+    device_keypair: &crate::identity::native_identity::NativeKeypair,
+    device_peer_id: &str,
+    peer_id_str: String,
+    message_id: String,
+    preview: Option<Box<LinkPreviewRef>>,
+    db_path: &str,
+    db_passphrase: &str,
+) {
+    hollow_log!("[HOLLOW-SWARM] AttachDmLinkPreview {message_id} for {peer_id_str}");
+
+    let lp = preview.as_deref();
+    let lp_json = preview_column(lp);
+
+    let mut attached: Option<AttachSig> = None;
+    if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+        // Local-author op — the row has to be one WE sent.
+        if store.get_dm_message_is_mine(&message_id) != Some(true) {
+            hollow_log!("[HOLLOW-LP] Refusing to attach preview to DM {message_id} — not ours");
+            return;
+        }
+        let Some(row) = store.get_dm_message_sig_row(&message_id) else {
+            return;
+        };
+        let signed = sign_attached_preview(
+            &row, lp, bundle_keypair, pub_key_b64, "dm", &peer_id_str,
+            &super::resolver::resolve(local_peer_str), &message_id,
+        );
+        let _ = store.update_link_preview_and_sig(
+            &message_id, lp_json.as_deref(),
+            signed.sig.as_deref(), signed.pk.as_deref(),
+        );
+        attached = Some(signed);
+    }
+    let Some(signed) = attached else { return };
+
+    // The recipient may still be offline with the ORIGINAL message sitting in
+    // their queue. Rewrite that queued envelope in place rather than letting a
+    // bare `lp_set` chase a message they haven't received: on reconnect they
+    // get ONE message that already carries its card.
+    rewrite_pending_dm_preview(
+        pending_messages, &message_id, lp, &signed.sig, &signed.pk,
+    );
+
+    let envelope = MessageEnvelope::LinkPreviewSet {
+        mid: message_id.clone(),
+        lp: preview.clone(),
+        ts: signed.ts,
+        sig: signed.sig.clone(),
+        pk: signed.pk.clone(),
+        sid: None,
+        cid: None,
+    };
+    let envelope_json = serde_json::to_string(&envelope).unwrap_or_default();
+
+    // Fans to the recipient's devices AND our own siblings, so the card lands
+    // on the copy sitting on our phone too.
+    let recipient_master = super::resolver::resolve(&peer_id_str);
+    fan_out_dm_envelope(
+        olm, crypto_store, event_tx, ws_cmd_tx, ws_room_peers,
+        pending_messages, key_request_in_flight,
+        local_peer_str, device_keypair, device_peer_id, &recipient_master, &envelope_json,
+        None, // siblings resolve the convo by mid on receive, same as edits
+    ).await;
+
+    let _ = event_tx.send(NetworkEvent::DmLinkPreviewUpdated {
+        peer_id: recipient_master,
+        message_id,
+        preview: preview.map(|b| *b),
+    }).await;
+}
+
+/// Rewrite every queued copy of a DM whose preview just landed, across ALL
+/// per-device pending queues. Mirrors [`rewrite_pending_dm_edits`]: the queued
+/// `DirectMessage` keeps its original text/mid/order_us and gains the card
+/// plus the signature that now covers it.
+fn rewrite_pending_dm_preview(
+    pending_messages: &mut HashMap<String, Vec<String>>,
+    message_id: &str,
+    preview: Option<&LinkPreviewRef>,
+    sig: &Option<String>,
+    pk: &Option<String>,
+) {
+    for queued in pending_messages.values_mut() {
+        for entry in queued.iter_mut() {
+            let Ok(MessageEnvelope::DirectMessage { inner }) =
+                serde_json::from_str::<MessageEnvelope>(entry)
+            else {
+                continue;
+            };
+            if inner.mid.as_deref() != Some(message_id) {
+                continue;
+            }
+            let updated = MessageEnvelope::DirectMessage {
+                inner: Box::new(DirectMessagePayload {
+                    link_preview: preview.cloned(),
+                    sig: sig.clone(),
+                    pk: pk.clone(),
+                    ..*inner
+                }),
+            };
+            if let Ok(json) = serde_json::to_string(&updated) {
+                *entry = json;
+                hollow_log!("[HOLLOW-LP] Updated pending DM {message_id} with its late preview");
+            }
+        }
+    }
+}
+
 // ── 5. DeleteChannelMessage ──────────────────────────────────────────
 
 pub(crate) async fn handle_delete_channel_message(
@@ -2477,6 +2765,138 @@ pub(crate) async fn handle_envelope_edit_message(
                 public_key: pk,
             }).await;
         }
+    }
+}
+
+/// Handle `MessageEnvelope::LinkPreviewSet` / `HavenMessage::PublicLinkPreviewSet`
+/// (issue #45). One handler for all three ingest paths — Olm-direct DM/channel,
+/// MLS-decrypted channel, and plaintext public channel — because the rule is the
+/// same everywhere: the card only lands if the AUTHOR signed it.
+///
+/// `peer_str` is the transport sender (a DEVICE id on the DM path). `sid`
+/// present = channel message, absent = DM.
+///
+/// Applying the same card twice is a quiet no-op, so a duplicated frame or a
+/// re-broadcast costs nothing.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn handle_envelope_link_preview_set(
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    server_state: Option<&ServerState>,
+    peer_str: &str,
+    local_master: &str,
+    mid: String,
+    lp: Option<Box<LinkPreviewRef>>,
+    ts: i64,
+    sig: Option<String>,
+    pk: Option<String>,
+    sid: Option<String>,
+    cid: Option<String>,
+    db_path: &str,
+    db_passphrase: &str,
+) {
+    // Moderation (LIVE ingest): a muted member can't author card content
+    // either, mirroring the edit gate.
+    if live_muted_ingest_drop(server_state, peer_str, "link preview") {
+        return;
+    }
+
+    let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) else {
+        return;
+    };
+    let is_channel = sid.is_some();
+
+    // Who must have signed this, and under what context. Both are derived
+    // from OUR row, never from fields the sender controls.
+    let (signer, ctx, convo_peer) = if is_channel {
+        let Some(sender) = store.get_channel_message_sender(&mid) else {
+            // Row not synced yet — the sync batch will bring the card with it.
+            return;
+        };
+        let sender_master = super::resolver::resolve(&sender);
+        if !super::resolver::same_identity(&sender_master, peer_str) {
+            hollow_log!("[HOLLOW-SECURITY] REJECTED link preview for {mid} from {peer_str} — not the author ({sender_master})");
+            return;
+        }
+        let ctx = format!(
+            "{}:{}", sid.as_deref().unwrap_or_default(), cid.as_deref().unwrap_or_default(),
+        );
+        (sender_master, ctx, String::new())
+    } else {
+        // DM. Normally the attacher is the other party (the row is not ours).
+        // The exception is our OWN sibling echoing our own attach back at us,
+        // which is legitimate precisely because it resolves to our master.
+        let is_mine = store.get_dm_message_is_mine(&mid);
+        let is_sibling = super::resolver::same_identity(peer_str, local_master);
+        if !(is_mine == Some(false) || (is_mine == Some(true) && is_sibling)) {
+            hollow_log!("[HOLLOW-LP] Rejected: {peer_str} tried to set a preview on DM {mid} (is_mine={is_mine:?})");
+            return;
+        }
+        let convo = if is_sibling {
+            store.get_dm_message_peer(&mid).unwrap_or_default()
+        } else {
+            super::resolver::resolve(peer_str)
+        };
+        // A sibling echo was signed by US with the row's conversation peer as
+        // recipient; a friend's attach was signed by them with US as recipient.
+        if is_sibling {
+            (local_master.to_string(), convo.clone(), convo)
+        } else {
+            (super::resolver::resolve(peer_str), local_master.to_string(), convo)
+        }
+    };
+
+    let Some(row) = (if is_channel {
+        store.get_channel_message_sig_row(&mid)
+    } else {
+        store.get_dm_message_sig_row(&mid)
+    }) else {
+        return;
+    };
+
+    // SECURITY: the signature must verify over the row we hold, with the NEW
+    // digest folded in. This is what stops a relay pasting a card of its
+    // choosing onto a plaintext public-channel message, and it REJECTS —
+    // there is deliberately no log-and-accept path.
+    let lp_digest = lp.as_deref().map(link_preview_digest);
+    let extras = SignedExtras {
+        mid: Some(&mid),
+        reply_to: row.reply_to_mid.as_deref(),
+        file_id: row.file_id.as_deref(),
+        order_us: row.order_us,
+        lp_digest: lp_digest.as_deref(),
+    };
+    let msg_type = if is_channel { "ch" } else { "dm" };
+    if !verify_message_signature_v2(
+        &signer, sig.as_deref(), pk.as_deref(), msg_type, &ctx,
+        ts, &extras, &row.text, &mut PkCache::new(),
+    ) {
+        hollow_log!("[HOLLOW-SECURITY] REJECTED link preview for {mid} from {peer_str} (signer {signer}) — signature verification FAILED");
+        return;
+    }
+
+    let lp_json = preview_column(lp.as_deref());
+    let applied = if is_channel {
+        store.update_channel_link_preview_and_sig(
+            &mid, lp_json.as_deref(), sig.as_deref(), pk.as_deref(),
+        )
+    } else {
+        store.update_link_preview_and_sig(
+            &mid, lp_json.as_deref(), sig.as_deref(), pk.as_deref(),
+        )
+    };
+    if !matches!(applied, Ok(true)) {
+        return;
+    }
+
+    let preview = lp.map(|b| *b);
+    if let (Some(server_id), Some(channel_id)) = (sid, cid) {
+        let _ = event_tx.send(NetworkEvent::ChannelLinkPreviewUpdated {
+            server_id, channel_id, message_id: mid, preview,
+        }).await;
+    } else {
+        let _ = event_tx.send(NetworkEvent::DmLinkPreviewUpdated {
+            peer_id: convo_peer, message_id: mid, preview,
+        }).await;
     }
 }
 

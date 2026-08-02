@@ -90,10 +90,28 @@ pub struct LinkPreviewRef {
     pub thumb_w: Option<u32>,
     /// Thumbnail height after resize.
     pub thumb_h: Option<u32>,
+    /// `"large"` = social-post layout (image on top), `None` = compact row.
+    pub kind: Option<String>,
+    /// Post author line, e.g. `"Jane Doe (@jane)"`. Social adapters only.
+    pub author: Option<String>,
+    /// Where the post's video lives: either a direct `.mp4`/`.webm` (plays
+    /// inline on tap) or the media page itself (opens in the browser). Never
+    /// fetched to render the card, never autoplayed.
+    pub video_url: Option<String>,
+    /// Video width, for the card's aspect ratio.
+    pub video_w: Option<u32>,
+    /// Video height, for the card's aspect ratio.
+    pub video_h: Option<u32>,
 }
+
+// The FFI twin keeps the rich fields FLAT so Dart reads `preview.author`
+// rather than `preview.rich?.author`. The node type boxes them instead —
+// see `node::LinkPreviewRef::rich`, where the boxing is load-bearing for the
+// swarm's stack usage. These two impls are where the shapes meet.
 
 impl From<node::LinkPreviewRef> for LinkPreviewRef {
     fn from(v: node::LinkPreviewRef) -> Self {
+        let rich = v.rich.map(|b| *b).unwrap_or_default();
         Self {
             url: v.url,
             title: v.title,
@@ -103,6 +121,11 @@ impl From<node::LinkPreviewRef> for LinkPreviewRef {
             thumb_webp_b64: v.thumb_webp_b64,
             thumb_w: v.thumb_w,
             thumb_h: v.thumb_h,
+            kind: rich.kind,
+            author: rich.author,
+            video_url: rich.video_url,
+            video_w: rich.video_w,
+            video_h: rich.video_h,
         }
     }
 }
@@ -118,6 +141,14 @@ impl From<LinkPreviewRef> for node::LinkPreviewRef {
             thumb_webp_b64: v.thumb_webp_b64,
             thumb_w: v.thumb_w,
             thumb_h: v.thumb_h,
+            rich: node::RichCard {
+                kind: v.kind,
+                author: v.author,
+                video_url: v.video_url,
+                video_w: v.video_w,
+                video_h: v.video_h,
+            }
+            .into_opt(),
         }
     }
 }
@@ -171,6 +202,11 @@ pub enum NetworkEvent {
     // -- Message editing events (Phase 3.5) --
     ChannelMessageEdited { server_id: String, channel_id: String, message_id: String, new_text: String, edited_at: i64, signature: Option<String>, public_key: Option<String> },
     DmMessageEdited { peer_id: String, message_id: String, new_text: String, edited_at: i64, signature: Option<String>, public_key: Option<String> },
+    /// A link preview landed on an existing message (issue #45). NOT an edit:
+    /// `edited_at` is untouched, so the bubble must not gain an "(edited)"
+    /// badge. `preview: None` means the card was cleared.
+    ChannelLinkPreviewUpdated { server_id: String, channel_id: String, message_id: String, preview: Option<LinkPreviewRef> },
+    DmLinkPreviewUpdated { peer_id: String, message_id: String, preview: Option<LinkPreviewRef> },
     // -- Message deletion events (Phase 3.5) --
     ChannelMessageDeleted { server_id: String, channel_id: String, message_id: String, deleted_at: i64 },
     DmMessageDeleted { peer_id: String, message_id: String, deleted_at: i64 },
@@ -703,6 +739,14 @@ fn to_ffi_event(event: node::NetworkEvent) -> NetworkEvent {
         node::NetworkEvent::DmMessageEdited { peer_id, message_id, .. } => {
             hollow_log!("[HOLLOW] DM message {message_id} edited for {peer_id}");
         }
+        node::NetworkEvent::ChannelLinkPreviewUpdated { server_id, channel_id, message_id, preview } => {
+            let verb = if preview.is_some() { "attached to" } else { "cleared from" };
+            hollow_log!("[HOLLOW] Link preview {verb} channel message {message_id} in {server_id}/{channel_id}");
+        }
+        node::NetworkEvent::DmLinkPreviewUpdated { peer_id, message_id, preview } => {
+            let verb = if preview.is_some() { "attached to" } else { "cleared from" };
+            hollow_log!("[HOLLOW] Link preview {verb} DM message {message_id} for {peer_id}");
+        }
         node::NetworkEvent::ChannelMessageDeleted { server_id, channel_id, message_id, .. } => {
             hollow_log!("[HOLLOW] Channel message {message_id} deleted in {server_id}/{channel_id}");
         }
@@ -896,6 +940,16 @@ fn to_ffi_event(event: node::NetworkEvent) -> NetworkEvent {
         }
         node::NetworkEvent::DmMessageEdited { peer_id, message_id, new_text, edited_at, signature, public_key } => {
             NetworkEvent::DmMessageEdited { peer_id, message_id, new_text, edited_at, signature, public_key }
+        }
+        node::NetworkEvent::ChannelLinkPreviewUpdated { server_id, channel_id, message_id, preview } => {
+            NetworkEvent::ChannelLinkPreviewUpdated {
+                server_id, channel_id, message_id, preview: preview.map(Into::into),
+            }
+        }
+        node::NetworkEvent::DmLinkPreviewUpdated { peer_id, message_id, preview } => {
+            NetworkEvent::DmLinkPreviewUpdated {
+                peer_id, message_id, preview: preview.map(Into::into),
+            }
         }
         node::NetworkEvent::ChannelMessageDeleted { server_id, channel_id, message_id, deleted_at } => {
             NetworkEvent::ChannelMessageDeleted { server_id, channel_id, message_id, deleted_at }
@@ -1890,9 +1944,14 @@ pub fn verify_message_proof_v2(
 }
 
 /// Fetch OpenGraph metadata for a URL and return a link preview the sender
-/// can embed in their next outgoing message. Runs on the shared Tokio
-/// runtime. Fails silently at every step — the caller should treat errors
-/// as "no preview" and send the message as plain text.
+/// can embed in their next outgoing message. Fails silently at every step —
+/// the caller should treat errors as "no preview" and send the message as
+/// plain text.
+///
+/// Runs on the dedicated HTTP runtime, never the node runtime: an authoring
+/// fetch is arbitrary third-party I/O on an unknown-latency host, and parking
+/// it on the node runtime lets a slow site compete with the SQLCipher
+/// blocking pool. Same rule the GIF / FFZ / IGDB / sticker fetchers follow.
 ///
 /// **Privacy:** This MUST only be called on the sender side. Receivers
 /// render the preview from embedded data and never fetch the URL. See
@@ -1901,7 +1960,7 @@ pub fn verify_message_proof_v2(
 /// Phase 6.75.
 #[frb]
 pub fn fetch_link_preview(url: String) -> Result<LinkPreviewRef, String> {
-    let rt = get_runtime();
+    let rt = get_http_runtime();
     let internal = rt
         .block_on(async move {
             crate::node::link_preview::fetch_link_preview(&url).await
@@ -2025,6 +2084,106 @@ pub fn edit_dm_message(
             peer_id: peer,
             message_id,
             new_text,
+        }),
+    )
+    .map_err(|e| format!("Failed to send command: {e}"))?;
+
+    Ok(())
+}
+
+/// Configure the social-preview proxy base URL (None/empty = direct, the
+/// default). Persisted on the Dart side and pushed at startup, like
+/// [`crate::api::gifs::set_gif_proxy_url`].
+///
+/// Empty is not a degraded mode: X and TikTok lookups go straight to the
+/// upstream public APIs, which is what ships. Setting this hands those
+/// lookups to a service that speaks the same normalized shape, for anyone who
+/// would rather the upstream never saw their IP at all. Issue #45.
+#[frb]
+pub fn set_embed_proxy_url(base: Option<String>) -> Result<(), String> {
+    let normalized = match base {
+        None => None,
+        Some(raw) => {
+            let trimmed = raw.trim().trim_end_matches('/');
+            if trimmed.is_empty() {
+                None
+            } else if !trimmed.starts_with("https://") {
+                return Err("Preview proxy URL must start with https://".into());
+            } else if reqwest::Url::parse(trimmed)
+                .ok()
+                .and_then(|u| u.host_str().map(str::to_string))
+                .is_none_or(|h| h.is_empty())
+            {
+                return Err("Preview proxy URL has no host".into());
+            } else {
+                Some(trimmed.to_string())
+            }
+        }
+    };
+    node::link_preview::set_embed_proxy_base(normalized);
+    Ok(())
+}
+
+/// Attach (or clear) a link preview on a channel message that was ALREADY
+/// sent, without editing it.
+///
+/// This exists for the send-beat-the-fetch race: the compose box fetches OG
+/// metadata in the background, and a fast sender used to lose the card
+/// entirely. Call this when the fetch lands after the send. `preview: None`
+/// clears the card, which is what an edit that removed the URL wants.
+///
+/// The row is re-signed over its unchanged text/timestamp with the new
+/// preview digest, so it keeps verifying. `edited_at` is untouched: a late
+/// card must not make the bubble say "(edited)".
+///
+/// Only the message's author can attach — the command is dropped otherwise.
+/// Issue #45.
+#[frb]
+pub fn attach_channel_link_preview(
+    server_id: String,
+    channel_id: String,
+    message_id: String,
+    preview: Option<LinkPreviewRef>,
+) -> Result<(), String> {
+    let node = get_node();
+    let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
+    // Release the global node mutex BEFORE the (possibly waiting) send —
+    // holding it across block_on(send) serializes all other FFI calls.
+    drop(guard);
+
+    let rt = get_runtime();
+    rt.block_on(
+        cmd_tx.send(node::NodeCommand::AttachChannelLinkPreview {
+            server_id,
+            channel_id,
+            message_id,
+            preview: preview.map(|p| Box::new(p.into())),
+        }),
+    )
+    .map_err(|e| format!("Failed to send command: {e}"))?;
+
+    Ok(())
+}
+
+/// DM twin of [`attach_channel_link_preview`]. Issue #45.
+#[frb]
+pub fn attach_dm_link_preview(
+    peer_id: String,
+    message_id: String,
+    preview: Option<LinkPreviewRef>,
+) -> Result<(), String> {
+    let node = get_node();
+    let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
+    drop(guard);
+
+    let rt = get_runtime();
+    rt.block_on(
+        cmd_tx.send(node::NodeCommand::AttachDmLinkPreview {
+            peer_id,
+            message_id,
+            preview: preview.map(|p| Box::new(p.into())),
         }),
     )
     .map_err(|e| format!("Failed to send command: {e}"))?;

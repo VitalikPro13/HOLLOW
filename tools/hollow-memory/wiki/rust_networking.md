@@ -511,8 +511,15 @@ Fetches OpenGraph metadata from URLs typed in the compose box and builds a `Link
 | `FETCH_TIMEOUT_SECS` | 3 | Total timeout for HTML + image fetches combined |
 | `MAX_TITLE_CHARS` | 200 | Unicode character cap for title |
 | `MAX_DESC_CHARS` | 400 | Unicode character cap for description |
-| `THUMB_MAX_DIM` | 400 px | Max dimension for WebP thumbnail |
-| `USER_AGENT` | `"Hollow/0.1 LinkPreview"` | Identifies the fetcher |
+| `THUMB_MAX_DIM` | 400 px | Max dimension for a compact-card WebP thumbnail |
+| `THUMB_MAX_DIM_LARGE` | 800 px | Max dimension when the card will be large |
+| `MIN_LARGE_THUMB_W` | 320 px | Below this, never use the large card (stretched logos) |
+| `HERO_MIN_W` / `HERO_MIN_ASPECT` / `HERO_MAX_ASPECT` | 600 px / 1.3 / 3.0 | An undeclared but unmistakable share hero |
+| `USER_AGENT` | `"Mozilla/5.0 (compatible; HollowBot/1.0; +https://anonlisten.com/bot)"` | Crawler-shaped on purpose — the fx*/vx* embed proxies serve OG tags only to bot UAs, and x.com serves them to us because of this. The `+url` must resolve (page lives at `!website/src/routes/bot/`). |
+
+### Client reuse and the proxy tunnel
+
+`http_client()` caches ONE `reqwest::Client` in a `OnceLock<Mutex<Option<(Option<String>, Client)>>>`, keyed on the anti-censorship SOCKS address, rebuilding only when that changes. When `get_proxy_socks_addr()` is set the client routes via `socks5h://` — remote DNS, so the hostname never hits the local resolver. Going direct while the tunnel is up would leak to exactly the network the tunnel hides from.
 
 ### Public API
 
@@ -521,16 +528,36 @@ Fetches OpenGraph metadata from URLs typed in the compose box and builds a `Link
 Flow:
 1. Parse URL via `reqwest::Url::parse()`. Reject non-http/https schemes.
 2. Extract display domain from parsed URL
-3. Build `reqwest::Client` with `USER_AGENT`, 3s timeout, max 3 redirects
-4. Fetch HTML via `fetch_bounded()` with 2 MB cap
-5. Parse OG metadata via `parse_og_metadata()`
-6. If `og:image` or `twitter:image` found:
-   a. Resolve relative URL against base URL via `parsed.join(img_src)`
-   b. Fetch image via `fetch_bounded()` with 4 MB cap
-   c. Compress to WebP thumbnail via `image_convert::convert_to_webp_preview()` with 400px max dimension
-   d. Base64-encode the WebP bytes
-7. Return `LinkPreviewRef { url, title, description, domain, site_name, thumb_webp_b64, thumb_w, thumb_h }`
-8. Errors are returned as `Err(String)` — caller silently drops the preview without blocking the message send
+3. Get the shared client via `http_client()`
+4. **Social adapter first** (see below). Any failure logs and falls through to the OpenGraph path — a dead adapter degrades to the old behavior, never to an error.
+5. Fetch HTML via `fetch_bounded()` with 2 MB cap
+6. Parse OG metadata via `parse_og_metadata()` — now also reads `og:type`, `twitter:card`, `og:video[:url|:secure_url]`, `og:image:width`
+7. If `og:image` or `twitter:image` found: resolve relative → fetch (4 MB cap) → `convert_to_webp_preview()` at `THUMB_MAX_DIM_LARGE` when the page looks large-card-worthy, else `THUMB_MAX_DIM` → base64
+8. Decide the layout with `wants_large_card()` (below) and fill `RichCard`
+9. Return `LinkPreviewRef { …, rich: Option<Box<RichCard>> }`
+10. Errors are returned as `Err(String)` — caller silently drops the preview without blocking the message send
+
+### Card layout — declaration-driven, NOT a host allowlist
+
+`declares_large_card()` / `declares_video()` / `wants_large_card()`.
+
+The page says which layout it wants and the code reads it: `twitter:card` = `summary_large_image` or `player`, or `og:type` starting `video`/`music`. Measured live 2026-08-02 — semgrep.dev, github.com and instagram.com all send `summary_large_image`; youtube.com sends `player` + `video.other`; wikipedia sends neither.
+
+Plus one undeclared fallback: an image ≥ `HERO_MIN_W` wide with aspect in `HERO_MIN_ASPECT..=HERO_MAX_ASPECT` (the classic 1200x630). Wikipedia's SQUARE 1200x1200 article logo fails on aspect, which is the point. Veto: no image, or decoded width < `MIN_LARGE_THUMB_W`.
+
+Video affordance follows the same declarations. A declared `og:video` that is a real `.mp4`/`.webm` becomes `video_url` and plays inline; otherwise `video_url` is the PAGE url and the card opens it.
+
+**A `MEDIA_PAGE_HOSTS` allowlist was written and deleted — do not reintroduce it.** See `feedback_declared_standards_over_allowlists`.
+
+### Social adapters (`mod social`)
+
+Key-free public APIs, called DIRECTLY from the client — there is no Hollow-run proxy. FxEmbed reads the post server-side, so X never sees the user's IP for the metadata either way.
+
+- **X family** (`x.com`, `twitter.com`, `fixupx.com`, `fxtwitter.com`, `vxtwitter.com`, `twittpr.com`) → `GET https://api.fxtwitter.com/2/status/{id}`. **The v2 endpoint nests the post under `status`; the older `/status/{id}` uses `tweet`. `parse_fxembed()` accepts EITHER** — reading only `tweet` made every X link silently fall back to OpenGraph on first ship. Prefers a video (with its poster) over a still photo.
+- **TikTok** (`tiktok.com`, `vxtiktok.com`, `tnktok.com`) → `GET https://www.tiktok.com/oembed?url=…`. Title, author, thumbnail; no media URL exists, so no inline video.
+- Host matching is SUFFIX on the parsed host (`host == s || host.ends_with(".{s}")`), never substring — `x.com.evil.tld` matches nothing.
+- Adapter results always get `kind: "large"`.
+- `EMBED_PROXY_BASE` (`set_embed_proxy_url` FFI) optionally routes the whole adapter step at a configured service. **Empty = direct, and that is the default.**
 
 ### HTML Fetching
 

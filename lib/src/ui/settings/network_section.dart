@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/gif_provider.dart';
+import 'package:hollow/src/core/providers/link_preview_settings_provider.dart';
 import 'package:hollow/src/core/providers/relay_domain_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
@@ -132,6 +133,7 @@ class NetworkSettingsView extends ConsumerWidget {
         ],
       ),
       const GifProxySettingsCard(),
+      const LinkPreviewSettingsCard(),
       // Anti-censorship (VLESS+REALITY) tunnel — hidden from the UI: the
       // current REALITY transport is non-functional. Kept in the codebase
       // (widget below + Rust proxy_tunnel) for a future transport attempt.
@@ -826,6 +828,180 @@ class _AntiCensorshipCardState extends ConsumerState<_AntiCensorshipCard> {
           ),
         ],
       ),
+    );
+  }
+}
+
+/// Link previews (issue #45): the master switch, plus the optional proxy for
+/// social-post lookups. Shared by desktop and mobile settings.
+class LinkPreviewSettingsCard extends ConsumerStatefulWidget {
+  const LinkPreviewSettingsCard({super.key});
+
+  @override
+  ConsumerState<LinkPreviewSettingsCard> createState() =>
+      _LinkPreviewSettingsCardState();
+}
+
+class _LinkPreviewSettingsCardState
+    extends ConsumerState<LinkPreviewSettingsCard> {
+  final _proxyController = TextEditingController();
+  bool _hydrated = false;
+  bool _busy = false;
+  bool _proxyBusy = false;
+  bool _expanded = false;
+
+  @override
+  void dispose() {
+    _proxyController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _setEnabled(bool enabled) async {
+    setState(() => _busy = true);
+    try {
+      await ref.read(linkPreviewsEnabledProvider.notifier).setEnabled(enabled);
+    } catch (e) {
+      if (!mounted) return;
+      HollowToast.show(context, 'Could not save that setting',
+          type: HollowToastType.error);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _saveProxy(String value) async {
+    setState(() => _proxyBusy = true);
+    try {
+      await ref.read(embedProxyUrlProvider.notifier).setUrl(value);
+      if (!mounted) return;
+      _proxyController.text = ref.read(embedProxyUrlProvider);
+      HollowToast.show(
+          context,
+          value.trim().isEmpty
+              ? 'Social lookups go direct again'
+              : 'Social lookups go through your proxy');
+    } catch (e) {
+      if (!mounted) return;
+      HollowToast.show(context, 'Invalid proxy URL — must be https://',
+          type: HollowToastType.error);
+    } finally {
+      if (mounted) setState(() => _proxyBusy = false);
+    }
+  }
+
+  Widget _caption(HollowTheme hollow, String text) => Text(
+        text,
+        style: HollowTypography.caption
+            .copyWith(color: hollow.textSecondary, fontSize: 11),
+      );
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+    final enabled = ref.watch(linkPreviewsEnabledProvider);
+    final proxy = ref.watch(embedProxyUrlProvider);
+    if (!_hydrated) {
+      _proxyController.text = proxy;
+      _hydrated = true;
+      _expanded = proxy.isNotEmpty;
+    }
+
+    return SettingsCard(
+      title: 'Link Previews',
+      children: [
+        _caption(
+          hollow,
+          'When you paste a link, your device fetches its title and image and '
+          'sends them WITH the message. People who receive it make no web '
+          'requests at all — the card is bytes that travelled in the message.',
+        ),
+        const SizedBox(height: HollowSpacing.md),
+        SettingsToggleRow(
+          icon: LucideIcons.link,
+          label: 'Fetch previews for links you send',
+          subtitle: 'Turn this off and your device never touches a pasted '
+              'link, so the site learns nothing. Cards other people attach '
+              'still show up.',
+          value: enabled,
+          // Swallow taps mid-save rather than disabling the row — the write
+          // is a single settings key and finishes in a frame or two.
+          onChanged: (v) {
+            if (!_busy) _setEnabled(v);
+          },
+        ),
+        const SizedBox(height: HollowSpacing.sm),
+        Align(
+          alignment: Alignment.centerLeft,
+          child: HollowButton.ghost(
+            compact: true,
+            icon: Icon(
+              _expanded ? LucideIcons.chevronDown : LucideIcons.chevronRight,
+              size: 14,
+            ),
+            onPressed: () => setState(() => _expanded = !_expanded),
+            child: const Text('Advanced (social preview proxy)'),
+          ),
+        ),
+        if (_expanded) ...[
+          const SizedBox(height: HollowSpacing.sm),
+          const SettingsSectionLabel(label: 'Social preview proxy'),
+          const SizedBox(height: HollowSpacing.xs),
+          _caption(
+            hollow,
+            'Optional, and empty is the normal setting. X and TikTok links go '
+            'through a public read-only API so their cards show the post '
+            'instead of a login wall — that API reads the post itself, so X '
+            'never sees your address either way, but its operator does see '
+            'that someone looked the post up. Point this at a service of your '
+            'own to put a hop in between. Every other link is fetched '
+            'directly by your device, proxy or not.',
+          ),
+          const SizedBox(height: HollowSpacing.xs),
+          Row(
+            children: [
+              Expanded(
+                child: HollowTextField(
+                  controller: _proxyController,
+                  hintText: 'https://embed.example.com',
+                  isDense: true,
+                  onChanged: (_) => setState(() {}),
+                ),
+              ),
+              const SizedBox(width: HollowSpacing.xs),
+              HollowButton.filled(
+                compact: true,
+                onPressed:
+                    _proxyBusy || _proxyController.text.trim() == proxy
+                        ? null
+                        : () => _saveProxy(_proxyController.text),
+                child: _proxyBusy
+                    ? const SizedBox(
+                        width: 14,
+                        height: 14,
+                        child: CircularProgressIndicator(strokeWidth: 2))
+                    : const Text('Save'),
+              ),
+            ],
+          ),
+          if (proxy.isNotEmpty) ...[
+            const SizedBox(height: HollowSpacing.xs),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: HollowButton.ghost(
+                compact: true,
+                icon: const Icon(LucideIcons.rotateCcw, size: 14),
+                onPressed: _proxyBusy
+                    ? null
+                    : () {
+                        _proxyController.clear();
+                        _saveProxy('');
+                      },
+                child: const Text('Remove proxy (go direct)'),
+              ),
+            ),
+          ],
+        ],
+      ],
     );
   }
 }

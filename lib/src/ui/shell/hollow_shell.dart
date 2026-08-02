@@ -79,6 +79,7 @@ import 'package:hollow/src/ui/dialogs/license_key_dialog.dart';
 import 'package:hollow/src/core/providers/license_key_provider.dart';
 import 'package:hollow/src/core/providers/gif_library_provider.dart';
 import 'package:hollow/src/core/providers/gif_provider.dart';
+import 'package:hollow/src/core/providers/link_preview_settings_provider.dart';
 import 'package:hollow/src/core/providers/relay_domain_provider.dart';
 import 'package:hollow/src/core/providers/relay_status_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
@@ -896,6 +897,11 @@ class _HollowShellState extends ConsumerState<HollowShell>
     await ref.read(gifMediaHostsProvider.notifier).loadCached();
     await ref.read(gifRatingProvider.notifier).loadCached();
     await ref.read(gifAutoplayProvider.notifier).loadCached();
+    // Link previews (issue #45) — same shape: the master on/off switch, plus
+    // the optional social-lookup proxy, pushed into Rust here rather than
+    // read lazily, so the first URL typed already honours them.
+    await ref.read(linkPreviewsEnabledProvider.notifier).loadCached();
+    await ref.read(embedProxyUrlProvider.notifier).loadCached();
     // AFTER the source settings: saved GIFs store proxy-RELATIVE media paths
     // (or, for direct-mode picks, absolute CDN URLs) and resolve against
     // whatever source is active.

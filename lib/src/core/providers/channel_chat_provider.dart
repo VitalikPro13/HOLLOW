@@ -22,7 +22,10 @@ class ChannelChatNotifier
   String _key(String serverId, String channelId) => '$serverId:$channelId';
 
   /// Send a message to a channel.
-  Future<void> sendMessage(String serverId, String channelId, String text,
+  /// Returns the generated message id so a caller that sent before its link
+  /// preview finished fetching can attach the card afterwards (issue #45).
+  /// Conference chat returns its own RAM-only id, which no attach path uses.
+  Future<String> sendMessage(String serverId, String channelId, String text,
       {String? replyToMid, network_api.LinkPreviewRef? linkPreview}) async {
     final networkService = ref.read(networkServiceProvider);
     final localPeerId = ref.read(identityProvider).peerId ?? 'unknown';
@@ -36,6 +39,7 @@ class ChannelChatNotifier
       final confId = serverId.substring('conf:'.length);
       final ts = await conference_api.conferenceSendChat(
           confId: confId, text: text);
+      final confMid = 'conf-$localPeerId-$ts';
       _addMessage(
         serverId,
         channelId,
@@ -44,10 +48,10 @@ class ChannelChatNotifier
           text: text,
           isMe: true,
           timestamp: DateTime.fromMillisecondsSinceEpoch(ts.toInt()),
-          messageId: 'conf-$localPeerId-$ts',
+          messageId: confMid,
         ),
       );
-      return;
+      return confMid;
     }
 
     final messageId = generateMessageId();
@@ -74,6 +78,7 @@ class ChannelChatNotifier
       linkPreview: linkPreview,
     );
     _addMessage(serverId, channelId, msg);
+    return messageId;
   }
 
   /// Receive a message from a peer in a channel.
@@ -164,6 +169,42 @@ class ChannelChatNotifier
       editedAt: editedAt,
       signature: signature,
       publicKey: publicKey,
+    );
+    final updated = Map.of(state);
+    updated[key] = updatedList;
+    state = updated;
+  }
+
+  /// Attach (or clear) a link preview on a channel message we already sent
+  /// (issue #45). Rethrows; the compose panes swallow it, since a late card
+  /// that never lands is cosmetic.
+  Future<void> attachLinkPreview(String serverId, String channelId,
+      String messageId, network_api.LinkPreviewRef? preview) async {
+    await network_api.attachChannelLinkPreview(
+      serverId: serverId,
+      channelId: channelId,
+      messageId: messageId,
+      preview: preview,
+    );
+    // UI update happens via the ChannelLinkPreviewUpdated event.
+  }
+
+  /// Apply a late link preview to an in-memory message. Never touches
+  /// `editedAt` — see the DM twin in [ChatNotifier.applyLinkPreview].
+  void applyLinkPreview(String serverId, String channelId, String messageId,
+      network_api.LinkPreviewRef? preview) {
+    final key = _key(serverId, channelId);
+    final current = state[key];
+    if (current == null) return;
+
+    final idx = current.indexWhere((m) => m.messageId == messageId);
+    if (idx == -1) return;
+    if (current[idx].linkPreview == preview) return;
+
+    final updatedList = List<ChannelChatMessage>.from(current);
+    updatedList[idx] = updatedList[idx].copyWith(
+      linkPreview: preview,
+      clearLinkPreview: preview == null,
     );
     final updated = Map.of(state);
     updated[key] = updatedList;

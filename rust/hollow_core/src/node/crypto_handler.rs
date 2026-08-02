@@ -160,6 +160,33 @@ pub(crate) fn link_preview_digest(lp: &LinkPreviewRef) -> String {
         }
         None => h.update([0u8]),
     }
+
+    // Rich-card fields (issue #45), folded in so a tamperer can no more
+    // rewrite a card's author line or its video target than its title.
+    // `video_w/h` and `thumb_w/h` stay OUT: they are layout integers, and
+    // lying about them buys nothing but a wrong aspect ratio.
+    //
+    // Written so an OLD preview hashes to EXACTLY the digest it always did:
+    // absent fields contribute no bytes at all, and the presence mask is
+    // appended only when at least one IS present. Without that mask,
+    // author=Some("x")/video=None would feed the hash the same bytes as
+    // author=None/video=Some("x"). Rows already on disk therefore keep
+    // verifying with no migration.
+    let empty = crate::node::RichCard::default();
+    let r = lp.rich.as_deref().unwrap_or(&empty);
+    let rich = [&r.kind, &r.author, &r.video_url];
+    let mask = rich
+        .iter()
+        .enumerate()
+        .fold(0u8, |m, (i, f)| if f.is_some() { m | (1 << i) } else { m });
+    if mask != 0 {
+        for field in rich.into_iter().flatten() {
+            h.update((field.len() as u64).to_le_bytes());
+            h.update(field.as_bytes());
+        }
+        h.update([mask]);
+    }
+
     hex::encode(h.finalize())
 }
 
@@ -3364,7 +3391,15 @@ mod tests {
             thumb_webp_b64: Some("AAAA".into()),
             thumb_w: Some(10),
             thumb_h: Some(10),
+            rich: None,
         }
+    }
+
+    /// `lp()` with the given rich-card mutation applied.
+    fn lp_rich(f: impl FnOnce(&mut crate::node::RichCard)) -> LinkPreviewRef {
+        let mut rich = crate::node::RichCard::default();
+        f(&mut rich);
+        LinkPreviewRef { rich: rich.into_opt(), ..lp("t") }
     }
 
     /// A v2 signature verifies, and each structured field is
@@ -3614,6 +3649,73 @@ mod tests {
         b.url = "a".into();
         b.title = "bc".into();
         assert_ne!(link_preview_digest(&a), link_preview_digest(&b));
+    }
+
+    /// The rich-card fields (issue #45) were added so that adding them changes
+    /// NOTHING for a preview that doesn't use them. Every row already on disk
+    /// keeps the digest it was signed with, so no message stops verifying
+    /// because the struct grew.
+    ///
+    /// The literal is the digest of `lp("Pinned Title")` as produced before
+    /// `kind`/`author`/`video_url` existed. If a future field is folded in
+    /// unconditionally, this test is what fails.
+    #[test]
+    fn rich_fields_absent_preserves_legacy_digest() {
+        let plain = lp("Pinned Title");
+        assert!(plain.rich.is_none());
+
+        // Recompute the pre-#45 digest by hand: the five strings, then the
+        // thumbnail present-flag. Nothing else.
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        for field in [
+            &plain.url, &plain.title, &plain.description, &plain.domain, &plain.site_name,
+        ] {
+            h.update((field.len() as u64).to_le_bytes());
+            h.update(field.as_bytes());
+        }
+        match &plain.thumb_webp_b64 {
+            Some(t) => {
+                h.update([1u8]);
+                h.update((t.len() as u64).to_le_bytes());
+                h.update(t.as_bytes());
+            }
+            None => h.update([0u8]),
+        }
+        assert_eq!(link_preview_digest(&plain), hex::encode(h.finalize()));
+    }
+
+    /// Each rich field is bound: flipping one changes the digest, so a relay
+    /// cannot repaint a public-channel card's author line or point its play
+    /// button somewhere else while the signature still verifies.
+    #[test]
+    fn rich_fields_are_bound_by_the_digest() {
+        let baseline = link_preview_digest(&lp("t"));
+
+        let variants = [
+            lp_rich(|r| r.kind = Some("large".into())),
+            lp_rich(|r| r.author = Some("@someone".into())),
+            lp_rich(|r| r.video_url = Some("https://video.example/v.mp4".into())),
+        ];
+        for variant in &variants {
+            assert_ne!(baseline, link_preview_digest(variant));
+        }
+
+        // The presence mask is what stops one field's value being replayed as
+        // another's: same bytes hashed, different slots.
+        assert_ne!(
+            link_preview_digest(&lp_rich(|r| r.author = Some("x".into()))),
+            link_preview_digest(&lp_rich(|r| r.video_url = Some("x".into()))),
+        );
+
+        // Layout integers stay OUT — lying about them buys a wrong aspect
+        // ratio and nothing more.
+        let mut resized = lp_rich(|r| {
+            r.video_w = Some(1920);
+            r.video_h = Some(1080);
+        });
+        resized.thumb_w = Some(4);
+        assert_eq!(baseline, link_preview_digest(&resized));
     }
 
     /// An edit is re-signed over the EDIT timestamp and the NEW text

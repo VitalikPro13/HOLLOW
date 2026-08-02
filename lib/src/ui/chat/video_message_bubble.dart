@@ -379,7 +379,7 @@ class _VideoMessageBubbleState extends ConsumerState<VideoMessageBubble> {
             child: switch (_state) {
               _PlaybackState.thumbnail => _buildThumbnail(hollow),
               _PlaybackState.preparing => _buildPreparing(hollow),
-              _PlaybackState.playing => _InlinePlayer(
+              _PlaybackState.playing => InlineVideoPlayer(
                   controller: _controller!,
                   hollow: hollow,
                   onFullscreen: () {
@@ -687,24 +687,33 @@ class _VideoMessageBubbleState extends ConsumerState<VideoMessageBubble> {
 
 /// Stateful inline player wrapper. Owns the auto-fade timer for the control
 /// bar, and rebuilds when the controller's value changes (so the scrub bar
-/// and timestamp stay in sync). The [controller] is owned by the parent
-/// `_VideoMessageBubbleState`; this widget never disposes it.
-class _InlinePlayer extends StatefulWidget {
+/// and timestamp stay in sync).
+///
+/// The [controller] is owned by the PARENT — this widget never disposes it.
+/// Shared with [LinkPreviewCard], whose social-post cards play a direct
+/// mp4/webm the same way a file video plays (issue #45), so both surfaces
+/// get the same controls and the same auto-fade behaviour instead of a
+/// second half-built player.
+class InlineVideoPlayer extends StatefulWidget {
   final VideoPlayerController controller;
   final HollowTheme hollow;
-  final VoidCallback onFullscreen;
 
-  const _InlinePlayer({
+  /// Fullscreen handoff. Cards pass null: their source is a remote URL, and
+  /// the fullscreen viewer takes a disk path.
+  final VoidCallback? onFullscreen;
+
+  const InlineVideoPlayer({
+    super.key,
     required this.controller,
     required this.hollow,
-    required this.onFullscreen,
+    this.onFullscreen,
   });
 
   @override
-  State<_InlinePlayer> createState() => _InlinePlayerState();
+  State<InlineVideoPlayer> createState() => InlineVideoPlayerState();
 }
 
-class _InlinePlayerState extends State<_InlinePlayer> {
+class InlineVideoPlayerState extends State<InlineVideoPlayer> {
   bool _controlsVisible = true;
   Timer? _hideTimer;
   bool _isHovering = false;
@@ -821,14 +830,16 @@ class _ControlBar extends StatelessWidget {
   final VideoPlayerController controller;
   final HollowTheme hollow;
   final VoidCallback onPlayPause;
-  final VoidCallback onFullscreen;
+  /// Null hides the button entirely — a link-preview card has no disk path
+  /// to hand the fullscreen viewer.
+  final VoidCallback? onFullscreen;
   final bool isFullscreen;
 
   const _ControlBar({
     required this.controller,
     required this.hollow,
     required this.onPlayPause,
-    required this.onFullscreen,
+    this.onFullscreen,
     this.isFullscreen = false,
   });
 
@@ -904,10 +915,12 @@ class _ControlBar extends StatelessWidget {
                   ),
                 ),
                 const Spacer(),
-                _IconBtn(
-                  icon: isFullscreen ? LucideIcons.minimize2 : LucideIcons.maximize2,
-                  onTap: onFullscreen,
-                ),
+                if (onFullscreen != null)
+                  _IconBtn(
+                    icon:
+                        isFullscreen ? LucideIcons.minimize2 : LucideIcons.maximize2,
+                    onTap: onFullscreen!,
+                  ),
               ],
             ),
           ),

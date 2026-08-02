@@ -183,7 +183,10 @@ class MessageBubble extends ConsumerWidget {
     final linkPreviewWidget = message.linkPreview != null
         ? Padding(
             padding: const EdgeInsets.only(top: HollowSpacing.xs),
-            child: LinkPreviewCard(preview: message.linkPreview!),
+            child: LinkPreviewCard(
+              preview: message.linkPreview!,
+              messageId: message.messageId,
+            ),
           )
         : null;
 

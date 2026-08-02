@@ -1217,10 +1217,12 @@ hollow-msg2:{type}:{context}:{sender}:{timestamp_ms}:{message_id}:{reply_to}:{fi
 | reply_to | message_id of the replied-to message, or empty |
 | file_id | Attachment id, or empty |
 | order_us | Microsecond Lamport send stamp (same-millisecond ordering), or empty |
-| lp_digest | SHA-256 (hex) of the link preview's length-prefixed fields (url, title, description, domain, site name, thumbnail bytes), or empty |
+| lp_digest | SHA-256 (hex) of the link preview's length-prefixed fields (url, title, description, domain, site name, thumbnail bytes, and — where present — the card kind, author line and video target), or empty |
 | text | Message body — the only field that may contain `:`, so it is last |
 
 Absent optional fields serialize as empty strings. Binding these fields closes the v1 gaps: an attacker who could replay an otherwise-valid signed message can no longer re-target its reply, swap or add an attachment, rewrite its link preview into a phishing card, reorder it within a millisecond burst, or manipulate its dedup key.
+
+**Re-signing a preview without editing the message.** A link preview is fetched by the sender while they type, and a fast sender can dispatch the message before that fetch returns. The card is therefore allowed to arrive afterwards, as a separate signed operation naming the original message. Because `lp_digest` is inside the signed payload, such an operation cannot simply amend the stored row: it carries a fresh signature over the *unchanged* text, timestamp, reply target, attachment and ordering stamp, with only the digest differing. Receivers reconstruct that payload from the row they already hold and reject the operation unless it verifies against the row's author, so a relay cannot use it to paste a card of its choosing onto a plaintext public-channel message. The row's edit stamp is deliberately untouched — a preview landing late is not an authorship event, and presenting it as one would train users to ignore the edited marker. The same operation with an empty preview clears a card, which is what an edit that removes the URL performs.
 
 The legacy v1 payload (`hollow-msg:{type}:{context}:{sender}:{timestamp_ms}:{text}`) covered the message text only, leaving the reply target, attachment, ordering stamp and link preview outside the signature. It was accepted alongside v2 during the 0.8.3–0.8.4 transition and removed in 0.8.5: a verifier that accepts a weaker payload lets the attacker, not the sender, choose which fields are covered. Signatures produced before 0.8.3 no longer verify; those messages display as unverified and are not replicated through sync.
 
@@ -1447,6 +1449,7 @@ It deliberately does **not** cover the WebRTC media plane (audio/video pixels, S
 | Message content interception | E2EE (Olm for DMs, MLS for servers). Only intended recipients hold decryption keys. |
 | Relay compromise | Zero-knowledge design. A fully compromised relay learns only peer IDs and room membership (both in memory, not logged to disk). |
 | Push-provider metadata harvesting | Empty wake-up pushes (`{wake, sender}` only). Apple/Google never receive message text, size, or content; all content is fetched from Hollow's relay and decrypted on-device. |
+| Link-preview IP harvesting | Previews are fetched once, by the sender, and travel inside the encrypted message. A recipient's device makes no request to the previewed site to render the card, so posting a link into a large room reveals nothing about who read it. Without this, a link in a busy channel would enumerate its readers to whoever controls the URL. Playing an embedded video is the sole exception and requires an explicit tap, on a target the signature already covers. |
 | Device-list tampering | The device list is signed by the master key and versioned; only the master can add or revoke a device, and replays cannot un-revoke. |
 | Stolen/lost device | Manual device revocation: a signed tombstone removes the device's MLS leaf and Olm sessions everywhere and causes the revoked device to wipe itself. |
 | Voice/video eavesdropping | SFrame E2EE. Media is encrypted per-frame. TURN servers see only ciphertext. |

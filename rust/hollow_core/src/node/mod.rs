@@ -32,6 +32,6 @@ pub(crate) mod ws_client;
 mod test_harness;
 
 pub(crate) use crdt_store::CrdtStore;
-pub(crate) use types::{LinkPreviewRef, NetworkEvent, NodeCommand, SendFilePayload, ShareRef, SignedDeviceList, VaultUploadFilePayload, VideoThumbRef};
+pub(crate) use types::{LinkPreviewRef, NetworkEvent, NodeCommand, RichCard, SendFilePayload, ShareRef, SignedDeviceList, VaultUploadFilePayload, VideoThumbRef};
 pub(crate) use crypto_handler::verify_message_signature;
 pub(crate) use swarm::spawn_node;

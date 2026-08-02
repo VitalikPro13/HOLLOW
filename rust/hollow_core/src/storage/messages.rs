@@ -1254,6 +1254,66 @@ impl MessageStore {
         Ok(())
     }
 
+    /// Set (or clear) a DM row's link preview AND its signature together.
+    /// Issue #45 — see [`Self::update_link_preview_and_sig_in`].
+    pub fn update_link_preview_and_sig(
+        &self,
+        message_id: &str,
+        link_preview_json: Option<&str>,
+        signature: Option<&str>,
+        public_key: Option<&str>,
+    ) -> Result<bool, String> {
+        self.update_link_preview_and_sig_in(
+            "messages", message_id, link_preview_json, signature, public_key,
+        )
+    }
+
+    /// Channel twin of [`Self::update_link_preview_and_sig`]. Issue #45.
+    pub fn update_channel_link_preview_and_sig(
+        &self,
+        message_id: &str,
+        link_preview_json: Option<&str>,
+        signature: Option<&str>,
+        public_key: Option<&str>,
+    ) -> Result<bool, String> {
+        self.update_link_preview_and_sig_in(
+            "channel_messages", message_id, link_preview_json, signature, public_key,
+        )
+    }
+
+    /// Attach (or clear) a card and swap in the re-signature that covers it,
+    /// in ONE statement. Returns whether a row matched.
+    ///
+    /// The pair is inseparable: the v2 signature binds `lp_digest`, so a row
+    /// whose preview changed without its signature following would stop
+    /// verifying and stop replicating through signed sync backfill. Writing
+    /// them apart would leave that inconsistency visible to any concurrent
+    /// reader.
+    ///
+    /// Deliberately does NOT touch `text`, `edited_at`, or `message_edits`:
+    /// attaching a late card is not an edit, and the bubble must not sprout
+    /// an "(edited)" badge because a fetch finished a second after send.
+    /// `table` is a fixed table name, never user input.
+    fn update_link_preview_and_sig_in(
+        &self,
+        table: &str,
+        message_id: &str,
+        link_preview_json: Option<&str>,
+        signature: Option<&str>,
+        public_key: Option<&str>,
+    ) -> Result<bool, String> {
+        let rows = self.conn
+            .execute(
+                &format!(
+                    "UPDATE {table} SET link_preview_json = ?1, signature = ?2, \
+                     public_key = ?3 WHERE message_id = ?4"
+                ),
+                params![link_preview_json, signature, public_key, message_id],
+            )
+            .map_err(|e| format!("Failed to update {table} link preview + sig: {e}"))?;
+        Ok(rows > 0)
+    }
+
     // -- Olm persistence --
 
     /// Save (upsert) the Olm account pickle.

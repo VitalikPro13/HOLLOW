@@ -690,24 +690,27 @@ Tap-to-reveal spoiler text. State toggles `_revealed`:
 ### LinkPreviewCard
 
 **File:** `lib/src/ui/chat/link_preview_card.dart`
-**Class:** `LinkPreviewCard extends StatelessWidget`
+**Class:** `LinkPreviewCard extends ConsumerStatefulWidget`
 **Purpose:** Rendered link preview card inside sent messages. Shows metadata fetched by the sender.
 
-**Privacy model:** Sender fetches the preview; receivers only see the cached data. Receivers NEVER make HTTP requests to previewed URLs (only when the user explicitly taps the card).
+Takes `preview` (`network_api.LinkPreviewRef`) plus an optional `messageId`, passed from `message_bubble.dart` / `channel_message_bubble.dart` and used only to key the single-playback slot.
 
-Takes a `network_api.LinkPreviewRef preview` containing: `url`, `title`, `description`, `domain`, `siteName`, `thumbWebpB64`.
+**Privacy model:** Sender fetches the preview; receivers only see data that travelled with the message. Receivers NEVER make an HTTP request to RENDER a card. The one exception is tapping play on an inline video (below) — an explicit gesture, same trust as clicking through.
 
-**Layout:**
-- `maxWidth: 400`, `HollowPressable` wrapper (tappable).
-- Container: elevated background, `radiusMd` corners, accent 3px left border, border on other sides.
-- Padding: `HollowSpacing.sm` all sides.
-- Row:
-  - Thumbnail (80x80, `radiusSm` clip, `BoxFit.cover`): decoded from base64 WebP. Returns `SizedBox.shrink()` if no thumbnail or decode fails. Uses `gaplessPlayback: true`.
-  - SizedBox(sm)
-  - Flexible Column:
-    - Header line: "Site Name . domain" or just "domain" (caption, secondary, ellipsized)
-    - Title (body, w600, primary, maxLines 2, ellipsized)
-    - Description (caption, secondary, height 1.3, maxLines 3, ellipsized)
+**Two layouts, chosen by the sender via `preview.kind` (issue #45):**
+
+*Compact* (`kind == null`) — the original row. 80x80 thumb left, title maxLines 2, description maxLines 3.
+
+*Large* (`kind == "large"`) — image full-width on top at the sender's `thumbW/thumbH` aspect (clamped 0.6–2.4), then header, then the **author** line as heading when present (falling back to title), then description at **maxLines 6** because a post's body is the point of the card. Emitted by the social adapters AND by any page that declares a big card — see `rust_networking.md` § link_preview.rs.
+
+Both layouts always show the header line ("Site Name · domain"), so a card sourced from a post still states where a tap goes.
+
+**Inline video (issue #45):**
+- `isDirectPlayableVideo(url)` (top-level, exported for tests) gates it: scheme must be http(s) AND the path must end in `.mp4/.webm/.m4v/.mov`. True → inline play; false → external-open glyph. This is what separates X (FxEmbed returns a real mp4) from YouTube (no direct URL exists — signed DASH segments).
+- State machine mirrors `VideoMessageBubble`: poster → preparing → playing, `currentlyPlayingVideoProvider` for one-video-at-a-time, `currentlyPlayingAudioProvider` stand-down, `VisibilityDetector` pause on scroll-away, pause-then-null-then-dispose.
+- Reuses `InlineVideoPlayer` from `video_message_bubble.dart` (un-privatised for this; `onFullscreen` is optional and cards pass null — the fullscreen viewer takes a disk path).
+- **The whole poster is the tap target**, `HitTestBehavior.opaque`, so it swallows the tap before the card's open-in-browser handler sees it. The glyph is decoration. A small centred button meant missing it threw you out to the browser.
+- Card taps are inert while playing. A failed `initialize()` falls back to opening the browser rather than leaving a spinner.
 
 **Tap handler:** Opens the URL in the default browser via `launchUrl(uri, mode: externalApplication)`.
 

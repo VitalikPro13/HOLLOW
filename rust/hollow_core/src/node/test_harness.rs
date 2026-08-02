@@ -10311,3 +10311,289 @@ async fn sframe_heal_escalation_authority_removes_and_readds_peer() {
     drop(o);
     drop(b);
 }
+
+/// Issue #45 — a link preview whose fetch finished AFTER the send still lands
+/// on the message, everywhere the message went.
+///
+/// The regression this locks down is the whole complaint: the compose box
+/// debounces 600 ms before fetching, so anyone who pastes a URL and sends
+/// immediately used to get no card at all. The fetch was always still
+/// running; nothing was listening for it.
+///
+/// What must hold once the card lands:
+///  * the recipient's row shows it,
+///  * OUR OWN other device's row shows it (the fan-out reaches siblings),
+///  * the row still VERIFIES — the attach re-signs, and a preview that broke
+///    the signature would stop the message replicating through signed sync,
+///  * `edited_at` stays NULL. An attach is not an edit, and a bubble must not
+///    sprout "(edited)" because a fetch was slow.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn late_link_preview_lands_on_recipient_and_sibling_without_marking_edited() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    // M = us, two devices B (sending) + C (the phone). A = the friend.
+    const A_MASTER: u8 = 140;
+    const M_MASTER: u8 = 141;
+    const B_DEV: u8 = 142;
+    const C_DEV: u8 = 143;
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
+    let m_master = NativeKeypair::from_secret_bytes(&seed_bytes(M_MASTER)).peer_id();
+    let b_dev = NativeKeypair::from_secret_bytes(&seed_bytes(B_DEV)).peer_id();
+    let c_dev = NativeKeypair::from_secret_bytes(&seed_bytes(C_DEV)).peer_id();
+
+    super::resolver::seed_self(&m_master, &[b_dev.clone(), c_dev.clone()]);
+    super::resolver::update_many(&m_master, [b_dev.as_str(), c_dev.as_str()]);
+
+    let mut a = spawn_node_with_friends(&relay, A_MASTER, A_MASTER, &[&m_master]).await;
+    sleep_ms(1200).await;
+    let mut b = spawn_node_with_friends(&relay, M_MASTER, B_DEV, &[&a_master]).await;
+    sleep_ms(1200).await;
+    let mut c = spawn_node_with_friends(&relay, M_MASTER, C_DEV, &[&a_master]).await;
+    sleep_ms(5000).await;
+    drain_events(&mut a);
+    drain_events(&mut b);
+    drain_events(&mut c);
+
+    // B sends with NO preview — the fetch is still in flight at this point.
+    const MID: &str = "lp-late-1";
+    b.cmd_tx
+        .send(NodeCommand::SendMessage {
+            peer_id: a_master.clone(),
+            text: "look at this https://example.com/post".to_string(),
+            message_id: MID.to_string(),
+            reply_to_mid: None,
+            link_preview: None,
+        })
+        .await
+        .unwrap();
+    let delivered = wait_event(&mut a, std::time::Duration::from_secs(10), |ev| {
+        matches!(ev, NetworkEvent::MessageReceived { message_id, .. } if message_id == MID)
+    })
+    .await;
+    assert!(delivered, "the plain message must reach the friend first");
+    sleep_ms(500).await;
+
+    // Nobody has a card yet.
+    assert!(
+        a.store().get_dm_message_sig_row(MID).and_then(|r| r.link_preview).is_none(),
+        "the friend's row must start with no card"
+    );
+
+    // ...and now the fetch lands. This is what the compose pane calls.
+    let preview = crate::node::LinkPreviewRef {
+        url: "https://example.com/post".to_string(),
+        title: "A Post".to_string(),
+        description: "body text".to_string(),
+        domain: "example.com".to_string(),
+        site_name: "Example".to_string(),
+        thumb_webp_b64: Some("QUJD".to_string()),
+        thumb_w: Some(800),
+        thumb_h: Some(450),
+        rich: crate::node::RichCard {
+            kind: Some("large".to_string()),
+            author: Some("Jane (@jane)".to_string()),
+            ..Default::default()
+        }
+        .into_opt(),
+    };
+    b.cmd_tx
+        .send(NodeCommand::AttachDmLinkPreview {
+            peer_id: a_master.clone(),
+            message_id: MID.to_string(),
+            preview: Some(Box::new(preview.clone())),
+        })
+        .await
+        .unwrap();
+    sleep_ms(2500).await;
+
+    // Every copy of the row: sender, recipient, and our own second device.
+    for (name, node) in [("sender B", &b), ("friend A", &a), ("sibling C", &c)] {
+        let row = node
+            .store()
+            .get_dm_message_sig_row(MID)
+            .unwrap_or_else(|| panic!("{name} must have the message row"));
+        let card = row
+            .link_preview
+            .as_ref()
+            .unwrap_or_else(|| panic!("{name} must have the late card"));
+        assert_eq!(card.title, "A Post", "{name} card title");
+        assert_eq!(
+            card.rich.as_ref().and_then(|r| r.author.as_deref()),
+            Some("Jane (@jane)"),
+            "{name} must carry the rich author line"
+        );
+        assert!(
+            row.edited_at.is_none(),
+            "{name}: a late card must NOT mark the message edited"
+        );
+
+        // The signature must cover the card that is now on the row.
+        let digest = crate::node::crypto_handler::link_preview_digest(card);
+        let extras = crate::node::crypto_handler::SignedExtras {
+            mid: Some(MID),
+            reply_to: row.reply_to_mid.as_deref(),
+            file_id: row.file_id.as_deref(),
+            order_us: row.order_us,
+            lp_digest: Some(&digest),
+        };
+        // A DM signature binds the RECIPIENT's master as context, and every
+        // side reconstructs that same value — the sender from who it sent to,
+        // the recipient from its own identity, a sibling from the row's convo
+        // peer. All three must agree or the card breaks the row.
+        let ctx = a_master.clone();
+        assert!(
+            crate::node::crypto_handler::verify_message_signature_v2(
+                &m_master,
+                row.signature.as_deref(),
+                row.public_key.as_deref(),
+                "dm",
+                &ctx,
+                row.edited_at.unwrap_or(row.timestamp),
+                &extras,
+                &row.text,
+                &mut crate::node::crypto_handler::PkCache::new(),
+            ),
+            "{name}: the row must still verify against the re-signed payload"
+        );
+    }
+
+    // A non-author cannot paste a card onto someone else's message: A tries to
+    // set one on the message M sent, and every copy must ignore it.
+    let forged = crate::node::LinkPreviewRef {
+        title: "Free crypto, click here".to_string(),
+        ..preview.clone()
+    };
+    a.cmd_tx
+        .send(NodeCommand::AttachDmLinkPreview {
+            peer_id: m_master.clone(),
+            message_id: MID.to_string(),
+            preview: Some(Box::new(forged)),
+        })
+        .await
+        .unwrap();
+    sleep_ms(1500).await;
+    for (name, node) in [("sender B", &b), ("friend A", &a), ("sibling C", &c)] {
+        let title = node
+            .store()
+            .get_dm_message_sig_row(MID)
+            .and_then(|r| r.link_preview)
+            .map(|c| c.title)
+            .unwrap_or_default();
+        assert_eq!(
+            title, "A Post",
+            "{name}: a non-author's attach must be refused, card unchanged"
+        );
+    }
+
+    drop(a);
+    drop(b);
+    drop(c);
+}
+
+/// Issue #45 — attaching `None` clears the card and re-signs, which is what an
+/// edit that removes the URL does. The cleared row must still verify, or the
+/// message would quietly stop replicating through signed backfill.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn clearing_a_link_preview_re_signs_and_propagates() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    const A_MASTER: u8 = 150;
+    const M_MASTER: u8 = 151;
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
+    let m_master = NativeKeypair::from_secret_bytes(&seed_bytes(M_MASTER)).peer_id();
+
+    let mut a = spawn_node_with_friends(&relay, A_MASTER, A_MASTER, &[&m_master]).await;
+    sleep_ms(1200).await;
+    let mut b = spawn_node_with_friends(&relay, M_MASTER, M_MASTER, &[&a_master]).await;
+    sleep_ms(4000).await;
+    drain_events(&mut a);
+    drain_events(&mut b);
+
+    const MID: &str = "lp-clear-1";
+    let preview = crate::node::LinkPreviewRef {
+        url: "https://example.com/x".to_string(),
+        title: "Original".to_string(),
+        description: String::new(),
+        domain: "example.com".to_string(),
+        site_name: String::new(),
+        thumb_webp_b64: None,
+        thumb_w: None,
+        thumb_h: None,
+        rich: None,
+    };
+    // Sent WITH a card this time.
+    b.cmd_tx
+        .send(NodeCommand::SendMessage {
+            peer_id: a_master.clone(),
+            text: "https://example.com/x".to_string(),
+            message_id: MID.to_string(),
+            reply_to_mid: None,
+            link_preview: Some(preview),
+        })
+        .await
+        .unwrap();
+    let delivered = wait_event(&mut a, std::time::Duration::from_secs(10), |ev| {
+        matches!(ev, NetworkEvent::MessageReceived { message_id, .. } if message_id == MID)
+    })
+    .await;
+    assert!(delivered, "the carded message must arrive");
+    sleep_ms(400).await;
+    assert!(
+        a.store().get_dm_message_sig_row(MID).and_then(|r| r.link_preview).is_some(),
+        "precondition: the friend has the original card"
+    );
+
+    // The author edits the URL out, so the card is cleared.
+    b.cmd_tx
+        .send(NodeCommand::AttachDmLinkPreview {
+            peer_id: a_master.clone(),
+            message_id: MID.to_string(),
+            preview: None,
+        })
+        .await
+        .unwrap();
+    sleep_ms(2000).await;
+
+    for (name, node) in [("sender", &b), ("recipient", &a)] {
+        let row = node
+            .store()
+            .get_dm_message_sig_row(MID)
+            .unwrap_or_else(|| panic!("{name} row"));
+        assert!(row.link_preview.is_none(), "{name}: the card must be gone");
+        assert!(row.edited_at.is_none(), "{name}: clearing is still not an edit");
+
+        let extras = crate::node::crypto_handler::SignedExtras {
+            mid: Some(MID),
+            reply_to: row.reply_to_mid.as_deref(),
+            file_id: row.file_id.as_deref(),
+            order_us: row.order_us,
+            lp_digest: None,
+        };
+        let ctx = a_master.clone(); // the recipient's master, on both sides
+        assert!(
+            crate::node::crypto_handler::verify_message_signature_v2(
+                &m_master,
+                row.signature.as_deref(),
+                row.public_key.as_deref(),
+                "dm",
+                &ctx,
+                row.edited_at.unwrap_or(row.timestamp),
+                &extras,
+                &row.text,
+                &mut crate::node::crypto_handler::PkCache::new(),
+            ),
+            "{name}: the cleared row must still verify"
+        );
+    }
+
+    drop(a);
+    drop(b);
+}

@@ -890,6 +890,20 @@ class EventStreamNotifier extends Notifier<bool> {
               publicKey: publicKey,
             );
 
+      // A link preview landed on a message that was sent before its fetch
+      // finished (issue #45). Deliberately NOT routed through applyEdit: the
+      // text is unchanged and editedAt stays null, so no "(edited)" badge.
+      case NetworkEvent_ChannelLinkPreviewUpdated(
+            :final serverId, :final channelId, :final messageId, :final preview):
+        debugPrint('[HOLLOW] Link preview for $messageId in $serverId/$channelId');
+        ref.read(channelChatProvider.notifier).applyLinkPreview(
+            serverId, channelId, messageId, preview);
+
+      case NetworkEvent_DmLinkPreviewUpdated(
+            :final peerId, :final messageId, :final preview):
+        debugPrint('[HOLLOW] Link preview for DM $messageId from $peerId');
+        ref.read(chatProvider.notifier).applyLinkPreview(peerId, messageId, preview);
+
       case NetworkEvent_ChannelMessageDeleted(
             :final serverId, :final channelId, :final messageId, :final deletedAt):
         debugPrint('[HOLLOW] Channel message deleted: $messageId in $serverId/$channelId');

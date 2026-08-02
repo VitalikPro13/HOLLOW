@@ -58,6 +58,8 @@ class ChannelChatMessage {
     Map<String, List<String>>? reactions,
     FileAttachment? fileAttachment,
     network_api.LinkPreviewRef? linkPreview,
+    /// Drop the card entirely — see the DM twin in [ChatMessage.copyWith].
+    bool clearLinkPreview = false,
     String? signature,
     String? publicKey,
   }) {
@@ -74,7 +76,7 @@ class ChannelChatMessage {
       replyToMid: replyToMid,
       reactions: reactions ?? this.reactions,
       fileAttachment: fileAttachment ?? this.fileAttachment,
-      linkPreview: linkPreview ?? this.linkPreview,
+      linkPreview: clearLinkPreview ? null : (linkPreview ?? this.linkPreview),
       archiveSignatureValid: archiveSignatureValid,
     );
   }

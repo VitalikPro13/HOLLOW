@@ -1784,6 +1784,24 @@ async fn run_event_loop(
                             &db_path, &db_passphrase,
                         ).await;
                     }
+                    NodeCommand::AttachChannelLinkPreview { server_id, channel_id, message_id, preview } => {
+                        message_ops::handle_attach_channel_link_preview(
+                            &mut olm, &crypto_store, &mut mls, &server_states, &event_tx,
+                            &ws_cmd_tx, &ws_room_peers,
+                            &bundle_keypair, &pub_key_b64, &local_peer_str,
+                            server_id, channel_id, message_id, preview,
+                            &db_path, &db_passphrase,
+                        ).await;
+                    }
+                    NodeCommand::AttachDmLinkPreview { peer_id: peer_id_str, message_id, preview } => {
+                        message_ops::handle_attach_dm_link_preview(
+                            &mut olm, &crypto_store, &event_tx, &ws_cmd_tx, &ws_room_peers,
+                            &mut pending_messages, &mut key_request_in_flight,
+                            &bundle_keypair, &pub_key_b64, &local_peer_str, &device_keypair, &device_peer_id,
+                            peer_id_str, message_id, preview,
+                            &db_path, &db_passphrase,
+                        ).await;
+                    }
 
                     NodeCommand::DeleteChannelMessage { server_id, channel_id, message_id } => {
                         message_ops::handle_delete_channel_message(
@@ -6968,6 +6986,16 @@ async fn handle_incoming_request(
                         }
                     }
                 }
+                Ok(MessageEnvelope::LinkPreviewSet { mid, lp, ts, sig, pk, sid, cid }) => {
+                    hollow_log!("[HOLLOW-LP] Received link preview for message {mid} from {peer_str}");
+                    message_ops::handle_envelope_link_preview_set(
+                        event_tx,
+                        sid.as_deref().and_then(|s| server_states.get(s)),
+                        &peer_str, master_peer_str,
+                        mid, lp, ts, sig, pk, sid, cid,
+                        &db_path, &db_passphrase,
+                    ).await;
+                }
                 Ok(MessageEnvelope::DeleteMessage { mid, ts, sig, pk, sid, cid }) => {
                     hollow_log!("[HOLLOW-DELETE] Received delete for message {mid} from {peer_str}");
 
@@ -9842,6 +9870,14 @@ async fn handle_incoming_request(
                                     db_path, db_passphrase,
                                 ).await;
                             }
+                            MessageEnvelope::LinkPreviewSet { mid, lp, ts, sig, pk, sid, cid } => {
+                                let mod_state = sid.as_deref().and_then(|s| server_states.get(s));
+                                message_ops::handle_envelope_link_preview_set(
+                                    event_tx, mod_state, &sender_master, &local_peer,
+                                    mid, lp, ts, sig, pk, sid, cid,
+                                    db_path, db_passphrase,
+                                ).await;
+                            }
                             MessageEnvelope::DeleteMessage { mid, ts, sig, pk, sid, cid } => {
                                 message_ops::handle_envelope_delete_message(
                                     event_tx, bundle_keypair, &sender_master,
@@ -11430,6 +11466,17 @@ async fn handle_incoming_request(
             message_ops::handle_envelope_edit_message(
                 &event_tx, &bundle_keypair, server_states.get(&server_id), &sender_master,
                 mid, text, ts, sig, pk,
+                Some(server_id), Some(channel_id),
+                &db_path, &db_passphrase,
+            ).await;
+        }
+
+        HavenMessage::PublicLinkPreviewSet { server_id, channel_id, mid, lp, ts, sig, pk } => {
+            if peer_str == local_peer_str { return; }
+            let sender_master = super::resolver::resolve(peer_str);
+            message_ops::handle_envelope_link_preview_set(
+                &event_tx, server_states.get(&server_id), &sender_master, local_peer_str,
+                mid, lp, ts, sig, pk,
                 Some(server_id), Some(channel_id),
                 &db_path, &db_passphrase,
             ).await;

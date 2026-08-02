@@ -727,6 +727,13 @@ fn try_decrypt_dm(
                 Ok(MessageEnvelope::EditMessage { mid, text: new_text, ts, sig, pk, .. }) => {
                     handle_edit_message(&convo, local_master, mid, new_text, ts, sig, pk, db_path, db_passphrase)
                 }
+                Ok(MessageEnvelope::LinkPreviewSet { mid, lp, ts, sig, pk, sid, .. })
+                    if sid.is_none() =>
+                {
+                    handle_link_preview_set(
+                        &convo, local_master, mid, lp, ts, sig, pk, db_path, db_passphrase,
+                    )
+                }
                 Ok(MessageEnvelope::FileHeader { inner }) => {
                     handle_file_header(&convo, local_master, *inner, db_path, db_passphrase)
                 }
@@ -953,6 +960,56 @@ fn persist_direct_message(
             }
         }
     }
+}
+
+/// Apply a late link preview (issue #45) while the app is backgrounded.
+///
+/// The fetch node has to handle this or the card is lost for good: preview
+/// bytes never ride sync backfill (only `lp_digest` does), so a `lp_set` this
+/// node consumed and dropped would never come back. Returns `None` — a card
+/// landing on a message the user already has is not a new notification.
+#[allow(clippy::too_many_arguments)]
+fn handle_link_preview_set(
+    convo: &str,
+    local_master: &str,
+    mid: String,
+    lp: Option<Box<crate::node::LinkPreviewRef>>,
+    ts: i64,
+    sig: Option<String>,
+    pk: Option<String>,
+    db_path: &str,
+    db_passphrase: &str,
+) -> Option<FetchedDm> {
+    let store = crate::storage::MessageStore::open(db_path, db_passphrase).ok()?;
+    // Only the other party's own message can gain a card here. `is_mine`
+    // true would be our own row, which this node never attaches to.
+    if store.get_dm_message_is_mine(&mid) != Some(false) {
+        return None;
+    }
+    let row = store.get_dm_message_sig_row(&mid)?;
+
+    // Same gate as the live path: verify over OUR row's text and extras with
+    // the NEW digest, and reject rather than log.
+    let lp_digest = lp.as_deref().map(crate::node::crypto_handler::link_preview_digest);
+    let extras = crate::node::crypto_handler::SignedExtras {
+        mid: Some(&mid),
+        reply_to: row.reply_to_mid.as_deref(),
+        file_id: row.file_id.as_deref(),
+        order_us: row.order_us,
+        lp_digest: lp_digest.as_deref(),
+    };
+    if fetch_dm_sig_rejected(
+        convo, local_master, ts, &row.text, sig.as_deref(), pk.as_deref(), &extras,
+    ) {
+        return None;
+    }
+
+    let lp_json = lp.as_deref().and_then(|c| serde_json::to_string(c).ok());
+    let applied = store
+        .update_link_preview_and_sig(&mid, lp_json.as_deref(), sig.as_deref(), pk.as_deref())
+        .unwrap_or(false);
+    hollow_log!("[HOLLOW-FETCH] link preview mid={mid} applied={applied}");
+    None
 }
 
 /// Handle a decrypted EditMessage envelope.

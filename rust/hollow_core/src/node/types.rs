@@ -198,6 +198,13 @@ pub(crate) enum NetworkEvent {
     // -- Message editing events (Phase 3.5) --
     ChannelMessageEdited { server_id: String, channel_id: String, message_id: String, new_text: String, edited_at: i64, signature: Option<String>, public_key: Option<String> },
     DmMessageEdited { peer_id: String, message_id: String, new_text: String, edited_at: i64, signature: Option<String>, public_key: Option<String> },
+    // -- Late link-preview events (issue #45) --
+    //
+    // A card landed on a message that is already on screen. Deliberately NOT
+    // an edit event: `edited_at` is untouched, so the bubble must not grow an
+    // "(edited)" badge just because its preview arrived late.
+    ChannelLinkPreviewUpdated { server_id: String, channel_id: String, message_id: String, preview: Option<LinkPreviewRef> },
+    DmLinkPreviewUpdated { peer_id: String, message_id: String, preview: Option<LinkPreviewRef> },
     // -- Message deletion events (Phase 3.5) --
     ChannelMessageDeleted { server_id: String, channel_id: String, message_id: String, deleted_at: i64 },
     DmMessageDeleted { peer_id: String, message_id: String, deleted_at: i64 },
@@ -732,6 +739,14 @@ pub(crate) enum NodeCommand {
     // -- Message editing (Phase 3.5) --
     EditChannelMessage { server_id: String, channel_id: String, message_id: String, new_text: String },
     EditDmMessage { peer_id: String, message_id: String, new_text: String },
+    // -- Late link previews (issue #45) --
+    //
+    // Attach a card to a message ALREADY sent, re-signing the row rather than
+    // editing it. `preview: None` clears an existing card. Emitted when a
+    // background OG fetch outlives the send that raced it, and when an edit
+    // changes or removes the message's URL.
+    AttachChannelLinkPreview { server_id: String, channel_id: String, message_id: String, preview: Option<Box<LinkPreviewRef>> },
+    AttachDmLinkPreview { peer_id: String, message_id: String, preview: Option<Box<LinkPreviewRef>> },
     // -- Message deletion/hiding (Phase 3.5) --
     DeleteChannelMessage { server_id: String, channel_id: String, message_id: String },
     DeleteDmMessage { peer_id: String, message_id: String },
@@ -989,6 +1004,8 @@ impl NodeCommand {
             Self::UpdateProfile { .. } => "UpdateProfile",
             Self::EditChannelMessage { .. } => "EditChannelMessage",
             Self::EditDmMessage { .. } => "EditDmMessage",
+            Self::AttachChannelLinkPreview { .. } => "AttachChannelLinkPreview",
+            Self::AttachDmLinkPreview { .. } => "AttachDmLinkPreview",
             Self::DeleteChannelMessage { .. } => "DeleteChannelMessage",
             Self::DeleteDmMessage { .. } => "DeleteDmMessage",
             Self::AddChannelReaction { .. } => "AddChannelReaction",
@@ -1631,6 +1648,25 @@ pub(crate) enum HavenMessage {
         channel_id: String,
         mid: String,
         text: String,
+        ts: i64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sig: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pk: Option<String>,
+    },
+
+    /// Attach (or clear) a link preview on an existing PUBLIC channel message.
+    /// Plaintext twin of `MessageEnvelope::LinkPreviewSet` — see that variant
+    /// for why this is not an edit. Issue #45.
+    #[serde(rename = "pub_lp_set")]
+    PublicLinkPreviewSet {
+        server_id: String,
+        channel_id: String,
+        mid: String,
+        /// `None` clears the card (an edit removed the URL).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lp: Option<Box<LinkPreviewRef>>,
+        /// The ORIGINAL message timestamp, not "now".
         ts: i64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sig: Option<String>,
@@ -2404,6 +2440,41 @@ pub(crate) enum MessageEnvelope {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cid: Option<String>,
     },
+    /// Attach (or clear) a link preview on an existing message, WITHOUT
+    /// touching its text and WITHOUT stamping it edited (issue #45).
+    ///
+    /// The compose box fetches OG metadata in the background while the user
+    /// types; sending before that lands used to throw the result away. Now
+    /// the fetch finishes and the author emits this, re-signed over the SAME
+    /// text / ts / reply_to / file_id / order_us with the new `lp_digest`, so
+    /// the row keeps verifying — including through signed sync backfill,
+    /// which carries the digest.
+    ///
+    /// `ts` is the ORIGINAL message timestamp, never "now": this is not an
+    /// edit, `edited_at` stays untouched, and no "(edited)" badge appears
+    /// just because a preview arrived a second late.
+    #[serde(rename = "lp_set")]
+    LinkPreviewSet {
+        /// The message_id of the message the card belongs to.
+        mid: String,
+        /// The card. `None` CLEARS it (used when an edit removes the URL).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lp: Option<Box<LinkPreviewRef>>,
+        /// The original message's timestamp — what the re-signature binds.
+        ts: i64,
+        /// Ed25519 signature over the re-signed message payload.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sig: Option<String>,
+        /// Author's Ed25519 public key.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pk: Option<String>,
+        /// Server ID (present for channel messages, absent for DMs).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sid: Option<String>,
+        /// Channel ID (present for channel messages, absent for DMs).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cid: Option<String>,
+    },
     /// Delete (hide) an existing message (channel or DM).
     #[serde(rename = "delete")]
     DeleteMessage {
@@ -3153,6 +3224,70 @@ pub struct LinkPreviewRef {
     /// Thumbnail height after resize.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thumb_h: Option<u32>,
+    /// Social-post extras (issue #45), absent for a plain OpenGraph card.
+    ///
+    /// BOXED ON PURPOSE, and this is not a micro-optimization. A
+    /// `LinkPreviewRef` sits BY VALUE inside `ChannelMessagePayload`,
+    /// `DirectMessagePayload` and `HavenMessage::PublicChannelMessage`, all of
+    /// which live in the swarm event loop's async state machines. Adding the
+    /// five fields inline grew every one of those frames by ~80 bytes and
+    /// overflowed the 2 MB tokio worker stack in debug builds — 44 of the 74
+    /// multi-node harness tests died with STATUS_STACK_OVERFLOW. Behind one
+    /// pointer the same data costs 8 bytes. Anything added here in future
+    /// belongs in [`RichCard`], never as another inline field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rich: Option<Box<RichCard>>,
+}
+
+/// The extra fields a social-post card carries. See [`LinkPreviewRef::rich`]
+/// for why this is a separate boxed struct rather than five more fields.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct RichCard {
+    /// Card layout the SENDER chose: `Some("large")` for a social post
+    /// (image on top, room for the full post text), `None` for the compact
+    /// row. Adapter-enriched previews go large; plain OpenGraph stays compact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// Post author line, e.g. `"Jane Doe (@jane)"`. Social adapters only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
+    /// Where this post's video lives. NEVER an iframe or a JS embed.
+    ///
+    /// Two cases, and the receiver tells them apart by looking at the URL
+    /// (`isDirectPlayableVideo` on the Dart side):
+    ///  * a DIRECT `.mp4`/`.webm` file, which an adapter found — the card can
+    ///    play it inline on an explicit tap;
+    ///  * the media PAGE itself (a YouTube watch URL, an Instagram reel),
+    ///    which has no direct file to play — the card shows the same
+    ///    affordance but opens the page instead.
+    ///
+    /// Either way nothing is fetched to RENDER the card, and nothing ever
+    /// autoplays.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video_url: Option<String>,
+    /// Video width, for the card's aspect ratio.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video_w: Option<u32>,
+    /// Video height, for the card's aspect ratio.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video_h: Option<u32>,
+}
+
+impl RichCard {
+    /// True when nothing was actually enriched — such a card is stored as
+    /// `None` so it hashes (and serializes) identically to a plain preview.
+    pub fn is_empty(&self) -> bool {
+        self.kind.is_none()
+            && self.author.is_none()
+            && self.video_url.is_none()
+            && self.video_w.is_none()
+            && self.video_h.is_none()
+    }
+
+    /// `Some(boxed)` unless every field is absent.
+    pub fn into_opt(self) -> Option<Box<Self>> {
+        (!self.is_empty()).then(|| Box::new(self))
+    }
 }
 
 /// A single DM in a DM sync batch.
