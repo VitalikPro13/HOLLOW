@@ -16,6 +16,7 @@ import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/chat_provider.dart' show generateMessageId;
 import 'package:hollow/src/core/providers/connection_status_provider.dart';
 import 'package:hollow/src/core/providers/download_manager_provider.dart';
+import 'package:hollow/src/core/providers/event_provider.dart';
 import 'package:hollow/src/core/providers/file_transfer_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/layout_provider.dart';
@@ -1207,6 +1208,8 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
       }
       return;
     }
+    // Manual pull: lift the auto-download-gate pin so real progress renders.
+    ref.read(fileTransferProvider.notifier).clearDeclined(attachment.fileId);
     try {
       if (mounted) {
         HollowToast.show(context, 'Requesting file from peer...', type: HollowToastType.info);
@@ -2362,6 +2365,23 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
         _vaultDownloadAndSaveVideo(attachment);
       } else if (attachment.diskPath != null) {
         _saveFile(attachment);
+      } else if (attachment.shareRootHash != null &&
+          attachment.shareKeyHex != null) {
+        // Share-backed (>34 MB): rejoin the share swarm via the persisted
+        // ref — a direct FileRequest response carries no share_ref and our
+        // own size cap rejects it (issue #41).
+        ref.read(eventStreamProvider.notifier).startManualShareDownload(
+              fileId: attachment.fileId,
+              rootHash: attachment.shareRootHash!,
+              keyHex: attachment.shareKeyHex!,
+              serverId: widget.serverId,
+              sequential: false,
+            ).catchError((e) {
+          if (context.mounted) {
+            HollowToast.show(context, 'Download failed: $e',
+                type: HollowToastType.error);
+          }
+        });
       } else {
         // For <6 member servers (full replication), request file from
         // the sender via P2P stream. For 6+ members, use vault download.

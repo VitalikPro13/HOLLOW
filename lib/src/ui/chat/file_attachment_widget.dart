@@ -3,8 +3,14 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/models/file_attachment.dart';
+import 'package:hollow/src/core/providers/event_provider.dart';
 import 'package:hollow/src/core/providers/file_transfer_provider.dart';
+import 'package:hollow/src/core/providers/server_provider.dart';
+import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
+import 'package:hollow/src/rust/api/network.dart' as network_api;
+import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 import 'package:hollow/src/ui/components/animated_gif_image.dart';
+import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
@@ -62,12 +68,18 @@ class FileAttachmentWidget extends ConsumerWidget {
       return _buildExpiredCard(hollow);
     }
 
+    // Manual download entry (issue #41): the same flow as the hover-bar
+    // Download button — share-backed files rejoin their share swarm, regular
+    // files go out as a FileRequest to a holder. Self-contained: the file's
+    // own metadata row carries the conversation context.
+    void onDownload() => _startManualDownload(context, ref);
+
     // Share-backed file with no seeders and not yet downloaded.
     if (transfer?.shareRootHash != null &&
         !isComplete &&
         (transfer?.seeders ?? -1) == 0 &&
         (transfer?.chunksReceived ?? 0) == 0) {
-      return _buildUnavailableCard(hollow);
+      return _buildUnavailableCard(hollow, onDownload);
     }
 
     // Phase 6.75: Video preview takes priority over generic file rendering.
@@ -96,9 +108,76 @@ class FileAttachmentWidget extends ConsumerWidget {
     }
 
     if (attachment.isImage) {
-      return _buildImagePreview(context, hollow, isComplete, diskPath, isDownloading, progress, bytesReceived, vaultPhase);
+      return _buildImagePreview(context, hollow, isComplete, diskPath, isDownloading, progress, bytesReceived, vaultPhase, onDownload);
     }
-    return _buildFileCard(hollow, isComplete, isDownloading, progress, bytesReceived, vaultPhase);
+    return _buildFileCard(hollow, isComplete, isDownloading, progress, bytesReceived, vaultPhase, onDownload);
+  }
+
+  /// Start a manual download for this attachment — the pressable placeholder
+  /// twin of the hover-bar Download button (issue #41). Routes by what the
+  /// file actually is:
+  ///  - share-backed (>34 MB): rejoin the share swarm via the PERSISTED share
+  ///    ref (a direct FileRequest response would be rejected by our own size
+  ///    cap and cannot resume a share);
+  ///  - guest public channel: receipt-gated RequestPublicFile;
+  ///  - everything else: FileRequest to the DM peer / file sender (Rust
+  ///    resolves devices and reroutes to another holder when offline).
+  Future<void> _startManualDownload(BuildContext context, WidgetRef ref) async {
+    final transfer = ref.read(fileTransferProvider)[attachment.fileId];
+    if (transfer?.isDownloading == true) {
+      HollowToast.show(context, 'File is already downloading...',
+          type: HollowToastType.info);
+      return;
+    }
+    ref.read(fileTransferProvider.notifier).clearDeclined(attachment.fileId);
+    try {
+      final info =
+          await storage_api.getFileMetadata(fileId: attachment.fileId);
+      final shareRoot = attachment.shareRootHash ??
+          info?.shareRootHash ??
+          transfer?.shareRootHash;
+      final shareKey = attachment.shareKeyHex ?? info?.shareKeyHex;
+      final contextType = info?.contextType ?? '';
+      final contextId = info?.contextId ?? '';
+      final isChannel = contextType == 'channel' && contextId.contains(':');
+      final serverId = isChannel ? contextId.split(':').first : '';
+
+      if (shareRoot != null && shareKey != null) {
+        final isVideo =
+            _videoExtensions.contains(attachment.fileExt.toLowerCase());
+        await ref.read(eventStreamProvider.notifier).startManualShareDownload(
+              fileId: attachment.fileId,
+              rootHash: shareRoot,
+              keyHex: shareKey,
+              serverId: serverId,
+              sequential: isVideo,
+            );
+      } else if (isChannel &&
+          !ref.read(serverListProvider).containsKey(serverId)) {
+        // Not a member of this server — guest viewing a public channel.
+        await crdt_api.requestPublicFile(
+          serverId: serverId,
+          fileId: attachment.fileId,
+          peerHint: info?.senderId,
+        );
+      } else {
+        final target = contextType == 'dm' ? contextId : info?.senderId;
+        if (target == null || target.isEmpty) {
+          throw Exception('no known holder for this file');
+        }
+        await network_api.requestFileFromPeer(
+            fileId: attachment.fileId, peerId: target, chunks: []);
+      }
+      if (context.mounted) {
+        HollowToast.show(context, 'Requesting file...',
+            type: HollowToastType.info);
+      }
+    } catch (e) {
+      if (context.mounted) {
+        HollowToast.show(context, 'Download failed: $e',
+            type: HollowToastType.error);
+      }
+    }
   }
 
   /// True when this attachment should be rendered as a video bubble.
@@ -164,55 +243,60 @@ class FileAttachmentWidget extends ConsumerWidget {
     );
   }
 
-  Widget _buildUnavailableCard(HollowTheme hollow) {
-    return Container(
-      constraints: const BoxConstraints(maxWidth: 280),
-      clipBehavior: Clip.antiAlias,
-      decoration: BoxDecoration(
-        color: hollow.surface,
-        borderRadius: BorderRadius.circular(HollowSpacing.sm),
-        border: Border.all(color: hollow.border),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.all(HollowSpacing.md),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(LucideIcons.cloudOff, size: 24, color: hollow.textSecondary),
-            const SizedBox(width: HollowSpacing.md),
-            Flexible(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text(
-                    attachment.fileName,
-                    style: HollowTypography.body.copyWith(
-                      color: hollow.textSecondary,
-                      fontSize: 13,
+  Widget _buildUnavailableCard(HollowTheme hollow, VoidCallback onDownload) {
+    return HollowPressable(
+      onTap: onDownload,
+      semanticLabel: 'Retry download of ${attachment.fileName}',
+      borderRadius: BorderRadius.circular(HollowSpacing.sm),
+      child: Container(
+        constraints: const BoxConstraints(maxWidth: 280),
+        clipBehavior: Clip.antiAlias,
+        decoration: BoxDecoration(
+          color: hollow.surface,
+          borderRadius: BorderRadius.circular(HollowSpacing.sm),
+          border: Border.all(color: hollow.border),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.all(HollowSpacing.md),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(LucideIcons.cloudOff, size: 24, color: hollow.textSecondary),
+              const SizedBox(width: HollowSpacing.md),
+              Flexible(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      attachment.fileName,
+                      style: HollowTypography.body.copyWith(
+                        color: hollow.textSecondary,
+                        fontSize: 13,
+                      ),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
                     ),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                  const SizedBox(height: HollowSpacing.xxs),
-                  Text(
-                    'No seeders · ${attachment.formattedSize}',
-                    style: HollowTypography.caption.copyWith(
-                      color: hollow.textSecondary,
-                      fontStyle: FontStyle.italic,
+                    const SizedBox(height: HollowSpacing.xxs),
+                    Text(
+                      'No seeders · tap to retry · ${attachment.formattedSize}',
+                      style: HollowTypography.caption.copyWith(
+                        color: hollow.textSecondary,
+                        fontStyle: FontStyle.italic,
+                      ),
                     ),
-                  ),
-                ],
+                  ],
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );
   }
 
   Widget _buildImagePreview(
-      BuildContext context, HollowTheme hollow, bool isComplete, String? diskPath, bool isDownloading, double progress, int bytesReceived, String? vaultPhase) {
+      BuildContext context, HollowTheme hollow, bool isComplete, String? diskPath, bool isDownloading, double progress, int bytesReceived, String? vaultPhase, VoidCallback onDownload) {
     // Calculate display size maintaining aspect ratio.
     const maxWidth = 300.0;
     const maxHeight = 250.0;
@@ -278,11 +362,67 @@ class FileAttachmentWidget extends ConsumerWidget {
     }
 
     // Show placeholder with progress or downloading indicator.
-    return _buildPlaceholder(hollow, displayWidth, displayHeight, isDownloading, progress, bytesReceived, vaultPhase);
+    return _buildPlaceholder(hollow, displayWidth, displayHeight, isDownloading, progress, bytesReceived, vaultPhase, onDownload: onDownload);
   }
 
   Widget _buildPlaceholder(
-      HollowTheme hollow, double width, double height, bool isDownloading, double progress, int bytesReceived, String? vaultPhase) {
+      HollowTheme hollow, double width, double height, bool isDownloading, double progress, int bytesReceived, String? vaultPhase, {VoidCallback? onDownload}) {
+    // Idle (not downloading, no partial progress) + a download hook = the
+    // pressable placeholder (issue #41): image dimensions box with a download
+    // button in it instead of a dead rectangle.
+    if (!isDownloading && !(progress > 0 && progress < 1) && onDownload != null) {
+      return HollowPressable(
+        onTap: onDownload,
+        semanticLabel: 'Download ${attachment.fileName}',
+        borderRadius: BorderRadius.circular(hollow.radiusSm),
+        child: Container(
+          width: width,
+          height: height,
+          decoration: BoxDecoration(
+            color: hollow.surface,
+            borderRadius: BorderRadius.circular(hollow.radiusSm),
+            border: Border.all(color: hollow.border),
+          ),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Container(
+                width: 44,
+                height: 44,
+                decoration: BoxDecoration(
+                  color: hollow.elevated,
+                  shape: BoxShape.circle,
+                  border: Border.all(color: hollow.border),
+                ),
+                child: Icon(LucideIcons.download,
+                    size: 20, color: hollow.textPrimary),
+              ),
+              const SizedBox(height: HollowSpacing.sm),
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  // Media-type hint: image and video previews share this
+                  // placeholder shape, so say which one this is.
+                  Icon(
+                    _isVideoAttachment() ? LucideIcons.video : LucideIcons.image,
+                    size: 12,
+                    color: hollow.textSecondary,
+                  ),
+                  const SizedBox(width: 4),
+                  Text(
+                    attachment.formattedSize,
+                    style: HollowTypography.caption.copyWith(
+                      color: hollow.textSecondary,
+                      fontSize: 10,
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      );
+    }
     return Container(
       width: width,
       height: height,
@@ -358,7 +498,8 @@ class FileAttachmentWidget extends ConsumerWidget {
     return '${(b / (1024 * 1024 * 1024)).toStringAsFixed(1)} GB';
   }
 
-  Widget _buildFileCard(HollowTheme hollow, bool isComplete, bool isDownloading, double progress, int bytesReceived, String? vaultPhase) {
+  Widget _buildFileCard(HollowTheme hollow, bool isComplete, bool isDownloading, double progress, int bytesReceived, String? vaultPhase, VoidCallback onDownload) {
+    final showDownload = !isComplete && !isDownloading && vaultPhase == null;
     return Container(
       constraints: const BoxConstraints(maxWidth: 280),
       clipBehavior: Clip.antiAlias,
@@ -404,7 +545,12 @@ class FileAttachmentWidget extends ConsumerWidget {
                                 ? '${_formatSize(bytesReceived)} / ${attachment.formattedSize}'
                                 : isDownloading
                                     ? 'Downloading... ${attachment.formattedSize}'
-                                    : attachment.formattedSize,
+                                    // The name column ellipsizes, so long
+                                    // filenames hide their extension — repeat
+                                    // it next to the size (issue #41 feedback).
+                                    : attachment.fileExt.isEmpty
+                                        ? attachment.formattedSize
+                                        : '${attachment.formattedSize} · .${attachment.fileExt.toLowerCase()}',
                         style: HollowTypography.caption.copyWith(
                           color: hollow.textSecondary,
                           fontSize: 11,
@@ -413,6 +559,17 @@ class FileAttachmentWidget extends ConsumerWidget {
                     ],
                   ),
                 ),
+                if (showDownload) ...[
+                  const SizedBox(width: HollowSpacing.md),
+                  HollowPressable(
+                    onTap: onDownload,
+                    semanticLabel: 'Download ${attachment.fileName}',
+                    borderRadius: BorderRadius.circular(hollow.radiusSm),
+                    padding: const EdgeInsets.all(HollowSpacing.xs),
+                    child: Icon(LucideIcons.download,
+                        size: 18, color: hollow.textPrimary),
+                  ),
+                ],
               ],
             ),
           ),

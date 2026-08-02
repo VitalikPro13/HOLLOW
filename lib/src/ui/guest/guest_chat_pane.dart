@@ -10,6 +10,7 @@ import 'package:hollow/src/core/models/channel_chat_message.dart';
 import 'package:hollow/src/core/models/file_attachment.dart';
 import 'package:hollow/src/core/providers/channel_chat_provider.dart';
 import 'package:hollow/src/core/providers/file_transfer_provider.dart';
+import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/core/providers/guest_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
@@ -95,6 +96,11 @@ class _GuestChatPaneState extends ConsumerState<GuestChatPane> {
         if (msgIndex > hi) hi = msgIndex;
       }
       if (hi < 0) return;
+      // Auto-download off for this server (#41): the guest viewport sweep is
+      // an auto-download too — skip it; cards offer a manual Download button.
+      if (effectiveAutoDownloadMb(ref, 'server:${widget.serverId}') == 0) {
+        return;
+      }
       lo = (lo - 15).clamp(0, list.length - 1);
       hi = (hi + 15).clamp(0, list.length - 1);
       final transfers = ref.read(fileTransferProvider);
@@ -139,6 +145,8 @@ class _GuestChatPaneState extends ConsumerState<GuestChatPane> {
       HollowToast.show(context, 'Requesting file from peers...',
           type: HollowToastType.info);
     }
+    // Manual pull: lift the auto-download-gate pin so real progress renders.
+    ref.read(fileTransferProvider.notifier).clearDeclined(att.fileId);
     _requestedFiles.add(att.fileId);
     try {
       await crdt_api.requestPublicFile(

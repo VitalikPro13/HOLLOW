@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/reduce_motion.dart';
@@ -614,9 +616,9 @@ class RingtoneEndNotifier extends AsyncNotifier<double> {
   }
 }
 
-/// Auto-download threshold for share-backed files (in MB).
-/// Files up to this size auto-download; larger ones require manual action.
-/// Minimum: 34 MB (the share-backed file threshold). Default: 169 MB.
+/// Auto-download threshold in MB. Gates share-backed auto-starts (Dart) AND
+/// pushed/pulled regular files (pushed to Rust via setAutoDownloadConfig).
+/// 0 = automatic downloads OFF (issue #41); otherwise 34–2048. Default: 169 MB.
 final autoDownloadThresholdProvider =
     AsyncNotifierProvider<AutoDownloadThresholdNotifier, int>(
         AutoDownloadThresholdNotifier.new);
@@ -627,19 +629,105 @@ class AutoDownloadThresholdNotifier extends AsyncNotifier<int> {
     final val = await storage_api.loadSetting(key: 'auto_download_threshold_mb');
     if (val != null && val.isNotEmpty) {
       final mb = int.tryParse(val);
-      if (mb != null && mb >= 34) return mb;
+      if (mb != null && (mb == 0 || mb >= 34)) return mb;
     }
     return 169;
   }
 
   Future<void> setThreshold(int mb) async {
-    final clamped = mb.clamp(34, 2048);
+    final clamped = mb <= 0 ? 0 : mb.clamp(34, 2048);
     await storage_api.saveSetting(
       key: 'auto_download_threshold_mb',
       value: clamped.toString(),
     );
     state = AsyncData(clamped);
+    final overrides = await ref
+        .read(autoDownloadOverridesProvider.future)
+        .catchError((_) => const <String, bool>{});
+    await pushAutoDownloadConfig(thresholdMb: clamped, overrides: overrides);
   }
+}
+
+/// Per-conversation auto-download overrides (issue #41). Keys are
+/// `dm:{master}` / `server:{server_id}`; `false` = never auto-download there,
+/// `true` = auto-download there even when the global threshold is 0 (Off).
+/// Absent = follow the global setting. Persisted as one JSON object.
+final autoDownloadOverridesProvider =
+    AsyncNotifierProvider<AutoDownloadOverridesNotifier, Map<String, bool>>(
+        AutoDownloadOverridesNotifier.new);
+
+class AutoDownloadOverridesNotifier extends AsyncNotifier<Map<String, bool>> {
+  @override
+  Future<Map<String, bool>> build() async {
+    final val = await storage_api.loadSetting(key: 'auto_download_overrides');
+    if (val == null || val.isEmpty) return const {};
+    try {
+      final decoded = jsonDecode(val) as Map<String, dynamic>;
+      return decoded.map((k, v) => MapEntry(k, v == true));
+    } catch (_) {
+      return const {};
+    }
+  }
+
+  /// `null` removes the override (follow the global setting).
+  Future<void> setOverride(String contextKey, bool? autoDownload) async {
+    final current = Map<String, bool>.from(state.valueOrNull ?? const {});
+    if (autoDownload == null) {
+      current.remove(contextKey);
+    } else {
+      current[contextKey] = autoDownload;
+    }
+    await storage_api.saveSetting(
+      key: 'auto_download_overrides',
+      value: jsonEncode(current),
+    );
+    state = AsyncData(current);
+    final threshold = await ref
+        .read(autoDownloadThresholdProvider.future)
+        .catchError((_) => 169);
+    await pushAutoDownloadConfig(thresholdMb: threshold, overrides: current);
+  }
+}
+
+/// Push the combined auto-download config into Rust. Called from _bootstrap
+/// (explicitly — never rely on a lazy provider build reaching Rust, same rule
+/// as setRelayUrl) and after every threshold/override change.
+Future<void> pushAutoDownloadConfig({
+  required int thresholdMb,
+  required Map<String, bool> overrides,
+}) async {
+  await network_api
+      .setAutoDownloadConfig(
+        thresholdMb: thresholdMb,
+        overridesJson: jsonEncode(overrides),
+      )
+      .catchError((_) {});
+}
+
+/// Effective auto-download threshold in MB for one conversation
+/// (`dm:{master}` / `server:{server_id}`). 0 = off. Mirrors the Rust-side
+/// `effective_auto_download_mb` — keep the two in sync.
+int effectiveAutoDownloadMb(WidgetRef ref, String contextKey) =>
+    _effectiveAutoDownloadMb(
+      ref.watch(autoDownloadThresholdProvider).valueOrNull ?? 169,
+      ref.watch(autoDownloadOverridesProvider).valueOrNull ?? const {},
+      contextKey,
+    );
+
+/// Read-only variant for providers/notifiers holding a [Ref].
+int effectiveAutoDownloadMbRead(Ref ref, String contextKey) =>
+    _effectiveAutoDownloadMb(
+      ref.read(autoDownloadThresholdProvider).valueOrNull ?? 169,
+      ref.read(autoDownloadOverridesProvider).valueOrNull ?? const {},
+      contextKey,
+    );
+
+int _effectiveAutoDownloadMb(
+    int global, Map<String, bool> overrides, String contextKey) {
+  final override = overrides[contextKey];
+  if (override == false) return 0;
+  if (override == true) return global == 0 ? 169 : global;
+  return global;
 }
 
 /// Vault cache size cap in MB. Files downloaded from server channels are

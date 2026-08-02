@@ -177,6 +177,24 @@ if (-not $SkipZip) {
     $zipItems = Get-ChildItem $releaseDir -Force |
         Where-Object { $excludeExt -notcontains $_.Extension }
     Compress-Archive -Path $zipItems.FullName -DestinationPath $zipPath -CompressionLevel Optimal
+
+    # True portable variant: same payload + the portable.txt marker, so identity,
+    # DB and downloads live in hollow_data\ next to the exe (USB-stick install).
+    # Kept as a SEPARATE artifact — adding the marker to the plain zip would
+    # silently detach existing zip users from their %APPDATA% profile.
+    $portableZipPath = Join-Path $outDir "hollow-$Version-win64-portable.zip"
+    if (Test-Path $portableZipPath) { Remove-Item $portableZipPath -Force }
+    $markerPath = Join-Path $env:TEMP 'portable.txt'
+    @(
+        'Hollow portable mode marker.',
+        'While this file sits next to hollow.exe, all data (identity key,',
+        'encrypted database, downloaded files) lives in hollow_data\ in this',
+        'folder instead of %APPDATA%. Delete this file (and hollow_data\) to',
+        'switch back to a normal per-user install.'
+    ) | Out-File -FilePath $markerPath -Encoding utf8
+    Copy-Item $zipPath $portableZipPath -Force
+    Compress-Archive -Path $markerPath -Update -DestinationPath $portableZipPath
+    Remove-Item $markerPath -Force
 } else { Step 5 'Zip (SKIPPED)' }
 
 # --- 6. Android APK ---

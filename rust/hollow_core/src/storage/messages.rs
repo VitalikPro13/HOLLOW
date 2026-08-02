@@ -143,6 +143,9 @@ pub(crate) struct StoredFile {
     /// holds the link back to the underlying video. Persisted as JSON in the
     /// `video_thumb_json` column. None for regular files and images.
     pub video_thumb: Option<crate::node::VideoThumbRef>,
+    /// Share back-reference for share-backed (>34 MB) files, persisted so a
+    /// manual download can rejoin the share swarm after a restart (issue #41).
+    pub share_ref: Option<crate::node::ShareRef>,
 }
 
 /// One sticker of the user's personal vault. `pack` is a free-form group
@@ -266,7 +269,7 @@ fn dm_message_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredMessag
 }
 
 /// Column list every files query selects, in [`stored_file_from_row`] order.
-const FILE_COLS: &str = "file_id, file_name, file_ext, mime_type, size_bytes, chunk_count, chunks_received, is_image, width, height, message_id, context_type, context_id, sender_id, is_mine, created_at, completed_at, disk_path, hidden_at, video_thumb_json, expired_at";
+const FILE_COLS: &str = "file_id, file_name, file_ext, mime_type, size_bytes, chunk_count, chunks_received, is_image, width, height, message_id, context_type, context_id, sender_id, is_mine, created_at, completed_at, disk_path, hidden_at, video_thumb_json, expired_at, share_ref_json";
 
 /// Map one row selected via [`FILE_COLS`] to a StoredFile.
 fn stored_file_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredFile> {
@@ -292,6 +295,9 @@ fn stored_file_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredFile>
         hidden_at: row.get(18)?,
         expired_at: row.get(20)?,
         video_thumb: MessageStore::parse_video_thumb_json(row.get::<_, Option<String>>(19)?),
+        share_ref: row
+            .get::<_, Option<String>>(21)?
+            .and_then(|s| serde_json::from_str(&s).ok()),
     })
 }
 
@@ -760,6 +766,14 @@ impl MessageStore {
         // Timestamp when the file was expired by the retention timer.
         // NULL = not expired. Non-null = file data deleted from disk, row kept as placeholder.
         migrate(conn, "ALTER TABLE files ADD COLUMN expired_at INTEGER;");
+
+        // -- Migration: persisted ShareRef for share-backed (>34 MB) files --
+        // (issue #41). The share root hash + AES key used to arrive only inside
+        // the live FileHeader and were kept in RAM, so a manual download after
+        // an app restart (or with auto-download off) had no way back into the
+        // share swarm — the fallback FileRequest path re-serves the bytes with
+        // share_ref: None and the requester's own 34 MB cap rejects them.
+        migrate(conn, "ALTER TABLE files ADD COLUMN share_ref_json TEXT;");
 
         ddl(conn, "file_chunks table",
             "CREATE TABLE IF NOT EXISTS file_chunks (
@@ -4275,6 +4289,25 @@ impl MessageStore {
     /// on null or parse failure (forward-compat).
     fn parse_video_thumb_json(json: Option<String>) -> Option<crate::node::VideoThumbRef> {
         json.and_then(|s| serde_json::from_str(&s).ok())
+    }
+
+    /// Persist the ShareRef of a share-backed file (issue #41). Kept out of
+    /// `insert_file_metadata` so re-arriving headers WITHOUT a share_ref (e.g.
+    /// a FileRequest response) never blank an already-stored one.
+    pub fn set_file_share_ref(
+        &self,
+        file_id: &str,
+        share_ref: &crate::node::ShareRef,
+    ) -> Result<(), String> {
+        let json = serde_json::to_string(share_ref)
+            .map_err(|e| format!("Failed to serialize share ref: {e}"))?;
+        self.conn
+            .execute(
+                "UPDATE files SET share_ref_json = ?2 WHERE file_id = ?1",
+                params![file_id, json],
+            )
+            .map_err(|e| format!("Failed to set share ref: {e}"))?;
+        Ok(())
     }
 
     /// Mark a chunk as received. Returns the new chunks_received count.

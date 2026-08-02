@@ -197,6 +197,23 @@ class UpdateNotifier extends Notifier<UpdateState> {
       } else {
         appDir = File(Platform.resolvedExecutable).parent.path;
       }
+      // The update script copies into appDir with its errors swallowed —
+      // probe writability here so a read-only location (portable copy on a
+      // locked USB stick, Program Files) fails visibly instead of silently.
+      try {
+        final probe =
+            File('$appDir${Platform.pathSeparator}.hollow_write_probe');
+        probe.writeAsStringSync('probe');
+        probe.deleteSync();
+      } catch (_) {
+        state = state.copyWith(
+          status: UpdateStatus.error,
+          error: 'The app folder is not writable, so the update cannot be '
+              'installed in place. Move the app to a writable location and '
+              'try again.',
+        );
+        return;
+      }
       final batPath = await updater_api.applyUpdate(
         zipPath: destPath,
         appDir: appDir,

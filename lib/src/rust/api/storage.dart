@@ -653,6 +653,13 @@ class StoredFileInfo {
   /// vault download on tap.
   final VideoThumbRef? videoThumb;
 
+  /// Persisted share swarm root hash for share-backed (>34 MB) files —
+  /// lets a manual download rejoin the share after a restart (issue #41).
+  final String? shareRootHash;
+
+  /// Persisted share AES key (hex) paired with `share_root_hash`.
+  final String? shareKeyHex;
+
   const StoredFileInfo({
     required this.fileId,
     required this.fileName,
@@ -674,6 +681,8 @@ class StoredFileInfo {
     this.diskPath,
     this.expiredAt,
     this.videoThumb,
+    this.shareRootHash,
+    this.shareKeyHex,
   });
 
   @override
@@ -697,7 +706,9 @@ class StoredFileInfo {
       completedAt.hashCode ^
       diskPath.hashCode ^
       expiredAt.hashCode ^
-      videoThumb.hashCode;
+      videoThumb.hashCode ^
+      shareRootHash.hashCode ^
+      shareKeyHex.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -723,7 +734,9 @@ class StoredFileInfo {
           completedAt == other.completedAt &&
           diskPath == other.diskPath &&
           expiredAt == other.expiredAt &&
-          videoThumb == other.videoThumb;
+          videoThumb == other.videoThumb &&
+          shareRootHash == other.shareRootHash &&
+          shareKeyHex == other.shareKeyHex;
 }
 
 /// A message returned to Dart from the local database.

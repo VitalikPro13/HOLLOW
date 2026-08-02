@@ -1293,6 +1293,25 @@ pub fn set_relay_url(domain: Option<String>) -> Result<(), String> {
     Ok(())
 }
 
+/// Push the auto-download settings into the node (issue #41). Runtime-effective
+/// — no node restart needed. `threshold_mb == 0` turns automatic downloads off.
+/// `overrides_json` is a JSON object mapping `dm:{master}` / `server:{id}` keys
+/// to a bool (`false` = never auto-download there, `true` = always).
+#[frb]
+pub fn set_auto_download_config(
+    threshold_mb: u32,
+    overrides_json: String,
+) -> Result<(), String> {
+    let overrides: std::collections::HashMap<String, bool> = if overrides_json.trim().is_empty() {
+        std::collections::HashMap::new()
+    } else {
+        serde_json::from_str(&overrides_json)
+            .map_err(|e| format!("Invalid overrides JSON: {e}"))?
+    };
+    crate::node::file_handler::set_auto_download_conf(threshold_mb, overrides);
+    Ok(())
+}
+
 /// Configure (or clear) the anti-censorship REALITY proxy. Call BEFORE
 /// start_node() — like set_relay_url, it seeds a global that start_node reads to
 /// launch the `shoes` tunnel. Passing all-empty / null fields disables the proxy

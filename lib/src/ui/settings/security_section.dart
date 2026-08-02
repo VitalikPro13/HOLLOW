@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/hollow_data_dir.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/rust/api/identity.dart' as identity_api;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
@@ -536,6 +537,26 @@ class _SecurityTabState extends State<SecurityTab> {
         ),
       ),
       const SizedBox(height: HollowSpacing.md),
+      if (isPortableMode) ...[
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Icon(LucideIcons.triangleAlert, size: 16, color: hollow.warning),
+            const SizedBox(width: HollowSpacing.xs),
+            Expanded(
+              child: Text(
+                'Portable mode: device protection is tied to THIS computer. '
+                'If you move the app folder to another machine, the identity '
+                'will not unlock there — use password protection instead.',
+                style: HollowTypography.caption.copyWith(
+                  color: hollow.textSecondary, fontSize: 11, height: 1.4,
+                ),
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: HollowSpacing.md),
+      ],
       if (_hasOsKeychain) ...[
         Row(
           children: [

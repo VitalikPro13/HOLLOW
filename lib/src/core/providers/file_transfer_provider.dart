@@ -39,6 +39,12 @@ class FileTransferState {
   final String? shareRootHash;
   /// Number of active seeders — updated from ShareProgress events.
   final int? seeders;
+  /// Declined by the auto-download gate (issue #41). While true, progress from
+  /// ANY byte source (Rust WS poll, Dart WebRTC data-channel receive) is
+  /// ignored — the sender pushes regardless and the bytes are discarded, so
+  /// the bubble must keep showing the manual Download button, not a spinner.
+  /// Cleared when the user starts a manual download or the file completes.
+  final bool declined;
 
   const FileTransferState({
     required this.fileId,
@@ -59,6 +65,7 @@ class FileTransferState {
     this.videoThumb,
     this.shareRootHash,
     this.seeders,
+    this.declined = false,
   });
 
   double get progress =>
@@ -74,6 +81,7 @@ class FileTransferState {
     String? diskPath,
     network_api.VideoThumbRef? videoThumb,
     int? seeders,
+    bool? declined,
   }) {
     return FileTransferState(
       fileId: fileId,
@@ -94,6 +102,7 @@ class FileTransferState {
       videoThumb: videoThumb ?? this.videoThumb,
       shareRootHash: shareRootHash,
       seeders: seeders ?? this.seeders,
+      declined: declined ?? this.declined,
     );
   }
 }
@@ -493,10 +502,45 @@ class FileTransferNotifier
     state = updated;
   }
 
+  /// Mark a file declined by the auto-download gate (issue #41): the bubble
+  /// keeps its manual Download button while the unwanted push transits and is
+  /// discarded. Keeps header metadata if an entry already exists.
+  void markDeclined(String fileId) {
+    final current = state[fileId];
+    if (current?.isComplete == true) return;
+    final updated = Map<String, FileTransferState>.from(state);
+    updated[fileId] = FileTransferState(
+      fileId: fileId,
+      fileName: current?.fileName ?? '',
+      sizeBytes: current?.sizeBytes ?? 0,
+      totalChunks: 0,
+      isImage: current?.isImage ?? false,
+      width: current?.width,
+      height: current?.height,
+      videoThumb: current?.videoThumb,
+      shareRootHash: current?.shareRootHash,
+      declined: true,
+    );
+    state = updated;
+  }
+
+  /// Clear the declined flag — called by every manual-download entry point so
+  /// the real transfer's progress renders again.
+  void clearDeclined(String fileId) {
+    final current = state[fileId];
+    if (current == null || !current.declined) return;
+    final updated = Map<String, FileTransferState>.from(state);
+    updated[fileId] = current.copyWith(declined: false);
+    state = updated;
+  }
+
   /// Handle FileProgress event.
   void onFileProgress(String fileId, int chunksReceived, int totalChunks) {
     final updated = Map<String, FileTransferState>.from(state);
     final current = state[fileId];
+    // Declined by the auto-download gate: the arriving bytes are being
+    // discarded — never surface their progress (issue #41).
+    if (current?.declined == true) return;
     if (current == null) {
       // WebRTC race: progress arrived before FileHeader. Create a minimal entry
       // so the UI shows the progress bar.
@@ -538,6 +582,7 @@ class FileTransferNotifier
         isDownloading: false,
         diskPath: diskPath,
         chunksReceived: current.totalChunks > 0 ? current.totalChunks : 1,
+        declined: false,
       );
     } else {
       // File completed without a prior header (e.g., received via sync then stream).

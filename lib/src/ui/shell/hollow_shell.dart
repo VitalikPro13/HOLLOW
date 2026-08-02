@@ -877,6 +877,17 @@ class _HollowShellState extends ConsumerState<HollowShell>
     await network_api.setRelayUrl(domain: relayDomain);
     await ref.read(licenseKeyProvider.notifier).loadCached();
 
+    // Auto-download config (issue #41) — push explicitly, like the relay URL:
+    // the Rust-side gate defaults permissive until this lands.
+    await pushAutoDownloadConfig(
+      thresholdMb: await ref
+          .read(autoDownloadThresholdProvider.future)
+          .catchError((_) => 169),
+      overrides: await ref
+          .read(autoDownloadOverridesProvider.future)
+          .catchError((_) => const <String, bool>{}),
+    );
+
     // GIF source settings — push explicitly, like the relay URL above:
     // proxy override (self-hosters), the user's own Klipy key (direct mode),
     // its media allowlist, and the content rating.

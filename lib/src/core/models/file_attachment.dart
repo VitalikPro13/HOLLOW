@@ -20,6 +20,11 @@ class FileAttachment {
   /// triggers a vault download on tap.
   final network_api.VideoThumbRef? videoThumb;
   final int? expiredAt;
+  /// Persisted share swarm reference for share-backed (>34 MB) files —
+  /// a manual download rejoins the share instead of a direct FileRequest
+  /// (whose response our own size cap would reject). Issue #41.
+  final String? shareRootHash;
+  final String? shareKeyHex;
 
   const FileAttachment({
     required this.fileId,
@@ -36,6 +41,8 @@ class FileAttachment {
     this.diskPath,
     this.videoThumb,
     this.expiredAt,
+    this.shareRootHash,
+    this.shareKeyHex,
   });
 
   bool get isExpired => expiredAt != null;
@@ -57,6 +64,8 @@ class FileAttachment {
     String? diskPath,
     network_api.VideoThumbRef? videoThumb,
     int? expiredAt,
+    String? shareRootHash,
+    String? shareKeyHex,
   }) {
     return FileAttachment(
       fileId: fileId,
@@ -73,6 +82,8 @@ class FileAttachment {
       diskPath: diskPath ?? this.diskPath,
       videoThumb: videoThumb ?? this.videoThumb,
       expiredAt: expiredAt ?? this.expiredAt,
+      shareRootHash: shareRootHash ?? this.shareRootHash,
+      shareKeyHex: shareKeyHex ?? this.shareKeyHex,
     );
   }
 }

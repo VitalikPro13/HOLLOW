@@ -19,6 +19,18 @@ Future<void> setLicenseKey({String? key}) =>
 Future<void> setRelayUrl({String? domain}) =>
     RustLib.instance.api.crateApiNetworkSetRelayUrl(domain: domain);
 
+/// Push the auto-download settings into the node (issue #41). Runtime-effective
+/// — no node restart needed. `threshold_mb == 0` turns automatic downloads off.
+/// `overrides_json` is a JSON object mapping `dm:{master}` / `server:{id}` keys
+/// to a bool (`false` = never auto-download there, `true` = always).
+Future<void> setAutoDownloadConfig({
+  required int thresholdMb,
+  required String overridesJson,
+}) => RustLib.instance.api.crateApiNetworkSetAutoDownloadConfig(
+  thresholdMb: thresholdMb,
+  overridesJson: overridesJson,
+);
+
 /// Configure (or clear) the anti-censorship REALITY proxy. Call BEFORE
 /// start_node() — like set_relay_url, it seeds a global that start_node reads to
 /// launch the `shoes` tunnel. Passing all-empty / null fields disables the proxy

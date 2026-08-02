@@ -500,6 +500,21 @@ async fn run_event_loop(
     let mut pending_public_file_requests: std::collections::HashMap<String, (String, std::time::Instant)> =
         std::collections::HashMap::new();
 
+    // Files WE explicitly asked for (manual Download button, missing-file
+    // sweeps, guest pulls): file_id -> requested-at. A FileHeader answering one
+    // of these bypasses BOTH the per-context size cap and the auto-download
+    // gate — the user asked for exactly these bytes (issue #41). Receipts are
+    // consumed on first matching header and expire after 5 minutes.
+    let mut requested_file_receipts: std::collections::HashMap<String, std::time::Instant> =
+        std::collections::HashMap::new();
+
+    // Pushed files declined by the auto-download gate THIS session. Stream
+    // bytes that arrive for these (the sender queues its push before any
+    // response could reach it) are deleted instead of being parked forever in
+    // `early_file_streams`.
+    let mut declined_file_ids: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+
     // (server room, channel) pairs whose relay offline catch-up replay already
     // ran THIS connection — fed by both the connect-time sweep (RoomMembers)
     // and the channel-open hook (SubscribeChannels). Cleared on
@@ -2149,6 +2164,10 @@ async fn run_event_loop(
                     }
 
                     NodeCommand::RequestFile { file_id, peer_id: peer_id_str, chunks } => {
+                        // Explicit pull: the response header must pass the size
+                        // cap and the auto-download gate (issue #41).
+                        requested_file_receipts.insert(file_id.clone(), std::time::Instant::now());
+                        declined_file_ids.remove(&file_id);
                         file_handler::handle_request_file(
                             file_id, peer_id_str, chunks,
                             &ws_cmd_tx, &ws_room_peers,
@@ -2176,6 +2195,10 @@ async fn run_event_loop(
                                     file_id.clone(),
                                     (server_id.clone(), std::time::Instant::now()),
                                 );
+                                // The answering PublicFileHeader delegates into the
+                                // shared header path — mark it explicitly requested
+                                // so the auto-download gate lets it through.
+                                requested_file_receipts.insert(file_id.clone(), std::time::Instant::now());
                                 hollow_log!("[HOLLOW-GUEST] Requesting public file {file_id} in {server_id} from {t}");
                                 super::crypto_handler::send_message_to_peer(
                                     &ws_cmd_tx, &ws_room_peers, &t,
@@ -2212,6 +2235,15 @@ async fn run_event_loop(
                                 &mut share_registry, &bundle_keypair, &event_tx,
                                 transfer_id, chunk_index, temp_path,
                             ).await;
+                        } else if kind == "file" && declined_file_ids.contains(&transfer_id) {
+                            // Auto-download gate (issue #41): discard pushed bytes
+                            // for a declined file (see the BinaryDirect twin).
+                            hollow_log!("[HOLLOW-FILE] Discarding declined pushed WebRTC transfer {transfer_id}");
+                            let _ = std::fs::remove_file(&temp_path);
+                            let _ = event_tx.send(NetworkEvent::FileFailed {
+                                file_id: transfer_id.clone(),
+                                error: "auto_download_off".to_string(),
+                            }).await;
                         } else {
                             file_handler::handle_webrtc_transfer_complete(
                                 transfer_id, temp_path, sender_peer_id, kind, shard_index,
@@ -2430,6 +2462,8 @@ async fn run_event_loop(
                                 &mut pending_friend_removals,
                                 &mut requested_asset_kinds,
                                 &mut pending_public_file_requests,
+                                &mut requested_file_receipts,
+                                &mut declined_file_ids,
                                 HavenMessage::CrdtOpBroadcast { server_id, op_json },
                             ).await;
                         }
@@ -2647,6 +2681,11 @@ async fn run_event_loop(
                         synced_peers.clear();
                         requested_asset_kinds.clear();
                         pending_public_file_requests.clear();
+                        // Explicit-pull receipts die with the socket (the pending
+                        // request can't be answered on a new connection anyway);
+                        // declined_file_ids intentionally survives — it reflects the
+                        // auto-download setting, not connection state.
+                        requested_file_receipts.clear();
                         relay_catchup_done.clear();
                         key_request_in_flight.clear();
                         key_bundle_sent_to.clear();
@@ -3693,19 +3732,35 @@ async fn run_event_loop(
                         if let Some(completed) = super::ws_stream_transfer::ws_stream_receive(
                             &mut pending_ws_transfers, &data,
                         ) {
-                            file_handler::handle_completed_stream(
-                                completed,
-                                &from,
-                                &mut pending_file_streams,
-                                &mut pending_shard_streams,
-                                &mut pending_vault_downloads,
-                                &mut early_file_streams,
-                                &mut pending_link_snapshots,
-                                &bundle_keypair,
-                                &event_tx,
-                                &ws_cmd_tx, &ws_room_peers,
-                                &db_path, &db_passphrase,
-                            ).await;
+                            // Auto-download gate (issue #41): the sender queues its
+                            // push before our decline could ever reach it — bytes
+                            // for a declined file are deleted here instead of being
+                            // parked forever in early_file_streams.
+                            if declined_file_ids.contains(&completed.id) {
+                                hollow_log!("[HOLLOW-FILE] Discarding declined pushed stream {} ({} bytes)", completed.id, completed.size);
+                                let _ = std::fs::remove_file(&completed.temp_path);
+                                // Clear any transfer state the UI picked up from a
+                                // progress tick that raced the decline — without
+                                // this the bubble shows a spinner at 100% forever.
+                                let _ = event_tx.send(NetworkEvent::FileFailed {
+                                    file_id: completed.id.clone(),
+                                    error: "auto_download_off".to_string(),
+                                }).await;
+                            } else {
+                                file_handler::handle_completed_stream(
+                                    completed,
+                                    &from,
+                                    &mut pending_file_streams,
+                                    &mut pending_shard_streams,
+                                    &mut pending_vault_downloads,
+                                    &mut early_file_streams,
+                                    &mut pending_link_snapshots,
+                                    &bundle_keypair,
+                                    &event_tx,
+                                    &ws_cmd_tx, &ws_room_peers,
+                                    &db_path, &db_passphrase,
+                                ).await;
+                            }
                         }
                     }
                     WsEvent::LicenseError { reason } => {
@@ -4201,6 +4256,8 @@ async fn run_event_loop(
                                         &mut pending_friend_removals,
                                         &mut requested_asset_kinds,
                                         &mut pending_public_file_requests,
+                                        &mut requested_file_receipts,
+                                        &mut declined_file_ids,
                                         msg,
                                     ).await;
                             } else {
@@ -4588,6 +4645,10 @@ async fn run_event_loop(
                 };
                 for (file_id, received, total) in snapshot {
                     if received == 0 { continue; }
+                    // Declined pushed streams (auto-download off, issue #41) still
+                    // transit — never surface their progress, the UI is showing a
+                    // manual Download button for this file.
+                    if declined_file_ids.contains(&file_id) { continue; }
                     // Link snapshot ids carry a "link_" prefix so they emit real-byte
                     // LinkProgress (drives the device-link bar) instead of FileProgress.
                     if let Some(link_id) = file_id.strip_prefix("link_") {
@@ -5314,6 +5375,8 @@ async fn handle_incoming_request(
     pending_friend_removals: &mut std::collections::HashSet<String>,
     requested_asset_kinds: &mut HashMap<String, emotes::AssetKind>,
     pending_public_file_requests: &mut HashMap<String, (String, std::time::Instant)>,
+    requested_file_receipts: &mut HashMap<String, std::time::Instant>,
+    declined_file_ids: &mut std::collections::HashSet<String>,
     request: HavenMessage,
 ) {
 
@@ -7061,9 +7124,22 @@ async fn handle_incoming_request(
                     use crate::node::file_transfer;
                     hollow_log!("[HOLLOW-FILE] FileHeader received: {fid} ({name}, {size} bytes, {chunks} chunks, share_ref={})", share_ref.is_some());
 
+                    // Explicit pull (manual Download / sweep / guest request)?
+                    // Consumes the receipt; bypasses the size cap AND the
+                    // auto-download gate — we asked for exactly this file.
+                    let explicitly_requested = requested_file_receipts
+                        .remove(&fid)
+                        .map(|t| t.elapsed() < std::time::Duration::from_secs(300))
+                        .unwrap_or(false);
+                    if explicitly_requested {
+                        declined_file_ids.remove(&fid);
+                    }
+
                     // SECURITY: Validate file size against server limit (or default 34MB for DMs).
                     // Skip for share-backed files — Share handles delivery with no size limit.
-                    if share_ref.is_none() {
+                    // Skip for explicit pulls — the >34MB share-backed fallback re-serve
+                    // arrives WITHOUT a share_ref and must not be rejected by our own cap.
+                    if share_ref.is_none() && !explicitly_requested {
                         let max_bytes: u64 = if let Some(ref s) = sid {
                             if let Some(state) = server_states.get(s) {
                                 let max_mb_str = state.settings.get("max_file_size_mb")
@@ -7145,6 +7221,12 @@ async fn handle_incoming_request(
                                 &peer_str, false, ts,
                                 vthumb.as_ref(),
                             );
+                            // Persist the share back-reference (issue #41) so a
+                            // manual download can rejoin the share swarm after a
+                            // restart — the key otherwise lives only in Dart RAM.
+                            if let Some(sr) = share_ref.as_ref() {
+                                let _ = store.set_file_share_ref(&fid, sr);
+                            }
                         }
                     }
 
@@ -7194,6 +7276,21 @@ async fn handle_incoming_request(
                     // arrive. The FCM fetch node always did this (fetch.rs); the FULL node
                     // ignored inline_bytes, registered a pending stream that never
                     // completed, and the buffered image rendered as nothing on desktop.
+                    // AUTO-DOWNLOAD GATE key + verdict (issue #41) — computed
+                    // here because it gates BOTH the inline-image write below
+                    // and the pending-stream registration further down. An
+                    // existing pending stream = a transfer we already chose to
+                    // accept (the decrypt-fail retry re-requests WITHOUT a
+                    // receipt — its fresh header must not be declined).
+                    let auto_dl_key = if sid_str.is_empty() {
+                        format!("dm:{dm_convo}")
+                    } else {
+                        format!("server:{sid_str}")
+                    };
+                    let auto_ok = explicitly_requested
+                        || pending_file_streams.contains_key(&fid)
+                        || file_handler::auto_download_allows(size, &name, &auto_dl_key);
+
                     let mut inline_done = false;
                     if !already_complete && share_ref.is_none() {
                         if let (Some(b64), Some(ak), Some(an)) =
@@ -7215,74 +7312,112 @@ async fn handle_incoming_request(
                                     crate::vault::pipeline::aes_decrypt(&ct, &k, &n).ok()
                                 });
                             if let Some(plaintext) = decoded {
-                                let files_dir = file_transfer::files_dir();
-                                let _ = std::fs::create_dir_all(&files_dir);
-                                let disk_path = files_dir.join(format!("{fid}.{ext}"));
-                                if std::fs::write(&disk_path, &plaintext).is_ok() {
-                                    let disk_str = disk_path.to_string_lossy().to_string();
-                                    if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
-                                        // Captionless offline image: the "[file:...]"
-                                        // companion DM is never sent to offline peers, so
-                                        // insert the message row here (dedup by mid — a
-                                        // captioned image's real caption DM wins later via
-                                        // promote_file_sentinel_to_caption). Mirrors fetch.rs.
-                                        //
-                                        // SECURITY (backfill rule, 0.8.5): the header's sig is
-                                        // the MESSAGE signature over the sentinel text — the
-                                        // row is stored ONLY when it VERIFIES (a captioned
-                                        // image's header legitimately fails here, since the
-                                        // sender signed the CAPTION — its caption DM creates
-                                        // the row instead; an unsigned header no longer
-                                        // materialises a row at all). Sibling echoes skip the
-                                        // check: the sender is us, and the header carries no
-                                        // convo to reconstruct the signing context from.
-                                        // `order_us` from the header — the v2 signature binds
-                                        // the sender's Lamport stamp, so a local ts*1000
-                                        // default would wedge this row's later sync re-serve.
-                                        let from_sibling = super::resolver::same_identity(&peer_str, master_peer_str);
-                                        let sentinel_text = format!("[file:{fid}]");
-                                        let sentinel_sig_ok = from_sibling || {
-                                            let extras = crypto_handler::SignedExtras {
-                                                mid: mid.as_deref(),
-                                                reply_to: None,
-                                                file_id: Some(&fid),
-                                                order_us,
-                                                lp_digest: None,
-                                            };
-                                            check_backfill_signature(
-                                                &dm_convo, "dm", master_peer_str, ts, None,
-                                                &extras, &sentinel_text,
-                                                sig.as_deref(), pk.as_deref(), &mut PkCache::new(),
-                                            ).is_acceptable()
+                                if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+                                    // Captionless offline image: the "[file:...]"
+                                    // companion DM is never sent to offline peers, so
+                                    // insert the message row here (dedup by mid — a
+                                    // captioned image's real caption DM wins later via
+                                    // promote_file_sentinel_to_caption). Mirrors fetch.rs.
+                                    // Stored REGARDLESS of the auto-download gate —
+                                    // only the file bytes are gated, never the message.
+                                    //
+                                    // SECURITY (backfill rule, 0.8.5): the header's sig is
+                                    // the MESSAGE signature over the sentinel text — the
+                                    // row is stored ONLY when it VERIFIES (a captioned
+                                    // image's header legitimately fails here, since the
+                                    // sender signed the CAPTION — its caption DM creates
+                                    // the row instead; an unsigned header no longer
+                                    // materialises a row at all). Sibling echoes skip the
+                                    // check: the sender is us, and the header carries no
+                                    // convo to reconstruct the signing context from.
+                                    // `order_us` from the header — the v2 signature binds
+                                    // the sender's Lamport stamp, so a local ts*1000
+                                    // default would wedge this row's later sync re-serve.
+                                    let from_sibling = super::resolver::same_identity(&peer_str, master_peer_str);
+                                    let sentinel_text = format!("[file:{fid}]");
+                                    let sentinel_sig_ok = from_sibling || {
+                                        let extras = crypto_handler::SignedExtras {
+                                            mid: mid.as_deref(),
+                                            reply_to: None,
+                                            file_id: Some(&fid),
+                                            order_us,
+                                            lp_digest: None,
                                         };
-                                        if ctx_type == "dm"
-                                            && sentinel_sig_ok
-                                            && !mid.as_deref()
-                                                .map(|m| store.dm_message_exists(m))
-                                                .unwrap_or(false)
-                                        {
-                                            let _ = store.insert(
-                                                &dm_convo, &sentinel_text, false, ts,
-                                                sig.as_deref(), pk.as_deref(),
-                                                mid.as_deref(), None, Some(&fid), order_us,
-                                            );
-                                        }
-                                        let _ = store.mark_file_complete(&fid, &disk_str);
+                                        check_backfill_signature(
+                                            &dm_convo, "dm", master_peer_str, ts, None,
+                                            &extras, &sentinel_text,
+                                            sig.as_deref(), pk.as_deref(), &mut PkCache::new(),
+                                        ).is_acceptable()
+                                    };
+                                    if ctx_type == "dm"
+                                        && sentinel_sig_ok
+                                        && !mid.as_deref()
+                                            .map(|m| store.dm_message_exists(m))
+                                            .unwrap_or(false)
+                                    {
+                                        let _ = store.insert(
+                                            &dm_convo, &sentinel_text, false, ts,
+                                            sig.as_deref(), pk.as_deref(),
+                                            mid.as_deref(), None, Some(&fid), order_us,
+                                        );
                                     }
-                                    hollow_log!("[HOLLOW-FILE] Wrote inline image {fid} ({} bytes) from buffered header", plaintext.len());
-                                    let _ = event_tx.send(NetworkEvent::FileCompleted {
-                                        file_id: fid.clone(),
-                                        disk_path: disk_str,
-                                    }).await;
+                                }
+                                if !auto_ok {
+                                    // AUTO-DOWNLOAD GATE (issue #41): drop the inline
+                                    // ciphertext — the card renders from the metadata
+                                    // row with a manual Download button that re-pulls
+                                    // the bytes from the sender.
+                                    hollow_log!("[HOLLOW-FILE] Auto-download gate dropped inline image bytes for {fid} ({auto_dl_key}) — message kept, manual download available");
                                     inline_done = true;
+                                } else {
+                                    let files_dir = file_transfer::files_dir();
+                                    let _ = std::fs::create_dir_all(&files_dir);
+                                    let disk_path = files_dir.join(format!("{fid}.{ext}"));
+                                    if std::fs::write(&disk_path, &plaintext).is_ok() {
+                                        let disk_str = disk_path.to_string_lossy().to_string();
+                                        if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+                                            let _ = store.mark_file_complete(&fid, &disk_str);
+                                        }
+                                        hollow_log!("[HOLLOW-FILE] Wrote inline image {fid} ({} bytes) from buffered header", plaintext.len());
+                                        let _ = event_tx.send(NetworkEvent::FileCompleted {
+                                            file_id: fid.clone(),
+                                            disk_path: disk_str,
+                                        }).await;
+                                        inline_done = true;
+                                    }
                                 }
                             }
                         }
                     }
 
+                    // AUTO-DOWNLOAD GATE (issue #41): a pushed stream in a
+                    // conversation with auto-download off (or over the
+                    // threshold) is declined — the metadata row above still
+                    // renders the card with a manual Download button, but no
+                    // pending stream registers and any bytes the sender already
+                    // queued are deleted on arrival instead of parked.
+                    if !already_complete && !inline_done && !auto_ok
+                        && share_ref.is_none() && aes_key.is_some()
+                    {
+                        declined_file_ids.insert(fid.clone());
+                        if let Some((temp_path, _, _)) = early_file_streams.remove(&fid) {
+                            let _ = std::fs::remove_file(&temp_path);
+                        }
+                        hollow_log!("[HOLLOW-FILE] Auto-download gate declined pushed file {fid} ({size} bytes, {auto_dl_key}) — metadata kept, manual download available");
+                        // Tell Dart NOW, at header time: the transfer provider
+                        // flags the file declined so NO progress source (Rust
+                        // WS poll, Dart WebRTC data-channel receive) can flip
+                        // the bubble into a spinner while the unwanted push
+                        // transits and is discarded.
+                        let _ = event_tx.send(NetworkEvent::FileFailed {
+                            file_id: fid.clone(),
+                            error: "auto_download_off".to_string(),
+                        }).await;
+                    }
+
                     // If aes_key is present and no share_ref, this is a streamed transfer — register for stream receive.
                     // Share-backed files skip this — Share handles delivery, no P2P binary data.
-                    if !already_complete && !inline_done && share_ref.is_none() && let (Some(ak), Some(an)) = (aes_key, aes_nonce) {
+                    if !already_complete && !inline_done && auto_ok && share_ref.is_none() && let (Some(ak), Some(an)) = (aes_key, aes_nonce) {
                         // Preserve the retry counter across a re-registration. A DM
                         // file is fanned out to several of the recipient's devices, so
                         // the SAME file can produce MULTIPLE FileHeaders here — and the
@@ -9680,6 +9815,7 @@ async fn handle_incoming_request(
                                     &server_id, sender_peer_id,
                                     fid, name, ext, mime, size, chunks, img, w, h,
                                     mid, sid, cid, ts, aes_key, aes_nonce, vthumb, share_ref,
+                                    requested_file_receipts, declined_file_ids,
                                     ws_cmd_tx, ws_room_peers,
                                     db_path, db_passphrase,
                                 ).await;
@@ -11568,6 +11704,7 @@ async fn handle_incoming_request(
                 mid, Some(sid.clone()), Some(cid), ts,
                 Some(aes_key), Some(aes_nonce),
                 None, None,
+                requested_file_receipts, declined_file_ids,
                 ws_cmd_tx, ws_room_peers,
                 db_path, db_passphrase,
             ).await;

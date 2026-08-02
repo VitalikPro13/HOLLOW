@@ -253,6 +253,20 @@ final iceServers = turnUris.map((uri) => {
 
 ## File Transfer Gotchas
 
+### A pushed file stream cannot be declined mid-flight (issue #41)
+
+**Rule:** The auto-download gate is receive-side only — never add a "decline" wire message expecting it to cancel a push, and never rely on receiver-side signaling to save the pushed bytes.
+
+**Why:** `ws_stream_send` queues the ENTIRE file into the unbounded WS command channel within a single event-loop turn; any response from the receiver is processed after the last chunk is already queued. The gate therefore: (a) prevents all PULL transfers before any request (Dart sweeps + share auto-start), (b) discards pushed bytes on arrival (metadata kept, `declined_file_ids` RAM set, `FileFailed("auto_download_off")` sentinel pins the Dart UI on its Download button). Progress must be suppressed in BOTH runtimes — the Rust stream-progress poll AND `webrtc_provider.dart`'s data-channel receive (which reports progress from Dart, bypassing anything Rust does). Full architecture: memory `project_autodownload_gate`.
+
+### Explicit file requests carry a receipt that bypasses the size cap
+
+**Rule:** Every explicit pull (`NodeCommand::RequestFile` / `RequestPublicFile`) records `requested_file_receipts[fid]`; the answering FileHeader bypasses the per-context size cap AND the auto-download gate. Never remove this — the >34 MB share-backed fallback re-serve arrives WITHOUT a share_ref and would be rejected by the requester's own 34 MB cap (the pre-#41 "manual download of big files is broken" bug). The persisted `files.share_ref_json` column is the other half of that fix.
+
+### Portable mode: the data folder is `hollow_data`, never `data`
+
+**Rule:** Portable detection (marker next to the exe) pins the data root to `<exe dir>/hollow_data`. The Flutter runner already ships a `data\` folder next to the exe — naming collision would corrupt the runner assets. Markers accepted: `portable.txt`, `portable.txt.txt` (Explorer hidden-extensions trap — a real user hit this), bare `portable`, an existing `hollow_data/`, or `--portable`. The plain release zip must NEVER include the marker (it would detach existing zip users from their APPDATA profile); only `-portable.zip` ships it. See memory `project_portable_mode`.
+
 ### Share-backed files (>34 MB) bypass size checks in THREE places
 
 **Rule:** `FileHeader.share_ref` must bypass size validation and `PendingFileStream` registration in exactly three code locations.

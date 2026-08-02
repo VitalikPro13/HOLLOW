@@ -2372,10 +2372,13 @@ class _AutoDownloadSlider extends ConsumerWidget {
     final hollow = HollowTheme.of(context);
     final asyncVal = ref.watch(autoDownloadThresholdProvider);
     final value = asyncVal.valueOrNull ?? 169;
+    final off = value == 0;
 
-    final label = value >= 1024
-        ? '${(value / 1024).toStringAsFixed(1)} GB'
-        : '$value MB';
+    final label = off
+        ? 'Off'
+        : value >= 1024
+            ? '${(value / 1024).toStringAsFixed(1)} GB'
+            : '$value MB';
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -2392,16 +2395,22 @@ class _AutoDownloadSlider extends ConsumerWidget {
           ],
         ),
         Slider(
-          value: value.toDouble().clamp(34, 2048),
-          min: 34,
+          value: off ? 0 : value.toDouble().clamp(34, 2048),
+          min: 0,
           max: 2048,
           divisions: 50,
           activeColor: hollow.accent,
           inactiveColor: hollow.border,
-          onChanged: (v) =>
-              ref.read(autoDownloadThresholdProvider.notifier).setThreshold(v.round()),
+          // Below the 34 MB floor snaps to Off (0) — 1–33 MB has no meaning
+          // (34 MB is the direct-transfer cap).
+          onChanged: (v) => ref
+              .read(autoDownloadThresholdProvider.notifier)
+              .setThreshold(v.round() < 34 ? 0 : v.round()),
         ),
-        Text('Files up to this size auto-download',
+        Text(
+            off
+                ? 'Off — files show a download button instead'
+                : 'Files up to this size auto-download',
             style: HollowTypography.caption.copyWith(
               color: hollow.textSecondary, fontSize: 11,
             )),

@@ -427,10 +427,18 @@ Watches `fileTransferProvider.select((s) => s[attachment.fileId])` for live down
 - `maxWidth: 280`, surface background, border, `radiusSm` corners.
 - Row: `clock` icon (24px, secondary) + Column: fileName (secondary 13px, ellipsized) + "File expired . {formattedSize}" (italic caption).
 
+### Manual Download (issue #41)
+
+`_startManualDownload(context, ref)` — the pressable-placeholder twin of the hover-bar Download button. Self-contained: resolves the conversation from the file's own metadata row (`getFileMetadata`), calls `clearDeclined` first, then routes:
+- share-backed (persisted `shareRootHash`/`shareKeyHex` on the attachment / metadata row) → `EventStreamNotifier.startManualShareDownload`;
+- channel where we're NOT a member (guest public channel) → `crdt_api.requestPublicFile(peerHint: senderId)`;
+- otherwise → `requestFileFromPeer` (DM: contextId master; channel: senderId — Rust reroutes to another holder when offline).
+Toasts: info on request, error on failure.
+
 ### Unavailable Card (No Seeders)
 
-`_buildUnavailableCard(hollow)`:
-- Same layout as expired card but with `cloudOff` icon and "No seeders . {formattedSize}" text.
+`_buildUnavailableCard(hollow, onDownload)`:
+- Same layout as expired card but with `cloudOff` icon and "No seeders . tap to retry . {formattedSize}" text; whole card is a `HollowPressable` that retries via `_startManualDownload`.
 
 ### Image Preview
 
@@ -440,7 +448,7 @@ Watches `fileTransferProvider.select((s) => s[attachment.fileId])` for live down
 - **Complete with file on disk:** `GestureDetector(onTap: showFullscreen)` wrapping `MouseRegion(cursor: click)` wrapping `ConstrainedBox` wrapping `ClipRRect(radiusSm)` containing either `GifFileImage` (for `.gif`) or `Image.file` with `BoxFit.contain`. Error builder falls back to placeholder.
 - **Downloading:** Placeholder with `CircularProgressIndicator` (40px, determinate if progress > 0), status text below.
 - **Partial progress (not downloading):** Placeholder with 80px `LinearProgressIndicator` and percentage text.
-- **No progress:** Placeholder with `image` icon (32px) and formattedSize.
+- **Idle / not downloaded (issue #41):** PRESSABLE placeholder — sized box with a circular download button (44px, `download` icon), plus a media-type icon (`image`/`video`, 12px) next to formattedSize. Tap = `_startManualDownload`. Falls back to the static icon-only box when no download hook (error-builder path).
 
 ### Fullscreen Image Viewer
 
@@ -455,8 +463,8 @@ Watches `fileTransferProvider.select((s) => s[attachment.fileId])` for live down
 
 `_buildFileCard(...)`:
 - `maxWidth: 280`, surface background, border, `radiusSm` corners.
-- Row: file-type icon (28px, accent) + Column: fileName (body 13px w500, ellipsized) + status text (caption 11px, secondary).
-- Status text priority: vault phase > downloading with bytes > downloading > formattedSize.
+- Row: file-type icon (28px, accent) + Column: fileName (body 13px w500, ellipsized) + status text (caption 11px, secondary) + trailing download icon button (18px `HollowPressable`) when not complete/downloading (issue #41).
+- Status text priority: vault phase > downloading with bytes > downloading > `"{formattedSize} · .{ext}"` (extension repeated because the name column ellipsizes).
 - 3px `LinearProgressIndicator` at bottom when downloading or partial progress.
 
 ### File Icon Mapping

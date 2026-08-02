@@ -4,6 +4,7 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
+import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/core/providers/storage_provider.dart';
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 import 'package:hollow/src/theme/hollow_theme.dart';
@@ -414,6 +415,15 @@ class _ContextRowState extends ConsumerState<_ContextRow> {
                 ],
               ),
             ),
+            // Per-conversation auto-download override (issue #41). Channel
+            // rows map to their SERVER — one override per server, not per
+            // channel.
+            _AutoDownloadOverrideButton(
+              contextKey: isDm
+                  ? 'dm:${usage.contextId}'
+                  : 'server:${usage.contextId.split(':').first}',
+              conversationLabel: label,
+            ),
             // Trash is always tappable (works on touch); it just brightens on
             // hover on desktop. Always-visible keeps it discoverable on mobile.
             AnimatedOpacity(
@@ -428,6 +438,80 @@ class _ContextRowState extends ConsumerState<_ContextRow> {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+/// Per-conversation auto-download override menu (issue #41): Default (follow
+/// the global threshold) / Always on / Off. State is stored in
+/// [autoDownloadOverridesProvider] and pushed to Rust on every change.
+class _AutoDownloadOverrideButton extends ConsumerWidget {
+  const _AutoDownloadOverrideButton(
+      {required this.contextKey, required this.conversationLabel});
+  final String contextKey;
+  final String conversationLabel;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final hollow = HollowTheme.of(context);
+    final override = (ref.watch(autoDownloadOverridesProvider).valueOrNull ??
+        const {})[contextKey];
+    final icon = override == false
+        ? LucideIcons.cloudOff
+        : LucideIcons.download;
+    final color = override == null ? hollow.textSecondary : hollow.accent;
+
+    return PopupMenuButton<String>(
+      tooltip: 'Auto-download',
+      icon: Icon(icon,
+          size: 16,
+          color: color,
+          semanticLabel: 'Auto-download settings for $conversationLabel'),
+      color: hollow.elevated,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(hollow.radiusMd),
+        side: BorderSide(color: hollow.border),
+      ),
+      onSelected: (value) {
+        final notifier = ref.read(autoDownloadOverridesProvider.notifier);
+        switch (value) {
+          case 'default':
+            notifier.setOverride(contextKey, null);
+          case 'on':
+            notifier.setOverride(contextKey, true);
+          case 'off':
+            notifier.setOverride(contextKey, false);
+        }
+      },
+      itemBuilder: (ctx) => [
+        _item(hollow, 'default', 'Auto-download: Default',
+            selected: override == null),
+        _item(hollow, 'on', 'Auto-download: Always on',
+            selected: override == true),
+        _item(hollow, 'off', 'Auto-download: Off',
+            selected: override == false),
+      ],
+    );
+  }
+
+  PopupMenuItem<String> _item(HollowTheme hollow, String value, String label,
+      {required bool selected}) {
+    return PopupMenuItem(
+      value: value,
+      child: Row(
+        children: [
+          SizedBox(
+            width: 20,
+            child: selected
+                ? Icon(LucideIcons.check, size: 14, color: hollow.accent)
+                : null,
+          ),
+          Text(label,
+              style: HollowTypography.body.copyWith(
+                color: selected ? hollow.textPrimary : hollow.textSecondary,
+              )),
+        ],
       ),
     );
   }

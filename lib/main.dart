@@ -34,14 +34,22 @@ late final String _lockFilePath;
 /// Check if another instance is already running via lock file.
 /// Returns true if this is the only instance (safe to proceed).
 bool _acquireSingleInstanceLock() {
-  final appDataDir = Platform.environment['APPDATA'] ??
-      Platform.environment['HOME'] ??
-      '.';
   final sep = Platform.pathSeparator;
-  _lockFilePath = '$appDataDir${sep}Hollow${sep}hollow.lock';
+  final String lockDir;
+  if (isPortableMode) {
+    // Portable copies get their own lock inside hollow_data so a portable and
+    // an installed instance can coexist.
+    lockDir = hollowDataDir;
+  } else {
+    final appDataDir = Platform.environment['APPDATA'] ??
+        Platform.environment['HOME'] ??
+        '.';
+    lockDir = '$appDataDir${sep}Hollow';
+  }
+  _lockFilePath = '$lockDir${sep}hollow.lock';
 
   // Ensure directory exists.
-  final dir = Directory('$appDataDir${sep}Hollow');
+  final dir = Directory(lockDir);
   if (!dir.existsSync()) {
     dir.createSync(recursive: true);
   }
@@ -145,7 +153,7 @@ Future<void> _initCrashLogging() async {
   }
 }
 
-Future<void> main() async {
+Future<void> main(List<String> args) async {
   WidgetsFlutterBinding.ensureInitialized();
 
   // Phones and tablets are portrait-only for now: the UI is the mobile shell
@@ -166,6 +174,11 @@ Future<void> main() async {
 
   registerRustLicenses();
 
+  // Resolve app data directory (async on mobile, sync on desktop; detects
+  // portable mode). Must run before the single-instance lock so a portable
+  // copy locks inside its own data folder, and before any file I/O.
+  await initHollowDataDir(forcePortable: args.contains('--portable'));
+
   // Single-instance check — exit if another instance is running.
   if (Platform.isWindows || Platform.isLinux || Platform.isMacOS) {
     if (!_acquireSingleInstanceLock()) {
@@ -176,10 +189,6 @@ Future<void> main() async {
   // Pre-compile GPU shaders before the first frame to eliminate
   // shader compilation jank during animations.
   await HollowShaderWarmUp().execute();
-
-  // Resolve app data directory (async on mobile, sync on desktop).
-  // Must be called before RustLib.init crash logging or any file I/O.
-  await initHollowDataDir();
 
   // iOS: migrate the data dir into the App Group container so the Notification
   // Service Extension can open the SAME SQLCipher DB + identity to fetch &
@@ -198,8 +207,19 @@ Future<void> main() async {
   await RustLib.init();
 
   // On mobile, dirs crate returns None — pass the app data path to Rust.
-  if (Platform.isAndroid || Platform.isIOS) {
+  // Portable desktop copies pass it too so Rust's data_dir() follows the stick
+  // instead of falling back to the OS profile dir.
+  if (Platform.isAndroid || Platform.isIOS || isPortableMode) {
     await identity_api.setDataDir(path: hollowDataDir);
+  }
+  // Portable verdict into hollow_debug.log (next to the exe on Windows) so a
+  // "marker not picked up" report is diagnosable from the log alone.
+  if (Platform.isWindows || Platform.isLinux || Platform.isMacOS) {
+    network_api
+        .logFromDart(
+            message: '[PORTABLE] $portableDetectionNote'
+                '${isPortableMode ? ' (ACTIVE, data root: $hollowDataDir)' : ''}')
+        .catchError((_) {});
   }
 
   // Performance sentinels: frame-stall logger + slow platform-channel

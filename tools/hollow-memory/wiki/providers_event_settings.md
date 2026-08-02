@@ -258,7 +258,9 @@ The entire body is wrapped in `try-catch` to prevent unhandled exceptions from k
 - Determines vault mode: `serverId != null && members >= 6`.
 - `fileTransferProvider.notifier.onFileHeaderReceived(...)` with isVaultMode flag.
 - Calls `_reloadChatForFile(fileId)` to update message UI.
-- If share-backed (shareRootHash + shareKeyHex present) AND server sync is done: checks `autoDownloadThresholdProvider` (default 169 MB). If file size is within threshold, initiates auto-download via `share_api.shareStartFromRef()`. Maps rootHash to fileId in `_shareToFileId` and stores pending download info in `_pendingAutoDownloads`. If sync not yet done, skips auto-download to prevent cache thrash.
+- If share-backed (shareRootHash + shareKeyHex present) AND server sync is done: checks the EFFECTIVE auto-download threshold (`effectiveAutoDownloadMbRead(ref, 'server:$serverId')` — per-conversation override then global; 0 = off, issue #41). If allowed and within threshold, initiates auto-download via `share_api.shareStartFromRef()`. Maps rootHash to fileId in `_shareToFileId` and stores pending download info in `_pendingAutoDownloads`. If sync not yet done, skips auto-download to prevent cache thrash.
+- `FileFailed` with the sentinel error `"auto_download_off"` routes to `fileTransferProvider.markDeclined()` (pins the bubble on its manual Download button; `onFileProgress` ignores pinned files from ANY source incl. the Dart WebRTC receive) instead of `onFileFailed`.
+- `startManualShareDownload()` (public, issue #41): manual restart of a share-backed download from the PERSISTED `files.share_ref_json` ref — registers the same `_shareToFileId`/`_pendingAutoDownloads` bridging as the auto path. Used by all Download buttons for share-backed files (a direct FileRequest response is share-less and rejected by our own size cap).
 
 **`NetworkEvent_FileProgress`** (fileId, chunksReceived, totalChunks)
 - `fileTransferProvider.notifier.onFileProgress(fileId, chunksReceived, totalChunks)`
@@ -628,12 +630,19 @@ All three are seeded into `VoiceService`/`VoiceChannelService` at service creati
 - Key: `'ringtone_end'`
 - Default: `30.0`. Clip end offset in seconds (or song duration if shorter).
 
-### Auto-Download Threshold
+### Auto-Download Threshold (issue #41)
 Provider: `autoDownloadThresholdProvider` -- `AsyncNotifierProvider<AutoDownloadThresholdNotifier, int>`
 - Key: `'auto_download_threshold_mb'`
-- Default: `169` MB. Minimum: `34` MB (the share-backed file threshold). Maximum: `2048` MB.
-- Files up to this size auto-download when received as share-backed attachments. Larger ones require manual action.
-- `setThreshold(int mb)` -- Clamps to [34, 2048] before persisting.
+- Default: `169` MB. `0` = auto-download OFF. Otherwise [34, 2048] (sub-34 slider values snap to 0).
+- Gates ALL automatic file delivery: share-backed auto-starts (Dart), pushed streams (Rust receive gate), and the missing-file sweeps (DM/channel/guest — the sweeps ARE the auto-download for offline-sent files).
+- `setThreshold(int mb)` -- `mb <= 0 ? 0 : clamp(34, 2048)`; re-pushes the combined config to Rust.
+
+### Auto-Download Overrides (issue #41)
+Provider: `autoDownloadOverridesProvider` -- `AsyncNotifierProvider<AutoDownloadOverridesNotifier, Map<String, bool>>`
+- Key: `'auto_download_overrides'` (one JSON object). Keys `dm:{master}` / `server:{server_id}`; `false` = never auto there, `true` = auto even when global is 0 (falls back to 169), absent = follow global.
+- `setOverride(contextKey, bool?)` -- null removes; re-pushes config to Rust. UI: per-conversation menu on Files & Storage rows (`_AutoDownloadOverrideButton`, server-level for channel rows).
+- Helpers `effectiveAutoDownloadMb(WidgetRef, key)` / `effectiveAutoDownloadMbRead(Ref, key)` mirror Rust's `effective_auto_download_mb` — keep in sync.
+- `pushAutoDownloadConfig(thresholdMb:, overrides:)` → `set_auto_download_config` FFI; pushed explicitly in `_bootstrap` next to `setRelayUrl` (never rely on lazy provider builds reaching Rust) and on every change.
 
 ### Vault Cache Capacity
 Provider: `vaultCacheCapProvider` -- `AsyncNotifierProvider<VaultCacheCapNotifier, int>`

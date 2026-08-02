@@ -326,6 +326,8 @@ class ChatNotifier extends Notifier<Map<String, List<ChatMessage>>> {
               diskPath: info.diskPath,
               videoThumb: info.videoThumb,
               expiredAt: info.expiredAt?.toInt(),
+              shareRootHash: info.shareRootHash,
+              shareKeyHex: info.shareKeyHex,
             );
           }
         } catch (_) {}

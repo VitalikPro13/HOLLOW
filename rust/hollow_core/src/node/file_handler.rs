@@ -23,6 +23,74 @@ use super::ws_stream_transfer;
 /// first or second retry; a genuinely corrupt source won't, so we cap it.
 const FILE_DECRYPT_MAX_RETRIES: u32 = 3;
 
+// ── Auto-download configuration (issue #41) ─────────────────────────────────
+//
+// Pushed by Dart via `set_auto_download_config` at bootstrap and on every
+// settings change. `threshold_mb == 0` means auto-download is OFF. Overrides
+// are keyed `dm:{master}` / `server:{server_id}`: `false` = never auto here,
+// `true` = auto here even when the global is off (falls back to the 169 MB
+// default threshold in that case). Default-permissive (169 MB) when Dart never
+// pushed — matches the Dart-side default so old flows keep working.
+//
+// The gate is receive-side only: pull paths (missing-file sweeps, share
+// auto-start) are gated in Dart before any request is made; pushed streams
+// are declined at FileHeader time (metadata kept for the card, no pending
+// stream registered, late bytes deleted). A sender-side pre-negotiation so
+// pushed bytes never ride the wire at all is future work.
+pub(crate) struct AutoDownloadConf {
+    pub threshold_mb: u32,
+    pub overrides: HashMap<String, bool>,
+}
+
+const AUTO_DOWNLOAD_DEFAULT_MB: u32 = 169;
+
+fn auto_download_conf() -> &'static std::sync::Mutex<AutoDownloadConf> {
+    static CONF: std::sync::OnceLock<std::sync::Mutex<AutoDownloadConf>> =
+        std::sync::OnceLock::new();
+    CONF.get_or_init(|| {
+        std::sync::Mutex::new(AutoDownloadConf {
+            threshold_mb: AUTO_DOWNLOAD_DEFAULT_MB,
+            overrides: HashMap::new(),
+        })
+    })
+}
+
+/// Replace the auto-download config (FFI `set_auto_download_config`).
+pub(crate) fn set_auto_download_conf(threshold_mb: u32, overrides: HashMap<String, bool>) {
+    if let Ok(mut conf) = auto_download_conf().lock() {
+        conf.threshold_mb = threshold_mb;
+        conf.overrides = overrides;
+    }
+}
+
+/// The effective auto-download threshold in MB for a conversation
+/// (`dm:{master}` / `server:{server_id}`). 0 = never auto-download.
+pub(crate) fn effective_auto_download_mb(context_key: &str) -> u32 {
+    let Ok(conf) = auto_download_conf().lock() else {
+        return AUTO_DOWNLOAD_DEFAULT_MB;
+    };
+    match conf.overrides.get(context_key) {
+        Some(false) => 0,
+        Some(true) => {
+            if conf.threshold_mb == 0 { AUTO_DOWNLOAD_DEFAULT_MB } else { conf.threshold_mb }
+        }
+        None => conf.threshold_mb,
+    }
+}
+
+/// `true` = a PUSHED file transfer of `size` bytes may auto-register its
+/// stream in this conversation. Voice messages are exempt — they are tiny,
+/// conversational, and the recorder names them exactly "Voice message.ogg"
+/// (the header carries no dedicated flag; keep this in sync with
+/// `_stageVoiceMessage` on the Dart side).
+pub(crate) fn auto_download_allows(size: u64, file_name: &str, context_key: &str) -> bool {
+    if file_name == "Voice message.ogg" {
+        return true;
+    }
+    let mb = effective_auto_download_mb(context_key) as u64;
+    mb > 0 && size <= mb * 1024 * 1024
+}
+
 /// SECURITY (0.8.5): `true` = this REMOTE file-metadata write may proceed.
 ///
 /// `insert_file_metadata` is an UPSERT keyed on `file_id` — it deliberately
@@ -2386,6 +2454,8 @@ pub(crate) async fn handle_envelope_file_header(
     aes_nonce: Option<String>,
     vthumb: Option<VideoThumbRef>,
     share_ref: Option<super::types::ShareRef>,
+    requested_file_receipts: &mut HashMap<String, std::time::Instant>,
+    declined_file_ids: &mut std::collections::HashSet<String>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     db_path: &str,
@@ -2393,7 +2463,18 @@ pub(crate) async fn handle_envelope_file_header(
 ) {
     hollow_log!("[HOLLOW-FILE] MLS FileHeader: {fid} ({name}, {size} bytes, {chunks} chunks, share_ref={})", share_ref.is_some());
 
+    // Explicit pull — bypasses the size cap and the auto-download gate
+    // (mirrors the DM/Olm header arm in swarm.rs; issue #41).
+    let explicitly_requested = requested_file_receipts
+        .remove(&fid)
+        .map(|t| t.elapsed() < std::time::Duration::from_secs(300))
+        .unwrap_or(false);
+    if explicitly_requested {
+        declined_file_ids.remove(&fid);
+    }
+
     if share_ref.is_none()
+        && !explicitly_requested
         && mls_file_header_exceeds_cap(server_states, server_id, size, &sender_peer_id)
     {
         return;
@@ -2423,12 +2504,38 @@ pub(crate) async fn handle_envelope_file_header(
                 &sender_peer_id, false, ts,
                 vthumb.as_ref(),
             );
+            // Persist the share back-reference (issue #41) so a manual
+            // download can rejoin the share swarm after a restart.
+            if let Some(sr) = share_ref.as_ref() {
+                let _ = store.set_file_share_ref(&fid, sr);
+            }
         }
+    }
+
+    // AUTO-DOWNLOAD GATE (issue #41) — mirrors the DM/Olm arm: metadata above
+    // still renders the card, but a gated push registers no pending stream and
+    // late-arriving bytes are deleted instead of parked. An existing pending
+    // stream = a transfer we already accepted (the decrypt-fail retry
+    // re-requests WITHOUT a receipt).
+    let auto_ok = explicitly_requested
+        || pending_file_streams.contains_key(&fid)
+        || auto_download_allows(size, &name, &format!("server:{server_id}"));
+    if !auto_ok && share_ref.is_none() && aes_key.is_some() {
+        declined_file_ids.insert(fid.clone());
+        if let Some((temp_path, _, _)) = early_file_streams.remove(&fid) {
+            let _ = std::fs::remove_file(&temp_path);
+        }
+        hollow_log!("[HOLLOW-FILE] Auto-download gate declined pushed MLS file {fid} ({size} bytes, server:{server_id}) — metadata kept, manual download available");
+        // Header-time decline signal — see the DM/Olm arm twin.
+        let _ = event_tx.send(NetworkEvent::FileFailed {
+            file_id: fid.clone(),
+            error: "auto_download_off".to_string(),
+        }).await;
     }
 
     // Register pending stream so binary file bytes can be decrypted on arrival.
     // Skip for share-backed files — no binary data arrives via P2P, Share handles delivery.
-    if share_ref.is_none() && let (Some(ak), Some(an)) = (aes_key, aes_nonce) {
+    if auto_ok && share_ref.is_none() && let (Some(ak), Some(an)) = (aes_key, aes_nonce) {
         register_pending_file_stream_and_reprocess(
             &fid, ak, an, &name, &ext, &sender_peer_id, server_id,
             &sid, &cid, &mid, img, w, h,

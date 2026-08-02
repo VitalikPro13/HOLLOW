@@ -459,6 +459,7 @@ State is a `Map<String, FileTransferState>` keyed by file ID (which is the messa
 | `videoThumb` | `VideoThumbRef?` | `null` | Video thumbnail reference. When non-null, this file is a thumbnail for a vault-stored video. UI renders play button overlay. |
 | `shareRootHash` | `String?` | `null` | Share root hash for share-backed files (>34 MB channel files). |
 | `seeders` | `int?` | `null` | Active seeder count (updated from ShareProgress events). |
+| `declined` | `bool` | `false` | Auto-download gate pin (issue #41). Set by `markDeclined()` on the `FileFailed("auto_download_off")` sentinel; while true, `onFileProgress` IGNORES progress from ANY source (Rust WS poll AND the Dart WebRTC data-channel receive) so the bubble keeps its Download button while the unwanted push is discarded. Cleared by `clearDeclined()` (called from every manual-download entry point) and on completion. |
 
 **Computed:** `progress` -- `chunksReceived / totalChunks` (0.0-1.0).
 

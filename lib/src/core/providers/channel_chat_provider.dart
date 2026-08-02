@@ -8,6 +8,7 @@ import 'package:hollow/src/core/providers/service_providers.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/file_transfer_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
+import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/rust/api/conference.dart' as conference_api;
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
@@ -351,6 +352,8 @@ class ChannelChatNotifier
                 diskPath: info.diskPath,
                 videoThumb: info.videoThumb,
                 expiredAt: info.expiredAt?.toInt(),
+                shareRootHash: info.shareRootHash,
+                shareKeyHex: info.shareKeyHex,
               );
             }
           } catch (_) {}
@@ -619,6 +622,10 @@ class ChannelChatNotifier
       String serverId, String channelId,
       List<ChannelChatMessage> messages,
       int firstVisible, int lastVisible) async {
+    // Auto-download off for this server (#41): the viewport sweep IS the
+    // auto-download for channel files — skip it; file cards offer a manual
+    // Download button instead.
+    if (effectiveAutoDownloadMbRead(ref, 'server:$serverId') == 0) return;
     final start = (firstVisible - 15).clamp(0, messages.length - 1);
     final end = (lastVisible + 15).clamp(0, messages.length - 1);
     // Candidates come from THIS server's online members (master-keyed) —

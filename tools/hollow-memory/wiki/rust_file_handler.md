@@ -147,21 +147,34 @@ When `share_ref.is_none()`, validates file size against server's `max_file_size_
 
 ### Flow
 1. Logs the FileHeader with share_ref status.
-2. Size validation (with share_ref bypass).
-3. Saves file metadata to DB (`insert_file_metadata()`).
-4. **PendingFileStream registration (share_ref bypass):** When `share_ref.is_none()` and AES key/nonce are present, registers a `PendingFileStream` for binary stream completion. When `share_ref.is_some()`, skips registration entirely -- Share handles delivery.
-5. **Early arrival check:** If an early file stream exists (WebRTC bytes arrived before header), immediately processes it via `handle_completed_stream()`.
-6. Emits `NetworkEvent::FileHeaderReceived` with `share_ref` passed through (Dart uses this to trigger Share-based download).
+2. Explicit-pull receipt check (`requested_file_receipts.remove(fid)`, 300s TTL) — a matching receipt bypasses the size cap AND the auto-download gate.
+3. Size validation (with share_ref + explicit-request bypass).
+4. Saves file metadata to DB (`insert_file_metadata()`); persists `share_ref` via `set_file_share_ref()` when present.
+5. **Auto-download gate (issue #41):** `auto_ok = explicitly_requested || pending_file_streams.contains_key(fid) || auto_download_allows(size, name, "server:{sid}")`. When gated: fid → `declined_file_ids`, early-arrival temp deleted, `FileFailed { error: "auto_download_off" }` emitted (Dart pins the bubble on its Download button), NO stream registration.
+6. **PendingFileStream registration (share_ref bypass):** When `auto_ok`, `share_ref.is_none()` and AES key/nonce are present, registers a `PendingFileStream` for binary stream completion. When `share_ref.is_some()`, skips registration entirely -- Share handles delivery.
+7. **Early arrival check:** If an early file stream exists (WebRTC bytes arrived before header), immediately processes it via `handle_completed_stream()`.
+8. Emits `NetworkEvent::FileHeaderReceived` with `share_ref` passed through (Dart uses this to trigger Share-based download).
+
+---
+
+## Auto-download gate (issue #41)
+
+Config global lives at the top of `file_handler.rs`: `AutoDownloadConf { threshold_mb, overrides }` behind a `OnceLock<Mutex<_>>`, default-permissive (169 MB) until Dart pushes via the `set_auto_download_config` FFI (api/network.rs, runtime-effective). `threshold_mb == 0` = off. Overrides keyed `dm:{master}` / `server:{server_id}`; `false` = never auto, `true` = auto even when global is 0 (falls back to 169). Helpers: `effective_auto_download_mb(context_key)`, `auto_download_allows(size, file_name, context_key)` — voice messages exempt by the literal recorder filename `"Voice message.ogg"`.
+
+The gate applies to PUSHED streams only (metadata always lands so the card renders). Pull paths (DM/channel/guest sweeps, share auto-start) are gated in **Dart** before any request is made. Event-loop state: `requested_file_receipts` (explicit pulls; also inserted by `RequestPublicFile`; cleared on WS disconnect) and `declined_file_ids` (RAM, survives reconnect). Declined bytes that arrive anyway are deleted at BOTH stream-completion entry points (WsEvent::BinaryDirect intercept + WebRtcTransferComplete arm) with a `FileFailed("auto_download_off")` emit; the 500ms stream-progress poll also skips declined fids.
+
+**A pushed stream cannot be cancelled:** `ws_stream_send` queues the whole file into the unbounded WS command channel within one event-loop turn — no decline signal can beat it, which is why no FileDecline wire variant exists. See memory `project_autodownload_gate`.
 
 ---
 
 ## DM FileHeader handler in swarm.rs (share_ref bypass #3)
 
-`swarm.rs` line ~3445 -- Handles `MessageEnvelope::FileHeader` received via Olm decryption in the DM path. Same three bypass points as the MLS path:
+`swarm.rs` -- Handles `MessageEnvelope::FileHeader` received via Olm decryption in the DM path. Same bypass points as the MLS path:
 
-1. **Size check bypass:** `if share_ref.is_none()` gates the size validation against 34 MB default or server setting.
-2. **PendingFileStream skip:** `if share_ref.is_none() && let (Some(ak), Some(an)) = (aes_key, aes_nonce)` gates stream registration.
-3. Emits `FileHeaderReceived` with `share_ref` for Dart to handle.
+1. **Size check bypass:** `if share_ref.is_none() && !explicitly_requested` gates the size validation against 34 MB default or server setting.
+2. **Auto-download gate** (context key `dm:{master}` / `server:{sid}`), mirroring the MLS arm; the inline-image (0x08 relay-buffered) branch stores the sentinel MESSAGE row regardless but drops the ciphertext when gated (manual download re-pulls from the sender).
+3. **PendingFileStream skip:** `if auto_ok && share_ref.is_none() && let (Some(ak), Some(an)) = (aes_key, aes_nonce)` gates stream registration.
+4. Emits `FileHeaderReceived` with `share_ref` for Dart to handle.
 
 ---
 

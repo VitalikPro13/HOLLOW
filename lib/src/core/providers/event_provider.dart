@@ -1171,6 +1171,8 @@ class EventStreamNotifier extends Notifier<bool> {
                   height: height?.toInt(),
                   totalChunks: 0,
                   videoThumb: videoThumb,
+                  shareRootHash: shareRootHash,
+                  shareKeyHex: shareKeyHex,
                 ),
               );
         }
@@ -1180,9 +1182,12 @@ class EventStreamNotifier extends Notifier<bool> {
           if (!_serverSyncDone.contains(serverId)) {
             debugPrint('[HOLLOW] Share-backed file during sync — skipping auto-download for $fileId');
           } else {
-          final thresholdMb = ref.read(autoDownloadThresholdProvider).valueOrNull ?? 169;
+          // Per-conversation override then global threshold; 0 = off (#41).
+          final thresholdMb =
+              effectiveAutoDownloadMbRead(ref, 'server:$serverId');
           final autoDownloadThreshold = thresholdMb * 1024 * 1024;
-          final autoDownload = sizeBytes.toInt() <= autoDownloadThreshold;
+          final autoDownload =
+              thresholdMb > 0 && sizeBytes.toInt() <= autoDownloadThreshold;
           final isVideo = const {'mp4', 'webm', 'mov', 'mkv', 'avi', 'm4v'}
               .contains(fileName.split('.').last.toLowerCase());
 
@@ -1234,8 +1239,15 @@ class EventStreamNotifier extends Notifier<bool> {
 
       case NetworkEvent_FileFailed(:final fileId, :final error):
         debugPrint('[HOLLOW] File failed: $fileId — $error');
-        ref.read(fileTransferProvider.notifier).onFileFailed(
-              fileId, error);
+        if (error == 'auto_download_off') {
+          // Auto-download gate decline (issue #41), not a real failure: pin
+          // the bubble on its manual Download button so neither the Rust WS
+          // poll nor the Dart WebRTC receive can flip it into a spinner
+          // while the unwanted push transits and is discarded.
+          ref.read(fileTransferProvider.notifier).markDeclined(fileId);
+        } else {
+          ref.read(fileTransferProvider.notifier).onFileFailed(fileId, error);
+        }
 
       // -- Vault shard events (Phase 4) --
       case NetworkEvent_ShardStored(:final serverId, :final contentId,
@@ -1932,6 +1944,43 @@ class EventStreamNotifier extends Notifier<bool> {
   Future<void> requestMissingDmFilesOnOpen(String peerId) =>
       _requestMissingFilesForDm(peerId);
 
+  /// Manually start a share-backed download (issue #41): the Download button
+  /// on an over-threshold or auto-download-off share-backed file. Registers
+  /// the same bridging state as the auto-download path so ShareManifestReady /
+  /// ShareProgress / ShareCompleted flow into the file-transfer UI. The share
+  /// ref comes from the persisted `files.share_ref_json` column, so this works
+  /// after a restart (a direct FileRequest cannot — its response is share-less
+  /// and our own size cap rejects it).
+  Future<void> startManualShareDownload({
+    required String fileId,
+    required String rootHash,
+    required String keyHex,
+    required String serverId,
+    required bool sequential,
+  }) async {
+    ref.read(fileTransferProvider.notifier).clearDeclined(fileId);
+    _shareToFileId[rootHash] = fileId;
+    _pendingAutoDownloads[rootHash] = (
+      sequential: sequential,
+      link: 'hollow://share/$rootHash',
+      fileId: fileId,
+    );
+    try {
+      await share_api.shareStartFromRef(
+        rootHash: rootHash,
+        keyHex: keyHex,
+        saveDir: '',
+        sequential: sequential,
+        serverId: serverId,
+        contextType: 'channel',
+      );
+    } catch (e) {
+      _pendingAutoDownloads.remove(rootHash);
+      debugPrint('[HOLLOW] Manual share download failed to start: $e');
+      rethrow;
+    }
+  }
+
   /// Request missing files after DM sync completes — scoped to THIS
   /// conversation only (the account-global sweep re-requested every missing id
   /// from the DM peer on every chat open, and leaked unrelated file ids to
@@ -1939,6 +1988,10 @@ class EventStreamNotifier extends Notifier<bool> {
   Future<void> _requestMissingFilesForDm(String peerId) async {
     await Future.delayed(const Duration(seconds: 1));
     try {
+      // Auto-download off for this DM (#41): the sweep IS the auto-download
+      // for offline-sent files — skip it entirely; every file card offers a
+      // manual Download button instead.
+      if (effectiveAutoDownloadMbRead(ref, 'dm:$peerId') == 0) return;
       final missingIds =
           await storage_api.getMissingFileIdsForDm(peerId: peerId);
       if (missingIds.isEmpty) return;

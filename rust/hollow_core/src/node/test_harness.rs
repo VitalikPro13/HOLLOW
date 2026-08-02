@@ -2466,6 +2466,113 @@ async fn dm_file_transfer_completes_and_decrypts() {
     assert!(!b.missing_file_ids().contains(&fid), "completed file is not missing");
 }
 
+/// Issue #41 — auto-download gate. With auto-download OFF for the conversation
+/// the receiver keeps the pushed file's METADATA (the card renders with a
+/// manual Download button) but registers no stream: the pushed bytes are
+/// discarded and the row never completes. An explicit RequestFile (the manual
+/// button) then bypasses the gate and the transfer completes normally.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
+async fn dm_auto_download_off_declines_push_then_manual_request_completes() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    const A_MASTER: u8 = 101;
+    const B_MASTER: u8 = 102;
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
+    let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
+
+    let mut a = spawn_node_with_friends(&relay, A_MASTER, A_MASTER, &[&b_master]).await;
+    sleep_ms(1200).await;
+    let mut b = spawn_node_with_friends(&relay, B_MASTER, B_MASTER, &[&a_master]).await;
+    sleep_ms(4000).await;
+    assert_eq!(a.olm_status(&b.device_id).await, "confirmed");
+    drain_events(&mut a);
+    drain_events(&mut b);
+
+    // Turn auto-download OFF for exactly this DM (global stays at the
+    // permissive default so the conf leaks nothing into other tests even if
+    // an assert below fires before the restore).
+    let gate_key = format!("dm:{a_master}");
+    super::file_handler::set_auto_download_conf(
+        169,
+        std::collections::HashMap::from([(gate_key.clone(), false)]),
+    );
+
+    let src = global_tmp.path().join("gated.bin");
+    let contents: &[u8] = b"gated file contents that must not auto-persist";
+    std::fs::write(&src, contents).expect("write src file");
+
+    a.cmd_tx
+        .send(NodeCommand::SendFile(Box::new(super::types::SendFilePayload {
+            peer_id: Some(b.master_id.clone()),
+            server_id: None,
+            channel_id: None,
+            file_path: src.to_str().unwrap().to_string(),
+            message_id: "gated-file-msg-1".to_string(),
+            message_text: String::new(),
+            vthumb: None,
+            override_width: None,
+            override_height: None,
+            share_ref: None,
+        })))
+        .await
+        .unwrap();
+
+    // The header still lands (card metadata)...
+    let mut got_fid = None;
+    let header = wait_event(&mut b, std::time::Duration::from_secs(5), |ev| {
+        if let NetworkEvent::FileHeaderReceived { file_id, file_name, .. } = ev {
+            if file_name.starts_with("gated") {
+                got_fid = Some(file_id.clone());
+                return true;
+            }
+        }
+        false
+    })
+    .await;
+    assert!(header, "gated push must still deliver FileHeaderReceived (the card)");
+    let fid = got_fid.expect("file id from header");
+
+    // ...but the pushed bytes are declined: no FileCompleted, row incomplete.
+    let completed_anyway = wait_event(&mut b, std::time::Duration::from_secs(3), |ev| {
+        matches!(ev, NetworkEvent::FileCompleted { file_id, .. } if *file_id == fid)
+    })
+    .await;
+    assert!(!completed_anyway, "auto-download off must not complete a pushed file");
+    let meta = b.file_meta(&fid).expect("metadata row persisted despite the gate");
+    assert!(meta.completed_at.is_none(), "gated file must stay incomplete");
+
+    // Manual download (the placeholder / hover button): explicit RequestFile
+    // bypasses the gate via the request receipt and completes normally.
+    b.cmd_tx
+        .send(NodeCommand::RequestFile {
+            file_id: fid.clone(),
+            peer_id: a.master_id.clone(),
+            chunks: Vec::new(),
+        })
+        .await
+        .unwrap();
+    let done = wait_event(&mut b, std::time::Duration::from_secs(5), |ev| {
+        matches!(ev, NetworkEvent::FileCompleted { file_id, .. } if *file_id == fid)
+    })
+    .await;
+    assert!(done, "explicit RequestFile must bypass the auto-download gate");
+    sleep_ms(200).await;
+
+    let meta = b.file_meta(&fid).expect("files row after manual download");
+    assert!(meta.completed_at.is_some(), "manual download completed");
+    let disk = meta.disk_path.expect("completed file has a disk path");
+    let got = std::fs::read(&disk).expect("read the received file");
+    assert_eq!(got, contents, "manually pulled file decrypts to the original contents");
+
+    // Restore the permissive default for the rest of the suite.
+    super::file_handler::set_auto_download_conf(169, std::collections::HashMap::new());
+}
+
 // ---------------------------------------------------------------------------
 // Ring-2 CONTROL PLANE: voice-channel join/leave + participant tracking + signal
 // routing. Real audio/SFU is out of scope; the control path rides a plaintext

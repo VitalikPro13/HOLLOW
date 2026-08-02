@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/hollow_data_dir.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
@@ -58,20 +59,26 @@ class _AutoDownloadSlider extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final threshold =
         ref.watch(autoDownloadThresholdProvider).valueOrNull ?? 169;
+    final off = threshold == 0;
     return SettingsLabeledSlider(
       icon: LucideIcons.download,
       title: 'Auto-Download Threshold',
-      subtitle: 'Files up to $threshold MB auto-download',
-      value: threshold.toDouble().clamp(34, 2048),
-      min: 34,
+      subtitle: off
+          ? 'Off — files show a download button instead (voice messages still '
+              'play automatically)'
+          : 'Files up to $threshold MB auto-download',
+      value: off ? 0 : threshold.toDouble().clamp(34, 2048),
+      min: 0,
       max: 2048,
       divisions: 50,
-      label: '$threshold MB',
-      minLabel: '34 MB',
+      label: off ? 'Off' : '$threshold MB',
+      minLabel: 'Off',
       maxLabel: '2 GB',
+      // Anything dragged below the 34 MB floor snaps to Off (0) — the
+      // 1–33 MB range has no meaning (34 MB is the direct-transfer cap).
       onChanged: (value) => ref
           .read(autoDownloadThresholdProvider.notifier)
-          .setThreshold(value.round()),
+          .setThreshold(value.round() < 34 ? 0 : value.round()),
     );
   }
 }
@@ -228,7 +235,9 @@ class _DataLocationRow extends StatelessWidget {
   /// core's `dirs::data_dir()/hollow` per platform, resolved to a real path via
   /// the home/APPDATA env var (falls back to the `~`/`%APPDATA%` template if the
   /// env var is missing). Desktop only — mobile uses a sandboxed app container.
+  /// Portable mode overrides all of it with the hollow_data folder by the exe.
   static String _dataLocationPath() {
+    if (isPortableMode) return hollowDataDir;
     final env = Platform.environment;
     if (Platform.isWindows) {
       final appData = env['APPDATA'];
@@ -284,7 +293,10 @@ class _DataLocationRow extends StatelessWidget {
               ),
               const SizedBox(height: 2),
               Text(
-                'Identity key, encrypted database, and downloaded files.',
+                isPortableMode
+                    ? 'Portable mode — identity key, encrypted database, and '
+                        'downloaded files travel with the app folder.'
+                    : 'Identity key, encrypted database, and downloaded files.',
                 style: HollowTypography.caption
                     .copyWith(color: hollow.textSecondary, fontSize: 10),
               ),

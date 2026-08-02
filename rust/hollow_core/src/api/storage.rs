@@ -752,6 +752,11 @@ pub struct StoredFileInfo {
     /// The Dart UI uses this to render a play button overlay and trigger the
     /// vault download on tap.
     pub video_thumb: Option<crate::api::network::VideoThumbRef>,
+    /// Persisted share swarm root hash for share-backed (>34 MB) files —
+    /// lets a manual download rejoin the share after a restart (issue #41).
+    pub share_root_hash: Option<String>,
+    /// Persisted share AES key (hex) paired with `share_root_hash`.
+    pub share_key_hex: Option<String>,
 }
 
 fn stored_file_to_ffi(f: crate::storage::messages::StoredFile) -> StoredFileInfo {
@@ -776,6 +781,8 @@ fn stored_file_to_ffi(f: crate::storage::messages::StoredFile) -> StoredFileInfo
         disk_path: f.disk_path,
         expired_at: f.expired_at,
         video_thumb: f.video_thumb.map(crate::api::network::VideoThumbRef::from),
+        share_root_hash: f.share_ref.as_ref().map(|s| s.root_hash.clone()),
+        share_key_hex: f.share_ref.map(|s| s.key),
     }
 }
 
