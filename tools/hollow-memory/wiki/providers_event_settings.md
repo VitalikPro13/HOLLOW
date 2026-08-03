@@ -425,7 +425,7 @@ The entire body is wrapped in `try-catch` to prevent unhandled exceptions from k
 - `shareTabProvider.notifier.handleShareList(entries)`
 
 **`NetworkEvent_ShareNeedWebRtc`** (peerId, hidden)
-- `webRtcProvider.notifier.ensureConnection(peerId, iceConfigOverride: ...)` -- Uses `streamIceConfigProvider` for hidden shares, `shareIceConfigProvider` for public shares.
+- `webRtcProvider.notifier.ensureShareConnection(peerId, config)` -- dials the DEDICATED STUN-only Share connection (never the general `hollow-data` one). Uses `streamIceConfigProvider` for hidden shares, `shareIceConfigProvider` for public shares.
 
 #### License and Budget Events
 

@@ -73,6 +73,24 @@ pub(crate) fn handle_webrtc_send_signal(
                 return;
             }
         }
+        // Hollow Share's dedicated STUN-only data channel — own variants so a
+        // pre-Share-lane client drops them instead of mistaking a Share offer
+        // for a general one (see HavenMessage::RtcShareOffer).
+        "share_offer" => HavenMessage::RtcShareOffer { sdp: payload, conn_id },
+        "share_answer" => HavenMessage::RtcShareAnswer { sdp: payload, conn_id },
+        "share_ice" => {
+            if let Ok(ice) = serde_json::from_str::<serde_json::Value>(&payload) {
+                HavenMessage::RtcShareIceCandidate {
+                    candidate: ice["candidate"].as_str().unwrap_or("").to_string(),
+                    sdp_mid: ice["sdpMid"].as_str().unwrap_or("").to_string(),
+                    sdp_mline_index: ice["sdpMLineIndex"].as_u64().unwrap_or(0) as u32,
+                    conn_id,
+                }
+            } else {
+                hollow_log!("[HOLLOW-WEBRTC] Failed to parse Share ICE payload");
+                return;
+            }
+        }
         _ => {
             hollow_log!("[HOLLOW-WEBRTC] Unknown signal type: {signal_type}");
             return;

@@ -81,7 +81,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.11.1';
 
   @override
-  int get rustContentHash => 251450073;
+  int get rustContentHash => 1783590196;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -1444,6 +1444,20 @@ abstract class RustLibApi extends BaseApi {
     required String tempPath,
     required String senderPeerId,
     required int chunkIndex,
+  });
+
+  Future<void> crateApiNetworkWebrtcSharePeerConnected({
+    required String peerId,
+  });
+
+  Future<void> crateApiNetworkWebrtcSharePeerDisconnected({
+    required String peerId,
+  });
+
+  Future<void> crateApiNetworkWebrtcShareTransferFailed({
+    required String transferId,
+    required String peerId,
+    required String error,
   });
 
   Future<void> crateApiNetworkWebrtcTransferComplete({
@@ -12671,6 +12685,109 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
+  Future<void> crateApiNetworkWebrtcSharePeerConnected({
+    required String peerId,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(peerId, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 341,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiNetworkWebrtcSharePeerConnectedConstMeta,
+        argValues: [peerId],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiNetworkWebrtcSharePeerConnectedConstMeta =>
+      const TaskConstMeta(
+        debugName: "webrtc_share_peer_connected",
+        argNames: ["peerId"],
+      );
+
+  @override
+  Future<void> crateApiNetworkWebrtcSharePeerDisconnected({
+    required String peerId,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(peerId, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 342,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiNetworkWebrtcSharePeerDisconnectedConstMeta,
+        argValues: [peerId],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiNetworkWebrtcSharePeerDisconnectedConstMeta =>
+      const TaskConstMeta(
+        debugName: "webrtc_share_peer_disconnected",
+        argNames: ["peerId"],
+      );
+
+  @override
+  Future<void> crateApiNetworkWebrtcShareTransferFailed({
+    required String transferId,
+    required String peerId,
+    required String error,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(transferId, serializer);
+          sse_encode_String(peerId, serializer);
+          sse_encode_String(error, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 343,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiNetworkWebrtcShareTransferFailedConstMeta,
+        argValues: [transferId, peerId, error],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiNetworkWebrtcShareTransferFailedConstMeta =>
+      const TaskConstMeta(
+        debugName: "webrtc_share_transfer_failed",
+        argNames: ["transferId", "peerId", "error"],
+      );
+
+  @override
   Future<void> crateApiNetworkWebrtcTransferComplete({
     required String transferId,
     required String tempPath,
@@ -12690,7 +12807,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 341,
+            funcId: 344,
             port: port_,
           );
         },
@@ -12733,7 +12850,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 342,
+            funcId: 345,
             port: port_,
           );
         },

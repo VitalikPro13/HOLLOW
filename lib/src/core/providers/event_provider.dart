@@ -1624,12 +1624,15 @@ class EventStreamNotifier extends Notifier<bool> {
         debugPrint('[HOLLOW-SHARE] list: ${entries.length} entries');
         ref.read(shareTabProvider.notifier).handleShareList(entries);
       case NetworkEvent_ShareNeedWebRtc(:final peerId, :final hidden):
-        ref.read(webRtcProvider.notifier).ensureConnection(
-          peerId,
-          iceConfigOverride: hidden
-              ? ref.read(streamIceConfigProvider)
-              : ref.read(shareIceConfigProvider),
-        );
+        // Share rides its OWN peer connection, never the general hollow-data
+        // one — that connection carries TURN (and is TURN-only while "Always
+        // relay calls" is on), and Share must stay off the relay entirely.
+        ref.read(webRtcProvider.notifier).ensureShareConnection(
+              peerId,
+              hidden
+                  ? ref.read(streamIceConfigProvider)
+                  : ref.read(shareIceConfigProvider),
+            );
 
       case NetworkEvent_LicenseError(:final reason):
         ref.read(licenseErrorProvider.notifier).state = reason;

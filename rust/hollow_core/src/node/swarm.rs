@@ -536,8 +536,14 @@ async fn run_event_loop(
     }
 
     // -- WebRTC peer tracking (Phase 5A) --
-    // Peers with active WebRTC data channels (Dart notifies us via NodeCommand).
+    // Peers with active GENERAL 'hollow-data' channels (Dart notifies us via
+    // NodeCommand). Carries DM/channel files, vault shards, screen audio, gossip.
     let mut webrtc_peers: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Peers with an active HOLLOW SHARE channel — a SECOND, STUN-only peer
+    // connection (HOLLOW_PLAN §7A). Kept separate on purpose: the general
+    // channel above carries TURN, so a Share scheduled against it would push
+    // multi-GB payloads through the relay. See node/share_handler.rs.
+    let mut webrtc_share_peers: std::collections::HashSet<String> = std::collections::HashSet::new();
     // Pending WebRTC sends — stored so we can retry via WSS on failure.
     // Key: transfer_id, Value: (peer_id, kind, id, source_path, total_size)
     let mut pending_webrtc_sends: HashMap<String, (String, super::ws_stream_transfer::StreamKind, String, std::path::PathBuf, u64)> = HashMap::new();
@@ -2257,6 +2263,21 @@ async fn run_event_loop(
                     NodeCommand::WebRtcPeerDisconnected { peer_id } => {
                         voice_handler::handle_webrtc_peer_disconnected(
                             peer_id, &mut webrtc_peers, &mut gossip_overlays,
+                        );
+                    }
+                    NodeCommand::WebRtcSharePeerConnected { peer_id } => {
+                        super::share_handler::handle_share_peer_connected(
+                            peer_id, &mut webrtc_share_peers,
+                        );
+                    }
+                    NodeCommand::WebRtcSharePeerDisconnected { peer_id } => {
+                        super::share_handler::handle_share_peer_disconnected(
+                            peer_id, &mut webrtc_share_peers,
+                        );
+                    }
+                    NodeCommand::WebRtcShareTransferFailed { transfer_id, peer_id, error } => {
+                        super::share_handler::handle_share_transfer_failed(
+                            transfer_id, peer_id, error, &mut webrtc_share_peers,
                         );
                     }
                     NodeCommand::WebRtcSendSignal { peer_id, signal_type, payload, conn_id } => {
@@ -4273,7 +4294,7 @@ async fn run_event_loop(
                                             HavenMessage::ShareChunkRequest { root_hash, indices } => {
                                                 super::share_handler::handle_envelope_share_chunk_request(
                                                     &mut share_registry, &mut seed_budget, &bundle_keypair, &ws_cmd_tx,
-                                                    &event_tx, &webrtc_peers, &from, root_hash, indices,
+                                                    &event_tx, &webrtc_share_peers, &from, root_hash, indices,
                                                 ).await;
                                             }
                                             HavenMessage::ShareChunkResponse { root_hash, index, data_b64 } => {
@@ -5087,7 +5108,7 @@ async fn run_event_loop(
                 arm_started = Some(("timer", "share_tick", std::time::Instant::now()));
                 let messaging_active = std::time::Instant::now()
                     .duration_since(last_message_traffic) < super::share_handler::COEXIST_PAUSE;
-                super::share_handler::tick(&mut share_registry, &ws_cmd_tx, messaging_active, &webrtc_peers, &event_tx, &bundle_keypair).await;
+                super::share_handler::tick(&mut share_registry, &ws_cmd_tx, messaging_active, &webrtc_share_peers, &event_tx, &bundle_keypair).await;
             }
 
             // -- TURN credential refresh (50 min) --
@@ -12291,6 +12312,55 @@ async fn handle_incoming_request(
             let _ = event_tx.send(NetworkEvent::WebRtcSignal {
                 peer_id: peer_str.to_string(),
                 signal_type: "ice".to_string(),
+                payload,
+                conn_id,
+            }).await;
+        }
+
+        // -- Hollow Share data channel (dedicated, STUN-only — §7A) --
+        HavenMessage::RtcShareOffer { sdp, conn_id } => {
+            if sdp.len() > MAX_SDP_SIZE {
+                hollow_log!("[HOLLOW-SECURITY] BLOCKED RtcShareOffer — size {} exceeds limit from {peer_str}", sdp.len());
+                return;
+            }
+            // BLOCK GUARD: same as RtcOffer — a blocked identity can't open a
+            // data channel to us, Share lane included. Siblings exempt.
+            if !super::resolver::same_identity(peer_str, master_peer_str)
+                && super::blocklist::is_blocked(peer_str)
+            {
+                return;
+            }
+            hollow_log!("[HOLLOW-WEBRTC] RtcShareOffer from {peer_str} conn={conn_id}");
+            let _ = event_tx.send(NetworkEvent::WebRtcSignal {
+                peer_id: peer_str.to_string(),
+                signal_type: "share_offer".to_string(),
+                payload: sdp,
+                conn_id,
+            }).await;
+        }
+        HavenMessage::RtcShareAnswer { sdp, conn_id } => {
+            if sdp.len() > MAX_SDP_SIZE {
+                hollow_log!("[HOLLOW-SECURITY] BLOCKED RtcShareAnswer — size {} exceeds limit from {peer_str}", sdp.len());
+                return;
+            }
+            hollow_log!("[HOLLOW-WEBRTC] RtcShareAnswer from {peer_str} conn={conn_id}");
+            let _ = event_tx.send(NetworkEvent::WebRtcSignal {
+                peer_id: peer_str.to_string(),
+                signal_type: "share_answer".to_string(),
+                payload: sdp,
+                conn_id,
+            }).await;
+        }
+        HavenMessage::RtcShareIceCandidate { candidate, sdp_mid, sdp_mline_index, conn_id } => {
+            hollow_log!("[HOLLOW-WEBRTC] RtcShareIceCandidate from {peer_str} conn={conn_id}");
+            let payload = serde_json::json!({
+                "candidate": candidate,
+                "sdpMid": sdp_mid,
+                "sdpMLineIndex": sdp_mline_index,
+            }).to_string();
+            let _ = event_tx.send(NetworkEvent::WebRtcSignal {
+                peer_id: peer_str.to_string(),
+                signal_type: "share_ice".to_string(),
                 payload,
                 conn_id,
             }).await;

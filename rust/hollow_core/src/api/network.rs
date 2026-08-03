@@ -3447,6 +3447,57 @@ pub fn webrtc_peer_disconnected(peer_id: String) -> Result<(), String> {
     Ok(())
 }
 
+/// Notify Rust that the DEDICATED Hollow Share data channel is open with a peer.
+///
+/// Tracked in its own set: Share runs a second, STUN-only peer connection so
+/// its bytes never ride the relay (HOLLOW_PLAN §7A). Reporting it as a general
+/// channel would let Rust schedule Share chunks over the TURN-capable one.
+#[frb]
+pub fn webrtc_share_peer_connected(peer_id: String) -> Result<(), String> {
+    let node = get_node();
+    let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
+    drop(guard);
+    let rt = get_runtime();
+    rt.block_on(cmd_tx.send(node::NodeCommand::WebRtcSharePeerConnected { peer_id }))
+        .map_err(|e| format!("Failed to send command: {e}"))?;
+    Ok(())
+}
+
+/// Notify Rust that the dedicated Hollow Share data channel has closed.
+#[frb]
+pub fn webrtc_share_peer_disconnected(peer_id: String) -> Result<(), String> {
+    let node = get_node();
+    let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
+    drop(guard);
+    let rt = get_runtime();
+    rt.block_on(cmd_tx.send(node::NodeCommand::WebRtcSharePeerDisconnected { peer_id }))
+        .map_err(|e| format!("Failed to send command: {e}"))?;
+    Ok(())
+}
+
+/// Notify Rust that a Share chunk transfer failed on the Share data channel.
+/// Kept apart from [`webrtc_transfer_failed`], which also evicts the peer from
+/// the general set and drives the WS relay retry — neither applies to Share.
+#[frb]
+pub fn webrtc_share_transfer_failed(
+    transfer_id: String,
+    peer_id: String,
+    error: String,
+) -> Result<(), String> {
+    let node = get_node();
+    let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
+    drop(guard);
+    let rt = get_runtime();
+    rt.block_on(cmd_tx.send(node::NodeCommand::WebRtcShareTransferFailed {
+        transfer_id, peer_id, error,
+    }))
+    .map_err(|e| format!("Failed to send command: {e}"))?;
+    Ok(())
+}
+
 /// Send a WebRTC signaling message (SDP offer/answer or ICE candidate) to a peer.
 /// Rust routes it through the WSS relay to the target peer.
 #[frb]

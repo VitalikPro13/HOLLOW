@@ -8,7 +8,7 @@ Covers `share_handler.rs` -- Phase 7A backend for private, encrypted, zero-track
 
 Hollow Share is a BitTorrent-like file sharing system using:
 - **Relay rooms** for peer discovery and signaling (room ID = `share:{root_hash_hex}`).
-- **WebRTC data channels** for chunk transfer. STUN-only for BOTH user and hidden/channel shares — `streamIceConfigProvider` is a plain alias of `shareIceConfigProvider`, so the `hidden` branch in `event_provider.dart` is a seam for future divergence, not a behavioural difference today. (Caveat: a Share reuses an already-open general hollow-data connection, which does carry TURN — memory `project_share_data_channel_reuse_turn`.)
+- **A DEDICATED WebRTC data channel** for chunk transfer — Share's own peer connection per peer, separate from the general `hollow-data` one, negotiated over the `rtc_share_offer` / `rtc_share_answer` / `rtc_share_ice` envelopes and tracked in `webrtc_share_peers` (never `webrtc_peers`). STUN-only for BOTH user and hidden/channel shares — `streamIceConfigProvider` is a plain alias of `shareIceConfigProvider`, so the `hidden` branch in `event_provider.dart` is a seam for future divergence, not a behavioural difference today. Until 2026-08-03 Share instead REUSED any already-open general connection, inheriting its TURN candidates — memory `project_share_data_channel_reuse_turn`.
 - **AES-256-GCM** encryption with per-chunk nonce derivation.
 - **SHA-256** manifest root hash for link integrity + per-chunk hash verification.
 - **Rarest-first** or **sequential** chunk scheduling.
@@ -293,7 +293,7 @@ Skipped when:
 - No peer_have data (no peers known).
 
 #### WebRTC Connection Requests
-For each peer in `peer_have` that is not in `webrtc_peers`, emits `NetworkEvent::ShareNeedWebRtc` so Dart establishes a connection. Hidden shares pass `hidden: true` to enable TURN-based ICE config.
+For each peer in `peer_have` that is not in `webrtc_share_peers` (the SHARE lane's set — an open general `hollow-data` channel does not count), emits `NetworkEvent::ShareNeedWebRtc` so Dart dials the dedicated Share connection. Hidden shares pass `hidden: true`, which selects `streamIceConfigProvider` — also STUN-only.
 
 #### Chunk Selection
 
@@ -502,10 +502,10 @@ Both chunk completion handlers maintain a sliding window:
 
 Share chunk transfer requires WebRTC data channels (relay path exists as fallback but logs warnings). The scheduler tick handles connection establishment:
 
-1. Each tick, for **every** share with known peers (seeding as well as downloading), checks if each peer in `peer_have` is in `webrtc_peers`.
+1. Each tick, for **every** share with known peers (seeding as well as downloading), checks if each peer in `peer_have` is in `webrtc_share_peers`.
 2. For missing connections, emits `NetworkEvent::ShareNeedWebRtc { peer_id, hidden }`.
-3. Dart calls `ensureConnection()` on the peer with the STUN-only Share config.
-4. Chunk requests are only sent to peers with active WebRTC connections (the `webrtc_peers.contains()` filter in the needed-chunk collection).
+3. Dart calls `ensureShareConnection()` on the peer, which dials a SECOND peer connection built from the STUN-only Share config (`connectShareToPeer` — it never reuses the general one).
+4. Chunk requests are only sent to peers with an active SHARE connection (the `webrtc_share_peers.contains()` filter in the needed-chunk collection); serving is gated the same way (`prefer_webrtc`).
 5. `handle_envelope_share_chunk_request()` skips relay-only peers (`!prefer_webrtc`).
 6. On WebRTC send completion, `handle_webrtc_send_complete()` cleans up temp files using the `{short_root}:{idx}` transfer ID pattern.
 

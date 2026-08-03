@@ -1178,7 +1178,7 @@ pub async fn tick(
     registry: &mut ShareRegistry,
     ws_cmd_tx: &mpsc::UnboundedSender<WsCommand>,
     messaging_active: bool,
-    webrtc_peers: &std::collections::HashSet<String>,
+    webrtc_share_peers: &std::collections::HashSet<String>,
     event_tx: &mpsc::Sender<NetworkEvent>,
     bundle_keypair: &NativeKeypair,
 ) {
@@ -1209,7 +1209,7 @@ pub async fn tick(
         // scheduling is skipped if messaging is busy, the share is a pure seed
         // with nothing to fetch, or the download hasn't started yet).
         if messaging_active { continue; }
-        tick_schedule_requests(registry, ws_cmd_tx, webrtc_peers, event_tx, &root_hash, now).await;
+        tick_schedule_requests(registry, ws_cmd_tx, webrtc_share_peers, event_tx, &root_hash, now).await;
     }
 }
 
@@ -1321,7 +1321,7 @@ fn expire_inflight_requests(registry: &mut ShareRegistry, root_hash: &str, now: 
 async fn tick_schedule_requests(
     registry: &mut ShareRegistry,
     ws_cmd_tx: &mpsc::UnboundedSender<WsCommand>,
-    webrtc_peers: &std::collections::HashSet<String>,
+    webrtc_share_peers: &std::collections::HashSet<String>,
     event_tx: &mpsc::Sender<NetworkEvent>,
     root_hash: &str,
     now: Instant,
@@ -1330,21 +1330,23 @@ async fn tick_schedule_requests(
         let Some(state) = registry.get(root_hash) else { return; };
         if state.peer_have.is_empty() { return; }
 
-        // Request WebRTC connections for peers we know about but aren't
+        // Request Share data channels for peers we know about but aren't
         // connected to. This runs BEFORE the completeness guard on purpose, so
-        // a pure SEEDER asks for the link too. A seeder that only ever answers
-        // an offer builds its peer connection from the general ICE config, and
-        // that config is TURN-capable — with "Always relay calls" on it is
-        // TURN-only — which would drag multi-GB Share payloads onto the relay.
-        // Dialling ourselves means the connection is created with the STUN-only
-        // Share config on both ends (HOLLOW_PLAN §7A).
-        request_missing_webrtc_links(state, webrtc_peers, event_tx).await;
+        // a pure SEEDER asks for the link too — it would otherwise only ever
+        // answer, and both ends dialling is what gets the STUN-only Share
+        // config applied symmetrically (HOLLOW_PLAN §7A).
+        //
+        // `webrtc_share_peers` is the SHARE lane's set, not the general
+        // hollow-data one: a general channel to this peer proves nothing about
+        // Share reachability, and treating it as if it did is what used to let
+        // Share inherit that channel's TURN candidates.
+        request_missing_webrtc_links(state, webrtc_share_peers, event_tx).await;
 
         if state.have.is_complete() { return; }
         let Some(ref manifest) = state.manifest else { return; };
         if state.data_file.is_none() { return; }
 
-        let needed = collect_needed_chunks(state, webrtc_peers, manifest.chunk_count);
+        let needed = collect_needed_chunks(state, webrtc_share_peers, manifest.chunk_count);
         let assignments = assign_chunks_to_peers(needed, &state.inflight);
         (state.room_id(), assignments)
     };
@@ -1354,15 +1356,16 @@ async fn tick_schedule_requests(
     send_chunk_requests(ws_cmd_tx, &room, root_hash, assignments);
 }
 
-/// Emit ShareNeedWebRtc for every known swarm peer without a data channel yet.
+/// Emit ShareNeedWebRtc for every known swarm peer without a SHARE data
+/// channel yet (the general hollow-data channel doesn't count — see §7A).
 async fn request_missing_webrtc_links(
     state: &ShareSwarmState,
-    webrtc_peers: &std::collections::HashSet<String>,
+    webrtc_share_peers: &std::collections::HashSet<String>,
     event_tx: &mpsc::Sender<NetworkEvent>,
 ) {
     let is_hidden = state.hidden;
     for peer_id in state.peer_have.keys() {
-        if !webrtc_peers.contains(peer_id.as_str()) {
+        if !webrtc_share_peers.contains(peer_id.as_str()) {
             let _ = event_tx.send(NetworkEvent::ShareNeedWebRtc {
                 peer_id: peer_id.clone(),
                 hidden: is_hidden,
@@ -1386,7 +1389,7 @@ fn schedule_window(state: &ShareSwarmState, chunk_count: u32) -> (u32, u32) {
 /// Rarest-first order for normal shares; sequential keeps ascending idx order.
 fn collect_needed_chunks(
     state: &ShareSwarmState,
-    webrtc_peers: &std::collections::HashSet<String>,
+    webrtc_share_peers: &std::collections::HashSet<String>,
     chunk_count: u32,
 ) -> Vec<(u32, Vec<String>)> {
     let (seq_start, seq_end) = schedule_window(state, chunk_count);
@@ -1396,7 +1399,7 @@ fn collect_needed_chunks(
         if state.inflight.contains_key(&idx) { continue; }
         let mut owners: Vec<String> = state.peer_have.iter()
             .filter_map(|(p, bm)| {
-                if bm.has(idx) && webrtc_peers.contains(p.as_str()) { Some(p.clone()) } else { None }
+                if bm.has(idx) && webrtc_share_peers.contains(p.as_str()) { Some(p.clone()) } else { None }
             })
             .collect();
         if !owners.is_empty() {
@@ -1573,6 +1576,49 @@ pub async fn handle_envelope_share_have(
     state.peer_have.insert(sender_peer_id.to_string(), bitmap);
 }
 
+// ── Share data-channel liveness (NodeCommand handlers) ───────────────
+//
+// Hollow Share runs its OWN peer connection per peer, built from the STUN-only
+// Share ICE config, and `webrtc_share_peers` is that lane's liveness set. It is
+// deliberately NOT the general `webrtc_peers` set: the general hollow-data
+// connection carries TURN (TURN-ONLY while "Always relay calls" is on), so
+// scheduling or serving chunks on the strength of THAT channel is exactly how
+// multi-GB Share payloads used to end up on the relay (HOLLOW_PLAN §7A).
+
+/// Dart: the dedicated Share data channel to `peer_id` is open.
+pub(crate) fn handle_share_peer_connected(
+    peer_id: String,
+    webrtc_share_peers: &mut std::collections::HashSet<String>,
+) {
+    hollow_log!("[SHARE] Share data channel ready for {peer_id}");
+    webrtc_share_peers.insert(peer_id);
+}
+
+/// Dart: the dedicated Share data channel to `peer_id` is gone. The next tick
+/// re-emits ShareNeedWebRtc for any swarm peer that's still needed, so this is
+/// self-healing — there is no relay fallback to drop to, by design.
+pub(crate) fn handle_share_peer_disconnected(
+    peer_id: String,
+    webrtc_share_peers: &mut std::collections::HashSet<String>,
+) {
+    hollow_log!("[SHARE] Share data channel closed for {peer_id}");
+    webrtc_share_peers.remove(&peer_id);
+}
+
+/// Dart: a chunk transfer over the Share channel failed. Drop the peer from the
+/// Share set — the tick re-dials and the downloader's in-flight timeout
+/// re-requests the chunk. Never touches the general set (a Share hiccup must
+/// not knock DM/channel files onto the WS relay).
+pub(crate) fn handle_share_transfer_failed(
+    transfer_id: String,
+    peer_id: String,
+    error: String,
+    webrtc_share_peers: &mut std::collections::HashSet<String>,
+) {
+    hollow_log!("[SHARE] Share transfer failed: {transfer_id} to/from {peer_id}: {error}");
+    webrtc_share_peers.remove(&peer_id);
+}
+
 /// Clean up a peer that left a share room. For active downloads, keeps
 /// peer_have intact so the tick resumes immediately after WebRTC
 /// re-establishes. For completed/seeding shares, removes the peer
@@ -1593,12 +1639,12 @@ pub async fn handle_envelope_share_chunk_request(
     bundle_keypair: &NativeKeypair,
     _ws_cmd_tx: &mpsc::UnboundedSender<WsCommand>,
     event_tx: &mpsc::Sender<NetworkEvent>,
-    webrtc_peers: &std::collections::HashSet<String>,
+    webrtc_share_peers: &std::collections::HashSet<String>,
     sender_peer_id: &str,
     root_hash: String,
     indices: Vec<u32>,
 ) {
-    let prefer_webrtc = webrtc_peers.contains(sender_peer_id);
+    let prefer_webrtc = webrtc_share_peers.contains(sender_peer_id);
     let Some(state) = registry.get_mut(&root_hash) else { return; };
     if !state.seeding && state.have.count_set() == 0 { return; }
     let chunk_size = state.manifest.as_ref().map(|m| m.chunk_size).unwrap_or(CHUNK_SIZE);
@@ -2028,6 +2074,63 @@ pub async fn handle_webrtc_share_chunk_complete(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The Share lane's liveness set gates BOTH scheduling (which peers we ask
+    /// for chunks) and serving (`prefer_webrtc`). A peer that only has the
+    /// general hollow-data channel must be invisible to it — that channel
+    /// carries TURN, and treating it as a Share transport is what put Share
+    /// bytes on the relay (HOLLOW_PLAN §7A).
+    #[test]
+    fn share_peer_set_is_independent_of_the_general_channel() {
+        let mut share_peers: std::collections::HashSet<String> = Default::default();
+        handle_share_peer_connected("peer_a".to_string(), &mut share_peers);
+        assert!(share_peers.contains("peer_a"));
+        assert!(!share_peers.contains("peer_b"), "general-only peer must not appear");
+
+        // A failed Share transfer drops only that peer; the tick re-dials.
+        handle_share_transfer_failed(
+            "root:7".to_string(), "peer_a".to_string(), "boom".to_string(),
+            &mut share_peers,
+        );
+        assert!(share_peers.is_empty());
+
+        handle_share_peer_connected("peer_a".to_string(), &mut share_peers);
+        handle_share_peer_disconnected("peer_a".to_string(), &mut share_peers);
+        assert!(share_peers.is_empty());
+    }
+
+    /// Share signalling rides its OWN HavenMessage variants so a client that
+    /// predates the Share lane DROPS them (unknown tag → parse error) instead
+    /// of feeding a Share offer to its single-connection data-channel layer,
+    /// where the glare tiebreaker would tear down its live hollow-data link.
+    #[test]
+    fn share_rtc_variants_round_trip_and_are_distinct_from_general() {
+        let offer = HavenMessage::RtcShareOffer {
+            sdp: "v=0".to_string(),
+            conn_id: "abc".to_string(),
+        };
+        let wire = serde_json::to_string(&offer).unwrap();
+        assert!(wire.contains("rtc_share_offer"), "unexpected wire tag: {wire}");
+        assert!(matches!(
+            serde_json::from_str::<HavenMessage>(&wire).unwrap(),
+            HavenMessage::RtcShareOffer { .. }
+        ));
+
+        // What an older client does with it: no such variant → refuses to parse.
+        #[derive(serde::Deserialize)]
+        #[serde(tag = "type")]
+        enum LegacyRtcOnly {
+            #[serde(rename = "rtc_offer")]
+            RtcOffer { sdp: String, conn_id: String },
+        }
+        assert!(serde_json::from_str::<LegacyRtcOnly>(&wire).is_err());
+        let general = serde_json::to_string(&HavenMessage::RtcOffer {
+            sdp: "v=0".to_string(),
+            conn_id: "abc".to_string(),
+        })
+        .unwrap();
+        assert!(serde_json::from_str::<LegacyRtcOnly>(&general).is_ok());
+    }
 
     /// Every sanitized name must be a single component that stays inside `dir`.
     fn assert_contained(raw: &str) {

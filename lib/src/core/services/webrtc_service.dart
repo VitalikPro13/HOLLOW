@@ -30,6 +30,35 @@ const _kTypeGossipOp = 0x04; // small gossip frame (CRDT op JSON, Tier 2 scaling
 const _kTypePing = 0xFE; // keepalive ping byte
 const _kTypePong = 0xFC; // keepalive pong response byte
 
+/// Which transport a peer connection belongs to.
+///
+/// [general] is the multiplexed `hollow-data` channel: DM/channel file
+/// transfers, vault shards, screen-share audio, gossip frames. It is built from
+/// the general ICE config, which carries TURN (and is TURN-ONLY while "Always
+/// relay calls" is on).
+///
+/// [share] is a SECOND, dedicated peer connection used only by Hollow Share
+/// (including the hidden >34 MB chat-file variant). It is always built from the
+/// STUN-only Share config, so Share bytes can never ride the relay
+/// (HOLLOW_PLAN §7A). Before this split, Share reused the general connection
+/// whenever one already existed — i.e. for anyone you actually chat with — and
+/// silently inherited its TURN candidates.
+enum _Lane { general, share }
+
+/// Signal types on the wire. The Share lane has its OWN types (and its own
+/// `HavenMessage` variants in Rust) instead of a flag on the general ones, so a
+/// client that predates the Share lane fails to parse them and drops them at
+/// the envelope layer. Reusing `offer` would make that client treat a Share
+/// offer as a general one and tear down its live `hollow-data` connection over
+/// the glare tiebreaker (or ignore it and flap) — collateral damage to DMs,
+/// files and screen audio for a feature it doesn't have.
+const _kSigOffer = 'offer';
+const _kSigAnswer = 'answer';
+const _kSigIce = 'ice';
+const _kSigShareOffer = 'share_offer';
+const _kSigShareAnswer = 'share_answer';
+const _kSigShareIce = 'share_ice';
+
 /// Idle timeout before closing a peer connection (3x keepalive interval).
 const _kIdleTimeout = Duration(seconds: 90);
 
@@ -68,10 +97,19 @@ class WebRtcService {
   final String Function(String peerId) resolveIdentity;
 
   /// ICE configuration (STUN + TURN). Updated by IceConfigProvider.
+  /// GENERAL lane only — the Share lane never reads this.
   Map<String, dynamic> iceServers;
 
-  /// Active peer connections: peer_id -> _PeerConn
+  /// Relay domain, for the STUN-only fallback config used when a Share offer
+  /// arrives before we've been told this peer's Share config.
+  final String relayDomain;
+
+  /// Active GENERAL peer connections: peer_id -> _PeerConn
   final Map<String, _PeerConn> _connections = {};
+
+  /// Active SHARE peer connections: peer_id -> _PeerConn. Deliberately a second
+  /// connection to the same peer — see [_Lane].
+  final Map<String, _PeerConn> _shareConnections = {};
 
   /// Active incoming transfers: transfer_id -> _IncomingTransfer
   final Map<String, _IncomingTransfer> _transfers = {};
@@ -85,9 +123,11 @@ class WebRtcService {
   /// Peers we're intentionally closing (idle timeout or manual).
   /// Prevents triggering reconnect for intentional disconnects.
   final Set<String> _intentionalClose = {};
+  final Set<String> _shareIntentionalClose = {};
 
   /// Guards against concurrent connectToPeer calls for the same peer.
   final Set<String> _connecting = {};
+  final Set<String> _shareConnecting = {};
 
   /// Timestamp of last keepalive ping sent per peer (for RTT measurement).
   final Map<String, DateTime> _pingSentAt = {};
@@ -131,27 +171,47 @@ class WebRtcService {
   /// Called when a STUN-only (Share) connection fails — peer unreachable without TURN.
   void Function(String peerId)? onShareConnectionFailed;
 
-  /// Peers connected with STUN-only config (Share). Used to fire the right callback on failure.
-  final Set<String> _stunOnlyPeers = {};
-
   /// STUN-only ICE config remembered per Share peer, so an offer we ANSWER is
-  /// built from the Share config too instead of the general one.
+  /// built from the Share config too.
   ///
-  /// Hollow Share must never pull bytes onto the relay (HOLLOW_PLAN §7A), and
-  /// with "Always relay calls" on, the general config is TURN-only. Entries
-  /// deliberately OUTLIVE the connection: a dropped link is re-offered by the
-  /// remote within a tick, and forgetting on cleanup would put us right back on
-  /// the general config for the reconnect. Keeping it costs no privacy — a peer
-  /// we ever exchanged Share candidates with has already seen this address.
+  /// Entries deliberately OUTLIVE the connection: a dropped link is re-offered
+  /// by the remote within a tick, and forgetting on cleanup would leave the
+  /// answer path guessing. Keeping it costs no privacy — a peer we ever
+  /// exchanged Share candidates with has already seen this address.
   final Map<String, Map<String, dynamic>> _shareIceConfig = {};
 
   WebRtcService({
     required this.localPeerId,
     Map<String, dynamic>? iceServers,
-    String relayDomain = 'relay.anonlisten.com',
+    this.relayDomain = 'relay.anonlisten.com',
     String Function(String peerId)? resolveIdentity,
   })  : iceServers = iceServers ?? _defaultIceServers(domain: relayDomain),
         resolveIdentity = resolveIdentity ?? ((p) => p);
+
+  // ── Lane plumbing ──
+
+  Map<String, _PeerConn> _connsFor(_Lane lane) =>
+      lane == _Lane.share ? _shareConnections : _connections;
+
+  Set<String> _connectingFor(_Lane lane) =>
+      lane == _Lane.share ? _shareConnecting : _connecting;
+
+  Set<String> _intentionalFor(_Lane lane) =>
+      lane == _Lane.share ? _shareIntentionalClose : _intentionalClose;
+
+  String _sigOffer(_Lane lane) =>
+      lane == _Lane.share ? _kSigShareOffer : _kSigOffer;
+  String _sigAnswer(_Lane lane) =>
+      lane == _Lane.share ? _kSigShareAnswer : _kSigAnswer;
+  String _sigIce(_Lane lane) => lane == _Lane.share ? _kSigShareIce : _kSigIce;
+
+  String _tag(_Lane lane) => lane == _Lane.share ? 'share' : 'general';
+
+  /// ICE config for a Share connection to [peerId]. Never the general config:
+  /// falls back to the plain STUN-only default when the Share tick hasn't
+  /// handed us one yet (an offer can land before our own tick fires).
+  Map<String, dynamic> _shareConfigFor(String peerId) =>
+      _shareIceConfig[peerId] ?? _defaultIceServers(domain: relayDomain);
 
   /// Find the live, OPEN connection to the person identified by [peerId],
   /// resolving device<->master. `_connections` is DEVICE-keyed (the routable
@@ -163,13 +223,14 @@ class WebRtcService {
   /// needs it too (otherwise sends to the master are silently dropped and a
   /// doomed 2nd connect-to-bare-master times out). See
   /// feedback_webrtc_datachannel_multidevice.
-  _PeerConn? _openConnForIdentity(String peerId) {
-    final direct = _connections[peerId];
+  _PeerConn? _openConnForIdentity(String peerId, [_Lane lane = _Lane.general]) {
+    final map = _connsFor(lane);
+    final direct = map[peerId];
     if (direct?.dataChannel?.state == RTCDataChannelState.RTCDataChannelOpen) {
       return direct;
     }
     final wantId = resolveIdentity(peerId);
-    for (final conn in _connections.values) {
+    for (final conn in map.values) {
       if (conn.dataChannel?.state != RTCDataChannelState.RTCDataChannelOpen) {
         continue;
       }
@@ -178,9 +239,14 @@ class WebRtcService {
     return null;
   }
 
-  /// Check if a peer has an active data channel (device<->master aware).
+  /// Check if a peer has an active GENERAL data channel (device<->master aware).
   bool hasPeerChannel(String peerId) {
     return _openConnForIdentity(peerId) != null;
+  }
+
+  /// Check if a peer has an active SHARE data channel.
+  bool hasShareChannel(String peerId) {
+    return _openConnForIdentity(peerId, _Lane.share) != null;
   }
 
   /// Send a screen audio packet to a peer over the existing data channel.
@@ -272,51 +338,66 @@ class WebRtcService {
     _shareIceConfig[peerId] = config;
   }
 
-  /// Initiate a WebRTC connection to a peer (offerer side).
-  /// Pass [iceConfigOverride] to use a specific ICE config (e.g. STUN-only for Share).
-  Future<void> connectToPeer(String peerId, {Map<String, dynamic>? iceConfigOverride}) async {
-    // Record the Share config BEFORE any early return — we may not end up
-    // dialling (an open channel already exists, or the remote wins the race),
-    // but the answer path still needs to know this is a Share peer.
-    if (iceConfigOverride != null) noteShareIceConfig(peerId, iceConfigOverride);
+  /// Initiate the GENERAL WebRTC connection to a peer (offerer side).
+  Future<void> connectToPeer(String peerId) async {
     // Already connected or connecting.
     if (_connections.containsKey(peerId)) return;
     // Already have an OPEN channel to this person under a device id (the caller
     // may pass the MASTER, which isn't a _connections key). Don't open a doomed
     // 2nd connection to the bare master — it has no routable socket and times
-    // out. Reuse the existing channel. (Skip this short-circuit for STUN-only
-    // Share connections, which intentionally use a separate config.)
-    if (iceConfigOverride == null) {
-      if (_openConnForIdentity(peerId) != null) return;
-      // Cold device-link map: identity didn't resolve, but if there's already
-      // exactly one open channel it's PROBABLY this call peer — don't dial the
-      // master. CAVEAT: "cold map" and "a different second person" look the
-      // same to the resolver, and blindly reusing here silently skipped dialing
-      // a genuine 2nd peer (a late-joining VC screen-share viewer lost its data
-      // channel; gossip lost a neighbor). So only take the shortcut when the
-      // open channel's owner is UNKNOWN to the link map too — if the map can
-      // name that owner (resolves to a different master than [peerId], since
-      // _openConnForIdentity above already failed), it's a different person:
-      // fall through and dial.
-      final open = _connections.values
-          .where((c) =>
-              c.dataChannel?.state == RTCDataChannelState.RTCDataChannelOpen)
-          .toList();
-      if (open.length == 1 &&
-          resolveIdentity(open.first.peerId) == open.first.peerId) {
-        _log('[HOLLOW-WEBRTC-DART] connectToPeer($peerId): unresolved but one '
-            'open channel exists (owner unknown to link map) — reusing, not '
-            'dialing master');
-        return;
-      }
+    // out. Reuse the existing channel.
+    if (_openConnForIdentity(peerId) != null) return;
+    // Cold device-link map: identity didn't resolve, but if there's already
+    // exactly one open channel it's PROBABLY this call peer — don't dial the
+    // master. CAVEAT: "cold map" and "a different second person" look the
+    // same to the resolver, and blindly reusing here silently skipped dialing
+    // a genuine 2nd peer (a late-joining VC screen-share viewer lost its data
+    // channel; gossip lost a neighbor). So only take the shortcut when the
+    // open channel's owner is UNKNOWN to the link map too — if the map can
+    // name that owner (resolves to a different master than [peerId], since
+    // _openConnForIdentity above already failed), it's a different person:
+    // fall through and dial.
+    final open = _connections.values
+        .where(
+            (c) => c.dataChannel?.state == RTCDataChannelState.RTCDataChannelOpen)
+        .toList();
+    if (open.length == 1 &&
+        resolveIdentity(open.first.peerId) == open.first.peerId) {
+      _log('[HOLLOW-WEBRTC-DART] connectToPeer($peerId): unresolved but one '
+          'open channel exists (owner unknown to link map) — reusing, not '
+          'dialing master');
+      return;
     }
-    if (!_connecting.add(peerId)) return;
+    await _dial(peerId, _Lane.general, iceServers);
+  }
 
-    final isStunOnly = iceConfigOverride != null;
-    final config = iceConfigOverride ?? iceServers;
-    if (isStunOnly) _stunOnlyPeers.add(peerId);
+  /// Initiate the dedicated STUN-only SHARE connection to a peer (offerer side).
+  ///
+  /// This NEVER reuses the general connection, however healthy it is: that
+  /// reuse is exactly the hole this lane closes — a Share to anyone you already
+  /// chat with inherited the general connection's TURN candidates and pushed
+  /// multi-GB payloads through the relay (HOLLOW_PLAN §7A forbids it).
+  Future<void> connectShareToPeer(
+      String peerId, Map<String, dynamic> config) async {
+    // Record the Share config BEFORE any early return — we may not end up
+    // dialling (the remote wins the race and we answer instead), but the answer
+    // path still needs this peer's STUN-only config.
+    noteShareIceConfig(peerId, config);
+    if (_shareConnections.containsKey(peerId)) return;
+    if (_openConnForIdentity(peerId, _Lane.share) != null) return;
+    await _dial(peerId, _Lane.share, config);
+  }
+
+  /// Create the peer connection + data channel and send the offer, on [lane].
+  Future<void> _dial(
+      String peerId, _Lane lane, Map<String, dynamic> config) async {
+    final conns = _connsFor(lane);
+    if (!_connectingFor(lane).add(peerId)) return;
+
+    final isShare = lane == _Lane.share;
     final connId = _generateConnId();
-    _log('[HOLLOW-WEBRTC-DART] Connecting to $peerId (conn=$connId, local=$localPeerId, stunOnly=$isStunOnly)');
+    _log('[HOLLOW-WEBRTC-DART] Connecting to $peerId '
+        '(lane=${_tag(lane)}, conn=$connId, local=$localPeerId)');
 
     try {
       final pc = await createPeerConnection(config);
@@ -325,20 +406,29 @@ class WebRtcService {
         connId: connId,
         peerId: peerId,
         isOfferer: true,
+        lane: lane,
       );
-      _connections[peerId] = conn;
-      _connecting.remove(peerId);
+      conns[peerId] = conn;
+      _connectingFor(lane).remove(peerId);
 
       // Create data channel (offerer creates it).
       final dcInit = RTCDataChannelInit()
         ..ordered = true;
-      final dc = await pc.createDataChannel('hollow-data', dcInit);
+      final dc = await pc.createDataChannel(
+          isShare ? 'hollow-share' : 'hollow-data', dcInit);
       conn.dataChannel = dc;
-      _setupDataChannel(dc, peerId);
+      _setupDataChannel(dc, peerId, lane);
 
       // ICE candidate handler.
       pc.onIceCandidate = (candidate) {
         if (candidate.candidate == null || candidate.candidate!.isEmpty) return;
+        // Belt and braces on the Share lane: we configure no TURN server, so a
+        // relay candidate should be impossible — never ship one if it is.
+        if (isShare && _isRelayCandidate(candidate.candidate!)) {
+          _log('[HOLLOW-WEBRTC-DART] Share: dropping our own relay candidate '
+              'for $peerId (should be unreachable — STUN-only config)');
+          return;
+        }
         final payload = jsonEncode({
           'candidate': candidate.candidate,
           'sdpMid': candidate.sdpMid,
@@ -346,7 +436,7 @@ class WebRtcService {
         });
         network_api.webrtcSendSignal(
           peerId: peerId,
-          signalType: 'ice',
+          signalType: _sigIce(lane),
           payload: payload,
           connId: conn.connId, // Use current connId (may change on glare)
         );
@@ -354,43 +444,69 @@ class WebRtcService {
 
       // Connection state handler.
       pc.onConnectionState = (state) {
-        _handleConnectionState(peerId, state);
+        _handleConnectionState(peerId, state, lane);
       };
 
       // Create and send offer.
       final offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
 
-      // Send raw SDP string (not JSON-wrapped — Rust puts it directly in HavenMessage::RtcOffer.sdp).
+      // Send raw SDP string (not JSON-wrapped — Rust puts it directly in
+      // HavenMessage::RtcOffer.sdp / RtcShareOffer.sdp).
       await network_api.webrtcSendSignal(
         peerId: peerId,
-        signalType: 'offer',
-        payload: offer.sdp!,
+        signalType: _sigOffer(lane),
+        payload: _stripRelayCandidates(offer.sdp!, lane),
         connId: connId,
       );
 
       // If the data channel doesn't open within 10s, tear down the stale
       // connection so incoming offers or fresh attempts aren't blocked.
       Future.delayed(const Duration(seconds: 10), () {
-        final current = _connections[peerId];
-        if (current != null && current.connId == connId && !hasPeerChannel(peerId)) {
-          _log('[HOLLOW-WEBRTC-DART] Connection timeout for $peerId (conn=$connId) — no data channel opened');
-          _cleanupConnection(peerId);
-          network_api.webrtcPeerDisconnected(peerId: peerId);
+        final current = conns[peerId];
+        final opened = isShare ? hasShareChannel(peerId) : hasPeerChannel(peerId);
+        if (current != null && current.connId == connId && !opened) {
+          _log('[HOLLOW-WEBRTC-DART] Connection timeout for $peerId '
+              '(lane=${_tag(lane)}, conn=$connId) — no data channel opened');
+          _cleanupConnection(peerId, lane);
+          _notifyDisconnected(peerId, lane);
         }
       });
     } catch (e) {
-      _connecting.remove(peerId);
-      _log('[HOLLOW-WEBRTC-DART] connectToPeer failed for $peerId: $e');
+      _connectingFor(lane).remove(peerId);
+      _log('[HOLLOW-WEBRTC-DART] connectToPeer failed for $peerId '
+          '(lane=${_tag(lane)}): $e');
       // A throw after the PC was created+stored (createDataChannel/createOffer/
       // setLocalDescription all throw) leaves a live PC + thread-set in the map.
       // Dispose it — but only if it's still OUR connId (a glare supersede may
       // already have replaced the entry with a newer connection).
-      final partial = _connections[peerId];
+      final partial = conns[peerId];
       if (partial != null && partial.connId == connId) {
-        await _cleanupConnection(peerId);
+        await _cleanupConnection(peerId, lane);
       }
     }
+  }
+
+  /// True for an ICE candidate line that routes through a TURN server.
+  static bool _isRelayCandidate(String candidate) =>
+      candidate.contains(' typ relay');
+
+  /// Strip any `typ relay` candidate lines from an SDP on the Share lane.
+  ///
+  /// Our own SDP can't contain them (no TURN server is configured), and a
+  /// current peer's can't either — but a modified or future client's could, and
+  /// libwebrtc would happily use a REMOTE relay candidate even though we
+  /// gathered none of our own. Stripping locally makes "Share never touches the
+  /// relay" something we enforce rather than something we trust the peer for.
+  static String _stripRelayCandidates(String sdp, _Lane lane) {
+    if (lane != _Lane.share || !sdp.contains(' typ relay')) return sdp;
+    final kept = sdp
+        .split('\n')
+        .where((line) => !(line.startsWith('a=candidate:') &&
+            _isRelayCandidate(line)))
+        .toList();
+    _log('[HOLLOW-WEBRTC-DART] Share: stripped relay candidates from SDP');
+    return kept.join('\n');
   }
 
   /// Handle an incoming signaling message from Rust.
@@ -402,12 +518,18 @@ class WebRtcService {
   ) async {
     try {
       switch (signalType) {
-        case 'offer':
-          await _handleOffer(peerId, payload, connId);
-        case 'answer':
-          await _handleAnswer(peerId, payload, connId);
-        case 'ice':
-          await _handleIce(peerId, payload, connId);
+        case _kSigOffer:
+          await _handleOffer(peerId, payload, connId, _Lane.general);
+        case _kSigAnswer:
+          await _handleAnswer(peerId, payload, connId, _Lane.general);
+        case _kSigIce:
+          await _handleIce(peerId, payload, connId, _Lane.general);
+        case _kSigShareOffer:
+          await _handleOffer(peerId, payload, connId, _Lane.share);
+        case _kSigShareAnswer:
+          await _handleAnswer(peerId, payload, connId, _Lane.share);
+        case _kSigShareIce:
+          await _handleIce(peerId, payload, connId, _Lane.share);
       }
     } catch (e) {
       _log('[HOLLOW-WEBRTC-DART] Signal error ($signalType from $peerId): $e');
@@ -424,18 +546,19 @@ class WebRtcService {
     int shardIndex, {
     int chunkIndex = 0,
   }) async {
-    final conn = _connections[peerId];
-    if (conn == null || !hasPeerChannel(peerId)) {
-      _log('[HOLLOW-WEBRTC-DART] No data channel for $peerId, failing transfer $transferId');
-      await network_api.webrtcTransferFailed(
-        transferId: transferId,
-        peerId: peerId,
-        error: 'No active data channel',
-      );
+    // Share chunks ride the dedicated STUN-only lane and NEVER fall back to the
+    // general (TURN-capable) channel — falling back is the whole bug.
+    final lane = kind == 'share_chunk' ? _Lane.share : _Lane.general;
+    final conn = _openConnForIdentity(peerId, lane);
+    if (conn == null) {
+      _log('[HOLLOW-WEBRTC-DART] No ${_tag(lane)} data channel for $peerId, '
+          'failing transfer $transferId');
+      await _reportTransferFailed(
+          transferId, peerId, lane, 'No active data channel');
       return;
     }
 
-    _resetIdleTimer(peerId);
+    _armIdleTimer(conn, lane);
 
     try {
       // Read entire file into memory (like WS path) to avoid per-chunk async I/O.
@@ -514,26 +637,43 @@ class WebRtcService {
       // dc.send() doesn't throw when the channel is closing — it silently drops bytes.
       if (dc.state != RTCDataChannelState.RTCDataChannelOpen) {
         _log('[HOLLOW-WEBRTC-DART] Data channel died during send of $transferId — triggering WSS fallback');
-        await network_api.webrtcTransferFailed(
-          transferId: transferId,
-          peerId: peerId,
-          error: 'Data channel closed during send',
-        );
+        await _reportTransferFailed(
+            transferId, peerId, lane, 'Data channel closed during send');
         return;
       }
 
-      _resetIdleTimer(peerId);
+      _armIdleTimer(conn, lane);
       _log('[HOLLOW-WEBRTC-DART] Send complete: $transferId ($offset bytes)');
       onSendComplete?.call(transferId);
       await network_api.webrtcSendComplete(transferId: transferId);
     } catch (e) {
       _log('[HOLLOW-WEBRTC-DART] Send failed: $transferId — $e');
-      await network_api.webrtcTransferFailed(
+      await _reportTransferFailed(transferId, peerId, lane, e.toString());
+    }
+  }
+
+  /// Report a failed transfer to Rust on the right lane.
+  ///
+  /// The general lane's report also evicts the peer from Rust's `webrtc_peers`
+  /// and drives the WSS relay retry; the Share lane has its OWN set and no
+  /// relay retry (a Share chunk is re-requested by the downloader's scheduler),
+  /// so crossing them would knock the general channel out of service over a
+  /// Share hiccup — and vice versa.
+  Future<void> _reportTransferFailed(
+      String transferId, String peerId, _Lane lane, String error) async {
+    if (lane == _Lane.share) {
+      await network_api.webrtcShareTransferFailed(
         transferId: transferId,
         peerId: peerId,
-        error: e.toString(),
+        error: error,
       );
+      return;
     }
+    await network_api.webrtcTransferFailed(
+      transferId: transferId,
+      peerId: peerId,
+      error: error,
+    );
   }
 
   /// Send a broadcast file to a peer via data channel (gossip relay tree).
@@ -574,18 +714,36 @@ class WebRtcService {
     return true;
   }
 
-  /// Close connection to a peer (intentional — no reconnect).
+  /// Close the GENERAL connection to a peer (intentional — no reconnect).
   Future<void> disconnectPeer(String peerId) async {
     _intentionalClose.add(peerId);
-    await _cleanupConnection(peerId);
+    await _cleanupConnection(peerId, _Lane.general);
+  }
+
+  /// Close the SHARE connection to a peer (intentional — no reconnect).
+  Future<void> disconnectSharePeer(String peerId) async {
+    _shareIntentionalClose.add(peerId);
+    await _cleanupConnection(peerId, _Lane.share);
   }
 
   /// Remove and close a peer connection without marking intentional.
-  Future<void> _cleanupConnection(String peerId) async {
-    _connecting.remove(peerId);
-    _stunOnlyPeers.remove(peerId);
-    final conn = _connections.remove(peerId);
+  Future<void> _cleanupConnection(String peerId,
+      [_Lane lane = _Lane.general]) async {
+    _connectingFor(lane).remove(peerId);
+    final conn = _connsFor(lane).remove(peerId);
     if (conn != null) await _closeConn(conn);
+  }
+
+  /// Tell Rust a lane's data channel is gone. The two sets are separate: the
+  /// general one gates file/shard/gossip routing, the Share one gates chunk
+  /// scheduling and serving.
+  void _notifyDisconnected(String peerId, _Lane lane) {
+    if (lane == _Lane.share) {
+      network_api.webrtcSharePeerDisconnected(peerId: peerId)
+          .catchError((_) {});
+      return;
+    }
+    network_api.webrtcPeerDisconnected(peerId: peerId).catchError((_) {});
   }
 
   /// Close a single connection's timers + channel + PC WITHOUT touching the
@@ -608,11 +766,15 @@ class WebRtcService {
     } catch (_) {}
   }
 
-  /// Dispose all connections.
+  /// Dispose all connections (both lanes).
   Future<void> dispose() async {
     final peers = _connections.keys.toList();
     for (final peerId in peers) {
       await disconnectPeer(peerId);
+    }
+    final sharePeers = _shareConnections.keys.toList();
+    for (final peerId in sharePeers) {
+      await disconnectSharePeer(peerId);
     }
     // Close any in-flight incoming transfers' IOSinks + delete their temp files
     // before dropping them — clearing the map alone leaks open file handles.
@@ -627,8 +789,9 @@ class WebRtcService {
     _transfers.clear();
     _pendingIceCandidates.clear(); // Phase 6.25 leak fix
     _connecting.clear();
+    _shareConnecting.clear();
     _intentionalClose.clear();
-    _stunOnlyPeers.clear();
+    _shareIntentionalClose.clear();
     _shareIceConfig.clear();
     _pingSentAt.clear();
     _screenAudioBufferedCache.clear();
@@ -638,9 +801,11 @@ class WebRtcService {
   // --- Private ---
 
   Future<void> _handleOffer(
-      String peerId, String payload, String connId) async {
-    // payload is the raw SDP string (not JSON).
-    final sdp = payload;
+      String peerId, String payload, String connId, _Lane lane) async {
+    // payload is the raw SDP string (not JSON). On the Share lane, drop any
+    // relay candidates the remote inlined before libwebrtc ever sees them.
+    final sdp = _stripRelayCandidates(payload, lane);
+    final conns = _connsFor(lane);
 
     // Glare tiebreaker: compare MASTER identities, not raw peer ids. The relay
     // reports DEVICE ids and a multi-device peer can surface as different ids on
@@ -652,11 +817,12 @@ class WebRtcService {
     final bool politeSelf =
         resolveIdentity(localPeerId).compareTo(resolveIdentity(peerId)) < 0;
 
-    final existing = _connections[peerId];
+    final existing = conns[peerId];
     if (existing != null) {
       // Same connId = renegotiation on existing connection (media track change).
       if (existing.connId == connId) {
-        _log('[HOLLOW-WEBRTC-DART] Renegotiation offer from $peerId (conn=$connId)');
+        _log('[HOLLOW-WEBRTC-DART] Renegotiation offer from $peerId '
+            '(lane=${_tag(lane)}, conn=$connId)');
 
         // Handle renegotiation glare: if we also sent a renegotiation offer,
         // polite peer rolls back.
@@ -680,54 +846,57 @@ class WebRtcService {
 
         await network_api.webrtcSendSignal(
           peerId: peerId,
-          signalType: 'answer',
-          payload: answer.sdp!,
+          signalType: _sigAnswer(lane),
+          payload: _stripRelayCandidates(answer.sdp!, lane),
           connId: connId,
         );
         _log('[HOLLOW-WEBRTC-DART] Sent renegotiation answer to $peerId');
         return;
       }
 
-      // Different connId = glare (initial connection collision).
+      // Different connId = glare (initial connection collision). Resolved
+      // WITHIN the lane — a Share offer must never tear down the general
+      // connection (or vice versa); they are independent transports.
       if (politeSelf) {
-        _log('[HOLLOW-WEBRTC-DART] Glare: we are polite, dropping our connection to $peerId');
-        await disconnectPeer(peerId);
+        _log('[HOLLOW-WEBRTC-DART] Glare (${_tag(lane)}): we are polite, '
+            'dropping our connection to $peerId');
+        if (lane == _Lane.share) {
+          await disconnectSharePeer(peerId);
+        } else {
+          await disconnectPeer(peerId);
+        }
         // Fall through to accept their offer below.
       } else {
-        _log('[HOLLOW-WEBRTC-DART] Glare: we are impolite, ignoring offer from $peerId');
+        _log('[HOLLOW-WEBRTC-DART] Glare (${_tag(lane)}): we are impolite, '
+            'ignoring offer from $peerId');
         return;
       }
     }
 
-    _log('[HOLLOW-WEBRTC-DART] Handling offer from $peerId (conn=$connId)');
+    _log('[HOLLOW-WEBRTC-DART] Handling offer from $peerId '
+        '(lane=${_tag(lane)}, conn=$connId)');
 
     // Close any prior connection we still hold for this peer before replacing it
     // in the map — otherwise the old PC's data channel stays open, orphaned (no
     // longer in _connections), and keeps delivering packets (duplicate audio /
     // leaked channel). The glare "polite" branch already disconnected; this
     // covers the non-glare overwrite + reconnect churn.
-    final prior = _connections[peerId];
+    final prior = conns[peerId];
     if (prior != null) {
-      _log('[HOLLOW-WEBRTC-DART] Replacing prior connection to $peerId (closing orphan)');
+      _log('[HOLLOW-WEBRTC-DART] Replacing prior ${_tag(lane)} connection to '
+          '$peerId (closing orphan)');
       // AWAIT — otherwise the orphan's close()/dispose() races the new PC's
       // construction below, leaking the old PC's thread-set (and risking a
       // native teardown overlapping new-PC setup → heap corruption on Linux).
       await _closeConn(prior);
     }
 
-    // Answer a Share peer with the STUN-only Share config instead of the
-    // general one — only while "Always relay calls" is on, so everyone else
-    // keeps today's TURN fallback for strict NATs. Without this a Share SEEDER
-    // (which only ever answers, never dials) would push every uploaded byte
-    // through the relay.
-    final relayOnly = iceServers['iceTransportPolicy'] == 'relay';
+    // A Share offer is ALWAYS answered from the STUN-only Share config — a
+    // Share SEEDER mostly answers rather than dials, and answering from the
+    // general config would gather TURN candidates and push every uploaded byte
+    // through the relay (HOLLOW_PLAN §7A).
     final answerConfig =
-        (relayOnly ? _shareIceConfig[peerId] : null) ?? iceServers;
-    if (answerConfig != iceServers) {
-      _stunOnlyPeers.add(peerId);
-      _log('[HOLLOW-WEBRTC-DART] Answering $peerId with the STUN-only Share '
-          'config (always-relay is on; Share stays peer-to-peer)');
-    }
+        lane == _Lane.share ? _shareConfigFor(peerId) : iceServers;
 
     final pc = await createPeerConnection(answerConfig);
     final conn = _PeerConn(
@@ -735,21 +904,28 @@ class WebRtcService {
       connId: connId, // Use THEIR connId — answers must match
       peerId: peerId,
       isOfferer: false,
+      lane: lane,
     );
-    _connections[peerId] = conn;
+    conns[peerId] = conn;
 
     // Answer side receives data channel via onDataChannel. Don't call
     // _onDataChannelReady here — _setupDataChannel's onDataChannelState fires it
     // on open (calling it both here AND there double-fires webrtcPeerConnected +
     // starts two keepalive timers).
     pc.onDataChannel = (dc) {
-      _log('[HOLLOW-WEBRTC-DART] onDataChannel fired for $peerId');
+      _log('[HOLLOW-WEBRTC-DART] onDataChannel fired for $peerId '
+          '(lane=${_tag(lane)}, label=${dc.label})');
       conn.dataChannel = dc;
-      _setupDataChannel(dc, peerId);
+      _setupDataChannel(dc, peerId, lane);
     };
 
     pc.onIceCandidate = (candidate) {
       if (candidate.candidate == null || candidate.candidate!.isEmpty) return;
+      if (lane == _Lane.share && _isRelayCandidate(candidate.candidate!)) {
+        _log('[HOLLOW-WEBRTC-DART] Share: dropping our own relay candidate '
+            'for $peerId (should be unreachable — STUN-only config)');
+        return;
+      }
       final icePayload = jsonEncode({
         'candidate': candidate.candidate,
         'sdpMid': candidate.sdpMid,
@@ -757,14 +933,14 @@ class WebRtcService {
       });
       network_api.webrtcSendSignal(
         peerId: peerId,
-        signalType: 'ice',
+        signalType: _sigIce(lane),
         payload: icePayload,
         connId: connId,
       );
     };
 
     pc.onConnectionState = (state) {
-      _handleConnectionState(peerId, state);
+      _handleConnectionState(peerId, state, lane);
     };
 
     await pc.setRemoteDescription(RTCSessionDescription(sdp, 'offer'));
@@ -775,68 +951,83 @@ class WebRtcService {
     // Send raw SDP string.
     await network_api.webrtcSendSignal(
       peerId: peerId,
-      signalType: 'answer',
-      payload: answer.sdp!,
+      signalType: _sigAnswer(lane),
+      payload: _stripRelayCandidates(answer.sdp!, lane),
       connId: connId,
     );
-    _log('[HOLLOW-WEBRTC-DART] Sent answer to $peerId (conn=$connId)');
+    _log('[HOLLOW-WEBRTC-DART] Sent answer to $peerId '
+        '(lane=${_tag(lane)}, conn=$connId)');
 
     // Flush any ICE candidates that arrived before the offer was processed.
-    await _flushPendingIce(connId);
+    await _flushPendingIce(connId, lane);
   }
 
   Future<void> _handleAnswer(
-      String peerId, String payload, String connId) async {
+      String peerId, String payload, String connId, _Lane lane) async {
     // Match by peer_id first, then fall back to conn_id. A multi-device peer's
     // answer can arrive tagged with a DIFFERENT device id than the offer was
     // sent to (the relay labels the envelope with whichever device of the
     // peer's identity it routed through), so `_connections[peerId]` misses even
     // though the PC exists. conn_id is the stable, hop-invariant correlator —
     // it's identical in the offer and the answer — so use it to find the PC.
-    var conn = _connections[peerId];
+    // Searched within the LANE: the two lanes hold a connection per peer each,
+    // and only the conn_id tells them apart.
+    var conn = _connsFor(lane)[peerId];
     if (conn == null || conn.connId != connId) {
-      final byConn = _findConnByConnId(connId);
+      final byConn = _findConnByConnId(connId, lane);
       if (byConn != null) conn = byConn;
     }
     if (conn == null) {
-      _log('[HOLLOW-WEBRTC-DART] Answer from $peerId but no connection exists (conn=$connId)');
+      _log('[HOLLOW-WEBRTC-DART] Answer from $peerId but no ${_tag(lane)} '
+          'connection exists (conn=$connId)');
       return;
     }
 
-    _log('[HOLLOW-WEBRTC-DART] Handling answer from $peerId (conn=$connId, ours=${conn.connId}, key=${conn.peerId})');
+    _log('[HOLLOW-WEBRTC-DART] Handling answer from $peerId (lane=${_tag(lane)}, conn=$connId, ours=${conn.connId}, key=${conn.peerId})');
 
     if (conn.connId != connId) {
       _log('[HOLLOW-WEBRTC-DART] Ignoring stale answer from $peerId (conn=$connId, current=${conn.connId})');
       return;
     }
 
-    await conn.pc.setRemoteDescription(RTCSessionDescription(payload, 'answer'));
+    await conn.pc.setRemoteDescription(
+        RTCSessionDescription(_stripRelayCandidates(payload, lane), 'answer'));
   }
 
   /// Find an active connection by its [connId] regardless of which peer_id key
   /// it's stored under. Needed because a multi-device peer's answer/ICE can
   /// arrive labelled with a sibling device id different from the offer target.
-  _PeerConn? _findConnByConnId(String connId) {
-    for (final c in _connections.values) {
+  _PeerConn? _findConnByConnId(String connId, [_Lane lane = _Lane.general]) {
+    for (final c in _connsFor(lane).values) {
       if (c.connId == connId) return c;
     }
     return null;
   }
 
   Future<void> _handleIce(
-      String peerId, String payload, String connId) async {
+      String peerId, String payload, String connId, _Lane lane) async {
     final json = jsonDecode(payload);
+    final candidateStr = json['candidate'] as String;
+    // The Share lane is STUN-only by construction on OUR side, but a relay
+    // candidate from the REMOTE is still usable by libwebrtc (their TURN
+    // allocation, our direct socket) — which would put Share bytes back on the
+    // relay. Refuse them: enforcement beats trusting the peer's config.
+    if (lane == _Lane.share && _isRelayCandidate(candidateStr)) {
+      _log('[HOLLOW-WEBRTC-DART] Share: refused a relay ICE candidate from '
+          '$peerId (conn=$connId) — Share stays STUN-only');
+      return;
+    }
     final candidate = RTCIceCandidate(
-      json['candidate'] as String,
+      candidateStr,
       json['sdpMid'] as String?,
       json['sdpMLineIndex'] as int?,
     );
 
     // Match by peer_id, then by conn_id (a sibling-device-labelled candidate for
     // the same PC — see _handleAnswer). Only queue if neither finds the PC.
-    var conn = _connections[peerId];
+    var conn = _connsFor(lane)[peerId];
     if (conn == null || conn.connId != connId) {
-      final byConn = _findConnByConnId(connId);
+      final byConn = _findConnByConnId(connId, lane);
       if (byConn != null) conn = byConn;
     }
     if (conn == null) {
@@ -853,10 +1044,10 @@ class WebRtcService {
 
   /// Flush ICE candidates that were queued (by conn_id) before the connection
   /// for [connId] was created.
-  Future<void> _flushPendingIce(String connId) async {
+  Future<void> _flushPendingIce(String connId, [_Lane lane = _Lane.general]) async {
     final queued = _pendingIceCandidates.remove(connId);
     if (queued == null || queued.isEmpty) return;
-    final conn = _findConnByConnId(connId);
+    final conn = _findConnByConnId(connId, lane);
     if (conn == null) return;
     _log('[HOLLOW-WEBRTC-DART] Flushing ${queued.length} queued ICE candidates for conn=$connId');
     for (final candidate in queued) {
@@ -864,57 +1055,73 @@ class WebRtcService {
     }
   }
 
-  void _setupDataChannel(RTCDataChannel dc, String peerId) {
+  void _setupDataChannel(RTCDataChannel dc, String peerId, _Lane lane) {
     dc.onDataChannelState = (state) {
-      _log('[HOLLOW-WEBRTC-DART] Data channel state: $peerId -> $state');
+      _log('[HOLLOW-WEBRTC-DART] Data channel state: $peerId '
+          '(${_tag(lane)}) -> $state');
       if (state == RTCDataChannelState.RTCDataChannelOpen) {
-        _onDataChannelReady(peerId);
+        _onDataChannelReady(peerId, lane);
       } else if (state == RTCDataChannelState.RTCDataChannelClosed) {
         // Only react to final Closed state, not Closing (prevents double-fire).
-        _onDataChannelClosed(peerId);
+        _onDataChannelClosed(peerId, lane);
       }
     };
 
     dc.onMessage = (msg) {
-      _onDataChannelMessage(peerId, msg.binary);
-      _resetIdleTimer(peerId);
+      _onDataChannelMessage(peerId, msg.binary, lane);
+      _resetIdleTimer(peerId, lane);
     };
   }
 
-  void _onDataChannelReady(String peerId) {
-    final conn = _connections[peerId];
+  void _onDataChannelReady(String peerId, _Lane lane) {
+    final conn = _connsFor(lane)[peerId];
     // Idempotency guard: _onDataChannelReady can fire more than once for the
     // same live channel (the answerer's onDataChannel plus onDataChannelState,
     // and reconnect churn), which would double-start the keepalive + re-notify
     // Rust. If this channel already started its keepalive, it's a repeat fire.
     if (conn != null && conn.keepaliveTimer != null) return;
 
-    _log('[HOLLOW-WEBRTC-DART] Data channel OPEN with $peerId');
-    _resetIdleTimer(peerId);
+    _log('[HOLLOW-WEBRTC-DART] Data channel OPEN with $peerId '
+        '(lane=${_tag(lane)})');
+    _resetIdleTimer(peerId, lane);
 
-    // Start keepalive ping to prevent idle timeout.
+    // Start keepalive ping to prevent idle timeout. The Share lane keeps it
+    // too: while a share is in the registry the tick would re-dial an
+    // idled-out link within seconds, so letting it lapse buys nothing but
+    // signalling churn.
     if (conn != null) {
       conn.keepaliveTimer?.cancel();
       conn.keepaliveTimer = Timer.periodic(_kKeepaliveInterval, (_) {
         if (conn.dataChannel?.state == RTCDataChannelState.RTCDataChannelOpen) {
-          _pingSentAt[peerId] = DateTime.now();
+          _pingSentAt[_pingKey(peerId, lane)] = DateTime.now();
           conn.dataChannel!.send(
               RTCDataChannelMessage.fromBinary(Uint8List.fromList([_kTypePing])));
         }
       });
     }
 
+    if (lane == _Lane.share) {
+      network_api.webrtcSharePeerConnected(peerId: peerId).catchError((_) {});
+      return;
+    }
     network_api.webrtcPeerConnected(peerId: peerId);
   }
 
-  Future<void> _onDataChannelClosed(String peerId) async {
-    _log('[HOLLOW-WEBRTC-DART] Data channel CLOSED with $peerId');
-    final wasIntentional = _intentionalClose.remove(peerId);
-    _pingSentAt.remove(peerId);
-    _screenAudioBufferedCache.remove(peerId);
-    _screenAudioBufferPolling.remove(peerId);
-    _connecting.remove(peerId);
-    _stunOnlyPeers.remove(peerId);
+  /// RTT bookkeeping key — lane-scoped, or a Share pong would pop the general
+  /// lane's timestamp and feed the gossip scorer a bogus round trip.
+  String _pingKey(String peerId, _Lane lane) =>
+      lane == _Lane.share ? '$peerId#share' : peerId;
+
+  Future<void> _onDataChannelClosed(String peerId, _Lane lane) async {
+    _log('[HOLLOW-WEBRTC-DART] Data channel CLOSED with $peerId '
+        '(lane=${_tag(lane)})');
+    final wasIntentional = _intentionalFor(lane).remove(peerId);
+    _pingSentAt.remove(_pingKey(peerId, lane));
+    _connectingFor(lane).remove(peerId);
+    if (lane == _Lane.general) {
+      _screenAudioBufferedCache.remove(peerId);
+      _screenAudioBufferPolling.remove(peerId);
+    }
     // Route through _closeConn so the PC is actually close()+dispose()'d and
     // BOTH timers (idle + keepalive) are cancelled. Previously this only
     // cancelled idleTimer and dropped the map entry — the RTCPeerConnection
@@ -923,14 +1130,17 @@ class WebRtcService {
     // disconnect routes here). The map entry is removed first, so the
     // dataChannel.close() inside _closeConn re-entering this callback finds no
     // entry and short-circuits.
-    final conn = _connections.remove(peerId);
+    final conn = _connsFor(lane).remove(peerId);
     if (conn != null) {
       await _closeConn(conn);
     }
 
-    // Fail any in-progress incoming transfers from this peer.
+    // Fail any in-progress incoming transfers from this peer ON THIS LANE —
+    // Share chunks ride the Share channel, everything else the general one, so
+    // a close on one lane must not cancel the other's transfers.
     final incompleteIds = _transfers.entries
-        .where((e) => e.value.senderPeerId == peerId)
+        .where((e) =>
+            e.value.senderPeerId == peerId && _laneForKind(e.value.kind) == lane)
         .map((e) => e.key)
         .toList();
     for (final id in incompleteIds) {
@@ -939,33 +1149,45 @@ class WebRtcService {
         _log('[HOLLOW-WEBRTC-DART] Incomplete transfer $id from $peerId (${transfer.bytesReceived}/${transfer.totalSize}) — notifying Rust');
         transfer.sink.close();
         try { File(transfer.tempPath).deleteSync(); } catch (_) {}
-        network_api.webrtcTransferFailed(
-          transferId: id,
-          peerId: peerId,
-          error: 'Data channel closed mid-transfer',
-        );
+        _reportTransferFailed(
+            id, peerId, lane, 'Data channel closed mid-transfer');
       }
     }
 
-    network_api.webrtcPeerDisconnected(peerId: peerId);
+    _notifyDisconnected(peerId, lane);
 
     if (!wasIntentional) {
       _log('[HOLLOW-WEBRTC-DART] Unexpected close with $peerId — Rust will drive reconnect if needed');
     }
   }
 
+  /// Which lane a transfer of [kind] belongs to.
+  static _Lane _laneForKind(String kind) =>
+      kind == 'share_chunk' ? _Lane.share : _Lane.general;
+
+  /// Whether a frame type may arrive on [lane]. Continuation frames (0xFF)
+  /// carry no type of their own — they're matched against their transfer's
+  /// kind at dispatch instead.
+  static bool _frameAllowedOnLane(int typeByte, _Lane lane) {
+    if (lane == _Lane.share) {
+      return typeByte == _kTypeShareChunk || typeByte == _kTypeContinuation;
+    }
+    return typeByte != _kTypeShareChunk;
+  }
+
   void _handleConnectionState(
-      String peerId, RTCPeerConnectionState state) {
-    _log('[HOLLOW-WEBRTC-DART] PC state: $peerId -> $state');
+      String peerId, RTCPeerConnectionState state, _Lane lane) {
+    _log('[HOLLOW-WEBRTC-DART] PC state: $peerId (${_tag(lane)}) -> $state');
     if (state == RTCPeerConnectionState.RTCPeerConnectionStateConnected) {
-      _logIceRoute(peerId);
+      _logIceRoute(peerId, lane);
     }
     if (state == RTCPeerConnectionState.RTCPeerConnectionStateFailed) {
-      final wasStunOnly = _stunOnlyPeers.remove(peerId);
-      _log('[HOLLOW-WEBRTC-DART] Connection FAILED with $peerId — closing (stunOnly=$wasStunOnly)');
-      _cleanupConnection(peerId);
-      network_api.webrtcPeerDisconnected(peerId: peerId);
-      if (wasStunOnly) {
+      _log('[HOLLOW-WEBRTC-DART] Connection FAILED with $peerId '
+          '(lane=${_tag(lane)}) — closing');
+      _cleanupConnection(peerId, lane);
+      _notifyDisconnected(peerId, lane);
+      if (lane == _Lane.share) {
+        // STUN-only and unreachable: no TURN fallback by design (§7A).
         onShareConnectionFailed?.call(peerId);
       }
       // Don't force reconnect here — let _onDataChannelClosed or the share
@@ -974,16 +1196,27 @@ class WebRtcService {
     // Note: don't close on RTCPeerConnectionStateDisconnected — it can recover.
   }
 
-  Future<void> _logIceRoute(String peerId) async {
+  Future<void> _logIceRoute(String peerId, _Lane lane) async {
     // Resolve the connection per attempt — glare or a reconnect can swap it
     // out mid-probe, and reporting a route for a superseded PC would feed the
     // gossip scorer a stale verdict.
-    final route = await probeIceRoute(() => _connections[peerId]?.pc);
+    final route = await probeIceRoute(() => _connsFor(lane)[peerId]?.pc);
     if (route == null) {
-      _log('[HOLLOW-WEBRTC-DART] ICE route to $peerId: no succeeded candidate pair found');
+      _log('[HOLLOW-WEBRTC-DART] ICE route to $peerId (${_tag(lane)}): no succeeded candidate pair found');
       return;
     }
-    _log('[HOLLOW-WEBRTC-DART] ICE route to $peerId: $route');
+    _log('[HOLLOW-WEBRTC-DART] ICE route to $peerId (${_tag(lane)}): $route');
+    if (lane == _Lane.share) {
+      // A relayed Share route means the §7A guarantee broke somewhere upstream
+      // of here — say so loudly rather than quietly burning relay bandwidth.
+      if (!route.isDirect) {
+        _log('[HOLLOW-WEBRTC-DART] [SENTINEL] Share route to $peerId is NOT '
+            'direct ($route) — Share must be STUN-only (HOLLOW_PLAN §7A)');
+      }
+      // Share routes stay out of the gossip peer scorer: that overlay is built
+      // on the general lane.
+      return;
+    }
     // Tier 3 reachability-aware overlay: feed the route class into the gossip
     // peer scorer so rotation drifts toward direct peers.
     network_api
@@ -991,14 +1224,14 @@ class WebRtcService {
         .catchError((_) {});
   }
 
-  void _onDataChannelMessage(String peerId, Uint8List data) {
+  void _onDataChannelMessage(String peerId, Uint8List data, _Lane lane) {
     if (data.isEmpty) return;
 
     final typeByte = data[0];
 
     // Keepalive ping — reply with pong for RTT measurement.
     if (data.length == 1 && typeByte == _kTypePing) {
-      final conn = _connections[peerId];
+      final conn = _connsFor(lane)[peerId];
       if (conn?.dataChannel?.state == RTCDataChannelState.RTCDataChannelOpen) {
         conn!.dataChannel!.send(
             RTCDataChannelMessage.fromBinary(Uint8List.fromList([_kTypePong])));
@@ -1006,13 +1239,25 @@ class WebRtcService {
       return;
     }
 
-    // Keepalive pong — compute RTT and report to Rust for peer scoring.
+    // Keepalive pong — compute RTT and report to Rust for peer scoring
+    // (general lane only; the scorer models the gossip overlay).
     if (data.length == 1 && typeByte == _kTypePong) {
-      final sentAt = _pingSentAt.remove(peerId);
-      if (sentAt != null) {
+      final sentAt = _pingSentAt.remove(_pingKey(peerId, lane));
+      if (sentAt != null && lane == _Lane.general) {
         final rttMs = DateTime.now().difference(sentAt).inMilliseconds;
         network_api.webrtcPingReport(peerId: peerId, rttMs: rttMs);
       }
+      return;
+    }
+
+    // Lane discipline: the Share channel carries share chunks and nothing else.
+    // It is reachable by anyone holding a share link — including people you
+    // have no relationship with — so it must not be a way into the file, shard,
+    // screen-audio or gossip paths. Symmetrically, share chunks never ride the
+    // general channel any more.
+    if (!_frameAllowedOnLane(typeByte, lane)) {
+      _log('[HOLLOW-WEBRTC-DART] Dropped frame type 0x'
+          '${typeByte.toRadixString(16)} on the ${_tag(lane)} lane from $peerId');
       return;
     }
 
@@ -1049,6 +1294,8 @@ class WebRtcService {
       final id = _extractId(data, 1);
       final transfer = _transfers[id];
       if (transfer == null) return;
+      // A continuation must arrive on the same lane its first chunk did.
+      if (_laneForKind(transfer.kind) != lane) return;
 
       final payload = data.sublist(65);
       transfer.sink.add(payload);
@@ -1160,10 +1407,11 @@ class WebRtcService {
             '(expected ${transfer.totalSize} bytes) — treating as failed transfer');
         try { File(transfer.tempPath).deleteSync(); } catch (_) {}
         // Signal failure so Rust auto-retries the request (same as a transport drop).
-        network_api.webrtcTransferFailed(
-          transferId: transfer.transferId,
-          peerId: transfer.senderPeerId,
-          error: 'Incomplete on disk (flush verify failed)',
+        await _reportTransferFailed(
+          transfer.transferId,
+          transfer.senderPeerId,
+          _laneForKind(transfer.kind),
+          'Incomplete on disk (flush verify failed)',
         );
         return;
       }
@@ -1215,14 +1463,27 @@ class WebRtcService {
     return false;
   }
 
-  void _resetIdleTimer(String peerId) {
-    final conn = _connections[peerId];
+  void _resetIdleTimer(String peerId, [_Lane lane = _Lane.general]) {
+    final conn = _connsFor(lane)[peerId];
     if (conn == null) return;
+    _armIdleTimer(conn, lane);
+  }
+
+  /// Arm the idle timer on a specific connection. Takes the connection rather
+  /// than a peer id because a send can resolve to a channel keyed under a
+  /// SIBLING device id (device<->master collapse) — keying the timer by the
+  /// caller's id would leave that channel's timer un-reset.
+  void _armIdleTimer(_PeerConn conn, _Lane lane) {
+    final key = conn.peerId;
     conn.idleTimer?.cancel();
     conn.idleTimer = Timer(_kIdleTimeout, () {
-      _log('[HOLLOW-WEBRTC-DART] Idle timeout for $peerId');
-      disconnectPeer(peerId);
-      network_api.webrtcPeerDisconnected(peerId: peerId);
+      _log('[HOLLOW-WEBRTC-DART] Idle timeout for $key (${_tag(lane)})');
+      if (lane == _Lane.share) {
+        disconnectSharePeer(key);
+      } else {
+        disconnectPeer(key);
+      }
+      _notifyDisconnected(key, lane);
     });
   }
 
@@ -1268,6 +1529,7 @@ class _PeerConn {
   String connId;
   final String peerId;
   final bool isOfferer;
+  final _Lane lane;
   Timer? idleTimer;
   Timer? keepaliveTimer;
 
@@ -1276,6 +1538,7 @@ class _PeerConn {
     required this.connId,
     required this.peerId,
     required this.isOfferer,
+    this.lane = _Lane.general,
   });
 }
 

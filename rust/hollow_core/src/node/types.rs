@@ -851,6 +851,16 @@ pub(crate) enum NodeCommand {
     // -- WebRTC commands (Phase 5A) --
     WebRtcPeerConnected { peer_id: String },
     WebRtcPeerDisconnected { peer_id: String },
+    /// Hollow Share's DEDICATED STUN-only data channel opened/closed. Tracked
+    /// in its own set (`webrtc_share_peers`), never mixed with the general one:
+    /// the general channel carries TURN, and a Share riding it would push
+    /// multi-GB payloads onto the relay (HOLLOW_PLAN §7A).
+    WebRtcSharePeerConnected { peer_id: String },
+    WebRtcSharePeerDisconnected { peer_id: String },
+    /// A Share chunk transfer failed on the Share channel. Separate from
+    /// `WebRtcTransferFailed` so a Share hiccup can't evict the peer from the
+    /// general set (which would knock DM/channel files onto the WS relay).
+    WebRtcShareTransferFailed { transfer_id: String, peer_id: String, error: String },
     WebRtcSendSignal { peer_id: String, signal_type: String, payload: String, conn_id: String },
     /// `chunk_index` is only meaningful when kind == "share_chunk"; for "file" / "shard" it's ignored.
     WebRtcTransferComplete { transfer_id: String, temp_path: String, sender_peer_id: String, kind: String, shard_index: u16, chunk_index: u32 },
@@ -1051,6 +1061,9 @@ impl NodeCommand {
             Self::RequestShardFromPeer { .. } => "RequestShardFromPeer",
             Self::WebRtcPeerConnected { .. } => "WebRtcPeerConnected",
             Self::WebRtcPeerDisconnected { .. } => "WebRtcPeerDisconnected",
+            Self::WebRtcSharePeerConnected { .. } => "WebRtcSharePeerConnected",
+            Self::WebRtcSharePeerDisconnected { .. } => "WebRtcSharePeerDisconnected",
+            Self::WebRtcShareTransferFailed { .. } => "WebRtcShareTransferFailed",
             Self::WebRtcSendSignal { .. } => "WebRtcSendSignal",
             Self::WebRtcTransferComplete { .. } => "WebRtcTransferComplete",
             Self::WebRtcSendComplete { .. } => "WebRtcSendComplete",
@@ -1886,6 +1899,41 @@ pub(crate) enum HavenMessage {
     /// ICE candidate for WebRTC connection establishment.
     #[serde(rename = "rtc_ice")]
     RtcIceCandidate {
+        candidate: String,
+        sdp_mid: String,
+        sdp_mline_index: u32,
+        conn_id: String,
+    },
+
+    // -- Hollow Share data-channel signaling --
+    //
+    // Share negotiates a SECOND, dedicated peer connection per peer, built from
+    // the STUN-only Share ICE config so its bytes never touch the relay
+    // (HOLLOW_PLAN §7A). It gets its own variants rather than a flag on
+    // RtcOffer/RtcAnswer/RtcIceCandidate on purpose: a client that predates the
+    // Share lane can't parse these, so it DROPS them here at the envelope layer.
+    // Had they reused `rtc_offer`, that client would have handed a Share offer
+    // to its single-connection data-channel layer, where the glare tiebreaker
+    // would tear down (or flap) the live hollow-data connection its DMs, file
+    // transfers and screen audio depend on.
+
+    /// SDP offer for the dedicated Hollow Share data channel.
+    #[serde(rename = "rtc_share_offer")]
+    RtcShareOffer {
+        sdp: String,
+        conn_id: String,
+    },
+
+    /// SDP answer for the dedicated Hollow Share data channel.
+    #[serde(rename = "rtc_share_answer")]
+    RtcShareAnswer {
+        sdp: String,
+        conn_id: String,
+    },
+
+    /// ICE candidate for the dedicated Hollow Share data channel.
+    #[serde(rename = "rtc_share_ice")]
+    RtcShareIceCandidate {
         candidate: String,
         sdp_mid: String,
         sdp_mline_index: u32,

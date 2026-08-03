@@ -1810,13 +1810,14 @@ DevTools profiling (Apr 6) confirmed: CPU usage in background is caused entirely
     - [x] Manifest timeout: 10s countdown in the paste dialog. No seeders → returns to input with error
     - [x] Relay room rendezvous: signaling only — no public DHT, no tracker. Zero file bytes over relay
     - [x] STUN-only: `shareIceConfigProvider` returns no-TURN config so share traffic never consumes relay bandwidth
+    - [x] **Dedicated Share transport (2026-08-03):** Share negotiates its OWN peer connection per peer (`_Lane.share` in `webrtc_service.dart`, `webrtc_share_peers` in Rust) over `rtc_share_offer/answer/ice` envelopes. It never reuses the general `hollow-data` connection, which carries TURN — that reuse silently relayed every Share to anyone you already chat with. Remote `typ relay` candidates are refused locally, so the guarantee holds even against a peer that offers them
     - [x] `PeerLeft` cleanup: dropped peer is removed from every share's `peer_have`, in-flight requests freed for rescheduling
   - [x] **Chunk transport — WebRTC-only binary path:**
     - [x] Control plane (manifest req/resp, Have bitmaps, chunk requests) rides `HavenMessage` over the relay — small signaling messages
-    - [x] **Bulk chunk bytes ride direct WebRTC data channels only (STUN-only, no TURN, no relay fallback).** If no WebRTC connection exists, chunks are skipped (not sent over relay). Scheduler only requests from `webrtc_peers`-connected peers
+    - [x] **Bulk chunk bytes ride direct WebRTC data channels only (STUN-only, no TURN, no relay fallback).** If no Share data channel exists, chunks are skipped (not sent over relay). Scheduler only requests from `webrtc_share_peers`-connected peers — the SHARE lane's set, never the general one
     - [x] Wire format: `StreamKind::ShareChunk` + `TYPE_SHARE_CHUNK = 0x02` byte + 4-byte LE `chunk_index`. Identical in Rust `ws_stream_transfer.rs` and Dart `webrtc_service.dart`
     - [x] Receiver: Dart `_completeIncomingTransfer` branches on `kind == "share_chunk"` → calls `webrtcShareChunkComplete` FFI → Rust verify+decrypt+write+progress+complete
-    - [x] **WebRTC auto-reconnection:** `ShareNeedWebRtc { peer_id }` event emitted when scheduler detects a peer in `peer_have` but not in `webrtc_peers`. Dart calls `ensureConnection()` to re-establish the data channel. Download resumes automatically
+    - [x] **WebRTC auto-reconnection:** `ShareNeedWebRtc { peer_id }` event emitted when scheduler detects a peer in `peer_have` but not in `webrtc_share_peers`. Dart calls `ensureShareConnection()` to re-establish the STUN-only Share data channel. Download resumes automatically
     - [x] Sender-side temp cleanup: `.send_*.tmp` files deleted after WebRTC send completes via `handle_webrtc_send_complete`
   - [x] **UI — Share tab in app:**
     - [x] **Shell integration:** Share icon on bottom bar (dock mode) + server strip (classic mode), follows Archive pattern. `hollow_shell.dart:_buildChatOrEmpty()` checks `shareTabOpenProvider` before `archiveTabOpenProvider`. All navigation paths (Home, Archive, server, peer selection) clear share state
@@ -1842,7 +1843,7 @@ DevTools profiling (Apr 6) confirmed: CPU usage in background is caused entirely
     - `rust/hollow_core/src/node/swarm.rs` — registry, `SeedBudget`, `last_message_traffic`, 50ms share tick timer, command dispatch, envelope intercept, `PeerLeft` cleanup, auto-rejoin
     - `rust/hollow_core/src/node/file_handler.rs` — sender-side `.send_*.tmp` cleanup in `handle_webrtc_send_complete`
     - `lib/src/core/providers/share_tab_provider.dart` (NEW) — `shareTabOpenProvider`, `ShareTabNotifier` with live list state, pending manifest tracking, toggle state caching
-    - `lib/src/core/providers/event_provider.dart` — Share event dispatch + `ShareNeedWebRtc` → `ensureConnection`
+    - `lib/src/core/providers/event_provider.dart` — Share event dispatch + `ShareNeedWebRtc` → `ensureShareConnection`
     - `lib/src/core/providers/ice_config_provider.dart` — `shareIceConfigProvider` (STUN-only)
     - `lib/src/ui/share/share_dashboard.dart` (NEW) — main dashboard, header, empty state, grouped list
     - `lib/src/ui/share/share_card.dart` (NEW) — download/seeding/failed card modes, progress bar, speed, toggle, show in folder

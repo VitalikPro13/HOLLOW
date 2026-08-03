@@ -768,6 +768,35 @@ Future<void> webrtcPeerConnected({required String peerId}) =>
 Future<void> webrtcPeerDisconnected({required String peerId}) =>
     RustLib.instance.api.crateApiNetworkWebrtcPeerDisconnected(peerId: peerId);
 
+/// Notify Rust that the DEDICATED Hollow Share data channel is open with a peer.
+///
+/// Tracked in its own set: Share runs a second, STUN-only peer connection so
+/// its bytes never ride the relay (HOLLOW_PLAN §7A). Reporting it as a general
+/// channel would let Rust schedule Share chunks over the TURN-capable one.
+Future<void> webrtcSharePeerConnected({required String peerId}) => RustLib
+    .instance
+    .api
+    .crateApiNetworkWebrtcSharePeerConnected(peerId: peerId);
+
+/// Notify Rust that the dedicated Hollow Share data channel has closed.
+Future<void> webrtcSharePeerDisconnected({required String peerId}) => RustLib
+    .instance
+    .api
+    .crateApiNetworkWebrtcSharePeerDisconnected(peerId: peerId);
+
+/// Notify Rust that a Share chunk transfer failed on the Share data channel.
+/// Kept apart from [`webrtc_transfer_failed`], which also evicts the peer from
+/// the general set and drives the WS relay retry — neither applies to Share.
+Future<void> webrtcShareTransferFailed({
+  required String transferId,
+  required String peerId,
+  required String error,
+}) => RustLib.instance.api.crateApiNetworkWebrtcShareTransferFailed(
+  transferId: transferId,
+  peerId: peerId,
+  error: error,
+);
+
 /// Send a WebRTC signaling message (SDP offer/answer or ICE candidate) to a peer.
 /// Rust routes it through the WSS relay to the target peer.
 Future<void> webrtcSendSignal({

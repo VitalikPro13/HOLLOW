@@ -568,7 +568,7 @@ hollow://share/<base64url([version: 1 byte][root_hash: 32 bytes][key: 32 bytes])
 ### 8.4 Peer Discovery and Chunk Transport
 
 - **Relay rendezvous:** Peers join a relay room keyed by the root hash. The relay forwards only signaling — zero file bytes ever touch the relay.
-- **STUN-only WebRTC:** Share connections use STUN (no TURN) so share traffic never consumes relay bandwidth. If no peer-to-peer connection can be established, chunks are skipped (not relayed).
+- **STUN-only WebRTC on a dedicated connection:** Share negotiates its own peer connection to each swarm member, separate from the general-purpose data channel that carries messaging file transfers, screen-share audio and gossip. That separation is what makes the guarantee hold: the general connection is configured with a TURN relay for peers behind symmetric NATs, so a share sharing it would silently inherit a relayed path. The Share connection is offered, answered and re-established only from a STUN-only configuration, and relayed candidates proposed by the remote peer are refused locally rather than trusted not to appear. If no direct path can be established, chunks are skipped, never relayed.
 - **Address visibility, stated precisely:** ICE candidates are exchanged through the encrypted relay and never published to a public DHT or tracker, so no third party can enumerate the participants in a share. The peers *within* a swarm do observe each other's addresses, which is inherent to any direct peer-to-peer transfer. This is a deliberate trade: the alternative is relaying multi-gigabyte payloads through infrastructure that is funded for messaging and voice.
 - **ISP-invisible:** Looks like normal WebRTC traffic with no protocol fingerprint to throttle.
 
@@ -587,7 +587,7 @@ Files larger than 34 MB sent in DMs or server channels transparently use Share a
 
 The receiver downloads via the Share protocol (chunked, resumable, multi-source) and the file appears in the UI identically to a direct transfer. This integration bypasses the normal file size check in three places: sender-side size validation, receiver-side MLS/Olm path size validation, and `PendingFileStream` registration (which is skipped entirely for share-backed files).
 
-Share-backed transfers use **STUN-only** (no TURN) to ensure large file traffic never consumes relay bandwidth.
+Share-backed transfers ride the same dedicated **STUN-only** Share connection as ordinary shares (§8.4) — including to a peer the sender is already exchanging messages with over a TURN-capable connection — so large-file traffic never consumes relay bandwidth.
 
 ### 8.7 Persistence and Seeding
 
@@ -1165,7 +1165,7 @@ The WebSocket relay handles signaling (SDP offers/answers, ICE candidates). WebR
 - **STUN servers:** Public STUN servers + self-hosted coturn for server-reflexive candidate discovery.
 - **TURN server:** Self-hosted coturn on the VPS for peers behind symmetric NATs.
 - **Dual-stack (IPv4 + IPv6):** The relay, STUN, and TURN infrastructure all listen on both address families, and clients gather IPv6 ICE candidates wherever the OS provides them. When both peers have IPv6 there is no NAT in the path, so connections that would fail IPv4 hole-punching (symmetric NAT, carrier-grade NAT — common on mobile networks) complete directly instead of falling back to TURN. This benefits exactly the peer pairs most likely to need relayed media otherwise.
-- **Share exception:** Hollow Share connections use STUN-only (no TURN) to ensure share traffic never consumes relay bandwidth.
+- **Share exception:** Hollow Share runs on a separate peer connection per peer, configured STUN-only (no TURN), so share traffic never consumes relay bandwidth (§8.4). It is negotiated with its own signaling message types, which a peer running an older build cannot parse and therefore discards — a share with such a peer simply does not start, rather than degrading its existing general-purpose connection.
 - **Optional relay-only mode:** an off-by-default per-account setting restricts candidate gathering to relay candidates for real-time connections, hiding the user's address from co-participants at the cost of latency and quality (§6.4). Share is outside its scope.
 
 ### 14.3 Signaling Flow

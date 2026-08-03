@@ -443,6 +443,11 @@ Helper struct: `PublicChannelEntry { channel_id, name, category }`. FFI structs:
 - **`RtcOffer { sdp, conn_id }`** — `"rtc_offer"` — SDP offer for WebRTC data channel connection.
 - **`RtcAnswer { sdp, conn_id }`** — `"rtc_answer"` — SDP answer for WebRTC data channel connection.
 - **`RtcIceCandidate { candidate, sdp_mid, sdp_mline_index, conn_id }`** — `"rtc_ice"` — ICE candidate for WebRTC connection establishment.
+- **`RtcShareOffer { sdp, conn_id }`** — `"rtc_share_offer"` — SDP offer for the DEDICATED Hollow Share data channel.
+- **`RtcShareAnswer { sdp, conn_id }`** — `"rtc_share_answer"` — SDP answer for the Share data channel.
+- **`RtcShareIceCandidate { candidate, sdp_mid, sdp_mline_index, conn_id }`** — `"rtc_share_ice"` — ICE candidate for the Share data channel.
+
+Share signalling has its OWN variants rather than a flag on the three above, and that is load-bearing: Share needs a second, STUN-only peer connection (HOLLOW_PLAN §7A), and a client that predates it cannot parse these tags so it DROPS them here at the envelope layer. Reusing `rtc_offer` would hand a Share offer to that client's single-connection data-channel layer, where the glare tiebreaker tears down (or flaps) the live `hollow-data` connection its DMs, files and screen audio depend on. `RtcShareOffer` carries the same `MAX_SDP_SIZE` + blocklist guards as `RtcOffer`. See memory `project_share_data_channel_reuse_turn`.
 
 ### Voice Call Signaling (1:1 Calls)
 

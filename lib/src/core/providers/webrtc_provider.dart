@@ -99,11 +99,14 @@ class WebRtcNotifier extends Notifier<WebRtcState> {
   Future<void> handleSignal(
       String peerId, String signalType, String payload, String connId) async {
     final s = service;
-    // Update state to show connecting.
-    final peers = Map<String, WebRtcPeerStatus>.from(state.peers);
-    if (!peers.containsKey(peerId)) {
-      peers[peerId] = WebRtcPeerStatus.connecting;
-      state = state.copyWith(peers: peers);
+    // Update state to show connecting. [state.peers] tracks the GENERAL lane
+    // (it drives gossip broadcast fan-out), so Share signalling leaves it alone.
+    if (!signalType.startsWith('share_')) {
+      final peers = Map<String, WebRtcPeerStatus>.from(state.peers);
+      if (!peers.containsKey(peerId)) {
+        peers[peerId] = WebRtcPeerStatus.connecting;
+        state = state.copyWith(peers: peers);
+      }
     }
     await s.handleSignal(peerId, signalType, payload, connId);
   }
@@ -117,21 +120,32 @@ class WebRtcNotifier extends Notifier<WebRtcState> {
         chunkIndex: chunkIndex);
   }
 
-  /// Proactively establish WebRTC connection to a peer.
-  /// Pass [iceConfigOverride] for STUN-only connections (e.g. Share).
-  Future<void> ensureConnection(String peerId, {Map<String, dynamic>? iceConfigOverride}) async {
+  /// Proactively establish the GENERAL WebRTC connection to a peer.
+  Future<void> ensureConnection(String peerId) async {
     final s = service;
-    // Register the Share peer even when we don't dial — a Share SEEDER usually
-    // ends up answering the downloader's offer, and the answer path needs the
-    // STUN-only config so Share bytes never ride the relay.
-    if (iceConfigOverride != null) {
-      s.noteShareIceConfig(peerId, iceConfigOverride);
-    }
     if (s.hasPeerChannel(peerId)) return;
     final peers = Map<String, WebRtcPeerStatus>.from(state.peers);
     peers[peerId] = WebRtcPeerStatus.connecting;
     state = state.copyWith(peers: peers);
-    await s.connectToPeer(peerId, iceConfigOverride: iceConfigOverride);
+    await s.connectToPeer(peerId);
+  }
+
+  /// Proactively establish the dedicated STUN-only SHARE connection to a peer.
+  ///
+  /// Deliberately separate from [ensureConnection]: Hollow Share gets its own
+  /// peer connection even when a general one is already open, because that one
+  /// carries TURN and Share must never touch the relay (HOLLOW_PLAN §7A).
+  /// [WebRtcState.peers] tracks the general lane only — the Share lane's
+  /// liveness lives in Rust's share-peer set.
+  Future<void> ensureShareConnection(
+      String peerId, Map<String, dynamic> shareIceConfig) async {
+    final s = service;
+    // Register the Share config even when we don't dial — a Share SEEDER
+    // usually ends up answering the downloader's offer, and the answer path
+    // needs the STUN-only config.
+    s.noteShareIceConfig(peerId, shareIceConfig);
+    if (s.hasShareChannel(peerId)) return;
+    await s.connectShareToPeer(peerId, shareIceConfig);
   }
 
   /// Mark peer as connected (called when data channel opens).
