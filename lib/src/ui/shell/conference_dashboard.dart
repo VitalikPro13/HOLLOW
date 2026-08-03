@@ -23,6 +23,7 @@ import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/hollow_toggle.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
+import 'package:hollow/src/ui/components/ptt_mic_visual.dart';
 import 'package:hollow/src/ui/dialogs/screen_share_dialog.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -1444,7 +1445,7 @@ class _ConferenceCallArea extends ConsumerWidget {
     // up, and we never embed it in that state). The floating controls pill is
     // HIDDEN — its Disconnect tears down only the voice leg and strands the
     // meeting — and the conference's static controls bar sits below instead.
-    if (inThisCall && (vcState.isScreenShareActive || vcState.isCameraActive)) {
+    if (inThisCall && (vcState.showsShareSurface || vcState.isCameraActive)) {
       return Column(
         children: [
           Expanded(
@@ -1667,12 +1668,19 @@ class _ConferenceControls extends ConsumerWidget {
       child: Row(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          control(
-            icon: vcState.isMuted ? LucideIcons.micOff : LucideIcons.mic,
-            label: vcState.isMuted ? 'Unmute' : 'Mute',
-            active: vcState.isMuted,
-            onTap: vcNotifier.toggleMute,
-          ),
+          Builder(builder: (context) {
+            // PTT-aware mic (issue #38): gated look while idle, live on hold.
+            final mic = micButtonVisual(ref,
+                isMuted: vcState.isMuted,
+                hollow: hollow,
+                idleColor: hollow.textPrimary);
+            return control(
+              icon: mic.icon,
+              label: mic.tooltip,
+              active: vcState.isMuted,
+              onTap: vcNotifier.toggleMute,
+            );
+          }),
           const SizedBox(width: HollowSpacing.sm),
           control(
             icon: vcState.isDeafened

@@ -9,6 +9,7 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
+import 'package:hollow/src/ui/components/ptt_mic_visual.dart';
 import 'package:hollow/src/ui/dialogs/screen_share_dialog.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -105,22 +106,24 @@ class VoiceChannelPanel extends ConsumerWidget {
           Row(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              // Mute toggle
-              HollowTooltip(
-                message: vcState.isMuted ? 'Unmute' : 'Mute',
-                child: HollowPressable(
-                  semanticLabel: vcState.isMuted ? 'Unmute' : 'Mute',
-                  onTap: () =>
-                      ref.read(voiceChannelProvider.notifier).toggleMute(),
-                  borderRadius: BorderRadius.circular(hollow.radiusSm),
-                  padding: const EdgeInsets.all(HollowSpacing.sm),
-                  child: Icon(
-                    vcState.isMuted ? LucideIcons.micOff : LucideIcons.mic,
-                    size: 18,
-                    color: vcState.isMuted ? hollow.error : hollow.textPrimary,
+              // Mute toggle (PTT-aware: gated mic while idle, live on hold)
+              Builder(builder: (context) {
+                final mic = micButtonVisual(ref,
+                    isMuted: vcState.isMuted,
+                    hollow: hollow,
+                    idleColor: hollow.textPrimary);
+                return HollowTooltip(
+                  message: mic.tooltip,
+                  child: HollowPressable(
+                    semanticLabel: vcState.isMuted ? 'Unmute' : 'Mute',
+                    onTap: () =>
+                        ref.read(voiceChannelProvider.notifier).toggleMute(),
+                    borderRadius: BorderRadius.circular(hollow.radiusSm),
+                    padding: const EdgeInsets.all(HollowSpacing.sm),
+                    child: Icon(mic.icon, size: 18, color: mic.color),
                   ),
-                ),
-              ),
+                );
+              }),
               const SizedBox(width: HollowSpacing.sm),
               // Deafen toggle
               HollowTooltip(

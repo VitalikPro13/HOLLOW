@@ -25,6 +25,10 @@ class MobileSourceSwitchPill extends ConsumerWidget {
   final String localPeerId;
   final void Function(String peerId, String type) onSelect;
 
+  /// Screen sources present but not opted into yet (issue #38) — rendered
+  /// with an eye affordance; the caller's [onSelect] starts watching them.
+  final Set<String> unwatchedPeerIds;
+
   const MobileSourceSwitchPill({
     super.key,
     required this.sources,
@@ -32,6 +36,7 @@ class MobileSourceSwitchPill extends ConsumerWidget {
     required this.focusedType,
     required this.localPeerId,
     required this.onSelect,
+    this.unwatchedPeerIds = const {},
   });
 
   @override
@@ -57,6 +62,8 @@ class MobileSourceSwitchPill extends ConsumerWidget {
             final isScreen = source.type == 'screen';
             final isFocused = source.peerId == focusedPeerId &&
                 source.type == focusedType;
+            final isUnwatched =
+                isScreen && unwatchedPeerIds.contains(source.peerId);
             // Routable device id → master for the name/avatar lookups;
             // focus tracking stays keyed on the routable id.
             final displayId =
@@ -68,8 +75,9 @@ class MobileSourceSwitchPill extends ConsumerWidget {
                   const EdgeInsets.symmetric(horizontal: HollowSpacing.xs),
               child: HollowPressable(
                 onTap: () => onSelect(source.peerId, source.type),
-                semanticLabel:
-                    '${isScreen ? 'Screen' : 'Camera'}: ${source.peerId == localPeerId ? 'You' : name}',
+                semanticLabel: isUnwatched
+                    ? 'Watch screen share from ${source.peerId == localPeerId ? 'you' : name}'
+                    : '${isScreen ? 'Screen' : 'Camera'}: ${source.peerId == localPeerId ? 'You' : name}',
                 borderRadius: BorderRadius.circular(hollow.radiusSm),
                 backgroundColor: isFocused ? hollow.accentMuted : null,
                 padding: const EdgeInsets.symmetric(
@@ -80,7 +88,11 @@ class MobileSourceSwitchPill extends ConsumerWidget {
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     Icon(
-                      isScreen ? LucideIcons.monitor : LucideIcons.video,
+                      isUnwatched
+                          ? LucideIcons.eye
+                          : isScreen
+                              ? LucideIcons.monitor
+                              : LucideIcons.video,
                       size: 12,
                       color:
                           isFocused ? hollow.accent : hollow.textSecondary,

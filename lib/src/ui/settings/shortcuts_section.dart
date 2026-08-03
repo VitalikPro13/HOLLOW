@@ -1,22 +1,34 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/providers/settings_provider.dart';
+import 'package:hollow/src/core/services/hotkeys/hotkey_binding.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/settings/settings_shared.dart';
 
-/// Shortcuts category of the desktop Settings dialog — a static reference of
-/// the keyboard shortcuts, grouped General / Chat Input.
-class ShortcutsSettingsView extends StatelessWidget {
+/// Shortcuts category of the desktop Settings dialog — a reference of the
+/// keyboard shortcuts, grouped General / Voice / Chat Input. The Voice rows
+/// read the LIVE bindings (rebindable in Audio & Video > Voice).
+class ShortcutsSettingsView extends ConsumerWidget {
   const ShortcutsSettingsView({super.key});
 
+  String _bindingDisplay(WidgetRef ref,
+      AsyncNotifierProvider<KeybindNotifier, String> provider,
+      String fallback) {
+    final raw = ref.watch(provider).valueOrNull ?? fallback;
+    return HotkeyBinding.parse(raw)?.display() ??
+        HotkeyBinding.parse(fallback)!.display();
+  }
+
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     return settingsCardList([
       const SettingsCard(
         title: 'General',
         children: [
           _ShortcutRow(label: 'Open Settings', shortcut: 'Ctrl + ,'),
-          _ShortcutRow(label: 'Toggle Member Panel', shortcut: 'Ctrl + Shift + M'),
+          _ShortcutRow(label: 'Toggle Member Panel', shortcut: 'Ctrl + Shift + P'),
           _ShortcutRow(label: 'Quick Search', shortcut: 'Ctrl + K'),
           _ShortcutRow(label: 'Toggle Split View', shortcut: r'Ctrl + Shift + \'),
           _ShortcutRow(label: 'Focus Left Pane', shortcut: 'Ctrl + 1'),
@@ -24,6 +36,25 @@ class ShortcutsSettingsView extends StatelessWidget {
           _ShortcutRow(label: 'Zoom Interface In', shortcut: 'Ctrl + +'),
           _ShortcutRow(label: 'Zoom Interface Out', shortcut: 'Ctrl + −'),
           _ShortcutRow(label: 'Reset Zoom', shortcut: 'Ctrl + 0'),
+        ],
+      ),
+      SettingsCard(
+        title: 'Voice (in calls — rebind in Audio & Video)',
+        children: [
+          _ShortcutRow(
+            label: 'Push to Talk (hold)',
+            shortcut: _bindingDisplay(ref, pttKeybindProvider, 'ctrl+space'),
+          ),
+          _ShortcutRow(
+            label: 'Toggle Mute',
+            shortcut:
+                _bindingDisplay(ref, muteKeybindProvider, 'ctrl+shift+m'),
+          ),
+          _ShortcutRow(
+            label: 'Toggle Deafen',
+            shortcut:
+                _bindingDisplay(ref, deafenKeybindProvider, 'ctrl+shift+d'),
+          ),
         ],
       ),
       const SettingsCard(

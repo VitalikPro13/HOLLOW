@@ -25,6 +25,8 @@ import 'package:hollow/src/core/services/voice_channel_service.dart';
 import 'package:hollow/src/core/providers/webrtc_provider.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/rust/api/network.dart' as network_api;
+import 'package:hollow/src/ui/app.dart' show hollowNavigatorKey;
+import 'package:hollow/src/ui/components/hollow_toast.dart';
 
 /// Audio state for a peer in a voice channel.
 class PeerAudioState {
@@ -88,6 +90,15 @@ class VoiceChannelState {
   /// Only used when both screen share and camera are active.
   final String focusedSourceType;
 
+  /// Remote sharers we explicitly opted into watching (issue #38).
+  /// A remote share never streams to us until its peer id is in this set —
+  /// `peerScreenSharing` alone is just the badge.
+  final Set<String> watchingScreenShares;
+
+  /// Desktop-only: show all sources as a tile grid instead of one focused
+  /// source full-bleed.
+  final bool isGridView;
+
   /// Whether the local user's camera is on.
   final bool isCameraOn;
 
@@ -119,6 +130,8 @@ class VoiceChannelState {
     this.peerScreenShareLabels = const {},
     this.focusedScreenSharePeerId,
     this.focusedSourceType = 'screen',
+    this.watchingScreenShares = const {},
+    this.isGridView = false,
     this.isCameraOn = false,
     this.isFrontCamera = true,
     this.peerCameraOn = const {},
@@ -141,10 +154,19 @@ class VoiceChannelState {
   /// Get saved volume for a peer (default 1.0).
   double getPeerVolume(String peerId) => peerVolumes[peerId] ?? 1.0;
 
-  /// Whether any screen share is active (local or remote).
-  bool get isScreenShareActive =>
-      isScreenSharing ||
-      peerScreenSharing.values.any((v) => v);
+  /// Whether we are actually receiving at least one remote share.
+  bool get isWatchingAnyShare => watchingScreenShares.isNotEmpty;
+
+  /// Whether the share surface (focus/grid view) should be shown: we're
+  /// sharing ourselves or watching someone. A remote share we have NOT
+  /// opted into never flips this — it only shows the badge + Watch banner.
+  bool get showsShareSurface => isScreenSharing || isWatchingAnyShare;
+
+  /// Remote sharers we have not opted into watching yet.
+  List<String> get unwatchedRemoteShares => [
+        for (final e in peerScreenSharing.entries)
+          if (e.value && !watchingScreenShares.contains(e.key)) e.key,
+      ];
 
   /// Whether any camera video is active (local or remote).
   bool get isCameraActive =>
@@ -172,6 +194,8 @@ class VoiceChannelState {
     bool clearFocusedSharer = false,
     bool clearCurrent = false,
     String? focusedSourceType,
+    Set<String>? watchingScreenShares,
+    bool? isGridView,
     bool? isCameraOn,
     bool? isFrontCamera,
     Map<String, bool>? peerCameraOn,
@@ -220,6 +244,12 @@ class VoiceChannelState {
       focusedSourceType: clearCurrent
           ? 'screen'
           : (focusedSourceType ?? this.focusedSourceType),
+      watchingScreenShares: clearCurrent
+          ? const {}
+          : (watchingScreenShares ?? this.watchingScreenShares),
+      isGridView: clearCurrent
+          ? false
+          : (isGridView ?? this.isGridView),
       isCameraOn: clearCurrent
           ? false
           : (isCameraOn ?? this.isCameraOn),
@@ -251,6 +281,17 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
   /// Early ICE candidates that arrived before the service was created.
   /// Key: "incoming:peerId" or "outgoing:peerId"
   final Map<String, List<Map<String, dynamic>>> _earlyScreenIce = {};
+
+  /// Peers that requested to watch OUR share via screen_watch (issue #38).
+  /// We only ever send a screen offer to peers in this set.
+  final Set<String> _watchers = {};
+
+  /// Peers whose audio PC to us has reached connected — the precondition for
+  /// sending them a screen offer (Olm/MLS transport is warm by then).
+  final Set<String> _audioConnectedPeers = {};
+
+  /// Viewer-side "offer never came" timeouts, keyed by sharer peer id.
+  final Map<String, Timer> _watchConnectTimers = {};
 
   /// Cached SFrame keys from MLS epoch changes — applied when the service is
   /// (re)created. Keyed by `_sframeCacheKey(serverId, channelId)`:
@@ -615,10 +656,16 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
         }
       }
 
-      if (state.isScreenSharing && _screenCaptureStream != null) {
+      _audioConnectedPeers.add(peerId);
+
+      // Opt-in watching (issue #38): only send our share to peers that asked
+      // via screen_watch — never unconditionally.
+      if (state.isScreenSharing &&
+          _screenCaptureStream != null &&
+          _watchers.contains(peerId)) {
         if (!_outgoingScreenShares.containsKey(peerId) &&
             _outgoingScreenShares.length < maxScreenShareOutgoing) {
-          debugPrint('[HOLLOW-VC] Peer $peerId connected — sending screen share offer');
+          debugPrint('[HOLLOW-VC] Watcher $peerId connected — sending screen share offer');
           _sendScreenShareToPeer(peerId);
         }
       }
@@ -683,6 +730,11 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     // The mic is live now — if the channel went away while it was opening,
     // give it straight back.
     if (await _joinSuperseded(gen, svc)) return;
+
+    // Apply the transmit gate now that capture exists: in push-to-talk mode
+    // the mic starts gated (capture-muted) while state.isMuted stays false —
+    // peers see us unmuted; the key gates actual transmission.
+    _applyTxGate();
 
     // Re-assert the speaker route now that the audio session actually
     // exists. The early _setSpeakerRoute(true) above ran BEFORE the service
@@ -820,9 +872,10 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     await _service!.onPeerJoinedMyChannel(peerId);
 
     // If we're sharing our screen, send state to the late joiner so they
-    // know we're sharing. The actual screen_offer is sent once the audio
-    // PC reaches connected state (via onPeerConnected callback), ensuring
-    // MLS is ready and the peer can decrypt it.
+    // know we're sharing (badge + Watch banner). The actual screen_offer is
+    // only sent if they opt in via screen_watch AND their audio PC reaches
+    // connected state (via onPeerConnected callback), ensuring MLS is ready
+    // and the peer can decrypt it.
     if (state.isScreenSharing && _screenCaptureStream != null) {
       final json = <String, dynamic>{'enabled': true};
       if (state.screenShareLabel != null) {
@@ -869,6 +922,8 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
   Future<void> onRemotePeerLeft(String peerId) async {
     if (_service == null) return;
     await _service!.onPeerLeftMyChannel(peerId);
+    _watchers.remove(peerId);
+    _audioConnectedPeers.remove(peerId);
     // A gone peer can't heal — drop its ladder state.
     _sframeFailures.removeWhere((k, _) => k.startsWith('$peerId|'));
     _sframeHealProgress.remove(peerId);
@@ -920,6 +975,10 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     }
     if (signalType == 'screen_state') {
       _handleScreenState(peerId, payload);
+      return;
+    }
+    if (signalType == 'screen_watch') {
+      await _handleScreenWatch(peerId, payload);
       return;
     }
     if (_service == null) return;
@@ -981,6 +1040,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       _remoteCameraRenderers.clear();
 
       // Clean up screen sharing (stops the screen-audio capturer).
+      _audioConnectedPeers.clear();
       await _cleanupAllScreenShares();
 
       // Disarm the entire-screen anti-echo voice redirect AFTER the capturer is
@@ -1044,11 +1104,47 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     ref.read(vcLocalSpeakingProvider.notifier).reset();
   }
 
+  // --- Push-to-talk transmit gate (issue #38) ---------------------------
+  // PTT state deliberately lives OUTSIDE VoiceChannelState: key press and
+  // release must not rebuild every voiceChannelProvider watcher, and no
+  // audio_state signal fans out per press — peers see a PTT user as
+  // unmuted and the speaking indicator (level-gated) conveys talk state.
+  bool _pttMode = false;
+  bool _pttTransmit = false;
+
+  /// The mic transmits only when EVERY gate is open: not manually muted or
+  /// deafened, and (in PTT mode) the key is held. Pure function of the four
+  /// flags, so a manual mute always wins over a held PTT key.
+  void _applyTxGate() {
+    final gated =
+        state.isMuted || state.isDeafened || (_pttMode && !_pttTransmit);
+    _service?.setMuted(gated);
+  }
+
+  /// Hotkey layer: PTT key edge (true = held). Idempotent.
+  void setPttTransmit(bool active) {
+    if (_pttTransmit == active) return;
+    _pttTransmit = active;
+    if (state.isInVoiceChannel) {
+      debugPrint('[HOLLOW-HOTKEY] VC PTT transmit=$active '
+          '(mode=$_pttMode muted=${state.isMuted})');
+    }
+    _applyTxGate();
+  }
+
+  /// Hotkey layer: voice input mode changed (true = push-to-talk).
+  void setVoiceInputMode(bool ptt) {
+    if (_pttMode == ptt) return;
+    _pttMode = ptt;
+    _pttTransmit = false;
+    _applyTxGate();
+  }
+
   void toggleMute() {
     if (_leaving) return;
     final newMuted = !state.isMuted;
     state = state.copyWith(isMuted: newMuted);
-    _service?.setMuted(newMuted);
+    _applyTxGate();
     _broadcastAudioState();
   }
 
@@ -1059,8 +1155,8 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       isMuted: newDeafened ? true : state.isMuted,
       isDeafened: newDeafened,
     );
-    // Mute our mic when deafened.
-    _service?.setMuted(newDeafened || state.isMuted);
+    // Mute our mic when deafened (via the gate — PTT-aware).
+    _applyTxGate();
     // Silence all remote audio when deafened. Fire-and-forget, so it carries
     // its own catch: a sync try/catch around an un-awaited future catches
     // nothing and the rejection lands in the zone handler.
@@ -1098,6 +1194,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
   /// Handle peer disconnect — remove from all voice channels.
   Future<void> onPeerDisconnected(String peerId) async {
     ref.read(recordingProvider.notifier).onPeerDisconnected(peerId);
+    _audioConnectedPeers.remove(peerId);
     final updated = _deepCopyParticipants();
     for (final serverChannels in updated.values) {
       for (final channelPeers in serverChannels.values) {
@@ -1407,17 +1504,9 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       }
     }
 
-    // Send screen share to each peer in the channel (up to cap).
-    final peers = state.getParticipants(
-        state.currentServerId!, state.currentChannelId!);
-    for (final peerId in peers) {
-      if (peerId == localPeerId) continue;
-      if (_outgoingScreenShares.length >= maxScreenShareOutgoing) {
-        debugPrint('[HOLLOW-VC] Screen share outgoing cap reached ($maxScreenShareOutgoing)');
-        break;
-      }
-      await _sendScreenShareToPeer(peerId);
-    }
+    // Opt-in watching (issue #38): no fan-out here. Peers learn about the
+    // share via the screen_state broadcast below and request it with a
+    // screen_watch signal — _handleScreenWatch sends the per-peer offer.
 
     // MOBILE: one central audio capture for the whole channel. Fanning at
     // send time over _outgoingScreenShares.keys picks up late joiners
@@ -1474,6 +1563,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       // so the brief window where the VC voices' in-process volume is
       // restored isn't re-captured.
       await _stopMobileShareAudio();
+      _watchers.clear();
       final sharePeers = _outgoingScreenShares.keys.toList();
       for (final service in _outgoingScreenShares.values) {
         try { await service.close(); } catch (_) {}
@@ -1508,8 +1598,10 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       String? newFocus = state.focusedScreenSharePeerId;
       bool clearFocus = false;
       if (newFocus == localPeerId) {
+        // Only a share we're actually watching can take focus.
         final remoteSharerId = state.peerScreenSharing.entries
-            .where((e) => e.value)
+            .where((e) =>
+                e.value && state.watchingScreenShares.contains(e.key))
             .map((e) => e.key)
             .firstOrNull;
         newFocus = remoteSharerId;
@@ -1552,6 +1644,12 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       focusedScreenSharePeerId: peerId,
       focusedSourceType: sourceType,
     );
+  }
+
+  /// Toggle the desktop tile-grid view of all sources (issue #38).
+  void setGridView(bool on) {
+    if (state.isGridView == on) return;
+    state = state.copyWith(isGridView: on);
   }
 
   /// Send our screen share to a specific peer (creates outgoing ScreenShareService).
@@ -1700,20 +1798,25 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
 
     debugPrint('[HOLLOW-VC] Received screen offer from $peerId');
 
+    // Opt-in watching (issue #38): an offer we never asked for is dropped.
+    // Offers only flow after our screen_watch{want:true} reached the sharer.
+    if (!state.watchingScreenShares.contains(peerId)) {
+      debugPrint('[HOLLOW-VC] Ignoring unsolicited screen offer from $peerId (not watching)');
+      return;
+    }
+
     if (!_incomingScreenShares.containsKey(peerId) &&
         _incomingScreenShares.length >= maxScreenShareIncoming) {
       debugPrint('[HOLLOW-VC] Rejecting screen offer from $peerId — incoming cap ($maxScreenShareIncoming) reached');
       return;
     }
 
-    // Mark this peer as sharing and auto-focus (screen_offer may arrive before screen_state).
+    // Mark this peer as sharing (screen_offer may arrive before screen_state).
+    // No auto-focus: watchScreenShare already focused this share when the
+    // user opted in — the offer landing must not steal focus.
     final sharing = Map.of(state.peerScreenSharing);
     sharing[peerId] = true;
-    state = state.copyWith(
-      peerScreenSharing: sharing,
-      focusedScreenSharePeerId:
-          state.focusedScreenSharePeerId ?? peerId,
-    );
+    state = state.copyWith(peerScreenSharing: sharing);
 
     final iceConfig = ref.read(iceConfigProvider);
     final localPeerId = ref.read(identityProvider).peerId ?? '';
@@ -1752,8 +1855,10 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
 
     service.onRemoteTrackReady = () {
       debugPrint('[HOLLOW-VC] Screen share track ready from $peerId');
+      // The share we asked for is live — stop the "offer never came" timer.
+      _watchConnectTimers.remove(peerId)?.cancel();
       // Force a state rebuild so the UI picks up the renderer.
-      // Also auto-focus if no one is focused yet.
+      // Also auto-focus if no one is focused yet (only fires for watched shares).
       state = state.copyWith(
         focusedScreenSharePeerId:
             state.focusedScreenSharePeerId ?? peerId,
@@ -1849,44 +1954,193 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     final sharing = Map.of(state.peerScreenSharing);
     final labels = Map.of(state.peerScreenShareLabels);
     if (enabled) {
+      // Badge only — opt-in watching (issue #38) means a new share must
+      // never steal focus or flip the view; the user presses Watch.
       sharing[peerId] = true;
       if (quality != null) labels[peerId] = quality;
-      // Auto-focus if no one is focused.
-      if (state.focusedScreenSharePeerId == null) {
-        state = state.copyWith(
-          peerScreenSharing: sharing,
-          peerScreenShareLabels: labels,
-          focusedScreenSharePeerId: peerId,
-        );
-        return;
-      }
     } else {
       sharing.remove(peerId);
       labels.remove(peerId);
+      // The share is gone — forget any watch state for it.
+      _watchConnectTimers.remove(peerId)?.cancel();
+      final watching = state.watchingScreenShares.contains(peerId)
+          ? ({...state.watchingScreenShares}..remove(peerId))
+          : state.watchingScreenShares;
       // Clean up incoming service.
       _cleanupPeerScreenShare(peerId);
-      // If the leaving sharer was focused, switch to another.
+      // If the leaving sharer was focused, switch to another WATCHED share.
       if (state.focusedScreenSharePeerId == peerId) {
         final localPeerId = ref.read(identityProvider).peerId ?? '';
         final nextFocus = state.isScreenSharing
             ? localPeerId
             : sharing.entries
-                .where((e) => e.value)
+                .where((e) => e.value && watching.contains(e.key))
                 .map((e) => e.key)
                 .firstOrNull;
         state = state.copyWith(
           peerScreenSharing: sharing,
           peerScreenShareLabels: labels,
+          watchingScreenShares: watching,
           focusedScreenSharePeerId: nextFocus,
           clearFocusedSharer: nextFocus == null,
         );
         return;
       }
+      state = state.copyWith(
+        peerScreenSharing: sharing,
+        peerScreenShareLabels: labels,
+        watchingScreenShares: watching,
+      );
+      return;
     }
     state = state.copyWith(
       peerScreenSharing: sharing,
       peerScreenShareLabels: labels,
     );
+  }
+
+  /// Sharer side of opt-in watching (issue #38): a peer asked to start or
+  /// stop receiving our share.
+  Future<void> _handleScreenWatch(String peerId, String payload) async {
+    final v = jsonDecode(payload);
+    final want = v['want'] as bool? ?? false;
+    debugPrint('[HOLLOW-VC] Screen watch from $peerId: want=$want');
+
+    if (want) {
+      // Raced against our stop — nothing to send; the peer's badge clears
+      // via our screen_state{disabled} broadcast.
+      if (!state.isScreenSharing || _screenCaptureStream == null) return;
+      _watchers.add(peerId);
+      if (_outgoingScreenShares.containsKey(peerId)) return; // already sending
+      if (_outgoingScreenShares.length >= maxScreenShareOutgoing) {
+        debugPrint('[HOLLOW-VC] Watch request from $peerId ignored — outgoing cap ($maxScreenShareOutgoing) reached');
+        return;
+      }
+      // Only offer once the audio PC is connected (Olm/MLS transport warm);
+      // otherwise onPeerConnected sends it when the PC lands.
+      if (_audioConnectedPeers.contains(peerId)) {
+        await _sendScreenShareToPeer(peerId);
+      }
+    } else {
+      _watchers.remove(peerId);
+      final outgoing = _outgoingScreenShares.remove(peerId);
+      if (outgoing != null) {
+        await outgoing.close();
+        await _dropShareCryptors(peerId);
+        debugPrint('[HOLLOW-VC] Stopped sending share to $peerId (viewer opted out)');
+      }
+    }
+  }
+
+  /// Viewer side of opt-in watching (issue #38): request [peerId]'s share.
+  /// Optimistically marks us as watching + focuses the share; the sharer
+  /// replies with a screen_offer which _handleScreenOffer now accepts.
+  Future<void> watchScreenShare(String peerId) async {
+    if (!state.isInVoiceChannel) return;
+    if (state.peerScreenSharing[peerId] != true) return;
+    if (state.watchingScreenShares.contains(peerId)) return;
+    if (_incomingScreenShares.length >= maxScreenShareIncoming) {
+      _toast('Watch limit reached ($maxScreenShareIncoming shares)',
+          HollowToastType.error);
+      return;
+    }
+
+    state = state.copyWith(
+      watchingScreenShares: {...state.watchingScreenShares, peerId},
+      focusedScreenSharePeerId: peerId,
+      focusedSourceType: 'screen',
+    );
+
+    network_api
+        .voiceChannelSendSignal(
+          serverId: state.currentServerId!,
+          channelId: state.currentChannelId!,
+          peerId: peerId,
+          signalType: 'screen_watch',
+          payload: jsonEncode({'want': true}),
+        )
+        .catchError((_) {});
+
+    // If no offer produces a live track in time, revert so the tile/banner
+    // doesn't spin forever (sharer at cap, signal lost, ...).
+    _watchConnectTimers.remove(peerId)?.cancel();
+    _watchConnectTimers[peerId] = Timer(const Duration(seconds: 20), () {
+      _watchConnectTimers.remove(peerId);
+      if (!state.watchingScreenShares.contains(peerId)) return;
+      if (getScreenShareRenderer(peerId) != null) return;
+      debugPrint('[HOLLOW-VC] Watch of $peerId timed out — reverting');
+      stopWatchingScreenShare(peerId);
+      _toast("Couldn't connect to the screen share", HollowToastType.error);
+    });
+  }
+
+  /// Viewer side of opt-in watching (issue #38): stop receiving [peerId]'s
+  /// share (the badge stays — the peer is still sharing to others).
+  Future<void> stopWatchingScreenShare(String peerId) async {
+    if (!state.watchingScreenShares.contains(peerId)) return;
+    _watchConnectTimers.remove(peerId)?.cancel();
+    _earlyScreenIce.remove('incoming:$peerId');
+
+    final watching = {...state.watchingScreenShares}..remove(peerId);
+
+    // Focus repair BEFORE closing the service so the UI never renders a
+    // focused share whose renderer is being torn down.
+    if (state.focusedScreenSharePeerId == peerId &&
+        state.focusedSourceType == 'screen') {
+      final localPeerId = ref.read(identityProvider).peerId ?? '';
+      final nextWatched = state.peerScreenSharing.entries
+          .where((e) => e.value && watching.contains(e.key))
+          .map((e) => e.key)
+          .firstOrNull;
+      final nextFocus =
+          nextWatched ?? (state.isScreenSharing ? localPeerId : null);
+      String? cameraFocus;
+      if (nextFocus == null) {
+        cameraFocus = state.isCameraOn
+            ? localPeerId
+            : state.peerCameraOn.entries
+                .where((e) => e.value)
+                .map((e) => e.key)
+                .firstOrNull;
+      }
+      state = state.copyWith(
+        watchingScreenShares: watching,
+        focusedScreenSharePeerId: nextFocus ?? cameraFocus,
+        clearFocusedSharer: nextFocus == null && cameraFocus == null,
+        focusedSourceType: nextFocus != null
+            ? 'screen'
+            : (cameraFocus != null ? 'camera' : state.focusedSourceType),
+      );
+    } else {
+      state = state.copyWith(watchingScreenShares: watching);
+    }
+
+    final incoming = _incomingScreenShares.remove(peerId);
+    if (incoming != null) {
+      await incoming.close();
+      await _dropShareCryptors(peerId);
+    }
+
+    if (state.isInVoiceChannel) {
+      network_api
+          .voiceChannelSendSignal(
+            serverId: state.currentServerId!,
+            channelId: state.currentChannelId!,
+            peerId: peerId,
+            signalType: 'screen_watch',
+            payload: jsonEncode({'want': false}),
+          )
+          .catchError((_) {});
+    }
+  }
+
+  void _toast(String message, HollowToastType type) {
+    final overlay = hollowNavigatorKey.currentState?.overlay;
+    final overlayContext = overlay?.context;
+    if (overlay == null || overlayContext == null || !overlayContext.mounted) {
+      return;
+    }
+    HollowToast.show(overlayContext, message, type: type, overlayState: overlay);
   }
 
   /// Broadcast our screen share state to all peers.
@@ -1926,6 +2180,9 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
 
   /// Clean up screen share services for a specific peer.
   Future<void> _cleanupPeerScreenShare(String peerId) async {
+    // Forget watch bookkeeping both ways (viewer + sharer side).
+    _watchConnectTimers.remove(peerId)?.cancel();
+    _watchers.remove(peerId);
     // Close incoming screen share from this peer.
     final incoming = _incomingScreenShares.remove(peerId);
     if (incoming != null) {
@@ -1939,26 +2196,35 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     if (incoming != null || outgoing != null) {
       await _dropShareCryptors(peerId);
     }
-    // Update peerScreenSharing map.
+    // Update peerScreenSharing map + watching set.
+    final watching = state.watchingScreenShares.contains(peerId)
+        ? ({...state.watchingScreenShares}..remove(peerId))
+        : state.watchingScreenShares;
     if (state.peerScreenSharing.containsKey(peerId)) {
       final sharing = Map.of(state.peerScreenSharing)..remove(peerId);
-      // If the removed peer was focused, switch to another sharer.
+      // If the removed peer was focused, switch to another WATCHED sharer.
       if (state.focusedScreenSharePeerId == peerId) {
         final localPeerId = ref.read(identityProvider).peerId ?? '';
         final nextFocus = state.isScreenSharing
             ? localPeerId
             : sharing.entries
-                .where((e) => e.value)
+                .where((e) => e.value && watching.contains(e.key))
                 .map((e) => e.key)
                 .firstOrNull;
         state = state.copyWith(
           peerScreenSharing: sharing,
+          watchingScreenShares: watching,
           focusedScreenSharePeerId: nextFocus,
           clearFocusedSharer: nextFocus == null,
         );
       } else {
-        state = state.copyWith(peerScreenSharing: sharing);
+        state = state.copyWith(
+          peerScreenSharing: sharing,
+          watchingScreenShares: watching,
+        );
       }
+    } else if (!identical(watching, state.watchingScreenShares)) {
+      state = state.copyWith(watchingScreenShares: watching);
     }
   }
 
@@ -1966,6 +2232,12 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
   Future<void> _cleanupAllScreenShares() async {
     _screenTrackPoller?.cancel();
     _screenTrackPoller = null;
+
+    for (final t in _watchConnectTimers.values) {
+      t.cancel();
+    }
+    _watchConnectTimers.clear();
+    _watchers.clear();
 
     await _stopMobileShareAudio();
     final allSharePeers = <String>{
@@ -1999,6 +2271,8 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     state = state.copyWith(
       isScreenSharing: false,
       peerScreenSharing: const {},
+      watchingScreenShares: const {},
+      isGridView: false,
       clearFocusedSharer: true,
     );
   }

@@ -453,14 +453,22 @@ The `ScrollablePositionedList` uses a `ValueKey('dm-list-${peerId}')` so each pa
 
 ## Screen Share Mode -- Two Layout Paths
 
-When a DM call involves screen sharing (`isScreenShareActive`), the entire message area is replaced with a full-bleed screen share view. The chat becomes an overlay:
+When a DM call involves screen sharing (`isScreenShareActive` = the call peer's DM and ANY share, ours or theirs), the entire message area is replaced with a full-bleed screen share view. The chat becomes an overlay:
 
 1. **Background**: `_ScreenShareFullView` renders the focused video source
-2. **Source pill**: Top-center floating pill for switching between video sources (only if 2+ active)
+2. **Source pill**: Top-center floating pill for switching between video sources (only if 2+ active). Unwatched remote-share tabs show an EYE icon and tapping them opts in (`watchRemoteScreenShare()`); a trailing grid toggle flips `dmShareGridViewProvider`
 3. **Chat overlay**: Right-side 360px panel that slides in/out via `_ChatOverlaySlider`. Toggle button (chevron left/right) is always visible when overlays are visible. The chat panel contains the same `_buildMessageArea()` content as normal mode
 4. **Controls pill**: Bottom-center `_ScreenShareControlsOverlay` with all call controls
 
 All overlays fade out after 1 second of inactivity via `_overlayHideTimer`. Mouse movement or hover over overlay elements pins them visible. The chat panel can be permanently pinned open via `_chatOverlayPinned`.
+
+### Opt-in watching (issue #38)
+
+The remote share is media-gated: the sharer captures + self-previews immediately (provider-owned `_dmScreenStream` + preview renderer in call_provider, VC-style) but only sends the `screen_offer` after the peer's `call_screen_watch{want:true}` (`_sendDmScreenOffer` — SFrame + per-watch screen-audio capture ride along). `CallState.watchingRemoteShare` gates the receive side; unsolicited offers are dropped. **Unwatched UX (owner decision — never a banner over chat, that broke the Column):** `_ScreenShareFullView` renders `_buildUnwatchedShareStack` — a clean avatar + "X is sharing their screen" + Watch placeholder, side-by-side with our own share tile when both share (matches the VC grid's placeholder tile). Stop watching (button top-right of the single-source stack) returns to that placeholder. 20s watch timeout reverts with a toast.
+
+### DM grid view (issue #38)
+
+`dmShareGridViewProvider` (StateProvider, session-sticky) → `_buildDmGridView`: own share, their share (live or Watch placeholder), and both cameras as tiles (1-2 side by side, 3-4 as 2×2 with the underfull row centered); tap a live tile to focus + exit grid; Stop sharing stays reachable top-right.
 
 ## Mobile Call UI
 

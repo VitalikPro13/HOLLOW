@@ -3006,6 +3006,34 @@ async fn voice_channel_join_leave_and_signal_routing() {
     .await;
     assert!(!leaked, "an unknown VC signal type must be silently dropped");
 
+    // --- A targeted screen_watch signal (opt-in watching, issue #38) routes J → O ---
+    drain_events(&mut o);
+    j.cmd_tx
+        .send(NodeCommand::VoiceChannelSendSignal {
+            server_id: server_id.clone(),
+            channel_id: voice_cid.clone(),
+            peer_id: o_master.clone(),
+            signal_type: "screen_watch".to_string(),
+            payload: serde_json::json!({"want": true}).to_string(),
+        })
+        .await
+        .unwrap();
+    let mut watch_payload = None;
+    let o_saw_watch = wait_event(&mut o, std::time::Duration::from_secs(4), |ev| {
+        if let NetworkEvent::VoiceChannelSignal { signal_type, payload, .. } = ev {
+            if signal_type == "screen_watch" {
+                watch_payload = Some(payload.clone());
+                return true;
+            }
+        }
+        false
+    })
+    .await;
+    assert!(o_saw_watch, "sharer must receive the routed screen_watch VC signal");
+    let watch_json: serde_json::Value =
+        serde_json::from_str(&watch_payload.expect("screen_watch payload")).expect("valid json");
+    assert_eq!(watch_json["want"], serde_json::Value::Bool(true), "want flag must round-trip");
+
     // --- J leaves the voice channel; O sees the leave ---
     drain_events(&mut o);
     j.cmd_tx

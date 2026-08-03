@@ -448,6 +448,8 @@ Voice and video calls are available on all platforms, including mobile (Android 
 
 Voice, video, and screen share video travel over **WebRTC peer-to-peer connections** (DTLS-SRTP as the base transport, SFrame as the application-layer encryption). The relay is not in the media path — it carries only WebRTC signaling (SDP offers/answers, ICE candidates).
 
+**Screen shares are consent-based per viewer.** A sharer announces the share's existence with a lightweight state signal, but never negotiates a media connection to a participant until that participant explicitly requests it (a targeted watch signal; the request is revocable, and revocation tears the per-viewer connection down). Receivers symmetrically discard share offers they did not request. This is both a bandwidth property — in a per-viewer mesh the sharer uploads one copy per *watching* peer, so participants who joined only to talk cost the sharer nothing — and a consent property: no participant's client decodes another's screen content without an explicit local action.
+
 For peers behind symmetric NATs (~10-15% of users), a **TURN server** relays the encrypted media. The TURN server sees only SFrame ciphertext.
 
 **Address visibility and the relay-only option.** A successful direct path means the two endpoints have exchanged and probed each other's candidate addresses, so co-participants in a session observe each other's IP addresses. Encryption protects content, not network addresses, and this is inherent to direct peer-to-peer media rather than a property of this system in particular. The exposure is bounded to *participants in a session the user joined*: there is no tracker, no DHT, and no mechanism by which a non-participant or passive observer obtains the address.

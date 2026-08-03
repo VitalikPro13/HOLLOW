@@ -64,6 +64,7 @@ import 'package:hollow/src/ui/components/share_volume_control.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/large_file_share_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
+import 'package:hollow/src/ui/components/ptt_mic_visual.dart';
 import 'package:hollow/src/core/providers/verified_peers_provider.dart';
 import 'package:hollow/src/ui/components/security_alert_banner.dart';
 import 'package:hollow/src/ui/components/status_dot.dart';
@@ -140,6 +141,8 @@ Widget _dmSourcePill({
   required String? focusedPeerId,
   required String? focusedType,
   required void Function(String peerId, String type) onTapSource,
+  Set<String> unwatchedScreenPeerIds = const {},
+  Widget? trailing,
 }) {
   return Container(
     padding: const EdgeInsets.symmetric(
@@ -153,49 +156,60 @@ Widget _dmSourcePill({
     ),
     child: Row(
       mainAxisSize: MainAxisSize.min,
-      children: sources.map((source) {
-        final name = displayNameFor(profiles, source.peerId);
-        final isFocused =
-            source.peerId == focusedPeerId && source.type == focusedType;
-        return Padding(
-          padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.xs),
-          child: HollowPressable(
-            onTap: () => onTapSource(source.peerId, source.type),
-            borderRadius: BorderRadius.circular(hollow.radiusSm),
-            backgroundColor: isFocused ? hollow.accentMuted : null,
-            padding: const EdgeInsets.symmetric(
-              horizontal: HollowSpacing.sm,
-              vertical: HollowSpacing.xs,
-            ),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(
-                  source.type == 'screen'
-                      ? LucideIcons.monitor
-                      : LucideIcons.video,
-                  size: 12,
-                  color: isFocused ? hollow.accent : hollow.textSecondary,
-                ),
-                const SizedBox(width: HollowSpacing.xs),
-                HollowAvatar(
-                  peerId: source.peerId,
-                  size: 18,
-                ),
-                const SizedBox(width: HollowSpacing.xs),
-                Text(
-                  source.peerId == localPeerId ? 'You' : name,
-                  style: HollowTypography.caption.copyWith(
-                    color: isFocused ? hollow.textPrimary : hollow.textSecondary,
-                    fontWeight: isFocused ? FontWeight.w600 : FontWeight.w400,
-                    fontSize: 12,
+      children: [
+        ...sources.map((source) {
+          final name = displayNameFor(profiles, source.peerId);
+          final isFocused =
+              source.peerId == focusedPeerId && source.type == focusedType;
+          final isUnwatched = source.type == 'screen' &&
+              unwatchedScreenPeerIds.contains(source.peerId);
+          return Padding(
+            padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.xs),
+            child: HollowPressable(
+              onTap: () => onTapSource(source.peerId, source.type),
+              semanticLabel: isUnwatched
+                  ? 'Watch screen share from $name'
+                  : null,
+              borderRadius: BorderRadius.circular(hollow.radiusSm),
+              backgroundColor: isFocused ? hollow.accentMuted : null,
+              padding: const EdgeInsets.symmetric(
+                horizontal: HollowSpacing.sm,
+                vertical: HollowSpacing.xs,
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
+                    isUnwatched
+                        ? LucideIcons.eye
+                        : source.type == 'screen'
+                            ? LucideIcons.monitor
+                            : LucideIcons.video,
+                    size: 12,
+                    color: isFocused ? hollow.accent : hollow.textSecondary,
                   ),
-                ),
-              ],
+                  const SizedBox(width: HollowSpacing.xs),
+                  HollowAvatar(
+                    peerId: source.peerId,
+                    size: 18,
+                  ),
+                  const SizedBox(width: HollowSpacing.xs),
+                  Text(
+                    source.peerId == localPeerId ? 'You' : name,
+                    style: HollowTypography.caption.copyWith(
+                      color:
+                          isFocused ? hollow.textPrimary : hollow.textSecondary,
+                      fontWeight: isFocused ? FontWeight.w600 : FontWeight.w400,
+                      fontSize: 12,
+                    ),
+                  ),
+                ],
+              ),
             ),
-          ),
-        );
-      }).toList(),
+          );
+        }),
+        ?trailing,
+      ],
     ),
   );
 }
@@ -251,19 +265,17 @@ Future<void> _toggleScreenShare(
 
 Widget _muteCallButton(WidgetRef ref, HollowTheme hollow, CallState call,
     {required double iconSize, required EdgeInsetsGeometry padding}) {
-  final label = call.isMuted ? 'Unmute' : 'Mute';
+  // PTT-aware (issue #38): gated mic while PTT idles, accent while held.
+  final mic = micButtonVisual(ref,
+      isMuted: call.isMuted, hollow: hollow, idleColor: hollow.textSecondary);
   return HollowTooltip(
-    message: label,
+    message: mic.tooltip,
     child: HollowPressable(
-      semanticLabel: label,
+      semanticLabel: call.isMuted ? 'Unmute' : 'Mute',
       onTap: () => ref.read(callProvider.notifier).toggleMute(),
       borderRadius: BorderRadius.circular(hollow.radiusSm),
       padding: padding,
-      child: Icon(
-        call.isMuted ? LucideIcons.micOff : LucideIcons.mic,
-        size: iconSize,
-        color: call.isMuted ? hollow.error : hollow.textSecondary,
-      ),
+      child: Icon(mic.icon, size: iconSize, color: mic.color),
     ),
   );
 }
@@ -508,6 +520,12 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
   ) {
     final profiles = ref.watch(profileProvider);
     final focused = ref.watch(focusedDmSourceProvider);
+    final gridOn = ref.watch(dmShareGridViewProvider);
+    // Opt-in watching (issue #38): the remote share tab shows an eye until
+    // we opted in — tapping it starts watching instead of focusing.
+    final unwatched = {
+      if (call.remoteScreenSharing && !call.watchingRemoteShare) remotePeerId,
+    };
     return MouseRegion(
       onEnter: (_) => _pinOverlays(),
       onExit: (_) => _resetOverlayTimer(),
@@ -516,12 +534,47 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
         profiles: profiles,
         sources: _dmActiveSources(call, localPeerId, remotePeerId),
         localPeerId: localPeerId,
-        focusedPeerId: focused.peerId,
-        focusedType: focused.type,
+        focusedPeerId: gridOn ? null : focused.peerId,
+        focusedType: gridOn ? null : focused.type,
+        unwatchedScreenPeerIds: unwatched,
         onTapSource: (peerId, type) {
+          if (type == 'screen' && unwatched.contains(peerId)) {
+            ref.read(callProvider.notifier).watchRemoteScreenShare();
+          }
           ref.read(focusedDmSourceProvider.notifier).state =
               DmFocusedSource(peerId: peerId, type: type);
+          ref.read(dmShareGridViewProvider.notifier).state = false;
         },
+        trailing: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: 1,
+              height: 18,
+              margin:
+                  const EdgeInsets.symmetric(horizontal: HollowSpacing.xs),
+              color: hollow.border.withValues(alpha: 0.6),
+            ),
+            HollowTooltip(
+              message: gridOn ? 'Exit grid view' : 'Grid view',
+              child: HollowPressable(
+                onTap: () =>
+                    ref.read(dmShareGridViewProvider.notifier).state = !gridOn,
+                semanticLabel: gridOn
+                    ? 'Exit grid view'
+                    : 'Show all sources in a grid',
+                borderRadius: BorderRadius.circular(hollow.radiusSm),
+                backgroundColor: gridOn ? hollow.accentMuted : null,
+                padding: const EdgeInsets.all(HollowSpacing.xs),
+                child: Icon(
+                  LucideIcons.layoutGrid,
+                  size: 14,
+                  color: gridOn ? hollow.accent : hollow.textSecondary,
+                ),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -1071,8 +1124,12 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
           status: c.status,
           isScreenSharing: c.isScreenSharing,
           remoteScreenSharing: c.remoteScreenSharing,
+          watchingRemoteShare: c.watchingRemoteShare,
         )));
     final isCallWithThisPeer = call.peerId == widget.peerId;
+    // Any share (ours or theirs) engages the share surface. Opt-in watching
+    // (issue #38) gates the MEDIA, not the surface: an unwatched remote
+    // share renders as an avatar + Watch placeholder tile in there.
     final isScreenShareActive = isCallWithThisPeer &&
         (call.isScreenSharing || call.remoteScreenSharing);
 
@@ -2428,6 +2485,11 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
     } else if (_expandedRenderer == 'remote') {
       focusedPeerId = remotePeerId;
     }
+    // Opt-in watching (issue #38): the remote screen tab shows an eye until
+    // opted in — tapping it starts watching (which activates the layout).
+    final unwatched = {
+      if (call.remoteScreenSharing && !call.watchingRemoteShare) remotePeerId,
+    };
     return _dmSourcePill(
       hollow: hollow,
       profiles: profiles,
@@ -2435,8 +2497,14 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
       localPeerId: localPeerId,
       focusedPeerId: focusedPeerId,
       focusedType: focusedPeerId != null ? 'camera' : null,
-      onTapSource: (peerId, type) =>
-          _onDmSourceTapped(peerId, type, localPeerId),
+      unwatchedScreenPeerIds: unwatched,
+      onTapSource: (peerId, type) {
+        if (type == 'screen' && unwatched.contains(peerId)) {
+          ref.read(callProvider.notifier).watchRemoteScreenShare();
+          return;
+        }
+        _onDmSourceTapped(peerId, type, localPeerId);
+      },
     );
   }
 
@@ -3395,7 +3463,30 @@ class _ScreenShareFullView extends ConsumerWidget {
     final localScreen = notifier.localScreenShareRenderer;
     final remoteCamera = voice?.remoteRenderer;
     final localCamera = voice?.localRenderer;
-    final bothSharing = call.isScreenSharing && call.remoteScreenSharing;
+    // Opt-in watching (issue #38): the remote share only counts once we
+    // pressed Watch — unwatched it stays a pill tab / grid placeholder.
+    final bothSharing = call.isScreenSharing &&
+        call.remoteScreenSharing &&
+        call.watchingRemoteShare;
+
+    // Zoom-style grid of all sources (issue #38 follow-up).
+    if (ref.watch(dmShareGridViewProvider)) {
+      return _buildDmGridView(
+        ref, call, hollow, localPeerId,
+        remoteScreen: remoteScreen,
+        localScreen: localScreen,
+        remoteCamera: remoteCamera,
+        localCamera: localCamera,
+      );
+    }
+
+    // Opt-in watching (issue #38): their share exists but isn't watched —
+    // the share surface shows a clean avatar + Watch placeholder (side by
+    // side with our own share when we're sharing too). Media stays gated.
+    if (call.remoteScreenSharing && !call.watchingRemoteShare) {
+      return _buildUnwatchedShareStack(
+          ref, call, hollow, localScreen: localScreen);
+    }
 
     // Resolve the focused source. Falls back to a sensible default if the
     // focused source isn't currently active.
@@ -3422,6 +3513,335 @@ class _ScreenShareFullView extends ConsumerWidget {
           ref, call, hollow, bigChoice, remoteScreen, localScreen, localPeerId);
     }
     return _buildSingleSourceStack(call, hollow, notifier, bigChoice);
+  }
+
+  /// The peer shares but we haven't opted in: a clean placeholder surface
+  /// (avatar + name + Watch), split with our own share when both share —
+  /// the same look as the VC grid's unwatched tile.
+  Widget _buildUnwatchedShareStack(
+    WidgetRef ref,
+    CallState call,
+    HollowTheme hollow, {
+    required RTCVideoRenderer? localScreen,
+  }) {
+    final profiles = ref.watch(profileProvider);
+    final name = displayNameFor(profiles, peerId);
+
+    final placeholder = Container(
+      margin: call.isScreenSharing ? const EdgeInsets.all(2) : EdgeInsets.zero,
+      decoration: BoxDecoration(
+        color: hollow.elevated,
+        borderRadius: call.isScreenSharing
+            ? BorderRadius.circular(hollow.radiusSm)
+            : BorderRadius.zero,
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            HollowAvatar(peerId: peerId, size: 64),
+            const SizedBox(height: HollowSpacing.md),
+            Text(
+              '$name is sharing their screen',
+              style: HollowTypography.body
+                  .copyWith(color: hollow.textSecondary),
+              textAlign: TextAlign.center,
+            ),
+            if (call.remoteScreenShareLabel != null) ...[
+              const SizedBox(height: HollowSpacing.xs),
+              Text(
+                call.remoteScreenShareLabel!,
+                style: HollowTypography.caption.copyWith(
+                  color: hollow.textTertiary,
+                  fontSize: 11,
+                ),
+              ),
+            ],
+            const SizedBox(height: HollowSpacing.md),
+            HollowButton.filled(
+              compact: true,
+              icon: const Icon(LucideIcons.eye, size: 14),
+              onPressed: () => ref
+                  .read(callProvider.notifier)
+                  .watchRemoteScreenShare(),
+              child: const Text('Watch'),
+            ),
+          ],
+        ),
+      ),
+    );
+
+    if (!call.isScreenSharing) {
+      return Container(color: Colors.black, child: placeholder);
+    }
+
+    // Both sharing, theirs unwatched: our share left, their placeholder
+    // right — the same side-by-side the VC grid shows.
+    final ownTile = Container(
+      margin: const EdgeInsets.all(2),
+      decoration: BoxDecoration(
+        color: hollow.elevated,
+        borderRadius: BorderRadius.circular(hollow.radiusSm),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          if (localScreen != null)
+            _renderTile(localScreen, isCamera: false, isLocal: true)
+          else
+            Center(
+              child: Icon(LucideIcons.monitor,
+                  size: 32,
+                  color: hollow.textSecondary.withValues(alpha: 0.4)),
+            ),
+          Positioned(
+            left: 6,
+            bottom: 6,
+            child: Container(
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+              decoration: BoxDecoration(
+                color: Colors.black.withValues(alpha: 0.6),
+                borderRadius: BorderRadius.circular(4),
+              ),
+              child: Text(
+                call.screenShareLabel != null
+                    ? 'You · ${call.screenShareLabel}'
+                    : 'You',
+                style: HollowTypography.caption.copyWith(
+                  color: Colors.white,
+                  fontSize: 10,
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+
+    return Container(
+      color: Colors.black,
+      child: Stack(
+        children: [
+          Positioned.fill(
+            child: Row(
+              children: [
+                Expanded(child: ownTile),
+                Expanded(child: placeholder),
+              ],
+            ),
+          ),
+          Positioned(
+            top: HollowSpacing.md,
+            right: HollowSpacing.md,
+            child: HollowButton.danger(
+              onPressed: () =>
+                  ref.read(callProvider.notifier).stopScreenShare(),
+              compact: true,
+              icon: const Icon(LucideIcons.monitorOff, size: 14),
+              child: const Text('Stop sharing'),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Zoom-style grid (issue #38): every active source as a tile — own share,
+  /// remote share (Watch placeholder until opted in), both cameras. Tap a
+  /// live tile to focus it full-bleed.
+  Widget _buildDmGridView(
+    WidgetRef ref,
+    CallState call,
+    HollowTheme hollow,
+    String localPeerId, {
+    required RTCVideoRenderer? remoteScreen,
+    required RTCVideoRenderer? localScreen,
+    required RTCVideoRenderer? remoteCamera,
+    required RTCVideoRenderer? localCamera,
+  }) {
+    void focusSource(String srcPeerId, String type) {
+      ref.read(focusedDmSourceProvider.notifier).state =
+          DmFocusedSource(peerId: srcPeerId, type: type);
+      ref.read(dmShareGridViewProvider.notifier).state = false;
+    }
+
+    Widget liveTile({
+      required RTCVideoRenderer? renderer,
+      required bool isCamera,
+      required bool isLocal,
+      required String label,
+      String? quality,
+      VoidCallback? onTap,
+    }) {
+      return GestureDetector(
+        onTap: onTap,
+        child: Container(
+          margin: const EdgeInsets.all(2),
+          decoration: BoxDecoration(
+            color: hollow.elevated,
+            borderRadius: BorderRadius.circular(hollow.radiusSm),
+          ),
+          clipBehavior: Clip.antiAlias,
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              if (renderer != null)
+                _renderTile(renderer, isCamera: isCamera, isLocal: isLocal)
+              else
+                Center(
+                  child: Icon(
+                    isCamera ? LucideIcons.video : LucideIcons.monitor,
+                    size: 32,
+                    color: hollow.textSecondary.withValues(alpha: 0.4),
+                  ),
+                ),
+              Positioned(
+                left: 6,
+                bottom: 6,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 6, vertical: 2),
+                  decoration: BoxDecoration(
+                    color: Colors.black.withValues(alpha: 0.6),
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                  child: Text(
+                    quality != null ? '$label · $quality' : label,
+                    style: HollowTypography.caption.copyWith(
+                      color: Colors.white,
+                      fontSize: 10,
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    final tiles = <Widget>[
+      if (call.isScreenSharing)
+        liveTile(
+          renderer: localScreen,
+          isCamera: false,
+          isLocal: true,
+          label: 'Your screen',
+          quality: call.screenShareLabel,
+          onTap: () => focusSource(localPeerId, 'screen'),
+        ),
+      if (call.remoteScreenSharing && call.watchingRemoteShare)
+        liveTile(
+          renderer: remoteScreen,
+          isCamera: false,
+          isLocal: false,
+          label: 'Their screen',
+          quality: call.remoteScreenShareLabel,
+          onTap: () => focusSource(peerId, 'screen'),
+        ),
+      if (call.remoteScreenSharing && !call.watchingRemoteShare)
+        // Unwatched share — placeholder; only the Watch button acts.
+        Container(
+          margin: const EdgeInsets.all(2),
+          decoration: BoxDecoration(
+            color: hollow.elevated,
+            borderRadius: BorderRadius.circular(hollow.radiusSm),
+          ),
+          clipBehavior: Clip.antiAlias,
+          child: Center(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                HollowAvatar(peerId: peerId, size: 48),
+                const SizedBox(height: HollowSpacing.sm),
+                Text(
+                  'Sharing their screen',
+                  style: HollowTypography.caption.copyWith(
+                    color: hollow.textSecondary,
+                    fontSize: 12,
+                  ),
+                ),
+                const SizedBox(height: HollowSpacing.sm),
+                HollowButton.filled(
+                  compact: true,
+                  icon: const Icon(LucideIcons.eye, size: 14),
+                  onPressed: () => ref
+                      .read(callProvider.notifier)
+                      .watchRemoteScreenShare(),
+                  child: const Text('Watch'),
+                ),
+              ],
+            ),
+          ),
+        ),
+      if (call.isVideoEnabled)
+        liveTile(
+          renderer: localCamera,
+          isCamera: true,
+          isLocal: true,
+          label: 'Your camera',
+          onTap: () => focusSource(localPeerId, 'camera'),
+        ),
+      if (call.remoteVideoEnabled)
+        liveTile(
+          renderer: remoteCamera,
+          isCamera: true,
+          isLocal: false,
+          label: 'Their camera',
+          onTap: () => focusSource(peerId, 'camera'),
+        ),
+    ];
+
+    // 1-2 tiles side by side; 3-4 in a 2x2 (underfull row centered).
+    Widget grid;
+    if (tiles.isEmpty) {
+      grid = const SizedBox.shrink();
+    } else if (tiles.length <= 2) {
+      grid = Row(children: [for (final t in tiles) Expanded(child: t)]);
+    } else {
+      final top = tiles.sublist(0, 2);
+      final bottom = tiles.sublist(2);
+      grid = Column(
+        children: [
+          Expanded(
+              child:
+                  Row(children: [for (final t in top) Expanded(child: t)])),
+          Expanded(
+            child: Row(
+              children: [
+                if (bottom.length == 1) const Spacer(),
+                for (final t in bottom) Expanded(flex: 2, child: t),
+                if (bottom.length == 1) const Spacer(),
+              ],
+            ),
+          ),
+        ],
+      );
+    }
+
+    return Stack(
+      children: [
+        Positioned.fill(
+          child: Container(color: Colors.black, child: grid),
+        ),
+        // Stop sharing stays reachable from the grid.
+        if (call.isScreenSharing)
+          Positioned(
+            top: HollowSpacing.md,
+            right: HollowSpacing.md,
+            child: HollowButton.danger(
+              onPressed: () =>
+                  ref.read(callProvider.notifier).stopScreenShare(),
+              compact: true,
+              icon: const Icon(LucideIcons.monitorOff, size: 14),
+              child: const Text('Stop sharing'),
+            ),
+          ),
+      ],
+    );
   }
 
   /// Both sharing: big tile = focused source, PiP = the OTHER screen.
@@ -3613,12 +4033,28 @@ class _ScreenShareFullView extends ConsumerWidget {
               ],
             ),
           )
-        else if (call.remoteScreenSharing &&
-            call.remoteScreenShareLabel != null)
+        else if (call.remoteScreenSharing)
           Positioned(
             top: HollowSpacing.md,
             right: HollowSpacing.md,
-            child: _shareLabelChip(hollow, call.remoteScreenShareLabel!),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (call.remoteScreenShareLabel != null) ...[
+                  _shareLabelChip(hollow, call.remoteScreenShareLabel!),
+                  const SizedBox(width: HollowSpacing.sm),
+                ],
+                // Opt-in watching (issue #38): leaving the stream is one tap.
+                if (call.watchingRemoteShare)
+                  HollowButton.ghost(
+                    onPressed: () =>
+                        notifier.stopWatchingRemoteScreenShare(),
+                    compact: true,
+                    icon: const Icon(LucideIcons.eyeOff, size: 14),
+                    child: const Text('Stop watching'),
+                  ),
+              ],
+            ),
           ),
       ],
     );
@@ -4297,4 +4733,3 @@ Color _bannerColorFromId(String id) {
   final hue = ((hash % 360).abs() + 40) % 360;
   return HSLColor.fromAHSL(1.0, hue.toDouble(), 0.45, 0.35).toColor();
 }
-

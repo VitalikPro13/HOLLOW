@@ -2028,6 +2028,17 @@ pub(crate) enum HavenMessage {
         role: String,
     },
 
+    /// Viewer -> sharer: request or cancel receiving the call screen share
+    /// (opt-in watching, issue #38 follow-up). The sharer only sends a
+    /// screen offer after want=true.
+    #[serde(rename = "call_screen_watch")]
+    CallScreenWatch {
+        #[serde(default)]
+        call_id: String,
+        #[serde(default)]
+        want: bool,
+    },
+
     // -- Gossip relay tree (Phase 5D) --
 
     /// Gossip peer exchange: share neighbor list for topology discovery.
@@ -2956,6 +2967,19 @@ pub(crate) enum MessageEnvelope {
         quality: Option<String>,
     },
 
+    /// Targeted: viewer -> sharer, request or cancel receiving their screen
+    /// share (opt-in watching, issue #38). The sharer only sends a screen
+    /// offer to peers that asked with want=true.
+    #[serde(rename = "vc_screen_watch")]
+    VoiceChannelScreenWatch {
+        sid: String,
+        cid: String,
+        #[serde(default)]
+        want: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<String>,
+    },
+
     // -- Voice channel camera (Phase 5B) --
 
     /// Targeted: renegotiation SDP offer (adding/removing video track).
@@ -3030,6 +3054,7 @@ impl MessageEnvelope {
             | Self::VoiceChannelScreenAnswer { target, .. }
             | Self::VoiceChannelScreenIce { target, .. }
             | Self::VoiceChannelScreenState { target, .. }
+            | Self::VoiceChannelScreenWatch { target, .. }
             | Self::VoiceChannelRenegOffer { target, .. }
             | Self::VoiceChannelRenegAnswer { target, .. }
             | Self::VoiceChannelCameraState { target, .. } => target.as_deref(),

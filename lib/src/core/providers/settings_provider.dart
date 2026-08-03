@@ -1123,3 +1123,93 @@ class OfflineInboxNotifier extends Notifier<bool> {
 
 final offlineInboxProvider =
     NotifierProvider<OfflineInboxNotifier, bool>(OfflineInboxNotifier.new);
+
+// ---------------------------------------------------------------------------
+// Voice input mode + hotkeys (issue #38)
+// ---------------------------------------------------------------------------
+
+/// Voice input mode values for [voiceInputModeProvider].
+const String kVoiceInputActivity = 'activity';
+const String kVoiceInputPtt = 'ptt';
+
+/// How the mic transmits in calls: 'activity' (always-on, default) or 'ptt'
+/// (push-to-talk — mic only transmits while the PTT key is held).
+final voiceInputModeProvider =
+    AsyncNotifierProvider<VoiceInputModeNotifier, String>(
+        VoiceInputModeNotifier.new);
+
+class VoiceInputModeNotifier extends AsyncNotifier<String> {
+  @override
+  Future<String> build() async {
+    final val = await storage_api.loadSetting(key: 'voice_input_mode');
+    return val == kVoiceInputPtt ? kVoiceInputPtt : kVoiceInputActivity;
+  }
+
+  Future<void> setMode(String mode) async {
+    final v = mode == kVoiceInputPtt ? kVoiceInputPtt : kVoiceInputActivity;
+    await storage_api.saveSetting(key: 'voice_input_mode', value: v);
+    state = AsyncData(v);
+  }
+}
+
+/// Push-to-talk release delay in milliseconds — how long the mic stays open
+/// after the key is released, so word endings aren't clipped.
+const int kPttReleaseDefaultMs = 200;
+
+final pttReleaseDelayProvider =
+    AsyncNotifierProvider<PttReleaseDelayNotifier, int>(
+        PttReleaseDelayNotifier.new);
+
+class PttReleaseDelayNotifier extends AsyncNotifier<int> {
+  @override
+  Future<int> build() async {
+    final val = await storage_api.loadSetting(key: 'ptt_release_ms');
+    if (val == null || val.isEmpty) return kPttReleaseDefaultMs;
+    return (int.tryParse(val) ?? kPttReleaseDefaultMs).clamp(0, 1000);
+  }
+
+  Future<void> setDelay(int ms) async {
+    final clamped = ms.clamp(0, 1000);
+    await storage_api.saveSetting(
+      key: 'ptt_release_ms',
+      value: clamped.toString(),
+    );
+    state = AsyncData(clamped);
+  }
+}
+
+/// Serialized [HotkeyBinding] strings (e.g. 'ctrl+space'); empty = unbound.
+class KeybindNotifier extends AsyncNotifier<String> {
+  final String storageKey;
+  final String defaultBinding;
+  KeybindNotifier(this.storageKey, this.defaultBinding);
+
+  @override
+  Future<String> build() async {
+    final val = await storage_api.loadSetting(key: storageKey);
+    if (val == null || val.isEmpty) return defaultBinding;
+    return val;
+  }
+
+  Future<void> setBinding(String serialized) async {
+    await storage_api.saveSetting(key: storageKey, value: serialized);
+    state = AsyncData(serialized);
+  }
+}
+
+/// Push-to-talk key (hold to transmit). Default Ctrl+Space.
+final pttKeybindProvider = AsyncNotifierProvider<KeybindNotifier, String>(
+    () => KeybindNotifier('ptt_keybind', 'ctrl+space'));
+
+/// Mute-toggle hotkey. Default Ctrl+Shift+M (the member panel moved to
+/// Ctrl+Shift+P to give the Discord muscle-memory combo to mute).
+final muteKeybindProvider = AsyncNotifierProvider<KeybindNotifier, String>(
+    () => KeybindNotifier('mute_keybind', 'ctrl+shift+m'));
+
+/// Deafen-toggle hotkey. Default Ctrl+Shift+D.
+final deafenKeybindProvider = AsyncNotifierProvider<KeybindNotifier, String>(
+    () => KeybindNotifier('deafen_keybind', 'ctrl+shift+d'));
+
+/// True while the settings keybind-capture field is armed — the hotkey
+/// controller suspends so the capture never triggers live actions.
+final keybindCaptureActiveProvider = StateProvider<bool>((_) => false);

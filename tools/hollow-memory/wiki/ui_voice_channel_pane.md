@@ -19,11 +19,19 @@ The `build()` method of `_VoiceChannelPaneState` checks `voiceChannelProvider` s
 
 1. **Not in this channel**: If `vcState.currentServerId != widget.serverId` or `vcState.currentChannelId != widget.channelId`, renders a plain `ChannelChatPane` (no voice UI). This is the default when the user hasn't joined the voice channel.
 
-2. **Audio-only (no video/screen share)**: If in the channel but neither `isScreenShareActive` nor `isCameraActive`, renders a plain `ChannelChatPane`. Voice participants are visible in the member sidebar instead.
+2. **Audio-only (no video/screen share)**: If in the channel but neither `showsShareSurface` nor `isCameraActive`, renders a plain `ChannelChatPane`. Voice participants are visible in the member sidebar instead. If unwatched remote shares exist (`unwatchedRemoteShares`), a floating `_UnwatchedShareBanner` is stacked over the chat (per sharer: avatar + "X is sharing their screen" + Watch + dismiss); dismissing collapses it to a compact re-expandable "N screen shares" chip — never a dead end — and dismissals reset on channel switch (`didUpdateWidget`) or when the peer re-shares.
 
-3. **Camera grid view**: If `vcState.isCameraActive` (local or any peer has camera on) and no screen share, renders `_buildCameraGridView()`.
+3. **Camera grid view**: If `vcState.isCameraActive` (local or any peer has camera on) and no share surface, renders `_buildCameraGridView()`.
 
-4. **Screen share view**: If `vcState.isScreenShareActive` (local or any peer sharing screen), renders `_buildScreenShareView()`. This takes priority over camera grid -- screen share can coexist with cameras in "mixed mode" via the source switcher.
+4. **Screen share view**: If `vcState.showsShareSurface` (WE are sharing OR we are WATCHING at least one remote share — opt-in watching, issue #38; the old any-share `isScreenShareActive` getter was deleted), renders `_buildScreenShareView()`. This takes priority over camera grid -- screen share can coexist with cameras in "mixed mode" via the source switcher. **A remote share we have not opted into never flips the view** — it is only the sidebar badge + the Watch banner.
+
+## Opt-in Watching (issue #38)
+
+Remote shares are media-gated: the sharer only sends a `screen_offer` to peers that requested it via the targeted `screen_watch{want}` VC signal. Viewer methods on the provider: `watchScreenShare(peerId)` (optimistic `watchingScreenShares` add + focus + 20s "offer never came" timeout that reverts with a toast) and `stopWatchingScreenShare(peerId)` (closes the incoming PC, sends `want:false`, focus-repairs to another WATCHED source). `_handleScreenOffer` drops unsolicited offers; `_handleScreenState` never auto-focuses (badge must not hijack the view). Share audio rides the same gate (per-peer capture starts with the offer). ShareVolume controls gate on `isWatchingAnyShare`.
+
+## Grid View (issue #38)
+
+`VoiceChannelState.isGridView` + `setGridView()`: the switcher pill has a grid toggle (`LucideIcons.layoutGrid`). Grid mode replaces the focused content with `_buildSourceTileGrid` — every source from `_collectSources` (own share first, then watched remote shares, unwatched placeholders with a Watch button, then cameras) laid out by the ONE shared `_buildTileGrid` builder (cols = n≤2 ? n : n≤4 ? 2 : 3, underfull last row centered) that the camera grid also uses. Tapping a live tile focuses it and exits grid mode; watched share tiles carry a stop-watching corner button, the own-share tile a stop-sharing one. In focus mode, a 160×90 self-share PiP (bottom right) shows `localScreenShareRenderer` whenever we share but aren't focused on our own share. Desktop-only (mobile keeps the switch pill + single view).
 
 ## State Variables in _VoiceChannelPaneState
 
@@ -31,6 +39,7 @@ The `build()` method of `_VoiceChannelPaneState` checks `voiceChannelProvider` s
 - `_overlaysVisible` -- bool, controls opacity of floating controls and chat toggle. Managed by `_resetOverlayTimer()`.
 - `_chatOverlayPinned` -- bool, whether the side chat panel is pinned open. When pinned, the overlay hide timer is suppressed.
 - `_focusedVideoPeerId` -- nullable String, which peer's video tile is in fullscreen mode. Null means grid view. Only used in camera grid mode.
+- `_dismissedShareBanners` -- session-local set of sharer ids whose Watch banner was dismissed (see mode 2 above).
 
 ## Overlay Visibility System
 

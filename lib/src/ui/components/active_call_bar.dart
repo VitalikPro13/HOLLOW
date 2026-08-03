@@ -14,6 +14,7 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
+import 'package:hollow/src/ui/components/ptt_mic_visual.dart';
 import 'package:hollow/src/ui/components/recording_indicator.dart';
 import 'package:hollow/src/ui/components/status_dot.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -191,23 +192,27 @@ class _ActiveCallBarState extends ConsumerState<ActiveCallBar> {
                       ],
                     ],
                     const SizedBox(width: HollowSpacing.md),
-                    HollowTooltip(
-                      message: call.isMuted ? 'Unmute' : 'Mute',
-                      child: HollowPressable(
-                        semanticLabel: call.isMuted ? 'Unmute' : 'Mute',
-                        onTap: () =>
-                            ref.read(callProvider.notifier).toggleMute(),
-                        borderRadius: BorderRadius.circular(hollow.radiusSm),
-                        padding: const EdgeInsets.all(HollowSpacing.xs),
-                        child: Icon(
-                          call.isMuted ? LucideIcons.micOff : LucideIcons.mic,
-                          size: 18,
-                          color: call.isMuted
-                              ? hollow.error
-                              : hollow.textSecondary,
+                    Builder(builder: (context) {
+                      // PTT-aware mic (issue #38): gated while idle, live
+                      // on hold.
+                      final mic = micButtonVisual(ref,
+                          isMuted: call.isMuted,
+                          hollow: hollow,
+                          idleColor: hollow.textSecondary);
+                      return HollowTooltip(
+                        message: mic.tooltip,
+                        child: HollowPressable(
+                          semanticLabel: call.isMuted ? 'Unmute' : 'Mute',
+                          onTap: () =>
+                              ref.read(callProvider.notifier).toggleMute(),
+                          borderRadius:
+                              BorderRadius.circular(hollow.radiusSm),
+                          padding: const EdgeInsets.all(HollowSpacing.xs),
+                          child:
+                              Icon(mic.icon, size: 18, color: mic.color),
                         ),
-                      ),
-                    ),
+                      );
+                    }),
                     const SizedBox(width: HollowSpacing.xs),
                     HollowTooltip(
                       message: call.isVideoEnabled

@@ -8378,6 +8378,12 @@ async fn handle_incoming_request(
                         }).await;
                     }
                 }
+                Ok(MessageEnvelope::VoiceChannelScreenWatch { sid, cid, want, .. }) => {
+                    voice_handler::handle_envelope_voice_channel_screen_watch(
+                        voice_channel_participants, event_tx,
+                        peer_str.to_string(), sid, cid, want,
+                    ).await;
+                }
                 Ok(MessageEnvelope::VoiceChannelRenegOffer { sid, cid, sdp, .. }) => {
                     let vc_key = format!("{sid}:{cid}");
                     let is_participant = voice_channel_participants.get(&vc_key).map(|p| p.contains(peer_str)).unwrap_or(false);
@@ -10347,6 +10353,7 @@ async fn handle_incoming_request(
                             | MessageEnvelope::VoiceChannelScreenAnswer { .. }
                             | MessageEnvelope::VoiceChannelScreenIce { .. }
                             | MessageEnvelope::VoiceChannelScreenState { .. }
+                            | MessageEnvelope::VoiceChannelScreenWatch { .. }
                             | MessageEnvelope::VoiceChannelRenegOffer { .. }
                             | MessageEnvelope::VoiceChannelRenegAnswer { .. }
                             | MessageEnvelope::VoiceChannelCameraState { .. }
@@ -10425,6 +10432,12 @@ async fn handle_incoming_request(
                                 voice_handler::handle_envelope_voice_channel_screen_state(
                                     voice_channel_participants, event_tx,
                                     peer_str.to_string(), sid, cid, enabled, quality,
+                                ).await;
+                            }
+                            MessageEnvelope::VoiceChannelScreenWatch { sid, cid, want, .. } => {
+                                voice_handler::handle_envelope_voice_channel_screen_watch(
+                                    voice_channel_participants, event_tx,
+                                    peer_str.to_string(), sid, cid, want,
                                 ).await;
                             }
 
@@ -12722,6 +12735,18 @@ async fn handle_incoming_request(
             let _ = event_tx.send(NetworkEvent::CallSignal {
                 peer_id: peer_str.to_string(),
                 signal_type: "screen_ice".to_string(),
+                payload,
+            }).await;
+        }
+        HavenMessage::CallScreenWatch { call_id, want } => {
+            hollow_log!("[HOLLOW-CALL] CallScreenWatch from {peer_str} call={call_id} want={want}");
+            let payload = serde_json::json!({
+                "call_id": call_id,
+                "want": want,
+            }).to_string();
+            let _ = event_tx.send(NetworkEvent::CallSignal {
+                peer_id: peer_str.to_string(),
+                signal_type: "screen_watch".to_string(),
                 payload,
             }).await;
         }

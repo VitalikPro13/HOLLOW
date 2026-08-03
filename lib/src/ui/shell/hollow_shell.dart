@@ -21,6 +21,7 @@ import 'package:hollow/src/core/providers/channel_provider.dart';
 import 'package:hollow/src/core/providers/chat_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/help_panel_provider.dart';
+import 'package:hollow/src/core/providers/hotkey_provider.dart';
 import 'package:hollow/src/core/providers/member_panel_provider.dart';
 import 'package:hollow/src/core/providers/device_link_sync_provider.dart';
 import 'package:hollow/src/core/providers/node_provider.dart';
@@ -1210,10 +1211,11 @@ class _HollowShellState extends ConsumerState<HollowShell>
       return true;
     }
 
-    // Ctrl+Shift+M → Toggle member panel.
+    // Ctrl+Shift+P → Toggle member panel ("People"; Ctrl+Shift+M now belongs
+    // to the mute-toggle voice hotkey, matching Discord muscle memory).
     if (isCtrl &&
         isShift &&
-        event.logicalKey == LogicalKeyboardKey.keyM) {
+        event.logicalKey == LogicalKeyboardKey.keyP) {
       final current = ref.read(memberPanelProvider);
       ref.read(memberPanelProvider.notifier).state = !current;
       return true;
@@ -1564,6 +1566,12 @@ class _HollowShellState extends ConsumerState<HollowShell>
 
   @override
   Widget build(BuildContext context) {
+    // Keep the voice hotkey controller alive (PTT + mute/deafen, issue #38).
+    // Desktop only — it self-activates while in a call and idles otherwise.
+    if (!Platform.isAndroid && !Platform.isIOS) {
+      ref.watch(hotkeyControllerProvider);
+    }
+
     // Annotation mode hides the entire shell so the user sees the apps
     // underneath through the now-transparent Hollow window. The annotation
     // OverlayEntry (drawing surface + toolbar) sits in the root Navigator
@@ -1769,7 +1777,7 @@ class _HollowShellState extends ConsumerState<HollowShell>
     final vc = ref.watch(voiceChannelProvider.select((s) => (
           s.currentChannelId,
           s.isInVoiceChannel,
-          s.isScreenShareActive || s.isCameraActive,
+          s.showsShareSurface || s.isCameraActive,
         )));
     final selectedChannel = selectedChannelId != null ? channels[selectedChannelId] : null;
     final vcScreenShareFullBleed = selectedChannel?.channelType == ChannelType.voice
@@ -1887,7 +1895,7 @@ class _HollowShellState extends ConsumerState<HollowShell>
     final vc = ref.watch(voiceChannelProvider.select((s) => (
           s.currentChannelId,
           s.isInVoiceChannel,
-          s.isScreenShareActive || s.isCameraActive,
+          s.showsShareSurface || s.isCameraActive,
         )));
     final selectedChannel = selectedChannelId != null ? channels[selectedChannelId] : null;
     final vcScreenShareFullBleed = selectedChannel?.channelType == ChannelType.voice

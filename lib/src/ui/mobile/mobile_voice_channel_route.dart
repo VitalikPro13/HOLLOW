@@ -4,7 +4,9 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
+import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
+import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/voice_channel_provider.dart';
 import 'package:hollow/src/core/providers/speaking_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
@@ -68,12 +70,16 @@ class _MobileVoiceChannelRouteState
   bool _hasVideo(VoiceChannelState vcState) {
     // A SELF share doesn't count — mobile never previews its own share
     // (mirror recursion; see _buildVideoView), so it must not force an empty
-    // video view over the avatars. Checked against peerScreenSharing (the
-    // authoritative map), not focusedScreenSharePeerId — focus may point at
-    // a camera source while a different peer is sharing.
+    // video view over the avatars. Only WATCHED remote shares count (opt-in,
+    // issue #38): an unwatched share is just a badge + Watch chip over the
+    // avatar view, never a forced video surface.
     final localPeerId = ref.read(identityProvider).peerId ?? '';
     for (final entry in vcState.peerScreenSharing.entries) {
-      if (entry.value && entry.key != localPeerId) return true;
+      if (entry.value &&
+          entry.key != localPeerId &&
+          vcState.watchingScreenShares.contains(entry.key)) {
+        return true;
+      }
     }
     if (vcState.isCameraOn) return true;
     for (final entry in vcState.peerCameraOn.entries) {
@@ -123,6 +129,19 @@ class _MobileVoiceChannelRouteState
     final hasVideo = _hasVideo(vcState);
     _syncWakelock(hasVideo);
 
+    // The watched share currently displayed full-bleed (for Stop watching).
+    final watchedSharers = <String>[
+      for (final e in vcState.peerScreenSharing.entries)
+        if (e.value &&
+            e.key != localPeerId &&
+            vcState.watchingScreenShares.contains(e.key))
+          e.key,
+    ];
+    final displayedSharer =
+        watchedSharers.contains(vcState.focusedScreenSharePeerId)
+            ? vcState.focusedScreenSharePeerId
+            : (watchedSharers.isEmpty ? null : watchedSharers.first);
+
     return MobileSheetDragToMinimize(
       child: Scaffold(
         backgroundColor: hollow.background,
@@ -130,8 +149,8 @@ class _MobileVoiceChannelRouteState
           child: Column(
             children: [
               _buildTopBar(hollow, vcState.joinedAt,
-                  remoteSharing:
-                      vcState.peerScreenSharing.values.any((v) => v)),
+                  remoteSharing: vcState.isWatchingAnyShare,
+                  watchedSharerId: displayedSharer),
               // System-status notice, at the top under the channel name (divider
               // below) — surfaces maintenance/outage while you're in a call.
               const SystemStatusBanner(),
@@ -150,7 +169,7 @@ class _MobileVoiceChannelRouteState
   }
 
   Widget _buildTopBar(HollowTheme hollow, DateTime? joinedAt,
-      {required bool remoteSharing}) {
+      {required bool remoteSharing, String? watchedSharerId}) {
     return Padding(
       padding: const EdgeInsets.symmetric(
         horizontal: HollowSpacing.md,
@@ -190,6 +209,18 @@ class _MobileVoiceChannelRouteState
               ],
             ),
           ),
+          // Stop watching the displayed share (opt-in watching, issue #38).
+          if (watchedSharerId != null)
+            HollowPressable(
+              semanticLabel: 'Stop watching screen share',
+              onTap: () => ref
+                  .read(voiceChannelProvider.notifier)
+                  .stopWatchingScreenShare(watchedSharerId),
+              borderRadius: BorderRadius.circular(hollow.radiusSm),
+              padding: const EdgeInsets.all(HollowSpacing.sm),
+              child: Icon(LucideIcons.eyeOff,
+                  size: 22, color: hollow.textPrimary),
+            ),
           // Received share audio: volume + duck controls (opens the sheet).
           // Top bar, not the controls row — that one is already crowded.
           if (remoteSharing)
@@ -223,9 +254,16 @@ class _MobileVoiceChannelRouteState
       }
     }
 
+    // Unwatched shares surface as tappable "Watch" chips over the avatar
+    // view (opt-in, issue #38) — never a forced video surface.
+    final unwatched = [
+      for (final p in vcState.unwatchedRemoteShares)
+        if (p != localPeerId) p,
+    ];
+
     // Speaking state via a scoped Consumer: VAD flips rebuild ONLY the avatar
     // cluster, never this whole voice-channel Scaffold.
-    return Center(
+    final avatars = Center(
       child: Consumer(builder: (context, ref, _) {
         // Self comes from the dedicated local flag and is re-keyed under the
         // id THIS list uses. The set is keyed by routable DEVICE ids, while
@@ -243,6 +281,51 @@ class _MobileVoiceChannelRouteState
         );
       }),
     );
+    if (unwatched.isEmpty) return avatars;
+
+    final profiles = ref.watch(profileProvider);
+    return Column(
+      children: [
+        const SizedBox(height: HollowSpacing.sm),
+        for (final peerId in unwatched)
+          Padding(
+            padding: const EdgeInsets.only(bottom: HollowSpacing.xs),
+            child: Builder(builder: (context) {
+              final displayId =
+                  ref.watch(deviceLinkProvider).identityOf(peerId);
+              final name = displayNameFor(profiles, displayId);
+              return HollowPressable(
+                onTap: () => ref
+                    .read(voiceChannelProvider.notifier)
+                    .watchScreenShare(peerId),
+                semanticLabel: 'Watch screen share from $name',
+                borderRadius: BorderRadius.circular(HollowRadius.pill),
+                backgroundColor: hollow.surface,
+                padding: const EdgeInsets.symmetric(
+                  horizontal: HollowSpacing.md,
+                  vertical: HollowSpacing.xs,
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(LucideIcons.monitor,
+                        size: 14, color: hollow.accentText),
+                    const SizedBox(width: HollowSpacing.xs),
+                    Text(
+                      '$name is sharing — Watch',
+                      style: HollowTypography.caption.copyWith(
+                        color: hollow.textPrimary,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                ),
+              );
+            }),
+          ),
+        Expanded(child: avatars),
+      ],
+    );
   }
 
   Widget _buildVideoView(
@@ -253,23 +336,33 @@ class _MobileVoiceChannelRouteState
     // its own screen, so a preview would show the app showing itself
     // (infinite mirror) — the avatar view + the accent share button convey
     // the sharing state instead.
-    final remoteSharers = <String>[
+    // Only WATCHED shares render (opt-in, issue #38); unwatched sharers
+    // still get a pill tab with an eye affordance that starts watching.
+    final allRemoteSharers = <String>[
       for (final e in vcState.peerScreenSharing.entries)
         if (e.value && e.key != localPeerId) e.key,
     ];
+    final remoteSharers = <String>[
+      for (final p in allRemoteSharers)
+        if (vcState.watchingScreenShares.contains(p)) p,
+    ];
+    final unwatchedSharers = {
+      for (final p in allRemoteSharers)
+        if (!vcState.watchingScreenShares.contains(p)) p,
+    };
 
     // Source switcher pill tabs: remote screens first, then all cameras.
     // Same setFocusedSource flow as desktop's _buildSharerSwitcher; only
     // shown in mixed mode (a screen share is up) — a camera-only grid
     // already shows every camera at once.
     final sources = <({String peerId, String type})>[
-      for (final p in remoteSharers) (peerId: p, type: 'screen'),
+      for (final p in allRemoteSharers) (peerId: p, type: 'screen'),
       if (vcState.isCameraOn) (peerId: localPeerId, type: 'camera'),
       for (final e in vcState.peerCameraOn.entries)
         if (e.value && e.key != localPeerId)
           (peerId: e.key, type: 'camera'),
     ];
-    final showPill = remoteSharers.isNotEmpty && sources.length > 1;
+    final showPill = allRemoteSharers.isNotEmpty && sources.length > 1;
 
     final focusedPeer = vcState.focusedScreenSharePeerId;
     final focusedType = vcState.focusedSourceType;
@@ -362,8 +455,16 @@ class _MobileVoiceChannelRouteState
                   focusedPeerId: effectivePeer,
                   focusedType: effectiveType,
                   localPeerId: localPeerId,
-                  onSelect: (peerId, type) =>
-                      vcNotifier.setFocusedSource(peerId, type),
+                  unwatchedPeerIds: unwatchedSharers,
+                  onSelect: (peerId, type) {
+                    // Tapping an unwatched share tab opts in (issue #38).
+                    if (type == 'screen' &&
+                        unwatchedSharers.contains(peerId)) {
+                      vcNotifier.watchScreenShare(peerId);
+                    } else {
+                      vcNotifier.setFocusedSource(peerId, type);
+                    }
+                  },
                 ),
               ),
             ),

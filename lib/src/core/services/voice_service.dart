@@ -498,20 +498,25 @@ class VoiceService {
   // Media controls
   // ---------------------------------------------------------------------------
 
-  /// Toggle microphone mute.
-  void toggleMute() {
+  /// Set microphone mute (idempotent — the PTT gate calls this on every key
+  /// edge, so repeats must be harmless).
+  void setMuted(bool muted) {
     if (_localStream == null) return;
     final audioTracks = _localStream!.getAudioTracks();
     if (audioTracks.isEmpty) return;
-    _isMuted = !_isMuted;
+    if (_isMuted == muted) return;
+    _isMuted = muted;
     audioTracks.first.enabled = !_isMuted;
     // Freeze the capture processor's dynamic servo while muted — the APM
     // keeps processing real mic input with the track disabled, and adapting
     // to room bleed (e.g. shared music on speakers) buries the voice on
     // unmute.
     Helper.setCaptureMuted(_isMuted).catchError((_) {});
-    _log('[HOLLOW-VOICE] Mute toggled: $_isMuted');
+    _log('[HOLLOW-VOICE] Mute set: $_isMuted');
   }
+
+  /// Toggle microphone mute.
+  void toggleMute() => setMuted(!_isMuted);
 
   /// Set the volume of the remote peer's audio (how loud you hear them).
   /// volume: 0.0 = silent, 1.0 = normal, 2.0 = 2x.

@@ -134,6 +134,39 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
               // call is exactly when "relay restarting in 2 min" matters most.
               // Top-anchored here (divider below) since it follows the name row.
               const SystemStatusBanner(),
+              // Opt-in watching (issue #38): the peer's share never streams
+              // until this is tapped.
+              if (call.remoteScreenSharing && !call.watchingRemoteShare)
+                Padding(
+                  padding: const EdgeInsets.only(top: HollowSpacing.xs),
+                  child: HollowPressable(
+                    onTap: () => ref
+                        .read(callProvider.notifier)
+                        .watchRemoteScreenShare(),
+                    semanticLabel: 'Watch screen share',
+                    borderRadius: BorderRadius.circular(HollowRadius.pill),
+                    backgroundColor: hollow.surface,
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: HollowSpacing.md,
+                      vertical: HollowSpacing.xs,
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(LucideIcons.monitor,
+                            size: 14, color: hollow.accentText),
+                        const SizedBox(width: HollowSpacing.xs),
+                        Text(
+                          'Sharing their screen — Watch',
+                          style: HollowTypography.caption.copyWith(
+                            color: hollow.textPrimary,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
               Expanded(
                 child: showVideo
                     ? _buildVideoView(hollow, call)
@@ -199,9 +232,22 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
               ],
             ),
           ),
+          // Stop watching the remote share (opt-in watching, issue #38).
+          if (call.watchingRemoteShare)
+            HollowPressable(
+              semanticLabel: 'Stop watching screen share',
+              onTap: () => ref
+                  .read(callProvider.notifier)
+                  .stopWatchingRemoteScreenShare(),
+              borderRadius: BorderRadius.circular(hollow.radiusSm),
+              padding: const EdgeInsets.all(HollowSpacing.sm),
+              child: Icon(LucideIcons.eyeOff,
+                  size: 22, color: hollow.textPrimary),
+            ),
           // Received share audio: volume + duck controls (opens the sheet).
           // Top bar, not the controls row — that one already overflows at 6.
-          if (call.remoteScreenSharing)
+          // Watch-gated: audio only flows for a share we opted into.
+          if (call.watchingRemoteShare)
             const ShareVolumeButton(
               iconSize: 22,
               padding: EdgeInsets.all(HollowSpacing.sm),
@@ -448,7 +494,20 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
                   focusedPeerId: effectiveFocusPeer,
                   focusedType: effectiveFocusType,
                   localPeerId: localPeerId,
+                  unwatchedPeerIds: {
+                    if (call.remoteScreenSharing &&
+                        !call.watchingRemoteShare)
+                      widget.peerId,
+                  },
                   onSelect: (peerId, type) {
+                    // Tapping the unwatched share tab opts in (issue #38).
+                    if (type == 'screen' &&
+                        call.remoteScreenSharing &&
+                        !call.watchingRemoteShare) {
+                      ref
+                          .read(callProvider.notifier)
+                          .watchRemoteScreenShare();
+                    }
                     ref.read(focusedDmSourceProvider.notifier).state =
                         DmFocusedSource(peerId: peerId, type: type);
                   },

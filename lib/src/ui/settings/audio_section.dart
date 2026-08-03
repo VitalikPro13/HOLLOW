@@ -18,6 +18,7 @@ import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/dialogs/ringtone_clip_editor_dialog.dart';
+import 'package:hollow/src/ui/settings/keybind_capture_field.dart';
 import 'package:hollow/src/ui/settings/settings_shared.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:win32audio/win32audio.dart' as win32audio;
@@ -29,12 +30,232 @@ class AudioVideoSettingsView extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return settingsCardList(const [
-      SettingsCard(
+    return settingsCardList([
+      const SettingsCard(
         title: 'Devices',
         children: [_AudioDeviceSettings()],
       ),
+      // Voice input mode + hotkeys (issue #38) — desktop only (hotkeys need
+      // a keyboard; mobile transmits via voice activity).
+      if (!Platform.isAndroid && !Platform.isIOS)
+        const SettingsCard(
+          title: 'Voice',
+          children: [_VoiceInputSettings()],
+        ),
     ]);
+  }
+}
+
+/// Voice input mode (Voice Activity / Push-to-Talk) + call hotkeys.
+class _VoiceInputSettings extends ConsumerStatefulWidget {
+  const _VoiceInputSettings();
+
+  @override
+  ConsumerState<_VoiceInputSettings> createState() =>
+      _VoiceInputSettingsState();
+}
+
+class _VoiceInputSettingsState extends ConsumerState<_VoiceInputSettings> {
+  @override
+  void initState() {
+    super.initState();
+    // These providers may have loaded BEFORE storage was ready at app start
+    // and cached the defaults (the bootstrap-not-build settings trap) —
+    // re-read from disk whenever the card opens so the chips show truth.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      ref.invalidate(voiceInputModeProvider);
+      ref.invalidate(pttKeybindProvider);
+      ref.invalidate(muteKeybindProvider);
+      ref.invalidate(deafenKeybindProvider);
+      ref.invalidate(pttReleaseDelayProvider);
+    });
+  }
+
+  SliderThemeData _slimSliderTheme(HollowTheme hollow) {
+    return SliderThemeData(
+      activeTrackColor: hollow.accent,
+      inactiveTrackColor: hollow.border,
+      thumbColor: hollow.accent,
+      overlayColor: hollow.accent.withValues(alpha: 0.08),
+      trackHeight: 2,
+      thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 5),
+      overlayShape: const RoundSliderOverlayShape(overlayRadius: 10),
+    );
+  }
+
+  Widget _keybindRow(
+    HollowTheme hollow, {
+    required IconData icon,
+    required String label,
+    required String serialized,
+    required ValueChanged<String> onChanged,
+    required String semanticLabel,
+  }) {
+    return Row(
+      children: [
+        Icon(icon, size: 14, color: hollow.textSecondary),
+        const SizedBox(width: HollowSpacing.sm),
+        Expanded(
+          child: Text(
+            label,
+            style: HollowTypography.bodySmall.copyWith(
+              color: hollow.textSecondary,
+            ),
+          ),
+        ),
+        KeybindCaptureField(
+          serialized: serialized,
+          onChanged: onChanged,
+          semanticLabel: semanticLabel,
+        ),
+      ],
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+    final mode = ref.watch(voiceInputModeProvider).valueOrNull ??
+        kVoiceInputActivity;
+    final isPtt = mode == kVoiceInputPtt;
+    final pttBind =
+        ref.watch(pttKeybindProvider).valueOrNull ?? 'ctrl+space';
+    final muteBind =
+        ref.watch(muteKeybindProvider).valueOrNull ?? 'ctrl+shift+m';
+    final deafenBind =
+        ref.watch(deafenKeybindProvider).valueOrNull ?? 'ctrl+shift+d';
+    final releaseMs = ref.watch(pttReleaseDelayProvider).valueOrNull ??
+        kPttReleaseDefaultMs;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        // Input mode chips (selection state = chips, never filled buttons).
+        Row(
+          children: [
+            Text(
+              'Input mode',
+              style: HollowTypography.bodySmall.copyWith(
+                color: hollow.textSecondary,
+              ),
+            ),
+            const SizedBox(width: HollowSpacing.md),
+            _EngineChip(
+              label: 'Voice Activity',
+              hint: 'always on',
+              isSelected: !isPtt,
+              onTap: () => ref
+                  .read(voiceInputModeProvider.notifier)
+                  .setMode(kVoiceInputActivity),
+            ),
+            const SizedBox(width: HollowSpacing.xs),
+            _EngineChip(
+              label: 'Push to Talk',
+              hint: 'hold a key',
+              isSelected: isPtt,
+              onTap: () => ref
+                  .read(voiceInputModeProvider.notifier)
+                  .setMode(kVoiceInputPtt),
+            ),
+          ],
+        ),
+        const SizedBox(height: HollowSpacing.sm),
+        // PTT-only rows — dimmed + inert in Voice Activity mode.
+        AnimatedOpacity(
+          duration: const Duration(milliseconds: 150),
+          opacity: isPtt ? 1.0 : 0.4,
+          child: IgnorePointer(
+            ignoring: !isPtt,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                _keybindRow(
+                  hollow,
+                  icon: LucideIcons.mic,
+                  label: 'Push-to-talk key (hold to transmit)',
+                  serialized: pttBind,
+                  onChanged: (v) =>
+                      ref.read(pttKeybindProvider.notifier).setBinding(v),
+                  semanticLabel: 'Set push-to-talk key',
+                ),
+                const SizedBox(height: HollowSpacing.xs),
+                Row(
+                  children: [
+                    Icon(LucideIcons.timer,
+                        size: 14, color: hollow.textSecondary),
+                    const SizedBox(width: HollowSpacing.sm),
+                    Text(
+                      'Release delay',
+                      style: HollowTypography.bodySmall.copyWith(
+                        color: hollow.textSecondary,
+                      ),
+                    ),
+                    const SizedBox(width: HollowSpacing.md),
+                    Expanded(
+                      child: SliderTheme(
+                        data: _slimSliderTheme(hollow),
+                        child: Slider(
+                          value: releaseMs.toDouble().clamp(0, 1000),
+                          min: 0,
+                          max: 1000,
+                          divisions: 20,
+                          onChanged: (v) => ref
+                              .read(pttReleaseDelayProvider.notifier)
+                              .setDelay(v.round()),
+                        ),
+                      ),
+                    ),
+                    SizedBox(
+                      width: 52,
+                      child: Text(
+                        '$releaseMs ms',
+                        style: HollowTypography.caption.copyWith(
+                          color: hollow.accentText,
+                          fontWeight: FontWeight.w600,
+                        ),
+                        textAlign: TextAlign.right,
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+        const SizedBox(height: HollowSpacing.sm),
+        _keybindRow(
+          hollow,
+          icon: LucideIcons.micOff,
+          label: 'Toggle mute',
+          serialized: muteBind,
+          onChanged: (v) =>
+              ref.read(muteKeybindProvider.notifier).setBinding(v),
+          semanticLabel: 'Set mute toggle hotkey',
+        ),
+        const SizedBox(height: HollowSpacing.xs),
+        _keybindRow(
+          hollow,
+          icon: LucideIcons.headphoneOff,
+          label: 'Toggle deafen',
+          serialized: deafenBind,
+          onChanged: (v) =>
+              ref.read(deafenKeybindProvider.notifier).setBinding(v),
+          semanticLabel: 'Set deafen toggle hotkey',
+        ),
+        const SizedBox(height: HollowSpacing.sm),
+        Text(
+          'Hotkeys are active while you are in a call. They work '
+          'system-wide on Windows and Linux (X11); on macOS and Wayland '
+          'they work while Hollow is focused. Ctrl+Shift+M now toggles '
+          'mute — the member panel moved to Ctrl+Shift+P.',
+          style: HollowTypography.caption.copyWith(
+            color: hollow.textTertiary,
+            fontSize: 11,
+          ),
+        ),
+      ],
+    );
   }
 }
 

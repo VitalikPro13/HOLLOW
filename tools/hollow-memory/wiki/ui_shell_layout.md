@@ -285,7 +285,7 @@ Registered globally on `HardwareKeyboard.instance` (not focus-dependent). Regist
 | Shortcut | Action |
 |---|---|
 | `Ctrl+,` | Open `UserSettingsDialog` |
-| `Ctrl+Shift+M` | Toggle member panel |
+| `Ctrl+Shift+P` | Toggle member panel (moved off `Ctrl+Shift+M` 2026-08-03 — that combo is now the mute-toggle voice hotkey, handled by `HotkeyController` in hotkey_provider.dart, active only while in a call, rebindable in Settings > Audio & Video > Voice) |
 | `Ctrl+K` | Toggle channel search |
 | `Ctrl+Shift+\` | Toggle split view (dock mode only) |
 | `Ctrl+1` | Focus left pane (split view only) |

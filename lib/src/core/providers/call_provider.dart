@@ -17,6 +17,7 @@ import 'package:hollow/src/core/providers/relay_domain_provider.dart';
 import 'package:hollow/src/core/providers/speaking_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/core/providers/webrtc_provider.dart';
+import 'package:hollow/src/core/services/desktop_capture_support.dart';
 import 'package:hollow/src/core/services/macos_version.dart';
 import 'package:hollow/src/core/services/screen_audio_receiver.dart';
 import 'package:hollow/src/core/services/share_audio_level.dart';
@@ -55,6 +56,10 @@ class CallState {
   final bool isVideoCall;
   final bool isScreenSharing;
   final bool remoteScreenSharing;
+
+  /// Opt-in watching (issue #38): the remote share never streams to us until
+  /// we pressed Watch — [remoteScreenSharing] alone is just the badge.
+  final bool watchingRemoteShare;
   final String sframeKey; // hex-encoded 32-byte SFrame key for E2EE
   // NOTE: speaking (VAD) state deliberately lives in callSpeakingProvider,
   // NOT here — it flips 1-4x/sec while talking and a copyWith here rebuilt
@@ -95,6 +100,7 @@ class CallState {
     this.isVideoCall = false,
     this.isScreenSharing = false,
     this.remoteScreenSharing = false,
+    this.watchingRemoteShare = false,
     this.sframeKey = '',
     this.isSpeakerOn = false,
     this.isDeafened = false,
@@ -118,6 +124,7 @@ class CallState {
     bool? isVideoCall,
     bool? isScreenSharing,
     bool? remoteScreenSharing,
+    bool? watchingRemoteShare,
     String? sframeKey,
     bool? isSpeakerOn,
     bool? isDeafened,
@@ -142,6 +149,7 @@ class CallState {
         isVideoCall: isVideoCall ?? this.isVideoCall,
         isScreenSharing: isScreenSharing ?? this.isScreenSharing,
         remoteScreenSharing: remoteScreenSharing ?? this.remoteScreenSharing,
+        watchingRemoteShare: watchingRemoteShare ?? this.watchingRemoteShare,
         sframeKey: sframeKey ?? this.sframeKey,
         isSpeakerOn: isSpeakerOn ?? this.isSpeakerOn,
         isDeafened: isDeafened ?? this.isDeafened,
@@ -193,9 +201,33 @@ class CallNotifier extends Notifier<CallState> {
       _incomingScreenShare?.remoteRenderer;
 
   /// Renderer for the local outgoing screen share (self-preview).
-  /// Used by UI to show what we're currently sharing in the screen share view.
+  /// Bound to the provider-owned capture stream so the preview lives even
+  /// before the peer opts in to watch (issue #38); the service-owned
+  /// renderer is the pre-opt-in-era fallback.
   RTCVideoRenderer? get localScreenShareRenderer =>
-      _outgoingScreenShare?.localRenderer;
+      _dmScreenPreviewRenderer ?? _outgoingScreenShare?.localRenderer;
+
+  // --- Opt-in screen share watching, DM side (issue #38) ------------------
+  /// Capture stream + preview owned by the PROVIDER (not the share PC), so
+  /// capture/preview live independently of whether the peer watches.
+  MediaStream? _dmScreenStream;
+  RTCVideoRenderer? _dmScreenPreviewRenderer;
+  Timer? _dmScreenTrackPoller;
+
+  /// Sharer side: the peer asked to receive our share.
+  bool _dmPeerWantsShare = false;
+
+  /// Viewer side: "offer never came" timeout after pressing Watch.
+  Timer? _dmWatchConnectTimer;
+
+  // Share parameters, kept for the deferred offer (sent on screen_watch).
+  int _dmShareMaxWidth = 1920;
+  int _dmShareMaxHeight = 1080;
+  int _dmShareFps = 30;
+  bool _dmShareAudio = false;
+  int _dmSharePid = 0;
+  int _dmShareHwnd = 0;
+  ScreenContentProfile _dmShareProfile = ScreenContentProfile.motion;
 
   VoiceService get _service {
     if (_voiceService == null) {
@@ -261,6 +293,9 @@ class CallNotifier extends Notifier<CallState> {
           status: CallStatus.active,
           startedAt: DateTime.now(),
         );
+        // Apply the PTT transmit gate now that capture is live — in PTT
+        // mode the mic starts gated until the key is held (issue #38).
+        _applyTxGate();
         _scheduleStatsDump(peerId);
 
         // AI-NS fallback check for calls that STARTED with the toggle on
@@ -685,11 +720,44 @@ class CallNotifier extends Notifier<CallState> {
     await _cleanup();
   }
 
+  // --- Push-to-talk transmit gate (issue #38) ---------------------------
+  // Mirrors voiceChannelProvider: PTT flags live OUTSIDE CallState (no
+  // rebuild per key edge, no audio_state fan per press). state.isMuted is
+  // the USER's intent — under PTT the service mute differs from it, so the
+  // service's isMuted is no longer read back into state.
+  bool _pttMode = false;
+  bool _pttTransmit = false;
+
+  void _applyTxGate() {
+    final gated =
+        state.isMuted || state.isDeafened || (_pttMode && !_pttTransmit);
+    _service.setMuted(gated);
+  }
+
+  /// Hotkey layer: PTT key edge (true = held). Idempotent.
+  void setPttTransmit(bool active) {
+    if (_pttTransmit == active) return;
+    _pttTransmit = active;
+    if (state.status == CallStatus.active) {
+      debugPrint('[HOLLOW-HOTKEY] DM PTT transmit=$active '
+          '(mode=$_pttMode muted=${state.isMuted})');
+      _applyTxGate();
+    }
+  }
+
+  /// Hotkey layer: voice input mode changed (true = push-to-talk).
+  void setVoiceInputMode(bool ptt) {
+    if (_pttMode == ptt) return;
+    _pttMode = ptt;
+    _pttTransmit = false;
+    if (state.status == CallStatus.active) _applyTxGate();
+  }
+
   /// Toggle microphone mute.
   void toggleMute() {
     if (state.status != CallStatus.active) return;
-    _service.toggleMute();
-    state = state.copyWith(isMuted: _service.isMuted);
+    state = state.copyWith(isMuted: !state.isMuted);
+    _applyTxGate();
     _sendAudioState();
   }
 
@@ -698,14 +766,14 @@ class CallNotifier extends Notifier<CallState> {
   void toggleDeafen() {
     if (state.status != CallStatus.active) return;
     final newDeafened = !state.isDeafened;
-    if (newDeafened && !_service.isMuted) _service.toggleMute();
     unawaited(_service
         .setRemoteAudioVolume(newDeafened ? 0.0 : _lastRemoteVolume)
         .catchError((_) {}));
     state = state.copyWith(
       isDeafened: newDeafened,
-      isMuted: _service.isMuted,
+      isMuted: newDeafened ? true : state.isMuted,
     );
+    _applyTxGate();
     _sendAudioState();
   }
 
@@ -846,19 +914,113 @@ class CallNotifier extends Notifier<CallState> {
 
     final peerId = state.peerId!;
     final callId = state.callId!;
+
+    // Opt-in watching (issue #38): capture + preview start NOW (provider-
+    // owned, so the sharer always sees their own screen), but the offer is
+    // only sent once the peer asks via screen_watch — no bandwidth until
+    // they press Watch.
+    _dmShareMaxWidth = width;
+    _dmShareMaxHeight = height;
+    _dmShareFps = fps;
+    _dmShareAudio = shareAudio;
+    _dmSharePid = pid;
+    _dmShareHwnd = windowHwnd;
+    _dmShareProfile = profile;
+
+    try {
+      // Capture screen ONCE (same platform branches as the VC path).
+      if (Platform.isAndroid) {
+        _dmScreenStream = await navigator.mediaDevices.getDisplayMedia({
+          'video': true,
+          'audio': false,
+        });
+      } else if (Platform.isIOS) {
+        _dmScreenStream = await navigator.mediaDevices.getDisplayMedia({
+          'video': {'deviceId': 'broadcast'},
+          'audio': false,
+        });
+      } else {
+        // A Wayland portal-first share MUST NOT re-enumerate (extra portal
+        // dialog); Windows/Linux audio rides the data channel, never
+        // getDisplayMedia.
+        if (!DesktopCaptureSupport.isPortalSourceId(sourceId)) {
+          await desktopCapturer.getSources(
+              types: DesktopCaptureSupport.sourceTypes);
+        }
+        final getDisplayAudio =
+            shareAudio && !Platform.isWindows && !Platform.isLinux;
+        _dmScreenStream = await navigator.mediaDevices.getDisplayMedia({
+          'video': {
+            'deviceId': {'exact': sourceId},
+            'mandatory': {
+              'frameRate': fps.toDouble(),
+              'width': width,
+              'height': height,
+            },
+          },
+          'audio': getDisplayAudio,
+        });
+        if (DesktopCaptureSupport.isPortalSourceId(sourceId)) {
+          DesktopCaptureSupport.portalGrantLikely = true;
+        }
+      }
+
+      // Local preview renderer, independent of any peer connection.
+      _dmScreenPreviewRenderer = RTCVideoRenderer();
+      await _dmScreenPreviewRenderer!.initialize();
+      _dmScreenPreviewRenderer!.srcObject = _dmScreenStream;
+
+      // Build quality label (e.g. "1080p60", "4K30"). Use the SHORT side so a
+      // portrait mobile capture (1080x1920) reads "1080p", same as landscape.
+      const resLabels = {360: '360p', 480: '480p', 720: '720p', 1080: '1080p', 1440: '1440p', 2160: '4K'};
+      final shortSide = height < width ? height : width;
+      final qualityLabel = '${resLabels[shortSide] ?? '${shortSide}p'}$fps';
+      state = state.copyWith(isScreenSharing: true, screenShareLabel: qualityLabel);
+
+      // Sharing WITH audio: freeze the mic servo for the whole share so
+      // speaker bleed of the shared music can't re-calibrate the trim.
+      if (shareAudio) {
+        ShareAudioLevel.setSendingShareAudio(true);
+      }
+
+      _sendSignal(peerId, 'screen_state',
+          jsonEncode({'call_id': callId, 'enabled': true, 'quality': qualityLabel}));
+
+      _startDmScreenTrackPoller();
+
+      // Peer already asked to watch (e.g. re-share while they kept the view
+      // open) — send the offer immediately.
+      if (_dmPeerWantsShare) {
+        await _sendDmScreenOffer();
+      }
+    } catch (e) {
+      debugPrint('[HOLLOW-CALL] Failed to start screen share: $e');
+      ShareAudioLevel.setSendingShareAudio(false);
+      await _disarmVoiceRedirect();
+      await _teardownDmShareCapture();
+      state = state.copyWith(
+          isScreenSharing: false, clearScreenShareLabel: true);
+    }
+  }
+
+  /// Send the (deferred) screen share offer to the peer — only ever called
+  /// once they opted in via screen_watch{want:true} (issue #38).
+  Future<void> _sendDmScreenOffer() async {
+    if (state.status != CallStatus.active) return;
+    if (_dmScreenStream == null) return;
+    final peerId = state.peerId!;
+    final callId = state.callId!;
     final iceConfig = ref.read(iceConfigProvider);
 
     // Close any prior outgoing share before overwriting the field, so its PC +
-    // thread-set can't be orphaned (e.g. re-share without an intervening stop).
+    // thread-set can't be orphaned (e.g. re-watch after a glitch).
     await _outgoingScreenShare?.close();
 
-    // Create outgoing screen share service (separate PC).
     _outgoingScreenShare = ScreenShareService(
       localPeerId: localPeerId,
       iceServers: iceConfig,
     );
 
-    // Wire ICE callback to send screen_ice signals.
     _outgoingScreenShare!.onIceCandidate = (candidate) {
       _sendSignal(peerId, 'screen_ice', jsonEncode({
         'call_id': callId,
@@ -869,17 +1031,13 @@ class CallNotifier extends Notifier<CallState> {
       }));
     };
 
-    _outgoingScreenShare!.onScreenShareEnded = () {
-      if (state.isScreenSharing) {
-        stopScreenShare();
-      }
-    };
-
     try {
-      final offerSdp = await _outgoingScreenShare!.createOffer(
-        sourceId, width, height, fps,
-        shareAudio: shareAudio,
-        profile: profile,
+      final offerSdp = await _outgoingScreenShare!.createOfferFromStream(
+        _dmScreenStream!,
+        maxWidth: _dmShareMaxWidth,
+        maxHeight: _dmShareMaxHeight,
+        fps: _dmShareFps,
+        profile: _dmShareProfile,
       );
 
       // Enable SFrame E2EE on the screen share PC.
@@ -888,17 +1046,8 @@ class CallNotifier extends Notifier<CallState> {
             _outgoingScreenShare!.pc!, peerId, isSender: true);
       }
 
-      // Build quality label (e.g. "1080p60", "4K30"). Use the SHORT side so a
-      // portrait mobile capture (1080x1920) reads "1080p", same as landscape.
-      const resLabels = {360: '360p', 480: '480p', 720: '720p', 1080: '1080p', 1440: '1440p', 2160: '4K'};
-      final shortSide = height < width ? height : width;
-      final qualityLabel = '${resLabels[shortSide] ?? '${shortSide}p'}$fps';
-      state = state.copyWith(isScreenSharing: true, screenShareLabel: qualityLabel);
-
       _sendSignal(peerId, 'screen_offer',
           jsonEncode({'call_id': callId, 'sdp': offerSdp}));
-      _sendSignal(peerId, 'screen_state',
-          jsonEncode({'call_id': callId, 'enabled': true, 'quality': qualityLabel}));
 
       // Start screen audio capture via data channel on the data-channel-audio
       // platforms: Windows (WASAPI), Linux (PulseAudio monitor), macOS 13.0+
@@ -909,7 +1058,7 @@ class CallNotifier extends Notifier<CallState> {
           Platform.isAndroid ||
           Platform.isIOS ||
           (Platform.isMacOS && MacOsScreenAudioSupport.hasSckAudio);
-      if (shareAudio && dcAudio) {
+      if (_dmShareAudio && dcAudio) {
         final webrtc = ref.read(webRtcProvider.notifier).service;
         // Ensure the file-transfer DC exists with this peer.
         if (!webrtc.hasPeerChannel(peerId)) {
@@ -924,7 +1073,7 @@ class CallNotifier extends Notifier<CallState> {
         // own in-app media (a video opened in chat) still is. Only for an
         // entire-screen share (no per-app window/pid target).
         int excludePid = 0;
-        final isEntireScreen = pid == 0 && windowHwnd == 0;
+        final isEntireScreen = _dmSharePid == 0 && _dmShareHwnd == 0;
         if (Platform.isWindows && isEntireScreen) {
           try {
             final trackIds = await _service.getRemoteAudioTrackIds();
@@ -947,24 +1096,64 @@ class CallNotifier extends Notifier<CallState> {
         _callLog('[HOLLOW-AU-SCREEN] Starting screen audio capture (stream=$streamId)');
         await _outgoingScreenShare!.startScreenAudioCapture(
           streamId,
-          pid: pid,
-          windowHwnd: windowHwnd,
+          pid: _dmSharePid,
+          windowHwnd: _dmShareHwnd,
           excludePid: excludePid,
           onPacket: (packet) {
             webrtc.sendScreenAudio(peerId, packet);
           },
         );
-        // Sharing WITH audio: freeze the mic servo for the whole share so
-        // speaker bleed of the shared music can't re-calibrate the trim.
-        ShareAudioLevel.setSendingShareAudio(true);
       }
     } catch (e) {
-      debugPrint('[HOLLOW-CALL] Failed to start screen share: $e');
-      ShareAudioLevel.setSendingShareAudio(false);
+      debugPrint('[HOLLOW-CALL] Failed to send screen share offer: $e');
       await _disarmVoiceRedirect();
       await _outgoingScreenShare?.close();
       _outgoingScreenShare = null;
     }
+  }
+
+  void _showToast(String message) {
+    final overlay = hollowNavigatorKey.currentState?.overlay;
+    final overlayContext = overlay?.context;
+    if (overlay == null || overlayContext == null || !overlayContext.mounted) {
+      return;
+    }
+    HollowToast.show(overlayContext, message,
+        type: HollowToastType.error, overlayState: overlay);
+  }
+
+  /// Dispose the provider-owned DM capture stream + preview + poller.
+  Future<void> _teardownDmShareCapture() async {
+    _dmScreenTrackPoller?.cancel();
+    _dmScreenTrackPoller = null;
+    if (_dmScreenPreviewRenderer != null) {
+      _dmScreenPreviewRenderer!.srcObject = null;
+      await _dmScreenPreviewRenderer!.dispose();
+      _dmScreenPreviewRenderer = null;
+    }
+    _dmScreenStream?.getTracks().forEach((t) => t.stop());
+    await _dmScreenStream?.dispose();
+    _dmScreenStream = null;
+  }
+
+  /// Poll the capture track to detect the shared window/source closing.
+  void _startDmScreenTrackPoller() {
+    _dmScreenTrackPoller?.cancel();
+    bool stopping = false;
+    _dmScreenTrackPoller =
+        Timer.periodic(const Duration(seconds: 2), (_) async {
+      if (stopping) return;
+      if (_dmScreenStream == null) {
+        _dmScreenTrackPoller?.cancel();
+        return;
+      }
+      final tracks = _dmScreenStream!.getVideoTracks();
+      if (tracks.isEmpty || tracks.first.muted == true) {
+        stopping = true;
+        debugPrint('[HOLLOW-CALL] Screen track ended — stopping share');
+        await stopScreenShare();
+      }
+    });
   }
 
   /// Disarm the entire-screen anti-echo voice redirect if armed: restores the
@@ -984,12 +1173,14 @@ class CallNotifier extends Notifier<CallState> {
   /// Stop screen sharing.
   Future<void> stopScreenShare() async {
     ShareAudioLevel.setSendingShareAudio(false);
+    _dmPeerWantsShare = false;
     // Stop the capturer FIRST, then disarm the redirect — so the brief window
     // where the remote voice's in-process volume is restored isn't captured
     // (the capturer is already gone), avoiding a momentary echo blip on stop.
     await _outgoingScreenShare?.close();
     _outgoingScreenShare = null;
     await _disarmVoiceRedirect();
+    await _teardownDmShareCapture();
     state = state.copyWith(isScreenSharing: false, clearScreenShareLabel: true);
 
     final peerId = state.peerId;
@@ -997,6 +1188,76 @@ class CallNotifier extends Notifier<CallState> {
     if (peerId != null && callId != null) {
       _sendSignal(peerId, 'screen_state',
           jsonEncode({'call_id': callId, 'enabled': false}));
+    }
+  }
+
+  /// Sharer side of opt-in watching (issue #38): the peer asked to start or
+  /// stop receiving our share.
+  Future<void> _handleScreenWatch(String peerId, String payload) async {
+    final json = jsonDecode(payload) as Map<String, dynamic>;
+    final callId = json['call_id'] as String? ?? '';
+    final want = json['want'] as bool? ?? false;
+    if (state.callId != callId) return;
+    debugPrint('[HOLLOW-CALL] Screen watch from $peerId: want=$want');
+
+    if (want) {
+      _dmPeerWantsShare = true;
+      if (state.isScreenSharing && _outgoingScreenShare == null) {
+        await _sendDmScreenOffer();
+      }
+    } else {
+      _dmPeerWantsShare = false;
+      final outgoing = _outgoingScreenShare;
+      _outgoingScreenShare = null;
+      await outgoing?.close();
+      await _disarmVoiceRedirect();
+      if (outgoing != null) {
+        debugPrint('[HOLLOW-CALL] Stopped sending share (viewer opted out)');
+      }
+    }
+  }
+
+  /// Viewer side of opt-in watching (issue #38): request the remote share.
+  Future<void> watchRemoteScreenShare() async {
+    if (state.status != CallStatus.active) return;
+    if (!state.remoteScreenSharing || state.watchingRemoteShare) return;
+    final peerId = state.peerId!;
+    final callId = state.callId!;
+
+    state = state.copyWith(watchingRemoteShare: true);
+    _sendSignal(
+        peerId, 'screen_watch', jsonEncode({'call_id': callId, 'want': true}));
+
+    // If no offer produces a live track in time, revert so the view doesn't
+    // spin forever.
+    _dmWatchConnectTimer?.cancel();
+    _dmWatchConnectTimer = Timer(const Duration(seconds: 20), () {
+      _dmWatchConnectTimer = null;
+      if (!state.watchingRemoteShare) return;
+      if (screenShareRenderer != null) return;
+      debugPrint('[HOLLOW-CALL] Watch timed out — reverting');
+      stopWatchingRemoteScreenShare();
+      _showToast("Couldn't connect to the screen share");
+    });
+  }
+
+  /// Viewer side of opt-in watching (issue #38): stop receiving the remote
+  /// share (the badge stays — the peer is still sharing).
+  Future<void> stopWatchingRemoteScreenShare() async {
+    if (!state.watchingRemoteShare) return;
+    _dmWatchConnectTimer?.cancel();
+    _dmWatchConnectTimer = null;
+    state = state.copyWith(watchingRemoteShare: false);
+
+    final incoming = _incomingScreenShare;
+    _incomingScreenShare = null;
+    await incoming?.close();
+
+    final peerId = state.peerId;
+    final callId = state.callId;
+    if (peerId != null && callId != null) {
+      _sendSignal(peerId, 'screen_watch',
+          jsonEncode({'call_id': callId, 'want': false}));
     }
   }
 
@@ -1033,6 +1294,8 @@ class CallNotifier extends Notifier<CallState> {
           await _handleScreenAnswer(peerId, payload);
         case 'screen_ice':
           await _handleScreenIce(peerId, payload);
+        case 'screen_watch':
+          await _handleScreenWatch(peerId, payload);
         case 'recording_start':
           ref.read(recordingProvider.notifier).onRemoteRecordingStart(peerId);
         case 'recording_stop':
@@ -1489,10 +1752,15 @@ class CallNotifier extends Notifier<CallState> {
       final incoming = _incomingScreenShare;
       _incomingScreenShare = null;
       await incoming?.close();
+      _dmWatchConnectTimer?.cancel();
+      _dmWatchConnectTimer = null;
     }
 
     state = state.copyWith(
       remoteScreenSharing: enabled,
+      // The share is gone — the watch opt-in dies with it (a re-share asks
+      // again via the Watch banner).
+      watchingRemoteShare: enabled && state.watchingRemoteShare,
       remoteScreenShareLabel: enabled ? quality : null,
       clearRemoteScreenShareLabel: !enabled,
     );
@@ -1504,6 +1772,12 @@ class CallNotifier extends Notifier<CallState> {
     final sdp = json['sdp'] as String;
 
     if (state.callId != callId) return;
+
+    // Opt-in watching (issue #38): an offer we never asked for is dropped.
+    if (!state.watchingRemoteShare) {
+      debugPrint('[HOLLOW-CALL] Ignoring unsolicited screen offer from $peerId (not watching)');
+      return;
+    }
 
     debugPrint('[HOLLOW-CALL] Screen offer from $peerId');
 
@@ -1533,6 +1807,9 @@ class CallNotifier extends Notifier<CallState> {
     };
 
     _incomingScreenShare!.onRemoteTrackReady = () {
+      // The share we asked for is live — stop the "offer never came" timer.
+      _dmWatchConnectTimer?.cancel();
+      _dmWatchConnectTimer = null;
       // Force UI rebuild so RTCVideoView picks up the renderer.
       debugPrint('[HOLLOW-CALL] Screen share remote track ready');
       state = state.copyWith();
@@ -1630,6 +1907,11 @@ class CallNotifier extends Notifier<CallState> {
     _outgoingScreenShare = null;
     await _incomingScreenShare?.close();
     _incomingScreenShare = null;
+    // Opt-in watching (issue #38): call over = capture + watch state over.
+    _dmPeerWantsShare = false;
+    _dmWatchConnectTimer?.cancel();
+    _dmWatchConnectTimer = null;
+    await _teardownDmShareCapture();
     // Disarm the entire-screen anti-echo voice redirect AFTER the capturer is
     // gone (restores remote-voice playout + kills the renderer child) so the
     // restored voice isn't briefly re-captured.
@@ -1719,3 +2001,7 @@ class DmFocusedSource {
 
 final focusedDmSourceProvider =
     StateProvider<DmFocusedSource>((_) => const DmFocusedSource.none());
+
+/// DM share view mode (issue #38): all sources as a tile grid instead of
+/// one focused source full-bleed. UI-only, session-sticky like the focus.
+final dmShareGridViewProvider = StateProvider<bool>((_) => false);

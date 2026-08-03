@@ -19,6 +19,7 @@ import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
+import 'package:hollow/src/ui/components/ptt_mic_visual.dart';
 import 'package:hollow/src/ui/components/share_volume_control.dart';
 import 'package:hollow/src/ui/components/status_dot.dart';
 import 'package:hollow/src/ui/dialogs/screen_share_dialog.dart';
@@ -57,6 +58,10 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
   /// Which video tile is fullscreen (null = grid view).
   String? _focusedVideoPeerId;
 
+  /// Sharers whose "X is sharing — Watch" banner was dismissed this session.
+  /// Cleared per-peer when their share ends (a re-share banners again).
+  final Set<String> _dismissedShareBanners = {};
+
   void _resetOverlayTimer() {
     _overlayHideTimer?.cancel();
     if (!_overlaysVisible) {
@@ -76,6 +81,17 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
   }
 
   @override
+  void didUpdateWidget(covariant VoiceChannelPane oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // Fresh channel = fresh banner state (re-opening a channel must offer
+    // Watch again even if it was dismissed last time).
+    if (oldWidget.channelId != widget.channelId ||
+        oldWidget.serverId != widget.serverId) {
+      _dismissedShareBanners.clear();
+    }
+  }
+
+  @override
   void dispose() {
     _overlayHideTimer?.cancel();
     super.dispose();
@@ -88,6 +104,10 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
     final isInThisChannel = vcState.currentServerId == widget.serverId &&
         vcState.currentChannelId == widget.channelId;
 
+    // A dismissed "Watch" banner returns if that peer stops and re-shares.
+    _dismissedShareBanners
+        .removeWhere((p) => vcState.peerScreenSharing[p] != true);
+
     // Not in this voice channel — show channel text chat (no join prompt).
     if (!isInThisChannel) {
       return ChannelChatPane(
@@ -97,8 +117,9 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
       );
     }
 
-    // Screen share active — full-bleed view (mixed mode if cameras too).
-    if (vcState.isScreenShareActive) {
+    // Share surface — we're sharing ourselves or WATCHING someone (opt-in,
+    // issue #38). A remote share we haven't opted into never flips the view.
+    if (vcState.showsShareSurface) {
       return _buildScreenShareView(hollow, vcState);
     }
 
@@ -107,11 +128,74 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
       return _buildCameraGridView(hollow, vcState);
     }
 
-    // Normal: just channel text chat (voice participants visible in sidebar).
-    return ChannelChatPane(
+    // Normal: channel text chat, with a floating "X is sharing — Watch"
+    // banner when someone shares and we haven't opted in.
+    final chat = ChannelChatPane(
       serverId: widget.serverId,
       channelId: widget.channelId,
       channelName: widget.channelName,
+    );
+    final allUnwatched = vcState.unwatchedRemoteShares;
+    final unwatched = allUnwatched
+        .where((p) => !_dismissedShareBanners.contains(p))
+        .toList();
+    if (allUnwatched.isEmpty) return chat;
+    return Stack(
+      children: [
+        Positioned.fill(child: chat),
+        Positioned(
+          top: 12,
+          left: 0,
+          right: 0,
+          child: Center(
+            // Dismissal is never a dead end: the banner collapses to a
+            // compact chip that re-expands on tap.
+            child: unwatched.isNotEmpty
+                ? _UnwatchedShareBanner(
+                    sharerIds: unwatched,
+                    labels: vcState.peerScreenShareLabels,
+                    onWatch: (peerId) => ref
+                        .read(voiceChannelProvider.notifier)
+                        .watchScreenShare(peerId),
+                    onDismiss: (peerId) =>
+                        setState(() => _dismissedShareBanners.add(peerId)),
+                  )
+                : HollowTooltip(
+                    message: 'Show screen share notification',
+                    child: HollowPressable(
+                      onTap: () =>
+                          setState(_dismissedShareBanners.clear),
+                      semanticLabel: 'Show screen share notification',
+                      borderRadius:
+                          BorderRadius.circular(HollowRadius.pill),
+                      backgroundColor:
+                          hollow.surface.withValues(alpha: 0.9),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: HollowSpacing.sm,
+                        vertical: HollowSpacing.xs,
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(LucideIcons.monitor,
+                              size: 13, color: hollow.accentText),
+                          const SizedBox(width: HollowSpacing.xs),
+                          Text(
+                            allUnwatched.length == 1
+                                ? '1 screen share'
+                                : '${allUnwatched.length} screen shares',
+                            style: HollowTypography.caption.copyWith(
+                              color: hollow.textSecondary,
+                              fontSize: 11,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+          ),
+        ),
+      ],
     );
   }
 
@@ -223,131 +307,18 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
     );
   }
 
-  /// Build the N-tile video grid layout.
+  /// Build the N-tile camera grid layout (delegates to the shared grid).
   Widget _buildVideoGrid(
     HollowTheme hollow,
     VoiceChannelState vcState,
     List<String> cameraPeers,
     String localPeerId,
   ) {
-    final n = cameraPeers.length;
-    if (n == 0) return const SizedBox.shrink();
-
-    if (n == 1) {
-      return _buildVideoTile(
-          hollow, vcState, cameraPeers[0], localPeerId, canTap: false);
-    }
-
-    if (n == 2) {
-      return Row(
-        children: [
-          Expanded(
-              child: _buildVideoTile(
-                  hollow, vcState, cameraPeers[0], localPeerId)),
-          Expanded(
-              child: _buildVideoTile(
-                  hollow, vcState, cameraPeers[1], localPeerId)),
-        ],
-      );
-    }
-
-    if (n == 3) {
-      return Column(
-        children: [
-          Expanded(
-            child: Row(
-              children: [
-                Expanded(
-                    child: _buildVideoTile(
-                        hollow, vcState, cameraPeers[0], localPeerId)),
-                Expanded(
-                    child: _buildVideoTile(
-                        hollow, vcState, cameraPeers[1], localPeerId)),
-              ],
-            ),
-          ),
-          Expanded(
-            child: Center(
-              child: FractionallySizedBox(
-                widthFactor: 0.5,
-                child: _buildVideoTile(
-                    hollow, vcState, cameraPeers[2], localPeerId),
-              ),
-            ),
-          ),
-        ],
-      );
-    }
-
-    if (n == 4) {
-      return Column(
-        children: [
-          Expanded(
-            child: Row(
-              children: [
-                Expanded(
-                    child: _buildVideoTile(
-                        hollow, vcState, cameraPeers[0], localPeerId)),
-                Expanded(
-                    child: _buildVideoTile(
-                        hollow, vcState, cameraPeers[1], localPeerId)),
-              ],
-            ),
-          ),
-          Expanded(
-            child: Row(
-              children: [
-                Expanded(
-                    child: _buildVideoTile(
-                        hollow, vcState, cameraPeers[2], localPeerId)),
-                Expanded(
-                    child: _buildVideoTile(
-                        hollow, vcState, cameraPeers[3], localPeerId)),
-              ],
-            ),
-          ),
-        ],
-      );
-    }
-
-    // n == 5: top row 3, bottom row 2 centered
-    return Column(
-      children: [
-        Expanded(
-          child: Row(
-            children: [
-              Expanded(
-                  child: _buildVideoTile(
-                      hollow, vcState, cameraPeers[0], localPeerId)),
-              Expanded(
-                  child: _buildVideoTile(
-                      hollow, vcState, cameraPeers[1], localPeerId)),
-              Expanded(
-                  child: _buildVideoTile(
-                      hollow, vcState, cameraPeers[2], localPeerId)),
-            ],
-          ),
-        ),
-        Expanded(
-          child: Row(
-            children: [
-              const Spacer(),
-              Expanded(
-                flex: 2,
-                child: _buildVideoTile(
-                    hollow, vcState, cameraPeers[3], localPeerId),
-              ),
-              Expanded(
-                flex: 2,
-                child: _buildVideoTile(
-                    hollow, vcState, cameraPeers[4], localPeerId),
-              ),
-              const Spacer(),
-            ],
-          ),
-        ),
-      ],
-    );
+    return _buildTileGrid([
+      for (final peerId in cameraPeers)
+        _buildVideoTile(hollow, vcState, peerId, localPeerId,
+            canTap: cameraPeers.length > 1),
+    ]);
   }
 
   /// Single video tile in the grid.
@@ -357,6 +328,7 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
     String peerId,
     String localPeerId, {
     bool canTap = true,
+    VoidCallback? onTapOverride,
   }) {
     final isLocal = peerId == localPeerId;
     final renderer = ref.read(voiceChannelProvider.notifier)
@@ -376,9 +348,10 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
         : ref.watch(vcSpeakingProvider.select((s) => s.contains(peerId)));
 
     return GestureDetector(
-      onTap: canTap
-          ? () => setState(() => _focusedVideoPeerId = peerId)
-          : null,
+      onTap: onTapOverride ??
+          (canTap
+              ? () => setState(() => _focusedVideoPeerId = peerId)
+              : null),
       child: Container(
         margin: const EdgeInsets.all(2),
         decoration: BoxDecoration(
@@ -590,22 +563,41 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
     final focusedPeerId = vcState.focusedScreenSharePeerId;
     final isLocalFocused = focusedPeerId == localPeerId;
     final isCameraFocused = vcState.focusedSourceType == 'camera';
+    final sources = _collectSources(vcState, localPeerId);
 
     return MouseRegion(
       onHover: (_) => _resetOverlayTimer(),
       onEnter: (_) => _resetOverlayTimer(),
       child: Stack(
         children: [
-          // Layer 0: full-bleed content (screen share or camera)
+          // Layer 0: grid of all sources, or the focused source full-bleed.
           Positioned.fill(
-            child: isCameraFocused && focusedPeerId != null
-                ? _buildFocusedCameraContent(hollow, focusedPeerId, localPeerId)
-                : _buildScreenShareContent(
-                    hollow, vcState, focusedPeerId, isLocalFocused),
+            child: vcState.isGridView
+                ? Container(
+                    color: Colors.black,
+                    child:
+                        _buildSourceTileGrid(hollow, vcState, localPeerId),
+                  )
+                : isCameraFocused && focusedPeerId != null
+                    ? _buildFocusedCameraContent(
+                        hollow, focusedPeerId, localPeerId)
+                    : _buildScreenShareContent(
+                        hollow, vcState, focusedPeerId, isLocalFocused),
           ),
 
+          // Layer 0.5 (bottom right): own-share feedback PiP while focused on
+          // something else (issue #38 — "see my share while watching theirs").
+          if (!vcState.isGridView &&
+              vcState.isScreenSharing &&
+              !(isLocalFocused && !isCameraFocused))
+            Positioned(
+              right: HollowSpacing.md,
+              bottom: 72,
+              child: _buildSelfSharePip(hollow),
+            ),
+
           // Layer 1 (top): source switcher tabs (multiple sources)
-          if (_countActiveSources(vcState) > 1)
+          if (sources.length > 1 || vcState.isGridView)
             Positioned(
               top: HollowSpacing.md,
               left: 0,
@@ -615,7 +607,8 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
                 duration: HollowDurations.normal,
                 child: IgnorePointer(
                   ignoring: !_overlaysVisible,
-                  child: _buildSharerSwitcher(hollow, vcState, localPeerId),
+                  child: _buildSharerSwitcher(
+                      hollow, vcState, localPeerId, sources),
                 ),
               ),
             ),
@@ -798,6 +791,38 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
       );
     }
 
+    // Focused on a share we haven't opted into — Watch placeholder, never a
+    // dead "Connecting..." (opt-in watching, issue #38).
+    if (!vcState.watchingScreenShares.contains(focusedPeerId)) {
+      final displayId =
+          ref.watch(deviceLinkProvider).identityOf(focusedPeerId);
+      final name = displayNameFor(ref.watch(profileProvider), displayId);
+      return Container(
+        color: Colors.black,
+        child: Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              HollowAvatar(peerId: displayId, size: 64),
+              const SizedBox(height: HollowSpacing.md),
+              Text('$name is sharing their screen',
+                  style: HollowTypography.body
+                      .copyWith(color: hollow.textSecondary)),
+              const SizedBox(height: HollowSpacing.md),
+              HollowButton.filled(
+                compact: true,
+                icon: const Icon(LucideIcons.eye, size: 14),
+                onPressed: () => ref
+                    .read(voiceChannelProvider.notifier)
+                    .watchScreenShare(focusedPeerId),
+                child: const Text('Watch'),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
     // Remote peer is focused — show their screen.
     final renderer = ref
         .read(voiceChannelProvider.notifier)
@@ -909,35 +934,314 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
     );
   }
 
-  /// Count all active video sources (screen shares + cameras) for the switcher.
-  int _countActiveSources(VoiceChannelState vcState) {
-    int count = vcState.isScreenSharing ? 1 : 0;
-    count += vcState.peerScreenSharing.values.where((v) => v).length;
-    // In mixed mode, also count camera sources.
-    if (vcState.isCameraOn) count++;
-    count += vcState.peerCameraOn.values.where((v) => v).length;
-    return count;
+  /// All video sources in display order: own share, watched remote shares,
+  /// unwatched remote shares (placeholder + Watch), then cameras. Feeds both
+  /// the switcher pill and the grid view (issue #38).
+  List<({String peerId, String type, bool isLocal, bool watched})>
+      _collectSources(VoiceChannelState vcState, String localPeerId) {
+    return [
+      if (vcState.isScreenSharing)
+        (peerId: localPeerId, type: 'screen', isLocal: true, watched: true),
+      for (final e in vcState.peerScreenSharing.entries)
+        if (e.value &&
+            e.key != localPeerId &&
+            vcState.watchingScreenShares.contains(e.key))
+          (peerId: e.key, type: 'screen', isLocal: false, watched: true),
+      for (final e in vcState.peerScreenSharing.entries)
+        if (e.value &&
+            e.key != localPeerId &&
+            !vcState.watchingScreenShares.contains(e.key))
+          (peerId: e.key, type: 'screen', isLocal: false, watched: false),
+      if (vcState.isCameraOn)
+        (peerId: localPeerId, type: 'camera', isLocal: true, watched: true),
+      for (final e in vcState.peerCameraOn.entries)
+        if (e.value && e.key != localPeerId)
+          (peerId: e.key, type: 'camera', isLocal: false, watched: true),
+    ];
+  }
+
+  /// Lay out N tiles: 1-2 side by side, 3-4 two columns, 5+ three columns;
+  /// an underfull last row is centered (flex spacers). The ONE grid builder —
+  /// used by both the camera grid and the all-sources grid view.
+  Widget _buildTileGrid(List<Widget> tiles) {
+    final n = tiles.length;
+    if (n == 0) return const SizedBox.shrink();
+    if (n == 1) return tiles[0];
+    final cols = n <= 2 ? n : (n <= 4 ? 2 : 3);
+    final rows = <Widget>[];
+    for (var i = 0; i < n; i += cols) {
+      final end = (i + cols) > n ? n : (i + cols);
+      final rowTiles = tiles.sublist(i, end);
+      final missing = cols - rowTiles.length;
+      rows.add(Expanded(
+        child: Row(
+          children: [
+            if (missing > 0) Spacer(flex: missing),
+            for (final t in rowTiles) Expanded(flex: 2, child: t),
+            if (missing > 0) Spacer(flex: missing),
+          ],
+        ),
+      ));
+    }
+    return Column(children: rows);
+  }
+
+  /// The all-sources grid (issue #38): every share and camera at once —
+  /// own share preview included; unwatched shares as Watch placeholders.
+  Widget _buildSourceTileGrid(
+    HollowTheme hollow,
+    VoiceChannelState vcState,
+    String localPeerId,
+  ) {
+    final sources = _collectSources(vcState, localPeerId);
+    return _buildTileGrid([
+      for (final src in sources)
+        _buildSourceTile(hollow, vcState, src, localPeerId),
+    ]);
+  }
+
+  /// One grid tile for any source type (issue #38).
+  Widget _buildSourceTile(
+    HollowTheme hollow,
+    VoiceChannelState vcState,
+    ({String peerId, String type, bool isLocal, bool watched}) src,
+    String localPeerId,
+  ) {
+    final notifier = ref.read(voiceChannelProvider.notifier);
+    void focusThis() {
+      notifier.setFocusedSource(src.peerId, src.type);
+      notifier.setGridView(false);
+    }
+
+    if (src.type == 'camera') {
+      return _buildVideoTile(hollow, vcState, src.peerId, localPeerId,
+          onTapOverride: focusThis);
+    }
+
+    final displayId = ref.watch(deviceLinkProvider).identityOf(src.peerId);
+    final profiles = ref.watch(profileProvider);
+    final name = src.isLocal ? 'You' : displayNameFor(profiles, displayId);
+
+    // Unwatched share — placeholder tile; only the Watch button acts.
+    if (!src.watched) {
+      return Container(
+        margin: const EdgeInsets.all(2),
+        decoration: BoxDecoration(
+          color: hollow.elevated,
+          borderRadius: BorderRadius.circular(hollow.radiusSm),
+        ),
+        clipBehavior: Clip.antiAlias,
+        child: Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              HollowAvatar(peerId: displayId, size: 48),
+              const SizedBox(height: HollowSpacing.sm),
+              Text(
+                '$name is sharing their screen',
+                style: HollowTypography.caption.copyWith(
+                  color: hollow.textSecondary,
+                  fontSize: 12,
+                ),
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: HollowSpacing.sm),
+              HollowButton.filled(
+                compact: true,
+                icon: const Icon(LucideIcons.eye, size: 14),
+                onPressed: () => notifier.watchScreenShare(src.peerId),
+                child: const Text('Watch'),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    final renderer = src.isLocal
+        ? notifier.localScreenShareRenderer
+        : notifier.getScreenShareRenderer(src.peerId);
+    final quality = src.isLocal
+        ? vcState.screenShareLabel
+        : vcState.peerScreenShareLabels[src.peerId];
+
+    return GestureDetector(
+      onTap: focusThis,
+      child: Container(
+        margin: const EdgeInsets.all(2),
+        decoration: BoxDecoration(
+          color: hollow.elevated,
+          borderRadius: BorderRadius.circular(hollow.radiusSm),
+        ),
+        clipBehavior: Clip.antiAlias,
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            if (renderer != null)
+              RepaintBoundary(
+                child: RTCVideoView(
+                  renderer,
+                  objectFit:
+                      RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
+                ),
+              )
+            else
+              Center(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(LucideIcons.monitor,
+                        size: 32,
+                        color: hollow.textSecondary.withValues(alpha: 0.4)),
+                    const SizedBox(height: HollowSpacing.xs),
+                    Text(
+                      'Connecting...',
+                      style: HollowTypography.caption.copyWith(
+                        color: hollow.textSecondary,
+                        fontSize: 11,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            // Name + type label (bottom-left).
+            Positioned(
+              left: 6,
+              bottom: 6,
+              child: Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                decoration: BoxDecoration(
+                  color: Colors.black.withValues(alpha: 0.6),
+                  borderRadius: BorderRadius.circular(4),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Icon(LucideIcons.monitor,
+                        size: 10, color: Colors.white70),
+                    const SizedBox(width: 4),
+                    Text(
+                      quality != null ? '$name · $quality' : name,
+                      style: HollowTypography.caption.copyWith(
+                        color: Colors.white,
+                        fontSize: 10,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            // Corner action (top-right): stop sharing (own) / stop watching.
+            Positioned(
+              top: 4,
+              right: 4,
+              child: HollowTooltip(
+                message: src.isLocal ? 'Stop sharing' : 'Stop watching',
+                child: HollowPressable(
+                  onTap: src.isLocal
+                      ? () => notifier.stopScreenShare()
+                      : () => notifier.stopWatchingScreenShare(src.peerId),
+                  borderRadius: BorderRadius.circular(hollow.radiusSm),
+                  padding: const EdgeInsets.all(4),
+                  semanticLabel: src.isLocal
+                      ? 'Stop sharing your screen'
+                      : 'Stop watching this share',
+                  child: Container(
+                    padding: const EdgeInsets.all(3),
+                    decoration: BoxDecoration(
+                      color: Colors.black.withValues(alpha: 0.55),
+                      borderRadius: BorderRadius.circular(4),
+                    ),
+                    child: Icon(
+                      src.isLocal
+                          ? LucideIcons.monitorOff
+                          : LucideIcons.eyeOff,
+                      size: 13,
+                      color: Colors.white,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// Own-share feedback PiP (bottom right of the focus view).
+  Widget _buildSelfSharePip(HollowTheme hollow) {
+    final renderer =
+        ref.read(voiceChannelProvider.notifier).localScreenShareRenderer;
+    if (renderer == null) return const SizedBox.shrink();
+    return HollowTooltip(
+      message: 'Your share — click to focus',
+      child: GestureDetector(
+        onTap: () {
+          final localPeerId = ref.read(identityProvider).peerId ?? '';
+          ref
+              .read(voiceChannelProvider.notifier)
+              .setFocusedSource(localPeerId, 'screen');
+        },
+        child: Container(
+          width: 160,
+          height: 90,
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(color: hollow.border),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withValues(alpha: 0.3),
+                blurRadius: 8,
+              ),
+            ],
+          ),
+          clipBehavior: Clip.antiAlias,
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              RepaintBoundary(
+                child: RTCVideoView(
+                  renderer,
+                  objectFit:
+                      RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+                ),
+              ),
+              Positioned(
+                left: 4,
+                bottom: 4,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 5, vertical: 1),
+                  decoration: BoxDecoration(
+                    color: Colors.black.withValues(alpha: 0.6),
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                  child: Text(
+                    'Your share',
+                    style: HollowTypography.caption.copyWith(
+                      color: Colors.white,
+                      fontSize: 9,
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 
   Widget _buildSharerSwitcher(
     HollowTheme hollow,
     VoiceChannelState vcState,
     String localPeerId,
+    List<({String peerId, String type, bool isLocal, bool watched})> sources,
   ) {
     final profiles = ref.watch(profileProvider);
-
-    // Build list of all sources: (peerId, type) pairs.
-    final sources = <(String, String)>[]; // (peerId, 'screen' | 'camera')
-    // Screen share sources first.
-    if (vcState.isScreenSharing) sources.add((localPeerId, 'screen'));
-    for (final entry in vcState.peerScreenSharing.entries) {
-      if (entry.value) sources.add((entry.key, 'screen'));
-    }
-    // Camera sources.
-    if (vcState.isCameraOn) sources.add((localPeerId, 'camera'));
-    for (final entry in vcState.peerCameraOn.entries) {
-      if (entry.value) sources.add((entry.key, 'camera'));
-    }
+    final notifier = ref.read(voiceChannelProvider.notifier);
 
     return Center(
       child: MouseRegion(
@@ -956,67 +1260,114 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
           ),
           child: Row(
             mainAxisSize: MainAxisSize.min,
-            children: sources.map((source) {
-              final (peerId, sourceType) = source;
-              final isFocused =
-                  peerId == vcState.focusedScreenSharePeerId &&
-                  sourceType == vcState.focusedSourceType;
-              // Routable device id → master for the name/avatar lookups;
-              // focus tracking stays keyed on the routable id.
-              final displayId =
-                  ref.watch(deviceLinkProvider).identityOf(peerId);
-              final name = displayNameFor(profiles, displayId);
+            children: [
+              ...sources.map((source) {
+                final peerId = source.peerId;
+                final sourceType = source.type;
+                final isUnwatched =
+                    sourceType == 'screen' && !source.watched;
+                final isFocused = !vcState.isGridView &&
+                    peerId == vcState.focusedScreenSharePeerId &&
+                    sourceType == vcState.focusedSourceType;
+                // Routable device id → master for the name/avatar lookups;
+                // focus tracking stays keyed on the routable id.
+                final displayId =
+                    ref.watch(deviceLinkProvider).identityOf(peerId);
+                final name = displayNameFor(profiles, displayId);
 
-              return Padding(
-                padding: const EdgeInsets.symmetric(
-                    horizontal: HollowSpacing.xs),
-                child: HollowPressable(
-                  onTap: () => ref
-                      .read(voiceChannelProvider.notifier)
-                      .setFocusedSource(peerId, sourceType),
-                  borderRadius:
-                      BorderRadius.circular(hollow.radiusSm),
-                  backgroundColor: isFocused ? hollow.accentMuted : null,
+                return Padding(
                   padding: const EdgeInsets.symmetric(
-                    horizontal: HollowSpacing.sm,
-                    vertical: HollowSpacing.xs,
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      // Source type icon.
-                      Icon(
-                        sourceType == 'screen'
-                            ? LucideIcons.monitor
-                            : LucideIcons.video,
-                        size: 12,
-                        color: isFocused
-                            ? hollow.accent
-                            : hollow.textSecondary,
-                      ),
-                      const SizedBox(width: HollowSpacing.xs),
-                      HollowAvatar(
-                        peerId: displayId,
-                        size: 18,
-                      ),
-                      const SizedBox(width: HollowSpacing.xs),
-                      Text(
-                        peerId == localPeerId ? 'You' : name,
-                        style: HollowTypography.caption.copyWith(
+                      horizontal: HollowSpacing.xs),
+                  child: HollowPressable(
+                    onTap: () {
+                      // Tapping an unwatched share opts in (issue #38);
+                      // watchScreenShare also focuses it.
+                      if (isUnwatched) {
+                        notifier.watchScreenShare(peerId);
+                        notifier.setGridView(false);
+                      } else {
+                        notifier.setFocusedSource(peerId, sourceType);
+                        notifier.setGridView(false);
+                      }
+                    },
+                    semanticLabel: isUnwatched
+                        ? 'Watch screen share from $name'
+                        : null,
+                    borderRadius:
+                        BorderRadius.circular(hollow.radiusSm),
+                    backgroundColor: isFocused ? hollow.accentMuted : null,
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: HollowSpacing.sm,
+                      vertical: HollowSpacing.xs,
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        // Source type icon (eye = unwatched share).
+                        Icon(
+                          isUnwatched
+                              ? LucideIcons.eye
+                              : sourceType == 'screen'
+                                  ? LucideIcons.monitor
+                                  : LucideIcons.video,
+                          size: 12,
                           color: isFocused
-                              ? hollow.textPrimary
+                              ? hollow.accent
                               : hollow.textSecondary,
-                          fontWeight: isFocused
-                              ? FontWeight.w600
-                              : FontWeight.w400,
-                          fontSize: 12,
                         ),
-                      ),
-                    ],
+                        const SizedBox(width: HollowSpacing.xs),
+                        HollowAvatar(
+                          peerId: displayId,
+                          size: 18,
+                        ),
+                        const SizedBox(width: HollowSpacing.xs),
+                        Text(
+                          peerId == localPeerId ? 'You' : name,
+                          style: HollowTypography.caption.copyWith(
+                            color: isFocused
+                                ? hollow.textPrimary
+                                : hollow.textSecondary,
+                            fontWeight: isFocused
+                                ? FontWeight.w600
+                                : FontWeight.w400,
+                            fontSize: 12,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                );
+              }),
+              // Divider + grid toggle (issue #38 — all sources at once).
+              Container(
+                width: 1,
+                height: 18,
+                margin: const EdgeInsets.symmetric(
+                    horizontal: HollowSpacing.xs),
+                color: hollow.border.withValues(alpha: 0.6),
+              ),
+              HollowTooltip(
+                message:
+                    vcState.isGridView ? 'Exit grid view' : 'Grid view',
+                child: HollowPressable(
+                  onTap: () => notifier.setGridView(!vcState.isGridView),
+                  semanticLabel: vcState.isGridView
+                      ? 'Exit grid view'
+                      : 'Show all sources in a grid',
+                  borderRadius: BorderRadius.circular(hollow.radiusSm),
+                  backgroundColor:
+                      vcState.isGridView ? hollow.accentMuted : null,
+                  padding: const EdgeInsets.all(HollowSpacing.xs),
+                  child: Icon(
+                    LucideIcons.layoutGrid,
+                    size: 14,
+                    color: vcState.isGridView
+                        ? hollow.accent
+                        : hollow.textSecondary,
                   ),
                 ),
-              );
-            }).toList(),
+              ),
+            ],
           ),
         ),
       ),
@@ -1138,23 +1489,24 @@ class _VoiceControlsPillState extends ConsumerState<_VoiceControlsPill> {
               ),
             ),
             const SizedBox(width: HollowSpacing.lg),
-            // Mute
-            HollowTooltip(
-              message: vcState.isMuted ? 'Unmute' : 'Mute',
-              child: HollowPressable(
-                semanticLabel: vcState.isMuted ? 'Unmute' : 'Mute',
-                onTap: () =>
-                    ref.read(voiceChannelProvider.notifier).toggleMute(),
-                borderRadius: BorderRadius.circular(hollow.radiusSm),
-                padding: const EdgeInsets.all(HollowSpacing.xs),
-                child: Icon(
-                  vcState.isMuted ? LucideIcons.micOff : LucideIcons.mic,
-                  size: 16,
-                  color:
-                      vcState.isMuted ? hollow.error : hollow.textSecondary,
+            // Mute (PTT-aware: gated mic while idle, accent while held)
+            Builder(builder: (context) {
+              final mic = micButtonVisual(ref,
+                  isMuted: vcState.isMuted,
+                  hollow: hollow,
+                  idleColor: hollow.textSecondary);
+              return HollowTooltip(
+                message: mic.tooltip,
+                child: HollowPressable(
+                  semanticLabel: vcState.isMuted ? 'Unmute' : 'Mute',
+                  onTap: () =>
+                      ref.read(voiceChannelProvider.notifier).toggleMute(),
+                  borderRadius: BorderRadius.circular(hollow.radiusSm),
+                  padding: const EdgeInsets.all(HollowSpacing.xs),
+                  child: Icon(mic.icon, size: 16, color: mic.color),
                 ),
-              ),
-            ),
+              );
+            }),
             const SizedBox(width: HollowSpacing.xs),
             // Deafen
             HollowTooltip(
@@ -1217,8 +1569,9 @@ class _VoiceControlsPillState extends ConsumerState<_VoiceControlsPill> {
                   ),
                 ),
               ),
-            // Received share audio: volume + duck controls.
-            if (vcState.peerScreenSharing.values.any((v) => v)) ...[
+            // Received share audio: volume + duck controls — only when we're
+            // actually receiving a share (watch-gated, issue #38).
+            if (vcState.isWatchingAnyShare) ...[
               const SizedBox(width: HollowSpacing.xs),
               const ShareVolumeButton(),
             ],
@@ -1419,6 +1772,116 @@ class _OverlaySliderState extends State<_OverlaySlider>
         );
       },
       child: widget.child,
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// "X is sharing — Watch" banner (opt-in watching, issue #38)
+// ---------------------------------------------------------------------------
+
+/// Floating card shown over the channel chat while remote shares exist that
+/// we haven't opted into. One row per sharer: avatar + name + Watch + dismiss.
+class _UnwatchedShareBanner extends ConsumerWidget {
+  final List<String> sharerIds;
+  final Map<String, String> labels;
+  final void Function(String peerId) onWatch;
+  final void Function(String peerId) onDismiss;
+
+  const _UnwatchedShareBanner({
+    required this.sharerIds,
+    required this.labels,
+    required this.onWatch,
+    required this.onDismiss,
+  });
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final hollow = HollowTheme.of(context);
+    final profiles = ref.watch(profileProvider);
+
+    return Container(
+      constraints: const BoxConstraints(maxWidth: 420),
+      decoration: BoxDecoration(
+        color: hollow.surface,
+        borderRadius: BorderRadius.circular(hollow.radiusMd),
+        border: Border.all(color: hollow.border),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.25),
+            blurRadius: 12,
+            offset: const Offset(0, 4),
+          ),
+        ],
+      ),
+      padding: const EdgeInsets.symmetric(
+        horizontal: HollowSpacing.sm,
+        vertical: HollowSpacing.xs,
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          for (final peerId in sharerIds)
+            Builder(builder: (context) {
+              final displayId =
+                  ref.watch(deviceLinkProvider).identityOf(peerId);
+              final name = displayNameFor(profiles, displayId);
+              final quality = labels[peerId];
+              return Padding(
+                padding:
+                    const EdgeInsets.symmetric(vertical: HollowSpacing.xs),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(LucideIcons.monitor,
+                        size: 14, color: hollow.textSecondary),
+                    const SizedBox(width: HollowSpacing.xs),
+                    HollowAvatar(peerId: displayId, size: 18),
+                    const SizedBox(width: HollowSpacing.xs),
+                    Flexible(
+                      child: Text(
+                        '$name is sharing their screen',
+                        style: HollowTypography.caption.copyWith(
+                          color: hollow.textPrimary,
+                          fontSize: 12,
+                        ),
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                    if (quality != null) ...[
+                      const SizedBox(width: HollowSpacing.xs),
+                      Text(
+                        quality,
+                        style: HollowTypography.caption.copyWith(
+                          color: hollow.textTertiary,
+                          fontSize: 11,
+                        ),
+                      ),
+                    ],
+                    const SizedBox(width: HollowSpacing.sm),
+                    HollowButton.filled(
+                      compact: true,
+                      onPressed: () => onWatch(peerId),
+                      child: const Text('Watch'),
+                    ),
+                    const SizedBox(width: HollowSpacing.xs),
+                    HollowTooltip(
+                      message: 'Dismiss',
+                      child: HollowPressable(
+                        onTap: () => onDismiss(peerId),
+                        borderRadius: BorderRadius.circular(hollow.radiusSm),
+                        padding: const EdgeInsets.all(4),
+                        semanticLabel: 'Dismiss share notification',
+                        child: Icon(LucideIcons.x,
+                            size: 14, color: hollow.textSecondary),
+                      ),
+                    ),
+                  ],
+                ),
+              );
+            }),
+        ],
+      ),
     );
   }
 }
