@@ -401,6 +401,8 @@ These variants carry channel messages for public channels. They are Ed25519-sign
 
 Helper struct: `PublicChannelEntry { channel_id, name, category }`. FFI structs: `PublicChannelEntryFfi`, `GuestSyncMessageFfi`, `GuestReactionFfi`.
 
+`GuestSyncMessageFfi` carries `link_preview` — guests hold no rows, so the card comes straight off the wire. That is only safe because `message_ops::guest_item_accepted` folds the shipped card into the signature check it already runs (the batch is PLAINTEXT, so without binding the card a relay could paste a phishing one onto the surface strangers see).
+
 ### Lifecycle
 
 - **`PeerDisconnecting`** — `"disconnecting"` — broadcast when the app is shutting down. Lets peers immediately mark the user as offline instead of waiting for keepalive timeout.
@@ -539,6 +541,10 @@ Many variants include a `target: Option<String>` field — when present, only th
 - **`DmSyncBatch` (`"dm_sync"`)** — batch of synced DMs.
   - `messages: Vec<DmSyncItem>` — the synced DMs
   - `has_more: Option<bool>` — if true, more DMs available
+
+**Sync items carry link previews.** `SyncMessageItem` and `DmSyncItem` both hold `lp: Option<Box<LinkPreviewRef>>` (the card) alongside `lp_digest` (the hash the v2 signature binds). Boxed for the same reason as `LinkPreviewRef::rich` — these types live in the swarm's async frames. Packed by `sync_handler::channel_sync_items`, `swarm::build_dm_sync_items`, and the guest `PublicChannelSyncResponse` builder; applied via `message_ops::apply_synced_link_preview`.
+
+**Preview budget and the pagination floor.** Cards are up to ~100 KB base64 and a page holds 200 messages, so a packer stops at `sync_handler::SYNC_PREVIEW_BUDGET_BYTES` (2 MB) and returns `SyncPage { items, truncated }`; every responder must fold `truncated` into its `has_more`. Cutting the page (rather than stripping cards) is deliberate — nothing in the protocol re-requests a stripped card. `MIN_ITEMS_BEFORE_TRUNCATION = 50` is a correctness floor, not tuning: the per-sender and DM watermark queries are INCLUSIVE (`timestamp >= …`), so the head of every page after the first is rows the requester already has, and a page short enough to be all-overlap would leave the watermark unmoved and loop forever.
 
 ### Edit & Delete
 

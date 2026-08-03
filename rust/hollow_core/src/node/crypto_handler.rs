@@ -139,10 +139,9 @@ pub(crate) fn message_signing_payload(
 /// v2 payload so a tamperer cannot rewrite a preview's title / description /
 /// image on an otherwise-valid message.
 ///
-/// The DIGEST — not the preview — is what rides where the full preview does
-/// not: sync items carry `lp_digest` (64 hex chars) instead of shipping
-/// thumbnail bytes through backfill, and archives store it alongside the row.
-/// Verification only ever needs the digest.
+/// Archives store this digest alongside the row rather than the preview, and
+/// a sync item may carry it alone (see [`backfill_lp_digest`]) — verification
+/// only ever needs the digest.
 pub(crate) fn link_preview_digest(lp: &LinkPreviewRef) -> String {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
@@ -188,6 +187,33 @@ pub(crate) fn link_preview_digest(lp: &LinkPreviewRef) -> String {
     }
 
     hex::encode(h.finalize())
+}
+
+/// The link-preview digest a SYNC ITEM's signature must be checked against.
+///
+/// An item can carry the full card (`lp`), a bare digest (`lp_digest`), or
+/// both. The full card wins whenever it is present, and that ordering is the
+/// security property, not a preference: recomputing the digest from the bytes
+/// we are about to STORE means the signature covers exactly those bytes. A
+/// responder that swaps in a phishing card — or a relay rewriting a plaintext
+/// public-channel batch — produces a digest the author never signed, so
+/// `check_backfill_signature` returns `Forged` and the whole item is dropped.
+///
+/// Trusting the wire's `lp_digest` while storing a different `lp` would be the
+/// exact inverse: the item would verify and the attacker's card would land.
+///
+/// The `lp_digest`-only case is legitimate and stays supported: a responder
+/// whose own row arrived digest-only (or a peer older than this field) has the
+/// digest but not the bytes. Such an item verifies and stores card-less,
+/// which is the behaviour every peer had before previews rode backfill.
+pub(crate) fn backfill_lp_digest(
+    lp: Option<&LinkPreviewRef>,
+    lp_digest: Option<&str>,
+) -> Option<String> {
+    match lp {
+        Some(lp) => Some(link_preview_digest(lp)),
+        None => lp_digest.map(str::to_owned),
+    }
 }
 
 /// The structured fields a v2 signature binds, alongside type/context/sender/

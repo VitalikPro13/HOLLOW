@@ -38,6 +38,8 @@ Two message types:
 
 Critical rules: Dart timestamps MUST be hydrated from Rust's signed value, not `DateTime.now()`. The payload string must be identical on both signing and verification sides — which now includes persisting the SENDER's `order_us` on every row-creating path (never the local ts*1000 default) and carrying `lp_digest` in sync items.
 
+**A sync item's `lp_digest` comes from `crypto_handler::backfill_lp_digest(lp, lp_digest)`, never straight off the wire.** Sync items carry the full card now, and when one is present the digest is RECOMPUTED from it — the wire's `lp_digest` is ignored. That ordering is the security property: backfill delivers thumbnail bytes a peer will render, so trusting the sender's digest while storing a different card would let a hostile responder (or, on the plaintext public-channel path, the relay) swap in a phishing card under a valid signature. Recomputing means any swap yields a digest the author never signed and `check_backfill_signature` returns `Forged`. An item with `lp_digest` but no `lp` is legitimate (older responder, or a row that arrived digest-only) and verifies as before, storing card-less.
+
 ### Ed25519 Signing
 
 `crypto_handler:sign_message(keypair, pub_key_b64, payload) -> (Option<String>, Option<String>)`

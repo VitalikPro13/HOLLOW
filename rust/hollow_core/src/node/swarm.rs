@@ -1686,6 +1686,10 @@ async fn run_event_loop(
                                             hidden_at: m.hidden_at,
                                             reactions,
                                             file_meta,
+                                            // Local branch: straight off our own
+                                            // row, so the owner's preview shows
+                                            // the same cards the guest view does.
+                                            link_preview: m.link_preview.clone(),
                                         }
                                     }).collect();
                                     // Build sender profiles from local state
@@ -5294,13 +5298,30 @@ fn request_dm_resync_after_rekey(
 fn build_dm_sync_items(
     store: &crate::storage::MessageStore,
     messages: &[crate::storage::messages::StoredMessage],
-) -> Vec<DmSyncItem> {
+) -> super::sync_handler::SyncPage<DmSyncItem> {
     let msg_ids: Vec<String> = messages.iter().filter_map(|m| m.message_id.clone()).collect();
     let reactions_map = store.load_reactions_for_sync(&msg_ids).unwrap_or_default();
     let file_ids: Vec<&str> = messages.iter().filter_map(|m| m.file_id.as_deref()).collect();
     let file_meta_map = store.get_file_metadata_batch(&file_ids).unwrap_or_default();
 
-    messages.iter().map(|m| {
+    let mut budget = super::sync_handler::PreviewBudget::new();
+    let mut items: Vec<DmSyncItem> = Vec::with_capacity(messages.len());
+    let mut truncated = false;
+
+    for m in messages {
+        // Budget spent → END the page (the caller flags `has_more`), never
+        // pack a message without the card it was signed with. See
+        // `sync_handler::SYNC_PREVIEW_BUDGET_BYTES`.
+        if let Some(lp) = &m.link_preview {
+            if !budget.fits(lp, items.len()) {
+                hollow_log!(
+                    "[HOLLOW-SYNC] Preview budget spent after {} DM(s) — cutting the page short (has_more)",
+                    items.len()
+                );
+                truncated = true;
+                break;
+            }
+        }
         let reactions = m.message_id.as_ref()
             .and_then(|mid| reactions_map.get(mid))
             .map(|rs| rs.iter().map(|(e, p, ts, sig, pk)| SyncReactionItem {
@@ -5328,7 +5349,7 @@ fn build_dm_sync_items(
         let (hidden_at, hidden_sig, hidden_pk) = message_ops::deletion_proof_fields(
             store, m.hidden_at, m.message_id.as_deref(),
         );
-        DmSyncItem {
+        items.push(DmSyncItem {
             t: m.text.clone(),
             ts: m.timestamp,
             mine: m.is_mine,
@@ -5344,9 +5365,11 @@ fn build_dm_sync_items(
             hidden_pk,
             order_us: m.order_us,
             lp_digest: m.link_preview.as_ref().map(crypto_handler::link_preview_digest),
+            lp: m.link_preview.clone().map(Box::new),
             reactions,
-        }
-    }).collect()
+        });
+    }
+    super::sync_handler::SyncPage { items, truncated }
 }
 
 /// Enforce device revocations (Step 7) that were just learned from an ingested
@@ -6086,12 +6109,18 @@ async fn handle_incoming_request(
                             // sender via `msg.s`. An edited row verifies against its
                             // EDIT signature (edited_at + current text). See
                             // `check_backfill_signature`.
+                            // Recomputed from the shipped card when there is
+                            // one — that is what makes the preview
+                            // signature-covered (`backfill_lp_digest`).
+                            let lp_digest = crypto_handler::backfill_lp_digest(
+                                msg.lp.as_deref(), msg.lp_digest.as_deref(),
+                            );
                             let extras = crypto_handler::SignedExtras {
                                 mid: msg.mid.as_deref(),
                                 reply_to: msg.reply_to.as_deref(),
                                 file_id: msg.file_id.as_deref(),
                                 order_us: msg.order_us,
-                                lp_digest: msg.lp_digest.as_deref(),
+                                lp_digest: lp_digest.as_deref(),
                             };
                             let sig_check = check_backfill_signature(
                                 &msg.s, "ch", &format!("{sid}:{cid}"),
@@ -6159,6 +6188,26 @@ async fn handle_incoming_request(
                                         }
                                     }
                                 }
+                            }
+
+                            // The card the item's signature covers. Runs on
+                            // every branch above — fresh row, pre-existing
+                            // card-less row, edited row — so a peer catching
+                            // up gets the preview with the message instead of
+                            // a bare link. See `apply_synced_link_preview`.
+                            if sig_verified
+                                && let (Some(lp), Some(mid)) = (msg.lp.as_deref(), &msg.mid)
+                                && message_ops::apply_synced_link_preview(
+                                    &store, true, mid, &msg.t,
+                                    lp, msg.sig.as_deref(), msg.pk.as_deref(),
+                                )
+                            {
+                                let _ = event_tx.send(NetworkEvent::ChannelLinkPreviewUpdated {
+                                    server_id: sid.clone(),
+                                    channel_id: cid.clone(),
+                                    message_id: mid.clone(),
+                                    preview: Some(lp.clone()),
+                                }).await;
                             }
 
                             // Apply deletion if the message was hidden on the syncing peer —
@@ -6475,12 +6524,17 @@ async fn handle_incoming_request(
                                 (&convo_peer, &local_peer)
                             };
                             // Backfill signature rule (0.8.5): Valid or nothing.
+                            // The digest is recomputed from the shipped card
+                            // when there is one (`backfill_lp_digest`).
+                            let lp_digest = crypto_handler::backfill_lp_digest(
+                                msg.lp.as_deref(), msg.lp_digest.as_deref(),
+                            );
                             let extras = crypto_handler::SignedExtras {
                                 mid: msg.mid.as_deref(),
                                 reply_to: msg.reply_to.as_deref(),
                                 file_id: msg.file_id.as_deref(),
                                 order_us: msg.order_us,
-                                lp_digest: msg.lp_digest.as_deref(),
+                                lp_digest: lp_digest.as_deref(),
                             };
                             let sig_check = check_backfill_signature(
                                 sender_m, "dm", recipient_m,
@@ -6572,6 +6626,25 @@ async fn handle_incoming_request(
                                     // but edited_at may be missing — stamp it.
                                     let _ = store.set_dm_message_edited_at(mid, edit_ts);
                                 }
+                            }
+
+                            // The card the item's signature covers. Runs on
+                            // every branch above — fresh row, pre-existing
+                            // card-less row, edited row — so a friend catching
+                            // up after being offline gets the preview with the
+                            // message. See `apply_synced_link_preview`.
+                            if sig_check == BackfillSig::Valid
+                                && let (Some(lp), Some(mid)) = (msg.lp.as_deref(), &msg.mid)
+                                && message_ops::apply_synced_link_preview(
+                                    &store, false, mid, &msg.t,
+                                    lp, msg.sig.as_deref(), msg.pk.as_deref(),
+                                )
+                            {
+                                let _ = event_tx.send(NetworkEvent::DmLinkPreviewUpdated {
+                                    peer_id: convo_peer.clone(),
+                                    message_id: mid.clone(),
+                                    preview: Some(lp.clone()),
+                                }).await;
                             }
 
                             // Apply deletion if the message was hidden on the syncing peer —
@@ -6708,13 +6781,17 @@ async fn handle_incoming_request(
                             };
                             // Backfill signature rule (0.8.5): Valid or nothing. A
                             // sibling is still only as trustworthy as the batch it
-                            // forwards.
+                            // forwards — including the cards in it, which is why
+                            // the digest comes from the shipped preview.
+                            let lp_digest = crypto_handler::backfill_lp_digest(
+                                msg.lp.as_deref(), msg.lp_digest.as_deref(),
+                            );
                             let extras = crypto_handler::SignedExtras {
                                 mid: msg.mid.as_deref(),
                                 reply_to: msg.reply_to.as_deref(),
                                 file_id: msg.file_id.as_deref(),
                                 order_us: msg.order_us,
-                                lp_digest: msg.lp_digest.as_deref(),
+                                lp_digest: lp_digest.as_deref(),
                             };
                             let sig_check = check_backfill_signature(
                                 sender_m, "dm", recipient_m,
@@ -6805,6 +6882,23 @@ async fn handle_incoming_request(
                                 } else {
                                     let _ = store.set_dm_message_edited_at(mid, edit_ts);
                                 }
+                            }
+
+                            // The card the item's signature covers, so a sibling
+                            // that was offline gets the preview alongside the
+                            // message. See `apply_synced_link_preview`.
+                            if sig_check == BackfillSig::Valid
+                                && let (Some(lp), Some(mid)) = (msg.lp.as_deref(), &msg.mid)
+                                && message_ops::apply_synced_link_preview(
+                                    &store, false, mid, &msg.t,
+                                    lp, msg.sig.as_deref(), msg.pk.as_deref(),
+                                )
+                            {
+                                let _ = event_tx.send(NetworkEvent::DmLinkPreviewUpdated {
+                                    peer_id: convo_peer.clone(),
+                                    message_id: mid.clone(),
+                                    preview: Some(lp.clone()),
+                                }).await;
                             }
 
                             // Apply deletion if hidden on the sibling — ONLY with the
@@ -9540,10 +9634,14 @@ async fn handle_incoming_request(
                 };
                 if let Ok(messages) = messages_result {
                         hollow_log!("[HOLLOW-SYNC] Sending {} DM sync messages to {peer_str} (convo {convo_peer}, both_directions={both_directions})", messages.len());
-                        let items = build_dm_sync_items(&store, &messages);
+                        let super::sync_handler::SyncPage { items, truncated } =
+                            build_dm_sync_items(&store, &messages);
 
                         if !items.is_empty() {
-                            let has_more = if items.len() >= 200 {
+                            // `truncated` = the preview budget ended the page
+                            // early, so there is more to serve regardless of
+                            // how short it came out.
+                            let has_more = if truncated || items.len() >= 200 {
                                 Some(true)
                             } else {
                                 None
@@ -9616,8 +9714,11 @@ async fn handle_incoming_request(
                         }
                     };
                     if messages.is_empty() { continue; }
-                    let has_more = if messages.len() >= 200 { Some(true) } else { None };
-                    let items = build_dm_sync_items(&store, &messages);
+                    let super::sync_handler::SyncPage { items, truncated } =
+                        build_dm_sync_items(&store, &messages);
+                    // `truncated` = the preview budget cut the page short, so
+                    // more remains even when the page is under the limit.
+                    let has_more = if truncated || messages.len() >= 200 { Some(true) } else { None };
                     hollow_log!(
                         "[HOLLOW-SYNC] Sending {} sibling DM(s) for convo {convo} to {peer_str} (has_more={has_more:?})",
                         items.len()
@@ -11597,13 +11698,32 @@ async fn handle_incoming_request(
                         store.get_channel_messages_before(&server_id, &channel_id, i64::MAX, limit)
                     };
                     if let Ok(msgs) = messages_result {
-                        let has_more = msgs.len() as i32 >= limit;
                         let msg_ids: Vec<String> = msgs.iter().filter_map(|m| m.message_id.clone()).collect();
                         let reactions_map = store.load_reactions_for_sync(&msg_ids).unwrap_or_default();
                         let file_ids: Vec<&str> = msgs.iter().filter_map(|m| m.file_id.as_deref()).collect();
                         let file_meta_map = store.get_file_metadata_batch(&file_ids).unwrap_or_default();
 
-                        let items: Vec<SyncMessageItem> = msgs.iter().map(|m| {
+                        let mut budget = super::sync_handler::PreviewBudget::new();
+                        let mut items: Vec<SyncMessageItem> = Vec::with_capacity(msgs.len());
+                        let mut truncated = false;
+
+                        for m in msgs.iter() {
+                            // Same rule as the member responders: cut the page
+                            // rather than serve a message stripped of the card
+                            // its signature covers. This page walks BACKWARDS
+                            // (newest first, `before_timestamp`), so the tail we
+                            // drop is the oldest — exactly what the requester
+                            // asks for next.
+                            if let Some(lp) = &m.link_preview {
+                                if !budget.fits(lp, items.len()) {
+                                    hollow_log!(
+                                        "[HOLLOW-SYNC] Preview budget spent after {} guest item(s) — cutting the page short (has_more)",
+                                        items.len()
+                                    );
+                                    truncated = true;
+                                    break;
+                                }
+                            }
                             let reactions = m.message_id.as_ref()
                                 .and_then(|mid| reactions_map.get(mid))
                                 .map(|rs| rs.iter().map(|(e, p, ts, sig, pk)| SyncReactionItem {
@@ -11632,7 +11752,7 @@ async fn handle_incoming_request(
                             let (hidden_at, hidden_sig, hidden_pk) = message_ops::deletion_proof_fields(
                                 &store, m.hidden_at, m.message_id.as_deref(),
                             );
-                            SyncMessageItem {
+                            items.push(SyncMessageItem {
                                 s: m.sender_id.clone(),
                                 t: m.text.clone(),
                                 ts: m.timestamp,
@@ -11648,9 +11768,11 @@ async fn handle_incoming_request(
                                 hidden_pk,
                                 order_us: m.order_us,
                                 lp_digest: m.link_preview.as_ref().map(crypto_handler::link_preview_digest),
+                                lp: m.link_preview.clone().map(Box::new),
                                 reactions,
-                            }
-                        }).collect();
+                            });
+                        }
+                        let has_more = truncated || msgs.len() as i32 >= limit;
 
                         // Build sender profiles (one per unique sender)
                         // Priority: server nickname > profile display name > nothing
@@ -11784,6 +11906,9 @@ async fn handle_incoming_request(
                     hidden_at,
                     reactions,
                     file_meta,
+                    // Safe to render: `guest_item_accepted` above bound this
+                    // exact card into the signature it checked.
+                    link_preview: m.lp.map(|b| *b),
                 });
             }
             let ffi_profiles: Vec<SyncSenderProfileFfi> = sender_profiles.into_iter().map(|(pid, p)| {

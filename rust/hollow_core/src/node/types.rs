@@ -528,6 +528,11 @@ pub(crate) struct GuestSyncMessageFfi {
     /// `SyncFileMetaItem` already carried this; it used to be dropped here,
     /// leaving guests a raw `[file:<id>]` token instead of a file card.
     pub file_meta: Option<GuestFileMetaFfi>,
+    /// The message's link preview. Guests hold no rows, so the card comes
+    /// straight off the wire — and reaches here only because
+    /// `guest_item_accepted` folded it into the signature check, which is what
+    /// stops a relay pasting its own card onto a plaintext public batch.
+    pub link_preview: Option<LinkPreviewRef>,
 }
 
 /// FFI-visible file metadata for a guest message. Metadata ONLY — a guest
@@ -3143,12 +3148,32 @@ pub(crate) struct SyncMessageItem {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub order_us: Option<i64>,
     /// Hex `link_preview_digest` of the message's link preview (0.8.3, v2
-    /// signatures). Backfill verification needs the digest the sender signed —
-    /// carrying the 64-char digest instead of the full preview keeps thumbnail
-    /// bytes out of sync batches. `None` = no preview (or a pre-0.8.3
+    /// signatures). Backfill verification needs the digest the sender signed;
+    /// this field carries it on its own for the cases where [`Self::lp`] is
+    /// absent but the row still has one. `None` = no preview (or a pre-0.8.3
     /// responder; their rows are v1-signed and don't cover it).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lp_digest: Option<String>,
+    /// The message's link preview, carried IN FULL.
+    ///
+    /// This used to be digest-only, on the reasoning that "verification only
+    /// ever needs the digest" — true, and precisely why the card never reached
+    /// anyone who was offline when it was sent. A peer that catches up through
+    /// backfill got a row whose signature bound a preview it had no copy of,
+    /// so it rendered a bare link, and re-serving that row computed
+    /// `lp_digest = None` from its own empty column and every downstream peer
+    /// REJECTED the message as forged. Previews now ride the batch.
+    ///
+    /// When both this and `lp_digest` are present the digest is RECOMPUTED
+    /// from this preview and the wire's `lp_digest` is ignored — that is what
+    /// makes the card signature-covered end to end, so a responder swapping in
+    /// a phishing card fails the backfill check instead of having it stored.
+    ///
+    /// Boxed deliberately, like [`LinkPreviewRef::rich`]: a preview is ~200
+    /// bytes by value and these items are built, cloned and matched inside the
+    /// swarm's async state machines.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lp: Option<Box<LinkPreviewRef>>,
     /// Reactions on this message (synced alongside the message).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reactions: Vec<SyncReactionItem>,
@@ -3245,7 +3270,7 @@ pub struct ShareRef {
 /// privacy requirement, not a cache optimization.
 ///
 /// Phase 6.75 link previews. See HOLLOW_PLAN.md.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LinkPreviewRef {
     /// The URL that was previewed.
     #[serde(default)]
@@ -3386,6 +3411,10 @@ pub(crate) struct DmSyncItem {
     /// See [`SyncMessageItem::lp_digest`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lp_digest: Option<String>,
+    /// The DM's link preview, carried in full. See [`SyncMessageItem::lp`] —
+    /// same field, same recompute-the-digest rule, same reason it exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lp: Option<Box<LinkPreviewRef>>,
     /// Reactions on this message (synced alongside the message).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reactions: Vec<SyncReactionItem>,

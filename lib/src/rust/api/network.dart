@@ -1181,6 +1181,11 @@ class GuestSyncMessageFfi {
   /// Attachment metadata (never bytes) — Dart builds the file card from it.
   final GuestFileMetaFfi? fileMeta;
 
+  /// The message's link preview card. Signature-covered before it got here
+  /// (`guest_item_accepted`), so the guest browser renders it like any
+  /// member would — and, as everywhere else, without fetching the URL.
+  final LinkPreviewRef? linkPreview;
+
   const GuestSyncMessageFfi({
     required this.senderId,
     required this.text,
@@ -1193,6 +1198,7 @@ class GuestSyncMessageFfi {
     this.hiddenAt,
     required this.reactions,
     this.fileMeta,
+    this.linkPreview,
   });
 
   @override
@@ -1207,7 +1213,8 @@ class GuestSyncMessageFfi {
       replyTo.hashCode ^
       hiddenAt.hashCode ^
       reactions.hashCode ^
-      fileMeta.hashCode;
+      fileMeta.hashCode ^
+      linkPreview.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -1224,7 +1231,8 @@ class GuestSyncMessageFfi {
           replyTo == other.replyTo &&
           hiddenAt == other.hiddenAt &&
           reactions == other.reactions &&
-          fileMeta == other.fileMeta;
+          fileMeta == other.fileMeta &&
+          linkPreview == other.linkPreview;
 }
 
 /// FFI-facing link preview for a URL embedded in a message.

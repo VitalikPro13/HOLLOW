@@ -13435,8 +13435,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   GuestSyncMessageFfi dco_decode_guest_sync_message_ffi(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 11)
-      throw Exception('unexpected arr length: expect 11 but see ${arr.length}');
+    if (arr.length != 12)
+      throw Exception('unexpected arr length: expect 12 but see ${arr.length}');
     return GuestSyncMessageFfi(
       senderId: dco_decode_String(arr[0]),
       text: dco_decode_String(arr[1]),
@@ -13449,6 +13449,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       hiddenAt: dco_decode_opt_box_autoadd_i_64(arr[8]),
       reactions: dco_decode_list_guest_reaction_ffi(arr[9]),
       fileMeta: dco_decode_opt_box_autoadd_guest_file_meta_ffi(arr[10]),
+      linkPreview: dco_decode_opt_box_autoadd_link_preview_ref(arr[11]),
     );
   }
 
@@ -16097,6 +16098,9 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_fileMeta = sse_decode_opt_box_autoadd_guest_file_meta_ffi(
       deserializer,
     );
+    var var_linkPreview = sse_decode_opt_box_autoadd_link_preview_ref(
+      deserializer,
+    );
     return GuestSyncMessageFfi(
       senderId: var_senderId,
       text: var_text,
@@ -16109,6 +16113,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       hiddenAt: var_hiddenAt,
       reactions: var_reactions,
       fileMeta: var_fileMeta,
+      linkPreview: var_linkPreview,
     );
   }
 
@@ -19545,6 +19550,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_opt_box_autoadd_i_64(self.hiddenAt, serializer);
     sse_encode_list_guest_reaction_ffi(self.reactions, serializer);
     sse_encode_opt_box_autoadd_guest_file_meta_ffi(self.fileMeta, serializer);
+    sse_encode_opt_box_autoadd_link_preview_ref(self.linkPreview, serializer);
   }
 
   @protected

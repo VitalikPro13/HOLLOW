@@ -117,6 +117,18 @@ forms its group. **Both leaves at the same epoch.** Then `SendChannelMessage` (n
 Owner is always the MLS coordinator in 2-node. **Sleep ≥~4-5s after JoinServer** so the batch timer
 ticks AFTER the KeyPackage is queued (Welcome only goes out post-queue).
 
+## Testing BACKFILL specifically (2026-08-03)
+
+"Peer goes offline, sender acts, peer returns" does **not** test sync backfill — at least three paths independently rescue that peer, so the scenario passes with a broken backfill. This was caught the hard way while testing the link-preview backfill fix: the first test passed before the fix existed.
+
+The rescuers: the sender's `pending_messages` queue (offline-but-has-session devices get queued, and attach handlers rewrite queued envelopes in place); the MockRelay's per-device offline buffer (`relay.buffered_count(dev)`, replayed on reconnect); and topic catch-up replay from `topic_buffers`.
+
+Use a peer for whom backfill is the ONLY vehicle:
+- `backfilled_member_gets_link_preview_through_channel_sync` — a member who JOINS AFTER the content exists. Nothing was ever addressed, queued or broadcast to them.
+- `freshly_linked_device_backfills_dm_link_previews_from_its_sibling` — a device that did not exist at send time (`spawn_node_full` with a pre-seeded source-only device list). Seed it into `resolver::seed_self` only AFTER the activity, or the sender queues for it.
+
+Both also assert the synced row VERIFIES against the digest of the card it now holds — the row a peer stores is the row it re-serves, so a row that cannot reproduce its own signed digest silently stops replicating. See [[feedback-backfill-test-isolation]].
+
 ## Current tests (13)
 
 Step 9C/9D added 6 more (2026-06-19), each negative-tested where it guards a fix:

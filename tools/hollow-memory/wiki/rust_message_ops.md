@@ -33,7 +33,8 @@ Extras ride `SignedExtras { mid, reply_to, file_id, order_us, lp_digest }` — a
 **Critical invariants:**
 - Dart timestamps MUST be hydrated from Rust's signed value (the `ts` in the `MessageSent`/`ChannelMessageSent` event), not `DateTime.now()`. The signing payload embeds the timestamp, so any mismatch breaks verification.
 - **`order_us` is SIGNED** — every row-creating path must persist the SENDER's wire value; `insert()`'s `ts*1000` default on `None` produces a row whose v2 signature fails when re-served through sync. Carriers: DM/MLS envelopes, `PublicChannelMessage.order_us`, `FileHeaderPayload.order_us` (inline-image sentinel rows), sync items, fetch inserts.
-- Sync items (`SyncMessageItem`/`DmSyncItem`) carry `lp_digest` (64 hex chars), never preview bytes.
+- Sync items (`SyncMessageItem`/`DmSyncItem`) carry the FULL preview in `lp` (boxed) plus `lp_digest`. They used to carry the digest alone, which meant a peer catching up got a bare link AND — because it then re-served `lp_digest: None` from its own empty column — the next peer rejected the message as forged. When `lp` is present the digest is RECOMPUTED from it (`crypto_handler::backfill_lp_digest`) and the wire's `lp_digest` ignored, so a swapped card fails the backfill signature instead of landing. `lp_digest` alone still verifies and stores card-less (older responder).
+- `message_ops::apply_synced_link_preview()` lands a synced card. It writes card AND signature together (`update_*_link_preview_and_sig`) because the v2 payload binds `lp_digest` — a card grafted onto an older signature reproduces the broken row above — and it is guarded on the item's text matching the row's, so a stale item cannot overwrite an edited row's newer signature.
 
 ---
 

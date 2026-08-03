@@ -12756,6 +12756,8 @@ impl SseDecode for crate::api::network::GuestSyncMessageFfi {
             <Vec<crate::api::network::GuestReactionFfi>>::sse_decode(deserializer);
         let mut var_fileMeta =
             <Option<crate::api::network::GuestFileMetaFfi>>::sse_decode(deserializer);
+        let mut var_linkPreview =
+            <Option<crate::api::network::LinkPreviewRef>>::sse_decode(deserializer);
         return crate::api::network::GuestSyncMessageFfi {
             sender_id: var_senderId,
             text: var_text,
@@ -12768,6 +12770,7 @@ impl SseDecode for crate::api::network::GuestSyncMessageFfi {
             hidden_at: var_hiddenAt,
             reactions: var_reactions,
             file_meta: var_fileMeta,
+            link_preview: var_linkPreview,
         };
     }
 }
@@ -17462,6 +17465,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::network::GuestSyncMessageFfi 
             self.hidden_at.into_into_dart().into_dart(),
             self.reactions.into_into_dart().into_dart(),
             self.file_meta.into_into_dart().into_dart(),
+            self.link_preview.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -20188,6 +20192,7 @@ impl SseEncode for crate::api::network::GuestSyncMessageFfi {
         <Option<i64>>::sse_encode(self.hidden_at, serializer);
         <Vec<crate::api::network::GuestReactionFfi>>::sse_encode(self.reactions, serializer);
         <Option<crate::api::network::GuestFileMetaFfi>>::sse_encode(self.file_meta, serializer);
+        <Option<crate::api::network::LinkPreviewRef>>::sse_encode(self.link_preview, serializer);
     }
 }
 

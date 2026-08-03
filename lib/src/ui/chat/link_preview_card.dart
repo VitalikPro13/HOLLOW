@@ -49,10 +49,11 @@ bool isDirectPlayableVideo(String? url) {
 ///
 ///  * **compact** (`kind == null`) — the original row: 80px thumb on the left,
 ///    title, description clipped to 3 lines. What a plain OpenGraph page gets.
-///  * **large** (`kind == "large"`) — image across the top at its real aspect
-///    ratio, then site, author, and up to 6 lines of body. What the social
-///    adapters emit, because a post's text IS the content and a 3-line clip
-///    throws most of it away.
+///  * **large** (`kind == "large"`) — image across the top, fitted (never
+///    cropped, never stretched) into the card width by
+///    [_LinkPreviewCardState._maxMediaHeight], then site, author, and up to 6
+///    lines of body. What the social adapters emit, because a post's text IS
+///    the content and a 3-line clip throws most of it away.
 ///
 /// **Rendering never touches the network.** Every byte of the card travelled
 /// with the message; receivers do not fetch the previewed URL to draw it.
@@ -82,6 +83,16 @@ enum _CardVideoState { poster, preparing, playing }
 
 class _LinkPreviewCardState extends ConsumerState<LinkPreviewCard> {
   static const double _maxWidth = 400;
+
+  /// Tallest the media area may be, whatever shape the source is.
+  ///
+  /// Aspect alone does not bound a card: a 16:9 thumbnail across 400px is
+  /// 225px tall, but the SAME rule on a 9:16 reel poster is 700px, and the
+  /// bubble became a monolith you had to scroll past (Instagram, TikTok —
+  /// anything vertical). Landscape media still spans the card; portrait now
+  /// gives up width instead of taking height. Same fit rule the video bubble
+  /// uses in `_resolveDisplaySize`.
+  static const double _maxMediaHeight = 360;
 
   VideoPlayerController? _controller;
   _CardVideoState _videoState = _CardVideoState.poster;
@@ -295,8 +306,15 @@ class _LinkPreviewCardState extends ConsumerState<LinkPreviewCard> {
     );
   }
 
-  /// Full-width media area: the poster at the sender's aspect ratio, and —
-  /// for a post carrying a direct video — the inline player once tapped.
+  /// Media area: the poster at the sender's aspect ratio, FITTED into the card
+  /// rather than stretched across it, and — for a post carrying a direct video
+  /// — the inline player once tapped.
+  ///
+  /// The fit is the whole point (see [_maxMediaHeight]): whichever dimension
+  /// would overflow is the one that gives, so a landscape thumbnail still
+  /// spans the card and a portrait one narrows and centres. Nothing is
+  /// cropped — the box matches the source aspect, so `BoxFit.cover` has
+  /// nothing to cut.
   ///
   /// A post whose `video_url` is not a direct file (YouTube, TikTok) still
   /// gets a play badge, but tapping it opens the browser. See
@@ -312,9 +330,11 @@ class _LinkPreviewCardState extends ConsumerState<LinkPreviewCard> {
 
     final w = preview.thumbW;
     final h = preview.thumbH;
-    // Clamp extremes so a 1:8 banner can't make the bubble a mile tall.
+    // Clamp extremes. Height is bounded by _maxMediaHeight now, so what this
+    // still buys is a floor on WIDTH: an unclamped 1:8 sliver would render
+    // 45px wide once contained, which is not a preview of anything.
     final ratio = (w != null && h != null && w > 0 && h > 0)
-        ? (w / h).clamp(0.6, 2.4)
+        ? (w / h).clamp(0.6, 2.4).toDouble()
         : 16 / 9;
 
     final image = Image.memory(
@@ -326,39 +346,77 @@ class _LinkPreviewCardState extends ConsumerState<LinkPreviewCard> {
     );
 
     final hasVideo = preview.videoUrl != null && preview.videoUrl!.isNotEmpty;
-    if (!hasVideo) {
-      return AspectRatio(aspectRatio: ratio.toDouble(), child: image);
-    }
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        // Unbounded width would make `cardWidth` infinite and the fit
+        // meaningless; fall back to the card's own cap.
+        final cardWidth = constraints.maxWidth.isFinite
+            ? constraints.maxWidth
+            : _maxWidth;
+        final inset = HollowSpacing.sm * 2;
+        // Contain: whichever dimension would overflow is the one that gives.
+        // A narrowed poster is inset, so it competes for slightly less width.
+        final tall = ratio < cardWidth / _maxMediaHeight;
+        final width = tall
+            ? (_maxMediaHeight * ratio).clamp(0.0, cardWidth - inset)
+            : cardWidth;
 
-    return AspectRatio(
-      aspectRatio: ratio.toDouble(),
-      child: switch (_videoState) {
-        _CardVideoState.poster => _buildPoster(hollow, image),
-        _CardVideoState.preparing => Stack(
-            fit: StackFit.expand,
-            children: [
-              image,
-              const ColoredBox(color: Color(0x66000000)),
-              const Center(
-                child: SizedBox(
-                  width: 26,
-                  height: 26,
-                  child: CircularProgressIndicator(
-                    strokeWidth: 2,
-                    color: Colors.white,
-                  ),
-                ),
-              ),
-            ],
+        final media = AspectRatio(
+          aspectRatio: ratio,
+          child: hasVideo ? _buildVideoArea(hollow, image) : image,
+        );
+
+        // Full-width media bleeds to the card edges and inherits its rounding.
+        if (!tall) return media;
+
+        // A narrowed poster would otherwise sit square-cornered and flush
+        // against the card's rounded top, reading like a clipping bug rather
+        // than a deliberate fit. Inset and round it instead.
+        return Padding(
+          padding: const EdgeInsets.fromLTRB(
+            HollowSpacing.sm, HollowSpacing.sm, HollowSpacing.sm, 0,
           ),
-        _CardVideoState.playing => InlineVideoPlayer(
-            controller: _controller!,
-            hollow: hollow,
-            // No fullscreen: that viewer takes a disk path, and this is a
-            // remote URL we deliberately never download.
+          child: Center(
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(hollow.radiusSm),
+              child: SizedBox(width: width, child: media),
+            ),
           ),
+        );
       },
     );
+  }
+
+  /// The media area's contents for a post that carries a video: poster with a
+  /// play affordance, the spinner while the controller warms up, then the
+  /// player itself. Sized by the caller.
+  Widget _buildVideoArea(HollowTheme hollow, Widget image) {
+    return switch (_videoState) {
+      _CardVideoState.poster => _buildPoster(hollow, image),
+      _CardVideoState.preparing => Stack(
+          fit: StackFit.expand,
+          children: [
+            image,
+            const ColoredBox(color: Color(0x66000000)),
+            const Center(
+              child: SizedBox(
+                width: 26,
+                height: 26,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  color: Colors.white,
+                ),
+              ),
+            ),
+          ],
+        ),
+      _CardVideoState.playing => InlineVideoPlayer(
+          controller: _controller!,
+          hollow: hollow,
+          // No fullscreen: that viewer takes a disk path, and this is a
+          // remote URL we deliberately never download.
+        ),
+    };
   }
 
   /// Poster with the play button. Inline-capable posts start the player;

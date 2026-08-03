@@ -480,6 +480,10 @@ pub struct GuestSyncMessageFfi {
     pub reactions: Vec<GuestReactionFfi>,
     /// Attachment metadata (never bytes) — Dart builds the file card from it.
     pub file_meta: Option<GuestFileMetaFfi>,
+    /// The message's link preview card. Signature-covered before it got here
+    /// (`guest_item_accepted`), so the guest browser renders it like any
+    /// member would — and, as everywhere else, without fetching the URL.
+    pub link_preview: Option<LinkPreviewRef>,
 }
 
 /// FFI-facing file metadata for a guest message (metadata only, no bytes).
@@ -1321,6 +1325,7 @@ fn to_ffi_event(event: node::NetworkEvent) -> NetworkEvent {
                         height: fm.height,
                         disk_path: fm.disk_path,
                     }),
+                    link_preview: m.link_preview.map(Into::into),
                 }).collect(),
                 sender_profiles: sender_profiles.into_iter().map(|p| SyncSenderProfileFfi {
                     peer_id: p.peer_id, name: p.name, avatar: p.avatar,

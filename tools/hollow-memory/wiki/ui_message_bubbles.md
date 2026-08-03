@@ -701,9 +701,13 @@ Takes `preview` (`network_api.LinkPreviewRef`) plus an optional `messageId`, pas
 
 *Compact* (`kind == null`) — the original row. 80x80 thumb left, title maxLines 2, description maxLines 3.
 
-*Large* (`kind == "large"`) — image full-width on top at the sender's `thumbW/thumbH` aspect (clamped 0.6–2.4), then header, then the **author** line as heading when present (falling back to title), then description at **maxLines 6** because a post's body is the point of the card. Emitted by the social adapters AND by any page that declares a big card — see `rust_networking.md` § link_preview.rs.
+*Large* (`kind == "large"`) — image on top, then header, then the **author** line as heading when present (falling back to title), then description at **maxLines 6** because a post's body is the point of the card. Emitted by the social adapters AND by any page that declares a big card — see `rust_networking.md` § link_preview.rs.
 
 Both layouts always show the header line ("Site Name · domain"), so a card sourced from a post still states where a tap goes.
+
+**Media is CONTAINED, not stretched (`_maxMediaHeight = 360`).** The image used to span the full card width at the sender's aspect, which reads fine at 16:9 (~225px tall) and made a 9:16 reel poster a ~670px monolith — aspect alone does not bound height once width is fixed. `_buildWideImage` now fits the poster into `cardWidth × _maxMediaHeight`: landscape still spans the card, portrait gives up WIDTH and is inset + rounded (square corners flush against the card's rounded top read as a clipping bug). Nothing is cropped — the `AspectRatio` box matches the source, so `BoxFit.cover` has nothing to cut, which matters for a widget whose job is to preview. Same fit rule as `video_message_bubble.dart::_resolveDisplaySize`. The `thumbW/thumbH` clamp (0.6–2.4) survives but now floors WIDTH: an unclamped 1:8 banner would contain down to a 45px sliver.
+
+Verified visually by `test/screenshots/link_preview_card_screenshot_test.dart` — see `feedback_ui_screenshot_harness`.
 
 **Inline video (issue #45):**
 - `isDirectPlayableVideo(url)` (top-level, exported for tests) gates it: scheme must be http(s) AND the path must end in `.mp4/.webm/.m4v/.mov`. True → inline play; false → external-open glyph. This is what separates X (FxEmbed returns a real mp4) from YouTube (no direct URL exists — signed DASH segments).

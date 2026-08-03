@@ -1835,6 +1835,10 @@ class EventStreamNotifier extends Notifier<bool> {
             replyToMid: m.replyTo,
             reactions: reactions,
             fileAttachment: attachment,
+            // Signature-covered on the Rust side before it reached us
+            // (guest_item_accepted binds the card into the check), so this
+            // renders like any member's card — and still fetches nothing.
+            linkPreview: m.linkPreview,
           );
         }).toList();
         ref.read(channelChatProvider.notifier).setGuestMessages(

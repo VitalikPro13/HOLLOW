@@ -10606,3 +10606,335 @@ async fn clearing_a_link_preview_re_signs_and_propagates() {
     drop(a);
     drop(b);
 }
+
+/// Issue #45 follow-up — a peer that gets a message through BACKFILL gets the
+/// card with it, not just a bare link.
+///
+/// The field report: previews work when both peers are online and the sender
+/// always sees their own, but a peer catching up gets the text and no card.
+/// Backfill carried only `lp_digest` — the 64-char hash the signature binds —
+/// on the reasoning that verification never needs more than the hash. True,
+/// and exactly why the card never arrived: nothing else in the protocol ever
+/// re-sends one.
+///
+/// The scenario is a member who joins AFTER the card exists, chosen because it
+/// is the one where sync is provably the only vehicle. A member who merely
+/// goes offline and returns can also be rescued by a queued live envelope or a
+/// relay topic replay, which would make this test pass with the bug still in
+/// place (it did, while being written).
+///
+/// Two things must hold on the joiner's row, and the second is the quieter
+/// half of the bug:
+///  * the card is THERE, and
+///  * the row still VERIFIES against the digest of that card — because the row
+///    a peer stores is the row it later re-serves. A row holding a signature
+///    over a preview it does not have computes `lp_digest = None` when packed
+///    for the next peer, and that peer REJECTS the message as forged. The card
+///    used to die after one hop; so did the message behind it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn backfilled_member_gets_link_preview_through_channel_sync() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    // O = owner/poster, J = the member who only ever sees history.
+    const O_MASTER: u8 = 144;
+    const J_MASTER: u8 = 145;
+    let o_master = NativeKeypair::from_secret_bytes(&seed_bytes(O_MASTER)).peer_id();
+    let j_master = NativeKeypair::from_secret_bytes(&seed_bytes(J_MASTER)).peer_id();
+
+    let mut o = spawn_node_with_friends(&relay, O_MASTER, O_MASTER, &[&j_master]).await;
+    sleep_ms(1200).await;
+    let mut j = spawn_node_with_friends(&relay, J_MASTER, J_MASTER, &[&o_master]).await;
+    sleep_ms(4000).await;
+
+    let server_id = create_server_and_wait(&mut o, "Preview Server").await;
+    let general = general_channel_of(&server_id);
+    drain_events(&mut o);
+    drain_events(&mut j);
+
+    // --- The message and its card happen with O alone in the server. ---
+    const MID: &str = "lp-sync-1";
+    o.cmd_tx
+        .send(NodeCommand::SendChannelMessage {
+            server_id: server_id.clone(),
+            channel_id: general.clone(),
+            text: "read this https://example.com/story".to_string(),
+            message_id: MID.to_string(),
+            reply_to_mid: None,
+            link_preview: None,
+        })
+        .await
+        .unwrap();
+    sleep_ms(800).await;
+
+    // The fetch lands after the send — the common case, and the one that made
+    // the card a separate `lp_set` frame nobody later can re-request.
+    let preview = crate::node::LinkPreviewRef {
+        url: "https://example.com/story".to_string(),
+        title: "The Story".to_string(),
+        description: "what happened".to_string(),
+        domain: "example.com".to_string(),
+        site_name: "Example".to_string(),
+        thumb_webp_b64: Some("SEVMTE8".to_string()),
+        thumb_w: Some(800),
+        thumb_h: Some(450),
+        rich: crate::node::RichCard {
+            kind: Some("large".to_string()),
+            author: Some("A Reporter".to_string()),
+            ..Default::default()
+        }
+        .into_opt(),
+    };
+    o.cmd_tx
+        .send(NodeCommand::AttachChannelLinkPreview {
+            server_id: server_id.clone(),
+            channel_id: general.clone(),
+            message_id: MID.to_string(),
+            preview: Some(Box::new(preview.clone())),
+        })
+        .await
+        .unwrap();
+    sleep_ms(1500).await;
+    assert!(
+        o.store().get_channel_message_sig_row(MID).and_then(|r| r.link_preview).is_some(),
+        "precondition: the poster holds the card"
+    );
+    // Precondition: J was not a member for any of it, so nothing was ever
+    // addressed, queued or broadcast to them. Backfill is the only vehicle.
+    assert!(
+        j.store().get_channel_message_sig_row(MID).is_none(),
+        "precondition: the non-member must not have the row yet"
+    );
+
+    // --- J joins. History arrives as a ChannelSyncBatch and nothing else. ---
+    drain_events(&mut j);
+    j.cmd_tx
+        .send(NodeCommand::JoinServer {
+            server_id: server_id.clone(),
+            twitch_proof_json: None,
+            nsfw_confirmed: false,
+        })
+        .await
+        .unwrap();
+    let joined = wait_event(&mut j, std::time::Duration::from_secs(10), |ev| {
+        matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
+    })
+    .await;
+    assert!(joined, "member J should join the server");
+    sleep_ms(4000).await;
+
+    let row = j
+        .store()
+        .get_channel_message_sig_row(MID)
+        .expect("the joining member must backfill the message row");
+
+    // 1. The card came with the message.
+    let card = row
+        .link_preview
+        .as_ref()
+        .expect("returning member must get the CARD through sync, not just the text");
+    assert_eq!(card.title, "The Story", "synced card title");
+    assert_eq!(
+        card.thumb_webp_b64.as_deref(),
+        Some("SEVMTE8"),
+        "the thumbnail must ride the batch — a card with no image is half a card"
+    );
+    assert_eq!(
+        card.rich.as_ref().and_then(|r| r.author.as_deref()),
+        Some("A Reporter"),
+        "rich fields must survive the round trip"
+    );
+    assert!(
+        row.edited_at.is_none(),
+        "a card arriving through sync must not mark the message edited"
+    );
+
+    // 2. The row verifies against THAT card's digest — so this member can
+    //    re-serve the message and be believed. This is the assertion that
+    //    fails on the old digest-only wire.
+    let digest = crate::node::crypto_handler::link_preview_digest(card);
+    let extras = crate::node::crypto_handler::SignedExtras {
+        mid: Some(MID),
+        reply_to: row.reply_to_mid.as_deref(),
+        file_id: row.file_id.as_deref(),
+        order_us: row.order_us,
+        lp_digest: Some(&digest),
+    };
+    assert!(
+        crate::node::crypto_handler::verify_message_signature_v2(
+            &o_master,
+            row.signature.as_deref(),
+            row.public_key.as_deref(),
+            "ch",
+            &format!("{server_id}:{general}"),
+            row.edited_at.unwrap_or(row.timestamp),
+            &extras,
+            &row.text,
+            &mut crate::node::crypto_handler::PkCache::new(),
+        ),
+        "the synced row must verify against the card it now holds — otherwise \
+         re-serving it computes a digest nobody signed and the next peer drops \
+         the message entirely"
+    );
+
+    // 3. Re-syncing is idempotent: the same card arriving again must not
+    //    duplicate the row.
+    relay.set_online(&j.device_id, false);
+    sleep_ms(300).await;
+    relay.set_online(&j.device_id, true);
+    sleep_ms(3000).await;
+    let count = j
+        .channel_messages(&server_id, &general)
+        .iter()
+        .filter(|m| m.text.contains("https://example.com/story"))
+        .count();
+    assert_eq!(count, 1, "a re-synced card must not duplicate the message row");
+
+    drop(o);
+    drop(j);
+}
+
+/// The DM half of the same fix — a card reaching a device through
+/// `DmSiblingSyncBatch`, which is the DM path where backfill is provably the
+/// only vehicle.
+///
+/// A friend who merely goes offline is rescued by the sender's pending queue
+/// and the relay's per-device buffer, so that scenario cannot tell the fix from
+/// the bug. A device that did not EXIST when the message was sent has neither:
+/// nothing was ever queued or buffered for it, and nothing re-broadcasts. It
+/// has exactly what its sibling will hand it. This is the "link my phone and
+/// scroll back" case.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn freshly_linked_device_backfills_dm_link_previews_from_its_sibling() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    // A = the friend. M = us: device B exists, device C gets linked later.
+    const A_MASTER: u8 = 146;
+    const M_MASTER: u8 = 147;
+    const B_DEV: u8 = 148;
+    const C_DEV: u8 = 149;
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
+    let m_master = NativeKeypair::from_secret_bytes(&seed_bytes(M_MASTER)).peer_id();
+    let b_dev = NativeKeypair::from_secret_bytes(&seed_bytes(B_DEV)).peer_id();
+    let c_dev = NativeKeypair::from_secret_bytes(&seed_bytes(C_DEV)).peer_id();
+
+    // Only B exists so far — C is deliberately unknown to every node, so no
+    // queue or buffer can be holding anything for it.
+    super::resolver::seed_self(&m_master, &[b_dev.clone()]);
+    super::resolver::update_many(&m_master, [b_dev.as_str()]);
+
+    let mut a = spawn_node_with_friends(&relay, A_MASTER, A_MASTER, &[&m_master]).await;
+    sleep_ms(1200).await;
+    let mut b = spawn_node_with_friends(&relay, M_MASTER, B_DEV, &[&a_master]).await;
+    sleep_ms(4000).await;
+    drain_events(&mut a);
+    drain_events(&mut b);
+
+    const MID: &str = "lp-sib-1";
+    b.cmd_tx
+        .send(NodeCommand::SendMessage {
+            peer_id: a_master.clone(),
+            text: "see https://example.com/thread".to_string(),
+            message_id: MID.to_string(),
+            reply_to_mid: None,
+            link_preview: None,
+        })
+        .await
+        .unwrap();
+    let delivered = wait_event(&mut a, std::time::Duration::from_secs(10), |ev| {
+        matches!(ev, NetworkEvent::MessageReceived { message_id, .. } if message_id == MID)
+    })
+    .await;
+    assert!(delivered, "the plain message must reach the friend first");
+
+    let preview = crate::node::LinkPreviewRef {
+        url: "https://example.com/thread".to_string(),
+        title: "The Thread".to_string(),
+        description: "a discussion".to_string(),
+        domain: "example.com".to_string(),
+        site_name: "Example".to_string(),
+        thumb_webp_b64: Some("VEhSRUFE".to_string()),
+        thumb_w: Some(800),
+        thumb_h: Some(418),
+        rich: None,
+    };
+    b.cmd_tx
+        .send(NodeCommand::AttachDmLinkPreview {
+            peer_id: a_master.clone(),
+            message_id: MID.to_string(),
+            preview: Some(Box::new(preview.clone())),
+        })
+        .await
+        .unwrap();
+    sleep_ms(2000).await;
+    assert!(
+        b.store().get_dm_message_sig_row(MID).and_then(|r| r.link_preview).is_some(),
+        "precondition: the sending device holds the card"
+    );
+
+    // --- NOW device C is linked. Its DB is empty; sibling backfill is all it has. ---
+    super::resolver::seed_self(&m_master, &[b_dev.clone(), c_dev.clone()]);
+    super::resolver::update_many(&m_master, [b_dev.as_str(), c_dev.as_str()]);
+    let c = spawn_node_full(
+        &relay, M_MASTER, C_DEV, &[&a_master], Some(&[b_dev.clone()]),
+    )
+    .await;
+    sleep_ms(9000).await; // link → inbox join → DmSiblingSyncRequest → batch
+
+    let row = c
+        .store()
+        .get_dm_message_sig_row(MID)
+        .expect("the freshly-linked device must backfill the DM row from its sibling");
+    let card = row
+        .link_preview
+        .as_ref()
+        .expect("the linked device must get the CARD through sibling backfill");
+    assert_eq!(card.title, "The Thread", "backfilled DM card title");
+    assert_eq!(
+        card.thumb_webp_b64.as_deref(),
+        Some("VEhSRUFE"),
+        "the thumbnail must ride the DM batch too"
+    );
+    assert!(
+        row.edited_at.is_none(),
+        "a backfilled card must not mark the DM edited"
+    );
+
+    // And the row verifies against that card — same re-serve argument as the
+    // channel test. A DM signature binds the RECIPIENT's master as context.
+    let digest = crate::node::crypto_handler::link_preview_digest(card);
+    let extras = crate::node::crypto_handler::SignedExtras {
+        mid: Some(MID),
+        reply_to: row.reply_to_mid.as_deref(),
+        file_id: row.file_id.as_deref(),
+        order_us: row.order_us,
+        lp_digest: Some(&digest),
+    };
+    assert!(
+        crate::node::crypto_handler::verify_message_signature_v2(
+            &m_master,
+            row.signature.as_deref(),
+            row.public_key.as_deref(),
+            "dm",
+            &a_master,
+            row.edited_at.unwrap_or(row.timestamp),
+            &extras,
+            &row.text,
+            &mut crate::node::crypto_handler::PkCache::new(),
+        ),
+        "the backfilled DM row must verify against the card it now holds"
+    );
+
+    drop(a);
+    drop(b);
+    drop(c);
+}

@@ -219,12 +219,19 @@ pub(crate) fn guest_item_accepted(
     cid: &str,
     pk_cache: &mut PkCache,
 ) -> bool {
+    // Digest from the shipped card, so the card is covered by the same check
+    // that covers the text. This is the whole reason a guest may render a
+    // preview at all: the batch is PLAINTEXT, so without binding the card a
+    // relay could paste a phishing one onto any message a stranger reads.
+    let lp_digest = super::crypto_handler::backfill_lp_digest(
+        m.lp.as_deref(), m.lp_digest.as_deref(),
+    );
     let extras = SignedExtras {
         mid: m.mid.as_deref(),
         reply_to: m.reply_to.as_deref(),
         file_id: m.file_id.as_deref(),
         order_us: m.order_us,
-        lp_digest: m.lp_digest.as_deref(),
+        lp_digest: lp_digest.as_deref(),
     };
     let verdict = super::crypto_handler::check_backfill_signature(
         &super::resolver::resolve(&m.s), "ch", &format!("{sid}:{cid}"),
@@ -255,12 +262,15 @@ pub(crate) fn verified_guest_hidden_at(
     let hidden_ts = m.hidden_at?;
     let (sig, pk) = (m.hidden_sig.as_deref()?, m.hidden_pk.as_deref()?);
     let signer = super::resolver::resolve(&m.s);
+    let lp_digest = super::crypto_handler::backfill_lp_digest(
+        m.lp.as_deref(), m.lp_digest.as_deref(),
+    );
     let extras = SignedExtras {
         mid: m.mid.as_deref(),
         reply_to: m.reply_to.as_deref(),
         file_id: m.file_id.as_deref(),
         order_us: m.order_us,
-        lp_digest: m.lp_digest.as_deref(),
+        lp_digest: lp_digest.as_deref(),
     };
     verify_message_signature_v2(
         &signer, Some(sig), Some(pk), "ch-delete", &format!("{sid}:{cid}"),
@@ -1701,6 +1711,61 @@ fn sign_attached_preview(
 /// Serialize a preview for the `link_preview_json` column. `None` clears it.
 fn preview_column(preview: Option<&LinkPreviewRef>) -> Option<String> {
     preview.and_then(|lp| serde_json::to_string(lp).ok())
+}
+
+/// Land the card riding a VERIFIED sync item on its row.
+///
+/// Backfill used to carry only `lp_digest`, so a peer that was offline when a
+/// card was attached received a message whose signature bound a preview it had
+/// no copy of. It rendered a bare link — and re-serving that row computed
+/// `lp_digest = None` from its own empty column, which every downstream peer
+/// then rejected as forged. Previews ride the batch now; this is where they
+/// land.
+///
+/// Card and signature are written TOGETHER because the pair is inseparable:
+/// the v2 payload binds `lp_digest`, so a card grafted on without the
+/// signature covering it produces exactly the row that used to break — one
+/// that fails its own Message Proof and replicates to nobody. The signature
+/// written is the item's own, the one `check_backfill_signature` just verified
+/// over this exact card.
+///
+/// Guarded on the item's text matching the row's, because that signature only
+/// speaks for the text it was made over. If our row has been edited since (or
+/// this item is a stale copy), the batch's edit branch owns the row and must
+/// not have its newer signature overwritten by an older one.
+///
+/// Returns true when the card actually landed, so the caller can emit
+/// `*LinkPreviewUpdated` and repaint an open pane.
+pub(crate) fn apply_synced_link_preview(
+    store: &crate::storage::MessageStore,
+    is_channel: bool,
+    mid: &str,
+    item_text: &str,
+    lp: &LinkPreviewRef,
+    sig: Option<&str>,
+    pk: Option<&str>,
+) -> bool {
+    let row = if is_channel {
+        store.get_channel_message_sig_row(mid)
+    } else {
+        store.get_dm_message_sig_row(mid)
+    };
+    let Some(row) = row else { return false };
+    if row.text != item_text {
+        return false;
+    }
+    // Already exactly this card (the common case on every re-sync) — skip the
+    // write and the event rather than repaint for nothing.
+    if row.link_preview.as_ref() == Some(lp) {
+        return false;
+    }
+    let Some(lp_json) = preview_column(Some(lp)) else { return false };
+    let applied = if is_channel {
+        store.update_channel_link_preview_and_sig(mid, Some(&lp_json), sig, pk)
+    } else {
+        store.update_link_preview_and_sig(mid, Some(&lp_json), sig, pk)
+    };
+    matches!(applied, Ok(true))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3303,6 +3368,7 @@ mod tests {
             hidden_pk: pk.clone(),
             order_us: Some(42),
             lp_digest: None,
+            lp: None,
             reactions: Vec::new(),
         };
         let mut cache = PkCache::new();
@@ -3356,6 +3422,7 @@ mod tests {
             hidden_pk: None,
             order_us: Some(ts * 1000),
             lp_digest: None,
+            lp: None,
             reactions: Vec::new(),
         }
     }
@@ -3374,6 +3441,132 @@ mod tests {
         crate::node::types::SyncReactionItem {
             e: emoji.to_string(), p: reactor.to_string(), ts, sig, pk,
         }
+    }
+
+    /// Issue #45 follow-up — a card riding a sync batch is covered by the SAME
+    /// signature that covers the text, because the digest is recomputed from
+    /// the shipped preview rather than trusted from the wire's `lp_digest`.
+    ///
+    /// That ordering is the security property. Backfill now carries thumbnail
+    /// bytes a peer will render, so a responder (or, on the plaintext
+    /// public-channel path, the relay) that could swap the card while keeping
+    /// the author's `lp_digest` would have a phishing primitive: same message,
+    /// same signature, attacker's image and title. Recomputing means any swap
+    /// produces a digest the author never signed.
+    #[test]
+    fn synced_link_preview_is_covered_by_the_item_signature() {
+        let _g = crate::node::resolver::test_lock();
+        let author = kp(242);
+        let author_id = author.peer_id();
+        let (sid, cid) = ("srv-lp", "chan-lp");
+        let (mid, text, ts) = ("lp-item-1", "look https://example.com/x", 7_000i64);
+
+        let card = LinkPreviewRef {
+            url: "https://example.com/x".to_string(),
+            title: "Real Title".to_string(),
+            description: "real body".to_string(),
+            domain: "example.com".to_string(),
+            site_name: "Example".to_string(),
+            thumb_webp_b64: Some("UkVBTA".to_string()),
+            thumb_w: Some(800),
+            thumb_h: Some(450),
+            rich: None,
+        };
+        let digest = link_preview_digest(&card);
+        let extras = SignedExtras {
+            mid: Some(mid), reply_to: None, file_id: None,
+            order_us: Some(ts * 1000), lp_digest: Some(&digest),
+        };
+        let (sig, pk) = sign_message_versioned(
+            &author, &pk_b64(&author), "ch", &format!("{sid}:{cid}"),
+            &author_id, ts, &extras, text,
+        );
+
+        // The responder ships card + digest together, as every packer does.
+        let item = crate::node::types::SyncMessageItem {
+            s: author_id.clone(),
+            t: text.to_string(),
+            ts,
+            sig,
+            pk,
+            mid: Some(mid.to_string()),
+            edited_at: None,
+            reply_to: None,
+            file_id: None,
+            file_meta: None,
+            hidden_at: None,
+            hidden_sig: None,
+            hidden_pk: None,
+            order_us: Some(ts * 1000),
+            lp_digest: Some(digest.clone()),
+            lp: Some(Box::new(card.clone())),
+            reactions: Vec::new(),
+        };
+
+        let verdict = |it: &crate::node::types::SyncMessageItem| {
+            let d = crate::node::crypto_handler::backfill_lp_digest(
+                it.lp.as_deref(), it.lp_digest.as_deref(),
+            );
+            let extras = SignedExtras {
+                mid: it.mid.as_deref(), reply_to: it.reply_to.as_deref(),
+                file_id: it.file_id.as_deref(), order_us: it.order_us,
+                lp_digest: d.as_deref(),
+            };
+            crate::node::crypto_handler::check_backfill_signature(
+                &it.s, "ch", &format!("{sid}:{cid}"),
+                it.ts, it.edited_at, &extras, &it.t,
+                it.sig.as_deref(), it.pk.as_deref(), &mut PkCache::new(),
+            )
+        };
+
+        assert_eq!(
+            verdict(&item),
+            crate::node::crypto_handler::BackfillSig::Valid,
+            "an intact card must verify — this is what carries previews to a peer \
+             that was offline",
+        );
+
+        // A responder swaps the card and updates `lp_digest` to match, which is
+        // the best a tamperer can do. Recomputing from `lp` means the digest we
+        // check is the swapped one, and the author's signature does not cover it.
+        let mut phish = item.clone();
+        let evil = LinkPreviewRef {
+            title: "Free crypto, click here".to_string(),
+            thumb_webp_b64: Some("RVZJTA".to_string()),
+            ..card.clone()
+        };
+        phish.lp_digest = Some(link_preview_digest(&evil));
+        phish.lp = Some(Box::new(evil));
+        assert_eq!(
+            verdict(&phish),
+            crate::node::crypto_handler::BackfillSig::Forged,
+            "a swapped card must REJECT the whole item, not land as a preview",
+        );
+
+        // Keeping the author's digest while shipping someone else's card is the
+        // same attack from the other side, and must fail the same way.
+        let mut grafted = item.clone();
+        grafted.lp = Some(Box::new(LinkPreviewRef {
+            title: "Also not the real title".to_string(),
+            ..card.clone()
+        }));
+        assert_eq!(
+            verdict(&grafted),
+            crate::node::crypto_handler::BackfillSig::Forged,
+            "the wire's lp_digest must not be able to vouch for a different card",
+        );
+
+        // Digest-only, no card: a responder whose own row arrived before
+        // previews rode backfill. Still verifies, stores card-less — the
+        // behaviour every peer had before this change, and the reason
+        // `lp_digest` stays on the wire.
+        let mut legacy = item.clone();
+        legacy.lp = None;
+        assert_eq!(
+            verdict(&legacy),
+            crate::node::crypto_handler::BackfillSig::Valid,
+            "a digest-only item from an older responder must still verify",
+        );
     }
 
     /// Reactions riding a sync batch carry their OWN reactor id, so the

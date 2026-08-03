@@ -377,6 +377,91 @@ async fn mls_remove_identity_and_broadcast(
 
 // ── Shared channel-sync response plumbing ─────────────────────────────
 
+// ── Link previews in backfill (issue #45 follow-up) ──────────────────
+//
+// A card's thumbnail is a lossy WebP up to 800px on its long edge — tens of
+// kilobytes, base64'd into the JSON on top — and a sync page holds up to 200
+// messages. A link-heavy channel could therefore mint a multi-megabyte batch
+// out of one request.
+//
+// The answer is NOT to strip cards past some limit. A stripped card never
+// comes back: nothing in the protocol re-requests one, which is exactly the
+// bug that made previews vanish for anyone who was offline. Instead the PAGE
+// is cut short. Pages are already the wire's unit of flow control — every
+// responder reports `has_more` and the requester re-asks from its advanced
+// watermark — so a short page costs one extra round trip and still delivers
+// every card.
+
+/// Link-preview bytes one sync batch may carry before its page is cut short.
+pub(crate) const SYNC_PREVIEW_BUDGET_BYTES: usize = 2 * 1_024 * 1_024;
+
+/// Messages a page always carries before the byte budget may end it.
+///
+/// This floor is what keeps pagination LIVE, and it is not a tuning knob. A
+/// requester re-asks from its own watermark, and two of the three watermark
+/// queries are INCLUSIVE (`timestamp >= …`, to catch same-millisecond
+/// messages — `INSERT OR IGNORE` absorbs the overlap). So the first rows of
+/// every page after the first are rows the requester ALREADY has. Cut a page
+/// short enough and it could contain nothing but that overlap: the requester
+/// stores nothing new, its watermark does not move, it asks again, and gets
+/// the identical page forever.
+///
+/// Keeping at least this many messages means a stall needs ~50 messages
+/// sitting exactly on their sender's watermark — the same "overlap is tiny"
+/// assumption the 200-message page limit has always rested on.
+const MIN_ITEMS_BEFORE_TRUNCATION: usize = 50;
+
+/// A packed sync page: the items, plus whether the preview budget ended it
+/// early. `truncated` MUST reach the responder's `has_more`, or the messages
+/// left behind wait for whatever triggers the next sync.
+pub(crate) struct SyncPage<T> {
+    pub items: Vec<T>,
+    pub truncated: bool,
+}
+
+/// Spends [`SYNC_PREVIEW_BUDGET_BYTES`] across one batch.
+pub(crate) struct PreviewBudget {
+    remaining: usize,
+}
+
+impl PreviewBudget {
+    pub(crate) fn new() -> Self {
+        Self { remaining: SYNC_PREVIEW_BUDGET_BYTES }
+    }
+
+    /// Charge one preview to the budget. `false` = it does not fit, and the
+    /// caller must END the page there rather than pack the message card-less.
+    ///
+    /// `packed` is how many messages the page already holds; below
+    /// [`MIN_ITEMS_BEFORE_TRUNCATION`] the answer is always yes, which is what
+    /// guarantees the page outruns the requester's inclusive watermark.
+    pub(crate) fn fits(&mut self, lp: &LinkPreviewRef, packed: usize) -> bool {
+        let cost = preview_wire_cost(lp);
+        if packed < MIN_ITEMS_BEFORE_TRUNCATION {
+            self.remaining = self.remaining.saturating_sub(cost);
+            return true;
+        }
+        match self.remaining.checked_sub(cost) {
+            Some(left) => {
+                self.remaining = left;
+                true
+            }
+            None => false,
+        }
+    }
+}
+
+/// Rough serialized size of a preview. The thumbnail dominates by orders of
+/// magnitude; the text fields are capped at 200/400 chars by the fetcher.
+fn preview_wire_cost(lp: &LinkPreviewRef) -> usize {
+    lp.thumb_webp_b64.as_ref().map_or(0, String::len)
+        + lp.url.len()
+        + lp.title.len()
+        + lp.description.len()
+        + lp.domain.len()
+        + lp.site_name.len()
+}
+
 /// Pack stored channel messages into wire `SyncMessageItem`s, joining in each
 /// message's reactions and file metadata via two batch queries. The channel
 /// twin of swarm.rs's `build_dm_sync_items`; shared by every channel-sync
@@ -385,13 +470,29 @@ async fn mls_remove_identity_and_broadcast(
 pub(crate) fn channel_sync_items(
     store: &crate::storage::MessageStore,
     messages: &[crate::storage::messages::StoredChannelMessage],
-) -> Vec<SyncMessageItem> {
+) -> SyncPage<SyncMessageItem> {
     let msg_ids: Vec<String> = messages.iter().filter_map(|m| m.message_id.clone()).collect();
     let reactions_map = store.load_reactions_for_sync(&msg_ids).unwrap_or_default();
     let file_ids: Vec<&str> = messages.iter().filter_map(|m| m.file_id.as_deref()).collect();
     let file_meta_map = store.get_file_metadata_batch(&file_ids).unwrap_or_default();
 
-    messages.iter().map(|m| {
+    let mut budget = PreviewBudget::new();
+    let mut items: Vec<SyncMessageItem> = Vec::with_capacity(messages.len());
+    let mut truncated = false;
+
+    for m in messages {
+        // Cut the page here when this message's card no longer fits — never
+        // pack the message and drop its card (see the budget note above).
+        if let Some(lp) = &m.link_preview {
+            if !budget.fits(lp, items.len()) {
+                hollow_log!(
+                    "[HOLLOW-SYNC] Preview budget spent after {} item(s) — cutting the page short (has_more)",
+                    items.len()
+                );
+                truncated = true;
+                break;
+            }
+        }
         let reactions = m.message_id.as_ref()
             .and_then(|mid| reactions_map.get(mid))
             .map(|rs| rs.iter().map(|(e, p, ts, sig, pk)| SyncReactionItem {
@@ -419,7 +520,7 @@ pub(crate) fn channel_sync_items(
         let (hidden_at, hidden_sig, hidden_pk) = super::message_ops::deletion_proof_fields(
             store, m.hidden_at, m.message_id.as_deref(),
         );
-        SyncMessageItem {
+        items.push(SyncMessageItem {
             s: m.sender_id.clone(),
             t: m.text.clone(),
             ts: m.timestamp,
@@ -436,9 +537,11 @@ pub(crate) fn channel_sync_items(
             order_us: m.order_us,
             lp_digest: m.link_preview.as_ref()
                 .map(super::crypto_handler::link_preview_digest),
+            lp: m.link_preview.clone().map(Box::new),
             reactions,
-        }
-    }).collect()
+        });
+    }
+    SyncPage { items, truncated }
 }
 
 /// Build one page (≤200 messages) of a channel-sync response: query per-sender
@@ -457,7 +560,7 @@ pub(crate) fn build_channel_sync_batch(
     } else {
         store.get_channel_messages_since(sid, cid, since_timestamp, 200)
     }?;
-    let items = channel_sync_items(store, &messages);
+    let SyncPage { items, truncated } = channel_sync_items(store, &messages);
     let total = if !sender_timestamps.is_empty() {
         store.count_channel_messages_since_per_sender(sid, cid, sender_timestamps)
             .unwrap_or(items.len() as u32)
@@ -465,7 +568,13 @@ pub(crate) fn build_channel_sync_batch(
         store.count_channel_messages_since(sid, cid, since_timestamp)
             .unwrap_or(items.len() as u32)
     };
-    let has_more = if items.len() >= 200 && total > 200 { Some(true) } else { None };
+    // `truncated` = the preview budget ended the page before the query did, so
+    // there is definitely more to serve even though the page is short.
+    let has_more = if truncated || (items.len() >= 200 && total > 200) {
+        Some(true)
+    } else {
+        None
+    };
     let count = items.len();
     Ok((MessageEnvelope::ChannelSyncBatch {
         sid: sid.to_string(),
@@ -2893,12 +3002,17 @@ fn verify_sync_item_sig(
     cid: &str,
     pk_cache: &mut PkCache,
 ) -> BackfillSig {
+    // Recomputed from the shipped card when there is one — that is what makes
+    // the preview signature-covered. See `crypto_handler::backfill_lp_digest`.
+    let lp_digest = super::crypto_handler::backfill_lp_digest(
+        msg.lp.as_deref(), msg.lp_digest.as_deref(),
+    );
     let extras = super::crypto_handler::SignedExtras {
         mid: msg.mid.as_deref(),
         reply_to: msg.reply_to.as_deref(),
         file_id: msg.file_id.as_deref(),
         order_us: msg.order_us,
-        lp_digest: msg.lp_digest.as_deref(),
+        lp_digest: lp_digest.as_deref(),
     };
     super::crypto_handler::check_backfill_signature(
         &msg.s, "ch", &format!("{sid}:{cid}"),
@@ -2907,9 +3021,9 @@ fn verify_sync_item_sig(
     )
 }
 
-/// Insert / edit / repair one synced channel message row. Returns (1 when a
-/// NEW row was inserted — feeds the sync counter, else 0; the edited-event to
-/// emit, if any).
+/// Insert / edit / repair one synced channel message row, and land the link
+/// preview riding it. Returns (1 when a NEW row was inserted — feeds the sync
+/// counter, else 0; the events to emit).
 fn upsert_synced_channel_message(
     store: &crate::storage::MessageStore,
     sid: &str,
@@ -2917,10 +3031,13 @@ fn upsert_synced_channel_message(
     msg: &SyncMessageItem,
     is_mine: bool,
     sig_verified: bool,
-) -> (u32, Option<NetworkEvent>) {
+) -> (u32, Vec<NetworkEvent>) {
     let already_exists = msg.mid.as_ref()
         .map(|mid| store.channel_message_exists(mid))
         .unwrap_or(false);
+
+    let mut inserted = 0u32;
+    let mut events = Vec::new();
 
     if !already_exists {
         if let Ok(1) = store.insert_channel_message(
@@ -2933,17 +3050,15 @@ fn upsert_synced_channel_message(
             if let (Some(edit_ts), Some(mid)) = (msg.edited_at, &msg.mid) {
                 let _ = store.set_channel_message_edited_at(mid, edit_ts);
             }
-            return (1, None);
+            inserted = 1;
         }
-        return (0, None);
-    }
-    if let (Some(edit_ts), Some(mid)) = (msg.edited_at, &msg.mid) {
+    } else if let (Some(edit_ts), Some(mid)) = (msg.edited_at, &msg.mid) {
         if store.edit_channel_message(
             mid, &msg.t, edit_ts,
             msg.sig.as_deref(),
             msg.pk.as_deref(),
         ).unwrap_or(false) {
-            return (0, Some(NetworkEvent::ChannelMessageEdited {
+            events.push(NetworkEvent::ChannelMessageEdited {
                 server_id: sid.to_string(),
                 channel_id: cid.to_string(),
                 message_id: mid.clone(),
@@ -2951,12 +3066,31 @@ fn upsert_synced_channel_message(
                 edited_at: edit_ts,
                 signature: msg.sig.clone(),
                 public_key: msg.pk.clone(),
-            }));
+            });
         }
     } else if sig_verified {
         repair_wedged_sender(store, msg, is_mine);
     }
-    (0, None)
+
+    // The card the item's signature covers. Deliberately runs on EVERY branch:
+    // a fresh insert, a row that reached us card-less by some other path, and
+    // an edited row alike should end up holding it. `sig_verified` because a
+    // card is author content — see `apply_synced_link_preview`.
+    if sig_verified
+        && let (Some(lp), Some(mid)) = (msg.lp.as_deref(), &msg.mid)
+        && super::message_ops::apply_synced_link_preview(
+            store, true, mid, &msg.t, lp, msg.sig.as_deref(), msg.pk.as_deref(),
+        )
+    {
+        events.push(NetworkEvent::ChannelLinkPreviewUpdated {
+            server_id: sid.to_string(),
+            channel_id: cid.to_string(),
+            message_id: mid.clone(),
+            preview: Some(lp.clone()),
+        });
+    }
+
+    (inserted, events)
 }
 
 /// Multi-device self-heal: the row already exists but may have been stored
