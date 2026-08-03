@@ -53,9 +53,13 @@ def init_db():
             value TEXT NOT NULL
         );
     """)
+    # vec0 takes the dimension as DDL syntax, so it cannot be a bound parameter.
+    # Force it through int() to guarantee only a literal integer is ever
+    # interpolated, whatever EMBEDDING_DIM is configured to.
+    dim = int(EMBEDDING_DIM)
     conn.execute(f"""
         CREATE VIRTUAL TABLE IF NOT EXISTS vec_chunks USING vec0(
-            embedding float[{EMBEDDING_DIM}]
+            embedding float[{dim}]
         )
     """)
     conn.commit()

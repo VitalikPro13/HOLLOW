@@ -1,9 +1,45 @@
 const http = require('http');
+const crypto = require('crypto');
 const admin = require('firebase-admin');
 const path = require('path');
 
 const PORT = parseInt(process.env.PUSH_PORT || '3001', 10);
 const KEY_PATH = process.env.FIREBASE_KEY_PATH || path.join(__dirname, 'service-account.json');
+// Shared secret with the relay (relay side: HOLLOW_PUSH_TOKEN). This process
+// holds the Firebase Admin credential, and binding to 127.0.0.1 only limits WHO
+// can reach it, not who may use it — without a check, any local process could
+// send arbitrary pushes to arbitrary device tokens. Unset = accept unauthenticated
+// callers as before, so the relay and the sidecar can be deployed independently;
+// set it on both sides to enforce.
+const PUSH_TOKEN = process.env.PUSH_TOKEN || '';
+
+// Constant-time compare that does not leak length via early return.
+function tokenOk(supplied) {
+  if (!PUSH_TOKEN) return true;
+  const a = Buffer.from(String(supplied || ''), 'utf8');
+  const b = Buffer.from(PUSH_TOKEN, 'utf8');
+  if (a.length !== b.length) return false;
+  return crypto.timingSafeEqual(a, b);
+}
+
+// A token mismatch between relay and sidecar would kill EVERY push silently,
+// which is indistinguishable from "nobody is offline". Log the fact of a
+// rejection (never the caller, the supplied value, or any peer data) so the
+// misconfiguration is visible in journalctl. Throttled to once a minute so a
+// hostile local process cannot flood the journal.
+let rejectedSinceLog = 0;
+let lastRejectLog = 0;
+function noteRejected() {
+  rejectedSinceLog++;
+  const now = Date.now();
+  if (now - lastRejectLog < 60_000) return;
+  lastRejectLog = now;
+  console.error(
+    `[push-sidecar] rejected ${rejectedSinceLog} unauthenticated push(es) in the last minute — ` +
+    `if pushes have stopped working, check that HOLLOW_PUSH_TOKEN (relay) matches PUSH_TOKEN (sidecar)`
+  );
+  rejectedSinceLog = 0;
+}
 
 admin.initializeApp({
   credential: admin.credential.cert(KEY_PATH),
@@ -29,6 +65,15 @@ const server = http.createServer((req, res) => {
   if (req.method !== 'POST' || req.url !== '/push') {
     res.writeHead(404);
     res.end();
+    return;
+  }
+
+  if (!tokenOk(req.headers['x-push-token'])) {
+    // No detail in the body and nothing logged about the caller — a rejected
+    // push says only that it was rejected.
+    noteRejected();
+    res.writeHead(401);
+    res.end('unauthorized');
     return;
   }
 

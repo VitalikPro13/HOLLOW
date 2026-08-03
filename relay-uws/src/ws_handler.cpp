@@ -480,11 +480,24 @@ void deliver_push(const PushJob& job) {
     }
     std::string payload = body.dump();
 
+    // Shared secret for the loopback hop to the push sidecar. The sidecar holds
+    // the Firebase Admin credential, so binding to 127.0.0.1 is a reachability
+    // limit, not an authorization one: any local process could otherwise post
+    // arbitrary tokens through it. Read once; empty (unset) sends no header and
+    // the sidecar stays open, so either side can be deployed alone.
+    static const std::string push_token = [] {
+        const char* t = getenv("HOLLOW_PUSH_TOKEN");
+        return t ? std::string(t) : std::string();
+    }();
+
     std::string req = "POST /push HTTP/1.1\r\n"
                       "Host: 127.0.0.1\r\n"
-                      "Content-Type: application/json\r\n"
-                      "Content-Length: " + std::to_string(payload.size()) + "\r\n"
-                      "Connection: close\r\n\r\n" + payload;
+                      "Content-Type: application/json\r\n";
+    if (!push_token.empty()) {
+        req += "X-Push-Token: " + push_token + "\r\n";
+    }
+    req += "Content-Length: " + std::to_string(payload.size()) + "\r\n"
+           "Connection: close\r\n\r\n" + payload;
 
     send(fd, req.data(), req.size(), MSG_NOSIGNAL);
     char buf[128];
@@ -579,15 +592,27 @@ static void evict_over_budget(RelayState& state) {
     }
 }
 
+// NOTE: there is deliberately NO per-minute rate limit on the offline-buffer
+// deposit paths. Rate limiting the relay silently drops messages and breaks CRDT
+// sync — a reconnection burst (key exchange + SyncRequests + profiles to every
+// offline friend at once) legitimately exceeds any threshold worth setting, and
+// a channel post legitimately fans one frame per offline member. Buffer abuse is
+// bounded by fair-share eviction below (a flooder evicts only itself) plus the
+// existing push debounce, neither of which can drop a legitimate message.
+// See feedback_relay_rules.
+
 // Buffer an offline DM frame for later replay when the target joins its DM room.
-// RAM only, ciphertext only. Capped per-peer (drop oldest on overflow).
+// RAM only, ciphertext only. Capped per-peer AND per-sender (drop oldest on
+// overflow, the flooder's own frames first).
 static void buffer_offline_msg(const std::string& target_peer_id,
                                const std::string& room,
                                std::string frame, RelayState& state,
+                               const std::string& sender,
                                bool is_image = false, bool is_channel = false) {
     auto& q = state.offline_buffer[target_peer_id];
     state.buffer_total_bytes += frame.size();
-    q.push_back({room, std::move(frame), std::chrono::steady_clock::now(), is_image, is_channel});
+    q.push_back({room, std::move(frame), sender, std::chrono::steady_clock::now(),
+                 is_image, is_channel});
     // Three independent caps: DM text, inlined-image and channel frames evict
     // separately so a chatty server never pushes out buffered DMs (and
     // vice-versa).
@@ -596,9 +621,29 @@ static void buffer_offline_msg(const std::string& target_peer_id,
         for (const auto& m : q) if (m.is_image == img && m.is_channel == chan) n++;
         return n;
     };
+    // FAIR-SHARE eviction: drop the oldest frame belonging to whichever sender
+    // currently occupies the most slots of this kind, instead of the globally
+    // oldest. With a single sender this is byte-for-byte the old behaviour. Under
+    // contention it means a flooder can only ever evict ITSELF — which is the
+    // whole defence against one peer buffering junk at a peer_id it knows until
+    // every genuine message waiting there has been pushed out.
+    //
+    // Deliberately NOT a flat per-sender cap: the caps here are legitimately
+    // reachable by ONE sender (100 baseline, 500 opted-in), so a fixed share
+    // would silently truncate a real conversation with an offline friend.
     auto drop_oldest_kind = [&](bool img, bool chan) {
+        std::unordered_map<std::string, size_t> counts;
+        for (const auto& m : q) {
+            if (m.is_image == img && m.is_channel == chan) counts[m.sender]++;
+        }
+        if (counts.empty()) return;
+        const std::string* worst = nullptr;
+        size_t worst_n = 0;
+        for (const auto& [s, n] : counts) {
+            if (n > worst_n) { worst_n = n; worst = &s; }
+        }
         for (auto it = q.begin(); it != q.end(); ++it) {
-            if (it->is_image == img && it->is_channel == chan) {
+            if (it->is_image == img && it->is_channel == chan && it->sender == *worst) {
                 state.buffer_total_bytes -= std::min(state.buffer_total_bytes, it->frame.size());
                 q.erase(it);
                 return;
@@ -696,6 +741,12 @@ void sweep_offline_buffer(RelayState& state) {
             } else {
                 break;
             }
+        }
+        // A cleared registration that has finished draining is done — reap it
+        // now rather than holding an empty slot until the 7-day idle expiry.
+        if (!tb.accepting && tb.frames.empty()) {
+            it = state.topic_buffers.erase(it);
+            continue;
         }
         auto idle = std::chrono::duration_cast<std::chrono::seconds>(
             now - tb.last_registered).count();
@@ -820,13 +871,20 @@ static void handle_set_topic_buffer(PerSocketData* data, const json& j, RelaySta
     prefix.push_back('\0');
 
     if (j.value("clear", false)) {
-        for (auto it = state.topic_buffers.begin(); it != state.topic_buffers.end(); ) {
-            if (it->first.rfind(prefix, 0) == 0) {
-                state.buffer_total_bytes -=
-                    std::min(state.buffer_total_bytes, it->second.bytes);
-                it = state.topic_buffers.erase(it);
-            } else {
-                ++it;
+        // Turning catch-up off STOPS retention; it does not destroy what is
+        // already retained. This used to erase every topic buffer for the room
+        // outright, and `clear` is authorized by room membership alone — the
+        // relay cannot tell a server owner from an ordinary member, so any one
+        // member could wipe the shared catch-up state every other member
+        // depends on and strand late joiners. Now the registration stops
+        // accepting new frames and its retention drops to the floor, so what is
+        // held ages out on the normal sweep (within OFFLINE_RETENTION_MIN_SECS)
+        // rather than vanishing on demand. A genuine owner-off converges just
+        // as surely; a hostile member only shortens a window, never deletes.
+        for (auto& [key, tb] : state.topic_buffers) {
+            if (key.rfind(prefix, 0) == 0) {
+                tb.accepting = false;
+                tb.retention_secs = OFFLINE_RETENTION_MIN_SECS;
             }
         }
         return;
@@ -850,9 +908,11 @@ static void handle_set_topic_buffer(PerSocketData* data, const json& j, RelaySta
             auto& tb = state.topic_buffers[key];
             tb.retention_secs = retention;
             tb.last_registered = now;
+            tb.accepting = true;
         } else {
             it->second.retention_secs = retention;  // latest registrar wins
             it->second.last_registered = now;
+            it->second.accepting = true;            // re-arm a cleared buffer
         }
     }
     // No logging — room + channel set is membership metadata.
@@ -987,9 +1047,15 @@ static void handle_binary_channel_direct(PerSocketData* data,
     bool fully_offline = state.peer_sockets.find(target_str) == state.peer_sockets.end();
     if (in_room) return;
 
+    // No per-minute gate here on purpose: one channel post legitimately fans
+    // one 0x09 frame per OFFLINE member, so a flat cap would silently drop
+    // delivery for large servers. Abuse is bounded per target instead — the
+    // per-sender channel share in buffer_offline_msg plus the channel push
+    // debounce below. See OFFLINE_INJECT_PER_MIN.
     if (!payload.empty()) {
         buffer_offline_msg(target_str, room_str,
                            build_direct_frame(room_code, data->peer_id, payload), state,
+                           data->peer_id,
                            /*is_image=*/false, /*is_channel=*/true);
     }
     // Push only for FULLY offline targets (a live socket needs no wake).
@@ -1046,7 +1112,8 @@ static void handle_direct(PerSocketData* data, const std::string& room,
         // Buffer as a 0x06 frame so the fetch node's binary parser handles it
         // uniformly with binary DMs.
         buffer_offline_msg(target, room,
-                           build_direct_frame(room, data->peer_id, msg_data), state);
+                           build_direct_frame(room, data->peer_id, msg_data), state,
+                           data->peer_id);
         if (!in_sockets) {
             try_push_notify(target, data->peer_id, state);
         }
@@ -1063,22 +1130,12 @@ static void handle_direct(PerSocketData* data, const std::string& room,
     send_to_peer(tit->second, direct_str, uWS::OpCode::TEXT);
 }
 
-static void handle_binary_broadcast(PerSocketData* data,
-                                     std::string_view raw, RelayState& state) {
-    if (raw.size() <= 33) return;
-
-    std::string room_hex = hex_encode(
-        reinterpret_cast<const uint8_t*>(raw.data() + 1), 32);
-
-    auto rit = state.ws_rooms.find(room_hex);
-    if (rit == state.ws_rooms.end()) return;
-
-    for (auto& [pid, peer_ws] : rit->second.peers) {
-        if (pid != data->peer_id) {
-            send_to_peer(peer_ws, raw, uWS::OpCode::BINARY);
-        }
-    }
-}
+// NOTE: opcode 0x01 (legacy raw 32-byte-room binary broadcast) was REMOVED.
+// It forwarded an attacker-chosen frame to every peer of any room whose code
+// the sender knew, with NO membership check at all — the only handler here
+// that never verified the sender belonged to the room it posted to. No client
+// has sent 0x01 since room codes became strings; live room broadcast is 0x03
+// (handle_binary_msg) and topic fan-out is 0x07, both membership-gated.
 
 static void handle_binary_direct(PerSocketData* data,
                                   std::string_view raw, RelayState& state) {
@@ -1104,6 +1161,20 @@ static void handle_binary_direct(PerSocketData* data,
 
     std::string_view payload = raw.substr(payload_start);
 
+    std::string room_str(room_code);
+    auto rit = state.ws_rooms.find(room_str);
+    if (rit == state.ws_rooms.end()) return;
+
+    // The sender must be in the room it claims to send through. Without this
+    // any authenticated peer who learned a room code could push binary directs
+    // at that room's members without ever joining — the same gate 0x03/0x04/
+    // 0x07/0x09 already apply. privacy: no rejection logging.
+    if (rit->second.peers.find(data->peer_id) == rit->second.peers.end()) return;
+
+    std::string target_str(target_peer);
+    auto tit = rit->second.peers.find(target_str);
+    if (tit == rit->second.peers.end()) return;
+
     // Build forwarded frame: replace target with sender
     std::string forwarded;
     forwarded.reserve(1 + room_code.size() + 1 + data->peer_id.size() + 1 + payload.size());
@@ -1113,14 +1184,6 @@ static void handle_binary_direct(PerSocketData* data,
     forwarded.append(data->peer_id);
     forwarded.push_back(0x00);
     forwarded.append(payload);
-
-    std::string room_str(room_code);
-    auto rit = state.ws_rooms.find(room_str);
-    if (rit == state.ws_rooms.end()) return;
-
-    std::string target_str(target_peer);
-    auto tit = rit->second.peers.find(target_str);
-    if (tit == rit->second.peers.end()) return;
 
     send_to_peer(tit->second, forwarded, uWS::OpCode::BINARY);
 }
@@ -1192,10 +1255,18 @@ static void handle_binary_direct_msg(PerSocketData* data,
     if (rit == state.ws_rooms.end()) {
         // Room doesn't exist — target is offline. Buffer the message for replay
         // when they wake up, then fire a push.
+        //
+        // Nobody is in this room, INCLUDING the sender, so there is no
+        // membership to verify against: any authenticated peer can reach this
+        // branch with any room code and any target peer_id. That is deliberate
+        // (a first DM to an offline peer legitimately has no live room), but it
+        // makes this the widest deposit primitive on the relay, so it carries
+        // the rate limit AND the per-sender buffer share. The frame itself is
+        // ciphertext the target's client verifies and drops if unwanted.
         if (state.peer_sockets.find(target_str) == state.peer_sockets.end()) {
             buffer_offline_msg(target_str, room_str,
                                build_direct_frame(room_code, data->peer_id, payload), state,
-                               is_image);
+                               data->peer_id, is_image);
             try_push_notify(target_str, data->peer_id, state);
         }
         return;
@@ -1218,7 +1289,7 @@ static void handle_binary_direct_msg(PerSocketData* data,
         bool fully_offline = state.peer_sockets.find(target_str) == state.peer_sockets.end();
         buffer_offline_msg(target_str, room_str,
                            build_direct_frame(room_code, data->peer_id, payload), state,
-                           is_image);
+                           data->peer_id, is_image);
         if (fully_offline) {
             try_push_notify(target_str, data->peer_id, state);
         }
@@ -1292,7 +1363,7 @@ static void handle_binary_topic_msg(PerSocketData* data,
         key.push_back('\0');
         key += topic_str;
         auto tit = state.topic_buffers.find(key);
-        if (tit != state.topic_buffers.end()) {
+        if (tit != state.topic_buffers.end() && tit->second.accepting) {
             auto& tb = tit->second;
             tb.frames.push_back({forwarded, data->peer_id, std::chrono::steady_clock::now()});
             tb.bytes += forwarded.size();
@@ -1545,10 +1616,13 @@ static void handle_text_message(SSLWebSocket* ws, PerSocketData* data,
         handle_direct(data, j.value("room", ""), j.value("target", ""),
                       j.value("data", ""), state);
     } else if (type == "check_peers") {
-        // Lightweight liveness check: client sends peer IDs + room IDs,
-        // relay returns which peers are connected and which rooms are populated.
+        // Lightweight liveness check: client sends peer IDs, relay returns which
+        // are connected. Deliberately unthrottled: peer ids are high-entropy so
+        // this cannot be enumerated blind, the reply only restates what routing
+        // already exposes, and throttling it would silently degrade the liveness
+        // check that heals offline-friend state. The privacy fix here was
+        // removing the ROOM probe below, not bounding this lookup.
         json online_peers = json::array();
-        json active_rooms = json::array();
         if (j.contains("peers") && j["peers"].is_array()) {
             for (auto& pid : j["peers"]) {
                 if (pid.is_string()) {
@@ -1559,18 +1633,16 @@ static void handle_text_message(SSLWebSocket* ws, PerSocketData* data,
                 }
             }
         }
-        if (j.contains("rooms") && j["rooms"].is_array()) {
-            for (auto& rid : j["rooms"]) {
-                if (rid.is_string()) {
-                    const std::string& room_id = rid.get_ref<const std::string&>();
-                    auto rit = state.ws_rooms.find(room_id);
-                    if (rit != state.ws_rooms.end() && !rit->second.peers.empty()) {
-                        active_rooms.push_back(room_id);
-                    }
-                }
-            }
-        }
-        send_json(ws, {{"type", "peer_status"}, {"online", online_peers}, {"active_rooms", active_rooms}});
+        // `active_rooms` is answered as a constant empty array and the room
+        // probe behind it is GONE. It reported whether an arbitrary room code
+        // held any peers, and DM room codes are a deterministic function of the
+        // two master peer_ids — so anyone holding two peer_ids could ask the
+        // relay whether those two people were talking. No client has ever used
+        // the reply (swarm.rs discards it), but the field stays on the wire
+        // because ServerMsg::PeerStatus can't deserialize without it.
+        send_json(ws, {{"type", "peer_status"},
+                       {"online", online_peers},
+                       {"active_rooms", json::array()}});
     } else if (type == "discover_peers") {
         // Peer discovery over the LIVE WS connection (replaces the HTTP /bootstrap
         // poll, which paid a fresh TLS handshake per request and could stall under
@@ -1581,7 +1653,14 @@ static void handle_text_message(SSLWebSocket* ws, PerSocketData* data,
         json peers = json::array();
         if (!room.empty()) {
             auto rit = state.ws_rooms.find(room);
-            if (rit != state.ws_rooms.end()) {
+            // Members only. Without this the reply was a roster dump for ANY
+            // room whose code the caller knew: hand it a deterministic DM room
+            // code and it returned exactly which peers were in that DM. Clients
+            // only ever discover in rooms they have already joined
+            // (`active_room` + their own server ids), so requiring membership
+            // costs nothing legitimate.
+            if (rit != state.ws_rooms.end() &&
+                rit->second.peers.count(data->peer_id)) {
                 for (const auto& [pid, sock] : rit->second.peers) {
                     if (pid != data->peer_id) peers.push_back(pid);  // exclude self
                 }
@@ -1841,9 +1920,9 @@ void setup_ws_handler(uWS::SSLApp& app, RelayState& state, const Config& config)
                     }
 
                     switch (opcode) {
-                        case 0x01:
-                            handle_binary_broadcast(data, message, state);
-                            break;
+                        // 0x01 intentionally unhandled — see the note above
+                        // handle_binary_direct. It was an unauthorized
+                        // cross-room broadcast primitive with no live callers.
                         case 0x02:
                             handle_binary_direct(data, message, state);
                             break;

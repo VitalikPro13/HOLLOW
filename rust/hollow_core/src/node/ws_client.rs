@@ -252,7 +252,11 @@ enum ServerMsg {
     PeerJoined { room: String, peer_id: String },
     PeerLeft { room: String, peer_id: String },
     Members { room: String, peers: Vec<String> },
-    PeerStatus { online: Vec<String>, active_rooms: Vec<String> },
+    // `active_rooms` is always empty now: the relay's room-activity probe was
+    // removed (it let anyone holding two peer_ids ask whether their
+    // deterministic DM room was live). Defaulted so a relay that drops the
+    // field entirely still deserializes here.
+    PeerStatus { online: Vec<String>, #[serde(default)] active_rooms: Vec<String> },
     DiscoveredPeers { room: String, peers: Vec<String> },
     TurnCredentials {
         #[serde(default)] username: String,

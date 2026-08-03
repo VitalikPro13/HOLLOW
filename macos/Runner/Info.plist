@@ -42,9 +42,14 @@
 	<array>
 		<string>_hollow._tcp</string>
 	</array>
+	<!-- ATS stays ON for anything leaving the machine. NSAllowsArbitraryLoads
+	     was a blanket cleartext exemption covering the whole public internet;
+	     nothing needed it. Relay/WS traffic is TLS and rides Rust and Dart
+	     sockets that bypass ATS anyway, so the only cleartext consumer is the
+	     loopback helper server, which NSAllowsLocalNetworking covers. -->
 	<key>NSAppTransportSecurity</key>
 	<dict>
-		<key>NSAllowsArbitraryLoads</key>
+		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>
 	<key>CFBundleURLTypes</key>

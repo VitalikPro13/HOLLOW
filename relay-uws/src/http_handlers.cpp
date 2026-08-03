@@ -227,32 +227,13 @@ static void handle_health(HttpResponse* res) {
     res->end(R"({"status":"ok","service":"hollow-signaling"})");
 }
 
-static void handle_turn_credentials(HttpResponse* res, const Config& config) {
-    cors_headers(res);
-
-    if (config.turn_secret.empty()) {
-        res->writeStatus("503 Service Unavailable");
-        res->end(json({{"error", "TURN not configured"}}).dump());
-        return;
-    }
-
-    uint64_t ttl = 3600;
-    uint64_t expiry = now_unix_secs() + ttl;
-    std::string username = std::to_string(expiry) + ":hollow";
-    std::string password = hmac_sha1_base64(config.turn_secret, username);
-
-    json resp = {
-        {"username", username},
-        {"password", password},
-        {"ttl", ttl},
-        {"uris", {
-            "turn:relay.anonlisten.com:3478",
-            "turn:relay.anonlisten.com:3478?transport=tcp",
-            "turns:relay.anonlisten.com:5349"
-        }}
-    };
-    res->end(resp.dump());
-}
+// NOTE: the open HTTP GET /turn-credentials endpoint was REMOVED. It handed
+// out valid time-limited TURN credentials to any unauthenticated caller, which
+// made the TURN service farmable for free relay bandwidth against the per-IP
+// daily budget. TURN credentials are issued ONLY over the authenticated,
+// non-guest WebSocket (`get_turn_credentials` in ws_handler.cpp), which has
+// been the client path since 0.7.1. Do not reintroduce an HTTP variant: there
+// is no caller identity at the HTTP layer to bind the credential to.
 
 static void handle_server_stats(HttpResponse* res, RelayState& state) {
     cors_headers(res);
@@ -359,7 +340,8 @@ static void handle_relay_status(HttpResponse* res, RelayState& state) {
     res->end(resp.dump());
 }
 
-void setup_http_handlers(uWS::SSLApp& app, RelayState& state, const Config& config) {
+void setup_http_handlers(uWS::SSLApp& app, RelayState& state,
+                         const Config& /*config*/) {
     app.options("/*", [](HttpResponse* res, HttpRequest* /*req*/) {
         res->writeHeader("Access-Control-Allow-Origin", "*");
         res->writeHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
@@ -381,10 +363,6 @@ void setup_http_handlers(uWS::SSLApp& app, RelayState& state, const Config& conf
 
     app.get("/health", [](HttpResponse* res, HttpRequest* /*req*/) {
         handle_health(res);
-    });
-
-    app.get("/turn-credentials", [&config](HttpResponse* res, HttpRequest* /*req*/) {
-        handle_turn_credentials(res, config);
     });
 
     app.get("/server-stats", [&state](HttpResponse* res, HttpRequest* /*req*/) {

@@ -909,12 +909,12 @@ class PeerConnectionObserver implements PeerConnection.Observer, EventChannel.St
         } else if (field.get(codec).equals(MediaStreamTrack.MediaType.MEDIA_TYPE_VIDEO)) {
           map.putString("kind", "video");
         }
-      } catch (NoSuchFieldException e1) {
-        e1.printStackTrace();
-      } catch (IllegalArgumentException e1) {
-        e1.printStackTrace();
-      } catch (IllegalAccessException e1) {
-        e1.printStackTrace();
+      } catch (NoSuchFieldException | IllegalArgumentException | IllegalAccessException e1) {
+        // Reflective read of the private `kind` field is best-effort: on a
+        // libwebrtc build where it is absent or inaccessible the codec map just
+        // goes out without "kind". Route it through the plugin logger rather
+        // than dumping a stack trace straight to stderr.
+        Log.w(TAG, "getCodecInfo: could not resolve codec kind", e1);
       }
       codecs.pushMap(map);
     }

@@ -1,6 +1,6 @@
 # Hollow — Privacy Policy
 
-**Last updated: July 29, 2026**
+**Last updated: August 2, 2026**
 
 Hollow is built on one principle: your conversations are yours. We cannot read your messages, listen to your calls, or identify you. This policy explains exactly what data exists, where it exists, and what we can and cannot access.
 
@@ -105,6 +105,18 @@ When you pick an emote or GIF, your device downloads the image once through the 
 
 **Using your own KLIPY API key.** Settings › Network lets you enter your own KLIPY API key, which turns off the proxy for GIF search: your device then contacts KLIPY and its content network directly. If you do that, KLIPY sees your IP address and your searches, tied together by your key — we describe this in the setting itself, because it is a trade rather than an upgrade. It is off by default and nothing about it changes the rule above: a picked GIF is still re-encoded locally and still travels as encrypted bytes, and people who receive your messages still make no network requests. The same applies if you point Hollow at your own self-hosted copy of the proxy.
 
+## Link previews
+
+When you type or paste a web link into the message box, your device fetches that page once and reads its title, description and preview image to build the card you see above the send button. Unlike the searches described above, this request does not go through our web server at all — it goes straight from your device to the site, so we never see which links you share. The site sees an ordinary visit from your IP address, the same as if you had opened the link in a browser, and the request identifies itself as `HollowBot` with a link to [a page explaining what it is](https://anonlisten.com/bot) so site operators can recognise or block it.
+
+**The card is sent, not fetched.** The title, description and a downscaled thumbnail are embedded in your end-to-end encrypted message and travel with it. People who receive your message render the card from those bytes and make **no request to the linked site at all** — not on receipt, not on display. This is the part that matters: without it, posting a link into a busy channel would quietly report every reader's IP address to whoever controls that URL. One person sharing a link means exactly one fetch, no matter how many people read it.
+
+**Posts on X and TikTok.** Those sites serve nothing useful to a preview fetch, so links to them are looked up through a public, key-free read-only API instead (FxEmbed for X, TikTok's own oEmbed endpoint). Those services read the post on their end, so X does not see your address for the post's text — though your device still downloads the preview image from the site's own image servers, which does show your address there, as visiting the post would. What is new is that the operator of that lookup service can see that some address asked about some post. It carries no Hollow identity and nothing is stored on our side, because our side is not involved.
+
+**Turning it off, or adding a hop.** Settings › Network › Link Previews turns previews off entirely — with it off, your device never touches a pasted link, and the strongest version of this section is simply that nothing happens. The same section lets you route those X and TikTok lookups through a service of your choosing if you would rather the upstream never saw your address; it is empty by default, which means direct.
+
+**Videos.** A preview card for a video post shows a play button. Tapping it either plays the video in place, which downloads it from the host, or opens the page in your browser. Either way it happens only because you tapped it — nothing about a video card loads or plays on its own, and the play button can only ever reach the address the sender's own app found, because that address is covered by the message's signature.
+
 ## Law enforcement and government requests
 
 We are committed to transparency about any requests we receive.
@@ -139,7 +151,7 @@ This data never leaves your device in an unencrypted form. If you delete the Hol
 
 Hollow does not integrate with any analytics, advertising, or tracking services. Hollow is a native desktop and mobile application — it does not use cookies or any web-based tracking technology.
 
-The only third parties Hollow ever communicates with are the ones described in this policy: Google/Apple push services on mobile (wake signals only, no content), and — only if you choose to use the corresponding optional features — Twitch (verification), IGDB/Steam via our proxy (game showcase), and FrankerFaceZ/KLIPY via our proxy (emote and GIF search), or KLIPY directly if you supply your own API key.
+The only third parties Hollow ever communicates with are the ones described in this policy: Google/Apple push services on mobile (wake signals only, no content), and — only if you choose to use the corresponding optional features — Twitch (verification), IGDB/Steam via our proxy (game showcase), FrankerFaceZ/KLIPY via our proxy (emote and GIF search), or KLIPY directly if you supply your own API key. Sharing a web link also contacts that link's own site directly to build its preview card, unless you turn link previews off — see [Link previews](#link-previews).
 
 If you download Hollow from a third-party platform (e.g., GitHub), that platform's own privacy policy governs your interaction with their service.
 

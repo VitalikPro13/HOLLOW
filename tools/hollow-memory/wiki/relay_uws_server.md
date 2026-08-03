@@ -392,7 +392,7 @@ When a new WebSocket connects:
 2. If `TEXT` opcode: reject if >1 MB (silent drop). Route to `handle_text_message()`.
 3. If `BINARY` opcode:
    - Dispatch on first byte:
-     - `0x01` -> `handle_binary_broadcast()` — room broadcast via 32-byte room hash
+     - `0x01` -> UNHANDLED (removed 2026-08; see below)
      - `0x02` -> `handle_binary_direct()` — peer-to-peer direct via NUL-delimited fields
      - `0x03` -> `handle_binary_msg()` — room broadcast via NUL-delimited room string
      - `0x04` -> `handle_binary_direct_msg()` — peer-to-peer direct via NUL-delimited fields
@@ -535,8 +535,8 @@ Parses JSON and dispatches on `type` field:
 - `"leave"` -> `leave_room()`
 - `"msg"` -> `handle_msg()`
 - `"direct"` -> `handle_direct()`
-- `"check_peers"` -> inline handler: accepts `peers` (array of peer IDs) and `rooms` (array of room IDs), does O(1) hashmap lookups against `peer_sockets` and `ws_rooms`, returns `{"type":"peer_status","online":[...],"active_rooms":[...]}`. Used by the 60s client-side peer liveness timer for offline friend self-healing. No privacy leak — relay already knows all peer connections and room memberships.
-- `"discover_peers"` -> inline handler: accepts `room`, returns `{"type":"discovered_peers","room":..,"peers":[...]}` listing the room's `ws_rooms` peers (excluding self). Replaces the HTTP `/bootstrap` poll for peer discovery so it rides the live WS connection instead of paying a fresh TLS handshake per request (which could stall under a WS frame burst on the single event loop). Cheap: one map lookup + bounded copy, no blocking I/O. Client side: `WsCommand::DiscoverPeers` / `WsEvent::DiscoveredPeers`. (Since 2026-07 this IS peer discovery — the client's HTTP signaling task was deleted; the relay keeps the HTTP endpoints for old clients.)
+- `"check_peers"` -> inline handler: accepts `peers` (array of peer IDs), does O(1) hashmap lookups against `peer_sockets`, returns `{"type":"peer_status","online":[...],"active_rooms":[]}`. Used by the 60s client-side peer liveness timer for offline friend self-healing. Deliberately UNTHROTTLED: peer ids are high-entropy (not enumerable blind), the reply only restates what routing already exposes, and a cap would silently degrade the liveness check that heals offline-friend state. **The `rooms` probe was REMOVED 2026-08** (issue #46): it reported whether an arbitrary room code held any peers, and DM room codes are a deterministic function of the two master peer_ids — so anyone holding two peer_ids could ask the relay whether those two people were talking. `active_rooms` is now always `[]`; the field stays on the wire only because `ServerMsg::PeerStatus` needs it to deserialize on older clients (it is `#[serde(default)]` from 0.9.4). Never reintroduce a room-state lookup keyed on a caller-supplied room code.
+- `"discover_peers"` -> inline handler: accepts `room`, returns `{"type":"discovered_peers","room":..,"peers":[...]}` listing the room's `ws_rooms` peers (excluding self). Replaces the HTTP `/bootstrap` poll for peer discovery so it rides the live WS connection instead of paying a fresh TLS handshake per request (which could stall under a WS frame burst on the single event loop). Cheap: one map lookup + bounded copy, no blocking I/O. Client side: `WsCommand::DiscoverPeers` / `WsEvent::DiscoveredPeers`. (Since 2026-07 this IS peer discovery — the client's HTTP signaling task was deleted; the relay keeps the HTTP endpoints for old clients.) **MEMBERS ONLY since 2026-08** (issue #46): the requester must be in the room. It previously answered for any room code, making it a roster dump — hand it a deterministic DM room code and it returned exactly who was in that DM. Clients only ever discover in rooms they have already joined (`active_room` + their own server ids), so the gate costs nothing legitimate.
 - `"get_turn_credentials"` (2026-07) -> inline handler: HMAC-SHA1 time-limited TURN credentials over the AUTHENTICATED socket — same generation as HTTP `/turn-credentials` (username `{expiry}:hollow`, ttl 3600, 3 URIs) but guest sockets get `{"error":"auth required"}` and no open farmable endpoint is involved. Returns `{"type":"turn_credentials",username,password,ttl,uris[]}`. `setup_ws_handler`/`handle_text_message` now take `const Config&` for `turn_secret`. Client side: `WsCommand::GetTurnCredentials` on connect + 50-min refresh → `NetworkEvent::TurnCredentials` → Dart `iceConfigProvider`.
 - `"subscribe"` -> `handle_subscribe()`
 
@@ -546,17 +546,22 @@ Unknown types are silently ignored. Invalid JSON is silently ignored.
 
 Binary messages use a type-byte prefix system for zero-copy routing. Four binary message types exist:
 
-#### Type 0x01 — Binary room broadcast (hash-addressed)
+#### Type 0x01 — Binary room broadcast (hash-addressed) — REMOVED 2026-08
 
-**Frame:** `[0x01][32-byte room hash][payload]`
+**Frame was:** `[0x01][32-byte room hash][payload]`
 
-`handle_binary_broadcast()`:
-1. Minimum size check: > 33 bytes.
-2. Extract 32 bytes starting at offset 1 — this is the raw binary room hash.
-3. Hex-encode the 32 bytes to get the room code string for map lookup.
-4. Broadcast the ENTIRE raw frame (including type byte and room hash) to all other peers in the room.
+`handle_binary_broadcast()` is **gone**, and `0x01` is now an unhandled opcode.
 
-Used for: MLS-encrypted `MessageEnvelope` broadcasts (the room hash is the server ID).
+It was the one binary handler that never checked room membership at all: it
+hex-encoded the caller-supplied 32-byte room hash, looked the room up, and
+forwarded the frame verbatim to every peer in it. Anyone authenticated who knew
+a room code could therefore inject frames into a room they had never joined.
+
+Nothing sent it. Server broadcasts moved to `0x03` (`handle_binary_msg`, which
+is membership-gated) when room codes became NUL-delimited strings; the Rust
+client emits only `0x02/0x03/0x04/0x07/0x08/0x09`. Reported publicly via a
+semgrep sweep in issue #46. Do not reintroduce a hash-addressed broadcast
+without a membership check.
 
 #### Type 0x02 — Binary peer-to-peer direct
 
@@ -611,13 +616,13 @@ The type change from 0x04 to 0x06 lets receivers distinguish forwarded direct me
 
 | Client sends | Relay forwards as | Mode | Room addressing |
 |-------------|-------------------|------|-----------------|
-| `0x01` | `0x01` (unchanged) | Broadcast | 32-byte binary hash |
+| `0x01` | — (REMOVED, unhandled) | — | — |
 | `0x02` | `0x02` (target->sender rewrite) | Direct | NUL-delimited string |
 | `0x03` | `0x05` (type change + sender inject) | Broadcast | NUL-delimited string |
 | `0x04` | `0x06` (type change + sender inject) | Direct | NUL-delimited string |
 | `0x08` | `0x06` (same as 0x04) | Direct (image) | NUL-delimited string |
 
-The 0x01 broadcast is the only type that doesn't rewrite — it forwards the entire frame as-is (the sender identity is embedded in the encrypted MLS payload, not the routing header). `0x08` is identical to `0x04` on the wire/forward path — the only difference is the offline buffer tags it `is_image` so it counts against the per-peer image cap (1) instead of the text cap (100). Used for offline inlined-image delivery (see Push notifications section).
+Every surviving type rewrites the routing header to inject the AUTHENTICATED sender, so a client cannot forge who a frame came from at the relay layer. (The removed `0x01` was the one exception — it forwarded verbatim.) `0x08` is identical to `0x04` on the wire/forward path — the only difference is the offline buffer tags it `is_image` so it counts against the per-peer image cap (1) instead of the text cap (100). Used for offline inlined-image delivery (see Push notifications section).
 
 ### ws_handler.cpp — Binary rate limiting (REMOVED)
 
@@ -744,15 +749,24 @@ Returns: `{"status":"ok","service":"hollow-signaling"}`
 
 No authentication, no state access. Used for uptime monitoring.
 
-### GET /turn-credentials — TURN credential generation
+### GET /turn-credentials — REMOVED 2026-08
 
-Returns time-limited TURN credentials for WebRTC media relay.
+**This route is gone.** It handed valid time-limited TURN credentials to any
+unauthenticated caller, so the TURN service was farmable by anyone for free
+relay bandwidth against the per-IP daily budget (issue #46). Credentials are
+issued ONLY over the authenticated non-guest WebSocket
+(`"get_turn_credentials"`), which has been the client path since 0.7.1
+(2026-07-03). Do not add an HTTP variant back: there is no caller identity at
+the HTTP layer to bind a credential to. `setup_http_handlers` still takes a
+`const Config&` (now unused) so the signature stays stable.
 
-**Process:**
+The generation itself (unchanged, now WS-only):
 1. If `config.turn_secret` is empty, return 503 `{"error":"TURN not configured"}`.
 2. Calculate expiry: `now + 3600` (1 hour TTL).
 3. Build username: `"<expiry>:hollow"` (coturn time-limited format).
-4. Compute password: `HMAC-SHA1(turn_secret, username)` base64-encoded.
+4. Compute password: `HMAC-SHA1(turn_secret, username)` base64-encoded. HMAC-SHA1
+   is REQUIRED here by the coturn/TURN REST API spec — semgrep flags it as a
+   weak hash, but it cannot be changed unilaterally without breaking TURN auth.
 5. Return:
    ```json
    {
@@ -881,13 +895,13 @@ ulimit -n 500000
 
 ## Message flow: complete path of a chat message
 
-1. Sender's Rust `node/` encrypts the message with MLS and sends a binary frame: `[0x01][32-byte server_id][MLS ciphertext]`.
+1. Sender's Rust `node/` encrypts the message with MLS and sends a binary frame: `[0x03][server_id\0][MLS ciphertext]`.
 2. Rust `ws_client.rs` sends this over the WSS connection to `relay.anonlisten.com:443/ws`.
 3. Relay's `.message` handler receives it as `BINARY` opcode.
-4. First byte is `0x01` -> `handle_binary_broadcast()`.
-6. Bytes 1-32 are hex-encoded to get the room code (server ID).
-7. The room is looked up in `ws_rooms`.
-8. The entire raw frame is forwarded via `send_to_peer()` to every other peer in the room.
+4. First byte is `0x03` -> `handle_binary_msg()`.
+6. The NUL-delimited room code (server ID) is read from offset 1.
+7. The room is looked up in `ws_rooms`, and the SENDER must be a member of it.
+8. The frame is rebuilt as `0x05` with the authenticated sender injected, then forwarded via `send_to_peer()` to every other peer in the room.
 9. `send_to_peer()` checks each recipient's `getBufferedAmount()` < 2 MB soft limit.
 10. Each recipient's Rust `ws_client.rs` receives the binary frame, strips the type byte and room hash, decrypts with MLS.
 
@@ -946,10 +960,10 @@ The relay is normally a dumb pipe, but to make FCM push notifications deliver re
 **State (`RelayState`, state.h):**
 - `push_tokens`: `peer_id -> {token, platform}`. Registered via `register_push_token` WS message (`handle_register_push_token`). RAM only, re-registered each app launch.
 - `last_push_sent`: `peer_id -> time_point`. Debounce, `PUSH_DEBOUNCE_SECS = 10` (was 30). Throttles FCM call rate only — does NOT drop messages (the buffer keeps them). NOTE: rapid-fire sends within the debounce window suppress later FCM wakes, so some Tier-2 previews won't run until the next un-debounced send — looks flaky under burst testing, fine under normal use.
-- `offline_buffer`: `peer_id -> deque<BufferedMsg{room, frame, at, is_image, is_channel}>`. Each `frame` is a ready-to-send `0x06` direct frame (ciphertext only). **Independent per-peer caps**: baseline `MAX_BUFFERED_MSGS_PER_PEER = 100` (text) and `MAX_BUFFERED_IMAGES_PER_PEER = 1`; **opted-in peers** (message-availability cache, `set_offline_buffer {enabled, retention_secs}` JSON, registry `offline_optin: peer -> retention_secs` clamped 1h..7d, re-sent by ws_client on every reconnect) get `MAX_OPTIN_MSGS_PER_PEER = 500` and `MAX_OPTIN_IMAGES_PER_PEER = 8` with THEIR retention at sweep (images always ≤24h — inlined bytes never ride extended retention). Baseline `OFFLINE_BUFFER_TTL_SECS = 86400` (24h). All buffered bytes count into `buffer_total_bytes` against `MAX_BUFFER_TOTAL_BYTES = 512MB` (oldest-front global eviction, `evict_over_budget`).
+- `offline_buffer`: `peer_id -> deque<BufferedMsg{room, frame, sender, at, is_image, is_channel}>`. **FAIR-SHARE eviction since 2026-08** (issue #46): when a per-peer cap is hit, `drop_oldest_kind` drops the oldest frame belonging to whichever sender currently occupies the MOST slots of that kind — not the globally oldest. With one sender this is byte-for-byte the old behaviour; under contention a flooder can only evict ITSELF. Without it the per-peer caps bounded RAM but not WHO filled it, so one authenticated peer could buffer 100 frames at any peer_id it knew and evict every genuine message waiting there. **Deliberately NOT a flat per-sender cap and NOT rate limited** — the per-peer caps are legitimately reachable by one sender (500 opted-in), and a per-minute limit would silently drop reconnection bursts and large-server `0x09` fan-out. Both are the message-loss class `feedback_relay_rules` forbids. Each `frame` is a ready-to-send `0x06` direct frame (ciphertext only). **Independent per-peer caps**: baseline `MAX_BUFFERED_MSGS_PER_PEER = 100` (text) and `MAX_BUFFERED_IMAGES_PER_PEER = 1`; **opted-in peers** (message-availability cache, `set_offline_buffer {enabled, retention_secs}` JSON, registry `offline_optin: peer -> retention_secs` clamped 1h..7d, re-sent by ws_client on every reconnect) get `MAX_OPTIN_MSGS_PER_PEER = 500` and `MAX_OPTIN_IMAGES_PER_PEER = 8` with THEIR retention at sweep (images always ≤24h — inlined bytes never ride extended retention). Baseline `OFFLINE_BUFFER_TTL_SECS = 86400` (24h). All buffered bytes count into `buffer_total_bytes` against `MAX_BUFFER_TOTAL_BYTES = 512MB` (oldest-front global eviction, `evict_over_budget`).
 
 **Flow (ws_handler.cpp):**
-1. `handle_binary_direct_msg` (0x04 text / **0x08 image**) / `handle_direct` (text): target offline (`peer_sockets` miss) → `buffer_offline_msg(.., is_image)` stores the `0x06` frame → `try_push_notify()` → `notify_push_sidecar()` enqueues `{token, platform, sender}` for the push worker. `buffer_offline_msg` evicts oldest of each kind independently (`count_kind`/`drop_oldest_kind`) so an image burst never pushes out buffered text. **Push delivery uses a SINGLE persistent worker thread + bounded queue (`PUSH_QUEUE_MAX`), NOT a detached thread per push** — `notify_push_sidecar()` lazily starts one worker (`push_worker_loop`) that drains the queue and does the blocking POST to localhost:3001. Per-push thread spawning previously caused churn during DM/file-sync bursts (each POST is a blocking connect/send/recv with 2s timeouts). Queue overflow drops oldest (push is best-effort; the DM still delivers via the offline buffer).
+1. `handle_binary_direct_msg` (0x04 text / **0x08 image**) / `handle_direct` (text): target offline (`peer_sockets` miss) → `buffer_offline_msg(.., is_image)` stores the `0x06` frame → `try_push_notify()` → `notify_push_sidecar()` enqueues `{token, platform, sender}` for the push worker. `buffer_offline_msg` evicts oldest of each kind independently (`count_kind`/`drop_oldest_kind`) so an image burst never pushes out buffered text. **Push delivery uses a SINGLE persistent worker thread + bounded queue (`PUSH_QUEUE_MAX`), NOT a detached thread per push** — `notify_push_sidecar()` lazily starts one worker (`push_worker_loop`) that drains the queue and does the blocking POST to localhost:3001. The POST carries `X-Push-Token` when `HOLLOW_PUSH_TOKEN` is set (sidecar side: `PUSH_TOKEN`, constant-time compare, 401 on mismatch) — the sidecar holds the Firebase Admin credential, so loopback binding limits reachability but not authorization, and any local process could otherwise push to arbitrary device tokens (issue #46). Unset on either side = open, so the two can be deployed independently. Per-push thread spawning previously caused churn during DM/file-sync bursts (each POST is a blocking connect/send/recv with 2s timeouts). Queue overflow drops oldest (push is best-effort; the DM still delivers via the offline buffer).
 2. The peer's FCM fetch node (or full node) later joins the DM room → `handle_join` calls `replay_buffered_msgs()` → sends ALL buffered frames for that room (text + image, both as 0x06), drops delivered entries.
 3. `sweep_offline_buffer()` (5-min timer in main.cpp) evicts entries older than 24h.
 
@@ -968,7 +982,7 @@ The relay is normally a dumb pipe, but to make FCM push notifications deliver re
 Generalizes the push buffer into user-facing offline delivery. **Availability, never authority**: the relay retains the SAME E2EE Ed25519-signed ciphertext it routes; receivers verify + dedup-by-mid + CRDT-merge exactly as if a peer served it; peer sync stays the correctness floor. RAM-only by design (restart = clean slate; nothing seizable persists).
 
 - **DM tier**: `set_offline_buffer {enabled, retention_secs}` (see offline_buffer bullet above). Dart default ON at 3d (`offlineInboxProvider`/`offlineInboxRetentionProvider`, re-applied from `_bootstrap`; ws_client re-registers on reconnect). Delete-on-replay unchanged.
-- **Channel rings**: `topic_buffers: room+'\0'+topic -> TopicBuffer{frames(0x08 form + sender), bytes, retention, last_registered}`. Registered additively via `set_topic_buffer {room, channels[], retention_secs}` (member must be in room; `clear:true` ONLY from the Owner/Admin toggle site — a stale-CRDT member must never wipe the buffer); idle-expire 7d. Inbound `0x07` frames tee into registered rings (caps 200 msgs / 1MB per channel). `topic_catchup {room, channel, max_age_secs}` replays to the requester, skipping their own frames (MLS can't decrypt own ciphertext) and frames older than `max_age_secs` (client watermark + 30min lookback via `catchup_watermark_age_secs` — stops SecretReuse noise from cross-session re-replay). Deletion = retention expiry, NEVER delivery ("everyone got it" is unknowable without learning membership).
+- **Channel rings**: `topic_buffers: room+'\0'+topic -> TopicBuffer{frames(0x08 form + sender), bytes, retention, last_registered}`. Registered additively via `set_topic_buffer {room, channels[], retention_secs}` (member must be in room); idle-expire 7d. **`clear:true` is non-destructive since 2026-08** (issue #46): it sets `accepting=false` and drops `retention_secs` to `OFFLINE_RETENTION_MIN_SECS`, so retained frames age out on the normal sweep instead of being erased on demand, and a drained non-accepting ring is reaped immediately. It used to erase every buffer for the room outright — and since the relay authorizes `clear` by room membership alone (it cannot tell an owner from a member, by design), any single member could destroy the shared catch-up state everyone else depended on. Convention said "Owner/Admin toggle site only"; nothing enforced it. Re-registering re-arms `accepting`. Inbound `0x07` frames tee into registered rings (caps 200 msgs / 1MB per channel). `topic_catchup {room, channel, max_age_secs}` replays to the requester, skipping their own frames (MLS can't decrypt own ciphertext) and frames older than `max_age_secs` (client watermark + 30min lookback via `catchup_watermark_age_secs` — stops SecretReuse noise from cross-session re-replay). Deletion = retention expiry, NEVER delivery ("everyone got it" is unknowable without learning membership).
 - **Client wiring** (swarm.rs): CRDT setting `relay_catchup_secs` (Owner/Admin `ServerSettingChanged`; ABSENT = default ON 259200s, explicit "0" = off). Per-channel `relay_catchup_done` gate (cleared on Disconnected); catch-up fires on RoomMembers sweep AND on `SubscribeChannels` (channel open). `register_relay_catchup` re-registers on toggle, connect, channel open, channel create.
 - **MLS late-delivery windows** (mls_manager.rs `hollow_join_config`): `out_of_order_tolerance=512`, `maximum_forward_distance=2000`, `max_past_epochs=3`, applied at create/join AND upgraded onto loaded groups via `set_configuration` — OpenMLS defaults (5, 1000, 0) made replayed ring frames permanently undecryptable after newer traffic or an epoch bump.
 - **Iron rule**: anything that must reach OFFLINE channel members rides `0x07` topic frames — 0x03 room broadcasts and targeted direct sends are invisible to the rings (channel FileHeaders + file companion messages were both moved to `send_mls_broadcast_topic`).

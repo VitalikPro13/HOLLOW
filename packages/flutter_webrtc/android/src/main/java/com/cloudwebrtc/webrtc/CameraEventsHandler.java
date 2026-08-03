@@ -23,7 +23,7 @@ class CameraEventsHandler implements CameraVideoCapturer.CameraEventsHandler {
             try {
                 Thread.sleep(1);
             } catch (InterruptedException e) {
-                e.printStackTrace();
+                Log.w(TAG, "waitForCameraOpen sleep interrupted", e);
             }
         }
     }
@@ -34,7 +34,7 @@ class CameraEventsHandler implements CameraVideoCapturer.CameraEventsHandler {
             try {
                 Thread.sleep(1);
             } catch (InterruptedException e) {
-                e.printStackTrace();
+                Log.w(TAG, "waitForCameraClosed sleep interrupted", e);
             }
         }
     }

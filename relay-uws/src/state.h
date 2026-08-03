@@ -46,6 +46,14 @@ static constexpr int64_t OFFLINE_BUFFER_TTL_SECS = 86400;  // 24 hours
 // membership). Separate buffer cap so chatty servers can't evict buffered DMs.
 static constexpr size_t MAX_BUFFERED_CHANNEL_MSGS_PER_PEER = 30;
 
+// Offline-buffer eviction is FAIR-SHARE, not per-sender-capped and not rate
+// limited (see buffer_offline_msg in ws_handler.cpp). When a per-peer cap is hit
+// the relay drops the oldest frame belonging to whichever sender occupies the
+// most slots, so a peer flooding someone else's buffer can only evict itself.
+// A flat per-sender cap would silently truncate a real conversation, and a
+// per-minute limit would silently drop reconnection bursts — both are the
+// message-loss class of bug the relay refuses to introduce (feedback_relay_rules).
+
 // Opt-in offline delivery ("message-availability cache") — the relay stays an
 // availability HELPER, never a source of truth: it retains the SAME E2EE,
 // Ed25519-signed ciphertext it already routes, the receiver verifies + dedups
@@ -203,6 +211,7 @@ struct RelayState {
     struct BufferedMsg {
         std::string room;              // DM/server room code the frame belongs to
         std::string frame;             // ready-to-send 0x06 binary frame
+        std::string sender;            // authenticated peer that buffered it
         std::chrono::steady_clock::time_point at;
         bool is_image = false;         // inlined-image frame (separate cap)
         bool is_channel = false;       // channel message frame (separate cap)
@@ -227,6 +236,10 @@ struct RelayState {
     struct TopicBuffer {
         std::deque<TopicFrame> frames;
         size_t bytes = 0;
+        // Cleared registrations stop taking new frames but keep the ones they
+        // already hold until retention expires them. `clear` is authorized only
+        // by room membership, so it must not be an instant-destruction verb.
+        bool accepting = true;
         int64_t retention_secs = 86400;
         std::chrono::steady_clock::time_point last_registered;
     };

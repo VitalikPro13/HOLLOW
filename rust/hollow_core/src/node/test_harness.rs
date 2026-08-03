@@ -336,7 +336,12 @@ impl MockRelay {
             WsCommand::SendBinaryDirect { room_code, target_peer, data } => {
                 // Delivered as BinaryDirect when present; not buffered (matches
                 // the file/shard streaming path — irrelevant to current tests).
+                // Both ends must be in the room: the relay drops a 0x02 whose
+                // SENDER never joined, so senders that skip the join must fail
+                // here too rather than passing only under the mock.
+                let sender_in_room = inner.peer_in_room(&room_code, from);
                 let in_room = inner.peer_in_room(&room_code, &target_peer);
+                if !sender_in_room { return; }
                 if let Some(conn) = inner.conns.get(&target_peer).filter(|c| c.online && in_room) {
                     let _ = conn.event_tx.send(WsEvent::BinaryDirect {
                         room: room_code,
@@ -394,9 +399,12 @@ impl MockRelay {
                 }
             }
             WsCommand::DiscoverPeers { room_code } => {
+                // Members only, like the relay — discovery is not a roster dump
+                // for any room code you happen to know.
                 let peers: Vec<String> = inner
                     .rooms
                     .get(&room_code)
+                    .filter(|s| s.contains(from))
                     .map(|s| s.iter().filter(|p| *p != from).cloned().collect())
                     .unwrap_or_default();
                 if let Some(conn) = inner.conns.get(from) {
@@ -408,10 +416,11 @@ impl MockRelay {
                     .into_iter()
                     .filter(|p| inner.conns.get(p).map(|c| c.online).unwrap_or(false))
                     .collect();
-                let active_rooms: Vec<String> = rooms
-                    .into_iter()
-                    .filter(|r| inner.rooms.get(r).map(|s| !s.is_empty()).unwrap_or(false))
-                    .collect();
+                // The relay no longer answers the room-activity probe (it let
+                // anyone holding two peer_ids test whether their deterministic
+                // DM room was live), so nothing may depend on a reply here.
+                let _ = rooms;
+                let active_rooms: Vec<String> = Vec::new();
                 if let Some(conn) = inner.conns.get(from) {
                     let _ = conn.event_tx.send(WsEvent::PeerStatus { online, active_rooms });
                 }
