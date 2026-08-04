@@ -7,11 +7,14 @@ import 'package:hollow/src/ui/dialogs/showcase_editor.dart';
 import 'package:hollow/src/core/providers/banner_provider.dart';
 import 'package:hollow/src/core/providers/blocked_users_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
+import 'package:hollow/src/core/providers/dm_navigation.dart';
 import 'package:hollow/src/core/providers/friends_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/local_nickname_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
+import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/verified_peers_provider.dart';
+import 'package:hollow/src/core/role_hierarchy.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/rust/api/twitch.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
@@ -24,10 +27,12 @@ import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
+import 'package:hollow/src/ui/components/hollow_tooltip.dart';
 import 'package:hollow/src/ui/components/status_dot.dart';
 import 'package:hollow/src/ui/dialogs/report_user_dialog.dart';
 import 'package:hollow/src/ui/dialogs/user_settings_dialog.dart';
 import 'package:hollow/src/ui/dialogs/verify_contact_dialog.dart';
+import 'package:hollow/src/ui/settings/manage_member_dialog.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:url_launcher/url_launcher.dart';
 
@@ -61,6 +66,10 @@ class ProfileCardBody extends ConsumerStatefulWidget {
   final String? role;
   final String? twitchUsername;
   final List<crdt_api.LabelFfi>? labels;
+
+  /// Server context (member panel / channel chat). Enables the permission-
+  /// gated Manage Member action; null in DM/self contexts.
+  final String? serverId;
   final ProfileCardDensity density;
   final VoidCallback dismissHost;
   final VoidCallback? onExpand;
@@ -74,6 +83,7 @@ class ProfileCardBody extends ConsumerStatefulWidget {
     this.role,
     this.twitchUsername,
     this.labels,
+    this.serverId,
     this.onExpand,
   });
 
@@ -121,6 +131,9 @@ class _ProfileCardBodyState extends ConsumerState<ProfileCardBody> {
     final localPeerId = ref.watch(identityProvider).peerId;
     final isMe = widget.peerId == localPeerId;
     final isOnline = isMe || identityIsOnline(ref, widget.peerId);
+    final master = ref.watch(deviceLinkProvider).identityOf(widget.peerId);
+    final isFriendAccepted =
+        !isMe && ref.watch(friendsProvider)[master]?.status == 'accepted';
 
     final displayName = profile?.displayName ?? '';
     final status = profile?.status ?? '';
@@ -315,6 +328,22 @@ class _ProfileCardBodyState extends ConsumerState<ProfileCardBody> {
                       ),
                     ),
                   ],
+                  // Friends state lives up here (the action area only shows
+                  // a friend BUTTON for the not-yet-friends states).
+                  if (isFriendAccepted) ...[
+                    const SizedBox(width: HollowSpacing.sm),
+                    Icon(LucideIcons.userCheck,
+                        size: _compact ? 11 : 12, color: hollow.success),
+                    const SizedBox(width: HollowSpacing.xxs),
+                    Text(
+                      'Friends',
+                      style: HollowTypography.caption.copyWith(
+                        color: hollow.success,
+                        fontSize: _compact ? 11 : 12,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
                 ],
               ),
               if (status.isNotEmpty) ...[
@@ -351,15 +380,19 @@ class _ProfileCardBodyState extends ConsumerState<ProfileCardBody> {
               // ── About ──
               ..._aboutSection(hollow, aboutMe),
 
-              // ── Actions (full): one row below About Me ──
+              // ── Actions (full): below About Me ──
               if (!_compact) ...[
                 const SizedBox(height: HollowSpacing.md + 2),
-                Wrap(
-                  spacing: HollowSpacing.sm,
-                  runSpacing: HollowSpacing.xs,
-                  crossAxisAlignment: WrapCrossAlignment.center,
-                  children: _buildFullActions(hollow, localNick),
-                ),
+                if (isMe)
+                  Wrap(
+                    spacing: HollowSpacing.sm,
+                    runSpacing: HollowSpacing.xs,
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    children: _buildSelfActions(),
+                  )
+                else
+                  ..._memberActions(hollow, master, localNick,
+                      isFriendAccepted: isFriendAccepted),
               ],
 
               // ── Showcase hint (compact): the mini card stays mini ──
@@ -393,10 +426,20 @@ class _ProfileCardBodyState extends ConsumerState<ProfileCardBody> {
                 ),
               ],
 
-              // ── Actions (compact): stacked full-width buttons ──
+              // ── Actions (compact): one primary + a utility icon strip ──
               if (_compact) ...[
                 const SizedBox(height: HollowSpacing.sm),
-                ..._buildCompactActions(localNick),
+                if (isMe)
+                  HollowButton.outline(
+                    onPressed: _openUserSettings,
+                    compact: true,
+                    expand: true,
+                    icon: const Icon(LucideIcons.pencil),
+                    child: const Text('Edit Profile'),
+                  )
+                else
+                  ..._memberActions(hollow, master, localNick,
+                      isFriendAccepted: isFriendAccepted),
               ],
             ],
           ),
@@ -535,154 +578,167 @@ class _ProfileCardBodyState extends ConsumerState<ProfileCardBody> {
     showVerifyContactDialog(navContext, peerId: masterId);
   }
 
-  List<Widget> _buildFullActions(HollowTheme hollow, String? localNick) {
-    final localPeerId = ref.read(identityProvider).peerId;
-    if (widget.peerId == localPeerId) {
-      return [
-        // Opens ON TOP of the profile dialog — saving updates it live.
-        HollowButton.ghost(
-          onPressed: () => showShowcaseEditorDialog(context, ref),
-          compact: true,
-          icon: const Icon(LucideIcons.layoutGrid),
-          child: const Text('Edit Showcase'),
-        ),
-        HollowButton.outline(
-          onPressed: _openUserSettings,
-          compact: true,
-          icon: const Icon(LucideIcons.pencil),
-          child: const Text('Edit Profile'),
-        ),
-      ];
-    }
-    final master = ref.watch(deviceLinkProvider).identityOf(widget.peerId);
-    final isBlocked = ref.watch(blockedUsersProvider).contains(master);
-    final isVerified = ref.watch(isPeerVerifiedProvider(master));
+  /// The provider writes run BEFORE dismissing — dismissing disposes this
+  /// widget (and its ref) when hosted in the raw-OverlayEntry popup.
+  void _openDm(String masterId) {
+    openDmConversation(ref, masterId);
+    widget.dismissHost();
+  }
+
+  void _openManageMember(String masterId, String serverId) {
+    final navContext = Navigator.of(context, rootNavigator: true).context;
+    widget.dismissHost();
+    showManageMemberDialog(navContext, serverId: serverId, peerId: masterId);
+  }
+
+  /// Whether the local user holds ANY member-management capability over this
+  /// profile in [ProfileCardBody.serverId] (advisory UI gating — the dialog
+  /// and Rust `op_allowed` re-check per section).
+  bool _canManageMember() {
+    final serverId = widget.serverId;
+    if (serverId == null) return false;
+    final myRole = ref.watch(myRoleProvider(serverId)).valueOrNull ?? 'member';
+    final perms =
+        ref.watch(myPermissionsProvider(serverId)).valueOrNull ?? 0;
+    final targetRole = widget.role ?? 'member';
+    return (canManageRole(myRole, targetRole) &&
+            assignableRoles(myRole).isNotEmpty) ||
+        (perms & Permission.manageRoles) != 0 ||
+        (perms & Permission.manageChannels) != 0;
+  }
+
+  /// Self, full density: showcase + profile editors side by side.
+  List<Widget> _buildSelfActions() {
     return [
-      // Set Nickname — full-width outline (matches Edit Profile styling).
-      SizedBox(
-        width: double.infinity,
-        child: HollowButton.outline(
-          onPressed: () => _openNicknameDialog(localNick),
-          compact: true,
-          icon: Icon(localNick != null ? LucideIcons.pencil : LucideIcons.tag),
-          child: Text(localNick != null ? 'Edit Nickname' : 'Set Nickname'),
-        ),
+      // Opens ON TOP of the profile dialog — saving updates it live.
+      HollowButton.ghost(
+        onPressed: () => showShowcaseEditorDialog(context, ref),
+        compact: true,
+        icon: const Icon(LucideIcons.layoutGrid),
+        child: const Text('Edit Showcase'),
       ),
-      // Verify — the entry point to the safety-number comparison (Issue 1-D).
-      SizedBox(
-        width: double.infinity,
-        child: HollowButton.outline(
-          onPressed: () => _openVerifyDialog(master),
-          compact: true,
-          icon: Icon(isVerified ? LucideIcons.shieldCheck : LucideIcons.shield),
-          child: Text(isVerified ? 'Verified — view number' : 'Verify contact'),
-        ),
+      HollowButton.outline(
+        onPressed: _openUserSettings,
+        compact: true,
+        icon: const Icon(LucideIcons.pencil),
+        child: const Text('Edit Profile'),
       ),
-      // Block + Report share one full-width row (each half). Red outline
-      // (danger tint) — the solid-red .danger fill stays for the confirm
-      // dialog's destructive action.
-      SizedBox(
-        width: double.infinity,
-        child: Row(
-          children: [
-            Expanded(
-              child: HollowButton.outline(
-                danger: true,
-                onPressed: isBlocked
-                    ? () => unblockUser(context, masterId: master)
-                    : () => _openBlockConfirm(master),
-                compact: true,
-                expand: true,
-                icon: const Icon(LucideIcons.ban),
-                child: Text(isBlocked ? 'Unblock' : 'Block'),
-              ),
-            ),
-            const SizedBox(width: HollowSpacing.sm),
-            Expanded(
-              child: HollowButton.outline(
-                danger: true,
-                onPressed: () => _openReportDialog(master),
-                compact: true,
-                expand: true,
-                icon: const Icon(LucideIcons.flag),
-                child: const Text('Report'),
-              ),
-            ),
-          ],
-        ),
-      ),
-      // Friends status at the bottom.
-      ProfileFriendAction(peerId: widget.peerId, expand: false),
     ];
   }
 
-  List<Widget> _buildCompactActions(String? localNick) {
-    final localPeerId = ref.read(identityProvider).peerId;
-    if (widget.peerId == localPeerId) {
-      return [
-        HollowButton.outline(
-          onPressed: _openUserSettings,
-          compact: true,
-          expand: true,
-          icon: const Icon(LucideIcons.pencil),
-          child: const Text('Edit Profile'),
-        ),
-      ];
-    }
-    final master = ref.watch(deviceLinkProvider).identityOf(widget.peerId);
+  /// Actions for someone else's card, both densities: ONE primary button
+  /// (Message for friends, otherwise the friend-state action) over a strip
+  /// of tooltipped utility icons — the card stays a profile, not a button
+  /// stack.
+  List<Widget> _memberActions(
+    HollowTheme hollow,
+    String master,
+    String? localNick, {
+    required bool isFriendAccepted,
+  }) {
     final isBlocked = ref.watch(blockedUsersProvider).contains(master);
     final isVerified = ref.watch(isPeerVerifiedProvider(master));
     return [
-      // Set Nickname — outline (matches Edit Profile styling).
-      HollowButton.outline(
-        onPressed: () => _openNicknameDialog(localNick),
-        compact: true,
-        expand: true,
-        icon: Icon(localNick != null ? LucideIcons.pencil : LucideIcons.tag),
-        child: Text(localNick != null ? 'Edit Nickname' : 'Set Nickname'),
-      ),
-      const SizedBox(height: HollowSpacing.xs),
-      // Verify — the entry point to the safety-number comparison (Issue 1-D).
-      HollowButton.outline(
-        onPressed: () => _openVerifyDialog(master),
-        compact: true,
-        expand: true,
-        icon: Icon(isVerified ? LucideIcons.shieldCheck : LucideIcons.shield),
-        child: Text(isVerified ? 'Verified — view number' : 'Verify contact'),
-      ),
-      const SizedBox(height: HollowSpacing.xs),
-      // Block + Report share one row (each half), red outline (danger tint).
+      // Primary slot: Message for friends (mirroring the mobile profile
+      // sheet's gate), else Add Friend / Accept Request / Request Sent.
+      if (isFriendAccepted)
+        HollowButton.filled(
+          onPressed: () => _openDm(master),
+          compact: _compact,
+          expand: true,
+          icon: const Icon(LucideIcons.messageCircle),
+          child: const Text('Message'),
+        )
+      else
+        ProfileFriendAction(peerId: widget.peerId, expand: true),
+      SizedBox(height: _compact ? HollowSpacing.sm : HollowSpacing.md),
+      // Utility strip: every icon carries a tooltip AND a semantic label
+      // (icon-only controls always need purpose labels).
       Row(
         children: [
-          Expanded(
-            child: HollowButton.outline(
-              danger: true,
-              onPressed: isBlocked
-                  ? () => unblockUser(context, masterId: master)
-                  : () => _openBlockConfirm(master),
-              compact: true,
-              expand: true,
-              icon: const Icon(LucideIcons.ban),
-              child: Text(isBlocked ? 'Unblock' : 'Block'),
-            ),
+          _cardIconAction(
+            hollow,
+            icon: localNick != null ? LucideIcons.pencil : LucideIcons.tag,
+            tooltip: localNick != null ? 'Edit nickname' : 'Set nickname',
+            onTap: () => _openNicknameDialog(localNick),
           ),
-          const SizedBox(width: HollowSpacing.xs),
-          Expanded(
-            child: HollowButton.outline(
-              danger: true,
-              onPressed: () => _openReportDialog(master),
-              compact: true,
-              expand: true,
-              icon: const Icon(LucideIcons.flag),
-              child: const Text('Report'),
+          _iconGap(),
+          _cardIconAction(
+            hollow,
+            icon: isVerified ? LucideIcons.shieldCheck : LucideIcons.shield,
+            tooltip:
+                isVerified ? 'Verified — view safety number' : 'Verify contact',
+            color: isVerified ? hollow.success : null,
+            onTap: () => _openVerifyDialog(master),
+          ),
+          if (_canManageMember()) ...[
+            _iconGap(),
+            _cardIconAction(
+              hollow,
+              icon: LucideIcons.userCog,
+              tooltip: 'Manage member',
+              onTap: () => _openManageMember(master, widget.serverId!),
             ),
+          ],
+          _iconGap(),
+          _cardIconAction(
+            hollow,
+            icon: LucideIcons.ban,
+            tooltip: isBlocked ? 'Unblock' : 'Block',
+            color: hollow.error,
+            onTap: isBlocked
+                ? () => unblockUser(context, masterId: master)
+                : () => _openBlockConfirm(master),
+          ),
+          _iconGap(),
+          _cardIconAction(
+            hollow,
+            icon: LucideIcons.flag,
+            tooltip: 'Report',
+            color: hollow.error,
+            onTap: () => _openReportDialog(master),
           ),
         ],
       ),
-      const SizedBox(height: HollowSpacing.xs),
-      // Friends status at the bottom.
-      ProfileFriendAction(peerId: widget.peerId, expand: true),
     ];
+  }
+
+  Widget _iconGap() =>
+      SizedBox(width: _compact ? HollowSpacing.xs : HollowSpacing.sm);
+
+  /// One square in the utility strip. Neutral border for every action —
+  /// intent rides the icon tint (error for block/report) so the strip reads
+  /// as one calm row instead of competing outlined buttons.
+  Widget _cardIconAction(
+    HollowTheme hollow, {
+    required IconData icon,
+    required String tooltip,
+    required VoidCallback onTap,
+    Color? color,
+  }) {
+    return Expanded(
+      child: HollowTooltip(
+        message: tooltip,
+        child: HollowPressable(
+          semanticLabel: tooltip,
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(hollow.radiusSm),
+          child: Container(
+            height: _compact ? 30.0 : 34.0,
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(hollow.radiusSm),
+              border: Border.all(color: hollow.border),
+            ),
+            alignment: Alignment.center,
+            child: Icon(
+              icon,
+              size: _compact ? 14 : 15,
+              color: color ?? hollow.textSecondary,
+            ),
+          ),
+        ),
+      ),
+    );
   }
 }
 

@@ -44,6 +44,8 @@ import 'package:hollow/src/ui/chat/emote_image.dart';
 import 'package:hollow/src/core/providers/emote_provider.dart';
 import 'package:hollow/src/ui/components/connection_progress.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
+import 'package:hollow/src/ui/components/hollow_button.dart';
+import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/long_press_message.dart';
 import 'package:hollow/src/ui/components/saved_messages_avatar.dart';
@@ -3443,8 +3445,41 @@ class _DmCallButtons extends ConsumerWidget {
     final isCallWithThisPeer = isInCall && call.peerId == peerId;
     final canCall = isOnline && !isInCall;
 
-    void startAndOpen({bool withVideo = false}) {
-      ref.read(callProvider.notifier).startCall(peerId, withVideo: withVideo);
+    Future<void> startAndOpen({bool withVideo = false}) async {
+      // Starting a DM call while in a server voice channel disconnects the
+      // channel (issue #49) — confirm before doing so.
+      final vc = ref.read(voiceChannelProvider);
+      if (vc.isInVoiceChannel) {
+        final channelName = vc.currentChannelName ?? 'voice';
+        final confirmed = await showHollowDialog<bool>(
+          context: context,
+          builder: (ctx) {
+            final h = HollowTheme.of(ctx);
+            return HollowDialog(
+              title: 'Start Call?',
+              content: Text(
+                'Starting this call will disconnect you from #$channelName.',
+                style: HollowTypography.body.copyWith(color: h.textSecondary),
+              ),
+              actions: [
+                HollowButton.ghost(
+                  onPressed: () => Navigator.pop(ctx, false),
+                  child: const Text('Cancel'),
+                ),
+                HollowButton.filled(
+                  onPressed: () => Navigator.pop(ctx, true),
+                  child: const Text('Start Call'),
+                ),
+              ],
+            );
+          },
+        );
+        if (confirmed != true || !context.mounted) return;
+      }
+      await ref
+          .read(callProvider.notifier)
+          .startCall(peerId, withVideo: withVideo);
+      if (!context.mounted) return;
       Navigator.of(context).push(
         hollowMobileRoute(
           settings: const RouteSettings(name: 'call-screen'),

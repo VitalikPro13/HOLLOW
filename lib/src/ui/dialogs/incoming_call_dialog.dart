@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
+import 'package:hollow/src/core/providers/voice_channel_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
@@ -40,6 +41,7 @@ class _IncomingCallOverlayState extends ConsumerState<IncomingCallOverlay>
   String _cachedPeerId = '';
   String _cachedDisplayName = '';
   bool _cachedIsVideoCall = false;
+  String? _cachedVcChannelName;
 
   @override
   void initState() {
@@ -143,6 +145,11 @@ class _IncomingCallOverlayState extends ConsumerState<IncomingCallOverlay>
       final callerProfile = ref.watch(profileProvider.select((p) => p[_cachedPeerId]));
       _cachedDisplayName = displayNameForPeer(callerProfile, _cachedPeerId);
       _cachedIsVideoCall = call.isVideoCall;
+      // Warn when answering will pull the user out of a voice channel
+      // (issue #49 — accepting auto-leaves it).
+      final vc = ref.watch(voiceChannelProvider);
+      _cachedVcChannelName =
+          vc.isInVoiceChannel ? (vc.currentChannelName ?? 'voice') : null;
     }
 
     if (isVisible && !_wasVisible) {
@@ -217,6 +224,17 @@ class _IncomingCallOverlayState extends ConsumerState<IncomingCallOverlay>
                       color: hollow.textSecondary,
                     ),
                   ),
+                  if (_cachedVcChannelName != null) ...[
+                    const SizedBox(height: HollowSpacing.xs),
+                    Text(
+                      'Answering will leave #$_cachedVcChannelName',
+                      style: HollowTypography.caption.copyWith(
+                        color: hollow.warning,
+                      ),
+                      textAlign: TextAlign.center,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ],
                   const SizedBox(height: HollowSpacing.lg),
                   Row(
                     mainAxisAlignment: MainAxisAlignment.center,

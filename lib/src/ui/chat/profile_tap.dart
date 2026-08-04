@@ -66,6 +66,7 @@ void showChatProfile(
     role: role,
     twitchUsername: twitchUsername,
     labels: labels,
+    serverId: serverId,
     anchor: Offset(pos.dx, pos.dy + 24),
   );
 }

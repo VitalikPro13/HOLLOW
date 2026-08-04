@@ -30,6 +30,7 @@ import 'package:hollow/src/core/providers/split_view_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/peers_provider.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
+import 'package:hollow/src/core/providers/voice_channel_provider.dart';
 import 'package:hollow/src/core/providers/speaking_provider.dart';
 import 'package:hollow/src/ui/components/call_duration_text.dart';
 import 'package:hollow/src/core/providers/recording_provider.dart';
@@ -53,6 +54,7 @@ import 'package:hollow/src/ui/components/animated_gif_image.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/speaking_border.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
+import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/chat/hollow_link_utils.dart';
 import 'package:hollow/src/ui/chat/voice_recorder_bar.dart';
 import 'package:hollow/src/core/services/voice_message_recorder.dart';
@@ -1373,6 +1375,45 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     );
   }
 
+  /// Starting a DM call while in a server voice channel disconnects the
+  /// channel (issue #49) — confirm before doing so. Returns true to proceed.
+  Future<bool> _confirmLeaveVoiceForCall() async {
+    final vc = ref.read(voiceChannelProvider);
+    if (!vc.isInVoiceChannel) return true;
+    final channelName = vc.currentChannelName ?? 'voice';
+    final confirmed = await showHollowDialog<bool>(
+      context: context,
+      builder: (ctx) {
+        final h = HollowTheme.of(ctx);
+        return HollowDialog(
+          title: 'Start Call?',
+          content: Text(
+            'Starting this call will disconnect you from #$channelName.',
+            style: HollowTypography.body.copyWith(color: h.textSecondary),
+          ),
+          actions: [
+            HollowButton.ghost(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancel'),
+            ),
+            HollowButton.filled(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Start Call'),
+            ),
+          ],
+        );
+      },
+    );
+    return confirmed == true && mounted;
+  }
+
+  Future<void> _startDmCall({required bool withVideo}) async {
+    if (!await _confirmLeaveVoiceForCall()) return;
+    await ref
+        .read(callProvider.notifier)
+        .startCall(widget.peerId, withVideo: withVideo);
+  }
+
   Widget _buildVoiceCallButton(HollowTheme hollow) {
     final call = ref.watch(callProvider);
     final isOnline = identityIsOnline(ref, widget.peerId);
@@ -1386,7 +1427,7 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
       child: HollowPressable(
         semanticLabel: isCallWithThisPeer ? 'In call' : 'Start voice call',
         onTap: isOnline && !isInCall
-            ? () => ref.read(callProvider.notifier).startCall(widget.peerId)
+            ? () => _startDmCall(withVideo: false)
             : null,
         borderRadius: BorderRadius.circular(hollow.radiusSm),
         padding: const EdgeInsets.all(HollowSpacing.xs),
@@ -1413,9 +1454,7 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
       child: HollowPressable(
         semanticLabel: 'Start video call',
         onTap: isOnline && !isInCall
-            ? () => ref
-                .read(callProvider.notifier)
-                .startCall(widget.peerId, withVideo: true)
+            ? () => _startDmCall(withVideo: true)
             : null,
         borderRadius: BorderRadius.circular(hollow.radiusSm),
         padding: const EdgeInsets.all(HollowSpacing.xs),

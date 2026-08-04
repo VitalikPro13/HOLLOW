@@ -654,10 +654,30 @@ Persists download path via SQLCipher settings (`storage_api.loadSetting` / `stor
 
 ## Cross-Provider Interactions
 
-### VoiceChannelProvider <-> CallProvider
-- `VoiceChannelNotifier.joinChannel()` checks `callProvider.status != idle` and blocks if a call is active.
+### VoiceChannelProvider <-> CallProvider (bidirectional since issue #49, 2026-08-04)
+A DM call and a server voice channel must never run at the same time. Both
+gates live at provider chokepoints, so new UI entry points inherit them:
+- **VC side blocks:** `VoiceChannelNotifier.joinChannel()` checks
+  `callProvider.status != idle` and returns — no longer silently: it shows
+  an info toast ("You're in a call. Hang up to join a voice channel.") via
+  the post-frame `hollowNavigatorKey` overlay pattern.
+- **Call side auto-leaves (newest-chosen wins):** `CallNotifier.startCall()`
+  (now async) and `acceptCall()` call `_leaveVoiceChannelIfActive()` —
+  awaits `leaveChannel()` (tears down VC screen share cleanly) in try/catch.
+  Both RE-CHECK call state after the await (`status != idle` in startCall;
+  `status == connecting && callId` match in acceptCall) because the teardown
+  is long enough for invite glare or a caller hang-up. Do NOT re-read
+  `isInVoiceChannel` right after the await — VC state clears asynchronously
+  via `onLocalLeft` (the Rust `VoiceChannelLeft` event), not in
+  `leaveChannel()` itself.
+- **UI warns before the fact:** `IncomingCallOverlay` (and the dormant
+  `MobileIncomingCallOverlay`) show "Answering will leave #channel"
+  (hollow.warning, cached alongside the other exit-animation display info)
+  while ringing in a VC; the DM-header call buttons (chat_pane
+  `_confirmLeaveVoiceForCall`, mobile_chat_route `startAndOpen`) confirm
+  with a "Start Call?" HollowDialog before starting. An incoming invite
+  while in a VC still RINGS (only an active DM call replies `busy`).
 - `VoiceChannelNotifier.startScreenShare()` checks `callProvider.isScreenSharing` and blocks if already sharing in a DM call.
-- These are one-way checks; calls don't check voice channel state.
 
 ### FileTransferProvider <-> ShareTabProvider
 - `FileTransferNotifier.sendFile()` creates hidden shares for >34 MB files via `share_api.shareCreateFromFile()`.

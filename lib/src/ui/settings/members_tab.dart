@@ -1,6 +1,7 @@
 ﻿import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/moderation_format.dart';
+import 'package:hollow/src/core/role_hierarchy.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart'
     show mutedMembersProvider;
 import 'package:hollow/src/core/providers/identity_provider.dart';
@@ -98,26 +99,9 @@ class MembersTab extends ConsumerWidget {
   };
 }
 
-/// Whether [actorRole] can change [targetRole] to a different role.
-bool _canManageRole(String actorRole, String targetRole) {
-  const priorities = {'owner': 3, 'admin': 2, 'moderator': 1, 'member': 0};
-  final actorPriority = priorities[actorRole] ?? 0;
-  final targetPriority = priorities[targetRole] ?? 0;
-  if (actorRole == 'owner') return true;
-  if (actorPriority <= 1) return false; // Members & moderators can't manage
-  return actorPriority > targetPriority;
-}
-
-/// Roles that [actorRole] can assign (must be below actor's rank).
-List<String> _assignableRoles(String actorRole) {
-  if (actorRole == 'owner') {
-    return ['admin', 'moderator', 'member'];
-  }
-  if (actorRole == 'admin') {
-    return ['moderator', 'member'];
-  }
-  return [];
-}
+// Role hierarchy helpers (canManageRole / assignableRoles) moved to the
+// shared core/role_hierarchy.dart so the profile-card Manage Member dialog
+// can't drift from this tab.
 
 class _MemberRow extends ConsumerWidget {
   final String serverId;
@@ -142,7 +126,7 @@ class _MemberRow extends ConsumerWidget {
     final localPeerId = ref.watch(identityProvider).peerId;
     final isMe = peerId == localPeerId;
     final info = _roleInfo(role, hollow);
-    final canManage = !isMe && _canManageRole(myRole, role);
+    final canManage = !isMe && canManageRole(myRole, role);
     final peerProfile =
         ref.watch(profileProvider.select((p) => p[peerId]));
     final resolvedName =
@@ -239,7 +223,7 @@ class _MemberRow extends ConsumerWidget {
                   side: BorderSide(color: hollow.border),
                 ),
                 itemBuilder: (context) {
-                  final assignable = _assignableRoles(myRole);
+                  final assignable = assignableRoles(myRole);
                   return [
                     // Role change options
                     for (final r in assignable)

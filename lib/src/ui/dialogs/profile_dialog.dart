@@ -26,6 +26,7 @@ Future<void> showProfileDialog(
   String? role,
   String? twitchUsername,
   List<crdt_api.LabelFfi>? labels,
+  String? serverId,
 }) {
   if (Platform.isAndroid || Platform.isIOS) {
     showMobileProfileSheet(
@@ -45,6 +46,7 @@ Future<void> showProfileDialog(
       role: role,
       twitchUsername: twitchUsername,
       labels: labels,
+      serverId: serverId,
     ),
   );
 }
@@ -69,6 +71,7 @@ class ProfileDialog extends ConsumerWidget {
   final String? role;
   final String? twitchUsername;
   final List<crdt_api.LabelFfi>? labels;
+  final String? serverId;
 
   const ProfileDialog({
     super.key,
@@ -77,6 +80,7 @@ class ProfileDialog extends ConsumerWidget {
     this.role,
     this.twitchUsername,
     this.labels,
+    this.serverId,
   });
 
   /// The shared panel/card surface decoration.
@@ -147,6 +151,7 @@ class ProfileDialog extends ConsumerWidget {
         role: role,
         twitchUsername: twitchUsername,
         labels: labels,
+        serverId: serverId,
         density: ProfileCardDensity.full,
         dismissHost: () => Navigator.of(context).pop(),
       ),

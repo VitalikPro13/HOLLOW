@@ -957,7 +957,7 @@ File: `lib/src/ui/components/profile_card_popup.dart`
 
 ### showProfileCardPopup()
 
-Top-level function. Creates `OverlayEntry` with `_ProfileCardOverlay`. Accepts `peerId`, optional `nickname`, `role`, `twitchUsername`, `labels`, `anchor`, `anchorBottom`.
+Top-level function. Creates `OverlayEntry` with `_ProfileCardOverlay`. Accepts `peerId`, optional `nickname`, `role`, `twitchUsername`, `labels`, `serverId` (issue #48 — enables the permission-gated Manage Member action; forwarded to the full dialog on expand), `anchor`, `anchorBottom`. Card content and action layout: see wiki `ui_profile_card`.
 
 ### _ProfileCardOverlay
 

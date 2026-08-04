@@ -623,6 +623,7 @@ class _ServerMemberTile extends ConsumerWidget {
             role: role,
             twitchUsername: effectiveTwitch.isNotEmpty ? effectiveTwitch : null,
             labels: labels.isNotEmpty ? labels : null,
+            serverId: serverId,
             anchor: Offset(pos.dx - kProfileCardPopupWidth - 10, pos.dy - 100),
           );
         },

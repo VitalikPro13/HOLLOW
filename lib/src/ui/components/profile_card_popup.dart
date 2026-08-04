@@ -24,6 +24,7 @@ void showProfileCardPopup({
   String? role,
   String? twitchUsername,
   List<crdt_api.LabelFfi>? labels,
+  String? serverId,
   required Offset anchor,
   bool anchorBottom = false,
 }) {
@@ -37,6 +38,7 @@ void showProfileCardPopup({
       role: role,
       twitchUsername: twitchUsername,
       labels: labels,
+      serverId: serverId,
       anchor: anchor,
       anchorBottom: anchorBottom,
       onDismiss: () { entry.remove(); entry.dispose(); },
@@ -56,6 +58,7 @@ class _ProfileCardOverlay extends ConsumerStatefulWidget {
   final String? role;
   final String? twitchUsername;
   final List<crdt_api.LabelFfi>? labels;
+  final String? serverId;
   final Offset anchor;
   final bool anchorBottom;
   final VoidCallback onDismiss;
@@ -66,6 +69,7 @@ class _ProfileCardOverlay extends ConsumerStatefulWidget {
     required this.role,
     this.twitchUsername,
     this.labels,
+    this.serverId,
     required this.anchor,
     this.anchorBottom = false,
     required this.onDismiss,
@@ -119,6 +123,7 @@ class _ProfileCardOverlayState extends ConsumerState<_ProfileCardOverlay>
       role: widget.role,
       twitchUsername: widget.twitchUsername,
       labels: widget.labels,
+      serverId: widget.serverId,
     );
   }
 
@@ -207,6 +212,7 @@ class _ProfileCardOverlayState extends ConsumerState<_ProfileCardOverlay>
                     role: widget.role,
                     twitchUsername: widget.twitchUsername,
                     labels: widget.labels,
+                    serverId: widget.serverId,
                     density: ProfileCardDensity.compact,
                     dismissHost: widget.onDismiss,
                     onExpand: _expand,

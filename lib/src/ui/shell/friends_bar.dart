@@ -1,6 +1,7 @@
 ﻿import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/conference_provider.dart';
+import 'package:hollow/src/core/providers/dm_navigation.dart';
 import 'package:hollow/src/core/providers/shell_tab.dart';
 import 'package:hollow/src/core/providers/favourite_friends_provider.dart';
 import 'package:hollow/src/core/providers/friends_provider.dart';
@@ -308,19 +309,7 @@ class FriendsBar extends ConsumerWidget {
   }
 
   void _selectFriend(WidgetRef ref, String peerId) {
-    final split = ref.read(splitViewProvider);
-    if (split.isSplit && split.focusedPane == 1) {
-      ref.read(splitViewProvider.notifier).navigateRightToPeer(peerId);
-    } else {
-      setShellTab(ref.read, null);
-      ref.read(selectedPeerProvider.notifier).state = peerId;
-      ref.read(selectedServerProvider.notifier).state = null;
-      ref.read(channelListProvider.notifier).clear();
-      ref.read(selectedChannelProvider.notifier).state = null;
-      ref.read(serverSettingsOpenProvider.notifier).state = false;
-    }
-    // Mark as read.
-    ref.read(unreadProvider.notifier).markDmSeen(peerId, null);
+    openDmConversation(ref, peerId);
   }
 
   void _showAddFriendDialog(

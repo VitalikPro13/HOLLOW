@@ -4,6 +4,7 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
@@ -502,10 +503,25 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
 
   /// Join a voice channel. If already in one, leave it first.
   Future<void> joinChannel(String serverId, String channelId) async {
-    // Block if in a 1:1 call.
+    // Block if in a 1:1 call. Say so — a silent return reads as a dead
+    // button (issue #49).
     final callState = ref.read(callProvider);
     if (callState.status != CallStatus.idle) {
       debugPrint('[HOLLOW-VC] Cannot join voice channel — in a call');
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        try {
+          final overlay = hollowNavigatorKey.currentState?.overlay;
+          if (overlay == null) return;
+          HollowToast.show(
+            overlay.context,
+            "You're in a call. Hang up to join a voice channel.",
+            type: HollowToastType.info,
+            overlayState: overlay,
+          );
+        } catch (e) {
+          debugPrint('[HOLLOW-VC] in-call toast failed: $e');
+        }
+      });
       return;
     }
 

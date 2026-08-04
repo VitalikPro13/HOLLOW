@@ -16,16 +16,38 @@ via `dismissHost` — same fixed 26×26 scrimmed circle, borderRadius 13, NO
 HollowPressable padding so hover paint stays inside; the game card's X
 reuses this structure) → corner band (Twitch/integration chip
 ALONE, right-aligned under the banner, both densities) → identity block
-(name, secondary name, presence StatusDot row via `identityIsOnline`, italic
-custom status) → ONE merged chip row (role incl. Member + cosmetic labels) →
-divider → ABOUT ME → actions → peer-id copy footer. Compact shows a "View
-showcase" hint (sparkles, accentText) when the person has a board. Full
-density puts ALL action buttons in one row below About Me (Edit Showcase +
-Edit Profile for self; Set Nickname + friend action for others).
+(name, secondary name, presence StatusDot row via `identityIsOnline` + green
+"Verified" and "Friends" indicators, italic custom status) → ONE merged chip
+row (role incl. Member + cosmetic labels) → divider → ABOUT ME → actions →
+peer-id copy footer. Compact shows a "View showcase" hint (sparkles,
+accentText) when the person has a board.
+
+**Actions (redesigned 2026-08-04, issue #48 follow-up).** For someone else's
+card, BOTH densities render `_memberActions`: ONE primary button — filled
+Message for accepted friends (`_openDm` → `openDmConversation`, providers
+written BEFORE `dismissHost` because dismissing disposes this widget's ref),
+otherwise `ProfileFriendAction` (Add Friend / Accept Request / Request Sent)
+— over a utility strip of equal-width square icon buttons via
+`_cardIconAction` (nickname, verify, Manage Member when `_canManageMember()`,
+block, report). Neutral borders on every square; intent rides the icon tint
+(error for block/report, success shieldCheck once verified); every icon has
+a HollowTooltip AND a semanticLabel. NEVER go back to stacked full-width
+text buttons — Vitalik: "more of a stack of buttons than a profile popup
+card". The accepted-friends state lives in the presence row (userCheck +
+"Friends"), not the action area. Self: full = Edit Showcase + Edit Profile
+(`_buildSelfActions` Wrap), compact = Edit Profile only.
+
+`_canManageMember()` gates on `serverId != null` plus (role ladder via
+shared `core/role_hierarchy.dart` `canManageRole`/`assignableRoles`) OR
+`Permission.manageRoles` OR `Permission.manageChannels` — advisory only;
+the dialog and Rust `op_allowed` re-check. Opens
+`ui/settings/manage_member_dialog.dart` (host-dismiss pattern, passes the
+MASTER id).
 
 Density metrics: compact banner 104 / avatar 64 / width 300
 (`kProfileCardPopupWidth`); full banner 220 / avatar 110 / card width 560
-(`kProfileDialogCenterWidth`), name 22px.
+(`kProfileDialogCenterWidth`), name 22px. Screenshot harness:
+`test/screenshots/profile_card_screenshot_test.dart`.
 
 ## showProfileCardPopup() — Compact Popup (desktop)
 
@@ -37,6 +59,13 @@ interior is `ProfileCardBody(compact)`. Member panel anchors derive from
 profile_card_body.dart and is RE-EXPORTED here (chat_pane imports it).
 Expand affordance: scrimmed circle button on the banner (a11y label "View
 full profile") → removes overlay instantly → `showProfileDialog`.
+
+`serverId` (nullable, added issue #48) threads the whole chain:
+`_ServerMemberTile` (member_panel) and `showChatProfile` pass it →
+`showProfileCardPopup` → `_ProfileCardOverlay` → `ProfileCardBody`, and
+`_expand` forwards it to `showProfileDialog` → `ProfileDialog`. Null in
+DM/self contexts (user_bar, bottom_bar, DM `_MemberTile`, DM bubbles) —
+no server context, no Manage Member.
 
 ## showProfileDialog() — Full Profile (dialogs/profile_dialog.dart)
 
@@ -58,7 +87,36 @@ sheet is scrollable, self gets Edit Showcase).
 channel contexts (`channel_message_bubble` passes it) resolve the sender's
 role/labels/nickname/twitch from `serverMembersProvider` AT TAP TIME so the
 chat popup matches the member panel. DMs pass none — no roles. The Member
-role renders as a chip like every other role (consistency rule).
+role renders as a chip like every other role (consistency rule). Since
+issue #48 the resolved `serverId` is forwarded into the popup, so channel
+chat popups get Manage Member too.
+
+## Manage Member dialog (ui/settings/manage_member_dialog.dart, issue #48)
+
+`showManageMemberDialog(context, serverId:, peerId:)` — peerId MUST be the
+MASTER identity (roles/labels/grants are master-keyed CRDT state). Member-
+first inverse of the channel-centric `channel_grants_dialog` — same FFI,
+same LWW model. Three permission-gated `SettingsCard` sections, each hidden
+without the capability:
+- **Role** — `LabelTypeChip`s: target's current role first, then
+  `assignableRoles(myRole)` (shared `core/role_hierarchy.dart`, which also
+  serves members_tab so the ladders can't drift). Tap → confirm dialog →
+  `changeMemberRole` → 150ms CrdtStore beat → invalidate
+  `serverMembersProvider`. Gated by `canManageRole` && non-self.
+- **Labels** — `LabelChip` toggles over `serverLabelsProvider`; selection
+  state seeded ONCE from the member row (`_labelIds ??=`, labels-tab
+  `_seeded` rule — a refetch right after a queued write returns the previous
+  value), optimistic with revert-on-error via assign/unassignLabel. Gated
+  by MANAGE_ROLES.
+- **Temporary channel access** — rows for channels with non-empty
+  `visibilityLabels` from `serverChannelsProvider` (computing per-member
+  visibility would re-implement the Rust predicate; redundant grants are
+  harmless). Active grant shows remaining time (`formatMuteRemaining`) or
+  "Until revoked" + revoke X; else a Grant button → `_View.pickDuration`
+  (same `kGrantDurationOptions` as the grants dialog) →
+  `grantChannelAccess`. Gated by MANAGE_CHANNELS.
+
+Dart gates are advisory — Rust `op_allowed` re-validates every op.
 
 ## UserBar Widget Overview
 

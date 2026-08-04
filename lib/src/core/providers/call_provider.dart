@@ -16,6 +16,7 @@ import 'package:hollow/src/core/providers/recording_provider.dart';
 import 'package:hollow/src/core/providers/relay_domain_provider.dart';
 import 'package:hollow/src/core/providers/speaking_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
+import 'package:hollow/src/core/providers/voice_channel_provider.dart';
 import 'package:hollow/src/core/providers/webrtc_provider.dart';
 import 'package:hollow/src/core/services/desktop_capture_support.dart';
 import 'package:hollow/src/core/services/macos_version.dart';
@@ -623,8 +624,26 @@ class CallNotifier extends Notifier<CallState> {
   // Call actions
   // ---------------------------------------------------------------------------
 
+  /// A DM call and a server voice channel must never run at the same time
+  /// (issue #49) — the session the user just chose wins, so leave the
+  /// channel (tears down its screen share too) before the call proceeds.
+  Future<void> _leaveVoiceChannelIfActive() async {
+    if (!ref.read(voiceChannelProvider).isInVoiceChannel) return;
+    _callLog('[HOLLOW-CALL] Leaving voice channel before DM call');
+    try {
+      await ref.read(voiceChannelProvider.notifier).leaveChannel();
+    } catch (e) {
+      _callLog('[HOLLOW-CALL] Failed to leave voice channel before call: $e');
+    }
+  }
+
   /// Start an outgoing call to a peer.
-  void startCall(String peerId, {bool withVideo = false}) {
+  Future<void> startCall(String peerId, {bool withVideo = false}) async {
+    if (state.status != CallStatus.idle) return;
+
+    await _leaveVoiceChannelIfActive();
+    // The leave awaited real teardown — an incoming invite may have started
+    // ringing in the meantime; don't stomp it.
     if (state.status != CallStatus.idle) return;
 
     final callId = _generateCallId();
@@ -680,6 +699,14 @@ class CallNotifier extends Notifier<CallState> {
 
     _ringTimer?.cancel();
     state = state.copyWith(status: CallStatus.connecting);
+
+    // Leave any voice channel before the call media comes up (issue #49) —
+    // otherwise both sessions run at once.
+    await _leaveVoiceChannelIfActive();
+    // The caller may have hung up while the channel tore down.
+    if (state.status != CallStatus.connecting || state.callId != callId) {
+      return;
+    }
 
     // Tell caller we accepted — they will send SDP offer.
     final acceptPayload = jsonEncode({
