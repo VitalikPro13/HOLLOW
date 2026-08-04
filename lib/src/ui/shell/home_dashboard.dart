@@ -1351,14 +1351,12 @@ class _NewsPanel extends ConsumerWidget {
                         enabled: true,
                         onActivate: () => showUserSettingsDialog(
                           context,
-                          ref,
                           openUpdatesTab: true,
                         ),
                         borderRadius: BorderRadius.circular(hollow.radiusSm),
                         child: GestureDetector(
                         onTap: () => showUserSettingsDialog(
                           context,
-                          ref,
                           openUpdatesTab: true,
                         ),
                         child: MouseRegion(

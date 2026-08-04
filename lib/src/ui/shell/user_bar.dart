@@ -211,7 +211,7 @@ class UserBar extends ConsumerWidget {
             message: 'Settings',
             child: HollowPressable(
               semanticLabel: 'Settings',
-              onTap: () => showUserSettingsDialog(context, ref),
+              onTap: () => showUserSettingsDialog(context),
               borderRadius: BorderRadius.circular(hollow.radiusSm),
               padding: const EdgeInsets.all(HollowSpacing.xs),
               child: Icon(

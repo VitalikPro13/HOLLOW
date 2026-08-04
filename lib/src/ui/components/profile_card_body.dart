@@ -533,7 +533,7 @@ class _ProfileCardBodyState extends ConsumerState<ProfileCardBody> {
   void _openUserSettings() {
     final navContext = Navigator.of(context, rootNavigator: true).context;
     widget.dismissHost();
-    showUserSettingsDialog(navContext, ref);
+    showUserSettingsDialog(navContext);
   }
 
   void _openNicknameDialog(String? localNick) {

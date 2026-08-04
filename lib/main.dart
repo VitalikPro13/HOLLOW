@@ -15,6 +15,7 @@ import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 import 'package:hollow/src/rust/frb_generated.dart';
 import 'package:hollow/src/core/perf_sentinel.dart';
 import 'package:hollow/src/core/services/deep_link_service.dart';
+import 'package:hollow/src/core/services/tray_service.dart';
 import 'package:hollow/src/core/shared_tickers.dart';
 import 'package:hollow/src/core/reduce_motion.dart';
 import 'package:hollow/src/ui/app.dart';
@@ -22,7 +23,6 @@ import 'package:hollow/src/core/hollow_data_dir.dart';
 import 'package:hollow/src/core/services/ios_data_dir_migration.dart';
 import 'package:hollow/src/ui/shader_warmup.dart';
 import 'package:firebase_core/firebase_core.dart';
-import 'package:tray_manager/tray_manager.dart';
 import 'package:window_manager/window_manager.dart';
 
 /// Global provider container — used by window/tray listeners.
@@ -255,16 +255,8 @@ Future<void> main(List<String> args) async {
   // the window first (it usually arrives while Hollow is hidden in tray).
   await DeepLinkService.instance.init(container);
   if (Platform.isWindows || Platform.isLinux || Platform.isMacOS) {
-    DeepLinkService.instance.bringToForeground = () async {
-      await _hideTrayIcon();
-      if (Platform.isLinux && await windowManager.isMinimized()) {
-        await windowManager.restore();
-      }
-      await windowManager.show();
-      await windowManager.focus();
-      _container.read(windowVisibleProvider.notifier).state = true;
-      SharedTickers.instance.resume();
-    };
+    DeepLinkService.instance.bringToForeground =
+        TrayService.instance.restoreWindow;
   }
 
   // Custom window chrome on desktop — hide native title bar.
@@ -295,8 +287,9 @@ Future<void> main(List<String> args) async {
       await windowManager.focus();
     });
 
-    // Set up tray listener (icon is only created when minimizing).
-    trayManager.addListener(_HollowTrayListener());
+    // Always-visible tray icon on Windows (issue #50); shared window-restore
+    // on all desktop platforms (deep links).
+    await TrayService.instance.init(container, quitApp: _quitApp);
 
     // Install .desktop + icon to XDG paths on first launch.
     await _installLinuxDesktopIntegration();
@@ -322,68 +315,21 @@ Future<void> main(List<String> args) async {
   ));
 }
 
-/// Show the system tray icon with context menu.
-/// Cached path to the extracted tray icon file.
-String? _trayIconPath;
-
-Future<String?> _ensureTrayIcon() async {
-  if (_trayIconPath != null && File(_trayIconPath!).existsSync()) {
-    return _trayIconPath;
-  }
-
-  // Linux/macOS tray requires PNG; Windows uses ICO.
-  final usesPng = !Platform.isWindows;
-  final exeDir = File(Platform.resolvedExecutable).parent.path;
-
-  // Try file system locations first (faster, no extraction needed).
-  final candidates = [
-    if (usesPng) '$exeDir/data/flutter_assets/assets/hollow_logo_rounded.png',
-    if (!usesPng) '$exeDir/data/flutter_assets/assets/app_icon.ico',
-    if (!usesPng) '$exeDir/app_icon.ico',
-    if (!usesPng) 'windows/runner/resources/app_icon.ico',
-    if (!usesPng) '${File(Platform.resolvedExecutable).parent.parent.parent.parent.parent.path}/windows/runner/resources/app_icon.ico',
-  ];
-
-  for (final candidate in candidates) {
-    if (File(candidate).existsSync()) {
-      _trayIconPath = File(candidate).absolute.path;
-      return _trayIconPath;
-    }
-  }
-
-  // Extract from Flutter assets as last resort.
+/// Full app shutdown — tray "Quit Hollow" and the close button when
+/// minimize-to-tray is off (Windows/macOS; Linux quits via [_linuxQuit]).
+Future<void> _quitApp() async {
+  await windowManager.hide();
   try {
-    final assetName = usesPng ? 'assets/hollow_logo_rounded.png' : 'assets/app_icon.ico';
-    final byteData = await rootBundle.load(assetName);
-    final tempDir = Directory.systemTemp;
-    final iconFile = File('${tempDir.path}/hollow_tray_icon.${usesPng ? 'png' : 'ico'}');
-    await iconFile.writeAsBytes(byteData.buffer.asUint8List());
-    _trayIconPath = iconFile.path;
-    return _trayIconPath;
-  } catch (e) {
-    debugPrint('[HOLLOW] Failed to extract tray icon: $e');
-    return null;
-  }
-}
-
-Future<void> _showTrayIcon() async {
-  final iconPath = await _ensureTrayIcon();
-  if (iconPath == null) return;
-  await trayManager.setIcon(iconPath);
-  await trayManager.setToolTip('Hollow — Running in background');
-  final menu = Menu(
-    items: [
-      MenuItem(key: 'show', label: 'Show Hollow'),
-      MenuItem.separator(),
-      MenuItem(key: 'quit', label: 'Quit'),
-    ],
-  );
-  await trayManager.setContextMenu(menu);
-}
-
-/// Remove the system tray icon.
-Future<void> _hideTrayIcon() async {
-  await trayManager.destroy();
+    // Phase 6.25: Dispose WebRTC resources before shutdown.
+    await _container.read(webRtcProvider.notifier).disposeAll();
+  } catch (_) {}
+  try {
+    await network_api.notifyShutdown();
+    await Future.delayed(const Duration(milliseconds: 200));
+  } catch (_) {}
+  await TrayService.instance.destroyIcon();
+  _releaseLock();
+  await windowManager.destroy();
 }
 
 /// Clean shutdown on Linux (no tray to clean up).
@@ -458,59 +404,6 @@ Future<void> _installLinuxDesktopIntegration() async {
   }
 }
 
-/// Handles tray icon interactions.
-class _HollowTrayListener extends TrayListener {
-  @override
-  void onTrayIconMouseDown() {
-    // On Linux, AppIndicator shows the context menu on any click —
-    // don't restore here or it destroys the tray before the menu appears.
-    if (!Platform.isLinux) _restoreWindow();
-  }
-
-  @override
-  void onTrayIconRightMouseDown() {
-    // No-op on Linux (AppIndicator shows menu automatically).
-    if (!Platform.isLinux) trayManager.popUpContextMenu();
-  }
-
-  @override
-  void onTrayMenuItemClick(MenuItem menuItem) {
-    switch (menuItem.key) {
-      case 'show':
-        _restoreWindow();
-        break;
-      case 'quit':
-        _quitApp();
-        break;
-    }
-  }
-
-  void _restoreWindow() async {
-    await _hideTrayIcon();
-    if (Platform.isLinux) {
-      await windowManager.restore();
-    }
-    await windowManager.show();
-    await windowManager.focus();
-    _container.read(windowVisibleProvider.notifier).state = true;
-    SharedTickers.instance.resume();
-  }
-
-  Future<void> _quitApp() async {
-    try {
-      // Phase 6.25: Dispose WebRTC resources before shutdown.
-      await _container.read(webRtcProvider.notifier).disposeAll();
-    } catch (_) {}
-    try {
-      await network_api.notifyShutdown();
-      await Future.delayed(const Duration(milliseconds: 200));
-    } catch (_) {}
-    await _hideTrayIcon();
-    _releaseLock();
-    await windowManager.destroy();
-  }
-}
-
 /// Handles window close, minimize, restore — pauses animations when hidden.
 class _HollowWindowListener extends WindowListener {
   @override
@@ -569,8 +462,10 @@ class _HollowWindowListener extends WindowListener {
         SharedTickers.instance.pause();
         await windowManager.hide();
       } else {
-        // Windows: minimize to system tray — app keeps running in background.
-        await _showTrayIcon();
+        // Windows: hide to the always-visible tray — app keeps running in
+        // the background (issue #50: the icon is up for the whole session,
+        // this just re-asserts it in case creation failed at startup).
+        await TrayService.instance.ensureIcon();
         _container.read(windowVisibleProvider.notifier).state = false;
         SharedTickers.instance.pause();
         await windowManager.hide();
@@ -580,14 +475,7 @@ class _HollowWindowListener extends WindowListener {
       if (Platform.isLinux) {
         await _linuxQuit();
       } else {
-        await windowManager.hide();
-        try {
-          await network_api.notifyShutdown();
-          await Future.delayed(const Duration(milliseconds: 200));
-        } catch (_) {}
-        await _hideTrayIcon();
-        _releaseLock();
-        await windowManager.destroy();
+        await _quitApp();
       }
     }
   }

@@ -786,7 +786,7 @@ Simple label-value row with spaceBetween alignment.
 
 **File:** `lib/src/ui/dialogs/user_settings_dialog.dart` (~740-line shell; split 2026-07-15 into per-category sections under `lib/src/ui/settings/` — see `ui_user_settings.md`)
 **Trigger:** Settings gear in user bar, Ctrl+, keyboard shortcut.
-**Entry point:** `showUserSettingsDialog(BuildContext context, WidgetRef ref, {openSystemTab, openUpdatesTab})`
+**Entry point:** `showUserSettingsDialog(BuildContext context, {openSystemTab, openUpdatesTab, toggle})` — no `WidgetRef` since issue #50: providers are read via `ProviderScope.containerOf(context)`, so non-widget callers (tray menu via `hollowNavigatorKey` context) can open it. `toggle: false` makes a call while already open a no-op instead of closing it (tray path).
 
 ### Toggle behavior
 - `_settingsDialogOpen` top-level bool prevents double-open; calling when open pops the dialog (toggle pattern)

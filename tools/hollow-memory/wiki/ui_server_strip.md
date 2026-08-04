@@ -196,7 +196,7 @@ Centered `Row` of `HollowPressable` icon buttons, each wrapped in `HollowTooltip
 - **Share** — `LucideIcons.share2`. Color: accent when `shareOpen`, textSecondary otherwise. Tap: open → `setShellTab(null)`; closed → `_openShare(ref)` (closes split, `setShellTab(ShellTab.share)`, clears other state).
 - **Archive** — `LucideIcons.archive`. Color: accent when `archiveOpen`, textSecondary otherwise. Tap: open → `setShellTab(null)`; closed → `_openArchive(ref)` (closes split, invalidates archive lists, resets archive selection, `setShellTab(ShellTab.archive)`).
 - **Download** — `DownloadIconButton(iconSize: 18)` (separate component).
-- **Settings** — `LucideIcons.settings`, textSecondary. Tap: `showUserSettingsDialog(context, ref, openSystemTab: true)`.
+- **Settings** — `LucideIcons.settings`, textSecondary. Tap: `showUserSettingsDialog(context, openSystemTab: true)`.
 - **Recovery phrase** — `LucideIcons.keyRound`, textSecondary. Only visible when `identity.mnemonic != null`. Tap: `showMnemonicDialog(context, identity.mnemonic!)`.
 
 Vertical 1px divider between center and right sections.

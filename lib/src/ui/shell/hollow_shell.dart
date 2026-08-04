@@ -1207,7 +1207,7 @@ class _HollowShellState extends ConsumerState<HollowShell>
     if (isCtrl &&
         !isShift &&
         event.logicalKey == LogicalKeyboardKey.comma) {
-      showUserSettingsDialog(context, ref);
+      showUserSettingsDialog(context);
       return true;
     }
 

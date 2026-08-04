@@ -382,7 +382,7 @@ class _BottomBarState extends ConsumerState<BottomBar> {
                   message: 'Settings',
                   child: HollowPressable(
                     semanticLabel: 'Settings',
-                    onTap: () => showUserSettingsDialog(context, ref, openSystemTab: true),
+                    onTap: () => showUserSettingsDialog(context, openSystemTab: true),
                     borderRadius:
                         BorderRadius.circular(hollow.radiusSm),
                     padding: const EdgeInsets.all(HollowSpacing.xs),

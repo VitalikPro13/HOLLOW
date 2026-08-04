@@ -154,6 +154,7 @@ flutter:
 
   assets:
     - assets/app_icon.ico
+    - assets/app_icon_unread.ico
     - assets/hollow_logo_rounded.png
     - assets/sounds/default_ringtone.wav
     - assets/tiktok-solo-icon.svg

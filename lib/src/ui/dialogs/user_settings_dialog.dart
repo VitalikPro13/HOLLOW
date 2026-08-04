@@ -36,17 +36,24 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 bool _settingsDialogOpen = false;
 
 /// Shows the user settings dialog, or closes it if already open (toggle).
-void showUserSettingsDialog(BuildContext context, WidgetRef ref, {bool openSystemTab = false, bool openUpdatesTab = false}) {
-  // Toggle: if already open, close it.
+/// Reads providers through the enclosing [ProviderScope], so any context under
+/// the app works — including the navigator context from non-widget callers
+/// like the tray menu (which passes `toggle: false` so a click while the
+/// dialog is already up just returns to it instead of closing it).
+void showUserSettingsDialog(BuildContext context,
+    {bool openSystemTab = false,
+    bool openUpdatesTab = false,
+    bool toggle = true}) {
   if (_settingsDialogOpen) {
-    Navigator.of(context, rootNavigator: true).pop();
+    if (toggle) Navigator.of(context, rootNavigator: true).pop();
     return;
   }
 
-  final localPeerId = ref.read(identityProvider).peerId;
+  final container = ProviderScope.containerOf(context, listen: false);
+  final localPeerId = container.read(identityProvider).peerId;
   if (localPeerId == null) return;
 
-  final profiles = ref.read(profileProvider);
+  final profiles = container.read(profileProvider);
   final currentProfile = profiles[localPeerId];
 
   final displayNameController = TextEditingController(

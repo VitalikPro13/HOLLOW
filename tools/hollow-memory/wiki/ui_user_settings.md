@@ -12,7 +12,7 @@ Formerly the largest UI file in the project. **Redesigned 2026-06-21** from a fi
 
 ## Entry Point and Toggle Behavior
 
-`showUserSettingsDialog(BuildContext context, WidgetRef ref, {bool openSystemTab, bool openUpdatesTab})` is the public entry. A module-level `bool _settingsDialogOpen` tracks whether the dialog is currently showing. If already open, calling this function pops the existing dialog (toggle behavior). On open, it reads the current profile (display name, status, aboutMe) from `profileProvider` and creates `TextEditingController`s for each. The `initialTab` parameter deep-links: `openUpdatesTab`→Updates, `openSystemTab`→Appearance (the old "System" tab's first split-off), else Profile.
+`showUserSettingsDialog(BuildContext context, {bool openSystemTab, bool openUpdatesTab, bool toggle = true})` is the public entry — no `WidgetRef` since issue #50 (reads via `ProviderScope.containerOf(context)`, so the tray menu can call it with the `hollowNavigatorKey` context). A module-level `bool _settingsDialogOpen` tracks whether the dialog is currently showing. If already open, calling this function pops the existing dialog (toggle behavior); `toggle: false` (tray path) makes it a no-op instead. On open, it reads the current profile (display name, status, aboutMe) from `profileProvider` and creates `TextEditingController`s for each. The `initialTab` parameter deep-links: `openUpdatesTab`→Updates, `openSystemTab`→Appearance (the old "System" tab's first split-off), else Profile.
 
 Helper: `_bannerColorFromId(String id)` generates a deterministic HSL color from a peer ID's hash code, shifted 40 degrees from the avatar hue, used as fallback banner gradient.
 

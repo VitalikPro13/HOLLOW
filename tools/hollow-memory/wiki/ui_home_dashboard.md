@@ -213,7 +213,7 @@ Contains four elements:
 
 3. **Version row (bottom):** Contains:
    - "Installed" label (9px caption) + version badge (`v{currentVersion}`, 10px, w700, `hollow.textSecondary` with 10% alpha background, 25% alpha border)
-   - If update available (`hasUpdate && manifest != null`): arrow icon (`LucideIcons.arrowRight`, 12px, `hollow.accent`) + tappable "Latest" label + version badge (`v{manifest.latest}`, 10px, w700, `hollow.accent` with 20% alpha background, 40% alpha border). Tap opens user settings dialog at updates tab via `showUserSettingsDialog(context, ref, openUpdatesTab: true)`.
+   - If update available (`hasUpdate && manifest != null`): arrow icon (`LucideIcons.arrowRight`, 12px, `hollow.accent`) + tappable "Latest" label + version badge (`v{manifest.latest}`, 10px, w700, `hollow.accent` with 20% alpha background, 40% alpha border). Tap opens user settings dialog at updates tab via `showUserSettingsDialog(context, openUpdatesTab: true)`.
    - Spacer + refresh button (`LucideIcons.refreshCw`, 12px). Tap runs `Future.wait` of `newsProvider.notifier.refresh()` and `updaterProvider.notifier.checkForUpdates()`. Shows error toast "Failed to fetch news -- check your connection" if news refresh returns false.
 
 ---
