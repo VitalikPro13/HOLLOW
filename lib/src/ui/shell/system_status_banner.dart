@@ -454,11 +454,34 @@ class _SystemStatusBannerState extends ConsumerState<SystemStatusBanner> {
 /// reassuring steady-state line is welcome rather than nagging. For
 /// info/maintenance/warning/critical it shows the same colour + headline +
 /// countdown as the banner.
-class HomeStatusCard extends ConsumerWidget {
+///
+/// Tap-to-expand mirrors the global banner: collapsed, the headline and message
+/// clamp to 2 lines each and the Details link is hidden entirely — on a narrow
+/// Home column that ellipsises a notice down to near-nothing. Tapping expands to
+/// the FULL untruncated text plus the Details link. Starts collapsed, and a new
+/// notice id resets it (the card is glanceable by default, detail on request).
+/// The healthy "All systems operational" state has no detail, so it stays a
+/// plain non-interactive line — no chevron, not in the focus chain.
+class HomeStatusCard extends ConsumerStatefulWidget {
   const HomeStatusCard({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<HomeStatusCard> createState() => _HomeStatusCardState();
+}
+
+class _HomeStatusCardState extends ConsumerState<HomeStatusCard> {
+  bool _expanded = false;
+  String _lastId = '';
+
+  void _openLink(String url) {
+    final uri = Uri.tryParse(url);
+    if (uri != null) {
+      launchUrl(uri, mode: LaunchMode.externalApplication);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
     final st = ref.watch(statusProvider);
     final status = st.status;
@@ -478,7 +501,19 @@ class HomeStatusCard extends ConsumerWidget {
             ? status.message
             : null);
 
-    return Container(
+    // A fresh notice re-announces quietly: reset to collapsed when the id flips.
+    if (status.id != _lastId) {
+      _lastId = status.id;
+      _expanded = false;
+    }
+
+    // Only worth a tap when the collapsed card actually hides something: a
+    // message (clamped to 2 lines) or a Details link (never shown collapsed).
+    final bool hasDetail =
+        !operational && (status.message.isNotEmpty || status.link.isNotEmpty);
+    final bool showFull = _expanded && hasDetail;
+
+    final card = Container(
       width: double.infinity,
       padding: const EdgeInsets.symmetric(
         horizontal: HollowSpacing.sm + 2,
@@ -513,8 +548,9 @@ class HomeStatusCard extends ConsumerWidget {
                 ),
                 Text(
                   headline,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
+                  maxLines: showFull ? null : 2,
+                  overflow:
+                      showFull ? TextOverflow.clip : TextOverflow.ellipsis,
                   style: HollowTypography.caption.copyWith(
                     color: color,
                     fontSize: 10,
@@ -523,11 +559,13 @@ class HomeStatusCard extends ConsumerWidget {
                 if (sub != null)
                   Text(
                     sub,
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
+                    maxLines: showFull ? null : 2,
+                    overflow:
+                        showFull ? TextOverflow.clip : TextOverflow.ellipsis,
                     style: HollowTypography.caption.copyWith(
                       color: hollow.textSecondary,
                       fontSize: 10,
+                      height: showFull ? 1.35 : null,
                     ),
                   ),
                 if (status.until != null) ...[
@@ -539,10 +577,98 @@ class HomeStatusCard extends ConsumerWidget {
                     fontSize: 10,
                   ),
                 ],
+                // The Details link is expand-only — collapsed, the card is a
+                // glanceable summary, and an underlined link in it would
+                // compete with the tap-to-expand affordance.
+                if (showFull && status.link.isNotEmpty) ...[
+                  const SizedBox(height: 5),
+                  HollowFocusRing(
+                    enabled: true,
+                    onActivate: () => _openLink(status.link),
+                    borderRadius: BorderRadius.circular(hollow.radiusSm),
+                    child: GestureDetector(
+                      // Absorb the tap so following the link doesn't also
+                      // collapse the card out from under the user.
+                      behavior: HitTestBehavior.opaque,
+                      onTap: () => _openLink(status.link),
+                      child: MouseRegion(
+                        cursor: SystemMouseCursors.click,
+                        child: Semantics(
+                          button: true,
+                          label: status.linkLabel.isNotEmpty
+                              ? status.linkLabel
+                              : 'Details',
+                          child: Text(
+                            status.linkLabel.isNotEmpty
+                                ? status.linkLabel
+                                : 'Details',
+                            style: HollowTypography.caption.copyWith(
+                              color: color,
+                              fontSize: 10,
+                              fontWeight: FontWeight.w700,
+                              decoration: TextDecoration.underline,
+                              decorationColor: color,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
               ],
             ),
           ),
+          if (hasDetail) ...[
+            const SizedBox(width: HollowSpacing.xs),
+            Padding(
+              padding: const EdgeInsets.only(top: 1),
+              child: Icon(
+                showFull ? LucideIcons.chevronUp : LucideIcons.chevronDown,
+                size: 14,
+                color: color.withValues(alpha: 0.7),
+              ),
+            ),
+          ],
         ],
+      ),
+    );
+
+    final animated = AnimatedSize(
+      duration: HollowDurations.fast,
+      curve: HollowCurves.subtle,
+      alignment: Alignment.topCenter,
+      child: card,
+    );
+
+    // Healthy steady state carries no detail — keep it a plain, inert line
+    // rather than a control that expands into nothing.
+    if (!hasDetail) {
+      return Semantics(
+        container: true,
+        label: 'System status: $headline',
+        child: animated,
+      );
+    }
+
+    void toggle() => setState(() => _expanded = !_expanded);
+
+    return Semantics(
+      container: true,
+      button: true,
+      label: 'System status: $headline',
+      hint: showFull ? 'Collapse notice' : 'Expand notice',
+      child: HollowFocusRing(
+        enabled: true,
+        onActivate: toggle,
+        borderRadius: BorderRadius.circular(hollow.radiusMd),
+        child: MouseRegion(
+          cursor: SystemMouseCursors.click,
+          child: GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: toggle,
+            child: animated,
+          ),
+        ),
       ),
     );
   }

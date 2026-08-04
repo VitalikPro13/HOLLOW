@@ -88,8 +88,8 @@ pub(crate) struct RelayMeter {
     /// SendToRoomTopic commands issued (single-frame topic broadcast).
     pub send_topic_cmds: u64,
     /// Total outbound frames the relay actually delivered to a socket, across
-    /// ALL command types. This IS relay egress — the bottleneck the 400 Mbps
-    /// pipe caps. `bytes_out` weights it by payload size.
+    /// ALL command types. This IS relay egress — the bottleneck the relay's
+    /// 1 Gbps pipe caps. `bytes_out` weights it by payload size.
     pub deliveries: u64,
     pub bytes_out: u64,
     /// Deliveries attributable to broadcast fan-out (SendToRoom + topic), so we
@@ -8729,11 +8729,16 @@ async fn scaling_benchmark_mls_fanout() {
     for &n in &[1_000usize, 10_000, 50_000] {
         let deliveries = slope * (n as f64 - 1.0);
         let mb_per_msg = deliveries * 2_048.0 / 1_048_576.0;
-        let secs_per_msg = mb_per_msg / 50.0;
+        // Relay uplink line rate. OVH lifted the production box from 400 Mbps
+        // (50 MB/s) to 1 Gbps on 2026-08-04; measured ~854 Mbps, so this is an
+        // optimistic ceiling by ~15%. Bump alongside `bandwidth_cap_mbps` in
+        // relay-uws/src/http_handlers.cpp if the port changes again.
+        const RELAY_UPLINK_MB_S: f64 = 125.0;
+        let secs_per_msg = mb_per_msg / RELAY_UPLINK_MB_S;
         let max_msgs_per_sec = if secs_per_msg > 0.0 { 1.0 / secs_per_msg } else { f64::INFINITY };
         println!(
             "  {:>6} members: {:>8.0} deliveries/msg = {:>7.1} MB egress/msg  |  \
-             1 hot channel saturates 400Mbps at ~{:.2} msg/s",
+             1 hot channel saturates 1Gbps at ~{:.2} msg/s",
             n, deliveries, mb_per_msg, max_msgs_per_sec,
         );
     }

@@ -55,18 +55,27 @@ coordinator issues. Measured at 5 / 9 / 13 total members:
    plus its CRDT-op/ack companion traffic; the shape is what matters and it is
    dead-linear).
 
-### Extrapolation from the measured slope (2.5 deliveries/other-member, 2 KB frame, 400 Mbps = 50 MB/s relay uplink)
+### Extrapolation from the measured slope (2.5 deliveries/other-member, 2 KB frame, 1 Gbps = 125 MB/s relay uplink)
+
+> **Uplink revised 2026-08-04.** OVH lifted the relay's port from 400 Mbps to
+> 1 Gbps for free (product-range change, applied on reboot). The table below is
+> recomputed at 1 Gbps line rate; the previous revision used 400 Mbps = 50 MB/s,
+> so every saturation figure here is **2.5× better than it was**. Measured real
+> throughput is ~854 Mbps (~107 MB/s), so treat the msg/s column as a line-rate
+> ceiling and knock ~15% off for the practical number.
 
 | members | relay deliveries/msg | egress/msg | 1 hot channel saturates the relay at |
 |--------:|---------------------:|-----------:|-------------------------------------:|
-|   1,000 |               ~2,498 |    ~4.9 MB |                           ~10.2 msg/s |
-|  10,000 |              ~24,998 |   ~48.8 MB |                            ~1.0 msg/s |
-|  50,000 |             ~124,998 |  ~244.1 MB |                            ~0.2 msg/s |
+|   1,000 |               ~2,498 |    ~4.9 MB |                           ~25.5 msg/s |
+|  10,000 |              ~24,998 |   ~48.8 MB |                            ~2.6 msg/s |
+|  50,000 |             ~124,998 |  ~244.1 MB |                            ~0.5 msg/s |
 
-**A 50k-member hot channel is bandwidth-dead — one post consumes ~244 MB of
-relay egress and the channel tops out around one message every five seconds —
+**A 50k-member hot channel is still bandwidth-dead — one post consumes ~244 MB
+of relay egress and the channel tops out around one message every two seconds —
 long before MLS crypto cost is anywhere near relevant.** This is the whole
-finding in one line: **the wall is relay fan-out bandwidth, not MLS.**
+finding in one line: **the wall is relay fan-out bandwidth, not MLS.** A 2.5×
+port bump moves the wall; it does not remove it, because the constraint is O(N)
+per message and no amount of pipe fixes an O(N).
 
 ### The second O(N): coordinator commit/welcome fan-out (the join path)
 
@@ -100,7 +109,7 @@ multicast, no shared-buffer send.
 - MLS envelope broadcast (0x01): `ws_handler.cpp:1027-1031`
 
 One inbound frame → up to N−1 outbound copies, **all egress from one relay on a
-400 Mbps pipe.** RAM is NOT the constraint (50k conns ≈ 670 MB against a
+1 Gbps pipe** (400 Mbps before 2026-08-04). RAM is NOT the constraint (50k conns ≈ 670 MB against a
 ~572k-conn / 8 GB ceiling from `BENCHMARK.md`; the per-channel availability
 cache is 512 MB-capped and does not multiply by member count). **Egress
 bandwidth is the binding constraint at 50k.**

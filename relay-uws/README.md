@@ -22,7 +22,7 @@ The relay is a lightweight, stateless message router. It does **not** store mess
 
 ## Performance
 
-Measured on an OVH VPS (4 vCPU / 8 GB RAM / 400 Mbps). Verified with 44,600 simultaneous authenticated WebSocket connections — see [BENCHMARK.md](BENCHMARK.md) for full methodology and data.
+Measured on an OVH VPS (4 vCPU / 8 GB RAM; 400 Mbps at measurement time, 1 Gbps since 2026-08-04 — the connection figures are RAM-bound and unaffected). Verified with 44,600 simultaneous authenticated WebSocket connections — see [BENCHMARK.md](BENCHMARK.md) for full methodology and data.
 
 | Metric | Value |
 |---|---|

@@ -1071,7 +1071,7 @@ Provider: `relayStatsProvider` -- `NotifierProvider<RelayStatsNotifier, RelaySta
 ### RelayStats Model
 - `memTotalKb`, `memUsedKb` -- VPS memory.
 - `rxMbps`, `txMbps` -- Network bandwidth.
-- `bandwidthCapMbps` -- Default 400 Mbps.
+- `bandwidthCapMbps` -- Default 1000 Mbps (fallback only; the live value rides `bandwidth_cap_mbps` from `/server-stats`).
 - `onlineUsers` -- Currently connected users.
 - `fetchCount` -- Increments per successful fetch (used only for the pulse-animation refresh, NOT for the status dot).
 - `lastSuccessAt` -- `DateTime?` of the last successful fetch.

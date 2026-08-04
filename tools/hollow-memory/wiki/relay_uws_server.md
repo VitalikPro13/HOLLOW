@@ -803,12 +803,12 @@ Returns real-time server resource utilization. Cached for 5 seconds.
   "mem_used_kb": 1234567,
   "rx_mbps": 12.34,
   "tx_mbps": 5.67,
-  "bandwidth_cap_mbps": 400,
+  "bandwidth_cap_mbps": 1000,
   "online_users": 42
 }
 ```
 
-`bandwidth_cap_mbps` is hardcoded to 400 (the OVH VPS bandwidth allocation). `online_users` comes from `state.peer_sockets.size() - guest_count` (excludes guest connections).
+`bandwidth_cap_mbps` is hardcoded to 1000 (the OVH VPS public bandwidth allocation — OVH lifted the port from 400 Mbps to 1 Gbps for free in Aug 2026 as part of a product-range change; measured 854 Mbps down / 827 Mbps up after the required reboot). It is NOT measured at runtime — `virtio_net` reports no link speed, so bump this constant by hand if the port ever changes again. `online_users` comes from `state.peer_sockets.size() - guest_count` (excludes guest connections).
 
 ### GET /relay-status — Relay status for client bootstrap
 

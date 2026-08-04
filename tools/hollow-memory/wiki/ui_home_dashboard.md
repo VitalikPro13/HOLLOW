@@ -263,7 +263,15 @@ Contains four elements:
 - Mobile chat: above the input cluster (`mobile_chat_route.dart`, `anchor: bottom`).
 - Mobile calls: top under the participant/channel name in BOTH `mobile_call_video_view.dart` (1:1) and `mobile_voice_channel_route.dart` (`anchor: top`).
 
-**`HomeStatusCard`** (`ConsumerWidget`) — the calm card variant. Unlike the banner it renders the green "All systems operational" healthy state too (Home/Settings are deliberate pull-surfaces, so a reassuring steady-state is welcome). Used on the desktop Home `_ProfileColumn` (replacing the Recovery Phrase card) and on the mobile Settings tab before `_MobileStatsCard` ("Your Stats").
+**`HomeStatusCard`** (`ConsumerStatefulWidget`) — the calm card variant. Unlike the banner it renders the green "All systems operational" healthy state too (Home/Settings are deliberate pull-surfaces, so a reassuring steady-state is welcome). Used on the desktop Home `_ProfileColumn` (replacing the Recovery Phrase card) and on the mobile Settings tab before `_MobileStatsCard` ("Your Stats").
+
+**Tap-to-expand (2026-08-04)** — mirrors the banner's pattern so the two surfaces behave identically:
+- Collapsed: headline + `sub` message each clamp to `maxLines: 2` with ellipsis; chevron-down on the right of the Row.
+- Expanded (`showFull`): `maxLines: null` + `TextOverflow.clip` on both, message gains `height: 1.35`, and the **Details link** appears — it is expand-ONLY (collapsed it would compete with the tap-to-expand affordance). The link has its own `HollowFocusRing` + `HitTestBehavior.opaque` `GestureDetector` so following it doesn't also collapse the card.
+- `AnimatedSize` (`HollowDurations.fast` / `HollowCurves.subtle`, `alignment: topCenter`).
+- `hasDetail = !operational && (message.isNotEmpty || link.isNotEmpty)`. When false the card returns a plain `Semantics` wrapper with NO chevron and NO focus ring — the healthy state has nothing to reveal, so it must not be an interactive control that expands into nothing.
+- A new `status.id` resets `_expanded` to false during build (same `_lastId` guard the banner uses).
+- Interactive path wraps in `Semantics(container: true, button: true, hint: 'Expand/Collapse notice')` → `HollowFocusRing` → `MouseRegion(click)` → `GestureDetector`, so it is keyboard-operable (a11y CI guards).
 
 ---
 

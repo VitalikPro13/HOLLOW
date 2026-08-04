@@ -315,7 +315,7 @@ static void handle_server_stats(HttpResponse* res, RelayState& state) {
         {"mem_used_kb", mem_used_kb},
         {"rx_mbps", round2(rx_mbps)},
         {"tx_mbps", round2(tx_mbps)},
-        {"bandwidth_cap_mbps", 400},
+        {"bandwidth_cap_mbps", 1000},
         {"online_users", state.online_users()}
     };
 

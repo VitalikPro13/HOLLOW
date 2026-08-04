@@ -2138,7 +2138,9 @@ Release time: 100ms
 CORE PHILOSOPHY:
 Horizontal scaling with identical cheap VPS instances. No vertical scaling, no mega-servers, no single points of failure. A swarm of small OVH boxes combines CPU, RAM, and bandwidth into one logical network — mirrors Hollow’s own distributed architecture. Every box runs the same self-contained binary, same config. Need more capacity? Add another box. Box dies? Clients auto-failover to the next one.
 
-THE HARDWARE: OVH unmetered VPS fleet. Current box: 4 vCPU AMD EPYC Genoa / 8 GB / 400 Mbps at $8.35/mo. Upgrade tier: 4 vCPU / 12 GB / 1 Gbps at $12.75/mo (~$10/mo annually). These are the only two SKUs that matter. N identical boxes = N× bandwidth + N× RAM. 10 boxes at $12.75 = $127.50/mo = 10 Gbps aggregate + 120 GB aggregate RAM. 50 boxes = $637/mo = 50 Gbps + 600 GB RAM. No Cloudflare, no load balancers, no third-party anything between users and the relay.
+THE HARDWARE: OVH unmetered VPS fleet. Current box: 4 vCPU AMD EPYC Genoa / 8 GB / **1 Gbps** at $8.50/mo (grandfathered — the identical SKU now lists at $10/mo). Upgrade tier: **6 vCPU / 12 GB / 2 Gbps at $14.50/mo**. These are the only two SKUs that matter. N identical boxes = N× bandwidth + N× RAM. 10 boxes at $14.50 = $145/mo = 20 Gbps aggregate + 120 GB aggregate RAM. 50 boxes = $725/mo = 100 Gbps + 600 GB RAM. No Cloudflare, no load balancers, no third-party anything between users and the relay.
+
+**Port history (2026-08-04):** OVH lifted the current box from 400 Mbps to 1 Gbps for free as part of a product-range change — RAM and vCPU untouched, one reboot from the customer console to apply. Verified on the live relay at **854 Mbps down / 827 Mbps up**. Note this is an *instance property*, not a rebuild: bandwidth and RAM come from the SKU, so a tier change is a reboot, not a migration. Nothing in the relay measures it — `virtio_net` reports no link speed, so `bandwidth_cap_mbps` in `http_handlers.cpp` is a hand-maintained constant. Bump it when the port changes.
 
 DNS: Hostinger (already hosting anonlisten.com). One A record per relay node. Round-robin distributes initial connections; client-side ping+load logic handles real routing after that.
 
@@ -2147,7 +2149,7 @@ STUN VS TURN BANDWIDTH REALITY: ~85-90% of home users connect via STUN (direct P
 ---
 
 MEASURED BASELINE (2026-04-15, pre-optimization, Nginx TLS → Axum relay):
-Tested at 10,000 concurrent loopback connections on current OVH VPS (4 vCPU / 8 GB / 400 Mbps).
+Tested at 10,000 concurrent loopback connections on current OVH VPS (4 vCPU / 8 GB / 400 Mbps — the port was 400 Mbps at measurement time; the same box has been 1 Gbps since 2026-08-04. RAM/CPU figures below are unaffected).
 - **133 KB RSS per connection** at the relay process alone
 - **186 KB per connection** through the full Nginx → relay path (+53 KB Nginx proxy overhead)
 - **~50 bytes/sec** sustained per idle connection (auth keepalive + occasional CRDT chatter)
@@ -2231,10 +2233,10 @@ SWARM IMPLEMENTATION CHECKLIST:
     - [ ] **Health probes.** Already have `GET /health`. Add mesh connectivity status (how many peer nodes connected) to `/server-stats` for K8s readiness checks and monitoring.
 
 SCALING ROADMAP:
-- **Phase A — current → ~500k concurrent users:** stay on the $8.35 VPS (4 vCPU / 8 GB / 400 Mbps). Current capacity ~572k at 13.4 KB/conn (verified with 44.6k simultaneous connections, perfectly linear scaling). Don’t upgrade.
-- **Phase B — 500k → 878k concurrent:** upgrade to OVH VPS 12 GB / 6 vCPU / 1 Gbps ($12.75/mo). Single-process capacity: ~878k connections. With `SO_REUSEPORT` multi-process (requires mesh): auth throughput scales 6× but RAM remains the bottleneck. Alternatively add a second 8 GB VPS for geo-redundancy.
-- **Phase C — 878k → 3M concurrent:** 3-5 OVH VPSes across EU/NA/APAC regions. ~$38-64/mo. Each box runs multi-process with the mesh. Coturn on a separate box if TURN traffic is measurable.
-- **Phase D — 3M+ concurrent:** grow the swarm. 5-10 OVH VPSes. ~$64-127/mo. Containerize + move to OVH managed K8s (free control plane) for orchestration.
+- **Phase A — current → ~500k concurrent users:** stay on the $8.50 VPS (4 vCPU / 8 GB / 1 Gbps). Current capacity ~572k at 13.4 KB/conn (verified with 44.6k simultaneous connections, perfectly linear scaling). Don’t upgrade. The free 400 Mbps → 1 Gbps port bump gave this phase 2.5× the egress headroom at no cost, so RAM is now the only thing that ends Phase A.
+- **Phase B — 500k → 878k concurrent:** upgrade to OVH VPS 12 GB / 6 vCPU / 2 Gbps ($14.50/mo). Single-process capacity: ~878k connections. With `SO_REUSEPORT` multi-process (requires mesh): auth throughput scales 6× but RAM remains the bottleneck. Alternatively add a second 8 GB VPS for geo-redundancy.
+- **Phase C — 878k → 3M concurrent:** 3-5 OVH VPSes across EU/NA/APAC regions. ~$44-73/mo. Each box runs multi-process with the mesh. Coturn on a separate box if TURN traffic is measurable.
+- **Phase D — 3M+ concurrent:** grow the swarm. 5-10 OVH VPSes. ~$73-145/mo. Containerize + move to OVH managed K8s (free control plane) for orchestration.
 
 ---
 

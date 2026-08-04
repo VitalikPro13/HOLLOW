@@ -25,7 +25,7 @@ class RelayStats {
     this.memUsedKb = 0,
     this.rxMbps = 0,
     this.txMbps = 0,
-    this.bandwidthCapMbps = 400,
+    this.bandwidthCapMbps = 1000,
     this.onlineUsers = 0,
     this.fetchCount = 0,
     this.lastSuccessAt,
@@ -110,7 +110,7 @@ class RelayStatsNotifier extends AutoDisposeNotifier<RelayStats> {
           rxMbps: (json['rx_mbps'] as num?)?.toDouble() ?? 0,
           txMbps: (json['tx_mbps'] as num?)?.toDouble() ?? 0,
           bandwidthCapMbps:
-              (json['bandwidth_cap_mbps'] as num?)?.toInt() ?? 400,
+              (json['bandwidth_cap_mbps'] as num?)?.toInt() ?? 1000,
           onlineUsers: (json['online_users'] as num?)?.toInt() ?? 0,
           fetchCount: state.fetchCount + 1,
           lastSuccessAt: DateTime.now(),
