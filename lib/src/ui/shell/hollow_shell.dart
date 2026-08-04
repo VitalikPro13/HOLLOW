@@ -83,7 +83,9 @@ import 'package:hollow/src/core/providers/gif_provider.dart';
 import 'package:hollow/src/core/providers/link_preview_settings_provider.dart';
 import 'package:hollow/src/core/providers/relay_domain_provider.dart';
 import 'package:hollow/src/core/providers/relay_status_provider.dart';
+import 'package:hollow/src/core/providers/app_shortcuts_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
+import 'package:hollow/src/core/services/hotkeys/hotkey_binding.dart';
 import 'package:hollow/src/rust/api/identity.dart' as identity_api;
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
@@ -1192,71 +1194,63 @@ class _HollowShellState extends ConsumerState<HollowShell>
   }
 
   /// Global keyboard shortcut handler — registered on HardwareKeyboard
-  /// so it works regardless of which widget currently has focus.
+  /// so it works regardless of which widget currently has focus. Bindings
+  /// come from [appShortcutsProvider] (rebindable, Settings > Shortcuts);
+  /// `matchesEvent` carries the AltGr guard (a held Alt = the user typing
+  /// a layout character, AZERTY @ = AltGr+à, issue #43 — never a shortcut).
   bool _handleGlobalKey(KeyEvent event) {
     if (event is! KeyDownEvent) return false;
+    // A keybind capture field is armed: the user is TYPING a new binding,
+    // not invoking one — acting here would fire the shortcut being rebound.
+    if (ref.read(keybindCaptureActiveProvider)) return false;
 
-    // AltGr registers as Ctrl+Alt on Windows — a held Alt means the user is
-    // typing a layout character (AZERTY @ = AltGr+à, issue #43), never one of
-    // our Ctrl shortcuts. Returning true here would suppress the WM_CHAR.
-    final isCtrl = HardwareKeyboard.instance.isControlPressed &&
-        !HardwareKeyboard.instance.isAltPressed;
-    final isShift = HardwareKeyboard.instance.isShiftPressed;
+    final hk = HardwareKeyboard.instance;
+    final binds =
+        ref.read(appShortcutsProvider).valueOrNull ?? kAppShortcutDefaults;
+    bool match(AppShortcut s) => binds[s]!.matchesEvent(event, hk);
 
-    // Ctrl+, → Open settings dialog.
-    if (isCtrl &&
-        !isShift &&
-        event.logicalKey == LogicalKeyboardKey.comma) {
+    if (match(AppShortcut.openSettings)) {
       showUserSettingsDialog(context);
       return true;
     }
 
-    // Ctrl+Shift+P → Toggle member panel ("People"; Ctrl+Shift+M now belongs
-    // to the mute-toggle voice hotkey, matching Discord muscle memory).
-    if (isCtrl &&
-        isShift &&
-        event.logicalKey == LogicalKeyboardKey.keyP) {
+    if (match(AppShortcut.toggleMemberPanel)) {
       final current = ref.read(memberPanelProvider);
       ref.read(memberPanelProvider.notifier).state = !current;
       return true;
     }
 
-    // Ctrl+K → Toggle channel search.
-    if (isCtrl &&
-        !isShift &&
-        event.logicalKey == LogicalKeyboardKey.keyK) {
+    if (match(AppShortcut.quickSearch)) {
       final current = ref.read(channelSearchOpenProvider);
       ref.read(channelSearchOpenProvider.notifier).state = !current;
       return true;
     }
 
-    // Ctrl + / Ctrl − / Ctrl 0 → Interface zoom (issue #20). Shift is
-    // ignored on +/− because "+" is Shift+= on most layouts.
-    if (isCtrl) {
-      final key = event.logicalKey;
-      if (key == LogicalKeyboardKey.equal ||
-          key == LogicalKeyboardKey.add ||
-          key == LogicalKeyboardKey.numpadAdd) {
-        ref.read(uiScaleProvider.notifier).nudge(1);
-        return true;
-      }
-      if (key == LogicalKeyboardKey.minus ||
-          key == LogicalKeyboardKey.numpadSubtract) {
-        ref.read(uiScaleProvider.notifier).nudge(-1);
-        return true;
-      }
-      if (!isShift &&
-          (key == LogicalKeyboardKey.digit0 ||
-              key == LogicalKeyboardKey.numpad0)) {
-        ref.read(uiScaleProvider.notifier).reset();
-        return true;
-      }
+    // Interface zoom (issue #20). On the DEFAULT bindings the historical
+    // aliases stay: "+" is Shift+= on most layouts (so shift is tolerated)
+    // and the numpad variants count. A custom binding matches exactly.
+    if (_matchZoom(event, hk, binds[AppShortcut.zoomIn]!, AppShortcut.zoomIn,
+        const [LogicalKeyboardKey.equal, LogicalKeyboardKey.add,
+            LogicalKeyboardKey.numpadAdd],
+        shiftTolerant: true)) {
+      ref.read(uiScaleProvider.notifier).nudge(1);
+      return true;
+    }
+    if (_matchZoom(event, hk, binds[AppShortcut.zoomOut]!, AppShortcut.zoomOut,
+        const [LogicalKeyboardKey.minus, LogicalKeyboardKey.numpadSubtract],
+        shiftTolerant: true)) {
+      ref.read(uiScaleProvider.notifier).nudge(-1);
+      return true;
+    }
+    if (_matchZoom(event, hk, binds[AppShortcut.zoomReset]!,
+        AppShortcut.zoomReset,
+        const [LogicalKeyboardKey.digit0, LogicalKeyboardKey.numpad0])) {
+      ref.read(uiScaleProvider.notifier).reset();
+      return true;
     }
 
-    // Ctrl+Shift+\ → Toggle split view (dock mode only).
-    if (isCtrl &&
-        isShift &&
-        event.logicalKey == LogicalKeyboardKey.backslash) {
+    // Split view toggle (dock mode only).
+    if (match(AppShortcut.toggleSplitView)) {
       final layoutMode =
           ref.read(layoutModeProvider).valueOrNull ?? LayoutMode.dock;
       if (layoutMode == LayoutMode.dock) {
@@ -1270,10 +1264,7 @@ class _HollowShellState extends ConsumerState<HollowShell>
       }
     }
 
-    // Ctrl+1 → Focus left pane.
-    if (isCtrl &&
-        !isShift &&
-        event.logicalKey == LogicalKeyboardKey.digit1) {
+    if (match(AppShortcut.focusLeftPane)) {
       final split = ref.read(splitViewProvider);
       if (split.isSplit) {
         ref.read(splitViewProvider.notifier).setFocus(0);
@@ -1281,10 +1272,7 @@ class _HollowShellState extends ConsumerState<HollowShell>
       }
     }
 
-    // Ctrl+2 → Focus right pane.
-    if (isCtrl &&
-        !isShift &&
-        event.logicalKey == LogicalKeyboardKey.digit2) {
+    if (match(AppShortcut.focusRightPane)) {
       final split = ref.read(splitViewProvider);
       if (split.isSplit) {
         ref.read(splitViewProvider.notifier).setFocus(1);
@@ -1293,6 +1281,22 @@ class _HollowShellState extends ConsumerState<HollowShell>
     }
 
     return false;
+  }
+
+  /// Zoom shortcuts keep their legacy alias behavior while on the default
+  /// binding: [aliasKeys] all count as the trigger, and with [shiftTolerant]
+  /// the shift state is ignored (Ctrl+Shift+= IS Ctrl++). Custom bindings
+  /// go through the exact [HotkeyBinding.matchesEvent] path instead.
+  bool _matchZoom(KeyEvent event, HardwareKeyboard hk, HotkeyBinding binding,
+      AppShortcut shortcut, List<LogicalKeyboardKey> aliasKeys,
+      {bool shiftTolerant = false}) {
+    if (binding != shortcut.defaultBinding) {
+      return binding.matchesEvent(event, hk);
+    }
+    final isCtrl = hk.isControlPressed && !hk.isAltPressed; // AltGr guard
+    if (!isCtrl) return false;
+    if (!shiftTolerant && hk.isShiftPressed) return false;
+    return aliasKeys.contains(event.logicalKey);
   }
 
   ChatMessage? _lastMessage(

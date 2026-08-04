@@ -37,6 +37,9 @@ class Win32KeyPoller implements HotkeyBackend {
   @override
   bool get isSystemWide => true;
 
+  @override
+  bool canHandle(HotkeyBinding binding) => binding.windowsVk != null;
+
   bool _down(int vk) => (_getAsyncKeyState(vk) & 0x8000) != 0;
 
   @override
@@ -64,15 +67,24 @@ class Win32KeyPoller implements HotkeyBackend {
       final vk = binding.windowsVk;
       if (vk == null) continue; // unmapped — in-app backend owns it
 
-      bool pressed = _down(vk) &&
-          ctrl == binding.ctrl &&
-          shift == binding.shift &&
-          // AltGr guard: a ctrl-binding without alt must see alt UP.
-          (binding.ctrl && !binding.alt ? !alt : alt == binding.alt);
-      // Bare keys are what you type with — never fire them mid-typing.
-      if (binding.isBare && textEditing) pressed = false;
-
       final was = _pressed[action] ?? false;
+      bool pressed;
+      if (was) {
+        // A held action releases on the TRIGGER key alone: modifiers may
+        // be tapped or released first mid-hold (typing while transmitting,
+        // chord release order) and must not chop a PTT transmission —
+        // mirrors the in-app backend's KeyUp semantics.
+        pressed = _down(vk);
+      } else {
+        pressed = _down(vk) &&
+            ctrl == binding.ctrl &&
+            shift == binding.shift &&
+            // AltGr guard: a ctrl-binding without alt must see alt UP.
+            (binding.ctrl && !binding.alt ? !alt : alt == binding.alt);
+        // Bare keys are what you type with — never fire them mid-typing.
+        if (binding.isBare && textEditing) pressed = false;
+      }
+
       if (pressed != was) {
         _pressed[action] = pressed;
         _onEdge?.call(action, pressed);

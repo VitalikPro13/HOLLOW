@@ -18,7 +18,8 @@ typedef _XKeysymToKeycodeDart = int Function(Pointer<Void>, int);
 /// while in a call) on a PRIVATE Display connection (never GTK's). Under a
 /// Wayland session this backend is not created — XWayland only sees keys
 /// while X11 apps have focus, and native-Wayland focus would silently miss;
-/// Wayland uses the in-app backend until the GlobalShortcuts portal work.
+/// Wayland uses the GlobalShortcuts portal backend instead (in-app backend
+/// on compositors without the portal).
 class X11KeyPoller implements HotkeyBackend {
   // X11 keysyms for modifiers.
   static const _xkShiftL = 0xFFE1, _xkShiftR = 0xFFE2;
@@ -78,6 +79,9 @@ class X11KeyPoller implements HotkeyBackend {
   @override
   bool get isSystemWide => true;
 
+  @override
+  bool canHandle(HotkeyBinding binding) => binding.x11Keysym != null;
+
   bool _keycodeDown(int kc) =>
       (_keymap[kc >> 3] & (1 << (kc & 7))) != 0;
 
@@ -116,13 +120,21 @@ class X11KeyPoller implements HotkeyBackend {
       final kc = _triggerKeycodes[action];
       if (kc == null) continue; // unmapped — in-app backend owns it
 
-      bool pressed = _keycodeDown(kc) &&
-          ctrl == binding.ctrl &&
-          shift == binding.shift &&
-          (binding.ctrl && !binding.alt ? !alt : alt == binding.alt);
-      if (binding.isBare && textEditing) pressed = false;
-
       final was = _pressed[action] ?? false;
+      bool pressed;
+      if (was) {
+        // Held actions release on the TRIGGER key alone — mid-hold modifier
+        // changes must not chop a PTT transmission (mirrors the in-app
+        // backend and the Win32 poller).
+        pressed = _keycodeDown(kc);
+      } else {
+        pressed = _keycodeDown(kc) &&
+            ctrl == binding.ctrl &&
+            shift == binding.shift &&
+            (binding.ctrl && !binding.alt ? !alt : alt == binding.alt);
+        if (binding.isBare && textEditing) pressed = false;
+      }
+
       if (pressed != was) {
         _pressed[action] = pressed;
         _onEdge?.call(action, pressed);

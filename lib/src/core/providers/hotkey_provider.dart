@@ -11,8 +11,22 @@ import 'package:hollow/src/core/providers/voice_channel_provider.dart';
 import 'package:hollow/src/core/services/hotkeys/hotkey_backend.dart';
 import 'package:hollow/src/core/services/hotkeys/hotkey_binding.dart';
 import 'package:hollow/src/core/services/hotkeys/inapp_key_backend.dart';
+import 'package:hollow/src/core/services/hotkeys/wayland_portal_backend.dart';
 import 'package:hollow/src/core/services/hotkeys/win32_key_poller.dart';
 import 'package:hollow/src/core/services/hotkeys/x11_key_poller.dart';
+import 'package:hollow/src/rust/api/network.dart' as network_api;
+
+/// Hotkey diagnostics must survive into RELEASE builds (hollow_debug.log):
+/// the Windows PTT field bug stayed undiagnosable for two rounds because
+/// debugPrint output doesn't exist in an installed build.
+void _log(String msg) {
+  debugPrint(msg);
+  try {
+    network_api.logFromDart(message: msg).catchError((_) {});
+  } catch (_) {
+    // FFI not up yet (tests, pre-init) — console-only then.
+  }
+}
 
 /// Voice hotkeys (issue #38): PTT + mute/deafen toggles, live ONLY while in
 /// a voice channel or an active DM call. Kept alive by one `ref.watch` in
@@ -35,18 +49,25 @@ final pttStateProvider =
         (_) => (enabled: false, transmitting: false));
 
 class HotkeyController {
-  HotkeyController(this._ref);
+  HotkeyController(this._ref, {@visibleForTesting HotkeyBackend? testPoller})
+      : _testPoller = testPoller;
 
   final Ref _ref;
 
-  /// System-wide poller (Windows / Linux X11), null on macOS/Wayland or
-  /// when initialization failed — the in-app backend covers everything then.
+  /// Test seam: a fake system-wide backend so the controller's registration
+  /// and edge routing are testable without user32/libX11.
+  final HotkeyBackend? _testPoller;
+
+  /// System-wide backend: Win32/X11 poller, or the Wayland GlobalShortcuts
+  /// portal (attached async once detected). Null on macOS / portal-less
+  /// Wayland / init failure — the in-app backend covers everything then.
   HotkeyBackend? _poller;
   final InAppKeyBackend _inApp = InAppKeyBackend();
 
   Timer? _pttReleaseTimer;
   bool _running = false;
   bool _suspended = false;
+  bool _disposed = false;
 
   /// One-shot: the voice-hotkey settings providers load in build(), which
   /// runs the moment this controller LISTENS them — at app start, before
@@ -58,10 +79,30 @@ class HotkeyController {
   bool _settingsRefreshed = false;
 
   void init() {
-    if (Platform.isWindows) {
+    if (_testPoller != null) {
+      _poller = _testPoller;
+    } else if (Platform.isWindows) {
       _poller = Win32KeyPoller.tryCreate();
     } else if (Platform.isLinux) {
       _poller = X11KeyPoller.tryCreate();
+      if (_poller == null) {
+        // Wayland: system-wide observation only exists via the XDG
+        // GlobalShortcuts portal, whose availability is only knowable
+        // async. The in-app backend covers the gap (and stays the
+        // fallback on compositors without the portal).
+        WaylandPortalBackend.detect().then((backend) {
+          if (backend == null) return;
+          if (_disposed) {
+            backend.close();
+            return;
+          }
+          _poller = backend;
+          _log('[HOLLOW-HOTKEY] Wayland GlobalShortcuts portal backend up');
+          _reevaluate();
+        }).catchError((Object e) {
+          _log('[HOLLOW-HOTKEY] Portal detection failed: $e');
+        });
+      }
     }
 
     // Call lifecycle → start/stop the backends.
@@ -78,6 +119,10 @@ class HotkeyController {
       _pushMode();
       _reevaluate();
     });
+    // Keep the release delay LOADED: it is only read at a release edge, and
+    // without a listener the first read returns AsyncLoading — the first PTT
+    // release would silently use the default instead of the configured value.
+    _ref.listen(pttReleaseDelayProvider, (_, _) {});
 
     // Settings capture field armed → suspend so captures never fire actions.
     _ref.listen(keybindCaptureActiveProvider, (_, active) {
@@ -112,7 +157,7 @@ class HotkeyController {
   /// capture; this controller only reports key edges).
   void _pushMode() {
     final ptt = _pttMode;
-    debugPrint('[HOLLOW-HOTKEY] Voice input mode → ${ptt ? 'PTT' : 'activity'}');
+    _log('[HOLLOW-HOTKEY] Voice input mode → ${ptt ? 'PTT' : 'activity'}');
     _ref.read(voiceChannelProvider.notifier).setVoiceInputMode(ptt);
     _ref.read(callProvider.notifier).setVoiceInputMode(ptt);
     _ref.read(pttStateProvider.notifier).state =
@@ -125,7 +170,7 @@ class HotkeyController {
 
     if (!_settingsRefreshed) {
       _settingsRefreshed = true;
-      debugPrint('[HOLLOW-HOTKEY] First call — refreshing hotkey settings');
+      _log('[HOLLOW-HOTKEY] First call — refreshing hotkey settings');
       _ref.invalidate(voiceInputModeProvider);
       _ref.invalidate(pttKeybindProvider);
       _ref.invalidate(muteKeybindProvider);
@@ -138,7 +183,16 @@ class HotkeyController {
 
     final bindings = <HotkeyAction, HotkeyBinding>{};
     void add(HotkeyAction action, AsyncValue<String> value, String fallback) {
-      final binding = HotkeyBinding.parse(value.valueOrNull ?? fallback);
+      final raw = value.valueOrNull;
+      var binding = HotkeyBinding.parse(raw ?? fallback);
+      if (binding == null && raw != null) {
+        // A stored string the current parser can't read must not silently
+        // kill the action (the other hotkeys would keep working and only
+        // this one goes dead, with nothing in the UI to say why).
+        _log('[HOLLOW-HOTKEY] Stored ${action.name} binding "$raw" is '
+            'unparseable — falling back to $fallback');
+        binding = HotkeyBinding.parse(fallback);
+      }
       if (binding != null) bindings[action] = binding;
     }
 
@@ -163,10 +217,7 @@ class HotkeyController {
       final mapped = <HotkeyAction, HotkeyBinding>{};
       final unmapped = <HotkeyAction, HotkeyBinding>{};
       for (final e in bindings.entries) {
-        final ok = Platform.isWindows
-            ? e.value.windowsVk != null
-            : e.value.x11Keysym != null;
-        (ok ? mapped : unmapped)[e.key] = e.value;
+        (poller.canHandle(e.value) ? mapped : unmapped)[e.key] = e.value;
       }
       if (mapped.isNotEmpty) poller.start(mapped, _onEdge, _isTextEditing);
       if (unmapped.isNotEmpty) {
@@ -174,9 +225,14 @@ class HotkeyController {
       }
     }
     _running = true;
-    debugPrint('[HOLLOW-HOTKEY] Backend started '
+    final mode = _ref.read(voiceInputModeProvider);
+    _log('[HOLLOW-HOTKEY] Backend started '
         '(${poller != null ? 'poller (system-wide)' : 'in-app'}): '
-        '${bindings.entries.map((e) => '${e.key.name}=${e.value.serialize()}').join(', ')}');
+        '${bindings.entries.map((e) => '${e.key.name}=${e.value.serialize()}').join(', ')} '
+        '| mode=${mode.valueOrNull ?? '<none>'}'
+        '${mode.isLoading ? ' (loading)' : ''}'
+        '${mode.hasError ? ' (ERROR: ${mode.error})' : ''}'
+        ' pttMode=$_pttMode');
   }
 
   void _stopBackends() {
@@ -200,7 +256,7 @@ class HotkeyController {
   }
 
   void _onEdge(HotkeyAction action, bool pressed) {
-    debugPrint('[HOLLOW-HOTKEY] Edge: ${action.name} '
+    _log('[HOLLOW-HOTKEY] Edge: ${action.name} '
         '${pressed ? 'pressed' : 'released'}');
     switch (action) {
       case HotkeyAction.pushToTalk:
@@ -239,21 +295,31 @@ class HotkeyController {
   /// provider dispose, when reading other providers may already be illegal.
   void _routePtt(bool active) {
     try {
-      _ref.read(voiceChannelProvider.notifier).setPttTransmit(active);
-      _ref.read(callProvider.notifier).setPttTransmit(active);
+      // UI state FIRST: the mic icon must reflect the key even if a
+      // notifier throws below — a key press with zero visible reaction is
+      // the least debuggable failure mode this feature has.
       final ptt = _ref.read(pttStateProvider);
       if (ptt.transmitting != active) {
         _ref.read(pttStateProvider.notifier).state =
             (enabled: ptt.enabled, transmitting: active);
       }
+      _ref.read(voiceChannelProvider.notifier).setPttTransmit(active);
+      _ref.read(callProvider.notifier).setPttTransmit(active);
     } catch (e) {
       // Reached on provider dispose (expected); anything else must be LOUD —
       // a swallowed error here reads as "PTT silently does nothing".
-      debugPrint('[HOLLOW-HOTKEY] PTT route failed: $e');
+      _log('[HOLLOW-HOTKEY] PTT route failed: $e');
     }
   }
 
   void dispose() {
+    _disposed = true;
     _stopBackends();
+    final poller = _poller;
+    if (poller is WaylandPortalBackend) {
+      // The portal session is kept across calls (rebind avoidance) — only
+      // a controller teardown closes it for real.
+      poller.close();
+    }
   }
 }

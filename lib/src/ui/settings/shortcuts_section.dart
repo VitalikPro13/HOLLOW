@@ -1,92 +1,245 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/providers/app_shortcuts_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/core/services/hotkeys/hotkey_binding.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
+import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/components/hollow_toast.dart';
+import 'package:hollow/src/ui/components/hollow_tooltip.dart';
+import 'package:hollow/src/ui/settings/keybind_capture_field.dart';
 import 'package:hollow/src/ui/settings/settings_shared.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-/// Shortcuts category of the desktop Settings dialog — a reference of the
-/// keyboard shortcuts, grouped General / Voice / Chat Input. The Voice rows
-/// read the LIVE bindings (rebindable in Audio & Video > Voice).
-class ShortcutsSettingsView extends ConsumerWidget {
+/// Shortcuts category of the desktop Settings dialog — every row is
+/// rebindable in place (tap the badge, press the new combo). The Voice rows
+/// edit the same providers as Audio & Video > Voice (one source of truth);
+/// the rest live in [appShortcutsProvider]. Enter/Shift+Enter are
+/// structural, not shortcuts, and stay fixed.
+class ShortcutsSettingsView extends ConsumerStatefulWidget {
   const ShortcutsSettingsView({super.key});
 
-  String _bindingDisplay(WidgetRef ref,
-      AsyncNotifierProvider<KeybindNotifier, String> provider,
-      String fallback) {
+  @override
+  ConsumerState<ShortcutsSettingsView> createState() =>
+      _ShortcutsSettingsViewState();
+}
+
+class _ShortcutsSettingsViewState extends ConsumerState<ShortcutsSettingsView> {
+  @override
+  void initState() {
+    super.initState();
+    // These providers may have loaded BEFORE storage was ready at app start
+    // and cached the defaults (the bootstrap-not-build settings trap) —
+    // re-read from disk whenever the page opens so the rows show truth.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      ref.invalidate(appShortcutsProvider);
+      ref.invalidate(pttKeybindProvider);
+      ref.invalidate(muteKeybindProvider);
+      ref.invalidate(deafenKeybindProvider);
+    });
+  }
+
+  void _setAppShortcut(AppShortcut shortcut, String serialized) {
+    final binding = HotkeyBinding.parse(serialized);
+    if (binding == null) return;
+    // A bare typable key (plain B, plain 7…) as an always-on shortcut would
+    // fire while typing messages — refuse; F-keys and friends stay allowed.
+    if (binding.isBare && binding.isTypableTrigger) {
+      HollowToast.show(
+          context,
+          'Add a modifier (Ctrl/Shift/Alt) — a bare letter or digit would '
+          'trigger while typing.',
+          type: HollowToastType.info);
+      return;
+    }
+    ref
+        .read(appShortcutsProvider.notifier)
+        .setBinding(shortcut, serialized)
+        .catchError((_) {
+      if (mounted) {
+        HollowToast.show(context, 'Could not save the shortcut.',
+            type: HollowToastType.error);
+      }
+    });
+  }
+
+  Widget _appShortcutRow(HollowTheme hollow, AppShortcut shortcut) {
+    final bindings =
+        ref.watch(appShortcutsProvider).valueOrNull ?? kAppShortcutDefaults;
+    final binding = bindings[shortcut]!;
+    return _EditableRow(
+      hollow: hollow,
+      label: shortcut.label,
+      serialized: binding.serialize(),
+      isOverridden: binding != shortcut.defaultBinding,
+      onChanged: (v) => _setAppShortcut(shortcut, v),
+      onReset: () => ref
+          .read(appShortcutsProvider.notifier)
+          .reset(shortcut)
+          .catchError((_) {}),
+    );
+  }
+
+  Widget _voiceShortcutRow(
+    HollowTheme hollow, {
+    required String label,
+    required AsyncNotifierProvider<KeybindNotifier, String> provider,
+    required String fallback,
+  }) {
     final raw = ref.watch(provider).valueOrNull ?? fallback;
-    return HotkeyBinding.parse(raw)?.display() ??
-        HotkeyBinding.parse(fallback)!.display();
+    final serialized =
+        HotkeyBinding.parse(raw) != null ? raw : fallback;
+    return _EditableRow(
+      hollow: hollow,
+      label: label,
+      serialized: serialized,
+      isOverridden: serialized != fallback,
+      // Voice bindings intentionally skip the bare-typable guard: they are
+      // live only in calls and bare keys are suppressed while typing.
+      onChanged: (v) =>
+          ref.read(provider.notifier).setBinding(v).catchError((_) {
+        if (mounted) {
+          HollowToast.show(context, 'Could not save the shortcut.',
+              type: HollowToastType.error);
+        }
+      }),
+      onReset: () =>
+          ref.read(provider.notifier).setBinding(fallback).catchError((_) {}),
+    );
   }
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
     return settingsCardList([
-      const SettingsCard(
+      SettingsCard(
         title: 'General',
         children: [
-          _ShortcutRow(label: 'Open Settings', shortcut: 'Ctrl + ,'),
-          _ShortcutRow(label: 'Toggle Member Panel', shortcut: 'Ctrl + Shift + P'),
-          _ShortcutRow(label: 'Quick Search', shortcut: 'Ctrl + K'),
-          _ShortcutRow(label: 'Toggle Split View', shortcut: r'Ctrl + Shift + \'),
-          _ShortcutRow(label: 'Focus Left Pane', shortcut: 'Ctrl + 1'),
-          _ShortcutRow(label: 'Focus Right Pane', shortcut: 'Ctrl + 2'),
-          _ShortcutRow(label: 'Zoom Interface In', shortcut: 'Ctrl + +'),
-          _ShortcutRow(label: 'Zoom Interface Out', shortcut: 'Ctrl + −'),
-          _ShortcutRow(label: 'Reset Zoom', shortcut: 'Ctrl + 0'),
+          for (final s in const [
+            AppShortcut.openSettings,
+            AppShortcut.toggleMemberPanel,
+            AppShortcut.quickSearch,
+            AppShortcut.toggleSplitView,
+            AppShortcut.focusLeftPane,
+            AppShortcut.focusRightPane,
+            AppShortcut.zoomIn,
+            AppShortcut.zoomOut,
+            AppShortcut.zoomReset,
+          ])
+            _appShortcutRow(hollow, s),
         ],
       ),
       SettingsCard(
-        title: 'Voice (in calls — rebind in Audio & Video)',
+        title: 'Voice (while in a call)',
         children: [
-          _ShortcutRow(
-            label: 'Push to Talk (hold)',
-            shortcut: _bindingDisplay(ref, pttKeybindProvider, 'ctrl+space'),
-          ),
-          _ShortcutRow(
-            label: 'Toggle Mute',
-            shortcut:
-                _bindingDisplay(ref, muteKeybindProvider, 'ctrl+shift+m'),
-          ),
-          _ShortcutRow(
-            label: 'Toggle Deafen',
-            shortcut:
-                _bindingDisplay(ref, deafenKeybindProvider, 'ctrl+shift+d'),
-          ),
+          _voiceShortcutRow(hollow,
+              label: 'Push to Talk (hold)',
+              provider: pttKeybindProvider,
+              fallback: 'ctrl+space'),
+          _voiceShortcutRow(hollow,
+              label: 'Toggle Mute',
+              provider: muteKeybindProvider,
+              fallback: 'ctrl+shift+m'),
+          _voiceShortcutRow(hollow,
+              label: 'Toggle Deafen',
+              provider: deafenKeybindProvider,
+              fallback: 'ctrl+shift+d'),
         ],
       ),
-      const SettingsCard(
+      SettingsCard(
         title: 'Chat Input',
         children: [
-          _ShortcutRow(label: 'Send Message', shortcut: 'Enter'),
-          _ShortcutRow(label: 'New Line', shortcut: 'Shift + Enter'),
-          _ShortcutRow(label: 'Bold', shortcut: 'Ctrl + B'),
-          _ShortcutRow(label: 'Italic', shortcut: 'Ctrl + I'),
-          _ShortcutRow(label: 'Code', shortcut: 'Ctrl + E'),
-          _ShortcutRow(label: 'Strikethrough', shortcut: 'Ctrl + Shift + X'),
-          _ShortcutRow(label: 'Spoiler', shortcut: 'Ctrl + Shift + S'),
+          const _FixedRow(label: 'Send Message', shortcut: 'Enter'),
+          const _FixedRow(label: 'New Line', shortcut: 'Shift + Enter'),
+          for (final s in const [
+            AppShortcut.formatBold,
+            AppShortcut.formatItalic,
+            AppShortcut.formatCode,
+            AppShortcut.formatStrikethrough,
+            AppShortcut.formatSpoiler,
+          ])
+            _appShortcutRow(hollow, s),
         ],
       ),
     ]);
   }
 }
 
-/// Single shortcut row: label on left, key badge on right.
-class _ShortcutRow extends StatelessWidget {
+/// Rebindable shortcut row: label, reset affordance (only when the binding
+/// differs from its default), press-to-set capture field.
+class _EditableRow extends StatelessWidget {
+  final HollowTheme hollow;
   final String label;
-  final String shortcut;
+  final String serialized;
+  final bool isOverridden;
+  final ValueChanged<String> onChanged;
+  final VoidCallback onReset;
 
-  const _ShortcutRow({
+  const _EditableRow({
+    required this.hollow,
     required this.label,
-    required this.shortcut,
+    required this.serialized,
+    required this.isOverridden,
+    required this.onChanged,
+    required this.onReset,
   });
 
   @override
   Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: HollowSpacing.xxs + 1),
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(
+              label,
+              style: HollowTypography.body.copyWith(
+                color: hollow.textSecondary,
+                fontSize: 12,
+              ),
+            ),
+          ),
+          if (isOverridden) ...[
+            HollowTooltip(
+              message: 'Reset to default',
+              child: HollowPressable(
+                onTap: onReset,
+                semanticLabel: 'Reset $label shortcut to default',
+                borderRadius: BorderRadius.circular(hollow.radiusSm),
+                padding: const EdgeInsets.all(HollowSpacing.xxs),
+                child: Icon(
+                  LucideIcons.rotateCcw,
+                  size: 12,
+                  color: hollow.textTertiary,
+                ),
+              ),
+            ),
+            const SizedBox(width: HollowSpacing.xs),
+          ],
+          KeybindCaptureField(
+            serialized: serialized,
+            onChanged: onChanged,
+            semanticLabel: 'Change $label shortcut',
+          ),
+        ],
+      ),
+    );
+  }
+}
 
+/// Non-rebindable row (structural keys): label + static badge.
+class _FixedRow extends StatelessWidget {
+  final String label;
+  final String shortcut;
+
+  const _FixedRow({required this.label, required this.shortcut});
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: HollowSpacing.xxs + 1),
       child: Row(
@@ -107,7 +260,7 @@ class _ShortcutRow extends StatelessWidget {
   }
 }
 
-/// Styled keyboard shortcut badge (e.g. "Ctrl + B").
+/// Styled keyboard shortcut badge (e.g. "Shift + Enter").
 class _KeyBadge extends StatelessWidget {
   final String shortcut;
 

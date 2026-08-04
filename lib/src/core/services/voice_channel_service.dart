@@ -801,11 +801,16 @@ class VoiceChannelService {
     // unmute — the APM keeps processing real mic input while the track is
     // disabled.
     Helper.setCaptureMuted(muted).catchError((_) {});
-    if (_localAudioStream == null) return;
+    if (_localAudioStream == null) {
+      _vcLog('[HOLLOW-VC] setMuted($muted) skipped — no local stream yet');
+      return;
+    }
     _isMuted = muted;
     for (final track in _localAudioStream!.getAudioTracks()) {
       track.enabled = !_isMuted;
     }
+    _vcLog('[HOLLOW-VC] setMuted($muted) applied to '
+        '${_localAudioStream!.getAudioTracks().length} track(s)');
   }
 
   /// Mute/unmute all incoming remote audio (deafen).

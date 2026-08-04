@@ -59,6 +59,10 @@ dependencies:
   # Voice messages on Linux capture via libpulse-simple over dart:ffi —
   # record_linux shells out to `parecord`, absent on PipeWire systems.
   ffi: ^2.1.0
+  # Wayland global PTT/mute hotkeys via the org.freedesktop.portal
+  # GlobalShortcuts D-Bus interface (was already transitive via
+  # flutter_local_notifications_linux).
+  dbus: ^0.7.12
   # Screen-off when the phone is held to the ear during earpiece calls
   # (Android needs WAKE_LOCK — already in the manifest; iOS blanks natively
   # while the events stream is subscribed).

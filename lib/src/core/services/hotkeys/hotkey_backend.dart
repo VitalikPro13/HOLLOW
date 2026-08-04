@@ -24,4 +24,10 @@ abstract class HotkeyBackend {
 
   /// Whether this backend sees keys while the window is unfocused.
   bool get isSystemWide;
+
+  /// Whether this backend can observe [binding] at all (e.g. the Win32
+  /// poller needs a virtual-key mapping, X11 a keysym). Bindings a
+  /// system-wide backend can't handle fall back to the in-app backend —
+  /// focused-only beats silently dead.
+  bool canHandle(HotkeyBinding binding);
 }

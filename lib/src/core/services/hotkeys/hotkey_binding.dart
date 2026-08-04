@@ -24,6 +24,21 @@ class HotkeyBinding {
   /// with.
   bool get isBare => !ctrl && !shift && !alt;
 
+  /// Whether the trigger key produces a character when typed (letters,
+  /// digits, space, punctuation). A BARE binding on a typable trigger is a
+  /// foot-gun for always-on app shortcuts (typing "b" would trigger Bold) —
+  /// the Shortcuts page refuses those; F-keys/Insert/Home/… stay allowed.
+  bool get isTypableTrigger {
+    final name = _nameOfKey(trigger);
+    if (name == null) return false;
+    if (name.length == 1) return true; // letters + digits
+    const typable = {
+      'space', 'grave', 'minus', 'equal', 'bracketleft', 'bracketright',
+      'backslash', 'semicolon', 'quote', 'comma', 'period', 'slash',
+    };
+    return typable.contains(name);
+  }
+
   static HotkeyBinding? parse(String s) {
     if (s.trim().isEmpty) return null;
     var ctrl = false, shift = false, alt = false;
@@ -94,6 +109,12 @@ class HotkeyBinding {
 
   /// X11 keysym for the trigger, or null if unmapped.
   int? get x11Keysym => _x11Keysym[trigger];
+
+  /// xkbcommon keysym NAME for the trigger (freedesktop shortcuts spec,
+  /// used as the GlobalShortcuts portal `preferred_trigger` hint), or null
+  /// if unmapped — the hint is optional; the portal dialog lets the user
+  /// pick a trigger either way.
+  String? get xkbName => _xkbNames[trigger];
 
   @override
   bool operator ==(Object other) =>
@@ -228,6 +249,35 @@ final Map<LogicalKeyboardKey, int> _x11Keysym = {
   LogicalKeyboardKey.end: 0xFF57,
   LogicalKeyboardKey.pageUp: 0xFF55,
   LogicalKeyboardKey.pageDown: 0xFF56,
+};
+
+/// LogicalKeyboardKey → xkbcommon keysym name (xkbcommon-keysyms.h without
+/// the XKB_KEY_ prefix — the freedesktop shortcuts-spec key identifiers).
+final Map<LogicalKeyboardKey, String> _xkbNames = {
+  LogicalKeyboardKey.space: 'space',
+  // a-z / 0-9: names are the characters themselves.
+  for (var i = 0; i < 26; i++)
+    _nameToKey[String.fromCharCode(0x61 + i)]!: String.fromCharCode(0x61 + i),
+  for (var i = 0; i < 10; i++)
+    _nameToKey[String.fromCharCode(0x30 + i)]!: String.fromCharCode(0x30 + i),
+  for (var i = 1; i <= 24; i++) _nameToKey['f$i']!: 'F$i',
+  LogicalKeyboardKey.backquote: 'grave',
+  LogicalKeyboardKey.minus: 'minus',
+  LogicalKeyboardKey.equal: 'equal',
+  LogicalKeyboardKey.bracketLeft: 'bracketleft',
+  LogicalKeyboardKey.bracketRight: 'bracketright',
+  LogicalKeyboardKey.backslash: 'backslash',
+  LogicalKeyboardKey.semicolon: 'semicolon',
+  LogicalKeyboardKey.quote: 'apostrophe',
+  LogicalKeyboardKey.comma: 'comma',
+  LogicalKeyboardKey.period: 'period',
+  LogicalKeyboardKey.slash: 'slash',
+  LogicalKeyboardKey.capsLock: 'Caps_Lock',
+  LogicalKeyboardKey.insert: 'Insert',
+  LogicalKeyboardKey.home: 'Home',
+  LogicalKeyboardKey.end: 'End',
+  LogicalKeyboardKey.pageUp: 'Prior',
+  LogicalKeyboardKey.pageDown: 'Next',
 };
 
 /// Build a binding from a captured key-down: the pressed non-modifier key +

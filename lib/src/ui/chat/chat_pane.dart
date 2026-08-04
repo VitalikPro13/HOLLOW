@@ -15,6 +15,7 @@ import 'package:hollow/src/core/providers/emote_provider.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/models/chat_message.dart';
 import 'package:hollow/src/core/providers/banner_provider.dart';
+import 'package:hollow/src/core/providers/app_shortcuts_provider.dart';
 import 'package:hollow/src/core/providers/chat_provider.dart';
 import 'package:hollow/src/core/providers/event_provider.dart';
 import 'package:hollow/src/core/providers/link_preview_settings_provider.dart';
@@ -2366,6 +2367,8 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
                 return handleChatInputKey(
                   event, _controller, _focusNode, _handleSend,
                   onPasteImage: _stageClipboardImage,
+                  formatBindings:
+                      ref.read(appShortcutsProvider).valueOrNull,
                 );
               },
               child: chatComposerField(

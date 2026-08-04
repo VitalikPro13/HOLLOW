@@ -157,7 +157,7 @@ The old `_buildSystemTab()` is gone. Its sections now live in per-category card 
 - **Network** (`_networkCards`): Relay card — relay list (`_buildRelayRow`), add-relay field (`_buildAddRelayField`), and "Apply & Restart" when the selection differs from the active relay.
 - **Files & Storage** (`_filesCards`): Downloads card (`_buildAutoDownloadSlider`), Cache card (`_buildCacheCapSlider`), Data Location card (`_buildDataLocation` + open-folder), Media card (`_ImageQualitySelector`). Sliders read/write providers directly.
 - **Audio & Video** (`_audioCards`): Devices card wrapping `_AudioDeviceSettings`.
-- **Shortcuts** (`_shortcutCards`): General + Chat Input cards of `_ShortcutRow`s.
+- **Shortcuts** (`ShortcutsSettingsView` in `settings/shortcuts_section.dart`, rebindable 2026-08-04): General / Voice / Chat Input cards where EVERY row is editable in place (`KeybindCaptureField` + reset-to-default arrow when overridden). General + formatting rows edit `appShortcutsProvider` (bare typable triggers refused with a toast — they'd fire while typing); the Voice trio edits the SAME `pttKeybindProvider`/`muteKeybindProvider`/`deafenKeybindProvider` as Audio & Video (one source of truth). Enter/Shift+Enter stay fixed. Stateful with the post-frame provider invalidate (bootstrap-not-build trap).
 
 The sub-widgets (`_AccentColorPicker`, `_BackgroundPicker`, `_AudioDeviceSettings`, `_ImageQualitySelector`, `_ShortcutRow`, `_ToggleRow`) are unchanged and documented below.
 

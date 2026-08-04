@@ -280,12 +280,12 @@ Because it only fires on a crossing, it never fights the header toggle: while na
 
 ## Keyboard Shortcuts
 
-Registered globally on `HardwareKeyboard.instance` (not focus-dependent). Registered in `initState()`, removed in `dispose()`. Only processes `KeyDownEvent`.
+Registered globally on `HardwareKeyboard.instance` (not focus-dependent). Registered in `initState()`, removed in `dispose()`. Only processes `KeyDownEvent`. **All bindings are REBINDABLE (2026-08-04):** `_handleGlobalKey` matches against the live map from `appShortcutsProvider` (`core/providers/app_shortcuts_provider.dart`, `AppShortcut` enum, overrides persisted as one `app_shortcuts` JSON setting) via `HotkeyBinding.matchesEvent` — which carries the AltGr guard. The handler NO-OPS while `keybindCaptureActiveProvider` is true (a capture in Settings > Shortcuts must not fire the shortcut being rebound). Defaults:
 
-| Shortcut | Action |
+| Shortcut (default) | Action |
 |---|---|
 | `Ctrl+,` | Open `UserSettingsDialog` |
-| `Ctrl+Shift+P` | Toggle member panel (moved off `Ctrl+Shift+M` 2026-08-03 — that combo is now the mute-toggle voice hotkey, handled by `HotkeyController` in hotkey_provider.dart, active only while in a call, rebindable in Settings > Audio & Video > Voice) |
+| `Ctrl+Shift+P` | Toggle member panel (moved off `Ctrl+Shift+M` 2026-08-03 — that combo is now the mute-toggle voice hotkey, handled by `HotkeyController` in hotkey_provider.dart, active only while in a call, rebindable in Settings > Audio & Video > Voice or Settings > Shortcuts) |
 | `Ctrl+K` | Toggle channel search |
 | `Ctrl+Shift+\` | Toggle split view (dock mode only) |
 | `Ctrl+1` | Focus left pane (split view only) |
@@ -294,7 +294,7 @@ Registered globally on `HardwareKeyboard.instance` (not focus-dependent). Regist
 | `Ctrl+-` | Interface zoom out |
 | `Ctrl+0` | Reset interface zoom to 100% |
 
-The zoom trio ignores Shift on `+`/`-` (on most layouts `+` IS Shift+`=`) and accepts the numpad variants. It is registered here, on `HardwareKeyboard`, precisely so it still works when the user has zoomed the on-screen controls out of reach.
+The zoom trio ignores Shift on `+`/`-` (on most layouts `+` IS Shift+`=`) and accepts the numpad variants — but ONLY while the binding is still the default (`_matchZoom`); a custom binding matches exactly. It is registered here, on `HardwareKeyboard`, precisely so it still works when the user has zoomed the on-screen controls out of reach. The chat-formatting shortcuts (bold/italic/code/strikethrough/spoiler) live in the same registry and are matched in `handleChatInputKey` (`chat_input_shortcuts.dart`, `formatBindings:` param threaded from both desktop panes).
 
 ## Chat Area Content Resolution
 

@@ -9,6 +9,7 @@ import 'package:hollow/src/core/models/channel_chat_message.dart';
 import 'package:hollow/src/core/moderation_format.dart';
 import 'package:hollow/src/core/reduce_motion.dart';
 import 'package:hollow/src/core/models/file_attachment.dart';
+import 'package:hollow/src/core/providers/app_shortcuts_provider.dart';
 import 'package:hollow/src/core/providers/channel_chat_provider.dart';
 import 'package:hollow/src/core/providers/link_preview_settings_provider.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
@@ -2824,6 +2825,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
     return handleChatInputKey(
       event, _controller, _focusNode, _handleSend,
       onPasteImage: _stageClipboardImage,
+      formatBindings: ref.read(appShortcutsProvider).valueOrNull,
     );
   }
 

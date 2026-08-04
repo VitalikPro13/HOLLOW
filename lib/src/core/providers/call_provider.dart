@@ -758,6 +758,11 @@ class CallNotifier extends Notifier<CallState> {
   void _applyTxGate() {
     final gated =
         state.isMuted || state.isDeafened || (_pttMode && !_pttTransmit);
+    if (_pttMode && state.status == CallStatus.active) {
+      _callLog('[HOLLOW-HOTKEY] DM tx gate: gated=$gated '
+          '(muted=${state.isMuted} deafened=${state.isDeafened} '
+          'held=$_pttTransmit)');
+    }
     _service.setMuted(gated);
   }
 
@@ -766,7 +771,7 @@ class CallNotifier extends Notifier<CallState> {
     if (_pttTransmit == active) return;
     _pttTransmit = active;
     if (state.status == CallStatus.active) {
-      debugPrint('[HOLLOW-HOTKEY] DM PTT transmit=$active '
+      _callLog('[HOLLOW-HOTKEY] DM PTT transmit=$active '
           '(mode=$_pttMode muted=${state.isMuted})');
       _applyTxGate();
     }

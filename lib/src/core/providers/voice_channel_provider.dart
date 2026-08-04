@@ -29,6 +29,15 @@ import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/ui/app.dart' show hollowNavigatorKey;
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 
+/// Log to hollow_debug.log (visible in release builds); console-only when
+/// the FFI isn't up (tests).
+void _vcLog(String msg) {
+  debugPrint(msg);
+  try {
+    network_api.logFromDart(message: msg).catchError((_) {});
+  } catch (_) {}
+}
+
 /// Audio state for a peer in a voice channel.
 class PeerAudioState {
   final bool isMuted;
@@ -1134,6 +1143,11 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
   void _applyTxGate() {
     final gated =
         state.isMuted || state.isDeafened || (_pttMode && !_pttTransmit);
+    if (_pttMode && state.isInVoiceChannel) {
+      _vcLog('[HOLLOW-HOTKEY] VC tx gate: gated=$gated '
+          '(muted=${state.isMuted} deafened=${state.isDeafened} '
+          'held=$_pttTransmit service=${_service != null})');
+    }
     _service?.setMuted(gated);
   }
 
@@ -1142,7 +1156,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     if (_pttTransmit == active) return;
     _pttTransmit = active;
     if (state.isInVoiceChannel) {
-      debugPrint('[HOLLOW-HOTKEY] VC PTT transmit=$active '
+      _vcLog('[HOLLOW-HOTKEY] VC PTT transmit=$active '
           '(mode=$_pttMode muted=${state.isMuted})');
     }
     _applyTxGate();

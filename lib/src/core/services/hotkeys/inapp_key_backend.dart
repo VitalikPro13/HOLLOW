@@ -18,6 +18,9 @@ class InAppKeyBackend implements HotkeyBackend {
   bool get isSystemWide => false;
 
   @override
+  bool canHandle(HotkeyBinding binding) => true;
+
+  @override
   void start(
     Map<HotkeyAction, HotkeyBinding> bindings,
     HotkeyEdgeCallback onEdge,

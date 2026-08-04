@@ -3,24 +3,27 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:hollow/src/core/providers/app_shortcuts_provider.dart';
+import 'package:hollow/src/core/services/hotkeys/hotkey_binding.dart';
 import 'package:super_clipboard/super_clipboard.dart';
 
 /// Handles keyboard shortcuts for the chat input field.
 ///
-/// - Enter → send message
-/// - Shift+Enter → insert newline
-/// - Ctrl+V → paste image from clipboard (if any), else default text paste
-/// - Ctrl+B → wrap selection in **bold**
-/// - Ctrl+I → wrap selection in *italic*
-/// - Ctrl+Shift+X → wrap selection in ~~strikethrough~~
-/// - Ctrl+E → wrap selection in `code`
-/// - Ctrl+Shift+S → wrap selection in ||spoiler||
+/// Structural (fixed): Enter → send, Shift+Enter → newline, Ctrl+V → paste
+/// image from clipboard (if any), else default text paste.
+///
+/// Formatting (rebindable, Settings > Shortcuts, defaults in parentheses):
+/// bold **…** (Ctrl+B), italic *…* (Ctrl+I), `code` (Ctrl+E),
+/// ~~strikethrough~~ (Ctrl+Shift+X), ||spoiler|| (Ctrl+Shift+S).
+/// [formatBindings] carries the live map (pass
+/// `ref.read(appShortcutsProvider).valueOrNull`); null = defaults.
 KeyEventResult handleChatInputKey(
   KeyEvent event,
   TextEditingController controller,
   FocusNode focusNode,
   VoidCallback onSend, {
   void Function(String path, String name)? onPasteImage,
+  Map<AppShortcut, HotkeyBinding>? formatBindings,
 }) {
   if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
     return KeyEventResult.ignored;
@@ -37,11 +40,8 @@ KeyEventResult handleChatInputKey(
     return _handleEnterKey(controller, onSend, isShift);
   }
 
-  // Formatting shortcuts (Ctrl required).
-  if (!isCtrl) return KeyEventResult.ignored;
-
   // Ctrl+V — check for clipboard image before letting default paste through.
-  if (event.logicalKey == LogicalKeyboardKey.keyV && !isShift) {
+  if (isCtrl && !isShift && event.logicalKey == LogicalKeyboardKey.keyV) {
     if (onPasteImage != null) {
       _tryPasteImage(onPasteImage);
     }
@@ -50,7 +50,8 @@ KeyEventResult handleChatInputKey(
     return KeyEventResult.ignored;
   }
 
-  return _handleFormattingKey(event, controller, isShift);
+  return _handleFormattingKey(
+      event, controller, formatBindings ?? kAppShortcutDefaults);
 }
 
 /// Enter → send, Shift+Enter → newline.
@@ -76,35 +77,28 @@ KeyEventResult _handleEnterKey(
   return KeyEventResult.handled;
 }
 
-/// Ctrl-based markdown formatting shortcuts (Ctrl is already held here).
+/// Markdown formatting shortcuts, matched against the live (rebindable)
+/// bindings — `matchesEvent` enforces the full modifier state per binding,
+/// including the AltGr guard.
 KeyEventResult _handleFormattingKey(
   KeyEvent event,
   TextEditingController controller,
-  bool isShift,
+  Map<AppShortcut, HotkeyBinding> binds,
 ) {
-  if (event.logicalKey == LogicalKeyboardKey.keyB && !isShift) {
-    _wrapSelection(controller, '**', '**');
-    return KeyEventResult.handled;
+  const wrappers = {
+    AppShortcut.formatBold: '**',
+    AppShortcut.formatItalic: '*',
+    AppShortcut.formatCode: '`',
+    AppShortcut.formatStrikethrough: '~~',
+    AppShortcut.formatSpoiler: '||',
+  };
+  final hk = HardwareKeyboard.instance;
+  for (final entry in wrappers.entries) {
+    if (binds[entry.key]!.matchesEvent(event, hk)) {
+      _wrapSelection(controller, entry.value, entry.value);
+      return KeyEventResult.handled;
+    }
   }
-  if (event.logicalKey == LogicalKeyboardKey.keyI && !isShift) {
-    _wrapSelection(controller, '*', '*');
-    return KeyEventResult.handled;
-  }
-  if (event.logicalKey == LogicalKeyboardKey.keyE && !isShift) {
-    _wrapSelection(controller, '`', '`');
-    return KeyEventResult.handled;
-  }
-  // Ctrl+Shift+X for strikethrough.
-  if (event.logicalKey == LogicalKeyboardKey.keyX && isShift) {
-    _wrapSelection(controller, '~~', '~~');
-    return KeyEventResult.handled;
-  }
-  // Ctrl+Shift+S for spoiler.
-  if (event.logicalKey == LogicalKeyboardKey.keyS && isShift) {
-    _wrapSelection(controller, '||', '||');
-    return KeyEventResult.handled;
-  }
-
   return KeyEventResult.ignored;
 }
 
