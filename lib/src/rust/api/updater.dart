@@ -6,7 +6,7 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `detect_common_prefix`, `download_inner`
+// These functions are ignored because they are not marked as `pub`: `detect_common_prefix`, `download_inner`, `relaunch_snippet`, `spawn_waiter`
 
 String getCurrentVersion() =>
     RustLib.instance.api.crateApiUpdaterGetCurrentVersion();
@@ -33,6 +33,11 @@ Future<String> applyUpdate({
   appDir: appDir,
   version: version,
 );
+
+/// Spawn a detached, windowless waiter that idles until this process exits,
+/// then relaunches the app. Call right before a self-restart `exit(0)`.
+Future<void> spawnRelaunchWaiter() =>
+    RustLib.instance.api.crateApiUpdaterSpawnRelaunchWaiter();
 
 class DownloadProgress {
   final BigInt bytesDownloaded;

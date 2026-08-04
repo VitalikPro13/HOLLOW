@@ -262,6 +262,10 @@ Extracts the update and generates a platform-specific helper script that perform
 
 Internal helper (Windows path only). Iterates all ZIP entries and checks if they all share the same first path component (e.g., `Release/`). Returns `Some("Release/")` if uniform, `None` otherwise. Used to strip wrapper directories from release ZIPs.
 
+### `spawn_relaunch_waiter() -> Result<(), String>`
+
+App SELF-RESTART (no update involved): spawns a detached, windowless waiter that idles until THIS process exits, then starts the exe again. Zero args — Rust's own pid/`current_exe()` are the app's. Called by Dart's `relaunchApp()` (`lib/src/core/app_relaunch.dart`), the single restart path for the profile switcher (#47), device-link restart, relay Apply & Restart, and the revocation self-nuke. **The spawn MUST live in Rust:** a child spawned directly from Dart dies against the Windows runner's pre-Flutter `SendAppLinkToInstance()` while the old window is alive, and Dart's detached mode can't run the waiter itself (kills powershell instantly — no console, no `CREATE_NO_WINDOW`; a detached cmd batch wedges its `tasklist|find` pipeline). Windows: powershell with `creation_flags(CREATE_NO_WINDOW)`, `Get-Process -Id <pid>` poll loop, then `Start-Process`. Unix: `/bin/sh` `kill -0` loop; macOS relaunches the `.app` via `open`, Linux `exec`s the binary. Guarded by cargo test `relaunch_waiter_tests` (Windows-only). See memory `project_profile_switcher_issue47`.
+
 ## Archive API (`api/archive.rs`)
 
 Cryptographic evidence archive system for exporting, verifying, and loading `.hollow-archive` files (ZIP bundles containing signed messages, edit histories, deletion evidence, reactions, and optionally file attachments). Also handles `.hollow-shards` bundles for vault shard recovery.

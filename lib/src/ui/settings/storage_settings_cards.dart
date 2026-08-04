@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/hollow_data_dir.dart';
+import 'package:hollow/src/core/profile_registry.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
@@ -231,26 +232,14 @@ class _ImageQualitySelector extends ConsumerWidget {
 class _DataLocationRow extends StatelessWidget {
   const _DataLocationRow();
 
-  /// The on-disk data directory shown in the FILES section. Mirrors the Rust
-  /// core's `dirs::data_dir()/hollow` per platform, resolved to a real path via
-  /// the home/APPDATA env var (falls back to the `~`/`%APPDATA%` template if the
-  /// env var is missing). Desktop only — mobile uses a sandboxed app container.
-  /// Portable mode overrides all of it with the hollow_data folder by the exe.
+  /// The on-disk data directory shown in the FILES section. Portable mode and
+  /// a pinned profile (Settings > Profile switcher) override the default with
+  /// the resolved root; otherwise it mirrors the Rust core's
+  /// `dirs::data_dir()/hollow` per platform (profile_registry.dart). Desktop
+  /// only — mobile uses a sandboxed app container.
   static String _dataLocationPath() {
-    if (isPortableMode) return hollowDataDir;
-    final env = Platform.environment;
-    if (Platform.isWindows) {
-      final appData = env['APPDATA'];
-      return appData != null ? '$appData\\hollow' : r'%APPDATA%\hollow';
-    }
-    final home = env['HOME'] ?? '~';
-    if (Platform.isMacOS) {
-      return '$home/Library/Application Support/hollow';
-    }
-    // Linux: XDG_DATA_HOME, default ~/.local/share.
-    final xdg = env['XDG_DATA_HOME'];
-    final base = (xdg != null && xdg.isNotEmpty) ? xdg : '$home/.local/share';
-    return '$base/hollow';
+    if (isPortableMode || isPinnedProfile) return hollowDataDir;
+    return defaultDesktopDataRoot();
   }
 
   /// Open the data directory in the OS file manager.
@@ -296,7 +285,12 @@ class _DataLocationRow extends StatelessWidget {
                 isPortableMode
                     ? 'Portable mode — identity key, encrypted database, and '
                         'downloaded files travel with the app folder.'
-                    : 'Identity key, encrypted database, and downloaded files.',
+                    : isPinnedProfile
+                        ? 'Switched profile — identity key, encrypted '
+                            'database, and downloaded files live in this '
+                            'folder. Manage profiles in Settings > Profile.'
+                        : 'Identity key, encrypted database, and downloaded '
+                            'files.',
                 style: HollowTypography.caption
                     .copyWith(color: hollow.textSecondary, fontSize: 10),
               ),

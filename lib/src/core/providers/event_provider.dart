@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/app_relaunch.dart';
 import 'package:hollow/src/core/providers/avatar_provider.dart';
 import 'package:hollow/src/core/providers/banner_provider.dart';
 import 'package:hollow/src/core/providers/blocked_users_provider.dart';
@@ -164,20 +165,12 @@ class EventStreamNotifier extends Notifier<bool> {
       debugPrint('[HOLLOW] self-nuke toast failed (non-fatal): $e');
     }
 
-    // Give the toast a beat, then shut the node down and relaunch.
+    // Give the toast a beat, then shut the node down and relaunch via the
+    // shared waiter-script helper (app_relaunch.dart) — a directly-spawned
+    // copy dies against the native single-instance forwarder while we're
+    // still shutting down.
     await Future<void>.delayed(const Duration(milliseconds: 1200));
-    try {
-      await notifyShutdown();
-      await Future<void>.delayed(const Duration(milliseconds: 200));
-    } catch (_) {}
-    try {
-      if (Platform.isWindows || Platform.isLinux || Platform.isMacOS) {
-        await Process.start(Platform.resolvedExecutable, const [],
-            mode: ProcessStartMode.detached);
-        await Future<void>.delayed(const Duration(milliseconds: 100));
-      }
-    } catch (_) {}
-    exit(0);
+    await relaunchApp();
   }
 
   void start() {

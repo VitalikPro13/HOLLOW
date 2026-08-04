@@ -19,6 +19,7 @@ import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/dialogs/twitch_device_code_dialog.dart';
+import 'package:hollow/src/ui/settings/profile_locations_card.dart';
 import 'package:hollow/src/ui/settings/settings_shared.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -139,6 +140,14 @@ class ProfileSection extends ConsumerWidget {
                   : (profileDirty ? 'Save Profile' : 'Saved')),
             ),
           ),
+
+          // ── Profiles on this computer (issue #47) ── below the Save commit
+          // so it can't read as part of the deferred profile-edit form: switch
+          // and erase are immediate, confirmed actions. Desktop-only.
+          const SizedBox(height: HollowSpacing.xl),
+          Container(height: 1, color: hollow.border),
+          const SizedBox(height: HollowSpacing.xl),
+          const ProfileLocationsCard(),
         ],
       ),
     );

@@ -1675,6 +1675,10 @@ pub fn perform_pending_wipe() -> Result<(), String> {
         // Keep the marker (removed last) + any single-instance lock file.
         if Some(&name) == marker_name.as_ref() { continue; }
         if name.to_string_lossy().ends_with(".lock") { continue; }
+        // Keep the profile registry (Settings > Profile switcher): it's
+        // app-level config anchored in the default data root, not identity
+        // data — erasing the default profile must not forget the others.
+        if name.to_string_lossy() == "profiles.json" { continue; }
         let res = if path.is_dir() {
             std::fs::remove_dir_all(&path)
         } else {

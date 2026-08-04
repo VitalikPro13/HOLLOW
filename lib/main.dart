@@ -36,9 +36,12 @@ late final String _lockFilePath;
 bool _acquireSingleInstanceLock() {
   final sep = Platform.pathSeparator;
   final String lockDir;
-  if (isPortableMode) {
+  if (isPortableMode || isPinnedProfile) {
     // Portable copies get their own lock inside hollow_data so a portable and
-    // an installed instance can coexist.
+    // an installed COPY (different exe) can coexist. Pinned profiles (issue
+    // #47) lock the same way — the lock's job is one process per data root.
+    // Note two profiles from the SAME exe still can't run at once: the native
+    // SendAppLinkToInstance() forwarder exits a second instance pre-Flutter.
     lockDir = hollowDataDir;
   } else {
     final appDataDir = Platform.environment['APPDATA'] ??
@@ -207,9 +210,10 @@ Future<void> main(List<String> args) async {
   await RustLib.init();
 
   // On mobile, dirs crate returns None — pass the app data path to Rust.
-  // Portable desktop copies pass it too so Rust's data_dir() follows the stick
-  // instead of falling back to the OS profile dir.
-  if (Platform.isAndroid || Platform.isIOS || isPortableMode) {
+  // Portable desktop copies and pinned profiles (Settings > Profile switcher)
+  // pass it too so Rust's data_dir() follows the chosen root instead of
+  // falling back to the OS profile dir.
+  if (Platform.isAndroid || Platform.isIOS || isPortableMode || isPinnedProfile) {
     await identity_api.setDataDir(path: hollowDataDir);
   }
   // Portable verdict into hollow_debug.log (next to the exe on Windows) so a

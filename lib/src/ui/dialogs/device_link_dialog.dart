@@ -1,11 +1,10 @@
 import 'dart:async';
-import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/app_relaunch.dart';
 import 'package:hollow/src/core/providers/device_link_sync_provider.dart';
-import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
@@ -634,22 +633,10 @@ class _DeviceLinkContentState extends ConsumerState<_DeviceLinkContent> {
   }
 
   Future<void> _restartApp() async {
-    // Mirror the existing "Apply & Restart" self-relaunch (user_settings_dialog):
-    // tell the node to shut down, spawn a fresh copy of ourselves, then exit. On
-    // mobile resolvedExecutable can't relaunch the app, so we just exit and the
-    // user re-opens it.
-    try {
-      await network_api.notifyShutdown();
-      await Future.delayed(const Duration(milliseconds: 200));
-    } catch (_) {}
-    try {
-      if (Platform.isWindows || Platform.isLinux || Platform.isMacOS) {
-        await Process.start(Platform.resolvedExecutable, const [],
-            mode: ProcessStartMode.detached);
-        await Future.delayed(const Duration(milliseconds: 100));
-      }
-    } catch (_) {}
-    exit(0);
+    // Shared waiter-script relaunch (app_relaunch.dart) — a directly-spawned
+    // copy dies against the native single-instance forwarder while we're
+    // still shutting down. On mobile it just exits and the user re-opens.
+    await relaunchApp();
   }
 
   // ── Failed ─────────────────────────────────────────────────────────────────

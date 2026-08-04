@@ -674,12 +674,14 @@ Source: `rust/hollow_core/src/identity/keys.rs`, `identity/encryption.rs`, `iden
 ### Data Dir
 
 `keys.rs:data_dir()` -- Resolves the Hollow data directory:
-1. Checks `DATA_DIR_OVERRIDE` OnceLock (set by `set_data_dir()` FFI from Dart on Android/iOS)
+1. Checks `DATA_DIR_OVERRIDE` OnceLock (set by `set_data_dir()` FFI from Dart on Android/iOS, and on desktop when portable mode or a pinned profile is active)
 2. Checks `HOLLOW_DATA_DIR` env var (for multi-instance testing)
 3. Falls back to `dirs::data_dir()` / `hollow` (= `%APPDATA%/hollow` on Windows)
 4. Creates directory if missing via `fs::create_dir_all()`
 
 Keypair stored at `{data_dir}/identity.key`.
+
+**Desktop root selection lives in DART** (`lib/src/core/hollow_data_dir.dart::initHollowDataDir`, issue #47): `HOLLOW_DATA_DIR` env > `--portable` arg > profile pin (`profiles.json` `active` at the default OS root, written by the Settings > Profile switcher) > portable marker file > bare `hollow_data`-next-to-exe **only if it contains identity data** (`identity.key`/`identity.device`/`messages.db` — an empty folder no longer auto-activates portable) > OS default. Whichever wins (other than the OS default) is passed to Rust via `set_data_dir()`. `perform_pending_wipe` (api/storage.rs) preserves `profiles.json` plus `*.lock` and its own marker. See memory `project_profile_switcher_issue47`.
 
 ### IdentityData
 

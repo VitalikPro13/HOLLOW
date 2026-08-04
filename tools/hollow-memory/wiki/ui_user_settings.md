@@ -91,7 +91,11 @@ Reduce Motion (formerly "Disable Animations") moved out of Appearance into the n
 
 ## Profile Tab
 
-Built by `_buildProfileTab(HollowTheme hollow)`. Layout is a `SingleChildScrollView` with a two-column Row at top, then a divider, then a Connections section.
+Built by `_buildProfileTab(HollowTheme hollow)`. Layout is a `SingleChildScrollView` with a two-column Row at top, then a divider, then a Connections section, the Save button, and (desktop-only, below a divider so it can't read as part of the deferred-commit form) the **Profiles block** (issue #47).
+
+### Profiles block (`ProfileLocationsCard`, profile_locations_card.dart)
+
+Switch/erase separate identities, each in its own data folder. Rows: **Default** (OS data root), **Portable folder** (`hollow_data` next to the exe — ALWAYS listed; if missing shows "Not created yet…" and hides Erase; switching creates it), and custom entries from `profiles.json` (Rename/Remove). Active row = accent border + ACTIVE chip; active detection compares against the RUNNING root (env override included). Switch = confirm dialog → pin path in registry (even for Default — the pin must beat portable folder auto-detection) → `relaunchApp()`. Erase: running profile → `stashPendingWipe()` + `relaunchApp()` (in-process SQLCipher deletes fail on Windows); offline profile → recursive delete guarded by a live-lock PID check and a looks-like-Hollow-data check (`identity.key`/`messages.db`/etc. or empty), keeping `profiles.json` + `*.lock`. "Add Profile Folder" (FilePicker) refuses non-empty non-Hollow folders; picking the portable folder redirects to its row. Card copy warns the OS-keychain protection holds ONE identity per computer (fixed Credential Manager slot). Desktop-only — no mobile twin (sandboxed roots; iOS NSE opens one fixed App Group DB path). See memory `project_profile_switcher_issue47`.
 
 ### Left Column: Profile Preview Card (200px wide)
 A live-updating miniature profile card showing how the user's profile will appear.

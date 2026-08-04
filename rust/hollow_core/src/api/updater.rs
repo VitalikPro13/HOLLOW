@@ -349,3 +349,132 @@ fn detect_common_prefix(archive: &mut zip::ZipArchive<fs::File>) -> Option<Strin
     }
     common
 }
+
+// ── Self-restart waiter (issue #47 profile switch, relay apply, device link,
+// revocation self-nuke) ─────────────────────────────────────────────────────
+//
+// Dart cannot restart the app by spawning a fresh copy before exiting: on
+// Windows the runner's SendAppLinkToInstance() runs pre-Flutter in the child,
+// finds the still-alive old window (same exe path), forwards, and the child
+// exits. So a detached waiter must idle until THIS process is gone, then
+// start the exe. The waiter can't be spawned from Dart either — its detached
+// mode kills powershell instantly (no console, no CREATE_NO_WINDOW), and a
+// detached cmd batch wedges its tasklist|find pipeline in a half-alive
+// console. Rust CAN pass CREATE_NO_WINDOW, so the spawn lives here.
+
+/// Spawn a detached, windowless waiter that idles until this process exits,
+/// then relaunches the app. Call right before a self-restart `exit(0)`.
+#[frb]
+pub fn spawn_relaunch_waiter() -> Result<(), String> {
+    let exe = std::env::current_exe()
+        .map_err(|e| format!("current_exe failed: {e}"))?;
+    let exe = exe
+        .to_str()
+        .ok_or("Executable path is not valid UTF-8")?
+        .to_string();
+    spawn_waiter(std::process::id(), &relaunch_snippet(&exe))
+}
+
+/// The platform snippet the waiter runs once the watched pid is gone.
+fn relaunch_snippet(exe: &str) -> String {
+    #[cfg(windows)]
+    {
+        // PowerShell single-quoted literal; ' escapes by doubling.
+        format!("Start-Process -FilePath '{}'", exe.replace('\'', "''"))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // Relaunch the bundle via LaunchServices when running from a .app.
+        match exe.find(".app/") {
+            Some(idx) => format!("/usr/bin/open \"{}\"", &exe[..idx + 4]),
+            None => format!("exec \"{exe}\""),
+        }
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        format!("exec \"{exe}\"")
+    }
+}
+
+#[cfg(windows)]
+fn spawn_waiter(pid: u32, launch: &str) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+    use std::process::Stdio;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    std::process::Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            &format!(
+                "while (Get-Process -Id {pid} -ErrorAction SilentlyContinue) \
+                 {{ Start-Sleep -Milliseconds 250 }}; {launch}"
+            ),
+        ])
+        .creation_flags(CREATE_NO_WINDOW)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map(|_| ()) // child handle drop does NOT kill the process
+        .map_err(|e| format!("Failed to spawn relaunch waiter: {e}"))
+}
+
+#[cfg(not(windows))]
+fn spawn_waiter(pid: u32, launch: &str) -> Result<(), String> {
+    use std::process::Stdio;
+    std::process::Command::new("/bin/sh")
+        .args([
+            "-c",
+            &format!("while kill -0 {pid} 2>/dev/null; do sleep 0.3; done; {launch}"),
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("Failed to spawn relaunch waiter: {e}"))
+}
+
+#[cfg(all(test, windows))]
+mod relaunch_waiter_tests {
+    /// End-to-end mechanics: waiter watches a short-lived pid, outlives it,
+    /// and runs the launch snippet. Guards the CREATE_NO_WINDOW PowerShell
+    /// spawn — the Dart-side detached spawn silently killed powershell, so
+    /// this MUST stay an empirical test, not a code-review assumption.
+    #[test]
+    fn waiter_fires_after_watched_pid_exits() {
+        use std::os::windows::process::CommandExt;
+        let marker = std::env::temp_dir()
+            .join(format!("hollow_waiter_test_{}.txt", std::process::id()));
+        let _ = std::fs::remove_file(&marker);
+
+        // A child that exits immediately = the "old Hollow" to outwait.
+        let mut child = std::process::Command::new("cmd")
+            .args(["/c", "exit"])
+            .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+            .spawn()
+            .expect("spawn short-lived child");
+        let watched = child.id();
+
+        super::spawn_waiter(
+            watched,
+            &format!(
+                "Set-Content -Path '{}' -Value ok",
+                marker.display()
+            ),
+        )
+        .expect("spawn waiter");
+
+        let _ = child.wait();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            if marker.exists() {
+                let _ = std::fs::remove_file(&marker);
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
+        panic!("relaunch waiter never ran its launch snippet");
+    }
+}

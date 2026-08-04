@@ -4,6 +4,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/app_relaunch.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/relay_domain_provider.dart';
@@ -486,14 +487,10 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
   Future<void> _applyRelayAndRestart() async {
     await ref.read(relayDomainProvider.notifier).setDomain(_selectedRelay);
     await ref.read(savedRelayListProvider.notifier).addRelay(_selectedRelay);
-    try {
-      await network_api.notifyShutdown();
-      await Future.delayed(const Duration(milliseconds: 200));
-    } catch (_) {}
-    final exe = Platform.resolvedExecutable;
-    await Process.start(exe, [], mode: ProcessStartMode.detached);
-    await Future.delayed(const Duration(milliseconds: 100));
-    exit(0);
+    // Shared waiter-script relaunch (app_relaunch.dart) — a directly-spawned
+    // copy dies against the native single-instance forwarder while we're
+    // still shutting down.
+    await relaunchApp();
   }
 
   Future<void> _removeRelay(String domain) async {
