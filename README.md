@@ -81,14 +81,14 @@ Your identity is a cryptographic keypair. Zero registrations. One recovery phras
 
 | Platform | Links |
 |----------|------|
-| Windows (10+) | [.exe](https://anonlisten.com/hollow/releases/hollow-0.9.0-win64-setup.exe) / [.zip](https://anonlisten.com/hollow/releases/hollow-0.9.0-win64.zip) |
-| macOS (10.15+) | [.dmg](https://anonlisten.com/hollow/releases/hollow-0.9.0.dmg) |
-| Linux | [Flatpak](https://anonlisten.com/hollow/releases/hollow-0.9.0-linux-x86_64.flatpak) / [.tar.gz](https://anonlisten.com/hollow/releases/hollow-0.9.0-linux.tar.gz) |
-| Android (7+) | [.apk](https://anonlisten.com/hollow/releases/hollow-0.9.0-android.apk) |
+| Windows (10+) | [.exe](https://anonlisten.com/hollow/releases/hollow-0.9.4-win64-setup.exe) / [.zip](https://anonlisten.com/hollow/releases/hollow-0.9.4-win64.zip) |
+| macOS (10.15+) | [.dmg](https://anonlisten.com/hollow/releases/hollow-0.9.4.dmg) |
+| Linux | [Flatpak](https://anonlisten.com/hollow/releases/hollow-0.9.4-linux-x86_64.flatpak) / [.tar.gz](https://anonlisten.com/hollow/releases/hollow-0.9.4-linux.tar.gz) |
+| Android (7+) | [.apk](https://anonlisten.com/hollow/releases/hollow-0.9.4-android.apk) |
 | iOS (16+) | [TestFlight](https://testflight.apple.com/join/5YG2S5e8) |
 | Web | Not planned |
 
-Current Progress: Just one breaking change on voice encryption, so update the app! Full KLIPY integration for GIFs/stickers, servers now have banners, plus other nice improvements that you can read in the [changelog.](https://github.com/VitalikPro13/HOLLOW/blob/main/changelog.txt)
+Current Progress: Tons of changes, all thanks to awesome contributors from the Issues page! Check out the full [changelog.](https://github.com/VitalikPro13/HOLLOW/blob/main/changelog.txt)
 
 ## Tech Stack
 
@@ -242,8 +242,6 @@ flutter build linux
 ```
 
 The output binary is at `build/linux/x64/release/bundle/hollow`.
-
-> **Note:** Linux desktop support is experimental. The app builds and core features work. Needs testing.
 
 </details>
 

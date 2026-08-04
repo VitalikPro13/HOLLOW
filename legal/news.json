@@ -1,5 +1,11 @@
 [
   {
+    "id": "2026-08-04-v094",
+    "date": "August 04, 2026",
+    "title": "v0.9.4 - Screen Share Watching, Voice Hotkeys, Link Previews, Channel Access & Portable Mode",
+    "body": "Hi! Honestly, I think that there should be in-app changelog rather than this small news section card, but it is what it is, for now. Screen shares are now opt-in, Linux Wayland window sharing works, push-to-talk, enhanced link previews, server channels gate by labels, etc. Everything in the [changelog](https://github.com/VitalikPro13/HOLLOW/blob/main/changelog.txt), so have fun! Also, the relay got a free upgrade to 1 Gbps port, so now it can handle more users on scale. Thanks!"
+  },
+  {
     "id": "2026-07-30-v090",
     "date": "July 30, 2026",
     "title": "v0.9 - GIFs, Stickers, Server Banners & Voice Encryption Fix (BREAKING for voice channels)",

@@ -1,6 +1,6 @@
 # Hollow Protocol Whitepaper
 
-**Version 0.9.0**\
+**Version 0.9.4**\
 **Author: Vitalii Rovinskyi**\
 *This document was generated with the assistance of Claude (AI). All technical content reflects the author's architecture and design decisions. Some sections may not match the version number shown above until the next release.*
 

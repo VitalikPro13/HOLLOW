@@ -1,3 +1,105 @@
+v0.9.4 - Screen Share Watching, Voice Hotkeys, Link Previews, Channel Access & Portable Mode
+
+NOTE: Hollow Share (the path for files over 34 MB) now negotiates its own direct connection, using a wire format older builds cannot read. Sharing with someone who has not updated will not connect. There is no relay fallback for Share by design, so failing outright is the correct outcome rather than quietly routing your file through our server. Everything else stays compatible.
+
+SCREEN SHARING (issue #38)
+
+- Screen shares are opt-in now. Nothing streams until a viewer presses Watch, instead of every share pushing video to everyone in the channel the moment it starts
+- Voice channels get a Watch banner that collapses into a chip you can bring back. DM calls show an unwatched share as the person's avatar and a Watch button rather than a blank rectangle
+- Both gain a grid view of every source at once, your own share included, with tap to fullscreen and a small preview of your own share while you are focused on someone else
+- A new share never hijacks what you are looking at. Badges tell you it exists and leave the choice to you
+
+WAYLAND WINDOW SHARING (issue #30)
+
+- Wayland can share individual windows now, which 0.9 left as a follow-up. Your desktop asks once which window you mean, and re-sharing the same one reuses that permission with no second prompt
+- X11 is unchanged and still enumerates windows itself
+
+VOICE, CALLS & SHORTCUTS
+
+- Push to talk, mute and deafen have global hotkeys that work while Hollow is in the background on Windows and X11, and in-app everywhere else
+- Wayland gets genuine global shortcuts through the desktop portal (KDE 5.25 and newer, GNOME 48 and newer), hold to talk included. Where the portal is missing, Hollow falls back to in-app shortcuts instead of pretending
+- Every shortcut is rebindable in place in Settings, not only the voice ones. Defaults are never written to disk, so a binding you never touched follows the app if we change it
+- Fixed a stored keybind Hollow could not parse killing that one action silently. It now falls back to the default and records why
+- Fixed push to talk cutting off mid-sentence when a modifier key changed while you were still holding the trigger
+- A DM call and a server voice channel can no longer run at once (issue #49). Starting or answering a call leaves the channel, and both the ringing card and the call buttons tell you before it happens
+
+LINK PREVIEWS (issue #45)
+
+- Fixed the long-standing "link pasted, no preview". The compose box waits 600ms before fetching, so sending quickly used to lose the card entirely. It now attaches afterwards, as its own signed update
+- Cards rebuilt around large image, video, music and article layouts, chosen by what the site declares about itself
+- A direct mp4 or webm plays inline when you tap it. Receiving a card never makes your client fetch anything, so opening a chat does not tell a website you were there
+- Previews now ride sync, so someone who joins later or a device you just linked gets the card too. Before this they reached only whoever was online at the moment it attached
+- A tall poster no longer swallows the message. Media is contained rather than stretched to the source shape
+- A card that arrives late does not mark the message as edited
+- X and TikTok are read through their own public endpoints straight from your client, with no Hollow-operated proxy in between
+- There is a switch to turn previews off entirely
+
+SERVERS & CHANNELS (issue #32)
+
+- Channels can be gated on labels: pick which labels get in, and holders of any of them can see or post alongside Admins and the Owner. This is enforced by encryption rather than hidden in the interface, so someone without the label holds no key to that channel's messages or its voice audio
+- Temporary access grants (15 minutes, 1 hour, 24 hours, or until revoked) that expire on their own and drop the person out of voice when they lapse
+- A label that carries access can never be self-assigned, checked both when it is set and again when the change arrives, so an edited client cannot work around it
+- Bulk-apply access across a whole category, plus a searchable member picker shared by the label and grant dialogs
+- Member actions moved onto the profile card (issue #48): Message for friends, and for staff a Manage Member dialog covering roles, labels and temporary access, reachable from wherever you clicked the person
+
+PUBLIC CHANNELS (issues #42, #44)
+
+- Guests see real file cards now instead of a bare filename. Images load near the viewport, everything else on demand, and file serving checks access rather than answering anyone who asks
+- Voice channels can no longer be published. A published one used to appear in the browser and then vanish
+- Fixed mentions-only notifications firing on everything (issue #42). The "replies to you" test could never be false, so every message counted as a mention
+- Channel settings toggles no longer flip back for a moment while the change is saving
+
+STICKERS & GIFS (issue #36)
+
+- One sticker or GIF per message, matching how everyone else does it. The picker stays open, so a vertical stack is just repeated clicks. Inline emotes are still uncapped
+- Sticker packs are usable at last: create an empty one, add to it from the sticker menu, save a KLIPY sticker in a tap, and export or import a pack as a file
+- A pack travels as a file, never a link. Hollow has nowhere to host bytes, so a link would mean either serving strangers from your own machine or putting a central server in the middle
+- Import trusts nothing in the file: every image is re-hashed and re-decoded, and dimensions come from the decoded picture rather than what the manifest claims
+- Fixed a hairline gap between tiled stickers that showed at some zoom levels and not others
+
+FILES & STORAGE (issue #41)
+
+- Portable mode: drop a portable.txt file next to the executable, or use the separate portable download, and everything lives in hollow_data beside the app instead of in your user folder: identity, database and downloaded files
+- Profile switcher (issue #47): keep separate data folders and switch between them in Settings, with rename and erase. Useful for a second identity, or for testing
+- Auto-download gains an Off setting and per-conversation overrides, so you can leave it off in general and on for one person
+- Senders now check your preference before pushing bytes you would only throw away, instead of sending them and having you discard them at the door
+- Voice messages are exempt from the size gate, so a voice note always arrives
+- Images carry a small blurred placeholder and videos a poster frame, so a file you have not downloaded still looks like something
+- Fixed manual download of a file over 34 MB failing after a restart
+
+PRIVACY & SECURITY (issue #46)
+
+- Closed seven authorization gaps on the relay found by a code audit. None of them touched encryption: message contents, key material and who sent what were never at risk, because every forwarding path already stamped the routing header with the authenticated sender
+- Removed an endpoint that handed valid TURN credentials to anyone who asked, which made our relay bandwidth farmable by strangers
+- Removed a broadcast opcode that forwarded a frame to a whole room with no membership check at all, and gated its sibling on membership
+- Room probing and peer discovery now answer only for rooms you have actually joined. DM room codes are derived from the two people's identities, so answering for any code turned a pair of identities into an "are these two talking" lookup
+- Any one member could previously wipe a room's shared catch-up buffer. Clearing is now non-destructive and frames simply age out on the normal sweep
+- The offline message buffer evicts fairly under pressure: whoever occupies the most slots loses their oldest frame, so a flood can only displace its own traffic. Deliberately not a rate limit, which would drop legitimate bursts (one channel post is one frame per offline member)
+- Hollow Share runs on its own direct connection and refuses relayed routes outright. It used to reuse whatever connection you already had with that person, so with "Always relay calls" on, every byte of a large file went through our relay. The Share dashboard already promised direct transfer, and now that promise is true
+
+DESKTOP
+
+- The Windows tray icon is always present now, not only after you close to tray (issue #50). Right-click gives mute, deafen, leave voice, settings and quit; the tooltip mirrors your connection state, and the icon carries a red dot while anything is unread. macOS and Linux tray behaviour is unchanged
+- Fixed AltGr firing shortcuts instead of typing on AZERTY layouts (issue #43). Windows reports AltGr as Ctrl and Alt together, so @, euro and brackets were being swallowed app-wide
+- A default ringtone now ships with the app (contributed by [Rong-Yao](https://github.com/Rong-Yao) in issue #39), so an unset ringtone is never silent
+- The microphone test in Settings was rebuilt on the call's own capture path (issue #40). It uses the constraints a real call uses, shows a live meter and plays you back through your chosen output, and works on PipeWire systems where the tool it used to rely on does not exist
+- Voice messages on Linux now record through PulseAudio directly, for the same reason
+
+INTERFACE
+
+- Fixed proportions falling apart at high interface scale (issues #20, #37). Zooming in shrinks the logical screen, so every fixed size grows as a share of it: at 200% the server banner took nearly a third of the channel column, and voice participant rows were the smallest text in the app while sitting next to member rows half again their size
+- The Home dashboard's side columns were clipped with no way to scroll them. They scroll now, and a narrow window drops the network column instead of squeezing everything
+- Swept overflow out of the user bar, stat bars and dialogs at large OS text sizes, which the desktop build passes through unclamped
+- Fixed the speaking indicator never lighting for yourself (issue #37). Your microphone level was being read from somewhere that does not report one, so it was always zero. It is measured in the audio pipeline itself now, right after noise suppression
+- Video calls show speaking on the camera tiles, and the sidebar cue is an outline around the avatar instead of a dot beside it
+- Fixed clicking in a zoomed chat jumping the view, and an edge drag that kept scrolling after you let go (issue #35)
+- Saved messages toggles off like the buttons beside it, instead of reading as a dead press
+- The System Status card on Home expands on tap like the banner does, so a long notice is readable in a narrow column
+
+RELAY
+
+- The relay's public port went from 400 Mbps to 1 Gbps, at no cost, as part of a change to our host's product range
+
 v0.9 - GIFs, Stickers, Server Banners & Voice Encryption Fix (BREAKING for voice channels)
 
 BREAKING CHANGE: Server voice channels are NOT compatible between 0.9 and 0.8.5 or older. Encryption in voice channels was never actually engaged on older builds (issue #27), and fixing it changes when keys are applied. Everyone in a voice channel needs to be on 0.9. Messages, DM calls and everything else are unaffected.
