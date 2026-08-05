@@ -15,6 +15,7 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/speaking_border.dart';
 import 'package:hollow/src/ui/components/call_duration_text.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/components/share_source_quality_chip.dart';
 import 'package:hollow/src/ui/components/share_volume_control.dart';
 import 'package:hollow/src/ui/mobile/mobile_screen_share_sheet.dart';
 import 'package:hollow/src/ui/mobile/mobile_sheet_drag.dart';
@@ -150,7 +151,9 @@ class _MobileVoiceChannelRouteState
             children: [
               _buildTopBar(hollow, vcState.joinedAt,
                   remoteSharing: vcState.isWatchingAnyShare,
-                  watchedSharerId: displayedSharer),
+                  watchedSharerId: displayedSharer,
+                  sourceQualityOn: displayedSharer != null &&
+                      vcState.sourceQualityShares.contains(displayedSharer)),
               // System-status notice, at the top under the channel name (divider
               // below) — surfaces maintenance/outage while you're in a call.
               const SystemStatusBanner(),
@@ -169,7 +172,9 @@ class _MobileVoiceChannelRouteState
   }
 
   Widget _buildTopBar(HollowTheme hollow, DateTime? joinedAt,
-      {required bool remoteSharing, String? watchedSharerId}) {
+      {required bool remoteSharing,
+      String? watchedSharerId,
+      bool sourceQualityOn = false}) {
     return Padding(
       padding: const EdgeInsets.symmetric(
         horizontal: HollowSpacing.md,
@@ -209,6 +214,17 @@ class _MobileVoiceChannelRouteState
               ],
             ),
           ),
+          // Source-quality opt-in for the displayed share (media forwarding
+          // step 1) — per watch session, OFF by default.
+          if (watchedSharerId != null) ...[
+            ShareSourceQualityChip(
+              active: sourceQualityOn,
+              onChanged: (on) => ref
+                  .read(voiceChannelProvider.notifier)
+                  .setShareSourceQuality(watchedSharerId, on),
+            ),
+            const SizedBox(width: HollowSpacing.xs),
+          ],
           // Stop watching the displayed share (opt-in watching, issue #38).
           if (watchedSharerId != null)
             HollowPressable(

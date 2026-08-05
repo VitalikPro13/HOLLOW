@@ -10,6 +10,7 @@ import 'package:flutter_webrtc/flutter_webrtc.dart';
 
 import 'package:hollow/src/core/providers/call_provider.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
+import 'package:hollow/src/core/viewer_display.dart';
 import 'package:hollow/src/core/providers/ice_config_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/recording_provider.dart';
@@ -105,6 +106,12 @@ class VoiceChannelState {
   /// `peerScreenSharing` alone is just the badge.
   final Set<String> watchingScreenShares;
 
+  /// Shares we asked to receive at SOURCE quality (media forwarding step 1).
+  /// OFF by default: the sharer clamps our stream to our display resolution
+  /// unless the sharer's peer id is in this set. Cleared when we stop
+  /// watching that share — the opt-in is per watch session, never sticky.
+  final Set<String> sourceQualityShares;
+
   /// Desktop-only: show all sources as a tile grid instead of one focused
   /// source full-bleed.
   final bool isGridView;
@@ -141,6 +148,7 @@ class VoiceChannelState {
     this.focusedScreenSharePeerId,
     this.focusedSourceType = 'screen',
     this.watchingScreenShares = const {},
+    this.sourceQualityShares = const {},
     this.isGridView = false,
     this.isCameraOn = false,
     this.isFrontCamera = true,
@@ -205,6 +213,7 @@ class VoiceChannelState {
     bool clearCurrent = false,
     String? focusedSourceType,
     Set<String>? watchingScreenShares,
+    Set<String>? sourceQualityShares,
     bool? isGridView,
     bool? isCameraOn,
     bool? isFrontCamera,
@@ -257,6 +266,9 @@ class VoiceChannelState {
       watchingScreenShares: clearCurrent
           ? const {}
           : (watchingScreenShares ?? this.watchingScreenShares),
+      sourceQualityShares: clearCurrent
+          ? const {}
+          : (sourceQualityShares ?? this.sourceQualityShares),
       isGridView: clearCurrent
           ? false
           : (isGridView ?? this.isGridView),
@@ -295,6 +307,13 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
   /// Peers that requested to watch OUR share via screen_watch (issue #38).
   /// We only ever send a screen offer to peers in this set.
   final Set<String> _watchers = {};
+
+  /// Per-watcher display resolution + source-quality request, from the
+  /// screen_watch payload (media forwarding step 1). Used to clamp THAT
+  /// viewer's encoder — per-viewer PCs mean per-viewer encoders, so one 4K
+  /// viewer never drags a 1080p room up. Absent / 0x0 = unknown (old
+  /// client) = no clamp.
+  final Map<String, ({int w, int h, bool source})> _watcherDisplays = {};
 
   /// Peers whose audio PC to us has reached connected — the precondition for
   /// sending them a screen offer (Olm/MLS transport is warm by then).
@@ -959,6 +978,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     if (_service == null) return;
     await _service!.onPeerLeftMyChannel(peerId);
     _watchers.remove(peerId);
+    _watcherDisplays.remove(peerId);
     _audioConnectedPeers.remove(peerId);
     // A gone peer can't heal — drop its ladder state.
     _sframeFailures.removeWhere((k, _) => k.startsWith('$peerId|'));
@@ -1605,6 +1625,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       // restored isn't re-captured.
       await _stopMobileShareAudio();
       _watchers.clear();
+      _watcherDisplays.clear();
       final sharePeers = _outgoingScreenShares.keys.toList();
       for (final service in _outgoingScreenShares.values) {
         try { await service.close(); } catch (_) {}
@@ -1732,10 +1753,13 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     _outgoingScreenShares[peerId] = service;
 
     try {
+      // Per-viewer cap: the share quality clamped to what THIS viewer's
+      // display can show (media forwarding step 1).
+      final (effMaxW, effMaxH) = _effectiveCapFor(peerId);
       final sdp = await service.createOfferFromStream(
         _screenCaptureStream!,
-        maxWidth: _screenShareMaxWidth,
-        maxHeight: _screenShareMaxHeight,
+        maxWidth: effMaxW,
+        maxHeight: effMaxH,
         fps: _screenShareFps,
         profile: _screenShareProfile,
       );
@@ -2045,14 +2069,35 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
   Future<void> _handleScreenWatch(String peerId, String payload) async {
     final v = jsonDecode(payload);
     final want = v['want'] as bool? ?? false;
-    debugPrint('[HOLLOW-VC] Screen watch from $peerId: want=$want');
+    final viewerW = (v['viewer_width'] as num?)?.toInt() ?? 0;
+    final viewerH = (v['viewer_height'] as num?)?.toInt() ?? 0;
+    final sourceQuality = v['source_quality'] as bool? ?? false;
+    debugPrint('[HOLLOW-VC] Screen watch from $peerId: want=$want '
+        'viewer=${viewerW}x$viewerH source=$sourceQuality');
 
     if (want) {
       // Raced against our stop — nothing to send; the peer's badge clears
       // via our screen_state{disabled} broadcast.
       if (!state.isScreenSharing || _screenCaptureStream == null) return;
       _watchers.add(peerId);
-      if (_outgoingScreenShares.containsKey(peerId)) return; // already sending
+      _watcherDisplays[peerId] =
+          (w: viewerW, h: viewerH, source: sourceQuality);
+      final existing = _outgoingScreenShares[peerId];
+      if (existing != null) {
+        // Already streaming to this viewer — a re-sent watch is a cap change
+        // (Source-quality toggle): try a live setParameters first; when the
+        // sender rejects it (Windows libwebrtc always does — field-verified
+        // 2026-08-05), renegotiate: fresh offer with the new cap riding the
+        // init sendEncodings, the guaranteed path. Brief stream restart.
+        final (effW, effH) = _effectiveCapFor(peerId);
+        final ok = await existing.updateResolutionCap(effW, effH);
+        if (!ok) {
+          debugPrint('[HOLLOW-VC] Live cap change rejected for $peerId — '
+              're-offering share at ${effW}x$effH');
+          await _sendScreenShareToPeer(peerId);
+        }
+        return;
+      }
       if (_outgoingScreenShares.length >= maxScreenShareOutgoing) {
         debugPrint('[HOLLOW-VC] Watch request from $peerId ignored — outgoing cap ($maxScreenShareOutgoing) reached');
         return;
@@ -2064,6 +2109,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       }
     } else {
       _watchers.remove(peerId);
+      _watcherDisplays.remove(peerId);
       final outgoing = _outgoingScreenShares.remove(peerId);
       if (outgoing != null) {
         await outgoing.close();
@@ -2071,6 +2117,20 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
         debugPrint('[HOLLOW-VC] Stopped sending share to $peerId (viewer opted out)');
       }
     }
+  }
+
+  /// The resolution cap for [peerId]'s outgoing share PC: the share's chosen
+  /// quality clamped to that viewer's reported display (media forwarding
+  /// step 1) — unless they explicitly asked for source quality.
+  (int, int) _effectiveCapFor(String peerId) {
+    final d = _watcherDisplays[peerId];
+    return ScreenShareService.effectiveViewerCap(
+      _screenShareMaxWidth,
+      _screenShareMaxHeight,
+      d?.w ?? 0,
+      d?.h ?? 0,
+      sourceQuality: d?.source ?? false,
+    );
   }
 
   /// Viewer side of opt-in watching (issue #38): request [peerId]'s share.
@@ -2092,13 +2152,21 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       focusedSourceType: 'screen',
     );
 
+    // Ship our display resolution so the sharer clamps our stream to what
+    // we can actually show (media forwarding step 1).
+    final (viewerW, viewerH) = largestDisplayResolution();
     network_api
         .voiceChannelSendSignal(
           serverId: state.currentServerId!,
           channelId: state.currentChannelId!,
           peerId: peerId,
           signalType: 'screen_watch',
-          payload: jsonEncode({'want': true}),
+          payload: jsonEncode({
+            'want': true,
+            'viewer_width': viewerW,
+            'viewer_height': viewerH,
+            'source_quality': state.sourceQualityShares.contains(peerId),
+          }),
         )
         .catchError((_) {});
 
@@ -2123,6 +2191,8 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     _earlyScreenIce.remove('incoming:$peerId');
 
     final watching = {...state.watchingScreenShares}..remove(peerId);
+    // Source quality is a per-watch-session opt-in — never sticky.
+    final sourceQuality = {...state.sourceQualityShares}..remove(peerId);
 
     // Focus repair BEFORE closing the service so the UI never renders a
     // focused share whose renderer is being torn down.
@@ -2146,6 +2216,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       }
       state = state.copyWith(
         watchingScreenShares: watching,
+        sourceQualityShares: sourceQuality,
         focusedScreenSharePeerId: nextFocus ?? cameraFocus,
         clearFocusedSharer: nextFocus == null && cameraFocus == null,
         focusedSourceType: nextFocus != null
@@ -2153,7 +2224,10 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
             : (cameraFocus != null ? 'camera' : state.focusedSourceType),
       );
     } else {
-      state = state.copyWith(watchingScreenShares: watching);
+      state = state.copyWith(
+        watchingScreenShares: watching,
+        sourceQualityShares: sourceQuality,
+      );
     }
 
     final incoming = _incomingScreenShares.remove(peerId);
@@ -2173,6 +2247,39 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
           )
           .catchError((_) {});
     }
+  }
+
+  /// Viewer side (media forwarding step 1): ask [peerId] to send us their
+  /// share at SOURCE quality instead of clamped to our display — or go back
+  /// to the clamp. OFF by default, per watch session. A re-sent screen_watch
+  /// live-updates the sharer's encoder cap; no renegotiation, no PC churn.
+  Future<void> setShareSourceQuality(String peerId, bool on) async {
+    if (state.sourceQualityShares.contains(peerId) == on) return;
+    final next = {...state.sourceQualityShares};
+    if (on) {
+      next.add(peerId);
+    } else {
+      next.remove(peerId);
+    }
+    state = state.copyWith(sourceQualityShares: next);
+
+    if (!state.isInVoiceChannel) return;
+    if (!state.watchingScreenShares.contains(peerId)) return;
+    final (viewerW, viewerH) = largestDisplayResolution();
+    network_api
+        .voiceChannelSendSignal(
+          serverId: state.currentServerId!,
+          channelId: state.currentChannelId!,
+          peerId: peerId,
+          signalType: 'screen_watch',
+          payload: jsonEncode({
+            'want': true,
+            'viewer_width': viewerW,
+            'viewer_height': viewerH,
+            'source_quality': on,
+          }),
+        )
+        .catchError((_) {});
   }
 
   void _toast(String message, HollowToastType type) {
@@ -2224,6 +2331,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     // Forget watch bookkeeping both ways (viewer + sharer side).
     _watchConnectTimers.remove(peerId)?.cancel();
     _watchers.remove(peerId);
+    _watcherDisplays.remove(peerId);
     // Close incoming screen share from this peer.
     final incoming = _incomingScreenShares.remove(peerId);
     if (incoming != null) {
@@ -2279,6 +2387,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     }
     _watchConnectTimers.clear();
     _watchers.clear();
+    _watcherDisplays.clear();
 
     await _stopMobileShareAudio();
     final allSharePeers = <String>{

@@ -24,6 +24,7 @@ import 'package:hollow/src/core/services/screen_audio_receiver.dart';
 import 'package:hollow/src/core/services/share_audio_level.dart';
 import 'package:hollow/src/core/services/screen_share_service.dart';
 import 'package:hollow/src/core/services/voice_service.dart';
+import 'package:hollow/src/core/viewer_display.dart';
 import 'package:hollow/src/ui/app.dart' show hollowNavigatorKey;
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 
@@ -61,6 +62,11 @@ class CallState {
   /// Opt-in watching (issue #38): the remote share never streams to us until
   /// we pressed Watch — [remoteScreenSharing] alone is just the badge.
   final bool watchingRemoteShare;
+
+  /// Viewer asked for SOURCE quality on the remote share (media forwarding
+  /// step 1). OFF by default: the sharer clamps our stream to our display
+  /// resolution until this is on. Per watch session, never sticky.
+  final bool watchingSourceQuality;
   final String sframeKey; // hex-encoded 32-byte SFrame key for E2EE
   // NOTE: speaking (VAD) state deliberately lives in callSpeakingProvider,
   // NOT here — it flips 1-4x/sec while talking and a copyWith here rebuilt
@@ -102,6 +108,7 @@ class CallState {
     this.isScreenSharing = false,
     this.remoteScreenSharing = false,
     this.watchingRemoteShare = false,
+    this.watchingSourceQuality = false,
     this.sframeKey = '',
     this.isSpeakerOn = false,
     this.isDeafened = false,
@@ -126,6 +133,7 @@ class CallState {
     bool? isScreenSharing,
     bool? remoteScreenSharing,
     bool? watchingRemoteShare,
+    bool? watchingSourceQuality,
     String? sframeKey,
     bool? isSpeakerOn,
     bool? isDeafened,
@@ -151,6 +159,8 @@ class CallState {
         isScreenSharing: isScreenSharing ?? this.isScreenSharing,
         remoteScreenSharing: remoteScreenSharing ?? this.remoteScreenSharing,
         watchingRemoteShare: watchingRemoteShare ?? this.watchingRemoteShare,
+        watchingSourceQuality:
+            watchingSourceQuality ?? this.watchingSourceQuality,
         sframeKey: sframeKey ?? this.sframeKey,
         isSpeakerOn: isSpeakerOn ?? this.isSpeakerOn,
         isDeafened: isDeafened ?? this.isDeafened,
@@ -217,6 +227,14 @@ class CallNotifier extends Notifier<CallState> {
 
   /// Sharer side: the peer asked to receive our share.
   bool _dmPeerWantsShare = false;
+
+  /// Sharer side: the peer's display resolution + source-quality request
+  /// from their screen_watch (media forwarding step 1) — clamps their
+  /// encoder to what they can actually show. 0x0 = unknown (old client)
+  /// = no clamp.
+  int _dmViewerWidth = 0;
+  int _dmViewerHeight = 0;
+  bool _dmViewerSourceQuality = false;
 
   /// Viewer side: "offer never came" timeout after pressing Watch.
   Timer? _dmWatchConnectTimer;
@@ -1064,10 +1082,13 @@ class CallNotifier extends Notifier<CallState> {
     };
 
     try {
+      // Per-viewer cap: the share quality clamped to what the peer's display
+      // can show (media forwarding step 1).
+      final (effMaxW, effMaxH) = _dmEffectiveCap();
       final offerSdp = await _outgoingScreenShare!.createOfferFromStream(
         _dmScreenStream!,
-        maxWidth: _dmShareMaxWidth,
-        maxHeight: _dmShareMaxHeight,
+        maxWidth: effMaxW,
+        maxHeight: effMaxH,
         fps: _dmShareFps,
         profile: _dmShareProfile,
       );
@@ -1206,6 +1227,9 @@ class CallNotifier extends Notifier<CallState> {
   Future<void> stopScreenShare() async {
     ShareAudioLevel.setSendingShareAudio(false);
     _dmPeerWantsShare = false;
+    _dmViewerWidth = 0;
+    _dmViewerHeight = 0;
+    _dmViewerSourceQuality = false;
     // Stop the capturer FIRST, then disarm the redirect — so the brief window
     // where the remote voice's in-process volume is restored isn't captured
     // (the capturer is already gone), avoiding a momentary echo blip on stop.
@@ -1230,11 +1254,33 @@ class CallNotifier extends Notifier<CallState> {
     final callId = json['call_id'] as String? ?? '';
     final want = json['want'] as bool? ?? false;
     if (state.callId != callId) return;
-    debugPrint('[HOLLOW-CALL] Screen watch from $peerId: want=$want');
+    final viewerW = (json['viewer_width'] as num?)?.toInt() ?? 0;
+    final viewerH = (json['viewer_height'] as num?)?.toInt() ?? 0;
+    final sourceQuality = json['source_quality'] as bool? ?? false;
+    debugPrint('[HOLLOW-CALL] Screen watch from $peerId: want=$want '
+        'viewer=${viewerW}x$viewerH source=$sourceQuality');
 
     if (want) {
       _dmPeerWantsShare = true;
-      if (state.isScreenSharing && _outgoingScreenShare == null) {
+      _dmViewerWidth = viewerW;
+      _dmViewerHeight = viewerH;
+      _dmViewerSourceQuality = sourceQuality;
+      if (!state.isScreenSharing) return;
+      if (_outgoingScreenShare != null) {
+        // Already streaming — a re-sent watch is a cap change (Source-quality
+        // toggle): try a live setParameters first; when the sender rejects it
+        // (Windows libwebrtc always does — field-verified 2026-08-05),
+        // renegotiate: _sendDmScreenOffer closes the old PC and re-offers
+        // with the new cap riding the init sendEncodings, the guaranteed
+        // path. Brief stream restart.
+        final (effW, effH) = _dmEffectiveCap();
+        final ok = await _outgoingScreenShare!.updateResolutionCap(effW, effH);
+        if (!ok) {
+          debugPrint('[HOLLOW-CALL] Live cap change rejected — '
+              're-offering share at ${effW}x$effH');
+          await _sendDmScreenOffer();
+        }
+      } else {
         await _sendDmScreenOffer();
       }
     } else {
@@ -1249,6 +1295,17 @@ class CallNotifier extends Notifier<CallState> {
     }
   }
 
+  /// The resolution cap for the outgoing DM share PC: the share's chosen
+  /// quality clamped to the peer's reported display (media forwarding
+  /// step 1) — unless they explicitly asked for source quality.
+  (int, int) _dmEffectiveCap() => ScreenShareService.effectiveViewerCap(
+        _dmShareMaxWidth,
+        _dmShareMaxHeight,
+        _dmViewerWidth,
+        _dmViewerHeight,
+        sourceQuality: _dmViewerSourceQuality,
+      );
+
   /// Viewer side of opt-in watching (issue #38): request the remote share.
   Future<void> watchRemoteScreenShare() async {
     if (state.status != CallStatus.active) return;
@@ -1257,8 +1314,19 @@ class CallNotifier extends Notifier<CallState> {
     final callId = state.callId!;
 
     state = state.copyWith(watchingRemoteShare: true);
+    // Ship our display resolution so the sharer clamps our stream to what
+    // we can actually show (media forwarding step 1).
+    final (viewerW, viewerH) = largestDisplayResolution();
     _sendSignal(
-        peerId, 'screen_watch', jsonEncode({'call_id': callId, 'want': true}));
+        peerId,
+        'screen_watch',
+        jsonEncode({
+          'call_id': callId,
+          'want': true,
+          'viewer_width': viewerW,
+          'viewer_height': viewerH,
+          'source_quality': state.watchingSourceQuality,
+        }));
 
     // If no offer produces a live track in time, revert so the view doesn't
     // spin forever.
@@ -1279,7 +1347,9 @@ class CallNotifier extends Notifier<CallState> {
     if (!state.watchingRemoteShare) return;
     _dmWatchConnectTimer?.cancel();
     _dmWatchConnectTimer = null;
-    state = state.copyWith(watchingRemoteShare: false);
+    // Source quality is a per-watch-session opt-in — never sticky.
+    state = state.copyWith(
+        watchingRemoteShare: false, watchingSourceQuality: false);
 
     final incoming = _incomingScreenShare;
     _incomingScreenShare = null;
@@ -1291,6 +1361,31 @@ class CallNotifier extends Notifier<CallState> {
       _sendSignal(peerId, 'screen_watch',
           jsonEncode({'call_id': callId, 'want': false}));
     }
+  }
+
+  /// Viewer side (media forwarding step 1): ask the sharer for SOURCE
+  /// quality instead of clamped-to-our-display — or go back to the clamp.
+  /// OFF by default, per watch session. A re-sent screen_watch live-updates
+  /// the sharer's encoder cap; no renegotiation, no PC churn.
+  Future<void> setRemoteShareSourceQuality(bool on) async {
+    if (state.watchingSourceQuality == on) return;
+    state = state.copyWith(watchingSourceQuality: on);
+    if (state.status != CallStatus.active) return;
+    if (!state.watchingRemoteShare) return;
+    final peerId = state.peerId;
+    final callId = state.callId;
+    if (peerId == null || callId == null) return;
+    final (viewerW, viewerH) = largestDisplayResolution();
+    _sendSignal(
+        peerId,
+        'screen_watch',
+        jsonEncode({
+          'call_id': callId,
+          'want': true,
+          'viewer_width': viewerW,
+          'viewer_height': viewerH,
+          'source_quality': on,
+        }));
   }
 
   /// Master dispatcher for incoming call signals from Rust events.
@@ -1791,8 +1886,9 @@ class CallNotifier extends Notifier<CallState> {
     state = state.copyWith(
       remoteScreenSharing: enabled,
       // The share is gone — the watch opt-in dies with it (a re-share asks
-      // again via the Watch banner).
+      // again via the Watch banner). Source quality dies with the watch.
       watchingRemoteShare: enabled && state.watchingRemoteShare,
+      watchingSourceQuality: enabled && state.watchingSourceQuality,
       remoteScreenShareLabel: enabled ? quality : null,
       clearRemoteScreenShareLabel: !enabled,
     );
@@ -1941,6 +2037,9 @@ class CallNotifier extends Notifier<CallState> {
     _incomingScreenShare = null;
     // Opt-in watching (issue #38): call over = capture + watch state over.
     _dmPeerWantsShare = false;
+    _dmViewerWidth = 0;
+    _dmViewerHeight = 0;
+    _dmViewerSourceQuality = false;
     _dmWatchConnectTimer?.cancel();
     _dmWatchConnectTimer = null;
     await _teardownDmShareCapture();

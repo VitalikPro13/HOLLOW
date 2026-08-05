@@ -63,6 +63,7 @@ import 'package:hollow/src/core/services/macos_version.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/profile_card_popup.dart';
 import 'package:hollow/src/ui/components/saved_messages_avatar.dart';
+import 'package:hollow/src/ui/components/share_source_quality_chip.dart';
 import 'package:hollow/src/ui/components/share_volume_control.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/large_file_share_dialog.dart';
@@ -3141,7 +3142,10 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
                 Positioned(
                   top: HollowSpacing.md,
                   right: HollowSpacing.md,
-                  child: _shareLabelChip(hollow, call.remoteScreenShareLabel!),
+                  child: ShareQualityChip(
+                    renderer: remoteRenderer,
+                    sourceLabel: call.remoteScreenShareLabel,
+                  ),
                 ),
             ],
           ),
@@ -3250,7 +3254,10 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
           Positioned(
             top: HollowSpacing.md,
             right: HollowSpacing.md,
-            child: _shareLabelChip(hollow, call.remoteScreenShareLabel!),
+            child: ShareQualityChip(
+              renderer: remoteRenderer,
+              sourceLabel: call.remoteScreenShareLabel,
+            ),
           ),
       ],
     );
@@ -3923,12 +3930,16 @@ class _ScreenShareFullView extends ConsumerWidget {
           child: _buildPipTile(ref, hollow, pipRenderer,
               pipIsLocal: !isLocalBig, localPeerId: localPeerId),
         ),
-        // Quality label for the big tile (top-left).
+        // Quality label for the big tile (top-left). A remote big tile shows
+        // the RECEIVED resolution live; our own share keeps its source label.
         if (!bigChoice.isCamera && bigLabel != null)
           Positioned(
             top: HollowSpacing.md,
             left: HollowSpacing.md,
-            child: _shareLabelChip(hollow, bigLabel),
+            child: ShareQualityChip(
+              renderer: bigChoice.isLocal ? null : bigChoice.renderer,
+              sourceLabel: bigLabel,
+            ),
           ),
         // Small "Stop sharing" affordance, top-right.
         Positioned(
@@ -4083,7 +4094,25 @@ class _ScreenShareFullView extends ConsumerWidget {
               mainAxisSize: MainAxisSize.min,
               children: [
                 if (call.remoteScreenShareLabel != null) ...[
-                  _shareLabelChip(hollow, call.remoteScreenShareLabel!),
+                  // Received resolution once frames flow (falls back to the
+                  // sharer's source label; only when the big tile IS the
+                  // remote share — a focused camera has no share renderer).
+                  ShareQualityChip(
+                    renderer: !bigChoice.isCamera && !bigChoice.isLocal
+                        ? bigChoice.renderer
+                        : null,
+                    sourceLabel: call.remoteScreenShareLabel,
+                  ),
+                  const SizedBox(width: HollowSpacing.sm),
+                ],
+                // Source-quality opt-in (media forwarding step 1) — per
+                // watch session, OFF by default.
+                if (call.watchingRemoteShare) ...[
+                  ShareSourceQualityChip(
+                    active: call.watchingSourceQuality,
+                    onChanged: (on) =>
+                        notifier.setRemoteShareSourceQuality(on),
+                  ),
                   const SizedBox(width: HollowSpacing.sm),
                 ],
                 // Opt-in watching (issue #38): leaving the stream is one tap.

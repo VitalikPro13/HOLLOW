@@ -8379,10 +8379,11 @@ async fn handle_incoming_request(
                         }).await;
                     }
                 }
-                Ok(MessageEnvelope::VoiceChannelScreenWatch { sid, cid, want, .. }) => {
+                Ok(MessageEnvelope::VoiceChannelScreenWatch { sid, cid, want, viewer_width, viewer_height, source_quality, .. }) => {
                     voice_handler::handle_envelope_voice_channel_screen_watch(
                         voice_channel_participants, event_tx,
                         peer_str.to_string(), sid, cid, want,
+                        viewer_width, viewer_height, source_quality,
                     ).await;
                 }
                 Ok(MessageEnvelope::VoiceChannelRenegOffer { sid, cid, sdp, .. }) => {
@@ -10436,10 +10437,11 @@ async fn handle_incoming_request(
                                     peer_str.to_string(), sid, cid, enabled, quality,
                                 ).await;
                             }
-                            MessageEnvelope::VoiceChannelScreenWatch { sid, cid, want, .. } => {
+                            MessageEnvelope::VoiceChannelScreenWatch { sid, cid, want, viewer_width, viewer_height, source_quality, .. } => {
                                 voice_handler::handle_envelope_voice_channel_screen_watch(
                                     voice_channel_participants, event_tx,
                                     peer_str.to_string(), sid, cid, want,
+                                    viewer_width, viewer_height, source_quality,
                                 ).await;
                             }
 
@@ -12746,11 +12748,14 @@ async fn handle_incoming_request(
                 payload,
             }).await;
         }
-        HavenMessage::CallScreenWatch { call_id, want } => {
-            hollow_log!("[HOLLOW-CALL] CallScreenWatch from {peer_str} call={call_id} want={want}");
+        HavenMessage::CallScreenWatch { call_id, want, viewer_width, viewer_height, source_quality } => {
+            hollow_log!("[HOLLOW-CALL] CallScreenWatch from {peer_str} call={call_id} want={want} viewer={viewer_width}x{viewer_height} source={source_quality}");
             let payload = serde_json::json!({
                 "call_id": call_id,
                 "want": want,
+                "viewer_width": viewer_width,
+                "viewer_height": viewer_height,
+                "source_quality": source_quality,
             }).to_string();
             let _ = event_tx.send(NetworkEvent::CallSignal {
                 peer_id: peer_str.to_string(),

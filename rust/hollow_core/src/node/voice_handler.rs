@@ -272,6 +272,9 @@ fn build_call_json_signal(signal_type: &str, payload: &str) -> Option<HavenMessa
         "screen_watch" => parsed.map(|v| HavenMessage::CallScreenWatch {
             call_id: jstr(&v, "call_id"),
             want: v["want"].as_bool().unwrap_or(false),
+            viewer_width: v["viewer_width"].as_u64().unwrap_or(0) as u32,
+            viewer_height: v["viewer_height"].as_u64().unwrap_or(0) as u32,
+            source_quality: v["source_quality"].as_bool().unwrap_or(false),
         }),
         "recording_start" | "recording_stop" => parsed.map(|v| HavenMessage::CallRecordingState {
             call_id: jstr(&v, "call_id"),
@@ -848,6 +851,9 @@ fn build_vc_signal_envelope(
         "screen_watch" => parsed.map(|v| MessageEnvelope::VoiceChannelScreenWatch {
             sid, cid,
             want: v["want"].as_bool().unwrap_or(false),
+            viewer_width: v["viewer_width"].as_u64().unwrap_or(0) as u32,
+            viewer_height: v["viewer_height"].as_u64().unwrap_or(0) as u32,
+            source_quality: v["source_quality"].as_bool().unwrap_or(false),
             target: None,
         }),
         "reneg_offer" => parsed.map(|v| MessageEnvelope::VoiceChannelRenegOffer {
@@ -1374,14 +1380,22 @@ pub(crate) async fn handle_envelope_voice_channel_screen_watch(
     sid: String,
     cid: String,
     want: bool,
+    viewer_width: u32,
+    viewer_height: u32,
+    source_quality: bool,
 ) {
     let vc_key = format!("{sid}:{cid}");
     if !is_vc_participant(voice_channel_participants, &vc_key, &sender_peer_id) {
         hollow_log!("[HOLLOW-SECURITY] BLOCKED VC screen watch from non-participant {sender_peer_id} in {cid}");
         return;
     }
-    hollow_log!("[HOLLOW-VC] Screen watch from {sender_peer_id}: want={want}");
-    let payload = serde_json::json!({"want": want}).to_string();
+    hollow_log!("[HOLLOW-VC] Screen watch from {sender_peer_id}: want={want} viewer={viewer_width}x{viewer_height} source={source_quality}");
+    let payload = serde_json::json!({
+        "want": want,
+        "viewer_width": viewer_width,
+        "viewer_height": viewer_height,
+        "source_quality": source_quality,
+    }).to_string();
     let _ = event_tx.send(NetworkEvent::VoiceChannelSignal {
         server_id: sid, channel_id: cid, peer_id: sender_peer_id,
         signal_type: "screen_watch".to_string(), payload,

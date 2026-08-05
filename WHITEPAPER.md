@@ -58,7 +58,7 @@ The client is a native application for Windows, macOS, Linux, Android, and iOS (
 - **Distributed storage.** Server files are distributed across members using adaptive erasure coding. No single member's departure causes data loss.
 - **Multi-device without accounts.** One identity can run on several devices, kept in sync, without any account server — and without the relay ever learning that two connections belong to the same person.
 - **Metadata-minimizing push.** Mobile push notifications carry only an opaque wake-up signal; message content is fetched over the existing E2EE channels and decrypted on-device, never exposed to Apple or Google.
-- **Zero VPS bandwidth for media.** Voice, video, screen sharing, and file transfers flow over peer-to-peer WebRTC connections. The relay carries only signaling.
+- **Near-zero VPS bandwidth for media.** Voice, video, screen sharing, and file transfers flow over peer-to-peer WebRTC connections; the relay carries signaling, plus an encrypted TURN fallback for the minority of NAT situations where no direct path exists (§6).
 
 ### 1.2 Architecture Overview
 
@@ -449,6 +449,8 @@ Voice and video calls are available on all platforms, including mobile (Android 
 Voice, video, and screen share video travel over **WebRTC peer-to-peer connections** (DTLS-SRTP as the base transport, SFrame as the application-layer encryption). The relay is not in the media path — it carries only WebRTC signaling (SDP offers/answers, ICE candidates).
 
 **Screen shares are consent-based per viewer.** A sharer announces the share's existence with a lightweight state signal, but never negotiates a media connection to a participant until that participant explicitly requests it (a targeted watch signal; the request is revocable, and revocation tears the per-viewer connection down). Receivers symmetrically discard share offers they did not request. This is both a bandwidth property — in a per-viewer mesh the sharer uploads one copy per *watching* peer, so participants who joined only to talk cost the sharer nothing — and a consent property: no participant's client decodes another's screen content without an explicit local action.
+
+**Streams are sized to their audience.** The watch request also carries the viewer's display resolution, and the sharer — which encodes independently per viewer — sends each watcher a stream no larger than that viewer can display. A 4K share watched from 1080p screens costs each viewer-connection 1080p, not 4K, cutting both the sharer's upload and encoding cost roughly in proportion to the pixel difference. A viewer may explicitly request the share's full source quality; the request raises only that viewer's own connection. Clients that predate the field simply receive the share at its chosen quality.
 
 For peers behind symmetric NATs (~10-15% of users), a **TURN server** relays the encrypted media. The TURN server sees only SFrame ciphertext.
 

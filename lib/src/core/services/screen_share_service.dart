@@ -110,6 +110,66 @@ class ScreenShareService {
     required this.iceServers,
   });
 
+  /// Effective per-viewer resolution cap (media forwarding step 1): the
+  /// share's chosen cap clamped to what THIS viewer's display can actually
+  /// show. Compared on orientation-normalized long/short edges so a portrait
+  /// phone isn't over-restricted watching a landscape share, then mapped back
+  /// into the share cap's orientation.
+  ///
+  /// A 0x0 viewer size means unknown (old client that doesn't send it) and
+  /// [sourceQuality] is the viewer's explicit opt-in to full quality — both
+  /// leave the share cap untouched, preserving pre-step-1 behavior.
+  static (int, int) effectiveViewerCap(
+    int shareMaxWidth,
+    int shareMaxHeight,
+    int viewerWidth,
+    int viewerHeight, {
+    bool sourceQuality = false,
+  }) {
+    if (sourceQuality || viewerWidth <= 0 || viewerHeight <= 0) {
+      return (shareMaxWidth, shareMaxHeight);
+    }
+    final shareLong =
+        shareMaxWidth > shareMaxHeight ? shareMaxWidth : shareMaxHeight;
+    final shareShort =
+        shareMaxWidth > shareMaxHeight ? shareMaxHeight : shareMaxWidth;
+    final viewerLong = viewerWidth > viewerHeight ? viewerWidth : viewerHeight;
+    final viewerShort = viewerWidth > viewerHeight ? viewerHeight : viewerWidth;
+    final effLong = shareLong < viewerLong ? shareLong : viewerLong;
+    final effShort = shareShort < viewerShort ? shareShort : viewerShort;
+    return shareMaxWidth >= shareMaxHeight
+        ? (effLong, effShort)
+        : (effShort, effLong);
+  }
+
+  /// Live-update the outgoing resolution cap on a negotiated sender — the
+  /// viewer changed what they can show / want (Source quality toggle,
+  /// re-sent screen_watch). Rides the same setParameters path the
+  /// post-connect enforcement uses, and writes _capWidth/_capHeight FIRST so
+  /// that enforcement re-applies THIS cap rather than reverting it.
+  ///
+  /// Returns false when the sender REJECTED the live change (Windows
+  /// libwebrtc does — field-verified 2026-08-05: setParameters always
+  /// returns false on the share sender there, the cap only ever applied via
+  /// addTransceiver init sendEncodings). The caller must then renegotiate:
+  /// tear down this service and send a fresh offer with the new cap in the
+  /// init encodings. Returns true when nothing changed or the live update
+  /// was accepted.
+  Future<bool> updateResolutionCap(int maxWidth, int maxHeight) async {
+    if (_capFps == null) return false; // Incoming-only PC / no cap requested.
+    if (_capWidth == maxWidth && _capHeight == maxHeight) return true;
+    _capWidth = maxWidth;
+    _capHeight = maxHeight;
+    final screenPc = _pc;
+    if (screenPc == null) return false;
+    _log('[HOLLOW-SCREEN] Viewer-driven cap update -> ${maxWidth}x$maxHeight');
+    final ok = await _reapplyResolutionCap(screenPc);
+    if (!ok) {
+      _log('[HOLLOW-SCREEN] Live cap update rejected — renegotiation needed');
+    }
+    return ok;
+  }
+
   /// Apply resolution, framerate, and bitrate caps on the video sender's
   /// encoding parameters. Even though getDisplayMedia now receives width/height
   /// constraints, the desktop capturer may still deliver native-resolution
@@ -119,13 +179,17 @@ class ScreenShareService {
   /// size when the caller knows better (post-connect we read the true size
   /// from media-source stats — getSettings is absent for desktop captures on
   /// some platforms and the 1920x1080 fallback computes a wrong scale).
-  Future<void> _applyResolutionCap(
+  /// Returns whether the sender ACCEPTED the setParameters call (false on
+  /// no PC / no video sender / libwebrtc rejection — callers that need the
+  /// cap to actually change must renegotiate on false).
+  Future<bool> _applyResolutionCap(
       int maxWidth, int maxHeight, int fps, ScreenContentProfile profile,
       {int? captureWidth, int? captureHeight}) async {
     _capWidth = maxWidth;
     _capHeight = maxHeight;
     _capFps = fps;
-    if (_pc == null) return;
+    if (_pc == null) return false;
+    var applied = false;
     final senders = await _pc!.getSenders();
     for (final sender in senders) {
       if (sender.track?.kind == 'video') {
@@ -156,9 +220,11 @@ class ScreenShareService {
         final ok = await sender.setParameters(params);
         _log('[HOLLOW-SCREEN] setParameters(cap ${maxWidth}x$maxHeight'
             '@${fps}fps) -> ${ok ? 'accepted' : 'REJECTED by libwebrtc'}');
+        applied = ok;
         break;
       }
     }
+    return applied;
   }
 
   /// Capture dimensions from track.getSettings(), defaulting to 1920x1080
@@ -1042,7 +1108,7 @@ class ScreenShareService {
     });
   }
 
-  Future<void> _reapplyResolutionCap(RTCPeerConnection screenPc) async {
+  Future<bool> _reapplyResolutionCap(RTCPeerConnection screenPc) async {
     try {
       int? srcW, srcH;
       final stats = await screenPc.getStats();
@@ -1056,7 +1122,7 @@ class ScreenShareService {
       }
       _log('[HOLLOW-SCREEN] Post-connect cap re-apply: capture=${srcW}x$srcH '
           'cap=${_capWidth}x$_capHeight@${_capFps}fps');
-      await _applyResolutionCap(
+      final applied = await _applyResolutionCap(
           _capWidth!, _capHeight!, _capFps!, _contentProfile,
           captureWidth: srcW, captureHeight: srcH);
 
@@ -1075,8 +1141,10 @@ class ScreenShareService {
           break;
         }
       }
+      return applied;
     } catch (e) {
       _log('[HOLLOW-SCREEN] Post-connect cap re-apply failed: $e');
+      return false;
     }
   }
 

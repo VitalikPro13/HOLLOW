@@ -2031,12 +2031,24 @@ pub(crate) enum HavenMessage {
     /// Viewer -> sharer: request or cancel receiving the call screen share
     /// (opt-in watching, issue #38 follow-up). The sharer only sends a
     /// screen offer after want=true.
+    ///
+    /// viewer_width/viewer_height = the viewer's largest display in physical
+    /// pixels (media forwarding step 1: the sharer clamps THIS viewer's
+    /// encoder to what they can actually show). 0x0 = unknown (old client)
+    /// = no clamp. source_quality = explicit per-viewer opt-in to the
+    /// share's full quality (lifts only this connection's clamp).
     #[serde(rename = "call_screen_watch")]
     CallScreenWatch {
         #[serde(default)]
         call_id: String,
         #[serde(default)]
         want: bool,
+        #[serde(default)]
+        viewer_width: u32,
+        #[serde(default)]
+        viewer_height: u32,
+        #[serde(default)]
+        source_quality: bool,
     },
 
     /// Call recording indicator (issue #53): the peer started/stopped a local
@@ -2991,12 +3003,24 @@ pub(crate) enum MessageEnvelope {
     /// Targeted: viewer -> sharer, request or cancel receiving their screen
     /// share (opt-in watching, issue #38). The sharer only sends a screen
     /// offer to peers that asked with want=true.
+    ///
+    /// viewer_width/viewer_height = the viewer's largest display in physical
+    /// pixels (media forwarding step 1: the sharer clamps THIS viewer's
+    /// encoder to what they can actually show). 0x0 = unknown (old client)
+    /// = no clamp. source_quality = explicit per-viewer opt-in to the
+    /// share's full quality (lifts only this connection's clamp).
     #[serde(rename = "vc_screen_watch")]
     VoiceChannelScreenWatch {
         sid: String,
         cid: String,
         #[serde(default)]
         want: bool,
+        #[serde(default)]
+        viewer_width: u32,
+        #[serde(default)]
+        viewer_height: u32,
+        #[serde(default)]
+        source_quality: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         target: Option<String>,
     },

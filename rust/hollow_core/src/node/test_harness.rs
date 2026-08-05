@@ -2382,6 +2382,48 @@ async fn call_signal_routes_to_friend_device_and_drops_unknown() {
 
     drain_events(&mut b);
 
+    // DM screen_watch (issue #38 + media forwarding step 1): the viewer's
+    // display resolution and source-quality request must round-trip.
+    a.cmd_tx
+        .send(NodeCommand::CallSendSignal {
+            peer_id: m_master.clone(),
+            signal_type: "screen_watch".to_string(),
+            payload: serde_json::json!({
+                "call_id": "call-1",
+                "want": true,
+                "viewer_width": 1920,
+                "viewer_height": 1080,
+                "source_quality": false,
+            })
+            .to_string(),
+        })
+        .await
+        .unwrap();
+    let mut dm_watch_payload = None;
+    let saw_watch = wait_event(&mut b, std::time::Duration::from_secs(4), |ev| {
+        if let NetworkEvent::CallSignal { signal_type, payload, .. } = ev {
+            if signal_type == "screen_watch" {
+                dm_watch_payload = Some(payload.clone());
+                return true;
+            }
+        }
+        false
+    })
+    .await;
+    assert!(saw_watch, "callee must receive the routed screen_watch call signal");
+    let dm_watch: serde_json::Value =
+        serde_json::from_str(&dm_watch_payload.expect("screen_watch payload")).expect("valid json");
+    assert_eq!(dm_watch["want"], serde_json::Value::Bool(true), "want must round-trip");
+    assert_eq!(dm_watch["viewer_width"], serde_json::json!(1920), "viewer_width must round-trip");
+    assert_eq!(dm_watch["viewer_height"], serde_json::json!(1080), "viewer_height must round-trip");
+    assert_eq!(
+        dm_watch["source_quality"],
+        serde_json::Value::Bool(false),
+        "source_quality must round-trip"
+    );
+
+    drain_events(&mut b);
+
     // An UNKNOWN signal type must be silently dropped (whitelist) — never delivered.
     a.cmd_tx
         .send(NodeCommand::CallSendSignal {
@@ -3051,7 +3093,13 @@ async fn voice_channel_join_leave_and_signal_routing() {
             channel_id: voice_cid.clone(),
             peer_id: o_master.clone(),
             signal_type: "screen_watch".to_string(),
-            payload: serde_json::json!({"want": true}).to_string(),
+            payload: serde_json::json!({
+                "want": true,
+                "viewer_width": 2560,
+                "viewer_height": 1440,
+                "source_quality": true,
+            })
+            .to_string(),
         })
         .await
         .unwrap();
@@ -3070,6 +3118,15 @@ async fn voice_channel_join_leave_and_signal_routing() {
     let watch_json: serde_json::Value =
         serde_json::from_str(&watch_payload.expect("screen_watch payload")).expect("valid json");
     assert_eq!(watch_json["want"], serde_json::Value::Bool(true), "want flag must round-trip");
+    // Media forwarding step 1: the viewer's display resolution + source-quality
+    // request must survive the typed Rust round-trip (receiver-driven caps).
+    assert_eq!(watch_json["viewer_width"], serde_json::json!(2560), "viewer_width must round-trip");
+    assert_eq!(watch_json["viewer_height"], serde_json::json!(1440), "viewer_height must round-trip");
+    assert_eq!(
+        watch_json["source_quality"],
+        serde_json::Value::Bool(true),
+        "source_quality must round-trip"
+    );
 
     // --- J leaves the voice channel; O sees the leave ---
     drain_events(&mut o);
