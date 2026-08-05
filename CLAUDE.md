@@ -19,33 +19,32 @@ Hollow is a fully distributed, encrypted Discord alternative — no central serv
 
 ## Build & Run Commands
 ```bash
-flutter run -d windows  # run debug on current platform
+flutter run -d windows
 flutter build windows  # release build
-flutter test test/  # widget tests (~1s, no device)
-cd rust/hollow_core && cargo check  # also cargo clippy
+flutter test test/  # widget tests, no device
+cd rust/hollow_core && cargo check  # + clippy
 
-# Multi-node integration harness — PRIMARY verification for distributed-logic changes
-cargo test --lib test_harness -- --nocapture  # N real nodes over in-process MockRelay
+cargo test --lib test_harness -- --nocapture  # multi-node harness (real nodes over in-process MockRelay)
 cargo test --lib  # full Rust suite
 
-# Regenerate FFI bindings after Rust API changes (MUST run from project root)
+# FRB codegen after Rust API changes (MUST run from project root)
 flutter_rust_bridge_codegen generate --rust-input "crate::api" --rust-root "rust/hollow_core" --dart-output "lib/src/rust"
 
-# Deploy relay to VPS (scp src/*.cpp src/*.h → ~/relay-uws/src/, then)
+# Relay deploy (scp src/*.cpp *.h → ~/relay-uws/src/, then)
 ssh ubuntu@141.227.186.209 "cd ~/relay-uws/build && cmake .. -DCMAKE_BUILD_TYPE=Release && make -j2 && sudo setcap cap_net_bind_service=+ep hollow-relay && sudo systemctl restart hollow-relay"
 
-# Windows release (build → sign → Inno installer → sign → zip; prompts for Certum PIN)
+# Windows release (build→sign→installer→zip; Certum PIN prompt)
 pwsh scripts\build_release.ps1  # full pipeline (-SkipBuild to repackage)
 pwsh scripts\sign_release.ps1  # sign every .exe/.dll in the Release folder
 ```
-**Certum signing:** scripts self-heal the CNG binding; output `installer\Output\`. `reference_certum_signing_procedure`.
+**Certum signing:** self-healing CNG binding; output `installer\Output\`. `reference_certum_signing_procedure`. **Release zips: .NET '/' zipping, NEVER Compress-Archive** (`feedback_compress_archive_backslash_zip`).
 
 ## Hollow Design System
 All UI uses custom Hollow widgets — no Material defaults: **HollowPressable**, **HollowButton** (`.filled()/.ghost()/.outline()/.danger()`), **HollowTextField**, **HollowDialog** (`showHollowDialog()`), **HollowTooltip**, **HollowToast**, **HollowToggle**, **StatusDot**, **StatBar**.
 - **CRITICAL — hover/dialog patterns:** NEVER animate a color from `Colors.transparent` (lerps via black — pass `backgroundColor: null`); hover never paints outside the control. Dialog pairs = ghost Cancel + filled confirm; `.danger` ONLY destructive; selection state = chips, never `.filled` — `feedback_hover_state_patterns`.
 
 ## Key Architecture Notes
-- **Multi-node test harness = PRIMARY testing for distributed logic** (`node/test_harness.rs`, cfg(test)). ALWAYS verify ring-1/ring-2 changes before declaring done. NOT covered: media/pixels/FFI/native/relay C++. `feedback_harness_first_testing`.
+- **Multi-node test harness (`node/test_harness.rs`) = PRIMARY testing for distributed logic.** ALWAYS verify ring-1/ring-2 changes before declaring done. NOT covered: media/pixels/FFI/native/relay C++. `feedback_harness_first_testing`.
 - **Node modules:** `swarm.rs` = event-loop dispatcher; domain logic in focused modules as `handle_*()` called from its match arms; types/enums in `types.rs`. No SwarmContext struct — pass state vars individually (`feedback_swarmcontext_borrow`). New envelope variants go in the right module's `handle_envelope_*()` (`feedback_envelope_dispatch_pattern`).
 - **Persistence actors:** `CrdtStore` + `CryptoStore` own long-lived SQLCipher conns in spawn_blocking threads, fire-and-forget mpsc; CrdtStore batch-drains one DB write per server. sync_handler saves use CrdtStore, MLS uses CryptoStore. NEVER `MessageStore::open()` in a sync handler (`feedback_sqlcipher_open_hygiene`).
 - **Peer state in swarm.rs:** `ws_room_peers` + `synced_peers`; PeerJoined → key exchange + sync; 30s keepalive in ws_client.rs.
@@ -75,7 +74,7 @@ All UI uses custom Hollow widgets — no Material defaults: **HollowPressable**,
 - **Relay:** uWebSockets C++ (`relay-uws/`) on OVH VPS. NO rate limits/soft backpressure; NEVER lower `maxPayloadLength` (64MB). Topic routing `0x07`, broadcast `0x03`. EVERY binary handler gates on SENDER room membership; buffer abuse = fair-share eviction, NEVER a cap. `feedback_relay_rules`, `feedback_relay_binary_opcode_membership_gate`, `feedback_relay_no_metadata_logging`.
 - **CRITICAL — relay per-IP accounting goes through `ip_limit_key()`** (v4 addr / v6 **/64**; unmap v4-MAPPED `::ffff:…` FIRST — naive /64 truncation collapses ALL v4 into ONE bucket). 10 GB/day counts binary BOTH directions; exhaustion = explicit `1008 "bandwidth_limit"` close, never silent. `project_relay_bandwidth_enforcement`, `project_relay_ipv6`.
 - **CRITICAL — relay offline delivery (availability cache, ON 3d):** anything reaching OFFLINE channel members MUST ride `0x07` topic frames — `0x03` and direct sends are invisible to the TTL rings. OPEN BUG: channel files don't render post-catchup. `project_relay_availability_cache`.
-- **Storage & profiles (#47):** data root = `dirs::data_dir()/hollow` (override `set_data_dir()`/`HOLLOW_DATA_DIR`); mobile sandboxed. Desktop precedence: env > `--portable` > profiles.json PIN > marker > `hollow_data` WITH identity data (NEVER `data`). Keychain = ONE slot/machine. `project_portable_mode`.
+- **Storage & profiles (#47):** data root = `dirs::data_dir()/hollow` (override `set_data_dir()`/`HOLLOW_DATA_DIR`); mobile sandboxed. Desktop precedence: env > `--portable` > profiles.json PIN > marker > `hollow_data` WITH identity data (NEVER `data`). Keychain = PER-PROFILE slots; unlock verifies every candidate + self-heals (`project_issue47_sframe_keystore_fix`). `project_portable_mode`.
 - **CRITICAL — self-restart ONLY via `relaunchApp()`** (Rust waiter — anything Dart spawns dies pre-Flutter). `project_profile_switcher_issue47`.
 - **CRITICAL — auto-download gate (#41):** pull paths gated in DART; pushes can't be cancelled (discard + `declined` pin); senders pre-negotiate via `auto_dl_pref`; VOICE exempt; RequestFile receipts bypass cap + gate — NEVER remove; `accept_header_thumb` = the ONE thumb filter. `project_autodownload_gate`.
 - **CRITICAL — bundled ffmpeg is MINIMAL:** test flags against `vendor/ffmpeg`'s binary, NEVER system ffmpeg; log stderr TAILS. `project_ffmpeg_minimal_build`.

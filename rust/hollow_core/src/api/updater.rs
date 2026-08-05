@@ -145,47 +145,7 @@ pub fn apply_update(
 
     #[cfg(target_os = "windows")]
     {
-    let zip_file = fs::File::open(&zip_path)
-        .map_err(|e| format!("Failed to open zip: {e}"))?;
-    let mut archive = zip::ZipArchive::new(zip_file)
-        .map_err(|e| format!("Failed to read zip archive: {e}"))?;
-
-    // Detect if all entries share a common top-level directory (e.g., "Release/")
-    // so we can flatten it.
-    let prefix = detect_common_prefix(&mut archive);
-
-    for i in 0..archive.len() {
-        let mut entry = archive
-            .by_index(i)
-            .map_err(|e| format!("Failed to read zip entry {i}: {e}"))?;
-
-        let raw_name = entry.name().to_string();
-        let name = if let Some(ref p) = prefix {
-            raw_name.strip_prefix(p.as_str()).unwrap_or(&raw_name).to_string()
-        } else {
-            raw_name
-        };
-
-        if name.is_empty() {
-            continue;
-        }
-
-        if name.ends_with('/') {
-            let dir_path = staging_dir.join(&name);
-            fs::create_dir_all(&dir_path)
-                .map_err(|e| format!("Failed to create dir {name}: {e}"))?;
-        } else {
-            let file_path = staging_dir.join(&name);
-            if let Some(parent) = file_path.parent() {
-                fs::create_dir_all(parent)
-                    .map_err(|e| format!("Failed to create parent for {name}: {e}"))?;
-            }
-            let mut outfile = fs::File::create(&file_path)
-                .map_err(|e| format!("Failed to create file {name}: {e}"))?;
-            std::io::copy(&mut entry, &mut outfile)
-                .map_err(|e| format!("Failed to extract {name}: {e}"))?;
-        }
-    }
+    extract_zip_to(&zip_path, &staging_dir)?;
 
     let staging_str = staging_dir
         .to_str()
@@ -330,11 +290,65 @@ fn write_macos_update_script(
         .ok_or_else(|| "Script path is not valid UTF-8".to_string())
 }
 
+/// Extracts an update zip into `staging_dir`, flattening a single common
+/// top-level directory (e.g. "Release/") when present.
+///
+/// Entry names are normalized `\` → `/` first: PowerShell's Compress-Archive
+/// (which builds the release zips) writes backslash-separated names and marks
+/// directory entries with a TRAILING backslash — treating those as files made
+/// `File::create` fail with os error 267/123 on every empty dir (issue #52).
+#[allow(dead_code)] // only reachable on Windows outside of tests
+fn extract_zip_to(zip_path: &str, staging_dir: &std::path::Path) -> Result<(), String> {
+    let zip_file = fs::File::open(zip_path)
+        .map_err(|e| format!("Failed to open zip: {e}"))?;
+    let mut archive = zip::ZipArchive::new(zip_file)
+        .map_err(|e| format!("Failed to read zip archive: {e}"))?;
+
+    let prefix = detect_common_prefix(&mut archive);
+
+    for i in 0..archive.len() {
+        let mut entry = archive
+            .by_index(i)
+            .map_err(|e| format!("Failed to read zip entry {i}: {e}"))?;
+
+        let raw_name = entry.name().replace('\\', "/");
+        let name = if let Some(ref p) = prefix {
+            raw_name.strip_prefix(p.as_str()).unwrap_or(&raw_name).to_string()
+        } else {
+            raw_name
+        };
+
+        if name.is_empty() {
+            continue;
+        }
+        if name.split('/').any(|part| part == "..") {
+            return Err(format!("Unsafe zip entry path: {name}"));
+        }
+
+        if name.ends_with('/') {
+            let dir_path = staging_dir.join(&name);
+            fs::create_dir_all(&dir_path)
+                .map_err(|e| format!("Failed to create dir {name}: {e}"))?;
+        } else {
+            let file_path = staging_dir.join(&name);
+            if let Some(parent) = file_path.parent() {
+                fs::create_dir_all(parent)
+                    .map_err(|e| format!("Failed to create parent for {name}: {e}"))?;
+            }
+            let mut outfile = fs::File::create(&file_path)
+                .map_err(|e| format!("Failed to create file {name}: {e}"))?;
+            std::io::copy(&mut entry, &mut outfile)
+                .map_err(|e| format!("Failed to extract {name}: {e}"))?;
+        }
+    }
+    Ok(())
+}
+
 fn detect_common_prefix(archive: &mut zip::ZipArchive<fs::File>) -> Option<String> {
     let mut common: Option<String> = None;
     for i in 0..archive.len() {
         let name = match archive.by_index_raw(i) {
-            Ok(entry) => entry.name().to_string(),
+            Ok(entry) => entry.name().replace('\\', "/"),
             Err(_) => return None,
         };
         let first_part = match name.find('/') {
@@ -348,6 +362,136 @@ fn detect_common_prefix(archive: &mut zip::ZipArchive<fs::File>) -> Option<Strin
         }
     }
     common
+}
+
+#[cfg(test)]
+mod extract_zip_tests {
+    use std::io::Write;
+
+    /// Builds a zip the way Compress-Archive does — backslash separators,
+    /// zero-byte directory entries with a trailing backslash — and asserts
+    /// extraction survives it (issue #52 regression).
+    #[test]
+    fn extracts_compress_archive_style_backslash_entries() {
+        let tmp = std::env::temp_dir().join(format!(
+            "hollow_updater_zip_test_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).expect("create tmp dir");
+
+        let zip_path = tmp.join("update.zip");
+        {
+            let file = std::fs::File::create(&zip_path).expect("create zip");
+            let mut writer = zip::ZipWriter::new(file);
+            let opts = zip::write::SimpleFileOptions::default();
+            // Empty-directory entry exactly as Compress-Archive emits it.
+            writer
+                .start_file("data\\flutter_assets\\packages\\", opts)
+                .expect("dir entry");
+            writer
+                .start_file("hollow.exe", opts)
+                .expect("exe entry");
+            writer.write_all(b"exe-bytes").expect("write exe");
+            writer
+                .start_file("data\\flutter_assets\\kernel_blob.bin", opts)
+                .expect("nested entry");
+            writer.write_all(b"blob").expect("write blob");
+            writer.finish().expect("finish zip");
+        }
+
+        let staging = tmp.join("staging");
+        std::fs::create_dir_all(&staging).expect("create staging");
+        super::extract_zip_to(zip_path.to_str().unwrap(), &staging)
+            .expect("extraction must tolerate backslash entries");
+
+        assert!(staging.join("hollow.exe").is_file());
+        assert!(staging
+            .join("data")
+            .join("flutter_assets")
+            .join("kernel_blob.bin")
+            .is_file());
+        assert!(staging
+            .join("data")
+            .join("flutter_assets")
+            .join("packages")
+            .is_dir());
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Minimal single-entry STORED zip with an arbitrary (unsanitized) entry
+    /// name. ZipWriter refuses to write traversal names, so the hostile
+    /// fixture must be built by hand. CRC stays 0 — rejection happens on the
+    /// NAME before any data is read.
+    fn raw_zip_single_entry(name: &[u8], data: &[u8]) -> Vec<u8> {
+        let name_len = (name.len() as u16).to_le_bytes();
+        let size = (data.len() as u32).to_le_bytes();
+        let mut out = Vec::new();
+        // Local file header.
+        out.extend_from_slice(b"PK\x03\x04");
+        out.extend_from_slice(&[20, 0, 0, 0, 0, 0, 0, 0, 0, 0]); // ver/flags/method/time/date
+        out.extend_from_slice(&[0, 0, 0, 0]); // crc32
+        out.extend_from_slice(&size); // compressed
+        out.extend_from_slice(&size); // uncompressed
+        out.extend_from_slice(&name_len);
+        out.extend_from_slice(&[0, 0]); // extra len
+        out.extend_from_slice(name);
+        out.extend_from_slice(data);
+        // Central directory.
+        let cd_offset = (out.len() as u32).to_le_bytes();
+        let cd_start = out.len();
+        out.extend_from_slice(b"PK\x01\x02");
+        out.extend_from_slice(&[20, 0, 20, 0, 0, 0, 0, 0, 0, 0, 0, 0]); // made-by/needed/flags/method/time/date
+        out.extend_from_slice(&[0, 0, 0, 0]); // crc32
+        out.extend_from_slice(&size);
+        out.extend_from_slice(&size);
+        out.extend_from_slice(&name_len);
+        out.extend_from_slice(&[0, 0]); // extra len
+        out.extend_from_slice(&[0, 0]); // comment len
+        out.extend_from_slice(&[0, 0]); // disk start
+        out.extend_from_slice(&[0, 0]); // internal attrs
+        out.extend_from_slice(&[0, 0, 0, 0]); // external attrs
+        out.extend_from_slice(&[0, 0, 0, 0]); // local header offset
+        out.extend_from_slice(name);
+        let cd_size = ((out.len() - cd_start) as u32).to_le_bytes();
+        // End of central directory.
+        out.extend_from_slice(b"PK\x05\x06");
+        out.extend_from_slice(&[0, 0, 0, 0, 1, 0, 1, 0]); // disks, entry counts
+        out.extend_from_slice(&cd_size);
+        out.extend_from_slice(&cd_offset);
+        out.extend_from_slice(&[0, 0]); // comment len
+        out
+    }
+
+    /// A hostile entry trying to escape the staging dir must abort extraction.
+    #[test]
+    fn rejects_path_traversal_entries() {
+        let tmp = std::env::temp_dir().join(format!(
+            "hollow_updater_slip_test_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).expect("create tmp dir");
+
+        let zip_path = tmp.join("evil.zip");
+        // Empty data so the stored CRC of 0 is valid if extraction proceeds.
+        std::fs::write(&zip_path, raw_zip_single_entry(b"..\\outside.txt", b""))
+            .expect("write raw zip");
+
+        let staging = tmp.join("staging");
+        std::fs::create_dir_all(&staging).expect("create staging");
+        // The zip crate sanitizes traversal names on read ("..\x" → "x"), and
+        // our own guard rejects any ".." that slips through — either way the
+        // entry must NOT materialize outside the staging dir.
+        let _ = super::extract_zip_to(zip_path.to_str().unwrap(), &staging);
+        assert!(
+            !tmp.join("outside.txt").exists(),
+            "traversal entry escaped the staging dir"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 }
 
 // ── Self-restart waiter (issue #47 profile switch, relay apply, device link,
@@ -376,23 +520,60 @@ pub fn spawn_relaunch_waiter() -> Result<(), String> {
 }
 
 /// The platform snippet the waiter runs once the watched pid is gone.
+///
+/// The original argv is forwarded: a relaunch that drops `--portable` (or any
+/// other data-root flag) comes back up on a DIFFERENT profile than the one
+/// the user was running — alternating identities between the relaunch and
+/// the next manual launch (issue #47 fallout).
 fn relaunch_snippet(exe: &str) -> String {
+    let args: Vec<String> = std::env::args().skip(1).collect();
     #[cfg(windows)]
     {
-        // PowerShell single-quoted literal; ' escapes by doubling.
-        format!("Start-Process -FilePath '{}'", exe.replace('\'', "''"))
-    }
-    #[cfg(target_os = "macos")]
-    {
-        // Relaunch the bundle via LaunchServices when running from a .app.
-        match exe.find(".app/") {
-            Some(idx) => format!("/usr/bin/open \"{}\"", &exe[..idx + 4]),
-            None => format!("exec \"{exe}\""),
+        // PowerShell single-quoted literals; ' escapes by doubling.
+        let exe_q = exe.replace('\'', "''");
+        if args.is_empty() {
+            format!("Start-Process -FilePath '{exe_q}'")
+        } else {
+            let list = args
+                .iter()
+                .map(|a| format!("'{}'", a.replace('\'', "''")))
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("Start-Process -FilePath '{exe_q}' -ArgumentList {list}")
         }
     }
-    #[cfg(not(any(windows, target_os = "macos")))]
+    #[cfg(not(windows))]
     {
-        format!("exec \"{exe}\"")
+        let sh_quote = |s: &str| format!("'{}'", s.replace('\'', "'\\''"));
+        let arg_str = args
+            .iter()
+            .map(|a| sh_quote(a))
+            .collect::<Vec<_>>()
+            .join(" ");
+        #[cfg(target_os = "macos")]
+        {
+            // Relaunch the bundle via LaunchServices when running from a .app.
+            match exe.find(".app/") {
+                Some(idx) => {
+                    let bundle = &exe[..idx + 4];
+                    if args.is_empty() {
+                        format!("/usr/bin/open \"{bundle}\"")
+                    } else {
+                        format!("/usr/bin/open \"{bundle}\" --args {arg_str}")
+                    }
+                }
+                None if args.is_empty() => format!("exec \"{exe}\""),
+                None => format!("exec \"{exe}\" {arg_str}"),
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            if args.is_empty() {
+                format!("exec \"{exe}\"")
+            } else {
+                format!("exec \"{exe}\" {arg_str}")
+            }
+        }
     }
 }
 

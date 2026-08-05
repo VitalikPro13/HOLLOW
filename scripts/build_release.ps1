@@ -174,9 +174,35 @@ if (-not $SkipZip) {
     if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
     # Exclude build/link artifacts and local logs so the portable ZIP matches the installer payload.
     $excludeExt = '.lib', '.exp', '.pdb', '.log'
-    $zipItems = Get-ChildItem $releaseDir -Force |
-        Where-Object { $excludeExt -notcontains $_.Extension }
-    Compress-Archive -Path $zipItems.FullName -DestinationPath $zipPath -CompressionLevel Optimal
+    # NEVER use Compress-Archive here: it writes backslash entry names and
+    # trailing-'\' directory entries (a ZIP spec violation) that the in-app
+    # updater shipped in <= 0.9.4 fails to extract (issue #52, os error
+    # 267/123). .NET ZipArchive with '/' separators extracts on EVERY updater
+    # version, old and new.
+    Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
+    $zip = [System.IO.Compression.ZipFile]::Open($zipPath, 'Create')
+    try {
+        $rootLen = $releaseDir.TrimEnd('\').Length + 1
+        Get-ChildItem $releaseDir -Recurse -File -Force |
+            Where-Object { $excludeExt -notcontains $_.Extension } |
+            ForEach-Object {
+                $entryName = $_.FullName.Substring($rootLen) -replace '\\', '/'
+                [void][System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile(
+                    $zip, $_.FullName, $entryName,
+                    [System.IO.Compression.CompressionLevel]::Optimal)
+            }
+        # Keep empty dirs (e.g. data/flutter_assets/packages/) as explicit
+        # '/'-terminated entries, matching what the installer lays down.
+        Get-ChildItem $releaseDir -Recurse -Directory -Force | ForEach-Object {
+            $hasFiles = Get-ChildItem $_.FullName -Recurse -File -Force |
+                Where-Object { $excludeExt -notcontains $_.Extension } |
+                Select-Object -First 1
+            if (-not $hasFiles) {
+                $entryName = ($_.FullName.Substring($rootLen) -replace '\\', '/') + '/'
+                [void]$zip.CreateEntry($entryName)
+            }
+        }
+    } finally { $zip.Dispose() }
 
     # True portable variant: same payload + the portable.txt marker, so identity,
     # DB and downloads live in hollow_data\ next to the exe (USB-stick install).
@@ -193,7 +219,12 @@ if (-not $SkipZip) {
         'switch back to a normal per-user install.'
     ) | Out-File -FilePath $markerPath -Encoding utf8
     Copy-Item $zipPath $portableZipPath -Force
-    Compress-Archive -Path $markerPath -Update -DestinationPath $portableZipPath
+    $zip = [System.IO.Compression.ZipFile]::Open($portableZipPath, 'Update')
+    try {
+        [void][System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile(
+            $zip, $markerPath, 'portable.txt',
+            [System.IO.Compression.CompressionLevel]::Optimal)
+    } finally { $zip.Dispose() }
     Remove-Item $markerPath -Force
 } else { Step 5 'Zip (SKIPPED)' }
 

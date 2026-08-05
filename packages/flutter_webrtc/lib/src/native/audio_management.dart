@@ -84,6 +84,58 @@ class NativeAudioManagement {
     });
   }
 
+  /// Record the PROCESSED capture signal (post AI-NS + enhance chain —
+  /// exactly what a remote peer receives pre-Opus) to a mono 16-bit WAV at
+  /// [path] (Hollow fork addition, issue #40 mic test). The capture pipeline
+  /// must be LIVE (a PeerConnection carrying the local track) or nothing is
+  /// written. Returns true when recording started. No-op false on web.
+  static Future<bool> startCaptureRecord(String path) async {
+    if (kIsWeb) return false;
+    final started =
+        await WebRTC.invokeMethod('startCaptureRecord', <String, dynamic>{
+      'path': path,
+    });
+    return started == true;
+  }
+
+  /// Stop the capture recording started by [startCaptureRecord] and finalize
+  /// the WAV file. Safe to call when not recording. No-op on web.
+  static Future<void> stopCaptureRecord() async {
+    if (kIsWeb) return;
+    await WebRTC.invokeMethod('stopCaptureRecord');
+  }
+
+  /// Offline-render a RAW mono 16-bit PCM WAV through a FRESH instance of
+  /// the native capture chain (AI-NS + EQ + gate/upward + compressor +
+  /// de-esser + limiter, dynamic servo included — the same C++ live calls
+  /// run) and write the processed WAV to [outPath] (Hollow fork addition,
+  /// issue #40 mic test). No live WebRTC session involved or required.
+  /// Blocking work happens on a native background thread. No-op false on
+  /// web.
+  static Future<bool> renderVoiceWav({
+    required String inPath,
+    required String outPath,
+    double gain = 1.0,
+    bool enhance = true,
+    double makeupDb = 12.0,
+    bool dynamicMode = false,
+    bool aiNs = false,
+    int engine = nsEngineRnnoise,
+  }) async {
+    if (kIsWeb) return false;
+    final ok = await WebRTC.invokeMethod('hollowRenderVoiceWav', {
+      'inPath': inPath,
+      'outPath': outPath,
+      'gain': gain,
+      'enhance': enhance,
+      'makeupDb': makeupDb,
+      'dynamic': dynamicMode,
+      'aiNs': aiNs,
+      'engine': engine,
+    });
+    return ok == true;
+  }
+
   /// Tell the capture post-processor whether the mic is MUTED (Hollow fork
   /// addition). The APM keeps processing real mic input while the outbound
   /// track is disabled, so without this the dynamic servo adapts to whatever

@@ -2039,6 +2039,17 @@ pub(crate) enum HavenMessage {
         want: bool,
     },
 
+    /// Call recording indicator (issue #53): the peer started/stopped a local
+    /// recording. `recording` is authoritative — the Dart-facing signal-type
+    /// string ("recording_start"/"recording_stop") is reconstructed from it.
+    #[serde(rename = "call_recording_state")]
+    CallRecordingState {
+        #[serde(default)]
+        call_id: String,
+        #[serde(default)]
+        recording: bool,
+    },
+
     // -- Gossip relay tree (Phase 5D) --
 
     /// Gossip peer exchange: share neighbor list for topology discovery.
@@ -2160,6 +2171,16 @@ pub(crate) enum HavenMessage {
         channel_id: String,
         #[serde(default)]
         enabled: bool,
+    },
+
+    /// Broadcast: recording state (on/off) in a voice channel (REC indicator,
+    /// issue #53). Plaintext twin of `MessageEnvelope::VoiceChannelRecordingState`.
+    #[serde(rename = "vc_recording_state")]
+    VoiceChannelRecordingState {
+        server_id: String,
+        channel_id: String,
+        #[serde(default)]
+        recording: bool,
     },
 
     // -- Recovery pool (Evidence Recovery) --
@@ -3013,6 +3034,18 @@ pub(crate) enum MessageEnvelope {
         target: Option<String>,
     },
 
+    /// Broadcast: recording state (on/off) in a voice channel (REC indicator,
+    /// issue #53).
+    #[serde(rename = "vc_recording_state")]
+    VoiceChannelRecordingState {
+        sid: String,
+        cid: String,
+        #[serde(default)]
+        recording: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<String>,
+    },
+
     // -- Gossip relay tree (Phase 5D) --
 
     /// Broadcast metadata: notifies server members that a gossip file broadcast is in flight.
@@ -3057,7 +3090,8 @@ impl MessageEnvelope {
             | Self::VoiceChannelScreenWatch { target, .. }
             | Self::VoiceChannelRenegOffer { target, .. }
             | Self::VoiceChannelRenegAnswer { target, .. }
-            | Self::VoiceChannelCameraState { target, .. } => target.as_deref(),
+            | Self::VoiceChannelCameraState { target, .. }
+            | Self::VoiceChannelRecordingState { target, .. } => target.as_deref(),
             Self::FileHeader { inner } => inner.target.as_deref(),
             Self::ShardStore { inner } => inner.target.as_deref(),
             _ => None,

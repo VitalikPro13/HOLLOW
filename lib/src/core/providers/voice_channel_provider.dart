@@ -342,6 +342,15 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
 
   Timer? _sframeHealTimer;
 
+  /// Keyless watchdog (issue #47 → #27): with NO SFrame key no cryptors ever
+  /// exist, so no cryptor-state callbacks fire and the heal ladder never
+  /// arms — an identity that lost its MLS groups (e.g. after a
+  /// profile-switch mnemonic recovery) sat keyless, transmitting plaintext
+  /// against peers' ciphertext, audibly garbled forever. Ticks after join
+  /// until the first key lands, nudging Rust to re-emit / re-bootstrap.
+  Timer? _sframeKeylessTimer;
+  int _sframeKeylessTicks = 0;
+
   /// Whether a channel is cryptographically isolated in its own MLS subgroup
   /// (per-channel subgroups / "Option B"): restricted visibility AND not a public
   /// channel. Mirrors Rust `ServerState::channel_uses_subgroup`. Such a channel's
@@ -655,6 +664,8 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     // Every preference above came from an await — bail before we open the mic
     // if the channel we were joining is already behind us.
     if (await _joinSuperseded(gen, svc)) return;
+
+    _armSframeKeylessWatchdog();
 
     // Wire VAD callback. Writes go to the dedicated vcSpeakingProvider (NOT
     // VoiceChannelState) so a speaking flip only rebuilds the glow consumers,
@@ -2408,9 +2419,47 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
   void _resetSframeHeal() {
     _sframeHealTimer?.cancel();
     _sframeHealTimer = null;
+    _sframeKeylessTimer?.cancel();
+    _sframeKeylessTimer = null;
+    _sframeKeylessTicks = 0;
     _sframeFailures.clear();
     _sframeHealProgress.clear();
     _sframeEscalations.clear();
+  }
+
+  void _armSframeKeylessWatchdog() {
+    _sframeKeylessTimer?.cancel();
+    _sframeKeylessTicks = 0;
+    _sframeKeylessTimer =
+        Timer.periodic(const Duration(seconds: 5), (_) => _sframeKeylessTick());
+  }
+
+  void _sframeKeylessTick() {
+    final svc = _service;
+    if (!state.isInVoiceChannel || svc == null) {
+      _sframeKeylessTimer?.cancel();
+      _sframeKeylessTimer = null;
+      return;
+    }
+    if (svc.frameCryptor?.isEnabled == true) {
+      // First key landed — the cryptor-state heal ladder owns recovery now.
+      _sframeKeylessTimer?.cancel();
+      _sframeKeylessTimer = null;
+      return;
+    }
+    _sframeKeylessTicks++;
+    if (_sframeKeylessTicks > 24) {
+      // ~2 min without a key (group authority offline). Stop nagging — a
+      // later MlsEpochChanged still applies normally via onEpochChanged.
+      _sframeKeylessTimer?.cancel();
+      _sframeKeylessTimer = null;
+      return;
+    }
+    debugPrint('[HOLLOW-VC] SFrame keyless after join '
+        '(tick $_sframeKeylessTicks) — nudging Rust for the group key');
+    // Rust's group-less heal branch re-requests the MLS bootstrap (rate
+    // limited by MLS_BOOTSTRAP_TIMEOUT); peerId is unused on that branch.
+    _sframeHealRust('', escalate: false);
   }
 
   Future<void> _sframeHealTick() async {

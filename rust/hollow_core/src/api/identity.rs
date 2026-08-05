@@ -65,6 +65,31 @@ pub fn restore_identity_from_mnemonic(phrase: String) -> Result<IdentityInfo, St
     })
 }
 
+/// Try every stored keychain candidate (per-profile slot, legacy machine
+/// slot, Windows DPAPI blob) and return the first key that actually decrypts
+/// THIS identity file. On success the verified key is re-stored so every slot
+/// self-heals to the active profile — with multiple profiles on one machine
+/// the legacy slot routinely holds the OTHER profile's key, and trusting it
+/// unverified funneled users into mnemonic recovery, which rotates the
+/// device key, discards the MLS identity + groups, and turns voice into
+/// undecryptable garbage audio (issue #47 → #27).
+fn keychain_key_that_decrypts(bytes: &[u8]) -> Option<[u8; 32]> {
+    use crate::identity::{encryption, platform_keystore};
+    let candidates = platform_keystore::retrieve_key_candidates().ok()?;
+    for key_vec in candidates {
+        if key_vec.len() != 32 {
+            continue;
+        }
+        let mut key = [0u8; 32];
+        key.copy_from_slice(&key_vec);
+        if encryption::decrypt_identity(bytes, &key).is_ok() {
+            let _ = platform_keystore::store_key(&key);
+            return Some(key);
+        }
+    }
+    None
+}
+
 /// Unlock the identity file for this session.
 /// For plaintext identities: loads directly (password ignored).
 /// For encrypted identities: decrypts using password and/or OS keychain.
@@ -72,7 +97,6 @@ pub fn restore_identity_from_mnemonic(phrase: String) -> Result<IdentityInfo, St
 #[frb]
 pub fn unlock_identity(password: Option<String>) -> Result<IdentityInfo, String> {
     use crate::identity::encryption;
-    use crate::identity::platform_keystore;
 
     let dir = crate::identity::data_dir()?;
     let path = dir.join("identity.key");
@@ -95,23 +119,10 @@ pub fn unlock_identity(password: Option<String>) -> Result<IdentityInfo, String>
                 && encryption::flags_has_os_keychain(flags)
             {
                 // Password + keychain (flags=0x03): try silent keychain first,
-                // fall back to password prompt if keychain unavailable.
-                match platform_keystore::retrieve_key() {
-                    Ok(Some(key_vec)) if key_vec.len() == 32 => {
-                        let mut key = [0u8; 32];
-                        key.copy_from_slice(&key_vec);
-                        // Verify it actually decrypts before trusting.
-                        if encryption::decrypt_identity(&bytes, &key).is_ok() {
-                            key
-                        } else {
-                            // Keychain key is stale — fall back to password.
-                            let pw = password.as_deref().ok_or(
-                                "Identity is password-protected. Provide a password.",
-                            )?;
-                            encryption::derive_wrapping_key_from_password(pw, &salt)?
-                        }
-                    }
-                    _ => {
+                // fall back to password prompt if no stored key decrypts.
+                match keychain_key_that_decrypts(&bytes) {
+                    Some(key) => key,
+                    None => {
                         let pw = password.as_deref()
                             .ok_or("Identity is password-protected. Provide a password.")?;
                         encryption::derive_wrapping_key_from_password(pw, &salt)?
@@ -124,13 +135,9 @@ pub fn unlock_identity(password: Option<String>) -> Result<IdentityInfo, String>
                 encryption::derive_wrapping_key_from_password(pw, &salt)?
             } else if encryption::flags_has_os_keychain(flags) {
                 // Keychain-only (flags=0x02): silent unlock on same machine.
-                match platform_keystore::retrieve_key() {
-                    Ok(Some(key_vec)) if key_vec.len() == 32 => {
-                        let mut key = [0u8; 32];
-                        key.copy_from_slice(&key_vec);
-                        key
-                    }
-                    _ => {
+                match keychain_key_that_decrypts(&bytes) {
+                    Some(key) => key,
+                    None => {
                         return Err(
                             "Identity was protected with this device's credentials which are no longer available. Restore from backup or mnemonic."
                                 .into(),

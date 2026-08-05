@@ -15,8 +15,18 @@
 #include <windows.graphics.directx.direct3d11.interop.h>
 #include <winrt/Windows.Foundation.Metadata.h>
 
+#include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <iostream>
+
+// Older SDK headers may lack these (Win8.1+ WASAPI auto-conversion flags).
+#ifndef AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM
+#define AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM 0x80000000
+#endif
+#ifndef AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY
+#define AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY 0x08000000
+#endif
 
 #pragma comment(lib, "mfplat.lib")
 #pragma comment(lib, "mfreadwrite.lib")
@@ -34,8 +44,11 @@ namespace {
 constexpr UINT32 kFps = 30;
 constexpr UINT32 kVideoBitrate = 8'000'000;
 constexpr UINT32 kAudioBitrate = 160'000;
-constexpr UINT32 kSystemAudioSampleRate = 48000;
-constexpr UINT32 kMicSampleRate = 44100;
+// One shared audio format for capture, mixing, and the AAC track. WASAPI's
+// AUTOCONVERTPCM does the per-device rate/channel/float conversion — the old
+// design wrote each device's NATIVE format into a track declared 48k/44.1k
+// stereo, so a 44.1k or mono device produced pitched/soundless tracks.
+constexpr UINT32 kMixSampleRate = 48000;
 constexpr UINT32 kAudioChannels = 2;
 constexpr REFERENCE_TIME kHns100PerSec = 10'000'000LL;
 constexpr int kFrameDurationMs = 10;
@@ -45,19 +58,13 @@ void SafeRelease(T*& p) {
   if (p) { p->Release(); p = nullptr; }
 }
 
-inline int16_t FloatToS16(float s) {
-  if (s > 1.0f) s = 1.0f;
-  if (s < -1.0f) s = -1.0f;
-  return static_cast<int16_t>(s * 32767.0f);
-}
-
-bool IsFloatFmt(const WAVEFORMATEX* f) {
-  if (f->wFormatTag == WAVE_FORMAT_IEEE_FLOAT) return true;
-  if (f->wFormatTag == WAVE_FORMAT_EXTENSIBLE) {
-    auto* ext = reinterpret_cast<const WAVEFORMATEXTENSIBLE*>(f);
-    return ext->SubFormat == KSDATAFORMAT_SUBTYPE_IEEE_FLOAT;
-  }
-  return false;
+std::wstring Widen(const std::string& s) {
+  if (s.empty()) return std::wstring();
+  int len = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, nullptr, 0);
+  std::wstring w(len, L'\0');
+  MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, &w[0], len);
+  if (!w.empty() && w.back() == L'\0') w.pop_back();
+  return w;
 }
 
 INT64 QpcTo100ns(INT64 qpc, const LARGE_INTEGER& freq) {
@@ -236,40 +243,26 @@ bool WinScreenRecorder::InitSinkWriter(const std::wstring& path,
     }
   }
 
-  // --- System audio output (AAC) ---
+  // --- Audio output (AAC): ONE mixed loopback+mic track ---
+  // Two separate AAC tracks (the old design) broke playback: mainstream
+  // players render only the FIRST audio track, so the mic (track 2) was
+  // silently ignored — "the recording misses my own voice" (issue #53).
   {
     ComPtr<IMFMediaType> out_mt;
-    CreateAudioMediaType(kSystemAudioSampleRate, kAudioChannels, &out_mt);
-    hr = writer_->AddStream(out_mt.Get(), &sys_audio_idx_);
+    CreateAudioMediaType(kMixSampleRate, kAudioChannels, &out_mt);
+    hr = writer_->AddStream(out_mt.Get(), &audio_idx_);
     if (FAILED(hr)) {
-      std::cerr << "[WinRec] AddStream(sys audio) failed (non-fatal)\n";
+      std::cerr << "[WinRec] AddStream(audio) failed (non-fatal): 0x"
+                << std::hex << hr << "\n";
     } else {
       ComPtr<IMFMediaType> in_mt;
-      CreatePcmInputType(kSystemAudioSampleRate, kAudioChannels, &in_mt);
-      hr = writer_->SetInputMediaType(sys_audio_idx_, in_mt.Get(), nullptr);
+      CreatePcmInputType(kMixSampleRate, kAudioChannels, &in_mt);
+      hr = writer_->SetInputMediaType(audio_idx_, in_mt.Get(), nullptr);
       if (FAILED(hr)) {
-        std::cerr << "[WinRec] SetInputMediaType(sys audio) failed (non-fatal)\n";
+        std::cerr << "[WinRec] SetInputMediaType(audio) failed (non-fatal): 0x"
+                  << std::hex << hr << "\n";
       } else {
-        has_sys_audio_ = true;
-      }
-    }
-  }
-
-  // --- Mic audio output (AAC) ---
-  {
-    ComPtr<IMFMediaType> out_mt;
-    CreateAudioMediaType(kMicSampleRate, kAudioChannels, &out_mt);
-    hr = writer_->AddStream(out_mt.Get(), &mic_audio_idx_);
-    if (FAILED(hr)) {
-      std::cerr << "[WinRec] AddStream(mic) failed (non-fatal)\n";
-    } else {
-      ComPtr<IMFMediaType> in_mt;
-      CreatePcmInputType(kMicSampleRate, kAudioChannels, &in_mt);
-      hr = writer_->SetInputMediaType(mic_audio_idx_, in_mt.Get(), nullptr);
-      if (FAILED(hr)) {
-        std::cerr << "[WinRec] SetInputMediaType(mic) failed (non-fatal)\n";
-      } else {
-        has_mic_audio_ = true;
+        has_audio_ = true;
       }
     }
   }
@@ -424,13 +417,12 @@ void WinScreenRecorder::WriteVideoFrame(ID3D11Texture2D* tex, INT64 qpc) {
 void WinScreenRecorder::StartAudioCapture() {
   audio_running_.store(true);
 
-  if (has_sys_audio_) {
+  if (has_audio_) {
     loopback_event_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-    loopback_thread_ = std::thread(&WinScreenRecorder::AudioThread, this, true);
-  }
-  if (has_mic_audio_) {
     mic_event_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    loopback_thread_ = std::thread(&WinScreenRecorder::AudioThread, this, true);
     mic_thread_ = std::thread(&WinScreenRecorder::AudioThread, this, false);
+    mix_thread_ = std::thread(&WinScreenRecorder::MixThread, this);
   }
 }
 
@@ -442,10 +434,8 @@ void WinScreenRecorder::AudioThread(bool loopback) {
   IMMDevice* dev = nullptr;
   IAudioClient* client = nullptr;
   IAudioCaptureClient* capture = nullptr;
-  WAVEFORMATEX* fmt = nullptr;
   HANDLE mm_task = nullptr;
   HANDLE& evt = loopback ? loopback_event_ : mic_event_;
-  const DWORD stream_idx = loopback ? sys_audio_idx_ : mic_audio_idx_;
   const char* tag = loopback ? "loopback" : "mic";
 
   auto cleanup = [&]() {
@@ -455,7 +445,6 @@ void WinScreenRecorder::AudioThread(bool loopback) {
     SafeRelease(client);
     SafeRelease(dev);
     SafeRelease(enumerator);
-    if (fmt) { CoTaskMemFree(fmt); fmt = nullptr; }
     if (com_init) CoUninitialize();
   };
 
@@ -464,32 +453,57 @@ void WinScreenRecorder::AudioThread(bool loopback) {
                         reinterpret_cast<void**>(&enumerator));
   if (FAILED(hr)) { cleanup(); return; }
 
-  EDataFlow flow = loopback ? eRender : eCapture;
-  hr = enumerator->GetDefaultAudioEndpoint(flow, eConsole, &dev);
-  if (FAILED(hr)) {
-    std::cerr << "[WinRec] " << tag << " GetDefaultAudioEndpoint failed\n";
-    if (loopback) captured_system_audio_ = false;
-    cleanup();
-    return;
+  // Prefer the endpoint Hollow is configured to use (loopback: the device
+  // remote voices actually play on; mic: the device the call captures from).
+  // Fall back to the eConsole default so a stale/unplugged id still records.
+  const std::string& want_id = loopback ? render_device_id_ : capture_device_id_;
+  if (!want_id.empty()) {
+    std::wstring wid = Widen(want_id);
+    hr = enumerator->GetDevice(wid.c_str(), &dev);
+    if (FAILED(hr) || !dev) {
+      std::cerr << "[WinRec] " << tag << " GetDevice('" << want_id
+                << "') failed: 0x" << std::hex << hr << " — using default\n";
+      dev = nullptr;
+    }
+  }
+  if (!dev) {
+    EDataFlow flow = loopback ? eRender : eCapture;
+    hr = enumerator->GetDefaultAudioEndpoint(flow, eConsole, &dev);
+    if (FAILED(hr)) {
+      std::cerr << "[WinRec] " << tag << " GetDefaultAudioEndpoint failed\n";
+      if (loopback) captured_system_audio_ = false;
+      cleanup();
+      return;
+    }
   }
 
   hr = dev->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr,
                      reinterpret_cast<void**>(&client));
   if (FAILED(hr)) { cleanup(); return; }
 
-  hr = client->GetMixFormat(&fmt);
-  if (FAILED(hr)) { cleanup(); return; }
+  // Fixed shared format: WASAPI converts whatever the device natively runs
+  // (44.1k, mono, float, 7.1) to s16 interleaved 48k stereo for us. The old
+  // native-format capture fed mismatched PCM into a fixed-format AAC stream
+  // — pitched or dead tracks depending on the device (issue #53).
+  WAVEFORMATEX want = {};
+  want.wFormatTag = WAVE_FORMAT_PCM;
+  want.nChannels = static_cast<WORD>(kAudioChannels);
+  want.nSamplesPerSec = kMixSampleRate;
+  want.wBitsPerSample = 16;
+  want.nBlockAlign = static_cast<WORD>(kAudioChannels * 2);
+  want.nAvgBytesPerSec = kMixSampleRate * kAudioChannels * 2;
 
-  bool is_float = IsFloatFmt(fmt);
-
-  DWORD flags = AUDCLNT_STREAMFLAGS_EVENTCALLBACK;
+  DWORD flags = AUDCLNT_STREAMFLAGS_EVENTCALLBACK |
+                AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM |
+                AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY;
   if (loopback) flags |= AUDCLNT_STREAMFLAGS_LOOPBACK;
 
   hr = client->Initialize(AUDCLNT_SHAREMODE_SHARED, flags,
-                          kHns100PerSec, 0, fmt, nullptr);
+                          kHns100PerSec, 0, &want, nullptr);
   if (FAILED(hr)) {
     std::cerr << "[WinRec] " << tag << " Initialize failed: 0x"
               << std::hex << hr << "\n";
+    if (loopback) captured_system_audio_ = false;
     cleanup();
     return;
   }
@@ -509,8 +523,9 @@ void WinScreenRecorder::AudioThread(bool loopback) {
 
   if (loopback) captured_system_audio_ = true;
 
-  const UINT32 native_rate = fmt->nSamplesPerSec;
-  const UINT32 native_ch = fmt->nChannels;
+  // Cap each ring at ~2 s so a wedged mixer can't grow them unbounded.
+  constexpr size_t kMaxRingSamples =
+      static_cast<size_t>(kMixSampleRate) * kAudioChannels * 2;
 
   while (audio_running_.load()) {
     DWORD wait = WaitForSingleObject(evt, 2000);
@@ -526,28 +541,22 @@ void WinScreenRecorder::AudioThread(bool loopback) {
       hr = capture->GetBuffer(&raw, &frames, &buf_flags, nullptr, nullptr);
       if (FAILED(hr)) break;
 
-      LARGE_INTEGER qpc;
-      QueryPerformanceCounter(&qpc);
-
-      // Convert to int16 PCM.
-      const size_t total = static_cast<size_t>(frames) * native_ch;
-      std::vector<int16_t> pcm(total);
-
-      if (buf_flags & AUDCLNT_BUFFERFLAGS_SILENT) {
-        memset(pcm.data(), 0, total * sizeof(int16_t));
-      } else if (is_float) {
-        const float* src = reinterpret_cast<const float*>(raw);
-        for (size_t i = 0; i < total; ++i)
-          pcm[i] = FloatToS16(src[i]);
-      } else {
-        memcpy(pcm.data(), raw, total * sizeof(int16_t));
+      const size_t total = static_cast<size_t>(frames) * kAudioChannels;
+      {
+        std::lock_guard<std::mutex> lk(ring_mtx_);
+        auto& ring = loopback ? sys_ring_ : mic_ring_;
+        if (ring.size() + total <= kMaxRingSamples) {
+          const size_t old = ring.size();
+          ring.resize(old + total);
+          if (buf_flags & AUDCLNT_BUFFERFLAGS_SILENT) {
+            memset(ring.data() + old, 0, total * sizeof(int16_t));
+          } else {
+            memcpy(ring.data() + old, raw, total * sizeof(int16_t));
+          }
+        }
       }
 
       capture->ReleaseBuffer(frames);
-
-      WriteAudioPcm(pcm.data(), frames, native_rate, native_ch,
-                     qpc.QuadPart, stream_idx);
-
       capture->GetNextPacketSize(&pkt);
     }
   }
@@ -555,16 +564,84 @@ void WinScreenRecorder::AudioThread(bool loopback) {
   cleanup();
 }
 
-void WinScreenRecorder::WriteAudioPcm(const int16_t* data, UINT32 frames,
-                                      UINT32 sample_rate, UINT32 channels,
-                                      INT64 qpc, DWORD stream_idx) {
+// Timeline mixer: sums the loopback and mic rings into the ONE audio track on
+// its own clock. Consumption lags real time by kMixLatencyMs so capture-thread
+// jitter never punches holes, and a source with no data contributes zeros
+// instead of stalling the track — WASAPI loopback delivers NO packets while
+// the system is silent, so "wait for both sources" would freeze the audio.
+void WinScreenRecorder::MixThread() {
+  constexpr INT64 kMixLatencyMs = 60;
+  std::vector<int16_t> sys_take, mic_take, mixed;
+  INT64 start_qpc = 0;
+
+  while (audio_running_.load()) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(kFrameDurationMs));
+
+    {
+      std::lock_guard<std::mutex> lock(mtx_);
+      if (!writer_ || !writer_started_) {
+        // Video hasn't begun the writer yet — drop buffered audio so the
+        // track starts aligned with the first video frame.
+        std::lock_guard<std::mutex> lk(ring_mtx_);
+        sys_ring_.clear();
+        mic_ring_.clear();
+        continue;
+      }
+    }
+
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    if (start_qpc == 0) {
+      start_qpc = now.QuadPart;
+      mix_base_ts_ = QpcTo100ns(start_qpc - base_qpc_, qpc_freq_);
+      if (mix_base_ts_ < 0) mix_base_ts_ = 0;
+      continue;
+    }
+
+    INT64 elapsed_100ns = QpcTo100ns(now.QuadPart - start_qpc, qpc_freq_) -
+                          kMixLatencyMs * 10'000LL;
+    if (elapsed_100ns <= 0) continue;
+    INT64 owed = elapsed_100ns * kMixSampleRate / kHns100PerSec -
+                 mix_frames_written_;
+    if (owed <= 0) continue;
+    // A scheduler stall must not burst an unbounded write.
+    owed = std::min<INT64>(owed, kMixSampleRate / 4);
+
+    const size_t want = static_cast<size_t>(owed) * kAudioChannels;
+    sys_take.assign(want, 0);
+    mic_take.assign(want, 0);
+    {
+      std::lock_guard<std::mutex> lk(ring_mtx_);
+      const size_t s = std::min(want, sys_ring_.size());
+      std::copy(sys_ring_.begin(), sys_ring_.begin() + s, sys_take.begin());
+      sys_ring_.erase(sys_ring_.begin(), sys_ring_.begin() + s);
+      const size_t m = std::min(want, mic_ring_.size());
+      std::copy(mic_ring_.begin(), mic_ring_.begin() + m, mic_take.begin());
+      mic_ring_.erase(mic_ring_.begin(), mic_ring_.begin() + m);
+    }
+
+    mixed.resize(want);
+    for (size_t i = 0; i < want; ++i) {
+      int v = static_cast<int>(sys_take[i]) + static_cast<int>(mic_take[i]);
+      if (v > 32767) v = 32767;
+      if (v < -32768) v = -32768;
+      mixed[i] = static_cast<int16_t>(v);
+    }
+    WriteMixedPcm(mixed.data(), static_cast<UINT32>(owed));
+  }
+}
+
+void WinScreenRecorder::WriteMixedPcm(const int16_t* data, UINT32 frames) {
   std::lock_guard<std::mutex> lock(mtx_);
-  if (!writer_ || !writer_started_) return;
+  if (!writer_ || !writer_started_ || !has_audio_) return;
 
-  INT64 ts = QpcTo100ns(qpc - base_qpc_, qpc_freq_);
-  if (ts < 0) ts = 0;
+  const INT64 ts =
+      mix_base_ts_ + mix_frames_written_ * kHns100PerSec / kMixSampleRate;
+  // The timeline advances even if a write fails, so one bad sample can't
+  // shift everything after it.
+  mix_frames_written_ += frames;
 
-  UINT32 byte_count = frames * channels * sizeof(int16_t);
+  UINT32 byte_count = frames * kAudioChannels * sizeof(int16_t);
   ComPtr<IMFMediaBuffer> buf;
   HRESULT hr = MFCreateMemoryBuffer(byte_count, &buf);
   if (FAILED(hr)) return;
@@ -580,9 +657,16 @@ void WinScreenRecorder::WriteAudioPcm(const int16_t* data, UINT32 frames,
   sample->AddBuffer(buf.Get());
   sample->SetSampleTime(ts);
   sample->SetSampleDuration(
-      static_cast<INT64>(frames) * 10'000'000LL / sample_rate);
+      static_cast<INT64>(frames) * kHns100PerSec / kMixSampleRate);
 
-  writer_->WriteSample(stream_idx, sample.Get());
+  hr = writer_->WriteSample(audio_idx_, sample.Get());
+  if (FAILED(hr) && !audio_write_err_logged_) {
+    // The old code discarded this HRESULT — an audio-less file finalized
+    // "successfully" with zero evidence anywhere.
+    std::cerr << "[WinRec] WriteSample(audio) failed: 0x" << std::hex << hr
+              << "\n";
+    audio_write_err_logged_ = true;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -590,6 +674,8 @@ void WinScreenRecorder::WriteAudioPcm(const int16_t* data, UINT32 frames,
 // ---------------------------------------------------------------------------
 
 void WinScreenRecorder::Start(const std::string& output_path,
+                              const std::string& render_device_id,
+                              const std::string& capture_device_id,
                               Completion completion) {
   if (recording_.load()) {
     completion("Already recording");
@@ -602,11 +688,20 @@ void WinScreenRecorder::Start(const std::string& output_path,
   }
 
   captured_system_audio_ = false;
-  has_sys_audio_ = false;
-  has_mic_audio_ = false;
+  has_audio_ = false;
   writer_started_ = false;
   base_qpc_ = 0;
   last_frame_qpc_ = 0;
+  mix_frames_written_ = 0;
+  mix_base_ts_ = 0;
+  audio_write_err_logged_ = false;
+  render_device_id_ = render_device_id;
+  capture_device_id_ = capture_device_id;
+  {
+    std::lock_guard<std::mutex> lk(ring_mtx_);
+    sys_ring_.clear();
+    mic_ring_.clear();
+  }
 
   // Convert path to wide string.
   int len = MultiByteToWideChar(CP_UTF8, 0, output_path.c_str(), -1, nullptr, 0);
@@ -648,7 +743,10 @@ void WinScreenRecorder::Start(const std::string& output_path,
   StartAudioCapture();
 
   std::cerr << "[WinRec] recording started " << cap_w_ << "x" << cap_h_
-            << " sys_audio=" << has_sys_audio_ << " mic=" << has_mic_audio_ << "\n";
+            << " audio=" << has_audio_
+            << " render_dev=" << (render_device_id_.empty() ? "default" : render_device_id_)
+            << " capture_dev=" << (capture_device_id_.empty() ? "default" : capture_device_id_)
+            << "\n";
   completion("");
 }
 
@@ -666,6 +764,8 @@ void WinScreenRecorder::Stop(Completion completion) {
   if (mic_event_) SetEvent(mic_event_);
   if (loopback_thread_.joinable()) loopback_thread_.join();
   if (mic_thread_.joinable()) mic_thread_.join();
+  if (mix_thread_.joinable()) mix_thread_.join();
+  std::cerr << "[WinRec] audio frames mixed: " << mix_frames_written_ << "\n";
 
   // Stop capture session.
   if (session_) {
@@ -707,9 +807,13 @@ void WinScreenRecorder::Cleanup() {
   if (loopback_event_) { CloseHandle(loopback_event_); loopback_event_ = nullptr; }
   if (mic_event_) { CloseHandle(mic_event_); mic_event_ = nullptr; }
 
+  {
+    std::lock_guard<std::mutex> lk(ring_mtx_);
+    sys_ring_.clear();
+    mic_ring_.clear();
+  }
   writer_started_ = false;
-  has_sys_audio_ = false;
-  has_mic_audio_ = false;
+  has_audio_ = false;
   MFShutdown();
 }
 

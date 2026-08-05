@@ -3,6 +3,10 @@
 
 #include <atomic>
 #include <cstdint>
+#include <cstdio>
+#include <string>
+#include <thread>
+#include <vector>
 
 #include "rtc_audio_processing.h"
 
@@ -49,7 +53,7 @@ class FlutterCaptureGainProcessor
         dfn_create_in_flight_(false),
         dfn_bailed_(false),
         dfn_format_ok_(true) {}
-  ~FlutterCaptureGainProcessor() override {}
+  ~FlutterCaptureGainProcessor() override { StopCaptureRecord(); }
 
   // Linear makeup-gain multiplier (1.0 = transparent in legacy mode; in
   // enhance mode it is rescaled so the slider's "100%" (2.0) is unity trim).
@@ -208,6 +212,18 @@ class FlutterCaptureGainProcessor
     return dfn_handle_.load(std::memory_order_acquire);
   }
 
+  // ── Mic-test capture recording (issue #40) ──
+  // Taps the PROCESSED capture signal — post AI-NS + full enhance chain,
+  // byte-for-byte what feeds the Opus encoder — into a mono 16-bit WAV.
+  // Start/Stop run on the platform thread; the audio thread only pushes
+  // samples into a preallocated SPSC ring (Process() stays allocation-free
+  // and lock-free), and a drain thread does all file I/O.
+  bool StartCaptureRecord(const std::string& path);
+  void StopCaptureRecord();
+  bool CaptureRecordActive() const {
+    return rec_active_.load(std::memory_order_relaxed);
+  }
+
   // CustomProcessing
   void Initialize(int sample_rate_hz, int num_channels) override;
   void Process(int num_bands, int num_frames, int buffer_size,
@@ -266,6 +282,11 @@ class FlutterCaptureGainProcessor
   // a thin sentinel wrapper around this so the whole-chain cost is measured
   // across every early return. Audio thread only.
   void ProcessChain(int num_bands, int buffer_size, float* buffer);
+  // Post-chain record tap (mic test). Audio thread only; see the public
+  // StartCaptureRecord above.
+  void RecordTap(int num_bands, int buffer_size, const float* buffer);
+  // Drain-thread body: ring -> s16 -> WAV file.
+  void RecordDrainLoop();
   // Frame RMS -> decaying peak-hold in level_db_ (see CaptureLevelDb).
   void MeasureCaptureLevel(int num_bands, int buffer_size,
                            const float* buffer);
@@ -351,7 +372,34 @@ class FlutterCaptureGainProcessor
   // path (band0's gains re-applied to the higher bands).
   static constexpr int kMaxBandLen = 1024;
   float band_gain_[kMaxBandLen];
+
+  // ── Mic-test record state (see StartCaptureRecord). SPSC ring: audio
+  // thread writes (rec_w_), drain thread reads (rec_r_); indices are
+  // monotonically increasing with modulo addressing.
+  std::atomic<bool> rec_active_{false};
+  std::vector<float> rec_ring_;
+  std::atomic<size_t> rec_w_{0};
+  std::atomic<size_t> rec_r_{0};
+  // WAV rate, latched by the tap from the FIRST live frame's 10 ms shape
+  // (never from Initialize's rate — they can disagree; see RecordTap).
+  std::atomic<int> rec_rate_{0};
+  std::thread rec_thread_;
+  FILE* rec_file_ = nullptr;       // drain thread only (after Start hands off)
+  uint32_t rec_data_bytes_ = 0;    // drain thread only
+  bool rec_shape_logged_ = false;  // audio thread only
 };
+
+// Offline mic-test renderer (issue #40 final design): runs a FRESH
+// FlutterCaptureGainProcessor instance (same code = bit-exact call
+// processing; never the process-global one a live call may own) over a
+// mono 16-bit PCM WAV and writes the processed WAV. `dfn_handle` may be
+// null (AI-NS off). Blocking file+DSP work — call from a background
+// thread. Returns false with `error` set on failure.
+bool RenderVoiceWavOffline(const std::string& in_path,
+                           const std::string& out_path, float gain,
+                           bool enhance, float makeup_db, bool dynamic_mode,
+                           void* dfn_handle, int dfn_engine,
+                           std::string* error);
 
 }  // namespace flutter_webrtc_plugin
 

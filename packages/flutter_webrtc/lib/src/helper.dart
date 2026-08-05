@@ -203,6 +203,41 @@ class Helper {
   static Future<void> setCaptureMuted(bool muted) =>
       NativeAudioManagement.setCaptureMuted(muted);
 
+  /// Record the PROCESSED capture signal (post AI-NS + full enhance chain —
+  /// what a remote peer hears pre-Opus) to a mono 16-bit WAV (Hollow fork
+  /// addition, issue #40 mic test). Requires a live capture pipeline (a PC
+  /// carrying the local track). Returns true when recording started.
+  static Future<bool> startCaptureRecord(String path) =>
+      NativeAudioManagement.startCaptureRecord(path);
+
+  /// Stop and finalize the [startCaptureRecord] WAV. Safe when idle.
+  static Future<void> stopCaptureRecord() =>
+      NativeAudioManagement.stopCaptureRecord();
+
+  /// Offline-render a raw mono 16-bit WAV through a fresh instance of the
+  /// native capture chain — same C++ as live calls (Hollow fork addition,
+  /// issue #40 mic test). Returns true when the processed WAV was written.
+  static Future<bool> renderVoiceWav({
+    required String inPath,
+    required String outPath,
+    double gain = 1.0,
+    bool enhance = true,
+    double makeupDb = 12.0,
+    bool dynamicMode = false,
+    bool aiNs = false,
+    int engine = nsEngineRnnoise,
+  }) =>
+      NativeAudioManagement.renderVoiceWav(
+        inPath: inPath,
+        outPath: outPath,
+        gain: gain,
+        enhance: enhance,
+        makeupDb: makeupDb,
+        dynamicMode: dynamicMode,
+        aiNs: aiNs,
+        engine: engine,
+      );
+
   /// Tell the capture post-processor that screen-share audio is active on
   /// this device (sending or playing) — the dynamic servo freezes for the
   /// whole share so continuous music bleed can't re-calibrate the mic trim.

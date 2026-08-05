@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
+import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/core/providers/voice_channel_provider.dart';
 import 'package:hollow/src/core/services/recording_service.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
@@ -87,7 +88,13 @@ class RecordingNotifier extends Notifier<RecordingState> {
     );
 
     try {
-      await RecordingService.instance.start();
+      // Windows: point the recorder at the devices Hollow actually uses —
+      // the eConsole defaults recorded the wrong endpoints when the user
+      // routed calls to a non-default headset/mic (#53).
+      await RecordingService.instance.start(
+        renderDeviceId: ref.read(audioOutputDeviceProvider).valueOrNull,
+        captureDeviceId: ref.read(audioInputDeviceProvider).valueOrNull,
+      );
     } catch (e) {
       // Roll back the optimistic flip on failure.
       state = state.copyWith(
@@ -206,20 +213,16 @@ class RecordingNotifier extends Notifier<RecordingState> {
       final serverId = vc.currentServerId;
       final channelId = vc.currentChannelId;
       if (serverId == null || channelId == null) return;
-      final peerIds = ref
-              .read(voiceChannelProvider.notifier)
-              .service
-              ?.connectedPeerIds ??
-          const <String>{};
-      for (final p in peerIds) {
-        _send(() => network_api.voiceChannelSendSignal(
-              serverId: serverId,
-              channelId: channelId,
-              peerId: p,
-              signalType: type,
-              payload: payload,
-            ));
-      }
+      // Broadcast-class state signal (like camera_state): Rust fans ONE MLS
+      // broadcast (plaintext member fallback) to the whole group and ignores
+      // peerId — a per-peer loop would emit N duplicate broadcasts.
+      _send(() => network_api.voiceChannelSendSignal(
+            serverId: serverId,
+            channelId: channelId,
+            peerId: '',
+            signalType: type,
+            payload: payload,
+          ));
     }
   }
 

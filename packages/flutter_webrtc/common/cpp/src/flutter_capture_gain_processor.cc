@@ -6,6 +6,11 @@
 #include <cstdio>
 #include <cstring>
 
+#ifdef _WIN32
+// For MultiByteToWideChar in the record-tap's UTF-8 path handling.
+#include <windows.h>
+#endif
+
 // MSVC: <windows.h> (pulled in transitively) defines max/min macros that
 // break std::max/std::min. No-op on GCC/Clang.
 #ifdef max
@@ -680,6 +685,7 @@ void FlutterCaptureGainProcessor::Process(int num_bands, int /*num_frames*/,
   last_process_us_ = now_us;
 
   ProcessChain(num_bands, buffer_size, buffer);
+  RecordTap(num_bands, buffer_size, buffer);
 
   // [SENTINEL] whole-chain cost EMA — same pattern as the DFN watchdog
   // (EMA, 100-frame warmup grace) but for the ENTIRE Process() chain.
@@ -702,6 +708,315 @@ void FlutterCaptureGainProcessor::Process(int num_bands, int /*num_frames*/,
                  "budget)\n",
                  ema);
   }
+}
+
+// ─── Mic-test capture recording (issue #40) ─────────────────────────────────
+// The tap sits AFTER ProcessChain in Process(), so the file holds exactly the
+// signal a remote peer receives pre-Opus: AI-NS + trim/EQ/gate/compressor/
+// de-esser/limiter, dynamic servo included. The old mic test played the LIVE
+// loopback instead — users judged their raw-ish monitor mix, not the chain,
+// and reported "the real call sounds better than the test".
+
+namespace {
+
+FILE* OpenWriteBinary(const std::string& path) {
+#ifdef _WIN32
+  int len = MultiByteToWideChar(CP_UTF8, 0, path.c_str(), -1, nullptr, 0);
+  if (len <= 0) return nullptr;
+  std::wstring w(static_cast<size_t>(len), L'\0');
+  MultiByteToWideChar(CP_UTF8, 0, path.c_str(), -1, &w[0], len);
+  FILE* f = nullptr;
+  if (_wfopen_s(&f, w.c_str(), L"wb") != 0) return nullptr;
+  return f;
+#else
+  return std::fopen(path.c_str(), "wb");
+#endif
+}
+
+// 44-byte canonical PCM header, mono 16-bit; sizes patched at stop.
+void WriteWavHeader(FILE* f, int rate, uint32_t data_bytes) {
+  auto w32 = [&](uint32_t v) { std::fwrite(&v, 4, 1, f); };
+  auto w16 = [&](uint16_t v) { std::fwrite(&v, 2, 1, f); };
+  std::fwrite("RIFF", 1, 4, f);
+  w32(36 + data_bytes);
+  std::fwrite("WAVE", 1, 4, f);
+  std::fwrite("fmt ", 1, 4, f);
+  w32(16);
+  w16(1);  // PCM
+  w16(1);  // mono
+  w32(static_cast<uint32_t>(rate));
+  w32(static_cast<uint32_t>(rate) * 2u);  // byte rate
+  w16(2);   // block align
+  w16(16);  // bits per sample
+  std::fwrite("data", 1, 4, f);
+  w32(data_bytes);
+}
+
+void PatchWavSizes(FILE* f, uint32_t data_bytes) {
+  const uint32_t riff = 36 + data_bytes;
+  std::fseek(f, 4, SEEK_SET);
+  std::fwrite(&riff, 4, 1, f);
+  std::fseek(f, 40, SEEK_SET);
+  std::fwrite(&data_bytes, 4, 1, f);
+}
+
+}  // namespace
+
+bool FlutterCaptureGainProcessor::StartCaptureRecord(const std::string& path) {
+  if (rec_active_.load(std::memory_order_acquire)) return false;
+  if (rec_thread_.joinable()) rec_thread_.join();  // reap a finished drain
+  FILE* f = OpenWriteBinary(path);
+  if (!f) {
+    std::fprintf(stderr, "[hollow_rec] cannot open '%s'\n", path.c_str());
+    return false;
+  }
+  rec_file_ = f;
+  rec_data_bytes_ = 0;
+  rec_shape_logged_ = false;
+  rec_rate_.store(0, std::memory_order_relaxed);
+  rec_ring_.assign(48000 * 2, 0.0f);  // 2 s at 48 kHz mono
+  rec_w_.store(0, std::memory_order_relaxed);
+  rec_r_.store(0, std::memory_order_relaxed);
+  rec_active_.store(true, std::memory_order_release);
+  rec_thread_ =
+      std::thread(&FlutterCaptureGainProcessor::RecordDrainLoop, this);
+  return true;
+}
+
+void FlutterCaptureGainProcessor::StopCaptureRecord() {
+  rec_active_.store(false, std::memory_order_release);
+  if (rec_thread_.joinable()) rec_thread_.join();
+}
+
+void FlutterCaptureGainProcessor::RecordTap(int num_bands, int buffer_size,
+                                            const float* buffer) {
+  if (!rec_active_.load(std::memory_order_acquire)) return;
+  if (buffer_size <= 0) return;
+  // Same shape rule as MeasureCaptureLevel: a fullband mono frame is the
+  // whole buffer; otherwise record the first band/channel segment. The APM
+  // contract is 10 ms frames, so the segment's own rate is seg_len * 100 —
+  // do NOT trust sample_rate_ for the WAV rate: the session shape varies
+  // per config, and a strict fullband-only gate produced EMPTY recordings
+  // whenever Initialize's rate and the live frame shape disagreed
+  // (field-debugged 2026-08-05 — tolerate and label, never re-tighten).
+  const bool fullband_mono = buffer_size == sample_rate_ / 100;
+  const int seg_len = fullband_mono
+                          ? buffer_size
+                          : (num_bands > 1 ? buffer_size / num_bands
+                                           : buffer_size);
+  if (seg_len <= 0) return;
+  const int frame_rate = seg_len * 100;
+
+  // Latch the WAV rate on the first frame; if the shape changes mid-take,
+  // skip rather than mix rates into one file (log once).
+  int expected = 0;
+  if (!rec_rate_.compare_exchange_strong(expected, frame_rate,
+                                         std::memory_order_relaxed)) {
+    if (expected != frame_rate) {
+      if (!rec_shape_logged_) {
+        rec_shape_logged_ = true;
+        std::fprintf(stderr,
+                     "[hollow_rec] frame rate changed mid-take (%d -> %d) — "
+                     "skipping new shape\n",
+                     expected, frame_rate);
+      }
+      return;
+    }
+  }
+
+  const size_t cap = rec_ring_.size();
+  if (cap == 0) return;
+  size_t w = rec_w_.load(std::memory_order_relaxed);
+  const size_t r = rec_r_.load(std::memory_order_acquire);
+  for (int i = 0; i < seg_len; ++i) {
+    if (w - r >= cap) break;  // ring full — drop; drain thread is stalled
+    rec_ring_[w % cap] = buffer[i];
+    ++w;
+  }
+  rec_w_.store(w, std::memory_order_release);
+}
+
+void FlutterCaptureGainProcessor::RecordDrainLoop() {
+  bool header_written = false;
+  std::vector<int16_t> tmp;
+  auto drain = [&]() {
+    const size_t cap = rec_ring_.size();
+    if (cap == 0 || rec_file_ == nullptr) return;
+    size_t r = rec_r_.load(std::memory_order_relaxed);
+    const size_t w = rec_w_.load(std::memory_order_acquire);
+    if (w == r) return;
+    if (!header_written) {
+      int rate = rec_rate_.load(std::memory_order_relaxed);
+      if (rate <= 0) rate = 48000;
+      WriteWavHeader(rec_file_, rate, 0);
+      header_written = true;
+    }
+    tmp.clear();
+    while (r != w) {
+      // Samples are float in int16 scale (see kFullScale) — clamp + cast.
+      float v = rec_ring_[r % cap];
+      if (v > 32767.0f) v = 32767.0f;
+      if (v < -32768.0f) v = -32768.0f;
+      tmp.push_back(static_cast<int16_t>(v));
+      ++r;
+    }
+    rec_r_.store(r, std::memory_order_release);
+    std::fwrite(tmp.data(), sizeof(int16_t), tmp.size(), rec_file_);
+    rec_data_bytes_ += static_cast<uint32_t>(tmp.size() * sizeof(int16_t));
+  };
+
+  while (rec_active_.load(std::memory_order_acquire)) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    drain();
+  }
+  drain();  // final flush after Stop flipped the flag
+
+  if (rec_file_ != nullptr) {
+    if (!header_written) {
+      // No frames ever arrived — leave a valid empty WAV.
+      WriteWavHeader(rec_file_, 48000, 0);
+    }
+    PatchWavSizes(rec_file_, rec_data_bytes_);
+    std::fclose(rec_file_);
+    rec_file_ = nullptr;
+    std::fprintf(stderr, "[hollow_rec] wrote %u bytes of capture audio\n",
+                 rec_data_bytes_);
+  }
+}
+
+// ─── Offline mic-test renderer (issue #40 final design) ─────────────────────
+// Raw WAV in → the SAME chain live calls run → processed WAV out. A fresh
+// processor instance guarantees no interference with (or from) a live call's
+// process-global chain state, and running offline sidesteps every
+// session-shape trap the loopback-PC test kept hitting (16 kHz APM paths,
+// AEC reference effects — see the 2026-08-05 ledger in memory).
+
+namespace {
+
+FILE* OpenReadBinary(const std::string& path) {
+#ifdef _WIN32
+  int len = MultiByteToWideChar(CP_UTF8, 0, path.c_str(), -1, nullptr, 0);
+  if (len <= 0) return nullptr;
+  std::wstring w(static_cast<size_t>(len), L'\0');
+  MultiByteToWideChar(CP_UTF8, 0, path.c_str(), -1, &w[0], len);
+  FILE* f = nullptr;
+  if (_wfopen_s(&f, w.c_str(), L"rb") != 0) return nullptr;
+  return f;
+#else
+  return std::fopen(path.c_str(), "rb");
+#endif
+}
+
+}  // namespace
+
+bool RenderVoiceWavOffline(const std::string& in_path,
+                           const std::string& out_path, float gain,
+                           bool enhance, float makeup_db, bool dynamic_mode,
+                           void* dfn_handle, int dfn_engine,
+                           std::string* error) {
+  auto fail = [&](const char* msg) {
+    if (error) *error = msg;
+    return false;
+  };
+
+  // Read the whole input — a 10 s 48 kHz mono take is <1 MB.
+  std::vector<uint8_t> bytes;
+  {
+    FILE* in = OpenReadBinary(in_path);
+    if (!in) return fail("cannot open input wav");
+    std::fseek(in, 0, SEEK_END);
+    const long sz = std::ftell(in);
+    std::fseek(in, 0, SEEK_SET);
+    if (sz < 44) {
+      std::fclose(in);
+      return fail("input wav too small");
+    }
+    bytes.resize(static_cast<size_t>(sz));
+    const size_t got = std::fread(bytes.data(), 1, bytes.size(), in);
+    std::fclose(in);
+    if (got != bytes.size()) return fail("input wav read failed");
+  }
+
+  auto rd16 = [&](size_t off) -> uint32_t {
+    return static_cast<uint32_t>(bytes[off]) |
+           (static_cast<uint32_t>(bytes[off + 1]) << 8);
+  };
+  auto rd32 = [&](size_t off) -> uint32_t {
+    return rd16(off) | (rd16(off + 2) << 16);
+  };
+  if (std::memcmp(bytes.data(), "RIFF", 4) != 0 ||
+      std::memcmp(bytes.data() + 8, "WAVE", 4) != 0) {
+    return fail("not a RIFF/WAVE file");
+  }
+  // Chunk scan: tolerate extra chunks even though our own writer is
+  // canonical 44-byte.
+  int rate = 0;
+  bool fmt_ok = false;
+  size_t data_off = 0, data_len = 0;
+  for (size_t off = 12; off + 8 <= bytes.size();) {
+    const uint32_t chunk_len = rd32(off + 4);
+    const size_t body = off + 8;
+    if (std::memcmp(bytes.data() + off, "fmt ", 4) == 0 &&
+        body + 16 <= bytes.size()) {
+      const uint32_t audio_format = rd16(body);
+      const uint32_t channels = rd16(body + 2);
+      rate = static_cast<int>(rd32(body + 4));
+      const uint32_t bits = rd16(body + 14);
+      fmt_ok = audio_format == 1 && channels == 1 && bits == 16;
+    } else if (std::memcmp(bytes.data() + off, "data", 4) == 0) {
+      data_off = body;
+      data_len = std::min<size_t>(chunk_len, bytes.size() - body);
+    }
+    off = body + chunk_len + (chunk_len & 1);
+  }
+  if (!fmt_ok) return fail("input must be mono 16-bit PCM");
+  if (rate < 8000 || rate > 192000) return fail("unsupported sample rate");
+  if (data_off == 0 || data_len < 2) return fail("no audio data");
+
+  const int frame = rate / 100;  // the chain's 10 ms frame contract
+  if (frame <= 0) return fail("rate too low for 10 ms frames");
+  const int16_t* pcm = reinterpret_cast<const int16_t*>(bytes.data() + data_off);
+  const size_t n = data_len / 2;
+
+  auto* proc = new FlutterCaptureGainProcessor();
+  proc->SetGain(gain);
+  proc->SetEnhance(enhance);
+  proc->SetEnhanceMakeup(makeup_db);
+  proc->SetEnhanceDynamic(dynamic_mode);
+  if (dfn_handle != nullptr) {
+    proc->SetNoiseSuppressAi(true);
+    proc->PublishDfnHandle(dfn_handle, dfn_engine);
+  }
+  proc->Initialize(rate, 1);
+
+  std::vector<float> buf(static_cast<size_t>(frame));
+  std::vector<int16_t> out_pcm;
+  out_pcm.reserve(n);
+  for (size_t pos = 0; pos + static_cast<size_t>(frame) <= n;
+       pos += static_cast<size_t>(frame)) {
+    for (int i = 0; i < frame; ++i) {
+      buf[static_cast<size_t>(i)] = static_cast<float>(pcm[pos + i]);
+    }
+    proc->Process(1, frame, frame, buf.data());
+    for (int i = 0; i < frame; ++i) {
+      float v = buf[static_cast<size_t>(i)];
+      if (v > 32767.0f) v = 32767.0f;
+      if (v < -32768.0f) v = -32768.0f;
+      out_pcm.push_back(static_cast<int16_t>(v));
+    }
+  }
+  delete proc;
+
+  FILE* out = OpenWriteBinary(out_path);
+  if (!out) return fail("cannot open output wav");
+  const uint32_t out_bytes =
+      static_cast<uint32_t>(out_pcm.size() * sizeof(int16_t));
+  WriteWavHeader(out, rate, out_bytes);
+  std::fwrite(out_pcm.data(), sizeof(int16_t), out_pcm.size(), out);
+  std::fclose(out);
+  std::fprintf(stderr, "[hollow_rec] offline render: %u bytes at %d Hz\n",
+               out_bytes, rate);
+  return true;
 }
 
 // Capture level meter decay: how fast the peak-hold falls once you stop

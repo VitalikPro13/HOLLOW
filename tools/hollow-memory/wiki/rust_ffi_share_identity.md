@@ -104,7 +104,7 @@ Restores a keypair from a 24-word mnemonic. Parses the phrase via `Mnemonic::par
 
 ### `unlock_identity(password: Option<String>) -> Result<IdentityInfo, String>`
 
-Must be called before any identity/DB operation. Reads `identity.key`, detects format. For plaintext: auto-wraps with DPAPI/Keychain if available. For encrypted: if `flags=0x01` (password), requires password param and derives wrapping key via Argon2id. If `flags=0x02` (OS keychain), retrieves key from DPAPI/Keychain silently. Stores wrapping key in session static.
+Must be called before any identity/DB operation. Reads `identity.key`, detects format. For plaintext: auto-wraps with DPAPI/Keychain if available. For encrypted: if `flags=0x01` (password), requires password param and derives wrapping key via Argon2id. If `flags=0x02` or `0x03` (OS keychain), keychain unlock goes through `keychain_key_that_decrypts()` (2026-08-05, issue #47→#27 fix): it fetches ALL stored candidates via `platform_keystore::retrieve_key_candidates()` (per-profile slot → legacy machine-global slot → Windows DPAPI blob), tries each against `decrypt_identity` on the actual file, and re-stores the verified winner to every slot (self-heal). NEVER trust a single slot unverified — with multiple profiles the legacy slot routinely holds the OTHER profile's key, and the old unverified path funneled users into mnemonic recovery → device-key rotation → MLS identity/groups discarded → SFrame garbage audio. Stores wrapping key in session static.
 
 ### `lock_identity() -> Result<(), String>`
 
@@ -138,7 +138,7 @@ Whether the session wrapping key is set.
 - **Mnemonic flow:** BIP-39 24-word (256-bit entropy) -> SHA-512 HMAC seed -> first 32 bytes -> Ed25519 secret key.
 - **Peer ID derivation:** Public key -> protobuf encoding -> identity multihash -> base58 string.
 - **Encryption:** `encryption.rs` — HKEYV1 format, Argon2id KDF (64MB/3iter), AES-256-GCM, session key static.
-- **Platform keystore:** `platform_keystore.rs` — Windows DPAPI (`windows-sys`), macOS Keychain (`security-framework`), Linux fallback (not available).
+- **Platform keystore:** `platform_keystore.rs` — Windows Credential Manager + DPAPI blob (`windows-sys`), macOS Keychain (`security-framework`), Linux fallback (not available). Slots are PER-PROFILE since 2026-08-05: suffix = first 8 bytes of SHA-256 over the data-dir path (`com.hollow.identity.wrapping_key.<hex16>` / mac account `wrapping_key.<hex16>`), with the legacy unsuffixed slot still written and read as a fallback. `store_key` writes per-profile + legacy + (Windows) the `identity.dpapi` blob; `retrieve_key_candidates()` returns all, most-authoritative first. Tests snapshot/restore the REAL slots via `SlotGuard` (they used to nuke a keychain-protected dev profile's key on every `cargo test`).
 
 ## Twitch API (`api/twitch.rs`)
 
@@ -248,7 +248,7 @@ Extracts the update and generates a platform-specific helper script that perform
 
 **Windows:**
 1. Creates staging dir `~/.hollow/updates/staging-{version}`.
-2. Extracts the ZIP with the Rust `zip` crate, stripping a common top-level prefix (e.g. `Release/`) via `detect_common_prefix()`.
+2. Extracts the ZIP via `extract_zip_to()` (Rust `zip` crate), stripping a common top-level prefix (e.g. `Release/`) via `detect_common_prefix()`. **Entry names are normalized `\`→`/` before every check** (issue #52, 2026-08-05): PowerShell's Compress-Archive wrote backslash-separated names and trailing-`\` empty-dir entries, which the old `ends_with('/')`-only directory detection treated as files → `File::create` os error 267/123 on every updater ≤0.9.4 once the Release tree gained an empty dir. Path-traversal (`..`) entries are rejected. Unit-tested with a Compress-Archive-style fixture + a hand-crafted hostile zip (`extract_zip_tests`). Release zips themselves are now built with forward-slash .NET zipping (`build_release.ps1`) — see memory `feedback_compress_archive_backslash_zip`.
 3. Generates `update.bat`: polls `tasklist` until `hollow.exe` exits, `xcopy /E /Y /Q` staging → `app_dir`, removes staging + ZIP, 5-1 countdown, relaunches `hollow.exe`.
 
 **macOS** (`write_macos_update_script()`):
@@ -264,7 +264,7 @@ Internal helper (Windows path only). Iterates all ZIP entries and checks if they
 
 ### `spawn_relaunch_waiter() -> Result<(), String>`
 
-App SELF-RESTART (no update involved): spawns a detached, windowless waiter that idles until THIS process exits, then starts the exe again. Zero args — Rust's own pid/`current_exe()` are the app's. Called by Dart's `relaunchApp()` (`lib/src/core/app_relaunch.dart`), the single restart path for the profile switcher (#47), device-link restart, relay Apply & Restart, and the revocation self-nuke. **The spawn MUST live in Rust:** a child spawned directly from Dart dies against the Windows runner's pre-Flutter `SendAppLinkToInstance()` while the old window is alive, and Dart's detached mode can't run the waiter itself (kills powershell instantly — no console, no `CREATE_NO_WINDOW`; a detached cmd batch wedges its `tasklist|find` pipeline). Windows: powershell with `creation_flags(CREATE_NO_WINDOW)`, `Get-Process -Id <pid>` poll loop, then `Start-Process`. Unix: `/bin/sh` `kill -0` loop; macOS relaunches the `.app` via `open`, Linux `exec`s the binary. Guarded by cargo test `relaunch_waiter_tests` (Windows-only). See memory `project_profile_switcher_issue47`.
+App SELF-RESTART (no update involved): spawns a detached, windowless waiter that idles until THIS process exits, then starts the exe again — **forwarding the ORIGINAL argv** (2026-08-05: a relaunch that dropped `--portable` came back on a DIFFERENT data root than the running profile, alternating identities between the waiter relaunch and the next manual launch). Called by Dart's `relaunchApp()` (`lib/src/core/app_relaunch.dart`), the single restart path for the profile switcher (#47), device-link restart, relay Apply & Restart, and the revocation self-nuke. **The spawn MUST live in Rust:** a child spawned directly from Dart dies against the Windows runner's pre-Flutter `SendAppLinkToInstance()` while the old window is alive, and Dart's detached mode can't run the waiter itself (kills powershell instantly — no console, no `CREATE_NO_WINDOW`; a detached cmd batch wedges its `tasklist|find` pipeline). Windows: powershell with `creation_flags(CREATE_NO_WINDOW)`, `Get-Process -Id <pid>` poll loop, then `Start-Process`. Unix: `/bin/sh` `kill -0` loop; macOS relaunches the `.app` via `open`, Linux `exec`s the binary. Guarded by cargo test `relaunch_waiter_tests` (Windows-only). See memory `project_profile_switcher_issue47`.
 
 ## Archive API (`api/archive.rs`)
 

@@ -8248,6 +8248,7 @@ async fn handle_incoming_request(
                 | Ok(MessageEnvelope::VoiceChannelAudioState { .. })
                 | Ok(MessageEnvelope::VoiceChannelScreenState { .. })
                 | Ok(MessageEnvelope::VoiceChannelCameraState { .. })
+                | Ok(MessageEnvelope::VoiceChannelRecordingState { .. })
                 | Ok(MessageEnvelope::BroadcastMeta { .. }) => {
                     hollow_log!("[HOLLOW-MLS] Received MLS-only envelope via Olm from {peer_str} — ignoring");
                 }
@@ -10357,6 +10358,7 @@ async fn handle_incoming_request(
                             | MessageEnvelope::VoiceChannelRenegOffer { .. }
                             | MessageEnvelope::VoiceChannelRenegAnswer { .. }
                             | MessageEnvelope::VoiceChannelCameraState { .. }
+                            | MessageEnvelope::VoiceChannelRecordingState { .. }
                             if !voice_handler::vc_rate_check(vc_signal_rate_tokens, peer_str) => {
                                 // Rate limited — drop silently (already logged).
                             }
@@ -10458,6 +10460,12 @@ async fn handle_incoming_request(
                                 voice_handler::handle_envelope_voice_channel_camera_state(
                                     voice_channel_participants, event_tx,
                                     peer_str.to_string(), sid, cid, enabled,
+                                ).await;
+                            }
+                            MessageEnvelope::VoiceChannelRecordingState { sid, cid, recording, .. } => {
+                                voice_handler::handle_envelope_voice_channel_recording_state(
+                                    voice_channel_participants, event_tx,
+                                    peer_str.to_string(), sid, cid, recording,
                                 ).await;
                             }
 
@@ -12750,6 +12758,18 @@ async fn handle_incoming_request(
                 payload,
             }).await;
         }
+        HavenMessage::CallRecordingState { call_id, recording } => {
+            hollow_log!("[HOLLOW-CALL] CallRecordingState from {peer_str} call={call_id} recording={recording}");
+            let payload = serde_json::json!({
+                "call_id": call_id,
+                "recording": recording,
+            }).to_string();
+            let _ = event_tx.send(NetworkEvent::CallSignal {
+                peer_id: peer_str.to_string(),
+                signal_type: if recording { "recording_start" } else { "recording_stop" }.to_string(),
+                payload,
+            }).await;
+        }
 
         // -- Gossip relay tree (Phase 5D) --
         HavenMessage::PeerExchange { server_id, peers } => {
@@ -12939,6 +12959,21 @@ async fn handle_incoming_request(
                 let _ = event_tx.send(NetworkEvent::VoiceChannelSignal {
                     server_id, channel_id, peer_id: peer_str.to_string(),
                     signal_type: "camera_state".to_string(), payload,
+                }).await;
+            }
+        }
+
+        HavenMessage::VoiceChannelRecordingState { server_id, channel_id, recording } => {
+            let vc_key = format!("{server_id}:{channel_id}");
+            let is_participant = voice_channel_participants.get(&vc_key).map(|p| p.contains(peer_str)).unwrap_or(false);
+            if !is_participant {
+                hollow_log!("[HOLLOW-SECURITY] BLOCKED plaintext VC recording state from non-participant {peer_str} in {channel_id}");
+            } else {
+                let payload = serde_json::json!({"recording": recording}).to_string();
+                let _ = event_tx.send(NetworkEvent::VoiceChannelSignal {
+                    server_id, channel_id, peer_id: peer_str.to_string(),
+                    signal_type: if recording { "recording_start" } else { "recording_stop" }.to_string(),
+                    payload,
                 }).await;
             }
         }

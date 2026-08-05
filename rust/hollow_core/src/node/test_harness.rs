@@ -2364,6 +2364,24 @@ async fn call_signal_routes_to_friend_device_and_drops_unknown() {
 
     drain_events(&mut b);
 
+    // Recording indicator (issue #53): recording_start must round-trip, with
+    // the Dart-facing signal-type string reconstructed from the recording flag.
+    a.cmd_tx
+        .send(NodeCommand::CallSendSignal {
+            peer_id: m_master.clone(),
+            signal_type: "recording_start".to_string(),
+            payload: serde_json::json!({"recording": true, "timestamp": 1}).to_string(),
+        })
+        .await
+        .unwrap();
+    let saw_rec = wait_event(&mut b, std::time::Duration::from_secs(4), |ev| {
+        matches!(ev, NetworkEvent::CallSignal { signal_type, .. } if signal_type == "recording_start")
+    })
+    .await;
+    assert!(saw_rec, "callee must receive the routed recording_start call signal");
+
+    drain_events(&mut b);
+
     // An UNKNOWN signal type must be silently dropped (whitelist) — never delivered.
     a.cmd_tx
         .send(NodeCommand::CallSendSignal {
@@ -2987,6 +3005,25 @@ async fn voice_channel_join_leave_and_signal_routing() {
     })
     .await;
     assert!(o_saw_signal, "owner must receive the routed audio_state VC signal");
+
+    // --- A broadcast recording indicator (issue #53) routes the same way ---
+    drain_events(&mut o);
+    j.cmd_tx
+        .send(NodeCommand::VoiceChannelSendSignal {
+            server_id: server_id.clone(),
+            channel_id: voice_cid.clone(),
+            // Broadcast-class: peer_id is ignored by the Rust send path.
+            peer_id: String::new(),
+            signal_type: "recording_start".to_string(),
+            payload: serde_json::json!({"recording": true, "timestamp": 1}).to_string(),
+        })
+        .await
+        .unwrap();
+    let o_saw_rec = wait_event(&mut o, std::time::Duration::from_secs(4), |ev| {
+        matches!(ev, NetworkEvent::VoiceChannelSignal { signal_type, .. } if signal_type == "recording_start")
+    })
+    .await;
+    assert!(o_saw_rec, "owner must receive the routed recording_start VC signal");
 
     // Unknown VC signal type is silently dropped (whitelist).
     drain_events(&mut o);

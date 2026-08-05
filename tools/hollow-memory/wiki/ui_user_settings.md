@@ -282,7 +282,7 @@ Below the pills: explanatory text "Images and GIFs are converted to WebP to save
 - `_audioInputs` — `List<win32audio.AudioDevice>` (microphones via win32audio)
 - `_audioOutputs` — `List<win32audio.AudioDevice>` (speakers via win32audio)
 - `_cameras` — `List<webrtc.MediaDeviceInfo>` (cameras via flutter_webrtc)
-- `_loading` (bool), `_micTestStream` (webrtc.MediaStream?), `_micTestSend`/`_micTestRecv` (RTCPeerConnection? loopback pair), `_micLevelTimer` (Timer?), `_micTestTeardown` (Future? — restart gate), `_micTesting` (bool), `_micLevel` (double 0.0-1.0), `_ringtonePreview` (AudioPlayer?)
+- `_loading` (bool), `_micTesting`/`_micRendering`/`_micTestReviewing` (mic-test phase bools), `_micRecorder` (rec.AudioRecorder?), `_micPulse` (LinuxPulseCapture?), `_micChunkSub`/`_micPcmBuf` (raw PCM collection), `_micTestRawPath`/`_micTestRecPath` (raw/processed WAVs), `_micProcessedOk`, `_micTestPlayer`/`_micPlayingPath` (A/B playback), `_micTestCapTimer` (10 s cap), `_micTestPeakDb` (log-only), `_ringtonePreview` (AudioPlayer?)
 
 ### Device Enumeration (`_loadDevices()`) — per-platform audio backend
 1. **Windows** audio inputs/outputs via `win32audio.Audio.enumDevices(AudioDeviceType.input/output)`.
@@ -313,12 +313,12 @@ All use `_buildDeviceRow()` — a Row with icon (14px), label (80px fixed width)
 
 **Audio Quality** — `LucideIcons.sliders`. Items from `AudioQualityPreset.values`, each showing label + bitrate + mono/stereo info. Stored via `audioQualityProvider.notifier.setPreset()`.
 
-### Mic Test — WebRTC loopback echo test (rebuilt 2026-07-31, issue #40)
-Button row: mic/micOff icon + ghost button "Test Microphone" / "Stop Test". When testing, an expanding volume meter bar appears (same `Stack` + `FractionallySizedBox` meter: >0.5 = green, >0.02 = accent, else dim) plus a caption "You are hearing your own microphone through the selected output…".
+### Mic Test — record RAW → offline-render → A/B review (FINAL design 2026-08-05, issue #40)
+Phases: idle → recording (`_micTesting`, 10 s cap, "Stop & Review" button + "Recording…" label — deliberately NO level meter and NO "nearly silent" toast; the chunk-RMS levels didn't track reliably in the field, peakDb is `[MIC-TEST]`-log-only) → rendering ("Applying voice processing…") → review (Play Processed / Play Raw / Re-record / Done).
 
-`_startMicTest()` — NO `record` package (its Linux backend needs `parecord`, absent on PipeWire). Flow: refuse while a call/VC is live (`callProvider.status != idle` or `voiceChannelProvider.currentChannelId != null` → info toast — the mic and process-global capture chain would be contended); apply `Helper.setNoiseSuppressAi` from settings; `getUserMedia` with CALL-IDENTICAL constraints (AEC on, WebRTC-NS = !aiNs, AGC off, `sourceId` optional for the selected input); apply `setCaptureGain`/`setVoiceEnhance`; then wire the track through a LOCAL loopback PeerConnection pair (`{'iceServers': []}`, trickle candidates queued until each side has its remote description). The loopback is load-bearing twice: libwebrtc only starts the ADM once a PC carries the track (bare getUserMedia leaves `getCaptureLevel()` at -100), and the receiving PC plays the mic back through `Helper.selectAudioOutput` — audible post-processing self-monitor. Level bar polls `Helper.getCaptureLevel()` every 100ms (dBFS -60..0 → 0..1).
+`_startMicTest()` — **no WebRTC session anywhere** (the 2026-07-31 loopback-PC design was replaced after a six-round field saga: the APM ran session-dependent shapes — 16 kHz paths, AEC-reference effects — that never matched real calls; full ledger in memory `project_mic_test_record_review`). Refuses while a call/VC is live (second mic handle). Captures raw PCM16 48 kHz mono via the `record` package's `startStream` (stored input id as `rec.InputDevice`; on failure retries the system default, logged), `LinuxPulseCapture` on Linux (never `record` there — parecord). Chunks buffer in RAM; Dart writes the raw WAV (`_wavFromPcm16`).
 
-`_stopMicTest()`: stores the teardown future in `_micTestTeardown` (a restart awaits it — no mic contention on rapid stop/start); teardown stops tracks, then close+dispose BOTH PCs (each in its own try — a close throw must not skip dispose), then disposes the stream. Works on Linux/PipeWire.
+`_finishMicRecording()` — stops capture, writes `mic_test_<ms>_raw.wav` under `$hollowDataDir/temp`, then calls `Helper.renderVoiceWav` (`hollowRenderVoiceWav` → `RenderVoiceWavOffline` in `flutter_capture_gain_processor.cc`): a FRESH `FlutterCaptureGainProcessor` instance configured from the user's live settings (gain/enhance/strength/dynamic + AI-NS via a cached per-process offline DFN handle) processes the file in 10 ms frames — bit-exact call DSP, no interference with a live call's process-global chain. Renderer is common/cpp (Win+Linux); **macOS mirror pending** (clean error toast + raw playback until then). Empty take (< ~100 ms of bytes) → device-NAMED "No audio arrived from …" toast. Both WAVs deleted on Done/re-record/dispose.
 
 ### Refresh Devices
 `LucideIcons.refreshCw` icon + "Refresh Devices" ghost button. Sets loading and re-runs `_loadDevices()`.

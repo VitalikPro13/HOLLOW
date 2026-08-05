@@ -3,6 +3,7 @@
 #include "flutter_data_channel.h"
 #include "hollow_dfn_binding.h"
 
+#include <mutex>
 #include <thread>
 
 #include "flutter_webrtc/flutter_web_r_t_c_plugin.h"
@@ -688,6 +689,85 @@ void FlutterWebRTC::HandleMethodCall(
       }
     }
     result->Success();
+  } else if (method_call.method_name().compare("startCaptureRecord") == 0) {
+    // Hollow fork (issue #40): record the PROCESSED capture signal (post
+    // AI-NS + enhance chain — exactly what a remote peer receives pre-Opus)
+    // to a WAV file for the settings mic test.
+    auto args = method_call.arguments();
+    if (!args) {
+      result->Error("Bad Arguments",
+                    "startCaptureRecord() Null arguments received");
+      return;
+    }
+    const EncodableMap params = GetValue<EncodableMap>(*args);
+    std::string rec_path = findString(params, "path");
+    if (rec_path.empty()) {
+      result->Error("Bad Arguments", "startCaptureRecord() No path provided");
+      return;
+    }
+    bool started = false;
+    if (capture_gain_processor()) {
+      started = capture_gain_processor()->StartCaptureRecord(rec_path);
+    }
+    result->Success(EncodableValue(started));
+  } else if (method_call.method_name().compare("stopCaptureRecord") == 0) {
+    if (capture_gain_processor()) {
+      capture_gain_processor()->StopCaptureRecord();
+    }
+    result->Success();
+  } else if (method_call.method_name().compare("hollowRenderVoiceWav") == 0) {
+    // Hollow fork (issue #40 mic test, final design): offline-render a RAW
+    // mic WAV through a FRESH instance of the capture chain (same code as
+    // live calls) so the user can A/B raw vs processed with no live WebRTC
+    // session involved.
+    auto args = method_call.arguments();
+    if (!args) {
+      result->Error("Bad Arguments",
+                    "hollowRenderVoiceWav() Null arguments received");
+      return;
+    }
+    const EncodableMap params = GetValue<EncodableMap>(*args);
+    std::string in_path = findString(params, "inPath");
+    std::string out_path = findString(params, "outPath");
+    if (in_path.empty() || out_path.empty()) {
+      result->Error("Bad Arguments", "hollowRenderVoiceWav() paths missing");
+      return;
+    }
+    const double rv_gain = maybeFindDouble(params, "gain").value_or(1.0);
+    const bool rv_enhance = findBoolean(params, "enhance");
+    const double rv_makeup = maybeFindDouble(params, "makeupDb").value_or(12.0);
+    const bool rv_dynamic = findBoolean(params, "dynamic");
+    const bool rv_ai_ns = findBoolean(params, "aiNs");
+    int rv_engine = findInt(params, "engine");
+    if (rv_engine < 0) rv_engine = hollow_dfn::kEngineRnnoise;
+    auto shared = std::shared_ptr<MethodResultProxy>(result.release());
+    std::thread([in_path, out_path, rv_gain, rv_enhance, rv_makeup,
+                 rv_dynamic, rv_ai_ns, rv_engine, shared]() {
+      // ONE cached offline engine per process — the DFN ABI has no destroy,
+      // so per-render creation would leak a model each run. Renders are
+      // UI-serialized; the mutex is hygiene for that assumption.
+      static std::mutex offline_mtx;
+      static void* offline_dfn = nullptr;
+      static int offline_engine = -1;
+      std::lock_guard<std::mutex> lock(offline_mtx);
+      void* handle = nullptr;
+      if (rv_ai_ns && hollow_dfn::Bind()) {
+        if (offline_dfn == nullptr || offline_engine != rv_engine) {
+          offline_dfn = hollow_dfn::CreateEngine(rv_engine);
+          offline_engine = rv_engine;
+        }
+        handle = offline_dfn;
+      }
+      std::string err;
+      const bool ok = RenderVoiceWavOffline(
+          in_path, out_path, static_cast<float>(rv_gain), rv_enhance,
+          static_cast<float>(rv_makeup), rv_dynamic, handle, rv_engine, &err);
+      if (ok) {
+        shared->Success(EncodableValue(true));
+      } else {
+        shared->Error("RENDER_FAILED", err);
+      }
+    }).detach();
   } else if (method_call.method_name().compare("setCaptureMuted") == 0) {
     // Hollow fork: mic mute state for the capture processor — freezes the
     // dynamic servo so it can't adapt to non-call audio while muted.
@@ -1603,9 +1683,13 @@ void FlutterWebRTC::HandleMethodCall(
       result->Error("BAD_PATH", "Output path missing");
       return;
     }
+    // MMDevice endpoint ids of the devices Hollow is configured to use
+    // (empty = system default) — see WinScreenRecorder::Start.
+    std::string render_dev = findString(params, "renderDeviceId");
+    std::string capture_dev = findString(params, "captureDeviceId");
     auto shared = std::shared_ptr<MethodResultProxy>(result.release());
     WinScreenRecorder::GetInstance().Start(
-        path, [shared](const std::string& err) {
+        path, render_dev, capture_dev, [shared](const std::string& err) {
           if (err.empty()) {
             EncodableMap m;
             m[EncodableValue("capturedSystemAudio")] = EncodableValue(

@@ -90,12 +90,12 @@ In `WindowTitleBar`. Visible on macOS and Windows only. Hover reveals "Annotate"
 
 File: `packages/flutter_webrtc/windows/win_screen_recorder.h/.cc`
 
-Singleton. Three concurrent capture sources feeding one Media Foundation Sink Writer:
+Singleton. Rewritten 2026-08-05 (issue #53): video plus **ONE mixed audio track** feeding a Media Foundation Sink Writer:
 
 - **Video:** Windows.Graphics.Capture → D3D11 staging texture → BGRA copy → MF sample → H.264 stream
-- **System audio:** WASAPI loopback (default render endpoint) → PCM16 → AAC stream
-- **Mic audio:** WASAPI capture (default capture endpoint) → PCM16 → AAC stream
+- **Audio (single 48 kHz stereo AAC track):** WASAPI loopback + WASAPI mic capture each push s16/48k/stereo into a ring (`AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | SRC_DEFAULT_QUALITY` — the OS converts every device format; the old native-format capture fed 44.1k/mono PCM into fixed-format streams → pitched/dead tracks); a timeline mixer thread (60 ms jitter lag) sums with saturation and writes sample-count timestamps. **NEVER two AAC tracks** — mainstream players render only the FIRST audio track, so the old mic-as-track-2 design made recordings miss the recorder's own voice. Zero-fill for absent sources (WASAPI loopback delivers NO packets during silence — waiting on both sources would stall the track).
+- **Device selection:** `Start(path, render_device_id, capture_device_id)` — Dart passes Hollow's configured win32audio endpoint ids (`audioOutputDeviceProvider`/`audioInputDeviceProvider`; win32audio ids ARE `IMMDevice::GetId()` strings) so the recorder loopbacks the device remote voices actually play on; falls back to the eConsole defaults (the old always-default behavior recorded silence when the user routed calls to a non-default headset). `WriteSample` failures log once (previously discarded — audio-less files finalized "successfully").
 
-Shared D3D11 device (BGRA support + video support + multithread). QPC-based timestamps. Writer starts lazily on first video frame. Frame rate limited to 30fps via QPC interval check. Graceful degradation: if loopback fails → video+mic only, if mic fails → video+system only.
+Shared D3D11 device (BGRA support + video support + multithread). QPC-based timestamps. Writer starts lazily on first video frame; the mixer drops buffered audio until then. Frame rate limited to 30fps via QPC interval check. macOS (`MacScreenRecorder.m`) still has the OLD two-track design — fix pending (HOLLOW_PLAN checkbox ~2069). See memory `project_issue53_call_recorder`.
 
 CMake links: `mfplat`, `mfreadwrite`, `mfuuid`, `mf`, `d3d11`, `dxgi`, `windowsapp` (WinRT), `Mmdevapi`, `Avrt`. C++20 + `/await` for C++/WinRT.

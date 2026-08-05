@@ -164,7 +164,7 @@ pub(crate) fn handle_call_send_signal(
     let reachable = ws_room_peers.values().any(|ps| ps.contains(&target));
     let control = matches!(
         signal_type.as_str(),
-        "invite" | "accept" | "reject" | "end" | "busy"
+        "invite" | "accept" | "reject" | "end" | "busy" | "recording_start" | "recording_stop"
     );
     if control || !reachable {
         hollow_log!(
@@ -272,6 +272,10 @@ fn build_call_json_signal(signal_type: &str, payload: &str) -> Option<HavenMessa
         "screen_watch" => parsed.map(|v| HavenMessage::CallScreenWatch {
             call_id: jstr(&v, "call_id"),
             want: v["want"].as_bool().unwrap_or(false),
+        }),
+        "recording_start" | "recording_stop" => parsed.map(|v| HavenMessage::CallRecordingState {
+            call_id: jstr(&v, "call_id"),
+            recording: v["recording"].as_bool().unwrap_or(signal_type == "recording_start"),
         }),
         _ => {
             hollow_log!("[HOLLOW-CALL] Unknown call signal type: {signal_type}");
@@ -771,7 +775,10 @@ pub(crate) async fn handle_voice_channel_send_signal(
     };
     // Broadcast state signals (audio/screen/camera state) → MLS broadcast + plaintext fallback.
     // Targeted SDP/ICE signals → MLS targeted + Olm fallback (IPs are sensitive).
-    let is_broadcast = matches!(signal_type.as_str(), "audio_state" | "screen_state" | "camera_state");
+    let is_broadcast = matches!(
+        signal_type.as_str(),
+        "audio_state" | "screen_state" | "camera_state" | "recording_start" | "recording_stop"
+    );
     if is_broadcast {
         broadcast_vc_state_signal(
             &signal_type, &payload, &envelope,
@@ -854,6 +861,11 @@ fn build_vc_signal_envelope(
             enabled: v["enabled"].as_bool().unwrap_or(false),
             target: None,
         }),
+        "recording_start" | "recording_stop" => parsed.map(|v| MessageEnvelope::VoiceChannelRecordingState {
+            sid, cid,
+            recording: v["recording"].as_bool().unwrap_or(signal_type == "recording_start"),
+            target: None,
+        }),
         _ => {
             hollow_log!("[HOLLOW-VC] Unknown signal type: {signal_type}");
             None
@@ -913,6 +925,10 @@ fn build_vc_plaintext_state(
         "camera_state" => parsed.map(|v| HavenMessage::VoiceChannelCameraState {
             server_id: server_id.to_string(), channel_id: channel_id.to_string(),
             enabled: v["enabled"].as_bool().unwrap_or(false),
+        }),
+        "recording_start" | "recording_stop" => parsed.map(|v| HavenMessage::VoiceChannelRecordingState {
+            server_id: server_id.to_string(), channel_id: channel_id.to_string(),
+            recording: v["recording"].as_bool().unwrap_or(signal_type == "recording_start"),
         }),
         _ => None,
     }
@@ -1390,5 +1406,27 @@ pub(crate) async fn handle_envelope_voice_channel_camera_state(
     let _ = event_tx.send(NetworkEvent::VoiceChannelSignal {
         server_id: sid, channel_id: cid, peer_id: sender_peer_id,
         signal_type: "camera_state".to_string(), payload,
+    }).await;
+}
+
+pub(crate) async fn handle_envelope_voice_channel_recording_state(
+    voice_channel_participants: &HashMap<String, std::collections::HashSet<String>>,
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    sender_peer_id: String,
+    sid: String,
+    cid: String,
+    recording: bool,
+) {
+    let vc_key = format!("{sid}:{cid}");
+    if !is_vc_participant(voice_channel_participants, &vc_key, &sender_peer_id) {
+        hollow_log!("[HOLLOW-SECURITY] BLOCKED VC recording state from non-participant {sender_peer_id} in {cid}");
+        return;
+    }
+    hollow_log!("[HOLLOW-VC] Recording state from {sender_peer_id}: recording={recording}");
+    let payload = serde_json::json!({"recording": recording}).to_string();
+    let _ = event_tx.send(NetworkEvent::VoiceChannelSignal {
+        server_id: sid, channel_id: cid, peer_id: sender_peer_id,
+        signal_type: if recording { "recording_start" } else { "recording_stop" }.to_string(),
+        payload,
     }).await;
 }

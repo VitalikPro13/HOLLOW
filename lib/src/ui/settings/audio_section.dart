@@ -1,5 +1,7 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:math' as math;
+import 'dart:typed_data';
 
 import 'package:audioplayers/audioplayers.dart';
 import 'package:file_picker/file_picker.dart';
@@ -7,9 +9,12 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart' as webrtc;
+import 'package:hollow/src/core/hollow_data_dir.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/core/providers/voice_channel_provider.dart';
+import 'package:hollow/src/core/services/linux_pulse_capture.dart';
+import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
@@ -21,6 +26,7 @@ import 'package:hollow/src/ui/dialogs/ringtone_clip_editor_dialog.dart';
 import 'package:hollow/src/ui/settings/keybind_capture_field.dart';
 import 'package:hollow/src/ui/settings/settings_shared.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:record/record.dart' as rec;
 import 'package:win32audio/win32audio.dart' as win32audio;
 
 /// Audio & Video category of the desktop Settings dialog: device selection,
@@ -278,15 +284,39 @@ class _AudioDeviceSettingsState extends ConsumerState<_AudioDeviceSettings> {
   List<_AudioDeviceInfo> _audioOutputs = [];
   List<webrtc.MediaDeviceInfo> _cameras = [];
   bool _loading = true;
-  webrtc.MediaStream? _micTestStream;
-  webrtc.RTCPeerConnection? _micTestSend;
-  webrtc.RTCPeerConnection? _micTestRecv;
-  Timer? _micLevelTimer;
-  bool _micLevelPollBusy = false;
-  Future<void>? _micTestTeardown;
   bool _micTesting = false;
-  double _micLevel = 0.0;
   AudioPlayer? _ringtonePreview;
+  // Mic test (issue #40, final design): record the RAW microphone (no
+  // WebRTC session at all — `record` package / LinuxPulseCapture at 48 kHz
+  // mono), then offline-render it through a FRESH instance of the real
+  // capture chain (hollowRenderVoiceWav — same C++ as live calls: AI-NS +
+  // EQ + gate/upward + compressor + de-esser + limiter, dynamic servo
+  // included), then A/B raw vs processed. Phases: idle → recording
+  // (_micTesting) → rendering (_micRendering) → review (_micTestReviewing).
+  rec.AudioRecorder? _micRecorder;
+  LinuxPulseCapture? _micPulse;
+  StreamSubscription<Uint8List>? _micChunkSub;
+  BytesBuilder? _micPcmBuf;
+  static const int _micRecRate = 48000;
+  String? _micTestRawPath; // raw take (WAV)
+  String? _micTestRecPath; // processed render (WAV)
+  bool _micRendering = false;
+  bool _micTestReviewing = false;
+  bool _micProcessedOk = false;
+  AudioPlayer? _micTestPlayer;
+  String? _micPlayingPath; // which take is playing (raw/processed), if any
+  Timer? _micTestCapTimer;
+  // Highest capture level seen while recording (dBFS; -100 = never) — the
+  // one number that discriminates "mic delivered nothing" from a recorder
+  // bug (the 2026-08-05 debugging lesson).
+  double _micTestPeakDb = -100.0;
+
+  /// Mic-test diagnostics MUST reach hollow_debug.log (debugPrint is
+  /// invisible in installed/release builds — the hotkey lesson).
+  void _micLog(String msg) {
+    debugPrint('[MIC-TEST] $msg');
+    network_api.logFromDart(message: '[MIC-TEST] $msg').catchError((_) {});
+  }
 
   @override
   void initState() {
@@ -296,9 +326,23 @@ class _AudioDeviceSettingsState extends ConsumerState<_AudioDeviceSettings> {
 
   @override
   void dispose() {
-    _stopMicTest();
+    _stopMicCapture();
+    _stopMicTestPlayback();
+    _deleteMicTestFiles();
     _stopRingtonePreview();
     super.dispose();
+  }
+
+  void _deleteMicTestFiles() {
+    for (final path in [_micTestRawPath, _micTestRecPath]) {
+      if (path != null) {
+        try {
+          File(path).deleteSync();
+        } catch (_) {}
+      }
+    }
+    _micTestRawPath = null;
+    _micTestRecPath = null;
   }
 
   Future<void> _startRingtonePreview(double volume) async {
@@ -491,21 +535,20 @@ class _AudioDeviceSettingsState extends ConsumerState<_AudioDeviceSettings> {
     }
   }
 
-  /// Loopback echo test through the real call pipeline (issue #40). The
-  /// `record` package the old test used shells out to `parecord` on Linux,
-  /// which PipeWire systems don't ship — and it bypassed the processing
-  /// chain entirely. Instead, capture via getUserMedia with the exact call
-  /// constraints and feed the track through a local PeerConnection pair:
-  /// libwebrtc only starts the audio device module (and thus the capture
-  /// meter) once a PC carries the track, and the receiving end plays you
-  /// back through the selected output — denoiser, enhance chain and gain
-  /// included, so what you hear is what peers hear.
+  /// Record-raw / render-offline / A-B review mic test (issue #40, final
+  /// design). The raw microphone is captured at 48 kHz mono with NO WebRTC
+  /// involved (`record` package; LinuxPulseCapture on Linux), then the take
+  /// is rendered through a FRESH instance of the real native capture chain
+  /// (`hollowRenderVoiceWav` — same C++ as live calls: AI-NS, EQ, gate +
+  /// upward compression, compressor, de-esser, limiter, dynamic servo),
+  /// and the user can play raw vs processed side by side.
   Future<void> _startMicTest() async {
-    // Wait out a previous teardown so a rapid restart can't contend for the
-    // mic, and refuse a double-start.
-    final teardown = _micTestTeardown;
-    if (teardown != null) await teardown;
-    if (_micTestStream != null || !mounted) return;
+    if (_micTesting || _micRendering || !mounted) return;
+
+    // Re-record: drop any previous take before claiming the mic again.
+    await _stopMicTestPlayback();
+    _discardMicTestRecording();
+    if (!mounted) return;
 
     // The test claims the mic and the process-global capture chain — refuse
     // while a call or voice channel is live rather than fight it for both.
@@ -520,7 +563,175 @@ class _AudioDeviceSettingsState extends ConsumerState<_AudioDeviceSettings> {
     }
 
     final selectedInput = ref.read(audioInputDeviceProvider).valueOrNull;
-    final selectedOutput = ref.read(audioOutputDeviceProvider).valueOrNull;
+    final aiNs = ref.read(noiseSuppressAiProvider).valueOrNull ?? false;
+    final enhance = ref.read(voiceEnhanceProvider).valueOrNull ?? true;
+    final dynMode = ref.read(voiceEnhanceDynamicProvider).valueOrNull ?? true;
+
+    try {
+      // RAW capture — deliberately NO WebRTC session (final design after
+      // the 2026-08-05 six-round field saga): the loopback-PC approach ran
+      // the APM at session-dependent shapes that never matched real calls.
+      // The raw mic is recorded at 48 kHz mono and the take is then
+      // offline-rendered through a fresh instance of the SAME native chain
+      // calls use (hollowRenderVoiceWav).
+      final buf = BytesBuilder(copy: false);
+      _micPcmBuf = buf;
+      _micTestPeakDb = -100.0;
+
+      Stream<Uint8List> chunks;
+      if (Platform.isLinux) {
+        // Linux NEVER via `record` (needs parecord, absent on PipeWire).
+        final pulse = await LinuxPulseCapture.start(
+          device: (selectedInput != null && selectedInput.isNotEmpty)
+              ? selectedInput
+              : null,
+          sampleRate: _micRecRate,
+          channels: 1,
+        );
+        _micPulse = pulse;
+        chunks = pulse.chunks;
+      } else {
+        final recorder = rec.AudioRecorder();
+        _micRecorder = recorder;
+        try {
+          chunks = await recorder.startStream(rec.RecordConfig(
+            encoder: rec.AudioEncoder.pcm16bits,
+            numChannels: 1,
+            sampleRate: _micRecRate,
+            device: (selectedInput != null && selectedInput.isNotEmpty)
+                ? rec.InputDevice(id: selectedInput, label: '')
+                : null,
+          ));
+        } catch (e) {
+          // The stored id may come from a different enumerator than
+          // `record`'s — fall back to the system default, visibly logged.
+          _micLog('startStream with device failed ($e) — retrying default');
+          chunks = await recorder.startStream(const rec.RecordConfig(
+            encoder: rec.AudioEncoder.pcm16bits,
+            numChannels: 1,
+            sampleRate: _micRecRate,
+          ));
+        }
+      }
+
+      _micChunkSub = chunks.listen((chunk) {
+        buf.add(chunk);
+        // Peak kept for the [MIC-TEST] log line only — the on-screen level
+        // meter was removed (it didn't track the record-package chunks
+        // reliably in the field; the A/B playback is the real feedback).
+        final level = _levelFromPcm16(chunk);
+        if (level.db > _micTestPeakDb) _micTestPeakDb = level.db;
+      });
+
+      _micLog('start: input=${selectedInput ?? "default"} aiNs=$aiNs '
+          'enhance=$enhance dyn=$dynMode rawRate=$_micRecRate');
+
+      if (!mounted) {
+        await _stopMicCapture();
+        return;
+      }
+      setState(() => _micTesting = true);
+
+      // The dynamic servo needs a few seconds of speech to settle; cap the
+      // take at 10 s so an abandoned test can't record forever.
+      _micTestCapTimer = Timer(const Duration(seconds: 10), () {
+        _finishMicRecording();
+      });
+    } catch (e) {
+      await _stopMicCapture();
+      if (!mounted) return;
+      HollowToast.show(context, 'Microphone error: $e',
+          type: HollowToastType.error);
+    }
+  }
+
+  /// RMS of a PCM16LE chunk → (dBFS, 0..1 bar) with the same -60..0 mapping
+  /// the old meter used.
+  static ({double db, double bar}) _levelFromPcm16(Uint8List chunk) {
+    final samples =
+        Int16List.view(chunk.buffer, chunk.offsetInBytes, chunk.length >> 1);
+    if (samples.isEmpty) return (db: -100.0, bar: 0.0);
+    double sumSq = 0;
+    for (final s in samples) {
+      sumSq += s.toDouble() * s.toDouble();
+    }
+    final rms = math.sqrt(sumSq / samples.length);
+    final db =
+        rms <= 1 ? -100.0 : 20.0 * math.log(rms / 32768.0) / math.ln10;
+    const minDb = -60.0;
+    final clamped = db.clamp(minDb, 0.0);
+    return (db: db, bar: (clamped - minDb) / (0.0 - minDb));
+  }
+
+  /// Canonical 44-byte-header mono 16-bit WAV wrapper around raw PCM16LE.
+  static Uint8List _wavFromPcm16(Uint8List pcm, int rate) {
+    final header = ByteData(44);
+    void ascii(int off, String s) {
+      for (var i = 0; i < s.length; i++) {
+        header.setUint8(off + i, s.codeUnitAt(i));
+      }
+    }
+
+    ascii(0, 'RIFF');
+    header.setUint32(4, 36 + pcm.length, Endian.little);
+    ascii(8, 'WAVE');
+    ascii(12, 'fmt ');
+    header.setUint32(16, 16, Endian.little);
+    header.setUint16(20, 1, Endian.little); // PCM
+    header.setUint16(22, 1, Endian.little); // mono
+    header.setUint32(24, rate, Endian.little);
+    header.setUint32(28, rate * 2, Endian.little);
+    header.setUint16(32, 2, Endian.little);
+    header.setUint16(34, 16, Endian.little);
+    ascii(36, 'data');
+    header.setUint32(40, pcm.length, Endian.little);
+    return (BytesBuilder(copy: false)
+          ..add(header.buffer.asUint8List())
+          ..add(pcm))
+        .takeBytes();
+  }
+
+  /// Recording → rendering → review: stop capture, write the raw WAV, run
+  /// it through the native chain, surface both takes for A/B playback.
+  Future<void> _finishMicRecording() async {
+    if (!_micTesting) return;
+    await _stopMicCapture();
+    if (!mounted) return;
+
+    final pcm = _micPcmBuf?.takeBytes() ?? Uint8List(0);
+    _micPcmBuf = null;
+    _micLog('finish: rawBytes=${pcm.length} '
+        'peakDb=${_micTestPeakDb.toStringAsFixed(1)}');
+
+    // Name the device we actually recorded from — a stale Settings pick is
+    // the failure users can't see otherwise (2026-08-05 field round).
+    final inputId = ref.read(audioInputDeviceProvider).valueOrNull;
+    final matches = _audioInputs.where((d) => d.id == inputId).toList();
+    final deviceLabel = matches.isEmpty
+        ? 'the selected microphone'
+        : '"${matches.first.name}"';
+    if (pcm.length < _micRecRate ~/ 5) {
+      // Under ~100 ms of audio: the capture never really ran.
+      HollowToast.show(
+          context,
+          'No audio arrived from $deviceLabel — check the Input device '
+          'selected above.',
+          type: HollowToastType.error);
+      return;
+    }
+
+    final tempDir = Directory('$hollowDataDir${Platform.pathSeparator}temp');
+    if (!tempDir.existsSync()) tempDir.createSync(recursive: true);
+    final stamp = DateTime.now().millisecondsSinceEpoch;
+    final rawPath = '${tempDir.path}${Platform.pathSeparator}'
+        'mic_test_${stamp}_raw.wav';
+    final outPath =
+        '${tempDir.path}${Platform.pathSeparator}mic_test_$stamp.wav';
+    File(rawPath).writeAsBytesSync(_wavFromPcm16(pcm, _micRecRate));
+    _micTestRawPath = rawPath;
+    _micTestRecPath = outPath;
+
+    // Offline-render through the real chain with the CURRENT knobs.
     final aiNs = ref.read(noiseSuppressAiProvider).valueOrNull ?? false;
     final engine = noiseSuppressEngineToNative(
         ref.read(noiseSuppressEngineProvider).valueOrNull ??
@@ -530,160 +741,106 @@ class _AudioDeviceSettingsState extends ConsumerState<_AudioDeviceSettings> {
     final dynMode = ref.read(voiceEnhanceDynamicProvider).valueOrNull ?? true;
     final strength = ref.read(voiceEnhanceStrengthProvider).valueOrNull ??
         kEnhanceStrengthDefault;
-
+    setState(() => _micRendering = true);
+    var ok = false;
     try {
-      // AI NS first — like the call path, its state decides the WebRTC-NS
-      // constraint before the capture opens.
-      await webrtc.Helper.setNoiseSuppressAi(aiNs, engine: engine)
-          .catchError((_) {});
-
-      final audioConstraints = <String, dynamic>{
-        'echoCancellation': true,
-        'noiseSuppression': !aiNs,
-        'googNoiseSuppression': !aiNs,
-        'autoGainControl': false,
-        'googAutoGainControl': false,
-      };
-      if (selectedInput != null) {
-        audioConstraints['optional'] = [
-          {'sourceId': selectedInput}
-        ];
-      }
-      final stream = await webrtc.navigator.mediaDevices
-          .getUserMedia({'audio': audioConstraints, 'video': false});
-      _micTestStream = stream;
-
-      try {
-        await webrtc.Helper.setCaptureGain(micGain);
-        await webrtc.Helper.setVoiceEnhance(enhance,
-            makeupDb: enhanceStrengthToMakeupDb(strength),
-            dynamicMode: dynMode);
-      } catch (e) {
-        debugPrint('[HOLLOW] mic test: capture chain setup failed: $e');
-      }
-
-      final send = await webrtc.createPeerConnection({'iceServers': []});
-      final recv = await webrtc.createPeerConnection({'iceServers': []});
-      _micTestSend = send;
-      _micTestRecv = recv;
-
-      // Trickle ICE between the two local ends; candidates can fire before
-      // the counterpart has its remote description, so queue until then.
-      var recvHasRemote = false;
-      var sendHasRemote = false;
-      final queuedForRecv = <webrtc.RTCIceCandidate>[];
-      final queuedForSend = <webrtc.RTCIceCandidate>[];
-      send.onIceCandidate = (c) {
-        if (c.candidate == null) return;
-        if (recvHasRemote) {
-          recv.addCandidate(c).catchError((_) {});
-        } else {
-          queuedForRecv.add(c);
-        }
-      };
-      recv.onIceCandidate = (c) {
-        if (c.candidate == null) return;
-        if (sendHasRemote) {
-          send.addCandidate(c).catchError((_) {});
-        } else {
-          queuedForSend.add(c);
-        }
-      };
-
-      for (final track in stream.getAudioTracks()) {
-        await send.addTrack(track, stream);
-      }
-      final offer = await send.createOffer({});
-      await send.setLocalDescription(offer);
-      await recv.setRemoteDescription(offer);
-      recvHasRemote = true;
-      for (final c in queuedForRecv) {
-        await recv.addCandidate(c).catchError((_) {});
-      }
-      final answer = await recv.createAnswer({});
-      await recv.setLocalDescription(answer);
-      await send.setRemoteDescription(answer);
-      sendHasRemote = true;
-      for (final c in queuedForSend) {
-        await send.addCandidate(c).catchError((_) {});
-      }
-
-      // Route the playback to the chosen speaker (same swallow-on-mismatch
-      // as the picker — Linux pulse ids may not match the ADM's).
-      if (selectedOutput != null) {
-        await webrtc.Helper.selectAudioOutput(selectedOutput).catchError((e) {
-          debugPrint('[HOLLOW] selectAudioOutput failed: $e');
-        });
-      }
-
-      if (!mounted) {
-        await _stopMicTest();
-        return;
-      }
-      setState(() => _micTesting = true);
-
-      _micLevelTimer =
-          Timer.periodic(const Duration(milliseconds: 100), (_) async {
-        if (_micLevelPollBusy) return;
-        _micLevelPollBusy = true;
-        try {
-          final res = await webrtc.Helper.getCaptureLevel();
-          if (!mounted || !_micTesting) return;
-          // Normalize dBFS (-60..0) to 0.0..1.0 for the level bar.
-          final levelDb = (res['levelDb'] as num?)?.toDouble() ?? -100.0;
-          const minDb = -60.0;
-          final clamped = levelDb.clamp(minDb, 0.0);
-          setState(() => _micLevel = (clamped - minDb) / (0.0 - minDb));
-        } catch (_) {
-          // Keep the last level; the meter self-heals on the next tick.
-        } finally {
-          _micLevelPollBusy = false;
-        }
-      });
+      ok = await webrtc.Helper.renderVoiceWav(
+        inPath: rawPath,
+        outPath: outPath,
+        gain: micGain,
+        enhance: enhance,
+        makeupDb: enhanceStrengthToMakeupDb(strength),
+        dynamicMode: dynMode,
+        aiNs: aiNs,
+        engine: engine,
+      );
     } catch (e) {
-      await _stopMicTest();
-      if (!mounted) return;
-      HollowToast.show(context, 'Microphone error: $e',
+      _micLog('render failed: $e');
+    }
+    _micProcessedOk =
+        ok && File(outPath).existsSync() && File(outPath).lengthSync() > 44;
+    _micLog('render: ok=$_micProcessedOk aiNs=$aiNs enhance=$enhance '
+        'dyn=$dynMode');
+    if (!mounted) return;
+    setState(() {
+      _micRendering = false;
+      _micTestReviewing = true;
+    });
+    if (!_micProcessedOk) {
+      HollowToast.show(
+          context,
+          'Voice processing failed — only the raw recording is available.',
           type: HollowToastType.error);
     }
   }
 
-  Future<void> _stopMicTest() {
-    final future = _teardownMicTest();
-    _micTestTeardown = future;
-    return future;
+  Future<void> _playMicTest(String path) async {
+    await _stopMicTestPlayback();
+    final player = AudioPlayer();
+    _micTestPlayer = player;
+    player.onPlayerComplete.listen((_) {
+      if (mounted) setState(() => _micPlayingPath = null);
+    });
+    await player.play(DeviceFileSource(path));
+    if (mounted) setState(() => _micPlayingPath = path);
   }
 
-  Future<void> _teardownMicTest() async {
-    _micLevelTimer?.cancel();
-    _micLevelTimer = null;
-    _micLevel = 0.0;
-    if (mounted) setState(() => _micTesting = false);
+  Future<void> _stopMicTestPlayback() async {
+    final player = _micTestPlayer;
+    _micTestPlayer = null;
+    if (player != null) {
+      try {
+        await player.stop();
+      } catch (_) {}
+      try {
+        await player.dispose();
+      } catch (_) {}
+    }
+    if (mounted && _micPlayingPath != null) {
+      setState(() => _micPlayingPath = null);
+    } else {
+      _micPlayingPath = null;
+    }
+  }
 
-    final stream = _micTestStream;
-    final send = _micTestSend;
-    final recv = _micTestRecv;
-    _micTestStream = null;
-    _micTestSend = null;
-    _micTestRecv = null;
-    if (stream != null) {
-      for (final track in stream.getTracks()) {
-        try {
-          await track.stop();
-        } catch (_) {}
-      }
+  void _discardMicTestRecording() {
+    _deleteMicTestFiles();
+    _micProcessedOk = false;
+    if (mounted && _micTestReviewing) {
+      setState(() => _micTestReviewing = false);
+    } else {
+      _micTestReviewing = false;
     }
-    for (final pc in [send, recv]) {
+  }
+
+  /// Stop the raw capture and release the device (any platform backend).
+  Future<void> _stopMicCapture() async {
+    _micTestCapTimer?.cancel();
+    _micTestCapTimer = null;
+    await _micChunkSub?.cancel();
+    _micChunkSub = null;
+    final recorder = _micRecorder;
+    _micRecorder = null;
+    if (recorder != null) {
       try {
-        await pc?.close();
+        await recorder.stop();
       } catch (_) {}
       try {
-        await pc?.dispose();
+        await recorder.dispose();
       } catch (_) {}
     }
-    try {
-      await stream?.dispose();
-    } catch (_) {}
+    final pulse = _micPulse;
+    _micPulse = null;
+    if (pulse != null) {
+      try {
+        await pulse.stop();
+      } catch (_) {}
+    }
+    if (mounted) {
+      setState(() => _micTesting = false);
+    } else {
+      _micTesting = false;
+    }
   }
 
   @override
@@ -753,12 +910,15 @@ class _AudioDeviceSettingsState extends ConsumerState<_AudioDeviceSettings> {
 
         // Mic test button + volume meter
         _buildMicTestRow(hollow),
-        if (_micTesting)
+        if (_micTesting || _micTestReviewing)
           Padding(
             padding: const EdgeInsets.only(left: 22, top: 4),
             child: Text(
-              'You are hearing your own microphone through the selected '
-              'output — exactly what others hear in a call.',
+              _micTesting
+                  ? 'Recording through your full voice processing — speak a '
+                      'sentence, then press Stop (auto-stops at 10s).'
+                  : 'Play it back to hear exactly what others hear in a call '
+                      '— noise suppression, enhancement and gain included.',
               style: HollowTypography.caption.copyWith(
                 color: hollow.textTertiary,
                 fontSize: 10,
@@ -1155,6 +1315,62 @@ class _AudioDeviceSettingsState extends ConsumerState<_AudioDeviceSettings> {
   }
 
   Widget _buildMicTestRow(HollowTheme hollow) {
+    // Rendering phase: the take is being run through the offline chain.
+    if (_micRendering) {
+      return Row(
+        children: [
+          Icon(LucideIcons.loaderCircle, size: 14, color: hollow.textSecondary),
+          const SizedBox(width: HollowSpacing.sm),
+          Text(
+            'Applying voice processing…',
+            style: HollowTypography.bodySmall.copyWith(
+              color: hollow.textSecondary,
+            ),
+          ),
+        ],
+      );
+    }
+    // Review phase: A/B the processed take against the raw one.
+    if (_micTestReviewing) {
+      Widget playButton(String label, String? path) {
+        final active = path != null && _micPlayingPath == path;
+        return HollowButton.ghost(
+          onPressed: path == null
+              ? null
+              : active
+                  ? _stopMicTestPlayback
+                  : () => _playMicTest(path),
+          compact: true,
+          child: Text(active ? 'Stop' : label),
+        );
+      }
+
+      return Row(
+        children: [
+          Icon(LucideIcons.play, size: 14, color: hollow.textSecondary),
+          const SizedBox(width: HollowSpacing.sm),
+          playButton(
+              'Play Processed', _micProcessedOk ? _micTestRecPath : null),
+          const SizedBox(width: HollowSpacing.sm),
+          playButton('Play Raw', _micTestRawPath),
+          const SizedBox(width: HollowSpacing.sm),
+          HollowButton.ghost(
+            onPressed: _startMicTest,
+            compact: true,
+            child: const Text('Re-record'),
+          ),
+          const SizedBox(width: HollowSpacing.sm),
+          HollowButton.ghost(
+            onPressed: () async {
+              await _stopMicTestPlayback();
+              _discardMicTestRecording();
+            },
+            compact: true,
+            child: const Text('Done'),
+          ),
+        ],
+      );
+    }
     return Row(
       children: [
         Icon(
@@ -1164,49 +1380,24 @@ class _AudioDeviceSettingsState extends ConsumerState<_AudioDeviceSettings> {
         ),
         const SizedBox(width: HollowSpacing.sm),
         HollowButton.ghost(
-          onPressed: _micTesting ? _stopMicTest : _startMicTest,
+          onPressed: _micTesting ? _finishMicRecording : _startMicTest,
           compact: true,
-          child: Text(_micTesting ? 'Stop Test' : 'Test Microphone'),
+          child: Text(_micTesting ? 'Stop & Review' : 'Test Microphone'),
         ),
         if (_micTesting) ...[
           const SizedBox(width: HollowSpacing.md),
-          // Volume meter bar
-          Expanded(
-            child: SizedBox(
-              height: 8,
-              child: ClipRRect(
-                borderRadius: BorderRadius.circular(4),
-                child: Stack(
-                  children: [
-                    // Background
-                    Container(
-                      color: hollow.border,
-                    ),
-                    // Level fill
-                    FractionallySizedBox(
-                      widthFactor: _micLevel.clamp(0.0, 1.0),
-                      child: AnimatedContainer(
-                        duration: const Duration(milliseconds: 80),
-                        decoration: BoxDecoration(
-                          color: _micLevelColor(hollow),
-                          borderRadius: BorderRadius.circular(4),
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
+          // No level meter here — it didn't track the record-package
+          // chunks reliably in the field; the A/B playback afterwards is
+          // the real feedback.
+          Text(
+            'Recording…',
+            style: HollowTypography.bodySmall.copyWith(
+              color: hollow.textSecondary,
             ),
           ),
         ],
       ],
     );
-  }
-
-  Color _micLevelColor(HollowTheme hollow) {
-    if (_micLevel > 0.5) return hollow.success;
-    if (_micLevel > 0.02) return hollow.accent;
-    return hollow.textSecondary.withValues(alpha: 0.3);
   }
 
   Future<void> _pickRingtoneFile() async {

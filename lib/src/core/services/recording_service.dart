@@ -79,7 +79,12 @@ class RecordingService {
 
   /// Begin recording. Throws [StateError] if already recording, or
   /// [RecordingException] on backend failure (native or ffmpeg).
-  Future<void> start() async {
+  ///
+  /// [renderDeviceId] / [captureDeviceId] (Windows only): MMDevice endpoint
+  /// ids of the output/input devices Hollow is configured to use, so the
+  /// recorder loopbacks the device remote voices actually play on and
+  /// captures the mic actually in use — not the eConsole defaults (#53).
+  Future<void> start({String? renderDeviceId, String? captureDeviceId}) async {
     if (isRecording) {
       throw StateError('Already recording');
     }
@@ -99,7 +104,15 @@ class RecordingService {
             await PerfSentinel.timedChannelCall<Map<Object?, Object?>>(
           _channel,
           method,
-          {'path': outFile},
+          {
+            'path': outFile,
+            if (Platform.isWindows && renderDeviceId != null &&
+                renderDeviceId.isNotEmpty)
+              'renderDeviceId': renderDeviceId,
+            if (Platform.isWindows && captureDeviceId != null &&
+                captureDeviceId.isNotEmpty)
+              'captureDeviceId': captureDeviceId,
+          },
         );
         _capturedSystemAudio = res?['capturedSystemAudio'] == true;
       } on PlatformException catch (e) {

@@ -19,6 +19,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 
 namespace flutter_webrtc_plugin {
 
@@ -33,7 +34,16 @@ class WinScreenRecorder {
 
   using Completion = std::function<void(const std::string& error)>;
 
-  void Start(const std::string& output_path, Completion completion);
+  // `render_device_id` / `capture_device_id` are MMDevice endpoint ids (the
+  // ones Hollow's settings hold via win32audio) — empty = system default.
+  // Recording MUST loopback the endpoint Hollow actually plays remote voices
+  // to and capture the mic Hollow actually uses; the eConsole defaults were
+  // why "headset selected in Hollow + speakers as Windows default" produced
+  // a silent recording (issue #53).
+  void Start(const std::string& output_path,
+             const std::string& render_device_id,
+             const std::string& capture_device_id,
+             Completion completion);
   void Stop(Completion completion);
 
   bool IsRecording() const { return recording_.load(); }
@@ -48,13 +58,12 @@ class WinScreenRecorder {
   bool InitGraphicsCapture(HMONITOR monitor, UINT32 w, UINT32 h);
   void StartAudioCapture();
   void AudioThread(bool loopback);
+  void MixThread();
   void OnFrameArrived(
       winrt::Windows::Graphics::Capture::Direct3D11CaptureFramePool const& pool,
       winrt::Windows::Foundation::IInspectable const&);
   void WriteVideoFrame(ID3D11Texture2D* tex, INT64 qpc);
-  void WriteAudioPcm(const int16_t* data, UINT32 frames,
-                     UINT32 sample_rate, UINT32 channels,
-                     INT64 qpc, DWORD stream_idx);
+  void WriteMixedPcm(const int16_t* data, UINT32 frames);
   void Cleanup();
 
   std::atomic<bool> recording_{false};
@@ -69,13 +78,11 @@ class WinScreenRecorder {
   // Media Foundation
   ComPtr<IMFSinkWriter> writer_;
   DWORD video_idx_ = 0;
-  DWORD sys_audio_idx_ = 0;
-  DWORD mic_audio_idx_ = 0;
+  DWORD audio_idx_ = 0;  // ONE mixed loopback+mic track (see InitSinkWriter)
   bool writer_started_ = false;
   INT64 base_qpc_ = 0;
   LARGE_INTEGER qpc_freq_ = {};
-  bool has_sys_audio_ = false;
-  bool has_mic_audio_ = false;
+  bool has_audio_ = false;
   INT64 last_frame_qpc_ = 0;
 
   // Graphics Capture
@@ -87,9 +94,22 @@ class WinScreenRecorder {
   // Audio threads
   std::thread loopback_thread_;
   std::thread mic_thread_;
+  std::thread mix_thread_;
   std::atomic<bool> audio_running_{false};
   HANDLE loopback_event_ = nullptr;
   HANDLE mic_event_ = nullptr;
+
+  // Mixer state: capture threads append s16 interleaved 48k stereo into the
+  // rings (ring_mtx_); the mixer thread drains both on its own clock, sums
+  // with saturation, and writes the single audio track.
+  std::mutex ring_mtx_;
+  std::vector<int16_t> sys_ring_;
+  std::vector<int16_t> mic_ring_;
+  INT64 mix_frames_written_ = 0;
+  INT64 mix_base_ts_ = 0;
+  bool audio_write_err_logged_ = false;
+  std::string render_device_id_;
+  std::string capture_device_id_;
 
   UINT32 cap_w_ = 0;
   UINT32 cap_h_ = 0;
