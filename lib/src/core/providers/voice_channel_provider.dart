@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
@@ -321,6 +322,24 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
 
   /// Viewer-side "offer never came" timeouts, keyed by sharer peer id.
   final Map<String, Timer> _watchConnectTimers = {};
+
+  /// Media forwarding step 2: our share session's stream id — rides
+  /// `origin.stream` on every outgoing screen offer/ICE. Minted per
+  /// startScreenShare, cleared on stop, so a restarted share is
+  /// distinguishable from a stale session.
+  String? _shareSessionId;
+
+  /// Media forwarding step 2: the id we self-attribute shares under —
+  /// our ROUTABLE device peer id (the id VC signal receivers key us by).
+  String? _shareOriginPeer;
+
+  /// Media forwarding step 2: per-ORIGINATOR record of who DELIVERED their
+  /// stream plus its wire metadata. On every direct leg (all of step 2)
+  /// `deliverer == originator`; step-3 forwarder legs set deliverer = the
+  /// forwarder's peer id. Used to echo `origin` on answers/ICE and to tear
+  /// down delivered streams when their deliverer disconnects.
+  final Map<String, ({String deliverer, String kind, String stream})>
+      _incomingShareOrigins = {};
 
   /// Cached SFrame keys from MLS epoch changes — applied when the service is
   /// (re)created. Keyed by `_sframeCacheKey(serverId, channelId)`:
@@ -1464,6 +1483,15 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     _screenShareHwnd = windowHwnd;
     _screenShareProfile = profile;
 
+    // Media forwarding step 2: mint this share session's identity — the
+    // stream id rides `origin.stream` on every screen signal (a restart mints
+    // a new one), the origin peer is our routable device id.
+    final rng = Random.secure();
+    _shareSessionId =
+        List.generate(8, (_) => rng.nextInt(16).toRadixString(16)).join();
+    _shareOriginPeer = await network_api.getLocalDevicePeerId() ??
+        (ref.read(identityProvider).peerId ?? '');
+
     // Capture screen ONCE. Source enumeration is desktop-only; mobile
     // captures THE screen (MediaProjection / ReplayKit broadcast).
     if (Platform.isAndroid) {
@@ -1626,6 +1654,9 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       await _stopMobileShareAudio();
       _watchers.clear();
       _watcherDisplays.clear();
+      // This share session is over — a restart mints a fresh origin.
+      _shareSessionId = null;
+      _shareOriginPeer = null;
       final sharePeers = _outgoingScreenShares.keys.toList();
       for (final service in _outgoingScreenShares.values) {
         try { await service.close(); } catch (_) {}
@@ -1714,6 +1745,29 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     state = state.copyWith(isGridView: on);
   }
 
+  /// Media forwarding step 2 — the ORIGINATOR of a screen signal: who the
+  /// stream is FROM, vs [sender] who DELIVERED it. Equal on every direct leg
+  /// (and Rust drops any other combination on this lane); step-3 forwarder
+  /// legs ride the fwd_* namespace with deliverer = the forwarder.
+  String _origOf(String sender, Map<String, dynamic> v) {
+    final origin = v['origin'];
+    if (origin is Map) {
+      final p = origin['peer'];
+      if (p is String && p.isNotEmpty) return p;
+    }
+    return sender;
+  }
+
+  /// Our own share's `origin` sub-object for outgoing screen offers/ICE.
+  /// Null until startScreenShare minted the session (old-wire shape: absent
+  /// origin = sender is the originator, so null is always safe).
+  Map<String, dynamic>? _myShareOrigin() {
+    final stream = _shareSessionId;
+    final peer = _shareOriginPeer;
+    if (stream == null || peer == null || peer.isEmpty) return null;
+    return {'peer': peer, 'kind': 'screen', 'stream': stream};
+  }
+
   /// Send our screen share to a specific peer (creates outgoing ScreenShareService).
   Future<void> _sendScreenShareToPeer(String peerId) async {
     if (_screenCaptureStream == null) return;
@@ -1728,6 +1782,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
 
     service.onIceCandidate = (candidate) {
       if (!state.isInVoiceChannel) return;
+      final origin = _myShareOrigin();
       network_api.voiceChannelSendSignal(
         serverId: state.currentServerId!,
         channelId: state.currentChannelId!,
@@ -1738,6 +1793,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
           'sdpMid': candidate.sdpMid,
           'sdpMLineIndex': candidate.sdpMLineIndex,
           'role': 'outgoing',
+          'origin': ?origin,
         }),
       );
     };
@@ -1786,12 +1842,16 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
 
       if (!state.isInVoiceChannel) return;
 
+      final origin = _myShareOrigin();
       network_api.voiceChannelSendSignal(
         serverId: state.currentServerId!,
         channelId: state.currentChannelId!,
         peerId: peerId,
         signalType: 'screen_offer',
-        payload: jsonEncode({'sdp': sdp}),
+        payload: jsonEncode({
+          'sdp': sdp,
+          'origin': ?origin,
+        }),
       );
 
       // Start screen audio capture via the data channel on the data-channel-audio
@@ -1861,37 +1921,46 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     final sdp = v['sdp'] as String? ?? '';
     if (sdp.isEmpty) return;
 
-    debugPrint('[HOLLOW-VC] Received screen offer from $peerId');
+    // Media forwarding step 2: everything about WHO the stream is from keys
+    // on the ORIGINATOR; [peerId] (the deliverer) keeps transport routing
+    // (answers/ICE go back to whoever delivered the offer). Equal on every
+    // direct leg today. rawOrigin is echoed verbatim on answer/ICE so the
+    // sharer's Rust guard (origin.peer == themselves) accepts it.
+    final originPeer = _origOf(peerId, v);
+    final rawOrigin =
+        v['origin'] is Map ? Map<String, dynamic>.from(v['origin'] as Map) : null;
+
+    debugPrint('[HOLLOW-VC] Received screen offer from $peerId (origin=$originPeer)');
 
     // Opt-in watching (issue #38): an offer we never asked for is dropped.
-    // Offers only flow after our screen_watch{want:true} reached the sharer.
-    if (!state.watchingScreenShares.contains(peerId)) {
-      debugPrint('[HOLLOW-VC] Ignoring unsolicited screen offer from $peerId (not watching)');
+    // Consent refers to the ORIGINATOR's share, whoever delivers it.
+    if (!state.watchingScreenShares.contains(originPeer)) {
+      debugPrint('[HOLLOW-VC] Ignoring unsolicited screen offer for $originPeer (not watching)');
       return;
     }
 
-    if (!_incomingScreenShares.containsKey(peerId) &&
+    if (!_incomingScreenShares.containsKey(originPeer) &&
         _incomingScreenShares.length >= maxScreenShareIncoming) {
-      debugPrint('[HOLLOW-VC] Rejecting screen offer from $peerId — incoming cap ($maxScreenShareIncoming) reached');
+      debugPrint('[HOLLOW-VC] Rejecting screen offer for $originPeer — incoming cap ($maxScreenShareIncoming) reached');
       return;
     }
 
-    // Mark this peer as sharing (screen_offer may arrive before screen_state).
+    // Mark the originator as sharing (screen_offer may arrive before screen_state).
     // No auto-focus: watchScreenShare already focused this share when the
     // user opted in — the offer landing must not steal focus.
     final sharing = Map.of(state.peerScreenSharing);
-    sharing[peerId] = true;
+    sharing[originPeer] = true;
     state = state.copyWith(peerScreenSharing: sharing);
 
     final iceConfig = ref.read(iceConfigProvider);
     final localPeerId = ref.read(identityProvider).peerId ?? '';
 
-    // Close existing incoming service for this peer if any (and drop its
-    // cryptors so the new PC's receivers re-enable cleanly).
-    final priorIncoming = _incomingScreenShares.remove(peerId);
+    // Close existing incoming service for this originator if any (and drop
+    // its cryptors so the new PC's receivers re-enable cleanly).
+    final priorIncoming = _incomingScreenShares.remove(originPeer);
     if (priorIncoming != null) {
       await priorIncoming.close();
-      await _dropShareCryptors(peerId);
+      await _dropShareCryptors(originPeer);
     }
 
     final service = ScreenShareService(
@@ -1914,37 +1983,44 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
           'sdpMid': candidate.sdpMid,
           'sdpMLineIndex': candidate.sdpMLineIndex,
           'role': 'incoming',
+          'origin': ?rawOrigin,
         }),
       );
     };
 
     service.onRemoteTrackReady = () {
-      debugPrint('[HOLLOW-VC] Screen share track ready from $peerId');
+      debugPrint('[HOLLOW-VC] Screen share track ready from $originPeer');
       // The share we asked for is live — stop the "offer never came" timer.
-      _watchConnectTimers.remove(peerId)?.cancel();
+      _watchConnectTimers.remove(originPeer)?.cancel();
       // Force a state rebuild so the UI picks up the renderer.
       // Also auto-focus if no one is focused yet (only fires for watched shares).
       state = state.copyWith(
         focusedScreenSharePeerId:
-            state.focusedScreenSharePeerId ?? peerId,
+            state.focusedScreenSharePeerId ?? originPeer,
       );
     };
 
-    _incomingScreenShares[peerId] = service;
+    _incomingScreenShares[originPeer] = service;
+    _incomingShareOrigins[originPeer] = (
+      deliverer: peerId,
+      kind: (rawOrigin?['kind'] as String?) ?? 'screen',
+      stream: (rawOrigin?['stream'] as String?) ?? '',
+    );
 
     final answerSdp = await service.handleOffer(sdp);
 
-    // Enable SFrame E2EE on the incoming screen share PC.
+    // Enable SFrame E2EE on the incoming screen share PC — keyed on the
+    // ORIGINATOR, whose sender key encrypted the frames.
     if (service.pc != null && _service?.frameCryptor != null) {
       await _enableSframeOnScreenSharePc(
-          service.pc!, _service!.frameCryptor!, peerId, isSender: false);
+          service.pc!, _service!.frameCryptor!, originPeer, isSender: false);
     }
 
     // Flush any ICE candidates that arrived before this service was created.
-    final earlyKey = 'incoming:$peerId';
+    final earlyKey = 'incoming:$originPeer';
     final early = _earlyScreenIce.remove(earlyKey);
     if (early != null && early.isNotEmpty) {
-      debugPrint('[HOLLOW-VC] Flushing ${early.length} early screen ICE for incoming:$peerId');
+      debugPrint('[HOLLOW-VC] Flushing ${early.length} early screen ICE for incoming:$originPeer');
       for (final ice in early) {
         await service.handleIceCandidate(
           ice['candidate'] as String,
@@ -1959,7 +2035,10 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       channelId: channelId,
       peerId: peerId,
       signalType: 'screen_answer',
-      payload: jsonEncode({'sdp': answerSdp}),
+      payload: jsonEncode({
+        'sdp': answerSdp,
+        'origin': ?rawOrigin,
+      }),
     );
   }
 
@@ -1988,13 +2067,16 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     final ScreenShareService? service;
     final String queueKey;
     if (role == 'incoming') {
-      // Their incoming = our outgoing.
+      // Their incoming = our outgoing (sharer side: transport-keyed by the
+      // viewer the leg goes to).
       service = _outgoingScreenShares[peerId];
       queueKey = 'outgoing:$peerId';
     } else {
-      // Their outgoing = our incoming.
-      service = _incomingScreenShares[peerId];
-      queueKey = 'incoming:$peerId';
+      // Their outgoing = our incoming — keyed by the stream's ORIGINATOR
+      // (media forwarding step 2; equals the sender on every direct leg).
+      final originPeer = _origOf(peerId, v);
+      service = _incomingScreenShares[originPeer];
+      queueKey = 'incoming:$originPeer';
     }
     if (service != null) {
       await service.handleIceCandidate(candidate, sdpMid, sdpMLineIndex);
@@ -2231,6 +2313,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     }
 
     final incoming = _incomingScreenShares.remove(peerId);
+    _incomingShareOrigins.remove(peerId);
     if (incoming != null) {
       await incoming.close();
       await _dropShareCryptors(peerId);
@@ -2332,17 +2415,30 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     _watchConnectTimers.remove(peerId)?.cancel();
     _watchers.remove(peerId);
     _watcherDisplays.remove(peerId);
-    // Close incoming screen share from this peer.
-    final incoming = _incomingScreenShares.remove(peerId);
-    if (incoming != null) {
-      await incoming.close();
+    // Incoming shares are ORIGINATOR-keyed (media forwarding step 2): drop
+    // the share this peer originated AND any share this peer was DELIVERING
+    // (step-3 forwarder legs; on direct legs deliverer == originator so the
+    // set collapses to the one key).
+    final originsToDrop = <String>{
+      if (_incomingScreenShares.containsKey(peerId)) peerId,
+      ..._incomingShareOrigins.entries
+          .where((e) => e.value.deliverer == peerId)
+          .map((e) => e.key),
+    };
+    for (final origin in originsToDrop) {
+      final incoming = _incomingScreenShares.remove(origin);
+      _incomingShareOrigins.remove(origin);
+      if (incoming != null) {
+        await incoming.close();
+        await _dropShareCryptors(origin);
+      }
     }
-    // Close outgoing screen share to this peer.
+    // Close outgoing screen share to this peer (viewer-keyed transport leg).
+    // _dropShareCryptors is idempotent, so a double drop when this peer's own
+    // incoming share was also just torn down is a harmless no-op.
     final outgoing = _outgoingScreenShares.remove(peerId);
     if (outgoing != null) {
       await outgoing.close();
-    }
-    if (incoming != null || outgoing != null) {
       await _dropShareCryptors(peerId);
     }
     // Update peerScreenSharing map + watching set.
@@ -2403,6 +2499,9 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       await service.close();
     }
     _incomingScreenShares.clear();
+    _incomingShareOrigins.clear();
+    _shareSessionId = null;
+    _shareOriginPeer = null;
     for (final peerId in allSharePeers) {
       await _dropShareCryptors(peerId);
     }
@@ -2652,6 +2751,23 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       await svc.setSframeKey(cached.epoch, Uint8List.fromList(cached.key));
     }
     await svc.rebindReceiversFor(peerId);
+    // Share-PC cryptors live under 'screen:$peerId' — the voice rebind above
+    // can't reach them (setKeyIndexForPeer prefix-matches '$peerId:'), so
+    // re-run the idempotent share enable on both directions' PCs; it ends
+    // with setKeyIndexForPeer('screen:$peerId', …) which is the actual heal.
+    final fc = svc.frameCryptor;
+    if (fc != null) {
+      final incomingPc = _incomingScreenShares[peerId]?.pc;
+      if (incomingPc != null) {
+        await _enableSframeOnScreenSharePc(incomingPc, fc, peerId,
+            isSender: false);
+      }
+      final outgoingPc = _outgoingScreenShares[peerId]?.pc;
+      if (outgoingPc != null) {
+        await _enableSframeOnScreenSharePc(outgoingPc, fc, peerId,
+            isSender: true);
+      }
+    }
   }
 
   /// Heal steps 2/3: hand over to Rust (re-export + re-emit the current MLS

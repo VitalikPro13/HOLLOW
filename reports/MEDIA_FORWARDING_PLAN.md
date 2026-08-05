@@ -1,8 +1,9 @@
 # Media Forwarding Plan — Resolution Capping, Originator Attribution, SFrame Packet Forwarders
 
-**Design session 2026-08-05 (Vitalik + Claude). Status: step 1 COMPLETE (shipped + field-verified same
-day on a Windows→VM DM call: clamp, Source toggle w/ renegotiation fallback, and live received-resolution
-label all confirmed working); steps 2–3 get their own plan-mode session.**
+**Design session 2026-08-05 (Vitalik + Claude); steps 2–3 planned + started same day — see §7 for
+live status. Step 1 COMPLETE (shipped + field-verified). Step 2 IMPLEMENTED (harness-green). The
+str0m forwarder spike PASSED all 5 acceptance criteria in a live host→VM field test — GO for the
+forwarder build. Approved implementation plan (D1–D6): `~/.claude/plans/pure-doodling-cupcake.md`.**
 Supersedes the old HOLLOW_PLAN.md line-2080 framing ("extend the voice gossip tree to CAMERAS and SCREEN SHARE").
 
 ---
@@ -176,24 +177,85 @@ vs. *who delivered it*.
   an infra peer needs its own bandwidth-accounting decision (the 10 GB/day per-IP cap would be consumed
   by media — policy TBD in the step-3 plan session).
 
-## 5. Open questions for the steps 2–3 plan session
+## 5. Open questions — ALL RESOLVED (2026-08-05/06 plan session; details in the approved plan)
 
-1. Where does the forwarder live on the VPS — inside relay-uws (C++ media stack: big) or as a headless
-   Hollow node process next to it (reuses the entire Rust/libwebrtc stack: likely answer)?
-2. RTP-layer access in the fork: insertable-streams-style packet tap vs a native forwarding shim — what's
-   the minimal patch that lets a client re-emit received RTP to another PC without decode?
-3. Tree optimizer inputs and cadence (upload headroom measurement, churn damping, how aggressively to
-   rebalance mid-stream).
-4. Simulcast layer set for screen content (1080p + 360p? + 30/5 fps split?) and its interaction with the
-   step-1 per-viewer caps.
-5. Bandwidth accounting policy for the infra forwarder (per-IP cap exemption? separate media budget?).
-6. Cameras: same forwarder machinery, but when do camera feeds justify a tree (grids are small streams)?
-7. Conference broadcast mode: one-to-many with ONLY forwarders (no mesh) — admission still MLS-gated.
+1. **VPS forwarder = separate headless Rust process** (own systemd unit next to relay-uws), never
+   inside the C++ relay. It is NOT a full node: a minimal WS-auth + Olm signaling loop + the
+   forwarder engine (spawn_node drags CRDT/MLS/storage it must never hold).
+2. **NO libwebrtc fork patch at all.** The forwarder is a transport-only Rust module built on
+   **str0m** (RTP mode) inside hollow_core behind a `forwarder` cargo feature — the same crate
+   later embeds in the app for phase-2 peer forwarders (their own display = downstream viewer #0
+   over a localhost leg). The 2026-07-19 "engine swap = NO" verdict doesn't apply: that was about
+   the client media engine; a blind forwarder needs exactly and only what str0m provides.
+   **Spike-proven — see §7.**
+3. **Tree v1 = static policy, no optimizer**: restricted-NAT viewers → forwarder, STUN viewers →
+   direct; sharer = tree root/coordinator; ingest always from the sharer in phase 1 (feeder
+   election = phase 2, since re-emitting IS the forwarder role); rebalance only on
+   join/leave/failure via the existing receiver-initiates heal. Viewer self-reports a route hint
+   on `screen_watch`.
+4. **Simulcast = phase 3** (the auto-quality mechanism once the tree removes per-viewer
+   encoders); prerequisite = root-causing the Windows live-setParameters rejection in the fork.
+   Until then: ingest leg encoded at max(effectiveViewerCap) over assigned forwarder viewers
+   (step-1 machinery reused); a forwarder viewer's Source request re-offers the ingest.
+5. **Forwarder gets its own bandwidth budget** (global + per-stream fair-share: degrade to the
+   small layer first, refuse NEW ingests/attaches with explicit FwdError codes, never starve
+   existing legs; zero metadata logging). Verified: the relay's 10 GB/day per-IP cap meters only
+   relay-WS binary frames — no call media today (screen-share audio's "0x03" is a WebRTC
+   data-channel type byte, not the relay opcode; TURN/coturn bytes are also unmetered).
+6. **Cameras deferred** — the contract carries `kind` from day one, so enabling later is policy.
+7. **Conference broadcast deferred** — contract keys on `(originator, stream id, kind)`, never
+   on "originator is in the viewer mesh", which is all broadcast mode will need.
 
-## 6. Build order
+Additional scoping locked: **phase 1 is VC-only; DM calls keep TURN** (k=1 ⇒ the forwarder saves
+zero bytes — the win exists only at k>1 viewers sharing one ingest). Forwarder control plane =
+its own `fwd_*` envelope namespace over a dedicated `fwd:{forwarder_peer_id}` relay room
+(Olm-encrypted; a forwarder can never satisfy the `is_vc_participant`/CRDT/MLS gates and must
+never hold group keys). Discovery = relay `get_media_forwarder` text command mirroring
+`get_turn_credentials`. **Phase-2 peer forwarding defaults ON with a Settings toggle** (desktop
+only, never mobile/metered, 2–3 downstream legs) — Vitalik decision 2026-08-06.
 
-1. **Step 1 now** — small, ships alone, immediately relieves bandwidth + CPU (this session).
-2. **Step 2 next** — pure signaling + registration keying; testable in the multi-node harness before any
-   forwarding exists.
-3. **Step 3 epic** — own design session (plan mode), then: peer forwarders → simulcast selection → infra
-   peer → conference broadcast.
+## 6. Build order (deliverables D1–D6 from the approved plan)
+
+| D | Deliverable | Status |
+|---|---|---|
+| D1 | Step 2 originator attribution (wire + spoof guard + Dart re-key + SFrame heal fix + tests) | **DONE** (see §7) |
+| D2 | str0m ↔ libwebrtc interop spike | **PASSED** (see §7) |
+| D3 | Forwarder module in hollow_core + headless `hollow-forwarder` bin + systemd deploy | next session |
+| D4 | Relay `get_media_forwarder` discovery + client plumbing | with D3 |
+| D5 | Client integration: route hint, `vc_screen_assign`, attach flow, fallback ladder | after D3+D4 |
+| D6 | Field verification (forced-relay VM viewer through the VPS forwarder) + this report updated | release gate |
+
+Then phase 2 (peer forwarders, same crate embedded in-app) → phase 3 (simulcast) → dynamic
+removal of the 15-viewer cap.
+
+## 7. Status log
+
+**2026-08-05/06 — step 2 + spike session (everything below in one day):**
+
+- **Step 2 (D1) IMPLEMENTED.** `StreamOrigin {peer, kind, stream}` boxed on
+  `vc_screen_offer/answer/ice` (`#[serde(default)]` + skip_serializing_if ⇒ byte-identical wire
+  when absent; serde tests pin the old wire shape). Spoof guard in voice_handler
+  (`inbound_origin_ok`, resolver-based so master-vs-device forms collapse): origin must name the
+  authenticated sender (offer dir) or ourselves (answer/ICE echo) or the WHOLE signal drops.
+  Olm inline screen arms consolidated into the shared voice_handler handlers. Dart re-key:
+  attribution/consent/badges/SFrame participant (`'screen:$originator'`) on the ORIGINATOR,
+  transport routing on the deliverer; `_incomingShareOrigins` deliverer index;
+  `_shareSessionId` + device-id origin minted per share session. SFrame heal-ladder fix rode
+  along (share cryptors were unreachable by heal step 1). Verified: new harness test
+  `vc_screen_origin_attribution_round_trip` (round-trips both directions, old-wire compat,
+  spoof drop), full suite 579/579, widget tests 406/406, no new clippy/analyzer findings.
+- **D2 spike PASSED (live field test, Windows host sharer → VirtualBox-NAT Win10 VM viewer).**
+  All 5 criteria: (1) production-path share (real ScreenShareService encoder config + SFrame
+  FrameCryptor, dev key) rendered through the blind hop — spike keyless, payloads ciphertext
+  end-to-end; (2) PLI: mid-stream viewer attach → picture in ~2–3 s, requests aggregated +
+  rate-limited upstream; (3) 5% deliberate egress UDP loss (post-RTX-cache) visually clean —
+  NACK/RTX recovery from the forwarder's packet cache works; (4) BWE alive over the ingest leg:
+  ~150 kbps idle desktop → 2–3.2 Mbps under motion, holds under loss; (5) PT spaces negotiate
+  independently per leg and codec-level translation maps them (VP8 96→96 here).
+  Spike artifacts (`rust/spike_str0m`, `lib/src/core/services/spike_forward_dev.dart`, one
+  env-gated `main.dart` hook) are THROWAWAY — delete when D3 lands.
+- **str0m/Windows lessons for D3** (memory `project_media_forwarding_epic` has the full list):
+  tolerate `WSAECONNRESET` on UDP recv/send (bounced ICE checks kill the leg right after "ICE
+  Connected" otherwise); `Event::MediaAdded` fires only for REMOTE media — keep the `Mid` from
+  `add_media()`; str0m auto-creates StreamTx for SDP-negotiated media; PT translation by
+  (codec, clock-rate) between the legs' `codec_config().params()`.

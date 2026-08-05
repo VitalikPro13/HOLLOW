@@ -21,6 +21,7 @@ import 'package:hollow/src/core/reduce_motion.dart';
 import 'package:hollow/src/ui/app.dart';
 import 'package:hollow/src/core/hollow_data_dir.dart';
 import 'package:hollow/src/core/services/ios_data_dir_migration.dart';
+import 'package:hollow/src/core/services/spike_forward_dev.dart';
 import 'package:hollow/src/ui/shader_warmup.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:window_manager/window_manager.dart';
@@ -308,6 +309,10 @@ Future<void> main(List<String> args) async {
   // Start shared animation tickers (one ticker drives all decorative anims).
   // No-op if reduce-motion was already effective (controller set disabled).
   SharedTickers.instance.start();
+
+  // THROWAWAY (media forwarding D2 spike): no-op unless HOLLOW_SPIKE_FWD is
+  // set. Delete together with spike_forward_dev.dart + rust/spike_str0m.
+  SpikeForwardDev.maybeStart();
 
   runApp(UncontrolledProviderScope(
     container: container,

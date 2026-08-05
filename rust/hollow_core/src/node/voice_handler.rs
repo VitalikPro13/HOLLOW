@@ -829,12 +829,15 @@ fn build_vc_signal_envelope(
             target: None,
         }),
         "screen_offer" => parsed.map(|v| MessageEnvelope::VoiceChannelScreenOffer {
+            origin: parse_stream_origin(&v),
             sid, cid, sdp: jstr(&v, "sdp"), target: None,
         }),
         "screen_answer" => parsed.map(|v| MessageEnvelope::VoiceChannelScreenAnswer {
+            origin: parse_stream_origin(&v),
             sid, cid, sdp: jstr(&v, "sdp"), target: None,
         }),
         "screen_ice" => parsed.map(|v| MessageEnvelope::VoiceChannelScreenIce {
+            origin: parse_stream_origin(&v),
             sid, cid,
             candidate: jstr(&v, "candidate"),
             sdp_mid: jstr(&v, "sdpMid"),
@@ -877,6 +880,54 @@ fn build_vc_signal_envelope(
             None
         }
     }
+}
+
+/// Parse the optional `origin` sub-object from a Dart signal payload
+/// (media forwarding step 2). Absent or malformed ⇒ `None` (old behavior:
+/// the delivering sender is the originator).
+fn parse_stream_origin(v: &serde_json::Value) -> Option<Box<StreamOrigin>> {
+    let o = v.get("origin")?;
+    if !o.is_object() {
+        return None;
+    }
+    Some(Box::new(StreamOrigin {
+        peer: jstr(o, "peer"),
+        kind: jstr(o, "kind"),
+        stream: jstr(o, "stream"),
+    }))
+}
+
+/// Media forwarding step 2 spoof guard: an inbound origin is acceptable only
+/// when it names the authenticated delivering sender (offer / their own
+/// outgoing-role ICE) or ourselves (answer / incoming-role ICE echoing OUR
+/// share). Anything else is an attribution spoof — the whole signal must be
+/// DROPPED (rejected, never log-and-continue): the SFrame group key is shared,
+/// so a spoofed origin would render the spoofer's pixels attributed to the
+/// victim. Forwarder-delivered legs (step 3) ride the `fwd_*` namespace, so
+/// origin ≠ sender never legitimately appears on this lane.
+///
+/// Comparisons go through the resolver (multi-device iron rule): one master =
+/// many device ids, and the sender/local ids here can arrive in either form
+/// (`local_peer_str` is the MASTER; VC senders are routable DEVICE ids). A
+/// cross-identity spoof still collapses to different masters and is dropped.
+fn inbound_origin_ok(
+    origin: &Option<Box<StreamOrigin>>,
+    sender_peer_id: &str,
+    local_peer_str: &str,
+) -> bool {
+    match origin {
+        None => true,
+        Some(o) => {
+            super::resolver::same_identity(&o.peer, sender_peer_id)
+                || super::resolver::same_identity(&o.peer, local_peer_str)
+        }
+    }
+}
+
+/// The `origin` sub-object appended to an outgoing `VoiceChannelSignal`
+/// payload handed to Dart.
+fn origin_json_value(o: &StreamOrigin) -> serde_json::Value {
+    serde_json::json!({"peer": o.peer, "kind": o.kind, "stream": o.stream})
 }
 
 /// Broadcast a VC state signal (audio/screen/camera state): MLS broadcast when
@@ -1236,20 +1287,70 @@ pub(crate) async fn handle_envelope_voice_channel_sdp_answer(
     emit_vc_sdp_signal(voice_channel_participants, event_tx, sender_peer_id, sid, cid, sdp, "sdp_answer", "SDP answer").await;
 }
 
+/// Screen-share twin of `emit_vc_sdp_signal`: same participant + size guards
+/// plus the media-forwarding step-2 origin spoof guard; forwards `origin` to
+/// Dart in the payload when present.
+#[allow(clippy::too_many_arguments)]
+async fn emit_vc_screen_sdp_signal(
+    voice_channel_participants: &HashMap<String, std::collections::HashSet<String>>,
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    sender_peer_id: String,
+    sid: String,
+    cid: String,
+    sdp: String,
+    origin: Option<Box<StreamOrigin>>,
+    local_peer_str: &str,
+    signal_type: &'static str,
+    log_label: &'static str,
+) {
+    let vc_key = format!("{sid}:{cid}");
+    if !is_vc_participant(voice_channel_participants, &vc_key, &sender_peer_id) {
+        hollow_log!("[HOLLOW-SECURITY] BLOCKED VC {log_label} from non-participant {sender_peer_id} in {cid}");
+        return;
+    }
+    if sdp.len() > 64 * 1024 {
+        hollow_log!("[HOLLOW-SECURITY] BLOCKED VC {log_label} — size {} exceeds limit from {sender_peer_id}", sdp.len());
+        return;
+    }
+    if !inbound_origin_ok(&origin, &sender_peer_id, local_peer_str) {
+        hollow_log!("[HOLLOW-SECURITY] BLOCKED VC {log_label} — spoofed origin from {sender_peer_id} in {cid}");
+        return;
+    }
+    hollow_log!("[HOLLOW-VC] {log_label} from {sender_peer_id} in vc {cid}");
+    let mut json = serde_json::json!({"sdp": sdp});
+    if let Some(o) = &origin {
+        json["origin"] = origin_json_value(o);
+    }
+    let _ = event_tx.send(NetworkEvent::VoiceChannelSignal {
+        server_id: sid, channel_id: cid, peer_id: sender_peer_id,
+        signal_type: signal_type.to_string(), payload: json.to_string(),
+    }).await;
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_envelope_voice_channel_screen_offer(
     voice_channel_participants: &HashMap<String, std::collections::HashSet<String>>,
     event_tx: &mpsc::Sender<NetworkEvent>,
     sender_peer_id: String, sid: String, cid: String, sdp: String,
+    origin: Option<Box<StreamOrigin>>, local_peer_str: &str,
 ) {
-    emit_vc_sdp_signal(voice_channel_participants, event_tx, sender_peer_id, sid, cid, sdp, "screen_offer", "Screen offer").await;
+    emit_vc_screen_sdp_signal(
+        voice_channel_participants, event_tx, sender_peer_id, sid, cid, sdp,
+        origin, local_peer_str, "screen_offer", "Screen offer",
+    ).await;
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_envelope_voice_channel_screen_answer(
     voice_channel_participants: &HashMap<String, std::collections::HashSet<String>>,
     event_tx: &mpsc::Sender<NetworkEvent>,
     sender_peer_id: String, sid: String, cid: String, sdp: String,
+    origin: Option<Box<StreamOrigin>>, local_peer_str: &str,
 ) {
-    emit_vc_sdp_signal(voice_channel_participants, event_tx, sender_peer_id, sid, cid, sdp, "screen_answer", "Screen answer").await;
+    emit_vc_screen_sdp_signal(
+        voice_channel_participants, event_tx, sender_peer_id, sid, cid, sdp,
+        origin, local_peer_str, "screen_answer", "Screen answer",
+    ).await;
 }
 
 pub(crate) async fn handle_envelope_voice_channel_reneg_offer(
@@ -1307,22 +1408,31 @@ pub(crate) async fn handle_envelope_voice_channel_screen_ice(
     sdp_mid: String,
     sdp_mline_index: u32,
     role: String,
+    origin: Option<Box<StreamOrigin>>,
+    local_peer_str: &str,
 ) {
     let vc_key = format!("{sid}:{cid}");
     if !is_vc_participant(voice_channel_participants, &vc_key, &sender_peer_id) {
         hollow_log!("[HOLLOW-SECURITY] BLOCKED VC screen ICE from non-participant {sender_peer_id} in {cid}");
         return;
     }
+    if !inbound_origin_ok(&origin, &sender_peer_id, local_peer_str) {
+        hollow_log!("[HOLLOW-SECURITY] BLOCKED VC screen ICE — spoofed origin from {sender_peer_id} in {cid}");
+        return;
+    }
     hollow_log!("[HOLLOW-VC] Screen ICE from {sender_peer_id} in vc {cid} role={role}");
-    let payload = serde_json::json!({
+    let mut json = serde_json::json!({
         "candidate": candidate,
         "sdpMid": sdp_mid,
         "sdpMLineIndex": sdp_mline_index,
         "role": role,
-    }).to_string();
+    });
+    if let Some(o) = &origin {
+        json["origin"] = origin_json_value(o);
+    }
     let _ = event_tx.send(NetworkEvent::VoiceChannelSignal {
         server_id: sid, channel_id: cid, peer_id: sender_peer_id,
-        signal_type: "screen_ice".to_string(), payload,
+        signal_type: "screen_ice".to_string(), payload: json.to_string(),
     }).await;
 }
 

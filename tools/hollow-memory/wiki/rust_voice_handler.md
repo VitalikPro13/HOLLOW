@@ -155,9 +155,26 @@ All envelope variants include `sid`, `cid`, and a `target: None` field (target i
 - `"ice"` -> `MessageEnvelope::VoiceChannelIce { sid, cid, candidate, sdp_mid, sdp_mline_index, target }`
 
 **Screen share negotiation (targeted):**
-- `"screen_offer"` -> `MessageEnvelope::VoiceChannelScreenOffer { sid, cid, sdp, target }`
-- `"screen_answer"` -> `MessageEnvelope::VoiceChannelScreenAnswer { sid, cid, sdp, target }`
-- `"screen_ice"` -> `MessageEnvelope::VoiceChannelScreenIce { sid, cid, candidate, sdp_mid, sdp_mline_index, role, target }` — `role` disambiguates sender/receiver.
+- `"screen_offer"` -> `MessageEnvelope::VoiceChannelScreenOffer { sid, cid, sdp, target, origin }`
+- `"screen_answer"` -> `MessageEnvelope::VoiceChannelScreenAnswer { sid, cid, sdp, target, origin }`
+- `"screen_ice"` -> `MessageEnvelope::VoiceChannelScreenIce { sid, cid, candidate, sdp_mid, sdp_mline_index, role, target, origin }` — `role` disambiguates sender/receiver.
+
+**`origin` (media forwarding step 2, 2026-08-05):** `Option<Box<StreamOrigin>>` with
+`{peer, kind, stream}` — the stream's ORIGINATOR (routable device id), the stream kind
+(`"screen"`), and a per-share-session random id. `#[serde(default)]` +
+`skip_serializing_if` ⇒ absent on old clients and byte-identical wire when unset; absent means
+"the delivering sender is the originator" (every direct leg today). Dart parses it from the
+payload's `origin` sub-object (`parse_stream_origin`). Receivers key attribution, watch-consent,
+dedup and SFrame cryptor registration on `origin.peer`; transport routing stays on the sender.
+**Spoof guard `inbound_origin_ok()`**: an inbound origin must be resolver-`same_identity` with
+the Olm/MLS-authenticated sender (offer / outgoing-role ICE) or with the local identity
+(answer / incoming-role ICE echoing our own share) — anything else drops the WHOLE signal with a
+`[HOLLOW-SECURITY]` log (the SFrame group key is shared, so a spoofed origin would attribute the
+spoofer's pixels to the victim). Forwarder-delivered legs (step 3) will ride a separate `fwd_*`
+namespace, never these variants. The screen offer/answer/ICE Olm arms in swarm.rs were
+consolidated into the shared `handle_envelope_voice_channel_screen_*` handlers so guards live in
+ONE place for both Olm and MLS paths (`emit_vc_screen_sdp_signal` = the screen twin of
+`emit_vc_sdp_signal` with the origin guard + payload passthrough).
 
 **Renegotiation (targeted):**
 - `"reneg_offer"` -> `MessageEnvelope::VoiceChannelRenegOffer { sid, cid, sdp, target }`
@@ -257,7 +274,7 @@ Private helper used by all SDP-carrying voice channel envelope handlers. Perform
 
 If both checks pass, wraps the SDP in a JSON object `{"sdp": sdp}` and emits `NetworkEvent::VoiceChannelSignal { server_id, channel_id, peer_id, signal_type, payload }`.
 
-Used by: `handle_envelope_voice_channel_sdp_offer`, `handle_envelope_voice_channel_sdp_answer`, `handle_envelope_voice_channel_screen_offer`, `handle_envelope_voice_channel_screen_answer`, `handle_envelope_voice_channel_reneg_offer`, `handle_envelope_voice_channel_reneg_answer`.
+Used by: `handle_envelope_voice_channel_sdp_offer`, `handle_envelope_voice_channel_sdp_answer`, `handle_envelope_voice_channel_reneg_offer`, `handle_envelope_voice_channel_reneg_answer`. The screen offer/answer handlers use `emit_vc_screen_sdp_signal()` instead — same two checks plus the media-forwarding origin spoof guard, and the payload forwards `origin` when present.
 
 ---
 
@@ -304,11 +321,16 @@ Delegates to `emit_vc_sdp_signal()` with `signal_type = "sdp_answer"`. Same guar
 
 ### handle_envelope_voice_channel_screen_offer()
 
-Delegates to `emit_vc_sdp_signal()` with `signal_type = "screen_offer"`.
+Delegates to `emit_vc_screen_sdp_signal()` with `signal_type = "screen_offer"` — participant
+check + 64 KB SDP limit + the `inbound_origin_ok()` spoof guard; forwards `origin` in the
+emitted payload. Called from BOTH the MLS dispatch arms and the (consolidated) Olm dispatch
+arms in swarm.rs.
 
 ### handle_envelope_voice_channel_screen_answer()
 
-Delegates to `emit_vc_sdp_signal()` with `signal_type = "screen_answer"`.
+Delegates to `emit_vc_screen_sdp_signal()` with `signal_type = "screen_answer"`. Same guards +
+origin passthrough; also serves both Olm and MLS paths. (`screen_ice` applies the same origin
+guard inline in its own handler.)
 
 ### handle_envelope_voice_channel_reneg_offer()
 

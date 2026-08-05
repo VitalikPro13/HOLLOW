@@ -3145,6 +3145,246 @@ async fn voice_channel_join_leave_and_signal_routing() {
 }
 
 // ---------------------------------------------------------------------------
+// Ring-2 CONTROL PLANE: media forwarding step 2 — originator attribution on the
+// VC screen lane. vc_screen_offer/answer/ice carry an optional StreamOrigin
+// (who the stream is FROM vs who DELIVERED it); receivers get it verbatim in
+// the VoiceChannelSignal payload. Guards: absent origin = old wire (delivered
+// untouched), and a spoofed origin (neither the sender nor the recipient) is
+// DROPPED — the SFrame group key is shared, so spoofed attribution would
+// render the spoofer's pixels under the victim's name.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
+async fn vc_screen_origin_attribution_round_trip() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    const O_MASTER: u8 = 111;
+    const J_MASTER: u8 = 121;
+    let o_master = NativeKeypair::from_secret_bytes(&seed_bytes(O_MASTER)).peer_id();
+    let j_master = NativeKeypair::from_secret_bytes(&seed_bytes(J_MASTER)).peer_id();
+
+    let mut o = spawn_node_with_friends(&relay, O_MASTER, O_MASTER, &[&j_master]).await;
+    sleep_ms(1200).await;
+    let mut j = spawn_node_with_friends(&relay, J_MASTER, J_MASTER, &[&o_master]).await;
+    sleep_ms(4000).await; // Olm confirm (targeted VC signals ride Olm)
+
+    let server_id = create_server_and_wait(&mut o, "Origin Server").await;
+    o.cmd_tx
+        .send(NodeCommand::CreateChannel {
+            server_id: server_id.clone(),
+            name: "Voice".to_string(),
+            category: None,
+            channel_type: "voice".to_string(),
+        })
+        .await
+        .unwrap();
+    let mut voice_cid = None;
+    let made = wait_event(&mut o, std::time::Duration::from_secs(3), |ev| {
+        if let NetworkEvent::ChannelAdded { channel_id, channel_type, .. } = ev {
+            if channel_type == "voice" {
+                voice_cid = Some(channel_id.clone());
+                return true;
+            }
+        }
+        false
+    })
+    .await;
+    assert!(made, "owner should create a voice channel");
+    let voice_cid = voice_cid.expect("voice channel id");
+    sleep_ms(300).await;
+
+    j.cmd_tx
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
+        .await
+        .unwrap();
+    let joined = wait_event(&mut j, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
+    })
+    .await;
+    assert!(joined, "joiner should join the server");
+    sleep_ms(1500).await;
+
+    // BOTH nodes join the voice channel: the receive guard checks the SENDER
+    // is a participant, and signals flow in both directions below.
+    j.cmd_tx
+        .send(NodeCommand::VoiceChannelJoin {
+            server_id: server_id.clone(),
+            channel_id: voice_cid.clone(),
+        })
+        .await
+        .unwrap();
+    let o_saw_join = wait_event(&mut o, std::time::Duration::from_secs(4), |ev| {
+        matches!(ev, NetworkEvent::VoiceChannelJoined { channel_id, .. } if *channel_id == voice_cid)
+    })
+    .await;
+    assert!(o_saw_join, "owner must see the joiner enter the voice channel");
+    o.cmd_tx
+        .send(NodeCommand::VoiceChannelJoin {
+            server_id: server_id.clone(),
+            channel_id: voice_cid.clone(),
+        })
+        .await
+        .unwrap();
+    let j_saw_join = wait_event(&mut j, std::time::Duration::from_secs(4), |ev| {
+        matches!(ev, NetworkEvent::VoiceChannelJoined { channel_id, .. } if *channel_id == voice_cid)
+    })
+    .await;
+    assert!(j_saw_join, "joiner must see the owner enter the voice channel");
+    drain_events(&mut o);
+    drain_events(&mut j);
+
+    // Helper: pull the next VoiceChannelSignal of a given type + its payload.
+    async fn next_signal(
+        node: &mut TestNode,
+        wanted: &str,
+        secs: u64,
+    ) -> Option<serde_json::Value> {
+        let mut got = None;
+        let ok = wait_event(node, std::time::Duration::from_secs(secs), |ev| {
+            if let NetworkEvent::VoiceChannelSignal { signal_type, payload, .. } = ev {
+                if signal_type == wanted {
+                    got = Some(payload.clone());
+                    return true;
+                }
+            }
+            false
+        })
+        .await;
+        if !ok { return None; }
+        Some(serde_json::from_str(&got.expect("payload")).expect("valid json"))
+    }
+
+    // --- 1. Sharer (J) -> viewer (O): screen_offer WITH origin round-trips ---
+    j.cmd_tx
+        .send(NodeCommand::VoiceChannelSendSignal {
+            server_id: server_id.clone(),
+            channel_id: voice_cid.clone(),
+            peer_id: o_master.clone(),
+            signal_type: "screen_offer".to_string(),
+            payload: serde_json::json!({
+                "sdp": "v=0 offer",
+                "origin": {"peer": j_master, "kind": "screen", "stream": "cafe0123"},
+            })
+            .to_string(),
+        })
+        .await
+        .unwrap();
+    let offer = next_signal(&mut o, "screen_offer", 4).await
+        .expect("viewer must receive the screen_offer");
+    assert_eq!(offer["sdp"], serde_json::json!("v=0 offer"));
+    assert_eq!(offer["origin"]["peer"], serde_json::json!(j_master),
+        "origin.peer must round-trip");
+    assert_eq!(offer["origin"]["kind"], serde_json::json!("screen"));
+    assert_eq!(offer["origin"]["stream"], serde_json::json!("cafe0123"),
+        "origin.stream must round-trip");
+
+    // --- 2. Viewer (O) -> sharer (J): answer ECHOES the sharer's origin ---
+    // origin.peer == the RECIPIENT here; the guard accepts it as an echo.
+    drain_events(&mut j);
+    o.cmd_tx
+        .send(NodeCommand::VoiceChannelSendSignal {
+            server_id: server_id.clone(),
+            channel_id: voice_cid.clone(),
+            peer_id: j_master.clone(),
+            signal_type: "screen_answer".to_string(),
+            payload: serde_json::json!({
+                "sdp": "v=0 answer",
+                "origin": {"peer": j_master, "kind": "screen", "stream": "cafe0123"},
+            })
+            .to_string(),
+        })
+        .await
+        .unwrap();
+    let answer = next_signal(&mut j, "screen_answer", 4).await
+        .expect("sharer must receive the echoed screen_answer");
+    assert_eq!(answer["origin"]["peer"], serde_json::json!(j_master),
+        "echoed origin must survive the answer direction");
+
+    // --- 3. Viewer (O) -> sharer (J): incoming-role ICE with origin echo ---
+    drain_events(&mut j);
+    o.cmd_tx
+        .send(NodeCommand::VoiceChannelSendSignal {
+            server_id: server_id.clone(),
+            channel_id: voice_cid.clone(),
+            peer_id: j_master.clone(),
+            signal_type: "screen_ice".to_string(),
+            payload: serde_json::json!({
+                "candidate": "candidate:1 1 udp 1 10.0.0.1 1 typ host",
+                "sdpMid": "0",
+                "sdpMLineIndex": 0,
+                "role": "incoming",
+                "origin": {"peer": j_master, "kind": "screen", "stream": "cafe0123"},
+            })
+            .to_string(),
+        })
+        .await
+        .unwrap();
+    let ice = next_signal(&mut j, "screen_ice", 4).await
+        .expect("sharer must receive the echoed screen_ice");
+    assert_eq!(ice["role"], serde_json::json!("incoming"));
+    assert_eq!(ice["origin"]["stream"], serde_json::json!("cafe0123"));
+
+    // --- 4. Old-wire compat: an offer WITHOUT origin is delivered untouched ---
+    drain_events(&mut o);
+    j.cmd_tx
+        .send(NodeCommand::VoiceChannelSendSignal {
+            server_id: server_id.clone(),
+            channel_id: voice_cid.clone(),
+            peer_id: o_master.clone(),
+            signal_type: "screen_offer".to_string(),
+            payload: serde_json::json!({"sdp": "v=0 legacy"}).to_string(),
+        })
+        .await
+        .unwrap();
+    let legacy = next_signal(&mut o, "screen_offer", 4).await
+        .expect("originless offer must still be delivered (old clients)");
+    assert_eq!(legacy["sdp"], serde_json::json!("v=0 legacy"));
+    assert!(legacy.get("origin").is_none(),
+        "absent origin must stay absent — no synthesized attribution");
+
+    // --- 5. Spoof rejection: origin naming a THIRD identity is dropped ---
+    drain_events(&mut j);
+    o.cmd_tx
+        .send(NodeCommand::VoiceChannelSendSignal {
+            server_id: server_id.clone(),
+            channel_id: voice_cid.clone(),
+            peer_id: j_master.clone(),
+            signal_type: "screen_answer".to_string(),
+            payload: serde_json::json!({
+                "sdp": "v=0 spoof",
+                "origin": {"peer": "12D3KooWFakeVictimPeerId", "kind": "screen", "stream": "ff00ff00"},
+            })
+            .to_string(),
+        })
+        .await
+        .unwrap();
+    let spoofed = next_signal(&mut j, "screen_answer", 2).await;
+    assert!(spoofed.is_none(),
+        "a spoofed origin (neither sender nor recipient) must be DROPPED");
+
+    // The drop is per-signal, not per-peer: a valid follow-up still flows.
+    drain_events(&mut j);
+    o.cmd_tx
+        .send(NodeCommand::VoiceChannelSendSignal {
+            server_id: server_id.clone(),
+            channel_id: voice_cid.clone(),
+            peer_id: j_master.clone(),
+            signal_type: "screen_answer".to_string(),
+            payload: serde_json::json!({"sdp": "v=0 healthy"}).to_string(),
+        })
+        .await
+        .unwrap();
+    let healthy = next_signal(&mut j, "screen_answer", 4).await
+        .expect("the node must stay healthy after dropping a spoofed signal");
+    assert_eq!(healthy["sdp"], serde_json::json!("v=0 healthy"));
+}
+
+// ---------------------------------------------------------------------------
 // Ring-2 CONTROL PLANE: recovery-pool formation. The cross-peer shard byte
 // streaming + reconstruction math need a populated vault (heavier setup), but the
 // pool's MEMBERSHIP control path is fully in-process: an initiator opens a pool

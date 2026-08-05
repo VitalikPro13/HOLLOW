@@ -8331,53 +8331,28 @@ async fn handle_incoming_request(
                         }).await;
                     }
                 }
-                Ok(MessageEnvelope::VoiceChannelScreenOffer { sid, cid, sdp, .. }) => {
-                    let vc_key = format!("{sid}:{cid}");
-                    let is_participant = voice_channel_participants.get(&vc_key).map(|p| p.contains(peer_str)).unwrap_or(false);
-                    if !is_participant {
-                        hollow_log!("[HOLLOW-SECURITY] BLOCKED VC screen offer (Olm) from non-participant {peer_str} in {cid}");
-                    } else if sdp.len() > 64 * 1024 {
-                        hollow_log!("[HOLLOW-SECURITY] BLOCKED VC screen offer (Olm) — size {} exceeds limit from {peer_str}", sdp.len());
-                    } else {
-                        let payload = serde_json::json!({"sdp": sdp}).to_string();
-                        let _ = event_tx.send(NetworkEvent::VoiceChannelSignal {
-                            server_id: sid, channel_id: cid, peer_id: peer_str.to_string(),
-                            signal_type: "screen_offer".to_string(), payload,
-                        }).await;
-                    }
+                // Screen offer/answer/ICE consolidate into the shared
+                // voice_handler handlers (same participant + size guards the
+                // inline arms had, plus the step-2 origin spoof guard) so the
+                // origin contract lives in ONE place for both Olm + MLS paths.
+                Ok(MessageEnvelope::VoiceChannelScreenOffer { sid, cid, sdp, origin, .. }) => {
+                    voice_handler::handle_envelope_voice_channel_screen_offer(
+                        voice_channel_participants, event_tx,
+                        peer_str.to_string(), sid, cid, sdp, origin, &local_peer_str,
+                    ).await;
                 }
-                Ok(MessageEnvelope::VoiceChannelScreenAnswer { sid, cid, sdp, .. }) => {
-                    let vc_key = format!("{sid}:{cid}");
-                    let is_participant = voice_channel_participants.get(&vc_key).map(|p| p.contains(peer_str)).unwrap_or(false);
-                    if !is_participant {
-                        hollow_log!("[HOLLOW-SECURITY] BLOCKED VC screen answer (Olm) from non-participant {peer_str} in {cid}");
-                    } else if sdp.len() > 64 * 1024 {
-                        hollow_log!("[HOLLOW-SECURITY] BLOCKED VC screen answer (Olm) — size {} exceeds limit from {peer_str}", sdp.len());
-                    } else {
-                        let payload = serde_json::json!({"sdp": sdp}).to_string();
-                        let _ = event_tx.send(NetworkEvent::VoiceChannelSignal {
-                            server_id: sid, channel_id: cid, peer_id: peer_str.to_string(),
-                            signal_type: "screen_answer".to_string(), payload,
-                        }).await;
-                    }
+                Ok(MessageEnvelope::VoiceChannelScreenAnswer { sid, cid, sdp, origin, .. }) => {
+                    voice_handler::handle_envelope_voice_channel_screen_answer(
+                        voice_channel_participants, event_tx,
+                        peer_str.to_string(), sid, cid, sdp, origin, &local_peer_str,
+                    ).await;
                 }
-                Ok(MessageEnvelope::VoiceChannelScreenIce { sid, cid, candidate, sdp_mid, sdp_mline_index, role, .. }) => {
-                    let vc_key = format!("{sid}:{cid}");
-                    let is_participant = voice_channel_participants.get(&vc_key).map(|p| p.contains(peer_str)).unwrap_or(false);
-                    if !is_participant {
-                        hollow_log!("[HOLLOW-SECURITY] BLOCKED VC screen ICE (Olm) from non-participant {peer_str} in {cid}");
-                    } else {
-                        let payload = serde_json::json!({
-                            "candidate": candidate,
-                            "sdpMid": sdp_mid,
-                            "sdpMLineIndex": sdp_mline_index,
-                            "role": role,
-                        }).to_string();
-                        let _ = event_tx.send(NetworkEvent::VoiceChannelSignal {
-                            server_id: sid, channel_id: cid, peer_id: peer_str.to_string(),
-                            signal_type: "screen_ice".to_string(), payload,
-                        }).await;
-                    }
+                Ok(MessageEnvelope::VoiceChannelScreenIce { sid, cid, candidate, sdp_mid, sdp_mline_index, role, origin, .. }) => {
+                    voice_handler::handle_envelope_voice_channel_screen_ice(
+                        voice_channel_participants, event_tx,
+                        peer_str.to_string(), sid, cid, candidate, sdp_mid, sdp_mline_index, role,
+                        origin, &local_peer_str,
+                    ).await;
                 }
                 Ok(MessageEnvelope::VoiceChannelScreenWatch { sid, cid, want, viewer_width, viewer_height, source_quality, .. }) => {
                     voice_handler::handle_envelope_voice_channel_screen_watch(
@@ -10413,22 +10388,23 @@ async fn handle_incoming_request(
                             }
 
                             // -- Voice channel screen sharing (Phase 5B) --
-                            MessageEnvelope::VoiceChannelScreenOffer { sid, cid, sdp, .. } => {
+                            MessageEnvelope::VoiceChannelScreenOffer { sid, cid, sdp, origin, .. } => {
                                 voice_handler::handle_envelope_voice_channel_screen_offer(
                                     voice_channel_participants, event_tx,
-                                    peer_str.to_string(), sid, cid, sdp,
+                                    peer_str.to_string(), sid, cid, sdp, origin, local_peer_str,
                                 ).await;
                             }
-                            MessageEnvelope::VoiceChannelScreenAnswer { sid, cid, sdp, .. } => {
+                            MessageEnvelope::VoiceChannelScreenAnswer { sid, cid, sdp, origin, .. } => {
                                 voice_handler::handle_envelope_voice_channel_screen_answer(
                                     voice_channel_participants, event_tx,
-                                    peer_str.to_string(), sid, cid, sdp,
+                                    peer_str.to_string(), sid, cid, sdp, origin, local_peer_str,
                                 ).await;
                             }
-                            MessageEnvelope::VoiceChannelScreenIce { sid, cid, candidate, sdp_mid, sdp_mline_index, role, .. } => {
+                            MessageEnvelope::VoiceChannelScreenIce { sid, cid, candidate, sdp_mid, sdp_mline_index, role, origin, .. } => {
                                 voice_handler::handle_envelope_voice_channel_screen_ice(
                                     voice_channel_participants, event_tx,
                                     peer_str.to_string(), sid, cid, candidate, sdp_mid, sdp_mline_index, role,
+                                    origin, local_peer_str,
                                 ).await;
                             }
                             MessageEnvelope::VoiceChannelScreenState { sid, cid, enabled, quality, .. } => {
