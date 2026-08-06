@@ -355,6 +355,14 @@ pub enum NetworkEvent {
     VoiceChannelJoined { server_id: String, channel_id: String, peer_id: String },
     VoiceChannelLeft { server_id: String, channel_id: String, peer_id: String },
     VoiceChannelSignal { server_id: String, channel_id: String, peer_id: String, signal_type: String, payload: String },
+    // -- Media forwarder events (media forwarding step 3) --
+    /// Client-bound `fwd_*` signal from a media forwarder (`fwd_ingest_answer`
+    /// / `fwd_egress_offer` / `fwd_error`). Dart must gate on "from_peer == the
+    /// discovered forwarder AND origin is watched+assigned" before acting.
+    ForwarderSignal { from_peer: String, signal_type: String, payload: String },
+    /// The relay's advertised media forwarder (static config; refreshed on
+    /// every reconnect). Cached by Dart's forwarderInfoProvider.
+    MediaForwarderInfo { peer_id: String, online: bool },
     // -- Gossip relay tree events (Phase 5D) --
     GossipConnect { peer_id: String },
     GossipDisconnect { peer_id: String },
@@ -1157,6 +1165,13 @@ fn to_ffi_event(event: node::NetworkEvent) -> NetworkEvent {
         }
         node::NetworkEvent::VoiceChannelSignal { server_id, channel_id, peer_id, signal_type, payload } => {
             NetworkEvent::VoiceChannelSignal { server_id, channel_id, peer_id, signal_type, payload }
+        }
+        // -- Media forwarder events (media forwarding step 3) --
+        node::NetworkEvent::ForwarderSignal { from_peer, signal_type, payload } => {
+            NetworkEvent::ForwarderSignal { from_peer, signal_type, payload }
+        }
+        node::NetworkEvent::MediaForwarderInfo { peer_id, online } => {
+            NetworkEvent::MediaForwarderInfo { peer_id, online }
         }
         // -- Gossip relay tree events (Phase 5D) --
         node::NetworkEvent::GossipConnect { peer_id } => {
@@ -3721,6 +3736,67 @@ pub fn voice_sframe_heal(
         server_id, channel_id, peer_id, escalate,
     }))
     .map_err(|e| format!("Failed to send command: {e}"))?;
+    Ok(())
+}
+
+// -- Media forwarder FFI (media forwarding step 3) --
+
+/// Send an Olm-encrypted `fwd_*` control signal to a media forwarder inside
+/// its `fwd:{peer_id}` relay room. Signal types are whitelisted to the
+/// client-sendable set (`fwd_stream_register` / `fwd_stream_auth` /
+/// `fwd_stream_unregister` / `fwd_ingest_offer` / `fwd_attach` / `fwd_detach`
+/// / `fwd_egress_answer`); payload is JSON with a REQUIRED `origin` object.
+/// Queues + fires a signed KeyRequest when no Olm session exists yet.
+#[frb]
+pub fn forwarder_send_signal(
+    forwarder_peer_id: String,
+    signal_type: String,
+    payload: String,
+) -> Result<(), String> {
+    let node = get_node();
+    let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
+    // Release the global node mutex BEFORE the (possibly waiting) send —
+    // holding it across block_on(send) serializes all other FFI calls.
+    drop(guard);
+    let rt = get_runtime();
+    rt.block_on(cmd_tx.send(node::NodeCommand::ForwarderSendSignal {
+        forwarder_peer_id, signal_type, payload,
+    }))
+    .map_err(|e| format!("Failed to send command: {e}"))?;
+    Ok(())
+}
+
+/// Join a media forwarder's dedicated relay room (`fwd:{peer_id}`) so fwd
+/// control signals can flow. Pure transport join — never touches the DM
+/// conversation-pane state the generic room join carries.
+#[frb]
+pub fn join_forwarder_room(forwarder_peer_id: String) -> Result<(), String> {
+    let node = get_node();
+    let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
+    // Release the global node mutex BEFORE the (possibly waiting) send —
+    // holding it across block_on(send) serializes all other FFI calls.
+    drop(guard);
+    let rt = get_runtime();
+    rt.block_on(cmd_tx.send(node::NodeCommand::JoinForwarderRoom { forwarder_peer_id }))
+        .map_err(|e| format!("Failed to send command: {e}"))?;
+    Ok(())
+}
+
+/// Leave a media forwarder's relay room (share stopped / no forwarder viewers
+/// left / no longer watching through it).
+#[frb]
+pub fn leave_forwarder_room(forwarder_peer_id: String) -> Result<(), String> {
+    let node = get_node();
+    let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
+    // Release the global node mutex BEFORE the (possibly waiting) send —
+    // holding it across block_on(send) serializes all other FFI calls.
+    drop(guard);
+    let rt = get_runtime();
+    rt.block_on(cmd_tx.send(node::NodeCommand::LeaveForwarderRoom { forwarder_peer_id }))
+        .map_err(|e| format!("Failed to send command: {e}"))?;
     Ok(())
 }
 

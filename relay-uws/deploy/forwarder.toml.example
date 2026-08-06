@@ -1,0 +1,21 @@
+# Hollow media forwarder configuration (hollow-forwarder --config <this file>).
+# See rust/hollow_core/src/forwarder/mod.rs (ForwarderConfig) for all fields.
+
+relay_domain = "relay.anonlisten.com"
+data_dir = "/home/ubuntu/forwarder/data"
+# The public IP advertised in ICE host candidates (sockets bind 0.0.0.0).
+public_ip = "141.227.186.209"
+
+# UDP media port range — one port per leg. Must be open in the firewall.
+udp_port_min = 40000
+udp_port_max = 40199
+
+# Budget (refuse-new-only; existing legs are never degraded or evicted).
+max_streams_global = 16
+max_streams_per_sender = 4
+max_legs_per_stream = 32
+# Global egress budget in bits/sec (0 = unlimited). 400 Mbps default leaves
+# headroom under the 1 Gbps port for the relay's own traffic.
+max_egress_bps = 400000000
+
+# license_key = "..."   # only for license-gated relays (or HOLLOW_FWD_LICENSE_KEY)

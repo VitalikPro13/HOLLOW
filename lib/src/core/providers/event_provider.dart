@@ -51,6 +51,7 @@ import 'package:hollow/src/core/providers/voice_channel_provider.dart';
 import 'package:hollow/src/core/providers/recovery_pool_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/core/providers/share_tab_provider.dart';
+import 'package:hollow/src/core/providers/forwarder_info_provider.dart';
 import 'package:hollow/src/core/providers/ice_config_provider.dart';
 import 'package:hollow/src/core/providers/relay_bandwidth_provider.dart';
 import 'package:hollow/src/core/services/push_hints_cache.dart';
@@ -321,6 +322,11 @@ class EventStreamNotifier extends Notifier<bool> {
           :final username, :final password, :final uris):
         ref.read(iceConfigProvider.notifier).setTurnCredentials(
             username: username, password: password, uris: uris);
+
+      case NetworkEvent_MediaForwarderInfo(:final peerId, :final online):
+        ref
+            .read(forwarderInfoProvider.notifier)
+            .setInfo(peerId: peerId, online: online);
 
       case NetworkEvent_BandwidthStatus(
           :final usedBytes, :final budgetBytes, :final resetInSecs):
@@ -1432,6 +1438,16 @@ class EventStreamNotifier extends Notifier<bool> {
             :final signalType, :final payload):
         ref.read(voiceChannelProvider.notifier).handleSignal(
               peerId, signalType, payload, serverId, channelId);
+
+      // Media forwarder control plane (step 3): fwd_ingest_answer /
+      // fwd_egress_offer / fwd_error from the forwarder's Olm-direct lane.
+      // The provider gates on "fromPeer == the discovered forwarder AND the
+      // origin is watched + assigned".
+      case NetworkEvent_ForwarderSignal(
+            :final fromPeer, :final signalType, :final payload):
+        ref
+            .read(voiceChannelProvider.notifier)
+            .handleForwarderSignal(fromPeer, signalType, payload);
 
       // -- Conference events (Zoom-style rooms) --
       case NetworkEvent_ConferenceJoinRequestReceived(

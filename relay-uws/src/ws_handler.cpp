@@ -1721,6 +1721,22 @@ static void handle_text_message(SSLWebSocket* ws, PerSocketData* data,
                                "turns:relay.anonlisten.com:5349"
                            }}});
         }
+    } else if (type == "get_media_forwarder") {
+        // Media forwarder discovery (media forwarding step 3) — mirrors
+        // get_turn_credentials: authenticated WS only, NEVER an HTTP variant
+        // (no caller identity at the HTTP layer — same reasoning as the
+        // removed /turn-credentials endpoint). Zero-knowledge preserved: one
+        // static peer_id from startup config plus a liveness bit from
+        // peer_sockets; no per-stream metadata exists on the relay.
+        if (data->is_guest) {
+            send_json(ws, {{"type", "media_forwarder"}, {"error", "auth required"}});
+        } else if (config.forwarder_peer_id.empty()) {
+            send_json(ws, {{"type", "media_forwarder"}, {"error", "not configured"}});
+        } else {
+            send_json(ws, {{"type", "media_forwarder"},
+                           {"peer_id", config.forwarder_peer_id},
+                           {"online", state.peer_sockets.count(config.forwarder_peer_id) > 0}});
+        }
     } else if (type == "get_bandwidth") {
         // Own daily byte-budget status over the LIVE connection — the reply
         // rides the exact socket whose bytes are counted, so attribution is

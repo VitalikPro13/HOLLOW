@@ -1,0 +1,34 @@
+# Hollow media forwarder (media forwarding step 3) — blind str0m packet relay
+# for SFrame-encrypted screen-share RTP. Never holds keys, never decodes.
+#
+# Install:
+#   sudo cp hollow-forwarder.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now hollow-forwarder
+#
+# First start prints "[HOLLOW-FWD] forwarder peer_id: 12D3KooW..." to the
+# journal — that id goes into the relay's --forwarder-peer-id flag. Back up
+# /home/ubuntu/forwarder/data/forwarder.key; rotation = DELETE the key (new
+# identity) + update the relay flag, never re-key the same peer_id.
+#
+# UDP media ports (default 40000-40199) must be open in ufw / the provider
+# firewall. SIGTERM simply kills the process — viewers recover via the
+# receiver-initiates fallback ladder.
+
+[Unit]
+Description=Hollow Media Forwarder (str0m packet relay)
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/forwarder
+ExecStart=/home/ubuntu/forwarder/hollow-forwarder --config /home/ubuntu/forwarder/forwarder.toml
+# Optional secrets (HOLLOW_FWD_LICENSE_KEY for license-gated relays); absent on
+# the open public relay. chmod 600 if created.
+EnvironmentFile=-/home/ubuntu/forwarder/forwarder.env
+Restart=always
+RestartSec=3
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

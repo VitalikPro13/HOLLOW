@@ -268,6 +268,7 @@ use super::crypto_handler::{
     send_message_to_peer, send_raw_to_peer, send_raw_to_identity,
 };
 use super::file_handler;
+use super::forwarder_client;
 use super::link_handler;
 use super::message_ops;
 use super::emotes;
@@ -2384,6 +2385,34 @@ async fn run_event_loop(
                         ).await;
                     }
 
+                    // -- Media forwarder control plane (media forwarding step 3) --
+
+                    NodeCommand::ForwarderSendSignal { forwarder_peer_id, signal_type, payload } => {
+                        last_message_traffic = std::time::Instant::now();
+                        forwarder_client::handle_forwarder_send_signal(
+                            &mut olm, &crypto_store, &event_tx, &ws_cmd_tx, &ws_room_peers,
+                            &mut pending_messages, &mut key_request_in_flight,
+                            &device_keypair, &device_peer_id,
+                            forwarder_peer_id, signal_type, payload,
+                        ).await;
+                    }
+
+                    // Deliberately NOT NodeCommand::JoinRoom — that arm mutates
+                    // `active_room` and fires `RoomCleared` (DM-conversation-pane
+                    // semantics that would wipe the open chat). The fwd room is a
+                    // pure transport join.
+                    NodeCommand::JoinForwarderRoom { forwarder_peer_id } => {
+                        let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinRoom {
+                            room_code: format!("fwd:{forwarder_peer_id}"),
+                        });
+                    }
+
+                    NodeCommand::LeaveForwarderRoom { forwarder_peer_id } => {
+                        let _ = ws_cmd_tx.send(super::ws_client::WsCommand::LeaveRoom {
+                            room_code: format!("fwd:{forwarder_peer_id}"),
+                        });
+                    }
+
                     // -- Conference commands (node/conference.rs) --
                     NodeCommand::ConferenceStart { conf_id, waiting_room, access_code_hash, host_display_name, host_avatar_hash } => {
                         super::conference::handle_conference_start(
@@ -2657,6 +2686,10 @@ async fn run_event_loop(
                         // every (re)connect; the 50-min timer below refreshes
                         // long-lived sessions before the 1h expiry).
                         let _ = ws_cmd_tx.send(super::ws_client::WsCommand::GetTurnCredentials);
+                        // Media forwarder discovery (step 3): static id, so
+                        // reconnects are the only refresh needed — D5's
+                        // fallback ladder corrects any staleness.
+                        let _ = ws_cmd_tx.send(super::ws_client::WsCommand::GetMediaForwarder);
                         // Join personal inbox room (for receiving friend requests from strangers).
                         let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinRoom {
                             room_code: format!("inbox:{}", local_peer_str),
@@ -3955,6 +3988,11 @@ async fn run_event_loop(
                     WsEvent::TurnCredentials { username, password, ttl, uris } => {
                         let _ = event_tx.send(NetworkEvent::TurnCredentials {
                             username, password, ttl, uris,
+                        }).await;
+                    }
+                    WsEvent::MediaForwarderInfo { peer_id, online } => {
+                        let _ = event_tx.send(NetworkEvent::MediaForwarderInfo {
+                            peer_id, online,
                         }).await;
                     }
                     WsEvent::BandwidthStatus { used, budget, reset_in_secs } => {
@@ -8354,11 +8392,17 @@ async fn handle_incoming_request(
                         origin, &local_peer_str,
                     ).await;
                 }
-                Ok(MessageEnvelope::VoiceChannelScreenWatch { sid, cid, want, viewer_width, viewer_height, source_quality, .. }) => {
+                Ok(MessageEnvelope::VoiceChannelScreenWatch { sid, cid, want, viewer_width, viewer_height, source_quality, route, .. }) => {
                     voice_handler::handle_envelope_voice_channel_screen_watch(
                         voice_channel_participants, event_tx,
                         peer_str.to_string(), sid, cid, want,
-                        viewer_width, viewer_height, source_quality,
+                        viewer_width, viewer_height, source_quality, route,
+                    ).await;
+                }
+                Ok(MessageEnvelope::VoiceChannelScreenAssign { sid, cid, origin, forwarder, .. }) => {
+                    voice_handler::handle_envelope_voice_channel_screen_assign(
+                        voice_channel_participants, event_tx,
+                        peer_str.to_string(), sid, cid, origin, forwarder, &local_peer_str,
                     ).await;
                 }
                 Ok(MessageEnvelope::VoiceChannelRenegOffer { sid, cid, sdp, .. }) => {
@@ -8390,6 +8434,64 @@ async fn handle_incoming_request(
                             signal_type: "reneg_answer".to_string(), payload,
                         }).await;
                     }
+                }
+
+                // -- Media forwarder control plane (step 3) --
+                // Client-bound signals from a forwarder. Rust enforces only the
+                // SDP size cap; the trust decision ("from the discovered
+                // forwarder AND for a watched+assigned origin") lives in Dart —
+                // an arbitrary peer sending these reaches a provider that
+                // ignores unknown senders.
+                Ok(MessageEnvelope::FwdIngestAnswer { origin, sdp }) => {
+                    if sdp.len() > MAX_SDP_SIZE {
+                        hollow_log!("[HOLLOW-SECURITY] BLOCKED fwd_ingest_answer — size {} exceeds limit from {peer_str}", sdp.len());
+                    } else {
+                        let payload = serde_json::json!({
+                            "origin": {"peer": origin.peer, "kind": origin.kind, "stream": origin.stream},
+                            "sdp": sdp,
+                        }).to_string();
+                        let _ = event_tx.send(NetworkEvent::ForwarderSignal {
+                            from_peer: peer_str.to_string(),
+                            signal_type: "fwd_ingest_answer".to_string(), payload,
+                        }).await;
+                    }
+                }
+                Ok(MessageEnvelope::FwdEgressOffer { origin, sdp }) => {
+                    if sdp.len() > MAX_SDP_SIZE {
+                        hollow_log!("[HOLLOW-SECURITY] BLOCKED fwd_egress_offer — size {} exceeds limit from {peer_str}", sdp.len());
+                    } else {
+                        let payload = serde_json::json!({
+                            "origin": {"peer": origin.peer, "kind": origin.kind, "stream": origin.stream},
+                            "sdp": sdp,
+                        }).to_string();
+                        let _ = event_tx.send(NetworkEvent::ForwarderSignal {
+                            from_peer: peer_str.to_string(),
+                            signal_type: "fwd_egress_offer".to_string(), payload,
+                        }).await;
+                    }
+                }
+                Ok(MessageEnvelope::FwdError { origin, code, detail }) => {
+                    let payload = serde_json::json!({
+                        "origin": {"peer": origin.peer, "kind": origin.kind, "stream": origin.stream},
+                        "code": code, "detail": detail,
+                    }).to_string();
+                    let _ = event_tx.send(NetworkEvent::ForwarderSignal {
+                        from_peer: peer_str.to_string(),
+                        signal_type: "fwd_error".to_string(), payload,
+                    }).await;
+                }
+                // Forwarder-bound signals arriving at a client — misdirected or
+                // malicious; a client never plays the forwarder role on this
+                // lane (phase-2 peer forwarders embed the forwarder module with
+                // its own signaling loop, not this dispatch).
+                Ok(MessageEnvelope::FwdStreamRegister { .. })
+                | Ok(MessageEnvelope::FwdStreamAuth { .. })
+                | Ok(MessageEnvelope::FwdStreamUnregister { .. })
+                | Ok(MessageEnvelope::FwdIngestOffer { .. })
+                | Ok(MessageEnvelope::FwdAttach { .. })
+                | Ok(MessageEnvelope::FwdDetach { .. })
+                | Ok(MessageEnvelope::FwdEgressAnswer { .. }) => {
+                    hollow_log!("[HOLLOW-SECURITY] Forwarder-bound fwd_* signal received by client from {peer_str} — ignoring");
                 }
 
                 Err(_) => {
@@ -10331,6 +10433,7 @@ async fn handle_incoming_request(
                             | MessageEnvelope::VoiceChannelScreenIce { .. }
                             | MessageEnvelope::VoiceChannelScreenState { .. }
                             | MessageEnvelope::VoiceChannelScreenWatch { .. }
+                            | MessageEnvelope::VoiceChannelScreenAssign { .. }
                             | MessageEnvelope::VoiceChannelRenegOffer { .. }
                             | MessageEnvelope::VoiceChannelRenegAnswer { .. }
                             | MessageEnvelope::VoiceChannelCameraState { .. }
@@ -10413,11 +10516,19 @@ async fn handle_incoming_request(
                                     peer_str.to_string(), sid, cid, enabled, quality,
                                 ).await;
                             }
-                            MessageEnvelope::VoiceChannelScreenWatch { sid, cid, want, viewer_width, viewer_height, source_quality, .. } => {
+                            MessageEnvelope::VoiceChannelScreenWatch { sid, cid, want, viewer_width, viewer_height, source_quality, route, .. } => {
                                 voice_handler::handle_envelope_voice_channel_screen_watch(
                                     voice_channel_participants, event_tx,
                                     peer_str.to_string(), sid, cid, want,
-                                    viewer_width, viewer_height, source_quality,
+                                    viewer_width, viewer_height, source_quality, route,
+                                ).await;
+                            }
+
+                            MessageEnvelope::VoiceChannelScreenAssign { sid, cid, origin, forwarder, .. } => {
+                                voice_handler::handle_envelope_voice_channel_screen_assign(
+                                    voice_channel_participants, event_tx,
+                                    peer_str.to_string(), sid, cid, origin, forwarder,
+                                    local_peer_str,
                                 ).await;
                             }
 
@@ -10461,6 +10572,23 @@ async fn handle_incoming_request(
                             | MessageEnvelope::DmSiblingSyncBatch { .. }
                             | MessageEnvelope::SessionAck => {
                                 hollow_log!("[HOLLOW-MLS] Unexpected DM envelope via MLS from {sender_peer_id} — ignoring");
+                            }
+
+                            // Forwarder control plane is Olm-direct inside the
+                            // fwd:{forwarder} room by contract — the forwarder
+                            // holds no group keys, so fwd_* via MLS is always
+                            // misdirected or spoofed.
+                            MessageEnvelope::FwdStreamRegister { .. }
+                            | MessageEnvelope::FwdStreamAuth { .. }
+                            | MessageEnvelope::FwdStreamUnregister { .. }
+                            | MessageEnvelope::FwdIngestOffer { .. }
+                            | MessageEnvelope::FwdIngestAnswer { .. }
+                            | MessageEnvelope::FwdAttach { .. }
+                            | MessageEnvelope::FwdDetach { .. }
+                            | MessageEnvelope::FwdEgressOffer { .. }
+                            | MessageEnvelope::FwdEgressAnswer { .. }
+                            | MessageEnvelope::FwdError { .. } => {
+                                hollow_log!("[HOLLOW-MLS] Unexpected fwd_* envelope via MLS from {sender_peer_id} — ignoring");
                             }
                         }
                     }

@@ -311,6 +311,10 @@ pub(crate) enum NetworkEvent {
     /// Dart's iceConfigProvider consumes these; Rust owns the refresh cadence
     /// (on connect + 50-min interval).
     TurnCredentials { username: String, password: String, ttl: u64, uris: Vec<String> },
+    /// The relay's advertised media forwarder (media forwarding step 3).
+    /// Static config on the relay — refreshed on every (re)connect only.
+    /// Dart's forwarderInfoProvider caches it.
+    MediaForwarderInfo { peer_id: String, online: bool },
     // -- Multi-device link snapshot events (Step 4) --
     /// (Populated device) Our link code was successfully claimed on the relay —
     /// show it (with countdown) for the empty device to enter.
@@ -388,6 +392,12 @@ pub(crate) enum NetworkEvent {
     VoiceChannelJoined { server_id: String, channel_id: String, peer_id: String },
     VoiceChannelLeft { server_id: String, channel_id: String, peer_id: String },
     VoiceChannelSignal { server_id: String, channel_id: String, peer_id: String, signal_type: String, payload: String },
+    // -- Media forwarder events (media forwarding step 3) --
+    /// A client-bound `fwd_*` signal from a media forwarder
+    /// (`fwd_ingest_answer` / `fwd_egress_offer` / `fwd_error`). Dart gates on
+    /// "from_peer == the discovered forwarder AND origin is watched+assigned"
+    /// before acting — Rust only enforces the SDP size cap here.
+    ForwarderSignal { from_peer: String, signal_type: String, payload: String },
     // -- Gossip relay tree events (Phase 5D) --
     /// Tell Dart to establish a WebRTC data channel to this peer (gossip neighbor).
     GossipConnect { peer_id: String },
@@ -881,6 +891,17 @@ pub(crate) enum NodeCommand {
     /// failures against `peer_id` — re-emit the current MLS key; with
     /// `escalate` also re-bootstrap the group / re-add the failing peer.
     VoiceSframeHeal { server_id: String, channel_id: String, peer_id: String, escalate: bool },
+    // -- Media forwarder control plane (media forwarding step 3) --
+    /// Send an Olm-encrypted `fwd_*` envelope to a media forwarder inside its
+    /// `fwd:{peer_id}` room. Queues + fires a signed KeyRequest when no Olm
+    /// session exists yet (message_ops pattern).
+    ForwarderSendSignal { forwarder_peer_id: String, signal_type: String, payload: String },
+    /// Join/leave the forwarder's dedicated relay room. Deliberately NOT
+    /// `NodeCommand::JoinRoom` — that arm mutates `active_room` and fires
+    /// `RoomCleared` (DM-conversation-pane semantics that would wipe the open
+    /// chat).
+    JoinForwarderRoom { forwarder_peer_id: String },
+    LeaveForwarderRoom { forwarder_peer_id: String },
     // -- Conference commands (node/conference.rs) --
     ConferenceStart { conf_id: String, waiting_room: bool, access_code_hash: Option<String>, host_display_name: String, host_avatar_hash: String },
     ConferenceEnd { conf_id: String },
@@ -1078,6 +1099,9 @@ impl NodeCommand {
             Self::VoiceChannelLeave { .. } => "VoiceChannelLeave",
             Self::VoiceChannelSendSignal { .. } => "VoiceChannelSendSignal",
             Self::VoiceSframeHeal { .. } => "VoiceSframeHeal",
+            Self::ForwarderSendSignal { .. } => "ForwarderSendSignal",
+            Self::JoinForwarderRoom { .. } => "JoinForwarderRoom",
+            Self::LeaveForwarderRoom { .. } => "LeaveForwarderRoom",
             Self::ConferenceStart { .. } => "ConferenceStart",
             Self::ConferenceEnd { .. } => "ConferenceEnd",
             Self::ConferenceRequestJoin { .. } => "ConferenceRequestJoin",
@@ -3034,6 +3058,32 @@ pub(crate) enum MessageEnvelope {
         viewer_height: u32,
         #[serde(default)]
         source_quality: bool,
+        /// Viewer's self-reported route class to the sharer (media forwarding
+        /// step 3): "" = old/unknown client, "direct", "relay",
+        /// "direct_failed" (fallback-ladder re-watch after a forwarder
+        /// failure). ADVISORY — the sharer uses it to decide forwarder
+        /// assignment; a wrong hint is corrected by the fallback ladder.
+        /// Non-empty also marks a step-3-capable client (old viewers must
+        /// never receive `vc_screen_assign`).
+        #[serde(default)]
+        route: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<String>,
+    },
+
+    /// Targeted: sharer -> viewer, assignment to a media forwarder (media
+    /// forwarding step 3). The viewer joins `fwd:{forwarder}` and attaches to
+    /// the stream identified by `origin` instead of receiving a direct
+    /// per-viewer PC. `forwarder` empty = revert-to-direct (re-watch).
+    /// Origin is spoof-guarded like the screen offer (must name the sender).
+    #[serde(rename = "vc_screen_assign")]
+    VoiceChannelScreenAssign {
+        sid: String,
+        cid: String,
+        #[serde(default)]
+        origin: Box<StreamOrigin>,
+        #[serde(default)]
+        forwarder: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         target: Option<String>,
     },
@@ -3083,6 +3133,115 @@ pub(crate) enum MessageEnvelope {
         target: Option<String>,
     },
 
+    // -- Media forwarder control plane (media forwarding step 3) --
+    //
+    // Client ↔ forwarder ONLY, Olm-direct inside the dedicated
+    // `fwd:{forwarder_peer_id}` relay room — never room-broadcast, never MLS,
+    // never the vc_* lane (the forwarder can't satisfy is_vc_participant and
+    // must never hold group keys). The forwarder requires `origin.peer` to be
+    // the Olm-authenticated sender on registration; viewers must be on the
+    // stream's allowlist to attach. Both legs exchange COMPLETE SDPs (the
+    // forwarder has a fixed public host candidate — the D2 spike proved a
+    // NAT'd client reaches it without trickle). Tag `fwd_ice` is RESERVED for
+    // a future trickle path; do not reuse it for anything else.
+
+    /// Sharer → forwarder: register a stream and its viewer allowlist.
+    /// Idempotent — re-registering replaces the allowlist.
+    #[serde(rename = "fwd_stream_register")]
+    FwdStreamRegister {
+        #[serde(default)]
+        origin: Box<StreamOrigin>,
+        #[serde(default)]
+        allowed_viewers: Vec<String>,
+    },
+
+    /// Sharer → forwarder: incremental allowlist update for a registered
+    /// stream (viewers joining/leaving the watch set).
+    #[serde(rename = "fwd_stream_auth")]
+    FwdStreamAuth {
+        #[serde(default)]
+        origin: Box<StreamOrigin>,
+        #[serde(default)]
+        add: Vec<String>,
+        #[serde(default)]
+        remove: Vec<String>,
+    },
+
+    /// Sharer → forwarder: tear down a stream (also implicit when the sharer
+    /// leaves the fwd room or the ingest leg dies).
+    #[serde(rename = "fwd_stream_unregister")]
+    FwdStreamUnregister {
+        #[serde(default)]
+        origin: Box<StreamOrigin>,
+    },
+
+    /// Sharer → forwarder: complete SDP offer for the single ingest leg.
+    #[serde(rename = "fwd_ingest_offer")]
+    FwdIngestOffer {
+        #[serde(default)]
+        origin: Box<StreamOrigin>,
+        #[serde(default)]
+        sdp: String,
+    },
+
+    /// Forwarder → sharer: complete SDP answer for the ingest leg.
+    #[serde(rename = "fwd_ingest_answer")]
+    FwdIngestAnswer {
+        #[serde(default)]
+        origin: Box<StreamOrigin>,
+        #[serde(default)]
+        sdp: String,
+    },
+
+    /// Viewer → forwarder: request an egress leg for a stream we were
+    /// assigned to (`vc_screen_assign`) and allowlisted for.
+    #[serde(rename = "fwd_attach")]
+    FwdAttach {
+        #[serde(default)]
+        origin: Box<StreamOrigin>,
+    },
+
+    /// Viewer → forwarder: tear down our egress leg.
+    #[serde(rename = "fwd_detach")]
+    FwdDetach {
+        #[serde(default)]
+        origin: Box<StreamOrigin>,
+    },
+
+    /// Forwarder → viewer: complete SDP offer for the egress leg (the
+    /// forwarder offers, mirroring the viewer's existing answerer shape).
+    #[serde(rename = "fwd_egress_offer")]
+    FwdEgressOffer {
+        #[serde(default)]
+        origin: Box<StreamOrigin>,
+        #[serde(default)]
+        sdp: String,
+    },
+
+    /// Viewer → forwarder: complete SDP answer for the egress leg.
+    #[serde(rename = "fwd_egress_answer")]
+    FwdEgressAnswer {
+        #[serde(default)]
+        origin: Box<StreamOrigin>,
+        #[serde(default)]
+        sdp: String,
+    },
+
+    /// Forwarder → client: explicit refusal/failure. `code` is one of
+    /// `full | over_budget | not_authorized | unknown_stream | shutting_down`
+    /// (see `forwarder::budget::FwdErrorCode`). Receivers fall back to the
+    /// direct+TURN path — the forwarder is an availability helper, never
+    /// authority.
+    #[serde(rename = "fwd_error")]
+    FwdError {
+        #[serde(default)]
+        origin: Box<StreamOrigin>,
+        #[serde(default)]
+        code: String,
+        #[serde(default)]
+        detail: String,
+    },
+
     // -- Gossip relay tree (Phase 5D) --
 
     /// Broadcast metadata: notifies server members that a gossip file broadcast is in flight.
@@ -3125,6 +3284,7 @@ impl MessageEnvelope {
             | Self::VoiceChannelScreenIce { target, .. }
             | Self::VoiceChannelScreenState { target, .. }
             | Self::VoiceChannelScreenWatch { target, .. }
+            | Self::VoiceChannelScreenAssign { target, .. }
             | Self::VoiceChannelRenegOffer { target, .. }
             | Self::VoiceChannelRenegAnswer { target, .. }
             | Self::VoiceChannelCameraState { target, .. }
@@ -3374,7 +3534,7 @@ pub struct ShareRef {
 /// BOXED at every use site per the `LinkPreviewRef::rich` rule below: inline
 /// envelope fields grow every event-loop future frame and have overflowed the
 /// 2 MB tokio worker stacks before. Behind one pointer it costs 8 bytes.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub(crate) struct StreamOrigin {
     /// Originator DEVICE peer_id (routable — VC signals key on the WS sender;
     /// UI collapses device→master at display time only).
@@ -3776,6 +3936,184 @@ mod stream_origin_tests {
                 assert_eq!(o.stream, "ff00ff00");
             }
             other => panic!("unexpected parse result: {other:?}"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod screen_assign_route_tests {
+    use super::*;
+
+    /// Old-client `vc_screen_watch` (no `route`) parses with route = "" —
+    /// the "unknown client" marker that keeps `vc_screen_assign` away from
+    /// pre-step-3 viewers.
+    #[test]
+    fn screen_watch_without_route_defaults_empty() {
+        let json = r#"{"t":"vc_screen_watch","sid":"s","cid":"c","want":true,"viewer_width":1920,"viewer_height":1080,"source_quality":false}"#;
+        match serde_json::from_str::<MessageEnvelope>(json) {
+            Ok(MessageEnvelope::VoiceChannelScreenWatch { want, route, viewer_width, .. }) => {
+                assert!(want);
+                assert_eq!(viewer_width, 1920);
+                assert_eq!(route, "");
+            }
+            other => panic!("unexpected parse result: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn screen_watch_route_round_trips() {
+        let env = MessageEnvelope::VoiceChannelScreenWatch {
+            sid: "s".into(), cid: "c".into(), want: true,
+            viewer_width: 2560, viewer_height: 1440, source_quality: false,
+            route: "relay".into(), target: None,
+        };
+        let json = serde_json::to_string(&env).unwrap();
+        match serde_json::from_str::<MessageEnvelope>(&json).unwrap() {
+            MessageEnvelope::VoiceChannelScreenWatch { route, .. } => {
+                assert_eq!(route, "relay");
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn screen_assign_round_trips_and_tag_pinned() {
+        let env = MessageEnvelope::VoiceChannelScreenAssign {
+            sid: "s".into(), cid: "c".into(),
+            origin: Box::new(StreamOrigin {
+                peer: "12D3KooWSharer".into(),
+                kind: "screen".into(),
+                stream: "ab12cd34".into(),
+            }),
+            forwarder: "12D3KooWFwd".into(),
+            target: None,
+        };
+        let json = serde_json::to_string(&env).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["t"], serde_json::json!("vc_screen_assign"));
+        match serde_json::from_str::<MessageEnvelope>(&json).unwrap() {
+            MessageEnvelope::VoiceChannelScreenAssign { origin, forwarder, .. } => {
+                assert_eq!(origin.peer, "12D3KooWSharer");
+                assert_eq!(origin.stream, "ab12cd34");
+                assert_eq!(forwarder, "12D3KooWFwd");
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+        // Revert-to-direct: empty forwarder survives (plain default field).
+        let json = r#"{"t":"vc_screen_assign","sid":"s","cid":"c","origin":{"peer":"p"}}"#;
+        match serde_json::from_str::<MessageEnvelope>(json).unwrap() {
+            MessageEnvelope::VoiceChannelScreenAssign { forwarder, .. } => {
+                assert_eq!(forwarder, "");
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod fwd_envelope_tests {
+    use super::*;
+
+    fn origin() -> Box<StreamOrigin> {
+        Box::new(StreamOrigin {
+            peer: "12D3KooWSharer".into(),
+            kind: "screen".into(),
+            stream: "ab12cd34".into(),
+        })
+    }
+
+    /// Every fwd_* wire tag pinned literally — the forwarder and clients ship
+    /// on independent schedules, so a silent tag rename would strand deployed
+    /// forwarders.
+    #[test]
+    fn fwd_tags_are_pinned() {
+        let cases: Vec<(MessageEnvelope, &str)> = vec![
+            (MessageEnvelope::FwdStreamRegister { origin: origin(), allowed_viewers: vec![] }, "fwd_stream_register"),
+            (MessageEnvelope::FwdStreamAuth { origin: origin(), add: vec![], remove: vec![] }, "fwd_stream_auth"),
+            (MessageEnvelope::FwdStreamUnregister { origin: origin() }, "fwd_stream_unregister"),
+            (MessageEnvelope::FwdIngestOffer { origin: origin(), sdp: "v=0".into() }, "fwd_ingest_offer"),
+            (MessageEnvelope::FwdIngestAnswer { origin: origin(), sdp: "v=0".into() }, "fwd_ingest_answer"),
+            (MessageEnvelope::FwdAttach { origin: origin() }, "fwd_attach"),
+            (MessageEnvelope::FwdDetach { origin: origin() }, "fwd_detach"),
+            (MessageEnvelope::FwdEgressOffer { origin: origin(), sdp: "v=0".into() }, "fwd_egress_offer"),
+            (MessageEnvelope::FwdEgressAnswer { origin: origin(), sdp: "v=0".into() }, "fwd_egress_answer"),
+            (MessageEnvelope::FwdError { origin: origin(), code: "full".into(), detail: String::new() }, "fwd_error"),
+        ];
+        for (env, tag) in cases {
+            let json = serde_json::to_string(&env).unwrap();
+            let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+            assert_eq!(v["t"], *tag, "wrong tag on {json}");
+        }
+    }
+
+    #[test]
+    fn fwd_register_round_trips() {
+        let env = MessageEnvelope::FwdStreamRegister {
+            origin: origin(),
+            allowed_viewers: vec!["12D3KooWViewerA".into(), "12D3KooWViewerB".into()],
+        };
+        let json = serde_json::to_string(&env).unwrap();
+        match serde_json::from_str::<MessageEnvelope>(&json).unwrap() {
+            MessageEnvelope::FwdStreamRegister { origin, allowed_viewers } => {
+                assert_eq!(origin.peer, "12D3KooWSharer");
+                assert_eq!(origin.stream, "ab12cd34");
+                assert_eq!(allowed_viewers.len(), 2);
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fwd_error_round_trips() {
+        let env = MessageEnvelope::FwdError {
+            origin: origin(),
+            code: "not_authorized".into(),
+            detail: "viewer not on allowlist".into(),
+        };
+        let json = serde_json::to_string(&env).unwrap();
+        match serde_json::from_str::<MessageEnvelope>(&json).unwrap() {
+            MessageEnvelope::FwdError { code, detail, .. } => {
+                assert_eq!(code, "not_authorized");
+                assert_eq!(detail, "viewer not on allowlist");
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    /// A minimal frame with every field absent still parses (all
+    /// `#[serde(default)]`) — an older/newer counterpart can always drop
+    /// fields it doesn't know.
+    #[test]
+    fn fwd_absent_fields_default() {
+        match serde_json::from_str::<MessageEnvelope>(r#"{"t":"fwd_attach"}"#) {
+            Ok(MessageEnvelope::FwdAttach { origin }) => {
+                assert_eq!(origin.peer, "");
+                assert_eq!(origin.kind, "");
+                assert_eq!(origin.stream, "");
+            }
+            other => panic!("unexpected parse result: {other:?}"),
+        }
+        match serde_json::from_str::<MessageEnvelope>(r#"{"t":"fwd_stream_auth","origin":{"peer":"p"}}"#) {
+            Ok(MessageEnvelope::FwdStreamAuth { origin, add, remove }) => {
+                assert_eq!(origin.peer, "p");
+                assert!(add.is_empty());
+                assert!(remove.is_empty());
+            }
+            other => panic!("unexpected parse result: {other:?}"),
+        }
+    }
+
+    /// fwd envelopes are Olm-direct only — none may claim a broadcast target.
+    #[test]
+    fn fwd_envelopes_have_no_target() {
+        let envs = [
+            MessageEnvelope::FwdStreamRegister { origin: origin(), allowed_viewers: vec![] },
+            MessageEnvelope::FwdIngestOffer { origin: origin(), sdp: "v=0".into() },
+            MessageEnvelope::FwdEgressOffer { origin: origin(), sdp: "v=0".into() },
+            MessageEnvelope::FwdError { origin: origin(), code: "full".into(), detail: String::new() },
+        ];
+        for env in envs {
+            assert!(env.target().is_none(), "fwd envelope unexpectedly targetable");
         }
     }
 }

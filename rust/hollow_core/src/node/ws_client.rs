@@ -74,6 +74,10 @@ pub enum WsCommand {
     /// WS connection (replaces the open HTTP /turn-credentials endpoint —
     /// retries ride the normal reconnect machinery instead of dead-chaining).
     GetTurnCredentials,
+    /// Ask the relay which media forwarder it advertises (media forwarding
+    /// step 3). Mirrors GetTurnCredentials: authed WS only, re-sent on every
+    /// reconnect (the id is static config; no refresh timer needed).
+    GetMediaForwarder,
     /// Claim a temporary nickname on the relay (RAM only). `master` is our
     /// MASTER identity — the relay hands it back on resolve so a stranger's
     /// friend request targets `inbox:{master}` (which we actually listen on)
@@ -164,6 +168,8 @@ pub enum WsEvent {
     DiscoveredPeers { room: String, peers: Vec<String> },
     /// Response to GetTurnCredentials — time-limited TURN credentials.
     TurnCredentials { username: String, password: String, ttl: u64, uris: Vec<String> },
+    /// Response to GetMediaForwarder — the relay's advertised media forwarder.
+    MediaForwarderInfo { peer_id: String, online: bool },
     /// Temporary nickname successfully claimed.
     NicknameClaimed { nickname: String },
     /// Temporary nickname released.
@@ -207,6 +213,7 @@ impl WsEvent {
             Self::PeerStatus { .. } => "PeerStatus",
             Self::DiscoveredPeers { .. } => "DiscoveredPeers",
             Self::TurnCredentials { .. } => "TurnCredentials",
+            Self::MediaForwarderInfo { .. } => "MediaForwarderInfo",
             Self::NicknameClaimed { .. } => "NicknameClaimed",
             Self::NicknameReleased => "NicknameReleased",
             Self::NicknameError { .. } => "NicknameError",
@@ -263,6 +270,11 @@ enum ServerMsg {
         #[serde(default)] password: String,
         #[serde(default)] ttl: u64,
         #[serde(default)] uris: Vec<String>,
+        #[serde(default)] error: Option<String>,
+    },
+    MediaForwarder {
+        #[serde(default)] peer_id: String,
+        #[serde(default)] online: bool,
         #[serde(default)] error: Option<String>,
     },
     Error { error: String },
@@ -806,6 +818,15 @@ async fn send_command(write: &mut WsSink, cmd: &WsCommand) -> bool {
             }
             return true;
         }
+        WsCommand::GetMediaForwarder => {
+            let msg = serde_json::json!({ "type": "get_media_forwarder" });
+            let text = msg.to_string();
+            if let Err(e) = bounded_send(write, Message::Text(text.into())).await {
+                hollow_log!("[HOLLOW-WS] GetMediaForwarder send failed: {e}");
+                return false;
+            }
+            return true;
+        }
         WsCommand::GetBandwidth => {
             let msg = serde_json::json!({ "type": "get_bandwidth" });
             if let Err(e) = bounded_send(write, Message::Text(msg.to_string().into())).await {
@@ -1144,6 +1165,16 @@ async fn handle_server_message(event_tx: &mpsc::UnboundedSender<WsEvent>, msg: S
             }
             hollow_log!("[HOLLOW-WS] TURN credentials received: {} URI(s), ttl={ttl}s", uris.len());
             WsEvent::TurnCredentials { username, password, ttl, uris }
+        }
+        ServerMsg::MediaForwarder { peer_id, online, error } => {
+            if let Some(err) = error {
+                // Non-fatal: relay without a forwarder configured (or guest
+                // socket) — clients just keep today's direct+TURN path.
+                hollow_log!("[HOLLOW-WS] Media forwarder unavailable: {err}");
+                return;
+            }
+            hollow_log!("[HOLLOW-WS] Media forwarder advertised (online={online})");
+            WsEvent::MediaForwarderInfo { peer_id, online }
         }
         ServerMsg::Error { error } => {
             hollow_log!("[HOLLOW-WS] Server error: {error}");

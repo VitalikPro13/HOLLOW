@@ -103,6 +103,7 @@ TURN_SECRET=your_secret ./build/hollow-relay \
 | `--keys-file` | `keys.json` | License keys JSON path |
 | `--cert-file` | `/etc/letsencrypt/live/relay.anonlisten.com/fullchain.pem` | TLS certificate chain |
 | `--key-file` | `/etc/letsencrypt/live/relay.anonlisten.com/privkey.pem` | TLS private key |
+| `--forwarder-peer-id` | *(none)* | Media forwarder peer_id advertised via `get_media_forwarder` (startup-load; restart on rotation) |
 
 ### License keys format (`keys.json`)
 

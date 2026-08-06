@@ -12,6 +12,11 @@ struct Config {
     std::string cert_file = "/etc/letsencrypt/live/relay.anonlisten.com/fullchain.pem";
     std::string key_file = "/etc/letsencrypt/live/relay.anonlisten.com/privkey.pem";
     std::string turn_secret;
+    // Media forwarder discovery (get_media_forwarder): the peer_id of the
+    // infra forwarder this relay advertises. Startup-load only — rotation =
+    // update the flag + restart (no hot-reload machinery by design). Empty =
+    // not configured. Zero-knowledge: one static id, no per-stream metadata.
+    std::string forwarder_peer_id;
 };
 
 inline void print_help() {
@@ -24,6 +29,7 @@ inline void print_help() {
         "  --reports-file <path> User reports JSON file (default: reports.json)\n"
         "  --cert-file <path>    TLS certificate file\n"
         "  --key-file <path>     TLS private key file\n"
+        "  --forwarder-peer-id <id>  Media forwarder peer_id to advertise (get_media_forwarder)\n"
         "  --help                Show this help\n"
     );
 }
@@ -43,6 +49,7 @@ inline Config parse_args(int argc, char** argv) {
         else if (arg == "--reports-file" && i + 1 < argc) config.reports_file = argv[++i];
         else if (arg == "--cert-file" && i + 1 < argc) config.cert_file = argv[++i];
         else if (arg == "--key-file" && i + 1 < argc) config.key_file = argv[++i];
+        else if (arg == "--forwarder-peer-id" && i + 1 < argc) config.forwarder_peer_id = argv[++i];
         else if (arg == "--help") { print_help(); exit(0); }
     }
     return config;

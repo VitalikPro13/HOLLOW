@@ -170,6 +170,54 @@ class ScreenShareService {
     return ok;
   }
 
+  /// Wait for ICE gathering to complete and return the full local SDP.
+  ///
+  /// Media forwarding step 3: forwarder legs exchange COMPLETE SDPs — the
+  /// forwarder sits on a fixed public host candidate and has no trickle lane
+  /// (`FwdIce` is reserved, unimplemented). Call after createOfferFromStream
+  /// (ingest leg) or handleOffer (egress leg answer). Falls back to whatever
+  /// has gathered when the [timeout] lapses — a srflx candidate is usually in
+  /// well under a second.
+  /// A leg whose SDP leaves with zero candidates can never connect, and ICE
+  /// then fails SILENTLY (no state transitions at all — the port allocator
+  /// never activates the transport). Logging the count here is what turned
+  /// that into a one-line diagnosis; keep it.
+  Future<String?> gatheredLocalSdp(
+      {Duration timeout = const Duration(seconds: 10)}) async {
+    final pc = _pc;
+    if (pc == null) return null;
+    final deadline = DateTime.now().add(timeout);
+    String? sdp;
+    // Wait for CANDIDATES, not for gatheringState == complete: this fork
+    // routinely sits in `gathering` indefinitely even with candidates already
+    // in the local description, which turned every forwarder leg into a flat
+    // 10-second stall before the SDP was sent (field-measured 2026-08-06).
+    // One extra settle poll after the first candidate picks up the srflx that
+    // usually lands right behind the host one.
+    var polls = 0;
+    while (DateTime.now().isBefore(deadline)) {
+      sdp = (await pc.getLocalDescription())?.sdp;
+      final have = sdp != null && sdp.contains('a=candidate:');
+      if (have && polls >= 1) break;
+      if (pc.iceGatheringState ==
+          RTCIceGatheringState.RTCIceGatheringStateComplete) {
+        break;
+      }
+      polls = have ? polls + 1 : 0;
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+    }
+    sdp = (await pc.getLocalDescription())?.sdp;
+    final candidates =
+        sdp == null ? 0 : RegExp('a=candidate:').allMatches(sdp).length;
+    _log('[HOLLOW-SCREEN] Gathered local SDP: $candidates candidate(s), '
+        'gathering=${pc.iceGatheringState}');
+    if (candidates == 0) {
+      _log('[HOLLOW-SCREEN] WARNING: no ICE candidates gathered — this leg '
+          'cannot connect');
+    }
+    return sdp;
+  }
+
   /// Apply resolution, framerate, and bitrate caps on the video sender's
   /// encoding parameters. Even though getDisplayMedia now receives width/height
   /// constraints, the desktop capturer may still deliver native-resolution

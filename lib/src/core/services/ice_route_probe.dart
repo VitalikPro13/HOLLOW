@@ -66,6 +66,19 @@ Future<IceRoute?> probeIceRoute(RTCPeerConnection? Function() resolvePc) async {
   return null;
 }
 
+/// One immediate stats pass — no retry schedule. For callers that need a
+/// best-effort route hint NOW from an already-connected PC (the viewer's
+/// `route` field on screen_watch, media forwarding step 3). Returns null when
+/// no succeeded pair is visible yet; the hint is advisory, so callers just
+/// send "" and the fallback ladder corrects any wrong guess.
+Future<IceRoute?> probeIceRouteOnce(RTCPeerConnection pc) async {
+  try {
+    return _routeFromStats(await pc.getStats());
+  } catch (_) {
+    return null;
+  }
+}
+
 IceRoute? _routeFromStats(List<StatsReport> stats) {
   StatsReport? pair;
   for (final r in stats) {

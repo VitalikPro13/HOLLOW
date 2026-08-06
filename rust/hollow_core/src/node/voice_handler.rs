@@ -857,7 +857,18 @@ fn build_vc_signal_envelope(
             viewer_width: v["viewer_width"].as_u64().unwrap_or(0) as u32,
             viewer_height: v["viewer_height"].as_u64().unwrap_or(0) as u32,
             source_quality: v["source_quality"].as_bool().unwrap_or(false),
+            route: jstr(&v, "route"),
             target: None,
+        }),
+        "screen_assign" => parsed.and_then(|v| {
+            // Assignment is meaningless without an origin — refuse to build.
+            let origin = parse_stream_origin(&v)?;
+            Some(MessageEnvelope::VoiceChannelScreenAssign {
+                sid, cid,
+                origin,
+                forwarder: jstr(&v, "forwarder"),
+                target: None,
+            })
         }),
         "reneg_offer" => parsed.map(|v| MessageEnvelope::VoiceChannelRenegOffer {
             sid, cid, sdp: jstr(&v, "sdp"), target: None,
@@ -1483,6 +1494,7 @@ pub(crate) async fn handle_envelope_voice_channel_screen_state(
     }).await;
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_envelope_voice_channel_screen_watch(
     voice_channel_participants: &HashMap<String, std::collections::HashSet<String>>,
     event_tx: &mpsc::Sender<NetworkEvent>,
@@ -1493,22 +1505,60 @@ pub(crate) async fn handle_envelope_voice_channel_screen_watch(
     viewer_width: u32,
     viewer_height: u32,
     source_quality: bool,
+    route: String,
 ) {
     let vc_key = format!("{sid}:{cid}");
     if !is_vc_participant(voice_channel_participants, &vc_key, &sender_peer_id) {
         hollow_log!("[HOLLOW-SECURITY] BLOCKED VC screen watch from non-participant {sender_peer_id} in {cid}");
         return;
     }
-    hollow_log!("[HOLLOW-VC] Screen watch from {sender_peer_id}: want={want} viewer={viewer_width}x{viewer_height} source={source_quality}");
+    hollow_log!("[HOLLOW-VC] Screen watch from {sender_peer_id}: want={want} viewer={viewer_width}x{viewer_height} source={source_quality} route={route}");
     let payload = serde_json::json!({
         "want": want,
         "viewer_width": viewer_width,
         "viewer_height": viewer_height,
         "source_quality": source_quality,
+        "route": route,
     }).to_string();
     let _ = event_tx.send(NetworkEvent::VoiceChannelSignal {
         server_id: sid, channel_id: cid, peer_id: sender_peer_id,
         signal_type: "screen_watch".to_string(), payload,
+    }).await;
+}
+
+/// Sharer -> viewer forwarder assignment (media forwarding step 3). Same
+/// participant gate as every VC signal, plus the step-2 origin spoof guard in
+/// its offer-direction form: the origin must name the authenticated sender
+/// (the sharer assigning viewers to ITS OWN stream) — anything else could
+/// steer a viewer to attach to a stream attributed to a victim.
+pub(crate) async fn handle_envelope_voice_channel_screen_assign(
+    voice_channel_participants: &HashMap<String, std::collections::HashSet<String>>,
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    sender_peer_id: String,
+    sid: String,
+    cid: String,
+    origin: Box<StreamOrigin>,
+    forwarder: String,
+    local_peer_str: &str,
+) {
+    let vc_key = format!("{sid}:{cid}");
+    if !is_vc_participant(voice_channel_participants, &vc_key, &sender_peer_id) {
+        hollow_log!("[HOLLOW-SECURITY] BLOCKED VC screen assign from non-participant {sender_peer_id} in {cid}");
+        return;
+    }
+    let origin_opt = Some(origin);
+    if !inbound_origin_ok(&origin_opt, &sender_peer_id, local_peer_str) {
+        hollow_log!("[HOLLOW-SECURITY] BLOCKED VC screen assign from {sender_peer_id} — spoofed origin");
+        return;
+    }
+    let origin = origin_opt.expect("guarded above");
+    let payload = serde_json::json!({
+        "origin": origin_json_value(&origin),
+        "forwarder": forwarder,
+    }).to_string();
+    let _ = event_tx.send(NetworkEvent::VoiceChannelSignal {
+        server_id: sid, channel_id: cid, peer_id: sender_peer_id,
+        signal_type: "screen_assign".to_string(), payload,
     }).await;
 }
 

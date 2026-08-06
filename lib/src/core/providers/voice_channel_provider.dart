@@ -12,6 +12,7 @@ import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
 import 'package:hollow/src/core/viewer_display.dart';
+import 'package:hollow/src/core/providers/forwarder_info_provider.dart';
 import 'package:hollow/src/core/providers/ice_config_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/recording_provider.dart';
@@ -19,6 +20,7 @@ import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/core/providers/speaking_provider.dart';
 import 'package:hollow/src/core/services/desktop_capture_support.dart';
 import 'package:hollow/src/core/services/frame_cryptor_service.dart';
+import 'package:hollow/src/core/services/ice_route_probe.dart';
 import 'package:hollow/src/core/services/macos_version.dart';
 import 'package:hollow/src/core/services/mobile_screen_audio_capturer.dart';
 import 'package:hollow/src/core/services/screen_audio_receiver.dart';
@@ -340,6 +342,37 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
   /// down delivered streams when their deliverer disconnects.
   final Map<String, ({String deliverer, String kind, String stream})>
       _incomingShareOrigins = {};
+
+  // -- Media forwarding step 3: infra forwarder --
+
+  /// Sharer side: viewers served THROUGH the forwarder (no per-viewer PC —
+  /// they don't consume the 15-cap). Their display caps stay in
+  /// [_watcherDisplays]; the ingest is encoded at the max over this set.
+  final Set<String> _forwarderViewers = {};
+
+  /// Sharer side: the SINGLE ingest leg to the forwarder (one copy of the
+  /// stream regardless of how many viewers it fans to).
+  ScreenShareService? _ingestService;
+
+  /// Sharer side: the forwarder our current share session registered with
+  /// (null = none; also gates the fwd room join/leave refcount).
+  String? _ingestForwarder;
+
+  /// Sharer side: tears the idle ingest down ~30 s after the last forwarder
+  /// viewer leaves (a quick re-watch shouldn't pay a full re-register).
+  Timer? _ingestLingerTimer;
+
+  /// Viewer side: forwarder assignments by ORIGINATOR
+  /// (`vc_screen_assign`) — which forwarder serves that origin's stream to
+  /// us. fwd_* frames are honored ONLY for assigned origins from the
+  /// assigned forwarder.
+  final Map<String, ({String forwarder, String kind, String stream})>
+      _screenAssignments = {};
+
+  /// Viewer side: origins we already walked the forwarder→direct fallback
+  /// ladder for this watch session (one attempt — then the normal watch
+  /// timeout gives up).
+  final Set<String> _fwdFallbackTried = {};
 
   /// Cached SFrame keys from MLS epoch changes — applied when the service is
   /// (re)created. Keyed by `_sframeCacheKey(serverId, channelId)`:
@@ -733,10 +766,12 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       _audioConnectedPeers.add(peerId);
 
       // Opt-in watching (issue #38): only send our share to peers that asked
-      // via screen_watch — never unconditionally.
+      // via screen_watch — never unconditionally. Forwarder-served viewers
+      // (step 3) never get a direct per-viewer PC from this path either.
       if (state.isScreenSharing &&
           _screenCaptureStream != null &&
-          _watchers.contains(peerId)) {
+          _watchers.contains(peerId) &&
+          !_forwarderViewers.contains(peerId)) {
         if (!_outgoingScreenShares.containsKey(peerId) &&
             _outgoingScreenShares.length < maxScreenShareOutgoing) {
           debugPrint('[HOLLOW-VC] Watcher $peerId connected — sending screen share offer');
@@ -1054,6 +1089,11 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     }
     if (signalType == 'screen_watch') {
       await _handleScreenWatch(peerId, payload);
+      return;
+    }
+    // Media forwarding step 3: the sharer routed us to a forwarder.
+    if (signalType == 'screen_assign') {
+      await _handleScreenAssign(peerId, payload);
       return;
     }
     if (_service == null) return;
@@ -1654,6 +1694,9 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       await _stopMobileShareAudio();
       _watchers.clear();
       _watcherDisplays.clear();
+      // Step 3: unregister at the forwarder + close the ingest leg BEFORE
+      // the session ids clear (the unregister envelope needs the origin).
+      await _teardownIngest(unregister: true);
       // This share session is over — a restart mints a fresh origin.
       _shareSessionId = null;
       _shareOriginPeer = null;
@@ -1939,10 +1982,60 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       return;
     }
 
+    // A direct offer supersedes any forwarder assignment for this origin
+    // (revert-to-direct / fallback-ladder outcome).
+    final staleAssignment = _screenAssignments.remove(originPeer);
+    if (staleAssignment != null) {
+      _maybeLeaveFwdRoom(staleAssignment.forwarder);
+    }
+
+    final answerSdp = await _attachIncomingShare(
+      originPeer: originPeer,
+      delivererPeer: peerId,
+      rawOrigin: rawOrigin,
+      offerSdp: sdp,
+      viaForwarder: false,
+      serverId: serverId,
+      channelId: channelId,
+    );
+    if (answerSdp == null) return;
+
+    network_api.voiceChannelSendSignal(
+      serverId: serverId,
+      channelId: channelId,
+      peerId: peerId,
+      signalType: 'screen_answer',
+      payload: jsonEncode({
+        'sdp': answerSdp,
+        'origin': ?rawOrigin,
+      }),
+    );
+  }
+
+  /// Shared construction of an incoming share leg — direct offers
+  /// (_handleScreenOffer) and forwarder egress offers (step 3) build the
+  /// SAME service, keyed by ORIGINATOR everywhere (attribution, SFrame
+  /// cryptor `'screen:$originPeer'`, renderer lookup), with the DELIVERER
+  /// kept only for transport routing. Returns the answer SDP, or null when
+  /// the incoming cap rejected the stream.
+  ///
+  /// Forwarder legs differ in exactly two transport properties: STUN-only
+  /// ICE (never forced-relay TURN — the forwarder IS the relay replacement)
+  /// and COMPLETE SDPs (no trickle lane, so no onIceCandidate wiring and no
+  /// early-ICE flush).
+  Future<String?> _attachIncomingShare({
+    required String originPeer,
+    required String delivererPeer,
+    required Map<String, dynamic>? rawOrigin,
+    required String offerSdp,
+    required bool viaForwarder,
+    String? serverId,
+    String? channelId,
+  }) async {
     if (!_incomingScreenShares.containsKey(originPeer) &&
         _incomingScreenShares.length >= maxScreenShareIncoming) {
       debugPrint('[HOLLOW-VC] Rejecting screen offer for $originPeer — incoming cap ($maxScreenShareIncoming) reached');
-      return;
+      return null;
     }
 
     // Mark the originator as sharing (screen_offer may arrive before screen_state).
@@ -1952,7 +2045,8 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     sharing[originPeer] = true;
     state = state.copyWith(peerScreenSharing: sharing);
 
-    final iceConfig = ref.read(iceConfigProvider);
+    final iceConfig =
+        viaForwarder ? _forwarderLegIceConfig() : ref.read(iceConfigProvider);
     final localPeerId = ref.read(identityProvider).peerId ?? '';
 
     // Close existing incoming service for this originator if any (and drop
@@ -1972,21 +2066,23 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     service.preferredAudioOutputDeviceId =
         await ref.read(audioOutputDeviceProvider.future);
 
-    service.onIceCandidate = (candidate) {
-      network_api.voiceChannelSendSignal(
-        serverId: serverId,
-        channelId: channelId,
-        peerId: peerId,
-        signalType: 'screen_ice',
-        payload: jsonEncode({
-          'candidate': candidate.candidate,
-          'sdpMid': candidate.sdpMid,
-          'sdpMLineIndex': candidate.sdpMLineIndex,
-          'role': 'incoming',
-          'origin': ?rawOrigin,
-        }),
-      );
-    };
+    if (!viaForwarder) {
+      service.onIceCandidate = (candidate) {
+        network_api.voiceChannelSendSignal(
+          serverId: serverId!,
+          channelId: channelId!,
+          peerId: delivererPeer,
+          signalType: 'screen_ice',
+          payload: jsonEncode({
+            'candidate': candidate.candidate,
+            'sdpMid': candidate.sdpMid,
+            'sdpMLineIndex': candidate.sdpMLineIndex,
+            'role': 'incoming',
+            'origin': ?rawOrigin,
+          }),
+        );
+      };
+    }
 
     service.onRemoteTrackReady = () {
       debugPrint('[HOLLOW-VC] Screen share track ready from $originPeer');
@@ -2000,14 +2096,26 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       );
     };
 
+    if (viaForwarder) {
+      // Forwarder died / dropped our leg mid-stream: the feed dies, the
+      // fallback ladder re-requests the direct path (availability helper,
+      // never authority — the share must survive its assist).
+      service.onDisconnected = () {
+        if (_incomingScreenShares[originPeer] != service) return;
+        _vcLog('[HOLLOW-VC] Forwarder leg for $originPeer disconnected — '
+            'walking the fallback ladder');
+        _fallbackToDirect(originPeer);
+      };
+    }
+
     _incomingScreenShares[originPeer] = service;
     _incomingShareOrigins[originPeer] = (
-      deliverer: peerId,
+      deliverer: delivererPeer,
       kind: (rawOrigin?['kind'] as String?) ?? 'screen',
       stream: (rawOrigin?['stream'] as String?) ?? '',
     );
 
-    final answerSdp = await service.handleOffer(sdp);
+    final answerSdp = await service.handleOffer(offerSdp);
 
     // Enable SFrame E2EE on the incoming screen share PC — keyed on the
     // ORIGINATOR, whose sender key encrypted the frames.
@@ -2016,30 +2124,23 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
           service.pc!, _service!.frameCryptor!, originPeer, isSender: false);
     }
 
-    // Flush any ICE candidates that arrived before this service was created.
-    final earlyKey = 'incoming:$originPeer';
-    final early = _earlyScreenIce.remove(earlyKey);
-    if (early != null && early.isNotEmpty) {
-      debugPrint('[HOLLOW-VC] Flushing ${early.length} early screen ICE for incoming:$originPeer');
-      for (final ice in early) {
-        await service.handleIceCandidate(
-          ice['candidate'] as String,
-          ice['sdpMid'] as String?,
-          ice['sdpMLineIndex'] as int?,
-        );
+    if (!viaForwarder) {
+      // Flush any ICE candidates that arrived before this service was created.
+      final earlyKey = 'incoming:$originPeer';
+      final early = _earlyScreenIce.remove(earlyKey);
+      if (early != null && early.isNotEmpty) {
+        debugPrint('[HOLLOW-VC] Flushing ${early.length} early screen ICE for incoming:$originPeer');
+        for (final ice in early) {
+          await service.handleIceCandidate(
+            ice['candidate'] as String,
+            ice['sdpMid'] as String?,
+            ice['sdpMLineIndex'] as int?,
+          );
+        }
       }
     }
 
-    network_api.voiceChannelSendSignal(
-      serverId: serverId,
-      channelId: channelId,
-      peerId: peerId,
-      signalType: 'screen_answer',
-      payload: jsonEncode({
-        'sdp': answerSdp,
-        'origin': ?rawOrigin,
-      }),
-    );
+    return answerSdp;
   }
 
   /// Handle incoming screen share answer.
@@ -2154,8 +2255,9 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     final viewerW = (v['viewer_width'] as num?)?.toInt() ?? 0;
     final viewerH = (v['viewer_height'] as num?)?.toInt() ?? 0;
     final sourceQuality = v['source_quality'] as bool? ?? false;
+    final route = v['route'] as String? ?? '';
     debugPrint('[HOLLOW-VC] Screen watch from $peerId: want=$want '
-        'viewer=${viewerW}x$viewerH source=$sourceQuality');
+        'viewer=${viewerW}x$viewerH source=$sourceQuality route=$route');
 
     if (want) {
       // Raced against our stop — nothing to send; the peer's badge clears
@@ -2164,6 +2266,27 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       _watchers.add(peerId);
       _watcherDisplays[peerId] =
           (w: viewerW, h: viewerH, source: sourceQuality);
+
+      // Media forwarding step 3: a relay-routed NEW-client viewer (non-empty
+      // route = step-3-capable; old viewers must never receive
+      // vc_screen_assign) is served THROUGH the forwarder — one ingest copy,
+      // no per-viewer PC, no 15-cap slot. "direct_failed" viewers already
+      // walked the fallback ladder and always get the direct path.
+      final fwd = ref.read(forwarderInfoProvider);
+      if (route == 'relay' && fwd.usable) {
+        if (_forwarderViewers.contains(peerId)) {
+          // Re-sent watch (cap / Source-quality change): the ingest is
+          // encoded at max(effectiveViewerCap) over the forwarder audience.
+          await _reofferIngest();
+        } else {
+          await _assignViewerToForwarder(peerId, fwd.peerId);
+        }
+        return;
+      }
+      // Viewer moved OFF the forwarder path (direct / direct_failed).
+      if (_forwarderViewers.contains(peerId)) {
+        await _removeForwarderViewer(peerId);
+      }
       final existing = _outgoingScreenShares[peerId];
       if (existing != null) {
         // Already streaming to this viewer — a re-sent watch is a cap change
@@ -2192,6 +2315,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     } else {
       _watchers.remove(peerId);
       _watcherDisplays.remove(peerId);
+      await _removeForwarderViewer(peerId);
       final outgoing = _outgoingScreenShares.remove(peerId);
       if (outgoing != null) {
         await outgoing.close();
@@ -2215,6 +2339,471 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     );
   }
 
+  // -- Media forwarding step 3: forwarder lane --
+
+  /// ICE config for forwarder legs (ingest + egress attach): NO ice servers
+  /// at all — host candidates only.
+  ///
+  /// DELIBERATELY not [iceConfigProvider]: "Always relay calls" forces
+  /// `iceTransportPolicy: relay` there, and a forced-TURN leg to the
+  /// forwarder would blackhole it — the forwarder IS the relay replacement
+  /// (same operator infra as TURN, so nothing new is disclosed). Also NOT
+  /// [shareIceConfigProvider]: that is the Hollow Share FILE lane with its
+  /// own bandwidth doctrine.
+  ///
+  /// CRITICAL — the list must stay EMPTY. The forwarder answers on a fixed
+  /// PUBLIC address, so a server-reflexive candidate buys nothing: our host
+  /// candidate plus our own outbound checks are sufficient, and the forwarder
+  /// learns our NAT mapping as a peer-reflexive candidate from those checks.
+  /// Configuring STUN servers here actively BREAKS the leg: libwebrtc's UDP
+  /// port withholds its candidates while it waits on the configured STUN
+  /// servers, so on a host whose DNS answers IPv6-first without a routable
+  /// IPv6 path (the D6 test VM: ULA address, IPv6-only default gateway) the
+  /// allocator produced ZERO candidates, never activated ICE, and the leg
+  /// silently timed out — three field tests, 2026-08-06. The D2 spike used an
+  /// empty list and connected first try.
+  Map<String, dynamic> _forwarderLegIceConfig() => const {'iceServers': []};
+
+  /// The viewer's `route` hint for screen_watch: one immediate stats pass on
+  /// the audio PC to [peerId]. ADVISORY — a wrong hint is corrected by the
+  /// fallback ladder; "" (unknown) keeps today's direct path.
+  Future<String> _routeHintTo(String peerId) async {
+    // Already served through the forwarder for this sharer: stay put — a
+    // re-watch (Source toggle) must not bounce us to direct mid-stream.
+    // (_fallbackToDirect bypasses this with an explicit "direct_failed".)
+    if (_screenAssignments.containsKey(peerId)) return 'relay';
+    // Forced-relay users are relay-routed by policy — no probe needed.
+    if (ref.read(alwaysRelayCallsProvider)) return 'relay';
+    try {
+      final pc = _service?.pcFor(peerId);
+      if (pc != null) {
+        final route = await probeIceRouteOnce(pc);
+        if (route != null) return route.isDirect ? 'direct' : 'relay';
+      }
+    } catch (_) {}
+    return '';
+  }
+
+  /// Sharer side: serve [viewerPeer] through the forwarder instead of a
+  /// per-viewer PC. Registers the stream (idempotent full-allowlist replace —
+  /// one self-healing shape instead of register + incremental bookkeeping),
+  /// ensures the single ingest leg, then assigns the viewer.
+  Future<void> _assignViewerToForwarder(
+      String viewerPeer, String forwarderPeerId) async {
+    final origin = _myShareOrigin();
+    if (origin == null) return;
+    _ingestLingerTimer?.cancel();
+    _ingestLingerTimer = null;
+    if (_ingestForwarder == null) {
+      _ingestForwarder = forwarderPeerId;
+      await network_api
+          .joinForwarderRoom(forwarderPeerId: forwarderPeerId)
+          .catchError((_) {});
+    }
+    _forwarderViewers.add(viewerPeer);
+    // Registers (idempotently) inside _ensureIngestLeg; when the leg is
+    // already live this call still refreshes the allowlist with the new viewer.
+    await _registerStreamAtForwarder(forwarderPeerId);
+    await _ensureIngestLeg(forwarderPeerId);
+    if (!state.isInVoiceChannel) return;
+    network_api
+        .voiceChannelSendSignal(
+          serverId: state.currentServerId!,
+          channelId: state.currentChannelId!,
+          peerId: viewerPeer,
+          signalType: 'screen_assign',
+          payload: jsonEncode({'origin': origin, 'forwarder': forwarderPeerId}),
+        )
+        .catchError((_) {});
+    _vcLog('[HOLLOW-VC] Viewer $viewerPeer assigned to forwarder '
+        '(${_forwarderViewers.length} forwarder viewer(s))');
+  }
+
+  /// Ingest cap: max(effectiveViewerCap) over the forwarder audience
+  /// (step-1 machinery reused). One pixel-peeper's Source request raises only
+  /// this one stream until phase-3 simulcast.
+  (int, int) _ingestCap() {
+    var w = 0, h = 0;
+    for (final viewer in _forwarderViewers) {
+      final (vw, vh) = _effectiveCapFor(viewer);
+      if (vw * vh >= w * h) {
+        w = vw;
+        h = vh;
+      }
+    }
+    if (w == 0 || h == 0) return (_screenShareMaxWidth, _screenShareMaxHeight);
+    return (w, h);
+  }
+
+  /// (Re-)register our stream + current allowlist at the forwarder. Idempotent
+  /// by contract (a re-register replaces the allowlist), so every path that is
+  /// about to offer an ingest calls this first: an ingest offer for a stream
+  /// the forwarder doesn't know is refused outright with `unknown_stream`, and
+  /// a registration can legitimately be missing (dropped first send, forwarder
+  /// restart, our own room churn).
+  Future<void> _registerStreamAtForwarder(String forwarderPeerId) async {
+    final origin = _myShareOrigin();
+    if (origin == null) return;
+    await network_api
+        .forwarderSendSignal(
+          forwarderPeerId: forwarderPeerId,
+          signalType: 'fwd_stream_register',
+          payload: jsonEncode({
+            'origin': origin,
+            'allowed_viewers': _forwarderViewers.toList(),
+          }),
+        )
+        .catchError((_) {});
+  }
+
+  /// Create the single ingest leg to the forwarder (no-op if live).
+  Future<void> _ensureIngestLeg(String forwarderPeerId) async {
+    if (_ingestService != null) return;
+    if (_screenCaptureStream == null) return;
+    final origin = _myShareOrigin();
+    if (origin == null) return;
+    // Never offer an ingest for a stream the forwarder might not hold.
+    await _registerStreamAtForwarder(forwarderPeerId);
+    final localPeerId = ref.read(identityProvider).peerId ?? '';
+    final service = ScreenShareService(
+      localPeerId: localPeerId,
+      iceServers: _forwarderLegIceConfig(),
+    );
+    _ingestService = service;
+    // Forwarder died / dropped the ingest mid-stream: revert the whole
+    // forwarder audience to direct per-viewer PCs.
+    service.onDisconnected = () {
+      if (_ingestService != service) return;
+      _vcLog('[HOLLOW-VC] Forwarder ingest leg disconnected — reverting viewers');
+      _revertForwarderViewersToDirect();
+    };
+    try {
+      final (capW, capH) = _ingestCap();
+      await service.createOfferFromStream(
+        _screenCaptureStream!,
+        maxWidth: capW,
+        maxHeight: capH,
+        fps: _screenShareFps,
+        profile: _screenShareProfile,
+      );
+      if (service.pc != null && _service?.frameCryptor != null) {
+        await _enableSframeOnScreenSharePc(
+            service.pc!, _service!.frameCryptor!, forwarderPeerId,
+            isSender: true);
+      }
+      // Forwarder legs ride COMPLETE SDPs (fwd_ice is reserved, unbuilt).
+      final fullSdp = await service.gatheredLocalSdp();
+      if (fullSdp == null || fullSdp.isEmpty) {
+        throw Exception('ingest SDP gathering produced nothing');
+      }
+      await network_api.forwarderSendSignal(
+        forwarderPeerId: forwarderPeerId,
+        signalType: 'fwd_ingest_offer',
+        payload: jsonEncode({'origin': origin, 'sdp': fullSdp}),
+      );
+      _vcLog('[HOLLOW-VC] Forwarder ingest leg offered (${capW}x$capH)');
+    } catch (e) {
+      _vcLog('[HOLLOW-VC] Ingest leg setup failed: $e');
+      _ingestService = null;
+      await service.close();
+      await _dropShareCryptors(forwarderPeerId);
+    }
+  }
+
+  /// Re-offer the ingest at the current cap (a forwarder viewer's cap or
+  /// Source-quality changed): live setParameters first, renegotiate when the
+  /// sender rejects it (Windows always does — the step-1 verdict).
+  Future<void> _reofferIngest() async {
+    final fwd = _ingestForwarder;
+    if (fwd == null) return;
+    final svc = _ingestService;
+    if (svc != null) {
+      final (capW, capH) = _ingestCap();
+      if (await svc.updateResolutionCap(capW, capH)) return;
+      _vcLog('[HOLLOW-VC] Live ingest cap change rejected — re-offering at '
+          '${capW}x$capH');
+      _ingestService = null;
+      await svc.close();
+      await _dropShareCryptors(fwd);
+    }
+    await _ensureIngestLeg(fwd);
+  }
+
+  /// Remove a forwarder viewer; the LAST one starts the ~30 s ingest linger
+  /// (a quick re-watch shouldn't pay a full re-register round).
+  Future<void> _removeForwarderViewer(String viewerPeer) async {
+    if (!_forwarderViewers.remove(viewerPeer)) return;
+    final fwd = _ingestForwarder;
+    final origin = _myShareOrigin();
+    if (fwd == null || origin == null) return;
+    await network_api
+        .forwarderSendSignal(
+          forwarderPeerId: fwd,
+          signalType: 'fwd_stream_auth',
+          payload: jsonEncode({
+            'origin': origin,
+            'add': const <String>[],
+            'remove': [viewerPeer],
+          }),
+        )
+        .catchError((_) {});
+    if (_forwarderViewers.isEmpty) {
+      _ingestLingerTimer?.cancel();
+      _ingestLingerTimer = Timer(const Duration(seconds: 30), () {
+        _ingestLingerTimer = null;
+        if (_forwarderViewers.isEmpty) {
+          _teardownIngest(unregister: true);
+        }
+      });
+    }
+  }
+
+  /// Tear down the ingest leg (+ registration when [unregister]) and release
+  /// the fwd room if the viewer side holds no assignments there either.
+  Future<void> _teardownIngest({required bool unregister}) async {
+    _ingestLingerTimer?.cancel();
+    _ingestLingerTimer = null;
+    final fwd = _ingestForwarder;
+    final svc = _ingestService;
+    _ingestService = null;
+    if (svc != null) {
+      await svc.close();
+      if (fwd != null) await _dropShareCryptors(fwd);
+    }
+    if (fwd != null && unregister) {
+      final origin = _myShareOrigin();
+      if (origin != null) {
+        await network_api
+            .forwarderSendSignal(
+              forwarderPeerId: fwd,
+              signalType: 'fwd_stream_unregister',
+              payload: jsonEncode({'origin': origin}),
+            )
+            .catchError((_) {});
+      }
+    }
+    _forwarderViewers.clear();
+    _ingestForwarder = null;
+    _maybeLeaveFwdRoom(fwd);
+  }
+
+  /// Leave the forwarder's relay room once neither side needs it (sharer
+  /// ingest gone AND no viewer assignments reference it).
+  void _maybeLeaveFwdRoom(String? forwarderPeerId) {
+    if (forwarderPeerId == null || forwarderPeerId.isEmpty) return;
+    if (_ingestForwarder == forwarderPeerId) return;
+    if (_screenAssignments.values.any((a) => a.forwarder == forwarderPeerId)) {
+      return;
+    }
+    network_api
+        .leaveForwarderRoom(forwarderPeerId: forwarderPeerId)
+        .catchError((_) {});
+  }
+
+  /// Viewer side of `vc_screen_assign`: the sharer routed us to a forwarder.
+  /// Join its room and attach; the egress offer arrives as a ForwarderSignal.
+  Future<void> _handleScreenAssign(String peerId, String payload) async {
+    final v = jsonDecode(payload);
+    final origin = v['origin'];
+    final originPeer = origin is Map ? (origin['peer'] as String? ?? '') : '';
+    final forwarder = v['forwarder'] as String? ?? '';
+    // Rust already dropped spoofed origins (origin must name the SENDER);
+    // consent still gates here — only honored for a share we're watching.
+    if (originPeer.isEmpty || !state.watchingScreenShares.contains(originPeer)) {
+      return;
+    }
+    if (forwarder.isEmpty) {
+      // Revert-to-direct: forget the assignment; the direct offer follows.
+      final prev = _screenAssignments.remove(originPeer);
+      _maybeLeaveFwdRoom(prev?.forwarder);
+      return;
+    }
+    // Trust gate: ONLY the relay-advertised forwarder id is ever attached to.
+    final advertised = ref.read(forwarderInfoProvider).peerId;
+    if (advertised.isEmpty || forwarder != advertised) {
+      _vcLog('[HOLLOW-VC] screen_assign names an unadvertised forwarder — ignored');
+      return;
+    }
+    _screenAssignments[originPeer] = (
+      forwarder: forwarder,
+      kind: origin is Map ? (origin['kind'] as String? ?? 'screen') : 'screen',
+      stream: origin is Map ? (origin['stream'] as String? ?? '') : '',
+    );
+    await network_api
+        .joinForwarderRoom(forwarderPeerId: forwarder)
+        .catchError((_) {});
+    await network_api
+        .forwarderSendSignal(
+          forwarderPeerId: forwarder,
+          signalType: 'fwd_attach',
+          payload: jsonEncode({'origin': origin}),
+        )
+        .catchError((_) {});
+    _vcLog('[HOLLOW-VC] Assigned to forwarder for $originPeer — attaching');
+  }
+
+  /// Client-bound fwd_* signals (NetworkEvent.forwarderSignal). Gated hard:
+  /// ingest answers only from OUR registered forwarder; egress offers only
+  /// for origins we were assigned AND are watching, from that assignment's
+  /// forwarder.
+  Future<void> handleForwarderSignal(
+      String fromPeer, String signalType, String payload) async {
+    Map<String, dynamic> v;
+    try {
+      v = Map<String, dynamic>.from(jsonDecode(payload) as Map);
+    } catch (_) {
+      return;
+    }
+    switch (signalType) {
+      case 'fwd_ingest_answer':
+        if (fromPeer != _ingestForwarder) return;
+        final sdp = v['sdp'] as String? ?? '';
+        if (sdp.isEmpty) return;
+        await _ingestService?.handleAnswer(sdp);
+      case 'fwd_egress_offer':
+        await _handleFwdEgressOffer(fromPeer, v);
+      case 'fwd_error':
+        await _handleFwdError(fromPeer, v);
+    }
+  }
+
+  /// The forwarder's egress offer for a stream we were assigned: identical
+  /// attribution/SFrame/renderer path as a direct offer (D1's originator
+  /// keys), with the forwarder as the DELIVERER. Replies a COMPLETE SDP.
+  Future<void> _handleFwdEgressOffer(
+      String fromPeer, Map<String, dynamic> v) async {
+    final origin = v['origin'];
+    final originPeer = origin is Map ? (origin['peer'] as String? ?? '') : '';
+    final sdp = v['sdp'] as String? ?? '';
+    if (originPeer.isEmpty || sdp.isEmpty) return;
+    final assignment = _screenAssignments[originPeer];
+    if (assignment == null || assignment.forwarder != fromPeer) return;
+    if (!state.watchingScreenShares.contains(originPeer)) return;
+    final rawOrigin =
+        origin is Map ? Map<String, dynamic>.from(origin) : null;
+    final answer = await _attachIncomingShare(
+      originPeer: originPeer,
+      delivererPeer: fromPeer,
+      rawOrigin: rawOrigin,
+      offerSdp: sdp,
+      viaForwarder: true,
+    );
+    if (answer == null) return;
+    final fullAnswer =
+        await _incomingScreenShares[originPeer]?.gatheredLocalSdp() ?? answer;
+    await network_api
+        .forwarderSendSignal(
+          forwarderPeerId: fromPeer,
+          signalType: 'fwd_egress_answer',
+          payload: jsonEncode({'origin': rawOrigin, 'sdp': fullAnswer}),
+        )
+        .catchError((_) {});
+  }
+
+  /// FwdError: walk the fallback ladder — the forwarder is an availability
+  /// helper, never authority. Sharer side reverts its forwarder audience to
+  /// direct offers; viewer side re-watches with route "direct_failed".
+  Future<void> _handleFwdError(String fromPeer, Map<String, dynamic> v) async {
+    final origin = v['origin'];
+    final originPeer = origin is Map ? (origin['peer'] as String? ?? '') : '';
+    final code = v['code'] as String? ?? '';
+    // Sharer side: our stream/ingest was refused.
+    if (fromPeer == _ingestForwarder &&
+        originPeer == (_shareOriginPeer ?? '')) {
+      _vcLog('[HOLLOW-VC] Forwarder refused our stream ($code) — '
+          'reverting viewers to direct');
+      await _revertForwarderViewersToDirect();
+      return;
+    }
+    // Viewer side: our attach was refused.
+    final assignment = _screenAssignments[originPeer];
+    if (assignment != null && assignment.forwarder == fromPeer) {
+      _fallbackToDirect(originPeer);
+    }
+  }
+
+  /// Sharer-side fallback: the forwarder refused or lost our ingest — tear
+  /// the forwarder path down and serve every forwarder viewer a direct
+  /// per-viewer PC (revert-to-direct assign + offer, up to the 15-cap).
+  Future<void> _revertForwarderViewersToDirect() async {
+    final origin = _myShareOrigin();
+    final viewers = List.of(_forwarderViewers);
+    await _teardownIngest(unregister: false);
+    for (final viewer in viewers) {
+      if (!_watchers.contains(viewer)) continue;
+      if (state.isInVoiceChannel && origin != null) {
+        network_api
+            .voiceChannelSendSignal(
+              serverId: state.currentServerId!,
+              channelId: state.currentChannelId!,
+              peerId: viewer,
+              signalType: 'screen_assign',
+              payload: jsonEncode({'origin': origin, 'forwarder': ''}),
+            )
+            .catchError((_) {});
+      }
+      if (_audioConnectedPeers.contains(viewer) &&
+          !_outgoingScreenShares.containsKey(viewer) &&
+          _outgoingScreenShares.length < maxScreenShareOutgoing) {
+        await _sendScreenShareToPeer(viewer);
+      }
+    }
+  }
+
+  /// Viewer-side fallback: drop the assignment, detach, and re-watch with
+  /// route "direct_failed" so the sharer serves today's direct+TURN path.
+  /// One attempt per watch session — after that the normal 20 s watch
+  /// timeout gives up with the toast.
+  void _fallbackToDirect(String originPeer) {
+    final prev = _screenAssignments.remove(originPeer);
+    if (prev != null) {
+      network_api
+          .forwarderSendSignal(
+            forwarderPeerId: prev.forwarder,
+            signalType: 'fwd_detach',
+            payload: jsonEncode({
+              'origin': {
+                'peer': originPeer,
+                'kind': prev.kind,
+                'stream': prev.stream,
+              },
+            }),
+          )
+          .catchError((_) {});
+      _maybeLeaveFwdRoom(prev.forwarder);
+    }
+    if (!state.watchingScreenShares.contains(originPeer)) return;
+    if (!_fwdFallbackTried.add(originPeer)) return;
+    if (!state.isInVoiceChannel) return;
+    _vcLog('[HOLLOW-VC] Forwarder path failed for $originPeer — requesting direct');
+    final (viewerW, viewerH) = largestDisplayResolution();
+    network_api
+        .voiceChannelSendSignal(
+          serverId: state.currentServerId!,
+          channelId: state.currentChannelId!,
+          peerId: originPeer,
+          signalType: 'screen_watch',
+          payload: jsonEncode({
+            'want': true,
+            'viewer_width': viewerW,
+            'viewer_height': viewerH,
+            'source_quality': state.sourceQualityShares.contains(originPeer),
+            'route': 'direct_failed',
+          }),
+        )
+        .catchError((_) {});
+    // Fresh 20 s window for the direct offer to land.
+    _watchConnectTimers.remove(originPeer)?.cancel();
+    _watchConnectTimers[originPeer] = Timer(const Duration(seconds: 20), () {
+      _watchConnectTimers.remove(originPeer);
+      if (!state.watchingScreenShares.contains(originPeer)) return;
+      if (getScreenShareRenderer(originPeer) != null) return;
+      debugPrint('[HOLLOW-VC] Direct fallback for $originPeer timed out — reverting');
+      stopWatchingScreenShare(originPeer);
+      _toast("Couldn't connect to the screen share", HollowToastType.error);
+    });
+  }
+
   /// Viewer side of opt-in watching (issue #38): request [peerId]'s share.
   /// Optimistically marks us as watching + focuses the share; the sharer
   /// replies with a screen_offer which _handleScreenOffer now accepts.
@@ -2235,8 +2824,10 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     );
 
     // Ship our display resolution so the sharer clamps our stream to what
-    // we can actually show (media forwarding step 1).
+    // we can actually show (media forwarding step 1), plus our route hint
+    // (step 3): "relay" marks us a forwarder candidate.
     final (viewerW, viewerH) = largestDisplayResolution();
+    final route = await _routeHintTo(peerId);
     network_api
         .voiceChannelSendSignal(
           serverId: state.currentServerId!,
@@ -2248,17 +2839,24 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
             'viewer_width': viewerW,
             'viewer_height': viewerH,
             'source_quality': state.sourceQualityShares.contains(peerId),
+            'route': route,
           }),
         )
         .catchError((_) {});
 
     // If no offer produces a live track in time, revert so the tile/banner
-    // doesn't spin forever (sharer at cap, signal lost, ...).
+    // doesn't spin forever (sharer at cap, signal lost, ...). A forwarder
+    // assignment that never delivered walks the fallback ladder once first.
     _watchConnectTimers.remove(peerId)?.cancel();
     _watchConnectTimers[peerId] = Timer(const Duration(seconds: 20), () {
       _watchConnectTimers.remove(peerId);
       if (!state.watchingScreenShares.contains(peerId)) return;
       if (getScreenShareRenderer(peerId) != null) return;
+      if (_screenAssignments.containsKey(peerId) &&
+          !_fwdFallbackTried.contains(peerId)) {
+        _fallbackToDirect(peerId);
+        return;
+      }
       debugPrint('[HOLLOW-VC] Watch of $peerId timed out — reverting');
       stopWatchingScreenShare(peerId);
       _toast("Couldn't connect to the screen share", HollowToastType.error);
@@ -2319,6 +2917,26 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       await _dropShareCryptors(peerId);
     }
 
+    // Step 3: detach from the forwarder if this origin was served through it.
+    _fwdFallbackTried.remove(peerId);
+    final assignment = _screenAssignments.remove(peerId);
+    if (assignment != null) {
+      network_api
+          .forwarderSendSignal(
+            forwarderPeerId: assignment.forwarder,
+            signalType: 'fwd_detach',
+            payload: jsonEncode({
+              'origin': {
+                'peer': peerId,
+                'kind': assignment.kind,
+                'stream': assignment.stream,
+              },
+            }),
+          )
+          .catchError((_) {});
+      _maybeLeaveFwdRoom(assignment.forwarder);
+    }
+
     if (state.isInVoiceChannel) {
       network_api
           .voiceChannelSendSignal(
@@ -2349,6 +2967,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     if (!state.isInVoiceChannel) return;
     if (!state.watchingScreenShares.contains(peerId)) return;
     final (viewerW, viewerH) = largestDisplayResolution();
+    final route = await _routeHintTo(peerId);
     network_api
         .voiceChannelSendSignal(
           serverId: state.currentServerId!,
@@ -2360,6 +2979,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
             'viewer_width': viewerW,
             'viewer_height': viewerH,
             'source_quality': on,
+            'route': route,
           }),
         )
         .catchError((_) {});
@@ -2484,6 +3104,18 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     _watchConnectTimers.clear();
     _watchers.clear();
     _watcherDisplays.clear();
+
+    // Step 3: leaving the channel drops every forwarder relationship — the
+    // ingest+registration (sharer side) and all assignments (viewer side).
+    // Presence in the fwd room is the forwarder's own cleanup signal too.
+    await _teardownIngest(unregister: true);
+    final fwdRooms =
+        _screenAssignments.values.map((a) => a.forwarder).toSet();
+    _screenAssignments.clear();
+    _fwdFallbackTried.clear();
+    for (final fwd in fwdRooms) {
+      _maybeLeaveFwdRoom(fwd);
+    }
 
     await _stopMobileShareAudio();
     final allSharePeers = <String>{

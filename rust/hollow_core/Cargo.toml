@@ -5,9 +5,26 @@ edition = "2024"
 publish = false
 
 [lib]
-crate-type = ["cdylib", "staticlib"]
+# "rlib" exists solely for the feature-gated `hollow-forwarder` bin below —
+# a [[bin]] target can only link the lib crate through an rlib artifact.
+# Additive: cargokit/FRB consume the cdylib/staticlib exactly as before.
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+# Headless VPS media forwarder (media forwarding step 3, D3): blind str0m
+# packet relay for SFrame-encrypted screen-share RTP. Off by default — app
+# builds (cargokit/FRB) never compile str0m. Phase 2 embeds the same module
+# in-app for peer forwarders.
+[features]
+forwarder = ["dep:str0m", "dep:toml"]
+
+[[bin]]
+name = "hollow-forwarder"
+path = "src/bin/hollow_forwarder.rs"
+required-features = ["forwarder"]
 
 [dependencies]
+str0m = { version = "0.21", optional = true }
+toml = { version = "0.8", optional = true }
 flutter_rust_bridge = "=2.11.1"
 log = "0.4"
 serde = { version = "1", features = ["derive"] }

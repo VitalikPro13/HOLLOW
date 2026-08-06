@@ -7,6 +7,7 @@ pub(crate) mod emotes;
 pub(crate) mod fetch;
 pub(crate) mod file_handler;
 pub(crate) mod file_transfer;
+pub(crate) mod forwarder_client;
 pub(crate) mod gossip;
 pub(crate) mod gossip_relay;
 pub(crate) mod image_convert;

@@ -11305,3 +11305,356 @@ async fn freshly_linked_device_backfills_dm_link_previews_from_its_sibling() {
     drop(b);
     drop(c);
 }
+
+// ---------------------------------------------------------------------------
+// Media forwarder control plane (step 3, D3): the fwd_* client plumbing.
+//
+// A full mock node F plays the FORWARDER role (same relay-room mechanics; the
+// real forwarder's engine/media plane is outside harness scope by doctrine —
+// D6 field verification covers it). Verified here:
+//   1. JoinForwarderRoom is a PURE transport join — no RoomCleared (the
+//      NodeCommand::JoinRoom arm would wipe the open DM pane).
+//   2. First ForwarderSendSignal with NO Olm session queues + fires a signed
+//      KeyRequest; the envelope drains and arrives after key exchange.
+//   3. A client-bound fwd envelope (fwd_attach at a client) hits the ignore
+//      arm and the node stays healthy.
+//   4. Forwarder-sendable signals (fwd_egress_offer / fwd_error) emit
+//      NetworkEvent::ForwarderSignal on the client with origin + payload
+//      intact (the test-only build arms impersonate the forwarder role).
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
+async fn forwarder_room_and_signal_round_trip() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    const A_TAG: u8 = 131;
+    const F_TAG: u8 = 141;
+    let mut a = spawn_node_with_friends(&relay, A_TAG, A_TAG, &[]).await;
+    sleep_ms(800).await;
+    let mut f = spawn_node_with_friends(&relay, F_TAG, F_TAG, &[]).await;
+    sleep_ms(1200).await;
+    let f_id = f.device_id.clone();
+    let a_id = a.device_id.clone();
+
+    // F "hosts" its own fwd room (what the real forwarder does on connect);
+    // A joins it to reach the forwarder.
+    //
+    // Both nodes ALSO join `fwd:{a_id}` because step 4 below has F impersonate
+    // the forwarder role over the CLIENT send path (`ForwarderSendSignal`),
+    // which routes by `fwd:{target}` — correct for client→forwarder, but the
+    // real forwarder ships its replies from its OWN room
+    // (`forwarder::signaling::send_haven_direct`), a path no mock node runs.
+    // Joining both rooms keeps that one artifice deliverable without weakening
+    // the production routing rule under test.
+    for room_owner in [&f_id, &a_id] {
+        f.cmd_tx
+            .send(NodeCommand::JoinForwarderRoom { forwarder_peer_id: room_owner.clone() })
+            .await
+            .unwrap();
+    }
+    sleep_ms(300).await;
+    drain_events(&mut a);
+    for room_owner in [&f_id, &a_id] {
+        a.cmd_tx
+            .send(NodeCommand::JoinForwarderRoom { forwarder_peer_id: room_owner.clone() })
+            .await
+            .unwrap();
+    }
+    sleep_ms(1200).await;
+
+    // 1. The fwd-room join must NOT clear the DM conversation pane.
+    let mut saw_room_cleared = false;
+    while let Ok(ev) = a.event_rx.try_recv() {
+        if matches!(ev, NetworkEvent::RoomCleared) {
+            saw_room_cleared = true;
+        }
+    }
+    assert!(!saw_room_cleared, "JoinForwarderRoom must never emit RoomCleared");
+
+    // 2. First signal with no Olm session: queue + KeyRequest + drain.
+    let origin = serde_json::json!({"peer": f_id, "kind": "screen", "stream": "ab12cd34"});
+    a.cmd_tx
+        .send(NodeCommand::ForwarderSendSignal {
+            forwarder_peer_id: f_id.clone(),
+            signal_type: "fwd_attach".to_string(),
+            payload: serde_json::json!({"origin": origin}).to_string(),
+        })
+        .await
+        .unwrap();
+    // Key exchange (KeyRequest -> KeyBundle -> PreKey drain) takes a moment.
+    sleep_ms(4000).await;
+
+    // 3. F received the client-bound fwd envelope and IGNORED it (no
+    //    ForwarderSignal emission), staying healthy.
+    let mut f_emitted_fwd = false;
+    while let Ok(ev) = f.event_rx.try_recv() {
+        if matches!(ev, NetworkEvent::ForwarderSignal { .. }) {
+            f_emitted_fwd = true;
+        }
+    }
+    assert!(
+        !f_emitted_fwd,
+        "a client-bound fwd envelope must hit the ignore arm, not emit ForwarderSignal"
+    );
+    drain_events(&mut a);
+
+    // 4a. Forwarder-sendable: F -> A fwd_egress_offer emits ForwarderSignal.
+    f.cmd_tx
+        .send(NodeCommand::ForwarderSendSignal {
+            forwarder_peer_id: a_id.clone(),
+            signal_type: "fwd_egress_offer".to_string(),
+            payload: serde_json::json!({"origin": origin, "sdp": "v=0 fwd offer"}).to_string(),
+        })
+        .await
+        .unwrap();
+    let mut got_payload = None;
+    let got = wait_event(&mut a, std::time::Duration::from_secs(6), |ev| {
+        if let NetworkEvent::ForwarderSignal { from_peer, signal_type, payload } = ev {
+            if signal_type == "fwd_egress_offer" && *from_peer == f_id {
+                got_payload = Some(payload.clone());
+                return true;
+            }
+        }
+        false
+    })
+    .await;
+    assert!(got, "client must emit ForwarderSignal for fwd_egress_offer");
+    let v: serde_json::Value =
+        serde_json::from_str(&got_payload.expect("payload")).expect("valid json");
+    assert_eq!(v["sdp"], serde_json::json!("v=0 fwd offer"));
+    assert_eq!(v["origin"]["peer"], serde_json::json!(f_id.clone()));
+    assert_eq!(v["origin"]["stream"], serde_json::json!("ab12cd34"));
+
+    // 4b. fwd_error round-trips with code + detail.
+    f.cmd_tx
+        .send(NodeCommand::ForwarderSendSignal {
+            forwarder_peer_id: a_id.clone(),
+            signal_type: "fwd_error".to_string(),
+            payload: serde_json::json!({
+                "origin": origin, "code": "over_budget", "detail": "egress budget exhausted",
+            })
+            .to_string(),
+        })
+        .await
+        .unwrap();
+    let mut err_payload = None;
+    let got_err = wait_event(&mut a, std::time::Duration::from_secs(6), |ev| {
+        if let NetworkEvent::ForwarderSignal { signal_type, payload, .. } = ev {
+            if signal_type == "fwd_error" {
+                err_payload = Some(payload.clone());
+                return true;
+            }
+        }
+        false
+    })
+    .await;
+    assert!(got_err, "client must emit ForwarderSignal for fwd_error");
+    let v: serde_json::Value =
+        serde_json::from_str(&err_payload.expect("payload")).expect("valid json");
+    assert_eq!(v["code"], serde_json::json!("over_budget"));
+
+    drop(a);
+    drop(f);
+}
+
+// ---------------------------------------------------------------------------
+// vc_screen_assign + route hint (media forwarding step 3, D5 wire): the
+// sharer assigns a relay-routed viewer to a media forwarder over the VC lane.
+// Verified: route round-trips on screen_watch (absent = "" is serde-tested);
+// screen_assign round-trips origin + forwarder; a SPOOFED origin (naming a
+// third party) drops the whole signal and the node stays healthy.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
+async fn vc_screen_assign_and_route_round_trip() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    const O_MASTER: u8 = 151;
+    const J_MASTER: u8 = 161;
+    let o_master = NativeKeypair::from_secret_bytes(&seed_bytes(O_MASTER)).peer_id();
+    let j_master = NativeKeypair::from_secret_bytes(&seed_bytes(J_MASTER)).peer_id();
+
+    let mut o = spawn_node_with_friends(&relay, O_MASTER, O_MASTER, &[&j_master]).await;
+    sleep_ms(1200).await;
+    let mut j = spawn_node_with_friends(&relay, J_MASTER, J_MASTER, &[&o_master]).await;
+    sleep_ms(4000).await; // Olm confirm (targeted VC signals ride Olm)
+
+    let server_id = create_server_and_wait(&mut o, "Assign Server").await;
+    o.cmd_tx
+        .send(NodeCommand::CreateChannel {
+            server_id: server_id.clone(),
+            name: "Voice".to_string(),
+            category: None,
+            channel_type: "voice".to_string(),
+        })
+        .await
+        .unwrap();
+    let mut voice_cid = None;
+    let made = wait_event(&mut o, std::time::Duration::from_secs(3), |ev| {
+        if let NetworkEvent::ChannelAdded { channel_id, channel_type, .. } = ev {
+            if channel_type == "voice" {
+                voice_cid = Some(channel_id.clone());
+                return true;
+            }
+        }
+        false
+    })
+    .await;
+    assert!(made, "owner should create a voice channel");
+    let voice_cid = voice_cid.expect("voice channel id");
+    sleep_ms(300).await;
+
+    j.cmd_tx
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
+        .await
+        .unwrap();
+    let joined = wait_event(&mut j, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
+    })
+    .await;
+    assert!(joined, "joiner should join the server");
+    sleep_ms(1500).await;
+
+    j.cmd_tx
+        .send(NodeCommand::VoiceChannelJoin {
+            server_id: server_id.clone(),
+            channel_id: voice_cid.clone(),
+        })
+        .await
+        .unwrap();
+    let o_saw_join = wait_event(&mut o, std::time::Duration::from_secs(4), |ev| {
+        matches!(ev, NetworkEvent::VoiceChannelJoined { channel_id, .. } if *channel_id == voice_cid)
+    })
+    .await;
+    assert!(o_saw_join, "owner must see the joiner enter the voice channel");
+    o.cmd_tx
+        .send(NodeCommand::VoiceChannelJoin {
+            server_id: server_id.clone(),
+            channel_id: voice_cid.clone(),
+        })
+        .await
+        .unwrap();
+    let j_saw_join = wait_event(&mut j, std::time::Duration::from_secs(4), |ev| {
+        matches!(ev, NetworkEvent::VoiceChannelJoined { channel_id, .. } if *channel_id == voice_cid)
+    })
+    .await;
+    assert!(j_saw_join, "joiner must see the owner enter the voice channel");
+    drain_events(&mut o);
+    drain_events(&mut j);
+
+    async fn next_signal(
+        node: &mut TestNode,
+        wanted: &str,
+        secs: u64,
+    ) -> Option<serde_json::Value> {
+        let mut got = None;
+        let ok = wait_event(node, std::time::Duration::from_secs(secs), |ev| {
+            if let NetworkEvent::VoiceChannelSignal { signal_type, payload, .. } = ev {
+                if signal_type == wanted {
+                    got = Some(payload.clone());
+                    return true;
+                }
+            }
+            false
+        })
+        .await;
+        if !ok { return None; }
+        Some(serde_json::from_str(&got.expect("payload")).expect("valid json"))
+    }
+
+    // --- 1. Viewer (J) -> sharer (O): screen_watch carries the route hint ---
+    j.cmd_tx
+        .send(NodeCommand::VoiceChannelSendSignal {
+            server_id: server_id.clone(),
+            channel_id: voice_cid.clone(),
+            peer_id: o_master.clone(),
+            signal_type: "screen_watch".to_string(),
+            payload: serde_json::json!({
+                "want": true,
+                "viewer_width": 2560,
+                "viewer_height": 1440,
+                "source_quality": false,
+                "route": "relay",
+            })
+            .to_string(),
+        })
+        .await
+        .unwrap();
+    let watch = next_signal(&mut o, "screen_watch", 4).await
+        .expect("sharer must receive the screen_watch");
+    assert_eq!(watch["route"], serde_json::json!("relay"));
+    assert_eq!(watch["viewer_width"], serde_json::json!(2560));
+
+    // --- 2. Sharer (O) -> viewer (J): screen_assign round-trips ---
+    o.cmd_tx
+        .send(NodeCommand::VoiceChannelSendSignal {
+            server_id: server_id.clone(),
+            channel_id: voice_cid.clone(),
+            peer_id: j_master.clone(),
+            signal_type: "screen_assign".to_string(),
+            payload: serde_json::json!({
+                "origin": {"peer": o_master, "kind": "screen", "stream": "cafe0123"},
+                "forwarder": "12D3KooWFwdInfra",
+            })
+            .to_string(),
+        })
+        .await
+        .unwrap();
+    let assign = next_signal(&mut j, "screen_assign", 4).await
+        .expect("viewer must receive the screen_assign");
+    assert_eq!(assign["origin"]["peer"], serde_json::json!(o_master.clone()));
+    assert_eq!(assign["origin"]["stream"], serde_json::json!("cafe0123"));
+    assert_eq!(assign["forwarder"], serde_json::json!("12D3KooWFwdInfra"));
+    drain_events(&mut j);
+
+    // --- 3. SPOOFED origin (third party) must drop the WHOLE signal ---
+    let third_party = NativeKeypair::from_secret_bytes(&seed_bytes(199)).peer_id();
+    o.cmd_tx
+        .send(NodeCommand::VoiceChannelSendSignal {
+            server_id: server_id.clone(),
+            channel_id: voice_cid.clone(),
+            peer_id: j_master.clone(),
+            signal_type: "screen_assign".to_string(),
+            payload: serde_json::json!({
+                "origin": {"peer": third_party, "kind": "screen", "stream": "deadbeef"},
+                "forwarder": "12D3KooWFwdInfra",
+            })
+            .to_string(),
+        })
+        .await
+        .unwrap();
+    let spoofed = next_signal(&mut j, "screen_assign", 3).await;
+    assert!(spoofed.is_none(), "a spoofed screen_assign origin must be dropped");
+
+    // Node stays healthy: a legit assign still arrives afterwards.
+    o.cmd_tx
+        .send(NodeCommand::VoiceChannelSendSignal {
+            server_id: server_id.clone(),
+            channel_id: voice_cid.clone(),
+            peer_id: j_master.clone(),
+            signal_type: "screen_assign".to_string(),
+            payload: serde_json::json!({
+                "origin": {"peer": o_master, "kind": "screen", "stream": "cafe0123"},
+                "forwarder": "",
+            })
+            .to_string(),
+        })
+        .await
+        .unwrap();
+    let revert = next_signal(&mut j, "screen_assign", 4).await
+        .expect("legit revert-to-direct assign must still arrive");
+    assert_eq!(revert["forwarder"], serde_json::json!(""));
+
+    drop(o);
+    drop(j);
+}

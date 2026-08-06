@@ -170,8 +170,8 @@ dedup and SFrame cryptor registration on `origin.peer`; transport routing stays 
 the Olm/MLS-authenticated sender (offer / outgoing-role ICE) or with the local identity
 (answer / incoming-role ICE echoing our own share) — anything else drops the WHOLE signal with a
 `[HOLLOW-SECURITY]` log (the SFrame group key is shared, so a spoofed origin would attribute the
-spoofer's pixels to the victim). Forwarder-delivered legs (step 3) will ride a separate `fwd_*`
-namespace, never these variants. The screen offer/answer/ICE Olm arms in swarm.rs were
+spoofer's pixels to the victim). Forwarder-delivered legs ride the separate `fwd_*` namespace (see
+below), never these variants. The screen offer/answer/ICE Olm arms in swarm.rs were
 consolidated into the shared `handle_envelope_voice_channel_screen_*` handlers so guards live in
 ONE place for both Olm and MLS paths (`emit_vc_screen_sdp_signal` = the screen twin of
 `emit_vc_sdp_signal` with the origin guard + payload passthrough).
@@ -461,3 +461,52 @@ When a new peer joins a WS room (`PeerJoined` event in swarm.rs), the existing n
 No frb codegen needed — `HavenMessage` is internal, and `call_send_signal`/`NetworkEvent::CallSignal` are already generic over the type string. `CallAudioState` carries the 1:1 mute/deafen badge sync (Dart `audio_state`).
 
 **Recording indicator (issue #53, 2026-08-05):** Dart's `recording_start`/`recording_stop` signals are whitelisted on BOTH paths. 1:1 → `HavenMessage::CallRecordingState { call_id, recording }` (`call_recording_state`); VC → broadcast-class `MessageEnvelope::VoiceChannelRecordingState { sid, cid, recording, target }` (`vc_recording_state`) + plaintext `HavenMessage` twin — added to `is_broadcast`, the VC rate-limiter list, the MLS-only-via-Olm list, and `target()`. Receive handlers gate on VC participant membership and reconstruct the Dart-facing signal-type string from the `recording` bool. The VC Dart sender fires ONE broadcast (`peerId: ''`) — a per-peer loop would emit N duplicate MLS broadcasts. Harness-covered in both the DM and VC signal-routing tests.
+
+## Media forwarder control plane (`fwd_*`) — step 3 phase 1, 2026-08-06
+
+Screen shares can be served through a **blind packet forwarder** instead of a per-viewer PC. The
+forwarder is NOT a Hollow node: no CRDT, no MLS, no storage, no group keys. It terminates only the
+hop-by-hop DTLS-SRTP; payloads stay SFrame-encrypted under the ORIGINATOR's key end to end.
+Phase 1 = one infra forwarder on the VPS (`hollow-forwarder`); phase 2 = viewer-peer forwarders
+running the same module in-app. Detail + the field-bug post-mortem:
+`reports/MEDIA_FORWARDING_PLAN.md`, memory `project_media_forwarding_epic`.
+
+**Why a separate namespace:** a forwarder can never satisfy `is_vc_participant` / CRDT / MLS gates,
+so its signalling cannot ride the `vc_*` lane. `fwd_*` envelopes are Olm-direct inside a dedicated
+`fwd:{forwarder_peer_id}` relay room and are NEVER room-broadcast, never MLS
+(`MessageEnvelope::target()` unchanged; the MLS dispatch has explicit ignore arms for all ten).
+
+**Envelope variants** (`node/types.rs`, all fields `#[serde(default)]`, `origin: Box<StreamOrigin>`):
+client→forwarder `fwd_stream_register {origin, allowed_viewers}`, `fwd_stream_auth {origin, add,
+remove}`, `fwd_stream_unregister {origin}`, `fwd_ingest_offer {origin, sdp}`, `fwd_attach {origin}`,
+`fwd_detach {origin}`, `fwd_egress_answer {origin, sdp}`; forwarder→client `fwd_ingest_answer`,
+`fwd_egress_offer`, `fwd_error {origin, code, detail}` with codes
+`full|over_budget|not_authorized|unknown_stream|shutting_down`. Tag `fwd_ice` is RESERVED and
+unimplemented — both legs exchange COMPLETE SDPs (the forwarder has a fixed public host candidate).
+
+**Client plumbing:** `node/forwarder_client.rs` — `build_fwd_signal_envelope()` whitelists the
+client-sendable types (the forwarder-sendable ones are test-only `cfg(test)` arms so the harness can
+impersonate the role); `handle_forwarder_send_signal()` encrypts and sends through the
+**DETERMINISTIC `fwd:{id}` room**, never `ws_room_for_peer` (that lookup silently dropped the first
+signal of every share because the room join hadn't landed — same class as the DM one-way-loss rule).
+No session yet ⇒ queue in `pending_messages` + a signed KeyRequest through the same explicit room.
+Commands: `NodeCommand::{ForwarderSendSignal, JoinForwarderRoom, LeaveForwarderRoom}` — the join
+arms deliberately do NOT reuse `NodeCommand::JoinRoom`, which mutates `active_room` and fires
+`RoomCleared` (that would wipe the open DM pane). Inbound: `NetworkEvent::ForwarderSignal
+{from_peer, signal_type, payload}` for the three client-bound types (SDP size-capped in Rust; the
+"only from the discovered forwarder, only for a watched+assigned origin" trust decision is Dart's).
+FFI: `forwarder_send_signal` / `join_forwarder_room` / `leave_forwarder_room`.
+
+**VC-lane additions:** `vc_screen_watch` gained `route` (`""` old client / `"direct"` / `"relay"` /
+`"direct_failed"`) — the viewer's self-reported route class, ADVISORY, and a non-empty value is also
+the step-3-capable-client marker (old viewers must never receive an assignment). New broadcast-class
+peer variant `vc_screen_assign {sid, cid, origin, forwarder, target}` (sharer→viewer; `forwarder`
+empty = revert-to-direct) with the FULL new-variant touch list: `target()`, build arm, Olm arm, MLS
+arm, VC rate-limiter list, `is_vc_participant` gate, and the `inbound_origin_ok` spoof guard in its
+offer-direction form (`handle_envelope_voice_channel_screen_assign`).
+
+**Relay discovery:** `get_media_forwarder` text command (relay-uws `ws_handler.cpp`, mirrors
+`get_turn_credentials`) replies `{peer_id, online}` from the `--forwarder-peer-id` startup config +
+a `peer_sockets` lookup; guests refused; NEVER an HTTP variant. Client fires
+`WsCommand::GetMediaForwarder` on every `WsEvent::Connected` (static id ⇒ no refresh timer) →
+`NetworkEvent::MediaForwarderInfo` → Dart `forwarderInfoProvider`.

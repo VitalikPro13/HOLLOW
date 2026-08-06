@@ -921,6 +921,37 @@ Future<void> voiceSframeHeal({
   escalate: escalate,
 );
 
+/// Send an Olm-encrypted `fwd_*` control signal to a media forwarder inside
+/// its `fwd:{peer_id}` relay room. Signal types are whitelisted to the
+/// client-sendable set (`fwd_stream_register` / `fwd_stream_auth` /
+/// `fwd_stream_unregister` / `fwd_ingest_offer` / `fwd_attach` / `fwd_detach`
+/// / `fwd_egress_answer`); payload is JSON with a REQUIRED `origin` object.
+/// Queues + fires a signed KeyRequest when no Olm session exists yet.
+Future<void> forwarderSendSignal({
+  required String forwarderPeerId,
+  required String signalType,
+  required String payload,
+}) => RustLib.instance.api.crateApiNetworkForwarderSendSignal(
+  forwarderPeerId: forwarderPeerId,
+  signalType: signalType,
+  payload: payload,
+);
+
+/// Join a media forwarder's dedicated relay room (`fwd:{peer_id}`) so fwd
+/// control signals can flow. Pure transport join — never touches the DM
+/// conversation-pane state the generic room join carries.
+Future<void> joinForwarderRoom({required String forwarderPeerId}) => RustLib
+    .instance
+    .api
+    .crateApiNetworkJoinForwarderRoom(forwarderPeerId: forwarderPeerId);
+
+/// Leave a media forwarder's relay room (share stopped / no forwarder viewers
+/// left / no longer watching through it).
+Future<void> leaveForwarderRoom({required String forwarderPeerId}) => RustLib
+    .instance
+    .api
+    .crateApiNetworkLeaveForwarderRoom(forwarderPeerId: forwarderPeerId);
+
 /// Report data channel keepalive RTT for gossip peer scoring.
 Future<void> webrtcPingReport({required String peerId, required int rttMs}) =>
     RustLib.instance.api.crateApiNetworkWebrtcPingReport(
@@ -1931,6 +1962,22 @@ sealed class NetworkEvent with _$NetworkEvent {
     required String signalType,
     required String payload,
   }) = NetworkEvent_VoiceChannelSignal;
+
+  /// Client-bound `fwd_*` signal from a media forwarder (`fwd_ingest_answer`
+  /// / `fwd_egress_offer` / `fwd_error`). Dart must gate on "from_peer == the
+  /// discovered forwarder AND origin is watched+assigned" before acting.
+  const factory NetworkEvent.forwarderSignal({
+    required String fromPeer,
+    required String signalType,
+    required String payload,
+  }) = NetworkEvent_ForwarderSignal;
+
+  /// The relay's advertised media forwarder (static config; refreshed on
+  /// every reconnect). Cached by Dart's forwarderInfoProvider.
+  const factory NetworkEvent.mediaForwarderInfo({
+    required String peerId,
+    required bool online,
+  }) = NetworkEvent_MediaForwarderInfo;
   const factory NetworkEvent.gossipConnect({required String peerId}) =
       NetworkEvent_GossipConnect;
   const factory NetworkEvent.gossipDisconnect({required String peerId}) =

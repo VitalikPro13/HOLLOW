@@ -1,9 +1,19 @@
 # Media Forwarding Plan — Resolution Capping, Originator Attribution, SFrame Packet Forwarders
 
-**Design session 2026-08-05 (Vitalik + Claude); steps 2–3 planned + started same day — see §7 for
-live status. Step 1 COMPLETE (shipped + field-verified). Step 2 IMPLEMENTED (harness-green). The
-str0m forwarder spike PASSED all 5 acceptance criteria in a live host→VM field test — GO for the
-forwarder build. Approved implementation plan (D1–D6): `~/.claude/plans/pure-doodling-cupcake.md`.**
+**STATUS 2026-08-06: STEP 3 PHASE 1 IS COMPLETE AND FIELD-VERIFIED.** Step 1 (resolution capping)
+shipped; step 2 (originator attribution) shipped; step 3 phase 1 (the infra forwarder — D3 module +
+bin + VPS deploy, D4 relay discovery, D5 client integration, D6 field verification) all DONE — see
+§6 for the deliverable table and §7 for the status log incl. the D6 evidence and the five bugs the
+field found. A live screen share now traverses the VPS forwarder end to end: one encode on the
+sharer, blind packet relay, SFrame decrypting under the ORIGINATOR's key on a hop that never holds
+it, picture in ~1 s.
+**NEXT SESSION = PHASE 2: viewer-peer forwarders** (same crate embedded in the app; STUN-reachable
+peers with spare upload serve the TURN-only peers, so the relay carries ZERO media in the common
+case). Policy already decided: ON by default + Settings toggle, desktop only, never mobile/metered,
+2–3 downstream legs. Then phase 3 = simulcast (prerequisite: root-cause the Windows live
+`setParameters` rejection), then the 15-viewer cap goes dynamic.
+Design refs: `~/.claude/plans/pure-doodling-cupcake.md` (D1–D6) and
+`~/.claude/plans/hey-please-read-the-sequential-penguin.md` (the D3–D6 implementation plan).
 Supersedes the old HOLLOW_PLAN.md line-2080 framing ("extend the voice gossip tree to CAMERAS and SCREEN SHARE").
 
 ---
@@ -136,12 +146,21 @@ ORIGINATOR**, while transport (which PC, which packets, glare, conn_id) stays ke
 neighbor. This is the master-vs-device split Hollow already lives by, applied to media: *who it's from*
 vs. *who delivered it*.
 
-### Step 3 — The forwarder role (the epic; needs RTP-layer access in our libwebrtc fork)
+### Step 3 — The forwarder role (PHASE 1 COMPLETE + FIELD-VERIFIED 2026-08-06; phase 2 next)
 
-- Packet-level relay of SFrame ciphertext RTP; forwarders never decrypt, never re-encode.
-- Viewer-peer forwarders first: fanout of 2–3 per forwarder covers dozens of viewers at one extra hop.
-- Infra peer on the VPS as the reliability floor and the restricted-NAT answer (replaces TURN for shares
-  at `B + B·k` instead of `2·B·k`), and later the backbone of conference **broadcast mode**.
+Built on **str0m in RTP mode, NO libwebrtc fork patch** (the original "needs RTP-layer access in our
+fork" framing was superseded by the D2 spike — see §5.2).
+
+- Packet-level relay of SFrame ciphertext RTP; forwarders never decrypt, never re-encode. ✅ SHIPPED
+- **Infra peer on the VPS FIRST** (phase 1, done): the reliability floor and the restricted-NAT
+  answer, replacing TURN for shares at `B + B·k` instead of `2·B·k`, and later the backbone of
+  conference **broadcast mode**. Note this inverted the original ordering below — the infra peer
+  landed before viewer-peer forwarders because it needs no client-side upload policy, no tree
+  scoring, and can be restarted/instrumented freely during bring-up.
+- Viewer-peer forwarders = **PHASE 2, next session**: same crate embedded in the app (their own
+  display = downstream viewer #0 over a localhost leg); fanout of 2–3 per forwarder covers dozens
+  of viewers at one extra hop; ON by default + Settings toggle, desktop only, never mobile/metered.
+  This is the step that takes the relay's media cost to ZERO in the common case.
 - **Simulcast** (two-three `sendEncodings` layers, e.g. 1080p + 360p): forwarders adapt per-viewer quality
   by **packet selection** — a weak viewer gets the small layer, no re-encode anywhere.
 - Tree building: automatable scoring by upload headroom / route class (PeerScore.is_direct already exists
@@ -220,10 +239,10 @@ only, never mobile/metered, 2–3 downstream legs) — Vitalik decision 2026-08-
 |---|---|---|
 | D1 | Step 2 originator attribution (wire + spoof guard + Dart re-key + SFrame heal fix + tests) | **DONE** (see §7) |
 | D2 | str0m ↔ libwebrtc interop spike | **PASSED** (see §7) |
-| D3 | Forwarder module in hollow_core + headless `hollow-forwarder` bin + systemd deploy | next session |
-| D4 | Relay `get_media_forwarder` discovery + client plumbing | with D3 |
-| D5 | Client integration: route hint, `vc_screen_assign`, attach flow, fallback ladder | after D3+D4 |
-| D6 | Field verification (forced-relay VM viewer through the VPS forwarder) + this report updated | release gate |
+| D3 | Forwarder module in hollow_core + headless `hollow-forwarder` bin + systemd deploy | **DONE** (see §7) |
+| D4 | Relay `get_media_forwarder` discovery + client plumbing | **DONE** (see §7) |
+| D5 | Client integration: route hint, `vc_screen_assign`, attach flow, fallback ladder | **DONE** (see §7) |
+| D6 | Field verification (forced-relay VM viewer through the VPS forwarder) + this report updated | **PASSED** (see §7) |
 
 Then phase 2 (peer forwarders, same crate embedded in-app) → phase 3 (simulcast) → dynamic
 removal of the 15-viewer cap.
@@ -259,3 +278,95 @@ removal of the 15-viewer cap.
   Connected" otherwise); `Event::MediaAdded` fires only for REMOTE media — keep the `Mid` from
   `add_media()`; str0m auto-creates StreamTx for SDP-negotiated media; PT translation by
   (codec, clock-rate) between the legs' `codec_config().params()`.
+
+**2026-08-06 — D3+D4+D5 session (phase 1 implementation complete; D6 = the remaining gate):**
+
+- **D3 DONE.** `rust/hollow_core/src/forwarder/` behind the `forwarder` cargo feature
+  (`mod` config+boot, `signaling` = fetch.rs-shaped manual WS loop + Olm key-exchange RESPONDER,
+  `dispatch` = pure admission + per-peer token bucket, `engine` = stream/leg orchestration +
+  10 s budget/sweep tick, `stream` = per-stream fanout/PLI/counters, `budget` = pure caps) +
+  `src/bin/hollow_forwarder.rs`. Crate gained `crate-type "rlib"` + first `[features]` section
+  (str0m 0.21 + toml optional; verified inert for app builds: default `cargo check` clean, FRB
+  codegen untouched — the module lives OUTSIDE `api`). Deployed on the OVH VPS as
+  `hollow-forwarder.service` (`/home/ubuntu/forwarder`, TOML config, UDP 40000-40199 opened in
+  ufw, NO license key — the public relay is open). **Deviations from the approved plan, all
+  evidence-backed:** (1) NO hand-rolled packet-cache ring — str0m's own RTX cache via
+  `write_rtp(...).nackable(true)` serves egress NACKs (spike criterion 3 proved it post-cache);
+  (2) NO `FwdIce` in v1 — both legs ride COMPLETE SDPs (forwarder = fixed public host candidate;
+  the spike proved a NAT'd libwebrtc client reaches one without trickle); tag reserved;
+  (3) engine keeps the spike's per-leg task + per-leg UDP socket + broadcast fanout (kernel
+  demuxes; no bespoke demux layer), ports = a coturn-style RANGE, one per leg;
+  (4) forwarder identity = ONE keypair, master==device (`forwarder.key`); rotation = NEW identity
+  + relay flag update, never a re-key (clients pin the Olm identity key).
+  Lockfile note: adding str0m surfaced the known anyhow-1.0.75→backtrace→cc→getrandom-0.4 cycle;
+  fixed by bumping the anyhow pin to 1.0.104 (drops the backtrace edge).
+- **D4 DONE.** Relay `get_media_forwarder` (ws_handler.cpp, mirrors get_turn_credentials: guest
+  gate, `--forwarder-peer-id` startup config, `peer_sockets.count()` liveness) — deployed live.
+  Client: `WsCommand::GetMediaForwarder` fired on every `WsEvent::Connected` beside the TURN
+  request (no timer — static id) → `NetworkEvent::MediaForwarderInfo` → Dart
+  `forwarderInfoProvider` (plain Notifier cache, ice-config rules).
+- **D5 DONE.** `vc_screen_watch` gained `#[serde(default)] route` ("" old client / "direct" /
+  "relay" / "direct_failed"); viewer derives it from ONE immediate stats pass on the audio PC
+  (`pcFor()` + `probeIceRouteOnce`; forced-relay setting short-circuits to "relay"). New
+  `vc_screen_assign` variant (full touch list incl. rate-limiter + `is_vc_participant` +
+  `inbound_origin_ok` spoof guard). Sharer: relay-routed new-client viewers go through the
+  forwarder (idempotent full-allowlist `fwd_stream_register`, SINGLE ingest leg at
+  max(effectiveViewerCap), no `_outgoingScreenShares` slot — the 15-cap starts lifting), 30 s
+  ingest linger after the last forwarder viewer, `FwdError`/ingest-death reverts the audience to
+  direct offers. Viewer: `screen_assign` → fwd room join + `FwdAttach`; `fwd_egress_offer` rides
+  the extracted `_attachIncomingShare` helper (originator-keyed maps + SFrame
+  `'screen:$originator'`, forwarder = deliverer — D1 made this a pure key choice, zero UI edits);
+  COMPLETE-SDP answers via `gatheredLocalSdp()`. **Forwarder legs are EXEMPT from "Always relay
+  calls"** (STUN-only `_forwarderLegIceConfig` — the forwarder IS the relay replacement; forced
+  TURN would blackhole the leg). Fallback ladder: fwd_error / 20 s watch timeout / egress-leg
+  disconnect ⇒ detach + re-watch with `route:"direct_failed"` (once per session) ⇒ today's
+  direct+TURN path. Spike artifacts deleted (`rust/spike_str0m`, `spike_forward_dev.dart`,
+  main.dart hook); `_gatheredLocalSdp` ported into ScreenShareService first.
+- **D6 FIELD VERIFICATION PASSED 2026-08-06** (Windows host sharer → VirtualBox-NAT Win10 VM
+  viewer with "Always relay calls" ON, real VPS forwarder). Final run: stream registered → both
+  legs ICE-connected inside 1 s → `PLI sent upstream (via ssrc)` → picture on the viewer in
+  **~1 second**, ~1.2 Mbps egress. Proven: video traverses the blind hop; the viewer renders it
+  ATTRIBUTED TO THE SHARER with SFrame decrypting under the ORIGINATOR's key on a forwarder that
+  never held it; the sharer logs exactly ONE `Creating offer from shared stream` (one encode, one
+  copy, NO per-viewer PC — the 15-cap is untouched). The fallback ladder proved itself twice
+  unplanned: a forwarder-refused ingest and a mid-stream forwarder restart both reverted the
+  audience to direct+TURN and rendered normally (which also served as the step-2 regression check).
+  **Two follow-ups, neither blocking:** (1) the viewer's `[HOLLOW-SCREEN] ICE route` line labelled
+  the forwarder leg `TURN (relayed)` — that log predates this lane and cannot distinguish a
+  forwarder leg from a TURN'd direct leg, so it reads misleadingly on a client with "Always relay
+  calls" ON; make the label forwarder-aware. (2) Measure the actual relay saving with k>1 viewers:
+  at k=1 forwarder and TURN cost the relay the same `2·B`, so the `B + B·k` vs `2·B·k` win only
+  shows from the second viewer on (that is the number worth quoting publicly).
+- **Five bugs the field found that no test could** (all ours, each one hop further down the
+  pipeline — worth remembering as the shape of this class of work):
+  1. **str0m ICE destination.** Sockets bind `0.0.0.0` but advertise the public IP; `Receive`'s
+     `destination` must be the ADVERTISED address or str0m silently discards every inbound STUN
+     check. Both legs sat unconnected. (The spike dodged it by binding the LAN IP directly.)
+  2. **STUN servers on forwarder legs (client).** libwebrtc's UDP port withholds its candidates
+     while waiting on configured STUN servers; on a host whose DNS answers IPv6-first with no
+     routable IPv6 (the test VM: ULA address, IPv6-only default gateway) the allocator produced
+     ZERO candidates and never activated ICE. Forwarder legs need NO ice servers — the forwarder
+     is public and learns the peer's mapping as peer-reflexive. Empty list = what the spike used.
+  3. **`fwd_stream_register` dropped on send (client).** Routed via `send_encrypted_message`'s
+     `ws_room_for_peer` lookup, which found no shared room because the fwd-room join hadn't
+     landed yet → frame discarded → the forwarder refused the ingest with `unknown_stream`. The
+     fwd lane has a DETERMINISTIC room; route through it explicitly (the DM one-way-loss rule).
+  4. **PT translation ignored codec format params.** VP9 appears twice in a PT space (profile 0
+     and 2), H264 seven times; matching on (codec, clock_rate) alone can relabel a stream so the
+     receiver accepts packets and decodes nothing — black screen with healthy byte counters.
+     Match the full `CodecSpec`, fall back to codec+rate with a loud log.
+  5. **Keyframe request never reached the sharer.** `stream_rx_by_mid` did not resolve (the
+     working path is the SSRC seen on the wire), and the 1 s PLI aggregator DROPPED requests
+     inside its window instead of coalescing them. A joining viewer waited for a spontaneous
+     keyframe: **2m50s** of black screen, measured. Now: SSRC fallback, coalesce-never-drop, and
+     the forwarder requests a keyframe itself the moment an egress leg connects.
+  Every one of these was invisible to unit/harness tests by construction (media plane) and was
+  found by adding one decisive log line at a time — first inbound datagram per leg, candidate
+  counts on both sides of the SDP exchange, and the PT-mapping decision.
+- **Tests:** Rust suite 589/589 default features + 14/14 forwarder-feature unit tests (serde:
+  fwd tags pinned + defaults + no-target, screen_assign +
+  route; harness: `forwarder_room_and_signal_round_trip` — fwd room join without RoomCleared,
+  no-session queue→KeyRequest→drain, client-bound ignore arm, ForwarderSignal emission —
+  and `vc_screen_assign_and_route_round_trip` incl. spoof drop; forwarder unit tests for
+  budget/admission/token-bucket/PT-map run under `--features forwarder`); widget tests 406/406;
+  `flutter analyze` clean; relay rebuilt + restarted live.

@@ -6,13 +6,17 @@ After=network.target
 Type=simple
 User=ubuntu
 WorkingDirectory=/home/ubuntu/relay
+# --forwarder-peer-id: the media forwarder's identity (printed by
+# hollow-forwarder on first start as "forwarder peer_id"). Startup-load only —
+# update + restart on rotation.
 ExecStart=/home/ubuntu/relay-uws/build/hollow-relay \
     --port 443 \
     --public-ip 141.227.186.209 \
     --domain relay.anonlisten.com \
     --keys-file /home/ubuntu/relay/keys.json \
     --cert-file /etc/letsencrypt/live/relay.anonlisten.com/fullchain.pem \
-    --key-file /etc/letsencrypt/live/relay.anonlisten.com/privkey.pem
+    --key-file /etc/letsencrypt/live/relay.anonlisten.com/privkey.pem \
+    --forwarder-peer-id your-forwarder-peer-id-here
 Environment=TURN_SECRET=your-turn-secret-here
 Restart=always
 RestartSec=3

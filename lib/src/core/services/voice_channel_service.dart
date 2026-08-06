@@ -179,6 +179,11 @@ class VoiceChannelService {
   /// Set of peer IDs we currently have audio PCs with.
   Set<String> get connectedPeerIds => _peerConnections.keys.toSet();
 
+  /// The live audio-mesh PC to [peerId], if any. Media forwarding step 3:
+  /// `watchScreenShare` probes it for the viewer's route hint (direct vs
+  /// relay) — read-only access, never store or close through this.
+  RTCPeerConnection? pcFor(String peerId) => _peerConnections[peerId];
+
   // ---------------------------------------------------------------
   //  Lifecycle
   // ---------------------------------------------------------------
