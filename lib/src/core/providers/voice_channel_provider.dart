@@ -459,6 +459,11 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
 
   Timer? _sframeHealTimer;
 
+  /// MissingKey fast-path throttle (join-order epoch race): per-peer last
+  /// immediate heal ping, so a MissingKey storm collapses to one Rust
+  /// round-trip per peer per window.
+  final Map<String, DateTime> _sframeMissingKeyPings = {};
+
   /// Keyless watchdog (issue #47 → #27): with NO SFrame key no cryptors ever
   /// exist, so no cryptor-state callbacks fire and the heal ladder never
   /// arms — an identity that lost its MLS groups (e.g. after a
@@ -1087,6 +1092,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     _sframeFailures.removeWhere((k, _) => k.startsWith('$peerId|'));
     _sframeHealProgress.remove(peerId);
     _sframeEscalations.remove(peerId);
+    _sframeMissingKeyPings.remove(peerId);
     // Clean up screen sharing for this peer.
     await _cleanupPeerScreenShare(peerId);
     // Clean up camera state for this peer.
@@ -2597,6 +2603,23 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       if (direct != null) {
         await direct.close();
         await _dropShareCryptors(forwarderPeerId);
+        // CRYPTOR COLLISION (field-hit 2026-08-07: 10-15 s black on BOTH
+        // viewers at every peer promotion): the ingest leg's sender cryptor
+        // is keyed 'screen:<forwarderId>' — the SAME (participant, kind) as
+        // the direct per-viewer PC we just closed. enableForSender is
+        // idempotent per that key, so the enable inside _ensureIngestLeg
+        // no-op'd against the direct PC's cryptor, and the drop above then
+        // removed the participant entirely — the branch carried PLAINTEXT
+        // (both viewers DecryptionFailed) until an epoch change happened to
+        // re-run the sweep. Re-enable NOW, after the drop, so the cryptor
+        // genuinely binds the INGEST sender (drop+re-enable rule). The VPS
+        // branch never collides — the infra forwarder was never a viewer.
+        final ingestPc = branch.ingest?.pc;
+        final fc = _service?.frameCryptor;
+        if (ingestPc != null && fc != null) {
+          await _enableSframeOnScreenSharePc(ingestPc, fc, forwarderPeerId,
+              isSender: true);
+        }
       }
     }
     if (!state.isInVoiceChannel) return;
@@ -3693,6 +3716,23 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       _sframeFailures.putIfAbsent(key, () => DateTime.now());
       _sframeHealTimer ??= Timer.periodic(
           const Duration(seconds: 2), (_) => _sframeHealTick());
+      // MissingKey on a RECEIVER = "the frame wants a key slot I don't hold" —
+      // the join-order epoch race signature (our MLS group is silently stale;
+      // slots are additive so nothing else produces it on a live stream).
+      // Fire the cheap heal NOW instead of waiting for ladder step 2 (~6 s):
+      // Rust re-emits the current key AND probes the authority, which answers
+      // a stale epoch with a commit catch-up within ~1 RTT. Throttled per
+      // peer; the normal ladder keeps running unchanged as the backstop.
+      if (st == FrameCryptorState.FrameCryptorStateMissingKey && isReceiver) {
+        final last = _sframeMissingKeyPings[peerId];
+        if (last == null ||
+            DateTime.now().difference(last) >= const Duration(seconds: 5)) {
+          _sframeMissingKeyPings[peerId] = DateTime.now();
+          debugPrint(
+              '[HOLLOW-VC] MissingKey fast-path: immediate heal ping for $peerId');
+          _sframeHealRust(peerId, escalate: false);
+        }
+      }
     } else {
       // Ok / KeyRatcheted / New — this cryptor recovered.
       final wasFailing = _sframeFailures.remove(key) != null;
@@ -3716,6 +3756,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     _sframeFailures.clear();
     _sframeHealProgress.clear();
     _sframeEscalations.clear();
+    _sframeMissingKeyPings.clear();
   }
 
   void _armSframeKeylessWatchdog() {

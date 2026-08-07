@@ -392,7 +392,7 @@ pub(crate) async fn admit_peer(
             server_id: sid.clone(), welcome: welcome_b64, channel_id: None,
         });
     let epoch = mls_mgr.epoch(&sid).ok();
-    broadcast_mls_commit(ws_cmd_tx, &sid, None,
+    broadcast_mls_commit(mls_mgr, ws_cmd_tx, &sid, None,
         base64::engine::general_purpose::STANDARD.encode(commit), epoch);
 
     // Our own cryptors rotate too — mirror the batch-flush emission.
@@ -472,7 +472,7 @@ pub(crate) async fn handle_conference_kick(
     }
     persist_mls_state(mls_mgr, crypto_store);
     let epoch = mls_mgr.epoch(&sid).ok();
-    broadcast_mls_commit(ws_cmd_tx, &sid, None,
+    broadcast_mls_commit(mls_mgr, ws_cmd_tx, &sid, None,
         base64::engine::general_purpose::STANDARD.encode(commit), epoch);
     send_message_to_peer_in_room(ws_cmd_tx, &sid, peer_id,
         HavenMessage::ConferenceKicked { conf_id: conf_id.to_string() });

@@ -951,6 +951,11 @@ async fn run_event_loop(
     // Value = when the request was sent; entries expire after MLS_BOOTSTRAP_TIMEOUT to allow retry.
     let mut mls_bootstrap_requested: HashMap<String, std::time::Instant> = HashMap::new();
 
+    // Per-(group, peer) cooldowns for MLS epoch-hint service and self-probes
+    // (join-order SFrame race fix). Key: "{group_key}|{master}" for serving,
+    // "{group_key}|probe" for our own probes.
+    let mut mls_epoch_hint_cooldown: HashMap<String, std::time::Instant> = HashMap::new();
+
     // Track which channels the Dart UI is subscribed to per server (for scoped sync on decrypt failure).
     let mut subscribed_channels: HashMap<String, Vec<String>> = HashMap::new();
 
@@ -2369,7 +2374,8 @@ async fn run_event_loop(
                             &mut mls, &ws_cmd_tx, &ws_room_peers,
                             &server_states, &bundle_keypair, &crypto_store,
                             &mut voice_channel_participants, &mut voice_channel_gossip_mode,
-                            &gossip_overlays, &local_peer_str, &event_tx,
+                            &gossip_overlays, &mut mls_epoch_hint_cooldown,
+                            &local_peer_str, &event_tx,
                         ).await;
                     }
 
@@ -2401,6 +2407,7 @@ async fn run_event_loop(
                             &server_states,
                             &mut pending_mls_removals,
                             &mut mls_bootstrap_requested,
+                            &mut mls_epoch_hint_cooldown,
                             &crypto_store, &local_peer_str, &event_tx,
                         ).await;
                     }
@@ -2594,6 +2601,7 @@ async fn run_event_loop(
                                 &mut decrypt_fail_cooldown,
                                 &mut pending_mls_key_packages, &mut pending_mls_removals,
                                 &mut mls_decrypt_failures,
+                                &mut mls_epoch_hint_cooldown,
                                 &ws_cmd_tx, &ws_room_peers,
                                 &webrtc_peers, &mut pending_webrtc_sends,
                                 &mut channel_sync_sent,
@@ -2854,6 +2862,7 @@ async fn run_event_loop(
                         key_request_in_flight.clear();
                         key_bundle_sent_to.clear();
                         mls_bootstrap_requested.clear();
+                        mls_epoch_hint_cooldown.clear();
                         if !pending_messages.is_empty() {
                             hollow_log!("[HOLLOW-WS] Keeping {} pending message queues for delivery after reconnect", pending_messages.len());
                         }
@@ -3143,6 +3152,9 @@ async fn run_event_loop(
                                                     &peer_id, HavenMessage::SyncRequest {
                                                         server_id: sid.clone(),
                                                         state_vector_json: sv_json,
+                                                        // Epoch hint: lets the responder detect
+                                                        // us (or itself) stale on first contact.
+                                                        mls_epoch: mls.as_ref().and_then(|m| m.epoch(sid).ok()),
                                                     },
                                                 );
                                             }
@@ -3314,6 +3326,21 @@ async fn run_event_loop(
                                     key_request_in_flight.insert(peer_id.clone(), std::time::Instant::now());
                                 }
                             }
+                    }
+                    WsEvent::LeftRoom { room } => {
+                        // WE left this room: purge its frozen member snapshot from
+                        // the routing table. A self-left room receives no further
+                        // PeerLeft/RoomMembers, so a stale entry lives forever and
+                        // the flexible `ws_room_for_peer` first-match can route
+                        // targeted sends into it — the relay then drops them
+                        // (sender not in room), a silent one-way blackhole that
+                        // persists until restart. Field-hit 2026-08-07 twice, both
+                        // times right after a viewer's `fwd:` room detach: every
+                        // later VC signal to the sharer vanished ("Connecting to
+                        // screen share..." forever / lost screen_answer on revert).
+                        if ws_room_peers.remove(&room).is_some() {
+                            hollow_log!("[HOLLOW-WS] Left room {room} — purged its peer snapshot from routing");
+                        }
                     }
                     WsEvent::PeerLeft { room, peer_id } => {
                         hollow_log!("[HOLLOW-WS] Peer {peer_id} left room {room}");
@@ -3666,6 +3693,9 @@ async fn run_event_loop(
                                                     pid_str, HavenMessage::SyncRequest {
                                                         server_id: sid.clone(),
                                                         state_vector_json: sv_json.clone(),
+                                                        // Epoch hint: lets the responder detect
+                                                        // us (or itself) stale on first contact.
+                                                        mls_epoch: mls.as_ref().and_then(|m| m.epoch(sid).ok()),
                                                     },
                                                 );
                                             }
@@ -4450,6 +4480,7 @@ async fn run_event_loop(
                                         &mut decrypt_fail_cooldown,
                                         &mut pending_mls_key_packages, &mut pending_mls_removals,
                                         &mut mls_decrypt_failures,
+                                        &mut mls_epoch_hint_cooldown,
                                         &ws_cmd_tx, &ws_room_peers,
                                         &webrtc_peers, &mut pending_webrtc_sends,
                                         &mut channel_sync_sent,
@@ -4525,9 +4556,10 @@ async fn run_event_loop(
                                     // fans out. Non-holders (subgroup non-qualifiers, the
                                     // removed devices) ignore it via has_group / the epoch
                                     // guard on the receive side.
+                                    let commit_epoch = mls_mgr.epoch(&group_key).ok();
                                     crate::node::crypto_handler::broadcast_mls_commit(
-                                        &ws_cmd_tx, &server_id, channel_id.clone(),
-                                        commit_b64, mls_mgr.epoch(&group_key).ok(),
+                                        mls_mgr, &ws_cmd_tx, &server_id, channel_id.clone(),
+                                        commit_b64, commit_epoch,
                                     );
                                 }
                                 Err(e) => hollow_log!("[HOLLOW-MLS] Batch removal failed for {group_key}: {e}"),
@@ -4598,9 +4630,10 @@ async fn run_event_loop(
                                     // just added) is in the room. The just-added devices
                                     // receive it too but skip it via the epoch guard —
                                     // their Welcome already lands them at this epoch.
+                                    let commit_epoch = mls_mgr.epoch(&group_key).ok();
                                     crate::node::crypto_handler::broadcast_mls_commit(
-                                        &ws_cmd_tx, &server_id, channel_id.clone(),
-                                        commit_b64, mls_mgr.epoch(&group_key).ok(),
+                                        mls_mgr, &ws_cmd_tx, &server_id, channel_id.clone(),
+                                        commit_b64, commit_epoch,
                                     );
 
                                     hollow_log!("[HOLLOW-MLS] Batch-added {} members to {group_key}: {:?}", added_peers.len(), added_peers);
@@ -5584,6 +5617,7 @@ async fn handle_incoming_request(
     pending_mls_key_packages: &mut HashMap<String, Vec<(String, Vec<u8>)>>,
     pending_mls_removals: &mut HashMap<String, Vec<String>>,
     mls_decrypt_failures: &mut HashMap<String, u32>,
+    mls_epoch_hint_cooldown: &mut HashMap<String, std::time::Instant>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     webrtc_peers: &std::collections::HashSet<String>,
@@ -8625,9 +8659,9 @@ async fn handle_incoming_request(
 
         // -- CRDT sync message handlers --
 
-        HavenMessage::SyncRequest { server_id, state_vector_json } => {
+        HavenMessage::SyncRequest { server_id, state_vector_json, mls_epoch } => {
             hollow_log!("[HOLLOW-CRDT] SyncRequest from {peer_str} for server {server_id}");
-            
+
 
             if let Some(state) = server_states.get(&server_id) {
                 // Compute what they're missing
@@ -8649,6 +8683,17 @@ async fn handle_incoming_request(
 
                 // No bidirectional SyncRequest here — both peers trigger
                 // sync in ConnectionEstablished, so both sides already initiate.
+            }
+
+            // Epoch hint (join-order SFrame race fix): the first-contact sync
+            // doubles as the stale-group detector — serve a commit catch-up /
+            // repair when the sender is behind, self-probe when it's ahead.
+            if let (Some(their_epoch), Some(mls_mgr)) = (mls_epoch, mls.as_mut()) {
+                crate::node::crypto_handler::handle_epoch_hint(
+                    mls_mgr, ws_cmd_tx, ws_room_peers, server_states,
+                    pending_mls_removals, mls_epoch_hint_cooldown,
+                    &server_id, None, their_epoch, peer_str, local_peer_str,
+                );
             }
         }
 
@@ -10753,6 +10798,9 @@ async fn handle_incoming_request(
                                             peer_str, HavenMessage::SyncRequest {
                                                 server_id: server_id.clone(),
                                                 state_vector_json: sv,
+                                                // A decrypt failure often IS epoch skew —
+                                                // let the responder catch us up.
+                                                mls_epoch: mls_mgr.epoch(&server_id).ok(),
                                             },
                                         );
                                     }
@@ -11075,6 +11123,8 @@ async fn handle_incoming_request(
                                         &peer_str, HavenMessage::SyncRequest {
                                             server_id: server_id.clone(),
                                             state_vector_json: sv,
+                                            // Freshly Welcomed — current by construction.
+                                            mls_epoch: mls_mgr.epoch(&server_id).ok(),
                                         },
                                     );
                                 }
@@ -11118,131 +11168,76 @@ async fn handle_incoming_request(
         }
 
         HavenMessage::MlsCommit { server_id, commit, channel_id: cm_channel_id, epoch: cm_epoch } => {
-            let group_key = match &cm_channel_id {
+            hollow_log!("[HOLLOW-MLS] MlsCommit from {peer_str} for {server_id} (cid={cm_channel_id:?})");
+            if let Some(mls_mgr) = mls {
+                let _ = crate::node::crypto_handler::handle_mls_commit_frame(
+                    mls_mgr, crypto_store, server_states, ws_cmd_tx, ws_room_peers,
+                    mls_bootstrap_requested, event_tx, local_peer_str,
+                    &server_id, &commit, &cm_channel_id, cm_epoch,
+                ).await;
+            }
+        }
+
+        HavenMessage::MlsEpochProbe { server_id, channel_id: pr_channel_id, epoch } => {
+            // A peer asks whether its group is behind (join-order SFrame race
+            // fix). Membership gate + authority election + cooldowns live in
+            // the handler; a spoofed hint can never drop a group.
+            hollow_log!("[HOLLOW-MLS] MlsEpochProbe from {peer_str} for {server_id} (cid={pr_channel_id:?}, their epoch {epoch})");
+            if let Some(mls_mgr) = mls {
+                crate::node::crypto_handler::handle_epoch_hint(
+                    mls_mgr, ws_cmd_tx, ws_room_peers, server_states,
+                    pending_mls_removals, mls_epoch_hint_cooldown,
+                    &server_id, pr_channel_id.as_deref(), epoch,
+                    peer_str, local_peer_str,
+                );
+            }
+        }
+
+        HavenMessage::MlsCommitCatchup { server_id, channel_id: cu_channel_id, commits } => {
+            // Replay of commit frames we missed (unbuffered 0x03 broadcast).
+            // Every frame goes through the SAME validated apply path as a live
+            // MlsCommit; additionally each must be exactly one epoch ahead of
+            // us — we never attempt a gapped commit, so a bad catch-up can't
+            // even reach the drop-group recovery (strictly safer than the
+            // broadcast path it supplements).
+            let is_member = server_states.get(&server_id).is_some_and(|s| {
+                s.members.keys().any(|m| super::resolver::same_identity(m, peer_str))
+            });
+            if !is_member {
+                hollow_log!("[HOLLOW-MLS] Ignoring MlsCommitCatchup from non-member {peer_str} for {server_id}");
+                return;
+            }
+            let group_key = match &cu_channel_id {
                 Some(cid) => crate::crypto::subgroup_id(&server_id, cid),
                 None => server_id.clone(),
             };
-            hollow_log!("[HOLLOW-MLS] MlsCommit from {peer_str} for {group_key}");
-
-
             if let Some(mls_mgr) = mls {
-                // We may receive a Commit for a subgroup we're not part of (we don't
-                // qualify for the channel) — ignore it rather than self-drop.
                 if !mls_mgr.has_group(&group_key) {
-                    hollow_log!("[HOLLOW-MLS] Ignoring Commit for group we don't hold: {group_key}");
+                    hollow_log!("[HOLLOW-MLS] Ignoring MlsCommitCatchup for group we don't hold: {group_key}");
                     return;
                 }
-                // Tier 1 epoch guard: commits arrive as a room broadcast, so they
-                // also reach fresh joiners (already at the post-commit epoch via
-                // their Welcome) and duplicate deliveries. Skip instead of erroring
-                // into the costly drop-group + re-bootstrap path below.
-                if let Some(wire_epoch) = cm_epoch {
-                    if mls_mgr.epoch(&group_key).is_ok_and(|own| own >= wire_epoch) {
-                        hollow_log!("[HOLLOW-MLS] Skipping commit for {group_key} at epoch {wire_epoch} — already at/past it");
-                        return;
+                let mut entries = commits;
+                entries.sort_by_key(|(e, _)| *e);
+                entries.truncate(16); // flood guard
+                hollow_log!("[HOLLOW-MLS] Commit catch-up from {peer_str} for {group_key}: {} frame(s)", entries.len());
+                for (entry_epoch, commit_b64) in entries {
+                    let Ok(own) = mls_mgr.epoch(&group_key) else { break };
+                    if entry_epoch <= own {
+                        continue; // already there
                     }
-                }
-                let commit_bytes = match base64::engine::general_purpose::STANDARD.decode(&commit) {
-                    Ok(b) => b,
-                    Err(e) => { hollow_log!("[HOLLOW-MLS] Base64 decode Commit failed: {e}"); return; }
-                };
-
-                match mls_mgr.process_commit(&group_key, &commit_bytes) {
-                    Ok(()) => {
-                        persist_mls_state(mls_mgr, crypto_store);
-                        hollow_log!("[HOLLOW-MLS] Processed commit for {group_key}");
-
-                        // EVICTION CHECK: a commit that removed OUR OWN leaf merges
-                        // cleanly but leaves the group INACTIVE — export/encrypt fail
-                        // forever while has_group stays true, silently wedging SFrame
-                        // (issue #27's stuck state). If we're still a CRDT member
-                        // (heal-driven remove+re-add, not a kick/ban), drop the dead
-                        // group and re-bootstrap; the Welcome re-keys us.
-                        if !mls_mgr.is_active(&group_key) {
-                            hollow_log!("[HOLLOW-MLS] Commit EVICTED us from {group_key} — dropping inactive group");
-                            mls_mgr.remove_group(&group_key);
-                            persist_mls_state(mls_mgr, crypto_store);
-                            let still_member = server_states.get(&server_id).is_some_and(|s| {
-                                s.members.keys().any(|m| super::resolver::same_identity(m, local_peer_str))
-                            });
-                            if still_member
-                                && !mls_bootstrap_requested.get(&group_key)
-                                    .is_some_and(|t| t.elapsed() < MLS_BOOTSTRAP_TIMEOUT)
-                            {
-                                if let Some(state) = server_states.get(&server_id) {
-                                    let requested = match &cm_channel_id {
-                                        Some(cid) => {
-                                            crate::node::crypto_handler::request_subgroup_bootstrap(
-                                                mls_mgr, ws_cmd_tx, ws_room_peers,
-                                                state, &server_id, cid, local_peer_str,
-                                            );
-                                            true
-                                        }
-                                        None => crate::node::crypto_handler::request_server_group_bootstrap(
-                                            mls_mgr, ws_cmd_tx, ws_room_peers,
-                                            state, &server_id, local_peer_str,
-                                        ),
-                                    };
-                                    if requested {
-                                        mls_bootstrap_requested.insert(group_key.clone(), std::time::Instant::now());
-                                    }
-                                }
-                            }
-                            return;
-                        }
-
-                        // Emit epoch change for SFrame key rotation. For a subgroup
-                        // (restricted voice channel), route it to that channel's cryptor.
-                        if let Ok(sframe_key) = mls_mgr.export_secret(&group_key, "sframe", b"", 32) {
-                            let epoch = mls_mgr.epoch(&group_key).unwrap_or(0);
-                            let _ = event_tx.send(NetworkEvent::MlsEpochChanged {
-                                server_id: server_id.clone(), epoch, sframe_key,
-                                channel_id: cm_channel_id.clone(),
-                            }).await;
-                        }
+                    if entry_epoch != own + 1 {
+                        hollow_log!("[HOLLOW-MLS] Catch-up gap for {group_key}: at {own}, next frame is {entry_epoch} — stopping");
+                        break;
                     }
-                    Err(e) => {
-                        hollow_log!("[HOLLOW-MLS] Failed to process commit for {group_key}: {e}");
-
-                        // Commit processing failed — MLS group state is stale.
-                        // Drop group and request re-bootstrap. Server group: from owner.
-                        // Subgroup: from the subgroup coordinator (qualifying members).
-                        if !mls_bootstrap_requested.get(&group_key).is_some_and(|t| t.elapsed() < MLS_BOOTSTRAP_TIMEOUT) {
-                            hollow_log!("[HOLLOW-MLS] Dropping stale MLS group and requesting re-bootstrap for {group_key}");
-                            mls_mgr.remove_group(&group_key);
-                            persist_mls_state(mls_mgr, crypto_store);
-
-                            if let Some(state) = server_states.get(&server_id) {
-                                let local_peer = local_peer_str.to_string();
-                                // Pick the re-bootstrap target.
-                                let target: Option<String> = match &cm_channel_id {
-                                    Some(cid) => crate::node::crypto_handler::elect_subgroup_coordinator(
-                                        state, cid, &local_peer, &ws_room_peers,
-                                    ).filter(|c| c != &local_peer),
-                                    None => state.members_list().into_iter()
-                                        .find(|m| m.peer_id != local_peer
-                                            && state.roles.get(&m.peer_id)
-                                                .map(|r| *r.read() == crate::crdt::operations::MemberRole::Owner)
-                                                .unwrap_or(false))
-                                        .map(|m| m.peer_id.clone()),
-                                };
-                                if let Some(target) = target {
-                                    if let Ok(kp_bytes) = mls_mgr.generate_key_package() {
-                                        let kp_b64 = base64::engine::general_purpose::STANDARD.encode(&kp_bytes);
-                                        let data = serde_json::to_vec(&HavenMessage::MlsKeyPackage {
-                                            server_id: server_id.clone(),
-                                            key_package: kp_b64,
-                                            channel_id: cm_channel_id.clone(),
-                                        }).unwrap_or_default();
-                                        let sent = send_raw_to_identity(ws_cmd_tx, ws_room_peers, &target, data);
-                                        if sent > 0 {
-                                            mls_bootstrap_requested.insert(group_key.clone(), std::time::Instant::now());
-                                            hollow_log!("[HOLLOW-MLS] Sent re-bootstrap KeyPackage to {target} ({sent} device(s)) for {group_key}");
-                                        }
-                                    }
-                                }
-                            }
-                        }
+                    match crate::node::crypto_handler::handle_mls_commit_frame(
+                        mls_mgr, crypto_store, server_states, ws_cmd_tx, ws_room_peers,
+                        mls_bootstrap_requested, event_tx, local_peer_str,
+                        &server_id, &commit_b64, &cu_channel_id, Some(entry_epoch),
+                    ).await {
+                        crate::node::crypto_handler::CommitApplyOutcome::Applied
+                        | crate::node::crypto_handler::CommitApplyOutcome::Skipped => continue,
+                        crate::node::crypto_handler::CommitApplyOutcome::NoGroup
+                        | crate::node::crypto_handler::CommitApplyOutcome::Failed => break,
                     }
                 }
             }

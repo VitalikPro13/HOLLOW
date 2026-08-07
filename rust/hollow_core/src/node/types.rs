@@ -1230,6 +1230,14 @@ pub(crate) enum HavenMessage {
     SyncRequest {
         server_id: String,
         state_vector_json: String,
+        /// Sender's SERVER-GROUP MLS epoch (join-order SFrame race fix). Rides
+        /// the plaintext first-contact sync so a stale member is detected the
+        /// moment it (re-)enters the room — the responder serves an
+        /// `MlsCommitCatchup` replay (or the remove+re-add repair) when the
+        /// sender is behind, and probes the authority itself when AHEAD of us.
+        /// Absent = old client = no detection (today's behavior).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mls_epoch: Option<u64>,
     },
 
     #[serde(rename = "sync_response")]
@@ -1394,6 +1402,40 @@ pub(crate) enum HavenMessage {
         server_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         channel_id: Option<String>,
+    },
+
+    /// Plaintext epoch probe (join-order SFrame race fix): "my MLS group for
+    /// this key sits at `epoch` — am I behind?" Sent to the group authority at
+    /// VC join and from SFrame heal step 2. A present-but-stale group is
+    /// otherwise INVISIBLE: commits ride an unbuffered 0x03 room broadcast, and
+    /// every recovery trigger keys on `has_group`/leaf-missing, so a member
+    /// that missed join-churn commits sits on a stale SFrame key (black screen)
+    /// until the escalated heal. The authority answers with `MlsCommitCatchup`
+    /// or falls back to the remove+re-add repair. Plaintext by the sync rule —
+    /// the prober's MLS is stale by definition.
+    #[serde(rename = "mls_epoch_probe")]
+    MlsEpochProbe {
+        server_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        channel_id: Option<String>,
+        epoch: u64,
+    },
+
+    /// Replay of missed MLS commit frames to ONE stale member, ascending epoch
+    /// order. Entries are `(post_merge_epoch, base64_commit)` — the SAME bytes
+    /// that already rode the server-room `MlsCommit` broadcast, so replaying
+    /// them to a verified member leaks nothing; the receiver revalidates every
+    /// frame through the normal OpenMLS commit-apply path (epoch guard,
+    /// signature checks, eviction check). This is the non-churning repair: the
+    /// stale member marches to the current epoch WITHOUT new commits — repair
+    /// by remove+re-add bumps the epoch for everyone and feeds exactly the
+    /// churn spiral that thrashed the long-lived test server.
+    #[serde(rename = "mls_commit_catchup")]
+    MlsCommitCatchup {
+        server_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        channel_id: Option<String>,
+        commits: Vec<(u64, String)>,
     },
 
     // -- Conferences (node/conference.rs; reports/CONFERENCES_PLAN.md) --
@@ -3970,6 +4012,96 @@ mod stream_origin_tests {
                 assert_eq!(o.stream, "ff00ff00");
             }
             other => panic!("unexpected parse result: {other:?}"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod epoch_catchup_wire_tests {
+    use super::*;
+
+    /// Old-client `sync_request` (no `mls_epoch`) must parse to `None` —
+    /// pinned byte-for-byte because the harness can't simulate a pre-rollout
+    /// client (both nodes run this build).
+    #[test]
+    fn sync_request_without_epoch_parses_to_none() {
+        let json = r#"{"type":"sync_request","server_id":"srv1","state_vector_json":"{}"}"#;
+        match serde_json::from_str::<HavenMessage>(json) {
+            Ok(HavenMessage::SyncRequest { server_id, state_vector_json, mls_epoch }) => {
+                assert_eq!(server_id, "srv1");
+                assert_eq!(state_vector_json, "{}");
+                assert!(mls_epoch.is_none());
+            }
+            other => panic!("unexpected parse result: {other:?}"),
+        }
+    }
+
+    /// `mls_epoch: None` must serialize to EXACTLY today's wire bytes — no
+    /// `mls_epoch` key at all (skip_serializing_if), so old clients see an
+    /// unchanged protocol.
+    #[test]
+    fn sync_request_without_epoch_keeps_wire_bytes() {
+        let msg = HavenMessage::SyncRequest {
+            server_id: "s".into(),
+            state_vector_json: "{}".into(),
+            mls_epoch: None,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert_eq!(json, r#"{"type":"sync_request","server_id":"s","state_vector_json":"{}"}"#);
+    }
+
+    #[test]
+    fn sync_request_with_epoch_round_trips() {
+        let msg = HavenMessage::SyncRequest {
+            server_id: "s".into(),
+            state_vector_json: "{}".into(),
+            mls_epoch: Some(6),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains(r#""mls_epoch":6"#), "epoch missing from wire: {json}");
+        match serde_json::from_str::<HavenMessage>(&json).unwrap() {
+            HavenMessage::SyncRequest { mls_epoch, .. } => assert_eq!(mls_epoch, Some(6)),
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    /// Tag pin: the probe's wire name is part of the protocol.
+    #[test]
+    fn epoch_probe_round_trips_with_pinned_tag() {
+        let msg = HavenMessage::MlsEpochProbe {
+            server_id: "srv1".into(),
+            channel_id: None,
+            epoch: 4,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert_eq!(json, r#"{"type":"mls_epoch_probe","server_id":"srv1","epoch":4}"#);
+        match serde_json::from_str::<HavenMessage>(&json).unwrap() {
+            HavenMessage::MlsEpochProbe { server_id, channel_id, epoch } => {
+                assert_eq!(server_id, "srv1");
+                assert!(channel_id.is_none());
+                assert_eq!(epoch, 4);
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    /// Tag pin + subgroup form + entry ordering survives the round trip.
+    #[test]
+    fn commit_catchup_round_trips_with_pinned_tag() {
+        let msg = HavenMessage::MlsCommitCatchup {
+            server_id: "srv1".into(),
+            channel_id: Some("chan1".into()),
+            commits: vec![(5, "YWJj".into()), (6, "ZGVm".into())],
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.starts_with(r#"{"type":"mls_commit_catchup""#), "tag drifted: {json}");
+        match serde_json::from_str::<HavenMessage>(&json).unwrap() {
+            HavenMessage::MlsCommitCatchup { server_id, channel_id, commits } => {
+                assert_eq!(server_id, "srv1");
+                assert_eq!(channel_id.as_deref(), Some("chan1"));
+                assert_eq!(commits, vec![(5, "YWJj".to_string()), (6, "ZGVm".to_string())]);
+            }
+            other => panic!("unexpected variant: {other:?}"),
         }
     }
 }

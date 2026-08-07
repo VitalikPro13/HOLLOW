@@ -66,6 +66,13 @@ struct RelayInner {
     /// Mirrors the relay's temporary-nickname registry. TTL not modeled;
     /// an offline holder resolves as not_found like the real staleness check.
     nicknames: HashMap<String, (String, String)>,
+    /// Devices that silently DON'T receive 0x03 room broadcasts (SendToRoom)
+    /// while still present in the room. Models the real relay's backpressure
+    /// drop on a long-lived socket (uWS returns DROPPED past maxBackpressure
+    /// with no error to the sender) — the exact loss mode behind the
+    /// join-order MLS epoch race. Presence events and direct frames still
+    /// flow, so the victim looks perfectly healthy to everyone.
+    broadcast_deaf: HashSet<String>,
     /// Optional load meter (scaling benchmark). When `Some`, every command the
     /// relay handles and every frame the relay DELIVERS to a socket is tallied
     /// here — the ground truth for "what does one server operation cost the
@@ -258,6 +265,19 @@ impl MockRelay {
         inner.nicknames.get(nickname).map(|v| v.1.clone())
     }
 
+    /// Make a device deaf to 0x03 room broadcasts (or restore it) — the
+    /// silent-loss lever for the join-order MLS epoch race tests. The device
+    /// stays in its rooms and keeps receiving presence + direct frames.
+    #[allow(dead_code)]
+    pub(crate) fn set_broadcast_deaf(&self, peer_id: &str, deaf: bool) {
+        let mut inner = self.inner.lock().unwrap();
+        if deaf {
+            inner.broadcast_deaf.insert(peer_id.to_string());
+        } else {
+            inner.broadcast_deaf.remove(peer_id);
+        }
+    }
+
     fn handle_command(&self, from: &str, cmd: WsCommand) {
         let mut inner = self.inner.lock().unwrap();
         // Drop everything from an offline node (mirrors a dead socket).
@@ -307,11 +327,20 @@ impl MockRelay {
                         peer_id: from.to_string(),
                     });
                 }
+                // Mirror the real ws_client's local leave confirmation (mock
+                // nodes bypass ws_client entirely) — the swarm purges the
+                // room's peer snapshot on this, closing the stale-room
+                // targeted-send blackhole.
+                if let Some(conn) = inner.conns.get(from) {
+                    let _ = conn.event_tx.send(WsEvent::LeftRoom {
+                        room: room_code.clone(),
+                    });
+                }
             }
             WsCommand::SendToRoom { room_code, data } => {
                 if let Some(m) = inner.meter.as_mut() { m.send_to_room_cmds += 1; }
                 let n = data.len() as u64;
-                let delivered = inner.broadcast_except(&room_code, from, WsEvent::Message {
+                let delivered = inner.broadcast_data_except(&room_code, from, WsEvent::Message {
                     room: room_code.clone(),
                     from: from.to_string(),
                     data,
@@ -472,6 +501,29 @@ impl MockRelay {
 impl RelayInner {
     fn peer_in_room(&self, room: &str, peer: &str) -> bool {
         self.rooms.get(room).map(|s| s.contains(peer)).unwrap_or(false)
+    }
+
+    /// [`Self::broadcast_except`] for 0x03 DATA frames: additionally skips
+    /// `broadcast_deaf` devices (the backpressure-drop lever). Presence events
+    /// keep using `broadcast_except` directly — the real relay's drop hits
+    /// data frames on a wedged socket, not the membership protocol.
+    fn broadcast_data_except(&self, room: &str, from: &str, event: WsEvent) -> u64 {
+        let members: Vec<String> = self
+            .rooms
+            .get(room)
+            .map(|s| s.iter().cloned().collect())
+            .unwrap_or_default();
+        let mut delivered = 0u64;
+        for m in members {
+            if m == from || self.broadcast_deaf.contains(&m) {
+                continue;
+            }
+            if let Some(conn) = self.conns.get(&m).filter(|c| c.online) {
+                let _ = conn.event_tx.send(event.clone());
+                delivered += 1;
+            }
+        }
+        delivered
     }
 
     /// Broadcast to every online room member except the sender. Returns the
@@ -10686,6 +10738,332 @@ async fn sframe_heal_escalation_authority_removes_and_readds_peer() {
 
     drop(o);
     drop(b);
+}
+
+// ---------------------------------------------------------------------------
+// Join-order MLS epoch race (the "long black screens on run 2" bug, media
+// forwarding field session 2026-08-07). MLS commits ride an UNBUFFERED 0x03
+// room broadcast — a member whose socket misses them (join race, relay
+// backpressure drop) holds the group at a silently STALE epoch: every
+// recovery trigger keys on has_group/leaf-missing, no plaintext signal
+// carried the epoch, and in a voice-only channel no MLS ciphertext ever
+// fails a decrypt. The sharer rotates its SFrame key to the new epoch
+// immediately → the stale viewer gets MissingKey until the escalated heal
+// (~16 s; forever on a thrashed group).
+//
+// The fix under test: commit frames are CACHED per group; a stale member is
+// DETECTED via epoch hints (first-contact SyncRequest / MlsEpochProbe at VC
+// join + heal step 2) and served an MlsCommitCatchup REPLAY — marching to the
+// current epoch with ZERO added commits (repair-by-re-add bumps the epoch for
+// everyone and feeds the churn spiral). Fallback when the cache can't bridge:
+// the existing remove+re-add.
+//
+// The harness models the loss with MockRelay::set_broadcast_deaf — the
+// victim stays in the room, looks healthy, and silently misses 0x03 frames,
+// exactly like a backpressured relay socket.
+// ---------------------------------------------------------------------------
+
+/// Trio setup: O = owner, B = future stale victim, C = churn generator.
+/// All mutually friended; all three device leaves converged in the
+/// server-wide MLS group on all sides.
+async fn setup_epoch_race_trio(
+    relay: &MockRelay,
+    o_tag: u8,
+    b_tag: u8,
+    c_tag: u8,
+) -> (TestNode, TestNode, TestNode, String) {
+    let o_master = NativeKeypair::from_secret_bytes(&seed_bytes(o_tag)).peer_id();
+    let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(b_tag)).peer_id();
+    let c_master = NativeKeypair::from_secret_bytes(&seed_bytes(c_tag)).peer_id();
+
+    let mut o = spawn_node_with_friends(relay, o_tag, o_tag, &[&b_master, &c_master]).await;
+    sleep_ms(1500).await;
+    let mut b = spawn_node_with_friends(relay, b_tag, b_tag, &[&o_master, &c_master]).await;
+    sleep_ms(1500).await;
+    let mut c = spawn_node_with_friends(relay, c_tag, c_tag, &[&o_master, &b_master]).await;
+    sleep_ms(4000).await;
+    drain_events(&mut o);
+    drain_events(&mut b);
+    drain_events(&mut c);
+
+    let server_id = create_server_and_wait(&mut o, "Epoch Race Server").await;
+    sleep_ms(500).await;
+
+    for joiner in [&mut b, &mut c] {
+        joiner
+            .cmd_tx
+            .send(NodeCommand::JoinServer {
+                server_id: server_id.clone(),
+                twitch_proof_json: None,
+                nsfw_confirmed: false,
+            })
+            .await
+            .unwrap();
+        let joined = wait_event(joiner, std::time::Duration::from_secs(8), |ev| {
+            matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
+        })
+        .await;
+        assert!(joined, "member should join the server");
+    }
+
+    // All three leaves in the group, on all sides (batch adds: 2s timer).
+    let mut ok = false;
+    for _ in 0..15 {
+        sleep_ms(2000).await;
+        let o_leaves = o.mls_members(&server_id).await;
+        let b_leaves = b.mls_members(&server_id).await;
+        let c_leaves = c.mls_members(&server_id).await;
+        if o_leaves.contains(&o.device_id)
+            && o_leaves.contains(&b.device_id)
+            && o_leaves.contains(&c.device_id)
+            && b_leaves == o_leaves
+            && c_leaves == o_leaves
+        {
+            ok = true;
+            break;
+        }
+    }
+    assert!(ok, "all three leaves must join the server-wide MLS group everywhere");
+    drain_events(&mut o);
+    drain_events(&mut b);
+    drain_events(&mut c);
+    (o, b, c, server_id)
+}
+
+/// Make B stale: deafen it to 0x03 broadcasts, then drive MLS churn through
+/// C's escalated heal (drop group + KP → owner → remove+re-add commits).
+/// Returns (o_epoch_after_churn, b_stale_epoch).
+async fn make_b_stale(
+    relay: &MockRelay,
+    o: &mut TestNode,
+    b: &mut TestNode,
+    c: &mut TestNode,
+    server_id: &str,
+) -> (u64, u64) {
+    relay.set_broadcast_deaf(&b.device_id, true);
+
+    c.cmd_tx
+        .send(NodeCommand::VoiceSframeHeal {
+            server_id: server_id.to_string(),
+            channel_id: "general".to_string(),
+            peer_id: o.device_id.clone(),
+            escalate: true,
+        })
+        .await
+        .unwrap();
+
+    // O and C converge at a HIGHER epoch; B (deaf) must still sit on the old one.
+    let mut churned = None;
+    for _ in 0..15 {
+        sleep_ms(2000).await;
+        let (oe, ce, be) = (
+            o.mls_epoch(server_id).await,
+            c.mls_epoch(server_id).await,
+            b.mls_epoch(server_id).await,
+        );
+        if let (Some(oe), Some(ce), Some(be)) = (oe, ce, be) {
+            if oe == ce && oe > be {
+                churned = Some((oe, be));
+                break;
+            }
+        }
+    }
+    let (o_epoch, b_epoch) = churned.expect("churn must advance O+C past deaf B");
+    relay.set_broadcast_deaf(&b.device_id, false);
+    drain_events(o);
+    drain_events(b);
+    drain_events(c);
+    (o_epoch, b_epoch)
+}
+
+/// Heal-path detector: a stale member's `VoiceSframeHeal(escalate: false)` —
+/// ladder step 2, and the Dart MissingKey fast-path — probes the authority
+/// and converges via commit REPLAY: same epoch as the owner afterwards, and
+/// the owner's epoch NEVER moves (no repair churn).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
+async fn stale_epoch_heal_probe_converges_via_commit_replay() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut o, mut b, mut c, server_id) = setup_epoch_race_trio(&relay, 96, 97, 98).await;
+    let (o_epoch, b_epoch) = make_b_stale(&relay, &mut o, &mut b, &mut c, &server_id).await;
+    assert!(b_epoch < o_epoch, "precondition: B stale");
+
+    b.cmd_tx
+        .send(NodeCommand::VoiceSframeHeal {
+            server_id: server_id.clone(),
+            channel_id: "general".to_string(),
+            peer_id: o.device_id.clone(),
+            escalate: false,
+        })
+        .await
+        .unwrap();
+
+    // The re-emit fires immediately (stale key), then the probe round-trip
+    // brings the catch-up replay and a SECOND MlsEpochChanged at the real
+    // epoch. Assert on the epoch inspector — the event stream carries both.
+    let mut converged = false;
+    for _ in 0..10 {
+        sleep_ms(1000).await;
+        if b.mls_epoch(&server_id).await == Some(o_epoch) {
+            converged = true;
+            break;
+        }
+    }
+    assert!(converged, "stale B must converge to the owner's epoch via catch-up replay");
+    assert_eq!(
+        o.mls_epoch(&server_id).await,
+        Some(o_epoch),
+        "commit REPLAY must not advance the owner's epoch (no repair churn)"
+    );
+    let reemitted = wait_event(&mut b, std::time::Duration::from_secs(3), |ev| {
+        matches!(ev, NetworkEvent::MlsEpochChanged { server_id: sid, epoch, .. }
+            if *sid == server_id && *epoch == o_epoch)
+    })
+    .await;
+    assert!(reemitted, "the caught-up epoch key must reach the SFrame layer");
+
+    drop(o);
+    drop(b);
+    drop(c);
+}
+
+/// VC-join detector: joining a voice channel with a silently-stale group
+/// probes the authority and converges BEFORE any media failure — the exact
+/// field scenario (last VC joiner black-screens for ~16 s).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
+async fn stale_epoch_vc_join_probe_converges_via_commit_replay() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut o, mut b, mut c, server_id) = setup_epoch_race_trio(&relay, 99, 100, 101).await;
+
+    // A voice channel, known to everyone BEFORE the staleness window.
+    o.cmd_tx
+        .send(NodeCommand::CreateChannel {
+            server_id: server_id.clone(),
+            name: "Voice Lounge".to_string(),
+            category: None,
+            channel_type: "voice".to_string(),
+        })
+        .await
+        .unwrap();
+    let mut voice_cid = None;
+    let got = wait_event(&mut o, std::time::Duration::from_secs(5), |ev| {
+        if let NetworkEvent::ChannelAdded { channel_id, channel_type, .. } = ev {
+            if channel_type == "voice" {
+                voice_cid = Some(channel_id.clone());
+                return true;
+            }
+        }
+        false
+    })
+    .await;
+    assert!(got, "voice channel must be created");
+    let voice_cid = voice_cid.unwrap();
+    sleep_ms(1500).await; // let the CRDT op replicate to B and C
+
+    let (o_epoch, b_epoch) = make_b_stale(&relay, &mut o, &mut b, &mut c, &server_id).await;
+    assert!(b_epoch < o_epoch, "precondition: B stale");
+
+    b.cmd_tx
+        .send(NodeCommand::VoiceChannelJoin {
+            server_id: server_id.clone(),
+            channel_id: voice_cid.clone(),
+        })
+        .await
+        .unwrap();
+
+    let mut converged = false;
+    for _ in 0..10 {
+        sleep_ms(1000).await;
+        if b.mls_epoch(&server_id).await == Some(o_epoch) {
+            converged = true;
+            break;
+        }
+    }
+    assert!(converged, "VC join must detect the stale epoch and converge via catch-up");
+    assert_eq!(
+        o.mls_epoch(&server_id).await,
+        Some(o_epoch),
+        "commit REPLAY must not advance the owner's epoch"
+    );
+
+    drop(o);
+    drop(b);
+    drop(c);
+}
+
+/// First-contact detector: a member that was OFFLINE through the churn (not
+/// merely deaf) reconnects and converges from the first-contact SyncRequest
+/// epoch hints alone — no VC join, no heal call, no repair churn.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
+async fn stale_epoch_first_contact_hint_converges_on_reconnect() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut o, mut b, mut c, server_id) = setup_epoch_race_trio(&relay, 102, 103, 104).await;
+
+    let b_epoch_before = b.mls_epoch(&server_id).await.expect("B holds the group");
+    relay.set_online(&b.device_id, false);
+    sleep_ms(500).await;
+
+    // Churn while B is fully offline (0x03 broadcasts to it just vanish).
+    c.cmd_tx
+        .send(NodeCommand::VoiceSframeHeal {
+            server_id: server_id.clone(),
+            channel_id: "general".to_string(),
+            peer_id: o.device_id.clone(),
+            escalate: true,
+        })
+        .await
+        .unwrap();
+    let mut o_epoch = None;
+    for _ in 0..15 {
+        sleep_ms(2000).await;
+        let (oe, ce) = (o.mls_epoch(&server_id).await, c.mls_epoch(&server_id).await);
+        if let (Some(oe), Some(ce)) = (oe, ce) {
+            if oe == ce && oe > b_epoch_before {
+                o_epoch = Some(oe);
+                break;
+            }
+        }
+    }
+    let o_epoch = o_epoch.expect("churn must advance O+C while B is offline");
+    drain_events(&mut o);
+    drain_events(&mut c);
+
+    relay.set_online(&b.device_id, true);
+
+    // Reconnect flow: B re-joins its rooms, first-contact SyncRequests fan in
+    // BOTH directions with epoch hints — either direction converges B.
+    let mut converged = false;
+    for _ in 0..12 {
+        sleep_ms(1000).await;
+        if b.mls_epoch(&server_id).await == Some(o_epoch) {
+            converged = true;
+            break;
+        }
+    }
+    assert!(
+        converged,
+        "reconnecting stale B must converge from first-contact epoch hints alone"
+    );
+    assert_eq!(
+        o.mls_epoch(&server_id).await,
+        Some(o_epoch),
+        "commit REPLAY must not advance the owner's epoch"
+    );
+
+    drop(o);
+    drop(b);
+    drop(c);
 }
 
 /// Issue #45 — a link preview whose fetch finished AFTER the send still lands

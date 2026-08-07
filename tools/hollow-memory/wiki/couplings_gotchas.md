@@ -63,6 +63,22 @@ Comprehensive reference of every known non-obvious coupling, critical rule, and 
 
 **Correct approach:** Use `HavenMessage` (plaintext, Olm-encrypted per peer or sent via WS relay) for anything that must succeed on first attempt after reconnection. Reserve `MessageEnvelope` (MLS-encrypted) for messages where delivery can tolerate a brief delay while MLS state catches up.
 
+### Present-but-stale groups heal via epoch catch-up (2026-08-07)
+
+Commits ride ONE unbuffered `0x03` room broadcast — a member whose socket misses them
+(join race, relay backpressure) holds the group at a silently stale epoch, and nothing
+used to detect it (`has_group` gates everywhere; a voice-only channel carries no MLS
+ciphertext to fail a decrypt). Now: `MlsManager.commit_cache` keeps the last 8 commit
+frames per group; epoch hints ride the plaintext first-contact `SyncRequest.mls_epoch`
+and a `MlsEpochProbe` (fired at VC join and heal step 2); the group authority answers a
+stale hint with an `MlsCommitCatchup` replay — the stale member marches to the current
+epoch in ~1 RTT with ZERO new commits (never repair-by-re-add first: epoch churn is the
+death spiral). Iron rules: a hint can NEVER drop a group; catch-up frames apply only at
+exactly `own_epoch + 1`; all commit application goes through
+`crypto_handler::handle_mls_commit_frame` (shared by the broadcast arm and the replay);
+new commit-broadcast sites MUST go through `broadcast_mls_commit` (it feeds the cache).
+See memory `project_mls_epoch_catchup`.
+
 ### MLS coordinator election is deterministic
 
 **Rule:** `is_mls_coordinator()` in `crypto_handler.rs` elects the coordinator as the peer with the lowest `peer_id` string (lexicographic) among all online peers in the MLS group.

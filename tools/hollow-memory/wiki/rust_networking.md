@@ -113,7 +113,7 @@ Parsing: `ws_client.rs:parse_binary_relay_frame()` — finds first two NUL bytes
 
 ### Room Budget Tracking
 
-`ws_client.rs:track_room_change()` — called on every `JoinRoom`/`LeaveRoom` command. Updates `joined_rooms` HashSet and emits `RoomBudgetUpdate { joined, limit: 2000 }`. On `JoinRoom`, also sets `last_join_attempt` (used for rollback on "Too many rooms" error).
+`ws_client.rs:track_room_change()` — called on every `JoinRoom`/`LeaveRoom` command. Updates `joined_rooms` HashSet and emits `RoomBudgetUpdate { joined, limit: 2000 }`. On `JoinRoom`, also sets `last_join_attempt` (used for rollback on "Too many rooms" error). On `LeaveRoom` (2026-08-07) it ALSO emits `WsEvent::LeftRoom { room }` — the relay never echoes your own leave, and the swarm must purge `ws_room_peers[room]` on it: a self-left room's frozen member snapshot otherwise lives forever and `ws_room_for_peer` can route targeted sends into it, which the relay drops (sender not in room) — a silent per-node signal blackhole until restart (field-hit twice during media-forwarding phase 2's `fwd:` room churn; see memory `feedback_ws_presence_stale_rooms`).
 
 `ws_client.rs:handle_server_message()` — on `Error` containing "Too many rooms": removes the last attempted room from `joined_rooms`, emits corrected `RoomBudgetUpdate`, emits `RoomCapHit`.
 

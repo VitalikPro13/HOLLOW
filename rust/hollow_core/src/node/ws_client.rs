@@ -149,6 +149,17 @@ pub enum WsEvent {
     Connecting { reconnecting: bool },
     PeerJoined { room: String, peer_id: String },
     PeerLeft { room: String, peer_id: String },
+    /// WE left a room — client-side confirmation emitted locally when the
+    /// Leave frame goes out (the relay never echoes our own leave). The swarm
+    /// MUST purge its `ws_room_peers` snapshot for the room on this event: a
+    /// self-left room otherwise keeps its frozen member list forever (no more
+    /// PeerLeft/RoomMembers arrive for a room we're not in), and the flexible
+    /// `ws_room_for_peer` first-match can then route targeted sends into it —
+    /// which the relay drops (sender not in room). Field-hit 2026-08-07: after
+    /// a viewer detached from a `fwd:` room, EVERY subsequent VC signal to the
+    /// sharer silently vanished until app restart ("Connecting to screen
+    /// share..." forever).
+    LeftRoom { room: String },
     RoomMembers { room: String, peers: Vec<String> },
     /// Encrypted message from another peer, routed through a room.
     Message { room: String, from: String, data: Vec<u8> },
@@ -203,6 +214,7 @@ impl WsEvent {
             Self::Connecting { .. } => "Connecting",
             Self::PeerJoined { .. } => "PeerJoined",
             Self::PeerLeft { .. } => "PeerLeft",
+            Self::LeftRoom { .. } => "LeftRoom",
             Self::RoomMembers { .. } => "RoomMembers",
             Self::Message { .. } => "Message",
             Self::DirectMessage { .. } => "DirectMessage",
@@ -1096,6 +1108,9 @@ async fn track_room_change(state: &WsClientState, cmd: &WsCommand, event_tx: &mp
             let mut rooms = state.joined_rooms.write().await;
             rooms.remove(room_code);
             state.subscriptions.write().await.remove(room_code);
+            // Confirm our own leave to the swarm so it purges the room from
+            // `ws_room_peers` — see WsEvent::LeftRoom.
+            let _ = event_tx.send(WsEvent::LeftRoom { room: room_code.clone() });
             rooms.len() as u32
         }
         WsCommand::Subscribe { room_code, topics } => {

@@ -82,6 +82,8 @@ and sender.
 | Device-list ingest | `verify_device_list` — master-signed, monotonic version, revocation tombstones |
 | Olm key exchange | `REQUIRE_SIGNED_KEY_EXCHANGE` — device-signed bundle/request, recipient + freshness bound |
 | `save_profile` | 0.8.5: `profile_signing_payload` / `verify_profile_signature`. See below |
+| MLS commit catch-up ingest (`MlsCommitCatchup`, epoch-race fix 2026-08-07) | sender must be a server member; every frame revalidated by OpenMLS through the SAME `handle_mls_commit_frame` path as a live `MlsCommit` (epoch guard, group-member leaf signature, eviction check); additionally each frame must be exactly `own_epoch + 1` — a gapped/garbage frame is refused BEFORE it can reach the drop-group recovery, making catch-up strictly safer than the broadcast path it supplements; ≤16 frames per message |
+| MLS epoch hints (`SyncRequest.mls_epoch` / `MlsEpochProbe`) | member-gated (`handle_epoch_hint`); a hint can NEVER drop a group (that would be a remote group-reset primitive) — a low hint only triggers authority-gated commit-replay/re-add service (10 s per-peer cooldown), a high hint only a throttled self-probe to the authority |
 
 **Why profiles needed signing.** `ProfileUpdate` has no sender field, so
 attribution came from the transport — sound. But `ProfileRelay` exists so a peer

@@ -342,7 +342,7 @@ MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519
 4. Batch removal: when multiple members are removed simultaneously (e.g., recovery after prolonged offline), removals are batched into a single Commit (2 epoch advances total instead of 2 per member).
 
 **Commit distribution (large-server scaling):**
-A Commit is byte-identical for every recipient, so it is distributed as a *single* room broadcast through the relay rather than one targeted send per member device — the coordinator's network work per membership change is constant, independent of server size. Welcomes remain targeted (each carries the group secrets for one joiner). Because a room broadcast also reaches members who do not need the commit — a fresh joiner whose Welcome already placed it at the post-commit epoch, or a duplicate delivery — every Commit carries its post-merge epoch number, and a receiver already at or past that epoch skips it silently instead of misclassifying its own state as stale. A receiver that does not hold the group at all ignores the commit. Recipients that fall genuinely behind recover through the normal re-bootstrap path, and a removed member attempting to re-bootstrap is refused by the membership check on incoming KeyPackages.
+A Commit is byte-identical for every recipient, so it is distributed as a *single* room broadcast through the relay rather than one targeted send per member device — the coordinator's network work per membership change is constant, independent of server size. Welcomes remain targeted (each carries the group secrets for one joiner). Because a room broadcast also reaches members who do not need the commit — a fresh joiner whose Welcome already placed it at the post-commit epoch, or a duplicate delivery — every Commit carries its post-merge epoch number, and a receiver already at or past that epoch skips it silently instead of misclassifying its own state as stale. A receiver that does not hold the group at all ignores the commit. Recipients that fall genuinely behind recover through commit catch-up (§5.3.2), falling back to the re-bootstrap path when the gap cannot be bridged, and a removed member attempting to re-bootstrap is refused by the membership check on incoming KeyPackages.
 
 **Rejoining after removal (ban/unban cycle):**
 A peer who was removed and later re-invited must drop its stale MLS group state and bootstrap from scratch. The rejoining peer sends a fresh KeyPackage to the coordinator. Without this, the rejoining peer's stale epoch causes one-way decryption failure.
@@ -374,6 +374,17 @@ Three recovery paths ensure MLS group membership self-heals after disruptions:
 2. **Peer join detection.** When a `PeerJoined` event fires for a shared server, each peer checks if it has the MLS group. If not, it sends a KeyPackage to the coordinator. If the local peer *is* the coordinator, it requests the joining peer's KeyPackage instead.
 
 3. **Startup member enumeration.** When `RoomMembers` arrives (listing all connected peers on startup), each peer checks for missing MLS groups for all shared servers and sends KeyPackages as needed.
+
+### 5.3.2 Stale-Epoch Detection and Commit Catch-Up
+
+The recovery paths above key on a *missing* group. A group that is present but **stale** — the member missed one or more commit broadcasts (a broadcast is fire-and-forget: a socket not in the room at that instant, or a dropped frame, loses it permanently) — is a distinct failure mode: the member believes it is healthy, exports a stale media key (§6), and in a voice-only channel no MLS ciphertext ever arrives to fail a decrypt and trigger resync.
+
+Two mechanisms close this gap:
+
+- **Epoch hints.** A member advertises its current epoch for a group alongside the plaintext first-contact synchronization exchange, at voice-channel join, and from the media heal ladder. A hint is advisory and deliberately powerless: a member that learns it may itself be behind sends a throttled probe to the group authority; a hint can never cause a group to be dropped (that would hand any peer a remote group-reset primitive).
+- **Commit catch-up.** Every member retains a short ring of recently broadcast commit messages per group. When the group authority (owner-preferred coordinator) learns from a hint that a member is behind, it replays the missed commits, in order, directly to that member. The member applies them through the same validated path as live commits — each is accepted only if it advances the group by exactly one epoch, so a forged or gapped replay is refused before it can trigger any destructive recovery. Catch-up replays material that was already broadcast to the whole room, so it discloses nothing new; the requester must be a current member.
+
+Catch-up converges a stale member in one round trip **without generating new commits**. This matters because the fallback repair — removing and re-adding the member's leaves — advances the epoch for everyone and re-keys all media, so under churn repair-by-re-add can cascade. Re-add remains the fallback when the cache cannot bridge the gap.
 
 ### 5.4 Epoch and Key Rotation
 

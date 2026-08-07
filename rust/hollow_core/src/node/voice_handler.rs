@@ -307,6 +307,7 @@ pub(crate) async fn handle_voice_channel_join(
     voice_channel_participants: &mut HashMap<String, std::collections::HashSet<String>>,
     voice_channel_gossip_mode: &mut HashMap<String, bool>,
     gossip_overlays: &HashMap<String, super::gossip::GossipOverlay>,
+    mls_epoch_hint_cooldown: &mut HashMap<String, std::time::Instant>,
     local_peer_str: &str,
     event_tx: &mpsc::Sender<NetworkEvent>,
 ) {
@@ -349,7 +350,8 @@ pub(crate) async fn handle_voice_channel_join(
     // then applies it after creating the VoiceChannelService.
     emit_vc_sframe_key(
         mls, ws_cmd_tx, ws_room_peers, server_states,
-        &server_id, &channel_id, restricted, local_peer_str, event_tx,
+        &server_id, &channel_id, restricted, local_peer_str,
+        mls_epoch_hint_cooldown, event_tx,
     ).await;
     // Emit locally so our own UI updates.
     let _ = event_tx.send(NetworkEvent::VoiceChannelJoined {
@@ -426,6 +428,7 @@ async fn emit_vc_sframe_key(
     channel_id: &str,
     restricted: bool,
     local_peer_str: &str,
+    mls_epoch_hint_cooldown: &mut HashMap<String, std::time::Instant>,
     event_tx: &mpsc::Sender<NetworkEvent>,
 ) {
     let group_key = if restricted {
@@ -440,6 +443,19 @@ async fn emit_vc_sframe_key(
             hollow_log!("[HOLLOW-VC-SFRAME] MLS exists, has_group({group_key})={has_group}");
             if has_group {
                 export_and_emit_sframe(mls_mgr, &group_key, server_id, emit_cid, event_tx).await;
+                // Join-order SFrame race fix: a held group can be silently
+                // STALE (we missed the unbuffered commit broadcasts), and the
+                // export above would emit a key nobody else uses — black
+                // screen until the escalated heal. Ask the authority whether
+                // the group moved past us; a stale epoch comes back as an
+                // MlsCommitCatchup replay (or a remove+re-add) within ~1 RTT.
+                if let Some(state) = server_states.get(server_id) {
+                    super::crypto_handler::send_epoch_probe(
+                        mls_mgr, ws_cmd_tx, ws_room_peers, state,
+                        server_id, if restricted { Some(channel_id) } else { None },
+                        local_peer_str, mls_epoch_hint_cooldown,
+                    );
+                }
             } else if restricted {
                 // We qualify (join guard passed) but don't hold the subgroup yet.
                 // Pull our KeyPackage to the subgroup coordinator; the Welcome it
@@ -520,6 +536,7 @@ pub(crate) async fn handle_voice_sframe_heal(
     server_states: &HashMap<String, ServerState>,
     pending_mls_removals: &mut HashMap<String, Vec<String>>,
     mls_bootstrap_requested: &mut HashMap<String, std::time::Instant>,
+    mls_epoch_hint_cooldown: &mut HashMap<String, std::time::Instant>,
     crypto_store: &CryptoStore,
     local_peer_str: &str,
     event_tx: &mpsc::Sender<NetworkEvent>,
@@ -553,6 +570,18 @@ pub(crate) async fn handle_voice_sframe_heal(
     }
     if group_usable {
         export_and_emit_sframe(mls_mgr, &group_key, &server_id, emit_cid.clone(), event_tx).await;
+        // Join-order SFrame race fix: sustained cryptor failures with a held
+        // group are very often a silently-stale epoch (the re-emit above then
+        // re-emits the same stale key — a no-op). Probe the authority; a
+        // stale epoch comes back as an MlsCommitCatchup replay within ~1 RTT,
+        // which is what turns heal step 2 from cosmetic into curative.
+        if let Some(state) = server_states.get(&server_id) {
+            super::crypto_handler::send_epoch_probe(
+                mls_mgr, ws_cmd_tx, ws_room_peers, state,
+                &server_id, if restricted { Some(&channel_id) } else { None },
+                local_peer_str, mls_epoch_hint_cooldown,
+            );
+        }
     } else if let Some(state) = server_states.get(&server_id) {
         if !mls_bootstrap_requested.get(&group_key)
             .is_some_and(|t| t.elapsed() < super::swarm::MLS_BOOTSTRAP_TIMEOUT)

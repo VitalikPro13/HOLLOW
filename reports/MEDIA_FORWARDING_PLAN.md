@@ -10,8 +10,9 @@ forwarder per-frame outcome log), a 30 s idempotent fwd-room re-join belt self-h
 membership loss, and presence-flap tolerance is on BOTH the clients and the forwarder engine
 (media legs are the only truth). Relay + forwarder deployed live. Headline number:
 **egress = k×ingest on the forwarder (238/119 kbps at k=2) vs TURN's 2·B·k — and relay media
-= ZERO when a peer forwarder serves.** Remaining before phase 3: commit the working tree;
-follow-ups queued in §7 (SFrame join-order epoch race = own fix session; opportunistic
+= ZERO when a peer forwarder serves.** The SFrame join-order epoch race (runs 2's 5-10 s /
+formerly-permanent black screens) is **FIXED 2026-08-07** — commit cache + epoch hints +
+catch-up replay, see the top §7 entry. Remaining follow-ups queued in §7 (opportunistic
 rebalancer; fwd-room chatter suppression; relay ghost-eviction PeerLeft suppression).** Step 1 (resolution capping) shipped; step 2 (originator attribution)
 shipped; step 3 phase 1 (the VPS infra forwarder) COMPLETE + FIELD-VERIFIED — see §6 for the
 deliverable table and §7 for the D6 evidence and the five bugs the field found. Phase 2 embeds the
@@ -273,6 +274,107 @@ policy: assign direct viewers to branches past an upload threshold. That is what
 attribution, engine) already exists — phase 3 is simulcast + policy, no new transport.
 
 ## 7. Status log
+
+**2026-08-07 (later session) — SFRAME JOIN-ORDER EPOCH RACE FIXED (the runs-2 black-screen
+follow-up, its own session as planned). Root mechanism, confirmed by code audit: MLS commits
+ride ONE unbuffered `0x03` room broadcast (never cached client- or relay-side — the relay's
+catch-up rings tee only `0x07` topic frames), and EVERY stale-group recovery trigger keyed on
+`has_group`/leaf-missing — a present-but-stale group was undetectable (`swarm.rs`'s
+RoomMembers arm short-circuits on `has_group`; the decrypt-fail → SyncRequest path needs an
+inbound MLS ciphertext, which a voice-only channel never carries; no plaintext signal carried
+an epoch anywhere). So the last VC joiner missed the join-churn commits, exported a stale
+SFrame key, and sat on MissingKey until the Dart ladder's escalated re-bootstrap (~14-16 s;
+on a thrashed group the re-bootstraps themselves failed → permanent).**
+
+- **The fix is pull-based catch-up, NOT repair-by-more-commits** (an escalation remove+re-add
+  bumps the epoch for everyone — exactly the churn spiral that wrecked the long-lived test
+  server, epochs 39→47 in an afternoon). Three layers:
+  1. **Commit cache:** `MlsManager.commit_cache` — last 8 broadcast/applied commit frames per
+     group, RAM-only (fed in `broadcast_mls_commit` + the shared commit-apply path).
+  2. **Detection = epoch hints:** `#[serde(default)] mls_epoch` on the plaintext first-contact
+     `SyncRequest` (PeerJoined + RoomMembers + decrypt-fail + post-Welcome sites), plus a new
+     plaintext `MlsEpochProbe` fired at VC join (`emit_vc_sframe_key` has_group branch — which
+     previously exported a stale key BLIND) and from `voice_sframe_heal(escalate:false)` —
+     turning heal step 2 from a no-op re-emit into the cure. Dart belt: receiver
+     `MissingKey` fires the cheap heal immediately (5 s/peer throttle) instead of waiting
+     ~6 s for ladder step 2 (`MissingKey` on a receiver = "a slot I don't hold" = the race
+     signature; the key ring is additive so nothing else produces it on a live stream).
+  3. **Repair = `MlsCommitCatchup` replay:** the group AUTHORITY (owner-preferred; subgroup
+     coordinator for restricted channels; lowest-master fallback) answers a stale hint with
+     the cached commit frames, ascending — the stale member marches to the current epoch in
+     ~1 RTT with ZERO new commits; the owner's epoch never moves. Cache can't bridge →
+     falls back to the existing remove+re-add (KeyPackageRequest → batch timer → Welcome).
+- **Security posture:** hints can NEVER drop a group (that would be a remote group-reset
+  primitive — a spoofed-high hint achieves one throttled probe, nothing else); catch-up
+  ingest is member-gated, revalidated frame-by-frame through the SAME `handle_mls_commit_frame`
+  path as live commits (extracted from the swarm arm, so parity is by construction), and each
+  frame must be exactly `own_epoch + 1` — a gapped/garbage frame is refused before it can
+  even reach the drop-group recovery. 10 s per-(group,peer) cooldowns both directions.
+  Write-gates wiki updated (§5).
+- **Wire compat:** all additive (`#[serde(default)]` + skip_serializing_if — old-wire bytes
+  pinned by serde tests); old clients parse-drop the two new variants and simply keep
+  today's behavior.
+- **Verified:** 3 new multi-node harness tests (new `MockRelay::set_broadcast_deaf` lever —
+  models the relay's silent backpressure drop on a healthy-looking socket, the exact field
+  loss mode): heal-probe, VC-join-probe, and reconnect first-contact-hint paths each
+  converge the stale node to the owner's epoch **with the owner's epoch unchanged**
+  (replay, not re-add) — 3/3 in 42 s. Plus commit-cache unit tests (contiguity refusal,
+  cap/dedup/clear) and 5 wire-pin serde tests. Full suite + analyze clean.
+- **Field re-check for the next VM session:** fresh server, 3 participants, VM2 joins the VC
+  LAST during join churn — expect picture in ~1 s (previously 5-10 s), and the host journal
+  showing `MlsEpochProbe` → `Serving commit catch-up` instead of HEAL escalations.
+- **SAME-DAY FIELD RE-RUNS (Vitalik, all logs audited from all four vantage points):**
+  (1) *Settled-server re-run:* peer rung didn't engage (ICE race → both viewers honestly
+  `route=relay` → VPS branch; killing VM1 removed a parallel viewer, so "no blink on VM2" =
+  correct), kill handled cleanly, `egress = 2×ingest` at k=2 again, both presence-drop
+  tolerances held, `fwd_delivered` 357→469 / `fwd_buffered=0` / `send_dropped=0`; probes
+  fired at every VC join and correctly no-op'd (settled epoch 8 — the race can't occur).
+  (2) *Fresh-server run with a REAL promotion (route=direct watch → `Promoted`):* kill
+  ladder full pass (presence tolerance → media-leg death +6 s → `direct_failed` → VPS rung,
+  picture back ≈1 s — the 5 s freeze is the ICE death window). **But BOTH viewers went black
+  10-15 s at the PROMOTION itself — and the logs prove it was NOT the epoch race** (both VMs
+  probed epoch 2 = the host's own epoch; the catch-up correctly had nothing to serve).
+  **SECOND ROOT CAUSE of the black-screen family, now FIXED: the promotion cryptor
+  collision.** The branch ingest's sender cryptor is keyed `'screen:<forwarderId>'` — the
+  SAME (participant, kind) as the direct per-viewer PC to that peer. `enableForSender` is
+  idempotent per that key, so `_ensureIngestLeg`'s enable NO-OP'd against the direct PC's
+  cryptor, and the promotion then closed that PC + `_dropShareCryptors` — leaving the ingest
+  sender UNTRANSFORMED: the branch carried plaintext, both downstream viewers (the
+  forwarder's own display + the relay-routed viewer) hit `DecryptionFailed`, and nothing
+  healed it until VM1's ladder ESCALATED (~14 s) — the group surgery's epoch bump re-ran the
+  fix-#6 sweep, which is what re-keyed the ingest. Viewer-side heals can never reach a
+  host-side missing sender. The VPS branch never collides (the infra forwarder was never a
+  viewer), which is why phase-1/D6 never saw it, and the evening runs were masked by
+  coincident epoch churn re-running the sweep. Fix: after the promotion's direct-PC close +
+  cryptor drop, re-enable SFrame on the branch ingest (drop+re-enable rule) in
+  `_assignViewerToForwarder`. Field re-verify: promotion should now show pictures in ~1 s on
+  both viewers with NO heal lines; the media plane is outside harness coverage by
+  construction.
+- **PROMOTION CRYPTOR FIX FIELD-VERIFIED same evening** (host log 19:54: `Promoted` →
+  `Sender encryption enabled for screen:<forwarder>` firing right after the direct-PC
+  close; VM2 rendered through the peer branch immediately — the 10-15 s black is gone).
+- **THE TARGETED-SIGNAL BLACKHOLE — ROOT-CAUSED AND FIXED (the evening's two wedges, and
+  the failed revert after killing the promoted forwarder).** Nothing ever removed a room
+  from `ws_room_peers` when WE left it (only Disconnected clears and PeerLeft prunes) — so
+  after a viewer's `fwd:` room detach, the room's FROZEN member snapshot (still listing the
+  sharer) stayed in the routing table forever, and `ws_room_for_peer`'s first-match could
+  route every later targeted send into it → the relay drops sender-not-in-room directs →
+  silent one-way loss until app restart. Field signature, three hits in one evening: Win10's
+  9 vanished `screen_watch`es across 3 servers right after its VPS-branch detach
+  ("Connecting to screen share..." forever); VM2's vanished `direct_failed` re-watch AND
+  `screen_answer` one second after its `fwd:` detach at the kill (black screen instead of
+  the revert — the host's direct offer sat at `Connecting` with the answer lost). Fix: the
+  ws client now emits `WsEvent::LeftRoom` when the Leave frame goes out (the relay never
+  echoes our own leave) and the swarm purges the room's snapshot; MockRelay mirrors it. The
+  fwd rooms' join/leave churn is what made phase 2 the first heavy user of this path.
+- **Remaining new bug (own session): self-ghost VC participant** — BOTH the host and Win10
+  dial their OWN MASTER identity as a remote VC participant ("Creating offer for peer
+  <own master>" + endless "Encryption failed: No session" storms; the host even built
+  cryptors for its own master) — a master id is leaking into the VC participant set where
+  only routable DEVICE ids belong. Log-storm + wasted PCs; not media-blocking.
+  Also still worthwhile: sender-tagged logging on the inbound Olm decrypt-fail path (the
+  receive side stayed silent throughout — the blackhole was only diagnosable from the
+  absence of logs on both ends).
 
 **2026-08-07 — PREP SESSION for runs 2-4: the vanished-frame defect attacked on every hop;
 fwd control-plane rate limit REMOVED; relay + forwarder redeployed (fresh socket).**

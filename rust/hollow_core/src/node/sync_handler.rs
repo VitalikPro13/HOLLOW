@@ -357,9 +357,10 @@ async fn mls_remove_identity_and_broadcast(
                     }
                 }
                 let commit_b64 = base64::engine::general_purpose::STANDARD.encode(&commit_bytes);
+                let commit_epoch = mls_mgr.epoch(server_id).ok();
                 crate::node::crypto_handler::broadcast_mls_commit(
-                    ws_cmd_tx, server_id, None, commit_b64,
-                    mls_mgr.epoch(server_id).ok(),
+                    mls_mgr, ws_cmd_tx, server_id, None, commit_b64,
+                    commit_epoch,
                 );
                 hollow_log!("[HOLLOW-MLS] {log_ok}");
             }

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use openmls::prelude::*;
 use openmls::prelude::tls_codec::{Serialize as TlsSerialize, Deserialize as TlsDeserialize};
@@ -72,7 +72,18 @@ pub(crate) struct MlsManager {
     credential_with_key: CredentialWithKey,
     /// server_id → MlsGroup
     groups: HashMap<String, MlsGroup>,
+    /// RAM-only ring of recently authored/applied commit frames per group —
+    /// `(post_merge_epoch, base64_commit)`, ascending, capped. Serves the
+    /// `MlsCommitCatchup` replay to members that missed the unbuffered 0x03
+    /// room broadcast (join-order SFrame race). Deliberately NOT persisted:
+    /// after a restart the catch-up responder simply can't bridge and falls
+    /// back to the remove+re-add repair.
+    commit_cache: HashMap<String, VecDeque<(u64, String)>>,
 }
+
+/// Commits kept per group for catch-up replay. Deeper staleness than this is
+/// rare (it needs that many missed broadcasts) and falls back to remove+re-add.
+const COMMIT_CACHE_CAP: usize = 8;
 
 impl MlsManager {
     /// Create a new MlsManager with a fresh MLS identity.
@@ -107,6 +118,7 @@ impl MlsManager {
             signer,
             credential_with_key,
             groups: HashMap::new(),
+            commit_cache: HashMap::new(),
         })
     }
 
@@ -178,6 +190,7 @@ impl MlsManager {
             signer,
             credential_with_key,
             groups,
+            commit_cache: HashMap::new(),
         })
     }
 
@@ -623,6 +636,51 @@ impl MlsManager {
             // Delete from OpenMLS provider storage so join_from_welcome doesn't hit GroupAlreadyExists.
             let _ = group.delete(self.provider.storage());
         }
+        // Cached commits belong to the dropped incarnation — a fresh Welcome
+        // lands us past them, and serving them to anyone would only produce
+        // partial catch-ups that end behind the group anyway.
+        self.commit_cache.remove(server_id);
+    }
+
+    /// Record a commit frame (authored or applied) for catch-up replay.
+    /// Idempotent per epoch; keeps the ring ascending and capped.
+    pub fn cache_commit(&mut self, group_key: &str, epoch: u64, commit_b64: String) {
+        let ring = self.commit_cache.entry(group_key.to_string()).or_default();
+        if ring.iter().any(|(e, _)| *e == epoch) {
+            return;
+        }
+        ring.push_back((epoch, commit_b64));
+        ring.make_contiguous().sort_by_key(|(e, _)| *e);
+        while ring.len() > COMMIT_CACHE_CAP {
+            ring.pop_front();
+        }
+    }
+
+    /// Commit frames bridging `(after_epoch, up_to]` for catch-up replay,
+    /// ascending. Returns `Some` ONLY when the cache holds EVERY epoch in that
+    /// range — a partial replay would leave the receiver still stale while
+    /// looking served. `None` = can't bridge; caller falls back to the
+    /// remove+re-add repair.
+    pub fn cached_commits_after(
+        &self,
+        group_key: &str,
+        after_epoch: u64,
+        up_to: u64,
+    ) -> Option<Vec<(u64, String)>> {
+        if up_to <= after_epoch {
+            return None;
+        }
+        let ring = self.commit_cache.get(group_key)?;
+        let entries: Vec<(u64, String)> = ring
+            .iter()
+            .filter(|(e, _)| *e > after_epoch && *e <= up_to)
+            .cloned()
+            .collect();
+        let expected = (up_to - after_epoch) as usize;
+        if entries.len() != expected {
+            return None;
+        }
+        Some(entries)
     }
 
     /// Get the list of peer IDs in the MLS group (from their credentials).
@@ -654,6 +712,56 @@ fn read_bytes(cursor: &mut std::io::Cursor<&[u8]>, len: usize) -> Result<Vec<u8>
     let mut buf = vec![0u8; len];
     cursor.read_exact(&mut buf).map_err(|e| format!("Read error: {e}"))?;
     Ok(buf)
+}
+
+#[cfg(test)]
+mod commit_cache_tests {
+    use super::*;
+
+    #[test]
+    fn cache_bridges_only_contiguous_ranges() {
+        let mut mgr = MlsManager::new("12D3KooWCacheTest").unwrap();
+        mgr.cache_commit("g", 5, "c5".into());
+        mgr.cache_commit("g", 6, "c6".into());
+        mgr.cache_commit("g", 8, "c8".into()); // gap at 7
+
+        // Contiguous (4, 6] bridges.
+        let bridged = mgr.cached_commits_after("g", 4, 6).expect("bridge 5..=6");
+        assert_eq!(bridged, vec![(5, "c5".to_string()), (6, "c6".to_string())]);
+        // (4, 8] crosses the missing epoch 7 — must refuse (a partial replay
+        // would leave the receiver stale while looking served).
+        assert!(mgr.cached_commits_after("g", 4, 8).is_none());
+        // (6, 8] also needs 7 — refuse.
+        assert!(mgr.cached_commits_after("g", 6, 8).is_none());
+        // Nothing to bridge / inverted range — refuse.
+        assert!(mgr.cached_commits_after("g", 6, 6).is_none());
+        assert!(mgr.cached_commits_after("g", 9, 8).is_none());
+        // Unknown group — refuse.
+        assert!(mgr.cached_commits_after("nope", 4, 6).is_none());
+    }
+
+    #[test]
+    fn cache_caps_dedups_and_clears_with_group() {
+        let mut mgr = MlsManager::new("12D3KooWCacheTest2").unwrap();
+        // Duplicate epoch is idempotent (first frame wins).
+        mgr.cache_commit("g", 1, "first".into());
+        mgr.cache_commit("g", 1, "second".into());
+        assert_eq!(
+            mgr.cached_commits_after("g", 0, 1),
+            Some(vec![(1, "first".to_string())])
+        );
+        // Cap: only the newest COMMIT_CACHE_CAP entries survive.
+        for e in 2..=20u64 {
+            mgr.cache_commit("g", e, format!("c{e}"));
+        }
+        assert!(mgr.cached_commits_after("g", 0, 20).is_none(), "old entries evicted");
+        let tail_start = 20 - COMMIT_CACHE_CAP as u64;
+        let tail = mgr.cached_commits_after("g", tail_start, 20).expect("newest entries kept");
+        assert_eq!(tail.len(), COMMIT_CACHE_CAP);
+        // remove_group drops the ring.
+        mgr.remove_group("g");
+        assert!(mgr.cached_commits_after("g", tail_start, 20).is_none());
+    }
 }
 
 #[cfg(test)]
