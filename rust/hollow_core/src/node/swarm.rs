@@ -278,6 +278,19 @@ use super::vault_ops;
 use super::twitch;
 use super::voice_handler;
 
+/// Embedded peer-forwarder handle threaded into the shared inbound dispatch
+/// (`handle_incoming_request`) so forwarder-bound `fwd_*` envelopes can reach
+/// the embedded engine (media forwarding step 3 phase 2). Desktop-only in
+/// substance; a PhantomData elsewhere so the shared signature stays identical
+/// on every platform.
+#[cfg(all(feature = "forwarder", not(any(target_os = "android", target_os = "ios"))))]
+type FwdBridge<'a> = (
+    &'a mut super::embedded_forwarder::EmbeddedForwarder,
+    &'a mpsc::Sender<NodeCommand>,
+);
+#[cfg(not(all(feature = "forwarder", not(any(target_os = "android", target_os = "ios")))))]
+type FwdBridge<'a> = std::marker::PhantomData<&'a ()>;
+
 /// Build and spawn the networking layer. Returns the MASTER peer ID and a join
 /// handle.
 ///
@@ -482,6 +495,13 @@ async fn run_event_loop(
     // -- WebSocket relay peer tracking --
     // Tracks which peers are in which WS rooms. Key: room_code, Value: set of peer_id strings.
     let mut ws_room_peers: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
+
+    // Embedded peer forwarder (media forwarding step 3 phase 2): this desktop
+    // can serve as a blind packet forwarder for screen shares it watches.
+    // Desktop-only + feature-gated; every use site carries the same cfg.
+    #[cfg(all(feature = "forwarder", not(any(target_os = "android", target_os = "ios"))))]
+    let mut embedded_fwd =
+        super::embedded_forwarder::EmbeddedForwarder::new(device_peer_id.clone());
 
     // Peers we've already triggered sync for this session.
     let mut synced_peers: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -2389,8 +2409,16 @@ async fn run_event_loop(
 
                     NodeCommand::ForwarderSendSignal { forwarder_peer_id, signal_type, payload } => {
                         last_message_traffic = std::time::Instant::now();
+                        // Phase 2: a signal addressed to OURSELVES is the peer
+                        // forwarder's own display leg (viewer #0) — inject it
+                        // straight into the embedded engine, no Olm round-trip.
+                        #[cfg(all(feature = "forwarder", not(any(target_os = "android", target_os = "ios"))))]
+                        if forwarder_peer_id == device_peer_id {
+                            embedded_fwd.handle_self_signal(&signal_type, &payload, &cmd_tx);
+                            continue;
+                        }
                         forwarder_client::handle_forwarder_send_signal(
-                            &mut olm, &crypto_store, &event_tx, &ws_cmd_tx, &ws_room_peers,
+                            &mut olm, &crypto_store, &event_tx, &ws_cmd_tx,
                             &mut pending_messages, &mut key_request_in_flight,
                             &device_keypair, &device_peer_id,
                             forwarder_peer_id, signal_type, payload,
@@ -2411,6 +2439,33 @@ async fn run_event_loop(
                         let _ = ws_cmd_tx.send(super::ws_client::WsCommand::LeaveRoom {
                             room_code: format!("fwd:{forwarder_peer_id}"),
                         });
+                    }
+
+                    // -- Embedded peer forwarder (media forwarding step 3 phase 2) --
+                    // All three arms exist on every platform; the bodies are
+                    // desktop-only no-ops elsewhere.
+                    NodeCommand::SetPeerForwardingEnabled { enabled } => {
+                        #[cfg(all(feature = "forwarder", not(any(target_os = "android", target_os = "ios"))))]
+                        embedded_fwd.set_enabled(enabled, &ws_cmd_tx);
+                        #[cfg(not(all(feature = "forwarder", not(any(target_os = "android", target_os = "ios")))))]
+                        let _ = enabled;
+                    }
+                    NodeCommand::SetForwarderExpectation { origin_peer, kind, active } => {
+                        #[cfg(all(feature = "forwarder", not(any(target_os = "android", target_os = "ios"))))]
+                        embedded_fwd.set_expectation(origin_peer, kind, active, &ws_cmd_tx);
+                        #[cfg(not(all(feature = "forwarder", not(any(target_os = "android", target_os = "ios")))))]
+                        let _ = (origin_peer, kind, active);
+                    }
+                    NodeCommand::EmbeddedForwarderOut { to_peer, envelope_json } => {
+                        #[cfg(all(feature = "forwarder", not(any(target_os = "android", target_os = "ios"))))]
+                        super::embedded_forwarder::handle_engine_out(
+                            &mut olm, &crypto_store, &event_tx, &ws_cmd_tx,
+                            &mut pending_messages, &mut key_request_in_flight,
+                            &device_keypair, &device_peer_id,
+                            to_peer, envelope_json,
+                        ).await;
+                        #[cfg(not(all(feature = "forwarder", not(any(target_os = "android", target_os = "ios")))))]
+                        let _ = (to_peer, envelope_json);
                     }
 
                     // -- Conference commands (node/conference.rs) --
@@ -2521,6 +2576,10 @@ async fn run_event_loop(
                         if let Some((server_id, op_json)) =
                             super::gossip_relay::accept_gossip_op(&mut gossip_overlays, &payload)
                         {
+                            #[cfg(all(feature = "forwarder", not(any(target_os = "android", target_os = "ios"))))]
+                            let fwd_bridge: FwdBridge = (&mut embedded_fwd, &cmd_tx);
+                            #[cfg(not(all(feature = "forwarder", not(any(target_os = "android", target_os = "ios")))))]
+                            let fwd_bridge: FwdBridge = std::marker::PhantomData;
                             handle_incoming_request(
                                 &mut olm, &crypto_store, &crdt_store, &event_tx,
                                 &mut pending_messages, &mut key_request_in_flight, &mut key_bundle_sent_to,
@@ -2556,6 +2615,7 @@ async fn run_event_loop(
                                 &mut requested_file_receipts,
                                 &mut declined_file_ids,
                                 &mut peer_auto_dl,
+                                fwd_bridge,
                                 HavenMessage::CrdtOpBroadcast { server_id, op_json },
                             ).await;
                         }
@@ -2690,6 +2750,11 @@ async fn run_event_loop(
                         // reconnects are the only refresh needed — D5's
                         // fallback ladder corrects any staleness.
                         let _ = ws_cmd_tx.send(super::ws_client::WsCommand::GetMediaForwarder);
+                        // Phase 2: if we're serving as a peer forwarder, the
+                        // relay forgot our fwd room on the reconnect — rejoin
+                        // (media legs survive the signaling blip).
+                        #[cfg(all(feature = "forwarder", not(any(target_os = "android", target_os = "ios"))))]
+                        embedded_fwd.on_ws_connected(&ws_cmd_tx);
                         // Join personal inbox room (for receiving friend requests from strangers).
                         let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinRoom {
                             room_code: format!("inbox:{}", local_peer_str),
@@ -3259,6 +3324,14 @@ async fn run_event_loop(
                             }
                         }
 
+                        // Phase 2: presence lost in OUR fwd room — the peer's
+                        // owned streams unregister, its egress legs detach
+                        // (same semantics as the VPS forwarder's signaling).
+                        #[cfg(all(feature = "forwarder", not(any(target_os = "android", target_os = "ios"))))]
+                        if room == format!("fwd:{device_peer_id}") {
+                            embedded_fwd.peer_gone(&peer_id);
+                        }
+
                         // Drop any in-flight sibling-proof challenge for a peer that left
                         // our inbox (it'll be re-challenged on its next appearance).
                         pending_sibling_challenges.remove(&peer_id);
@@ -3404,6 +3477,12 @@ async fn run_event_loop(
                         }
                         ws_room_peers.insert(room.clone(), room_set);
                         for gone in vanished {
+                            // Phase 2: authoritative snapshot purged a peer
+                            // from OUR fwd room (missed PeerLeft).
+                            #[cfg(all(feature = "forwarder", not(any(target_os = "android", target_os = "ios"))))]
+                            if room == format!("fwd:{device_peer_id}") {
+                                embedded_fwd.peer_gone(&gone);
+                            }
                             // Conference call roster: gone from the conf room
                             // (per the authoritative snapshot) = gone from the
                             // call, even if they still share other rooms.
@@ -3986,6 +4065,10 @@ async fn run_event_loop(
                     // iceConfigProvider (replaces the HTTP fetch + its
                     // dead-chain-on-503 retry bug).
                     WsEvent::TurnCredentials { username, password, ttl, uris } => {
+                        // Phase 2: the TURN URIs double as the embedded
+                        // forwarder's STUN source for srflx discovery.
+                        #[cfg(all(feature = "forwarder", not(any(target_os = "android", target_os = "ios"))))]
+                        embedded_fwd.note_turn_uris(&uris);
                         let _ = event_tx.send(NetworkEvent::TurnCredentials {
                             username, password, ttl, uris,
                         }).await;
@@ -4349,6 +4432,10 @@ async fn run_event_loop(
                                         continue;
                                     }
 
+                                    #[cfg(all(feature = "forwarder", not(any(target_os = "android", target_os = "ios"))))]
+                                    let fwd_bridge: FwdBridge = (&mut embedded_fwd, &cmd_tx);
+                                    #[cfg(not(all(feature = "forwarder", not(any(target_os = "android", target_os = "ios")))))]
+                                    let fwd_bridge: FwdBridge = std::marker::PhantomData;
                                     handle_incoming_request(
                                         &mut olm, &crypto_store, &crdt_store, &event_tx,
                                         &mut pending_messages, &mut key_request_in_flight, &mut key_bundle_sent_to,
@@ -4384,6 +4471,7 @@ async fn run_event_loop(
                                         &mut requested_file_receipts,
                                         &mut declined_file_ids,
                                         &mut peer_auto_dl,
+                                        fwd_bridge,
                                         msg,
                                     ).await;
                             } else {
@@ -5524,6 +5612,7 @@ async fn handle_incoming_request(
     requested_file_receipts: &mut HashMap<String, std::time::Instant>,
     declined_file_ids: &mut std::collections::HashSet<String>,
     peer_auto_dl: &mut HashMap<String, u32>,
+    fwd_bridge: FwdBridge<'_>,
     request: HavenMessage,
 ) {
 
@@ -8392,11 +8481,11 @@ async fn handle_incoming_request(
                         origin, &local_peer_str,
                     ).await;
                 }
-                Ok(MessageEnvelope::VoiceChannelScreenWatch { sid, cid, want, viewer_width, viewer_height, source_quality, route, .. }) => {
+                Ok(MessageEnvelope::VoiceChannelScreenWatch { sid, cid, want, viewer_width, viewer_height, source_quality, route, fwd_capable, relay_private, .. }) => {
                     voice_handler::handle_envelope_voice_channel_screen_watch(
                         voice_channel_participants, event_tx,
                         peer_str.to_string(), sid, cid, want,
-                        viewer_width, viewer_height, source_quality, route,
+                        viewer_width, viewer_height, source_quality, route, fwd_capable, relay_private,
                     ).await;
                 }
                 Ok(MessageEnvelope::VoiceChannelScreenAssign { sid, cid, origin, forwarder, .. }) => {
@@ -8480,18 +8569,30 @@ async fn handle_incoming_request(
                         signal_type: "fwd_error".to_string(), payload,
                     }).await;
                 }
-                // Forwarder-bound signals arriving at a client — misdirected or
-                // malicious; a client never plays the forwarder role on this
-                // lane (phase-2 peer forwarders embed the forwarder module with
-                // its own signaling loop, not this dispatch).
-                Ok(MessageEnvelope::FwdStreamRegister { .. })
-                | Ok(MessageEnvelope::FwdStreamAuth { .. })
-                | Ok(MessageEnvelope::FwdStreamUnregister { .. })
-                | Ok(MessageEnvelope::FwdIngestOffer { .. })
-                | Ok(MessageEnvelope::FwdAttach { .. })
-                | Ok(MessageEnvelope::FwdDetach { .. })
-                | Ok(MessageEnvelope::FwdEgressAnswer { .. }) => {
-                    hollow_log!("[HOLLOW-SECURITY] Forwarder-bound fwd_* signal received by client from {peer_str} — ignoring");
+                // Forwarder-bound signals arriving at a client. Phase 2: an
+                // ENABLED embedded peer forwarder consumes them (expectation
+                // gate + engine admission + token bucket in
+                // `embedded_forwarder`); otherwise — misdirected or malicious —
+                // they keep hitting the pre-phase-2 ignore arm.
+                Ok(env @ (MessageEnvelope::FwdStreamRegister { .. }
+                | MessageEnvelope::FwdStreamAuth { .. }
+                | MessageEnvelope::FwdStreamUnregister { .. }
+                | MessageEnvelope::FwdIngestOffer { .. }
+                | MessageEnvelope::FwdAttach { .. }
+                | MessageEnvelope::FwdDetach { .. }
+                | MessageEnvelope::FwdEgressAnswer { .. })) => {
+                    #[cfg(all(feature = "forwarder", not(any(target_os = "android", target_os = "ios"))))]
+                    {
+                        let (embedded_fwd, cmd_tx) = fwd_bridge;
+                        if !embedded_fwd.handle_inbound(peer_str, env, cmd_tx) {
+                            hollow_log!("[HOLLOW-SECURITY] Forwarder-bound fwd_* signal received by client from {peer_str} — ignoring");
+                        }
+                    }
+                    #[cfg(not(all(feature = "forwarder", not(any(target_os = "android", target_os = "ios")))))]
+                    {
+                        let _ = (env, &fwd_bridge);
+                        hollow_log!("[HOLLOW-SECURITY] Forwarder-bound fwd_* signal received by client from {peer_str} — ignoring");
+                    }
                 }
 
                 Err(_) => {
@@ -10516,11 +10617,11 @@ async fn handle_incoming_request(
                                     peer_str.to_string(), sid, cid, enabled, quality,
                                 ).await;
                             }
-                            MessageEnvelope::VoiceChannelScreenWatch { sid, cid, want, viewer_width, viewer_height, source_quality, route, .. } => {
+                            MessageEnvelope::VoiceChannelScreenWatch { sid, cid, want, viewer_width, viewer_height, source_quality, route, fwd_capable, relay_private, .. } => {
                                 voice_handler::handle_envelope_voice_channel_screen_watch(
                                     voice_channel_participants, event_tx,
                                     peer_str.to_string(), sid, cid, want,
-                                    viewer_width, viewer_height, source_quality, route,
+                                    viewer_width, viewer_height, source_quality, route, fwd_capable, relay_private,
                                 ).await;
                             }
 

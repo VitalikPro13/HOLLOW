@@ -23,9 +23,13 @@ class IceRoute {
               ? 'LAN (direct)'
               : 'P2P ($localType/$remoteType)';
 
+  /// The raw pair facts without the TURN/STUN/LAN taxonomy — for callers
+  /// whose lane the taxonomy doesn't describe (forwarder legs, media
+  /// forwarding step 3: the label would mislead there).
+  String get detail => 'local=$localType remote=$remoteType proto=$proto';
+
   @override
-  String toString() =>
-      '$label (local=$localType remote=$remoteType proto=$proto)';
+  String toString() => '$label ($detail)';
 }
 
 /// Delays before each probe attempt, cumulative ≈ 7s.

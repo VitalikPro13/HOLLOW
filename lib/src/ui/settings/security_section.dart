@@ -160,6 +160,66 @@ class AlwaysRelayCallsToggle extends ConsumerWidget {
   }
 }
 
+/// "Peer media forwarding" — while watching a screen share, this desktop may
+/// serve as a blind packet forwarder carrying the (still end-to-end
+/// encrypted) stream to viewers who can't connect directly (media forwarding
+/// step 3 phase 2). ON by default; desktop only.
+class PeerForwardingToggle extends ConsumerWidget {
+  const PeerForwardingToggle({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final hollow = HollowTheme.of(context);
+    final enabled = ref.watch(peerForwardingProvider);
+
+    return Row(
+      children: [
+        Icon(LucideIcons.share2, size: 16, color: hollow.textSecondary),
+        const SizedBox(width: HollowSpacing.sm),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Peer media forwarding',
+                style: HollowTypography.body.copyWith(
+                  color: hollow.textPrimary,
+                  fontSize: 13,
+                ),
+              ),
+              const SizedBox(height: 2),
+              Text(
+                peerForwardingDescription,
+                style: HollowTypography.caption.copyWith(
+                  color: hollow.textSecondary,
+                  fontSize: 11,
+                ),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(width: HollowSpacing.md),
+        HollowToggle(
+          value: enabled,
+          onChanged: (val) async {
+            try {
+              await ref.read(peerForwardingProvider.notifier).setEnabled(val);
+            } catch (e) {
+              if (context.mounted) {
+                HollowToast.show(
+                  context,
+                  'Could not save the setting: $e',
+                  type: HollowToastType.error,
+                );
+              }
+            }
+          },
+        ),
+      ],
+    );
+  }
+}
+
 /// Security category — App Lock + Device Protection + Recovery Phrase,
 /// plus proof verification and the blocked users list.
 class SecurityTab extends StatefulWidget {
@@ -355,6 +415,8 @@ class _SecurityTabState extends State<SecurityTab> {
           const SettingsSectionLabel(label: 'CALL PRIVACY'),
           const SizedBox(height: HollowSpacing.sm),
           const AlwaysRelayCallsToggle(),
+          const SizedBox(height: HollowSpacing.md),
+          const PeerForwardingToggle(),
 
           const SizedBox(height: HollowSpacing.xl),
 

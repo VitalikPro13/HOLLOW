@@ -902,6 +902,21 @@ pub(crate) enum NodeCommand {
     /// chat).
     JoinForwarderRoom { forwarder_peer_id: String },
     LeaveForwarderRoom { forwarder_peer_id: String },
+    // -- Embedded peer forwarder (media forwarding step 3 phase 2) --
+    /// Settings toggle: this desktop may act as a viewer-peer forwarder.
+    /// No-op on mobile / non-forwarder builds.
+    SetPeerForwardingEnabled { enabled: bool },
+    /// The viewer advertised `fwd_capable` on a `vc_screen_watch` for this
+    /// originator — the embedded engine may accept a `fwd_stream_register`
+    /// whose origin matches `(origin_peer, kind)` while active. Cleared when
+    /// the watch ends. This is the abuse gate: a peer forwarder only ever
+    /// forwards a stream its user explicitly watches.
+    SetForwarderExpectation { origin_peer: String, kind: String, active: bool },
+    /// INTERNAL (embedded engine → swarm): a plaintext engine reply envelope
+    /// to Olm-encrypt and send through our own `fwd:{device_id}` room — or,
+    /// when `to_peer` is ourselves (the forwarder's own display leg), to
+    /// short-circuit straight back as a `ForwarderSignal` event.
+    EmbeddedForwarderOut { to_peer: String, envelope_json: String },
     // -- Conference commands (node/conference.rs) --
     ConferenceStart { conf_id: String, waiting_room: bool, access_code_hash: Option<String>, host_display_name: String, host_avatar_hash: String },
     ConferenceEnd { conf_id: String },
@@ -1102,6 +1117,9 @@ impl NodeCommand {
             Self::ForwarderSendSignal { .. } => "ForwarderSendSignal",
             Self::JoinForwarderRoom { .. } => "JoinForwarderRoom",
             Self::LeaveForwarderRoom { .. } => "LeaveForwarderRoom",
+            Self::SetPeerForwardingEnabled { .. } => "SetPeerForwardingEnabled",
+            Self::SetForwarderExpectation { .. } => "SetForwarderExpectation",
+            Self::EmbeddedForwarderOut { .. } => "EmbeddedForwarderOut",
             Self::ConferenceStart { .. } => "ConferenceStart",
             Self::ConferenceEnd { .. } => "ConferenceEnd",
             Self::ConferenceRequestJoin { .. } => "ConferenceRequestJoin",
@@ -3067,6 +3085,22 @@ pub(crate) enum MessageEnvelope {
         /// never receive `vc_screen_assign`).
         #[serde(default)]
         route: String,
+        /// Phase 2 (viewer-peer forwarders): this watcher offers to serve as
+        /// a forwarder for THIS share (desktop, peer-forwarding toggle ON).
+        /// The sharer may pick it for relay-routed viewers and self-assign it
+        /// (`vc_screen_assign{forwarder: <this watcher>}` sent to the watcher
+        /// itself switches its display to its embedded engine's egress leg).
+        /// Old clients: absent = false = never a candidate.
+        #[serde(default)]
+        fwd_capable: bool,
+        /// Phase 2 privacy: this viewer runs "Always relay calls" — its media
+        /// must only touch OPERATOR infrastructure (TURN or the infra
+        /// forwarder, the same trust domain), never another member's machine.
+        /// The sharer must skip the peer-forwarder rungs for it. Advisory
+        /// like `route` — the viewer additionally hard-refuses peer-forwarder
+        /// assignments locally. Absent (old client) = false.
+        #[serde(default)]
+        relay_private: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         target: Option<String>,
     },
@@ -3965,12 +3999,48 @@ mod screen_assign_route_tests {
         let env = MessageEnvelope::VoiceChannelScreenWatch {
             sid: "s".into(), cid: "c".into(), want: true,
             viewer_width: 2560, viewer_height: 1440, source_quality: false,
-            route: "relay".into(), target: None,
+            route: "relay".into(), fwd_capable: false, relay_private: false,
+            target: None,
         };
         let json = serde_json::to_string(&env).unwrap();
         match serde_json::from_str::<MessageEnvelope>(&json).unwrap() {
             MessageEnvelope::VoiceChannelScreenWatch { route, .. } => {
                 assert_eq!(route, "relay");
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    /// Phase 2: `fwd_capable` + `relay_private` round-trip, and their absence
+    /// (old client OR phase-1 client) parses as false — an old watcher is
+    /// never picked as a peer forwarder, and only an explicit flag steers a
+    /// viewer off the peer rungs.
+    #[test]
+    fn screen_watch_fwd_capable_round_trips_and_defaults_false() {
+        let env = MessageEnvelope::VoiceChannelScreenWatch {
+            sid: "s".into(), cid: "c".into(), want: true,
+            viewer_width: 1920, viewer_height: 1080, source_quality: false,
+            route: "direct".into(), fwd_capable: true, relay_private: true,
+            target: None,
+        };
+        let json = serde_json::to_string(&env).unwrap();
+        match serde_json::from_str::<MessageEnvelope>(&json).unwrap() {
+            MessageEnvelope::VoiceChannelScreenWatch {
+                fwd_capable, relay_private, route, ..
+            } => {
+                assert!(fwd_capable);
+                assert!(relay_private);
+                assert_eq!(route, "direct");
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+        let old = r#"{"t":"vc_screen_watch","sid":"s","cid":"c","want":true,"viewer_width":1920,"viewer_height":1080,"source_quality":false,"route":"direct"}"#;
+        match serde_json::from_str::<MessageEnvelope>(old).unwrap() {
+            MessageEnvelope::VoiceChannelScreenWatch {
+                fwd_capable, relay_private, ..
+            } => {
+                assert!(!fwd_capable, "absent fwd_capable must default to false");
+                assert!(!relay_private, "absent relay_private must default to false");
             }
             other => panic!("unexpected variant: {other:?}"),
         }

@@ -1,17 +1,29 @@
 # Media Forwarding Plan — Resolution Capping, Originator Attribution, SFrame Packet Forwarders
 
-**STATUS 2026-08-06: STEP 3 PHASE 1 IS COMPLETE AND FIELD-VERIFIED.** Step 1 (resolution capping)
-shipped; step 2 (originator attribution) shipped; step 3 phase 1 (the infra forwarder — D3 module +
-bin + VPS deploy, D4 relay discovery, D5 client integration, D6 field verification) all DONE — see
-§6 for the deliverable table and §7 for the status log incl. the D6 evidence and the five bugs the
-field found. A live screen share now traverses the VPS forwarder end to end: one encode on the
-sharer, blind packet relay, SFrame decrypting under the ORIGINATOR's key on a hop that never holds
-it, picture in ~1 s.
-**NEXT SESSION = PHASE 2: viewer-peer forwarders** (same crate embedded in the app; STUN-reachable
-peers with spare upload serve the TURN-only peers, so the relay carries ZERO media in the common
-case). Policy already decided: ON by default + Settings toggle, desktop only, never mobile/metered,
-2–3 downstream legs. Then phase 3 = simulcast (prerequisite: root-cause the Windows live
-`setParameters` rejection), then the 15-viewer cap goes dynamic.
+**STATUS 2026-08-07: STEP 3 PHASE 2 FIELD-VERIFIED COMPLETE — ALL FOUR RUNS PASSED** (peer
+rung + kill ladder, VPS rung, demotion, k=2 measurement + relay_private privacy gate + TURN
+baseline; §7 top entry has each run's evidence). The vanished-frame defect is FIXED and
+root-cause-confirmed (the removed fwd control-plane token bucket ate the last-in-burst large
+frame after the client's fwd-room join chatter); every hop of the fwd control plane is now
+instrumented (client send sizes / relay delivery + send-status counters in `/server-stats` /
+forwarder per-frame outcome log), a 30 s idempotent fwd-room re-join belt self-heals relay
+membership loss, and presence-flap tolerance is on BOTH the clients and the forwarder engine
+(media legs are the only truth). Relay + forwarder deployed live. Headline number:
+**egress = k×ingest on the forwarder (238/119 kbps at k=2) vs TURN's 2·B·k — and relay media
+= ZERO when a peer forwarder serves.** Remaining before phase 3: commit the working tree;
+follow-ups queued in §7 (SFrame join-order epoch race = own fix session; opportunistic
+rebalancer; fwd-room chatter suppression; relay ghost-eviction PeerLeft suppression).** Step 1 (resolution capping) shipped; step 2 (originator attribution)
+shipped; step 3 phase 1 (the VPS infra forwarder) COMPLETE + FIELD-VERIFIED — see §6 for the
+deliverable table and §7 for the D6 evidence and the five bugs the field found. Phase 2 embeds the
+SAME forwarder engine in desktop app builds: fwd-capable watchers on a direct route serve the
+TURN-only viewers (2–3 downstream legs each), the sharer's ladder becomes peer forwarder → VPS
+forwarder → direct+TURN, and the relay carries ZERO media in the common case. Policy as decided:
+ON by default + Settings toggle ("Peer media forwarding", Call Privacy section), desktop only,
+never mobile. §7's phase-2 entry has the implementation map + the field-verification procedure.
+Both D6 follow-ups are closed (forwarder-aware ICE route label; ingest+egress kbps in the
+aggregate counter line so the `B + B·k` saving is quotable from the journal at k>1).
+Then phase 3 = simulcast (prerequisite: root-cause the Windows live `setParameters` rejection),
+then the 15-viewer cap goes dynamic.
 Design refs: `~/.claude/plans/pure-doodling-cupcake.md` (D1–D6) and
 `~/.claude/plans/hey-please-read-the-sequential-penguin.md` (the D3–D6 implementation plan).
 Supersedes the old HOLLOW_PLAN.md line-2080 framing ("extend the voice gossip tree to CAMERAS and SCREEN SHARE").
@@ -157,10 +169,11 @@ fork" framing was superseded by the D2 spike — see §5.2).
   conference **broadcast mode**. Note this inverted the original ordering below — the infra peer
   landed before viewer-peer forwarders because it needs no client-side upload policy, no tree
   scoring, and can be restarted/instrumented freely during bring-up.
-- Viewer-peer forwarders = **PHASE 2, next session**: same crate embedded in the app (their own
-  display = downstream viewer #0 over a localhost leg); fanout of 2–3 per forwarder covers dozens
-  of viewers at one extra hop; ON by default + Settings toggle, desktop only, never mobile/metered.
-  This is the step that takes the relay's media cost to ZERO in the common case.
+- Viewer-peer forwarders = **PHASE 2 — IMPLEMENTED 2026-08-06, field verification pending** (see
+  §7): same engine embedded in desktop app builds (their own display = downstream viewer #0 over a
+  local leg); fanout of 3 remote legs per forwarder; ON by default + Settings toggle, desktop
+  only, never mobile. This is the step that takes the relay's media cost to ZERO in the common
+  case.
 - **Simulcast** (two-three `sendEncodings` layers, e.g. 1080p + 360p): forwarders adapt per-viewer quality
   by **packet selection** — a weak viewer gets the small layer, no re-encode anywhere.
 - Tree building: automatable scoring by upload headroom / route class (PeerScore.is_direct already exists
@@ -244,10 +257,242 @@ only, never mobile/metered, 2–3 downstream legs) — Vitalik decision 2026-08-
 | D5 | Client integration: route hint, `vc_screen_assign`, attach flow, fallback ladder | **DONE** (see §7) |
 | D6 | Field verification (forced-relay VM viewer through the VPS forwarder) + this report updated | **PASSED** (see §7) |
 
-Then phase 2 (peer forwarders, same crate embedded in-app) → phase 3 (simulcast) → dynamic
-removal of the 15-viewer cap.
+Then phase 2 (peer forwarders, same crate embedded in-app) → phase 3 → dynamic removal of the
+15-viewer cap.
+
+**Phase 3 (the closing move, Vitalik's framing 2026-08-06): full upload spreading.** Today peer
+forwarders serve only the relay-routed viewers (relay → 0); the sharer still uploads one copy
+per STUN viewer. Phase 3 extends the same branches to DIRECT viewers — the sharer sends 1-2
+copies total and STUN peers pull from each other (the §2e "A feeds the room" rows: 5 viewers at
+4K ≈ 10-20 Mbps sharer upload instead of 50) — plus feeder election (a peer branch can feed the
+VPS forwarder too). Prerequisites, in order: (1) simulcast (packet-selection per-viewer quality
+— without it one slow viewer drags its whole branch's single encode down), which itself needs
+the Windows live-`setParameters` rejection root-caused in the fork; (2) then the sharer-side
+policy: assign direct viewers to branches past an upload threshold. That is what makes the
+15-viewer cap DYNAMIC and closes the epic. All the machinery (branches, promotion, ladder,
+attribution, engine) already exists — phase 3 is simulcast + policy, no new transport.
 
 ## 7. Status log
+
+**2026-08-07 — PREP SESSION for runs 2-4: the vanished-frame defect attacked on every hop;
+fwd control-plane rate limit REMOVED; relay + forwarder redeployed (fresh socket).**
+
+- **Evidence loss discovered first:** journald on the VPS only retained ~9 h — the idle
+  forwarder's per-minute `0 stream(s)` aggregate line flooded the journal and rotated the whole
+  evening field session out of retention (zero interesting lines survive). The aggregate line
+  now logs ONLY while active (plus one trailing idle line at the transition). Lesson: idle
+  heartbeat logs are evidence-eaters on a journald box.
+- **Token bucket REMOVED (both roles).** The per-peer 20/5 bucket in `forwarder/signaling.rs` +
+  `node/embedded_forwarder.rs` was the ONLY spot in the entire fwd pipeline that ate a frame
+  with zero trace — unlogged by design ("replying would defeat the limiter") and sitting BEFORE
+  Olm decrypt, i.e. exactly where a "silently vanished" frame would die invisibly. Per the
+  relay doctrine (rate limits that silently drop = the broken-core class, `feedback_relay_rules`)
+  it is gone, not tuned: garbage still fails the cheap HavenMessage/Olm parse, the expensive
+  KeyRequest re-bundle keeps its 5 s per-peer cooldown, and every admission refusal is an
+  explicit FwdError. Honest note: the bucket is count-based, not size-based, so it is a
+  *suspect*, not a confirmed culprit — but it can no longer confound the next run.
+- **Every hop of the fwd control plane now observable:** (1) client send side already logged
+  sizes (added in the field session); (2) relay `send_to_peer` now captures the uWS send status
+  it previously IGNORED — uWS silently returns DROPPED past maxBackpressure — into
+  `/server-stats` counters `send_dropped` / `send_backpressure`, plus `fwd_delivered` /
+  `fwd_buffered` counting 0x04/0x08 directs to the configured forwarder id that were delivered
+  live vs diverted into the offline buffer (the buffered path = the membership-blackhole shape:
+  a frame buffered for a peer whose long-lived socket never re-joins is a frame that vanishes);
+  (3) the forwarder logs EVERY inbound 0x06 with size + outcome (KeyRequest / fwd_* → engine /
+  non-fwd / unparseable / decrypt-failed — sizes and envelope types only, zero identities). The
+  previously-silent HavenMessage-parse and base64-decode failures now log too. One run pinpoints
+  the drop hop.
+- **30 s fwd-room re-join belt (VPS signaling loop):** the relay's `handle_join` is idempotent
+  (redundant joins suppress the peer_joined broadcast) and replays buffered messages on every
+  join — so a periodic re-join both restores any relay-side membership loss AND recovers frames
+  that fell into the offline buffer, within 30 s.
+- **Presence-flap tolerance on the FORWARDER (engine `handle_peer_gone`):** the client-side
+  iron rule ("the MEDIA LEG is the only truth that may kill a branch") was LATENT on the
+  forwarder — a spurious PeerLeft/members-diff tore down live streams/legs. Now: presence loss
+  tears down only what carries NO connected media; live streams get `owner_gone` and the sweep
+  tick reaps them once their legs dry up; an admitted owner op (re-register / ingest offer)
+  clears the mark. Same engine ⇒ the embedded peer forwarder inherits the tolerance.
+- **Deployed:** relay rebuilt + restarted live (new `/server-stats` fields verified); forwarder
+  rebuilt on the Linux VM (uncommitted phase-2 tree — the VPS had been running the phase-1
+  binary all along) and swapped in, service restarted = the planned fresh-socket probe. Same
+  identity (`forwarder.key` persisted). Previous binary kept as `hollow-forwarder.prev`.
+- **Field checkpoints for the next runs:** run 2's kill-VM1 rung must show the VPS journal
+  logging `inbound … fwd_stream_register → engine` then `… fwd_ingest_offer → engine` (>10 KB)
+  — if the offer line is missing, read `/server-stats`: `fwd_buffered` > 0 = relay membership
+  blackhole (the 30 s belt should self-heal it); `send_dropped` > 0 = uWS backpressure. Also
+  verify fix #6 (branch-ingest SFrame re-key) on an epoch change mid-share, and run 1's
+  presence-flap tolerance now has a forwarder-side twin to watch.
+- **SAME-DAY RETEST RESULT (08:19 UTC): vanished-frame defect FIXED and root-cause CONFIRMED;
+  VPS rung PASSED end-to-end; peer rung not exercised (host config).** All previously-vanishing
+  frame classes delivered and journal-confirmed with matching sizes (ingest offer 10.7 KB,
+  egress answers 5.9/6.6 KB); `fwd_delivered=105, fwd_buffered=0, send_dropped=0`; both legs
+  ICE-connected ≈1 s; egress = k×ingest throughout. **Root-cause confirmation:** the journal
+  captured the exact kill shape — a viewer's fwd-room join fires the client's full discovery
+  cascade AT the forwarder (~45 `non-fwd HavenMessage — ignored` frames within ONE second,
+  profile/sync chatter), and the viewer's 6.6 KB egress answer arrives immediately AFTER that
+  burst. Under the removed 20-burst/5-per-sec token bucket, the chatter drained the sender's
+  bucket and the big control frame — always the LAST frame of the burst — was the one silently
+  eaten. The "size correlation" was an ORDER correlation. Presence tolerance + auth-remove
+  teardown both behaved on the real VM1 kill (VM2 unaffected). **Why the peer rung didn't
+  engage: the HOST had "Always relay calls" ON** — its call PCs offer only relay candidates, so
+  BOTH VMs' audio pairs to the sharer went TURN and both honestly probed `route=relay` → both
+  were assigned to the VPS branch (VM1 was never a direct-route watcher, so no promotion; the
+  kill therefore couldn't blink VM2 — they were parallel viewers). Host log fingerprint:
+  `[HOLLOW-VC] ICE route … local=relay` on the host side of every call pair while general-lane
+  PCs to the same machines are LAN/P2P direct. Fix for the re-run: Always-relay OFF on the
+  HOST (it belongs on the VMs only in run 4). Follow-up polish (non-blocking): suppress the
+  client's PeerJoined discovery cascade toward `fwd:` room peers — the forwarder ignores it
+  all; it's join-burst bandwidth + journal noise.
+  CORRECTION from run 2b (below): Vitalik reports Always-relay was OFF everywhere — the
+  all-TURN call pairs of the first attempt were an ICE race (TURN candidates won lab-wide),
+  not policy; the identical config produced direct pairs minutes later. Route probes honestly
+  report whatever ICE picked, so an occasional VPS-instead-of-peer assignment is expected lab
+  behavior, and the ladder handles it — no code change.
+- **RUN 2b (08:32 UTC) — PEER RUNG + KILL LADDER: FULL PASS.** VM1 probed `route=direct` this
+  time → on VM2's forced-relay watch the host logged `Promoted <VM1> to peer forwarder`,
+  register-before-assign held, ONE ingest leg on the LAN (`Forwarder leg — local=host
+  remote=host`), the direct PC to VM1 closed (one upload copy), VM1's engine attached its own
+  display + VM2 within ONE second (register → both attaches → ingest + 2 egress ICE-connected →
+  VP8 PT exact), VPS journal FLAT ZERO throughout — relay media = 0. THE KILL: VM1's app died →
+  presence dropped first and the client tolerance held the branch (`Presence drop for forwarder
+  … ignored — its ingest leg is alive`), 6 s later the MEDIA LEG died → `Ingest leg …
+  disconnected — reverting its viewers` → VM2 got a direct offer and rendered in <1 s (the
+  sharer-catches fast path; the VPS rung correctly never engaged since the sharer was alive).
+  PLI coalescing verified under load (viewer PLI storm → 1/s upstream). **Fix #6
+  field-verified:** two MLS epoch bumps (5, 6) landed mid-share with the branch ingest inside
+  the re-key sweep (`enabled on 3 PCs` incl. the ingest leg) — viewers behind the branch
+  decrypted after the bumps, the exact scenario that used to go permanently black.
+- **The 5-10 s establishment black screen (both VMs) = NOT the forwarder lane: it is the
+  join-order SFrame/MLS epoch race, now precisely characterized on a CLEAN server.** Signature
+  (VM2, mirrored on VM1): legs connect instantly and ciphertext flows, but the receiver
+  cryptor reports DecryptionFailed → MissingKey — the viewer's MLS group sat at epoch 4 while
+  the VC-join commits marched the group to 5-6 and the sharer rotated its sender key
+  immediately; the viewer missed those commits (join-race), so no epoch key. The voice-lane
+  heal ladder converged it: HEAL escalate=false at +8 s → escalate=true at +16 s →
+  re-bootstrap from the coordinator → key index 6 → FrameCryptorStateOk → picture. On the
+  thrashed server the re-bootstraps themselves failed, which is why it looked permanent there.
+  This is open item #2's bug with a clean repro signature: LAST JOINER MISSES THE JOIN-CHURN
+  COMMITS AND SITS ON A STALE EPOCH UNTIL THE ESCALATED RE-BOOTSTRAP. Fix directions for its
+  own session: make the sharer hold sender-key rotation until the group's members ack the
+  epoch key (or keep a previous-index grace), and/or fast-path the WrongEpoch → SyncRequest
+  recovery for freshly-joined members. Not a phase-2 blocker: once keys converge the lane is
+  stable, and a share started into a SETTLED VC (like run 1) gets pictures in ~1 s.
+- **RUN 3 (08:49-08:51 UTC, after one void attempt where the ICE race sent everyone to the
+  VPS again) — DEMOTION: PASS.** Promotion on VM2's watch (`route=direct` VM1 → `Promoted`,
+  host leg = `Forwarder leg`), VM2 left the VC → ~30 s linger → `fwd_stream_unregister` to the
+  peer forwarder + revert assign → 2 s later VM1's display back on `STUN (direct P2P)`. The
+  void attempt bonus-verified the viewer ladder (`direct_failed` → direct recovery ~1 s) and
+  the VPS branch's 30 s ingest linger firing to the second. **Runs 1, 2, 3 all PASSED — run 4
+  (k=2 measurement + relay_private + TURN baseline) is the last gate before commit.**
+- **RUN 4 (12:25-12:27 UTC) — k=2 MEASUREMENT + PRIVACY GATE + TURN BASELINE: PASS. PHASE-2
+  FIELD VERIFICATION COMPLETE (all four runs).** Both VMs under Always-relay: watches carried
+  `fwd_capable=false relay_private=true` (a forced-relay user neither serves nor rides a peer),
+  both assigned to the VPS branch, peer rung never considered. Steady-state journal aggregate:
+  **`1 stream, 3 legs, ingest ~119 kbps, egress ~238 kbps` — egress = exactly 2×ingest at k=2**
+  (the public `B + B·k` vs TURN `2·B·k` number: 3B vs 4B). Mid-stream
+  `systemctl restart hollow-forwarder`: presence tolerance held the branch on the WS drop, the
+  fresh forwarder refused with `unknown_stream` → sharer reverted its viewers → both VMs on
+  direct+TURN in ~6-9 s (`ICE route: TURN (relayed)` — correct under their Always-relay). NIC
+  observation: ~1.8 Mbps total (forwarder) vs ~4.2 Mbps (TURN) for the same 2 viewers
+  (content-dependent; the journal ratio is the rigorous number). Full-day control-plane
+  counters: `fwd_delivered=357, fwd_buffered=0, send_dropped=0`.
+- **Follow-up (named by Vitalik from the field, deliberate v1 gap): watch-ORDER sensitivity —
+  no opportunistic rebalance.** If the relay-routed viewer watches BEFORE any direct
+  fwd-capable watcher exists, it lands on the VPS rung and STAYS there (v1 = static policy,
+  rebalance only on join/leave/failure): the sharer then carries 2 uploads (direct copy + VPS
+  ingest) where a promotion would carry 1 with relay at zero. Near-simultaneous watches are a
+  topology coin flip on processing order. The fix is an opportunistic rebalancer — "fresh
+  direct fwd_capable watcher appeared while a VPS branch serves viewers ⇒ promote + migrate
+  that branch's viewers" — costing one blink per migrated viewer; slots naturally into the
+  phase-3 tree-scoring work (or a small v1.5 if the 2-upload case bites earlier).
+
+**2026-08-06 (evening) — PHASE 2 FIELD SESSION: RUN 1 PASSED IN FULL; runs 2-4 blocked by an
+SFrame/MLS key-staleness issue in the thrashed test server (NOT a forwarder bug); 7 field bugs
+found and FIXED (uncommitted, on the working tree). Continue next session.**
+
+- **RUN 1 (peer-forwarder path) PASSED with all four vantage points agreeing:** host sharer saw
+  `route=relay` → promoted the direct watcher (VM1) → ONE ingest leg at the branch cap; VM1's
+  embedded engine registered the stream (expectation gate), attached its own display via the
+  self-assignment short-circuit (`ICE route: Forwarder leg (blind relay hop)` — follow-up #1
+  label live), VP8 PT-mapped `exact`, served the forced-relay viewer (VM2) over the LAN;
+  **aggregate line: 1 stream, 3 legs, ingest ~976 kbps, egress ~1953 kbps — egress = 2×ingest
+  for k=2, on a member's desktop**; VM2 rendered ATTRIBUTED TO THE SHARER; the VPS forwarder
+  journal stayed at `0 streams / 0 kbps` the whole time — **relay media = ZERO.** Also verified
+  live on the real relay: `fwd_capable`/`relay_private` wire round-trip, and the ladder
+  descending peer → VPS → direct on failures.
+- **Seven field bugs found by the kill/churn tests, ALL FIXED in the working tree:**
+  1. *Deliverer-death strands the watch:* `_cleanupPeerScreenShare` closed a delivered stream
+     silently (no ladder) — and the sharer's revert direct-offer is `_audioConnectedPeers`-gated,
+     so when the host↔viewer audio PC happened to be down, NOTHING re-initiated ("Connecting to
+     screen share..." forever). Fix: deliverer death while the originator still shares walks
+     `_fallbackToDirect` (receiver-initiates doctrine; the re-watch rides the relay so it heals
+     even with the direct audio PC broken).
+  2. *Revert-assign with no follow-up offer strands the tile:* `screen_assign{forwarder:""}`
+     now re-arms the 20 s watch timer.
+  3. *Relay ghost-socket eviction = spurious PeerLeft:* after an app kill+restart, the relay
+     evicts the ghost ~85 s later and broadcasts PeerLeft for its rooms even though the SAME
+     peer's live socket is present — both sharer and viewers tore down a WORKING branch on it.
+     Fix: presence-flap tolerance — a branch with a live ingest leg and a delivered stream that
+     is still rendering are kept; the MEDIA LEG is the only truth that may kill a branch (its
+     own ICE death fires the existing recovery paths). Relay-side suppression = follow-up.
+  4. *Self-attach races the register:* promotion sent the self-assign FIRST; the promoted
+     forwarder's attach is a LOCAL short-circuit and beat the relay-carried register →
+     `unknown_stream` → its own display laddered away instantly. Fix: register + ingest offer are
+     sent BEFORE any assign (same-socket ordering makes the engine provably know the stream
+     first), plus a one-shot 700 ms self-attach retry on `unknown_stream` as the belt.
+  5. *Sharer re-laddered its own forwarder's display onto the VPS:* a branch HEAD's
+     `direct_failed` now DEMOTES the branch (viewers revert and re-ladder; the head falls
+     through to the direct path) — and `_pickForwarderFor` hard-refuses branch heads (no chains
+     in v1).
+  6. *Branch ingest legs sat OUTSIDE both SFrame re-key sweeps* (the epoch-rotation sweep and
+     `_sframeHealReapply`): an ingest sender that misses a rotation keeps encrypting under the
+     old key index → every viewer behind that forwarder decodes nothing (MissingKey→
+     DecryptionFailed → endless PLI storm) while heals bump epochs and dig deeper. LATENT IN
+     PHASE 1 TOO (the VPS `_ingestService` had the same blind spot — D6 simply never rotated an
+     epoch mid-share). Fix: both sweeps now include `_fwdBranches[].ingest`.
+  7. *(From the same session, non-forwarder)* the join-flow toast crashed on `Overlay.of` after
+     dialog pop (`create_server_dialog.dart`) — fixed per the toast iron rule.
+- **OPEN BLOCKER (why runs 2-4 stopped): recurring SFrame failure in the VOICE lane of the
+  long-lived test server, join-order dependent** — VM2 joining the VC LAST reliably failed
+  SFrame (audio cryptors failing before any share), while VM2 joining FIRST worked; and the
+  final promotion attempt still went black on both viewers even with fix #6 on the sharer. The
+  server's MLS group is thrashed: epoch 39 → 47 in one afternoon of heal-escalation
+  re-bootstraps; key events fire constantly with `enabled on 0 PCs`. The failure looks like a
+  pre-existing epoch/key-distribution ordering bug (`feedback_mls_patterns` territory) amplified
+  by the churned group — NOT a forwarder-lane bug (the forwarder moves ciphertext it never
+  decrypts; run 1 proved the lane end-to-end when keys were sane).
+- **NEXT SESSION:** (1) reproduce on a FRESH server + fresh VC (clean MLS group) — run 1 should
+  pass in ~1 s again, then runs 2 (kill VM1 → VPS rung, checkpoint-verified before the kill),
+  3 (demotion), 4 (k=2 measurement + relay_private check, procedure above); (2) investigate the
+  join-order SFrame failure as its own bug (repro: host+VM1 in VC, VM2 joins last → audio
+  cryptor failures; VM2 first → fine); (3) verify fix #6 engages (host log should show the
+  branch-ingest re-enable on epoch change mid-share); (4) relay follow-up: suppress
+  ghost-eviction PeerLeft when the peer has another live socket in the room.
+- **LATE-NIGHT ADDENDUM — FRESH SERVER = RUNS 1 AND 2 BOTH PASSED.** On a newly created server
+  (clean MLS group) the whole flow worked immediately: run 1 re-passed with pictures on both
+  VMs, and at +45 s the relay's ghost eviction fired for the promoted forwarder — **the
+  presence-flap tolerance held the branch** (`Presence drop … ignored — its ingest leg is
+  alive`), the exact event that killed the earlier session. Run 2 (VM1 killed): VM2 re-watched
+  `direct_failed` within seconds → VPS rung → VPS rung ALSO failed (vanished-frame defect
+  below) → second `direct_failed` → **direct+TURN, picture restored in ~10-15 s — the share
+  survived TWO failed helpers.** This confirms the runs-2-4 blocker was the thrashed old
+  server's MLS state, not the forwarder lane.
+- **REMAINING DEFECT, precisely characterized — large Olm frames to the VPS forwarder vanish:**
+  three occurrences today, always the same shape: small frames (register 443 B) arrive, large
+  ones (ingest offer ~10.5 KB, egress answers ~6 KB) silently don't; peer↔peer fwd frames of the
+  same sizes always flow. The VPS forwarder's WS socket has been up since morning without a
+  reconnect. Prime suspect: relay-side backpressure drop on that long-lived socket (uWS
+  `maxBackpressure` — check its configured value and the drop path in send_to_peer); first
+  probe next session = restart `hollow-forwarder.service` (fresh socket) and re-run the VPS
+  rung; if it heals, instrument the relay's backpressure counters. Silent drops on the fwd
+  control plane also argue for a client-side attach/offer RETRY tier later.
+- **VM lab notes that cost hours:** TWO VirtualBox VMs bridged over Wi-Fi = broken (second
+  guest's inbound goes silent ~90 s after connect; one-way-deaf WS + dead data channels);
+  bridged+NAT mix works and NAT is actually the more production-faithful viewer topology. A
+  VM restored from a foreign lab image had an Am79C970A NIC (no Win10 driver — zero adapters)
+  and stale static IP config. `HOLLOW_FORCE_RELAY_ROUTE=1` (route-hint-only env knob, added
+  this session) is REQUIRED to exercise the peer path in the lab now that Always-relay
+  deliberately routes to the VPS rung (`relay_private`).
 
 **2026-08-05/06 — step 2 + spike session (everything below in one day):**
 
@@ -370,3 +615,104 @@ removal of the 15-viewer cap.
   and `vc_screen_assign_and_route_round_trip` incl. spoof drop; forwarder unit tests for
   budget/admission/token-bucket/PT-map run under `--features forwarder`); widget tests 406/406;
   `flutter analyze` clean; relay rebuilt + restarted live.
+
+**2026-08-06 (same day, later session) — STEP 3 PHASE 2 IMPLEMENTED (viewer-peer forwarders);
+field verification = the remaining gate:**
+
+- **Build plumbing.** The `forwarder` cargo feature now reaches app builds via a new
+  `rust/hollow_core/cargokit.yaml` (`extra_flags: --features forwarder` for debug/profile/release —
+  vendored cargokit has no per-platform switch), kept mobile-inert by TARGET-SCOPING the str0m/toml
+  optional deps to `cfg(not(any(android, ios)))` and gating the module + all bridge code on
+  `all(feature, not(android/ios))`: verified `cargo tree --target aarch64-linux-android` resolves
+  NO str0m while desktop does. str0m's crypto backend is aws-lc (NOT OpenSSL) — desktop release
+  builders need cmake (+ NASM on Windows MSVC); already proven on the dev box and the Linux VM.
+- **Engine embed-ability (forwarder module).** New auto-advertise mode: empty `public_ip` =
+  embedded — each leg advertises the default-route LAN IP as host candidate PLUS its NAT mapping
+  discovered per-socket via a new minimal STUN client (`forwarder/stun.rs`, RFC 5389 binding +
+  XOR-MAPPED-ADDRESS, IPv4-only by design — the D6 bug-#2 lesson), advertised as a SECOND host
+  candidate (the same "public host candidate" shape the VPS uses behind 1:1 NAT). CLIENT legs keep
+  the zero-ICE-config iron rule on BOTH lanes — the forwarder side carrying the reflexive
+  candidate is what makes the pair connect. STUN discovery runs inside the leg task (engine loop
+  never blocks); `Receive::destination` stays the primary advertised address. Ephemeral UDP ports
+  (`udp_port_min = 0`); embedded caps = 2 streams / 4 legs per stream (3 remote + own display) /
+  no bps budget (the leg count IS the budget). `spawn_embedded_engine()` = engine::run only — no
+  second identity/DB/Olm (those are VPS-only boot steps).
+- **Node bridge (`node/embedded_forwarder.rs`).** The client-bound fwd_* ignore arm now feeds an
+  embedded engine when enabled: expectation gate (a `fwd_stream_register` is admitted ONLY for an
+  `(originator, kind)` this client advertised `fwd_capable` for on a live watch — a peer forwarder
+  only ever forwards a stream its user explicitly watches), per-peer token bucket (20/5, the VPS
+  numbers), then the engine's own spoof/owner/allowlist/caps admission unchanged. Engine replies
+  ride `NodeCommand::EmbeddedForwarderOut` back into the swarm loop where the OlmManager lives,
+  Olm-encrypt through OUR OWN `fwd:{device_id}` room (deterministic-room rule both directions;
+  send path = `send_fwd_envelope_via_room`, extracted from the phase-1 client sender).
+  SELF-addressed signals short-circuit: `ForwarderSendSignal` to our own device id injects
+  straight into the engine, and engine→self replies emit `NetworkEvent::ForwarderSignal`
+  `from_peer == us` — the forwarder's own display is just another attach, no Olm, no relay.
+  Presence: PeerLeft/RoomMembers diffs on our fwd room drive `EngineCmd::PeerGone`; reconnect
+  rejoins the room; TURN credential URIs double as the STUN source. STUN derivation prefers a
+  `stun:` URI, falls back to the TURN host on :3478.
+- **Wire.** `vc_screen_watch` gains `#[serde(default)] fwd_capable: bool` (absent = old client =
+  false = never a candidate). NO new envelope variants — the whole phase rides the phase-1 fwd_*
+  contract ("a forwarding peer and an SFU are the same component", §2c, now literal).
+  New FFI: `set_peer_forwarding_enabled`, `set_forwarder_expectation` (+ codegen).
+- **Sharer-side selection (voice_channel_provider.dart).** Phase-1's single-forwarder state
+  generalized to per-forwarder BRANCHES (`_FwdBranch`: viewers, one ingest leg, linger timer).
+  Relay-routed viewer ladder: existing peer branch with capacity (< 3 remote legs) → promote a
+  fresh candidate (fwd_capable watcher on a 'direct' route) → VPS infra forwarder → direct+TURN.
+  PROMOTION self-assigns the forwarder (`vc_screen_assign{forwarder: itself}` sent to it — its
+  display switches to its embedded engine's egress leg) and closes our direct PC to it: ONE
+  upload copy serves the forwarder + its downstream viewers. Its own display rides the register
+  allowlist + the branch's ingest cap (max over branch audience). `direct_failed` re-watches now
+  DESCEND the ladder: the failed branch is remembered per viewer (never re-assigned), two failed
+  rungs ⇒ direct; the viewer's own fallback counter caps at two as well (both sides bound the
+  ladder). Branch death (ingest disconnect / FwdError / forwarder stops watching / peer vanishes)
+  reverts that branch's viewers to direct offers and DEMOTES an idle peer forwarder back to its
+  own direct feed.
+- **Viewer side.** `vc_screen_assign` trust widened per the phase-2 model: the assignment is
+  authenticated as coming from the stream's ORIGINATOR (Rust `inbound_origin_ok`) and honored
+  only for a watched share, so the sharer may name ANY forwarder for its own stream — VPS, a
+  viewer-peer, or US (self-assignment → local attach through the FFI short-circuit; our own fwd
+  room membership belongs to the bridge, never joined/left from the assignment path). The
+  per-assignment fwd_* source gate is unchanged. Watch payloads advertise `fwd_capable` (desktop
+  + toggle) and arm/withdraw the engine expectation on watch start/stop/leave.
+- **Settings.** `peerForwardingProvider` (persisted `peer_media_forwarding`, default ON — absent
+  key = enabled; loaded at bootstrap beside Always-relay, pushed into the node post-start and on
+  toggle). "Peer media forwarding" toggle beside "Always relay calls" (desktop Settings > Security
+  > Call Privacy); disabling mid-serve tears the engine down and downstream viewers heal.
+- **Always-relay privacy gate (added same day — the phase-1 "forwarder legs are exempt from
+  forced TURN" rationale only holds for OPERATOR infrastructure).** A forced-relay user's media
+  must never touch another MEMBER's machine, in either role: (1) `_canForwardShares()` is false
+  under Always-relay — they never serve; (2) new `#[serde(default)] relay_private: bool` on
+  `vc_screen_watch` — the sharer skips the peer rungs and routes them VPS-forwarder-or-direct
+  only (advisory, like `route`); (3) viewer-side HARD refusal in `_handleScreenAssign` — a peer
+  forwarder assignment while Always-relay is on walks the ladder instead (catches buggy/malicious
+  sharers at the cost of one attempt). The VPS forwarder remains fine for them: same operator
+  trust domain as TURN, which is exactly what D6 field-verified.
+- **D6 follow-ups CLOSED:** (1) forwarder legs (`ScreenShareService(forwarderLeg: true)`) log
+  `ICE route: Forwarder leg (blind relay hop) — pair local=… remote=…` instead of the misleading
+  TURN/STUN taxonomy; (2) the engine's per-minute aggregate line now carries ingest AND egress
+  kbps — at k viewers egress ≈ k × ingest, which IS the `B + B·k` vs `2·B·k` number to quote; the
+  relay-side counterpart comes from `/server-stats` NIC deltas with the VM procedure below.
+- **Field verification procedure (pending; topology = host sharer + TWO bridged-network VMs —
+  NAT-mode VirtualBox guests can't reach each other, and the peer leg VM2→VM1 needs the LAN).
+  NOTE: Always-relay no longer exercises the peer path (the privacy gate routes it to the VPS
+  rung BY DESIGN) — the restricted-NAT viewer is simulated with the `HOLLOW_FORCE_RELAY_ROUTE=1`
+  env var instead (route-hint-only lab knob, inert in production):**
+  1. *Peer-forwarder path:* host shares; VM1 (bridged, defaults — fwd toggle ON, no
+     Always-relay) watches → direct; VM2 (bridged, `HOLLOW_FORCE_RELAY_ROUTE=1`, Always-relay
+     OFF) watches → expect: sharer logs "Promoted <VM1> to peer forwarder" + ONE ingest offer for
+     the branch, VM1's `[HOLLOW-SCREEN] ICE route` reads `Forwarder leg (blind relay hop)` (its
+     display now rides its own engine), VM2 renders ATTRIBUTED TO THE SHARER, VPS forwarder
+     journal shows NO new stream — relay media = 0.
+  2. *Ladder:* kill VM1's app mid-stream → VM2's feed dies → re-watch `direct_failed` → sharer
+     assigns the VPS forwarder (journal shows the stream register + legs) → picture back.
+     Restart `hollow-forwarder.service` mid-stream too → VM2 falls to direct+TURN, per phase 1's
+     proven ladder.
+  3. *Demotion:* VM2 stops watching → 30 s linger → VM1 demoted (sharer log + VM1 gets a direct
+     offer back, ICE route line goes back to the normal taxonomy).
+  4. *k>1 saving (follow-up #2 measurement) + privacy-gate check:* BOTH VMs with "Always relay
+     calls" ON (env var unset) → both must land on the VPS forwarder (never VM1, even though
+     VM1 is fwd-capable — that IS the relay_private verification): journal aggregate line reads
+     1 stream, 3 legs, egress ≈ 2 × ingest (`B + 2B` total). TURN baseline: stop
+     `hollow-forwarder.service`, re-watch (ladder → direct+TURN), read `/server-stats` NIC deltas
+     ≈ `4B`. Quote that pair publicly.

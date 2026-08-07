@@ -17,7 +17,7 @@
 //! stale `fwd_ingest_offer` after a session re-establishment would open a
 //! bogus leg.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use tokio::sync::mpsc;
 
@@ -137,7 +137,6 @@ pub(crate) async fn handle_forwarder_send_signal(
     crypto_store: &CryptoStore,
     event_tx: &mpsc::Sender<NetworkEvent>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
-    ws_room_peers: &HashMap<String, HashSet<String>>,
     pending_messages: &mut HashMap<String, Vec<String>>,
     key_request_in_flight: &mut HashMap<String, std::time::Instant>,
     device_keypair: &crate::identity::native_identity::NativeKeypair,
@@ -160,11 +159,38 @@ pub(crate) async fn handle_forwarder_send_signal(
     // ingest offer that followed with `unknown_stream` (field test
     // 2026-08-06). The room code is knowable without any snapshot.
     let room = format!("fwd:{forwarder_peer_id}");
+    send_fwd_envelope_via_room(
+        olm, crypto_store, event_tx, ws_cmd_tx, pending_messages, key_request_in_flight,
+        device_keypair, device_peer_id, &room, forwarder_peer_id, env_json, &signal_type,
+    )
+    .await;
+}
 
-    if olm.has_session(&forwarder_peer_id) {
-        match olm.encrypt(&forwarder_peer_id, env_json.as_bytes()) {
+/// Olm-encrypt an already-built fwd envelope to `target_peer` through an
+/// explicit room, queueing + firing a throttled signed KeyRequest when no
+/// session exists. Shared by the client→forwarder path above (room =
+/// `fwd:{target}`) and the embedded engine's replies (phase 2: room =
+/// `fwd:{OUR device id}` — sharer and assigned viewers join it before
+/// signaling us, so the deterministic-room rule holds in this direction too).
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn send_fwd_envelope_via_room(
+    olm: &mut OlmManager,
+    crypto_store: &CryptoStore,
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    pending_messages: &mut HashMap<String, Vec<String>>,
+    key_request_in_flight: &mut HashMap<String, std::time::Instant>,
+    device_keypair: &crate::identity::native_identity::NativeKeypair,
+    device_peer_id: &str,
+    room: &str,
+    target_peer: String,
+    env_json: String,
+    label: &str,
+) {
+    if olm.has_session(&target_peer) {
+        match olm.encrypt(&target_peer, env_json.as_bytes()) {
             Ok((msg_type, ciphertext)) => {
-                persist_olm_session(olm, crypto_store, &forwarder_peer_id);
+                persist_olm_session(olm, crypto_store, &target_peer);
                 let haven = HavenMessage::Encrypted {
                     message_type: msg_type,
                     body: OlmManager::encode_base64(&ciphertext),
@@ -175,17 +201,25 @@ pub(crate) async fn handle_forwarder_send_signal(
                     },
                 };
                 let json = serde_json::to_string(&haven).unwrap_or_default();
+                // Send-side observability (field debugging 2026-08-06: an
+                // ingest offer vanished between "offered" and the forwarder —
+                // this line splits send-side from transit/receive-side).
+                // Envelope TYPE + sizes only, never content.
+                hollow_log!(
+                    "[HOLLOW-FWD] send {label} -> {target_peer} via {room}: plain {} B, frame {} B, msg_type {msg_type}",
+                    env_json.len(), json.len()
+                );
                 let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendDirect {
-                    room_code: room,
-                    target_peer: forwarder_peer_id,
+                    room_code: room.to_string(),
+                    target_peer,
                     data: json.into_bytes(),
                 });
             }
             Err(e) => {
-                hollow_log!("[HOLLOW-FWD] encrypt of {signal_type} failed: {e}");
+                hollow_log!("[HOLLOW-FWD] encrypt of {label} failed: {e}");
                 let _ = event_tx
                     .send(NetworkEvent::MessageSendFailed {
-                        to_peer: forwarder_peer_id,
+                        to_peer: target_peer,
                         error: format!("Encryption failed: {e}"),
                     })
                     .await;
@@ -196,30 +230,30 @@ pub(crate) async fn handle_forwarder_send_signal(
 
     // No session yet — queue for the post-key-exchange drain and fire a
     // throttled signed KeyRequest (message_ops::queue_dm_key_request pattern,
-    // 10 s throttle). Unlike the DM path we KNOW the room the forwarder lives
-    // in (`fwd:{its id}`), so the request is sent through that room
-    // UNCONDITIONALLY rather than gated on our ws_room_peers snapshot — the
-    // first signal races the relay's members message for the just-joined fwd
-    // room, and the snapshot lookup reported the forwarder "offline" in that
-    // window (first field test 2026-08-06; the RoomMembers proactive exchange
-    // healed it, but the direct request removes the ordering dependency).
+    // 10 s throttle). Unlike the DM path we KNOW the room to reach the peer
+    // in, so the request is sent through it UNCONDITIONALLY rather than gated
+    // on our ws_room_peers snapshot — the first signal races the relay's
+    // members message for the just-joined fwd room, and the snapshot lookup
+    // reported the forwarder "offline" in that window (first field test
+    // 2026-08-06; the RoomMembers proactive exchange healed it, but the
+    // direct request removes the ordering dependency).
     pending_messages
-        .entry(forwarder_peer_id.clone())
+        .entry(target_peer.clone())
         .or_default()
         .push(env_json);
     let req_fresh = key_request_in_flight
-        .get(&forwarder_peer_id)
+        .get(&target_peer)
         .is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(10));
     if !req_fresh {
         hollow_log!(
-            "[HOLLOW-FWD] No session for forwarder {forwarder_peer_id}, queueing {signal_type} + KeyRequest"
+            "[HOLLOW-FWD] No session for {target_peer}, queueing {label} + KeyRequest"
         );
         send_message_to_peer_in_room(
             ws_cmd_tx,
-            &room,
-            &forwarder_peer_id,
-            signed_key_request(device_keypair, device_peer_id, &forwarder_peer_id),
+            room,
+            &target_peer,
+            signed_key_request(device_keypair, device_peer_id, &target_peer),
         );
-        key_request_in_flight.insert(forwarder_peer_id, std::time::Instant::now());
+        key_request_in_flight.insert(target_peer, std::time::Instant::now());
     }
 }

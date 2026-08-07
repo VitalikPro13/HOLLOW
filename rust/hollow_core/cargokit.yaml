@@ -1,0 +1,22 @@
+# Cargokit build options for the app's hollow_core builds (all platforms,
+# all configurations). Vendored cargokit reads this from the crate manifest
+# dir (rust_builder/cargokit/build_tool/lib/src/options.dart) and splices
+# extra_flags into `cargo build`.
+#
+# `--features forwarder` enables the embedded media forwarder (viewer-peer
+# forwarders, media forwarding step 3 phase 2). There is NO per-platform key
+# here — the flag reaches Android/iOS builds too, which is safe because the
+# str0m/toml deps are target-scoped to desktop in Cargo.toml and the module is
+# cfg-gated on not(android/ios): mobile builds see the feature but compile
+# none of it.
+#
+# NOTE for release builders: str0m pulls aws-lc-sys (C build) — desktop
+# toolchains need cmake (+ NASM on Windows MSVC). Already proven on the
+# Windows dev box and the Linux build VM during phase 1.
+cargo:
+  debug:
+    extra_flags: ["--features", "forwarder"]
+  profile:
+    extra_flags: ["--features", "forwarder"]
+  release:
+    extra_flags: ["--features", "forwarder"]

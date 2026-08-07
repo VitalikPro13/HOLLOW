@@ -984,6 +984,9 @@ class _HollowShellState extends ConsumerState<HollowShell>
     // ICE map from this flag. Loading it later would leave a window where a
     // peer connection is built with direct candidates.
     await ref.read(alwaysRelayCallsProvider.notifier).load();
+    // Peer media forwarding (step 3 phase 2): load with the same timing;
+    // pushed into the node right after start below.
+    await ref.read(peerForwardingProvider.notifier).load();
 
     // The conversation/server list is now populated from the local DB — drop
     // the "Unlocking…" spinner. The remaining network phase runs behind the
@@ -1025,6 +1028,10 @@ class _HollowShellState extends ConsumerState<HollowShell>
     }
 
     await ref.read(nodeProvider.notifier).start();
+
+    // Peer media forwarding: the node starts with it OFF — mirror the loaded
+    // setting in (desktop only; the command is a no-op on mobile builds).
+    ref.read(peerForwardingProvider.notifier).pushToNode();
 
     // Load invisible mode preference (non-blocking — Rust already loaded it
     // from DB at node startup, this is just for the Dart UI to show the

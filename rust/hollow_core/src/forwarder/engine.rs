@@ -16,7 +16,7 @@ use crate::node::types::{MessageEnvelope, StreamOrigin};
 
 use super::budget::{BudgetCfg, FwdErrorCode};
 use super::dispatch::{admit_attach, admit_owner_op, admit_register, StreamView};
-use super::leg::{self, LegCmd, LegEnded};
+use super::leg::{self, Advertise, LegCmd, LegEnded};
 use super::stream::{stream_key, LegHandle, StreamKey, StreamState};
 use super::ForwarderConfig;
 
@@ -38,6 +38,9 @@ pub(crate) struct OutSignal {
 
 /// Round-robin port allocation over the configured UDP range. No used-set —
 /// a port still held by a live leg simply fails to bind and we try the next.
+/// `min == 0` = embedded peer forwarder: bind an OS-assigned ephemeral port
+/// per leg (clients have no firewall config; outbound-first UDP is what their
+/// NAT/host firewall already handles for every WebRTC socket).
 struct PortAllocator {
     min: u16,
     max: u16,
@@ -50,6 +53,11 @@ impl PortAllocator {
     }
 
     async fn bind(&mut self) -> Option<(UdpSocket, u16)> {
+        if self.min == 0 {
+            let sock = UdpSocket::bind(("0.0.0.0", 0)).await.ok()?;
+            let port = sock.local_addr().ok()?.port();
+            return Some((sock, port));
+        }
         let span = (self.max - self.min) as u32 + 1;
         for _ in 0..span {
             let port = self.next;
@@ -59,6 +67,51 @@ impl PortAllocator {
             }
         }
         None
+    }
+}
+
+/// How legs advertise themselves — fixed public IP (VPS) or auto-discovered
+/// (embedded peer forwarder: LAN IP of the default-route interface + per-leg
+/// STUN mapping, resolved from `cfg.stun_server`).
+#[derive(Clone, Copy)]
+enum AdvertiseMode {
+    Fixed(IpAddr),
+    Auto { stun: Option<SocketAddr> },
+}
+
+impl AdvertiseMode {
+    /// Build the per-leg advertise info. Auto mode re-reads the local IP per
+    /// leg (a laptop can change networks mid-session; one connect() syscall).
+    fn for_leg(&self, port: u16) -> Advertise {
+        match *self {
+            AdvertiseMode::Fixed(ip) => Advertise { host: SocketAddr::new(ip, port), stun: None },
+            AdvertiseMode::Auto { stun } => {
+                let ip = local_route_ip(stun).unwrap_or(IpAddr::from([127, 0, 0, 1]));
+                Advertise { host: SocketAddr::new(ip, port), stun }
+            }
+        }
+    }
+}
+
+/// The local IP of the default-route interface: connect() on a UDP socket
+/// sends nothing but resolves the route. Falls back through the STUN address
+/// to a public anycast IP purely for route selection.
+fn local_route_ip(stun: Option<SocketAddr>) -> Option<IpAddr> {
+    let target = stun.unwrap_or_else(|| SocketAddr::from(([1, 1, 1, 1], 53)));
+    let sock = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    sock.connect(target).ok()?;
+    Some(sock.local_addr().ok()?.ip())
+}
+
+/// Resolve the configured STUN server, IPv4-only — the D6 field bug #2 was an
+/// IPv6-first answer with no routable IPv6; media legs are v4.
+async fn resolve_stun(server: &str) -> Option<SocketAddr> {
+    match tokio::net::lookup_host(server).await {
+        Ok(mut addrs) => addrs.find(|a| a.is_ipv4()),
+        Err(e) => {
+            hollow_log!("[HOLLOW-FWD] STUN server {server} did not resolve: {e}");
+            None
+        }
     }
 }
 
@@ -73,11 +126,24 @@ pub(crate) async fn run(
         max_legs_per_stream: cfg.max_legs_per_stream,
         max_egress_bps: cfg.max_egress_bps,
     };
-    let public_ip: IpAddr = match cfg.public_ip.parse() {
-        Ok(ip) => ip,
-        Err(e) => {
-            hollow_log!("[HOLLOW-FWD] invalid public_ip {}: {e}", cfg.public_ip);
-            return;
+    // Empty public_ip = embedded peer forwarder (auto-advertise). The VPS
+    // config always carries its fixed public IP.
+    let advertise = if cfg.public_ip.is_empty() {
+        let stun = match &cfg.stun_server {
+            Some(s) => resolve_stun(s).await,
+            None => None,
+        };
+        if stun.is_none() {
+            hollow_log!("[HOLLOW-FWD] embedded engine has no STUN — LAN-only candidates");
+        }
+        AdvertiseMode::Auto { stun }
+    } else {
+        match cfg.public_ip.parse::<IpAddr>() {
+            Ok(ip) => AdvertiseMode::Fixed(ip),
+            Err(e) => {
+                hollow_log!("[HOLLOW-FWD] invalid public_ip {}: {e}", cfg.public_ip);
+                return;
+            }
         }
     };
     let mut ports = PortAllocator::new(cfg.udp_port_min, cfg.udp_port_max);
@@ -87,11 +153,16 @@ pub(crate) async fn run(
 
     // Egress bps estimate: sampled over the tick interval from the aggregate
     // counters. Admission-only granularity (never touches existing legs).
+    // Ingest bps rides along for the aggregate log only — egress/ingest ≈ k
+    // is the headline `B + B·k` vs TURN's `2·B·k` number (D6 follow-up #2).
     let mut egress_bps: u64 = 0;
     let mut last_egress_bytes: u64 = 0;
+    let mut ingest_bps: u64 = 0;
+    let mut last_ingest_bytes: u64 = 0;
     let mut tick = tokio::time::interval(Duration::from_secs(10));
     tick.tick().await; // consume the immediate first tick
     let mut ticks: u32 = 0;
+    let mut was_active = false;
 
     loop {
         tokio::select! {
@@ -101,7 +172,7 @@ pub(crate) async fn run(
                     EngineCmd::Signal { sender, envelope } => {
                         handle_signal(
                             sender, envelope, &mut streams, &budget, egress_bps,
-                            shutting_down, &mut ports, public_ip, &out_tx, &ended_tx,
+                            shutting_down, &mut ports, advertise, &out_tx, &ended_tx,
                         ).await;
                     }
                     EngineCmd::PeerGone(peer) => {
@@ -140,21 +211,46 @@ pub(crate) async fn run(
             _ = tick.tick() => {
                 ticks += 1;
                 sweep_unconnected_legs(&mut streams).await;
-                // Recompute the egress bps estimate.
+                // Reap streams spared by the presence-flap tolerance once
+                // their media legs have dried up (owner never came back).
+                let orphaned: Vec<StreamKey> = streams.iter()
+                    .filter(|(_, s)| s.owner_gone && !s.has_live_media())
+                    .map(|(k, _)| k.clone())
+                    .collect();
+                for key in orphaned {
+                    if let Some(s) = streams.remove(&key) {
+                        s.shut_down();
+                        hollow_log!("[HOLLOW-FWD] swept a stream whose owner left (media legs gone)");
+                    }
+                }
+                // Recompute the bps estimates.
                 let total: u64 = streams.values()
                     .map(|s| s.counters.egress_bytes.load(Ordering::Relaxed))
                     .sum();
                 egress_bps = total.saturating_sub(last_egress_bytes) * 8 / 10;
                 last_egress_bytes = total;
-                // ONE aggregate line per minute — zero metadata logging.
+                let total_in: u64 = streams.values()
+                    .map(|s| s.counters.ingest_bytes.load(Ordering::Relaxed))
+                    .sum();
+                ingest_bps = total_in.saturating_sub(last_ingest_bytes) * 8 / 10;
+                last_ingest_bytes = total_in;
+                // ONE aggregate line per minute — zero metadata logging — but
+                // ONLY while active (plus one trailing idle line at the
+                // transition): an unchanging "0 streams" line every minute
+                // flooded journald on the VPS and rotated an entire field
+                // session's evidence out of retention (found 2026-08-07).
                 if ticks % 6 == 0 {
-                    let legs: usize = streams.values()
-                        .map(|s| s.egress.len() + usize::from(s.ingest.is_some()))
-                        .sum();
-                    hollow_log!(
-                        "[HOLLOW-FWD] {} stream(s), {} leg(s), egress ~{} kbps",
-                        streams.len(), legs, egress_bps / 1000
-                    );
+                    let active = !streams.is_empty();
+                    if active || was_active {
+                        let legs: usize = streams.values()
+                            .map(|s| s.egress.len() + usize::from(s.ingest.is_some()))
+                            .sum();
+                        hollow_log!(
+                            "[HOLLOW-FWD] {} stream(s), {} leg(s), ingest ~{} kbps, egress ~{} kbps",
+                            streams.len(), legs, ingest_bps / 1000, egress_bps / 1000
+                        );
+                    }
+                    was_active = active;
                 }
             }
         }
@@ -197,7 +293,7 @@ async fn handle_signal(
     egress_bps: u64,
     shutting_down: bool,
     ports: &mut PortAllocator,
-    public_ip: IpAddr,
+    advertise: AdvertiseMode,
     out_tx: &mpsc::UnboundedSender<OutSignal>,
     ended_tx: &mpsc::UnboundedSender<LegEnded>,
 ) {
@@ -219,6 +315,9 @@ async fn handle_signal(
             if already {
                 if let Some(s) = streams.get_mut(&key) {
                     s.allowlist = allowlist;
+                    // An admitted owner op proves the owner is back — undo a
+                    // presence-flap mark so the sweep doesn't reap a live re-share.
+                    s.owner_gone = false;
                 }
             } else {
                 streams.insert(key, StreamState::new((*origin).clone(), sender, allowlist));
@@ -265,16 +364,16 @@ async fn handle_signal(
                 return;
             };
             let s = streams.get_mut(&key).expect("admitted stream exists");
+            s.owner_gone = false;
             // A re-offer replaces the previous ingest leg.
             if let Some(old) = s.ingest.take() {
                 old.shut_down();
             }
             let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<LegCmd>();
             let connected = Arc::new(AtomicBool::new(false));
-            let public_addr = SocketAddr::new(public_ip, port);
             let task = tokio::spawn(leg::run_ingest_leg(
                 socket,
-                public_addr,
+                advertise.for_leg(port),
                 cmd_rx,
                 s.wiring.clone(),
                 s.counters.clone(),
@@ -333,11 +432,10 @@ async fn handle_signal(
             }
             let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<LegCmd>();
             let connected = Arc::new(AtomicBool::new(false));
-            let public_addr = SocketAddr::new(public_ip, port);
             let (offer_tx, offer_rx) = oneshot::channel();
             let task = tokio::spawn(leg::run_egress_leg(
                 socket,
-                public_addr,
+                advertise.for_leg(port),
                 cmd_rx,
                 s.wiring.clone(),
                 s.counters.clone(),
@@ -398,18 +496,42 @@ async fn handle_signal(
 /// reports peers that vanished from the room, never a wholesale clear, so a
 /// forwarder-side WS blip doesn't kill live media.)
 fn handle_peer_gone(peer: &str, streams: &mut HashMap<StreamKey, StreamState>) {
+    // Presence is a WEAK signal: the relay's ghost-socket eviction (and
+    // members-snapshot races) fires PeerLeft/absences for peers whose media
+    // legs are alive and pumping. THE MEDIA LEG IS THE ONLY TRUTH that may
+    // kill live forwarding (client-side iron rule, field 2026-08-06 — latent
+    // here too). Presence loss tears down only what carries NO connected
+    // media; live streams are marked `owner_gone` and the sweep tick removes
+    // them once their legs dry up (LegEnded / the unconnected sweep own real
+    // cleanup).
     let owned: Vec<StreamKey> = streams
         .iter()
         .filter(|(_, s)| s.owner == peer)
         .map(|(k, _)| k.clone())
         .collect();
     for key in owned {
-        if let Some(s) = streams.remove(&key) {
+        let live = streams.get(&key).is_some_and(|s| s.has_live_media());
+        if live {
+            if let Some(s) = streams.get_mut(&key) {
+                s.owner_gone = true;
+            }
+            hollow_log!(
+                "[HOLLOW-FWD] presence drop for a stream owner ignored — media legs alive (sweep owns cleanup)"
+            );
+        } else if let Some(s) = streams.remove(&key) {
             s.shut_down();
         }
     }
     for s in streams.values_mut() {
-        if let Some(leg) = s.egress.remove(peer) {
+        let connected = s
+            .egress
+            .get(peer)
+            .is_some_and(|l| l.connected.load(Ordering::Relaxed));
+        if connected {
+            hollow_log!(
+                "[HOLLOW-FWD] presence drop for a viewer ignored — its egress leg is alive"
+            );
+        } else if let Some(leg) = s.egress.remove(peer) {
             leg.shut_down();
         }
     }

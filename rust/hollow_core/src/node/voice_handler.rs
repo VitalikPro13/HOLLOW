@@ -858,6 +858,8 @@ fn build_vc_signal_envelope(
             viewer_height: v["viewer_height"].as_u64().unwrap_or(0) as u32,
             source_quality: v["source_quality"].as_bool().unwrap_or(false),
             route: jstr(&v, "route"),
+            fwd_capable: v["fwd_capable"].as_bool().unwrap_or(false),
+            relay_private: v["relay_private"].as_bool().unwrap_or(false),
             target: None,
         }),
         "screen_assign" => parsed.and_then(|v| {
@@ -1506,19 +1508,23 @@ pub(crate) async fn handle_envelope_voice_channel_screen_watch(
     viewer_height: u32,
     source_quality: bool,
     route: String,
+    fwd_capable: bool,
+    relay_private: bool,
 ) {
     let vc_key = format!("{sid}:{cid}");
     if !is_vc_participant(voice_channel_participants, &vc_key, &sender_peer_id) {
         hollow_log!("[HOLLOW-SECURITY] BLOCKED VC screen watch from non-participant {sender_peer_id} in {cid}");
         return;
     }
-    hollow_log!("[HOLLOW-VC] Screen watch from {sender_peer_id}: want={want} viewer={viewer_width}x{viewer_height} source={source_quality} route={route}");
+    hollow_log!("[HOLLOW-VC] Screen watch from {sender_peer_id}: want={want} viewer={viewer_width}x{viewer_height} source={source_quality} route={route} fwd_capable={fwd_capable} relay_private={relay_private}");
     let payload = serde_json::json!({
         "want": want,
         "viewer_width": viewer_width,
         "viewer_height": viewer_height,
         "source_quality": source_quality,
         "route": route,
+        "fwd_capable": fwd_capable,
+        "relay_private": relay_private,
     }).to_string();
     let _ = event_tx.send(NetworkEvent::VoiceChannelSignal {
         server_id: sid, channel_id: cid, peer_id: sender_peer_id,

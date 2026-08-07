@@ -55,15 +55,50 @@ pub(crate) struct LegEnded {
     pub viewer: Option<String>,
 }
 
-/// Build an rtp-mode Rtc advertising ONE host candidate at the forwarder's
-/// public address. The socket itself binds 0.0.0.0:port; `public_addr` is what
-/// rides the SDP (identical when the VPS carries its public IP on the iface,
-/// distinct behind 1:1 NAT).
-fn build_rtc(public_addr: SocketAddr) -> Result<Rtc, String> {
+/// What this leg advertises in its SDP (built by the engine per leg).
+#[derive(Clone, Copy)]
+pub(crate) struct Advertise {
+    /// The primary advertised address — also what `Receive::destination`
+    /// reports for every inbound datagram (str0m matches it against local
+    /// candidates; the socket binds 0.0.0.0 so `local_addr()` never matches).
+    /// VPS: the fixed public IP. Embedded peer forwarder: the LAN IP of the
+    /// default-route interface.
+    pub host: SocketAddr,
+    /// STUN server for embedded mode: the leg discovers its NAT mapping from
+    /// its own socket and advertises it as a SECOND host candidate. `None` on
+    /// the VPS (public host candidate is sufficient).
+    pub stun: Option<SocketAddr>,
+}
+
+/// Build an rtp-mode Rtc advertising the leg's candidates. `mapped` (embedded
+/// peer forwarders only) is the socket's NAT mapping discovered via STUN,
+/// advertised as a second HOST candidate — deliberately host-typ, mirroring
+/// how the VPS advertises a public address the socket doesn't literally bind
+/// ("identical when the iface carries the IP, distinct behind 1:1 NAT"): the
+/// remote just sends checks to it and the reply comes from the same socket.
+fn build_rtc(adv: Advertise, mapped: Option<SocketAddr>) -> Result<Rtc, String> {
     let mut rtc = Rtc::builder().set_rtp_mode(true).build(Instant::now());
-    let cand = Candidate::host(public_addr, "udp").map_err(|e| e.to_string())?;
+    let cand = Candidate::host(adv.host, "udp").map_err(|e| e.to_string())?;
     rtc.add_local_candidate(cand);
+    if let Some(m) = mapped {
+        if m != adv.host {
+            match Candidate::host(m, "udp") {
+                Ok(c) => {
+                    rtc.add_local_candidate(c);
+                }
+                Err(e) => hollow_log!("[HOLLOW-FWD] mapped candidate rejected: {e}"),
+            }
+        }
+    }
     Ok(rtc)
+}
+
+/// Embedded mode: discover the socket's NAT mapping before building the Rtc.
+/// Runs inside the leg task so the engine loop never blocks on it (≤ ~1.2 s
+/// worst case, one relay RTT typical).
+async fn discover_mapped(socket: &UdpSocket, adv: Advertise) -> Option<SocketAddr> {
+    let stun = adv.stun?;
+    super::stun::discover_mapped_addr(socket, stun).await
 }
 
 /// Run an ingest leg on an already-bound socket. Answers the sharer's offer
@@ -72,7 +107,7 @@ fn build_rtc(public_addr: SocketAddr) -> Result<Rtc, String> {
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_ingest_leg(
     socket: UdpSocket,
-    public_addr: SocketAddr,
+    adv: Advertise,
     cmd_rx: mpsc::UnboundedReceiver<LegCmd>,
     wiring: Arc<StreamWiring>,
     counters: Arc<StreamCounters>,
@@ -80,7 +115,8 @@ pub(crate) async fn run_ingest_leg(
     ended: LegEnded,
     ended_tx: mpsc::UnboundedSender<LegEnded>,
 ) {
-    let mut rtc = match build_rtc(public_addr) {
+    let mapped = discover_mapped(&socket, adv).await;
+    let mut rtc = match build_rtc(adv, mapped) {
         Ok(r) => r,
         Err(e) => {
             hollow_log!("[HOLLOW-FWD] ingest leg rtc build failed: {e}");
@@ -88,9 +124,9 @@ pub(crate) async fn run_ingest_leg(
             return;
         }
     };
-    hollow_log!("[HOLLOW-FWD] ingest leg up (udp :{})", public_addr.port());
+    hollow_log!("[HOLLOW-FWD] ingest leg up (udp :{})", adv.host.port());
     if let Err(e) = pump(
-        &mut rtc, socket, public_addr, cmd_rx, wiring, counters, connected, true, None, None,
+        &mut rtc, socket, adv.host, cmd_rx, wiring, counters, connected, true, None, None,
     )
     .await
     {
@@ -106,7 +142,7 @@ pub(crate) async fn run_ingest_leg(
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_egress_leg(
     socket: UdpSocket,
-    public_addr: SocketAddr,
+    adv: Advertise,
     cmd_rx: mpsc::UnboundedReceiver<LegCmd>,
     wiring: Arc<StreamWiring>,
     counters: Arc<StreamCounters>,
@@ -115,7 +151,8 @@ pub(crate) async fn run_egress_leg(
     ended: LegEnded,
     ended_tx: mpsc::UnboundedSender<LegEnded>,
 ) {
-    let mut rtc = match build_rtc(public_addr) {
+    let mapped = discover_mapped(&socket, adv).await;
+    let mut rtc = match build_rtc(adv, mapped) {
         Ok(r) => r,
         Err(e) => {
             let _ = offer_tx.send(Err(e));
@@ -136,14 +173,14 @@ pub(crate) async fn run_egress_leg(
     let offer_sdp = offer.to_sdp_string();
     hollow_log!(
         "[HOLLOW-FWD] egress leg up (udp :{}) — offer carries {} candidate line(s), {} byte(s)",
-        public_addr.port(),
+        adv.host.port(),
         offer_sdp.matches("a=candidate:").count(),
         offer_sdp.len()
     );
     let _ = offer_tx.send(Ok(offer_sdp));
 
     if let Err(e) = pump(
-        &mut rtc, socket, public_addr, cmd_rx, wiring, counters, connected, false,
+        &mut rtc, socket, adv.host, cmd_rx, wiring, counters, connected, false,
         Some(pending), Some(mid),
     )
     .await

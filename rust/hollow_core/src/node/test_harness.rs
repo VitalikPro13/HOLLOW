@@ -11572,7 +11572,8 @@ async fn vc_screen_assign_and_route_round_trip() {
         Some(serde_json::from_str(&got.expect("payload")).expect("valid json"))
     }
 
-    // --- 1. Viewer (J) -> sharer (O): screen_watch carries the route hint ---
+    // --- 1. Viewer (J) -> sharer (O): screen_watch carries the route hint
+    // and the phase-2 forwarding capability flag ---
     j.cmd_tx
         .send(NodeCommand::VoiceChannelSendSignal {
             server_id: server_id.clone(),
@@ -11585,6 +11586,8 @@ async fn vc_screen_assign_and_route_round_trip() {
                 "viewer_height": 1440,
                 "source_quality": false,
                 "route": "relay",
+                "fwd_capable": true,
+                "relay_private": true,
             })
             .to_string(),
         })
@@ -11594,6 +11597,32 @@ async fn vc_screen_assign_and_route_round_trip() {
         .expect("sharer must receive the screen_watch");
     assert_eq!(watch["route"], serde_json::json!("relay"));
     assert_eq!(watch["viewer_width"], serde_json::json!(2560));
+    assert_eq!(watch["fwd_capable"], serde_json::json!(true));
+    assert_eq!(watch["relay_private"], serde_json::json!(true));
+
+    // --- 1b. A phase-1 payload (no fwd_capable) rebuilds as false — an old
+    // watcher is never a peer-forwarder candidate ---
+    j.cmd_tx
+        .send(NodeCommand::VoiceChannelSendSignal {
+            server_id: server_id.clone(),
+            channel_id: voice_cid.clone(),
+            peer_id: o_master.clone(),
+            signal_type: "screen_watch".to_string(),
+            payload: serde_json::json!({
+                "want": true,
+                "viewer_width": 1920,
+                "viewer_height": 1080,
+                "source_quality": false,
+                "route": "direct",
+            })
+            .to_string(),
+        })
+        .await
+        .unwrap();
+    let watch = next_signal(&mut o, "screen_watch", 4).await
+        .expect("sharer must receive the second screen_watch");
+    assert_eq!(watch["fwd_capable"], serde_json::json!(false));
+    assert_eq!(watch["relay_private"], serde_json::json!(false));
 
     // --- 2. Sharer (O) -> viewer (J): screen_assign round-trips ---
     o.cmd_tx

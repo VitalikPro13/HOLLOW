@@ -122,6 +122,12 @@ static void send_json(SSLWebSocket* ws, const json& j) {
     ws->send(s, uWS::OpCode::TEXT);
 }
 
+// Delivery diagnostics + forwarder identity, wired up in setup_ws_handler.
+// File-scope because send_to_peer is called from a dozen sites that don't
+// carry state/config. Counters only — the relay logs nothing.
+static DeliveryDiag* g_diag = nullptr;
+static std::string g_forwarder_peer_id;
+
 static void send_to_peer(SSLWebSocket* ws, std::string_view data, uWS::OpCode op) {
     // Outbound half of the daily byte budget — attributed to the RECIPIENT's
     // IP so download-drains are counted too. Never closes here (a mid-fan-out
@@ -130,7 +136,14 @@ static void send_to_peer(SSLWebSocket* ws, std::string_view data, uWS::OpCode op
     if (op == uWS::OpCode::BINARY) {
         count_budget_bytes(ws->getUserData()->ip_state, data.size());
     }
-    ws->send(data, op);
+    // uWS silently returns DROPPED past maxBackpressure — count it or a
+    // delivery failure leaves zero trace anywhere (field 2026-08-06: large
+    // frames to the forwarder vanished with every hop looking healthy).
+    auto status = ws->send(data, op);
+    if (g_diag) {
+        if (status == SSLWebSocket::SendStatus::DROPPED) g_diag->send_dropped++;
+        else if (status == SSLWebSocket::SendStatus::BACKPRESSURE) g_diag->send_backpressure++;
+    }
 }
 
 // Forward declarations — offline buffer replay is used by handle_join (defined
@@ -1268,6 +1281,9 @@ static void handle_binary_direct_msg(PerSocketData* data,
                                build_direct_frame(room_code, data->peer_id, payload), state,
                                data->peer_id, is_image);
             try_push_notify(target_str, data->peer_id, state);
+            if (!g_forwarder_peer_id.empty() && target_str == g_forwarder_peer_id) {
+                state.diag.fwd_buffered++;
+            }
         }
         return;
     }
@@ -1293,9 +1309,18 @@ static void handle_binary_direct_msg(PerSocketData* data,
         if (fully_offline) {
             try_push_notify(target_str, data->peer_id, state);
         }
+        // A CONNECTED forwarder missing from its own fwd room = the silent
+        // blackhole shape (frames buffer, the long-lived socket never
+        // re-joins, nothing replays). The counter is the smoking gun.
+        if (!g_forwarder_peer_id.empty() && target_str == g_forwarder_peer_id) {
+            state.diag.fwd_buffered++;
+        }
         return;
     }
 
+    if (!g_forwarder_peer_id.empty() && target_str == g_forwarder_peer_id) {
+        state.diag.fwd_delivered++;
+    }
     send_to_peer(tit->second, build_direct_frame(room_code, data->peer_id, payload),
                  uWS::OpCode::BINARY);
 }
@@ -1834,6 +1859,8 @@ static void cleanup_peer(RelayState& state, const std::string& peer_id,
 }
 
 void setup_ws_handler(uWS::SSLApp& app, RelayState& state, const Config& config) {
+    g_diag = &state.diag;
+    g_forwarder_peer_id = config.forwarder_peer_id;
     app.ws<PerSocketData>("/ws", {
         .compression = uWS::DISABLED,
         .maxPayloadLength = 64 * 1024 * 1024,

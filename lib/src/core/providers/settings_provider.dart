@@ -1038,6 +1038,64 @@ const String alwaysRelayCallsDescription =
     'other participants never see your IP address. May reduce quality and '
     'increase latency. Restart is required.';
 
+/// Peer media forwarding (media forwarding step 3 phase 2): this desktop may
+/// serve as a blind packet forwarder for screen shares it watches, carrying
+/// the stream to viewers who can't connect directly — the collective-hosting
+/// principle applied to live media. ON by default (Vitalik decision
+/// 2026-08-06); desktop only, never mobile. The forwarder relays SFrame
+/// CIPHERTEXT it can already decrypt as a watcher — serving costs upload
+/// bandwidth (up to 3 extra stream copies), never privacy.
+///
+/// Synchronous state — loaded eagerly during bootstrap, pushed to Rust
+/// (`set_peer_forwarding_enabled`) after the node starts and on every toggle.
+class PeerForwardingNotifier extends Notifier<bool> {
+  @override
+  bool build() => true;
+
+  /// Load persisted value from DB. Default-ON: only an explicit 'false'
+  /// disables (absent key = first run = enabled).
+  Future<void> load() async {
+    try {
+      final val = await storage_api.loadSetting(key: 'peer_media_forwarding');
+      state = val != 'false';
+    } catch (e) {
+      debugPrint('[HOLLOW] peerForwarding.load() failed: $e');
+    }
+  }
+
+  /// Push the current value into the node (call after node start, and after
+  /// [load] — the Rust side defaults to disabled until told).
+  Future<void> pushToNode() async {
+    try {
+      await network_api.setPeerForwardingEnabled(enabled: state);
+    } catch (e) {
+      debugPrint('[HOLLOW] peerForwarding.pushToNode() failed: $e');
+    }
+  }
+
+  /// Persist + push. Does NOT swallow the save failure — call sites await
+  /// and toast. Disabling mid-serve tears active forwarding down (downstream
+  /// viewers heal to another path automatically).
+  Future<void> setEnabled(bool value) async {
+    state = value;
+    await storage_api.saveSetting(
+      key: 'peer_media_forwarding',
+      value: value.toString(),
+    );
+    await pushToNode();
+  }
+}
+
+final peerForwardingProvider = NotifierProvider<PeerForwardingNotifier, bool>(
+    PeerForwardingNotifier.new);
+
+/// Description under the "Peer media forwarding" toggle (desktop settings).
+const String peerForwardingDescription =
+    'While you watch a screen share, help carry it to viewers who can\'t '
+    'connect directly — instead of routing them through the relay server. '
+    'Streams stay end-to-end encrypted; helping costs some upload bandwidth. '
+    'Desktop only.';
+
 /// Offline inbox retention window in DAYS (1 / 3 / 7). Only meaningful while
 /// [offlineInboxProvider] is enabled; the relay clamps server-side too.
 class OfflineInboxRetentionNotifier extends Notifier<int> {

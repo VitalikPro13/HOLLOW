@@ -77,6 +77,12 @@ pub(crate) struct StreamState {
     /// The ingest leg's command sender, shared with the PLI aggregation task
     /// (the leg may not exist yet / may be replaced by a re-offer).
     pub ingest_cmd: Arc<tokio::sync::Mutex<Option<mpsc::UnboundedSender<LegCmd>>>>,
+    /// The owner's room presence was lost while the stream still carried live
+    /// media (presence-flap tolerance spared it). The engine's sweep tick
+    /// removes the stream once the media legs dry up — presence events alone
+    /// must never kill live forwarding (the client-side iron rule, field
+    /// 2026-08-06, mirrored here).
+    pub owner_gone: bool,
     pli_task: tokio::task::JoinHandle<()>,
 }
 
@@ -137,8 +143,21 @@ impl StreamState {
             wiring,
             counters: Arc::new(StreamCounters::default()),
             ingest_cmd,
+            owner_gone: false,
             pli_task,
         }
+    }
+
+    /// Any ICE-connected media leg (ingest or egress)? While true, presence
+    /// loss may not tear this stream down — leg death is the only truth.
+    pub(crate) fn has_live_media(&self) -> bool {
+        self.ingest
+            .as_ref()
+            .is_some_and(|l| l.connected.load(Ordering::Relaxed))
+            || self
+                .egress
+                .values()
+                .any(|l| l.connected.load(Ordering::Relaxed))
     }
 
     /// Tear the whole stream down (unregister / owner gone / shutdown).

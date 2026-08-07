@@ -10,10 +10,13 @@ publish = false
 # Additive: cargokit/FRB consume the cdylib/staticlib exactly as before.
 crate-type = ["cdylib", "staticlib", "rlib"]
 
-# Headless VPS media forwarder (media forwarding step 3, D3): blind str0m
-# packet relay for SFrame-encrypted screen-share RTP. Off by default — app
-# builds (cargokit/FRB) never compile str0m. Phase 2 embeds the same module
-# in-app for peer forwarders.
+# Media forwarder (media forwarding step 3): blind str0m packet relay for
+# SFrame-encrypted screen-share RTP. Phase 1 = the headless `hollow-forwarder`
+# VPS bin; phase 2 embeds the same engine in DESKTOP app builds (viewer-peer
+# forwarders). Desktop app builds enable this via rust/hollow_core/cargokit.yaml
+# (extra_flags) — the deps are target-scoped below so the SAME flag is inert on
+# Android/iOS (str0m/aws-lc never cross-compiled for mobile; the module itself
+# is additionally cfg-gated on not(android/ios) in lib.rs).
 [features]
 forwarder = ["dep:str0m", "dep:toml"]
 
@@ -23,8 +26,6 @@ path = "src/bin/hollow_forwarder.rs"
 required-features = ["forwarder"]
 
 [dependencies]
-str0m = { version = "0.21", optional = true }
-toml = { version = "0.8", optional = true }
 flutter_rust_bridge = "=2.11.1"
 log = "0.4"
 serde = { version = "1", features = ["derive"] }
@@ -70,6 +71,13 @@ hollow_dfn = { path = "../hollow_dfn" }
 [target.'cfg(target_os = "android")'.dependencies]
 # JNI exports for the fork's DfnBridge.java (see dfn_ffi.rs).
 jni = "0.21"
+
+# Forwarder deps are DESKTOP-ONLY: the `forwarder` feature flag is passed to
+# every cargokit platform build (cargokit.yaml has no per-platform switch), and
+# this target scoping is what keeps mobile builds from compiling str0m/aws-lc.
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+str0m = { version = "0.21", optional = true }
+toml = { version = "0.8", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_Security_Cryptography", "Win32_Security_Credentials", "Win32_Foundation"] }

@@ -25,6 +25,7 @@ pub(crate) mod engine;
 pub(crate) mod leg;
 pub(crate) mod signaling;
 pub(crate) mod stream;
+pub(crate) mod stun;
 
 use std::sync::Arc;
 
@@ -56,8 +57,13 @@ pub struct ForwarderConfig {
     /// Data directory (identity keypair, Olm DB, debug log).
     pub data_dir: String,
     /// The public IP advertised in ICE host candidates. Sockets bind
-    /// 0.0.0.0; this is what rides the SDP.
+    /// 0.0.0.0; this is what rides the SDP. EMPTY = embedded peer forwarder
+    /// (auto-advertise: LAN IP + per-leg STUN mapping from `stun_server`).
     pub public_ip: String,
+    /// STUN server ("host:port") for embedded auto-advertise mode. The VPS
+    /// never sets this — its public host candidate is sufficient.
+    #[serde(default)]
+    pub stun_server: Option<String>,
     #[serde(default = "default_port_min")]
     pub udp_port_min: u16,
     #[serde(default = "default_port_max")]
@@ -92,6 +98,41 @@ impl ForwarderConfig {
         }
         Ok(cfg)
     }
+}
+
+/// Embedded peer-forwarder engine (media forwarding step 3 phase 2): spawn
+/// ONLY `engine::run` — no identity, no DB, no Olm, no signaling loop. The
+/// swarm bridges the fwd_* lane in (`node/embedded_forwarder.rs`): inbound
+/// envelopes arrive already Olm-authenticated through the node's dispatch,
+/// outbound `OutSignal`s ride the node's own send path through `fwd:{self}`.
+///
+/// Caps are deliberately small: this is a member's desktop, not the VPS —
+/// 2 streams, 4 legs per stream (up to 3 remote downstream viewers per the
+/// phase-2 policy + the forwarder's own display leg), ephemeral UDP ports,
+/// no bps budget (the leg count IS the budget at one stream copy per leg).
+pub(crate) fn spawn_embedded_engine(
+    stun_server: Option<String>,
+) -> (
+    mpsc::UnboundedSender<engine::EngineCmd>,
+    mpsc::UnboundedReceiver<engine::OutSignal>,
+) {
+    let cfg = Arc::new(ForwarderConfig {
+        relay_domain: String::new(), // unused by the engine
+        license_key: None,           // unused by the engine
+        data_dir: String::new(),     // unused by the engine
+        public_ip: String::new(),    // auto-advertise
+        stun_server,
+        udp_port_min: 0, // ephemeral
+        udp_port_max: 0,
+        max_streams_global: 2,
+        max_streams_per_sender: 2,
+        max_legs_per_stream: 4,
+        max_egress_bps: 0,
+    });
+    let (engine_tx, engine_rx) = mpsc::unbounded_channel::<engine::EngineCmd>();
+    let (out_tx, out_rx) = mpsc::unbounded_channel::<engine::OutSignal>();
+    tokio::spawn(engine::run(cfg, engine_rx, out_tx));
+    (engine_tx, out_rx)
 }
 
 /// Load `forwarder.key` or mint a fresh identity on first run.

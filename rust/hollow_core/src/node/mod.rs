@@ -3,6 +3,11 @@ pub(crate) mod blocklist;
 pub(crate) mod conference;
 pub(crate) mod crdt_store;
 pub(crate) mod crypto_handler;
+/// Embedded peer-forwarder bridge (media forwarding step 3 phase 2): swarm ↔
+/// `forwarder::engine` seam for viewer-peer forwarders. Desktop-only, same
+/// gate as the forwarder module itself.
+#[cfg(all(feature = "forwarder", not(any(target_os = "android", target_os = "ios"))))]
+pub(crate) mod embedded_forwarder;
 pub(crate) mod emotes;
 pub(crate) mod fetch;
 pub(crate) mod file_handler;

@@ -466,6 +466,8 @@ The role is deliberately specified independently of who plays it. An operator-ru
 
 For users who prefer to trade latency and quality for address privacy, a per-account setting forces every real-time connection onto the TURN relay, so a co-participant sees only the relay's address. The setting is applied where the ICE configuration is produced rather than at each call site, so it cannot be omitted by one code path; it restricts candidate gathering to relay candidates only, and **fails closed** — if relay credentials are unavailable the connection is not established rather than silently falling back to a direct path. It is **off by default**: relaying all media would forfeit the latency advantage that motivates direct connections and would concentrate every session's bandwidth on relay infrastructure. Hollow Share is deliberately outside its scope (§8.4), and the setting's description states so.
 
+The setting also constrains the forwarder role in both directions. A forced-relay participant never advertises forwarding capability, so their machine never carries another member's media; and their own media is never routed through a member-operated forwarder — their watch requests mark them relay-private, the sharer routes them only through operator-run infrastructure or TURN (the same trust domain the setting already accepts), and the viewer independently refuses any assignment to a member-operated forwarder, so a buggy or malicious sharer cannot re-route them. Enforcement is therefore mutual: the preference holds even against a counterparty that ignores it.
+
 ### 6.5 Call Topologies
 
 - **1:1 calls:** Direct peer-to-peer WebRTC. Lowest latency, no intermediary.

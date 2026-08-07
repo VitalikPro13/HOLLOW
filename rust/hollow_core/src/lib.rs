@@ -103,13 +103,16 @@ pub mod dfn_ffi;
 mod crdt;
 mod crypto;
 mod frb_generated;
-/// Headless media forwarder (media forwarding step 3): blind str0m packet
-/// relay for SFrame screen-share RTP, deployed as the `hollow-forwarder` bin
-/// on the VPS (phase 2 embeds it in-app for peer forwarders). Feature-gated +
-/// intentionally OUTSIDE `api` so flutter_rust_bridge codegen never scans it
-/// (same rule as `push_enrich`). Public surface = `ForwarderConfig` + `run`
-/// only — the bin target can't see the crate's pub(crate) internals.
-#[cfg(feature = "forwarder")]
+/// Media forwarder (media forwarding step 3): blind str0m packet relay for
+/// SFrame screen-share RTP. Phase 1 = the headless `hollow-forwarder` VPS bin;
+/// phase 2 embeds the same engine in DESKTOP app builds (viewer-peer
+/// forwarders — swarm bridges the fwd_* lane into `engine::run`). Feature-gated
+/// AND desktop-gated (the feature flag reaches mobile cargokit builds too, but
+/// its deps are target-scoped out there) + intentionally OUTSIDE `api` so
+/// flutter_rust_bridge codegen never scans it (same rule as `push_enrich`).
+/// Public surface = `ForwarderConfig` + `run` only — the bin target can't see
+/// the crate's pub(crate) internals.
+#[cfg(all(feature = "forwarder", not(any(target_os = "android", target_os = "ios"))))]
 pub mod forwarder;
 mod identity;
 mod node;

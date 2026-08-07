@@ -3800,6 +3800,49 @@ pub fn leave_forwarder_room(forwarder_peer_id: String) -> Result<(), String> {
     Ok(())
 }
 
+/// Embedded peer forwarder (media forwarding step 3 phase 2): mirror the
+/// "Peer media forwarding" Settings toggle into the node. Desktop-only in
+/// effect — the command is a no-op on mobile / non-forwarder builds.
+#[frb]
+pub fn set_peer_forwarding_enabled(enabled: bool) -> Result<(), String> {
+    let node = get_node();
+    let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
+    // Release the global node mutex BEFORE the (possibly waiting) send —
+    // holding it across block_on(send) serializes all other FFI calls.
+    drop(guard);
+    let rt = get_runtime();
+    rt.block_on(cmd_tx.send(node::NodeCommand::SetPeerForwardingEnabled { enabled }))
+        .map_err(|e| format!("Failed to send command: {e}"))?;
+    Ok(())
+}
+
+/// Embedded peer forwarder: declare (or withdraw) willingness to forward the
+/// screen share identified by `(origin_peer, kind)` — set with `active: true`
+/// when a `vc_screen_watch` advertises `fwd_capable`, cleared when that watch
+/// ends. The embedded engine only ever accepts a `fwd_stream_register` whose
+/// origin matches an active expectation: a peer forwarder forwards ONLY
+/// streams its user explicitly watches.
+#[frb]
+pub fn set_forwarder_expectation(
+    origin_peer: String,
+    kind: String,
+    active: bool,
+) -> Result<(), String> {
+    let node = get_node();
+    let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
+    // Release the global node mutex BEFORE the (possibly waiting) send —
+    // holding it across block_on(send) serializes all other FFI calls.
+    drop(guard);
+    let rt = get_runtime();
+    rt.block_on(cmd_tx.send(node::NodeCommand::SetForwarderExpectation {
+        origin_peer, kind, active,
+    }))
+    .map_err(|e| format!("Failed to send command: {e}"))?;
+    Ok(())
+}
+
 // -- Gossip relay tree FFI (Phase 5D) --
 
 /// Report data channel keepalive RTT for gossip peer scoring.

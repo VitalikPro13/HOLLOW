@@ -1,11 +1,15 @@
-//! fwd_* admission decisions + control-frame rate limiting.
+//! fwd_* admission decisions.
 //!
 //! The decision functions are PURE (no I/O, no engine state mutation) so the
 //! whole authorization surface is unit-testable: the engine gathers a view of
 //! the relevant state, asks, then applies.
-
-use std::collections::HashMap;
-use std::time::Instant;
+//!
+//! Deliberately NO control-frame rate limiter (removed 2026-08-07): the
+//! per-peer token bucket that lived here dropped frames with zero trace —
+//! the silent-drop class the relay refuses (`feedback_relay_rules`) and a
+//! suspect in the vanished-large-frame field defect. Every refusal on this
+//! surface is an explicit `FwdError`; unwanted frames fail the cheap parse
+//! path and get logged.
 
 use super::budget::{can_attach, can_register, BudgetCfg, FwdErrorCode};
 
@@ -89,54 +93,9 @@ pub(crate) fn admit_viewer_op(has_leg: bool) -> Result<(), FwdErrorCode> {
     }
 }
 
-/// Per-peer token bucket for CONTROL frames. The fwd control surface is open
-/// to any relay-authenticated peer that joins the fwd room, and the Olm path
-/// has no client-side limiter — the forwarder carries its own DoS bound.
-///
-/// Media packets never pass through this (they ride UDP straight into str0m).
-pub(crate) struct PeerBuckets {
-    burst: f64,
-    refill_per_sec: f64,
-    map: HashMap<String, (f64, Instant)>,
-}
-
-impl PeerBuckets {
-    pub(crate) fn new(burst: u32, refill_per_sec: u32) -> Self {
-        Self {
-            burst: burst as f64,
-            refill_per_sec: refill_per_sec as f64,
-            map: HashMap::new(),
-        }
-    }
-
-    /// Take one token for `peer` at time `now`. `false` = rate-limited (drop
-    /// the frame; no FwdError reply — replying would defeat the limiter).
-    pub(crate) fn allow(&mut self, peer: &str, now: Instant) -> bool {
-        let (tokens, last) = self
-            .map
-            .entry(peer.to_string())
-            .or_insert((self.burst, now));
-        let elapsed = now.duration_since(*last).as_secs_f64();
-        *tokens = (*tokens + elapsed * self.refill_per_sec).min(self.burst);
-        *last = now;
-        if *tokens >= 1.0 {
-            *tokens -= 1.0;
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Drop a peer's bucket (left the room).
-    pub(crate) fn forget(&mut self, peer: &str) {
-        self.map.remove(peer);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
 
     fn cfg() -> BudgetCfg {
         BudgetCfg {
@@ -214,20 +173,5 @@ mod tests {
     fn viewer_ops() {
         assert!(admit_viewer_op(true).is_ok());
         assert_eq!(admit_viewer_op(false), Err(FwdErrorCode::NotAuthorized));
-    }
-
-    #[test]
-    fn token_bucket_exhausts_and_refills() {
-        let mut b = PeerBuckets::new(3, 1);
-        let t0 = Instant::now();
-        assert!(b.allow("p", t0));
-        assert!(b.allow("p", t0));
-        assert!(b.allow("p", t0));
-        assert!(!b.allow("p", t0), "burst exhausted");
-        // A different peer has its own bucket.
-        assert!(b.allow("q", t0));
-        // One second refills one token.
-        assert!(b.allow("p", t0 + Duration::from_secs(1)));
-        assert!(!b.allow("p", t0 + Duration::from_secs(1)));
     }
 }

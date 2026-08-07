@@ -46,6 +46,14 @@ class ScreenShareService {
   final String localPeerId;
   final Map<String, dynamic> iceServers;
 
+  /// True when this PC is a media-forwarder leg (step 3): an ingest to a
+  /// forwarder, or an egress attach from one. Labels the ICE-route log —
+  /// route probing can't distinguish a forwarder hop from a direct pair
+  /// (host↔host to a public forwarder looks "direct"; on an Always-relay
+  /// client the old label even read "TURN (relayed)" misleadingly — D6
+  /// follow-up #1).
+  final bool forwarderLeg;
+
   RTCPeerConnection? _pc;
   MediaStream? _screenStream; // Local screen capture (outgoing only)
   // Whether THIS service owns _screenStream and must stop+dispose it on close().
@@ -108,6 +116,7 @@ class ScreenShareService {
   ScreenShareService({
     required this.localPeerId,
     required this.iceServers,
+    this.forwarderLeg = false,
   });
 
   /// Effective per-viewer resolution cap (media forwarding step 1): the
@@ -1239,9 +1248,18 @@ class ScreenShareService {
   Future<void> _logIceRoute() async {
     // Resolve _pc per attempt — a renegotiation can replace it mid-probe.
     final route = await probeIceRoute(() => _pc);
+    // Forwarder legs get their own label (D6 follow-up #1): the probe's
+    // TURN/STUN/LAN taxonomy describes DIRECT lanes, and a blind-forwarder
+    // hop mislabels there (worst case "TURN (relayed)" on an Always-relay
+    // client — forwarder legs are exempt from forced TURN by design).
+    final prefix = forwarderLeg
+        ? '[HOLLOW-SCREEN] ICE route: Forwarder leg (blind relay hop) — '
+        : '[HOLLOW-SCREEN] ICE route: ';
     _log(route == null
-        ? '[HOLLOW-SCREEN] ICE route: no succeeded candidate pair found'
-        : '[HOLLOW-SCREEN] ICE route: $route');
+        ? '${prefix}no succeeded candidate pair found'
+        : forwarderLeg
+            ? '${prefix}pair ${route.detail}'
+            : '$prefix$route');
   }
 
   Future<void> _handleRemoteVideoTrack(RTCTrackEvent event) async {

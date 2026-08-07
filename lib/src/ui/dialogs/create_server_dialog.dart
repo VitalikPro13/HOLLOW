@@ -1,5 +1,6 @@
 ﻿import 'package:flutter/material.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
+import 'package:hollow/src/ui/app.dart' show hollowNavigatorKey;
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/ui/chat/hollow_link_utils.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
@@ -201,11 +202,21 @@ void _handleJoin(BuildContext context, TextEditingController controller) {
   // Parse invite link (hollow:// or web /join#server=) or raw server ID.
   final serverId = inviteIdFromInput(input, HollowLinkType.serverInvite);
 
-  final overlayContext = Navigator.of(context).context;
   Navigator.of(context).pop();
-  crdt_api.joinServer(serverId: serverId, nsfwConfirmed: false);
-  HollowToast.show(overlayContext, 'Joining server...',
-      type: HollowToastType.info);
+  // Fire-and-forget FFI: a bare un-awaited Future's rejection hits the zone
+  // crash handler (feedback_ffi_fire_and_forget_catcherror).
+  crdt_api.joinServer(serverId: serverId, nsfwConfirmed: false)
+      .catchError((_) {});
+  // The dialog is popped — its contexts may have no Overlay above them, and
+  // Overlay.of on a dead context null-crashes (field-hit 2026-08-06: the
+  // join-failure path crashed instead of toasting). Ride the root
+  // navigator's overlay (feedback_toast_from_nonwidget_overlaystate).
+  final overlay = hollowNavigatorKey.currentState?.overlay;
+  final overlayContext = overlay?.context;
+  if (overlay != null && overlayContext != null && overlayContext.mounted) {
+    HollowToast.show(overlayContext, 'Joining server...',
+        type: HollowToastType.info, overlayState: overlay);
+  }
 }
 
 void _handleCreate(

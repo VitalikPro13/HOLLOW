@@ -952,6 +952,30 @@ Future<void> leaveForwarderRoom({required String forwarderPeerId}) => RustLib
     .api
     .crateApiNetworkLeaveForwarderRoom(forwarderPeerId: forwarderPeerId);
 
+/// Embedded peer forwarder (media forwarding step 3 phase 2): mirror the
+/// "Peer media forwarding" Settings toggle into the node. Desktop-only in
+/// effect — the command is a no-op on mobile / non-forwarder builds.
+Future<void> setPeerForwardingEnabled({required bool enabled}) => RustLib
+    .instance
+    .api
+    .crateApiNetworkSetPeerForwardingEnabled(enabled: enabled);
+
+/// Embedded peer forwarder: declare (or withdraw) willingness to forward the
+/// screen share identified by `(origin_peer, kind)` — set with `active: true`
+/// when a `vc_screen_watch` advertises `fwd_capable`, cleared when that watch
+/// ends. The embedded engine only ever accepts a `fwd_stream_register` whose
+/// origin matches an active expectation: a peer forwarder forwards ONLY
+/// streams its user explicitly watches.
+Future<void> setForwarderExpectation({
+  required String originPeer,
+  required String kind,
+  required bool active,
+}) => RustLib.instance.api.crateApiNetworkSetForwarderExpectation(
+  originPeer: originPeer,
+  kind: kind,
+  active: active,
+);
+
 /// Report data channel keepalive RTT for gossip peer scoring.
 Future<void> webrtcPingReport({required String peerId, required int rttMs}) =>
     RustLib.instance.api.crateApiNetworkWebrtcPingReport(

@@ -462,6 +462,36 @@ No frb codegen needed — `HavenMessage` is internal, and `call_send_signal`/`Ne
 
 **Recording indicator (issue #53, 2026-08-05):** Dart's `recording_start`/`recording_stop` signals are whitelisted on BOTH paths. 1:1 → `HavenMessage::CallRecordingState { call_id, recording }` (`call_recording_state`); VC → broadcast-class `MessageEnvelope::VoiceChannelRecordingState { sid, cid, recording, target }` (`vc_recording_state`) + plaintext `HavenMessage` twin — added to `is_broadcast`, the VC rate-limiter list, the MLS-only-via-Olm list, and `target()`. Receive handlers gate on VC participant membership and reconstruct the Dart-facing signal-type string from the `recording` bool. The VC Dart sender fires ONE broadcast (`peerId: ''`) — a per-peer loop would emit N duplicate MLS broadcasts. Harness-covered in both the DM and VC signal-routing tests.
 
+## Phase 2 — viewer-peer forwarders (FIELD-VERIFIED COMPLETE 2026-08-07, all four runs; details in reports/MEDIA_FORWARDING_PLAN.md §7)
+
+The SAME `fwd_*` contract now also terminates at an **embedded engine inside desktop app
+builds** (`node/embedded_forwarder.rs` bridges the swarm's Olm dispatch ↔ `forwarder::engine`;
+cargokit passes `--features forwarder`, mobile target-scoped out). A fwd-capable watcher on a
+direct route gets PROMOTED by the sharer (self-assigned via `vc_screen_assign{forwarder: itself}`
+— `ForwarderSendSignal` to one's own device id short-circuits into the engine, no Olm), serves
+up to 3 remote viewers, and its own display rides its engine as viewer #0. Ladder: peer branch →
+VPS infra forwarder → direct+TURN; `relay_private` (Always-relay users) skips the peer rungs
+both sharer-side and via a viewer-side hard refusal. Key rules: register BEFORE any assign
+(same-socket ordering vs the instant local self-attach); a branch head's `direct_failed` =
+demote, never re-ladder; presence events never kill a branch whose MEDIA LEG is alive (relay
+ghost-eviction broadcasts spurious PeerLeft); branch ingest legs are INSIDE both SFrame re-key
+sweeps. `vc_screen_watch` gained `fwd_capable` + `relay_private` (`#[serde(default)]`).
+
+**2026-08-07 hardening (field-verified same day):** the fwd control plane carries **NO rate
+limiter** — the per-peer token bucket (20/5) was REMOVED from both `forwarder/signaling.rs` and
+`embedded_forwarder.rs` after the field proved it silently ate the last-in-burst large control
+frame (a viewer's fwd-room join fires the client's discovery cascade at the forwarder, ~45
+frames in 1 s, and the SDP offer/answer always arrives last). DoS bound = cheap parse failure +
+the KeyRequest 5 s cooldown + explicit-FwdError admission caps — never re-add a silent drop.
+Engine `handle_peer_gone` now mirrors the client presence tolerance: presence loss only tears
+legs/streams with NO connected media (`owner_gone` mark + sweep reaps once legs dry; admitted
+owner ops clear it). The VPS signaling loop re-sends its room join every 30 s ping tick
+(idempotent at the relay; also replays anything the relay buffered during a membership loss).
+Every inbound 0x06 logs size + outcome (sizes/types only); the idle per-minute aggregate line is
+throttled (it used to rotate field evidence out of journald). Relay `/server-stats` gained
+non-identifying delivery counters: `send_dropped`/`send_backpressure` (uWS send status, was
+silently ignored) + `fwd_delivered`/`fwd_buffered` (directs to the configured forwarder id).
+
 ## Media forwarder control plane (`fwd_*`) — step 3 phase 1, 2026-08-06
 
 Screen shares can be served through a **blind packet forwarder** instead of a per-viewer PC. The

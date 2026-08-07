@@ -30,7 +30,6 @@ use crate::node::crypto_handler::{
 use crate::node::types::{HavenMessage, MessageEnvelope};
 use crate::node::ws_client;
 
-use super::dispatch::PeerBuckets;
 use super::engine::{EngineCmd, OutSignal};
 use super::ForwarderConfig;
 
@@ -96,7 +95,7 @@ pub(crate) async fn run(
 
         let (mut write, mut read) = ws.split();
         let join = serde_json::json!({"type": "join", "room": room}).to_string();
-        if bounded_send(&mut write, Message::Text(join.into())).await.is_err() {
+        if bounded_send(&mut write, Message::Text(join.clone().into())).await.is_err() {
             continue;
         }
 
@@ -104,7 +103,6 @@ pub(crate) async fn run(
         ping.tick().await; // consume the immediate first tick
         let mut last_recv = tokio::time::Instant::now();
         let mut room_peers: HashSet<String> = HashSet::new();
-        let mut buckets = PeerBuckets::new(20, 5);
 
         'session: loop {
             tokio::select! {
@@ -115,6 +113,17 @@ pub(crate) async fn run(
                         break 'session;
                     }
                     if bounded_send(&mut write, Message::Ping(vec![0x01].into())).await.is_err() {
+                        break 'session;
+                    }
+                    // Membership belt (field 2026-08-06: large frames to this
+                    // long-lived socket vanished — one suspect is relay-side
+                    // room-membership loss, which silently diverts directs
+                    // into the offline buffer until our next join). Re-joining
+                    // is idempotent at the relay (redundant joins suppress the
+                    // peer_joined broadcast) AND replays anything buffered
+                    // while membership was broken — prevention and recovery in
+                    // one frame every 30 s.
+                    if bounded_send(&mut write, Message::Text(join.clone().into())).await.is_err() {
                         break 'session;
                     }
                 }
@@ -130,15 +139,12 @@ pub(crate) async fn run(
                     last_recv = tokio::time::Instant::now();
                     match msg {
                         Message::Text(text) => {
-                            handle_text_frame(
-                                &text, &room, &mut room_peers, &mut buckets, &engine_tx,
-                            );
+                            handle_text_frame(&text, &room, &mut room_peers, &engine_tx);
                         }
                         Message::Binary(data) => {
                             handle_binary_frame(
                                 &data, &peer_id, &keypair, &mut olm, &crypto_store,
-                                &mut buckets, &mut rekey_cooldown, &mut write, &room,
-                                &engine_tx,
+                                &mut rekey_cooldown, &mut write, &room, &engine_tx,
                             ).await;
                         }
                         Message::Ping(p) => {
@@ -167,7 +173,6 @@ fn handle_text_frame(
     text: &str,
     room: &str,
     room_peers: &mut HashSet<String>,
-    buckets: &mut PeerBuckets,
     engine_tx: &mpsc::UnboundedSender<EngineCmd>,
 ) {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(text) else {
@@ -191,7 +196,6 @@ fn handle_text_frame(
                 .unwrap_or_default();
             for gone in room_peers.difference(&new_peers) {
                 let _ = engine_tx.send(EngineCmd::PeerGone(gone.clone()));
-                buckets.forget(gone);
             }
             *room_peers = new_peers;
         }
@@ -204,7 +208,6 @@ fn handle_text_frame(
             if let Some(p) = v.get("peer_id").and_then(|p| p.as_str()) {
                 room_peers.remove(p);
                 let _ = engine_tx.send(EngineCmd::PeerGone(p.to_string()));
-                buckets.forget(p);
             }
         }
         _ => {}
@@ -222,8 +225,32 @@ fn parse_direct_frame(body: &[u8]) -> Option<(String, String)> {
     Some((sender, payload))
 }
 
+/// The engine-bound fwd envelope's wire tag, for the inbound observability
+/// line (envelope types + sizes only — never identities).
+fn fwd_env_label(env: &MessageEnvelope) -> &'static str {
+    match env {
+        MessageEnvelope::FwdStreamRegister { .. } => "fwd_stream_register",
+        MessageEnvelope::FwdStreamAuth { .. } => "fwd_stream_auth",
+        MessageEnvelope::FwdStreamUnregister { .. } => "fwd_stream_unregister",
+        MessageEnvelope::FwdIngestOffer { .. } => "fwd_ingest_offer",
+        MessageEnvelope::FwdAttach { .. } => "fwd_attach",
+        MessageEnvelope::FwdDetach { .. } => "fwd_detach",
+        MessageEnvelope::FwdEgressAnswer { .. } => "fwd_egress_answer",
+        _ => "other",
+    }
+}
+
 /// Inbound relay binary frame: only 0x06 (direct) matters — the whole fwd
 /// control plane is Olm-direct.
+///
+/// NO rate limiting here (2026-08-07): the per-peer token bucket this carried
+/// was the only spot in the whole fwd pipeline that ate a frame with ZERO
+/// trace — exactly the silent-drop class the relay refuses to have
+/// (`feedback_relay_rules`), and a live suspect for the vanished large-frame
+/// field defect. The DoS surface stays bounded without it: garbage fails the
+/// cheap HavenMessage/Olm parse, the expensive KeyRequest re-bundle is behind
+/// the 5 s per-peer cooldown, and admission caps refuse with explicit
+/// FwdError codes. Every outcome below logs (sizes + types, never identities).
 #[allow(clippy::too_many_arguments)]
 async fn handle_binary_frame(
     data: &[u8],
@@ -231,7 +258,6 @@ async fn handle_binary_frame(
     keypair: &NativeKeypair,
     olm: &mut OlmManager,
     crypto_store: &CryptoStore,
-    buckets: &mut PeerBuckets,
     rekey_cooldown: &mut HashMap<String, std::time::Instant>,
     write: &mut WsSink,
     room: &str,
@@ -240,21 +266,19 @@ async fn handle_binary_frame(
     if data.len() <= 3 || data[0] != 0x06 {
         return;
     }
+    let frame_len = data.len();
     let Some((sender, payload)) = parse_direct_frame(&data[1..]) else {
+        hollow_log!("[HOLLOW-FWD] inbound {frame_len} B: malformed direct frame — dropped");
         return;
     };
-    // Control-frame DoS bound: the Olm path has no client-side limiter, so the
-    // forwarder carries its own. Rate-limited frames are DROPPED (a reply
-    // would defeat the limiter).
-    if !buckets.allow(&sender, std::time::Instant::now()) {
-        return;
-    }
     let Ok(haven) = serde_json::from_str::<HavenMessage>(&payload) else {
+        hollow_log!("[HOLLOW-FWD] inbound {frame_len} B: unparseable HavenMessage — dropped");
         return;
     };
 
     match haven {
         HavenMessage::KeyRequest { to, ts, sig, pk } => {
+            hollow_log!("[HOLLOW-FWD] inbound {frame_len} B: KeyRequest");
             handle_key_request(
                 &sender, to, ts, sig, pk, local_peer_id, keypair, olm, crypto_store,
                 rekey_cooldown, write, room,
@@ -263,11 +287,15 @@ async fn handle_binary_frame(
         }
         HavenMessage::Encrypted { message_type, body, identity_key } => {
             let Ok(ciphertext) = OlmManager::decode_base64(&body) else {
+                hollow_log!("[HOLLOW-FWD] inbound {frame_len} B: bad base64 body — dropped");
                 return;
             };
             let Some(plaintext) = olm_decrypt(
                 &sender, message_type, identity_key.as_deref(), &ciphertext, olm, crypto_store,
             ) else {
+                hollow_log!(
+                    "[HOLLOW-FWD] inbound {frame_len} B: Olm decrypt failed (msg_type {message_type}) — dropped"
+                );
                 return;
             };
             persist_olm_session(olm, crypto_store, &sender);
@@ -280,18 +308,29 @@ async fn handle_binary_frame(
                 | MessageEnvelope::FwdAttach { .. }
                 | MessageEnvelope::FwdDetach { .. }
                 | MessageEnvelope::FwdEgressAnswer { .. })) => {
+                    hollow_log!(
+                        "[HOLLOW-FWD] inbound {frame_len} B: {} → engine",
+                        fwd_env_label(&env)
+                    );
                     let _ = engine_tx.send(EngineCmd::Signal { sender, envelope: env });
                 }
                 // SessionAck confirms the peer's ratchet; everything else a
                 // client might broadcast at room peers (profiles, sync
-                // requests) is silently irrelevant to a forwarder.
-                Ok(_) | Err(_) => {}
+                // requests) is irrelevant to a forwarder.
+                Ok(_) => {
+                    hollow_log!("[HOLLOW-FWD] inbound {frame_len} B: non-fwd envelope — ignored");
+                }
+                Err(_) => {
+                    hollow_log!("[HOLLOW-FWD] inbound {frame_len} B: undecodable envelope — ignored");
+                }
             }
         }
         // The forwarder never sends KeyRequest, so KeyBundle should never
         // arrive; everything else (profiles, friend requests, ...) is not
         // for us.
-        _ => {}
+        _ => {
+            hollow_log!("[HOLLOW-FWD] inbound {frame_len} B: non-fwd HavenMessage — ignored");
+        }
     }
 }
 

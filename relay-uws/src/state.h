@@ -139,6 +139,18 @@ struct IpState {
     uint32_t budget_day = 0;  // unix day (secs/86400) the counter belongs to
 };
 
+// Delivery diagnostics (counters ONLY — the relay logs nothing, and these
+// carry no identities). Added 2026-08-07 for the vanished-fwd-frame
+// investigation: uWS send() silently returns DROPPED past maxBackpressure and
+// send_to_peer used to ignore the status entirely, so a delivery failure left
+// zero trace anywhere. Exposed via /server-stats.
+struct DeliveryDiag {
+    uint64_t send_backpressure = 0;  // sends that increased user-space backpressure
+    uint64_t send_dropped = 0;       // sends uWS discarded (buffered > maxBackpressure)
+    uint64_t fwd_delivered = 0;      // 0x04/0x08 directs delivered live to the configured media forwarder
+    uint64_t fwd_buffered = 0;       // ...that fell into the offline buffer instead (membership loss!)
+};
+
 struct ServerStatsCache {
     std::string cached_json;
     std::chrono::steady_clock::time_point fetched_at;
@@ -175,6 +187,7 @@ struct RelayState {
     LicenseState license;
     ReportsState reports;
     ServerStatsCache stats_cache;
+    DeliveryDiag diag;
 
     // Temporary nickname registry (RAM only, released on disconnect, 10-min TTL).
     // The TTL + a dead-holder live-check on claim/resolve prevent a stale binding
