@@ -12,8 +12,13 @@ membership loss, and presence-flap tolerance is on BOTH the clients and the forw
 **egress = k×ingest on the forwarder (238/119 kbps at k=2) vs TURN's 2·B·k — and relay media
 = ZERO when a peer forwarder serves.** The SFrame join-order epoch race (runs 2's 5-10 s /
 formerly-permanent black screens) is **FIXED 2026-08-07** — commit cache + epoch hints +
-catch-up replay, see the top §7 entry. Remaining follow-ups queued in §7 (opportunistic
-rebalancer; fwd-room chatter suppression; relay ghost-eviction PeerLeft suppression).** Step 1 (resolution capping) shipped; step 2 (originator attribution)
+catch-up replay, see the top §7 entry. The 2026-08-07 follow-up trio (self-ghost VC
+participant, Olm decrypt-fail logging, opportunistic rebalancer) is DONE and FIELD-VERIFIED
+twice (2026-08-08) — see the top §7 entry. Remaining follow-ups queued in §7 (ICE
+direct-when-possible repair pair — Vitalik-approved 2026-08-08; fwd-room chatter
+suppression; relay ghost-eviction PeerLeft suppression). NEXT = PHASE 3 (setParameters
+root-cause → simulcast → upload spreading), which closes the epic and is the foundation
+for broadcast mode / "Hollow Streaming" (§8).** Step 1 (resolution capping) shipped; step 2 (originator attribution)
 shipped; step 3 phase 1 (the VPS infra forwarder) COMPLETE + FIELD-VERIFIED — see §6 for the
 deliverable table and §7 for the D6 evidence and the five bugs the field found. Phase 2 embeds the
 SAME forwarder engine in desktop app builds: fwd-capable watchers on a direct route serve the
@@ -274,6 +279,126 @@ policy: assign direct viewers to branches past an upload threshold. That is what
 attribution, engine) already exists — phase 3 is simulcast + policy, no new transport.
 
 ## 7. Status log
+
+**2026-08-07 (follow-up session) — THE PRE-PHASE-3 TRIO DONE: self-ghost VC participant
+fixed, inbound Olm decrypt-fail path fully logged, opportunistic rebalancer built.**
+
+- **Self-ghost VC participant — ROOT-CAUSED AND FIXED.** The own-join path was the ONE
+  remaining master-form insertion into the device-keyed VC participant set:
+  `handle_voice_channel_join` inserted + emitted `local_peer_str` (the MASTER) while Dart's
+  `onLocalJoined` self-skip compared the DEVICE id (changed by the 2026-07-15 glare-election
+  fix) — so every client dialed its own master as a remote participant ("Creating offer for
+  peer <own master>", audio cryptors minted for it, and one "Encryption failed: No session"
+  per trickled ICE candidate). Fix, in id-form-guessing-proof layers: (1) SELF is now
+  DEVICE-keyed like every remote entry (insert + both own join/leave emits + every self
+  membership/exclusion compare in swarm.rs/voice_handler.rs — Disconnected retain, reconnect
+  re-broadcast, auto-leave, conference reply-on-join, gossip-neighbor exclusion); (2)
+  `VoiceChannelJoined/Left` gained `is_self: bool` set by the RUST handler that knows —
+  Dart's event_provider branches on the flag and NEVER compares ids (the whole bug class was
+  Dart guessing which id form means "me"); (3) belts: `handle_voice_channel_send_signal`
+  DROPS self-targeted signals loudly (either id form — kills the No-session storm class at
+  the chokepoint; sibling devices have distinct device ids and are never blocked), inbound
+  join/leave self-echo guards match both forms, `onPeerJoinedMyChannel` refuses to dial
+  self, and the Dart set-iteration guards (`onLocalJoined`/`onModeChanged`) skip both forms.
+  New harness test `vc_self_participant_is_device_keyed_no_self_dial` runs nodes with
+  device≠master seeds (the existing VC tests use identical seeds and could never catch the
+  mixup) and pins: own join/leave = device id + is_self, remote view device-keyed +
+  !is_self, self-targeted signal dropped before Olm with no MessageSendFailed.
+- **Inbound Olm decrypt-fail path — sender-tagged logging at every silent death site** (the
+  evening blackhole was only diagnosable from log ABSENCE on both ends). swarm.rs live
+  path: entry frames that fail UTF-8/HavenMessage parse now log with sender + size (0x05/
+  0x06/0x08 payloads are always HavenMessage JSON — binary chunks ride 0x02/BinaryDirect,
+  so this can't spam); base64-decode fail; PreKey-missing-identity-key; the silent
+  prekey-with-existing fallthrough; the both-paths-failed PreKey drop now ALWAYS logs (the
+  re-key stays cooldown-gated — a burst used to go completely dark); and the big one — a
+  DECRYPTED envelope failing MessageEnvelope parse was silently MISROUTED into the
+  legacy-raw-text-DM fallback (version skew's exact signature): it now logs sender + size +
+  error when the payload looks like JSON. fetch.rs (push/offline) got the same treatment on
+  both its lanes; the MLS post-decrypt parse-fail log gained group + sender leaf + size.
+  The VPS forwarder's identity-free logs are BY DESIGN (zero-metadata doctrine) — untouched.
+- **Opportunistic rebalancer (the run-4 watch-ORDER gap) — BUILT.** New sharer-side hook in
+  `_handleScreenWatch`: a fresh `route=direct fwd_capable` watch arriving while the VPS
+  infra branch carries viewers promotes that watcher and migrates the branch's viewers onto
+  the new peer branch (`_maybeRebalanceOntoCandidate`) — sharer upload 2 copies → 1, relay
+  media → 0, one blink per migrated viewer. Invariants honored: `relay_private` viewers
+  never leave operator infra (they stay on the VPS branch), per-viewer failed-forwarder
+  memory respected, peer cap = 3 remote legs (overflow stays), no chains (branch
+  heads/branch riders are not candidates). Migration is MAKE-BEFORE-BREAK: viewers are only
+  removed from the VPS branch LOCALLY (no eager `fwd_stream_auth` removal — the VPS killing
+  the old egress leg before the assign lands would read as a branch failure and
+  permanently fail-mark the fresh candidate); the viewer retires its own VPS leg on assign
+  receipt, and the emptied branch's 30 s linger unregisters the stream. Viewer side gained
+  the two missing reassignment pieces: forwarder→forwarder assigns now RELEASE the old
+  forwarder's room (a lingering fwd-room membership is the stale-room routing-blackhole
+  shape; own room excluded — bridge-owned) and arm the 20 s no-show watchdog (extracted
+  `_armWatchNoShowTimer`, shared with the revert path) since the old leg is already retired
+  when the new attach can silently die.
+- **Verified:** new harness test + full Rust suite green (601/601), `flutter analyze` clean
+  for the touched files, widget tests 406/406.
+- **FIELD-VERIFIED 2026-08-08 (Vitalik's run, all four vantage points audited — FULL PASS).**
+  Topology: host sharer + Win10 (bridged, direct fwd-capable) + Win10_222
+  (`HOLLOW_FORCE_RELAY_ROUTE=1`). The logs, in order:
+  1. *Rebalance:* Win10_222 watched FIRST (`route=relay fwd_capable=true`) → VPS branch
+     (ingest 1152x720, `Forwarder leg local=srflx`); Win10's `route=direct` watch then hit
+     `Opportunistic rebalance: promoting … — migrating 1/1 viewer(s) off the VPS branch` →
+     `Promoted` → LAN ingest (`local=host remote=host`). Win10's embedded engine brought up
+     ingest + 2 egress legs (own display + Win10_222) ICE-connected in ~1 s with PLI/keyframe
+     flow; Win10_222's reassign logged `Left room fwd:<VPS> — purged its peer snapshot` (the
+     new fwd→fwd cleanup) and re-rendered the SAME second (the observed single blink);
+     SFrame receiver cryptor `FrameCryptorStateOk` at every hop — the promotion-cryptor fix
+     held through a real migration, zero DecryptionFailed/MissingKey anywhere.
+  2. *Make-before-break confirmed at the VPS:* its egress leg ended by ICE disconnect (the
+     VIEWER retiring it), NOT an auth kill; the host's 30 s linger `fwd_stream_unregister`
+     landed to the second (`stream closed: 2256 pkts`), engine settled at 0 streams / 0 kbps
+     — relay media = ZERO while the peer branch served. Forwarder-side presence tolerance
+     also fired en route ("presence drop for a viewer ignored — its egress leg is alive").
+  3. *Kill ladder:* Win10 killed via task manager → host presence tolerance held the branch
+     (2 ignored drops) → media leg died +7 s → SAME-SECOND revert: `screen_assign{''}` +
+     direct offer + Win10_222's answer + `Left room fwd:<Win10>` purge; Win10_222 rendered
+     the host's direct track immediately (its observed ~5 s freeze = the tolerance window).
+     No `direct_failed`, no ladder engagement — the sharer-catches fast path won.
+  4. *Self-ghost fix live:* ZERO "Creating offer for peer <own id>" on any machine, zero
+     "No session"/Encryption-failed storms; remote dials all device-keyed. The send-belt
+     visibly caught the ONE residual self-iteration — the broadcast-class state fans
+     (`_broadcastAudioState/ScreenState/CameraState` compared only the master form) logged
+     `DROPPED self-targeted audio_state/screen_state` on all three machines; all three fans
+     now skip both id forms (fixed same day, working tree), so those lines disappear next
+     build. Relay day counters: `fwd_delivered=1193, fwd_buffered=0, send_dropped=0`.
+  5. *Second run (same day) — REPEATED PASS, two extra behaviors exercised.* (i) Win10's
+     first watch probed `route=relay` (a genuine ICE race: its call PC paired via TURN
+     despite direct being possible) → the rebalancer correctly did NOT fire and BOTH
+     viewers rode the VPS branch — which incidentally re-measured the headline `1 stream,
+     3 legs, ingest ~364 / egress ~729 kbps` = 2×ingest at k=2. Vitalik's leave/rejoin
+     refreshed the probe (`route=direct`) → promotion + 1/1 migration + blink, as designed.
+     (ii) The kill recovered via the VIEWER-initiated ladder this time: Win10_222's egress
+     leg-death detection (t+6 s) beat the host's ingest-death by one log line — `Forwarder
+     leg … disconnected — walking the fallback ladder` → `direct_failed` re-watch → next
+     rung = VPS (correct for a relay-hint viewer; the host's revert then found an empty
+     branch = no-op). The VPS re-register + egress leg came up within 1 s and the branch
+     linger was cancelled 5 s before firing (the quick-re-watch design paying off). Which
+     recovery wins (sharer-catches direct vs viewer-ladder rung) is a legitimate race —
+     both endings render, SFrame Ok at every hop in both runs.
+
+**APPROVED FOLLOW-UP PAIR (Vitalik, 2026-08-08) — "direct whenever direct is possible":
+ICE detect-and-repair.** 100% STUN is impossible (symmetric NATs / UDP-hostile firewalls
+are TURN's reason to exist), but TURN winning the NOMINATION RACE when a direct pair was
+viable is repairable — libwebrtc nominates whichever pair completes its check first (TURN's
+pre-warmed allocation needs no hole punch, so it often wins by one RTT) and then NEVER
+migrates on its own. Two levers, app-level only (no fork ICE surgery):
+1. **Quiescent ICE-restart repair, ALL WebRTC lanes** (calls, VC audio, camera, screen
+   share, data channels/Share): when a PC settles on a relay pair while host/srflx
+   candidates exist on BOTH sides, schedule ONE ICE restart shortly after — the re-check
+   runs on a warmed network and the hole punch nearly always wins. ICE restart is
+   make-before-break (media/data keep flowing on the old pair until the new one connects),
+   but per Vitalik's constraint the restart must wait for a QUIESCENT window — never
+   mid-transfer on a data channel, never during an active renegotiation; the reneg-glare
+   rules (`_queueRenegOffer`) cover the offer mechanics. One attempt, then accept TURN.
+2. **Forwarder-lane route re-probe:** the `vc_screen_watch` route hint is probed ONCE — a
+   direct-capable watcher TURNed by the race stays `route=relay` forever (run-2 field
+   evidence: the manual leave/rejoin was exactly this refresh done by hand). Auto re-send
+   the watch with a fresh hint when the audio PC's selected route changes (or ~10 s after
+   connect); the opportunistic rebalancer then promotes without user action. Rides existing
+   idempotent machinery. Lever 1 makes this rarer; lever 2 catches what remains.
 
 **2026-08-07 (later session) — SFRAME JOIN-ORDER EPOCH RACE FIXED (the runs-2 black-screen
 follow-up, its own session as planned). Root mechanism, confirmed by code audit: MLS commits
@@ -818,3 +943,33 @@ field verification = the remaining gate:**
      1 stream, 3 legs, egress ≈ 2 × ingest (`B + 2B` total). TURN baseline: stop
      `hollow-forwarder.service`, re-watch (ladder → direct+TURN), read `/server-stats` NIC deltas
      ≈ `4B`. Quote that pair publicly.
+
+## 8. Where this lands: phase 3 closes the epic, and the tree becomes Hollow Streaming
+
+**Phase 3 (next sessions) is the closing move:** STUN viewers feeding OTHER STUN viewers —
+the sharer sends 1-2 copies total and the tree spreads the rest (§2e's "A feeds the room"
+rows: 5 viewers at 4K ≈ 10-20 Mbps sharer upload instead of 50). Build order stands:
+(1) root-cause the Windows live `setParameters` rejection in the fork; (2) simulcast
+(2-3 `sendEncodings` layers, per-viewer quality by PACKET SELECTION — no re-encode
+anywhere; without it one slow viewer drags its whole branch's single encode down);
+(3) the sharer-side spreading policy (assign direct viewers to branches past an upload
+threshold, feeder election so a peer branch can feed the VPS forwarder too) — which makes
+the 15-viewer cap DYNAMIC and closes the epic. All transport machinery (branches,
+promotion/demotion, the opportunistic rebalancer, the ladder, attribution, the engine)
+already exists and is field-verified — phase 3 is simulcast + policy, no new transport.
+
+**The broadcast consequence (Vitalik's framing, 2026-08-08): this IS Hollow Streaming.**
+The forwarding contract deliberately keys on `(originator, stream id, kind)` and never on
+"originator is in the viewer mesh" (§5.7), so the same tree serves a STREAMER whose
+audience is arbitrarily large: the streamer uploads ONE copy (or one per simulcast layer),
+fwd-capable viewers become branches serving 2-3 downstream legs each, branches feed
+branches (phase-3 spreading), the VPS forwarder is only the reliability floor for
+restricted-NAT pockets — and SFrame keeps it end-to-end encrypted THROUGH every hop, with
+attribution/consent keyed on the originator. That is collectively-hosted live streaming
+with no ingest server, no CDN, and no content-holding authority: the relay philosophy
+(availability helper, never authority) applied to a live audience. Conference "broadcast
+mode" (wiki `conferences`, deferred phase 2+) becomes a policy switch on this same tree.
+The ICE direct-when-possible repair pair (§7) multiplies the tree's quality — every
+race-TURNed viewer repaired to direct is one more potential branch and one less relay
+dependency. Deep-dive design (viewer counts, layer ladders, join storms, moderation
+surface) = its own plan session once phase 3 lands.

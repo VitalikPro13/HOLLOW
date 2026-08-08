@@ -1020,10 +1020,14 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
 
     // Connect to existing participants in this channel. Each dial is a full
     // PC bring-up, so re-check between them rather than build a mesh into a
-    // channel we've already left.
+    // channel we've already left. Self-skip covers BOTH id forms: the set is
+    // device-keyed (localPeerId here IS the device id), and the master compare
+    // is a belt against any legacy master-form self entry — the self-ghost bug
+    // was exactly a master-form self surviving a device-only skip.
+    final localMaster = ref.read(identityProvider).peerId ?? '';
     final existing = state.getParticipants(serverId, channelId);
     for (final peerId in existing) {
-      if (peerId == localPeerId) continue;
+      if (peerId == localPeerId || peerId == localMaster) continue;
       if (await _joinSuperseded(gen, svc)) return;
       await svc.onPeerJoinedMyChannel(peerId);
     }
@@ -1398,7 +1402,10 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
   /// Send our mute/deafen state to all peers in the current voice channel.
   void _broadcastAudioState() {
     if (!state.isInVoiceChannel) return;
-    final localPeerId = ref.read(identityProvider).peerId ?? '';
+    // The participant set is DEVICE-keyed (self included) — skip both our id
+    // forms (Rust's self-target belt would drop a miss, but noisily).
+    final localMaster = ref.read(identityProvider).peerId ?? '';
+    final localDevice = _service?.localPeerId ?? _myDevicePeerId ?? '';
     final peers = state.getParticipants(
         state.currentServerId!, state.currentChannelId!);
     final payload = jsonEncode({
@@ -1406,7 +1413,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       'deafened': state.isDeafened,
     });
     for (final peerId in peers) {
-      if (peerId == localPeerId) continue;
+      if (peerId == localMaster || peerId == localDevice) continue;
       network_api.voiceChannelSendSignal(
         serverId: state.currentServerId!,
         channelId: state.currentChannelId!,
@@ -1496,12 +1503,14 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
   /// Broadcast our camera state to all peers in the current voice channel.
   void _broadcastCameraState(bool enabled) {
     if (!state.isInVoiceChannel) return;
-    final localPeerId = ref.read(identityProvider).peerId ?? '';
+    // Device-keyed set: skip both our id forms (see _broadcastAudioState).
+    final localMaster = ref.read(identityProvider).peerId ?? '';
+    final localDevice = _service?.localPeerId ?? _myDevicePeerId ?? '';
     final peers = state.getParticipants(
         state.currentServerId!, state.currentChannelId!);
     final payload = jsonEncode({'enabled': enabled});
     for (final peerId in peers) {
-      if (peerId == localPeerId) continue;
+      if (peerId == localMaster || peerId == localDevice) continue;
       network_api.voiceChannelSendSignal(
         serverId: state.currentServerId!,
         channelId: state.currentChannelId!,
@@ -2376,6 +2385,16 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       if (stale != null) {
         await _removeViewerFromBranch(stale, peerId);
       }
+      // Opportunistic rebalancer (the v1 watch-ORDER gap, field-named
+      // 2026-08-07): when the relay-routed viewers watched BEFORE any
+      // direct fwd-capable watcher existed they landed on the VPS rung and
+      // STAYED there — the sharer paid 2 uploads (direct copy + VPS ingest)
+      // where a promotion pays 1 with relay at zero. A direct fwd-capable
+      // watch arriving while the VPS branch carries viewers now promotes
+      // this watcher and migrates those viewers (one blink each). When it
+      // fires, the promotion self-assign also serves THIS watcher's display,
+      // so the direct path below must not run.
+      if (await _maybeRebalanceOntoCandidate(peerId)) return;
       final existing = _outgoingScreenShares[peerId];
       if (existing != null) {
         // Already streaming to this viewer — a re-sent watch is a cap change
@@ -2543,6 +2562,67 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     final fwd = ref.read(forwarderInfoProvider);
     if (fwd.usable && !failed.contains(fwd.peerId)) return fwd.peerId;
     return null;
+  }
+
+  /// Opportunistic rebalancer: [candidate] just watched with a direct route
+  /// and `fwd_capable` while the VPS infra branch is serving viewers — promote
+  /// it and migrate those viewers onto the new peer branch (relay media → 0,
+  /// sharer upload 2 copies → 1). Static-policy v1 only ran this scan when a
+  /// RELAY viewer asked (`_pickForwarderFor`), so watch order decided the
+  /// topology forever. Costs one blink per migrated viewer. Honors the same
+  /// invariants as the pick: relay_private viewers never leave operator
+  /// infrastructure, per-viewer failed-forwarder memory is respected, and the
+  /// peer branch caps at [maxPeerForwarderLegs] remote legs — any overflow or
+  /// privacy-bound viewer simply stays on the VPS branch.
+  Future<bool> _maybeRebalanceOntoCandidate(String candidate) async {
+    if (!state.isScreenSharing || _screenCaptureStream == null) return false;
+    final r = _watcherRoutes[candidate];
+    if (r == null || !r.fwdCapable || r.route != 'direct' || r.relayPrivate) {
+      return false;
+    }
+    if (!_watchers.contains(candidate)) return false;
+    // Already a branch head, or currently riding a branch — not a fresh
+    // promotion target (no chains in v1).
+    if (_fwdBranches.containsKey(candidate)) return false;
+    if (_branchOf(candidate) != null) return false;
+    final vpsId = ref.read(forwarderInfoProvider).peerId;
+    if (vpsId.isEmpty || vpsId == candidate) return false;
+    final vps = _fwdBranches[vpsId];
+    if (vps == null || vps.isPeer || vps.viewers.isEmpty) return false;
+    final migrate = vps.viewers
+        .where((viewer) =>
+            _watchers.contains(viewer) &&
+            !(_watcherRoutes[viewer]?.relayPrivate ?? false) &&
+            !(_viewerFwdFailures[viewer]?.contains(candidate) ?? false))
+        .take(maxPeerForwarderLegs)
+        .toList();
+    if (migrate.isEmpty) return false;
+    _vcLog('[HOLLOW-VC] Opportunistic rebalance: promoting $candidate — '
+        'migrating ${migrate.length}/${vps.viewers.length} viewer(s) off the '
+        'VPS branch');
+    for (final viewer in migrate) {
+      // MAKE-BEFORE-BREAK: assign to the peer branch and only remove the
+      // viewer from the VPS branch LOCALLY. An eager `fwd_stream_auth`
+      // removal lets the VPS kill the old egress leg before the assign
+      // reaches the viewer — the leg death reads as a branch failure and
+      // fights the migration with a direct_failed re-watch (which would
+      // permanently mark the fresh candidate failed for that viewer). The
+      // viewer retires its own VPS leg on assign receipt; the stale
+      // allowlist entry dies with the empty branch's linger unregister (or
+      // the next register refresh) and is authorization, not liveness.
+      await _assignViewerToForwarder(viewer, candidate);
+      vps.viewers.remove(viewer);
+    }
+    if (vps.viewers.isEmpty) {
+      vps.linger?.cancel();
+      vps.linger = Timer(const Duration(seconds: 30), () {
+        vps.linger = null;
+        if (vps.viewers.isEmpty) {
+          _teardownBranch(vps, unregister: true, demote: true);
+        }
+      });
+    }
+    return true;
   }
 
   /// Sharer side: serve [viewerPeer] through [forwarderPeerId] instead of a
@@ -2889,23 +2969,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       // The promised direct offer can be withheld (the sharer gates offers
       // on a warm audio PC) — re-arm the watch timeout so a no-show walks
       // the ladder or gives up visibly instead of stranding the tile.
-      if (state.watchingScreenShares.contains(originPeer) &&
-          getScreenShareRenderer(originPeer) == null) {
-        _watchConnectTimers.remove(originPeer)?.cancel();
-        _watchConnectTimers[originPeer] =
-            Timer(const Duration(seconds: 20), () {
-          _watchConnectTimers.remove(originPeer);
-          if (!state.watchingScreenShares.contains(originPeer)) return;
-          if (getScreenShareRenderer(originPeer) != null) return;
-          if ((_fwdFallbackCount[originPeer] ?? 0) < 2) {
-            _fallbackToDirect(originPeer);
-            return;
-          }
-          stopWatchingScreenShare(originPeer);
-          _toast("Couldn't connect to the screen share",
-              HollowToastType.error);
-        });
-      }
+      _armWatchNoShowTimer(originPeer);
       return;
     }
     // Privacy hard gate: with "Always relay calls" on, a PEER forwarder leg
@@ -2925,6 +2989,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     _myDevicePeerId ??= await network_api.getLocalDevicePeerId();
     final isSelf = forwarder == _myDevicePeerId;
     _selfAttachRetried.remove(originPeer);
+    final prevAssignment = _screenAssignments[originPeer];
     _screenAssignments[originPeer] = (
       forwarder: forwarder,
       kind: origin is Map ? (origin['kind'] as String? ?? 'screen') : 'screen',
@@ -2951,8 +3016,41 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
           payload: jsonEncode({'origin': origin}),
         )
         .catchError((_) {});
+    // Forwarder→forwarder REASSIGNMENT (opportunistic rebalance: VPS → peer):
+    // release the OLD forwarder's room once nothing references it — a
+    // lingering fwd-room membership is exactly the stale-room shape behind
+    // the targeted-signal blackhole. (Never our own room; the helper guards.)
+    if (prevAssignment != null && prevAssignment.forwarder != forwarder) {
+      _maybeLeaveFwdRoom(prevAssignment.forwarder);
+    }
+    // The attach can die silently (forwarder restart, lost control frame) and
+    // our old delivery leg is already retired — arm the no-show timer so
+    // dead air walks the ladder instead of stranding the tile.
+    _armWatchNoShowTimer(originPeer);
     _vcLog('[HOLLOW-VC] Assigned to ${isSelf ? "OUR OWN engine" : "forwarder"} '
         'for $originPeer — attaching');
+  }
+
+  /// Arm (or re-arm) the 20 s "nothing rendered" watchdog for a share we're
+  /// watching: a promised delivery — direct offer after a revert, or a
+  /// forwarder egress after an assign — can silently never arrive, and by
+  /// then our previous leg is already retired. No-op when a renderer is
+  /// already live; the fired timer re-checks and self-defuses.
+  void _armWatchNoShowTimer(String originPeer) {
+    if (!state.watchingScreenShares.contains(originPeer)) return;
+    if (getScreenShareRenderer(originPeer) != null) return;
+    _watchConnectTimers.remove(originPeer)?.cancel();
+    _watchConnectTimers[originPeer] = Timer(const Duration(seconds: 20), () {
+      _watchConnectTimers.remove(originPeer);
+      if (!state.watchingScreenShares.contains(originPeer)) return;
+      if (getScreenShareRenderer(originPeer) != null) return;
+      if ((_fwdFallbackCount[originPeer] ?? 0) < 2) {
+        _fallbackToDirect(originPeer);
+        return;
+      }
+      stopWatchingScreenShare(originPeer);
+      _toast("Couldn't connect to the screen share", HollowToastType.error);
+    });
   }
 
   /// Client-bound fwd_* signals (NetworkEvent.forwarderSignal). Gated hard:
@@ -3384,7 +3482,9 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
   /// Broadcast our screen share state to all peers.
   void _broadcastScreenState(bool enabled) {
     if (!state.isInVoiceChannel) return;
-    final localPeerId = ref.read(identityProvider).peerId ?? '';
+    // Device-keyed set: skip both our id forms (see _broadcastAudioState).
+    final localMaster = ref.read(identityProvider).peerId ?? '';
+    final localDevice = _service?.localPeerId ?? _myDevicePeerId ?? '';
     final peers = state.getParticipants(
         state.currentServerId!, state.currentChannelId!);
     final json = <String, dynamic>{'enabled': enabled};
@@ -3393,7 +3493,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     }
     final payload = jsonEncode(json);
     for (final peerId in peers) {
-      if (peerId == localPeerId) continue;
+      if (peerId == localMaster || peerId == localDevice) continue;
       network_api.voiceChannelSendSignal(
         serverId: state.currentServerId!,
         channelId: state.currentChannelId!,
@@ -3938,14 +4038,19 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     );
 
     if (_service == null) return;
-    final localPeerId = ref.read(identityProvider).peerId ?? '';
+    // Self-skip must use the ROUTABLE DEVICE id — the participant set and the
+    // gossip neighbor list are device-keyed (self included). The master id is
+    // kept as a belt against any legacy master-form entry.
+    final localPeerId = _service!.localPeerId;
+    final localMaster = ref.read(identityProvider).peerId ?? '';
+    bool isLocal(String id) => id == localPeerId || id == localMaster;
 
     if (mode == 'gossip' && oldMode == 'mesh') {
       // Mesh → Gossip: close audio PCs to non-neighbor peers,
       // keep PCs to gossip neighbors.
       final existing = state.getParticipants(serverId, channelId);
       for (final peerId in existing) {
-        if (peerId == localPeerId) continue;
+        if (isLocal(peerId)) continue;
         if (!neighborSet.contains(peerId)) {
           // Not a gossip neighbor — close audio PC.
           debugPrint('[HOLLOW-VC] Gossip: closing non-neighbor $peerId');
@@ -3954,7 +4059,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       }
       // Ensure we have PCs to all gossip neighbors.
       for (final peerId in neighborSet) {
-        if (peerId == localPeerId) continue;
+        if (isLocal(peerId)) continue;
         await _service!.onPeerJoinedMyChannel(peerId);
       }
       // Set gossip mode on the service for track forwarding.
@@ -3966,7 +4071,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       _service!.gossipNeighbors = {};
       final existing = state.getParticipants(serverId, channelId);
       for (final peerId in existing) {
-        if (peerId == localPeerId) continue;
+        if (isLocal(peerId)) continue;
         await _service!.onPeerJoinedMyChannel(peerId);
       }
     } else if (mode == 'gossip') {
@@ -3982,7 +4087,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       }
       // Connect to new neighbors.
       for (final peerId in neighborSet) {
-        if (peerId == localPeerId) continue;
+        if (isLocal(peerId)) continue;
         await _service!.onPeerJoinedMyChannel(peerId);
       }
     }

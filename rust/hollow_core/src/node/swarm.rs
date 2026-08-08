@@ -2375,7 +2375,7 @@ async fn run_event_loop(
                             &server_states, &bundle_keypair, &crypto_store,
                             &mut voice_channel_participants, &mut voice_channel_gossip_mode,
                             &gossip_overlays, &mut mls_epoch_hint_cooldown,
-                            &local_peer_str, &event_tx,
+                            &local_peer_str, &device_peer_id, &event_tx,
                         ).await;
                     }
 
@@ -2385,7 +2385,7 @@ async fn run_event_loop(
                             &mut mls, &ws_cmd_tx, &ws_room_peers,
                             &server_states, &bundle_keypair, &crypto_store,
                             &mut voice_channel_participants, &mut voice_channel_gossip_mode,
-                            &gossip_overlays, &local_peer_str, &event_tx,
+                            &gossip_overlays, &local_peer_str, &device_peer_id, &event_tx,
                         ).await;
                     }
 
@@ -2396,7 +2396,7 @@ async fn run_event_loop(
                             &mut mls, &mut olm, &crypto_store,
                             &ws_cmd_tx, &ws_room_peers,
                             &server_states, &bundle_keypair,
-                            &local_peer_str, &event_tx,
+                            &local_peer_str, &device_peer_id, &event_tx,
                         ).await;
                     }
 
@@ -2879,9 +2879,9 @@ async fn run_event_loop(
                         }
                         // Remove all remote peers from voice channels (keep only self).
                         // On reconnect, PeerJoined re-broadcasts repopulate remote participants.
-                        let local_str = local_peer_str.to_string();
+                        // Self is DEVICE-keyed (master kept as a legacy belt).
                         for participants in voice_channel_participants.values_mut() {
-                            participants.retain(|p| *p == local_str);
+                            participants.retain(|p| *p == device_peer_id || *p == local_peer_str);
                         }
                         voice_channel_participants.retain(|_, p| !p.is_empty());
                         // Conference waiting rooms: knockers from the old socket can't
@@ -3213,7 +3213,7 @@ async fn run_event_loop(
                                             // Voice channel: re-broadcast our join to the reconnecting peer
                                             // so they know we're in a voice channel.
                                             for (vc_key, vc_peers) in voice_channel_participants.iter() {
-                                                if vc_peers.contains(&local_peer_str.to_string()) {
+                                                if vc_peers.contains(&device_peer_id) || vc_peers.contains(&local_peer_str) {
                                                     // vc_key = "server_id:channel_id"
                                                     if let Some(colon) = vc_key.find(':') {
                                                         let vc_sid = &vc_key[..colon];
@@ -3433,6 +3433,7 @@ async fn run_event_loop(
                                 server_id: sid.clone(),
                                 channel_id: cid.clone(),
                                 peer_id: peer_id.clone(),
+                                is_self: false,
                             }).await;
                         }
                         voice_channel_participants.retain(|vc_key, participants| {
@@ -4141,8 +4142,21 @@ async fn run_event_loop(
                     }
                     WsEvent::Message { room, from, data } | WsEvent::DirectMessage { room, from, data } => {
                         // Route incoming WS messages through the same handler as libp2p.
-                        if let Ok(text) = String::from_utf8(data) {
-                            if let Ok(msg) = serde_json::from_str::<HavenMessage>(&text) {
+                        // A frame that dies here must SAY so with the sender tagged — the
+                        // fwd-signal blackhole was only diagnosable from log absence on
+                        // both ends (these payloads are always HavenMessage JSON; binary
+                        // chunks ride 0x02 → BinaryDirect, so a failure here is abnormal).
+                        let frame_len = data.len();
+                        let utf8 = String::from_utf8(data);
+                        if utf8.is_err() {
+                            hollow_log!("[HOLLOW-SWARM] Inbound WS frame from {from} in {room} not UTF-8 ({frame_len} B) — dropped");
+                        }
+                        if let Ok(text) = utf8 {
+                            let parsed = serde_json::from_str::<HavenMessage>(&text);
+                            if let Err(ref e) = parsed {
+                                hollow_log!("[HOLLOW-SWARM] Inbound WS frame from {from} ({frame_len} B) failed HavenMessage parse — dropped: {e}");
+                            }
+                            if let Ok(msg) = parsed {
                                     // Rate limiting (same as libp2p path).
                                     let rate_ok = {
                                         let (tokens, last_refill) = peer_rate_tokens
@@ -5363,7 +5377,7 @@ async fn run_event_loop(
                         &mut mls, &ws_cmd_tx, &ws_room_peers, &server_states,
                         &bundle_keypair, &crypto_store,
                         &mut voice_channel_participants, &mut voice_channel_gossip_mode,
-                        &gossip_overlays, &local_peer_str, &sid, &event_tx,
+                        &gossip_overlays, &local_peer_str, &device_peer_id, &sid, &event_tx,
                     ).await;
                     let _ = event_tx.send(NetworkEvent::ServerUpdated {
                         server_id: sid.clone(),
@@ -5851,12 +5865,13 @@ async fn handle_incoming_request(
             let ciphertext = match OlmManager::decode_base64(&body) {
                 Ok(b) => b,
                 Err(e) => {
+                    hollow_log!("[HOLLOW-CRYPTO] Inbound Encrypted from {peer_str}: base64 decode failed ({} B) — dropped: {e}", body.len());
                     let _ = event_tx
                         .send(NetworkEvent::Error {
                             message: format!("Failed to decode message from {peer_str}: {e}"),
                         })
                         .await;
-                    
+
                     return;
                 }
             };
@@ -5866,12 +5881,13 @@ async fn handle_incoming_request(
                 let their_identity = match &identity_key {
                     Some(k) => k,
                     None => {
+                        hollow_log!("[HOLLOW-CRYPTO] Inbound PreKey from {peer_str} missing identity_key — dropped");
                         let _ = event_tx
                             .send(NetworkEvent::Error {
                                 message: format!("PreKeyMessage from {peer_str} missing identity_key"),
                             })
                             .await;
-                        
+
                         return;
                     }
                 };
@@ -5889,10 +5905,11 @@ async fn handle_incoming_request(
                             hollow_log!("[HOLLOW-CRYPTO] Decrypted PreKey with existing session for {peer_str}");
                             pt
                         }
-                        Err(_) => {
+                        Err(e) => {
                             // Existing session can't handle this PreKey — it's a
                             // genuinely new session from the peer (e.g. they re-keyed).
                             // Replace our session with the new inbound one.
+                            hollow_log!("[HOLLOW-CRYPTO] PreKey from {peer_str} undecryptable with existing session ({e}) — rebuilding inbound session");
                             olm.remove_session(&peer_str);
                             match olm.create_inbound_session(&peer_str, their_identity, &ciphertext) {
                                 Ok(pt) => {
@@ -5936,14 +5953,18 @@ async fn handle_incoming_request(
                                     pt
                                 }
                                 Err(e2) => {
-                                    // Both paths failed. Apply cooldown to prevent flood.
+                                    // Both paths failed. ALWAYS log the drop (the re-key
+                                    // below stays cooldown-gated) — a burst of failures
+                                    // must never go dark on the receive side.
+                                    hollow_log!("[HOLLOW-CRYPTO] Inbound PreKey from {peer_str} undecryptable on BOTH paths: {e2} — dropped");
+                                    // Apply cooldown to prevent re-key flood.
                                     let now = std::time::Instant::now();
                                     let should_rekey = match decrypt_fail_cooldown.get(peer_str) {
                                         Some(last) => now.duration_since(*last) >= Duration::from_secs(5),
                                         None => true,
                                     };
                                     if should_rekey {
-                                        hollow_log!("[HOLLOW-CRYPTO] PreKey session creation also failed for {peer_str}: {e2} — initiating re-key");
+                                        hollow_log!("[HOLLOW-CRYPTO] Initiating re-key with {peer_str}");
                                         decrypt_fail_cooldown.insert(peer_str.to_string(), now);
                                         if !key_request_is_fresh(key_request_in_flight, peer_str) {
                                             key_request_in_flight.insert(peer_str.to_string(), now);
@@ -8629,7 +8650,15 @@ async fn handle_incoming_request(
                     }
                 }
 
-                Err(_) => {
+                Err(e) => {
+                    // A decrypted payload that LOOKS like JSON but failed the
+                    // MessageEnvelope parse is version skew or corruption being
+                    // silently MISROUTED into the legacy-DM fallback — say so
+                    // with the sender tagged (the fwd-signal blackhole was only
+                    // diagnosable from log absence on both ends).
+                    if text.trim_start().starts_with('{') {
+                        hollow_log!("[HOLLOW-SWARM] Decrypted envelope from {peer_str} failed MessageEnvelope parse ({} B) — falling through as legacy raw-text DM: {e}", text.len());
+                    }
                     // Legacy raw-text DM (backward compatible). No signature
                     // available since these aren't wrapped in signed envelopes.
                     let legacy_ts = std::time::SystemTime::now()
@@ -9333,7 +9362,7 @@ async fn handle_incoming_request(
                             mls, ws_cmd_tx, ws_room_peers, server_states,
                             bundle_keypair, crypto_store,
                             voice_channel_participants, voice_channel_gossip_mode,
-                            gossip_overlays, local_peer_str, &server_id, event_tx,
+                            gossip_overlays, local_peer_str, device_peer_id, &server_id, event_tx,
                         ).await;
                     }
                 }
@@ -10181,8 +10210,8 @@ async fn handle_incoming_request(
                         let envelope_str = String::from_utf8_lossy(&plaintext);
                         let envelope = match serde_json::from_str::<MessageEnvelope>(&envelope_str) {
                             Ok(env) => env,
-                            Err(_) => {
-                                hollow_log!("[HOLLOW-MLS] Failed to parse decrypted envelope");
+                            Err(e) => {
+                                hollow_log!("[HOLLOW-MLS] Decrypted envelope in {group_key} from leaf {sender_peer_id} failed MessageEnvelope parse ({} B) — dropped: {e}", envelope_str.len());
                                 return;
                             }
                         };
@@ -10371,7 +10400,7 @@ async fn handle_incoming_request(
                                         mls, ws_cmd_tx, ws_room_peers, server_states,
                                         bundle_keypair, crypto_store,
                                         voice_channel_participants, voice_channel_gossip_mode,
-                                        gossip_overlays, local_peer_str, &sid, event_tx,
+                                        gossip_overlays, local_peer_str, device_peer_id, &sid, event_tx,
                                     ).await;
                                 }
                             }
@@ -10601,13 +10630,14 @@ async fn handle_incoming_request(
                                 voice_handler::handle_envelope_voice_channel_join(
                                     server_states, voice_channel_participants,
                                     voice_channel_gossip_mode, gossip_overlays,
-                                    ws_cmd_tx, event_tx, local_peer_str, peer_str.to_string(), sid, cid,
+                                    ws_cmd_tx, event_tx, local_peer_str, device_peer_id,
+                                    peer_str.to_string(), sid, cid,
                                 ).await;
                             }
                             MessageEnvelope::VoiceChannelLeave { sid, cid } => {
                                 voice_handler::handle_envelope_voice_channel_leave(
                                     voice_channel_participants, voice_channel_gossip_mode,
-                                    gossip_overlays, event_tx, local_peer_str,
+                                    gossip_overlays, event_tx, local_peer_str, device_peer_id,
                                     peer_str.to_string(), sid, cid,
                                 ).await;
                             }
@@ -13051,7 +13081,8 @@ async fn handle_incoming_request(
         // to survive epoch staleness after reconnection.
 
         HavenMessage::VoiceChannelJoin { server_id, channel_id } => {
-            if peer_str == local_peer_str { return; }
+            // Self-echo guard: both id forms (sender echoes carry our DEVICE id).
+            if peer_str == local_peer_str || peer_str == device_peer_id { return; }
             // Conferences have no CRDT membership — the equivalent check is
             // MLS group membership (leaf credentials ARE device ids), which
             // only an ADMITTED peer can hold. This is what lets the existing
@@ -13087,18 +13118,19 @@ async fn handle_incoming_request(
                     .insert(peer_str.to_string());
                 let _ = event_tx.send(NetworkEvent::VoiceChannelJoined {
                     server_id: server_id.clone(), channel_id: channel_id.clone(),
-                    peer_id: peer_str.to_string(),
+                    peer_id: peer_str.to_string(), is_self: false,
                 }).await;
                 voice_handler::check_voice_mode_transition(
                     &vc_key, &server_id, &channel_id,
                     &voice_channel_participants, voice_channel_gossip_mode,
-                    &gossip_overlays, local_peer_str, &event_tx,
+                    &gossip_overlays, device_peer_id, &event_tx,
                 ).await;
             }
         }
 
         HavenMessage::VoiceChannelLeave { server_id, channel_id } => {
-            if peer_str == local_peer_str { return; }
+            // Self-echo guard: both id forms (see the join twin).
+            if peer_str == local_peer_str || peer_str == device_peer_id { return; }
             hollow_log!("[HOLLOW-VC] {peer_str} left voice channel {channel_id} in {server_id} (plaintext)");
             let vc_key = format!("{server_id}:{channel_id}");
             if let Some(participants) = voice_channel_participants.get_mut(&vc_key) {
@@ -13110,12 +13142,12 @@ async fn handle_incoming_request(
             }
             let _ = event_tx.send(NetworkEvent::VoiceChannelLeft {
                 server_id: server_id.clone(), channel_id: channel_id.clone(),
-                peer_id: peer_str.to_string(),
+                peer_id: peer_str.to_string(), is_self: false,
             }).await;
             voice_handler::check_voice_mode_transition(
                 &vc_key, &server_id, &channel_id,
                 &voice_channel_participants, voice_channel_gossip_mode,
-                &gossip_overlays, local_peer_str, &event_tx,
+                &gossip_overlays, device_peer_id, &event_tx,
             ).await;
         }
 

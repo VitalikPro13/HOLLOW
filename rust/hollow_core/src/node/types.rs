@@ -389,8 +389,13 @@ pub(crate) enum NetworkEvent {
     /// Forward incoming voice call signaling message to Dart.
     CallSignal { peer_id: String, signal_type: String, payload: String },
     // -- Voice channel events (Phase 5C) --
-    VoiceChannelJoined { server_id: String, channel_id: String, peer_id: String },
-    VoiceChannelLeft { server_id: String, channel_id: String, peer_id: String },
+    /// `is_self` = this is OUR OWN join/leave (set by the emitting handler,
+    /// which knows for certain). Dart must branch on it — never on comparing
+    /// `peer_id` against a local id: the participant set is keyed by ROUTABLE
+    /// DEVICE ids and every id-form guess here has produced a self-dial bug
+    /// (the 2026-08 self-ghost dialed our own master as a remote participant).
+    VoiceChannelJoined { server_id: String, channel_id: String, peer_id: String, is_self: bool },
+    VoiceChannelLeft { server_id: String, channel_id: String, peer_id: String, is_self: bool },
     VoiceChannelSignal { server_id: String, channel_id: String, peer_id: String, signal_type: String, payload: String },
     // -- Media forwarder events (media forwarding step 3) --
     /// A client-bound `fwd_*` signal from a media forwarder

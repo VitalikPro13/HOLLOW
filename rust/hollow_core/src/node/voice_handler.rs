@@ -309,6 +309,7 @@ pub(crate) async fn handle_voice_channel_join(
     gossip_overlays: &HashMap<String, super::gossip::GossipOverlay>,
     mls_epoch_hint_cooldown: &mut HashMap<String, std::time::Instant>,
     local_peer_str: &str,
+    device_peer_id: &str,
     event_tx: &mpsc::Sender<NetworkEvent>,
 ) {
     hollow_log!("[HOLLOW-VC] Join voice channel {channel_id} in server {server_id}");
@@ -342,10 +343,13 @@ pub(crate) async fn handle_voice_channel_join(
         mls, ws_cmd_tx, ws_room_peers, server_states, crypto_store,
         &server_id, local_peer_str, &envelope, &plain,
     );
-    // Track participant.
+    // Track participant. SELF is keyed by our ROUTABLE DEVICE id, exactly like
+    // every remote entry (remote lanes insert the WS sender) — a master-form
+    // self-entry is the self-ghost bug: Dart's device-keyed self-skip missed
+    // it and dialed our own master as a remote participant.
     let vc_key = format!("{}:{}", server_id, channel_id);
     voice_channel_participants.entry(vc_key.clone()).or_default()
-        .insert(local_peer_str.to_string());
+        .insert(device_peer_id.to_string());
     // Emit current MLS epoch key BEFORE the join event — Dart caches it,
     // then applies it after creating the VoiceChannelService.
     emit_vc_sframe_key(
@@ -356,13 +360,13 @@ pub(crate) async fn handle_voice_channel_join(
     // Emit locally so our own UI updates.
     let _ = event_tx.send(NetworkEvent::VoiceChannelJoined {
         server_id: server_id.clone(), channel_id: channel_id.clone(),
-        peer_id: local_peer_str.to_string(),
+        peer_id: device_peer_id.to_string(), is_self: true,
     }).await;
     // Check for mode transition.
     check_voice_mode_transition(
         &vc_key, &server_id, &channel_id,
         voice_channel_participants, voice_channel_gossip_mode,
-        gossip_overlays, local_peer_str, event_tx,
+        gossip_overlays, device_peer_id, event_tx,
     ).await;
 }
 
@@ -691,6 +695,7 @@ pub(crate) async fn handle_voice_channel_leave(
     voice_channel_gossip_mode: &mut HashMap<String, bool>,
     gossip_overlays: &HashMap<String, super::gossip::GossipOverlay>,
     local_peer_str: &str,
+    device_peer_id: &str,
     event_tx: &mpsc::Sender<NetworkEvent>,
 ) {
     hollow_log!("[HOLLOW-VC] Leave voice channel {channel_id} in server {server_id}");
@@ -706,10 +711,12 @@ pub(crate) async fn handle_voice_channel_leave(
         mls, ws_cmd_tx, ws_room_peers, server_states, crypto_store,
         &server_id, local_peer_str, &envelope, &plain,
     );
-    // Untrack participant.
+    // Untrack participant (self entry is DEVICE-keyed; the master remove is a
+    // belt against any legacy master-form entry surviving in RAM).
     let vc_key = format!("{}:{}", server_id, channel_id);
     if let Some(participants) = voice_channel_participants.get_mut(&vc_key) {
-        participants.remove(&local_peer_str.to_string());
+        participants.remove(device_peer_id);
+        participants.remove(local_peer_str);
         if participants.is_empty() {
             voice_channel_participants.remove(&vc_key);
             voice_channel_gossip_mode.remove(&vc_key);
@@ -717,13 +724,13 @@ pub(crate) async fn handle_voice_channel_leave(
     }
     let _ = event_tx.send(NetworkEvent::VoiceChannelLeft {
         server_id: server_id.clone(), channel_id: channel_id.clone(),
-        peer_id: local_peer_str.to_string(),
+        peer_id: device_peer_id.to_string(), is_self: true,
     }).await;
     // Check for mode transition.
     check_voice_mode_transition(
         &vc_key, &server_id, &channel_id,
         voice_channel_participants, voice_channel_gossip_mode,
-        gossip_overlays, local_peer_str, event_tx,
+        gossip_overlays, device_peer_id, event_tx,
     ).await;
 }
 
@@ -748,15 +755,18 @@ pub(crate) async fn auto_leave_invisible_voice_channels(
     voice_channel_gossip_mode: &mut HashMap<String, bool>,
     gossip_overlays: &HashMap<String, super::gossip::GossipOverlay>,
     local_peer_str: &str,
+    device_peer_id: &str,
     server_id: &str,
     event_tx: &mpsc::Sender<NetworkEvent>,
 ) {
     // Which voice channels of THIS server are we currently a participant in?
+    // Our self-entry is DEVICE-keyed (master accepted as a legacy belt).
     let prefix = format!("{server_id}:");
     let leaving: Vec<String> = voice_channel_participants
         .iter()
         .filter(|(vc_key, members)| {
-            vc_key.starts_with(&prefix) && members.contains(local_peer_str)
+            vc_key.starts_with(&prefix)
+                && (members.contains(device_peer_id) || members.contains(local_peer_str))
         })
         .filter_map(|(vc_key, _)| vc_key.strip_prefix(&prefix).map(|c| c.to_string()))
         .filter(|cid| {
@@ -778,7 +788,7 @@ pub(crate) async fn auto_leave_invisible_voice_channels(
             mls, ws_cmd_tx, ws_room_peers,
             server_states, bundle_keypair, crypto_store,
             voice_channel_participants, voice_channel_gossip_mode,
-            gossip_overlays, local_peer_str, event_tx,
+            gossip_overlays, local_peer_str, device_peer_id, event_tx,
         ).await;
     }
 }
@@ -799,8 +809,18 @@ pub(crate) async fn handle_voice_channel_send_signal(
     server_states: &HashMap<String, ServerState>,
     bundle_keypair: &NativeKeypair,
     local_peer_str: &str,
+    device_peer_id: &str,
     event_tx: &mpsc::Sender<NetworkEvent>,
 ) {
+    // BELT: a targeted VC signal aimed at OURSELVES (either id form) is always
+    // an upstream bug — encrypting to our own id can never succeed ("No
+    // session" storms) and a master-form target is never routable. Drop loudly
+    // instead of flooding MessageSendFailed per trickled ICE candidate.
+    // Sibling devices have DISTINCT device ids, so this never blocks them.
+    if peer_id == local_peer_str || peer_id == device_peer_id {
+        hollow_log!("[HOLLOW-VC] DROPPED self-targeted {signal_type} for vc {channel_id} (target={peer_id}) — upstream bug, not sending");
+        return;
+    }
     hollow_log!("[HOLLOW-VC] Send signal {signal_type} to {peer_id} in vc {channel_id}");
     let Some(envelope) = build_vc_signal_envelope(&signal_type, &server_id, &channel_id, &payload) else {
         return;
@@ -1077,7 +1097,9 @@ pub(crate) async fn check_voice_mode_transition(
     voice_channel_participants: &HashMap<String, std::collections::HashSet<String>>,
     voice_channel_gossip_mode: &mut HashMap<String, bool>,
     gossip_overlays: &HashMap<String, super::gossip::GossipOverlay>,
-    local_peer_str: &str,
+    // OUR routable DEVICE id — the participant set is device-keyed (self
+    // included), so self-exclusion from gossip neighbors must compare it.
+    local_device_str: &str,
     event_tx: &mpsc::Sender<NetworkEvent>,
 ) {
     let count = voice_channel_participants
@@ -1104,11 +1126,11 @@ pub(crate) async fn check_voice_mode_transition(
                 .cloned()
                 .unwrap_or_default();
             let gossip_neighbors = if let Some(overlay) = gossip_overlays.get(server_id) {
-                overlay.get_voice_gossip_neighbors(&participants, local_peer_str)
+                overlay.get_voice_gossip_neighbors(&participants, local_device_str)
             } else {
                 // No gossip overlay — fall back to first 12 participants.
                 participants.iter()
-                    .filter(|p| p.as_str() != local_peer_str)
+                    .filter(|p| p.as_str() != local_device_str)
                     .take(super::gossip::MAX_GOSSIP_NEIGHBORS)
                     .cloned()
                     .collect()
@@ -1188,11 +1210,14 @@ pub(crate) async fn handle_envelope_voice_channel_join(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     event_tx: &mpsc::Sender<NetworkEvent>,
     local_peer_str: &str,
+    device_peer_id: &str,
     sender_peer_id: String,
     sid: String,
     cid: String,
 ) {
-    if sender_peer_id == local_peer_str { return; }
+    // Self-echo guard: match BOTH our id forms (an echo carries our DEVICE id;
+    // the master compare alone would admit it as a remote participant).
+    if sender_peer_id == local_peer_str || sender_peer_id == device_peer_id { return; }
     // Conferences are virtual servers with no CRDT state: this envelope arrived
     // MLS-DECRYPTED under the `conf:{id}` group, so the sender provably holds
     // the group — that IS the membership check (admission = the MLS add). The
@@ -1230,7 +1255,7 @@ pub(crate) async fn handle_envelope_voice_channel_join(
     if super::conference::is_conference_sid(&sid)
         && voice_channel_participants
             .get(&vc_key)
-            .is_some_and(|p| p.contains(local_peer_str))
+            .is_some_and(|p| p.contains(device_peer_id) || p.contains(local_peer_str))
     {
         super::crypto_handler::send_message_to_peer_in_room(
             ws_cmd_tx, &sid, &sender_peer_id,
@@ -1243,12 +1268,12 @@ pub(crate) async fn handle_envelope_voice_channel_join(
         .insert(sender_peer_id.clone());
     let _ = event_tx.send(NetworkEvent::VoiceChannelJoined {
         server_id: sid.clone(), channel_id: cid.clone(),
-        peer_id: sender_peer_id,
+        peer_id: sender_peer_id, is_self: false,
     }).await;
     check_voice_mode_transition(
         &vc_key, &sid, &cid,
         voice_channel_participants, voice_channel_gossip_mode,
-        gossip_overlays, local_peer_str, event_tx,
+        gossip_overlays, device_peer_id, event_tx,
     ).await;
 }
 
@@ -1260,11 +1285,13 @@ pub(crate) async fn handle_envelope_voice_channel_leave(
     gossip_overlays: &HashMap<String, super::gossip::GossipOverlay>,
     event_tx: &mpsc::Sender<NetworkEvent>,
     local_peer_str: &str,
+    device_peer_id: &str,
     sender_peer_id: String,
     sid: String,
     cid: String,
 ) {
-    if sender_peer_id == local_peer_str { return; }
+    // Self-echo guard: both id forms (see the join twin).
+    if sender_peer_id == local_peer_str || sender_peer_id == device_peer_id { return; }
     hollow_log!("[HOLLOW-VC] {sender_peer_id} left voice channel {cid} in {sid}");
     let vc_key = format!("{sid}:{cid}");
     if let Some(participants) = voice_channel_participants.get_mut(&vc_key) {
@@ -1276,12 +1303,12 @@ pub(crate) async fn handle_envelope_voice_channel_leave(
     }
     let _ = event_tx.send(NetworkEvent::VoiceChannelLeft {
         server_id: sid.clone(), channel_id: cid.clone(),
-        peer_id: sender_peer_id,
+        peer_id: sender_peer_id, is_self: false,
     }).await;
     check_voice_mode_transition(
         &vc_key, &sid, &cid,
         voice_channel_participants, voice_channel_gossip_mode,
-        gossip_overlays, local_peer_str, event_tx,
+        gossip_overlays, device_peer_id, event_tx,
     ).await;
 }
 

@@ -456,6 +456,13 @@ class VoiceChannelService {
   /// Called when a remote peer joins our voice channel.
   /// Determines who should create the offer (glare prevention).
   Future<void> onPeerJoinedMyChannel(String peerId) async {
+    // BELT: never dial ourselves — a self id reaching here is an upstream
+    // participant-set bug (the self-ghost dialed our own master), and the
+    // dial can only mint dead PCs + "No session" storms.
+    if (peerId == localPeerId) {
+      _vcLog('[HOLLOW-VC] Ignoring self id in participant dial: $peerId');
+      return;
+    }
     // In gossip mode, only connect to gossip neighbors.
     if (gossipMode && !gossipNeighbors.contains(peerId)) {
       return; // Not a gossip neighbor — skip (audio forwarded via neighbors).

@@ -1969,15 +1969,22 @@ sealed class NetworkEvent with _$NetworkEvent {
     required String signalType,
     required String payload,
   }) = NetworkEvent_CallSignal;
+
+  /// `is_self` = our own join/leave, decided by the Rust handler that knows.
+  /// Dart branches on this flag — never on comparing peer_id to a local id
+  /// (peer_id is the ROUTABLE DEVICE id; id-form guessing caused the
+  /// self-ghost dial bug).
   const factory NetworkEvent.voiceChannelJoined({
     required String serverId,
     required String channelId,
     required String peerId,
+    required bool isSelf,
   }) = NetworkEvent_VoiceChannelJoined;
   const factory NetworkEvent.voiceChannelLeft({
     required String serverId,
     required String channelId,
     required String peerId,
+    required bool isSelf,
   }) = NetworkEvent_VoiceChannelLeft;
   const factory NetworkEvent.voiceChannelSignal({
     required String serverId,

@@ -1378,15 +1378,17 @@ class EventStreamNotifier extends Notifier<bool> {
 
       // -- Voice channel events (Phase 5C) --
       case NetworkEvent_VoiceChannelJoined(
-            :final serverId, :final channelId, :final peerId):
+            :final serverId, :final channelId, :final peerId, :final isSelf):
         final vcNotifier = ref.read(voiceChannelProvider.notifier);
         vcNotifier.onPeerJoined(serverId, channelId, peerId);
-        final localPeerId = ref.read(identityProvider).peerId ?? '';
         // Conferences are virtual servers ('conf:...') with no channel list —
         // their call renders in the Conferences tab, so never touch the
         // selected-channel providers for them.
         final isConferenceJoin = serverId.startsWith('conf:');
-        if (peerId == localPeerId) {
+        // Self vs remote comes from RUST (the emitting handler knows) — never
+        // from comparing peerId to a local id: the id is the ROUTABLE DEVICE
+        // form and every local id-form guess here has self-dialed (self-ghost).
+        if (isSelf) {
           if (!isConferenceJoin) {
             // Cache the currently selected channel so we can restore it on leave.
             vcNotifier.preVcChannelId = ref.read(selectedChannelProvider);
@@ -1406,11 +1408,10 @@ class EventStreamNotifier extends Notifier<bool> {
         }
 
       case NetworkEvent_VoiceChannelLeft(
-            :final serverId, :final channelId, :final peerId):
+            :final serverId, :final channelId, :final peerId, :final isSelf):
         final vcNotifier = ref.read(voiceChannelProvider.notifier);
         vcNotifier.onPeerLeft(serverId, channelId, peerId);
-        final localPeerId = ref.read(identityProvider).peerId ?? '';
-        if (peerId == localPeerId) {
+        if (isSelf) {
           // Restore the channel that was selected before joining the VC.
           // Fall back to first text channel if the cached one is gone.
           // Conference leaves never touched channel selection on join, so

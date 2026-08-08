@@ -679,7 +679,13 @@ fn try_decrypt_dm(
     // over the master, so the two are distinct on a linked device.
     local_master: &str,
 ) -> Option<FetchedDm> {
-    let haven: HavenMessage = serde_json::from_str(data).ok()?;
+    let haven: HavenMessage = match serde_json::from_str(data) {
+        Ok(h) => h,
+        Err(e) => {
+            hollow_log!("[HOLLOW-FETCH] Buffered DM frame from {from} ({} B) failed HavenMessage parse — dropped: {e}", data.len());
+            return None;
+        }
+    };
 
     // DEFENSE: never process an envelope from OUR OWN identity (a sibling
     // self-echo). This inserter hardcodes `is_mine=false` and files under
@@ -713,7 +719,13 @@ fn try_decrypt_dm(
             body,
             identity_key,
         } => {
-            let ciphertext = OlmManager::decode_base64(&body).ok()?;
+            let ciphertext = match OlmManager::decode_base64(&body) {
+                Ok(b) => b,
+                Err(e) => {
+                    hollow_log!("[HOLLOW-FETCH] Encrypted body from {from}: base64 decode failed — dropped: {e}");
+                    return None;
+                }
+            };
 
             let plaintext = olm_decrypt_payload(
                 from, message_type, identity_key.as_deref(), &ciphertext, olm, crypto_store,
@@ -737,7 +749,11 @@ fn try_decrypt_dm(
                 Ok(MessageEnvelope::FileHeader { inner }) => {
                     handle_file_header(&convo, local_master, *inner, db_path, db_passphrase)
                 }
-                _ => None, // Other envelope types — ignore in fetch mode.
+                Err(e) => {
+                    hollow_log!("[HOLLOW-FETCH] Decrypted envelope from {from} failed MessageEnvelope parse ({} B) — dropped: {e}", text.len());
+                    None
+                }
+                Ok(_) => None, // Other envelope types — ignore in fetch mode.
             }
         }
         _ => None,
@@ -756,11 +772,18 @@ fn olm_decrypt_payload(
 ) -> Option<Vec<u8>> {
     if message_type == 0 {
         // PreKeyMessage
-        let their_identity = identity_key?;
+        let their_identity = match identity_key {
+            Some(k) => k,
+            None => {
+                hollow_log!("[HOLLOW-FETCH] PreKey from {from} missing identity_key — dropped");
+                return None;
+            }
+        };
         if olm.has_session(from) {
             match olm.try_decrypt_prekey_with_existing(from, ciphertext) {
                 Ok(pt) => Some(pt),
-                Err(_) => {
+                Err(e) => {
+                    hollow_log!("[HOLLOW-FETCH] PreKey from {from} undecryptable with existing session ({e}) — rebuilding inbound session");
                     olm.remove_session(from);
                     create_inbound_prekey_session(from, their_identity, ciphertext, olm, crypto_store)
                 }

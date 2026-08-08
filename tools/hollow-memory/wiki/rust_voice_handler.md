@@ -90,16 +90,16 @@ Incoming path: All incoming Call* HavenMessages are processed directly in `swarm
 
 ## handle_voice_channel_join()
 
-`voice_handler.rs:handle_voice_channel_join(server_id, channel_id, mls, ws_cmd_tx, ws_room_peers, server_states, bundle_keypair, voice_channel_participants, voice_channel_gossip_mode, gossip_overlays, local_peer_str, event_tx)`
+`voice_handler.rs:handle_voice_channel_join(server_id, channel_id, mls, ws_cmd_tx, ws_room_peers, server_states, bundle_keypair, voice_channel_participants, voice_channel_gossip_mode, gossip_overlays, mls_epoch_hint_cooldown, local_peer_str, device_peer_id, event_tx)`
 
 Called when the local user joins a server voice channel (`NodeCommand::VoiceChannelJoin`).
 
 Steps:
 0. **Restricted-channel guard (Phase 2 subgroups):** if `server.channel_uses_subgroup(channel_id)` (restricted, non-public), REJECT the join when `!can_see_channel(local_peer)` — return before announcing or touching SFrame. A modified client can't join a channel its role can't see.
 1. **Always-plaintext broadcast (MLS + plaintext simultaneously):** Constructs `MessageEnvelope::VoiceChannelJoin { sid, cid }` and sends MLS broadcast if available, PLUS always sends plaintext `HavenMessage::VoiceChannelJoin` to each reachable server member regardless of MLS success. Both paths fire unconditionally — MLS provides forward secrecy, plaintext ensures delivery survives stale MLS epochs. Receivers deduplicate via `HashSet::insert` (idempotent) and `_peerConnections.containsKey` guard.
-2. **Track participant locally:** Adds own peer ID to `voice_channel_participants["{server_id}:{channel_id}"]` (HashMap<String, HashSet<String>>).
+2. **Track participant locally:** Adds our **DEVICE peer id** (`device_peer_id`, NOT the master) to `voice_channel_participants["{server_id}:{channel_id}"]` (HashMap<String, HashSet<String>>) — SELF is keyed exactly like every remote entry (self-ghost fix 2026-08-07; see memory `feedback_vc_self_ghost_device_keyed_self`).
 3. **Emit SFrame key:** the group key is the channel's SUBGROUP (`subgroup_id(server, channel)`) when restricted, else the bare `server_id`. Emits `NetworkEvent::MlsEpochChanged { server_id, epoch, sframe_key, channel_id }` (channel_id = `Some(cid)` for a restricted channel so Dart routes the key to that channel's cryptor). If restricted but we don't hold the subgroup yet (just promoted / just joined), calls `crypto_handler::request_subgroup_bootstrap` — the resulting Welcome → MlsEpochChanged delivers the key. NEVER falls back to the server-group key for a restricted channel. If NON-restricted and the SERVER group is missing (0.8.6): calls `crypto_handler::request_server_group_bootstrap` (owner-targeted KeyPackage) — joining a VC keyless while peers encrypt would play their audio as ciphertext.
-4. **Emit local event:** Sends `NetworkEvent::VoiceChannelJoined { server_id, channel_id, peer_id }` so the local UI updates immediately (own join is not received back from the network).
+4. **Emit local event:** Sends `NetworkEvent::VoiceChannelJoined { server_id, channel_id, peer_id: device_peer_id, is_self: true }` so the local UI updates immediately (own join is not received back from the network). `is_self` is set by the emitting handler, which knows for certain — Dart's event_provider branches on the FLAG, never on comparing peer_id to a local id (every id-form guess there has produced a self-dial bug).
 5. **Check mode transition:** Calls `check_voice_mode_transition()` to evaluate mesh/gossip threshold.
 
 The `vc_key` format throughout the module is `"{server_id}:{channel_id}"`.
@@ -107,6 +107,8 @@ The `vc_key` format throughout the module is `"{server_id}:{channel_id}"`.
 **`auto_leave_invisible_voice_channels()`** — after a role/visibility/kick/ban CRDT op applies, leaves any voice channel the local node is in but can no longer SEE (`!can_see_channel`, or no longer a member). Runs the normal `handle_voice_channel_leave` teardown. Invoked from BOTH the plaintext `CrdtOpBroadcast` apply path AND the MLS `CrdtOp` apply path in swarm.rs (the MLS path usually wins the apply race and previously ran no reconcile/auto-leave).
 
 **MLS-path VC handlers key on the routable WS sender, not the MLS leaf credential.** In the swarm.rs MLS envelope dispatch, all `VoiceChannel*` handlers receive `peer_str.to_string()` (the relay-reported sender), NOT `sender_peer_id` (the MLS leaf credential). For a multi-device sender these differ; the leaf credential is not a live socket, so using it adds a phantom 2nd participant and makes SDP/ICE replies Olm-target an unreachable id. The plaintext VC path already uses the routable sender — matching it lets the participant Set dedup the two arrivals.
+
+**The participant set is device-keyed INCLUDING self (self-ghost fix, 2026-08-07).** Every self membership/exclusion compare uses `device_peer_id` (master kept only as a legacy belt): the Disconnected keep-only-self retain, the reconnect VC re-broadcast check, `auto_leave_invisible_voice_channels`, the conference reply-on-join check, and gossip-neighbor self-exclusion. Inbound join/leave self-echo guards match BOTH id forms. Regression: harness `vc_self_participant_is_device_keyed_no_self_dial` (runs device≠master seeds — the other VC tests use identical seeds and can't catch a mixup).
 
 ---
 
@@ -127,23 +129,25 @@ Group key resolution: conference sid → the sid itself; restricted channel → 
 
 ## handle_voice_channel_leave()
 
-`voice_handler.rs:handle_voice_channel_leave(server_id, channel_id, mls, ws_cmd_tx, ws_room_peers, server_states, bundle_keypair, voice_channel_participants, voice_channel_gossip_mode, gossip_overlays, local_peer_str, event_tx)`
+`voice_handler.rs:handle_voice_channel_leave(server_id, channel_id, mls, ws_cmd_tx, ws_room_peers, server_states, bundle_keypair, voice_channel_participants, voice_channel_gossip_mode, gossip_overlays, local_peer_str, device_peer_id, event_tx)`
 
 Called when the local user leaves a server voice channel (`NodeCommand::VoiceChannelLeave`).
 
 Steps:
 1. **Always-plaintext broadcast:** Same MLS + plaintext simultaneous pattern as join, using `MessageEnvelope::VoiceChannelLeave { sid, cid }`. Both paths fire unconditionally.
-2. **Untrack participant:** Removes own peer ID from the `voice_channel_participants` set for this vc_key. If the set becomes empty, removes the entire entry and also removes the vc_key from `voice_channel_gossip_mode`.
-3. **Emit local event:** `NetworkEvent::VoiceChannelLeft { server_id, channel_id, peer_id }`.
+2. **Untrack participant:** Removes our DEVICE id (and the master form, as a legacy belt) from the `voice_channel_participants` set for this vc_key. If the set becomes empty, removes the entire entry and also removes the vc_key from `voice_channel_gossip_mode`.
+3. **Emit local event:** `NetworkEvent::VoiceChannelLeft { server_id, channel_id, peer_id: device_peer_id, is_self: true }`.
 4. **Check mode transition:** Calls `check_voice_mode_transition()`.
 
 ---
 
 ## handle_voice_channel_send_signal()
 
-`voice_handler.rs:handle_voice_channel_send_signal(server_id, channel_id, peer_id, signal_type, payload, mls, olm, crypto_store, ws_cmd_tx, ws_room_peers, server_states, bundle_keypair, local_peer_str, event_tx)`
+`voice_handler.rs:handle_voice_channel_send_signal(server_id, channel_id, peer_id, signal_type, payload, mls, olm, crypto_store, ws_cmd_tx, ws_room_peers, server_states, bundle_keypair, local_peer_str, device_peer_id, event_tx)`
 
 Outbound handler for all voice channel signaling within server voice channels. Called from swarm.rs when Dart issues `NodeCommand::VoiceChannelSendSignal`. This is the most complex handler in the module because it supports 11 signal types and uses different delivery strategies depending on whether the signal is a broadcast or targeted.
+
+**Self-target belt (first check, 2026-08-07):** a `peer_id` matching EITHER of our own id forms (master or device) is dropped with a loud log before anything else — encrypting to ourselves can never succeed (it produced the "Encryption failed: No session" storms of the self-ghost bug, one per trickled ICE candidate) and a master-form target is never routable. Sibling devices have distinct device ids and are never blocked.
 
 ### Signal types and their MessageEnvelope variants
 
@@ -222,8 +226,8 @@ Evaluates whether a voice channel should switch between full-mesh and gossip-rel
 ### Mode transition behavior
 
 **Switching to gossip mode:**
-1. Queries the server's `GossipOverlay` for voice gossip neighbors via `overlay.get_voice_gossip_neighbors(participants, local_peer_str)`. This selects the best-scoring peers from the participant set up to `MAX_GOSSIP_NEIGHBORS` (12).
-2. If no gossip overlay exists, falls back to the first 12 non-self participants.
+1. Queries the server's `GossipOverlay` for voice gossip neighbors via `overlay.get_voice_gossip_neighbors(participants, local_device_str)`. This selects the best-scoring peers from the participant set up to `MAX_GOSSIP_NEIGHBORS` (12). Self-exclusion compares the DEVICE id — the participant set (self included) is device-keyed.
+2. If no gossip overlay exists, falls back to the first 12 non-self participants (same device-id exclusion).
 3. Emits `NetworkEvent::VoiceChannelModeChanged { server_id, channel_id, mode: "gossip", gossip_neighbors }` — Dart receives the neighbor list and adjusts which peers to maintain WebRTC connections with.
 
 **Switching to mesh mode:**
@@ -289,24 +293,24 @@ These handlers process `MessageEnvelope` variants that arrive via the MLS-encryp
 Processes a remote peer joining a voice channel via MLS.
 
 Security checks:
-1. Ignores if `sender_peer_id == local_peer_str` (own message echoed back)
+1. Ignores if the sender matches EITHER of our own id forms (`local_peer_str` OR `device_peer_id`) — an echo carries our DEVICE id, so the master compare alone would admit our own join as a remote participant
 2. Validates sender is a server member via `server_states[sid].members.contains_key(sender_peer_id)`. Blocks non-members with security log.
 3. Validates the target channel is a Voice type channel via `server_states[sid].channels[cid].channel_type == ChannelType::Voice`. Blocks non-voice channels with security log.
 
 If valid:
 1. Adds sender to `voice_channel_participants[vc_key]`
-2. Emits `NetworkEvent::VoiceChannelJoined { server_id, channel_id, peer_id }`
+2. Emits `NetworkEvent::VoiceChannelJoined { server_id, channel_id, peer_id, is_self: false }`
 3. Calls `check_voice_mode_transition()`
 
 ### handle_envelope_voice_channel_leave()
 
-`voice_handler.rs:handle_envelope_voice_channel_leave(voice_channel_participants, voice_channel_gossip_mode, gossip_overlays, event_tx, local_peer_str, sender_peer_id, sid, cid)`
+`voice_handler.rs:handle_envelope_voice_channel_leave(voice_channel_participants, voice_channel_gossip_mode, gossip_overlays, event_tx, local_peer_str, device_peer_id, sender_peer_id, sid, cid)`
 
 Processes a remote peer leaving a voice channel via MLS.
 
-1. Ignores if sender is self
+1. Ignores if sender is self (both id forms, same as the join twin)
 2. Removes sender from `voice_channel_participants[vc_key]`. If set becomes empty, removes the entry and clears gossip mode.
-3. Emits `NetworkEvent::VoiceChannelLeft { server_id, channel_id, peer_id }`
+3. Emits `NetworkEvent::VoiceChannelLeft { server_id, channel_id, peer_id, is_self: false }`
 4. Calls `check_voice_mode_transition()`
 
 Note: No server membership check on leave — if someone is in the participant set, they can leave. This avoids edge cases where a kicked member can't leave cleanly.
@@ -476,6 +480,22 @@ both sharer-side and via a viewer-side hard refusal. Key rules: register BEFORE 
 demote, never re-ladder; presence events never kill a branch whose MEDIA LEG is alive (relay
 ghost-eviction broadcasts spurious PeerLeft); branch ingest legs are INSIDE both SFrame re-key
 sweeps. `vc_screen_watch` gained `fwd_capable` + `relay_private` (`#[serde(default)]`).
+
+**Opportunistic rebalancer (2026-08-07, field-verified twice 2026-08-08):** watch ORDER no
+longer decides the topology. A fresh `route=direct fwd_capable` watch arriving while the VPS
+infra branch carries viewers promotes that watcher and migrates the branch's viewers onto the
+new peer branch (`_maybeRebalanceOntoCandidate` in voice_channel_provider.dart, hooked into
+`_handleScreenWatch`'s direct path) — one blink per migrated viewer, ≤3 legs, `relay_private`
+viewers stay on operator infra, per-viewer failed-forwarder memory honored, no chains.
+Migration is MAKE-BEFORE-BREAK: viewers leave the VPS branch LOCALLY only (no eager
+`fwd_stream_auth` removal — the VPS killing the old egress leg before the assign lands reads
+as a branch failure and would permanently fail-mark the fresh candidate); the viewer retires
+its own leg on assign receipt and the emptied branch's 30 s linger unregisters. Viewer-side
+fwd→fwd reassignment releases the OLD forwarder's room (stale fwd-room membership = the
+routing-blackhole shape; own room excluded — bridge-owned) and arms the shared 20 s no-show
+watchdog (`_armWatchNoShowTimer`). An honest `route=relay` probe from a direct-capable watcher
+(ICE race: TURN won nomination) correctly does NOT trigger it — the approved ICE
+detect-and-repair follow-up pair (report §7, 2026-08-08) closes that gap.
 
 **2026-08-07 hardening (field-verified same day):** the fwd control plane carries **NO rate
 limiter** — the per-peer token bucket (20/5) was REMOVED from both `forwarder/signaling.rs` and

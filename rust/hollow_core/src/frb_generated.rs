@@ -14704,20 +14704,24 @@ impl SseDecode for crate::api::network::NetworkEvent {
                 let mut var_serverId = <String>::sse_decode(deserializer);
                 let mut var_channelId = <String>::sse_decode(deserializer);
                 let mut var_peerId = <String>::sse_decode(deserializer);
+                let mut var_isSelf = <bool>::sse_decode(deserializer);
                 return crate::api::network::NetworkEvent::VoiceChannelJoined {
                     server_id: var_serverId,
                     channel_id: var_channelId,
                     peer_id: var_peerId,
+                    is_self: var_isSelf,
                 };
             }
             97 => {
                 let mut var_serverId = <String>::sse_decode(deserializer);
                 let mut var_channelId = <String>::sse_decode(deserializer);
                 let mut var_peerId = <String>::sse_decode(deserializer);
+                let mut var_isSelf = <bool>::sse_decode(deserializer);
                 return crate::api::network::NetworkEvent::VoiceChannelLeft {
                     server_id: var_serverId,
                     channel_id: var_channelId,
                     peer_id: var_peerId,
+                    is_self: var_isSelf,
                 };
             }
             98 => {
@@ -18767,22 +18771,26 @@ impl flutter_rust_bridge::IntoDart for crate::api::network::NetworkEvent {
                 server_id,
                 channel_id,
                 peer_id,
+                is_self,
             } => [
                 96.into_dart(),
                 server_id.into_into_dart().into_dart(),
                 channel_id.into_into_dart().into_dart(),
                 peer_id.into_into_dart().into_dart(),
+                is_self.into_into_dart().into_dart(),
             ]
             .into_dart(),
             crate::api::network::NetworkEvent::VoiceChannelLeft {
                 server_id,
                 channel_id,
                 peer_id,
+                is_self,
             } => [
                 97.into_dart(),
                 server_id.into_into_dart().into_dart(),
                 channel_id.into_into_dart().into_dart(),
                 peer_id.into_into_dart().into_dart(),
+                is_self.into_into_dart().into_dart(),
             ]
             .into_dart(),
             crate::api::network::NetworkEvent::VoiceChannelSignal {
@@ -21891,21 +21899,25 @@ impl SseEncode for crate::api::network::NetworkEvent {
                 server_id,
                 channel_id,
                 peer_id,
+                is_self,
             } => {
                 <i32>::sse_encode(96, serializer);
                 <String>::sse_encode(server_id, serializer);
                 <String>::sse_encode(channel_id, serializer);
                 <String>::sse_encode(peer_id, serializer);
+                <bool>::sse_encode(is_self, serializer);
             }
             crate::api::network::NetworkEvent::VoiceChannelLeft {
                 server_id,
                 channel_id,
                 peer_id,
+                is_self,
             } => {
                 <i32>::sse_encode(97, serializer);
                 <String>::sse_encode(server_id, serializer);
                 <String>::sse_encode(channel_id, serializer);
                 <String>::sse_encode(peer_id, serializer);
+                <bool>::sse_encode(is_self, serializer);
             }
             crate::api::network::NetworkEvent::VoiceChannelSignal {
                 server_id,

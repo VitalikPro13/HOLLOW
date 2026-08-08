@@ -352,8 +352,12 @@ pub enum NetworkEvent {
     /// Forward incoming voice call signaling message to Dart.
     CallSignal { peer_id: String, signal_type: String, payload: String },
     // -- Voice channel events (Phase 5C) --
-    VoiceChannelJoined { server_id: String, channel_id: String, peer_id: String },
-    VoiceChannelLeft { server_id: String, channel_id: String, peer_id: String },
+    /// `is_self` = our own join/leave, decided by the Rust handler that knows.
+    /// Dart branches on this flag — never on comparing peer_id to a local id
+    /// (peer_id is the ROUTABLE DEVICE id; id-form guessing caused the
+    /// self-ghost dial bug).
+    VoiceChannelJoined { server_id: String, channel_id: String, peer_id: String, is_self: bool },
+    VoiceChannelLeft { server_id: String, channel_id: String, peer_id: String, is_self: bool },
     VoiceChannelSignal { server_id: String, channel_id: String, peer_id: String, signal_type: String, payload: String },
     // -- Media forwarder events (media forwarding step 3) --
     /// Client-bound `fwd_*` signal from a media forwarder (`fwd_ingest_answer`
@@ -1157,11 +1161,11 @@ fn to_ffi_event(event: node::NetworkEvent) -> NetworkEvent {
             NetworkEvent::CallSignal { peer_id, signal_type, payload }
         }
         // -- Voice channel events (Phase 5C) --
-        node::NetworkEvent::VoiceChannelJoined { server_id, channel_id, peer_id } => {
-            NetworkEvent::VoiceChannelJoined { server_id, channel_id, peer_id }
+        node::NetworkEvent::VoiceChannelJoined { server_id, channel_id, peer_id, is_self } => {
+            NetworkEvent::VoiceChannelJoined { server_id, channel_id, peer_id, is_self }
         }
-        node::NetworkEvent::VoiceChannelLeft { server_id, channel_id, peer_id } => {
-            NetworkEvent::VoiceChannelLeft { server_id, channel_id, peer_id }
+        node::NetworkEvent::VoiceChannelLeft { server_id, channel_id, peer_id, is_self } => {
+            NetworkEvent::VoiceChannelLeft { server_id, channel_id, peer_id, is_self }
         }
         node::NetworkEvent::VoiceChannelSignal { server_id, channel_id, peer_id, signal_type, payload } => {
             NetworkEvent::VoiceChannelSignal { server_id, channel_id, peer_id, signal_type, payload }

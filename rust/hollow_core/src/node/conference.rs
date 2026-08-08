@@ -600,6 +600,7 @@ pub(crate) async fn handle_conf_room_peer_gone(
             server_id: room_code.to_string(),
             channel_id: CONF_CHANNEL.to_string(),
             peer_id: peer_id.to_string(),
+            is_self: false,
         }).await;
     }
 }

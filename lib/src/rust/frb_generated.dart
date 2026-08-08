@@ -14669,12 +14669,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           serverId: dco_decode_String(raw[1]),
           channelId: dco_decode_String(raw[2]),
           peerId: dco_decode_String(raw[3]),
+          isSelf: dco_decode_bool(raw[4]),
         );
       case 97:
         return NetworkEvent_VoiceChannelLeft(
           serverId: dco_decode_String(raw[1]),
           channelId: dco_decode_String(raw[2]),
           peerId: dco_decode_String(raw[3]),
+          isSelf: dco_decode_bool(raw[4]),
         );
       case 98:
         return NetworkEvent_VoiceChannelSignal(
@@ -17939,19 +17941,23 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         var var_serverId = sse_decode_String(deserializer);
         var var_channelId = sse_decode_String(deserializer);
         var var_peerId = sse_decode_String(deserializer);
+        var var_isSelf = sse_decode_bool(deserializer);
         return NetworkEvent_VoiceChannelJoined(
           serverId: var_serverId,
           channelId: var_channelId,
           peerId: var_peerId,
+          isSelf: var_isSelf,
         );
       case 97:
         var var_serverId = sse_decode_String(deserializer);
         var var_channelId = sse_decode_String(deserializer);
         var var_peerId = sse_decode_String(deserializer);
+        var var_isSelf = sse_decode_bool(deserializer);
         return NetworkEvent_VoiceChannelLeft(
           serverId: var_serverId,
           channelId: var_channelId,
           peerId: var_peerId,
+          isSelf: var_isSelf,
         );
       case 98:
         var var_serverId = sse_decode_String(deserializer);
@@ -21277,20 +21283,24 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         serverId: final serverId,
         channelId: final channelId,
         peerId: final peerId,
+        isSelf: final isSelf,
       ):
         sse_encode_i_32(96, serializer);
         sse_encode_String(serverId, serializer);
         sse_encode_String(channelId, serializer);
         sse_encode_String(peerId, serializer);
+        sse_encode_bool(isSelf, serializer);
       case NetworkEvent_VoiceChannelLeft(
         serverId: final serverId,
         channelId: final channelId,
         peerId: final peerId,
+        isSelf: final isSelf,
       ):
         sse_encode_i_32(97, serializer);
         sse_encode_String(serverId, serializer);
         sse_encode_String(channelId, serializer);
         sse_encode_String(peerId, serializer);
+        sse_encode_bool(isSelf, serializer);
       case NetworkEvent_VoiceChannelSignal(
         serverId: final serverId,
         channelId: final channelId,

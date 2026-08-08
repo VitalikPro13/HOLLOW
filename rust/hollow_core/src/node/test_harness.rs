@@ -3197,6 +3197,177 @@ async fn voice_channel_join_leave_and_signal_routing() {
 }
 
 // ---------------------------------------------------------------------------
+// Ring-2 CONTROL PLANE: the self-ghost regression (2026-08). The VC participant
+// set is keyed by ROUTABLE DEVICE ids — including OUR OWN entry. The bug: the
+// own-join path inserted/emitted the MASTER id while Dart's self-skip compared
+// the DEVICE id, so both ends dialed their own master as a remote participant
+// ("Creating offer for peer <own master>" + endless "No session" storms). This
+// test runs nodes whose device id genuinely differs from the master (the other
+// VC tests use master==device seeds and can never catch the mixup) and pins:
+// own join/leave events carry the DEVICE id + is_self=true, the remote view is
+// device-keyed with is_self=false, and a self-targeted VC signal is dropped
+// BEFORE Olm (no MessageSendFailed storm).
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
+async fn vc_self_participant_is_device_keyed_no_self_dial() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    const O_MASTER: u8 = 112;
+    const O_DEVICE: u8 = 113;
+    const J_MASTER: u8 = 122;
+    const J_DEVICE: u8 = 123;
+    let o_master = NativeKeypair::from_secret_bytes(&seed_bytes(O_MASTER)).peer_id();
+    let j_master = NativeKeypair::from_secret_bytes(&seed_bytes(J_MASTER)).peer_id();
+
+    let mut o = spawn_node_with_friends(&relay, O_MASTER, O_DEVICE, &[&j_master]).await;
+    sleep_ms(1200).await;
+    let mut j = spawn_node_with_friends(&relay, J_MASTER, J_DEVICE, &[&o_master]).await;
+    sleep_ms(4000).await; // Olm confirm (targeted VC signals ride Olm)
+    assert_ne!(j.device_id, j.master_id, "test precondition: device != master");
+
+    let server_id = create_server_and_wait(&mut o, "Ghost Server").await;
+    o.cmd_tx
+        .send(NodeCommand::CreateChannel {
+            server_id: server_id.clone(),
+            name: "Voice".to_string(),
+            category: None,
+            channel_type: "voice".to_string(),
+        })
+        .await
+        .unwrap();
+    let mut voice_cid = None;
+    let made = wait_event(&mut o, std::time::Duration::from_secs(3), |ev| {
+        if let NetworkEvent::ChannelAdded { channel_id, channel_type, .. } = ev {
+            if channel_type == "voice" {
+                voice_cid = Some(channel_id.clone());
+                return true;
+            }
+        }
+        false
+    })
+    .await;
+    assert!(made, "owner should create a voice channel");
+    let voice_cid = voice_cid.expect("voice channel id");
+    sleep_ms(300).await;
+
+    j.cmd_tx
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
+        .await
+        .unwrap();
+    let joined = wait_event(&mut j, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
+    })
+    .await;
+    assert!(joined, "joiner should join the server");
+    sleep_ms(1500).await;
+    drain_events(&mut o);
+    drain_events(&mut j);
+
+    // --- J joins: its OWN event must carry the DEVICE id and is_self=true. ---
+    j.cmd_tx
+        .send(NodeCommand::VoiceChannelJoin {
+            server_id: server_id.clone(),
+            channel_id: voice_cid.clone(),
+        })
+        .await
+        .unwrap();
+    let mut own_peer = None;
+    let mut own_is_self = None;
+    let j_own = wait_event(&mut j, std::time::Duration::from_secs(4), |ev| {
+        if let NetworkEvent::VoiceChannelJoined { channel_id, peer_id, is_self, .. } = ev {
+            if *channel_id == voice_cid {
+                own_peer = Some(peer_id.clone());
+                own_is_self = Some(*is_self);
+                return true;
+            }
+        }
+        false
+    })
+    .await;
+    assert!(j_own, "joiner must see its own VoiceChannelJoined");
+    assert_eq!(own_peer.as_deref(), Some(j.device_id.as_str()),
+        "own join must carry the ROUTABLE DEVICE id, never the master (self-ghost)");
+    assert_eq!(own_is_self, Some(true), "own join must be flagged is_self");
+
+    // --- O's view of J's join is device-keyed and NOT flagged self. ---
+    let mut remote_peer = None;
+    let mut remote_is_self = None;
+    let o_saw = wait_event(&mut o, std::time::Duration::from_secs(4), |ev| {
+        if let NetworkEvent::VoiceChannelJoined { channel_id, peer_id, is_self, .. } = ev {
+            if *channel_id == voice_cid {
+                remote_peer = Some(peer_id.clone());
+                remote_is_self = Some(*is_self);
+                return true;
+            }
+        }
+        false
+    })
+    .await;
+    assert!(o_saw, "owner must see the joiner enter the voice channel");
+    assert_eq!(remote_peer.as_deref(), Some(j.device_id.as_str()),
+        "remote join must be keyed by the sender's DEVICE id");
+    assert_eq!(remote_is_self, Some(false), "remote join must not be flagged self");
+
+    // --- Self-targeted VC signal belt: dropped BEFORE Olm, no failure storm. ---
+    drain_events(&mut j);
+    j.cmd_tx
+        .send(NodeCommand::VoiceChannelSendSignal {
+            server_id: server_id.clone(),
+            channel_id: voice_cid.clone(),
+            peer_id: j_master.clone(), // our OWN master — the ghost's exact shape
+            signal_type: "screen_watch".to_string(),
+            payload: serde_json::json!({"want": true}).to_string(),
+        })
+        .await
+        .unwrap();
+    let storm = wait_event(&mut j, std::time::Duration::from_millis(1000), |ev| {
+        matches!(ev, NetworkEvent::MessageSendFailed { .. })
+    })
+    .await;
+    assert!(!storm, "a self-targeted VC signal must be dropped before Olm (no MessageSendFailed)");
+
+    // --- J leaves: own event device-keyed + is_self; O sees the device id. ---
+    drain_events(&mut o);
+    drain_events(&mut j);
+    j.cmd_tx
+        .send(NodeCommand::VoiceChannelLeave {
+            server_id: server_id.clone(),
+            channel_id: voice_cid.clone(),
+        })
+        .await
+        .unwrap();
+    let mut left_peer = None;
+    let mut left_is_self = None;
+    let j_left = wait_event(&mut j, std::time::Duration::from_secs(4), |ev| {
+        if let NetworkEvent::VoiceChannelLeft { channel_id, peer_id, is_self, .. } = ev {
+            if *channel_id == voice_cid {
+                left_peer = Some(peer_id.clone());
+                left_is_self = Some(*is_self);
+                return true;
+            }
+        }
+        false
+    })
+    .await;
+    assert!(j_left, "joiner must see its own VoiceChannelLeft");
+    assert_eq!(left_peer.as_deref(), Some(j.device_id.as_str()),
+        "own leave must carry the DEVICE id");
+    assert_eq!(left_is_self, Some(true), "own leave must be flagged is_self");
+    let o_saw_leave = wait_event(&mut o, std::time::Duration::from_secs(4), |ev| {
+        matches!(ev, NetworkEvent::VoiceChannelLeft { channel_id, peer_id, .. }
+            if *channel_id == voice_cid && *peer_id == j.device_id)
+    })
+    .await;
+    assert!(o_saw_leave, "owner must see the joiner leave, keyed by its device id");
+}
+
+// ---------------------------------------------------------------------------
 // Ring-2 CONTROL PLANE: media forwarding step 2 — originator attribution on the
 // VC screen lane. vc_screen_offer/answer/ice carry an optional StreamOrigin
 // (who the stream is FROM vs who DELIVERED it); receivers get it verbatim in
