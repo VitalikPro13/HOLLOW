@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use str0m::format::CodecSpec;
-use str0m::media::Pt;
+use str0m::media::{Pt, Rid};
 use str0m::rtp::RtpPacket;
 use tokio::sync::{broadcast, mpsc};
 
@@ -18,6 +18,13 @@ use crate::hollow_log;
 use crate::node::types::StreamOrigin;
 
 use super::leg::LegCmd;
+
+/// One fanned-out packet: the ingest pump resolves each packet's simulcast
+/// layer (rid) ONCE — from str0m's SSRC↔rid mapping, which outlives the RID
+/// header extension the sender stops emitting after RTCP establishes the
+/// SSRC — so egress legs can select layers without re-deriving it. `None` =
+/// non-simulcast source (every old sharer).
+pub(crate) type FanPkt = (Arc<RtpPacket>, Option<Rid>);
 
 /// Streams key on the full origin triple — `(peer, kind, stream)` — never on
 /// "originator is in the viewer mesh" (conference broadcast, locked decision 7).
@@ -30,9 +37,11 @@ pub(crate) fn stream_key(o: &StreamOrigin) -> StreamKey {
 /// The shared fabric between a stream's legs (spike `Wiring`, per-stream now).
 pub(crate) struct StreamWiring {
     /// ingest -> every egress leg (spike-proven capacity 512).
-    pub fanout_tx: broadcast::Sender<Arc<RtpPacket>>,
-    /// egress -> PLI aggregation task.
-    pub kf_tx: mpsc::UnboundedSender<()>,
+    pub fanout_tx: broadcast::Sender<FanPkt>,
+    /// egress -> PLI aggregation task. `Some(rid)` targets one simulcast
+    /// layer's source; `None` = layer unknown → the ingest requests on every
+    /// source it has seen (safe: the aggregator coalesces to ≤1/s per layer).
+    pub kf_tx: mpsc::UnboundedSender<Option<Rid>>,
     /// The ingest leg's negotiated payload types: (pt, codec, clock_rate).
     /// Egress legs translate each packet's PT to their own numbering.
     pub ingest_params: std::sync::Mutex<Vec<(Pt, CodecSpec)>>,
@@ -69,6 +78,10 @@ pub(crate) struct StreamState {
     /// origin evolution.
     pub owner: String,
     pub allowlist: HashSet<String>,
+    /// Simulcast (phase 3): viewers the sharer wants on the LOW layer
+    /// (rid "q"). Applied when a viewer's egress leg spawns — a later
+    /// register refresh changes FUTURE attaches only.
+    pub low_viewers: HashSet<String>,
     pub ingest: Option<LegHandle>,
     /// viewer peer_id -> egress leg.
     pub egress: HashMap<String, LegHandle>,
@@ -91,8 +104,8 @@ impl StreamState {
     /// task: egress keyframe requests are deduped to at most one PLI per
     /// second upstream (spike-proven interval).
     pub(crate) fn new(origin: StreamOrigin, owner: String, allowlist: HashSet<String>) -> Self {
-        let (fanout_tx, _) = broadcast::channel::<Arc<RtpPacket>>(512);
-        let (kf_tx, mut kf_rx) = mpsc::unbounded_channel::<()>();
+        let (fanout_tx, _) = broadcast::channel::<FanPkt>(512);
+        let (kf_tx, mut kf_rx) = mpsc::unbounded_channel::<Option<Rid>>();
         let wiring = Arc::new(StreamWiring {
             fanout_tx,
             kf_tx,
@@ -106,25 +119,38 @@ impl StreamState {
             tokio::spawn(async move {
                 const MIN_INTERVAL: Duration = Duration::from_secs(1);
                 let mut last: Option<Instant> = None;
-                while kf_rx.recv().await.is_some() {
+                while let Some(first) = kf_rx.recv().await {
                     // COALESCE, never drop. Rate limiting upstream matters (k
                     // viewers must not become k PLIs), but discarding a request
                     // inside the window can discard the ONLY one that mattered
                     // and leave a viewer black until the encoder happens to
                     // emit a keyframe — minutes, for screen content. So wait
                     // out the remainder instead, then collapse everything that
-                    // piled up into one request.
+                    // piled up into one request PER LAYER (simulcast layers
+                    // are independent encoders — a low-layer keyframe does
+                    // nothing for a full-layer viewer).
                     if let Some(l) = last {
                         let elapsed = l.elapsed();
                         if elapsed < MIN_INTERVAL {
                             tokio::time::sleep(MIN_INTERVAL - elapsed).await;
                         }
                     }
-                    while kf_rx.try_recv().is_ok() {}
+                    let mut rids: Vec<Option<Rid>> = vec![first];
+                    while let Ok(r) = kf_rx.try_recv() {
+                        if !rids.contains(&r) {
+                            rids.push(r);
+                        }
+                    }
+                    // A layer-less request already covers every source.
+                    if rids.contains(&None) {
+                        rids = vec![None];
+                    }
                     last = Some(Instant::now());
                     match ingest_cmd.lock().await.as_ref() {
                         Some(tx) => {
-                            let _ = tx.send(LegCmd::RequestKeyframe);
+                            for rid in rids {
+                                let _ = tx.send(LegCmd::RequestKeyframe(rid));
+                            }
                         }
                         None => hollow_log!(
                             "[HOLLOW-FWD] keyframe request dropped — no ingest leg on this stream"
@@ -138,6 +164,7 @@ impl StreamState {
             origin,
             owner,
             allowlist,
+            low_viewers: HashSet::new(),
             ingest: None,
             egress: HashMap::new(),
             wiring,

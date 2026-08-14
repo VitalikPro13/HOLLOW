@@ -1,6 +1,36 @@
 # Media Forwarding Plan — Resolution Capping, Originator Attribution, SFrame Packet Forwarders
 
-**STATUS 2026-08-07: STEP 3 PHASE 2 FIELD-VERIFIED COMPLETE — ALL FOUR RUNS PASSED** (peer
+**STATUS 2026-08-08: PHASE 3 IMPLEMENTED (all three stages) — field verification = the
+remaining gate, then the epic closes.** (1) The Windows live-`setParameters` rejection is
+ROOT-CAUSED with source-level proof and FIXED in the plugin (no DLL rebuild): the
+native→Dart parameters map materialized unset optionals (`scalabilityMode` "" / `ssrc` 0 /
+bitrates 0), Dart round-tripped them non-null, and the write-back turned nullopt into
+Some("")/Some(0) — `CheckRtpParametersInvalidModificationAndValues` then rejects the WHOLE
+call (INVALID_MODIFICATION). This also explains the pre-2026-07-19 "returned true but did
+nothing" era: the missing `set_encodings` write-back DISCARDED the poisoned copies. (2)
+Simulcast: forwarder ingest legs now offer TWO rid layers (`q` low-first/protected +
+`f` = branch cap; VP8-constrained), str0m inverts the simulcast attrs in its answer,
+the engine tags each packet's layer at ingest and each egress leg packet-SELECTS its
+layer (sharer's `low_viewers` on the register; per-layer PLI; seamless VP8 switch with
+seq/ts/PictureID/TL0PICIDX/KEYIDX rewrite via str0m's `Vp8Patch`; dry-layer fallback +
+upgrade-home hysteresis; rid-less old-sharer streams pass through byte-identical). Old
+peer forwarders are protected by a new `fwd_simulcast` watch flag — no flag, no simulcast
+ingest. (3) Upload spreading: direct step-3-capable viewers past `maxDirectShareCopies`
+(=1) are served through branches (peer branch w/ capacity → promote a fwd-capable direct
+watcher, preferring one whose direct copy then closes, then the viewer ITSELF
+(self-promotion) → an ALREADY-SERVING VPS branch only — never a fresh VPS branch for a
+STUN viewer) — the "1-2 copies total" target; the 15-cap is now effectively dynamic.
+Deferred from phase 3 (own session): feeder election (a peer branch feeding the VPS
+forwarder's ingest — needs a new owner-delegated admission rule on the engine, security
+surface). See the 2026-08-08 §7 entry for the field checklist. **DEPLOY ORDER: the VPS
+`hollow-forwarder` binary must be redeployed BEFORE any client with this build shares —
+the sharer assumes the infra forwarder is simulcast-capable. (DONE 2026-08-14 — new
+engine live on the VPS, same identity, `.prev` kept.)** ALL remaining follow-ups are
+gathered into the **§9 next-session worklist** (parallel healing, Source-quality branch
+gating, ICE repair pair, chatter suppression, ghost-eviction suppression, feeder
+election) — plus the condensed 3-run field pass that gates it.
+
+Previous status (2026-08-07): STEP 3 PHASE 2 FIELD-VERIFIED COMPLETE — ALL FOUR RUNS PASSED (peer
 rung + kill ladder, VPS rung, demotion, k=2 measurement + relay_private privacy gate + TURN
 baseline; §7 top entry has each run's evidence). The vanished-frame defect is FIXED and
 root-cause-confirmed (the removed fwd control-plane token bucket ate the last-in-burst large
@@ -279,6 +309,165 @@ policy: assign direct viewers to branches past an upload threshold. That is what
 attribution, engine) already exists — phase 3 is simulcast + policy, no new transport.
 
 ## 7. Status log
+
+**2026-08-14 (later) — §9 FIELD PASS COMPLETE: RUNS A (×2), B, AND C ALL PASSED — PHASE 3
+IS FIELD-VERIFIED AND THE EPIC'S BUILD PHASE IS CLOSED.** The re-run of A bonus-covered
+the VPS rung WITH simulcast (VPS journal: both layers rid-mapped, egress serving 'f',
+clean close `20521 pkts in`, engine to 0 streams) and — via an ICE-raced `route=relay`
+first watch — the opportunistic REBALANCER with simulcast (`promoting … — migrating 1/1
+viewer(s) off the VPS branch`, make-before-break confirmed at the VPS: viewer-retired
+egress + linger unregister + the host's fwd-room routing purge). **RUN C:** Source toggle
+→ `Viewer-driven cap update -> 1920x1080` → `setParameters … accepted` → readback scale
+1.31→1.0 → `Encoded output: 1920x1080 … CAP APPLIED` — live encoding change on Windows,
+zero renegotiation, even landing in the mid-negotiation window that used to hard-fail.
+**RUN B (the last unchecked path):** VM1 re-probed `route=direct` after a VC
+leave/rejoin → direct offer (the one copy); VM2's direct watch then logged `Upload
+spreading: direct viewer <VM2> → <VM1> (1 direct copy running)` → `Promoted <VM1> …
+(simulcast)` → `Closing screen share service` (the copy-holder's direct PC closed) →
+SFrame drop+re-enable on the ingest → LAN ingest connected in 2 s: sharer at ONE ingest,
+ZERO direct copies. Twice during the session a VM's VirtualBox networking went one-way
+deaf (~116 s, the known two-bridged-VMs lab artifact) — the ladder + WS reconnect
+recovered both times, which doubles as unplanned resilience coverage. The dry-layer
+upgrade bug from run A #1 did not recur (fix compiled in, not re-exercised — watch for
+`returning to layer 'f'` without f flowing in future sessions). **The fixed forwarder
+binary is REDEPLOYED to the VPS (same identity, `.prev` kept). Remaining: commit, then
+the §9 worklist session.**
+
+**2026-08-14 — RUN A (of the §9 field pass): PASS on all vantage points, one bug found
+and FIXED same day.** Evidence, all four logs audited: (1) *Stage 1 live on Windows:*
+`setParameters(cap 1465x826@60fps) -> accepted` + params readback on BOTH the direct PC
+and the 2-encoding ingest leg (readback shows both layers: `scale=2.62 maxBr=1500000 |
+scale=1.31 maxBr=6000000`) — the rejection era is over. (2) *Simulcast end-to-end:*
+`Promoted … (simulcast)` → `Creating offer … simulcast f+q` → f 1465x826@1500-6000kbps +
+q 732x413@500-1500kbps → `Codec preference: video/VP8 > …` → VM1's engine mapped BOTH
+layers by rid (`ingest layer 'q' mapped (ssrc …)` / `'f' mapped`), `PT map … Vp8 exact`,
+both egress legs `serving layer 'f'` (correct — both displays exceed q), per-layer PLIs
+(`via layer ssrc`), SFrame `FrameCryptorStateOk` at every hop, zero decrypt failures.
+(3) *The key routing proof:* VM2's audio path to the sharer was TURN, yet its forwarder
+leg connected DIRECT (`local=srflx remote=host`) — "relay-routed" viewers ride peer
+branches off-relay; **VPS journal: zero entries for the whole run.** (4) *Dry-layer
+fallback fired FOR REAL:* ~25 s in, the f layer starved (BWE/static-content — the
+allocator protects q by design) → both legs logged `layer 'f' dry — falling back to 'q'`
+→ keyframe → `serving layer 'q'` with the picture CONTINUING (make-before-break at the
+packet level — no freeze). (5) *Kill ladder:* VM1 killed → host presence tolerance held →
+media-leg death +6 s → same-second `screen_offer` revert → VM2 re-rendered in ~1 s.
+**THE BUG (fixed):** one second after the fallback, both legs logged `returning to layer
+'f'` while f was still dead — the upgrade-home check read a stale `ideal_flowing_since`
+(it only resets when an ideal-layer packet ARRIVES after a gap; a fully dry layer never
+resets it), flipping desire back to a dead layer and nagging upstream PLIs. Fix: the
+upgrade now also requires the ideal layer to be FRESH (seen <1 s ago). Harm was bounded
+by construction (make-before-break kept q flowing) but it defeated the 5 s hysteresis.
+Rust suite re-green; Windows Release rebuilt with the fix — **runs B/C must use the
+rebuilt Release on all three machines; redeploy the VPS binary once the field session
+settles** (same bounded bug is in the deployed engine).
+
+**2026-08-08 — PHASE 3 IMPLEMENTED (setParameters root cause → simulcast → upload
+spreading). Field verification = the remaining gate; then the epic closes.**
+
+- **Stage 1 — the Windows live-`setParameters` rejection, ROOT-CAUSED + FIXED (plugin
+  C++ only, no DLL rebuild).** The chain, proven in source: (1) the wrapper's encoding
+  getters collapse unset optionals (`scalability_mode()` = `value_or("")`, `ssrc()` =
+  `value_or(0)`, bitrates/framerate = `value_or(0)`); (2) `rtpParametersToMap`
+  (flutter_peerconnection.cc) serialized them unconditionally, so Dart's cached
+  `sender.parameters` carried `scalabilityMode: ""` / `ssrc: 0` as NON-NULL; (3)
+  `toMap()` sent them back and `updateRtpParameters` wrote them onto the fresh native
+  params — flipping `std::nullopt` into `Some("")`/`Some(0)`; (4) m144's
+  `CheckScalabilityModeValues` finds no codec supporting mode `""` →
+  `INVALID_MODIFICATION` → the WHOLE call fails (`media_engine.cc`; pre-negotiation the
+  `ssrc 0 ≠ nullopt` "modified SSRC" check fires first). One bug, both historical eras
+  explained: before the 2026-07-19 `set_encodings` write-back fix the poisoned copies
+  were DISCARDED (setParameters returned true but was a silent no-op); the write-back
+  made the poison arrive (every call false since). Fix: the native→Dart map skips
+  sentinel values (unset stays null — rid added to the map while there, needed for
+  simulcast readback), and the write-back path (a) NEVER writes rid/ssrc (read-only on
+  a live sender — the fresh GetParameters copy already holds them), (b) skips empty
+  scalabilityMode / non-positive bitrates/framerate/temporal-layers. The
+  `updateResolutionCap` renegotiate-on-false fallback STAYS as the belt. Field check:
+  toggle Source quality on a Windows sender → `[HOLLOW-SCREEN] setParameters(cap …) ->
+  accepted` + readback + "CAP APPLIED".
+- **Stage 2 — simulcast on forwarder ingest legs (packet selection, no re-encode).**
+  - Sharer: ingest legs offer TWO rid layers — `q` (half per axis, ITS resolution's
+    bitrate tier) FIRST (libwebrtc's rate allocator protects encodings[0] under
+    congestion — the low layer is the one that must survive) + `f` (the branch cap).
+    Simulcast legs are VP8-constrained (`_applyScreenCodecPreference(vp8Only:)`) —
+    the engine's switch rewrite is VP8-descriptor-only and VP8 is the lane's
+    field-proven codec. Per-viewer direct PCs are UNTOUCHED (step-1 capping already
+    serves them; no rids there).
+  - Wire: `fwd_stream_register` gains `#[serde(default, skip_serializing_if empty)]
+    low_viewers` (viewers the engine should serve the q layer — computed by the sharer:
+    q covers their effective cap, i.e. `viewer_long × 2 ≤ f_long`; refreshed on every
+    register, applied at ATTACH time). `vc_screen_watch` gains `fwd_simulcast` —
+    a peer forwarder only gets a simulcast ingest if its watch advertised the flag
+    (an OLD embedded engine would fan BOTH layers' interleaved packets down one egress
+    SSRC = garbage on every viewer; the VPS forwarder is assumed capable — DEPLOY IT
+    FIRST). Old wire bytes pinned by new serde tests.
+  - Engine (`forwarder/simulcast.rs` + leg/stream/engine): the ingest pump resolves
+    each SSRC's rid ONCE (header ext, then str0m's Mid+Rid mapping — the ext stops
+    arriving after RTCP establishes the SSRC) and tags every fanned packet; egress legs
+    run a pure `LayerSelect` state machine — rid-less sources pass through
+    BYTE-IDENTICAL to phase 1/2 (zero regression by construction); layered sources
+    forward exactly one layer with seq/ts continuity offsets and VP8
+    PictureID/TL0PICIDX/KEYIDX rewrite via str0m's `Vp8Patch` on switches; switches
+    happen ONLY on the target layer's keyframe start (make-before-break: the old layer
+    flows until then). PLI plumbing is per-layer end to end (egress asks for ITS
+    layer; the stream's aggregator coalesces per rid; the ingest resolves the rid's
+    SSRC, falling back to every seen source). Pump policy: dry-layer fallback (wanted
+    layer dry >2.5 s while another flows — e.g. libwebrtc disabled a layer under CPU
+    pressure — ride what flows) + upgrade-home hysteresis (ideal layer flowing ≥5 s).
+    7 unit tests pin the state machine (passthrough byte-identity, keyframe-gated
+    switch + offset continuity, continuation-packet refusal, non-VP8 layer lock,
+    15-bit PictureID wrap, late-rid adoption).
+  - Viewer side: ZERO changes — a branch viewer receives one ordinary stream. Old
+    viewers keep working unchanged.
+- **Stage 3 — upload spreading (the closing policy).** Direct step-3-capable viewers
+  past `maxDirectShareCopies` (=1, soft) are served through branches:
+  `_pickSpreadTargetFor` = existing peer branch w/ capacity → promote a fwd-capable
+  direct watcher, PREFERRING one that already holds a direct copy (its copy closes on
+  promotion — strictly fewer encodes), then the viewer ITSELF (self-promotion: its
+  display rides its own engine; `_assignViewerToForwarder` keeps the head OUT of
+  `branch.viewers` and skips the duplicate assign), then any other capable watcher →
+  an ALREADY-SERVING VPS branch (zero marginal upload) — NEVER a fresh VPS branch for
+  a STUN-capable viewer (that would trade zero relay bytes for `B + B·k` relay while
+  saving nothing on the first viewer; the viewer falls through to a direct PC, capped
+  by the old 15). A spread viewer's cap-change re-watch stays on its branch
+  (`_reofferIngest` refreshes the register's low set + live-updates the ingest cap —
+  stage 1 makes that a real live update now). relay_private honored throughout; the
+  failed-forwarder memory + 2-failure ladder bound apply as everywhere. With this the
+  sharer's copies = `maxDirectShareCopies` + one ingest per branch — 5 viewers ≈ 2
+  encodes ≈ the §2e "10-20 Mbps instead of 50" row — and the 15-viewer cap is
+  effectively dynamic.
+- **Deferred from phase 3 (needs its own session): feeder election** — a peer branch
+  feeding the VPS forwarder's ingest so the mixed-branch case drops from 2 sharer
+  copies to 1. Sketch: the owner's register names a delegated `feeder`; the VPS admits
+  the ingest OFFER from that feeder (today `admit_owner_op` binds ingest to the owner —
+  the relaxation is a SECURITY surface and wants its own review); the peer engine
+  grows an "egress leg toward another forwarder" (its SendOnly offer IS
+  SDP-compatible with the VPS's ingest accept), signaled by the host client over the
+  existing `fwd:{vps}` room. Keyframes compose by construction (VPS PLI → peer egress
+  leg → peer kf_tx → sharer).
+- **Verified:** Rust suite green with `--features forwarder` (26 forwarder-filtered
+  incl. the new simulcast + wire tests; full suite run below), `flutter analyze` clean
+  on touched files (3 pre-existing infos), widget tests 406/406, plugin C++ compiled
+  via full `flutter build windows` debug.
+- **Field checklist (next VM session):**
+  1. *Stage 1:* Windows sender, toggle Source quality mid-share → `setParameters …
+     accepted`, readback scale changes, `CAP APPLIED`, NO re-offer line.
+  2. *Simulcast VPS rung:* forced-relay viewer through the VPS → VPS journal shows
+     `ingest layer 'q' mapped (ssrc …)` + `ingest layer 'f' mapped (ssrc …)`, egress
+     `serving layer 'f'` (or 'q' for a small/low viewer); picture ~1 s; SFrame Ok.
+  3. *Low viewer:* a viewer whose display ≤ half the branch cap → register carries it
+     in `low_viewers`, its egress logs `serving layer 'q'`, its received-resolution
+     chip reads ~half the cap; egress kbps visibly below the f viewer's.
+  4. *Layer resilience:* CPU-load the sharer (or drop the f layer) → f viewers' legs
+     log `layer 'f' dry — falling back to 'q'` with picture continuing (one keyframe
+     blink), then `returning to layer 'f'` when it recovers.
+  5. *Spreading:* THREE direct viewers (host + 2 VMs, all direct routes) → viewer 1
+     direct PC; viewer 2 (fwd-capable) `Upload spreading: … own branch
+     (self-promotion)`; viewer 3 assigned to viewer 2's branch. Sharer logs exactly
+     ONE direct offer + ONE ingest offer; relay media 0.
+  6. *Old-client guard:* an old-build viewer (route empty) always gets a direct PC;
+     an old-build peer forwarder (no `fwd_simulcast`) gets a SINGLE-layer ingest
+     (`Creating offer from shared stream (profile=…)` without `simulcast f+q`).
 
 **2026-08-07 (follow-up session) — THE PRE-PHASE-3 TRIO DONE: self-ghost VC participant
 fixed, inbound Olm decrypt-fail path fully logged, opportunistic rebalancer built.**
@@ -946,7 +1135,11 @@ field verification = the remaining gate:**
 
 ## 8. Where this lands: phase 3 closes the epic, and the tree becomes Hollow Streaming
 
-**Phase 3 (next sessions) is the closing move:** STUN viewers feeding OTHER STUN viewers —
+**PHASE 3 IMPLEMENTED 2026-08-08 (see the top §7 entry) — field verification is the
+remaining gate. Feeder election deferred to its own session (security-surface change
+on the engine's ingest admission).**
+
+**Phase 3 (the closing move):** STUN viewers feeding OTHER STUN viewers —
 the sharer sends 1-2 copies total and the tree spreads the rest (§2e's "A feeds the room"
 rows: 5 viewers at 4K ≈ 10-20 Mbps sharer upload instead of 50). Build order stands:
 (1) root-cause the Windows live `setParameters` rejection in the fork; (2) simulcast
@@ -973,3 +1166,56 @@ The ICE direct-when-possible repair pair (§7) multiplies the tree's quality —
 race-TURNed viewer repaired to direct is one more potential branch and one less relay
 dependency. Deep-dive design (viewer counts, layer ladders, join storms, moderation
 surface) = its own plan session once phase 3 lands.
+
+## 9. NEXT-SESSION WORKLIST (gathered 2026-08-14 per Vitalik — "do them all and that's it")
+
+**Gate first: the phase-3 field pass** (full checklist = §7 top entry; condensed to three
+runs, ~20-30 min): **Run A** = repeat run 2b (host shares, VM1 bridged direct
+fwd-capable, VM2 `HOLLOW_FORCE_RELAY_ROUTE=1`) — regression for promotion + kill ladder,
+PLUS the new lines: sharer `Creating offer from shared stream (… simulcast f+q)`, VM1
+engine `ingest layer 'f' mapped` + `ingest layer 'q' mapped`, egress `serving layer 'f'`.
+To see the q layer served, shrink one VM's display below half the branch cap (≤960 px
+wide at a 1080p cap, e.g. 800x600) → its register lands in `low_viewers`, its leg logs
+`serving layer 'q'`. **Run B** (the genuinely new behavior) = THREE direct viewers (no
+force-relay env anywhere): viewer 1 → direct PC; viewer 2 → `Upload spreading: … own
+branch (self-promotion)`; viewer 3 → assigned to viewer 2's branch; sharer logs exactly
+ONE direct offer + ONE ingest offer, VPS journal flat zero. **Run C** (30 s) = toggle
+Source quality on a Windows sender mid-share → `setParameters … accepted` + readback +
+`CAP APPLIED`, NO re-offer line. All three machines need THIS build (scp flow); the VPS
+forwarder already runs the new engine (deployed 2026-08-14, `.prev` kept).
+
+Then the worklist, one session:
+
+1. **Parallel healing / fast failover (NEW 2026-08-14).** The ~5-7 s crash freeze is
+   DETECTION (ICE death), not recovery (recovery is same-second, field-proven). Shrink to
+   ~1-2 s: early-suspicion signal = RTCP receiver-report / ICE-consent staleness — NEVER
+   media-byte silence (a static screen share is legitimately quiet) — then MAKE-BEFORE-BREAK
+   recovery: request the next rung / direct offer while the suspect leg stays up, render
+   whichever path delivers a frame first, kill the loser. Attribution keys on the
+   originator, so a delivery-path swap under a live tile is a pure transport change.
+   Planned teardowns (demotion / migration / rebalance) are already make-before-break —
+   this extends the same doctrine to crashes.
+2. **Source-quality gating on branches (approved direction 2026-08-14).** Exclude the
+   `source_quality` flag from BRANCH cap math (`_ingestCap` must stop honoring it via
+   `_effectiveCapFor`; sizing by displays only) — one pixel-peeper must not inflate a
+   shared branch/VPS ingest to 4K on everyone else's bandwidth. Source stays honored on
+   direct per-viewer PCs (sharer-pays-only, consenting pair). v1: a branch viewer
+   requesting Source simply stays on the f layer; moving them to a direct slot when one
+   is free = optional refinement.
+3. **ICE "direct whenever direct is possible" repair pair** (approved 2026-08-08, full
+   spec in §7): (a) quiescent-window ICE-restart on ALL WebRTC lanes when relay was
+   nominated while host/srflx existed both sides (one attempt, never mid-transfer/reneg);
+   (b) forwarder-lane watch route re-probe on ICE-route change → feeds the opportunistic
+   rebalancer automatically.
+4. **fwd-room chatter suppression:** suppress the PeerJoined discovery cascade toward
+   `fwd:` room peers (~45 junk frames per join at the forwarder; pure noise).
+5. **Relay-side ghost-eviction PeerLeft suppression** (client + forwarder tolerance
+   shipped; the relay-side counterpart closes the class).
+6. **Feeder election** (design sketch in the 2026-08-08 §7 entry): owner-delegated
+   `feeder` field on the register + engine ingest-admission relaxation (**needs its own
+   security review** — the one place the owner≡ingest binding loosens) + a peer-engine
+   egress leg toward another forwarder. The largest item — do last, or split out if the
+   session runs long.
+
+After the worklist: commit/release, then the **Hollow Streaming / broadcast-mode plan
+session** (§8).

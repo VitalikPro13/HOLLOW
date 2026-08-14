@@ -173,18 +173,39 @@ EncodableMap rtpParametersToMap(
        encodings.std_vector()) {
     EncodableMap map;
     map[EncodableValue("active")] = EncodableValue(encoding->active());
-    map[EncodableValue("maxBitrate")] =
-        EncodableValue(encoding->max_bitrate_bps());
-    map[EncodableValue("minBitrate")] =
-        EncodableValue(encoding->min_bitrate_bps());
-    map[EncodableValue("maxFramerate")] =
-        EncodableValue(static_cast<int>(encoding->max_framerate()));
+    // The wrapper getters collapse unset optionals to 0/"" (value_or). A
+    // materialized "unset" round-trips through Dart back into
+    // rtpSenderSetParameters, where writing it onto the sender turns
+    // std::nullopt into Some(0)/Some("") — and libwebrtc's
+    // CheckRtpParametersInvalidModificationAndValues then rejects the WHOLE
+    // setParameters call (INVALID_MODIFICATION: modified SSRC / unsupported
+    // scalabilityMode ""). Skip sentinel values so Dart sees null for unset.
+    if (encoding->max_bitrate_bps() > 0) {
+      map[EncodableValue("maxBitrate")] =
+          EncodableValue(encoding->max_bitrate_bps());
+    }
+    if (encoding->min_bitrate_bps() > 0) {
+      map[EncodableValue("minBitrate")] =
+          EncodableValue(encoding->min_bitrate_bps());
+    }
+    if (encoding->max_framerate() > 0) {
+      map[EncodableValue("maxFramerate")] =
+          EncodableValue(static_cast<int>(encoding->max_framerate()));
+    }
     map[EncodableValue("scaleResolutionDownBy")] =
         EncodableValue(encoding->scale_resolution_down_by());
-    map[EncodableValue("scalabilityMode")] =
-        EncodableValue(encoding->scalability_mode().std_string());
-    map[EncodableValue("ssrc")] =
-        EncodableValue(static_cast<int>(encoding->ssrc()));
+    if (!encoding->scalability_mode().std_string().empty()) {
+      map[EncodableValue("scalabilityMode")] =
+          EncodableValue(encoding->scalability_mode().std_string());
+    }
+    if (encoding->ssrc() != 0) {
+      map[EncodableValue("ssrc")] =
+          EncodableValue(static_cast<int>(encoding->ssrc()));
+    }
+    if (!encoding->rid().std_string().empty()) {
+      map[EncodableValue("rid")] =
+          EncodableValue(encoding->rid().std_string());
+    }
     map[EncodableValue("priority")] =
         EncodableValue(bitratePriorityToString(encoding->bitrate_priority()));
     map[EncodableValue("networkPriority")] =
@@ -763,38 +784,40 @@ scoped_refptr<RTCRtpParameters> FlutterPeerConnection::updateRtpParameters(
       if (!value.IsNull()) {
         param->set_active(GetValue<bool>(value));
       }
-      value = findEncodableValue(map, "rid");
-      if (!value.IsNull()) {
-        param->set_rid(GetValue<std::string>(value));
-      }
-      value = findEncodableValue(map, "ssrc");
-      if (!value.IsNull()) {
-        param->set_ssrc(GetValue<int>(value));
-      }
+      // rid and ssrc are READ-ONLY on a live sender (spec + libwebrtc's
+      // CheckRtpParametersInvalidModificationAndValues). NEVER write them
+      // back here: the fresh GetParameters copy already carries the correct
+      // values, and writing a drifted/materialized value (ssrc 0 while
+      // unset, "" rid) makes libwebrtc reject the ENTIRE setParameters call
+      // with INVALID_MODIFICATION — this was the Windows live-setParameters
+      // rejection. rid still applies at addTransceiver init (mapToEncoding).
       value = findEncodableValue(map, "maxBitrate");
-      if (!value.IsNull()) {
+      if (!value.IsNull() && GetValue<int>(value) > 0) {
         param->set_max_bitrate_bps(GetValue<int>(value));
       }
 
       value = findEncodableValue(map, "minBitrate");
-      if (!value.IsNull()) {
+      if (!value.IsNull() && GetValue<int>(value) > 0) {
         param->set_min_bitrate_bps(GetValue<int>(value));
       }
 
       value = findEncodableValue(map, "maxFramerate");
-      if (!value.IsNull()) {
+      if (!value.IsNull() && GetValue<int>(value) > 0) {
         param->set_max_framerate(GetValue<int>(value));
       }
       value = findEncodableValue(map, "numTemporalLayers");
-      if (!value.IsNull()) {
+      if (!value.IsNull() && GetValue<int>(value) >= 1) {
         param->set_num_temporal_layers(GetValue<int>(value));
       }
       value = findEncodableValue(map, "scaleResolutionDownBy");
-      if (!value.IsNull()) {
+      if (!value.IsNull() && GetValue<double>(value) >= 1.0) {
         param->set_scale_resolution_down_by(GetValue<double>(value));
       }
+      // The wrapper cannot UNSET an optional (setters only), so an empty
+      // scalabilityMode string means "leave as-is" — Some("") is an invalid
+      // mode and rejects the whole call.
       value = findEncodableValue(map, "scalabilityMode");
-      if (!value.IsNull()) {
+      if (!value.IsNull() && !GetValue<std::string>(value).empty()) {
         param->set_scalability_mode(GetValue<std::string>(value));
       }
       value = findEncodableValue(map, "priority");

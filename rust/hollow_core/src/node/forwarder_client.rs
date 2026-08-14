@@ -93,6 +93,7 @@ pub(crate) fn build_fwd_signal_envelope(
         "fwd_stream_register" => Some(MessageEnvelope::FwdStreamRegister {
             origin,
             allowed_viewers: jvec(&v, "allowed_viewers"),
+            low_viewers: jvec(&v, "low_viewers"),
         }),
         "fwd_stream_auth" => Some(MessageEnvelope::FwdStreamAuth {
             origin,

@@ -3148,6 +3148,15 @@ pub(crate) enum MessageEnvelope {
         /// assignments locally. Absent (old client) = false.
         #[serde(default)]
         relay_private: bool,
+        /// Phase 3 (simulcast): this watcher's embedded forwarder engine can
+        /// ingest a 2-layer rid simulcast stream and select layers per
+        /// viewer. The sharer offers a simulcast ingest ONLY to peer
+        /// forwarders that advertised this — an old engine would blindly fan
+        /// BOTH layers' interleaved packets down one egress stream (garbage
+        /// on every viewer). Absent (old client) = false = single-layer
+        /// ingest, today's behavior.
+        #[serde(default)]
+        fwd_simulcast: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         target: Option<String>,
     },
@@ -3234,6 +3243,14 @@ pub(crate) enum MessageEnvelope {
         origin: Box<StreamOrigin>,
         #[serde(default)]
         allowed_viewers: Vec<String>,
+        /// Simulcast (phase 3): viewers that should be served the LOW layer
+        /// (rid "q") when the ingest carries one; everyone else rides the
+        /// full layer (rid "f"). Absent/empty = full for all (old sharer /
+        /// no simulcast). Layer choice is applied when a viewer's egress leg
+        /// is created — a re-register updates the set for FUTURE attaches,
+        /// it never rewires a live leg (v1).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        low_viewers: Vec<String>,
     },
 
     /// Sharer → forwarder: incremental allowlist update for a registered
@@ -4137,6 +4154,7 @@ mod screen_assign_route_tests {
             sid: "s".into(), cid: "c".into(), want: true,
             viewer_width: 2560, viewer_height: 1440, source_quality: false,
             route: "relay".into(), fwd_capable: false, relay_private: false,
+            fwd_simulcast: false,
             target: None,
         };
         let json = serde_json::to_string(&env).unwrap();
@@ -4158,15 +4176,17 @@ mod screen_assign_route_tests {
             sid: "s".into(), cid: "c".into(), want: true,
             viewer_width: 1920, viewer_height: 1080, source_quality: false,
             route: "direct".into(), fwd_capable: true, relay_private: true,
+            fwd_simulcast: true,
             target: None,
         };
         let json = serde_json::to_string(&env).unwrap();
         match serde_json::from_str::<MessageEnvelope>(&json).unwrap() {
             MessageEnvelope::VoiceChannelScreenWatch {
-                fwd_capable, relay_private, route, ..
+                fwd_capable, relay_private, fwd_simulcast, route, ..
             } => {
                 assert!(fwd_capable);
                 assert!(relay_private);
+                assert!(fwd_simulcast);
                 assert_eq!(route, "direct");
             }
             other => panic!("unexpected variant: {other:?}"),
@@ -4174,10 +4194,11 @@ mod screen_assign_route_tests {
         let old = r#"{"t":"vc_screen_watch","sid":"s","cid":"c","want":true,"viewer_width":1920,"viewer_height":1080,"source_quality":false,"route":"direct"}"#;
         match serde_json::from_str::<MessageEnvelope>(old).unwrap() {
             MessageEnvelope::VoiceChannelScreenWatch {
-                fwd_capable, relay_private, ..
+                fwd_capable, relay_private, fwd_simulcast, ..
             } => {
                 assert!(!fwd_capable, "absent fwd_capable must default to false");
                 assert!(!relay_private, "absent relay_private must default to false");
+                assert!(!fwd_simulcast, "absent fwd_simulcast must default to false");
             }
             other => panic!("unexpected variant: {other:?}"),
         }
@@ -4235,7 +4256,7 @@ mod fwd_envelope_tests {
     #[test]
     fn fwd_tags_are_pinned() {
         let cases: Vec<(MessageEnvelope, &str)> = vec![
-            (MessageEnvelope::FwdStreamRegister { origin: origin(), allowed_viewers: vec![] }, "fwd_stream_register"),
+            (MessageEnvelope::FwdStreamRegister { origin: origin(), allowed_viewers: vec![], low_viewers: vec![] }, "fwd_stream_register"),
             (MessageEnvelope::FwdStreamAuth { origin: origin(), add: vec![], remove: vec![] }, "fwd_stream_auth"),
             (MessageEnvelope::FwdStreamUnregister { origin: origin() }, "fwd_stream_unregister"),
             (MessageEnvelope::FwdIngestOffer { origin: origin(), sdp: "v=0".into() }, "fwd_ingest_offer"),
@@ -4258,16 +4279,43 @@ mod fwd_envelope_tests {
         let env = MessageEnvelope::FwdStreamRegister {
             origin: origin(),
             allowed_viewers: vec!["12D3KooWViewerA".into(), "12D3KooWViewerB".into()],
+            low_viewers: vec!["12D3KooWViewerB".into()],
         };
         let json = serde_json::to_string(&env).unwrap();
         match serde_json::from_str::<MessageEnvelope>(&json).unwrap() {
-            MessageEnvelope::FwdStreamRegister { origin, allowed_viewers } => {
+            MessageEnvelope::FwdStreamRegister { origin, allowed_viewers, low_viewers } => {
                 assert_eq!(origin.peer, "12D3KooWSharer");
                 assert_eq!(origin.stream, "ab12cd34");
                 assert_eq!(allowed_viewers.len(), 2);
+                assert_eq!(low_viewers, vec!["12D3KooWViewerB".to_string()]);
             }
             other => panic!("unexpected variant: {other:?}"),
         }
+    }
+
+    /// The simulcast field is additive: absent on the wire = empty (old
+    /// sharer), and an empty set serializes to the EXACT pre-phase-3 bytes so
+    /// deployed forwarders and clients never see an unknown key.
+    #[test]
+    fn fwd_register_low_viewers_wire_compat() {
+        match serde_json::from_str::<MessageEnvelope>(
+            r#"{"t":"fwd_stream_register","origin":{"peer":"p"},"allowed_viewers":["a"]}"#,
+        ) {
+            Ok(MessageEnvelope::FwdStreamRegister { low_viewers, .. }) => {
+                assert!(low_viewers.is_empty());
+            }
+            other => panic!("unexpected parse result: {other:?}"),
+        }
+        let env = MessageEnvelope::FwdStreamRegister {
+            origin: origin(),
+            allowed_viewers: vec!["a".into()],
+            low_viewers: vec![],
+        };
+        let json = serde_json::to_string(&env).unwrap();
+        assert!(
+            !json.contains("low_viewers"),
+            "empty low set must not appear on the wire: {json}"
+        );
     }
 
     #[test]
@@ -4314,7 +4362,7 @@ mod fwd_envelope_tests {
     #[test]
     fn fwd_envelopes_have_no_target() {
         let envs = [
-            MessageEnvelope::FwdStreamRegister { origin: origin(), allowed_viewers: vec![] },
+            MessageEnvelope::FwdStreamRegister { origin: origin(), allowed_viewers: vec![], low_viewers: vec![] },
             MessageEnvelope::FwdIngestOffer { origin: origin(), sdp: "v=0".into() },
             MessageEnvelope::FwdEgressOffer { origin: origin(), sdp: "v=0".into() },
             MessageEnvelope::FwdError { origin: origin(), code: "full".into(), detail: String::new() },

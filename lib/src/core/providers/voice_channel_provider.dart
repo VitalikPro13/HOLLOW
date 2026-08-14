@@ -314,6 +314,12 @@ class _FwdBranch {
   /// The single ingest leg to this forwarder.
   ScreenShareService? ingest;
 
+  /// Phase 3: the live ingest carries 2 simulcast layers (rid f/q) and the
+  /// engine selects per-viewer. Decided when the ingest leg is created (VPS
+  /// forwarder = always; peer forwarder = only if its watch advertised
+  /// `fwd_simulcast`) — drives the register's `low_viewers` set.
+  bool simulcast = false;
+
   /// Tears the idle branch down ~30 s after its last viewer leaves (a quick
   /// re-watch shouldn't pay a full re-register).
   Timer? linger;
@@ -322,6 +328,16 @@ class _FwdBranch {
 class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
   static const int maxScreenShareOutgoing = 15;
   static const int maxScreenShareIncoming = 10;
+
+  /// Phase 3 (upload spreading): direct per-viewer PCs the sharer runs
+  /// before further step-3-capable DIRECT viewers are served through
+  /// branches instead — the "sharer sends 1-2 copies total" target: 1
+  /// direct copy + 1 branch ingest per branch, and each peer branch fans to
+  /// [maxPeerForwarderLegs] viewers. A SOFT threshold: when no branch rung
+  /// is available the viewer still gets a direct PC (capped by
+  /// [maxScreenShareOutgoing]). Old clients (empty route) always get direct
+  /// PCs — they can't receive `vc_screen_assign`.
+  static const int maxDirectShareCopies = 1;
 
   VoiceChannelService? _service;
 
@@ -386,7 +402,10 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
   /// privacy flag from their screen_watch. Candidates = fwd_capable &&
   /// route == 'direct'; relayPrivate viewers are only ever routed through
   /// operator infrastructure (VPS forwarder / TURN), never a peer.
-  final Map<String, ({String route, bool fwdCapable, bool relayPrivate})>
+  /// fwdSimulcast (phase 3) = their embedded engine can ingest a 2-layer
+  /// simulcast stream — only such peers get a simulcast ingest offer.
+  final Map<String,
+          ({String route, bool fwdCapable, bool relayPrivate, bool fwdSimulcast})>
       _watcherRoutes = {};
 
   /// Sharer side: forwarders that FAILED for a viewer this share session (a
@@ -2326,9 +2345,11 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     final route = v['route'] as String? ?? '';
     final fwdCapable = v['fwd_capable'] as bool? ?? false;
     final relayPrivate = v['relay_private'] as bool? ?? false;
+    final fwdSimulcast = v['fwd_simulcast'] as bool? ?? false;
     debugPrint('[HOLLOW-VC] Screen watch from $peerId: want=$want '
         'viewer=${viewerW}x$viewerH source=$sourceQuality route=$route '
-        'fwd_capable=$fwdCapable relay_private=$relayPrivate');
+        'fwd_capable=$fwdCapable relay_private=$relayPrivate '
+        'fwd_simulcast=$fwdSimulcast');
 
     if (want) {
       // Raced against our stop — nothing to send; the peer's badge clears
@@ -2337,8 +2358,12 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       _watchers.add(peerId);
       _watcherDisplays[peerId] =
           (w: viewerW, h: viewerH, source: sourceQuality);
-      _watcherRoutes[peerId] =
-          (route: route, fwdCapable: fwdCapable, relayPrivate: relayPrivate);
+      _watcherRoutes[peerId] = (
+        route: route,
+        fwdCapable: fwdCapable,
+        relayPrivate: relayPrivate,
+        fwdSimulcast: fwdSimulcast,
+      );
 
       // Media forwarding step 3: a relay-routed NEW-client viewer (non-empty
       // route = step-3-capable; old viewers must never receive
@@ -2380,6 +2405,19 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
         }
         // No rung left — fall through to the direct path.
       }
+      // Phase 3: a SPREAD direct viewer re-watching (cap / Source-quality
+      // change) stays on its branch — refresh the register's layer set and
+      // the ingest cap instead of bouncing it off and back on (one blink
+      // per bounce). Only when the direct-copy budget has headroom again
+      // does it fall through to the stale-removal + direct path below.
+      if (route == 'direct') {
+        final riding = _branchOf(peerId);
+        if (riding != null &&
+            _outgoingScreenShares.length >= maxDirectShareCopies) {
+          await _reofferIngest(riding);
+          return;
+        }
+      }
       // Viewer moved OFF the forwarder path (direct / exhausted ladder).
       final stale = _branchOf(peerId);
       if (stale != null) {
@@ -2398,10 +2436,10 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       final existing = _outgoingScreenShares[peerId];
       if (existing != null) {
         // Already streaming to this viewer — a re-sent watch is a cap change
-        // (Source-quality toggle): try a live setParameters first; when the
-        // sender rejects it (Windows libwebrtc always does — field-verified
-        // 2026-08-05), renegotiate: fresh offer with the new cap riding the
-        // init sendEncodings, the guaranteed path. Brief stream restart.
+        // (Source-quality toggle): try a live setParameters first (works
+        // since the plugin round-trip poison was fixed — phase 3);
+        // renegotiate when the sender still rejects it: fresh offer with the
+        // new cap riding the init sendEncodings. Brief stream restart.
         final (effW, effH) = _effectiveCapFor(peerId);
         final ok = await existing.updateResolutionCap(effW, effH);
         if (!ok) {
@@ -2410,6 +2448,24 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
           await _sendScreenShareToPeer(peerId);
         }
         return;
+      }
+      // Phase 3 — upload spreading: a step-3-capable DIRECT viewer past the
+      // direct-copy budget is served through a branch (peer branch with
+      // capacity → promote a fwd-capable direct watcher, preferring one
+      // whose direct copy then CLOSES → an already-running VPS branch).
+      // This is what turns "one PC per viewer" into "1-2 copies total" and
+      // makes the 15-cap effectively dynamic.
+      if (route == 'direct' &&
+          _outgoingScreenShares.length >= maxDirectShareCopies) {
+        final target = _pickSpreadTargetFor(peerId);
+        if (target != null) {
+          _vcLog('[HOLLOW-VC] Upload spreading: direct viewer $peerId → '
+              '${target == peerId ? 'own branch (self-promotion)' : target} '
+              '(${_outgoingScreenShares.length} direct cop'
+              '${_outgoingScreenShares.length == 1 ? 'y' : 'ies'} running)');
+          await _assignViewerToForwarder(peerId, target);
+          return;
+        }
       }
       if (_outgoingScreenShares.length >= maxScreenShareOutgoing) {
         debugPrint('[HOLLOW-VC] Watch request from $peerId ignored — outgoing cap ($maxScreenShareOutgoing) reached');
@@ -2564,6 +2620,58 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     return null;
   }
 
+  /// Phase-3 upload spreading: pick a branch for a DIRECT viewer past the
+  /// direct-copy budget. Differs from [_pickForwarderFor] (the relay-routed
+  /// ladder) in two deliberate ways:
+  /// - Promotion prefers a watcher that already HOLDS a direct copy (its
+  ///   copy closes on promotion — strictly fewer encodes), then the viewer
+  ///   ITSELF (its own display rides its engine instead of a new PC), then
+  ///   any other capable watcher.
+  /// - The VPS rung only applies to a branch that is ALREADY serving
+  ///   (marginal upload = zero). Never open a fresh VPS branch for a
+  ///   STUN-capable viewer: that trades zero relay bytes for `B + B·k` of
+  ///   relay while saving nothing on the first viewer — the direct-PC
+  ///   fallback is strictly better there (threshold is SOFT).
+  String? _pickSpreadTargetFor(String viewer) {
+    final failed = _viewerFwdFailures[viewer] ?? const <String>{};
+    if (failed.length >= 2) return null;
+    final privacyBound = _watcherRoutes[viewer]?.relayPrivate ?? false;
+    if (!privacyBound) {
+      for (final b in _fwdBranches.values) {
+        if (!b.isPeer) continue;
+        if (b.forwarderId == viewer || failed.contains(b.forwarderId)) {
+          continue;
+        }
+        if (b.viewers.length >= maxPeerForwarderLegs) continue;
+        return b.forwarderId;
+      }
+      bool promotable(String cand) {
+        final r = _watcherRoutes[cand];
+        return r != null &&
+            r.fwdCapable &&
+            r.route == 'direct' &&
+            _watchers.contains(cand) &&
+            !_fwdBranches.containsKey(cand) &&
+            _branchOf(cand) == null &&
+            !failed.contains(cand);
+      }
+
+      for (final cand in _outgoingScreenShares.keys) {
+        if (cand != viewer && promotable(cand)) return cand;
+      }
+      if (promotable(viewer)) return viewer;
+      for (final cand in _watcherRoutes.keys) {
+        if (cand != viewer && promotable(cand)) return cand;
+      }
+    }
+    final fwd = ref.read(forwarderInfoProvider);
+    if (fwd.usable && !failed.contains(fwd.peerId)) {
+      final vps = _fwdBranches[fwd.peerId];
+      if (vps != null && !vps.isPeer && vps.ingest != null) return fwd.peerId;
+    }
+    return null;
+  }
+
   /// Opportunistic rebalancer: [candidate] just watched with a direct route
   /// and `fwd_capable` while the VPS infra branch is serving viewers — promote
   /// it and migrate those viewers onto the new peer branch (relay media → 0,
@@ -2636,23 +2744,37 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       String viewerPeer, String forwarderPeerId) async {
     final origin = _myShareOrigin();
     if (origin == null) return;
+    // Phase-3 self-promotion (upload spreading): the viewer IS the branch —
+    // its display is downstream viewer #0 through its own engine, so it
+    // never goes into `viewers` (that set = REMOTE legs) and the
+    // isNewPeerBranch block's self-assign is the ONLY assign it gets.
+    final selfPromotion = viewerPeer == forwarderPeerId;
     var branch = _fwdBranches[forwarderPeerId];
     final isNewPeerBranch =
         branch == null && _watchers.contains(forwarderPeerId);
     if (branch == null) {
       branch = _FwdBranch(forwarderPeerId,
           isPeer: _watchers.contains(forwarderPeerId));
+      // Decide simulcast AT CREATION so the very first register already
+      // carries the low_viewers set — the viewer's attach races the second
+      // (post-ingest) register on a different socket, and layer choice is
+      // attach-time.
+      branch.simulcast = !branch.isPeer ||
+          (_watcherRoutes[forwarderPeerId]?.fwdSimulcast ?? false);
       _fwdBranches[forwarderPeerId] = branch;
       await network_api
           .joinForwarderRoom(forwarderPeerId: forwarderPeerId)
           .catchError((_) {});
       if (branch.isPeer) {
-        _vcLog('[HOLLOW-VC] Promoted $forwarderPeerId to peer forwarder');
+        _vcLog('[HOLLOW-VC] Promoted $forwarderPeerId to peer forwarder'
+            '${branch.simulcast ? ' (simulcast)' : ''}');
       }
     }
     branch.linger?.cancel();
     branch.linger = null;
-    branch.viewers.add(viewerPeer);
+    if (!selfPromotion) {
+      branch.viewers.add(viewerPeer);
+    }
     // Register BEFORE any assignment leaves: the register and the assigns
     // ride the SAME relay socket in order, so the engine provably knows the
     // stream before the promoted forwarder's INSTANT local self-attach can
@@ -2702,6 +2824,13 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
         }
       }
     }
+    if (selfPromotion) {
+      // The isNewPeerBranch block above already self-assigned; a second
+      // assign would make the viewer tear down and re-attach its own leg.
+      _vcLog('[HOLLOW-VC] Self-promoted $forwarderPeerId — its display '
+          'rides its own branch (0 remote viewer(s) yet)');
+      return;
+    }
     if (!state.isInVoiceChannel) return;
     network_api
         .voiceChannelSendSignal(
@@ -2746,22 +2875,42 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
   /// (dropped first send, forwarder restart, our own room churn). A peer
   /// forwarder is on its OWN allowlist — its display leg attaches through
   /// the same engine admission as everyone else.
+  ///
+  /// With a simulcast ingest (phase 3) the register also names the viewers
+  /// the engine should serve the LOW layer (rid q) — everyone whose display
+  /// the q layer already covers. Layer choice applies at attach time.
   Future<void> _registerStreamAtForwarder(_FwdBranch branch) async {
     final origin = _myShareOrigin();
     if (origin == null) return;
+    final audience = [
+      ...branch.viewers,
+      if (branch.isPeer) branch.forwarderId,
+    ];
     await network_api
         .forwarderSendSignal(
           forwarderPeerId: branch.forwarderId,
           signalType: 'fwd_stream_register',
           payload: jsonEncode({
             'origin': origin,
-            'allowed_viewers': [
-              ...branch.viewers,
-              if (branch.isPeer) branch.forwarderId,
-            ],
+            'allowed_viewers': audience,
+            if (branch.simulcast)
+              'low_viewers':
+                  audience.where((v) => _wantsLowLayer(branch, v)).toList(),
           }),
         )
         .catchError((_) {});
+  }
+
+  /// Phase-3 layer choice for one branch viewer: ride the LOW layer (half
+  /// the ingest cap per axis) when it already covers everything their
+  /// display can show. Source-quality viewers always ride the full layer.
+  bool _wantsLowLayer(_FwdBranch branch, String viewerPeer) {
+    final (fw, fh) = _ingestCap(branch);
+    final (vw, vh) = _effectiveCapFor(viewerPeer);
+    final vLong = vw > vh ? vw : vh;
+    final fLong = fw > fh ? fw : fh;
+    // The q layer is the full layer downscaled 2x per axis.
+    return vLong * 2 <= fLong;
   }
 
   /// Create a branch's single ingest leg (no-op if live).
@@ -2770,6 +2919,15 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     if (_screenCaptureStream == null) return;
     final origin = _myShareOrigin();
     if (origin == null) return;
+    // Phase 3: offer a 2-layer simulcast ingest when the engine on the other
+    // end can select layers — the VPS forwarder always can (deployed with
+    // this contract BEFORE clients ship); a peer forwarder only when its
+    // watch advertised `fwd_simulcast` (an old embedded engine would fan
+    // both layers interleaved = garbage on every viewer). Recomputed here
+    // (first decided at branch creation) so a rebuilt ingest tracks the
+    // forwarder's current watch flags.
+    branch.simulcast = !branch.isPeer ||
+        (_watcherRoutes[branch.forwarderId]?.fwdSimulcast ?? false);
     // Never offer an ingest for a stream the forwarder might not hold.
     await _registerStreamAtForwarder(branch);
     final localPeerId = ref.read(identityProvider).peerId ?? '';
@@ -2795,6 +2953,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
         maxHeight: capH,
         fps: _screenShareFps,
         profile: _screenShareProfile,
+        simulcast: branch.simulcast,
       );
       if (service.pc != null && _service?.frameCryptor != null) {
         await _enableSframeOnScreenSharePc(
@@ -2822,9 +2981,13 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
   }
 
   /// Re-offer a branch's ingest at the current cap (a branch viewer's cap or
-  /// Source-quality changed): live setParameters first, renegotiate when the
-  /// sender rejects it (Windows always does — the step-1 verdict).
+  /// Source-quality changed): live setParameters first (works since the
+  /// scalabilityMode-""/ssrc-0 round-trip poison was fixed in the plugin —
+  /// phase 3), renegotiate when the sender still rejects it.
   Future<void> _reofferIngest(_FwdBranch branch) async {
+    // Cap changes move viewers across the f/q layer threshold — refresh the
+    // engine's low set (attach-time only: live legs keep their layer).
+    await _registerStreamAtForwarder(branch);
     final svc = branch.ingest;
     if (svc != null) {
       final (capW, capH) = _ingestCap(branch);
@@ -3233,6 +3396,11 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       // OPERATOR infrastructure (TURN / the infra forwarder) — the sharer
       // skips the peer-forwarder rungs for them.
       'relay_private': ref.read(alwaysRelayCallsProvider),
+      // Phase 3: this build's embedded engine ingests 2-layer rid simulcast
+      // and selects layers per viewer. The sharer offers a simulcast ingest
+      // only to forwarders that said so — an old engine would interleave
+      // both layers down one egress stream.
+      'fwd_simulcast': canFwd,
     };
   }
 

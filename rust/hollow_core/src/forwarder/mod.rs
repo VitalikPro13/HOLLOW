@@ -24,6 +24,7 @@ pub(crate) mod dispatch;
 pub(crate) mod engine;
 pub(crate) mod leg;
 pub(crate) mod signaling;
+pub(crate) mod simulcast;
 pub(crate) mod stream;
 pub(crate) mod stun;
 

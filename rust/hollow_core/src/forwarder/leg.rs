@@ -18,14 +18,15 @@
 //! - PT translation by (codec, clock_rate) between the legs' independently
 //!   numbered `codec_config().params()` spaces.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use str0m::change::{SdpAnswer, SdpOffer, SdpPendingOffer};
-use str0m::format::CodecSpec;
-use str0m::media::{Direction, MediaKind, Mid, Pt};
+use str0m::format::{Codec, CodecSpec};
+use str0m::media::{Direction, MediaKind, Mid, Pt, Rid};
 use str0m::rtp::{RtpWrite, Ssrc};
 use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc};
 use tokio::net::UdpSocket;
@@ -33,6 +34,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::hollow_log;
 
+use super::simulcast::{LayerSelect, Verdict, RID_FULL, RID_LOW};
 use super::stream::{StreamCounters, StreamWiring};
 
 /// Commands into a leg's pump.
@@ -42,8 +44,9 @@ pub(crate) enum LegCmd {
     /// Egress leg: the viewer answered our offer.
     AcceptAnswer(String),
     /// Ingest leg: a downstream viewer wants a keyframe (PLI, pre-aggregated
-    /// by the stream's 1 s min-interval task).
-    RequestKeyframe,
+    /// by the stream's 1 s min-interval task). `Some(rid)` targets that
+    /// simulcast layer's source; `None`/unknown rid = every source seen.
+    RequestKeyframe(Option<Rid>),
     /// Engine-initiated teardown.
     Shutdown,
 }
@@ -126,7 +129,7 @@ pub(crate) async fn run_ingest_leg(
     };
     hollow_log!("[HOLLOW-FWD] ingest leg up (udp :{})", adv.host.port());
     if let Err(e) = pump(
-        &mut rtc, socket, adv.host, cmd_rx, wiring, counters, connected, true, None, None,
+        &mut rtc, socket, adv.host, cmd_rx, wiring, counters, connected, true, false, None, None,
     )
     .await
     {
@@ -139,6 +142,7 @@ pub(crate) async fn run_ingest_leg(
 
 /// Run an egress leg: creates the SendOnly video offer (sent to the viewer via
 /// the oneshot), then forwards fanned packets after the viewer answers.
+/// `want_low` = the sharer put this viewer on the LOW simulcast layer.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_egress_leg(
     socket: UdpSocket,
@@ -147,6 +151,7 @@ pub(crate) async fn run_egress_leg(
     wiring: Arc<StreamWiring>,
     counters: Arc<StreamCounters>,
     connected: Arc<AtomicBool>,
+    want_low: bool,
     offer_tx: oneshot::Sender<Result<String, String>>,
     ended: LegEnded,
     ended_tx: mpsc::UnboundedSender<LegEnded>,
@@ -180,7 +185,7 @@ pub(crate) async fn run_egress_leg(
     let _ = offer_tx.send(Ok(offer_sdp));
 
     if let Err(e) = pump(
-        &mut rtc, socket, adv.host, cmd_rx, wiring, counters, connected, false,
+        &mut rtc, socket, adv.host, cmd_rx, wiring, counters, connected, false, want_low,
         Some(pending), Some(mid),
     )
     .await
@@ -245,6 +250,7 @@ async fn pump(
     counters: Arc<StreamCounters>,
     connected: Arc<AtomicBool>,
     is_ingest: bool,
+    want_low: bool,
     mut pending: Option<SdpPendingOffer>,
     egress_mid_init: Option<Mid>,
 ) -> Result<(), String> {
@@ -256,7 +262,9 @@ async fn pump(
     };
     let mut egress_mid: Option<Mid> = egress_mid_init;
     let mut ingest_mid: Option<Mid> = None;
-    let mut pt_map: std::collections::HashMap<Pt, Option<Pt>> = std::collections::HashMap::new();
+    // ingest PT -> (egress PT, ingest codec is VP8) — the codec flag gates
+    // the simulcast switch machinery (VP8-only descriptor rewrite).
+    let mut pt_map: HashMap<Pt, (Option<Pt>, bool)> = HashMap::new();
     let mut warned_no_tx = false;
     let mut saw_inbound = false;
     // The ingest stream's SSRC, learned from its packets. `stream_rx_by_mid`
@@ -264,6 +272,25 @@ async fn pump(
     // (no MediaAdded yet, rid-less lookup); an SSRC we have literally seen on
     // the wire always resolves.
     let mut ingest_ssrc: Option<Ssrc> = None;
+    // Ingest: each source's simulcast layer, resolved once per SSRC (the RID
+    // header extension stops arriving after RTCP establishes the SSRC —
+    // str0m's StreamRx keeps the mapping). Tags every fanned packet.
+    let mut ssrc_rids: HashMap<Ssrc, Option<Rid>> = HashMap::new();
+    // Egress: layer selection + rewrite state (phase-3 simulcast). The
+    // desired layer starts from the sharer's low_viewers choice (contract
+    // rids "f"/"q" — rid-less old-sharer sources pass through regardless);
+    // the dry-layer fallback below re-desires when the wanted layer never
+    // flows (e.g. libwebrtc disabled it under CPU pressure), and the leg
+    // returns home once the ideal layer flows steadily again.
+    let ideal = Rid::from(if want_low { RID_LOW } else { RID_FULL });
+    let mut select = LayerSelect::new(Some(ideal));
+    let mut layer_last_seen: HashMap<Rid, Instant> = HashMap::new();
+    let mut ideal_flowing_since: Option<Instant> = None;
+    let mut first_fanout: Option<Instant> = None;
+    let mut last_forwarded: Option<Instant> = None;
+    let mut last_switch_kf: Option<Instant> = None;
+    let mut last_redesire_check = Instant::now();
+    let mut logged_layer: Option<Rid> = None;
     // CRITICAL: inbound packets must be reported with the ADVERTISED candidate
     // address as their destination — str0m matches `Receive.destination`
     // against local candidates, and the socket binds 0.0.0.0 (its local_addr
@@ -320,9 +347,11 @@ async fn pump(
                         // Don't wait for its own PLI to arrive and survive the
                         // trip: ask upstream ourselves the moment the leg is
                         // usable (idempotent — the stream's aggregator
-                        // rate-limits and coalesces).
+                        // rate-limits and coalesces). Target the layer this
+                        // leg wants; an unresolvable rid (old sharer, no
+                        // simulcast) falls back to every source at the ingest.
                         if !is_ingest {
-                            let _ = wiring.kf_tx.send(());
+                            let _ = wiring.kf_tx.send(select.desired());
                         }
                     }
                     Event::MediaAdded(m) => {
@@ -337,14 +366,37 @@ async fn pump(
                         counters
                             .ingest_bytes
                             .fetch_add(pkt.payload.len() as u64, Ordering::Relaxed);
-                        if ingest_ssrc != Some(pkt.header.ssrc) {
-                            ingest_ssrc = Some(pkt.header.ssrc);
+                        let ssrc = pkt.header.ssrc;
+                        if ingest_ssrc != Some(ssrc) {
+                            ingest_ssrc = Some(ssrc);
                         }
-                        let _ = wiring.fanout_tx.send(Arc::new(pkt));
+                        // Resolve this source's simulcast layer ONCE per SSRC
+                        // (ext when present, else str0m's Mid+Rid mapping).
+                        // Cache only positive hits — a late resolution must
+                        // still be able to land.
+                        let rid = match ssrc_rids.get(&ssrc) {
+                            Some(r) => *r,
+                            None => {
+                                let r = pkt.header.ext_vals.rid.or_else(|| {
+                                    rtc.direct_api().stream_rx(&ssrc).and_then(|rx| rx.rid())
+                                });
+                                if let Some(r) = r {
+                                    ssrc_rids.insert(ssrc, Some(r));
+                                    // The decisive simulcast field log: one
+                                    // line per layer, codec-plane only.
+                                    hollow_log!(
+                                        "[HOLLOW-FWD] ingest layer '{r}' mapped (ssrc {})",
+                                        *ssrc
+                                    );
+                                }
+                                r
+                            }
+                        };
+                        let _ = wiring.fanout_tx.send((Arc::new(pkt), rid));
                     }
                     Event::KeyframeRequest(_) if !is_ingest => {
                         hollow_log!("[HOLLOW-FWD] egress leg asked for a keyframe");
-                        let _ = wiring.kf_tx.send(());
+                        let _ = wiring.kf_tx.send(select.current().or(select.desired()));
                     }
                     _ => {}
                 },
@@ -421,25 +473,54 @@ async fn pump(
                             rtc.sdp_api().accept_answer(p, answer).map_err(|e| e.to_string())?;
                         }
                     }
-                    LegCmd::RequestKeyframe => {
+                    LegCmd::RequestKeyframe(rid) => {
                         // A viewer joining mid-stream can only start decoding
                         // from a keyframe, and screen-share encoders emit them
                         // very rarely on their own — a request that fails to
                         // reach the sharer costs the viewer MINUTES of black
-                        // screen (field-measured 2m50s, 2026-08-06). Try the
-                        // mid, then the SSRC we've actually seen.
+                        // screen (field-measured 2m50s, 2026-08-06). A layer-
+                        // targeted request resolves that rid's SSRC from the
+                        // wire-learned map (simulcast layers are independent
+                        // encoders); otherwise: every seen source, then the
+                        // mid, then the last seen SSRC.
                         let mut api = rtc.direct_api();
-                        let via_mid = ingest_mid
-                            .and_then(|mid| api.stream_rx_by_mid(mid, None))
-                            .map(|rx| {
-                                rx.request_keyframe(str0m::media::KeyframeRequestKind::Pli);
-                                "mid"
-                            });
-                        let how = via_mid.or_else(|| {
+                        let pli = str0m::media::KeyframeRequestKind::Pli;
+                        let target = rid.and_then(|r| {
+                            ssrc_rids
+                                .iter()
+                                .find_map(|(s, or)| (*or == Some(r)).then_some(*s))
+                        });
+                        let how = if let Some(ssrc) = target {
+                            api.stream_rx(&ssrc).map(|rx| {
+                                rx.request_keyframe(pli);
+                                "layer ssrc"
+                            })
+                        } else if !ssrc_rids.is_empty() {
+                            let mut any = false;
+                            let ssrcs: Vec<Ssrc> = ssrc_rids.keys().copied().collect();
+                            for ssrc in ssrcs {
+                                if let Some(rx) = api.stream_rx(&ssrc) {
+                                    rx.request_keyframe(pli);
+                                    any = true;
+                                }
+                            }
+                            any.then_some("all seen ssrcs")
+                        } else {
+                            None
+                        };
+                        let how = how.or_else(|| {
+                            ingest_mid
+                                .and_then(|mid| api.stream_rx_by_mid(mid, None))
+                                .map(|rx| {
+                                    rx.request_keyframe(pli);
+                                    "mid"
+                                })
+                        });
+                        let how = how.or_else(|| {
                             ingest_ssrc
                                 .and_then(|ssrc| api.stream_rx(&ssrc))
                                 .map(|rx| {
-                                    rx.request_keyframe(str0m::media::KeyframeRequestKind::Pli);
+                                    rx.request_keyframe(pli);
                                     "ssrc"
                                 })
                         });
@@ -460,13 +541,89 @@ async fn pump(
                     None => std::future::pending().await,
                 }
             }, if !is_ingest => {
-                if let (Some(pkt), Some(mid)) = (pkt, egress_mid) {
+                if let (Some((pkt, rid)), Some(mid)) = (pkt, egress_mid) {
+                    let now = Instant::now();
+                    if first_fanout.is_none() {
+                        first_fanout = Some(now);
+                    }
+                    if let Some(r) = rid {
+                        // Track the ideal layer's continuous-flow window for
+                        // the upgrade rule (a >1 s gap restarts it).
+                        if r == ideal {
+                            let gap = layer_last_seen
+                                .get(&r)
+                                .is_none_or(|t| now.duration_since(*t) > Duration::from_secs(1));
+                            if gap || ideal_flowing_since.is_none() {
+                                ideal_flowing_since = Some(now);
+                            }
+                        }
+                        layer_last_seen.insert(r, now);
+                    }
+                    // Layer policy (throttled): dry fallback, upgrade home,
+                    // pending-switch keyframe nudges. Runs on EVERY fanned
+                    // packet — including ones this leg drops — so a dry
+                    // current layer is detected as long as ANY layer flows.
+                    if now.duration_since(last_redesire_check) >= Duration::from_millis(500) {
+                        last_redesire_check = now;
+                        const DRY: Duration = Duration::from_millis(2500);
+                        const UPGRADE_AFTER: Duration = Duration::from_secs(5);
+                        let starving = match (last_forwarded, first_fanout) {
+                            (Some(t), _) => now.duration_since(t) > DRY,
+                            (None, Some(t)) => now.duration_since(t) > DRY,
+                            (None, None) => false,
+                        };
+                        let desired = select.desired();
+                        if starving {
+                            // The layer we want is dry — ride whatever flows
+                            // (libwebrtc can disable a simulcast layer under
+                            // CPU/bandwidth pressure; a foreign sharer may
+                            // use rids outside the f/q contract).
+                            let flowing = layer_last_seen.iter().find(|(r, t)| {
+                                Some(**r) != desired
+                                    && now.duration_since(**t) < Duration::from_secs(1)
+                            });
+                            if let Some((r, _)) = flowing {
+                                hollow_log!(
+                                    "[HOLLOW-FWD] egress layer '{}' dry — falling back to '{r}'",
+                                    desired.map(|d| d.to_string()).unwrap_or_default()
+                                );
+                                select.set_desired(Some(*r));
+                                let _ = wiring.kf_tx.send(Some(*r));
+                            }
+                        } else if desired != Some(ideal)
+                            // The ideal layer must be flowing RIGHT NOW, not
+                            // just "since a while ago": `ideal_flowing_since`
+                            // resets only when an ideal-layer packet arrives
+                            // after a gap — a COMPLETELY dry layer leaves it
+                            // stale, and without this freshness gate the leg
+                            // flipped its desire back to a dead layer one
+                            // second after falling off it, nagging upstream
+                            // PLIs at a layer the encoder had disabled
+                            // (field-hit run A, 2026-08-14).
+                            && layer_last_seen
+                                .get(&ideal)
+                                .is_some_and(|t| now.duration_since(*t) < Duration::from_secs(1))
+                            && ideal_flowing_since
+                                .is_some_and(|t| now.duration_since(t) > UPGRADE_AFTER)
+                        {
+                            hollow_log!("[HOLLOW-FWD] egress returning to layer '{ideal}'");
+                            select.set_desired(Some(ideal));
+                            let _ = wiring.kf_tx.send(Some(ideal));
+                        }
+                        if select.switch_pending()
+                            && last_switch_kf
+                                .is_none_or(|t| now.duration_since(t) >= Duration::from_secs(1))
+                        {
+                            last_switch_kf = Some(now);
+                            let _ = wiring.kf_tx.send(select.desired());
+                        }
+                    }
                     // Translate the ingest leg's PT to this leg's PT for the
                     // same codec CONFIGURATION — the two SDP negotiations
                     // number payload types independently (see map_pt on why
                     // the format params must match, not just the codec).
                     let ingest_pt = pkt.header.payload_type;
-                    let mapped = *pt_map.entry(ingest_pt).or_insert_with(|| {
+                    let (mapped, is_vp8) = *pt_map.entry(ingest_pt).or_insert_with(|| {
                         let ingest = wiring.ingest_params.lock().unwrap();
                         let egress = pt_space(rtc);
                         let ingest_spec = ingest.iter().find(|(p, _)| *p == ingest_pt).map(|(_, s)| *s);
@@ -491,29 +648,51 @@ async fn pump(
                                 "[HOLLOW-FWD] PT {ingest_pt:?} unknown on the ingest leg — dropping"
                             ),
                         }
-                        out
+                        (out, ingest_spec.is_some_and(|s| s.codec == Codec::Vp8))
                     });
                     let Some(egress_pt) = mapped else { continue };
+                    // Simulcast layer selection + rewrite. A rid-less source
+                    // (every old sharer) passes through byte-identically —
+                    // seq/ts untouched, no descriptor patch, exactly the
+                    // shipped phase-1/2 path.
+                    let verdict = select.on_packet(
+                        rid,
+                        *pkt.seq_no,
+                        pkt.header.timestamp,
+                        &pkt.payload,
+                        is_vp8,
+                    );
+                    let Verdict::Forward { seq, ts, patch } = verdict else { continue };
+                    if logged_layer != select.current() {
+                        logged_layer = select.current();
+                        if let Some(r) = logged_layer {
+                            hollow_log!("[HOLLOW-FWD] egress leg serving layer '{r}'");
+                        }
+                    }
+                    last_forwarded = Some(now);
                     let mut api = rtc.direct_api();
                     if let Some(tx) = api.stream_tx_by_mid(mid, None) {
-                        // Seq/time pass through untouched — one source, one
-                        // stream; payload is SFrame ciphertext end to end.
-                        // wallclock = arrival time; nackable(true) = str0m's
-                        // own RTX cache serves egress NACKs.
+                        // Payload is SFrame ciphertext end to end (the VP8
+                        // descriptor patched across a layer switch rides in
+                        // the clear BEFORE the encrypted frame). wallclock =
+                        // arrival time; nackable(true) = str0m's own RTX
+                        // cache serves egress NACKs.
                         counters
                             .egress_bytes
                             .fetch_add(pkt.payload.len() as u64, Ordering::Relaxed);
-                        tx.write_rtp(
-                            RtpWrite::new(
-                                egress_pt,
-                                pkt.seq_no,
-                                pkt.header.timestamp,
-                                pkt.timestamp,
-                                pkt.payload.clone(),
-                            )
-                            .marker(pkt.header.marker)
-                            .nackable(true),
-                        );
+                        let mut write = RtpWrite::new(
+                            egress_pt,
+                            seq.into(),
+                            ts,
+                            pkt.timestamp,
+                            pkt.payload.clone(),
+                        )
+                        .marker(pkt.header.marker)
+                        .nackable(true);
+                        if let Some(p) = patch {
+                            write = write.vp8_patch(p);
+                        }
+                        tx.write_rtp(write);
                     } else if !warned_no_tx {
                         warned_no_tx = true;
                         hollow_log!("[HOLLOW-FWD] egress: no StreamTx for negotiated mid — cannot forward");

@@ -466,6 +466,48 @@ No frb codegen needed — `HavenMessage` is internal, and `call_send_signal`/`Ne
 
 **Recording indicator (issue #53, 2026-08-05):** Dart's `recording_start`/`recording_stop` signals are whitelisted on BOTH paths. 1:1 → `HavenMessage::CallRecordingState { call_id, recording }` (`call_recording_state`); VC → broadcast-class `MessageEnvelope::VoiceChannelRecordingState { sid, cid, recording, target }` (`vc_recording_state`) + plaintext `HavenMessage` twin — added to `is_broadcast`, the VC rate-limiter list, the MLS-only-via-Olm list, and `target()`. Receive handlers gate on VC participant membership and reconstruct the Dart-facing signal-type string from the `recording` bool. The VC Dart sender fires ONE broadcast (`peerId: ''`) — a per-peer loop would emit N duplicate MLS broadcasts. Harness-covered in both the DM and VC signal-routing tests.
 
+## Phase 3 — simulcast + upload spreading (FIELD-VERIFIED COMPLETE 2026-08-14; details in reports/MEDIA_FORWARDING_PLAN.md §7/§9)
+
+**Live setParameters works on Windows now.** The historic every-call rejection was the
+plugin's parameters round-trip materializing unset optionals (`scalabilityMode ""`, `ssrc 0`)
+and writing them back — libwebrtc rejects the whole call with INVALID_MODIFICATION. Fixed in
+`flutter_peerconnection.cc` both directions; rid/ssrc are NEVER written back on the live path
+(read-only). Dynamic cap changes (`updateResolutionCap`, ingest re-caps) are now real live
+updates; the renegotiate-on-false fallback remains as the belt.
+
+**Simulcast (forwarder ingest legs ONLY):** the ingest offers 2 rid layers — contract rids
+`q` (half per axis, FIRST in sendEncodings so the rate allocator protects it under
+congestion) + `f` (the branch cap = max over the branch audience) — VP8-constrained
+(`_applyScreenCodecPreference(vp8Only:)`; the engine's layer-switch descriptor rewrite is
+VP8-only). Per-viewer direct PCs are untouched (step-1 capping serves them). Wire:
+`fwd_stream_register` gained `#[serde(default, skip_serializing_if empty)] low_viewers`
+(sharer rule: `viewer_long × 2 ≤ f_long` → ride q; applied at ATTACH time, never rewires a
+live leg); `vc_screen_watch` gained `fwd_simulcast` — a peer forwarder only receives a
+simulcast ingest if its watch advertised it (an old embedded engine would interleave both
+layers down one egress SSRC); the VPS forwarder is assumed capable (deploy-first ordering).
+
+**Engine layer selection (`forwarder/simulcast.rs` + leg.rs):** the ingest pump resolves each
+SSRC's rid once (header ext, then str0m's Mid+Rid mapping — the ext stops after RTCP) and
+tags the fanout; each egress leg runs a pure `LayerSelect` state machine — rid-less sources
+(old sharers) pass through BYTE-IDENTICAL to phase 1/2; layered sources forward exactly one
+layer, switching ONLY on the target layer's VP8 keyframe-start with seq/ts/PictureID/
+TL0PICIDX/KEYIDX continuity via str0m's `Vp8Patch` (make-before-break: the old layer flows
+until the keyframe lands). Per-layer PLI end to end. Pump policy: dry-layer fallback (wanted
+layer silent >2.5 s while another flows — e.g. the allocator disabled `f` under BWE pressure
+— ride what flows; field-fired 2026-08-14 with the picture continuing) + upgrade-home
+hysteresis (ideal layer flowing ≥5 s AND fresh <1 s — the freshness gate is load-bearing: a
+fully dry layer never resets its "flowing since" mark).
+
+**Upload spreading (voice_channel_provider):** a step-3-capable DIRECT viewer past
+`maxDirectShareCopies` (=1, SOFT) is served through a branch — `_pickSpreadTargetFor`: peer
+branch with capacity → promote a fwd-capable direct watcher, preferring one that already
+HOLDS a direct copy (its copy closes on promotion), then the viewer ITSELF (self-promotion:
+the head stays OUT of `branch.viewers`, no duplicate assign) → an ALREADY-SERVING VPS branch
+only (never open a fresh VPS branch for a STUN-capable viewer). Spread viewers' cap
+re-watches stay on-branch (`_reofferIngest` re-registers first = low-set refresh). Old
+clients (empty route) always get direct PCs. Field result: 2 direct viewers = ONE simulcast
+ingest, ZERO direct copies; the 15-viewer cap is effectively dynamic.
+
 ## Phase 2 — viewer-peer forwarders (FIELD-VERIFIED COMPLETE 2026-08-07, all four runs; details in reports/MEDIA_FORWARDING_PLAN.md §7)
 
 The SAME `fwd_*` contract now also terminates at an **embedded engine inside desktop app

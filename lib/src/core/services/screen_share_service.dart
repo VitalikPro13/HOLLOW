@@ -105,6 +105,11 @@ class ScreenShareService {
   int? _capHeight;
   int? _capFps;
 
+  /// Phase 3: this outgoing PC carries a 2-layer simulcast (forwarder ingest
+  /// legs only — rid 'f' at the cap + rid 'q' at half per axis). Cap changes
+  /// must keep BOTH layers consistent.
+  bool _simulcast = false;
+
   // --- Screen audio via out-of-process capturer (Windows) ---
   ScreenAudioCapturer? _screenAudioCapturer;
   // --- Screen audio via ScreenCaptureKit (macOS 13.0–14.1) ---
@@ -157,13 +162,18 @@ class ScreenShareService {
   /// post-connect enforcement uses, and writes _capWidth/_capHeight FIRST so
   /// that enforcement re-applies THIS cap rather than reverting it.
   ///
-  /// Returns false when the sender REJECTED the live change (Windows
-  /// libwebrtc does — field-verified 2026-08-05: setParameters always
-  /// returns false on the share sender there, the cap only ever applied via
-  /// addTransceiver init sendEncodings). The caller must then renegotiate:
-  /// tear down this service and send a fresh offer with the new cap in the
-  /// init encodings. Returns true when nothing changed or the live update
-  /// was accepted.
+  /// Returns false when the sender REJECTED the live change; the caller
+  /// must then renegotiate: tear down this service and send a fresh offer
+  /// with the new cap in the init encodings. Returns true when nothing
+  /// changed or the live update was accepted.
+  ///
+  /// History: on Windows EVERY live setParameters returned false 2026-07-20
+  /// → 2026-08-08. Root cause (phase 3): the native→Dart parameters map
+  /// materialized unset optionals (scalabilityMode "" / ssrc 0), and the
+  /// write-back turned them into set-but-invalid values — libwebrtc rejects
+  /// the whole call with INVALID_MODIFICATION. Fixed in the plugin
+  /// (flutter_peerconnection.cc); the renegotiate fallback stays as the
+  /// belt.
   Future<bool> updateResolutionCap(int maxWidth, int maxHeight) async {
     if (_capFps == null) return false; // Incoming-only PC / no cap requested.
     if (_capWidth == maxWidth && _capHeight == maxHeight) return true;
@@ -271,8 +281,12 @@ class ScreenShareService {
             ? (captureWidth, captureHeight)
             : _captureSizeOf(sender.track!);
         for (final encoding in params.encodings!) {
-          _configureVideoEncoding(
-              encoding, capW, capH, maxWidth, maxHeight, fps);
+          // Simulcast ingest legs: the 'q' layer tracks the cap at half per
+          // axis; everything else (incl. the 'f' layer) gets the full cap.
+          final low = _simulcast && encoding.rid == 'q';
+          final tw = low && maxWidth ~/ 2 >= 2 ? maxWidth ~/ 2 : maxWidth;
+          final th = low && maxHeight ~/ 2 >= 2 ? maxHeight ~/ 2 : maxHeight;
+          _configureVideoEncoding(encoding, capW, capH, tw, th, fps);
         }
         final ok = await sender.setParameters(params);
         _log('[HOLLOW-SCREEN] setParameters(cap ${maxWidth}x$maxHeight'
@@ -308,15 +322,36 @@ class ScreenShareService {
   /// when the sender attaches at negotiation) — a pre-negotiation
   /// setParameters is NOT reliably carried across that transition, which is
   /// how the receiver ended up with native resolution.
+  /// [rid] tags a simulcast layer (forwarder ingest legs, phase 3).
   RTCRtpEncoding _buildScreenSendEncoding(
-      MediaStreamTrack track, int maxWidth, int maxHeight, int fps) {
+      MediaStreamTrack track, int maxWidth, int maxHeight, int fps,
+      {String? rid}) {
     final encoding = RTCRtpEncoding()
       // Dart defaults this to 1, which would pin the encoder to a single
       // temporal layer; null lets libwebrtc pick per-codec.
-      ..numTemporalLayers = null;
+      ..numTemporalLayers = null
+      ..rid = rid;
     final (capW, capH) = _captureSizeOf(track);
     _configureVideoEncoding(encoding, capW, capH, maxWidth, maxHeight, fps);
     return encoding;
+  }
+
+  /// The two simulcast layers for a forwarder ingest leg (phase 3), LOW
+  /// FIRST: libwebrtc's rate allocator protects encodings[0] under
+  /// congestion, and the small layer is the one every branch viewer must be
+  /// able to keep receiving (a starved full layer drops its viewers onto the
+  /// low layer via the forwarder engine's dry-layer fallback). Rid names are
+  /// the forwarder contract: 'f' = full (the branch cap), 'q' = quarter
+  /// (half per axis).
+  List<RTCRtpEncoding> _buildSimulcastSendEncodings(
+      MediaStreamTrack track, int maxWidth, int maxHeight, int fps) {
+    final qW = maxWidth ~/ 2, qH = maxHeight ~/ 2;
+    return [
+      _buildScreenSendEncoding(
+          track, qW < 2 ? maxWidth : qW, qH < 2 ? maxHeight : qH, fps,
+          rid: 'q'),
+      _buildScreenSendEncoding(track, maxWidth, maxHeight, fps, rid: 'f'),
+    ];
   }
 
   /// Configure one video encoding: downscale to the cap if the capture is
@@ -624,7 +659,8 @@ class ScreenShareService {
   ///   software encode is cheap at text-profile framerates. Receivers
   ///   without AV1/VP9 fall back through normal SDP negotiation.
   Future<void> _applyScreenCodecPreference(
-      MediaStreamTrack screenTrack, ScreenContentProfile profile) async {
+      MediaStreamTrack screenTrack, ScreenContentProfile profile,
+      {bool vp8Only = false}) async {
     if (Platform.isAndroid || Platform.isIOS) return;
     try {
       final caps = await getRtpSenderCapabilities('video');
@@ -633,6 +669,10 @@ class ScreenShareService {
 
       int rank(RTCRtpCodecCapability c) {
         final mime = c.mimeType.toLowerCase();
+        // Simulcast ingest legs (phase 3): VP8 first, unconditionally — the
+        // forwarder's layer-switch descriptor rewrite is VP8-only, and VP8
+        // is the codec the fwd lane is field-proven on.
+        if (vp8Only) return mime == 'video/vp8' ? 0 : 1;
         if (Platform.isMacOS) {
           if (mime == 'video/vp8') return 0;
           if (mime == 'video/vp9') return 1;
@@ -690,16 +730,25 @@ class ScreenShareService {
   /// Create an offer using a pre-captured screen stream (for voice channels
   /// where one capture is shared across multiple peer connections).
   /// The caller manages the track poller centrally.
+  ///
+  /// [simulcast] (phase 3, forwarder ingest legs only): encode TWO rid
+  /// layers — 'q' (half per axis, protected under congestion by riding
+  /// first) + 'f' (the cap) — so the forwarder engine can pick per-viewer
+  /// layers by packet selection. Simulcast legs are constrained to VP8: the
+  /// engine's layer-switch rewrite is VP8-descriptor-only, and VP8 is the
+  /// codec the whole forwarder lane is field-proven on.
   Future<String> createOfferFromStream(
     MediaStream stream, {
     int maxWidth = 1920,
     int maxHeight = 1080,
     int fps = 60,
     ScreenContentProfile profile = ScreenContentProfile.motion,
+    bool simulcast = false,
   }) async {
     _log('[HOLLOW-SCREEN] Creating offer from shared stream '
-        '(profile=${profile.name})');
+        '(profile=${profile.name}${simulcast ? ', simulcast f+q' : ''})');
     _contentProfile = profile;
+    _simulcast = simulcast;
 
     // Idempotent: if this service already holds a PC (re-fired offer on
     // reconnect), tear the old one down before building a new one so its
@@ -733,16 +782,22 @@ class ScreenShareService {
         init: RTCRtpTransceiverInit(
           direction: TransceiverDirection.SendRecv,
           streams: [_screenStream!],
-          sendEncodings: [
-            _buildScreenSendEncoding(screenTrack, maxWidth, maxHeight, fps),
-          ],
+          sendEncodings: simulcast
+              ? _buildSimulcastSendEncodings(
+                  screenTrack, maxWidth, maxHeight, fps)
+              : [
+                  _buildScreenSendEncoding(
+                      screenTrack, maxWidth, maxHeight, fps),
+                ],
         ),
       );
       _log('[HOLLOW-SCREEN] Added screen video transceiver '
-          '(init cap ${maxWidth}x$maxHeight@${fps}fps)');
+          '(init cap ${maxWidth}x$maxHeight@${fps}fps'
+          '${simulcast ? ' + q layer' : ''})');
 
       await _applyContentHint(screenTrack);
-      await _applyScreenCodecPreference(screenTrack, profile);
+      await _applyScreenCodecPreference(screenTrack, profile,
+          vp8Only: simulcast);
 
       // Second layer: setParameters (degradationPreference + cap re-assert).
       await _applyResolutionCap(maxWidth, maxHeight, fps, profile);
@@ -1023,6 +1078,7 @@ class ScreenShareService {
     _capWidth = null;
     _capHeight = null;
     _capFps = null;
+    _simulcast = false;
   }
 
   /// Tear down the macOS system audio tap first so the system default input

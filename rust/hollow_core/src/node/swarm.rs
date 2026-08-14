@@ -8536,11 +8536,11 @@ async fn handle_incoming_request(
                         origin, &local_peer_str,
                     ).await;
                 }
-                Ok(MessageEnvelope::VoiceChannelScreenWatch { sid, cid, want, viewer_width, viewer_height, source_quality, route, fwd_capable, relay_private, .. }) => {
+                Ok(MessageEnvelope::VoiceChannelScreenWatch { sid, cid, want, viewer_width, viewer_height, source_quality, route, fwd_capable, relay_private, fwd_simulcast, .. }) => {
                     voice_handler::handle_envelope_voice_channel_screen_watch(
                         voice_channel_participants, event_tx,
                         peer_str.to_string(), sid, cid, want,
-                        viewer_width, viewer_height, source_quality, route, fwd_capable, relay_private,
+                        viewer_width, viewer_height, source_quality, route, fwd_capable, relay_private, fwd_simulcast,
                     ).await;
                 }
                 Ok(MessageEnvelope::VoiceChannelScreenAssign { sid, cid, origin, forwarder, .. }) => {
@@ -10692,11 +10692,11 @@ async fn handle_incoming_request(
                                     peer_str.to_string(), sid, cid, enabled, quality,
                                 ).await;
                             }
-                            MessageEnvelope::VoiceChannelScreenWatch { sid, cid, want, viewer_width, viewer_height, source_quality, route, fwd_capable, relay_private, .. } => {
+                            MessageEnvelope::VoiceChannelScreenWatch { sid, cid, want, viewer_width, viewer_height, source_quality, route, fwd_capable, relay_private, fwd_simulcast, .. } => {
                                 voice_handler::handle_envelope_voice_channel_screen_watch(
                                     voice_channel_participants, event_tx,
                                     peer_str.to_string(), sid, cid, want,
-                                    viewer_width, viewer_height, source_quality, route, fwd_capable, relay_private,
+                                    viewer_width, viewer_height, source_quality, route, fwd_capable, relay_private, fwd_simulcast,
                                 ).await;
                             }
 

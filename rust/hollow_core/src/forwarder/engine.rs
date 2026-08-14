@@ -298,7 +298,7 @@ async fn handle_signal(
     ended_tx: &mpsc::UnboundedSender<LegEnded>,
 ) {
     match envelope {
-        MessageEnvelope::FwdStreamRegister { origin, allowed_viewers } => {
+        MessageEnvelope::FwdStreamRegister { origin, allowed_viewers, low_viewers } => {
             let key = stream_key(&origin);
             let already = streams
                 .get(&key)
@@ -312,15 +312,19 @@ async fn handle_signal(
                 return;
             }
             let allowlist: HashSet<String> = allowed_viewers.into_iter().collect();
+            let low: HashSet<String> = low_viewers.into_iter().collect();
             if already {
                 if let Some(s) = streams.get_mut(&key) {
                     s.allowlist = allowlist;
+                    s.low_viewers = low;
                     // An admitted owner op proves the owner is back — undo a
                     // presence-flap mark so the sweep doesn't reap a live re-share.
                     s.owner_gone = false;
                 }
             } else {
-                streams.insert(key, StreamState::new((*origin).clone(), sender, allowlist));
+                let mut state = StreamState::new((*origin).clone(), sender, allowlist);
+                state.low_viewers = low;
+                streams.insert(key, state);
                 hollow_log!("[HOLLOW-FWD] stream registered ({} total)", streams.len());
             }
         }
@@ -430,6 +434,9 @@ async fn handle_signal(
             if let Some(old) = s.egress.remove(&sender) {
                 old.shut_down();
             }
+            // Simulcast layer choice is attach-time: the sharer's register
+            // named the viewers that should ride the low layer.
+            let want_low = s.low_viewers.contains(&sender);
             let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<LegCmd>();
             let connected = Arc::new(AtomicBool::new(false));
             let (offer_tx, offer_rx) = oneshot::channel();
@@ -440,6 +447,7 @@ async fn handle_signal(
                 s.wiring.clone(),
                 s.counters.clone(),
                 connected.clone(),
+                want_low,
                 offer_tx,
                 LegEnded { stream: key.clone(), viewer: Some(sender.clone()) },
                 ended_tx.clone(),
