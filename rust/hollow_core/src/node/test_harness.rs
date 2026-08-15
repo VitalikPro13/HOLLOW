@@ -5689,8 +5689,19 @@ async fn restricted_voice_channel_subgroup_enforces_sframe_membership() {
     // Wait until ALL THREE distinct identities are leaves of the server-wide MLS
     // group — the precondition for an MLS-broadcast ChannelAdded op to reach them.
     // (Batch-add commits happen on a 2s timer; give it room.)
+    //
+    // The budget is 60s, not the 24s this used to allow. On a coverage-
+    // instrumented CI runner this test takes ~94s against ~40s locally, and
+    // under that squeeze the three sequential batch-add commits overran 24s:
+    // the test flaked at THIS setup assert while the SFrame behaviour it
+    // actually covers was never reached — green in the Rust Coverage job and
+    // red in the Sonar job on the very SAME commit (2026-08-15). The loop exits
+    // as soon as the leaves converge, so a healthy run costs what it did before.
+    // 24s was also the shortest budget of any comparable multi-identity wait in
+    // this file (siblings use 15-25 iterations); this brings it in line.
     let mut srv_ok = false;
-    for _ in 0..12 {
+    let mut last_leaves: Vec<String> = Vec::new();
+    for _ in 0..30 {
         sleep_ms(2000).await;
         let leaves = o.mls_members(&server_id).await;
         if leaves.contains(&o.device_id)
@@ -5700,8 +5711,18 @@ async fn restricted_voice_channel_subgroup_enforces_sframe_membership() {
             srv_ok = true;
             break;
         }
+        last_leaves = leaves;
     }
-    assert!(srv_ok, "all three members must join the server-wide MLS group");
+    // Name the missing leaf: "must join the MLS group" alone cannot tell a real
+    // convergence bug from a slow runner.
+    assert!(
+        srv_ok,
+        "all three members must join the server-wide MLS group — \
+         last leaves {last_leaves:?}, missing O={} A={} M={}",
+        !last_leaves.contains(&o.device_id),
+        !last_leaves.contains(&a.device_id),
+        !last_leaves.contains(&m.device_id),
+    );
     drain_events(&mut o);
     drain_events(&mut a);
     drain_events(&mut m);
