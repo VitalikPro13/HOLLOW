@@ -63,7 +63,7 @@ import 'package:hollow/src/core/services/macos_version.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/profile_card_popup.dart';
 import 'package:hollow/src/ui/components/saved_messages_avatar.dart';
-import 'package:hollow/src/ui/components/share_source_quality_chip.dart';
+import 'package:hollow/src/ui/components/share_quality_chip.dart';
 import 'package:hollow/src/ui/components/share_volume_control.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/large_file_share_dialog.dart';
@@ -4102,16 +4102,6 @@ class _ScreenShareFullView extends ConsumerWidget {
                         ? bigChoice.renderer
                         : null,
                     sourceLabel: call.remoteScreenShareLabel,
-                  ),
-                  const SizedBox(width: HollowSpacing.sm),
-                ],
-                // Source-quality opt-in (media forwarding step 1) — per
-                // watch session, OFF by default.
-                if (call.watchingRemoteShare) ...[
-                  ShareSourceQualityChip(
-                    active: call.watchingSourceQuality,
-                    onChanged: (on) =>
-                        notifier.setRemoteShareSourceQuality(on),
                   ),
                   const SizedBox(width: HollowSpacing.sm),
                 ],

@@ -19,6 +19,8 @@ import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/core/providers/voice_channel_provider.dart';
 import 'package:hollow/src/core/providers/webrtc_provider.dart';
 import 'package:hollow/src/core/services/desktop_capture_support.dart';
+import 'package:hollow/src/core/services/ice_repair.dart';
+import 'package:hollow/src/core/services/ice_route_probe.dart';
 import 'package:hollow/src/core/services/macos_version.dart';
 import 'package:hollow/src/core/services/screen_audio_receiver.dart';
 import 'package:hollow/src/core/services/share_audio_level.dart';
@@ -66,7 +68,6 @@ class CallState {
   /// Viewer asked for SOURCE quality on the remote share (media forwarding
   /// step 1). OFF by default: the sharer clamps our stream to our display
   /// resolution until this is on. Per watch session, never sticky.
-  final bool watchingSourceQuality;
   final String sframeKey; // hex-encoded 32-byte SFrame key for E2EE
   // NOTE: speaking (VAD) state deliberately lives in callSpeakingProvider,
   // NOT here — it flips 1-4x/sec while talking and a copyWith here rebuilt
@@ -108,7 +109,6 @@ class CallState {
     this.isScreenSharing = false,
     this.remoteScreenSharing = false,
     this.watchingRemoteShare = false,
-    this.watchingSourceQuality = false,
     this.sframeKey = '',
     this.isSpeakerOn = false,
     this.isDeafened = false,
@@ -133,7 +133,6 @@ class CallState {
     bool? isScreenSharing,
     bool? remoteScreenSharing,
     bool? watchingRemoteShare,
-    bool? watchingSourceQuality,
     String? sframeKey,
     bool? isSpeakerOn,
     bool? isDeafened,
@@ -159,8 +158,6 @@ class CallState {
         isScreenSharing: isScreenSharing ?? this.isScreenSharing,
         remoteScreenSharing: remoteScreenSharing ?? this.remoteScreenSharing,
         watchingRemoteShare: watchingRemoteShare ?? this.watchingRemoteShare,
-        watchingSourceQuality:
-            watchingSourceQuality ?? this.watchingSourceQuality,
         sframeKey: sframeKey ?? this.sframeKey,
         isSpeakerOn: isSpeakerOn ?? this.isSpeakerOn,
         isDeafened: isDeafened ?? this.isDeafened,
@@ -193,6 +190,11 @@ class CallNotifier extends Notifier<CallState> {
   String? _queuedRenegOfferPeer;
   String? _queuedRenegOfferPayload;
   int _renegOfferAttempts = 0;
+
+  /// "Direct whenever direct is possible" (see [_scheduleIceRepair]): ONE
+  /// repair attempt per call, then we accept whatever ICE chose.
+  Timer? _iceRepairTimer;
+  bool _iceRepairDone = false;
 
   /// Last user-chosen remote volume — restored when un-deafening.
   double _lastRemoteVolume = 1.0;
@@ -234,7 +236,6 @@ class CallNotifier extends Notifier<CallState> {
   /// = no clamp.
   int _dmViewerWidth = 0;
   int _dmViewerHeight = 0;
-  bool _dmViewerSourceQuality = false;
 
   /// Viewer side: "offer never came" timeout after pressing Watch.
   Timer? _dmWatchConnectTimer;
@@ -316,6 +317,7 @@ class CallNotifier extends Notifier<CallState> {
         // mode the mic starts gated until the key is held (issue #38).
         _applyTxGate();
         _scheduleStatsDump(peerId);
+        _scheduleIceRepair(peerId);
 
         // AI-NS fallback check for calls that STARTED with the toggle on
         // (the toggle listener only covers mid-call flips): if DFN proves
@@ -611,6 +613,77 @@ class CallNotifier extends Notifier<CallState> {
     } finally {
       _renegotiationInProgress = false;
     }
+  }
+
+  /// One-shot "direct whenever direct is possible" repair for the call PC.
+  ///
+  /// libwebrtc nominates whichever candidate pair completes its check first,
+  /// and TURN's pre-warmed allocation often wins by a single RTT on a path
+  /// where a direct pair would have worked — then ICE never migrates on its
+  /// own. If both sides advertised a non-relay candidate, one ICE restart on a
+  /// warmed network usually lands the hole punch.
+  ///
+  /// Constraints honoured: never under "Always relay calls" (forced TURN is a
+  /// deliberate privacy choice, not a defect); only ONE attempt per call; only
+  /// in a QUIESCENT window (no renegotiation in flight or queued); and only the
+  /// polite side initiates, so the two ends can't restart into each other.
+  void _scheduleIceRepair(String peerId, {int attempt = 0}) {
+    if (_iceRepairDone) return;
+    if (ref.read(alwaysRelayCallsProvider)) return;
+    if (!shouldInitiateIceRepair(localPeerId, peerId)) {
+      // The other side owns the attempt; we just answer its offer.
+      _iceRepairDone = true;
+      return;
+    }
+    _iceRepairTimer?.cancel();
+    _iceRepairTimer = Timer(
+      attempt == 0 ? const Duration(seconds: 10) : const Duration(seconds: 5),
+      () async {
+        _iceRepairTimer = null;
+        if (_iceRepairDone) return;
+        if (state.status != CallStatus.active || state.peerId != peerId) return;
+        final pc = _service.peerConnection;
+        if (pc == null) return;
+
+        // Quiescent window only — an ICE restart is a renegotiation trigger,
+        // and firing one into an in-flight negotiation is the glare case the
+        // reneg rules exist to prevent. Re-check a few times, then give up.
+        if (_renegotiationInProgress || _queuedRenegOfferPeer != null) {
+          if (attempt < 5) {
+            _scheduleIceRepair(peerId, attempt: attempt + 1);
+          } else {
+            _callLog('[HOLLOW-ICE-REPAIR] never found a quiet window — '
+                'accepting the relayed pair');
+            _iceRepairDone = true;
+          }
+          return;
+        }
+
+        final verdict = await assessIceRepair(pc);
+        if (verdict == null) return;
+        if (!verdict.shouldRepair) {
+          // Either already direct, or genuinely no direct pair on offer
+          // (symmetric NAT / UDP-hostile firewall — TURN is doing its job).
+          _iceRepairDone = true;
+          return;
+        }
+
+        _iceRepairDone = true; // one attempt, whatever happens next
+        _callLog('[HOLLOW-ICE-REPAIR] relayed pair with direct candidates on '
+            'both sides (${verdict.detail}) — restarting ICE');
+        if (!await restartIceOn(pc)) return;
+        await _sendDeviceSwitchReneg('ice-repair');
+
+        // Verify on the retry ladder, never a single fixed delay: the pair
+        // does not read back as succeeded the instant the PC reports connected.
+        final after = await probeIceRoute(() => _service.peerConnection);
+        _callLog(after == null
+            ? '[HOLLOW-ICE-REPAIR] post-restart route unknown'
+            : after.isDirect
+                ? '[HOLLOW-ICE-REPAIR] repaired to direct: $after'
+                : '[HOLLOW-ICE-REPAIR] still relayed after restart: $after');
+      },
+    );
   }
 
   /// Ensure audio device preferences are loaded from SQLCipher before starting
@@ -1229,7 +1302,6 @@ class CallNotifier extends Notifier<CallState> {
     _dmPeerWantsShare = false;
     _dmViewerWidth = 0;
     _dmViewerHeight = 0;
-    _dmViewerSourceQuality = false;
     // Stop the capturer FIRST, then disarm the redirect — so the brief window
     // where the remote voice's in-process volume is restored isn't captured
     // (the capturer is already gone), avoiding a momentary echo blip on stop.
@@ -1256,15 +1328,13 @@ class CallNotifier extends Notifier<CallState> {
     if (state.callId != callId) return;
     final viewerW = (json['viewer_width'] as num?)?.toInt() ?? 0;
     final viewerH = (json['viewer_height'] as num?)?.toInt() ?? 0;
-    final sourceQuality = json['source_quality'] as bool? ?? false;
     debugPrint('[HOLLOW-CALL] Screen watch from $peerId: want=$want '
-        'viewer=${viewerW}x$viewerH source=$sourceQuality');
+        'viewer=${viewerW}x$viewerH');
 
     if (want) {
       _dmPeerWantsShare = true;
       _dmViewerWidth = viewerW;
       _dmViewerHeight = viewerH;
-      _dmViewerSourceQuality = sourceQuality;
       if (!state.isScreenSharing) return;
       if (_outgoingScreenShare != null) {
         // Already streaming — a re-sent watch is a cap change (Source-quality
@@ -1296,14 +1366,14 @@ class CallNotifier extends Notifier<CallState> {
   }
 
   /// The resolution cap for the outgoing DM share PC: the share's chosen
-  /// quality clamped to the peer's reported display (media forwarding
-  /// step 1) — unless they explicitly asked for source quality.
+  /// quality clamped to the peer's reported MONITOR (media forwarding
+  /// step 1). There is no per-viewer opt-out — see
+  /// [ScreenShareService.effectiveViewerCap].
   (int, int) _dmEffectiveCap() => ScreenShareService.effectiveViewerCap(
         _dmShareMaxWidth,
         _dmShareMaxHeight,
         _dmViewerWidth,
         _dmViewerHeight,
-        sourceQuality: _dmViewerSourceQuality,
       );
 
   /// Viewer side of opt-in watching (issue #38): request the remote share.
@@ -1325,7 +1395,6 @@ class CallNotifier extends Notifier<CallState> {
           'want': true,
           'viewer_width': viewerW,
           'viewer_height': viewerH,
-          'source_quality': state.watchingSourceQuality,
         }));
 
     // If no offer produces a live track in time, revert so the view doesn't
@@ -1349,7 +1418,7 @@ class CallNotifier extends Notifier<CallState> {
     _dmWatchConnectTimer = null;
     // Source quality is a per-watch-session opt-in — never sticky.
     state = state.copyWith(
-        watchingRemoteShare: false, watchingSourceQuality: false);
+        watchingRemoteShare: false);
 
     final incoming = _incomingScreenShare;
     _incomingScreenShare = null;
@@ -1361,31 +1430,6 @@ class CallNotifier extends Notifier<CallState> {
       _sendSignal(peerId, 'screen_watch',
           jsonEncode({'call_id': callId, 'want': false}));
     }
-  }
-
-  /// Viewer side (media forwarding step 1): ask the sharer for SOURCE
-  /// quality instead of clamped-to-our-display — or go back to the clamp.
-  /// OFF by default, per watch session. A re-sent screen_watch live-updates
-  /// the sharer's encoder cap; no renegotiation, no PC churn.
-  Future<void> setRemoteShareSourceQuality(bool on) async {
-    if (state.watchingSourceQuality == on) return;
-    state = state.copyWith(watchingSourceQuality: on);
-    if (state.status != CallStatus.active) return;
-    if (!state.watchingRemoteShare) return;
-    final peerId = state.peerId;
-    final callId = state.callId;
-    if (peerId == null || callId == null) return;
-    final (viewerW, viewerH) = largestDisplayResolution();
-    _sendSignal(
-        peerId,
-        'screen_watch',
-        jsonEncode({
-          'call_id': callId,
-          'want': true,
-          'viewer_width': viewerW,
-          'viewer_height': viewerH,
-          'source_quality': on,
-        }));
   }
 
   /// Master dispatcher for incoming call signals from Rust events.
@@ -1888,7 +1932,6 @@ class CallNotifier extends Notifier<CallState> {
       // The share is gone — the watch opt-in dies with it (a re-share asks
       // again via the Watch banner). Source quality dies with the watch.
       watchingRemoteShare: enabled && state.watchingRemoteShare,
-      watchingSourceQuality: enabled && state.watchingSourceQuality,
       remoteScreenShareLabel: enabled ? quality : null,
       clearRemoteScreenShareLabel: !enabled,
     );
@@ -2014,6 +2057,9 @@ class CallNotifier extends Notifier<CallState> {
     _ringTimer = null;
     _statsTimer?.cancel();
     _statsTimer = null;
+    _iceRepairTimer?.cancel();
+    _iceRepairTimer = null;
+    _iceRepairDone = false;
     _renegotiationInProgress = false;
     _queuedRenegOfferPeer = null;
     _queuedRenegOfferPayload = null;
@@ -2039,7 +2085,6 @@ class CallNotifier extends Notifier<CallState> {
     _dmPeerWantsShare = false;
     _dmViewerWidth = 0;
     _dmViewerHeight = 0;
-    _dmViewerSourceQuality = false;
     _dmWatchConnectTimer?.cancel();
     _dmWatchConnectTimer = null;
     await _teardownDmShareCapture();

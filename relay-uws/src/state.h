@@ -149,6 +149,7 @@ struct DeliveryDiag {
     uint64_t send_dropped = 0;       // sends uWS discarded (buffered > maxBackpressure)
     uint64_t fwd_delivered = 0;      // 0x04/0x08 directs delivered live to the configured media forwarder
     uint64_t fwd_buffered = 0;       // ...that fell into the offline buffer instead (membership loss!)
+    uint64_t ghost_left_suppressed = 0; // peer_left broadcasts withheld because a newer socket of the same peer took over
 };
 
 struct ServerStatsCache {

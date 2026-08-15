@@ -3,9 +3,6 @@ import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
-import 'package:hollow/src/ui/components/hollow_pressable.dart';
-import 'package:hollow/src/ui/components/hollow_tooltip.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Quality label chip for a watched share tile. While [renderer] is
 /// delivering frames it shows what WE actually receive (e.g. "824p60" on a
@@ -69,67 +66,6 @@ class ShareQualityChip extends StatelessWidget {
           color: hollow.textSecondary,
           fontSize: 11,
           fontWeight: FontWeight.w600,
-        ),
-      ),
-    );
-  }
-}
-
-/// Viewer-side "Source quality" toggle for a watched screen share (media
-/// forwarding step 1). OFF by default: the sharer clamps our stream to our
-/// display resolution; ON requests the share's full source quality for OUR
-/// connection only (per-viewer encoders — nobody else pays for it). The
-/// opt-in is per watch session, never persisted.
-///
-/// Styled like the quality-label chip it sits beside (surface pill on top of
-/// video); active state = accent text/border, never a filled button.
-class ShareSourceQualityChip extends StatelessWidget {
-  const ShareSourceQualityChip({
-    super.key,
-    required this.active,
-    required this.onChanged,
-  });
-
-  final bool active;
-  final ValueChanged<bool> onChanged;
-
-  @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-    final fg = active ? hollow.accentText : hollow.textSecondary;
-    return HollowTooltip(
-      message: active
-          ? 'Receiving source quality — click to match your display again'
-          : 'Receive source quality (uses more bandwidth)',
-      child: DecoratedBox(
-        decoration: BoxDecoration(
-          color: hollow.surface.withValues(alpha: 0.85),
-          borderRadius: BorderRadius.circular(hollow.radiusSm),
-          border: Border.all(color: active ? hollow.accentText : hollow.border),
-        ),
-        child: HollowPressable(
-          semanticLabel: 'Source quality',
-          onTap: () => onChanged(!active),
-          borderRadius: BorderRadius.circular(hollow.radiusSm),
-          padding: const EdgeInsets.symmetric(
-            horizontal: HollowSpacing.sm,
-            vertical: HollowSpacing.xs,
-          ),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(LucideIcons.maximize2, size: 12, color: fg),
-              const SizedBox(width: HollowSpacing.xs),
-              Text(
-                'Source',
-                style: HollowTypography.caption.copyWith(
-                  color: fg,
-                  fontSize: 11,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-            ],
-          ),
         ),
       ),
     );

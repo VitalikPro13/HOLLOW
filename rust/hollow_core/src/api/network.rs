@@ -3847,6 +3847,35 @@ pub fn set_forwarder_expectation(
     Ok(())
 }
 
+/// Feeder election (media forwarding, §9.6): start or stop FEEDING another
+/// forwarder with a stream this client's embedded engine already forwards.
+///
+/// Called on a branch head when the stream's OWNER delegates it via
+/// `vc_screen_assign{feed_target}`. The far forwarder still applies its own
+/// admission — it only accepts our ingest because the owner named us as its
+/// `feeder` in an owner-authenticated register — so this grants no authority
+/// the owner had not already granted.
+#[frb]
+pub fn set_forwarder_feed(
+    origin_peer: String,
+    kind: String,
+    stream: String,
+    target_forwarder: String,
+    active: bool,
+) -> Result<(), String> {
+    let node = get_node();
+    let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
+    // Release the global node mutex BEFORE the (possibly waiting) send.
+    drop(guard);
+    let rt = get_runtime();
+    rt.block_on(cmd_tx.send(node::NodeCommand::SetForwarderFeed {
+        origin_peer, kind, stream, target_forwarder, active,
+    }))
+    .map_err(|e| format!("Failed to send command: {e}"))?;
+    Ok(())
+}
+
 // -- Gossip relay tree FFI (Phase 5D) --
 
 /// Report data channel keepalive RTT for gossip peer scoring.

@@ -15,7 +15,6 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/call_duration_text.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
-import 'package:hollow/src/ui/components/share_source_quality_chip.dart';
 import 'package:hollow/src/ui/components/share_volume_control.dart';
 import 'package:hollow/src/ui/components/speaking_border.dart';
 import 'package:hollow/src/ui/mobile/mobile_screen_share_sheet.dart';
@@ -233,17 +232,6 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
               ],
             ),
           ),
-          // Source-quality opt-in (media forwarding step 1) — per watch
-          // session, OFF by default.
-          if (call.watchingRemoteShare) ...[
-            ShareSourceQualityChip(
-              active: call.watchingSourceQuality,
-              onChanged: (on) => ref
-                  .read(callProvider.notifier)
-                  .setRemoteShareSourceQuality(on),
-            ),
-            const SizedBox(width: HollowSpacing.xs),
-          ],
           // Stop watching the remote share (opt-in watching, issue #38).
           if (call.watchingRemoteShare)
             HollowPressable(

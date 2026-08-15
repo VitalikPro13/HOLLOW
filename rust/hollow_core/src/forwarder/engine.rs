@@ -15,7 +15,9 @@ use crate::hollow_log;
 use crate::node::types::{MessageEnvelope, StreamOrigin};
 
 use super::budget::{BudgetCfg, FwdErrorCode};
-use super::dispatch::{admit_attach, admit_owner_op, admit_register, StreamView};
+use super::dispatch::{
+    admit_attach, admit_ingest_offer, admit_owner_op, admit_register, StreamView,
+};
 use super::leg::{self, Advertise, LegCmd, LegEnded};
 use super::stream::{stream_key, LegHandle, StreamKey, StreamState};
 use super::ForwarderConfig;
@@ -281,6 +283,7 @@ fn view_of(streams: &HashMap<StreamKey, StreamState>, key: &StreamKey, sender: &
         owner: s.owner.clone(),
         sender_allowlisted: s.allowlist.contains(sender),
         egress_leg_count: s.egress.len() as u32,
+        feeder: s.feeder.clone(),
     })
 }
 
@@ -298,7 +301,7 @@ async fn handle_signal(
     ended_tx: &mpsc::UnboundedSender<LegEnded>,
 ) {
     match envelope {
-        MessageEnvelope::FwdStreamRegister { origin, allowed_viewers, low_viewers } => {
+        MessageEnvelope::FwdStreamRegister { origin, allowed_viewers, low_viewers, feeder } => {
             let key = stream_key(&origin);
             let already = streams
                 .get(&key)
@@ -317,6 +320,11 @@ async fn handle_signal(
                 if let Some(s) = streams.get_mut(&key) {
                     s.allowlist = allowlist;
                     s.low_viewers = low;
+                    // Feeder election: only an OWNER-authored register can set
+                    // (or clear) the delegation, and `admit_register` above has
+                    // already pinned origin == sender. Re-registers refresh it
+                    // like the allowlist, so revoking is just an empty field.
+                    s.feeder = feeder;
                     // An admitted owner op proves the owner is back — undo a
                     // presence-flap mark so the sweep doesn't reap a live re-share.
                     s.owner_gone = false;
@@ -324,6 +332,7 @@ async fn handle_signal(
             } else {
                 let mut state = StreamState::new((*origin).clone(), sender, allowlist);
                 state.low_viewers = low;
+                state.feeder = feeder;
                 streams.insert(key, state);
                 hollow_log!("[HOLLOW-FWD] stream registered ({} total)", streams.len());
             }
@@ -359,7 +368,10 @@ async fn handle_signal(
         }
         MessageEnvelope::FwdIngestOffer { origin, sdp } => {
             let key = stream_key(&origin);
-            if let Err(code) = admit_owner_op(view_of(streams, &key, &sender).as_ref(), &sender) {
+            // The owner OR its delegated feeder may supply the ingest. This is
+            // the only relaxation of the owner binding; everything else on this
+            // stream stays owner-only (see dispatch::admit_ingest_offer).
+            if let Err(code) = admit_ingest_offer(view_of(streams, &key, &sender).as_ref(), &sender) {
                 send_error(out_tx, &sender, &origin, code, "ingest refused");
                 return;
             }

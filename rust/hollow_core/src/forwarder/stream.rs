@@ -82,6 +82,11 @@ pub(crate) struct StreamState {
     /// (rid "q"). Applied when a viewer's egress leg spawns — a later
     /// register refresh changes FUTURE attaches only.
     pub low_viewers: HashSet<String>,
+    /// Feeder election: the ONE peer the OWNER delegated to supply this
+    /// stream's ingest in its place (empty = nobody). Set only from an
+    /// owner-authored register; grants SUPPLY only, never authority — see
+    /// `dispatch::admit_ingest_offer`.
+    pub feeder: String,
     pub ingest: Option<LegHandle>,
     /// viewer peer_id -> egress leg.
     pub egress: HashMap<String, LegHandle>,
@@ -165,6 +170,7 @@ impl StreamState {
             owner,
             allowlist,
             low_viewers: HashSet::new(),
+            feeder: String::new(),
             ingest: None,
             egress: HashMap::new(),
             wiring,

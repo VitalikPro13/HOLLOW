@@ -597,6 +597,24 @@ empty = revert-to-direct) with the FULL new-variant touch list: `target()`, buil
 arm, VC rate-limiter list, `is_vc_participant` gate, and the `inbound_origin_ok` spoof guard in its
 offer-direction form (`handle_envelope_voice_channel_screen_assign`).
 
+**§9 wire additions (2026-08-15), all additive + serde-pinned:**
+- `vc_screen_watch` gained `fwd_feed` — this watcher's engine can also FEED another
+  forwarder (feeder election). Absent (old client) = false = never asked.
+- `vc_screen_assign` gained `feed_target` — owner→branch head, "also feed your copy
+  into forwarder X"; empty = stop/never. Rides the same originator-authenticated
+  trust as the assign itself.
+- NEW `vc_screen_feed_state {sid, cid, origin, forwarder, up}` (feeder→owner) with
+  the full new-variant touch list. `up:false` is the SAFE default so a missing/old
+  reply leaves the owner supplying that forwarder itself (make-before-break).
+- `vc_reneg_offer` gained `ice_restart` — this renegotiation exists ONLY to apply an
+  ICE restart, so the answerer must SKIP its camera-track safety net
+  (`_checkRemoteVideoTrack`); without it that net invents a camera tile for the
+  peer's inactive video transceiver. Absent = false = today's behaviour.
+- `fwd_stream_register` gained `feeder` (owner-delegated ingest supplier).
+- **REMOVED:** `source_quality` on BOTH `vc_screen_watch` and `call_screen_watch`
+  (see the "Source quality" removal in `ui_voice_channel_pane.md`). Serde drops the
+  unknown key, so an older client's request is simply ignored → it gets the clamp.
+
 **Relay discovery:** `get_media_forwarder` text command (relay-uws `ws_handler.cpp`, mirrors
 `get_turn_credentials`) replies `{peer_id, online}` from the `--forwarder-peer-id` startup config +
 a `peer_sockets` lookup; guests refused; NEVER an HTTP variant. Client fires

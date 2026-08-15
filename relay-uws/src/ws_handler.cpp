@@ -153,8 +153,11 @@ static void replay_buffered_msgs(SSLWebSocket* ws, const std::string& peer_id,
                                  RelayState& state);
 // cleanup_peer is defined near the close handler but used by handle_auth's
 // supersede path (evict a stale duplicate connection's room state).
+// `suppress_peer_left` = the peer is NOT actually leaving (a newer socket of
+// the same peer_id is taking over): erase the room slots silently.
 static void cleanup_peer(RelayState& state, const std::string& peer_id,
-                         SSLWebSocket* expected_ws);
+                         SSLWebSocket* expected_ws,
+                         bool suppress_peer_left = false);
 
 static void handle_auth(SSLWebSocket* ws, PerSocketData* data,
                          std::string_view message, RelayState& state) {
@@ -284,17 +287,28 @@ static void handle_auth(SSLWebSocket* ws, PerSocketData* data,
         if (existing != state.peer_sockets.end() && existing->second != ws) {
             SSLWebSocket* ghost = existing->second;
             ghost->getUserData()->superseded = true;
-            // Evict the ghost's room memberships + socket entry. leave_room
-            // broadcasts peer_left, but the new socket immediately re-joins
-            // (WsEvent::Connected re-join loop), so friends get a fresh
-            // peer_joined + members snapshot — net presence stays correct.
-            cleanup_peer(state, peer_id, ghost);
+            // Evict the ghost's room memberships + socket entry, SILENTLY: the
+            // peer is not leaving, it is right here on a newer socket and will
+            // re-join immediately (WsEvent::Connected re-join loop). Emitting
+            // peer_left for a peer that is demonstrably present is a lie that
+            // observers act on — it tore down live media branches after an app
+            // restart, which is why both the client and the forwarder engine
+            // grew presence-flap tolerance. The successor's join broadcasts
+            // peer_joined and a fresh members snapshot, so presence converges
+            // without ever claiming a departure that did not happen.
+            cleanup_peer(state, peer_id, ghost, /*suppress_peer_left=*/true);
             // Close the dead socket so it stops consuming a connection slot.
             ghost->end(1000, "superseded");
         }
         state.peer_sockets[peer_id] = ws;
+        // Reset room bookkeeping for the new socket. MUST stay inside the
+        // non-fetch branch: a fetch-mode auth for a peer whose full node is
+        // connected used to wipe the FULL NODE's room set, so that node's
+        // eventual close found nothing to leave_room — leaving room slots
+        // pointing at a freed socket (no peer_left, and a dangling pointer for
+        // every later fan-out to that room).
+        state.peer_rooms[peer_id] = {};
     }
-    state.peer_rooms[peer_id] = {};
 
     send_json(ws, {{"type", "auth_ok"}});
     // privacy: no connection logging
@@ -394,7 +408,8 @@ static void handle_join(SSLWebSocket* ws, PerSocketData* data,
 // path, where the ghost IS the slot owner being evicted).
 static void leave_room(RelayState& state, const std::string& peer_id,
                         const std::string& room,
-                        SSLWebSocket* expected_ws = nullptr) {
+                        SSLWebSocket* expected_ws = nullptr,
+                        bool suppress_peer_left = false) {
     auto rit = state.ws_rooms.find(room);
     if (rit == state.ws_rooms.end()) return;
 
@@ -423,7 +438,16 @@ static void leave_room(RelayState& state, const std::string& peer_id,
         pit->second.erase(room);
     }
 
-    if (should_notify && !leaving_peer_invisible) {
+    if (suppress_peer_left && should_notify && !leaving_peer_invisible) {
+        // The peer did NOT leave — a newer socket of the SAME peer_id is
+        // authenticating right now and will re-join. Broadcasting peer_left
+        // here is a lie that observers act on: clients tore down live media
+        // branches on it (the ~85 s post-restart "ghost eviction" that the
+        // client- and forwarder-side presence-flap tolerance had to defend
+        // against). Erase the slot, stay silent; the successor's join
+        // broadcasts peer_joined and refreshes the members snapshot.
+        if (g_diag) g_diag->ghost_left_suppressed++;
+    } else if (should_notify && !leaving_peer_invisible) {
         json leave_msg = {
             {"type", "peer_left"},
             {"room", room},
@@ -1806,7 +1830,8 @@ void sweep_ip_budgets(RelayState& state) {
 // the live successor. `expected_ws` is the closing/evicted socket; room erases
 // are gated on it via leave_room so a ghost can't unjoin the live socket.
 static void cleanup_peer(RelayState& state, const std::string& peer_id,
-                         SSLWebSocket* expected_ws) {
+                         SSLWebSocket* expected_ws,
+                         bool suppress_peer_left) {
     // If a DIFFERENT socket now owns this peer_id, the closing socket is a stale
     // duplicate that was already replaced — skip the shared cleanup (nickname,
     // push, license, peer_sockets) so we don't tear down the live successor's
@@ -1851,7 +1876,7 @@ static void cleanup_peer(RelayState& state, const std::string& peer_id,
     // the live socket's rooms (and won't broadcast a spurious peer_left).
     std::vector<std::string> rooms(pit->second.begin(), pit->second.end());
     for (auto& room : rooms) {
-        leave_room(state, peer_id, room, expected_ws);
+        leave_room(state, peer_id, room, expected_ws, suppress_peer_left);
     }
     if (owns_peer) {
         state.peer_rooms.erase(peer_id);

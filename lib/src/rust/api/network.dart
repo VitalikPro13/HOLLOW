@@ -976,6 +976,28 @@ Future<void> setForwarderExpectation({
   active: active,
 );
 
+/// Feeder election (media forwarding, §9.6): start or stop FEEDING another
+/// forwarder with a stream this client's embedded engine already forwards.
+///
+/// Called on a branch head when the stream's OWNER delegates it via
+/// `vc_screen_assign{feed_target}`. The far forwarder still applies its own
+/// admission — it only accepts our ingest because the owner named us as its
+/// `feeder` in an owner-authenticated register — so this grants no authority
+/// the owner had not already granted.
+Future<void> setForwarderFeed({
+  required String originPeer,
+  required String kind,
+  required String stream,
+  required String targetForwarder,
+  required bool active,
+}) => RustLib.instance.api.crateApiNetworkSetForwarderFeed(
+  originPeer: originPeer,
+  kind: kind,
+  stream: stream,
+  targetForwarder: targetForwarder,
+  active: active,
+);
+
 /// Report data channel keepalive RTT for gossip peer scoring.
 Future<void> webrtcPingReport({required String peerId, required int rttMs}) =>
     RustLib.instance.api.crateApiNetworkWebrtcPingReport(

@@ -26,6 +26,116 @@ fn key_request_is_fresh(
         .is_some_and(|t| t.elapsed() < OLM_KEY_REQUEST_TIMEOUT)
 }
 
+/// True for the media-forwarder control-plane rooms (`fwd:{forwarder_id}`).
+///
+/// These rooms exist ONLY to carry Olm-encrypted `fwd_*` envelopes between a
+/// client and a forwarder engine. A forwarder is not a social peer: it holds no
+/// group keys, is in no server, shares no DMs, and DISCARDS every discovery
+/// frame we could send it. Presence in one must therefore not trigger the
+/// normal peer-discovery cascade — see [`ensure_olm_session_and_drain`].
+pub(crate) fn is_forwarder_room(room: &str) -> bool {
+    room.starts_with("fwd:")
+}
+
+/// True when EVERY room we currently share with `peer` is a forwarder
+/// control-plane room — i.e. this peer is a media forwarder to us, not a social
+/// peer. Structural (no configured-id lookup), so it holds for peer forwarders
+/// as well as the VPS one.
+///
+/// False when we share any ordinary room (a friend who is ALSO watching through
+/// our embedded engine shares their DM room, so they keep every social path),
+/// and false when we share no room at all — "unknown" must never be treated as
+/// "forwarder".
+fn peer_is_forwarder_only(
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    peer: &str,
+) -> bool {
+    let mut shares_a_room = false;
+    for (room, peers) in ws_room_peers.iter() {
+        if peers.contains(peer) {
+            if !is_forwarder_room(room) {
+                return false;
+            }
+            shares_a_room = true;
+        }
+    }
+    shares_a_room
+}
+
+/// The ONE piece of the peer-discovery cascade the forwarder lane genuinely
+/// needs: an Olm session, plus the drain of anything queued while we had none.
+///
+/// Returns true when a confirmed session already existed (so the caller can run
+/// the discovery work that belongs after it — the full path also flushes
+/// pending sync requests there; the fwd lane must not).
+///
+/// Load-bearing for the fwd lane: `forwarder_client::send_fwd_envelope_via_room`
+/// QUEUES into `pending_messages` and fires a KeyRequest when no session exists,
+/// so this drain is exactly what delivers the first `fwd_stream_register` of a
+/// share. Cutting it would wedge the lane.
+#[allow(clippy::too_many_arguments)]
+async fn ensure_olm_session_and_drain(
+    olm: &mut OlmManager,
+    crypto_store: &CryptoStore,
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    pending_messages: &mut HashMap<String, Vec<String>>,
+    key_request_in_flight: &mut HashMap<String, std::time::Instant>,
+    device_keypair: &crate::identity::native_identity::NativeKeypair,
+    device_peer_id: &str,
+    peer_id: &str,
+    context: &str,
+) -> bool {
+    // Proactive key exchange if no CONFIRMED Olm session. An outbound-only
+    // session is NOT proof the peer can decrypt us — only a confirmed
+    // (bidirectional) session is. Reporting SessionEstablished for an
+    // unconfirmed session is the bug where "A writes and B doesn't see it"
+    // (B never built its half).
+    if olm.has_confirmed_session(peer_id) {
+        let _ = event_tx
+            .send(NetworkEvent::SessionEstablished {
+                peer_id: peer_id.to_string(),
+            })
+            .await;
+        // Drain any pending messages queued while the peer was offline.
+        if let Some(queued) = pending_messages.remove(peer_id) {
+            hollow_log!(
+                "[HOLLOW-CRYPTO] {context}: draining {} pending messages for {peer_id}",
+                queued.len()
+            );
+            for text in queued {
+                send_encrypted_message(
+                    olm,
+                    crypto_store,
+                    peer_id,
+                    &text,
+                    event_tx,
+                    ws_cmd_tx,
+                    ws_room_peers,
+                )
+                .await;
+            }
+        }
+        true
+    } else if !key_request_is_fresh(key_request_in_flight, peer_id) {
+        // No session, or only an unconfirmed outbound session — send (or
+        // resend, if the prior request went stale) a KeyRequest. The
+        // reconciliation sweep retries if this frame is dropped.
+        hollow_log!("[HOLLOW-WS] Proactive key exchange for {peer_id}");
+        send_message_to_peer(
+            ws_cmd_tx,
+            ws_room_peers,
+            peer_id,
+            signed_key_request(device_keypair, device_peer_id, peer_id),
+        );
+        key_request_in_flight.insert(peer_id.to_string(), std::time::Instant::now());
+        false
+    } else {
+        false
+    }
+}
+
 /// Run the full sibling-convergence machinery for a peer we have CRYPTOGRAPHICALLY
 /// PROVEN is our own other device (it appeared in `inbox:{our_master}` AND either
 /// already resolves to us OR answered a [`HavenMessage::SiblingProveRequest`] with a
@@ -2463,16 +2573,41 @@ async fn run_event_loop(
                         #[cfg(not(all(feature = "forwarder", not(any(target_os = "android", target_os = "ios")))))]
                         let _ = (origin_peer, kind, active);
                     }
-                    NodeCommand::EmbeddedForwarderOut { to_peer, envelope_json } => {
+                    NodeCommand::EmbeddedForwarderOut { to_peer, envelope_json, via_target_room } => {
                         #[cfg(all(feature = "forwarder", not(any(target_os = "android", target_os = "ios"))))]
                         super::embedded_forwarder::handle_engine_out(
                             &mut olm, &crypto_store, &event_tx, &ws_cmd_tx,
                             &mut pending_messages, &mut key_request_in_flight,
                             &device_keypair, &device_peer_id,
-                            to_peer, envelope_json,
+                            to_peer, envelope_json, via_target_room,
                         ).await;
                         #[cfg(not(all(feature = "forwarder", not(any(target_os = "android", target_os = "ios")))))]
-                        let _ = (to_peer, envelope_json);
+                        let _ = (to_peer, envelope_json, via_target_room);
+                    }
+                    NodeCommand::SetForwarderFeed { origin_peer, kind, stream, target_forwarder, active } => {
+                        #[cfg(all(feature = "forwarder", not(any(target_os = "android", target_os = "ios"))))]
+                        {
+                            // Joining the target's room is what makes the feed
+                            // offer deliverable (deterministic-room rule); we
+                            // stay in it for the life of the feed.
+                            if active {
+                                let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinRoom {
+                                    room_code: format!("fwd:{target_forwarder}"),
+                                });
+                            } else {
+                                let _ = ws_cmd_tx.send(super::ws_client::WsCommand::LeaveRoom {
+                                    room_code: format!("fwd:{target_forwarder}"),
+                                });
+                            }
+                            embedded_fwd.set_feed(
+                                Box::new(StreamOrigin { peer: origin_peer, kind, stream }),
+                                target_forwarder,
+                                active,
+                                &cmd_tx,
+                            );
+                        }
+                        #[cfg(not(all(feature = "forwarder", not(any(target_os = "android", target_os = "ios")))))]
+                        let _ = (origin_peer, kind, stream, target_forwarder, active);
                     }
 
                     // -- Conference commands (node/conference.rs) --
@@ -2902,10 +3037,35 @@ async fn run_event_loop(
                         hollow_log!("[HOLLOW-WS] Peer {peer_id} joined room {room}");
                         ws_room_peers.entry(room.clone()).or_default().insert(peer_id.clone());
 
+                        // Media-forwarder control-plane room: run the MINIMAL path
+                        // (Olm session + queued fwd envelope drain) and skip the whole
+                        // discovery cascade. A forwarder discards every profile /
+                        // sync / friend / MLS / DM frame we could send it, so the
+                        // cascade was ~45 junk frames per join — pure join-burst
+                        // bandwidth and journal noise at the forwarder, and the burst
+                        // that used to drain the (now removed) fwd control-plane token
+                        // bucket and eat the last large frame behind it.
+                        //
+                        // CRITICAL: this must NOT touch `synced_peers`. That set is
+                        // GLOBAL, not per-room — inserting here would burn the `is_new`
+                        // flag so a LATER join of a genuinely shared room would skip
+                        // profile/sync forever (a silent discovery blackhole).
+                        let is_fwd_room = is_forwarder_room(&room);
+                        if is_fwd_room && peer_id != local_peer_str && peer_id != device_peer_id {
+                            ensure_olm_session_and_drain(
+                                &mut olm, &crypto_store, &event_tx, &ws_cmd_tx,
+                                &ws_room_peers, &mut pending_messages,
+                                &mut key_request_in_flight, &device_keypair,
+                                &device_peer_id, &peer_id, "PeerJoined(fwd)",
+                            ).await;
+                        }
+
                         // Conference: a peer appearing in a room we're still
                         // knocking on may be the HOST starting the meeting —
                         // re-send our join request (throttled, fresh KP).
-                        super::conference::reknock_if_pending(&mut mls, &ws_cmd_tx, &room);
+                        if !is_fwd_room {
+                            super::conference::reknock_if_pending(&mut mls, &ws_cmd_tx, &room);
+                        }
 
                         // Recovery pool: when a peer joins our recovery room, send them our inventory.
                         if room.starts_with("recovery:") {
@@ -2957,7 +3117,7 @@ async fn run_event_loop(
                                 }
                             }
 
-                            if peer_id != local_peer_str && peer_id != device_peer_id {
+                            if !is_fwd_room && peer_id != local_peer_str && peer_id != device_peer_id {
 
                                 // Only trigger sync if not already synced this session
                                 // (prevents duplicate sync when both WS and libp2p fire).
@@ -3097,25 +3257,15 @@ async fn run_event_loop(
                                         }
                                     }
 
-                                    // Proactive key exchange if no CONFIRMED Olm session.
-                                    // An outbound-only session is NOT proof the peer can decrypt
-                                    // us — only a confirmed (bidirectional) session is. Reporting
-                                    // SessionEstablished for an unconfirmed session is the bug where
-                                    // "A writes and B doesn't see it" (B never built its half).
-                                    if olm.has_confirmed_session(&peer_id) {
-                                        let _ = event_tx.send(NetworkEvent::SessionEstablished {
-                                            peer_id: peer_id.clone(),
-                                        }).await;
-                                        // Drain any pending messages queued while peer was offline.
-                                        if let Some(queued) = pending_messages.remove(&peer_id) {
-                                            hollow_log!("[HOLLOW-CRYPTO] PeerJoined: draining {} pending messages for {peer_id}", queued.len());
-                                            for text in queued {
-                                                send_encrypted_message(
-                                                    &mut olm, &crypto_store, &peer_id, &text, &event_tx,
-                                                    &ws_cmd_tx, &ws_room_peers,
-                                                ).await;
-                                            }
-                                        }
+                                    // Olm session + queued-message drain. Shared verbatim with
+                                    // the forwarder-room minimal path so the two can never
+                                    // diverge on the signed-key-exchange rules.
+                                    if ensure_olm_session_and_drain(
+                                        &mut olm, &crypto_store, &event_tx, &ws_cmd_tx,
+                                        &ws_room_peers, &mut pending_messages,
+                                        &mut key_request_in_flight, &device_keypair,
+                                        &device_peer_id, &peer_id, "PeerJoined",
+                                    ).await {
                                         sync_handler::flush_pending_sync_requests(
                                             &mut pending_sync_requests, &peer_id,
                                             &mut olm, &crypto_store,
@@ -3124,16 +3274,6 @@ async fn run_event_loop(
                                             &crdt_store,
                                             &db_path, &db_passphrase,
                                         ).await;
-                                    } else if !key_request_is_fresh(&key_request_in_flight, &peer_id) {
-                                        // No session, or only an unconfirmed outbound session — send
-                                        // (or resend, if the prior request went stale) a KeyRequest.
-                                        // The reconciliation sweep will retry if this frame is dropped.
-                                        hollow_log!("[HOLLOW-WS] Proactive key exchange for {peer_id}");
-                                        send_message_to_peer(
-                                            &ws_cmd_tx, &ws_room_peers,
-                                            &peer_id, signed_key_request(&device_keypair, &device_peer_id, &peer_id),
-                                        );
-                                        key_request_in_flight.insert(peer_id.clone(), std::time::Instant::now());
                                     }
 
                                     // CRDT sync + message sync for shared servers.
@@ -3494,14 +3634,25 @@ async fn run_event_loop(
                             .map(|old| old.difference(&room_set).cloned().collect())
                             .unwrap_or_default();
 
-                        // Conference waiting room: sweep pending knockers
-                        // against the authoritative snapshot (missed PeerLeft).
-                        super::conference::retain_pending_in_room(&mut conference_host, &room, &room_set);
-                        // Joiner side: peers already present when we (re)join a
-                        // conf room we're knocking on — covers reconnects and
-                        // "host already there" without waiting for a PeerJoined.
-                        if !room_set.is_empty() {
-                            super::conference::reknock_if_pending(&mut mls, &ws_cmd_tx, &room);
+                        // Media-forwarder control-plane room: presence bookkeeping
+                        // (the authoritative snapshot + the vanished purge below)
+                        // still runs — the embedded engine's tolerance depends on it —
+                        // but the whole discovery cascade is skipped. See the
+                        // PeerJoined arm for the rationale and the two "burn"
+                        // hazards this must not touch (`synced_peers` there,
+                        // `profile_broadcast_done` here).
+                        let is_fwd_room = is_forwarder_room(&room);
+
+                        if !is_fwd_room {
+                            // Conference waiting room: sweep pending knockers
+                            // against the authoritative snapshot (missed PeerLeft).
+                            super::conference::retain_pending_in_room(&mut conference_host, &room, &room_set);
+                            // Joiner side: peers already present when we (re)join a
+                            // conf room we're knocking on — covers reconnects and
+                            // "host already there" without waiting for a PeerJoined.
+                            if !room_set.is_empty() {
+                                super::conference::reknock_if_pending(&mut mls, &ws_cmd_tx, &room);
+                            }
                         }
                         ws_room_peers.insert(room.clone(), room_set);
                         for gone in vanished {
@@ -3582,9 +3733,27 @@ async fn run_event_loop(
                             }
                         }
 
+                        // Media-forwarder room: the ONE piece of the cascade the lane
+                        // needs is an Olm session (+ the drain that delivers a queued
+                        // fwd_stream_register). Everything below is skipped.
+                        if is_fwd_room {
+                            for pid_str in &peers {
+                                if pid_str != &local_peer && pid_str.as_str() != device_peer_id {
+                                    ensure_olm_session_and_drain(
+                                        &mut olm, &crypto_store, &event_tx, &ws_cmd_tx,
+                                        &ws_room_peers, &mut pending_messages,
+                                        &mut key_request_in_flight, &device_keypair,
+                                        &device_peer_id, pid_str, "RoomMembers(fwd)",
+                                    ).await;
+                                }
+                            }
+                        }
+
                         // On first RoomMembers, broadcast our profile to all rooms.
                         // This ensures peers who were online while we were offline get our latest profile.
-                        if !profile_broadcast_done {
+                        // NOT on a fwd room: that would BURN the one-shot flag on a
+                        // forwarder that discards profiles, so real rooms never get it.
+                        if !is_fwd_room && !profile_broadcast_done {
                             profile_broadcast_done = true;
                             hollow_log!("[HOLLOW-PROFILE] First RoomMembers — broadcasting our profile");
                             // Send our profile to all peers in this room (not ourselves —
@@ -3602,15 +3771,21 @@ async fn run_event_loop(
                         }
 
                         // Pre-compute StateVectors once per server (reused across all peers).
-                        let sv_cache: std::collections::HashMap<&str, String> = server_states.iter()
-                            .filter_map(|(sid, state)| {
-                                let sv = StateVector::from_server_state(state);
-                                serde_json::to_string(&sv).ok().map(|json| (sid.as_str(), json))
-                            })
-                            .collect();
+                        // Skipped entirely for a fwd room — serializing every server's
+                        // state vector for a peer that will never receive one is pure waste.
+                        let sv_cache: std::collections::HashMap<&str, String> = if is_fwd_room {
+                            std::collections::HashMap::new()
+                        } else {
+                            server_states.iter()
+                                .filter_map(|(sid, state)| {
+                                    let sv = StateVector::from_server_state(state);
+                                    serde_json::to_string(&sv).ok().map(|json| (sid.as_str(), json))
+                                })
+                                .collect()
+                        };
 
                         for pid_str in &peers {
-                            if pid_str != &local_peer && pid_str.as_str() != device_peer_id {
+                            if !is_fwd_room && pid_str != &local_peer && pid_str.as_str() != device_peer_id {
                                 let _ = event_tx.send(NetworkEvent::PeerDiscovered {
                                     peer: DiscoveredPeer {
                                         peer_id: pid_str.clone(),
@@ -3787,20 +3962,12 @@ async fn run_event_loop(
                                     // RoomMembers fires on the JOINING peer (us) while PeerJoined
                                     // fires on the EXISTING peer (them). Without this, DM sync is
                                     // one-directional: they ask us, but we never ask them.
-                                    if olm.has_confirmed_session(pid_str) {
-                                        let _ = event_tx.send(NetworkEvent::SessionEstablished {
-                                            peer_id: pid_str.clone(),
-                                        }).await;
-                                        // Drain any pending messages queued while peer was offline.
-                                        if let Some(queued) = pending_messages.remove(pid_str) {
-                                            hollow_log!("[HOLLOW-CRYPTO] RoomMembers: draining {} pending messages for {pid_str}", queued.len());
-                                            for text in queued {
-                                                send_encrypted_message(
-                                                    &mut olm, &crypto_store, pid_str, &text, &event_tx,
-                                                    &ws_cmd_tx, &ws_room_peers,
-                                                ).await;
-                                            }
-                                        }
+                                    if ensure_olm_session_and_drain(
+                                        &mut olm, &crypto_store, &event_tx, &ws_cmd_tx,
+                                        &ws_room_peers, &mut pending_messages,
+                                        &mut key_request_in_flight, &device_keypair,
+                                        &device_peer_id, pid_str, "RoomMembers",
+                                    ).await {
                                         sync_handler::flush_pending_sync_requests(
                                             &mut pending_sync_requests, pid_str,
                                             &mut olm, &crypto_store,
@@ -3809,13 +3976,6 @@ async fn run_event_loop(
                                             &crdt_store,
                                             &db_path, &db_passphrase,
                                         ).await;
-                                    } else if !key_request_is_fresh(&key_request_in_flight, pid_str) {
-                                        hollow_log!("[HOLLOW-WS] RoomMembers: proactive key exchange for {pid_str}");
-                                        send_message_to_peer(
-                                            &ws_cmd_tx, &ws_room_peers,
-                                            pid_str, signed_key_request(&device_keypair, &device_peer_id, pid_str),
-                                        );
-                                        key_request_in_flight.insert(pid_str.clone(), std::time::Instant::now());
                                     }
 
                                     // DM sync: ask this peer for messages we missed.
@@ -5436,6 +5596,14 @@ fn request_dm_resync_after_rekey(
     db_path: &str,
     db_passphrase: &str,
 ) {
+    // A media forwarder is not a social peer: it has no DM history with us and
+    // DISCARDS the request (one "non-fwd HavenMessage — ignored" line in its
+    // journal per session). Detected structurally — the only room we share with
+    // it is a `fwd:` room — so this covers peer forwarders as well as the VPS
+    // one, without either side knowing the other's role.
+    if peer_is_forwarder_only(ws_room_peers, peer_str) {
+        return;
+    }
     if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
         let convo = super::resolver::resolve(peer_str);
         // Multi-device: if WE have a sibling, request both directions from our
@@ -8536,20 +8704,26 @@ async fn handle_incoming_request(
                         origin, &local_peer_str,
                     ).await;
                 }
-                Ok(MessageEnvelope::VoiceChannelScreenWatch { sid, cid, want, viewer_width, viewer_height, source_quality, route, fwd_capable, relay_private, fwd_simulcast, .. }) => {
+                Ok(MessageEnvelope::VoiceChannelScreenWatch { sid, cid, want, viewer_width, viewer_height, route, fwd_capable, relay_private, fwd_simulcast, fwd_feed, .. }) => {
                     voice_handler::handle_envelope_voice_channel_screen_watch(
                         voice_channel_participants, event_tx,
                         peer_str.to_string(), sid, cid, want,
-                        viewer_width, viewer_height, source_quality, route, fwd_capable, relay_private, fwd_simulcast,
+                        viewer_width, viewer_height, route, fwd_capable, relay_private, fwd_simulcast, fwd_feed,
                     ).await;
                 }
-                Ok(MessageEnvelope::VoiceChannelScreenAssign { sid, cid, origin, forwarder, .. }) => {
+                Ok(MessageEnvelope::VoiceChannelScreenAssign { sid, cid, origin, forwarder, feed_target, .. }) => {
                     voice_handler::handle_envelope_voice_channel_screen_assign(
                         voice_channel_participants, event_tx,
-                        peer_str.to_string(), sid, cid, origin, forwarder, &local_peer_str,
+                        peer_str.to_string(), sid, cid, origin, forwarder, feed_target, &local_peer_str,
                     ).await;
                 }
-                Ok(MessageEnvelope::VoiceChannelRenegOffer { sid, cid, sdp, .. }) => {
+                Ok(MessageEnvelope::VoiceChannelScreenFeedState { sid, cid, origin, forwarder, up, .. }) => {
+                    voice_handler::handle_envelope_voice_channel_screen_feed_state(
+                        voice_channel_participants, event_tx,
+                        peer_str.to_string(), sid, cid, origin, forwarder, up, &local_peer_str,
+                    ).await;
+                }
+                Ok(MessageEnvelope::VoiceChannelRenegOffer { sid, cid, sdp, ice_restart, .. }) => {
                     let vc_key = format!("{sid}:{cid}");
                     let is_participant = voice_channel_participants.get(&vc_key).map(|p| p.contains(peer_str)).unwrap_or(false);
                     if !is_participant {
@@ -8557,7 +8731,7 @@ async fn handle_incoming_request(
                     } else if sdp.len() > 64 * 1024 {
                         hollow_log!("[HOLLOW-SECURITY] BLOCKED VC reneg offer (Olm) — size {} exceeds limit from {peer_str}", sdp.len());
                     } else {
-                        let payload = serde_json::json!({"sdp": sdp}).to_string();
+                        let payload = serde_json::json!({"sdp": sdp, "ice_restart": ice_restart}).to_string();
                         let _ = event_tx.send(NetworkEvent::VoiceChannelSignal {
                             server_id: sid, channel_id: cid, peer_id: peer_str.to_string(),
                             signal_type: "reneg_offer".to_string(), payload,
@@ -8590,14 +8764,47 @@ async fn handle_incoming_request(
                     if sdp.len() > MAX_SDP_SIZE {
                         hollow_log!("[HOLLOW-SECURITY] BLOCKED fwd_ingest_answer — size {} exceeds limit from {peer_str}", sdp.len());
                     } else {
-                        let payload = serde_json::json!({
-                            "origin": {"peer": origin.peer, "kind": origin.kind, "stream": origin.stream},
-                            "sdp": sdp,
-                        }).to_string();
-                        let _ = event_tx.send(NetworkEvent::ForwarderSignal {
-                            from_peer: peer_str.to_string(),
-                            signal_type: "fwd_ingest_answer".to_string(), payload,
-                        }).await;
+                        // Feeder election: when WE are feeding this forwarder,
+                        // its ingest answer belongs to OUR engine's feed leg
+                        // (structurally an egress answer), not to Dart — we
+                        // never offered an ingest of our own to it.
+                        #[cfg(all(feature = "forwarder", not(any(target_os = "android", target_os = "ios"))))]
+                        let consumed = {
+                            let (embedded_fwd, _) = fwd_bridge;
+                            embedded_fwd.handle_feed_answer(
+                                peer_str,
+                                MessageEnvelope::FwdIngestAnswer {
+                                    origin: origin.clone(),
+                                    sdp: sdp.clone(),
+                                },
+                            )
+                        };
+                        #[cfg(not(all(feature = "forwarder", not(any(target_os = "android", target_os = "ios")))))]
+                        let consumed = false;
+                        if consumed {
+                            // The fed forwarder ADMITTED our ingest (an old
+                            // binary that ignores the `feeder` field, or any
+                            // refusal, answers with fwd_error instead). Tell
+                            // Dart so it can report the feed up to the owner,
+                            // which is what lets the owner stop supplying that
+                            // forwarder itself — make-before-break.
+                            let payload = serde_json::json!({
+                                "origin": {"peer": origin.peer, "kind": origin.kind, "stream": origin.stream},
+                            }).to_string();
+                            let _ = event_tx.send(NetworkEvent::ForwarderSignal {
+                                from_peer: peer_str.to_string(),
+                                signal_type: "fwd_feed_up".to_string(), payload,
+                            }).await;
+                        } else {
+                            let payload = serde_json::json!({
+                                "origin": {"peer": origin.peer, "kind": origin.kind, "stream": origin.stream},
+                                "sdp": sdp,
+                            }).to_string();
+                            let _ = event_tx.send(NetworkEvent::ForwarderSignal {
+                                from_peer: peer_str.to_string(),
+                                signal_type: "fwd_ingest_answer".to_string(), payload,
+                            }).await;
+                        }
                     }
                 }
                 Ok(MessageEnvelope::FwdEgressOffer { origin, sdp }) => {
@@ -10609,6 +10816,7 @@ async fn handle_incoming_request(
                             | MessageEnvelope::VoiceChannelScreenState { .. }
                             | MessageEnvelope::VoiceChannelScreenWatch { .. }
                             | MessageEnvelope::VoiceChannelScreenAssign { .. }
+                            | MessageEnvelope::VoiceChannelScreenFeedState { .. }
                             | MessageEnvelope::VoiceChannelRenegOffer { .. }
                             | MessageEnvelope::VoiceChannelRenegAnswer { .. }
                             | MessageEnvelope::VoiceChannelCameraState { .. }
@@ -10692,27 +10900,35 @@ async fn handle_incoming_request(
                                     peer_str.to_string(), sid, cid, enabled, quality,
                                 ).await;
                             }
-                            MessageEnvelope::VoiceChannelScreenWatch { sid, cid, want, viewer_width, viewer_height, source_quality, route, fwd_capable, relay_private, fwd_simulcast, .. } => {
+                            MessageEnvelope::VoiceChannelScreenWatch { sid, cid, want, viewer_width, viewer_height, route, fwd_capable, relay_private, fwd_simulcast, fwd_feed, .. } => {
                                 voice_handler::handle_envelope_voice_channel_screen_watch(
                                     voice_channel_participants, event_tx,
                                     peer_str.to_string(), sid, cid, want,
-                                    viewer_width, viewer_height, source_quality, route, fwd_capable, relay_private, fwd_simulcast,
+                                    viewer_width, viewer_height, route, fwd_capable, relay_private, fwd_simulcast, fwd_feed,
                                 ).await;
                             }
 
-                            MessageEnvelope::VoiceChannelScreenAssign { sid, cid, origin, forwarder, .. } => {
+                            MessageEnvelope::VoiceChannelScreenAssign { sid, cid, origin, forwarder, feed_target, .. } => {
                                 voice_handler::handle_envelope_voice_channel_screen_assign(
                                     voice_channel_participants, event_tx,
-                                    peer_str.to_string(), sid, cid, origin, forwarder,
+                                    peer_str.to_string(), sid, cid, origin, forwarder, feed_target,
+                                    local_peer_str,
+                                ).await;
+                            }
+
+                            MessageEnvelope::VoiceChannelScreenFeedState { sid, cid, origin, forwarder, up, .. } => {
+                                voice_handler::handle_envelope_voice_channel_screen_feed_state(
+                                    voice_channel_participants, event_tx,
+                                    peer_str.to_string(), sid, cid, origin, forwarder, up,
                                     local_peer_str,
                                 ).await;
                             }
 
                             // -- Voice channel camera (Phase 5B) --
-                            MessageEnvelope::VoiceChannelRenegOffer { sid, cid, sdp, .. } => {
+                            MessageEnvelope::VoiceChannelRenegOffer { sid, cid, sdp, ice_restart, .. } => {
                                 voice_handler::handle_envelope_voice_channel_reneg_offer(
                                     voice_channel_participants, event_tx,
-                                    peer_str.to_string(), sid, cid, sdp,
+                                    peer_str.to_string(), sid, cid, sdp, ice_restart,
                                 ).await;
                             }
                             MessageEnvelope::VoiceChannelRenegAnswer { sid, cid, sdp, .. } => {
@@ -12978,14 +13194,13 @@ async fn handle_incoming_request(
                 payload,
             }).await;
         }
-        HavenMessage::CallScreenWatch { call_id, want, viewer_width, viewer_height, source_quality } => {
-            hollow_log!("[HOLLOW-CALL] CallScreenWatch from {peer_str} call={call_id} want={want} viewer={viewer_width}x{viewer_height} source={source_quality}");
+        HavenMessage::CallScreenWatch { call_id, want, viewer_width, viewer_height } => {
+            hollow_log!("[HOLLOW-CALL] CallScreenWatch from {peer_str} call={call_id} want={want} viewer={viewer_width}x{viewer_height}");
             let payload = serde_json::json!({
                 "call_id": call_id,
                 "want": want,
                 "viewer_width": viewer_width,
                 "viewer_height": viewer_height,
-                "source_quality": source_quality,
             }).to_string();
             let _ = event_tx.send(NetworkEvent::CallSignal {
                 peer_id: peer_str.to_string(),

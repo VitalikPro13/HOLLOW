@@ -2468,10 +2468,12 @@ async fn call_signal_routes_to_friend_device_and_drops_unknown() {
     assert_eq!(dm_watch["want"], serde_json::Value::Bool(true), "want must round-trip");
     assert_eq!(dm_watch["viewer_width"], serde_json::json!(1920), "viewer_width must round-trip");
     assert_eq!(dm_watch["viewer_height"], serde_json::json!(1080), "viewer_height must round-trip");
-    assert_eq!(
-        dm_watch["source_quality"],
-        serde_json::Value::Bool(false),
-        "source_quality must round-trip"
+    // "Source quality" was REMOVED 2026-08-15 (the clamp is keyed to the
+    // viewer's MONITOR, so it already delivers everything they can display).
+    // An older client's key must be DROPPED, not forwarded.
+    assert!(
+        dm_watch.get("source_quality").is_none(),
+        "source_quality must no longer round-trip: {dm_watch}"
     );
 
     drain_events(&mut b);
@@ -3170,14 +3172,15 @@ async fn voice_channel_join_leave_and_signal_routing() {
     let watch_json: serde_json::Value =
         serde_json::from_str(&watch_payload.expect("screen_watch payload")).expect("valid json");
     assert_eq!(watch_json["want"], serde_json::Value::Bool(true), "want flag must round-trip");
-    // Media forwarding step 1: the viewer's display resolution + source-quality
-    // request must survive the typed Rust round-trip (receiver-driven caps).
+    // Media forwarding step 1: the viewer's display resolution must survive the
+    // typed Rust round-trip (receiver-driven caps).
     assert_eq!(watch_json["viewer_width"], serde_json::json!(2560), "viewer_width must round-trip");
     assert_eq!(watch_json["viewer_height"], serde_json::json!(1440), "viewer_height must round-trip");
-    assert_eq!(
-        watch_json["source_quality"],
-        serde_json::Value::Bool(true),
-        "source_quality must round-trip"
+    // "Source quality" was REMOVED 2026-08-15 — an older client's key is
+    // parsed away rather than forwarded to the sharer.
+    assert!(
+        watch_json.get("source_quality").is_none(),
+        "source_quality must no longer round-trip: {watch_json}"
     );
 
     // --- J leaves the voice channel; O sees the leave ---
@@ -12006,6 +12009,128 @@ async fn forwarder_room_and_signal_round_trip() {
     let v: serde_json::Value =
         serde_json::from_str(&err_payload.expect("payload")).expect("valid json");
     assert_eq!(v["code"], serde_json::json!("over_budget"));
+
+    drop(a);
+    drop(f);
+}
+
+// ---------------------------------------------------------------------------
+// fwd-room discovery-cascade suppression (§9.4).
+//
+// A forwarder discards every profile / sync / friend / MLS / DM frame a client
+// could send it, so presence in a `fwd:` room must NOT run the peer-discovery
+// cascade (~45 junk frames per join at the forwarder — the burst that used to
+// drain the removed fwd control-plane token bucket and eat the large frame
+// behind it). Verified here:
+//   1. Joining `fwd:{F}` emits NO PeerDiscovered for F (the cascade's first
+//      emission) and pushes NO profile at F.
+//   2. The Olm session STILL establishes — the one piece the lane needs, since
+//      queued fwd envelopes drain through it.
+//   3. `synced_peers` was NOT burned: a later join of a genuinely shared room
+//      runs the FULL cascade for the same peer. This is the regression that
+//      would otherwise be a silent, permanent discovery blackhole.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
+async fn fwd_room_join_skips_discovery_but_keeps_olm() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    // Deliberately NOT friends and sharing NO server: the fwd room is the only
+    // reason these two ever meet, so any discovery traffic is attributable.
+    const A_TAG: u8 = 171;
+    const F_TAG: u8 = 181;
+    let mut a = spawn_node_with_friends(&relay, A_TAG, A_TAG, &[]).await;
+    sleep_ms(800).await;
+    let mut f = spawn_node_with_friends(&relay, F_TAG, F_TAG, &[]).await;
+    sleep_ms(1200).await;
+    let f_id = f.device_id.clone();
+    let a_id = a.device_id.clone();
+
+    drain_events(&mut a);
+    drain_events(&mut f);
+
+    // Both sides in the forwarder's room (F hosts it, A joins to reach it).
+    f.cmd_tx
+        .send(NodeCommand::JoinForwarderRoom { forwarder_peer_id: f_id.clone() })
+        .await
+        .unwrap();
+    sleep_ms(300).await;
+    a.cmd_tx
+        .send(NodeCommand::JoinForwarderRoom { forwarder_peer_id: f_id.clone() })
+        .await
+        .unwrap();
+    // Long enough for the full cascade to have fired if it were going to, and
+    // for key exchange (KeyRequest -> KeyBundle -> confirm) to complete.
+    sleep_ms(4000).await;
+
+    // 1. No discovery emission for the forwarder, and no profile pushed at it.
+    let mut a_discovered_f = false;
+    let mut a_session_with_f = false;
+    while let Ok(ev) = a.event_rx.try_recv() {
+        match ev {
+            NetworkEvent::PeerDiscovered { ref peer } if peer.peer_id == f_id => {
+                a_discovered_f = true;
+            }
+            NetworkEvent::SessionEstablished { ref peer_id } if *peer_id == f_id => {
+                a_session_with_f = true;
+            }
+            _ => {}
+        }
+    }
+    assert!(
+        !a_discovered_f,
+        "a fwd-room join must NOT run the discovery cascade (PeerDiscovered leaked)"
+    );
+
+    let mut f_saw_profile_from_a = false;
+    while let Ok(ev) = f.event_rx.try_recv() {
+        if let NetworkEvent::ProfileUpdated { ref peer_id } = ev {
+            if *peer_id == a_id {
+                f_saw_profile_from_a = true;
+            }
+        }
+    }
+    assert!(
+        !f_saw_profile_from_a,
+        "a fwd-room join must NOT push our profile at the forwarder"
+    );
+
+    // 2. The Olm session still established — without it the lane wedges (a
+    //    queued fwd_stream_register would never drain). The minimal path fires
+    //    the signed KeyRequest; the key-exchange handler emits this once the
+    //    session confirms.
+    assert!(
+        a_session_with_f,
+        "the fwd minimal path must still establish an Olm session"
+    );
+
+    // 3. `synced_peers` was not burned: a later join of a SHARED room runs the
+    //    full cascade for the very same peer.
+    drain_events(&mut a);
+    let shared_room = "harness-shared-room-171-181".to_string();
+    f.cmd_tx
+        .send(NodeCommand::JoinRoom { room_code: shared_room.clone() })
+        .await
+        .unwrap();
+    sleep_ms(300).await;
+    a.cmd_tx
+        .send(NodeCommand::JoinRoom { room_code: shared_room.clone() })
+        .await
+        .unwrap();
+    let rediscovered = wait_event(&mut a, std::time::Duration::from_secs(6), |ev| {
+        matches!(ev, NetworkEvent::PeerDiscovered { peer } if peer.peer_id == f_id)
+    })
+    .await;
+    assert!(
+        rediscovered,
+        "the fwd-room join must not burn synced_peers — a later shared-room \
+         join must still run the full discovery cascade"
+    );
 
     drop(a);
     drop(f);

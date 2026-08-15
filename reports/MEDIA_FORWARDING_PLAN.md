@@ -310,6 +310,339 @@ attribution, engine) already exists — phase 3 is simulcast + policy, no new tr
 
 ## 7. Status log
 
+**2026-08-15 — "SOURCE QUALITY" REMOVED (Vitalik's call). Step 1 is now purely
+automatic: every viewer gets `min(share, their largest MONITOR)`, always.**
+
+The feature could no longer keep its promise. Its original premise (§3 step 1)
+was that it "lifts the cap for that ONE connection only" — true when every
+viewer had a private PC and therefore a private encoder. A forwarder branch has
+ONE shared encoder feeding many viewers, so "that one connection" stopped
+existing, and §9.2 had to gate the request out of shared ingests. The result was
+a button that worked on a direct viewer and silently did nothing on a branch
+viewer, with nothing in the UI to tell them apart — worse than not having it.
+
+Two facts made removal the right call rather than "make it work everywhere":
+
+1. **The clamp is keyed to the viewer's largest connected MONITOR**
+   (`largestDisplayResolution()` reads `platformDispatcher.displays`), NOT the
+   window. So a viewer already receives every pixel their screen can show
+   regardless of how small their Hollow window is. Source only ever did
+   anything when the SHARE was bigger than the viewer's monitor.
+2. **Desktop has no zoom on a share**, so those extra pixels were downscaled
+   away on the only platform where a 4K share is likely. (Mobile has pinch-zoom,
+   but a phone's display cap is small anyway.)
+
+The field confusion that triggered this is worth recording: in the VM lab
+VirtualBox resizes the GUEST DISPLAY to the window, so Win10 honestly reported
+an 826-tall monitor and got 826p — which read as "the cap is following my
+window and Source can't fix it". On real hardware that does not happen.
+
+Removed end to end: the `ShareSourceQualityChip` widget + its 4 call sites, the
+`source_quality` wire field on BOTH `vc_screen_watch` and `call_screen_watch`,
+`sourceQualityShares`/`watchingSourceQuality` state, `setShareSourceQuality`/
+`setRemoteShareSourceQuality`, the `sourceQuality` parameters on
+`effectiveViewerCap`/`viewerWantsLowLayer`, and §9.2's `honorSource` flag (now
+unnecessary — there is nothing to honour). `share_source_quality_chip.dart` is
+renamed `share_quality_chip.dart`; the RECEIVED-resolution label chip it also
+contained stays, and is now the honest way to see what you are getting.
+
+**Wire compat is safe in both directions:** serde ignores unknown keys, so an
+older client's `source_quality: true` is simply dropped by a new sharer (it then
+gets the clamp — the new intended behaviour), and a new client sends no key to
+an old sharer, which defaults it to false. Harness assertions were inverted to
+PIN that the key no longer round-trips.
+
+If the capability is ever wanted back, the honest form is the plan's documented
+refinement — move a requesting viewer onto a direct per-viewer slot when one is
+free — never re-gating a shared ingest. Note it must exclude branch HEADS: a
+head with its own direct PC is exactly the cryptor collision fixed earlier today.
+
+**2026-08-15 (run 3) — FEEDER ELECTION FIELD-VERIFIED; the branch-head SFrame
+fix holds; the "quality jumping" is the f↔q dry-layer oscillator, now damped.**
+
+- **FEEDER ELECTION WORKS, end to end, in ~1 second.** The mixed topology arose
+  naturally (both VMs first probed `route=relay` → VPS branch; Win10 then
+  re-probed `direct` → promoted). Host: `Feeder election: delegating <Win10> to
+  feed the VPS forwarder (2 upload copies → 1)` → Win10: `Elected as FEEDER …
+  (re-emitting our copy into its ingest)` → `feeding forwarder <VPS>` → `Feed
+  leg into <VPS> admitted — reporting up` → host: `Feed to <VPS> is up —
+  closing our own ingest there (sharer down to one upload copy)`. The
+  make-before-break handover completed and the sharer went to ONE ingest.
+  Revocation also fired cleanly later (`stopped feeding forwarder`).
+- **Branch-head fix holds:** the Source toggle on the head no longer produces a
+  direct offer, and there is no `DecryptionFailed` anywhere in the run.
+- **THE "QUALITY JUMPING" — root-caused.** The engine log shows a clean
+  oscillator on every egress leg of the peer branch:
+  `562 serving 'f'` → `569 'f' dry — falling back to 'q'` → `580 returning to
+  'f'` → `595 dry → 'q'` → `601 returning to 'f'` … i.e. **826p ↔ 413p every
+  6-15 s**, exactly what Vitalik described. Driver: the sharer's encoder
+  reported `limit=bandwidth`, and libwebrtc's allocator protects `encodings[0]`
+  (= `q`) by design, so under BWE pressure `f` is the layer that starves.
+  **This is not a regression** — the same fallback was observed and accepted on
+  2026-08-14 ("the f layer starved (BWE/static-content — the allocator protects
+  q by design)"). What is new is recognising that a FIXED 5 s climb-back
+  (`UPGRADE_AFTER` in leg.rs) makes it a permanent oscillator on any link that
+  cannot hold `f`: it flows briefly while libwebrtc probes upward, we upgrade,
+  the allocator starves it again, forever.
+  **Fix: `simulcast::UpgradeGate`** — adaptive hysteresis. First climb-back
+  still costs only 5 s, but each upgrade that fails to STICK (dies within 30 s)
+  triples the requirement, capped at 60 s; an upgrade that held longer than
+  that resets it, so a genuinely recovered link gets quality back promptly.
+  Pure (caller supplies `now`), 2 new unit tests.
+- **A diagnostic that actively lied, now fixed.** `Encoded output: 733x412 …
+  cap=1467x826 -> CAP APPLIED` — with simulcast there is one `outbound-rtp` per
+  LAYER and the logger took the FIRST and returned, so it reported the `q`
+  layer and cheerfully declared the cap applied while `f` was dead. It now
+  reports every layer with its rid and judges the cap against the largest
+  actively-encoding one. This is what hid the starvation from the first read.
+- **Expectation note (not a bug): Source on a branch viewer does NOT give
+  1080p, by design.** Two independent caps apply — step-1 receiver-driven
+  capping means a 1467x826 window gets 826p, and §9.2 deliberately excludes
+  `source_quality` from SHARED branch ingests. The plan's documented optional
+  refinement (move a Source-requesting viewer to a direct slot when one is
+  free) is the lever if that trade should change; it is NOT implemented.
+- **Lab caveat:** the underlying BWE constraint on a host→guest path that
+  should be trivially fast is suspect. The bridged-VirtualBox networking is a
+  known bad actor in this lab; the oscillation damping is correct regardless,
+  but the *starvation itself* may not reproduce on real machines.
+- VPS forwarder REDEPLOYED with the UpgradeGate (same identity, `.prev` kept).
+
+**2026-08-15 (run 2) — watchdog CONFIRMED WORKING; Source-on-a-branch-HEAD
+found to be a black-screen bug (pre-existing, now FIXED); phantom camera gone.**
+
+- **Liveness watchdog: armed and firing.** The new one-shot diagnostic answered
+  the question the first run couldn't: this build exposes ALL four counters —
+  `liveness watchdog armed on 4 counter(s): responsesReceived=… requestsReceived=…
+  packetsReceived=… bytesReceived=…`. `suspect-fast` fired on the sharer
+  (t=687, its dead ingest leg) and on Win10 (t=689, its dead direct leg, which
+  then ran the new `_rerequestDirectShare` — "Direct share leg from … died —
+  re-requesting (attempt 1, receiver-initiates)"). Both new Stage-A paths
+  worked end to end.
+- **But the DOWNSTREAM viewer gains little in this topology, and that is
+  inherent.** Win10_222's egress leg is served by Win10's ENGINE, so it stays
+  healthy until that process actually dies; the leg then goes silent and the
+  3 s threshold expires at almost exactly the moment libwebrtc's own consent
+  check does (kill t≈691 → ICE `Disconnected` t=694 → recovered t=695, ≈4 s vs
+  ≈5 s in run 1). ICE's own timing varies 3-5 s run to run, so a 3 s threshold
+  sits right on its boundary. Tightening below 3 s trades that against false
+  positives on a legitimately quiet pair — do it only with more counter data,
+  which the armed-log now provides.
+- **THE BLACK SCREEN — root-caused, and it is NOT the kill.** Toggling Source
+  quality on Win10 while it was a promoted BRANCH HEAD made the sharer send it a
+  fresh DIRECT offer (`Creating offer from shared stream (profile=motion)` —
+  no `simulcast f+q`, single layer, 1920x1080, VP9-preferred). One second later
+  Win10 logged `Receiver screen:<host> (screen_video) state:
+  FrameCryptorStateDecryptionFailed`, then the heal ladder escalated
+  (676 escalate=false → 686 escalate=true) and churned MLS epochs 2→4. The
+  branch was dead from that moment; the leg deaths at 687/689/694 were the
+  aftermath, not the kill.
+  **Mechanism:** `_branchOf(peer)` matches only a branch's `viewers` set, and a
+  branch HEAD is deliberately NOT in its own — its display rides the ingest
+  through its own engine. So the `route=='relay'` re-watch path
+  (`current != null`) never matched a head, and the head's Source re-watch fell
+  through to the direct path. That new direct PC then collided with the branch
+  ingest's sender cryptor on `screen:<head>` — `enableForSender` is idempotent
+  per (participant, kind), so the new PC got no cryptor of its own and sent
+  frames the head could not decrypt. **This is the promotion-cryptor collision
+  of 2026-08-07 arriving from the opposite direction**, and it was reachable
+  before this epic's §9 work by any `route=relay` re-watch from a head — Source
+  is simply the easiest way to trigger it.
+  **Fix:** the relay re-watch now resolves `_fwdBranches[peerId] ?? _branchOf(peerId)`,
+  so a head re-offers its OWN ingest instead of falling through. With §9.2's
+  gating the recomputed cap is unchanged, so the correct end state is exactly
+  "a branch viewer asking for Source stays on the f layer".
+- **Phantom camera: GONE** (no `Found video track without renderer` this run) —
+  the `ice_restart` flag works.
+- Still unverified: `ghost_left_suppressed` (needs a genuinely half-open
+  socket), feeder election (needs a peer branch + VPS branch simultaneously).
+
+**2026-08-15 — FIRST §9 FIELD RUN (host sharer + Win10 + Win10_222 with
+`HOLLOW_FORCE_RELAY_ROUTE=1`, kill+restart of Win10). Recovery PASSED; the fast
+-failover watchdog did NOT fire and is FIXED; the ICE repair caused a phantom
+camera tile and is FIXED. Neither defect was visible without the logs.**
+
+- **Recovery path: PASS, unchanged from phase 2.** Kill at t=931 → the client
+  presence-flap tolerance correctly held the branch on the relay's (legitimate)
+  peer_left → the viewer's egress leg reported `Disconnected` at t=936 → ladder
+  → `direct_failed` re-watch → VPS branch → attach + `Connected` in the SAME
+  second, ICE route logged at 937. **~5 s end to end, ALL of it detection.**
+- **DEFECT 1 — the liveness watchdog never fired (`suspect-fast` absent from all
+  three logs).** Root cause: the freshness check compared
+  `lastPacketReceivedTimestamp` against `DateTime.now().millisecondsSinceEpoch`,
+  but this fork reports stats timestamps in MICROseconds
+  (`statsToMap`: `stats->timestamp_us()`, flutter_peerconnection.cc). The
+  subtraction went hugely negative, which always satisfied "younger than the
+  threshold", so the detector returned "fresh" forever. **This is exactly the
+  Step 0 the plan prescribed — "verify which members m144 populates before
+  writing the rule" — and skipping it cost the whole feature a field run.**
+  Fixed by removing the wall-clock comparison entirely: the detector now
+  fingerprints whichever inbound counters exist
+  (`responsesReceived`/`requestsReceived`/`packetsReceived`/`bytesReceived`) and
+  measures elapsed time on OUR clock since that fingerprint last CHANGED —
+  unit-agnostic by construction. Threshold 3 s (consent runs ~2.5 s, RTCP RR
+  ~1 s), so detection should land ~3-3.5 s vs libwebrtc's ~5 s. It now also
+  logs ONCE which counters it armed on, and if a build exposes none it says so
+  and DISABLES itself — a watchdog that silently never fires is worse than none,
+  because it looks like it works.
+- **DEFECT 2 — the ICE repair invented a camera tile (the "weird bug" Vitalik
+  saw).** Chain, exact and log-confirmed: Win10's repair fired at t=881 →
+  `restartIce()` + `_sendRenegotiationOffer` → Win10_222's `_handleRenegOffer`
+  ran its post-reneg camera safety net → `Found video track without renderer for
+  <Win10> — creating` → a renderer + SFrame video receiver for a camera that was
+  OFF. The safety net is right for a CAMERA reneg (onTrack can stay silent when
+  a transceiver is reused) but an ICE-restart re-offer changes no m-lines, so
+  everything it finds is an already-idle transceiver. Fixed with an additive
+  `ice_restart` flag on `vc_reneg_offer` (3-touch + serde pin test; absent =
+  false = today's behaviour): the answerer skips the camera net for it.
+- **The repair itself did NOT achieve direct** (`still relayed` one second
+  later) even though both sides advertised host/srflx. Legitimate — two
+  NAT'd VirtualBox guests may genuinely have no direct path — and the one-attempt
+  budget worked as designed. Worth re-checking on real machines before judging
+  the lever's value.
+- **Relay ghost suppression: NOT exercised** (`ghost_left_suppressed` still 0).
+  A Task-Manager kill closes the TCP socket immediately, so the relay had
+  already cleaned the peer up before the restarted client authenticated — there
+  was no ghost to supersede. Confirmed by the log: Win10 rejoined at t=957 and
+  NO spurious peer_left followed in the next ~11 minutes. The fix is inert until
+  a genuinely half-open socket survives into the successor's auth (the original
+  ~85 s field shape), not broken.
+- **Source-quality gating: not exercised this run** (no `source=true` watch in
+  the sharer log) — still pending.
+- Deployed infrastructure was live for this run: relay + VPS forwarder both on
+  the new build.
+
+**2026-08-14 (later) — §9 WORKLIST IMPLEMENTED: 5 of 6 items complete, 1 split
+out with evidence. Field verification is the remaining gate.** Implementation
+plan: `tmp.md` (written from a four-agent code scan of the Dart lane, the Rust
+node+engine, the relay C++, and the fork's ICE/stats surface).
+
+- **§9.2 Source-quality gating on branches — DONE.** `_effectiveCapFor` gained
+  `honorSource`; `_ingestCap` sizes a SHARED ingest by displays alone. The
+  half-cap layer test moved into a pure, unit-tested
+  `ScreenShareService.viewerWantsLowLayer` — which exposed a BACKFIRE the plan
+  had only half-anticipated: with the cap no longer honouring Source, a
+  Source-requesting viewer on a SMALL display would newly satisfy
+  `vLong*2 <= fLong` and be DEMOTED to the q layer, the exact opposite of the
+  request. Source now pins a branch viewer to `f`. 7 new unit tests.
+- **§9.4 fwd-room chatter suppression — DONE (harness-tested).** `is_forwarder_room`
+  + `ensure_olm_session_and_drain` (extracted so the full path and the minimal
+  path cannot drift on the signed-key-exchange rules); both presence arms skip
+  the whole cascade for `fwd:` rooms while keeping the authoritative snapshot,
+  the vanished purge (the embedded engine's presence tolerance depends on it)
+  and Olm session establishment. **Two burn hazards found and guarded:**
+  `synced_peers` is GLOBAL, not per-room (inserting on a fwd join would make a
+  LATER join of a real shared room skip discovery forever), and
+  `profile_broadcast_done` is a one-shot flag that a first-ever fwd RoomMembers
+  would have consumed. New harness test `fwd_room_join_skips_discovery_but_keeps_olm`
+  pins both, plus the drain that delivers a queued `fwd_stream_register`. Also
+  gated the post-rekey `DmSyncRequest` at its single chokepoint via a structural
+  `peer_is_forwarder_only` test (covers peer forwarders too, no configured-id
+  lookup).
+- **§9.5 Relay ghost-eviction PeerLeft — DONE.** Root cause pinned to ONE
+  emitter: the SUPERSEDE path in `handle_auth` broadcasts `peer_left` for every
+  room while the successor socket is authenticating. `suppress_peer_left`
+  threaded through `cleanup_peer`/`leave_room` (an explicit flag, because that
+  cleanup deliberately runs BEFORE `peer_sockets` is re-pointed, so a
+  "is there a newer socket?" check could never fire); the room slot is still
+  ERASED (memory safety — a slot pointing at a closed socket is a dangling
+  pointer), only the lie is withheld. New `/server-stats` counter
+  `ghost_left_suppressed`. **Drive-by bug fixed in the same file:**
+  `state.peer_rooms[peer_id] = {}` sat OUTSIDE the `!is_fetch` guard, so a
+  fetch-mode auth wiped a connected full node's room set — its later close then
+  found nothing to leave_room and left room slots pointing at a FREED socket
+  (no peer_left, dangling pointer on every later fan-out). Both TUs
+  syntax-checked on the VPS in a scratch copy; NOT yet deployed.
+- **§9.3 ICE "direct whenever direct is possible" — DONE for the two lanes that
+  matter, two deferred.** New `services/ice_repair.dart`: one `getStats()` pass
+  yields both the settled route and whether host/srflx existed on BOTH sides
+  (the candidate tables enumerate both ends, so no signaling change). Lever 1
+  wired on the DM call PC and the VC mesh PCs — quiescent window only, ONE
+  attempt, polite-peer initiator, hard-gated off under Always-relay, verified on
+  the retry ladder. **Lever 2** re-probes the watch `route` hint 10 s after the
+  audio PC settles and after a successful repair, and — the load-bearing detail
+  — BYPASSES `_routeHintTo`'s sticky "already assigned ⇒ relay" short-circuit,
+  without which a viewer parked on the VPS branch by the race could never report
+  direct and lever 2 would be dead on arrival. Sharer side needed no code: a
+  fresh `route=direct fwd_capable` watch already feeds the rebalancer. Verified
+  `restartIce()` is fully wired through the fork to the shipped libwebrtc; note
+  `createOffer({'iceRestart': true})` is SILENTLY DROPPED on the native path
+  (only the `mandatory` sub-map is read) — never use that form.
+  **Deferred: lanes C (general data channels) and D (screen-share direct PCs)** —
+  both lack any non-destructive re-offer path (`_handleOffer` closes and
+  replaces the PC), so each needs a new wire flag plus a reuse branch; lane D's
+  value is largely already captured by branches + lever 2 + the rebalancer.
+- **§9.1 Parallel healing — STAGE A DONE, STAGE B SPLIT OUT WITH A HARD
+  BLOCKER.** Stage A: a 1 Hz ICE-CONSENT staleness watchdog on every
+  screen-lane PC (`responsesReceived`, falling back to
+  `lastPacketReceivedTimestamp` — consent checks run regardless of media, so a
+  static screen share is never mistaken for a dead one), two consecutive stale
+  polls required, firing the lane's existing `onDisconnected` without closing
+  the PC so each role keeps its own recovery. Detection drops from ~5-7 s to
+  ~2.5-3.5 s against field-proven same-second recovery. Also closed the gap the
+  scan found: **direct share PCs had NO disconnect handler on EITHER end** — the
+  sender now frees its slot, the receiver re-requests through a new bounded
+  `_rerequestDirectShare` (deliberately NOT `_fallbackToDirect`, which would
+  re-watch as `direct_failed` and wrongly push the sharer down its forwarder
+  ladder). **Stage B (the shadow path) is NOT built, and the reason is
+  concrete:** `FrameCryptorService._receiverCryptors` is keyed
+  `(participant, kind)` and `enableForReceiver` early-returns on a hit, so a
+  second concurrent receiving PC for the same originator gets NO cryptor and
+  renders ciphertext — "render whichever path delivers first" is unachievable
+  as specced. A shadow participant LABEL would work (key material is shared —
+  `rotateKey` → `setSharedKey`), but it introduces a second SFrame identity that
+  BOTH re-key sweeps must learn, which is precisely the shape of field bug #6
+  (an ingest leg outside the sweeps → the whole branch black). That deserves its
+  own change and its own field run, not a blind sixth change in a batch.
+- **§9.6 Feeder election — DONE (needs the security review it was flagged for;
+  the checklist is satisfied in code, a human sign-off is not).** Wire, all
+  additive + serde-pinned: `feeder` on `fwd_stream_register`, `feed_target` on
+  `vc_screen_assign`, `fwd_feed` on `vc_screen_watch`, new
+  `vc_screen_feed_state`. Engine: `admit_owner_op` SPLIT so `fwd_ingest_offer`
+  goes through a new `admit_ingest_offer` (owner OR the owner-delegated feeder)
+  while auth/unregister stay strictly owner-only — **supply, never authority** —
+  with 3 new unit tests including "feeder may never administer" and "empty
+  feeder is never a wildcard". A connected INGEST leg now requests a keyframe
+  immediately, so the owner→feeder handover costs one keyframe instead of a
+  freeze. The feed leg needed NO new engine concept: an egress leg's SendOnly
+  OFFER is exactly what an ingest leg ANSWERS, so the bridge simply relabels
+  `fwd_egress_offer` → `fwd_ingest_offer` for feed targets and routes it through
+  the TARGET's `fwd:` room. **The allowlist direction is the easy thing to get
+  backwards and it fails closed with `not_authorized`:** a feed leg is an EGRESS
+  leg on the FEEDER's engine whose "viewer" is the forwarder being fed, so the
+  FED forwarder goes on the FEEDER's allowlist (`admit_attach` knows nothing
+  about feeds); the reverse is NOT needed, because at the fed forwarder the head
+  only OFFERS an ingest, which `admit_ingest_offer` authorises via `feeder`.
+  Both registers must therefore land BEFORE the feed starts — the same
+  same-socket ordering rule as promotion's register-before-assign.
+  Sharer policy elects a fed branch only when a peer
+  branch head advertised `fwd_feed`, keeps its OWN ingest up until
+  `feed_state{up:true}` (make-before-break), and reverts on a 10 s timeout or an
+  `fwd_error` — which is also exactly what an OLDER VPS binary produces, so the
+  rollout degrades gracefully in both directions. **v1 privacy gate, deliberately
+  conservative: election is SKIPPED whenever any `relay_private` viewer rides
+  the fed branch** — their downlink would still be operator infrastructure, but
+  the ciphertext would TRANSIT a member's machine and the promise covers
+  transit. Flip only on an explicit decision.
+- **Verified:** Rust suite green (603 passed / 0 failed before the feeder work;
+  full re-run at the end), forwarder-feature tests green (20/20 across dispatch
+  + wire pins), `flutter analyze lib/` shows ZERO new findings (61 before and
+  after — measured against a stashed baseline), widget tests 413/413 (406 + 7
+  new). Relay C++ syntax-checked on the VPS.
+- **INFRASTRUCTURE DEPLOYED 2026-08-15; clients + field test are the remaining
+  gate.** Relay rebuilt on the VPS and restarted — `/server-stats` now carries
+  `ghost_left_suppressed`, service clean (the `stop-sigterm timed out` line at
+  restart is this relay's normal shutdown, pre-existing). VPS `hollow-forwarder`
+  rebuilt from this tree and swapped in, **same identity**
+  (`12D3KooWHtaft…fRH` — clients pin the Olm identity key, so a re-key would
+  fire SecurityAlerts everywhere), previous binary kept as
+  `hollow-forwarder.prev`, previous relay binary as `hollow-relay.prev`.
+  Build note: the VPS's own Rust is 1.75 and the crate is edition 2024, so the
+  forwarder still has to be built on the `hollowvm` Ubuntu24 VM (Rust 1.95) and
+  scp'd via Windows — 2m22s with a warm cache. Deploy order used (and to reuse):
+  **relay → VPS forwarder → clients**, the middle step being load-bearing
+  because the forwarder must understand `feeder` before any client ships feeder
+  election. The condensed field pass is §9's F-1…F-5 checklist below.
+
 **2026-08-14 (later) — §9 FIELD PASS COMPLETE: RUNS A (×2), B, AND C ALL PASSED — PHASE 3
 IS FIELD-VERIFIED AND THE EPIC'S BUILD PHASE IS CLOSED.** The re-run of A bonus-covered
 the VPS rung WITH simulcast (VPS journal: both layers rid-mapped, egress serving 'f',
@@ -1167,7 +1500,45 @@ race-TURNed viewer repaired to direct is one more potential branch and one less 
 dependency. Deep-dive design (viewer counts, layer ladders, join storms, moderation
 surface) = its own plan session once phase 3 lands.
 
-## 9. NEXT-SESSION WORKLIST (gathered 2026-08-14 per Vitalik — "do them all and that's it")
+## 9. WORKLIST — IMPLEMENTED 2026-08-14 (see the top §7 entry for what each item
+## actually became); FIELD VERIFICATION IS THE REMAINING GATE
+
+**Status: 5 of 6 done, 1 split out.** Items 1(Stage A)/2/3/4/5 and 6 are
+implemented and test-green; item 1's Stage B (shadow path) is split out with a
+concrete blocker (SFrame receiver cryptors are keyed per (participant, kind), so
+a concurrent shadow PC gets no cryptor — see §7). ICE repair covers the call and
+VC-mesh lanes; the data-channel and screen-share lanes are deferred.
+
+**Field pass for the next VM session (3 machines: host + VM1 bridged +
+VM2 `HOLLOW_FORCE_RELAY_ROUTE=1`; rebuilt Release everywhere; deploy relay →
+VPS forwarder → clients FIRST):**
+
+- **F-1 (fast failover):** promotion topology from run 2b, then kill VM1's app.
+  Expect `suspect-fast` in the viewer/sharer log within ~2-3 s (vs the old ~5-7),
+  then the existing same-second recovery. Also pause a VM's network <2 s and
+  confirm NO teardown (the 2-consecutive-stale guard).
+- **F-2 (Source gating):** a branch viewer toggles Source → sharer logs NO
+  ingest re-offer, the branch cap does not move, that viewer stays on layer `f`;
+  a DIRECT viewer's Source toggle still lifts to source resolution.
+- **F-3 (ICE repair):** with Always-relay OFF on both sides, force/await a TURN
+  nomination → expect ONE `[HOLLOW-ICE-REPAIR]` attempt, a flip to direct, then
+  lever 2's automatic re-watch and promotion with NO manual leave/rejoin. A
+  forced-relay client must log NO repair attempt at all.
+- **F-4 (chatter + relay, log-reading):** VPS journal shows fwd-room joins
+  WITHOUT the ~45-frame discovery burst; `/server-stats` shows
+  `ghost_left_suppressed` incrementing on an app kill+restart while clients log
+  NO `Presence drop … ignored` lines (there is nothing left to tolerate).
+- **F-5 (feeder election):** host shares; VM1 = peer head (fwd_feed), VM2
+  forced-relay → VPS branch. Expect `Feeder election: delegating …` → VM1 logs
+  `Elected as FEEDER` → `feed leg into … admitted` → host logs `Feed to … is up
+  — closing our own ingest there` and ends with exactly ONE
+  `Creating offer from shared stream`; the VPS journal shows the ingest arriving
+  from VM1's identity. Kill VM1 → host resumes its own VPS ingest. Then repeat
+  with VM2 under Always-relay → election must be SKIPPED entirely.
+
+Original worklist text (for reference):
+
+## 9-original. NEXT-SESSION WORKLIST (gathered 2026-08-14 per Vitalik — "do them all and that's it")
 
 **Gate first: the phase-3 field pass** (full checklist = §7 top entry; condensed to three
 runs, ~20-30 min): **Run A** = repeat run 2b (host shares, VM1 bridged direct

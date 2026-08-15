@@ -274,7 +274,6 @@ fn build_call_json_signal(signal_type: &str, payload: &str) -> Option<HavenMessa
             want: v["want"].as_bool().unwrap_or(false),
             viewer_width: v["viewer_width"].as_u64().unwrap_or(0) as u32,
             viewer_height: v["viewer_height"].as_u64().unwrap_or(0) as u32,
-            source_quality: v["source_quality"].as_bool().unwrap_or(false),
         }),
         "recording_start" | "recording_stop" => parsed.map(|v| HavenMessage::CallRecordingState {
             call_id: jstr(&v, "call_id"),
@@ -905,11 +904,11 @@ fn build_vc_signal_envelope(
             want: v["want"].as_bool().unwrap_or(false),
             viewer_width: v["viewer_width"].as_u64().unwrap_or(0) as u32,
             viewer_height: v["viewer_height"].as_u64().unwrap_or(0) as u32,
-            source_quality: v["source_quality"].as_bool().unwrap_or(false),
             route: jstr(&v, "route"),
             fwd_capable: v["fwd_capable"].as_bool().unwrap_or(false),
             relay_private: v["relay_private"].as_bool().unwrap_or(false),
             fwd_simulcast: v["fwd_simulcast"].as_bool().unwrap_or(false),
+            fwd_feed: v["fwd_feed"].as_bool().unwrap_or(false),
             target: None,
         }),
         "screen_assign" => parsed.and_then(|v| {
@@ -919,11 +918,25 @@ fn build_vc_signal_envelope(
                 sid, cid,
                 origin,
                 forwarder: jstr(&v, "forwarder"),
+                feed_target: jstr(&v, "feed_target"),
+                target: None,
+            })
+        }),
+        "screen_feed_state" => parsed.and_then(|v| {
+            // Like the assign, meaningless without the stream it refers to.
+            let origin = parse_stream_origin(&v)?;
+            Some(MessageEnvelope::VoiceChannelScreenFeedState {
+                sid, cid,
+                origin,
+                forwarder: jstr(&v, "forwarder"),
+                up: v["up"].as_bool().unwrap_or(false),
                 target: None,
             })
         }),
         "reneg_offer" => parsed.map(|v| MessageEnvelope::VoiceChannelRenegOffer {
-            sid, cid, sdp: jstr(&v, "sdp"), target: None,
+            sid, cid, sdp: jstr(&v, "sdp"),
+            ice_restart: v["ice_restart"].as_bool().unwrap_or(false),
+            target: None,
         }),
         "reneg_answer" => parsed.map(|v| MessageEnvelope::VoiceChannelRenegAnswer {
             sid, cid, sdp: jstr(&v, "sdp"), target: None,
@@ -1323,6 +1336,7 @@ async fn emit_vc_sdp_signal(
     sdp: String,
     signal_type: &'static str,
     log_label: &'static str,
+    ice_restart: bool,
 ) {
     let vc_key = format!("{sid}:{cid}");
     if !is_vc_participant(voice_channel_participants, &vc_key, &sender_peer_id) {
@@ -1333,8 +1347,9 @@ async fn emit_vc_sdp_signal(
         hollow_log!("[HOLLOW-SECURITY] BLOCKED VC {log_label} — size {} exceeds limit from {sender_peer_id}", sdp.len());
         return;
     }
-    hollow_log!("[HOLLOW-VC] {log_label} from {sender_peer_id} in vc {cid}");
-    let payload = serde_json::json!({"sdp": sdp}).to_string();
+    hollow_log!("[HOLLOW-VC] {log_label} from {sender_peer_id} in vc {cid}{}",
+        if ice_restart { " (ice restart)" } else { "" });
+    let payload = serde_json::json!({"sdp": sdp, "ice_restart": ice_restart}).to_string();
     let _ = event_tx.send(NetworkEvent::VoiceChannelSignal {
         server_id: sid, channel_id: cid, peer_id: sender_peer_id,
         signal_type: signal_type.to_string(), payload,
@@ -1346,7 +1361,7 @@ pub(crate) async fn handle_envelope_voice_channel_sdp_offer(
     event_tx: &mpsc::Sender<NetworkEvent>,
     sender_peer_id: String, sid: String, cid: String, sdp: String,
 ) {
-    emit_vc_sdp_signal(voice_channel_participants, event_tx, sender_peer_id, sid, cid, sdp, "sdp_offer", "SDP offer").await;
+    emit_vc_sdp_signal(voice_channel_participants, event_tx, sender_peer_id, sid, cid, sdp, "sdp_offer", "SDP offer", false).await;
 }
 
 pub(crate) async fn handle_envelope_voice_channel_sdp_answer(
@@ -1354,7 +1369,7 @@ pub(crate) async fn handle_envelope_voice_channel_sdp_answer(
     event_tx: &mpsc::Sender<NetworkEvent>,
     sender_peer_id: String, sid: String, cid: String, sdp: String,
 ) {
-    emit_vc_sdp_signal(voice_channel_participants, event_tx, sender_peer_id, sid, cid, sdp, "sdp_answer", "SDP answer").await;
+    emit_vc_sdp_signal(voice_channel_participants, event_tx, sender_peer_id, sid, cid, sdp, "sdp_answer", "SDP answer", false).await;
 }
 
 /// Screen-share twin of `emit_vc_sdp_signal`: same participant + size guards
@@ -1426,9 +1441,9 @@ pub(crate) async fn handle_envelope_voice_channel_screen_answer(
 pub(crate) async fn handle_envelope_voice_channel_reneg_offer(
     voice_channel_participants: &HashMap<String, std::collections::HashSet<String>>,
     event_tx: &mpsc::Sender<NetworkEvent>,
-    sender_peer_id: String, sid: String, cid: String, sdp: String,
+    sender_peer_id: String, sid: String, cid: String, sdp: String, ice_restart: bool,
 ) {
-    emit_vc_sdp_signal(voice_channel_participants, event_tx, sender_peer_id, sid, cid, sdp, "reneg_offer", "Reneg offer").await;
+    emit_vc_sdp_signal(voice_channel_participants, event_tx, sender_peer_id, sid, cid, sdp, "reneg_offer", "Reneg offer", ice_restart).await;
 }
 
 pub(crate) async fn handle_envelope_voice_channel_reneg_answer(
@@ -1436,7 +1451,7 @@ pub(crate) async fn handle_envelope_voice_channel_reneg_answer(
     event_tx: &mpsc::Sender<NetworkEvent>,
     sender_peer_id: String, sid: String, cid: String, sdp: String,
 ) {
-    emit_vc_sdp_signal(voice_channel_participants, event_tx, sender_peer_id, sid, cid, sdp, "reneg_answer", "Reneg answer").await;
+    emit_vc_sdp_signal(voice_channel_participants, event_tx, sender_peer_id, sid, cid, sdp, "reneg_answer", "Reneg answer", false).await;
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1563,27 +1578,27 @@ pub(crate) async fn handle_envelope_voice_channel_screen_watch(
     want: bool,
     viewer_width: u32,
     viewer_height: u32,
-    source_quality: bool,
     route: String,
     fwd_capable: bool,
     relay_private: bool,
     fwd_simulcast: bool,
+    fwd_feed: bool,
 ) {
     let vc_key = format!("{sid}:{cid}");
     if !is_vc_participant(voice_channel_participants, &vc_key, &sender_peer_id) {
         hollow_log!("[HOLLOW-SECURITY] BLOCKED VC screen watch from non-participant {sender_peer_id} in {cid}");
         return;
     }
-    hollow_log!("[HOLLOW-VC] Screen watch from {sender_peer_id}: want={want} viewer={viewer_width}x{viewer_height} source={source_quality} route={route} fwd_capable={fwd_capable} relay_private={relay_private} fwd_simulcast={fwd_simulcast}");
+    hollow_log!("[HOLLOW-VC] Screen watch from {sender_peer_id}: want={want} viewer={viewer_width}x{viewer_height} route={route} fwd_capable={fwd_capable} relay_private={relay_private} fwd_simulcast={fwd_simulcast} fwd_feed={fwd_feed}");
     let payload = serde_json::json!({
         "want": want,
         "viewer_width": viewer_width,
         "viewer_height": viewer_height,
-        "source_quality": source_quality,
         "route": route,
         "fwd_capable": fwd_capable,
         "relay_private": relay_private,
         "fwd_simulcast": fwd_simulcast,
+        "fwd_feed": fwd_feed,
     }).to_string();
     let _ = event_tx.send(NetworkEvent::VoiceChannelSignal {
         server_id: sid, channel_id: cid, peer_id: sender_peer_id,
@@ -1604,6 +1619,7 @@ pub(crate) async fn handle_envelope_voice_channel_screen_assign(
     cid: String,
     origin: Box<StreamOrigin>,
     forwarder: String,
+    feed_target: String,
     local_peer_str: &str,
 ) {
     let vc_key = format!("{sid}:{cid}");
@@ -1620,10 +1636,53 @@ pub(crate) async fn handle_envelope_voice_channel_screen_assign(
     let payload = serde_json::json!({
         "origin": origin_json_value(&origin),
         "forwarder": forwarder,
+        "feed_target": feed_target,
     }).to_string();
     let _ = event_tx.send(NetworkEvent::VoiceChannelSignal {
         server_id: sid, channel_id: cid, peer_id: sender_peer_id,
         signal_type: "screen_assign".to_string(), payload,
+    }).await;
+}
+
+/// Feeder election: a delegated feeder reports whether its leg into another
+/// forwarder is up, so the owner knows when it may stop supplying that
+/// forwarder itself (make-before-break handover).
+///
+/// Gated exactly like the assign it answers: VC participant + the origin must
+/// name a stream the SENDER could legitimately speak about. Note the direction
+/// is feeder → OWNER, so `inbound_origin_ok`'s "names ourselves" branch is the
+/// one that applies (we are the originator of the stream being fed).
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn handle_envelope_voice_channel_screen_feed_state(
+    voice_channel_participants: &HashMap<String, std::collections::HashSet<String>>,
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    sender_peer_id: String,
+    sid: String,
+    cid: String,
+    origin: Box<StreamOrigin>,
+    forwarder: String,
+    up: bool,
+    local_peer_str: &str,
+) {
+    let vc_key = format!("{sid}:{cid}");
+    if !is_vc_participant(voice_channel_participants, &vc_key, &sender_peer_id) {
+        hollow_log!("[HOLLOW-SECURITY] BLOCKED VC feed state from non-participant {sender_peer_id} in {cid}");
+        return;
+    }
+    let origin_opt = Some(origin);
+    if !inbound_origin_ok(&origin_opt, &sender_peer_id, local_peer_str) {
+        hollow_log!("[HOLLOW-SECURITY] BLOCKED VC feed state from {sender_peer_id} — spoofed origin");
+        return;
+    }
+    let origin = origin_opt.expect("guarded above");
+    let payload = serde_json::json!({
+        "origin": origin_json_value(&origin),
+        "forwarder": forwarder,
+        "up": up,
+    }).to_string();
+    let _ = event_tx.send(NetworkEvent::VoiceChannelSignal {
+        server_id: sid, channel_id: cid, peer_id: sender_peer_id,
+        signal_type: "screen_feed_state".to_string(), payload,
     }).await;
 }
 

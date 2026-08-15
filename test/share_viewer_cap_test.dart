@@ -1,6 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hollow/src/core/services/screen_share_service.dart';
-import 'package:hollow/src/ui/components/share_source_quality_chip.dart';
+import 'package:hollow/src/ui/components/share_quality_chip.dart';
 
 void main() {
   group('ShareQualityChip.receivedLabel', () {
@@ -48,14 +48,6 @@ void main() {
       );
     });
 
-    test('source quality lifts the viewer clamp entirely', () {
-      expect(
-        ScreenShareService.effectiveViewerCap(3840, 2160, 1920, 1080,
-            sourceQuality: true),
-        (3840, 2160),
-      );
-    });
-
     test('unknown viewer size (old client) leaves the cap untouched', () {
       expect(
         ScreenShareService.effectiveViewerCap(3840, 2160, 0, 0),
@@ -77,6 +69,57 @@ void main() {
       expect(
         ScreenShareService.effectiveViewerCap(1080, 1920, 2560, 1440),
         (1080, 1920),
+      );
+    });
+
+    test('there is no per-viewer opt-out of the clamp', () {
+      // "Source quality" was REMOVED 2026-08-15: the clamp is keyed to the
+      // viewer's MONITOR, so it already delivers every pixel they can show,
+      // and a shared forwarder branch has no per-viewer encoder for an
+      // opt-out to apply to. A 4K share to a 1080p viewer is ALWAYS 1080p.
+      expect(
+        ScreenShareService.effectiveViewerCap(3840, 2160, 1920, 1080),
+        (1920, 1080),
+      );
+    });
+  });
+
+  group('ScreenShareService.viewerWantsLowLayer', () {
+    test('a viewer the q layer fully covers rides q', () {
+      // Branch cap 1920x1080 => q is 960x540; an 800x600 display fits.
+      expect(
+        ScreenShareService.viewerWantsLowLayer(1920, 1080, 800, 600),
+        isTrue,
+      );
+    });
+
+    test('a viewer needing more than half the cap stays on f', () {
+      expect(
+        ScreenShareService.viewerWantsLowLayer(1920, 1080, 1920, 1080),
+        isFalse,
+      );
+    });
+
+    test('exactly half the long edge still rides q', () {
+      expect(
+        ScreenShareService.viewerWantsLowLayer(1920, 1080, 960, 540),
+        isTrue,
+      );
+    });
+
+    test('unknown viewer size (old client) stays on f', () {
+      expect(
+        ScreenShareService.viewerWantsLowLayer(1920, 1080, 0, 0),
+        isFalse,
+      );
+    });
+
+    test('orientation is normalized on the long edge', () {
+      // Portrait 600x800 viewer against a landscape 1920x1080 branch cap:
+      // long edge 800, q long edge 960 => covered.
+      expect(
+        ScreenShareService.viewerWantsLowLayer(1920, 1080, 600, 800),
+        isTrue,
       );
     });
   });

@@ -5,6 +5,7 @@ import 'dart:typed_data';
 
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:hollow/src/core/services/frame_cryptor_service.dart';
+import 'package:hollow/src/core/services/ice_repair.dart';
 import 'package:hollow/src/core/services/ice_route_probe.dart';
 import 'package:hollow/src/core/services/remote_track_volume.dart';
 import 'package:hollow/src/core/services/local_speaking_detector.dart';
@@ -1463,7 +1464,8 @@ class VoiceChannelService {
   //  Renegotiation (for adding/removing video tracks)
   // ---------------------------------------------------------------
 
-  Future<void> _sendRenegotiationOffer(String peerId) async {
+  Future<void> _sendRenegotiationOffer(String peerId,
+      {bool iceRestart = false}) async {
     final pc = _peerConnections[peerId];
     if (pc == null || _serverId == null || _channelId == null) return;
 
@@ -1472,7 +1474,10 @@ class VoiceChannelService {
       final mungedSdp = _mungeOpusParams(offer.sdp!);
       await pc.setLocalDescription(RTCSessionDescription(mungedSdp, offer.type));
 
-      final payload = jsonEncode({'sdp': mungedSdp});
+      // `ice_restart` tells the answerer this re-offer carries no media
+      // change, so it must not run its camera-track safety net (which would
+      // otherwise invent a camera tile for us — see the flag's doc in types.rs).
+      final payload = jsonEncode({'sdp': mungedSdp, 'ice_restart': iceRestart});
       await network_api.voiceChannelSendSignal(
         serverId: _serverId!,
         channelId: _channelId!,
@@ -1498,6 +1503,11 @@ class VoiceChannelService {
     final v = jsonDecode(payload);
     final sdp = v['sdp'] as String? ?? '';
     if (sdp.isEmpty) return;
+    // An ICE-restart re-offer changes no m-lines; running the camera safety
+    // net below would materialise a renderer for the peer's INACTIVE video
+    // transceiver and show a phantom camera tile (field-observed 2026-08-15,
+    // caused by the "direct whenever direct is possible" repair).
+    final iceRestart = v['ice_restart'] as bool? ?? false;
 
     // Glare prevention: if we also have a pending offer, lower peerId wins.
     final sigState = pc.signalingState;
@@ -1530,8 +1540,12 @@ class VoiceChannelService {
 
     // After renegotiation, check if there's a remote video track we don't
     // have a renderer for. onTrack may not fire when a transceiver is reused
-    // (track removed then re-added on the same m-line).
-    await _checkRemoteVideoTrack(peerId, pc);
+    // (track removed then re-added on the same m-line). NOT for an ICE
+    // restart: nothing about the media changed, so anything this found would
+    // be a transceiver that was already there and already idle.
+    if (!iceRestart) {
+      await _checkRemoteVideoTrack(peerId, pc);
+    }
   }
 
   /// Check for a remote video track on a PC and create a renderer if missing.
@@ -1816,6 +1830,7 @@ class VoiceChannelService {
     if (state == RTCPeerConnectionState.RTCPeerConnectionStateConnected) {
       onPeerConnected?.call(peerId);
       _logIceRoute(peerId, pc);
+      scheduleIceRepair(peerId);
     }
     if (state ==
             RTCPeerConnectionState.RTCPeerConnectionStateFailed ||
@@ -1833,6 +1848,92 @@ class VoiceChannelService {
         ? '[HOLLOW-VC] ICE route to $peerId: no succeeded candidate pair found'
         : '[HOLLOW-VC] ICE route to $peerId: $route');
   }
+
+  /// Peers whose one-shot ICE repair has already been spent this session.
+  final Set<String> _iceRepairDone = {};
+
+  /// Peers with a renegotiation we started in flight. The mesh has no
+  /// `_renegotiationInProgress` equivalent — glare is normally arbitrated
+  /// inline by signalingState + the peer-id tiebreak — but an ICE restart is a
+  /// NEW renegotiation source, so it gets an explicit busy flag rather than
+  /// leaning on that tiebreak.
+  final Set<String> _renegInFlight = {};
+
+  /// Whether "Always relay calls" is on — injected by the provider so the
+  /// service never reaches into Riverpod. Forced-relay users must NEVER be
+  /// repaired to direct: that routing is a deliberate privacy choice.
+  bool Function()? isForcedRelay;
+
+  /// One-shot "direct whenever direct is possible" repair for a mesh PC.
+  /// See `ice_repair.dart` for why the nomination race makes this necessary
+  /// and why exactly one attempt is the right budget.
+  ///
+  /// This is the highest-value lane for the repair: a VC audio PC repaired to
+  /// direct is also what flips the screen-share `route` hint to `direct`,
+  /// which lets the sharer promote this viewer onto a peer branch (lever 2).
+  void scheduleIceRepair(String peerId, {int attempt = 0}) {
+    if (_iceRepairDone.contains(peerId)) return;
+    if (isForcedRelay?.call() ?? false) return;
+    if (!shouldInitiateIceRepair(localPeerId, peerId)) {
+      _iceRepairDone.add(peerId); // the other side owns the attempt
+      return;
+    }
+    Future<void>.delayed(
+      attempt == 0 ? const Duration(seconds: 10) : const Duration(seconds: 5),
+      () async {
+        if (_iceRepairDone.contains(peerId)) return;
+        final pc = _peerConnections[peerId];
+        if (pc == null) return;
+
+        // Quiescent window only (see the DM-lane twin): no renegotiation of
+        // ours in flight, and the PC settled in `stable`.
+        final busy = _renegInFlight.contains(peerId) ||
+            _pendingCameraReneg.contains(peerId) ||
+            pc.signalingState != RTCSignalingState.RTCSignalingStateStable;
+        if (busy) {
+          if (attempt < 5) {
+            scheduleIceRepair(peerId, attempt: attempt + 1);
+          } else {
+            _vcLog('[HOLLOW-ICE-REPAIR] $peerId: no quiet window — '
+                'accepting the relayed pair');
+            _iceRepairDone.add(peerId);
+          }
+          return;
+        }
+
+        final verdict = await assessIceRepair(pc);
+        if (verdict == null) return;
+        if (!verdict.shouldRepair) {
+          _iceRepairDone.add(peerId);
+          return;
+        }
+
+        _iceRepairDone.add(peerId); // one attempt, whatever happens
+        _vcLog('[HOLLOW-ICE-REPAIR] $peerId: relayed pair with direct '
+            'candidates both sides (${verdict.detail}) — restarting ICE');
+        if (!await restartIceOn(pc)) return;
+        _renegInFlight.add(peerId);
+        try {
+          await _sendRenegotiationOffer(peerId, iceRestart: true);
+        } finally {
+          _renegInFlight.remove(peerId);
+        }
+
+        final after = await probeIceRoute(() => _peerConnections[peerId]);
+        _vcLog(after == null
+            ? '[HOLLOW-ICE-REPAIR] $peerId: post-restart route unknown'
+            : after.isDirect
+                ? '[HOLLOW-ICE-REPAIR] $peerId: repaired to direct: $after'
+                : '[HOLLOW-ICE-REPAIR] $peerId: still relayed: $after');
+        onIceRouteRepaired?.call(peerId, after?.isDirect ?? false);
+      },
+    );
+  }
+
+  /// Fired after a repair attempt settles (direct = true when it worked) so
+  /// the provider can refresh anything keyed on the route — notably the
+  /// screen-watch hint (lever 2 of the pair).
+  void Function(String peerId, bool direct)? onIceRouteRepaired;
 
   /// onTrack handler: bind SFrame receivers for the new audio/video track,
   /// then (gossip mode only) forward received audio to other neighbors.

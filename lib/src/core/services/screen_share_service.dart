@@ -131,16 +131,19 @@ class ScreenShareService {
   /// into the share cap's orientation.
   ///
   /// A 0x0 viewer size means unknown (old client that doesn't send it) and
-  /// [sourceQuality] is the viewer's explicit opt-in to full quality — both
-  /// leave the share cap untouched, preserving pre-step-1 behavior.
+  /// leaves the share cap untouched, preserving pre-step-1 behavior.
+  ///
+  /// There is deliberately NO per-viewer "Source quality" opt-out (removed
+  /// 2026-08-15): the clamp is keyed to the viewer's largest MONITOR, so it
+  /// already delivers every pixel they can display, and on a shared forwarder
+  /// branch there is no per-viewer encoder for an opt-out to apply to.
   static (int, int) effectiveViewerCap(
     int shareMaxWidth,
     int shareMaxHeight,
     int viewerWidth,
-    int viewerHeight, {
-    bool sourceQuality = false,
-  }) {
-    if (sourceQuality || viewerWidth <= 0 || viewerHeight <= 0) {
+    int viewerHeight,
+  ) {
+    if (viewerWidth <= 0 || viewerHeight <= 0) {
       return (shareMaxWidth, shareMaxHeight);
     }
     final shareLong =
@@ -154,6 +157,28 @@ class ScreenShareService {
     return shareMaxWidth >= shareMaxHeight
         ? (effLong, effShort)
         : (effShort, effLong);
+  }
+
+  /// Phase-3 simulcast layer choice for ONE viewer on a forwarder branch:
+  /// true = serve the low layer (rid `q`, the full layer downscaled 2x per
+  /// axis), false = the full layer (rid `f`).
+  ///
+  /// [fullWidth]/[fullHeight] = the branch's ingest cap (the `f` layer).
+  /// [viewerCapWidth]/[viewerCapHeight] = that viewer's ALREADY-EFFECTIVE cap
+  /// (display clamped to the share cap) — the caller owns that math so this
+  /// stays the single half-cap comparison the field verified.
+  ///
+  static bool viewerWantsLowLayer(
+    int fullWidth,
+    int fullHeight,
+    int viewerCapWidth,
+    int viewerCapHeight,
+  ) {
+    if (viewerCapWidth <= 0 || viewerCapHeight <= 0) return false;
+    final vLong =
+        viewerCapWidth > viewerCapHeight ? viewerCapWidth : viewerCapHeight;
+    final fLong = fullWidth > fullHeight ? fullWidth : fullHeight;
+    return vLong * 2 <= fLong;
   }
 
   /// Live-update the outgoing resolution cap on a negotiated sender — the
@@ -1037,6 +1062,10 @@ class ScreenShareService {
   Future<void> close() async {
     _log('[HOLLOW-SCREEN] Closing screen share service');
 
+    // Stop the liveness watchdog FIRST: a planned teardown must never be
+    // reported as a suspected crash.
+    _stopLivenessWatchdog();
+
     // Stop screen audio capture before tearing down PC.
     await _stopScreenAudioCapture();
 
@@ -1191,12 +1220,186 @@ class ScreenShareService {
         onConnected?.call();
         _scheduleIceRouteLog();
         _scheduleResolutionCapEnforcement();
+        _startLivenessWatchdog();
       case RTCPeerConnectionState.RTCPeerConnectionStateFailed:
       case RTCPeerConnectionState.RTCPeerConnectionStateClosed:
       case RTCPeerConnectionState.RTCPeerConnectionStateDisconnected:
+        _stopLivenessWatchdog();
         onDisconnected?.call();
       default:
         break;
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Fast failover: ICE-consent staleness watchdog
+  // ---------------------------------------------------------------------------
+  //
+  // When the peer at the other end of a screen leg CRASHES, the recovery is
+  // same-second (field-proven) but the DETECTION is not: libwebrtc only gives
+  // up when ICE consent expires, which measured ~5-7 s of frozen picture. This
+  // watchdog shortens that to ~2.5-3.5 s.
+  //
+  // CRITICAL — the signal is ICE CONSENT, never media bytes. A static screen
+  // share is legitimately silent for minutes at a time, so "no frames" says
+  // nothing about liveness. ICE consent checks (STUN binding requests) run
+  // continuously regardless of media, so a candidate pair whose
+  // responses/packets stop advancing is genuinely unreachable.
+  //
+  // Conservative by construction: TWO consecutive stale polls are required,
+  // and a false positive costs one blink (the recovery paths are all
+  // idempotent re-requests) rather than a lost stream.
+
+  Timer? _livenessTimer;
+
+  /// Fingerprint of the nominated pair's inbound counters, and the local clock
+  /// reading when it last CHANGED. Staleness is "nothing has moved for N
+  /// seconds by OUR clock" — never a comparison against a timestamp reported
+  /// by the stats themselves, whose unit is not ours to assume (this fork
+  /// reports stats timestamps in MICROseconds; an earlier version of this
+  /// check compared one against `DateTime.now().millisecondsSinceEpoch`, went
+  /// permanently negative, and silently read as "always fresh" — the watchdog
+  /// never fired once in the field).
+  String? _livenessFingerprint;
+  DateTime? _livenessLastMovement;
+
+  /// Timer.periodic does not await an async callback, so a slow `getStats()`
+  /// could otherwise overlap the next tick.
+  bool _livenessPollInFlight = false;
+
+  /// Logged once per PC: which inbound counters this build actually exposes.
+  /// If none are, the watchdog disables itself loudly rather than pretending.
+  bool _livenessMembersLogged = false;
+
+  /// How long every inbound counter must sit still before we call the leg
+  /// dead. ICE consent checks run about every 2.5 s and RTCP receiver reports
+  /// about every 1 s, so 3 s of total silence is well past normal quiet —
+  /// while still beating libwebrtc's own ~5-7 s consent expiry.
+  static const _kConsentStaleAfter = Duration(seconds: 3);
+
+  /// Inbound counters, most decisive first. Whichever exist are combined into
+  /// the fingerprint; all of them stall when the far end stops answering.
+  /// Deliberately NOT media-only counters alone — a static screen share is
+  /// legitimately silent, which is why ICE consent is the primary signal.
+  static const _kLivenessMembers = <String>[
+    'responsesReceived',
+    'requestsReceived',
+    'packetsReceived',
+    'bytesReceived',
+  ];
+
+  void _startLivenessWatchdog() {
+    _stopLivenessWatchdog();
+    final watched = _pc;
+    if (watched == null) return;
+    _livenessTimer = Timer.periodic(const Duration(seconds: 1), (t) async {
+      if (watched != _pc) {
+        // Torn down or replaced meanwhile (close() nulls _pc).
+        t.cancel();
+        return;
+      }
+      if (_livenessPollInFlight) return;
+      _livenessPollInFlight = true;
+      final bool stale;
+      try {
+        stale = await _consentLooksStale(watched);
+      } finally {
+        _livenessPollInFlight = false;
+      }
+      if (watched != _pc) {
+        // Torn down or replaced meanwhile (close() nulls _pc).
+        t.cancel();
+        return;
+      }
+      if (!stale) return;
+      t.cancel();
+      _livenessTimer = null;
+      _log('[HOLLOW-SCREEN] suspect-fast: no inbound activity on the nominated '
+          'pair for ${_kConsentStaleAfter.inSeconds}s — declaring the leg dead '
+          'ahead of libwebrtc');
+      // Deliberately does NOT close the PC: the callback owner decides what
+      // recovery means for its role (a viewer walks its ladder, a sharer
+      // reverts its branch), exactly as it does for a real ICE death.
+      onDisconnected?.call();
+    });
+  }
+
+  void _stopLivenessWatchdog() {
+    _livenessTimer?.cancel();
+    _livenessTimer = null;
+    _livenessFingerprint = null;
+    _livenessLastMovement = null;
+    _livenessPollInFlight = false;
+    _livenessMembersLogged = false;
+  }
+
+  /// True when NOTHING has arrived on the nominated candidate pair for
+  /// [_kConsentStaleAfter], measured on OUR clock.
+  ///
+  /// Deliberately unit-agnostic: it only asks "did these counters change since
+  /// the last poll?", never "how old is this reported timestamp?". The stats
+  /// timestamps in this fork are microseconds, and mixing that with a
+  /// millisecond wall clock is what made the first version of this check read
+  /// as permanently fresh.
+  ///
+  /// The primary signal is ICE consent (`responsesReceived` / `requestsReceived`),
+  /// which keeps ticking regardless of media — a static screen share sends
+  /// almost nothing, so media counters alone would call a healthy leg dead.
+  Future<bool> _consentLooksStale(RTCPeerConnection pc) async {
+    try {
+      final stats = await pc.getStats();
+      StatsReport? pair;
+      for (final r in stats) {
+        if (r.type != 'candidate-pair') continue;
+        if (r.values['state'] != 'succeeded') continue;
+        pair = r;
+        if (r.values['nominated'] == true) break;
+      }
+      if (pair == null) return false; // nothing to judge yet
+
+      final parts = <String>[];
+      for (final name in _kLivenessMembers) {
+        final v = pair.values[name];
+        if (v is num) parts.add('$name=$v');
+      }
+
+      if (parts.isEmpty) {
+        // This build exposes none of the counters we can reason about. Say so
+        // ONCE and stand down — a watchdog that silently never fires is worse
+        // than no watchdog, because it looks like it is working.
+        if (!_livenessMembersLogged) {
+          _livenessMembersLogged = true;
+          _log('[HOLLOW-SCREEN] liveness watchdog DISABLED — candidate-pair '
+              'exposes none of $_kLivenessMembers (available: '
+              '${pair.values.keys.toList()})');
+          _stopLivenessWatchdog();
+        }
+        return false;
+      }
+
+      if (!_livenessMembersLogged) {
+        _livenessMembersLogged = true;
+        _log('[HOLLOW-SCREEN] liveness watchdog armed on ${parts.length} '
+            'counter(s): ${parts.join(' ')}');
+      }
+
+      final now = DateTime.now();
+      final fingerprint = parts.join('|');
+      if (fingerprint != _livenessFingerprint) {
+        _livenessFingerprint = fingerprint;
+        _livenessLastMovement = now;
+        return false;
+      }
+      final since = _livenessLastMovement;
+      if (since == null) {
+        _livenessLastMovement = now;
+        return false;
+      }
+      return now.difference(since) >= _kConsentStaleAfter;
+    } catch (_) {
+      // getStats throws once the PC is closed; the real state handler owns
+      // that case.
+      return false;
     }
   }
 
@@ -1264,31 +1467,51 @@ class ScreenShareService {
   Future<void> _logEncodedResolution(RTCPeerConnection screenPc) async {
     try {
       final stats = await screenPc.getStats();
+      // SIMULCAST: there is one outbound-rtp per LAYER. Reporting only the
+      // first one is how a dead `f` layer hid behind a healthy-looking
+      // "CAP APPLIED" for the q layer (field 2026-08-15) — the diagnostic said
+      // the cap was applied while the branch was actually serving half
+      // resolution. Report every layer, and judge the cap against the LARGEST
+      // one that is actually encoding.
+      final layers = <String>[];
+      int? bestLong;
+      int? bestW, bestH;
+      String? limit;
       for (final report in stats) {
         final kind = report.values['kind'] ?? report.values['mediaType'];
-        if (report.type == 'outbound-rtp' && kind == 'video') {
-          final w = (report.values['frameWidth'] as num?)?.toInt();
-          final h = (report.values['frameHeight'] as num?)?.toInt();
-          final fps = report.values['framesPerSecond'];
-          final limit = report.values['qualityLimitationReason'];
-          final capW = _capWidth, capH = _capHeight;
-          // Compare LONG edges so portrait window shares don't false-fail;
-          // small tolerance for encoder rounding.
-          final longEdge = (w ?? 0) > (h ?? 0) ? w : h;
-          final capLongEdge =
-              (capW ?? 0) > (capH ?? 0) ? capW : capH;
-          final verdict = (w == null || h == null)
-              ? 'no frames encoded yet'
-              : (capLongEdge != null &&
-                      longEdge! <= capLongEdge * 1.05 + 16)
-                  ? 'CAP APPLIED'
-                  : 'CAP NOT APPLIED';
-          _log('[HOLLOW-SCREEN] Encoded output: ${w}x$h@${fps}fps '
-              'limit=$limit cap=${capW}x$capH -> $verdict');
-          return;
+        if (report.type != 'outbound-rtp' || kind != 'video') continue;
+        final w = (report.values['frameWidth'] as num?)?.toInt();
+        final h = (report.values['frameHeight'] as num?)?.toInt();
+        final fps = report.values['framesPerSecond'];
+        final rid = report.values['rid'] as String?;
+        limit ??= report.values['qualityLimitationReason'] as String?;
+        layers.add('${rid ?? '-'}:${w ?? '?'}x${h ?? '?'}@${fps ?? '?'}fps');
+        if (w != null && h != null) {
+          final long = w > h ? w : h;
+          if (bestLong == null || long > bestLong) {
+            bestLong = long;
+            bestW = w;
+            bestH = h;
+          }
         }
       }
-      _log('[HOLLOW-SCREEN] Encoded output: no outbound-rtp video stats');
+      if (layers.isEmpty) {
+        _log('[HOLLOW-SCREEN] Encoded output: no outbound-rtp video stats');
+        return;
+      }
+      final capW = _capWidth, capH = _capHeight;
+      // Compare LONG edges so portrait window shares don't false-fail;
+      // small tolerance for encoder rounding.
+      final capLongEdge = (capW ?? 0) > (capH ?? 0) ? capW : capH;
+      final verdict = bestLong == null
+          ? 'no frames encoded yet'
+          : (capLongEdge != null && bestLong <= capLongEdge * 1.05 + 16)
+              ? 'CAP APPLIED'
+              : 'CAP NOT APPLIED';
+      final top = bestW == null ? '?' : '${bestW}x$bestH';
+      _log('[HOLLOW-SCREEN] Encoded output: ${layers.length} layer(s) '
+          '[${layers.join(', ')}] top=$top limit=$limit '
+          'cap=${capW}x$capH -> $verdict');
     } catch (e) {
       _log('[HOLLOW-SCREEN] Encoded resolution check failed: $e');
     }

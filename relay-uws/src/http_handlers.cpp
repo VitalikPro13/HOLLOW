@@ -321,7 +321,8 @@ static void handle_server_stats(HttpResponse* res, RelayState& state) {
         {"send_backpressure", state.diag.send_backpressure},
         {"send_dropped", state.diag.send_dropped},
         {"fwd_delivered", state.diag.fwd_delivered},
-        {"fwd_buffered", state.diag.fwd_buffered}
+        {"fwd_buffered", state.diag.fwd_buffered},
+        {"ghost_left_suppressed", state.diag.ghost_left_suppressed}
     };
 
     state.stats_cache.cached_json = resp.dump();

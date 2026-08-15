@@ -286,6 +286,9 @@ async fn pump(
     let mut select = LayerSelect::new(Some(ideal));
     let mut layer_last_seen: HashMap<Rid, Instant> = HashMap::new();
     let mut ideal_flowing_since: Option<Instant> = None;
+    // Anti-flap: how long the ideal layer must hold before we climb back to it,
+    // growing each time a climb-back fails to stick (see UpgradeGate).
+    let mut upgrade_gate = super::simulcast::UpgradeGate::new();
     let mut first_fanout: Option<Instant> = None;
     let mut last_forwarded: Option<Instant> = None;
     let mut last_switch_kf: Option<Instant> = None;
@@ -352,6 +355,19 @@ async fn pump(
                         // simulcast) falls back to every source at the ingest.
                         if !is_ingest {
                             let _ = wiring.kf_tx.send(select.desired());
+                        } else {
+                            // A freshly connected INGEST is either the first
+                            // supply of this stream or a REPLACEMENT (a re-offer,
+                            // or a feeder taking over from the owner). In the
+                            // replacement case every existing egress leg is mid-GOP
+                            // on a source that just went away, so ask the new
+                            // supplier for an I-frame immediately — otherwise the
+                            // audience waits for a spontaneous keyframe, which
+                            // screen-share encoders essentially never emit
+                            // (measured 2m50s of black in the field).
+                            // Layer-less: at handover we want whatever the new
+                            // supplier can give, on every layer it carries.
+                            let _ = wiring.kf_tx.send(None);
                         }
                     }
                     Event::MediaAdded(m) => {
@@ -566,7 +582,6 @@ async fn pump(
                     if now.duration_since(last_redesire_check) >= Duration::from_millis(500) {
                         last_redesire_check = now;
                         const DRY: Duration = Duration::from_millis(2500);
-                        const UPGRADE_AFTER: Duration = Duration::from_secs(5);
                         let starving = match (last_forwarded, first_fanout) {
                             (Some(t), _) => now.duration_since(t) > DRY,
                             (None, Some(t)) => now.duration_since(t) > DRY,
@@ -587,6 +602,12 @@ async fn pump(
                                     "[HOLLOW-FWD] egress layer '{}' dry — falling back to '{r}'",
                                     desired.map(|d| d.to_string()).unwrap_or_default()
                                 );
+                                if desired == Some(ideal) {
+                                    // We are falling OFF the ideal layer: if the
+                                    // climb-back we just made failed to stick, make
+                                    // the next one wait longer (anti-flap).
+                                    upgrade_gate.on_fallback(now);
+                                }
                                 select.set_desired(Some(*r));
                                 let _ = wiring.kf_tx.send(Some(*r));
                             }
@@ -604,9 +625,13 @@ async fn pump(
                                 .get(&ideal)
                                 .is_some_and(|t| now.duration_since(*t) < Duration::from_secs(1))
                             && ideal_flowing_since
-                                .is_some_and(|t| now.duration_since(t) > UPGRADE_AFTER)
+                                .is_some_and(|t| now.duration_since(t) > upgrade_gate.required())
                         {
-                            hollow_log!("[HOLLOW-FWD] egress returning to layer '{ideal}'");
+                            hollow_log!(
+                                "[HOLLOW-FWD] egress returning to layer '{ideal}' (after {:?} stable)",
+                                upgrade_gate.required()
+                            );
+                            upgrade_gate.on_upgrade(now);
                             select.set_desired(Some(ideal));
                             let _ = wiring.kf_tx.send(Some(ideal));
                         }

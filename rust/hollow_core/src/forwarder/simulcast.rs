@@ -25,6 +25,8 @@
 //! - The OLD layer keeps flowing while a switch waits for its keyframe —
 //!   make-before-break at packet granularity.
 
+use std::time::{Duration, Instant};
+
 use str0m::media::Rid;
 use str0m::rtp::{Vp8Descriptor, Vp8Patch};
 
@@ -249,6 +251,63 @@ impl LayerSelect {
     }
 }
 
+/// Adaptive hysteresis for returning to the ideal (high) layer.
+///
+/// The pump falls back to a lower layer when the wanted one goes dry, and
+/// climbs back once the ideal layer has been flowing for a while. With a FIXED
+/// climb-back delay that is an oscillator on any link that cannot sustain the
+/// high layer: it flows briefly (libwebrtc probes upward), we upgrade, the
+/// allocator starves it again — forever. Field 2026-08-15 measured a viewer
+/// flapping 826p <-> 413p every 6-15 s, which reads as "the quality keeps
+/// jumping" and is worse to watch than simply staying low.
+///
+/// So each upgrade that fails to STICK makes the next one wait longer, while a
+/// genuinely recovered link still climbs back promptly and then resets the
+/// penalty. Pure (the caller supplies `now`) so it is unit-testable.
+#[derive(Debug)]
+pub(crate) struct UpgradeGate {
+    required: Duration,
+    /// When we last climbed back to the ideal layer.
+    last_upgrade: Option<Instant>,
+}
+
+impl UpgradeGate {
+    /// First climb-back is quick — a one-off dip should not cost quality.
+    pub(crate) const BASE: Duration = Duration::from_secs(5);
+    /// Never make a recovered link wait longer than this to get quality back.
+    pub(crate) const MAX: Duration = Duration::from_secs(60);
+    /// An upgrade that dies within this window did not "stick".
+    pub(crate) const STUCK_AFTER: Duration = Duration::from_secs(30);
+
+    pub(crate) fn new() -> Self {
+        Self { required: Self::BASE, last_upgrade: None }
+    }
+
+    /// How long the ideal layer must flow before we climb back.
+    pub(crate) fn required(&self) -> Duration {
+        self.required
+    }
+
+    pub(crate) fn on_upgrade(&mut self, now: Instant) {
+        self.last_upgrade = Some(now);
+    }
+
+    /// We fell off the ideal layer. If that upgrade had only just happened,
+    /// the link cannot hold it — back off before trying again.
+    pub(crate) fn on_fallback(&mut self, now: Instant) {
+        let stuck = self
+            .last_upgrade
+            .is_none_or(|t| now.duration_since(t) >= Self::STUCK_AFTER);
+        if stuck {
+            // It held for a good while, so this is a fresh dip, not a flap.
+            self.required = Self::BASE;
+        } else {
+            self.required = (self.required * 3).min(Self::MAX);
+        }
+        self.last_upgrade = None;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -406,6 +465,47 @@ mod tests {
         // Next low frame gets 0x0000 (wrapped).
         fwd(s.on_packet(Some(rid(RID_LOW)), 91, 200, &vp8_delta(4, 9, 4), true));
         assert_eq!(s.last_out_pid, Some(0x0000));
+    }
+
+    #[test]
+    fn upgrade_gate_backs_off_only_on_flapping() {
+        let t0 = Instant::now();
+        let mut g = UpgradeGate::new();
+        assert_eq!(g.required(), UpgradeGate::BASE);
+
+        // Upgrade that dies almost immediately => the link can't hold it.
+        g.on_upgrade(t0);
+        g.on_fallback(t0 + Duration::from_secs(3));
+        assert_eq!(g.required(), UpgradeGate::BASE * 3);
+
+        // Again => longer still.
+        g.on_upgrade(t0 + Duration::from_secs(10));
+        g.on_fallback(t0 + Duration::from_secs(13));
+        assert_eq!(g.required(), UpgradeGate::BASE * 9);
+
+        // Capped.
+        for i in 0..10 {
+            let t = t0 + Duration::from_secs(100 + i * 10);
+            g.on_upgrade(t);
+            g.on_fallback(t + Duration::from_secs(2));
+        }
+        assert_eq!(g.required(), UpgradeGate::MAX);
+
+        // An upgrade that HELD for a long time is a fresh dip, not a flap —
+        // the next climb-back must be prompt again.
+        let t = t0 + Duration::from_secs(1000);
+        g.on_upgrade(t);
+        g.on_fallback(t + UpgradeGate::STUCK_AFTER + Duration::from_secs(1));
+        assert_eq!(g.required(), UpgradeGate::BASE);
+    }
+
+    #[test]
+    fn upgrade_gate_first_fallback_without_upgrade_is_not_a_flap() {
+        // Falling off the ideal layer before we ever climbed to it (the very
+        // first dry period) must not penalise the first climb-back.
+        let mut g = UpgradeGate::new();
+        g.on_fallback(Instant::now());
+        assert_eq!(g.required(), UpgradeGate::BASE);
     }
 
     #[test]

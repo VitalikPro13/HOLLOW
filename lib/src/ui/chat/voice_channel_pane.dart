@@ -20,7 +20,7 @@ import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
 import 'package:hollow/src/ui/components/ptt_mic_visual.dart';
-import 'package:hollow/src/ui/components/share_source_quality_chip.dart';
+import 'package:hollow/src/ui/components/share_quality_chip.dart';
 import 'package:hollow/src/ui/components/share_volume_control.dart';
 import 'package:hollow/src/ui/components/status_dot.dart';
 import 'package:hollow/src/ui/dialogs/screen_share_dialog.dart';
@@ -867,16 +867,6 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                // Source-quality opt-in (media forwarding step 1) — per
-                // viewer, per watch session, OFF by default.
-                if (vcState.watchingScreenShares.contains(focusedPeerId))
-                  ShareSourceQualityChip(
-                    active:
-                        vcState.sourceQualityShares.contains(focusedPeerId),
-                    onChanged: (on) => ref
-                        .read(voiceChannelProvider.notifier)
-                        .setShareSourceQuality(focusedPeerId, on),
-                  ),
                 if (remoteLabel != null || renderer != null) ...[
                   const SizedBox(width: HollowSpacing.xs),
                   // Shows the RECEIVED resolution once frames flow (live —

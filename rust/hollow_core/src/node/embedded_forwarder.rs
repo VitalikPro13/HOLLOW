@@ -35,6 +35,7 @@
 //! swarm call site carries the same cfg with a no-op else.
 
 use std::collections::HashSet;
+use std::sync::{Arc, RwLock};
 
 use tokio::sync::mpsc;
 
@@ -54,6 +55,17 @@ pub(crate) struct EmbeddedForwarder {
     /// STUN server ("host:port") derived from the relay's TURN credential
     /// URIs — same infrastructure the direct lanes already trust.
     stun_server: Option<String>,
+    /// Feeder election: forwarders we are FEEDING, keyed by their peer id.
+    ///
+    /// A feed leg is an ordinary egress leg whose "viewer" happens to be
+    /// another forwarder — the engine needs no new concept, because an egress
+    /// leg's SendOnly OFFER is exactly the shape an ingest leg ANSWERS. Only
+    /// the envelope LABELS differ, and this set is what tells the out-pump to
+    /// relabel (`fwd_egress_offer` -> `fwd_ingest_offer`) and to route through
+    /// the TARGET's room instead of our own.
+    ///
+    /// Shared with the out-pump task, which outlives any single borrow of self.
+    feed_targets: Arc<RwLock<HashSet<String>>>,
 }
 
 impl EmbeddedForwarder {
@@ -64,6 +76,7 @@ impl EmbeddedForwarder {
             expectations: HashSet::new(),
             engine_tx: None,
             stun_server: None,
+            feed_targets: Arc::new(RwLock::new(HashSet::new())),
         }
     }
 
@@ -177,6 +190,7 @@ impl EmbeddedForwarder {
                 let _ = cmd_tx.try_send(NodeCommand::EmbeddedForwarderOut {
                     to_peer: sender.to_string(),
                     envelope_json: serde_json::to_string(&refusal).unwrap_or_default(),
+                    via_target_room: false,
                 });
                 return true;
             }
@@ -217,6 +231,89 @@ impl EmbeddedForwarder {
         }
     }
 
+    /// Feeder election: start (or stop) feeding `target_forwarder` with the
+    /// stream identified by `origin`.
+    ///
+    /// Driven by the stream OWNER over `vc_screen_assign{feed_target}` — we
+    /// only ever feed a stream we are already forwarding, to a forwarder the
+    /// owner named. Mechanically this is just an attach by `target_forwarder`:
+    /// the engine's own admission still applies (the stream must exist and the
+    /// target must be on ITS allowlist, which only the owner can set), so this
+    /// grants no authority the owner hadn't already granted.
+    pub(crate) fn set_feed(
+        &mut self,
+        origin: Box<super::types::StreamOrigin>,
+        target_forwarder: String,
+        active: bool,
+        cmd_tx: &mpsc::Sender<NodeCommand>,
+    ) {
+        if target_forwarder.is_empty() || target_forwarder == self.device_peer_id {
+            return;
+        }
+        if active {
+            if !self.enabled {
+                hollow_log!("[HOLLOW-FWD] feed request while peer forwarding disabled — ignored");
+                return;
+            }
+            self.ensure_engine(cmd_tx);
+            if let Ok(mut t) = self.feed_targets.write() {
+                t.insert(target_forwarder.clone());
+            }
+            hollow_log!("[HOLLOW-FWD] feeding forwarder {target_forwarder} (delegated by owner)");
+            if let Some(tx) = &self.engine_tx {
+                // An attach BY the target: the engine builds a SendOnly egress
+                // leg and emits an offer addressed to it, which the out-pump
+                // relabels into an ingest offer.
+                let _ = tx.send(EngineCmd::Signal {
+                    sender: target_forwarder,
+                    envelope: MessageEnvelope::FwdAttach { origin },
+                });
+            }
+        } else {
+            if let Ok(mut t) = self.feed_targets.write() {
+                t.remove(&target_forwarder);
+            }
+            hollow_log!("[HOLLOW-FWD] stopped feeding forwarder {target_forwarder}");
+            if let Some(tx) = &self.engine_tx {
+                let _ = tx.send(EngineCmd::Signal {
+                    sender: target_forwarder,
+                    envelope: MessageEnvelope::FwdDetach { origin },
+                });
+            }
+        }
+    }
+
+    /// True when `peer` is a forwarder we are currently feeding — used by the
+    /// receive path to route its `fwd_ingest_answer` into OUR engine (as the
+    /// egress answer it structurally is) instead of surfacing it to Dart as if
+    /// we had offered an ingest of our own.
+    pub(crate) fn is_feed_target(&self, peer: &str) -> bool {
+        self.feed_targets
+            .read()
+            .map(|t| t.contains(peer))
+            .unwrap_or(false)
+    }
+
+    /// A fed forwarder answered our (relabeled) ingest offer. Inject it as the
+    /// egress answer the engine is waiting for. Returns false when it wasn't a
+    /// feed answer after all.
+    pub(crate) fn handle_feed_answer(&mut self, sender: &str, envelope: MessageEnvelope) -> bool {
+        let MessageEnvelope::FwdIngestAnswer { origin, sdp } = envelope else {
+            return false;
+        };
+        if !self.is_feed_target(sender) {
+            return false;
+        }
+        if let Some(tx) = &self.engine_tx {
+            let _ = tx.send(EngineCmd::Signal {
+                sender: sender.to_string(),
+                envelope: MessageEnvelope::FwdEgressAnswer { origin, sdp },
+            });
+            return true;
+        }
+        false
+    }
+
     /// Peer presence lost (left our fwd room, or purged by an authoritative
     /// RoomMembers snapshot): their owned streams unregister, their egress
     /// legs detach — same semantics as the VPS signaling loop.
@@ -238,11 +335,35 @@ impl EmbeddedForwarder {
         // EmbeddedForwarderOut arm Olm-encrypts (or self-delivers) there,
         // where the OlmManager lives. Task ends when the engine drops out_tx.
         let cmd_tx = cmd_tx.clone();
+        let feed_targets = self.feed_targets.clone();
         tokio::spawn(async move {
             while let Some(OutSignal { to_peer, envelope }) = out_rx.recv().await {
+                // Feeder election: a reply addressed to a forwarder we FEED is
+                // structurally an egress reply but must speak the ingest
+                // dialect, and must ride the TARGET's room (the deterministic
+                // fwd-room rule applies per-forwarder). Everything else is
+                // unchanged.
+                let feeding = feed_targets
+                    .read()
+                    .map(|t| t.contains(&to_peer))
+                    .unwrap_or(false);
+                let envelope = if feeding {
+                    match envelope {
+                        MessageEnvelope::FwdEgressOffer { origin, sdp } => {
+                            MessageEnvelope::FwdIngestOffer { origin, sdp }
+                        }
+                        other => other,
+                    }
+                } else {
+                    envelope
+                };
                 let envelope_json = serde_json::to_string(&envelope).unwrap_or_default();
                 if cmd_tx
-                    .send(NodeCommand::EmbeddedForwarderOut { to_peer, envelope_json })
+                    .send(NodeCommand::EmbeddedForwarderOut {
+                        to_peer,
+                        envelope_json,
+                        via_target_room: feeding,
+                    })
                     .await
                     .is_err()
                 {
@@ -278,6 +399,7 @@ pub(crate) async fn handle_engine_out(
     device_peer_id: &str,
     to_peer: String,
     envelope_json: String,
+    via_target_room: bool,
 ) {
     if to_peer == device_peer_id {
         let Ok(envelope) = serde_json::from_str::<MessageEnvelope>(&envelope_json) else {
@@ -294,10 +416,19 @@ pub(crate) async fn handle_engine_out(
         }
         return;
     }
-    let room = format!("fwd:{device_peer_id}");
+    // Replies to our own viewers ride OUR room (they joined it to reach us);
+    // a feed offer rides the TARGET forwarder's room, because that is where a
+    // client speaks to that forwarder. Both are deterministic — never a
+    // ws_room_for_peer lookup (the one-way-loss rule).
+    let room = if via_target_room {
+        format!("fwd:{to_peer}")
+    } else {
+        format!("fwd:{device_peer_id}")
+    };
+    let label = if via_target_room { "feed offer" } else { "engine reply" };
     super::forwarder_client::send_fwd_envelope_via_room(
         olm, crypto_store, event_tx, ws_cmd_tx, pending_messages, key_request_in_flight,
-        device_keypair, device_peer_id, &room, to_peer, envelope_json, "engine reply",
+        device_keypair, device_peer_id, &room, to_peer, envelope_json, label,
     )
     .await;
 }

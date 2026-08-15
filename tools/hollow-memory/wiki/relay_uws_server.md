@@ -499,6 +499,26 @@ Called explicitly via `{"type":"leave","room":"..."}` or implicitly on disconnec
    {"type":"peer_left","room":"<room>","peer_id":"<leaver>"}
    ```
 
+**`suppress_peer_left` (2026-08-15).** `leave_room(state, peer, room, expected_ws,
+suppress_peer_left)` — when true, step 4 is SKIPPED and `diag.ghost_left_suppressed`
+increments instead. Passed `true` from exactly one call site: the `handle_auth`
+supersede path, where a NEWER socket for the same `peer_id` is authenticating and
+the "leaver" is demonstrably still present. Broadcasting a departure there is a lie
+observers act on (it tore down live media branches after an app restart, which is
+why the client and forwarder engine both carry presence-flap tolerance).
+
+Two constraints that are easy to break:
+- It must be an EXPLICIT flag: the supersede cleanup runs BEFORE
+  `peer_sockets[peer_id]` is re-pointed at the new socket, so any "is there a newer
+  socket?" inference is false there.
+- The room slot is still ERASED — only the broadcast is withheld. A slot left
+  pointing at a closed socket is a dangling pointer on every later fan-out; the
+  successor's re-join restores presence via `peer_joined`.
+
+Also fixed in `handle_auth` the same day: `peer_rooms[peer_id] = {}` was outside the
+`!is_fetch` guard, so a fetch-mode auth wiped a connected full node's room set (its
+close then never called `leave_room`, leaving room slots on a freed socket).
+
 ### ws_handler.cpp:handle_msg() — Room text broadcast
 
 **Input:** `{"type":"msg","room":"<room>","data":"<payload>"}`
