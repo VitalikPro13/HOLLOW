@@ -764,15 +764,19 @@ typedef void (^NavigatorUserMediaSuccessCallback)(RTCMediaStream* mediaStream);
   RTCAudioSession* session = [RTCAudioSession sharedInstance];
   for (AVAudioSessionPortDescription* port in session.session.availableInputs) {
     if ([port.UID isEqualToString:deviceId]) {
-      if (self.preferredInput != port.portType) {
-        self.preferredInput = port.portType;
-        [AudioUtils selectAudioInput:self.preferredInput];
-      }
-      break;
+      // Hollow fork: apply unconditionally rather than only when the cached
+      // portType differs. Unplug/replug leaves the cache matching a port that
+      // is no longer preferred, and re-picking the same device from the route
+      // sheet must always re-assert it.
+      self.preferredInput = port.portType;
+      [AudioUtils selectAudioInput:self.preferredInput];
+      if (result)
+        result(nil);
+      // Hollow fork: RETURN. Without it the error reply below fired too,
+      // and a second reply on one FlutterResult is a hard engine error.
+      return;
     }
   }
-  if (result)
-    result(nil);
 #endif
   if (result)
     result([FlutterError errorWithCode:@"selectAudioInputFailed"
@@ -814,6 +818,9 @@ typedef void (^NavigatorUserMediaSuccessCallback)(RTCMediaStream* mediaStream);
             message:[NSString
                         stringWithFormat:@"Error: %@", [setCategoryError localizedFailureReason]]
             details:nil]);
+  // Hollow fork: RETURN — the fall-through below replied a second time on the
+  // same FlutterResult, which the engine rejects as a hard error.
+  return;
 
 #endif
   result([FlutterError errorWithCode:@"selectAudioOutputFailed"

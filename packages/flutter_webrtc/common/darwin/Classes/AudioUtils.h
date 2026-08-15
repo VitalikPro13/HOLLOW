@@ -8,6 +8,9 @@
 + (BOOL)selectAudioInput:(AVAudioSessionPort)type;
 + (void)setSpeakerphoneOn:(BOOL)enable;
 + (void)setSpeakerphoneOnButPreferBluetooth;
+// Hollow fork: YES when a headset / BT / USB / CarPlay device is physically
+// attached, even while a loudspeaker override is hiding it from currentRoute.
++ (BOOL)hasExternalAudioRoute;
 + (void)deactiveRtcAudioSession;
 + (void) setAppleAudioConfiguration:(NSDictionary*)configuration;
 @end

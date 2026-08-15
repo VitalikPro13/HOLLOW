@@ -214,6 +214,10 @@ class MobileControlButton extends StatelessWidget {
   final Color backgroundColor;
   final VoidCallback? onTap;
 
+  /// Optional secondary action (e.g. long-pressing the speaker button opens
+  /// the audio-device picker).
+  final VoidCallback? onLongPress;
+
   /// Screen-reader name for this icon-only control (e.g. "Mute", "Leave call").
   final String? semanticLabel;
 
@@ -225,6 +229,7 @@ class MobileControlButton extends StatelessWidget {
     required this.color,
     required this.backgroundColor,
     this.onTap,
+    this.onLongPress,
     this.semanticLabel,
   });
 
@@ -236,6 +241,7 @@ class MobileControlButton extends StatelessWidget {
       label: semanticLabel,
       child: GestureDetector(
         onTap: onTap,
+        onLongPress: onLongPress,
         child: AnimatedOpacity(
           opacity: onTap != null ? 1.0 : 0.4,
           duration: const Duration(milliseconds: 150),

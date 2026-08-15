@@ -4,6 +4,37 @@
 
 @implementation AudioUtils
 
+// Hollow fork: is a headset / BT / USB / CarPlay device physically attached?
+//
+// This exists because forcing the loudspeaker (overrideOutputAudioPort:
+// .speaker) OVERRIDES a connected headset — the user is left wearing silent
+// headphones while the call plays out of the phone, and iOS moves capture to
+// the built-in mic with it. Every "speaker on" path must therefore ask this
+// first.
+//
+// currentRoute alone is not enough: once an override is in effect the outputs
+// list reports the built-in speaker and the headset vanishes from it. The
+// headset's INPUT port stays listed in availableInputs regardless, so the two
+// checks together survive an override that is already applied.
++ (BOOL)hasExternalAudioRoute {
+  AVAudioSession* session = [AVAudioSession sharedInstance];
+  for (AVAudioSessionPortDescription* output in session.currentRoute.outputs) {
+    if (![output.portType isEqualToString:AVAudioSessionPortBuiltInSpeaker] &&
+        ![output.portType isEqualToString:AVAudioSessionPortBuiltInReceiver]) {
+      return YES;
+    }
+  }
+  for (AVAudioSessionPortDescription* input in session.availableInputs) {
+    if ([input.portType isEqualToString:AVAudioSessionPortHeadsetMic] ||
+        [input.portType isEqualToString:AVAudioSessionPortBluetoothHFP] ||
+        [input.portType isEqualToString:AVAudioSessionPortUSBAudio] ||
+        [input.portType isEqualToString:AVAudioSessionPortCarAudio]) {
+      return YES;
+    }
+  }
+  return NO;
+}
+
 + (void)ensureAudioSessionWithRecording:(BOOL)recording {
   RTCAudioSession* session = [RTCAudioSession sharedInstance];
   // we also need to set default WebRTC audio configuration, since it may be activated after
@@ -133,7 +164,18 @@
     // no-op. The correct value is AVAudioSessionPortOverrideSpeaker
     // (== kAudioSessionOverrideAudioRoute_Speaker, as selectAudioOutput
     // already uses).
-    success = [session.session overrideOutputAudioPort:AVAudioSessionPortOverrideSpeaker
+    //
+    // Hollow fork: but NEVER force it over a connected headset. The override
+    // outranks headphones/BT/USB, so a speaker-on default (voice channels,
+    // video calls, camera-on, the share-audio re-assert below) used to strand
+    // a headset user in silence with the call blaring from the phone. With a
+    // headset attached, "speaker" degrades to 'no override' — DefaultToSpeaker
+    // still lands us on the loudspeaker the moment it unplugs, and the
+    // route-change heal re-asserts a real override then.
+    const AVAudioSessionPortOverride routeOverride =
+        [AudioUtils hasExternalAudioRoute] ? AVAudioSessionPortOverrideNone
+                                           : AVAudioSessionPortOverrideSpeaker;
+    success = [session.session overrideOutputAudioPort:routeOverride
                                                  error:&error];
     if (!success)
       NSLog(@"setSpeakerphoneOn: Port override failed due to: %@", error);

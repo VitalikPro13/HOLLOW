@@ -216,6 +216,30 @@ public class AudioSwitchManager {
         });
     }
 
+    /**
+     * Hollow fork: the connected headset-class device (bluetooth first, then
+     * wired), or null when only the built-in speaker/earpiece are available.
+     * Null-safe against a not-yet-constructed AudioSwitch — this runs from
+     * route decisions that can land before initAudioSwitch()'s main-thread
+     * post has executed.
+     */
+    @Nullable
+    private AudioDevice firstExternalDevice() {
+        if (audioSwitch == null) {
+            return null;
+        }
+        AudioDevice wired = null;
+        for (AudioDevice device : availableAudioDevices()) {
+            if (device instanceof AudioDevice.BluetoothHeadset) {
+                return device;
+            }
+            if (wired == null && device instanceof AudioDevice.WiredHeadset) {
+                wired = device;
+            }
+        }
+        return wired;
+    }
+
     private void updatePreferredDeviceList(boolean speakerOn) {
         preferredDeviceList = new ArrayList<>();
         preferredDeviceList.add(AudioDevice.BluetoothHeadset.class);
@@ -235,7 +259,18 @@ public class AudioSwitchManager {
     public void enableSpeakerphone(boolean enable) {
         updatePreferredDeviceList(enable);
         if (enable) {
-            selectAudioOutput(AudioDevice.Speakerphone.class);
+            // Hollow fork: "speaker on" means "the loud route", never "the
+            // phone's own speaker at all costs". selectDevice() PINS its
+            // argument as audioswitch's user-selected device, so pinning
+            // Speakerphone while a headset is plugged in kept playing out of
+            // the handset — and the pin survived later hotplugs, so the
+            // headset never took over. With a headset attached, route there.
+            AudioDevice external = firstExternalDevice();
+            if (external != null) {
+                selectAudioOutput(external.getClass());
+            } else {
+                selectAudioOutput(AudioDevice.Speakerphone.class);
+            }
         } else {
             List<AudioDevice> devices = availableAudioDevices();
             AudioDevice audioDevice = null;
@@ -262,23 +297,35 @@ public class AudioSwitchManager {
     }
 
     public void enableSpeakerButPreferBluetooth() {
-        List<AudioDevice> devices = availableAudioDevices();
-        AudioDevice audioDevice = null;
-        for (AudioDevice device : devices) {
-            if (device.getClass().equals(AudioDevice.BluetoothHeadset.class)) {
-                audioDevice = device;
-                break;
-            } else if (device.getClass().equals(AudioDevice.WiredHeadset.class)) {
-                audioDevice = device;
-                break;
-            }
-        }
-
-        if (audioDevice == null) {
+        // Hollow fork: was a single loop that broke on the first bluetooth OR
+        // wired match, so list order decided the winner when both were
+        // connected. firstExternalDevice() prefers bluetooth deterministically.
+        AudioDevice external = firstExternalDevice();
+        if (external == null) {
             selectAudioOutput(AudioDevice.Speakerphone.class);
         } else {
-            selectAudioOutput(audioDevice.getClass());
+            selectAudioOutput(external.getClass());
         }
+    }
+
+    /**
+     * Hollow fork: type name ("bluetooth" / "wired-headset" / "speaker" /
+     * "earpiece") of the route audio is actually on, or null when unknown.
+     * getSources() only reports which outputs EXIST; a route picker also needs
+     * to know which one is live, including after audioswitch auto-switched on
+     * its own (hotplug).
+     */
+    @Nullable
+    public String selectedAudioOutputTypeName() {
+        if (audioSwitch == null) {
+            return null;
+        }
+        AudioDevice selected = audioSwitch.getSelectedAudioDevice();
+        if (selected == null) {
+            return null;
+        }
+        AudioDeviceKind kind = AudioDeviceKind.fromAudioDevice(selected);
+        return kind != null ? kind.typeName : null;
     }
 
     public void selectAudioOutput(@Nullable AudioDeviceKind kind) {

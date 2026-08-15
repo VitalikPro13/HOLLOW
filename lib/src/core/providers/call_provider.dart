@@ -9,6 +9,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
+import 'package:hollow/src/core/providers/audio_route_provider.dart';
 import 'package:hollow/src/core/providers/ice_config_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
@@ -18,6 +19,7 @@ import 'package:hollow/src/core/providers/speaking_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/core/providers/voice_channel_provider.dart';
 import 'package:hollow/src/core/providers/webrtc_provider.dart';
+import 'package:hollow/src/core/services/audio_route.dart';
 import 'package:hollow/src/core/services/desktop_capture_support.dart';
 import 'package:hollow/src/core/services/ice_repair.dart';
 import 'package:hollow/src/core/services/ice_route_probe.dart';
@@ -920,14 +922,36 @@ class CallNotifier extends Notifier<CallState> {
   /// Route audio to the loudspeaker (true) or earpiece (false). Mobile only.
   void _setSpeakerRoute(bool speaker) {
     if (!_isMobile) return;
-    unawaited(Helper.setSpeakerphoneOn(speaker).catchError((_) {}));
     state = state.copyWith(isSpeakerOn: speaker);
+    unawaited(_applySpeakerRoute(speaker));
+  }
+
+  /// "Speaker on" means the LOUDEST SENSIBLE route — which, whenever a headset
+  /// is attached, is the HEADSET. Forcing the built-in loudspeaker over one
+  /// leaves the user in silent headphones (iOS's port override outranks them
+  /// and drags capture to the built-in mic with it). See [AudioRoutes].
+  Future<void> _applySpeakerRoute(bool speaker) async {
+    await AudioRoutes.preferLoudRoute(speaker);
+    try {
+      await ref.read(audioRouteProvider.notifier).refresh();
+    } catch (_) {
+      // Provider torn down mid-call (hang-up raced the route apply).
+    }
   }
 
   /// Toggle loudspeaker/earpiece during a call. Mobile only.
   void toggleSpeaker() {
     if (state.status == CallStatus.idle) return;
     _setSpeakerRoute(!state.isSpeakerOn);
+  }
+
+  /// Switch this call to an explicit output route (mobile route sheet).
+  Future<void> selectAudioRoute(AudioRoute route) async {
+    if (!_isMobile || state.status == CallStatus.idle) return;
+    // Keep isSpeakerOn meaning "hands-free" so proximity blanking and the
+    // control-row highlight stay consistent with the chosen route.
+    state = state.copyWith(isSpeakerOn: route.kind != AudioRouteKind.earpiece);
+    await ref.read(audioRouteProvider.notifier).select(route);
   }
 
   /// Toggle camera on/off.
@@ -2099,6 +2123,7 @@ class CallNotifier extends Notifier<CallState> {
     // stale speakerphone state.
     if (_isMobile) {
       unawaited(Helper.setSpeakerphoneOn(false).catchError((_) {}));
+      ref.read(audioRouteProvider.notifier).reset();
     }
     state = const CallState();
   }

@@ -5,8 +5,10 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:proximity_sensor/proximity_sensor.dart';
 
+import '../../core/providers/audio_route_provider.dart';
 import '../../core/providers/call_provider.dart';
 import '../../core/providers/voice_channel_provider.dart';
+import '../../core/services/audio_route.dart';
 
 /// App-level proximity controller (mobile only).
 ///
@@ -63,17 +65,26 @@ class _CallProximityControllerState
   Widget build(BuildContext context) {
     final call = ref.watch(callProvider);
     final vc = ref.watch(voiceChannelProvider);
+    final activeKind = ref.watch(audioRouteProvider).activeKind;
 
-    // Earpiece mode = audio actively playing through the earpiece: a live
-    // call/VC, speaker off, no video on either side. Proximity should engage
-    // if EITHER a DM call or a voice channel is in earpiece mode.
+    // Earpiece mode = audio actually playing through the EARPIECE: a live
+    // call/VC, no video on either side, and the route held to the ear.
+    //
+    // The route decides, not the speaker flag: with headphones plugged into a
+    // voice call the flag stays false while audio is nowhere near the ear, and
+    // blanking the screen at every passing object is wrong. Falls back to the
+    // flag when the platform can't name the route.
+    final onEarpiece = activeKind == null
+        ? null
+        : activeKind == AudioRouteKind.earpiece;
+
     final callEarpiece = call.status == CallStatus.active &&
-        !call.isSpeakerOn &&
+        (onEarpiece ?? !call.isSpeakerOn) &&
         !call.isVideoEnabled &&
         !call.remoteVideoEnabled;
 
     final vcEarpiece = vc.isInVoiceChannel &&
-        !vc.isSpeakerOn &&
+        (onEarpiece ?? !vc.isSpeakerOn) &&
         !_vcHasVideo(vc);
 
     _setEarpieceMode(callEarpiece || vcEarpiece);

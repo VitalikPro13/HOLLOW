@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
+import 'package:hollow/src/core/providers/audio_route_provider.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/speaking_provider.dart';
@@ -17,6 +18,7 @@ import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/share_volume_control.dart';
 import 'package:hollow/src/ui/components/speaking_border.dart';
+import 'package:hollow/src/ui/mobile/mobile_audio_route_sheet.dart';
 import 'package:hollow/src/ui/mobile/mobile_screen_share_sheet.dart';
 import 'package:hollow/src/ui/mobile/mobile_sheet_drag.dart';
 import 'package:hollow/src/ui/mobile/mobile_source_switch_pill.dart';
@@ -539,6 +541,48 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
     );
   }
 
+  /// Speaker button that doubles as the audio-device picker: a plain
+  /// speaker/earpiece toggle while only the built-in routes exist, and the
+  /// route sheet as soon as a headset is attached (long-press always opens
+  /// it). The icon shows where audio ACTUALLY is, so a headset user can see
+  /// at a glance that the call isn't stuck on the phone.
+  Widget _buildAudioRouteButton(
+    HollowTheme hollow, {
+    required double iconSize,
+    required double buttonSize,
+    required bool handsFree,
+    required bool enabled,
+  }) {
+    final routeState = ref.watch(audioRouteProvider);
+    final activeRoute = routeState.activeRoute;
+    final canPick = routeState.hasExternalRoute;
+
+    Future<void> openSheet() => showMobileAudioRouteSheet(
+          context,
+          onSelect: (route) =>
+              ref.read(callProvider.notifier).selectAudioRoute(route),
+        );
+
+    return MobileControlButton(
+      icon: audioRouteIcon(routeState.activeKind),
+      iconSize: iconSize,
+      size: buttonSize,
+      color: handsFree ? hollow.accent : hollow.textPrimary,
+      backgroundColor: handsFree
+          ? hollow.accent.withValues(alpha: 0.15)
+          : hollow.elevated,
+      semanticLabel: activeRoute == null
+          ? 'Speaker'
+          : 'Audio device: ${activeRoute.label}',
+      onTap: !enabled
+          ? null
+          : canPick
+              ? openSheet
+              : () => ref.read(callProvider.notifier).toggleSpeaker(),
+      onLongPress: enabled ? openSheet : null,
+    );
+  }
+
   Widget _buildControls(HollowTheme hollow, CallState call) {
     // 6 buttons overflow narrow phones at 56px — same shrink as the voice
     // channel screen's crowded mode.
@@ -578,17 +622,12 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
                 ? () => ref.read(callProvider.notifier).toggleDeafen()
                 : null,
           ),
-          MobileControlButton(
-            icon: LucideIcons.speaker,
+          _buildAudioRouteButton(
+            hollow,
             iconSize: iconSize,
-            size: buttonSize,
-            color: call.isSpeakerOn ? hollow.accent : hollow.textPrimary,
-            backgroundColor: call.isSpeakerOn
-                ? hollow.accent.withValues(alpha: 0.15)
-                : hollow.elevated,
-            onTap: canControl
-                ? () => ref.read(callProvider.notifier).toggleSpeaker()
-                : null,
+            buttonSize: buttonSize,
+            handsFree: call.isSpeakerOn,
+            enabled: canControl,
           ),
           MobileControlButton(
             icon: call.isVideoEnabled

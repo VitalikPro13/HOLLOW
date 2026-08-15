@@ -411,12 +411,18 @@ static __weak id<RTCAudioDeviceModuleDelegate> gAudioDeviceModuleObserver = nil;
 }
 
 #if TARGET_OS_IPHONE
-// Hollow fork: if the user chose the loudspeaker but the session output is
-// sitting on the RECEIVER, re-assert speaker. The receiver is never correct
-// while _speakerOn (headphones/BT are different ports and always win), so
-// this cannot fight external hardware — and speaker-off needs no healing
-// (the receiver is the session default). Debounced so a misbehaving session
-// can't loop us.
+// Hollow fork: keep the speaker-mode route honest across route changes. Two
+// wrong states are healed, both by re-running setSpeakerphoneOn: (which picks
+// the correct port override for the hardware that is attached right now):
+//
+//  (a) output landed on the RECEIVER despite speaker mode — a session
+//      reconfiguration clobbered our override; re-assert the loudspeaker.
+//  (b) output is pinned to the BUILT-IN SPEAKER while a headset/BT/USB device
+//      is attached — a stale override is stranding the user in silent
+//      headphones; release it so the headset takes the call.
+//
+// Speaker-OFF needs no healing (the receiver is the session default).
+// Debounced so a misbehaving session can't loop us.
 - (void)healSpeakerRouteIfClobbered {
   if (!_speakerOn || !self.audioSessionManagementEnabled) {
     return;
@@ -427,17 +433,23 @@ static __weak id<RTCAudioDeviceModuleDelegate> gAudioDeviceModuleObserver = nil;
     return;
   }
   BOOL onReceiver = NO;
+  BOOL onBuiltInSpeaker = NO;
   for (AVAudioSessionPortDescription* output in
        [AVAudioSession sharedInstance].currentRoute.outputs) {
     if ([output.portType isEqualToString:AVAudioSessionPortBuiltInReceiver]) {
       onReceiver = YES;
-      break;
+    } else if ([output.portType
+                   isEqualToString:AVAudioSessionPortBuiltInSpeaker]) {
+      onBuiltInSpeaker = YES;
     }
   }
-  if (onReceiver) {
+  const BOOL strandedOnSpeaker =
+      onBuiltInSpeaker && [AudioUtils hasExternalAudioRoute];
+  if (onReceiver || strandedOnSpeaker) {
     lastHeal = now;
-    NSLog(@"[SENTINEL] speaker route clobbered (output on receiver) — "
-          @"re-asserting loudspeaker");
+    NSLog(@"[SENTINEL] speaker route wrong (%@) — re-applying route policy",
+          onReceiver ? @"output on receiver"
+                     : @"loudspeaker pinned over a connected headset");
     [AudioUtils setSpeakerphoneOn:YES];
   }
 }
@@ -1734,6 +1746,13 @@ static __weak id<RTCAudioDeviceModuleDelegate> gAudioDeviceModuleObserver = nil;
   else if ([@"ensureAudioSession" isEqualToString:call.method]) {
     [self ensureAudioSession];
     result(nil);
+  }
+  else if ([@"hollowSelectedAudioOutput" isEqualToString:call.method]) {
+    // Hollow fork: the portType the call is actually playing out of, for the
+    // mobile route picker's checkmark (getSources only lists what EXISTS).
+    AVAudioSessionPortDescription* output =
+        [AVAudioSession sharedInstance].currentRoute.outputs.firstObject;
+    result(output.portType);
   }
   else if ([@"enableSpeakerphoneButPreferBluetooth" isEqualToString:call.method]) {
     _speakerOn = YES;

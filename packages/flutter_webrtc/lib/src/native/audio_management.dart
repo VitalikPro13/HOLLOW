@@ -29,6 +29,28 @@ class NativeAudioManagement {
     await WebRTC.invokeMethod('enableSpeakerphoneButPreferBluetooth');
   }
 
+  /// Which output the call is ACTUALLY playing out of right now (Hollow fork
+  /// addition, mobile only) — `enumerateDevices()` only reports which outputs
+  /// exist, and on both platforms the OS can move the route on its own
+  /// (headset hotplug, audioswitch auto-switch), so a route picker cannot
+  /// derive the live route from its own last write.
+  ///
+  /// Android returns an `AudioDeviceKind` type name (`speaker`, `earpiece`,
+  /// `wired-headset`, `bluetooth`); iOS returns the `AVAudioSessionPort`
+  /// portType of the current route's first output (`Speaker`, `Receiver`,
+  /// `Headphones`, `BluetoothHFP`, …). Null when unknown/unsupported.
+  static Future<String?> getSelectedAudioOutput() async {
+    if (kIsWeb) return null;
+    try {
+      final res = await WebRTC.invokeMethod('hollowSelectedAudioOutput');
+      return res is String && res.isNotEmpty ? res : null;
+    } on PlatformException {
+      return null;
+    } on MissingPluginException {
+      return null;
+    }
+  }
+
   static Future<void> setVolume(double volume, MediaStreamTrack track) async {
     if (track.kind == 'audio') {
       if (kIsWeb) {

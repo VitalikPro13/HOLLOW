@@ -1017,6 +1017,12 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
         result.success(null);
         break;
       }
+      case "hollowSelectedAudioOutput": {
+        // Hollow fork: which output the call is actually on right now, for the
+        // mobile route picker's checkmark. getSources() only lists what EXISTS.
+        result.success(AudioSwitchManager.instance.selectedAudioOutputTypeName());
+        break;
+      }
       case "clearAndroidCommunicationDevice": {
         AudioSwitchManager.instance.clearCommunicationDevice();
         result.success(null);

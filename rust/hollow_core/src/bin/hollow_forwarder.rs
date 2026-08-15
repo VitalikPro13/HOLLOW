@@ -6,9 +6,27 @@
 //! die with their sockets, and viewers recover via the receiver-initiates
 //! fallback ladder (the forwarder is an availability helper, never
 //! authority).
+//!
+//! **Why the cfg gates below.** Cargo builds every `[[bin]]` whose
+//! `required-features` are satisfied, and cargokit.yaml passes
+//! `--features forwarder` to EVERY platform build (there is no per-platform
+//! key). On Android/iOS the lib's `forwarder` module is cfg'd out
+//! (`lib.rs`: str0m/aws-lc are desktop-only deps), so this bin has nothing to
+//! import — and an unresolved import here failed the whole mobile build
+//! ("could not compile `hollow_core` (bin \"hollow-forwarder\")", hit on an
+//! iOS Archive 2026-08-15). The bin must therefore compile away to an empty
+//! main on mobile rather than break the app it isn't part of.
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 use hollow_core::forwarder::{run, ForwarderConfig};
 
+/// Mobile app builds inherit `--features forwarder`; there is no forwarder
+/// module to drive there, so the bin is a no-op stub. Never shipped or run —
+/// only the desktop/VPS build below is real.
+#[cfg(any(target_os = "android", target_os = "ios"))]
+fn main() {}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 #[tokio::main]
 async fn main() {
     let mut config_path = "/etc/hollow-forwarder.toml".to_string();

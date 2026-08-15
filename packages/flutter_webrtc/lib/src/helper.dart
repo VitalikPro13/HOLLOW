@@ -151,6 +151,12 @@ class Helper {
   static Future<void> setSpeakerphoneOnButPreferBluetooth() =>
       NativeAudioManagement.setSpeakerphoneOnButPreferBluetooth();
 
+  /// The output the call is ACTUALLY on right now (Hollow fork, mobile only).
+  /// Android: an AudioDeviceKind type name. iOS: an AVAudioSessionPort
+  /// portType. Null when unknown. See [NativeAudioManagement.getSelectedAudioOutput].
+  static Future<String?> getSelectedAudioOutput() =>
+      NativeAudioManagement.getSelectedAudioOutput();
+
   /// To select a a specific camera, you need to set constraints
   /// eg.
   /// var constraints = {

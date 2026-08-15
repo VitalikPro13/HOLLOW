@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
+import 'package:hollow/src/core/providers/audio_route_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
@@ -16,6 +17,7 @@ import 'package:hollow/src/ui/components/speaking_border.dart';
 import 'package:hollow/src/ui/components/call_duration_text.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/share_volume_control.dart';
+import 'package:hollow/src/ui/mobile/mobile_audio_route_sheet.dart';
 import 'package:hollow/src/ui/mobile/mobile_screen_share_sheet.dart';
 import 'package:hollow/src/ui/mobile/mobile_sheet_drag.dart';
 import 'package:hollow/src/ui/mobile/mobile_source_switch_pill.dart';
@@ -645,6 +647,43 @@ class _MobileVoiceChannelRouteState
     );
   }
 
+  /// Speaker button that doubles as the audio-device picker: a plain
+  /// speaker/earpiece toggle while only the built-in routes exist, and the
+  /// route sheet as soon as a headset is attached (long-press always opens
+  /// it). The icon shows where audio ACTUALLY is, so a headset user can see
+  /// at a glance that the channel isn't stuck on the phone.
+  Widget _buildAudioRouteButton(
+    HollowTheme hollow, {
+    required double iconSize,
+    required double buttonSize,
+    required bool handsFree,
+  }) {
+    final routeState = ref.watch(audioRouteProvider);
+    final activeRoute = routeState.activeRoute;
+
+    Future<void> openSheet() => showMobileAudioRouteSheet(
+          context,
+          onSelect: (route) =>
+              ref.read(voiceChannelProvider.notifier).selectAudioRoute(route),
+        );
+
+    return MobileControlButton(
+      icon: audioRouteIcon(routeState.activeKind),
+      iconSize: iconSize,
+      size: buttonSize,
+      color: handsFree ? hollow.accent : hollow.textPrimary,
+      backgroundColor:
+          handsFree ? hollow.accent.withValues(alpha: 0.15) : hollow.elevated,
+      semanticLabel: activeRoute == null
+          ? 'Speaker'
+          : 'Audio device: ${activeRoute.label}',
+      onTap: routeState.hasExternalRoute
+          ? openSheet
+          : () => ref.read(voiceChannelProvider.notifier).toggleSpeaker(),
+      onLongPress: openSheet,
+    );
+  }
+
   Widget _buildControls(HollowTheme hollow, VoiceChannelState vcState) {
     final vcNotifier = ref.read(voiceChannelProvider.notifier);
     final isMobile = Platform.isAndroid || Platform.isIOS;
@@ -684,19 +723,13 @@ class _MobileVoiceChannelRouteState
             semanticLabel: vcState.isDeafened ? 'Undeafen' : 'Deafen',
             onTap: () => vcNotifier.toggleDeafen(),
           ),
-          // Speakerphone (mobile only)
+          // Audio device / speakerphone (mobile only)
           if (isMobile)
-            MobileControlButton(
-              icon: LucideIcons.speaker,
+            _buildAudioRouteButton(
+              hollow,
               iconSize: iconSize,
-              size: buttonSize,
-              color:
-                  vcState.isSpeakerOn ? hollow.accent : hollow.textPrimary,
-              backgroundColor: vcState.isSpeakerOn
-                  ? hollow.accent.withValues(alpha: 0.15)
-                  : hollow.elevated,
-              semanticLabel: 'Speaker',
-              onTap: () => vcNotifier.toggleSpeaker(),
+              buttonSize: buttonSize,
+              handsFree: vcState.isSpeakerOn,
             ),
           // Camera
           MobileControlButton(
