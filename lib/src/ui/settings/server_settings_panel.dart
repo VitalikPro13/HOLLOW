@@ -161,7 +161,7 @@ class _ServerSettingsPanelState extends ConsumerState<ServerSettingsPanel> {
                 const SizedBox(width: HollowSpacing.sm),
                 Expanded(
                   child: Text(
-                    'Server Settings — ${currentServer.name}',
+                    'Server Settings: ${currentServer.name}',
                     style: HollowTypography.subheading.copyWith(
                       color: hollow.textPrimary,
                       fontWeight: FontWeight.w600,
@@ -216,7 +216,7 @@ class _ServerSettingsPanelState extends ConsumerState<ServerSettingsPanel> {
               const SizedBox(width: HollowSpacing.sm),
               Expanded(
                 child: Text(
-                  'Server Settings — ${currentServer.name}',
+                  'Server Settings: ${currentServer.name}',
                   style: HollowTypography.subheading.copyWith(
                     color: hollow.textPrimary,
                     fontWeight: FontWeight.w600,

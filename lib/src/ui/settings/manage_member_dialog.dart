@@ -206,7 +206,7 @@ class _ManageMemberDialogState extends ConsumerState<_ManageMemberDialog> {
       builder: (ctx) {
         final h = HollowTheme.of(ctx);
         return HollowDialog(
-          title: 'Change Role',
+          title: 'Change role',
           content: Text(
             "Change $name's role to $roleName?",
             style: HollowTypography.body.copyWith(color: h.textSecondary),

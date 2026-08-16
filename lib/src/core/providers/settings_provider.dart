@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/reduce_motion.dart';
+import 'package:hollow/src/core/services/sound_service.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 
@@ -181,7 +182,7 @@ class CameraDeviceNotifier extends AsyncNotifier<String?> {
 ///
 /// Phase 6.75 image quality tiers.
 enum ImageQuality {
-  lossless('Lossless (100%)', 'Pixel-perfect — for art, diagrams, screenshots'),
+  lossless('Lossless (100%)', 'Pixel-perfect: for art, diagrams, screenshots'),
   balanced('Balanced (50%)', 'Indistinguishable, ~95% smaller'),
   small('Small (30%)', 'Aggressive compression for slow connections');
 
@@ -559,11 +560,15 @@ class RingtoneVolumeNotifier extends AsyncNotifier<double> {
   @override
   Future<double> build() async {
     final val = await storage_api.loadSetting(key: 'ringtone_volume');
-    if (val == null || val.isEmpty) return 0.5;
-    return double.tryParse(val) ?? 0.5;
+    final volume =
+        (val == null || val.isEmpty) ? 0.5 : (double.tryParse(val) ?? 0.5);
+    // The outgoing-call ringback plays from SoundService (no ref there).
+    SoundService.ringtoneVolume = volume;
+    return volume;
   }
 
   Future<void> setVolume(double volume) async {
+    SoundService.ringtoneVolume = volume;
     await storage_api.saveSetting(
       key: 'ringtone_volume',
       value: volume.toStringAsFixed(2),
@@ -1027,6 +1032,73 @@ final alwaysRelayCallsProvider =
     NotifierProvider<AlwaysRelayCallsNotifier, bool>(
         AlwaysRelayCallsNotifier.new);
 
+/// UI sound effects — join/leave voice, screen share start/stop, mute/deafen/
+/// camera, message notification (issue #55). Default ON.
+///
+/// Synchronous state loaded from bootstrap, and mirrored into [SoundService]'s
+/// statics on every change: the sounds fire from inside notifiers (including
+/// teardown paths) where re-entering the provider container is not safe.
+class SoundEffectsEnabledNotifier extends Notifier<bool> {
+  @override
+  bool build() => true;
+
+  Future<void> load() async {
+    try {
+      final val = await storage_api.loadSetting(key: 'sound_effects_enabled');
+      // Absent key = first run = enabled; only an explicit 'false' turns it off.
+      state = val != 'false';
+    } catch (e) {
+      debugPrint('[HOLLOW] soundEffectsEnabled.load() failed: $e');
+    }
+    SoundService.enabled = state;
+  }
+
+  Future<void> setEnabled(bool value) async {
+    state = value;
+    SoundService.enabled = value;
+    await storage_api.saveSetting(
+      key: 'sound_effects_enabled',
+      value: value.toString(),
+    );
+  }
+}
+
+final soundEffectsEnabledProvider =
+    NotifierProvider<SoundEffectsEnabledNotifier, bool>(
+        SoundEffectsEnabledNotifier.new);
+
+/// UI sound effects volume (0.0–1.0). Default 0.5 — same as the ringtone.
+class SoundEffectsVolumeNotifier extends Notifier<double> {
+  @override
+  double build() => 0.5;
+
+  Future<void> load() async {
+    try {
+      final val = await storage_api.loadSetting(key: 'sound_effects_volume');
+      if (val != null && val.isNotEmpty) {
+        state = (double.tryParse(val) ?? 0.5).clamp(0.0, 1.0);
+      }
+    } catch (e) {
+      debugPrint('[HOLLOW] soundEffectsVolume.load() failed: $e');
+    }
+    SoundService.volume = state;
+  }
+
+  Future<void> setVolume(double value) async {
+    final v = value.clamp(0.0, 1.0);
+    state = v;
+    SoundService.volume = v;
+    await storage_api.saveSetting(
+      key: 'sound_effects_volume',
+      value: v.toStringAsFixed(2),
+    );
+  }
+}
+
+final soundEffectsVolumeProvider =
+    NotifierProvider<SoundEffectsVolumeNotifier, double>(
+        SoundEffectsVolumeNotifier.new);
+
 /// Description shown under the "Always relay calls" toggle on desktop AND
 /// mobile — one source of truth so the two can't drift.
 ///
@@ -1092,7 +1164,7 @@ final peerForwardingProvider = NotifierProvider<PeerForwardingNotifier, bool>(
 /// Description under the "Peer media forwarding" toggle (desktop settings).
 const String peerForwardingDescription =
     'While you watch a screen share, help carry it to viewers who can\'t '
-    'connect directly — instead of routing them through the relay server. '
+    'connect directly, instead of routing them through the relay server. '
     'Streams stay end-to-end encrypted; helping costs some upload bandwidth. '
     'Desktop only.';
 

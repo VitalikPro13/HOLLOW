@@ -77,7 +77,7 @@ class _CategoryBulkAccessDialogState extends State<_CategoryBulkAccessDialog> {
     final canApply = _changeVisibility || _changePosting;
 
     return HollowDialog(
-      title: 'Apply access — ${widget.categoryName}',
+      title: 'Apply access: ${widget.categoryName}',
       content: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -85,8 +85,8 @@ class _CategoryBulkAccessDialogState extends State<_CategoryBulkAccessDialog> {
           Text(
             'Applies to ${widget.channelCount} '
             'channel${widget.channelCount == 1 ? '' : 's'} in this '
-            'category. Each channel keeps its own setting afterwards — '
-            'nothing stays linked to the category.',
+            'category. Each channel keeps its own setting afterwards. '
+            'Nothing stays linked to the category.',
             style: HollowTypography.bodySmall.copyWith(
               color: hollow.textSecondary,
             ),

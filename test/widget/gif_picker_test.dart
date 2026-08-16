@@ -405,7 +405,7 @@ void main() {
     await tester.pump();
     catalog.pending['|1']!.completeError(Exception('proxy down'));
     await tester.pump();
-    expect(find.text('Search failed — check your connection'), findsOneWidget);
+    expect(find.text('Search failed. Check your connection'), findsOneWidget);
 
     await tester.tapAt(const Offset(5, 5));
     await tester.pump();

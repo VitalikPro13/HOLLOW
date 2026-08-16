@@ -940,7 +940,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
     final remaining = readyAt.difference(DateTime.now());
     HollowToast.show(
       context,
-      'Slow mode — wait ${remaining.inSeconds + 1}s before sending again',
+      'Slow mode: wait ${remaining.inSeconds + 1}s before sending again',
       type: HollowToastType.info,
     );
     return true;
@@ -997,7 +997,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
     if (_channelMediaOnly) {
       HollowToast.show(
         context,
-        'This is a media-only channel — attach an image, GIF, or video',
+        'This is a media-only channel. Attach an image, GIF, or video',
         type: HollowToastType.info,
       );
       return;
@@ -1083,7 +1083,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
     if (_channelMediaOnly && !_mediaExtensions.contains(ext)) {
       HollowToast.show(
         context,
-        'This is a media-only channel — only images, GIFs, and videos can be posted',
+        'This is a media-only channel. Only images, GIFs, and videos can be posted',
         type: HollowToastType.info,
       );
       return;
@@ -1203,7 +1203,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
     if (_channelMediaOnly && !_mediaExtensions.contains(ext)) {
       HollowToast.show(
         context,
-        'This is a media-only channel — only images, GIFs, and videos can be posted',
+        'This is a media-only channel. Only images, GIFs, and videos can be posted',
         type: HollowToastType.info,
       );
       return;
@@ -1335,7 +1335,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
       if (match.isNotEmpty) return match.first.diskPath!;
     }
     if (mounted) {
-      HollowToast.show(context, 'Download timed out — not enough peers online',
+      HollowToast.show(context, 'Download timed out: not enough peers online',
           type: HollowToastType.error);
     }
     return null;
@@ -1707,7 +1707,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
             const SizedBox(width: HollowSpacing.sm),
             HollowTooltip(
               message:
-                  "Meeting chat isn't stored — it disappears when the meeting ends",
+                  "Meeting chat isn't stored. It disappears when the meeting ends",
               child: Container(
                 padding: const EdgeInsets.symmetric(
                   horizontal: HollowSpacing.sm,
@@ -1767,8 +1767,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
           // Split view toggle (dock mode only)
           if (showSplit &&
               !_isConference &&
-              (ref.watch(layoutModeProvider).valueOrNull ?? LayoutMode.dock) ==
-                  LayoutMode.dock) ...[
+              ref.watch(layoutModeProvider) == LayoutMode.dock) ...[
             const SizedBox(width: HollowSpacing.sm),
             _buildSplitToggleButton(hollow),
           ],
@@ -2785,7 +2784,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
     if (_channelMediaOnly) {
       HollowToast.show(
         context,
-        'This is a media-only channel — voice messages can\'t be posted here',
+        'This is a media-only channel. Voice messages can\'t be posted here',
         type: HollowToastType.info,
       );
       return;

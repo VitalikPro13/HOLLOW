@@ -345,7 +345,7 @@ class _GifPickerBodyState extends ConsumerState<GifPickerBody> {
       if (!mounted || seq != _querySeq) return;
       setState(() {
         _loading = false;
-        _error = 'Search failed — check your connection';
+        _error = 'Search failed. Check your connection';
       });
     });
   }
@@ -358,7 +358,7 @@ class _GifPickerBodyState extends ConsumerState<GifPickerBody> {
     _scrollOffset = 0;
     if (p.items.isEmpty &&
         p.backoffUntil * 1000 > DateTime.now().millisecondsSinceEpoch) {
-      _error = 'GIF search is busy — try again in a moment';
+      _error = 'GIF search is busy. Try again in a moment';
     } else {
       _error = null;
     }

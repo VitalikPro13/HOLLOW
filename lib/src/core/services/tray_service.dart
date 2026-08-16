@@ -116,7 +116,7 @@ class TrayService with TrayListener {
     if (!_iconVisible) return;
     unawaited(
       trayManager
-          .setToolTip('Hollow — ${status.label}')
+          .setToolTip('Hollow: ${status.label}')
           .catchError((_) {}),
     );
   }

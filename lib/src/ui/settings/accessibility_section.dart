@@ -44,7 +44,7 @@ class AccessibilitySettingsView extends ConsumerWidget {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      'Reduce Motion',
+                      'Reduce motion',
                       style: HollowTypography.body
                           .copyWith(color: hollow.textPrimary),
                     ),
@@ -78,7 +78,7 @@ class AccessibilitySettingsView extends ConsumerWidget {
         children: [
           SettingsToggleRow(
             icon: LucideIcons.square,
-            label: 'Reduce Transparency',
+            label: 'Reduce transparency',
             subtitle: 'Turn off background blur and glass effects',
             value: reduceTransparency,
             onChanged: (v) =>

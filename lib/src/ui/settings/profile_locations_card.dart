@@ -155,7 +155,7 @@ class _ProfileLocationsCardState extends State<ProfileLocationsCard> {
     final proceed = await showHollowDialog<bool>(
       context: context,
       builder: (dialogContext) => HollowDialog(
-        title: 'Switch Profile',
+        title: 'Switch profile',
         content: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -181,7 +181,7 @@ class _ProfileLocationsCardState extends State<ProfileLocationsCard> {
           ),
           HollowButton.filled(
             onPressed: () => Navigator.of(dialogContext).pop(true),
-            child: const Text('Switch & Restart'),
+            child: const Text('Switch & restart'),
           ),
         ],
       ),
@@ -211,7 +211,7 @@ class _ProfileLocationsCardState extends State<ProfileLocationsCard> {
     final name = await showHollowDialog<String>(
       context: context,
       builder: (dialogContext) => HollowDialog(
-        title: 'Profile Name',
+        title: 'Profile name',
         content: HollowTextField(
           controller: controller,
           hintText: 'e.g. Artist, Personal',
@@ -246,7 +246,7 @@ class _ProfileLocationsCardState extends State<ProfileLocationsCard> {
       // after this card was last built.
       setState(() {});
       HollowToast.show(
-          context, 'That is the portable folder — use its row in the list',
+          context, 'That is the portable folder: use its row in the list',
           type: HollowToastType.info);
       return;
     }
@@ -313,7 +313,7 @@ class _ProfileLocationsCardState extends State<ProfileLocationsCard> {
         ],
       ));
       if (mounted) {
-        HollowToast.show(context, 'Removed from the list — data kept on disk',
+        HollowToast.show(context, 'Removed from the list, data kept on disk',
             type: HollowToastType.info);
       }
     } catch (e) {
@@ -331,7 +331,7 @@ class _ProfileLocationsCardState extends State<ProfileLocationsCard> {
     final proceed = await showHollowDialog<bool>(
       context: context,
       builder: (dialogContext) => HollowDialog(
-        title: 'Erase Profile',
+        title: 'Erase profile',
         content: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -359,7 +359,7 @@ class _ProfileLocationsCardState extends State<ProfileLocationsCard> {
           ),
           HollowButton.danger(
             onPressed: () => Navigator.of(dialogContext).pop(true),
-            child: Text(isRunning ? 'Erase & Restart' : 'Erase Profile'),
+            child: Text(isRunning ? 'Erase & restart' : 'Erase profile'),
           ),
         ],
       ),
@@ -395,7 +395,7 @@ class _ProfileLocationsCardState extends State<ProfileLocationsCard> {
     }
     if (!_isEmptyOrHollowData(row.path)) {
       HollowToast.show(
-          context, 'That folder does not look like Hollow data — not erasing',
+          context, 'That folder does not look like Hollow data. Not erasing',
           type: HollowToastType.error);
       return;
     }
@@ -455,8 +455,8 @@ class _ProfileLocationsCardState extends State<ProfileLocationsCard> {
         Text(
           'Each profile is a separate identity stored in its own folder. '
           'Switching restarts Hollow; the profile you leave stays on disk. '
-          'Note: identity protection via the OS keychain holds only one '
-          'identity per computer — use password protection for additional '
+          'Identity protection via the OS keychain holds only one '
+          'identity per computer. Use password protection for additional '
           'profiles.',
           style: HollowTypography.caption.copyWith(
             color: hollow.textSecondary,
@@ -467,7 +467,7 @@ class _ProfileLocationsCardState extends State<ProfileLocationsCard> {
         if (_envOverrideActive) ...[
           const SizedBox(height: HollowSpacing.xs),
           Text(
-            'HOLLOW_DATA_DIR is set — it overrides the profile selection '
+            'HOLLOW_DATA_DIR is set. It overrides the profile selection '
             'until Hollow is started without it.',
             style: HollowTypography.caption.copyWith(
               color: hollow.warning,
@@ -485,7 +485,7 @@ class _ProfileLocationsCardState extends State<ProfileLocationsCard> {
           onPressed: _busy ? null : _addProfile,
           icon: const Icon(LucideIcons.folderPlus, size: 14),
           compact: true,
-          child: const Text('Add Profile Folder'),
+          child: const Text('Add profile folder'),
         ),
       ],
     );
@@ -560,7 +560,7 @@ class _ProfileLocationsCardState extends State<ProfileLocationsCard> {
                 ),
                 if (!exists)
                   Text(
-                    'Not created yet — switching starts a new identity here',
+                    'Not created yet. Switching starts a new identity here',
                     style: HollowTypography.caption.copyWith(
                       color: hollow.textSecondary,
                       fontSize: 9,

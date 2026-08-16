@@ -141,7 +141,7 @@ class _AccessLabelPickerDialogState
                 const SizedBox(width: HollowSpacing.sm),
                 Expanded(
                   child: Text(
-                    'No labels selected — the channel returns to '
+                    'No labels selected. The channel returns to '
                     'tier-based access.',
                     style: HollowTypography.bodySmall.copyWith(
                       color: hollow.warning,

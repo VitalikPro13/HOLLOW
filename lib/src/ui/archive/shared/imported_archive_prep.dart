@@ -91,8 +91,8 @@ ImportedArchivePrep prepareImportedArchive({
         : 'Archive signed by $exporterName on $dateStr';
   } else {
     archiveSigText = mobile
-        ? 'Signature invalid — may be tampered'
-        : 'Archive signature invalid — may have been tampered with';
+        ? 'Signature invalid: may be tampered'
+        : 'Archive signature invalid: may have been tampered with';
   }
 
   // Per-message signatures.

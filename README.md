@@ -5,7 +5,7 @@
 <h1 align="center">Hollow</h1>
 
 <p align="center">
-  Distributed, encrypted communication. No central servers or APIs. No accounts. No compromise.
+  Distributed, encrypted communication. No central servers or APIs. No accounts.
 </p>
 
 <p align="center">
@@ -31,7 +31,7 @@
 <br>
 
 <p align="center">
-  <img src="assets/Home_Screenshot_v031.png" width="800" alt="Hollow — Home">
+  <img src="assets/Home_Screenshot_v031.png" width="800" alt="Hollow home screen">
 </p>
 
 <details>
@@ -61,21 +61,21 @@ Your identity is a cryptographic keypair. Zero registrations. One recovery phras
 
 ## Features
 
-- **End-to-end encrypted messaging** -- Olm (Double Ratchet) for DMs, OpenMLS for servers. Forward secrecy by default
-- **Multi-device** -- link your phone and desktop into one identity with a short code. Messages, servers, and friends stay in sync end-to-end encrypted across your devices, and a lost device can be revoked remotely at any time
-- **Offline delivery without servers** -- messages sent while you're away are waiting when you come back. The relay buffers only ciphertext with a short expiry; nothing readable is ever stored anywhere
-- **Encrypted voice and video calls** -- peer-to-peer WebRTC with SFrame (AES-128-GCM)
-- **Voice that sounds right** -- on-device noise suppression (RNNoise, with DeepFilterNet3 on desktop), automatic loudness leveling, fullband Opus. No cloud processing ever touches your audio
-- **Screen sharing that stays sharp** -- a custom-tuned WebRTC engine encodes screens as screen content, not webcam video: crisp text, AV1/VP9, resolution, framerate and content profiles. Works on all five platforms, both sending and receiving, encrypted with the same SFrame pipeline. Share audio travels on its own encrypted music-grade Opus stream (with per-app capture on Windows and Linux) instead of the voice-call path, so game or music audio arrives crisp instead of call-quality mushy
-- **File sharing** -- encrypted peer-to-peer transfers. Files up to 34 MB transfer directly. Larger files use Hollow Share (BitTorrent-like swarmed distribution)
-- **Distributed storage (Vault)** -- erasure-coded encrypted shards distributed across server members. Files survive even when individual peers go offline
-- **Servers and channels** -- create communities with text channels, voice channels, roles, and permissions. All state synchronized via CRDTs with no authoritative server. Optional: secure Twitch verification to limit members only to your followers/subs
-- **Public channels** -- you can make your server channel public, so users can easily read it just from knowing the server ID/join link and without the need to even join it. You can use a viewer inside the app or on the [website](https://hollow.anonlisten.com/)
-- **Custom relay support** -- self-host your own relay for a fully isolated network. One `docker compose up` and you're running
-- **Cryptographic identity** -- Ed25519 keypair from a BIP-39 mnemonic. No accounts, no passwords, no email or phone verification
-- **Full local data retention** -- using the Archive tab, you can see all the messages saved in your local database that you can easily export
-- **Verifiable messages** -- every message is Ed25519-signed. Exported conversations are cryptographically unforgeable
-- **Native TLS** -- the relay handles TLS 1.3 directly (no Cloudflare, no reverse proxy). ~572,000 concurrent connections on a single $8/month VPS (see [BENCHMARK.md](relay-uws/BENCHMARK.md))
+- **End-to-end encrypted messaging**: Olm (Double Ratchet) for DMs, OpenMLS for servers. Forward secrecy by default
+- **Multi-device**: link your phone and desktop into one identity with a short code. Messages, servers, and friends stay in sync end-to-end encrypted across your devices, and a lost device can be revoked remotely at any time
+- **Offline delivery without servers**: messages sent while you're away are waiting when you come back. The relay buffers only ciphertext with a short expiry; nothing readable is ever stored anywhere
+- **Encrypted voice and video calls**: peer-to-peer WebRTC with SFrame (AES-128-GCM)
+- **Voice that sounds right**: on-device noise suppression (RNNoise, with DeepFilterNet3 on desktop), automatic loudness leveling, fullband Opus. No cloud processing ever touches your audio
+- **Screen sharing that stays sharp**: a custom-tuned WebRTC engine encodes screens as screen content rather than webcam video, so text stays readable. AV1/VP9, with resolution, framerate and content profiles. Works on all five platforms, both sending and receiving, encrypted with the same SFrame pipeline. Share audio travels on its own encrypted music-grade Opus stream (with per-app capture on Windows and Linux) instead of the voice-call path, so game or music audio arrives crisp instead of call-quality mushy
+- **File sharing**: encrypted peer-to-peer transfers. Files up to 34 MB transfer directly. Larger files use Hollow Share (BitTorrent-like swarmed distribution)
+- **Distributed storage (Vault)**: erasure-coded encrypted shards distributed across server members. Files survive even when individual peers go offline
+- **Servers and channels**: create communities with text channels, voice channels, roles, and permissions. All state synchronized via CRDTs with no authoritative server. Optional: secure Twitch verification to limit members only to your followers/subs
+- **Public channels**: you can make a server channel public, so anyone with the server ID or join link can read it without joining. You can use a viewer inside the app or on the [website](https://hollow.anonlisten.com/)
+- **Custom relay support**: self-host your own relay for a fully isolated network. One `docker compose up` and you're running
+- **Cryptographic identity**: Ed25519 keypair from a BIP-39 mnemonic. No accounts, no passwords, no email or phone verification
+- **Full local data retention**: the Archive tab shows every message saved in your local database, and you can export them
+- **Verifiable messages**: every message is Ed25519-signed. Exported conversations are cryptographically unforgeable
+- **Native TLS**: the relay handles TLS 1.3 directly (no Cloudflare, no reverse proxy). ~572,000 concurrent connections on a single $8/month VPS (see [BENCHMARK.md](relay-uws/BENCHMARK.md))
 
 ## Download
 
@@ -94,7 +94,7 @@ Current Progress: Tons of changes, all thanks to awesome contributors from the I
 
 | Layer | Technology |
 |-------|------------|
-| UI | Flutter (Dart) -- Windows, macOS, Linux, Android, iOS |
+| UI | Flutter (Dart) on Windows, macOS, Linux, Android, iOS |
 | Backend | Rust via flutter_rust_bridge FFI |
 | DM Encryption | vodozemac (Olm / Double Ratchet) |
 | Server Encryption | OpenMLS 0.8 |
@@ -119,13 +119,13 @@ In the Hollow app, enter your relay domain during setup or in Settings. See [rel
 
 ## Documentation
 
-- [Whitepaper](WHITEPAPER.md) -- full protocol specification: cryptography, networking, threat model
-- [Privacy Policy](legal/PRIVACY_POLICY.md) -- what data exists, where, and what we can access (nothing)
-- [Terms of Use](legal/TERMS_OF_USE.md) -- plain-language terms
-- [Relay Documentation](relay-uws/README.md) -- relay architecture, benchmarks, deployment
-- [Mobile Port Plan](MobilePort_Plan.md) -- Android/iOS build setup, OpenSSL cross-compilation, contributor guide
-- [Legality Research](legal/legality.md) -- age verification, illegal-content/CSAM liability, encryption regulations, legal precedents (US/UK/EU)
-- [Transparency Report](legal/transparency_report.md) -- legal requests received and data disclosure
+- [Whitepaper](WHITEPAPER.md): the full protocol specification, covering cryptography, networking, and the threat model
+- [Privacy Policy](legal/PRIVACY_POLICY.md): what data exists, where, and what we can access (nothing)
+- [Terms of Use](legal/TERMS_OF_USE.md): plain-language terms
+- [Relay Documentation](relay-uws/README.md): relay architecture, benchmarks, deployment
+- [Mobile Port Plan](MobilePort_Plan.md): Android/iOS build setup, OpenSSL cross-compilation, contributor guide
+- [Legality Research](legal/legality.md): age verification, illegal-content/CSAM liability, encryption regulations, legal precedents (US/UK/EU)
+- [Transparency Report](legal/transparency_report.md): legal requests received and data disclosure
 
 ## Building from Source
 
@@ -142,7 +142,7 @@ as screen content instead of webcam video (screencast mode + W3C content
 hints), which is why text stays sharp instead of turning blocky. The patched
 binaries and headers are vendored in git at
 `packages/flutter_webrtc/third_party/libwebrtc/`, so a normal clone + build
-just works -- no downloads, no extra steps. Rebuilding libwebrtc itself is only
+just works, with no downloads and no extra steps. Rebuilding libwebrtc itself is only
 needed for maintainers bumping the upstream milestone; the full reproducible
 recipe (source pins, patch file, gn args) lives in
 [BUILDING.md](packages/flutter_webrtc/third_party/libwebrtc/BUILDING.md).
@@ -251,7 +251,7 @@ Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for setup inst
 
 - Report bugs and request features via [Issues](../../issues)
 - Read the [Whitepaper](WHITEPAPER.md) for protocol-level context
-- Report security vulnerabilities privately -- see [SECURITY.md](SECURITY.md)
+- Report security vulnerabilities privately: see [SECURITY.md](SECURITY.md)
 
 ## License
 
@@ -263,10 +263,10 @@ For commercial use without AGPL obligations, a commercial license is available:
 
 | | AGPL-3.0 (free) | Commercial |
 |---|---|---|
-| Personal and community use | Yes | -- |
+| Personal and community use | Yes | n/a |
 | Modify and distribute | Yes (source must stay open) | Yes (proprietary OK) |
-| Small business | -- | $1,000/year |
-| Enterprise (SSO, SLA, custom) | -- | [Contact us](mailto:collab@anonlisten.com) |
+| Small business | n/a | $1,000/year |
+| Enterprise (SSO, SLA, custom) | n/a | [Contact us](mailto:collab@anonlisten.com) |
 
 The Hollow name, logo, and branding are trademarks of AnonListen and are not covered by the open-source license.
 

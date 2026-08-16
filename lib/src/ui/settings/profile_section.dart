@@ -137,7 +137,7 @@ class ProfileSection extends ConsumerWidget {
               icon: const Icon(LucideIcons.check, size: 16),
               child: Text(savingProfile
                   ? 'Saving...'
-                  : (profileDirty ? 'Save Profile' : 'Saved')),
+                  : (profileDirty ? 'Save profile' : 'Saved')),
             ),
           ),
 

@@ -88,7 +88,7 @@ class RecoveryPoolDashboard extends ConsumerWidget {
           ),
           const SizedBox(height: HollowSpacing.xs),
           Text(
-            pool.isActive ? 'Active — exchanging shards' : 'Pool stopped',
+            pool.isActive ? 'Active: exchanging shards' : 'Pool stopped',
             style: HollowTypography.caption.copyWith(
               color: pool.isActive ? const Color(0xFF4CAF50) : hollow.textSecondary,
               fontSize: 12,

@@ -1055,7 +1055,7 @@ async fn channel_send_gate_error(
     }
     if server.is_channel_media_only(channel_id) {
         // Standalone text is rejected; captions ride the file send path.
-        return Some("This is a media-only channel — attach an image, GIF, or video".to_string());
+        return Some("This is a media-only channel. Attach an image, GIF, or video".to_string());
     }
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1105,7 +1105,7 @@ async fn slow_mode_wait_error(
     let next_allowed = last_ts + (slow as i64) * 1000;
     if now_ms < next_allowed {
         let wait_s = ((next_allowed - now_ms) + 999) / 1000;
-        return Some(format!("Slow mode is on — wait {wait_s}s before sending again"));
+        return Some(format!("Slow mode is on. Wait {wait_s}s before sending again"));
     }
     None
 }

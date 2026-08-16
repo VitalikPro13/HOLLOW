@@ -615,7 +615,7 @@ fn proxy_query(params: Vec<(&'static str, String)>) -> Result<serde_json::Value,
             .await
             .map_err(|e| format!("GIF search failed: {e}"))?;
         if resp.status().as_u16() == 429 {
-            return Err("GIF search rate-limited — try again in a few minutes".into());
+            return Err("GIF search rate-limited. Try again in a few minutes".into());
         }
         if !resp.status().is_success() {
             return Err(format!("GIF search failed: HTTP {}", resp.status()));
@@ -665,7 +665,7 @@ fn direct_query(
             .await
             .map_err(|e| format!("GIF search failed: {e}"))?;
         match resp.status().as_u16() {
-            429 => return Err("Your Klipy key hit its rate limit — try again shortly".into()),
+            429 => return Err("Your Klipy key hit its rate limit. Try again shortly".into()),
             401 | 403 => return Err("Klipy rejected your API key".into()),
             s if !(200..300).contains(&s) => return Err(format!("GIF search failed: HTTP {s}")),
             _ => {}

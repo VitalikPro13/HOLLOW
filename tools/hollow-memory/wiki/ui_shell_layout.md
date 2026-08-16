@@ -31,22 +31,27 @@ Top-level function:
 5. **License key gate** — Loads cached key from DB. Calls `fetchRelayStatus()`. If `licenseRequired` and no cached key, shows `LicenseKeyDialog`. Sets key via `network_api.setLicenseKey()`.
 6. **Load servers** — `serverListProvider.notifier.loadFromDb()`.
 7. **Load unread state** — Iterates all servers, fetches their channels via `crdt_api.getServerChannels`, fetches DM peer IDs via `storage_api.getDmPeerIds()`, then calls `unreadProvider.notifier.loadAll()`. This happens BEFORE node startup so sync events don't race.
-8. **Start node** — `nodeProvider.notifier.start()`.
-9. **Post-start loads** (non-blocking after node):
+8. **Local-first loads**: pure DB reads, all awaited BEFORE the node starts so the shell can render complete and correct while the network phase runs behind it. `fetchRelayStatus` alone can cost 5 seconds, and these used to sit after it: a slow relay meant seconds of wrong theme and no background image on an otherwise fully-local render.
+   - `profileProvider.notifier.loadAll()` + `friendsProvider.notifier.loadAll()`: the DM/conversation list source.
+   - `themeModeProvider.notifier.load()`, `accentHueProvider.notifier.load()`.
+   - `layoutModeProvider.notifier.load()`: Dock vs Classic (issue #58). Same rule as the theme: the provider's `build()` returns the default and reads nothing, because the shell watches it during this render and `loadSetting` throws until the store is open.
+   - `uiScaleProvider.notifier.load()` + `chatTextScaleProvider.notifier.load()`: display size (issue #20).
+   - `backgroundProvider.notifier.load()`, `accentPresetsProvider.notifier.load()`.
+   - `soundEffectsEnabledProvider.notifier.load()` + `soundEffectsVolumeProvider.notifier.load()`: the UI sound pack (issue #55). Load-bearing beyond the UI: the notifiers mirror their value into `SoundService`'s statics, which is the only way the ref-less service learns the user's setting.
+   - `await ref.read(ringtoneVolumeProvider.future)` (in its own try/catch): building that provider is what publishes the volume to `SoundService`; without the preload the first outgoing call of a session rings at the default.
+   - `localNicknameProvider.notifier.loadAll()` (+ `setLocalNicknamesRef`), `serverStripLayoutProvider.notifier.loadLayout()`.
+   - `alwaysRelayCallsProvider.notifier.load()` + `peerForwardingProvider.notifier.load()`: both must be known BEFORE the node starts; the first TURN credentials land moments after, and `IceConfigNotifier` composes the ICE map from the flag.
+   - The "Unlocking…" spinner is dropped here (`_unlocking = false`), then `chatProvider.notifier.loadLastMessagePreviews(acceptedPeerIds)` fills the home dashboard previews.
+9. **Start node**: `fetchRelayStatus` / license gate, then `nodeProvider.notifier.start()`.
+10. **Post-start loads** (non-blocking after node):
    - `invisibleModeProvider.notifier.load()` — UI-only sync of invisible mode toggle.
-   - `serverStripLayoutProvider.notifier.loadLayout()` — folders + ordering.
-   - `serverAvatarProvider.notifier.loadAll(serverIds)` — server avatar images.
-   - `profileProvider.notifier.loadAll()` — cached user profiles.
-   - `accentHueProvider.notifier.load()` — accent color.
-   - `backgroundProvider.notifier.load()` — custom background image.
-   - `accentPresetsProvider.notifier.load()` — accent presets.
-   - `localNicknameProvider.notifier.loadAll()` — per-user local nicknames.
-   - `friendsProvider.notifier.loadAll()` — friends list.
+   - `offlineInboxRetentionProvider` → `offlineInboxProvider`: offline delivery inbox.
+   - `serverAvatarProvider` / `serverAvatarAnimProvider` / `serverBannerProvider` `.loadAll(serverIds)`: server imagery.
    - `shareTabProvider.notifier.loadAll()` — share entries for `hollow://share` cards.
-   - `chatProvider.notifier.loadLastMessagePreviews(acceptedPeerIds)` — DM preview messages for home dashboard.
    - `favouriteFriendsProvider.notifier.load()` — favourite friends ordering.
    - `hiddenArchiveDmsProvider.notifier.load()` — hidden archive DMs.
-   - `verifiedPeersProvider.notifier.load()` — verified peers list.
+   - `blockedUsersProvider.notifier.load()` / `verifiedPeersProvider.notifier.load()` / `securityAlertsProvider.notifier.load()`.
+   - `statusProvider.notifier.loadDismissed()`: dismissed status banners.
    - `systemNotificationProvider.notifier.init()` — native notifications (for tray mode).
 
 ## License Error Handling
@@ -99,7 +104,7 @@ The `build()` method of `_HollowShellState` reads these providers every frame:
 | `selectedChannelProvider` | `watch` | Currently selected channel ID |
 | `channelLayoutProvider` | `watch` | JSON string for channel ordering/categories |
 | `serverSettingsOpenProvider` | `watch` | Boolean: server settings panel open |
-| `layoutModeProvider` | `watch` | `LayoutMode.dock` or `LayoutMode.classic` (async, defaults to dock) |
+| `layoutModeProvider` | `watch` | `LayoutMode.dock` or `LayoutMode.classic` (synchronous `Notifier`, defaults to dock, restored by `_bootstrap`'s `load()`; read it bare, there is no `.valueOrNull` to unwrap) |
 | `backgroundProvider` | `watch` | Custom background image + opacity |
 
 Additional providers read within layout builders:
@@ -156,6 +161,8 @@ StartupRevealScope
           │       └── ServerSettingsPanel OR _buildChatOrEmpty()
           └── _MemberPanelSlider (conditional on server selected + panel open + no VC full-bleed)
 ```
+
+**Reachability:** the `ServerStrip` is Classic's only permanent rail, so it carries Browse Public Channels, Conferences and Help alongside Home / Share / Archive / servers. Those three otherwise live only on the dock's `FriendsBar`/`BottomBar`, which Classic never renders, so without them the features had no entry point at all in this layout (issue #58 sweep). Full rail order in `ui_server_strip.md`.
 
 **Voice channel full-bleed detection:** When the selected channel is a voice channel AND the user is in that channel AND screen share or camera is active, the member panel is hidden (`vcScreenShareFullBleed = true`). This gives the video content maximum width.
 
@@ -311,6 +318,8 @@ The zoom trio ignores Shift on `+`/`-` (on most layouts `+` IS Shift+`=`) and ac
 6. `selectedPeerId == null`:
    - Dock mode → `HomeDashboard`
    - Classic mode → `_buildEmptyChat()` (placeholder with message icon)
+
+   **The Home dashboard is a DOCK surface and stays one.** Classic's centre pane is a blank slate that only ever shows what the left panels select; dropping the dock's Home tab into it makes the two layouts bleed into each other. The consequence is deliberate: everything that lives only on the dashboard, the Network column included, is Dock-only by design, and the answer for a Classic user who wants it is "switch to Dock", not "render the dock's Home tab inside Classic".
 7. `selectedPeerId != null` → `ChatPane` (keyed by peer ID)
 
 **Steps 1–4 are ONE exclusive selection spread across four booleans.** Because the first open tab wins, a navigation site that clears three of them leaves the fourth covering whatever it just selected — that was issue #28 (Conferences over a freshly selected server channel). Switch them ONLY through `setShellTab(ref.read, ShellTab.x)` / `setShellTab(ref.read, null)` (`lib/src/core/providers/shell_tab.dart`), which is the one place that knows the full list; watch `anyShellTabOpenProvider` for "something is covering the chat" (the Home button's selected state). A source-scan guard in `test/shell_tab_test.dart` fails if any file outside `shell_tab.dart` writes a `*TabOpenProvider.notifier`.

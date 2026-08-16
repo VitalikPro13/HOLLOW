@@ -301,7 +301,7 @@ class _JoinDialogState extends ConsumerState<_JoinDialog> {
         setState(() => _joining = false);
         HollowToast.show(
           context,
-          'No active pool found — nobody responded',
+          'No active pool found. Nobody responded',
           type: HollowToastType.error,
         );
       }

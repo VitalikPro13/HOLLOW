@@ -86,7 +86,7 @@ class _UpdatesTabState extends ConsumerState<UpdatesTab> {
               ),
               child: Text(state.status == UpdateStatus.checking
                   ? 'Checking...'
-                  : 'Check for Updates'),
+                  : 'Check for updates'),
             ),
           ),
 
@@ -113,7 +113,7 @@ class _UpdatesTabState extends ConsumerState<UpdatesTab> {
             const SizedBox(height: HollowSpacing.xl),
             Center(
               child: Text(
-                'Press "Check for Updates" to see available versions.',
+                'Press "Check for updates" to see available versions.',
                 style: HollowTypography.body.copyWith(
                   color: hollow.textSecondary,
                 ),
@@ -265,7 +265,7 @@ class _UpdatesTabState extends ConsumerState<UpdatesTab> {
             HollowButton.filled(
               onPressed: () => notifier.installAndRestart(),
               icon: const Icon(LucideIcons.rotateCcw, size: 16),
-              child: const Text('Install & Restart'),
+              child: const Text('Install & restart'),
             ),
             const SizedBox(height: HollowSpacing.sm),
             Text(

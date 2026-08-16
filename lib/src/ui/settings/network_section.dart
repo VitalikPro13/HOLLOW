@@ -78,7 +78,7 @@ class NetworkSettingsView extends ConsumerWidget {
                 compact: true,
                 icon: const Icon(LucideIcons.plus, size: 14),
                 onPressed: onShowAddRelay,
-                child: const Text('Add Relay'),
+                child: const Text('Add relay'),
               ),
             ),
           if (selectedRelay != initialRelay) ...[
@@ -87,7 +87,7 @@ class NetworkSettingsView extends ConsumerWidget {
               width: double.infinity,
               child: HollowButton.filled(
                 onPressed: onApplyRestart,
-                child: const Text('Apply & Restart'),
+                child: const Text('Apply & restart'),
               ),
             ),
           ],
@@ -98,11 +98,11 @@ class NetworkSettingsView extends ConsumerWidget {
         children: [
           SettingsToggleRow(
             icon: LucideIcons.inbox,
-            label: 'Hold My Messages While I\'m Offline',
+            label: 'Hold my messages while I\'m offline',
             subtitle:
                 'Messages and file cards sent TO YOU while you\'re offline '
-                'wait on the relay, encrypted, and arrive when you come back '
-                '— even if the sender has gone offline by then. This only '
+                'wait on the relay, encrypted, and arrive when you come back, '
+                'even if the sender has gone offline by then. This only '
                 'affects what you receive; senders don\'t need it enabled. '
                 'The relay can\'t read any of it.',
             value: offlineInbox,
@@ -311,7 +311,7 @@ class _GifProxySettingsCardState extends ConsumerState<GifProxySettingsCard> {
       HollowToast.show(context, 'GIF proxy updated');
     } catch (e) {
       if (!mounted) return;
-      HollowToast.show(context, 'Invalid proxy URL — must be https://',
+      HollowToast.show(context, 'Invalid proxy URL: must be https://',
           type: HollowToastType.error);
     } finally {
       if (mounted) setState(() => _busy = false);
@@ -386,9 +386,9 @@ class _GifProxySettingsCardState extends ConsumerState<GifProxySettingsCard> {
           direct
               ? 'Searches go straight to KLIPY with your own API key, so '
                   'KLIPY sees your IP address and your searches. Message '
-                  'recipients still make no web requests — a picked GIF is '
+                  'recipients still make no web requests. A picked GIF is '
                   're-encoded and sent as encrypted bytes either way.'
-              : 'GIF search goes through Hollow\'s no-log proxy — the '
+              : 'GIF search goes through Hollow\'s no-log proxy: the '
                   'provider never sees who searches, and message recipients '
                   'make no web requests at all.',
         ),
@@ -411,7 +411,7 @@ class _GifProxySettingsCardState extends ConsumerState<GifProxySettingsCard> {
           icon: LucideIcons.play,
           label: 'Play GIFs automatically',
           subtitle: 'Animate every GIF on screen in the picker. Turn this off '
-              'to load still frames instead and use less data — on desktop, '
+              'to load still frames instead and use less data. On desktop, '
               'hovering a GIF still plays it.',
           value: ref.watch(gifAutoplayProvider),
           onChanged: (v) =>
@@ -443,7 +443,7 @@ class _GifProxySettingsCardState extends ConsumerState<GifProxySettingsCard> {
             hollow,
             'Optional. With your own key the app talks to KLIPY directly and '
             'skips Hollow\'s proxy: your own rate limit, no dependency on '
-            'our server. It is not more private — KLIPY sees your IP and '
+            'our server. It is not more private: KLIPY sees your IP and '
             'every search under one key, where the shared proxy shows them '
             'one server and a random id per request. Get a key at '
             'klipy.com/developers.',
@@ -732,8 +732,8 @@ class _AntiCensorshipCardState extends ConsumerState<_AntiCensorshipCard> {
         Text(
           'If your network blocks Hollow (DPI censorship, e.g. Russia or '
           'China), route the relay connection through a REALITY tunnel that '
-          'looks like ordinary HTTPS to a real website. It\'s pre-configured — '
-          'just turn it on and restart. Only touch Advanced if you run your own '
+          'looks like ordinary HTTPS to a real website. It\'s pre-configured. '
+          'Turn it on and restart. Only touch Advanced if you run your own '
           'relay.',
           style: HollowTypography.caption.copyWith(
             color: hollow.textSecondary,
@@ -793,7 +793,7 @@ class _AntiCensorshipCardState extends ConsumerState<_AntiCensorshipCard> {
             width: double.infinity,
             child: HollowButton.filled(
               onPressed: _applyAndRestart,
-              child: const Text('Apply & Restart'),
+              child: const Text('Apply & restart'),
             ),
           ),
         ],
@@ -882,7 +882,7 @@ class _LinkPreviewSettingsCardState
               : 'Social lookups go through your proxy');
     } catch (e) {
       if (!mounted) return;
-      HollowToast.show(context, 'Invalid proxy URL — must be https://',
+      HollowToast.show(context, 'Invalid proxy URL: must be https://',
           type: HollowToastType.error);
     } finally {
       if (mounted) setState(() => _proxyBusy = false);
@@ -913,7 +913,7 @@ class _LinkPreviewSettingsCardState
           hollow,
           'When you paste a link, your device fetches its title and image and '
           'sends them WITH the message. People who receive it make no web '
-          'requests at all — the card is bytes that travelled in the message.',
+          'requests at all: the card is bytes that travelled in the message.',
         ),
         const SizedBox(height: HollowSpacing.md),
         SettingsToggleRow(
@@ -950,7 +950,7 @@ class _LinkPreviewSettingsCardState
             hollow,
             'Optional, and empty is the normal setting. X and TikTok links go '
             'through a public read-only API so their cards show the post '
-            'instead of a login wall — that API reads the post itself, so X '
+            'instead of a login wall. That API reads the post itself, so X '
             'never sees your address either way, but its operator does see '
             'that someone looked the post up. Point this at a service of your '
             'own to put a hop in between. Every other link is fetched '

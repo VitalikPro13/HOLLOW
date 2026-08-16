@@ -46,7 +46,7 @@ class _VerifyProofSectionState extends State<VerifyProofSection> {
   Future<void> _importFile() async {
     try {
       final result = await FilePicker.platform.pickFiles(
-        dialogTitle: 'Import Proof JSON',
+        dialogTitle: 'Import proof JSON',
         type: FileType.custom,
         allowedExtensions: ['json'],
         withData: true, // mobile pickers may not expose a filesystem path
@@ -137,7 +137,7 @@ class _VerifyProofSectionState extends State<VerifyProofSection> {
           'hollow-msg2:${_canonicalMsgType(contextType)}:$contextId:$peerId:'
           '$timestampMs:${messageId ?? ''}:$replyTo:$fileId:$orderUs:$lpDigest:$text';
       if (reconstructed != canonicalPayload) {
-        fail('Payload mismatch — the message fields do not match the '
+        fail('Payload mismatch: the message fields do not match the '
             'canonical payload. The proof JSON may have been tampered with.\n\n'
             'Expected: $canonicalPayload\n'
             'Got: $reconstructed');
@@ -183,7 +183,7 @@ class _VerifyProofSectionState extends State<VerifyProofSection> {
     Map<String, dynamic>? sig,
   ) {
     if (message == null || sender == null || sig == null) {
-      return 'Invalid proof format — missing required fields.';
+      return 'Invalid proof format: missing required fields.';
     }
     final version = map['version'];
     final protocol = map['protocol'] as String?;
@@ -195,8 +195,8 @@ class _VerifyProofSectionState extends State<VerifyProofSection> {
     // display as authentic.
     if (version == 1) {
       return 'This is a legacy v1 proof. The v1 signature covered only the '
-          'message text — the attachment, reply target, ordering and link '
-          'preview were not signed — so Hollow no longer accepts it. Re-export '
+          'message text. The attachment, reply target, ordering and link '
+          'preview were not signed, so Hollow no longer accepts it. Re-export '
           'the proof from Hollow 0.8.5 or newer.';
     }
     if (version != 2) {
@@ -282,7 +282,7 @@ class _VerifyProofSectionState extends State<VerifyProofSection> {
             HollowButton.ghost(
               onPressed: _importFile,
               icon: const Icon(LucideIcons.fileUp, size: 16),
-              child: const Text('Import File'),
+              child: const Text('Import file'),
             ),
             const SizedBox(width: HollowSpacing.sm),
             HollowButton.filled(
@@ -337,7 +337,7 @@ class _VerifyProofSectionState extends State<VerifyProofSection> {
 
   /// Human-readable label for the proof's context type.
   static String _contextLabelFor(String? contextType) {
-    if (contextType == 'direct_message') return 'Direct Message';
+    if (contextType == 'direct_message') return 'Direct message';
     if (contextType == 'channel') return 'Channel';
     return contextType ?? '';
   }

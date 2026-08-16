@@ -314,7 +314,7 @@ class _MobileVoiceChannelRouteState
                         size: 14, color: hollow.accentText),
                     const SizedBox(width: HollowSpacing.xs),
                     Text(
-                      '$name is sharing — Watch',
+                      '$name is sharing. Watch',
                       style: HollowTypography.caption.copyWith(
                         color: hollow.textPrimary,
                         fontWeight: FontWeight.w600,

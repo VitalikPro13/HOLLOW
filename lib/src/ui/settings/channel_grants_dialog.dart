@@ -77,7 +77,7 @@ class _ChannelGrantsDialogState extends ConsumerState<_ChannelGrantsDialog> {
   @override
   Widget build(BuildContext context) {
     return HollowDialog(
-      title: 'Temporary access — #${widget.channelName}',
+      title: 'Temporary access: #${widget.channelName}',
       content: switch (_view) {
         _View.overview => _buildOverview(context),
         _View.pickDuration => _buildDurationPicker(context),
@@ -131,7 +131,7 @@ class _ChannelGrantsDialogState extends ConsumerState<_ChannelGrantsDialog> {
         const SizedBox(height: HollowSpacing.lg),
         if (grants.isNotEmpty) ...[
           SettingsCard(
-            title: 'Active grants',
+            title: 'Active Grants',
             children: [
               for (final (i, g) in grants.indexed)
                 Padding(

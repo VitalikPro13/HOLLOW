@@ -588,7 +588,7 @@ async fn channel_file_send_rejection(
         let is_media = file_transfer::is_image_mime(&mime) || mime.starts_with("video/");
         if !is_media {
             return Some(
-                "This is a media-only channel — only images, GIFs, and videos can be posted"
+                "This is a media-only channel. Only images, GIFs, and videos can be posted"
                     .to_string(),
             );
         }
@@ -617,7 +617,7 @@ async fn slow_mode_rejection(
     let next_allowed = last_ts + (slow as i64) * 1000;
     if (now_ms as i64) < next_allowed {
         let wait_s = ((next_allowed - now_ms as i64) + 999) / 1000;
-        return Some(format!("Slow mode is on — wait {wait_s}s before sending again"));
+        return Some(format!("Slow mode is on. Wait {wait_s}s before sending again"));
     }
     None
 }

@@ -667,7 +667,7 @@ class _ProfileCardBodyState extends ConsumerState<ProfileCardBody> {
             hollow,
             icon: isVerified ? LucideIcons.shieldCheck : LucideIcons.shield,
             tooltip:
-                isVerified ? 'Verified — view safety number' : 'Verify contact',
+                isVerified ? 'Verified: view safety number' : 'Verify contact',
             color: isVerified ? hollow.success : null,
             onTap: () => _openVerifyDialog(master),
           ),

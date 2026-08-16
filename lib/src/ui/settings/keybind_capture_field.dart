@@ -110,7 +110,7 @@ class _KeybindCaptureFieldState extends ConsumerState<KeybindCaptureField> {
           ),
           child: _capturing
               ? Text(
-                  'Press a key combo — Esc cancels',
+                  'Press a key combo (Esc cancels)',
                   style: HollowTypography.caption.copyWith(
                     color: hollow.accentText,
                     fontSize: 11,

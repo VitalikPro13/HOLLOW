@@ -145,8 +145,8 @@ class _ShareDashboardState extends ConsumerState<ShareDashboard> {
               'Share transfers are direct peer-to-peer (STUN-only, no relay '
               'fallback). Transfers may fail behind strict or symmetric NATs '
               'if a direct connection can\'t be established.'
-              '${alwaysRelay ? ' "Always relay calls" does not cover Share — '
-                  'the person you share with will see your IP address.' : ''}',
+              '${alwaysRelay ? ' "Always relay calls" does not cover Share. '
+                  'The person you share with will see your IP address.' : ''}',
               style: HollowTypography.caption.copyWith(
                 color: color,
                 fontSize: 11,

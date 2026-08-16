@@ -261,7 +261,7 @@ class _MemberRow extends ConsumerWidget {
                           ),
                           const SizedBox(width: HollowSpacing.sm),
                           Text(
-                            'Kick Member',
+                            'Kick member',
                             style: HollowTypography.body.copyWith(
                               color: hollow.error,
                             ),
@@ -280,7 +280,7 @@ class _MemberRow extends ConsumerWidget {
                           ),
                           const SizedBox(width: HollowSpacing.sm),
                           Text(
-                            'Mute Member',
+                            'Mute member',
                             style: HollowTypography.body.copyWith(
                               color: hollow.warning,
                             ),
@@ -299,7 +299,7 @@ class _MemberRow extends ConsumerWidget {
                           ),
                           const SizedBox(width: HollowSpacing.sm),
                           Text(
-                            'Ban Member',
+                            'Ban member',
                             style: HollowTypography.body.copyWith(
                               color: hollow.error,
                             ),
@@ -334,7 +334,7 @@ class _MemberRow extends ConsumerWidget {
     showHollowDialog(
       context: context,
       builder: (context) => _ConfirmDialog(
-        title: 'Change Role',
+        title: 'Change role',
         message:
             'Change $displayName\'s role to $roleName?',
         confirmLabel: 'Change',
@@ -371,7 +371,7 @@ class _MemberRow extends ConsumerWidget {
     showHollowDialog(
       context: context,
       builder: (context) => _ConfirmDialog(
-        title: 'Kick Member',
+        title: 'Kick member',
         message:
             'Are you sure you want to kick $displayName from the server?',
         confirmLabel: 'Kick',
@@ -444,7 +444,7 @@ class _MemberRow extends ConsumerWidget {
     showHollowDialog(
       context: context,
       builder: (context) => _ConfirmDialog(
-        title: 'Ban Member',
+        title: 'Ban member',
         message:
             'Are you sure you want to ban $displayName? They will be removed and unable to rejoin.',
         confirmLabel: 'Ban',
@@ -523,7 +523,7 @@ class _MuteDurationDialog extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               Text(
-                'Mute Member',
+                'Mute member',
                 textAlign: TextAlign.center,
                 style: HollowTypography.heading
                     .copyWith(color: hollow.textPrimary, fontSize: 18),

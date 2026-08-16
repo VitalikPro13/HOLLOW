@@ -70,7 +70,7 @@ class DevicesCategoryView extends StatelessWidget {
               HollowButton.outline(
                 onPressed: () => resetDeviceListsFlow(context),
                 icon: const Icon(LucideIcons.refreshCw, size: 16),
-                child: const Text('Reset Device List'),
+                child: const Text('Reset device list'),
               ),
             ],
           ),

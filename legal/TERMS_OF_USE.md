@@ -1,6 +1,6 @@
-# Hollow — Terms of Use
+# Hollow: Terms of Use
 
-**Last updated: July 10, 2026**
+**Last updated: August 16, 2026**
 
 These Terms of Use ("Terms") govern your access to and use of the Hollow application and related services ("Services") provided by AnonListen ("we", "us", "our"). By using Hollow, you agree to these Terms.
 
@@ -16,7 +16,7 @@ If you are using Hollow on behalf of an organization, you represent that you hav
 
 ## 3. Your account
 
-Your Hollow account is a cryptographic keypair generated on your device. You are responsible for safeguarding your recovery phrase (BIP-39 mnemonic). We cannot recover your account if you lose your recovery phrase — there is no "forgot password" mechanism because we do not have access to your credentials.
+Your Hollow account is a cryptographic keypair generated on your device. You are responsible for safeguarding your recovery phrase (BIP-39 mnemonic). We cannot recover your account if you lose your recovery phrase. There is no "forgot password" mechanism because we do not have access to your credentials.
 
 You are responsible for all activity that occurs under your account, including the security of your device.
 
@@ -48,7 +48,7 @@ Individual Hollow servers are created and managed by their owners. Server owners
 
 ### Reporting
 
-If you become aware of any use of Hollow that violates these Terms, you may report it to us at **privacy@anonlisten.com**. Hollow also includes in-app tools: you can block users (stored only on your device) and report users. Reports are transmitted anonymously and stored only as aggregate counters per reported account — no message content is or can be included, and we never learn who filed a report.
+If you become aware of any use of Hollow that violates these Terms, you may report it to us at **privacy@anonlisten.com**. Hollow also includes in-app tools: you can block users (stored only on your device) and report users. Reports are transmitted anonymously and stored only as aggregate counters per reported account. No message content is or can be included, and we never learn who filed a report.
 
 Due to the encrypted nature of the platform, our ability to investigate reports is limited, but we take all reports seriously and will take action where technically possible. Where reports or other signals indicate violations of these Terms, we may take the actions available to us at the infrastructure level, such as revoking access to our hosted relay.
 
@@ -56,11 +56,11 @@ Due to the encrypted nature of the platform, our ability to investigate reports 
 
 Hollow is open-source software. The client application and core library are licensed under the **GNU Affero General Public License v3.0 (AGPL-3.0)**. The relay server is licensed under the **MIT License**. The full license texts are available in the source repository.
 
-For commercial use without AGPL obligations (proprietary modifications, embedding, or enterprise deployments), a separate commercial license is available — contact **collab@anonlisten.com**.
+For commercial use without AGPL obligations (proprietary modifications, embedding, or enterprise deployments), a separate commercial license is available: contact **collab@anonlisten.com**.
 
 The Hollow name, trademarks, logos, and associated branding are the property of AnonListen (Vitalii Rovinskyi) and are not covered by the open-source licenses.
 
-**You own your copy of Hollow.** Once you download Hollow, it is yours. We cannot remotely disable, lock, or revoke your installed copy of the application. Your data, your keys, and your messages belong to you — not to us.
+**You own your copy of Hollow.** Once you download Hollow, it is yours. We cannot remotely disable, lock, or revoke your installed copy of the application. Your data, your keys, and your messages belong to you, not to us.
 
 ## 7. Privacy
 
@@ -80,9 +80,9 @@ We will make reasonable efforts to maintain service availability but do not guar
 
 ### Fair use limits
 
-To keep the shared relay infrastructure available to everyone, we enforce technical fair-use limits per IP address. These currently include a daily data budget (10 GB per day, counting traffic routed through the relay in both directions) and caps on simultaneous connections. Exceeding a limit results in disconnection from the relay until the limit resets — it never affects your account, your keys, or your data. In practice, only heavy file traffic routed through the relay can approach this budget: ordinary messaging uses a negligible amount, voice and video calls travel peer-to-peer without touching it, and large file transfers are designed to travel peer-to-peer and do not consume the relay budget either. We may adjust these limits over time to preserve service quality, and the current usage is visible in the application.
+To keep the shared relay infrastructure available to everyone, we enforce technical fair-use limits per IP address. These currently include a daily data budget (10 GB per day, counting traffic routed through the relay in both directions) and caps on simultaneous connections. Exceeding a limit results in disconnection from the relay until the limit resets; it never affects your account, your keys, or your data. In practice, only heavy file traffic routed through the relay can approach this budget: ordinary messaging uses a negligible amount, voice and video calls travel peer-to-peer without touching it, and large file transfers are designed to travel peer-to-peer and do not consume the relay budget either. We may adjust these limits over time to preserve service quality, and the current usage is visible in the application.
 
-During limited-access phases, access to our hosted relay may additionally require an access key, which we may revoke for violations of these Terms. Revocation or disconnection applies only to our hosted infrastructure — never to your copy of the application, your identity, or your data. You are always free to self-host your own relay; the software is open source.
+During limited-access phases, access to our hosted relay may additionally require an access key, which we may revoke for violations of these Terms. Revocation or disconnection applies only to our hosted infrastructure, never to your copy of the application, your identity, or your data. You are always free to self-host your own relay; the software is open source.
 
 ## 9. Disclaimers
 
@@ -109,7 +109,7 @@ You agree to indemnify, defend, and hold harmless AnonListen from any claims, da
 
 ## 12. Stopping use
 
-You may stop using Hollow at any time by deleting the application from your device. This removes all locally stored data. No account deletion request is needed — there is no account on our servers to delete.
+You may stop using Hollow at any time by deleting the application from your device. This removes all locally stored data. No account deletion request is needed; there is no account on our servers to delete.
 
 ## 13. Governing law and disputes
 

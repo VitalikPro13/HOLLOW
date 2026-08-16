@@ -9,6 +9,7 @@ import 'package:hollow/src/core/providers/notification_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/services/desktop_notification_service.dart';
+import 'package:hollow/src/core/services/sound_service.dart';
 import 'package:hollow/src/core/services/push_notification_service.dart'
     as push;
 import 'package:hollow/src/rust/api/network.dart' as network_api;
@@ -307,6 +308,10 @@ class SystemNotificationNotifier
 
   // ── In-app overlay cards ──────────────────────────────────────
 
+  /// In-app cards are the ONE surface that had no sound of its own: the native
+  /// toast path already rings with the OS notification sound, so hooking the
+  /// Hollow sound in here (rather than at the top of notifyDm/notifyChannel)
+  /// keeps the one-surface-one-sound-per-message property (#55).
   void _addMessage({
     required String sourceKey,
     required String title,
@@ -317,6 +322,7 @@ class SystemNotificationNotifier
     String? peerId,
     required NotificationMessage message,
   }) {
+    SoundService.instance.play(HollowSound.notification);
     final cards = List<NotificationCard>.from(state);
     final existingIndex =
         cards.indexWhere((c) => c.sourceKey == sourceKey);

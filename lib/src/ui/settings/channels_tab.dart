@@ -139,7 +139,7 @@ class _ChannelsTabState extends ConsumerState<ChannelsTab> {
           }
 
           return HollowDialog(
-            title: 'New Channel',
+            title: 'New channel',
             content: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
@@ -193,7 +193,7 @@ class _ChannelsTabState extends ConsumerState<ChannelsTab> {
     showHollowDialog(
       context: context,
       builder: (ctx) => HollowDialog(
-        title: 'New Category',
+        title: 'New category',
         content: HollowTextField(
           controller: controller,
           hintText: 'Category name',
@@ -236,7 +236,7 @@ class _ChannelsTabState extends ConsumerState<ChannelsTab> {
     showHollowDialog(
       context: context,
       builder: (ctx) => HollowDialog(
-        title: 'Rename Category',
+        title: 'Rename category',
         content: HollowTextField(
           controller: controller,
           hintText: 'Category name',
@@ -456,7 +456,7 @@ class _ChannelsTabState extends ConsumerState<ChannelsTab> {
       HollowToast.show(
           context,
           'Applied to ${targetIds.length - failed.length} of '
-          '${targetIds.length} channels — failed: '
+          '${targetIds.length} channels. Failed: '
           '${failed.map((n) => '#$n').join(', ')}',
           type: HollowToastType.error);
     }
@@ -515,7 +515,7 @@ class _ChannelsTabState extends ConsumerState<ChannelsTab> {
     showHollowDialog(
       context: context,
       builder: (ctx) => HollowDialog(
-        title: 'Rename Channel',
+        title: 'Rename channel',
         content: HollowTextField(
           controller: controller,
           hintText: 'Channel name',
@@ -552,7 +552,7 @@ class _ChannelsTabState extends ConsumerState<ChannelsTab> {
     showHollowDialog(
       context: context,
       builder: (ctx) => HollowDialog(
-        title: 'Delete Channel',
+        title: 'Delete channel',
         content: Text(
           'Are you sure you want to delete #$name? This cannot be undone.',
           style: HollowTypography.body,
@@ -950,7 +950,7 @@ class _ChannelsTabState extends ConsumerState<ChannelsTab> {
                     onPressed: _save,
                     expand: true,
                     icon: const Icon(LucideIcons.save, size: 16),
-                    child: const Text('Save Layout'),
+                    child: const Text('Save layout'),
                   ),
                 ),
               ],
@@ -1214,7 +1214,7 @@ class _ChannelRow extends StatelessWidget {
                     const SizedBox(width: 4),
                     HollowTooltip(
                       message: mediaOnly
-                          ? 'Media-only is on — only images, GIFs and videos can be posted'
+                          ? 'Media-only is on: only images, GIFs and videos can be posted'
                           : 'Restrict this channel to images, GIFs and videos only',
                       child: HollowPressable(
                         onTap: onMediaOnlyToggled,
@@ -1237,8 +1237,8 @@ class _ChannelRow extends StatelessWidget {
                     const SizedBox(width: 4),
                     HollowTooltip(
                       message: isPublic
-                          ? 'Public — anyone can read this channel without joining the server'
-                          : 'Publish this channel — anyone will be able to read it without joining',
+                          ? 'Public: anyone can read this channel without joining the server'
+                          : 'Publish this channel so anyone can read it without joining',
                       child: HollowPressable(
                         onTap: onPublicToggled,
                         semanticLabel: isPublic

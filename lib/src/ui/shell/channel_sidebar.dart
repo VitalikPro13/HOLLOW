@@ -1298,7 +1298,7 @@ class _ChannelTile extends ConsumerWidget {
             // channels are readable by anyone via the public browser.
             if (channel.isPublic) ...[
               HollowTooltip(
-                message: 'Public — anyone can read this channel without joining',
+                message: 'Public: anyone can read this channel without joining',
                 child: Icon(
                   LucideIcons.globe,
                   size: 12,

@@ -284,7 +284,7 @@ class _SecurityTabState extends State<SecurityTab> {
       );
 
   Future<void> _enablePassword() async {
-    final passphrase = await _askPassphrase(context, 'Set App Password', confirm: true, buttonLabel: 'Set Password');
+    final passphrase = await _askPassphrase(context, 'Set app password', confirm: true, buttonLabel: 'Set password');
     if (passphrase == null || !mounted) return;
 
     await _runProtectionAction('enablePassword', () async {
@@ -313,10 +313,10 @@ class _SecurityTabState extends State<SecurityTab> {
   }
 
   Future<void> _changePassword() async {
-    final oldPass = await _askPassphrase(context, 'Current Password', buttonLabel: 'Next');
+    final oldPass = await _askPassphrase(context, 'Current password', buttonLabel: 'Next');
     if (oldPass == null || !mounted) return;
 
-    final newPass = await _askPassphrase(context, 'New Password', confirm: true, buttonLabel: 'Change Password');
+    final newPass = await _askPassphrase(context, 'New password', confirm: true, buttonLabel: 'Change password');
     if (newPass == null || !mounted) return;
 
     await _runProtectionAction('changePassword', () async {
@@ -332,7 +332,7 @@ class _SecurityTabState extends State<SecurityTab> {
   }
 
   Future<void> _removePassword() async {
-    final pass = await _askPassphrase(context, 'Enter Current Password', buttonLabel: 'Remove Password');
+    final pass = await _askPassphrase(context, 'Enter current password', buttonLabel: 'Remove password');
     if (pass == null || !mounted) return;
 
     await _runProtectionAction('removePassword', () async {
@@ -486,7 +486,7 @@ class _SecurityTabState extends State<SecurityTab> {
           icon: _busyAction == 'enablePassword'
               ? _busySpinner(hollow.textOnAccent)
               : const Icon(LucideIcons.lock, size: 16),
-          child: const Text('Set Password'),
+          child: const Text('Set password'),
         ),
 
       if (!_hasPassword && _osKeychainAvailable)
@@ -545,8 +545,8 @@ class _SecurityTabState extends State<SecurityTab> {
                   const SizedBox(height: 2),
                   Text(
                     _hasOsKeychain
-                        ? 'Off — the app opens silently on this device, but your identity file is still encrypted.'
-                        : 'On — password is required every time you open Hollow.',
+                        ? 'Off: the app opens silently on this device, but your identity file is still encrypted.'
+                        : 'On: password is required every time you open Hollow.',
                     style: HollowTypography.caption.copyWith(
                       color: hollow.textSecondary, fontSize: 11,
                     ),
@@ -570,7 +570,7 @@ class _SecurityTabState extends State<SecurityTab> {
             icon: _busyAction == 'changePassword'
                 ? _busySpinner(hollow.accent)
                 : const Icon(LucideIcons.keyRound, size: 16),
-            child: const Text('Change Password'),
+            child: const Text('Change password'),
           ),
           const SizedBox(width: HollowSpacing.sm),
           HollowButton.ghost(
@@ -578,7 +578,7 @@ class _SecurityTabState extends State<SecurityTab> {
             icon: _busyAction == 'removePassword'
                 ? _busySpinner(hollow.accent)
                 : const Icon(LucideIcons.shieldOff, size: 16),
-            child: const Text('Remove Password'),
+            child: const Text('Remove password'),
           ),
         ],
       ),
@@ -609,7 +609,7 @@ class _SecurityTabState extends State<SecurityTab> {
               child: Text(
                 'Portable mode: device protection is tied to THIS computer. '
                 'If you move the app folder to another machine, the identity '
-                'will not unlock there — use password protection instead.',
+                'will not unlock there. Use password protection instead.',
                 style: HollowTypography.caption.copyWith(
                   color: hollow.textSecondary, fontSize: 11, height: 1.4,
                 ),
@@ -638,7 +638,7 @@ class _SecurityTabState extends State<SecurityTab> {
           icon: _busyAction == 'disableKeychain'
               ? _busySpinner(hollow.accent)
               : const Icon(LucideIcons.shieldOff, size: 16),
-          child: const Text('Remove Device Protection'),
+          child: const Text('Remove device protection'),
         ),
       ] else ...[
         HollowButton.outline(
@@ -646,7 +646,7 @@ class _SecurityTabState extends State<SecurityTab> {
           icon: _busyAction == 'enableKeychain'
               ? _busySpinner(hollow.accent)
               : const Icon(LucideIcons.monitor, size: 16),
-          child: const Text('Enable Device Protection'),
+          child: const Text('Enable device protection'),
         ),
       ],
       if (Platform.isWindows) ...[

@@ -211,8 +211,8 @@ class _ConferenceDashboardState extends ConsumerState<ConferenceDashboard> {
                   .copyWith(color: hollow.textSecondary)),
           const SizedBox(height: HollowSpacing.sm),
           Text(
-            'Create a room and share its link to meet anyone — '
-            'no server or friendship needed.',
+            'Create a room and share its link to meet anyone. '
+            'No server or friendship needed.',
             style: HollowTypography.bodySmall
                 .copyWith(color: hollow.textSecondary),
             textAlign: TextAlign.center,
@@ -530,7 +530,7 @@ class _RoomFormDialogState extends ConsumerState<_RoomFormDialog> {
           HollowTextField(
             controller: _codeController,
             hintText: _isEdit && hasCode && !_removeCode
-                ? 'Unchanged — type to replace'
+                ? 'Unchanged. Type to replace'
                 : 'Leave empty for none',
             maxLength: 64,
             showCounter: false,

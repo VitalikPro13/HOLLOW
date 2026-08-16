@@ -431,7 +431,7 @@ class _ScreenShareDialogState extends State<_ScreenShareDialog> {
                           const SizedBox(height: HollowSpacing.xs),
                           Text(
                             'On Wayland, audio is captured system-wide '
-                            '(Hollow\'s own audio excluded) — even when the '
+                            '(Hollow\'s own audio excluded), even when the '
                             'portal shares a single window.',
                             style: HollowTypography.caption.copyWith(
                               color: hollow.textTertiary,
@@ -443,7 +443,7 @@ class _ScreenShareDialogState extends State<_ScreenShareDialog> {
                           const SizedBox(height: HollowSpacing.xs),
                           Text(
                             'Audio sharing needs macOS 13.0 or later. '
-                            'You\'re on ${MacOsScreenAudioSupport.versionLabel ?? 'an older version'} — '
+                            'You\'re on ${MacOsScreenAudioSupport.versionLabel ?? 'an older version'}. '
                             'Apple exposes no system-audio API before 13.0. '
                             'Update to 13.0+ to share audio. '
                             'Video sharing still works.',
@@ -580,8 +580,8 @@ class _ScreenShareDialogState extends State<_ScreenShareDialog> {
                     ),
                     const SizedBox(height: 2),
                     Text(
-                      'Press Share and your desktop opens its own dialog — '
-                      'pick a whole screen or a single window there.',
+                      'Press Share and your desktop opens its own dialog. '
+                      'Pick a whole screen or a single window there.',
                       style: HollowTypography.caption.copyWith(
                         color: hollow.textTertiary,
                         fontSize: 11,

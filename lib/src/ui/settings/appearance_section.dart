@@ -6,6 +6,7 @@ import 'package:hollow/src/core/providers/accent_color_provider.dart';
 import 'package:hollow/src/core/providers/background_provider.dart';
 import 'package:hollow/src/core/providers/layout_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
+import 'package:hollow/src/core/providers/split_view_provider.dart';
 import 'package:hollow/src/core/providers/theme_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
@@ -28,9 +29,7 @@ class AppearanceSettingsView extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
     final isDark = ref.watch(themeModeProvider) == ThemeMode.dark;
-    final dockMode =
-        (ref.watch(layoutModeProvider).valueOrNull ?? LayoutMode.dock) ==
-            LayoutMode.dock;
+    final layoutMode = ref.watch(layoutModeProvider);
     final invisible = ref.watch(invisibleModeProvider);
     final isDesktop = Platform.isWindows || Platform.isLinux || Platform.isMacOS;
     final tray = ref.watch(minimizeToTrayProvider).valueOrNull ?? true;
@@ -40,7 +39,7 @@ class AppearanceSettingsView extends ConsumerWidget {
         children: [
           SettingsToggleRow(
             icon: isDark ? LucideIcons.moon : LucideIcons.sun,
-            label: 'Dark Mode',
+            label: 'Dark mode',
             value: isDark,
             onChanged: (v) => ref
                 .read(themeModeProvider.notifier)
@@ -57,19 +56,56 @@ class AppearanceSettingsView extends ConsumerWidget {
       SettingsCard(
         title: 'Layout',
         children: [
-          SettingsToggleRow(
-            icon: LucideIcons.layoutDashboard,
-            label: 'Dock Mode',
-            subtitle: 'Bottom bar with friends strip',
-            value: dockMode,
-            onChanged: (v) => ref.read(layoutModeProvider.notifier).setMode(
-                  v ? LayoutMode.dock : LayoutMode.classic,
+          // A two-way switch, not an on/off toggle: "Dock Mode off" gave no
+          // hint that what you land in is the familiar Discord/Slack shell.
+          Row(
+            children: [
+              Icon(LucideIcons.layoutDashboard,
+                  size: 16, color: hollow.textSecondary),
+              const SizedBox(width: HollowSpacing.sm),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Window layout',
+                      style: HollowTypography.body
+                          .copyWith(color: hollow.textPrimary),
+                    ),
+                    Text(
+                      layoutMode == LayoutMode.dock
+                          ? 'Dock: friends strip on top, dock bar at the bottom'
+                          : 'Classic: server strip, channels, chat, members',
+                      style: HollowTypography.caption.copyWith(
+                        color: hollow.textSecondary,
+                        fontSize: 10,
+                      ),
+                    ),
+                  ],
                 ),
+              ),
+            ],
+          ),
+          const SizedBox(height: HollowSpacing.md),
+          TriStateSegment<LayoutMode>(
+            value: layoutMode,
+            options: const [
+              (LayoutMode.dock, 'Dock'),
+              (LayoutMode.classic, 'Classic'),
+            ],
+            onChanged: (m) {
+              // Classic has no split view — leaving a split open would strand
+              // the right pane invisibly until the user switched back.
+              if (m == LayoutMode.classic) {
+                ref.read(splitViewProvider.notifier).closeSplit();
+              }
+              ref.read(layoutModeProvider.notifier).setMode(m);
+            },
           ),
           const SizedBox(height: HollowSpacing.md),
           SettingsToggleRow(
             icon: LucideIcons.eyeOff,
-            label: 'Appear Invisible',
+            label: 'Appear invisible',
             subtitle: 'Show as offline to other users',
             value: invisible,
             onChanged: (v) =>
@@ -79,7 +115,7 @@ class AppearanceSettingsView extends ConsumerWidget {
             const SizedBox(height: HollowSpacing.md),
             SettingsToggleRow(
               icon: LucideIcons.minimize2,
-              label: 'Minimize to Tray',
+              label: 'Minimize to tray',
               subtitle: 'Keep running in the background when closed',
               value: tray,
               onChanged: (v) =>
@@ -108,7 +144,7 @@ class _BackgroundPicker extends ConsumerWidget {
       context: context,
       imageBytes: raw,
       aspectRatio: 16.0 / 9.0,
-      title: 'Crop Background',
+      title: 'Crop background',
     );
     if (cropped != null) {
       ref.read(backgroundProvider.notifier).setImage(cropped);
@@ -138,7 +174,7 @@ class _BackgroundPicker extends ConsumerWidget {
             HollowButton.ghost(
               onPressed: () => _pickBackground(context, ref),
               compact: true,
-              child: Text(bg.hasBackground ? 'Change' : 'Set Image'),
+              child: Text(bg.hasBackground ? 'Change' : 'Set image'),
             ),
             if (bg.hasBackground) ...[
               const SizedBox(width: HollowSpacing.xs),
@@ -234,7 +270,7 @@ class _AccentColorPickerState extends ConsumerState<_AccentColorPicker> {
             Icon(LucideIcons.palette, size: 14, color: hollow.textSecondary),
             const SizedBox(width: HollowSpacing.sm),
             Text(
-              'Accent Color',
+              'Accent color',
               style: HollowTypography.body.copyWith(
                 color: hollow.textPrimary,
                 fontSize: 13,

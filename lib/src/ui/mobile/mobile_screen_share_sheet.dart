@@ -62,10 +62,10 @@ class _ScreenShareSheetState extends State<_ScreenShareSheet> {
           'still shares, and your mic stays on so you can talk.';
     }
     if (Platform.isAndroid) {
-      return 'Your mic stays on — you can talk over the shared audio. '
+      return 'Your mic stays on, so you can talk over the shared audio. '
           'Apps that block capture (some DRM/streaming apps) stay silent.';
     }
-    return 'Your mic stays on — you can talk over the shared audio. '
+    return 'Your mic stays on, so you can talk over the shared audio. '
         'Pick Hollow in the broadcast menu and tap Start Broadcast to begin.';
   }
 

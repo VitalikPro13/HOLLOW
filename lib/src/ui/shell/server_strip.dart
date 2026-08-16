@@ -3,6 +3,9 @@ import 'package:hollow/src/ui/components/overlay_anchor.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/color_utils.dart';
 import 'package:hollow/src/core/providers/archive_provider.dart';
+import 'package:hollow/src/core/providers/conference_provider.dart';
+import 'package:hollow/src/core/providers/guest_provider.dart';
+import 'package:hollow/src/core/providers/help_panel_provider.dart';
 import 'package:hollow/src/core/providers/share_tab_provider.dart';
 import 'package:hollow/src/core/providers/shell_tab.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
@@ -51,6 +54,9 @@ class _ServerStripState extends ConsumerState<ServerStrip> {
     final dmUnreadTotal = ref.watch(dmUnreadBadgeProvider);
     final archiveOpen = ref.watch(archiveTabOpenProvider);
     final shareOpen = ref.watch(shareTabOpenProvider);
+    final guestOpen = ref.watch(guestTabOpenProvider);
+    final conferencesOpen = ref.watch(conferenceTabOpenProvider);
+    final helpOpen = ref.watch(helpPanelOpenProvider);
     // Home is only "selected" when nothing is covering the chat area — any
     // centre tab counts, including the two this strip has no button for.
     final homeSelected =
@@ -136,6 +142,68 @@ class _ServerStripState extends ConsumerState<ServerStrip> {
       ),
     );
 
+    // Browse public channels, Conferences and Help live only on the dock's
+    // FriendsBar/BottomBar, so Classic mode had no way to reach any of them —
+    // this strip is Classic's only permanent rail (#58 sweep).
+    Widget guestIcon = _ServerIconWithIndicator(
+      isSelected: guestOpen,
+      child: _ServerIcon(
+        isSelected: guestOpen,
+        backgroundColor: hollow.elevated,
+        tooltip: 'Browse Public Channels',
+        onTap: () {
+          if (guestOpen) {
+            setShellTab(ref.read, null);
+            return;
+          }
+          setShellTab(ref.read, ShellTab.guest);
+          ref.read(selectedServerProvider.notifier).state = null;
+          ref.read(channelListProvider.notifier).clear();
+          ref.read(selectedChannelProvider.notifier).state = null;
+          ref.read(selectedPeerProvider.notifier).state = null;
+          ref.read(serverSettingsOpenProvider.notifier).state = false;
+        },
+        child: Icon(
+          LucideIcons.globe,
+          color: guestOpen ? hollow.accent : hollow.textSecondary,
+          size: 20,
+        ),
+      ),
+    );
+
+    Widget conferenceIcon = _ServerIconWithIndicator(
+      isSelected: conferencesOpen,
+      child: _ServerIcon(
+        isSelected: conferencesOpen,
+        backgroundColor: hollow.elevated,
+        tooltip: 'Conferences',
+        onTap: () => conferencesOpen
+            ? setShellTab(ref.read, null)
+            : ref.read(conferenceProvider.notifier).openTab(),
+        child: Icon(
+          LucideIcons.video,
+          color: conferencesOpen ? hollow.accent : hollow.textSecondary,
+          size: 20,
+        ),
+      ),
+    );
+
+    Widget helpIcon = Padding(
+      padding: const EdgeInsets.only(bottom: HollowSpacing.xs),
+      child: _ServerIcon(
+        isSelected: helpOpen,
+        backgroundColor: hollow.elevated,
+        tooltip: 'Help',
+        onTap: () =>
+            ref.read(helpPanelOpenProvider.notifier).state = !helpOpen,
+        child: Icon(
+          LucideIcons.circleHelp,
+          color: helpOpen ? hollow.accent : hollow.textSecondary,
+          size: 20,
+        ),
+      ),
+    );
+
     // Short divider
     Widget divider = Container(
       width: 32,
@@ -181,9 +249,13 @@ class _ServerStripState extends ConsumerState<ServerStrip> {
           const SizedBox(height: HollowSpacing.md),
           homeIcon,
           const SizedBox(height: HollowSpacing.xs),
+          guestIcon,
+          const SizedBox(height: HollowSpacing.xs),
           shareIcon,
           const SizedBox(height: HollowSpacing.xs),
           archiveIcon,
+          const SizedBox(height: HollowSpacing.xs),
+          conferenceIcon,
           const SizedBox(height: HollowSpacing.sm),
           divider,
           const SizedBox(height: HollowSpacing.sm),
@@ -250,6 +322,7 @@ class _ServerStripState extends ConsumerState<ServerStrip> {
             ),
           ),
 
+          helpIcon,
           addButton,
         ],
       ),

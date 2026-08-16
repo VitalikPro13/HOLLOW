@@ -57,11 +57,16 @@ File: `lib/src/ui/shell/server_strip.dart`
 
 1. `SizedBox(height: HollowSpacing.md)` — top padding.
 2. **Home icon** — `_ServerIconWithIndicator` wrapping `_ServerIcon`. Selected when `selectedServerId == null && !ref.watch(anyShellTabOpenProvider)` — ANY centre tab counts, including the guest/conference ones this strip has no button for. Shows DM unread count when a server is selected (not when already on home). Background: `hollow.accent`. Displays bold `'H'` text. Tap: `setShellTab(ref.read, null)` + clears `selectedServerProvider`, `channelListProvider`, `selectedChannelProvider`, `serverSettingsOpenProvider`.
-3. **Share icon** — `_ServerIconWithIndicator` + `_ServerIcon`. Selected when `shareOpen`. Background: `hollow.elevated`. Displays `LucideIcons.share2` (accent when selected, textSecondary otherwise). Tap TOGGLES: open → `setShellTab(null)`; closed → `setShellTab(ShellTab.share)` + clears server/channel/settings state.
-4. **Archive icon** — same pattern, and toggles the same way. Selected when `archiveOpen`. Displays `LucideIcons.archive`. When opening: invalidates `archiveDmListProvider` and `archiveChannelListProvider`, resets archive selection providers, `setShellTab(ShellTab.archive)`, clears server/channel/settings state.
-5. **Divider** — 32px wide, 2px tall, `hollow.border` color, rounded.
-6. **Server icon list** — `Expanded` containing `ListView.builder`. Items interleaved with reorder gaps: `gap0, item0, gap1, item1, ..., gapN`. `itemCount = stripLayout.length * 2 + 1`. Even raw indices are `_VerticalReorderGap` widgets; odd raw indices are server or folder icons. Each item gets `Padding(bottom: HollowSpacing.xs)`.
-7. **Add button** — `_ServerIcon` with `LucideIcons.plus` in accent color, tooltip `'Create a server'`. Tap: calls `showCreateServerDialog(context)`. Has bottom padding `HollowSpacing.md`.
+3. **Browse Public Channels icon**: `_ServerIconWithIndicator` + `_ServerIcon`, `LucideIcons.globe`. Selected when `guestTabOpenProvider`. Tap TOGGLES: open → `setShellTab(null)`; closed → `setShellTab(ShellTab.guest)` + clears server/channel/peer/settings state.
+4. **Share icon** — `_ServerIconWithIndicator` + `_ServerIcon`. Selected when `shareOpen`. Background: `hollow.elevated`. Displays `LucideIcons.share2` (accent when selected, textSecondary otherwise). Tap TOGGLES: open → `setShellTab(null)`; closed → `setShellTab(ShellTab.share)` + clears server/channel/settings state.
+5. **Archive icon** — same pattern, and toggles the same way. Selected when `archiveOpen`. Displays `LucideIcons.archive`. When opening: invalidates `archiveDmListProvider` and `archiveChannelListProvider`, resets archive selection providers, `setShellTab(ShellTab.archive)`, clears server/channel/settings state.
+6. **Conferences icon**: `LucideIcons.video`. Selected when `conferenceTabOpenProvider`. Tap TOGGLES: open → `setShellTab(null)`; closed → `conferenceProvider.notifier.openTab()`.
+7. **Divider** — 32px wide, 2px tall, `hollow.border` color, rounded.
+8. **Server icon list** — `Expanded` containing `ListView.builder`. Items interleaved with reorder gaps: `gap0, item0, gap1, item1, ..., gapN`. `itemCount = stripLayout.length * 2 + 1`. Even raw indices are `_VerticalReorderGap` widgets; odd raw indices are server or folder icons. Each item gets `Padding(bottom: HollowSpacing.xs)`.
+9. **Help icon**: `_ServerIcon` with `LucideIcons.circleHelp`, accent when `helpPanelOpenProvider`. Tap flips that provider. Not a shell tab, so no `_ServerIconWithIndicator` pill.
+10. **Add button** — `_ServerIcon` with `LucideIcons.plus` in accent color, tooltip `'Create a server'`. Tap: calls `showCreateServerDialog(context)`. Has bottom padding `HollowSpacing.md`.
+
+Items 3, 6 and 9 exist here because this strip is Classic mode's ONLY permanent rail: Browse Public Channels, Conferences and Help otherwise live only on the dock's `FriendsBar`/`BottomBar`, which Classic does not render, so in Classic they were unreachable (issue #58 sweep). The two centre tabs among them go through `setShellTab`, same as Share and Archive.
 
 ### Server Icon Rendering (_buildServerIcon)
 

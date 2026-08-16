@@ -247,7 +247,7 @@ void main() {
                     hollow: HollowTheme.of(context),
                     icon: LucideIcons.gauge,
                     // The real pair from the relay card in the report.
-                    label: 'Daily Relay Data',
+                    label: 'Daily relay data',
                     value: '480 / 7940 MB',
                     progress: 0.5,
                   ),
@@ -278,7 +278,7 @@ void main() {
       // The number is the thing you came to read — it must never be the part
       // that gets truncated.
       expect(find.text('480 / 7940 MB'), findsOneWidget);
-      final label = tester.widget<Text>(find.text('Daily Relay Data'));
+      final label = tester.widget<Text>(find.text('Daily relay data'));
       expect(label.overflow, TextOverflow.ellipsis);
     });
   });

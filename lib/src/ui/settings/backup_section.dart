@@ -29,11 +29,11 @@ class _BackupCategoryViewState extends State<BackupCategoryView> {
   Future<void> _exportBackup() async {
     if (_exporting) return;
     final passphrase =
-        await askPassphraseDialog(context, 'Set Backup Passphrase', confirm: true);
+        await askPassphraseDialog(context, 'Set backup passphrase', confirm: true);
     if (passphrase == null || !mounted) return;
 
     final result = await FilePicker.platform.saveFile(
-      dialogTitle: 'Export Backup',
+      dialogTitle: 'Export backup',
       fileName: 'hollow-backup.hollow',
       type: FileType.custom,
       allowedExtensions: ['hollow'],
@@ -126,7 +126,7 @@ class _BackupCategoryViewState extends State<BackupCategoryView> {
                             strokeWidth: 2, color: hollow.textSecondary),
                       )
                     : const Icon(LucideIcons.download, size: 16),
-                child: Text(_exporting ? 'Exporting…' : 'Export Backup'),
+                child: Text(_exporting ? 'Exporting…' : 'Export backup'),
               ),
             ],
           ),

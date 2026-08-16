@@ -271,7 +271,7 @@ class _MockBackgroundNotifier extends BackgroundNotifier {
 
 class _MockLayoutModeNotifier extends LayoutModeNotifier {
   @override
-  Future<LayoutMode> build() async => LayoutMode.dock;
+  LayoutMode build() => LayoutMode.dock;
 }
 
 class _MockReduceMotionNotifier extends ReduceMotionNotifier {

@@ -258,8 +258,8 @@ class _CleanupMenu extends ConsumerWidget {
             final ok = await _confirm(
               context,
               'Clear all downloaded files?',
-              'Deletes every downloaded file from disk. Messages stay — files '
-                  'can be downloaded again from peers later.',
+              'Deletes every downloaded file from disk. Messages stay, and '
+                  'files can be downloaded again from peers later.',
             );
             if (ok) await actions.clearAllFileBytes();
           case 'cache':
@@ -530,7 +530,7 @@ class _RowTrashButton extends StatelessWidget {
         context,
         'Clear "$label"?',
         'Deletes the downloaded files for this conversation from disk. '
-            'The messages stay — files can be downloaded again later.',
+            'The messages stay, and files can be downloaded again later.',
       );
       if (ok) await onConfirmed();
     }

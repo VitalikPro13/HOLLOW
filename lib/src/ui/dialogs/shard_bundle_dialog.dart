@@ -63,7 +63,7 @@ class _ExportShardsDialogState extends State<_ExportShardsDialog> {
       outputPath = '${tmpDir.path}/$fileName';
     } else {
       final savePath = await FilePicker.platform.saveFile(
-        dialogTitle: 'Save Shard Bundle',
+        dialogTitle: 'Save shard bundle',
         fileName: fileName,
         type: FileType.custom,
         allowedExtensions: ['hollow-shards'],
@@ -83,7 +83,7 @@ class _ExportShardsDialogState extends State<_ExportShardsDialog> {
       if (isMobile) {
         final bytes = await File(outputPath).readAsBytes();
         final savedPath = await FilePicker.platform.saveFile(
-          dialogTitle: 'Save Shard Bundle',
+          dialogTitle: 'Save shard bundle',
           fileName: fileName,
           bytes: bytes,
         );
@@ -103,7 +103,7 @@ class _ExportShardsDialogState extends State<_ExportShardsDialog> {
         Navigator.of(context).pop();
         HollowToast.show(
           context,
-          'Shards exported — $sizeStr',
+          'Shards exported: $sizeStr',
           type: HollowToastType.success,
         );
       }
@@ -211,7 +211,7 @@ class _ImportShardsDialogState extends State<_ImportShardsDialog> {
 
   Future<void> _pickAndImport() async {
     final picked = await FilePicker.platform.pickFiles(
-      dialogTitle: 'Select Shard Bundle',
+      dialogTitle: 'Select shard bundle',
       type: FileType.custom,
       allowedExtensions: ['hollow-shards'],
     );

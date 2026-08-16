@@ -148,7 +148,7 @@ class _ReportUserDialogState extends State<_ReportUserDialog> {
             ),
           const SizedBox(height: HollowSpacing.sm),
           Text(
-            'Reports are anonymous — the relay only keeps a per-category '
+            'Reports are anonymous: the relay only keeps a per-category '
             'counter, never who reported whom.',
             style: HollowTypography.caption.copyWith(
               color: hollow.textSecondary,

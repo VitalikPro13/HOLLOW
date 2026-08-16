@@ -345,7 +345,7 @@ class EventStreamNotifier extends Notifier<bool> {
         if (overlay != null) {
           HollowToast.show(
             overlay.context,
-            'Daily relay data limit reached — resets at midnight UTC.',
+            'Daily relay data limit reached. Resets at midnight UTC.',
             type: HollowToastType.error,
             overlayState: overlay,
           );
@@ -994,7 +994,7 @@ class EventStreamNotifier extends Notifier<bool> {
           HollowToast.show(
             overlayContext,
             error == 'not_found'
-                ? "Nickname '$nickname' not found — it may have expired"
+                ? "Nickname '$nickname' not found. It may have expired"
                 : "Couldn't look up '$nickname': $error",
             type: HollowToastType.error,
             overlayState: overlay,
@@ -1431,7 +1431,12 @@ class EventStreamNotifier extends Notifier<bool> {
           vcNotifier.preVcChannelId = null;
           vcNotifier.onLocalLeft();
         } else {
-          vcNotifier.onRemotePeerLeft(peerId);
+          final vcState = ref.read(voiceChannelProvider);
+          vcNotifier.onRemotePeerLeft(
+            peerId,
+            inOurChannel: vcState.currentServerId == serverId &&
+                vcState.currentChannelId == channelId,
+          );
         }
 
       case NetworkEvent_VoiceChannelSignal(

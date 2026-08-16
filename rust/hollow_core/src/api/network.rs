@@ -2781,7 +2781,7 @@ pub fn start_fetch_node(
         let node = get_node();
         let node_guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
         if node_guard.is_some() {
-            return Err("Full node is running — cannot start fetch node".to_string());
+            return Err("Full node is running, so the fetch node cannot start".to_string());
         }
     }
 
@@ -3215,7 +3215,7 @@ pub fn update_profile(
     });
     if let Some(bundle) = &showcase_assets_bundle {
         if bundle.len() > 1_500_000 {
-            return Err("Showcase assets too large (1.5MB max) — remove an artwork or game".into());
+            return Err("Showcase assets too large (1.5MB max). Remove an artwork or game".into());
         }
     }
 

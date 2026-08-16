@@ -86,7 +86,7 @@ class _ShowcaseEditorDialogState extends ConsumerState<_ShowcaseEditorDialog> {
       setState(() => _busy = false);
       HollowToast.show(
         context,
-        'Showcase is too large — shorten a text block',
+        'Showcase is too large. Shorten a text block',
         type: HollowToastType.error,
       );
       return;
@@ -113,7 +113,7 @@ class _ShowcaseEditorDialogState extends ConsumerState<_ShowcaseEditorDialog> {
       setState(() => _busy = false);
       HollowToast.show(
         context,
-        'Showcase images too large — remove an artwork or game',
+        'Showcase images too large. Remove an artwork or game',
         type: HollowToastType.error,
       );
       return;
@@ -129,7 +129,7 @@ class _ShowcaseEditorDialogState extends ConsumerState<_ShowcaseEditorDialog> {
       setState(() => _busy = false);
       HollowToast.show(
         context,
-        'Couldn\'t save the showcase — try again',
+        'Couldn\'t save the showcase. Try again',
         type: HollowToastType.error,
       );
       return;
@@ -385,7 +385,7 @@ class _ShowcaseEditorDialogState extends ConsumerState<_ShowcaseEditorDialog> {
         children: [
           Text(
             'Compose blocks on either side of your profile. Only what you '
-            'put here is shown — fill one side, both, or neither.',
+            'put here is shown. Fill one side, both, or neither.',
             style: HollowTypography.caption.copyWith(
               color: hollow.textSecondary,
               fontSize: 11,
@@ -486,7 +486,7 @@ class _SideEditor extends StatelessWidget {
         const SizedBox(height: HollowSpacing.xs),
         if (blocks.isEmpty)
           Text(
-            'Empty — this side isn\'t shown.',
+            'Empty. This side isn\'t shown.',
             style: HollowTypography.caption.copyWith(
               color: hollow.textSecondary.withValues(alpha: 0.6),
               fontSize: 11,
@@ -587,13 +587,13 @@ class _BlockRow extends StatelessWidget {
       ShowcaseBlockType.text => block.textTitle.isNotEmpty
           ? block.textTitle
           : (block.textBody.isNotEmpty ? block.textBody : 'Text block'),
-      ShowcaseBlockType.nowPlaying => 'Now Playing — ${block.gameName}',
-      ShowcaseBlockType.favoriteGame => 'Favorite — ${block.gameName}',
+      ShowcaseBlockType.nowPlaying => 'Now Playing: ${block.gameName}',
+      ShowcaseBlockType.favoriteGame => 'Favorite: ${block.gameName}',
       ShowcaseBlockType.gameShelf => block.shelfLabel.isNotEmpty
           ? '${block.shelfLabel} (${block.shelfGames.length} games)'
           : 'Game Shelf (${block.shelfGames.length} games)',
       ShowcaseBlockType.artwork => block.artworkCaption.isNotEmpty
-          ? 'Artwork — ${block.artworkCaption}'
+          ? 'Artwork: ${block.artworkCaption}'
           : 'Artwork',
       ShowcaseBlockType.unknown => 'Block from a newer version',
     };
@@ -662,15 +662,15 @@ Future<ShowcaseBlockType?> _showBlockPicker(BuildContext context) {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           _pickerOption(ctx, ShowcaseBlockType.nowPlaying, 'Now Playing',
-              'One game, present tense — set by you, never auto-detected'),
+              'One game, present tense. Set by you, never auto-detected'),
           _pickerOption(ctx, ShowcaseBlockType.favoriteGame, 'Favorite Game',
               'A big cover with your personal blurb'),
           _pickerOption(ctx, ShowcaseBlockType.gameShelf, 'Game Shelf',
-              'A cover grid — backlog, all-time favorites, whatever'),
+              'A cover grid: backlog, all-time favorites, whatever'),
           _pickerOption(ctx, ShowcaseBlockType.artwork, 'Artwork / GIF',
               'An image of your choosing'),
           _pickerOption(ctx, ShowcaseBlockType.text, 'Text',
-              'Free-form — bold, italic, code, spoilers, links'),
+              'Free-form: bold, italic, code, spoilers, links'),
         ],
       ),
       actions: [
@@ -902,7 +902,7 @@ class _GamePickerDialogState extends State<_GamePickerDialog> {
       if (!mounted) return;
       setState(() {
         _searching = false;
-        _error = 'Search unavailable — check your connection and try again';
+        _error = 'Search unavailable. Check your connection and try again';
       });
     }
   }

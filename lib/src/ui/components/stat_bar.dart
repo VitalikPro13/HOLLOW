@@ -45,7 +45,7 @@ class StatBar extends StatelessWidget {
             Icon(icon, size: 12, color: hollow.textSecondary),
             const SizedBox(width: HollowSpacing.xs),
             // The label yields, the value does not: "480 / 7940 MB" is the
-            // number you came to read, while "Daily Relay Data" can ellipse.
+            // number you came to read, while "Daily relay data" can ellipse.
             // Both were bare Texts either side of a Spacer, which overflowed
             // this card by 8px at EVERY window size — the Spacer claimed the
             // free space, so a long label + long value had nowhere to go.

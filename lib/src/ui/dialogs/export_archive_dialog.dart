@@ -94,7 +94,7 @@ class _ExportArchiveDialogContentState
       outputPath = '${tmpDir.path}/$fileName';
     } else {
       final savePath = await FilePicker.platform.saveFile(
-        dialogTitle: 'Save Archive',
+        dialogTitle: 'Save archive',
         fileName: fileName,
         type: FileType.custom,
         allowedExtensions: ['hollow-archive'],
@@ -134,7 +134,7 @@ class _ExportArchiveDialogContentState
       if (isMobile) {
         final bytes = await File(outputPath).readAsBytes();
         final savedPath = await FilePicker.platform.saveFile(
-          dialogTitle: 'Save Archive',
+          dialogTitle: 'Save archive',
           fileName: fileName,
           bytes: bytes,
         );
@@ -156,7 +156,7 @@ class _ExportArchiveDialogContentState
         Navigator.of(context).pop();
         HollowToast.show(
           context,
-          'Archive exported — $sizeStr',
+          'Archive exported: $sizeStr',
           type: HollowToastType.success,
         );
       }

@@ -27,6 +27,7 @@ import 'package:hollow/src/core/services/macos_version.dart';
 import 'package:hollow/src/core/services/mobile_screen_audio_capturer.dart';
 import 'package:hollow/src/core/services/screen_audio_receiver.dart';
 import 'package:hollow/src/core/services/share_audio_level.dart';
+import 'package:hollow/src/core/services/sound_service.dart';
 import 'package:hollow/src/core/services/screen_share_service.dart';
 import 'package:hollow/src/core/services/voice_channel_service.dart';
 import 'package:hollow/src/core/providers/webrtc_provider.dart';
@@ -775,6 +776,11 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       joinedAt: DateTime.now(),
     );
 
+    // You're in — the same cue peers hear when you arrive (#55). `duringCall`
+    // even though the mic isn't open yet: the clip outlives this line by half
+    // a second, by which point WebRTC owns the iOS audio session.
+    SoundService.instance.play(HollowSound.joinVoice, duringCall: true);
+
     // Group voice channels default to the loudspeaker on mobile.
     _setSpeakerRoute(true);
 
@@ -1099,6 +1105,13 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
   /// Called when a remote peer joins our current voice channel.
   Future<void> onRemotePeerJoined(String peerId) async {
     if (_service == null || !state.isInVoiceChannel) return;
+    // Someone walked into the channel you're sitting in — the cue the feature
+    // request was actually about ("we can't know what's happening right now").
+    // Deafened means silence, so channel chatter cues stay out; your own
+    // toggles still click, otherwise un-deafening feels like a dead button.
+    if (!state.isDeafened) {
+      SoundService.instance.play(HollowSound.joinVoice, duringCall: true);
+    }
     await _service!.onPeerJoinedMyChannel(peerId);
 
     // If we're sharing our screen, send state to the late joiner so they
@@ -1148,9 +1161,17 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     }
   }
 
-  /// Called when a remote peer leaves our current voice channel.
-  Future<void> onRemotePeerLeft(String peerId) async {
+  /// Called when a remote peer leaves a voice channel.
+  ///
+  /// [inOurChannel] is false when they left some OTHER channel of a server we
+  /// can see — the teardown below is a harmless no-op for a peer we were never
+  /// connected to, but the leave cue must not fire for a channel we aren't in.
+  Future<void> onRemotePeerLeft(String peerId,
+      {bool inOurChannel = true}) async {
     if (_service == null) return;
+    if (inOurChannel && state.isInVoiceChannel && !state.isDeafened) {
+      SoundService.instance.play(HollowSound.leaveVoice, duringCall: true);
+    }
     await _service!.onPeerLeftMyChannel(peerId);
     _watchers.remove(peerId);
     _watcherDisplays.remove(peerId);
@@ -1333,6 +1354,11 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
   /// run the teardown here. Detect the forced case by a non-null `_service`.
   void onLocalLeft() {
     _leaving = false;
+    // Covers both the user-initiated leave and a server-forced one — being
+    // kicked out of a channel is exactly when an audible cue earns its keep.
+    if (state.isInVoiceChannel) {
+      SoundService.instance.play(HollowSound.leaveVoice, duringCall: true);
+    }
     if (_service != null) {
       // Server-forced leave — the user-initiated path never ran. Hang up for real.
       // This callback is synchronous (a Rust event), so we can't await the
@@ -1402,12 +1428,14 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     if (_leaving) return;
     final newMuted = !state.isMuted;
     state = state.copyWith(isMuted: newMuted);
+    SoundService.instance.play(HollowSound.toggle, duringCall: true);
     _applyTxGate();
     _broadcastAudioState();
   }
 
   void toggleDeafen() {
     if (_leaving) return;
+    SoundService.instance.play(HollowSound.toggle, duringCall: true);
     final newDeafened = !state.isDeafened;
     state = state.copyWith(
       isMuted: newDeafened ? true : state.isMuted,
@@ -1561,6 +1589,9 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
         isCameraOn: true,
         isFrontCamera: _service!.useFrontCamera,
       );
+      // After startCamera, never before: a camera that failed to open must not
+      // sound like it turned on.
+      SoundService.instance.play(HollowSound.toggle, duringCall: true);
       _broadcastCameraState(true);
 
       // Camera on implies hands-off use — switch to the loudspeaker
@@ -1580,6 +1611,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       }
 
       state = state.copyWith(isCameraOn: false);
+      SoundService.instance.play(HollowSound.toggle, duringCall: true);
       _broadcastCameraState(false);
     }
 
@@ -1764,6 +1796,9 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       screenShareLabel: qualityLabel,
       focusedScreenSharePeerId: localPeerId,
     );
+    // Past every early return and the capture itself — this only fires once
+    // the share is genuinely live.
+    SoundService.instance.play(HollowSound.joinStream, duringCall: true);
 
     // Sharing WITH audio: freeze the mic servo for the whole share so
     // speaker bleed of the shared music can't re-calibrate the trim.
@@ -1846,6 +1881,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     if (!state.isScreenSharing || _stoppingScreenShare) return;
     _stoppingScreenShare = true;
     debugPrint('[HOLLOW-VC] Stopping screen share');
+    SoundService.instance.play(HollowSound.leaveStream, duringCall: true);
     ShareAudioLevel.setSendingShareAudio(false);
 
     try {
@@ -2394,6 +2430,15 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
 
     final sharing = Map.of(state.peerScreenSharing);
     final labels = Map.of(state.peerScreenShareLabels);
+    // Only on a real edge: a late-joiner catch-up screen_state re-announces a
+    // share that was already up, and that must not sound like a new one.
+    final wasSharing = sharing[peerId] ?? false;
+    if (enabled != wasSharing && !state.isDeafened) {
+      SoundService.instance.play(
+        enabled ? HollowSound.joinStream : HollowSound.leaveStream,
+        duringCall: true,
+      );
+    }
     if (enabled) {
       // Badge only — opt-in watching (issue #38) means a new share must
       // never steal focus or flip the view; the user presses Watch.

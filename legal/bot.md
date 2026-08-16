@@ -12,8 +12,8 @@ pasted a link to your site into a chat message.
 ## What it does
 
 When a Hollow user types a URL into the message box, their app fetches that
-page once and reads its OpenGraph tags — title, description, and the preview
-image — so the message can carry a preview card.
+page once and reads its OpenGraph tags (title, description, and the preview
+image) so the message can carry a preview card.
 
 That is the whole behaviour:
 
@@ -31,7 +31,7 @@ That is the whole behaviour:
 
 The user's own device, not our infrastructure. Hollow is distributed and there
 is no server in the middle fetching pages on anyone's behalf, so there is no IP
-range to block — the address in your log belongs to a person who was reading
+range to block. The address in your log belongs to a person who was reading
 your page.
 
 If you want to opt out, block on the User-Agent string. HollowBot sends it on

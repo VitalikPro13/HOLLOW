@@ -63,9 +63,9 @@ class _AutoDownloadSlider extends ConsumerWidget {
     final off = threshold == 0;
     return SettingsLabeledSlider(
       icon: LucideIcons.download,
-      title: 'Auto-Download Threshold',
+      title: 'Auto-download threshold',
       subtitle: off
-          ? 'Off — files show a download button instead (voice messages still '
+          ? 'Off: files show a download button instead (voice messages still '
               'play automatically)'
           : 'Files up to $threshold MB auto-download',
       value: off ? 0 : threshold.toDouble().clamp(34, 2048),
@@ -94,9 +94,9 @@ class _FilesCacheCapSlider extends ConsumerWidget {
     final cap = ref.watch(filesCacheCapProvider).valueOrNull ?? 5120;
     return SettingsLabeledSlider(
       icon: LucideIcons.download,
-      title: 'Downloaded Files Limit',
+      title: 'Downloaded files limit',
       subtitle:
-          '${(cap / 1024).toStringAsFixed(1)} GB — oldest downloaded files are evicted when this is exceeded (messages stay re-downloadable)',
+          '${(cap / 1024).toStringAsFixed(1)} GB: oldest downloaded files are evicted when this is exceeded (messages stay re-downloadable)',
       value: cap.toDouble().clamp(512, 51200),
       min: 512,
       max: 51200,
@@ -119,9 +119,9 @@ class _VaultCacheCapSlider extends ConsumerWidget {
     final cap = ref.watch(vaultCacheCapProvider).valueOrNull ?? 1024;
     return SettingsLabeledSlider(
       icon: LucideIcons.hardDrive,
-      title: 'Vault Cache Limit',
+      title: 'Vault cache limit',
       subtitle:
-          '${(cap / 1024).toStringAsFixed(1)} GB — cached vault video/file playback is evicted when this is exceeded',
+          '${(cap / 1024).toStringAsFixed(1)} GB: cached vault video/file playback is evicted when this is exceeded',
       value: cap.toDouble().clamp(256, 10240),
       min: 256,
       max: 10240,
@@ -146,9 +146,9 @@ class _AssetCacheCapSlider extends ConsumerWidget {
     final cap = ref.watch(assetCacheCapProvider).valueOrNull ?? 512;
     return SettingsLabeledSlider(
       icon: LucideIcons.smile,
-      title: 'Emotes & GIFs Limit',
+      title: 'Emotes & GIFs limit',
       subtitle:
-          '$cap MB — least-recently added emotes, stickers and GIFs are evicted '
+          '$cap MB: least-recently added emotes, stickers and GIFs are evicted '
           'when this is exceeded (ones your servers or personal set use are kept). '
           'Separate from this: the GIF search cache is capped at 200 MB, with '
           'the oldest thumbnails evicted past that.',
@@ -181,7 +181,7 @@ class _ImageQualitySelector extends ConsumerWidget {
       mainAxisSize: MainAxisSize.min,
       children: [
         Text(
-          'Image Quality',
+          'Image quality',
           style: HollowTypography.body.copyWith(
             color: hollow.textPrimary,
             fontWeight: FontWeight.w500,
@@ -283,10 +283,10 @@ class _DataLocationRow extends StatelessWidget {
               const SizedBox(height: 2),
               Text(
                 isPortableMode
-                    ? 'Portable mode — identity key, encrypted database, and '
+                    ? 'Portable mode: identity key, encrypted database, and '
                         'downloaded files travel with the app folder.'
                     : isPinnedProfile
-                        ? 'Switched profile — identity key, encrypted '
+                        ? 'Switched profile: identity key, encrypted '
                             'database, and downloaded files live in this '
                             'folder. Manage profiles in Settings > Profile.'
                         : 'Identity key, encrypted database, and downloaded '

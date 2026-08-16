@@ -55,7 +55,7 @@ class _WelcomeContentState extends State<_WelcomeContent> {
     // so a `FileType.custom` filter hides the backup file. Use `any` on mobile.
     final isMobile = Platform.isAndroid || Platform.isIOS;
     final result = await FilePicker.platform.pickFiles(
-      dialogTitle: 'Select Backup File',
+      dialogTitle: 'Select backup file',
       type: isMobile ? FileType.any : FileType.custom,
       allowedExtensions: isMobile ? null : ['hollow'],
     );

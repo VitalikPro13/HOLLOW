@@ -785,7 +785,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     final remaining = readyAt.difference(DateTime.now());
     HollowToast.show(
       context,
-      'Slow mode — wait ${remaining.inSeconds + 1}s before sending again',
+      'Slow mode: wait ${remaining.inSeconds + 1}s before sending again',
       type: HollowToastType.info,
     );
     return true;
@@ -914,7 +914,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     if (filePath == null) {
       HollowToast.show(
         context,
-        'This is a media-only channel — attach an image, GIF, or video',
+        'This is a media-only channel. Attach an image, GIF, or video',
         type: HollowToastType.info,
       );
       return false;
@@ -925,7 +925,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     if (!kMediaOnlyExtensions.contains(stagedExt)) {
       HollowToast.show(
         context,
-        'This is a media-only channel — only images, GIFs, and videos can be posted',
+        'This is a media-only channel. Only images, GIFs, and videos can be posted',
         type: HollowToastType.info,
       );
       return false;
@@ -1751,7 +1751,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
           Icon(LucideIcons.timer, size: 12, color: hollow.warning),
           const SizedBox(width: 4),
           Text(
-            'Slow mode — ${(_slowModeReadyAt!.difference(DateTime.now()).inSeconds + 1).clamp(1, 3600)}s',
+            'Slow mode: ${(_slowModeReadyAt!.difference(DateTime.now()).inSeconds + 1).clamp(1, 3600)}s',
             style: HollowTypography.caption.copyWith(
               color: hollow.warning,
               fontWeight: FontWeight.w600,
@@ -1840,7 +1840,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     if (_channelMediaOnly) {
       HollowToast.show(
         context,
-        'This is a media-only channel — voice messages can\'t be posted here',
+        'This is a media-only channel. Voice messages can\'t be posted here',
         type: HollowToastType.info,
       );
       return;

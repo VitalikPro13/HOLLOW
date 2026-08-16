@@ -14,6 +14,7 @@ import 'package:hollow/src/core/providers/call_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/core/providers/voice_channel_provider.dart';
 import 'package:hollow/src/core/services/linux_pulse_capture.dart';
+import 'package:hollow/src/core/services/sound_service.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
@@ -148,7 +149,7 @@ class _VoiceInputSettingsState extends ConsumerState<_VoiceInputSettings> {
             ),
             const SizedBox(width: HollowSpacing.md),
             _EngineChip(
-              label: 'Voice Activity',
+              label: 'Voice activity',
               hint: 'always on',
               isSelected: !isPtt,
               onTap: () => ref
@@ -157,7 +158,7 @@ class _VoiceInputSettingsState extends ConsumerState<_VoiceInputSettings> {
             ),
             const SizedBox(width: HollowSpacing.xs),
             _EngineChip(
-              label: 'Push to Talk',
+              label: 'Push to talk',
               hint: 'hold a key',
               isSelected: isPtt,
               onTap: () => ref
@@ -179,7 +180,7 @@ class _VoiceInputSettingsState extends ConsumerState<_VoiceInputSettings> {
                 _keybindRow(
                   hollow,
                   icon: LucideIcons.mic,
-                  label: 'Push-to-talk key (hold to transmit)',
+                  label: 'Push to talk (hold)',
                   serialized: pttBind,
                   onChanged: (v) =>
                       ref.read(pttKeybindProvider.notifier).setBinding(v),
@@ -254,7 +255,7 @@ class _VoiceInputSettingsState extends ConsumerState<_VoiceInputSettings> {
           'Hotkeys are active while you are in a call. They work '
           'system-wide on Windows and Linux (X11); on macOS and Wayland '
           'they work while Hollow is focused. Ctrl+Shift+M now toggles '
-          'mute — the member panel moved to Ctrl+Shift+P.',
+          'mute. The member panel moved to Ctrl+Shift+P.',
           style: HollowTypography.caption.copyWith(
             color: hollow.textTertiary,
             fontSize: 11,
@@ -714,7 +715,7 @@ class _AudioDeviceSettingsState extends ConsumerState<_AudioDeviceSettings> {
       // Under ~100 ms of audio: the capture never really ran.
       HollowToast.show(
           context,
-          'No audio arrived from $deviceLabel — check the Input device '
+          'No audio arrived from $deviceLabel. Check the Input device '
           'selected above.',
           type: HollowToastType.error);
       return;
@@ -769,7 +770,7 @@ class _AudioDeviceSettingsState extends ConsumerState<_AudioDeviceSettings> {
     if (!_micProcessedOk) {
       HollowToast.show(
           context,
-          'Voice processing failed — only the raw recording is available.',
+          'Voice processing failed. Only the raw recording is available.',
           type: HollowToastType.error);
     }
   }
@@ -915,10 +916,10 @@ class _AudioDeviceSettingsState extends ConsumerState<_AudioDeviceSettings> {
             padding: const EdgeInsets.only(left: 22, top: 4),
             child: Text(
               _micTesting
-                  ? 'Recording through your full voice processing — speak a '
+                  ? 'Recording through your full voice processing. Speak a '
                       'sentence, then press Stop (auto-stops at 10s).'
                   : 'Play it back to hear exactly what others hear in a call '
-                      '— noise suppression, enhancement and gain included.',
+                      '(noise suppression, enhancement and gain included).',
               style: HollowTypography.caption.copyWith(
                 color: hollow.textTertiary,
                 fontSize: 10,
@@ -938,7 +939,7 @@ class _AudioDeviceSettingsState extends ConsumerState<_AudioDeviceSettings> {
                 _loadDevices();
               },
               compact: true,
-              child: const Text('Refresh Devices'),
+              child: const Text('Refresh devices'),
             ),
           ],
         ),
@@ -969,13 +970,103 @@ class _AudioDeviceSettingsState extends ConsumerState<_AudioDeviceSettings> {
 
         // 30s info label
         Text(
-          'Ringtone plays for up to 30 seconds during incoming calls.',
+          'Ringtone plays for up to 30 seconds during incoming calls, and '
+          'while you wait for someone to pick up.',
           style: HollowTypography.caption.copyWith(
             color: hollow.textSecondary.withValues(alpha: 0.6),
             fontSize: 10,
           ),
         ),
+        const SizedBox(height: HollowSpacing.lg),
+
+        // Sound effects (issue #55)
+        Row(
+          children: [
+            Icon(LucideIcons.music, size: 14, color: hollow.textSecondary),
+            const SizedBox(width: HollowSpacing.sm),
+            Text(
+              'Sound Effects',
+              style: HollowTypography.caption.copyWith(
+                color: hollow.textPrimary,
+                fontWeight: FontWeight.w600,
+                fontSize: 12,
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: HollowSpacing.sm),
+        SettingsToggleRow(
+          icon: LucideIcons.volume2,
+          label: 'Play sound effects',
+          subtitle: 'Voice channel joins and leaves, screen shares, mute, '
+              'notifications',
+          value: ref.watch(soundEffectsEnabledProvider),
+          onChanged: (v) {
+            ref.read(soundEffectsEnabledProvider.notifier).setEnabled(v);
+            // Confirm the new setting with the sound it just enabled.
+            if (v) SoundService.instance.play(HollowSound.notification);
+          },
+        ),
+        const SizedBox(height: HollowSpacing.sm),
+        _buildSoundEffectsVolumeRow(hollow),
       ],
+    );
+  }
+
+  Widget _buildSoundEffectsVolumeRow(HollowTheme hollow) {
+    final enabled = ref.watch(soundEffectsEnabledProvider);
+    final value = ref.watch(soundEffectsVolumeProvider);
+    return Opacity(
+      opacity: enabled ? 1.0 : 0.4,
+      child: Row(
+        children: [
+          Icon(LucideIcons.volume2, size: 14, color: hollow.textSecondary),
+          const SizedBox(width: HollowSpacing.sm),
+          Text(
+            'Volume',
+            style: HollowTypography.caption.copyWith(
+              color: hollow.textSecondary,
+              fontSize: 11,
+            ),
+          ),
+          const SizedBox(width: HollowSpacing.sm),
+          Expanded(
+            child: SliderTheme(
+              data: SliderThemeData(
+                activeTrackColor: hollow.accent,
+                inactiveTrackColor: hollow.border,
+                thumbColor: hollow.accent,
+                overlayColor: hollow.accent.withValues(alpha: 0.1),
+                trackHeight: 3,
+                thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 6),
+              ),
+              child: Slider(
+                value: value,
+                onChanged: enabled
+                    ? (v) =>
+                        ref.read(soundEffectsVolumeProvider.notifier).setVolume(v)
+                    : null,
+                // Preview on release only — a sound per drag frame would be a
+                // machine-gun.
+                onChangeEnd: enabled
+                    ? (_) => SoundService.instance.play(HollowSound.joinVoice)
+                    : null,
+              ),
+            ),
+          ),
+          SizedBox(
+            width: 32,
+            child: Text(
+              '${(value * 100).round()}%',
+              style: HollowTypography.caption.copyWith(
+                color: hollow.textSecondary,
+                fontSize: 11,
+              ),
+              textAlign: TextAlign.right,
+            ),
+          ),
+        ],
+      ),
     );
   }
 
@@ -1063,12 +1154,12 @@ class _AudioDeviceSettingsState extends ConsumerState<_AudioDeviceSettings> {
     return _buildDeviceRow(
       hollow: hollow,
       icon: LucideIcons.sliders,
-      label: 'Audio Quality',
+      label: 'Audio quality',
       items: AudioQualityPreset.values
           .map((p) => DropdownMenuItem<String?>(
                 value: p.name,
                 child: Text(
-                  '${p.label} — ${p.bitrate ~/ 1000} kbps${p.stereo ? ' stereo' : ' mono'}',
+                  '${p.label} (${p.bitrate ~/ 1000} kbps${p.stereo ? ' stereo' : ' mono'})',
                   overflow: TextOverflow.ellipsis,
                 ),
               ))
@@ -1246,8 +1337,8 @@ class _AudioDeviceSettingsState extends ConsumerState<_AudioDeviceSettings> {
         child: SettingsToggleRow(
           icon: LucideIcons.audioWaveform,
           label: 'Dynamic mode',
-          subtitle: 'Continuously balances your mic level for you — '
-              'any microphone lands at the same natural loudness.',
+          subtitle: 'Continuously balances your mic level for you. '
+              'Any microphone lands at the same natural loudness.',
           value: dynMode && enhance,
           onChanged: enhance
               ? (v) =>
@@ -1350,9 +1441,9 @@ class _AudioDeviceSettingsState extends ConsumerState<_AudioDeviceSettings> {
           Icon(LucideIcons.play, size: 14, color: hollow.textSecondary),
           const SizedBox(width: HollowSpacing.sm),
           playButton(
-              'Play Processed', _micProcessedOk ? _micTestRecPath : null),
+              'Play processed', _micProcessedOk ? _micTestRecPath : null),
           const SizedBox(width: HollowSpacing.sm),
-          playButton('Play Raw', _micTestRawPath),
+          playButton('Play raw', _micTestRawPath),
           const SizedBox(width: HollowSpacing.sm),
           HollowButton.ghost(
             onPressed: _startMicTest,
@@ -1382,7 +1473,7 @@ class _AudioDeviceSettingsState extends ConsumerState<_AudioDeviceSettings> {
         HollowButton.ghost(
           onPressed: _micTesting ? _finishMicRecording : _startMicTest,
           compact: true,
-          child: Text(_micTesting ? 'Stop & Review' : 'Test Microphone'),
+          child: Text(_micTesting ? 'Stop & review' : 'Test microphone'),
         ),
         if (_micTesting) ...[
           const SizedBox(width: HollowSpacing.md),
@@ -1404,7 +1495,7 @@ class _AudioDeviceSettingsState extends ConsumerState<_AudioDeviceSettings> {
     final result = await FilePicker.platform.pickFiles(
       type: FileType.custom,
       allowedExtensions: ['mp3', 'wav', 'ogg', 'flac', 'm4a'],
-      dialogTitle: 'Select Ringtone',
+      dialogTitle: 'Select ringtone',
     );
     if (result != null && result.files.single.path != null) {
       final path = result.files.single.path!;

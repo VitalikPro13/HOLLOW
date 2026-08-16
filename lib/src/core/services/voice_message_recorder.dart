@@ -369,5 +369,5 @@ class RecorderFfmpegMissingException implements Exception {
   const RecorderFfmpegMissingException();
   @override
   String toString() =>
-      'Bundled ffmpeg binary not found — reinstall or rebuild Hollow';
+      'Bundled ffmpeg binary not found. Reinstall or rebuild Hollow';
 }

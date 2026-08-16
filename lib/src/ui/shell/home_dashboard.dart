@@ -1418,7 +1418,7 @@ class _NewsPanel extends ConsumerWidget {
                         if (context.mounted && results[0] == false) {
                           HollowToast.show(
                             context,
-                            'Failed to fetch news — check your connection',
+                            'Failed to fetch news. Check your connection',
                             type: HollowToastType.error,
                           );
                         }
@@ -1437,7 +1437,7 @@ class _NewsPanel extends ConsumerWidget {
                         if (context.mounted && results[0] == false) {
                           HollowToast.show(
                             context,
-                            'Failed to fetch news — check your connection',
+                            'Failed to fetch news. Check your connection',
                             type: HollowToastType.error,
                           );
                         }
@@ -1646,8 +1646,8 @@ class _RelayStatsCardState extends ConsumerState<_RelayStatsCard>
             DailyUsageMeter(
               hollow: hollow,
               icon: LucideIcons.gauge,
-              label: 'Daily Relay Data',
-              tooltip: 'Relay traffic for your connection today — uploads and '
+              label: 'Daily relay data',
+              tooltip: 'Relay traffic for your connection today: uploads and '
                   'downloads (files, images, sync). Shared by every device on '
                   'your network (counted per IP). Direct P2P transfers don\'t '
                   'count.',

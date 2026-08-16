@@ -115,7 +115,7 @@ class EmotesTab extends ConsumerWidget {
             child: Center(
               child: Text(
                 canManage
-                    ? 'No custom emotes yet — add one, or import from the\n'
+                    ? 'No custom emotes yet. Add one, or import from the\n'
                         'FFZ tab of the emoji picker in any chat.'
                     : 'No custom emotes yet.',
                 textAlign: TextAlign.center,
@@ -240,7 +240,7 @@ class ServerStickersSection extends ConsumerWidget {
             child: Center(
               child: Text(
                 canManage
-                    ? 'No stickers yet — add artwork, or save some from the\n'
+                    ? 'No stickers yet. Add artwork, or save some from the\n'
                         'KLIPY tab of the sticker panel in any chat.'
                     : 'No stickers yet.',
                 textAlign: TextAlign.center,

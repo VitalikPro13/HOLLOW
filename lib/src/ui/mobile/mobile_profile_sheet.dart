@@ -450,7 +450,7 @@ class MobileProfileSheet extends ConsumerWidget {
                             ),
                             expand: true,
                             child: Text(isVerified
-                                ? 'Verified — view number'
+                                ? 'Verified: view number'
                                 : 'Verify contact'),
                           ),
                         );

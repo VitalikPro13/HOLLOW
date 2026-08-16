@@ -27,6 +27,7 @@ import 'package:hollow/src/core/services/macos_version.dart';
 import 'package:hollow/src/core/services/screen_audio_receiver.dart';
 import 'package:hollow/src/core/services/share_audio_level.dart';
 import 'package:hollow/src/core/services/screen_share_service.dart';
+import 'package:hollow/src/core/services/sound_service.dart';
 import 'package:hollow/src/core/services/voice_service.dart';
 import 'package:hollow/src/core/viewer_display.dart';
 import 'package:hollow/src/ui/app.dart' show hollowNavigatorKey;
@@ -315,6 +316,9 @@ class CallNotifier extends Notifier<CallState> {
           status: CallStatus.active,
           startedAt: DateTime.now(),
         );
+        // Connected — the twin of the hang-up cue in `_cleanup()`. Fires on
+        // both sides, and only once (the guard above makes this edge-only).
+        SoundService.instance.play(HollowSound.joinVoice, duringCall: true);
         // Apply the PTT transmit gate now that capture is live — in PTT
         // mode the mic starts gated until the key is held (issue #38).
         _applyTxGate();
@@ -760,6 +764,11 @@ class CallNotifier extends Notifier<CallState> {
       sframeKey: sframeKey,
     );
 
+    // Ringback (#55): you press Call and hear the same Hollow ring the other
+    // side is hearing. Every path out of "ringing" stops it — the accept
+    // below, and `_cleanup()` for reject / busy / timeout / hang-up.
+    SoundService.instance.startRingback();
+
     final payload = jsonEncode({
       'call_id': callId,
       'video': withVideo,
@@ -882,6 +891,7 @@ class CallNotifier extends Notifier<CallState> {
   void toggleMute() {
     if (state.status != CallStatus.active) return;
     state = state.copyWith(isMuted: !state.isMuted);
+    SoundService.instance.play(HollowSound.toggle, duringCall: true);
     _applyTxGate();
     _sendAudioState();
   }
@@ -890,6 +900,7 @@ class CallNotifier extends Notifier<CallState> {
   /// channels — un-deafening keeps the mic muted.
   void toggleDeafen() {
     if (state.status != CallStatus.active) return;
+    SoundService.instance.play(HollowSound.toggle, duringCall: true);
     final newDeafened = !state.isDeafened;
     unawaited(_service
         .setRemoteAudioVolume(newDeafened ? 0.0 : _lastRemoteVolume)
@@ -973,6 +984,12 @@ class CallNotifier extends Notifier<CallState> {
       isVideoEnabled: enabled,
       isFrontCamera: _service.useFrontCamera,
     );
+
+    // Only on a real flip: `toggleVideo` returns the unchanged state when
+    // there is no camera to open, and a no-op must stay silent.
+    if (enabled != wasEnabled) {
+      SoundService.instance.play(HollowSound.toggle, duringCall: true);
+    }
 
     // Turning the camera on mid-call implies hands-off use — switch to the
     // loudspeaker (mobile). Turning it off keeps whatever route is active.
@@ -1123,6 +1140,7 @@ class CallNotifier extends Notifier<CallState> {
       final shortSide = height < width ? height : width;
       final qualityLabel = '${resLabels[shortSide] ?? '${shortSide}p'}$fps';
       state = state.copyWith(isScreenSharing: true, screenShareLabel: qualityLabel);
+      SoundService.instance.play(HollowSound.joinStream, duringCall: true);
 
       // Sharing WITH audio: freeze the mic servo for the whole share so
       // speaker bleed of the shared music can't re-calibrate the trim.
@@ -1322,6 +1340,10 @@ class CallNotifier extends Notifier<CallState> {
 
   /// Stop screen sharing.
   Future<void> stopScreenShare() async {
+    // Idempotent teardown — only sound off if a share was actually up.
+    if (state.isScreenSharing) {
+      SoundService.instance.play(HollowSound.leaveStream, duringCall: true);
+    }
     ShareAudioLevel.setSendingShareAudio(false);
     _dmPeerWantsShare = false;
     _dmViewerWidth = 0;
@@ -1659,6 +1681,8 @@ class CallNotifier extends Notifier<CallState> {
     }
 
     _ringTimer?.cancel();
+    // They picked up — the ring stops here, well before the media comes up.
+    SoundService.instance.stopRingback();
     state = state.copyWith(status: CallStatus.connecting);
 
     // Ensure device preferences are loaded before starting media.
@@ -1938,6 +1962,15 @@ class CallNotifier extends Notifier<CallState> {
     debugPrint(
         '[HOLLOW-CALL] Remote screen share: enabled=$enabled quality=$quality from $peerId');
 
+    // Edge only — a re-announce of a share that is already up stays silent —
+    // and deafened means deafened.
+    if (enabled != state.remoteScreenSharing && !state.isDeafened) {
+      SoundService.instance.play(
+        enabled ? HollowSound.joinStream : HollowSound.leaveStream,
+        duringCall: true,
+      );
+    }
+
     if (!enabled) {
       // Remote stopped sharing — tear down the incoming screen share PC.
       // Capture + null synchronously so a concurrent screen_offer doesn't
@@ -2079,6 +2112,17 @@ class CallNotifier extends Notifier<CallState> {
   Future<void> _cleanup() async {
     _ringTimer?.cancel();
     _ringTimer = null;
+    // The single teardown chokepoint — reject, busy, ring timeout, remote end
+    // and local hang-up all land here, so the ringback can't outlive the call.
+    SoundService.instance.stopRingback();
+    // Hang-up cue. Only for a call that actually connected: a decline or a
+    // ring timeout already announces itself (the ringback stopping, plus the
+    // busy toast), and a "left" tone there would read as "they hung up on you".
+    // No dedicated hangup asset was contributed for #55 — leaving a call is
+    // the same event as leaving voice, so it borrows that one.
+    if (state.status == CallStatus.active) {
+      SoundService.instance.play(HollowSound.leaveVoice, duringCall: true);
+    }
     _statsTimer?.cancel();
     _statsTimer = null;
     _iceRepairTimer?.cancel();

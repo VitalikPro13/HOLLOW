@@ -149,6 +149,48 @@ Uses `network_api.logFromDart()` to write to `hollow_debug.log` (visible in rele
 
 ---
 
+## SoundService (UI sound pack, issue #55)
+
+File: `lib/src/core/services/sound_service.dart`
+
+Plays the short one-shot UI cues and the outgoing-call ringback, on top of `audioplayers`. Singleton (`SoundService.instance`), fire-and-forget by design: every entry point is a `void` that swallows its own failures, so a missing codec on some Linux box can never take a channel join or a mute toggle down with it.
+
+### HollowSound enum
+
+One asset per EVENT, not per call site: the same join cue plays whether it was you or somebody else who walked into the channel, which is what makes it readable as a channel event rather than a button click. Six values, each carrying its asset path under `assets/` (`audioplayers`' `AssetSource` is rooted there):
+
+| Value | Asset | Fires for |
+|---|---|---|
+| `joinVoice` | `sounds/join_voice.wav` | You joined a voice channel, somebody joined yours, or a 1:1 call connected |
+| `leaveVoice` | `sounds/leave_voice.wav` | You left, somebody left yours, or a connected call hung up |
+| `joinStream` | `sounds/join_stream.wav` | A screen share started in your channel or call (yours or a peer's) |
+| `leaveStream` | `sounds/leave_stream.wav` | A screen share ended |
+| `toggle` | `sounds/mute_un_cam.wav` | YOUR OWN mute / deafen / camera toggle. Never a remote peer's, which would turn a busy channel into a clicking metronome |
+| `notification` | `sounds/notification.wav` | A message notification surfaced as an in-app card |
+
+The seventh bundled asset, `sounds/default_ringtone.wav`, is not in the enum: it is the incoming-call ringtone (issue #39) and doubles as the outgoing ringback below.
+
+### Static config, mirrored in by the notifiers
+
+`static bool enabled` (true), `static double volume` (0.5) and `static double ringtoneVolume` (0.5). Plain statics rather than a `ref` read: the hot call sites are inside notifiers that fire during teardown, where reaching back into the provider container is exactly the kind of thing that throws while disposing. `soundEffectsEnabledProvider` / `soundEffectsVolumeProvider` / `RingtoneVolumeNotifier` push their value here on load and on every change (see `providers_event_settings.md`); the service never reads back.
+
+### play(sound, {duringCall})
+
+1. Returns immediately when `enabled` is false.
+2. **`duringCall: true` drops the sound on iOS ONLY.** `audioplayers` sets the shared `AVAudioSession` category when it starts and DEACTIVATES the session when it ends, and doing either to a live `playAndRecord`/VoiceProcessingIO session is how you lose the mic mid-sentence. Android and desktop play everything (they take the no-focus context below). This is the only platform-conditional line in the file.
+3. Throttle: one play per sound per 150 ms (`_minGap`, a `_lastPlayed` map). Five peers joining at once, for instance a channel filling up after a relay reconnect, collapses to one sound.
+4. One `AudioPlayer` per `HollowSound`, built lazily and kept in `_players` (`playerId: 'hollow-sfx-<name>'`, `ReleaseMode.stop`). Each play does `stop()` then `play(AssetSource(...), volume: volume)`, so a re-trigger past the throttle window restarts from the top instead of queueing behind the previous tail.
+
+**Audio context:** `AudioContextConfig(focus: AudioContextConfigFocus.mixWithOthers)`, shared by every player including the ringback. No audio focus is requested and playback mixes with whatever else is running, so a mute blip can never duck or interrupt call audio.
+
+**Every call/VC cue passes `duringCall: true`**, including the local join cue, which fires a beat before the mic opens but whose clip outlives that by roughly half a second. The message-notification cue does not, so it still plays on iOS.
+
+### startRingback() / stopRingback()
+
+The looping outgoing-call ring: you pressed Call and are waiting for the other side to pick up. `startRingback()` is idempotent (a second start while ringing is ignored rather than layering a second loop) and plays `sounds/default_ringtone.wav` on a dedicated `hollow-ringback` player in `ReleaseMode.loop` at `ringtoneVolume`. It deliberately uses the BUNDLED ringtone, never the user's custom pick: the custom one identifies an INCOMING call, and hearing your own alert song back at you while dialling reads as a bug. `stopRingback()` stops, disposes and clears the player, and is safe to call when nothing is ringing (every call teardown path funnels through it).
+
+---
+
 ## VideoStreamServer
 
 File: `lib/src/core/services/video_stream_server.dart`

@@ -117,9 +117,26 @@ static gboolean my_application_local_command_line(GApplication* application,
 
   g_autoptr(GError) error = nullptr;
   if (!g_application_register(application, nullptr, &error)) {
-    g_warning("Failed to register: %s", error->message);
-    *exit_status = 1;
-    return TRUE;
+    // Owning our name on the session bus is what makes the app D-Bus-unique
+    // (see the flags in my_application_new), but it must never be the reason
+    // Hollow refuses to start: inside a Flatpak whose session-bus access was
+    // not granted, RequestName fails with ServiceUnknown and the app used to
+    // exit(1) before drawing a single frame (issue #59). Fall back to a plain
+    // non-unique instance — deep links then no longer forward to a running
+    // copy, which is a far smaller loss than not launching at all.
+    g_warning("Failed to register on the session bus (%s) — starting as a "
+              "non-unique instance; hollow:// links will not be forwarded",
+              error->message);
+    g_clear_error(&error);
+    g_application_set_flags(
+        application,
+        static_cast<GApplicationFlags>(g_application_get_flags(application) |
+                                       G_APPLICATION_NON_UNIQUE));
+    if (!g_application_register(application, nullptr, &error)) {
+      g_warning("Failed to register: %s", error->message);
+      *exit_status = 1;
+      return TRUE;
+    }
   }
 
   g_application_activate(application);

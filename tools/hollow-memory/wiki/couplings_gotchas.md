@@ -666,6 +666,26 @@ let _ = state.apply_op(&op);
 
 **Where:** `lib/main.dart:_HollowWindowListener.onWindowClose()` (Linux branch), `_linuxQuit()` helper.
 
+### wlroots (Hyprland, sway) has no minimize, so there is a second door out (issue #59)
+
+**Rule:** After issuing `minimize()`, poll `windowManager.isMinimized()` for ~400 ms (`_minimizeVisiblyTookEffect()`: 8 x 50 ms). If it never reports minimized, set `_linuxCloseMayHaveBeenIgnored = true` and toast "Hollow is still running. Press close again to quit." The NEXT close press quits (`isMinimized() || _linuxCloseMayHaveBeenIgnored` is the quit condition). `onWindowFocus()` clears the flag.
+
+**Why:** wlroots compositors implement no minimize at all: `xdg_toplevel.set_minimized` is advisory and Hyprland/sway ignore it, so `gtk_window_iconify()` is a silent no-op, `GDK_WINDOW_STATE_ICONIFIED` is never set, and the "already minimized → quit" branch above was unreachable. The close button read as dead and the app could only be killed from a task manager.
+
+**Why NOT just "quit when `isMinimized()` is false":** GTK on Wayland underreports ICONIFIED even where minimize genuinely works, so a false negative would quit the app out from under GNOME Wayland users on a single close press. The poll result is used ONLY to decide whether to warn; quitting still takes a deliberate second press.
+
+**Ordering that matters:** the flag is armed AFTER the poll window, not before it. The minimize's own focus churn would otherwise reach `onWindowFocus()` and clear the flag that was just set. And on a WM that really did minimize, the window can only come back by being restored, which focuses it, so the flag clears and the next close minimizes again exactly as before.
+
+**Where:** `lib/main.dart`, in `_linuxCloseMayHaveBeenIgnored`, `_minimizeVisiblyTookEffect()`, `_warnLinuxCloseIgnored()` (toasts via `hollowNavigatorKey.currentState?.overlay` with `overlayState:`, per the non-widget toast rule), `onWindowClose()` Linux branch, `onWindowFocus()`.
+
+### Linux launch must survive a failed session-bus registration
+
+**Rule:** `my_application_local_command_line()` does not exit when `g_application_register()` fails. It logs, clears the error, ORs `G_APPLICATION_NON_UNIQUE` into the app flags and registers again; only a second failure sets `exit_status = 1`.
+
+**Why:** owning the name on the session bus is what makes the app D-Bus-unique, but it must never be the reason Hollow refuses to start. Inside a Flatpak whose session-bus access was not granted, `RequestName` fails with ServiceUnknown and the app used to `exit(1)` before drawing a single frame (issue #59). A non-unique instance loses `hollow://` deep-link forwarding to a running copy, which is a far smaller loss than not launching at all.
+
+**Where:** `linux/runner/my_application.cc`.
+
 ### Window close on macOS uses the native Dock idiom, not tray (and AppDelegate must not auto-terminate)
 
 **Rule:** On macOS, `onWindowClose()` (minimize-to-tray setting on) just calls `windowManager.hide()` — NO tray icon. The app keeps running in the Dock with the active dot; clicking the Dock icon re-shows the window. This requires `macos/Runner/AppDelegate.swift` to override `applicationShouldTerminateAfterLastWindowClosed` to return **`false`** (the Flutter template default is `true`, which terminates the process on window close and bypasses the Dart handler entirely) plus `applicationShouldHandleReopen` to re-show/focus the window on Dock click. `onWindowFocus()` syncs `windowVisibleProvider = true` on macOS since the native reopen path doesn't go through the tray restore.

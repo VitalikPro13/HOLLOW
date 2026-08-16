@@ -970,12 +970,29 @@ class _HollowShellState extends ConsumerState<HollowShell>
     // background image on a fully-local render.
     await ref.read(themeModeProvider.notifier).load();
     await ref.read(accentHueProvider.notifier).load();
+    // Dock vs Classic shell (#58): same rule as the theme — reading it from the
+    // provider's build() raced the store open, so Classic never survived a
+    // restart.
+    await ref.read(layoutModeProvider.notifier).load();
     // Display size (issue #20) — same rule as the theme: loadSetting throws
     // until the store is open, so these load here, never in build().
     await ref.read(uiScaleProvider.notifier).load();
     await ref.read(chatTextScaleProvider.notifier).load();
     await ref.read(backgroundProvider.notifier).load();
     await ref.read(accentPresetsProvider.notifier).load();
+    // UI sound pack (#55): loaded here for the same reason as the theme, and
+    // because the notifiers mirror their value into SoundService's statics —
+    // the sounds fire from notifiers that have no `ref` of their own.
+    await ref.read(soundEffectsEnabledProvider.notifier).load();
+    await ref.read(soundEffectsVolumeProvider.notifier).load();
+    // Building the ringtone-volume provider is what publishes it to
+    // SoundService, which the outgoing ringback reads. Without this the first
+    // outgoing call of a session rings at the default, not the user's setting.
+    try {
+      await ref.read(ringtoneVolumeProvider.future);
+    } catch (e) {
+      debugPrint('[HOLLOW] ringtone volume preload failed: $e');
+    }
     await ref.read(localNicknameProvider.notifier).loadAll();
     setLocalNicknamesRef(ref.read(localNicknameProvider));
     await ref.read(serverStripLayoutProvider.notifier).loadLayout();
@@ -1258,9 +1275,7 @@ class _HollowShellState extends ConsumerState<HollowShell>
 
     // Split view toggle (dock mode only).
     if (match(AppShortcut.toggleSplitView)) {
-      final layoutMode =
-          ref.read(layoutModeProvider).valueOrNull ?? LayoutMode.dock;
-      if (layoutMode == LayoutMode.dock) {
+      if (ref.read(layoutModeProvider) == LayoutMode.dock) {
         final split = ref.read(splitViewProvider);
         if (split.isSplit) {
           ref.read(splitViewProvider.notifier).closeSplit();
@@ -1398,6 +1413,8 @@ class _HollowShellState extends ConsumerState<HollowShell>
     );
   }
 
+  /// Classic's resting state: nothing selected in the left panels, so the
+  /// centre pane stays empty.
   Widget _buildEmptyChat(HollowTheme hollow) {
     return Center(
       child: Column(
@@ -1549,14 +1566,17 @@ class _HollowShellState extends ConsumerState<HollowShell>
       }
       return _buildChannelPlaceholder(hollow, channel);
     }
-    // DM chat view — show Home dashboard when nothing selected (dock mode)
+    // DM chat view — the Home dashboard is a DOCK surface and stays one.
+    // Classic's centre pane is a blank slate that only ever shows what the
+    // left panels select; putting the dock's Home tab there makes the two
+    // layouts bleed into each other (rejected on sight, #58 follow-up). That
+    // also means the dashboard's Network column is Dock-only by design — the
+    // answer to vico93's second question is "switch to Dock", not "show the
+    // dock's Home tab inside Classic".
     if (selectedPeerId == null) {
-      final layoutMode =
-          ref.read(layoutModeProvider).valueOrNull ?? LayoutMode.dock;
-      if (layoutMode == LayoutMode.dock) {
-        return const HomeDashboard();
-      }
-      return _buildEmptyChat(hollow);
+      return ref.watch(layoutModeProvider) == LayoutMode.dock
+          ? const HomeDashboard()
+          : _buildEmptyChat(hollow);
     }
     return ChatPane(
       key: ValueKey(selectedPeerId),
@@ -1672,8 +1692,7 @@ class _HollowShellState extends ConsumerState<HollowShell>
     final settingsOpen = ref.watch(serverSettingsOpenProvider);
 
     // Layout mode
-    final layoutMode =
-        ref.watch(layoutModeProvider).valueOrNull ?? LayoutMode.dock;
+    final layoutMode = ref.watch(layoutModeProvider);
 
     final shellBody = LayoutBuilder(
       builder: (context, constraints) {

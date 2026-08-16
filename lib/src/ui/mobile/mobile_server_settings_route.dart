@@ -1279,14 +1279,14 @@ class _MobileServerSettingsRouteState
                       onPressed: _confirmDelete,
                       expand: true,
                       icon: const Icon(LucideIcons.trash2, size: 18),
-                      child: const Text('Delete Server'),
+                      child: const Text('Delete server'),
                     )
                   else
                     HollowButton.danger(
                       onPressed: _confirmLeave,
                       expand: true,
                       icon: const Icon(LucideIcons.logOut, size: 18),
-                      child: const Text('Leave Server'),
+                      child: const Text('Leave server'),
                     ),
                 ],
               ),
@@ -1457,8 +1457,8 @@ class _NotificationSection extends ConsumerWidget {
     final hollow = HollowTheme.of(context);
     final options = [
       (ChannelNotificationLevel.inherit, 'Default', LucideIcons.settings),
-      (ChannelNotificationLevel.all, 'All Messages', LucideIcons.bell),
-      (ChannelNotificationLevel.mentions, 'Mentions Only', LucideIcons.atSign),
+      (ChannelNotificationLevel.all, 'All messages', LucideIcons.bell),
+      (ChannelNotificationLevel.mentions, 'Mentions only', LucideIcons.atSign),
       (ChannelNotificationLevel.nothing, 'Nothing', LucideIcons.bellOff),
     ];
 
@@ -2045,7 +2045,7 @@ class _ChannelLayoutEditorState extends ConsumerState<_ChannelLayoutEditor> {
       HollowToast.show(
           context,
           'Applied to ${targetIds.length - failed.length} of '
-          '${targetIds.length} channels — failed: '
+          '${targetIds.length} channels. Failed: '
           '${failed.map((n) => '#$n').join(', ')}',
           type: HollowToastType.error);
     }
@@ -2387,7 +2387,7 @@ class _ChannelLayoutEditorState extends ConsumerState<_ChannelLayoutEditor> {
               Expanded(
                 child: HollowButton.filled(
                   onPressed: _save,
-                  child: const Text('Save Layout'),
+                  child: const Text('Save layout'),
                 ),
               ),
             ],

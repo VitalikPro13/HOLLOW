@@ -231,7 +231,7 @@ class _VerifyContactBodyState extends ConsumerState<VerifyContactBody> {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Text(
-          'Compare this number with $name over a channel you already trust — '
+          'Compare this number with $name over a channel you already trust: '
           'in person, on a video call, or through another app. If it matches on '
           'both screens, your messages reach only each other.',
           style: HollowTypography.body.copyWith(
@@ -417,8 +417,8 @@ class _CompareResult extends StatelessWidget {
             child: Text(
               matches
                   ? 'Numbers match.'
-                  : "Numbers don't match. Do not treat this contact as verified — "
-                      'check you both read the whole number, then try again.',
+                  : "Numbers don't match. Do not treat this contact as verified. "
+                      'Check you both read the whole number, then try again.',
               style: HollowTypography.body.copyWith(color: color, fontSize: 12),
             ),
           ),

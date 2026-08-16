@@ -153,13 +153,27 @@ Separated by 1px divider + spacing. Header: `_FieldLabel(label: 'CONNECTIONS')`.
 
 The old `_buildSystemTab()` is gone. Its sections now live in per-category card builders, all returning `List<Widget>` of `_SettingsCard`s:
 
-- **Appearance** (`_appearanceCards`): Theme card (dark mode + `_AccentColorPicker`), Background card (`_BackgroundPicker`), Layout card (dock mode, disable-animations, appear-invisible, + minimize-to-tray on desktop). All apply immediately.
+- **Appearance** (`_appearanceCards`): Theme card (dark mode + `_AccentColorPicker`), Background card (`_BackgroundPicker`), Layout card (Window layout picker, appear-invisible, + minimize-to-tray on desktop). All apply immediately.
 - **Network** (`_networkCards`): Relay card — relay list (`_buildRelayRow`), add-relay field (`_buildAddRelayField`), and "Apply & Restart" when the selection differs from the active relay.
 - **Files & Storage** (`_filesCards`): Downloads card (`_buildAutoDownloadSlider`), Cache card (`_buildCacheCapSlider`), Data Location card (`_buildDataLocation` + open-folder), Media card (`_ImageQualitySelector`). Sliders read/write providers directly.
 - **Audio & Video** (`_audioCards`): Devices card wrapping `_AudioDeviceSettings`.
 - **Shortcuts** (`ShortcutsSettingsView` in `settings/shortcuts_section.dart`, rebindable 2026-08-04): General / Voice / Chat Input cards where EVERY row is editable in place (`KeybindCaptureField` + reset-to-default arrow when overridden). General + formatting rows edit `appShortcutsProvider` (bare typable triggers refused with a toast — they'd fire while typing); the Voice trio edits the SAME `pttKeybindProvider`/`muteKeybindProvider`/`deafenKeybindProvider` as Audio & Video (one source of truth). Enter/Shift+Enter stay fixed. Stateful with the post-frame provider invalidate (bootstrap-not-build trap).
 
 The sub-widgets (`_AccentColorPicker`, `_BackgroundPicker`, `_AudioDeviceSettings`, `_ImageQualitySelector`, `_ShortcutRow`, `_ToggleRow`) are unchanged and documented below.
+
+### Appearance → Layout card: the Window layout picker (issue #58)
+
+The Layout card's first control is a labelled `TriStateSegment<LayoutMode>` (from `settings_shared.dart`), NOT a toggle: an icon + "Window layout" title with a subtitle that describes the ACTIVE mode ("Dock: friends strip on top, dock bar at the bottom" / "Classic: server strip, channels, chat, members"), then a two-option segment (Dock / Classic). A one-way "Dock Mode" on/off switch gave no hint that what you land in when you turn it off is the familiar Discord/Slack shell.
+
+`onChanged` closes any open split view (`splitViewProvider.notifier.closeSplit()`) BEFORE calling `layoutModeProvider.notifier.setMode(m)` when the target is Classic: Classic has no split view, so leaving a split open would strand the right pane invisibly until the user switched back. Reads `ref.watch(layoutModeProvider)` directly (the provider is a synchronous `Notifier` loaded in `_bootstrap`; see `providers_event_settings.md`).
+
+### Label capitalization (repo-wide convention)
+
+**Sentence case** for anything that reads as an instruction or a value: control labels and their subtitles, shortcut and action names (`AppShortcut` display names: "Open settings", "Toggle member panel", "Zoom interface in"), button labels ("Refresh devices", "Test microphone", "Play processed"), option values and chips ("Voice activity", "Push to talk"), dialog titles, and `FilePicker(dialogTitle:)` ("Select ringtone", "Export backup", "Import server template").
+
+**Title Case is retained** where the text names a container or a proper noun: `SettingsCard(title:)` ("Theme", "Background", "Layout", "Identity Backup", "Link a Device"; a few newer cards such as "Active grants" and "Temporary channel access" read as sentence case and were left alone), the ALL-CAPS `SettingsSectionLabel` / `_SectionLabel` headers (which uppercase anyway), role permission names (`roles_tab.dart` / `mobile_roles_route.dart`: "Manage Channels", "Kick Members"), document titles, and proper nouns and acronyms (Hollow, Twitch, GIF, MLS, TURN).
+
+Rule of thumb when adding UI text: if it is a thing the user acts on, sentence case; if it is the name of a box the things live in, Title Case.
 
 ### (Legacy) System Tab sections — for reference
 
@@ -338,7 +352,16 @@ Clear (X button): Sets ringtone path to null (= use the bundled default).
 
 `_stopRingtonePreview()`: Stops and disposes the preview player.
 
-**Info label**: "Ringtone plays for up to 30 seconds during incoming calls."
+**Info label**: "Ringtone plays for up to 30 seconds during incoming calls, and while you wait for someone to pick up." (The second clause is literal: the outgoing-call ringback plays the bundled ringtone at this same volume; see `SoundService.startRingback` in `services_media_storage.md`.)
+
+### Sound Effects block (issue #55)
+
+Sits at the bottom of the same card, under the ringtone rows: a `LucideIcons.music` + "Sound Effects" sub-header, then
+
+- **"Play sound effects"** `SettingsToggleRow` (`LucideIcons.volume2`, subtitle "Voice channel joins and leaves, screen shares, mute, notifications") → `soundEffectsEnabledProvider.notifier.setEnabled()`. Turning it ON plays `HollowSound.notification` immediately, confirming the setting with the sound it just enabled.
+- **Volume row** (`_buildSoundEffectsVolumeRow`): icon + "Volume" + `Slider` + percentage, wrapped in `Opacity(0.4)` with `onChanged: null` while the toggle is off. `onChanged` writes `soundEffectsVolumeProvider`; the preview (`HollowSound.joinVoice`) fires on **`onChangeEnd` only**, because a sound per drag frame would be a machine-gun.
+
+Mobile twin: `_SoundEffectsControls` under a `_SectionLabel(label: 'Sound Effects')` in `mobile_settings_tab.dart`, same providers and same preview-on-release behaviour.
 
 ---
 
@@ -656,7 +679,7 @@ Providers read/watched by this dialog:
 - `themeModeProvider` — dark/light mode
 - `minimizeToTrayProvider` — async, tray minimize toggle
 - `proxyEnabledProvider` — async, proxy toggle
-- `layoutModeProvider` — async, dock/classic layout
+- `layoutModeProvider` — sync, dock/classic layout (loaded in `_bootstrap`, not in `build()`)
 - `reduceMotionProvider` — async, tri-state Auto/On/Off reduce-motion (replaced `disableAnimationsProvider`)
 - `reduceTransparencyProvider` — async, reduce-transparency toggle
 - `invisibleModeProvider` — sync, invisible status
@@ -671,7 +694,8 @@ Providers read/watched by this dialog:
 - `cameraDeviceProvider` — async, saved camera device ID
 - `audioQualityProvider` — async, audio quality preset
 - `ringtonePathProvider` — async, ringtone file path
-- `ringtoneVolumeProvider` — async, ringtone volume (0.0-1.0)
+- `ringtoneVolumeProvider` — async, ringtone volume (0.0-1.0), also drives the outgoing ringback
+- `soundEffectsEnabledProvider` / `soundEffectsVolumeProvider`: sync, UI sound pack toggle + volume
 - `ringtoneStartProvider` / `ringtoneEndProvider` — async, clip range in seconds
 - `ringtoneDurationProvider` — async, cached total duration
 - `updaterProvider` — update state machine (status, manifest, progress, versions)

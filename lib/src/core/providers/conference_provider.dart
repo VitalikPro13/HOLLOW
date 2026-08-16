@@ -372,7 +372,7 @@ class ConferenceNotifier extends Notifier<ConferenceState> {
     final ownRoom = state.roomById(confId);
     if (ownRoom != null) {
       if (state.activeConfId == confId && state.isHost) return; // already in
-      _toast('This is your room — starting the meeting',
+      _toast('This is your room. Starting the meeting',
           HollowToastType.info);
       await startMeeting(ownRoom);
       return;

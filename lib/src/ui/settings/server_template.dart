@@ -223,7 +223,7 @@ Future<void> exportServerTemplate(
     final jsonBytes = utf8.encode(json);
 
     final savePath = await FilePicker.platform.saveFile(
-      dialogTitle: 'Export Server Template',
+      dialogTitle: 'Export server template',
       fileName: defaultName,
       type: FileType.custom,
       allowedExtensions: ['json'],
@@ -258,7 +258,7 @@ Future<void> importServerTemplate(
 ) async {
   try {
     final result = await FilePicker.platform.pickFiles(
-      dialogTitle: 'Import Server Template',
+      dialogTitle: 'Import server template',
       type: FileType.custom,
       allowedExtensions: ['json'],
     );
@@ -353,7 +353,7 @@ Future<void> importServerTemplate(
       showHollowDialog(
         context: context,
         builder: (ctx) => HollowDialog(
-          title: 'No Changes Needed',
+          title: 'No changes needed',
           content: Text(
             'This template matches your current server structure.',
             style: HollowTypography.body.copyWith(
@@ -480,7 +480,7 @@ class _TemplateApplyProgressDialog extends StatelessWidget {
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
     return HollowDialog(
-      title: 'Applying Template',
+      title: 'Applying template',
       content: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
@@ -634,7 +634,7 @@ Future<bool?> _showConfirmationDialog(
     builder: (ctx) {
       final hollow = HollowTheme.of(ctx);
       return HollowDialog(
-        title: 'Apply Template',
+        title: 'Apply template',
         content: SingleChildScrollView(
           child: Column(
             mainAxisSize: MainAxisSize.min,
@@ -723,7 +723,7 @@ Future<bool?> _showConfirmationDialog(
           // red misread as "this will delete something".
           HollowButton.filled(
             onPressed: () => Navigator.of(ctx).pop(true),
-            child: const Text('Apply Template'),
+            child: const Text('Apply template'),
           ),
         ],
       );

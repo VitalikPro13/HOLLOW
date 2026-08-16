@@ -24,7 +24,7 @@ Widget verifiedContactsIntro(HollowTheme hollow) {
   return Text(
     'You confirmed these contacts by comparing safety numbers in person or '
     'over another trusted channel. Their number stays the same if they '
-    'reinstall or add a device — you are warned about new devices separately.',
+    'reinstall or add a device. You are warned about new devices separately.',
     style: HollowTypography.caption.copyWith(color: hollow.textSecondary),
   );
 }

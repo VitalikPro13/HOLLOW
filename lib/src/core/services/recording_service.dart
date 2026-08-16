@@ -128,7 +128,7 @@ class RecordingService {
     final ffmpeg = VideoThumbnailService.findFfmpegBinary();
     if (ffmpeg == null) {
       throw const RecordingException(
-        'ffmpeg binary not found — install ffmpeg or bundle it next to the app',
+        'ffmpeg binary not found. Install it or bundle it next to the app',
       );
     }
 

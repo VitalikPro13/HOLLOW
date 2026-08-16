@@ -146,7 +146,7 @@ class MobileEmotesRoute extends ConsumerWidget {
                       child: Center(
                         child: Text(
                           canManage
-                              ? 'No custom emotes yet — add one, or import '
+                              ? 'No custom emotes yet. Add one, or import '
                                   'from the\nFFZ tab of the emoji picker in '
                                   'any chat.'
                               : 'No custom emotes yet.',

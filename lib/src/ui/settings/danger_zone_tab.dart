@@ -24,7 +24,7 @@ class DangerZoneTab extends ConsumerWidget {
     showHollowDialog(
       context: context,
       builder: (dialogContext) => HollowDialog(
-        title: 'Delete Server',
+        title: 'Delete server',
         content: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -50,7 +50,7 @@ class DangerZoneTab extends ConsumerWidget {
               Navigator.of(dialogContext).pop();
               _deleteServer(context, ref);
             },
-            child: const Text('Delete Server'),
+            child: const Text('Delete server'),
           ),
         ],
       ),
@@ -89,7 +89,7 @@ class DangerZoneTab extends ConsumerWidget {
     showHollowDialog(
       context: context,
       builder: (dialogContext) => HollowDialog(
-        title: 'Leave Server',
+        title: 'Leave server',
         content: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -115,7 +115,7 @@ class DangerZoneTab extends ConsumerWidget {
               Navigator.of(dialogContext).pop();
               _leaveServer(context, ref);
             },
-            child: const Text('Leave Server'),
+            child: const Text('Leave server'),
           ),
         ],
       ),
@@ -205,7 +205,7 @@ class DangerZoneTab extends ConsumerWidget {
                     HollowButton.danger(
                       onPressed: () => _confirmLeave(context, ref),
                       icon: const Icon(LucideIcons.logOut),
-                      child: const Text('Leave Server'),
+                      child: const Text('Leave server'),
                     ),
                   ],
                 ),
@@ -234,7 +234,7 @@ class DangerZoneTab extends ConsumerWidget {
                     HollowButton.danger(
                       onPressed: () => _confirmDelete(context, ref),
                       icon: const Icon(LucideIcons.trash2),
-                      child: const Text('Delete Server'),
+                      child: const Text('Delete server'),
                     ),
                   ],
                 ),

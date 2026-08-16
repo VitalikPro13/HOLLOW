@@ -160,7 +160,9 @@ flutter:
     - assets/app_icon.ico
     - assets/app_icon_unread.ico
     - assets/hollow_logo_rounded.png
-    - assets/sounds/default_ringtone.wav
+    # Whole directory: the UI sound pack (join/leave voice + stream, mute,
+    # notification) lives here alongside the default ringtone.
+    - assets/sounds/
     - assets/tiktok-solo-icon.svg
     - assets/rust_licenses.txt
     - assets/help/manifest.json

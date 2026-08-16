@@ -411,7 +411,7 @@ class _StickerPickerBodyState extends ConsumerState<StickerPickerBody> {
       if (!mounted || seq != _querySeq) return;
       setState(() {
         _loading = false;
-        _error = 'Search failed — check your connection';
+        _error = 'Search failed. Check your connection';
       });
     });
   }
@@ -1032,7 +1032,7 @@ class _StickerPickerBodyState extends ConsumerState<StickerPickerBody> {
       }
 
       if (!mounted) return;
-      HollowToast.show(context, 'Pack saved — send it like any other file',
+      HollowToast.show(context, 'Pack saved. Send it like any other file',
           type: HollowToastType.success);
     } catch (e) {
       if (!mounted) return;

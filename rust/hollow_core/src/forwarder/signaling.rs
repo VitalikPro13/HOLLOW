@@ -44,7 +44,7 @@ async fn bounded_send(write: &mut WsSink, msg: Message) -> Result<(), String> {
     match tokio::time::timeout(WRITE_TIMEOUT, write.send(msg)).await {
         Ok(Ok(())) => Ok(()),
         Ok(Err(e)) => Err(e.to_string()),
-        Err(_) => Err("write timed out — connection wedged".into()),
+        Err(_) => Err("write timed out: connection wedged".into()),
     }
 }
 

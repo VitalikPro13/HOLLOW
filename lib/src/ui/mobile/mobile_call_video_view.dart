@@ -159,7 +159,7 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
                             size: 14, color: hollow.accentText),
                         const SizedBox(width: HollowSpacing.xs),
                         Text(
-                          'Sharing their screen — Watch',
+                          'Sharing their screen. Watch',
                           style: HollowTypography.caption.copyWith(
                             color: hollow.textPrimary,
                             fontWeight: FontWeight.w600,

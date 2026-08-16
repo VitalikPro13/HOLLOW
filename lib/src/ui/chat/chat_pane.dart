@@ -1273,8 +1273,7 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
             _buildMuteToggleButton(hollow),
           ],
           // Split view button (dock mode only)
-          if ((ref.watch(layoutModeProvider).valueOrNull ?? LayoutMode.dock) ==
-              LayoutMode.dock) ...[
+          if (ref.watch(layoutModeProvider) == LayoutMode.dock) ...[
             const SizedBox(width: HollowSpacing.xs),
             _buildSplitToggleButton(hollow),
           ],
@@ -4692,7 +4691,7 @@ class _DmProfilePanel extends ConsumerWidget {
           onPressed: () => showVerifyContactDialog(context, peerId: master),
           compact: true,
           icon: Icon(isVerified ? LucideIcons.shieldCheck : LucideIcons.shield),
-          child: Text(isVerified ? 'Verified — view number' : 'Verify contact'),
+          child: Text(isVerified ? 'Verified: view number' : 'Verify contact'),
         ),
       ),
       const SizedBox(height: HollowSpacing.xs),

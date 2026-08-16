@@ -84,7 +84,7 @@ class _PasteLinkDialogState extends ConsumerState<PasteLinkDialog> {
               _cleanup();
               setState(() {
                 _state = _DialogState.input;
-                _errorText = 'No seeders found — try again later';
+                _errorText = 'No seeders found. Try again later';
               });
             }
           });

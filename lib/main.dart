@@ -19,6 +19,7 @@ import 'package:hollow/src/core/services/tray_service.dart';
 import 'package:hollow/src/core/shared_tickers.dart';
 import 'package:hollow/src/core/reduce_motion.dart';
 import 'package:hollow/src/ui/app.dart';
+import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/core/hollow_data_dir.dart';
 import 'package:hollow/src/core/services/ios_data_dir_migration.dart';
 import 'package:hollow/src/ui/shader_warmup.dart';
@@ -332,6 +333,51 @@ Future<void> _quitApp() async {
   await windowManager.destroy();
 }
 
+/// Set when a Linux close press issued a `minimize()` that the window manager
+/// may have ignored; the NEXT close press then quits instead (issue #59).
+///
+/// Cleared on focus: on a WM that really minimized, the window only comes back
+/// by being restored, which focuses it — so the following close minimizes
+/// again, exactly as before. On wlroots (Hyprland, sway) `set_minimized` is a
+/// no-op, the window never moves and never re-focuses, so the flag survives
+/// and the second press is the way out.
+bool _linuxCloseMayHaveBeenIgnored = false;
+
+/// Whether a just-issued `minimize()` visibly iconified the window.
+///
+/// `isMinimized()` reads GDK_WINDOW_STATE_ICONIFIED, set asynchronously — hence
+/// a poll rather than a single read. This is deliberately used ONLY to decide
+/// whether to warn the user, never to quit: GTK on Wayland does not reliably
+/// report ICONIFIED even where minimize genuinely works, and a false negative
+/// must not be able to close the app out from under someone.
+Future<bool> _minimizeVisiblyTookEffect() async {
+  for (var i = 0; i < 8; i++) {
+    await Future.delayed(const Duration(milliseconds: 50));
+    try {
+      if (await windowManager.isMinimized()) return true;
+    } catch (_) {}
+  }
+  return false;
+}
+
+/// Tell the user the app is still here and how to actually close it. Only ever
+/// SEEN when the minimize was ignored — on a WM that honoured it this paints
+/// into a window nobody is looking at.
+void _warnLinuxCloseIgnored() {
+  try {
+    final overlay = hollowNavigatorKey.currentState?.overlay;
+    if (overlay == null) return;
+    HollowToast.show(
+      overlay.context,
+      'Hollow is still running. Press close again to quit.',
+      type: HollowToastType.info,
+      overlayState: overlay,
+    );
+  } catch (e) {
+    debugPrint('[HOLLOW] close hint toast failed: $e');
+  }
+}
+
 /// Clean shutdown on Linux (no tray to clean up).
 Future<void> _linuxQuit() async {
   try {
@@ -420,6 +466,9 @@ class _HollowWindowListener extends WindowListener {
   void onWindowFocus() {
     SharedTickers.instance.resume();
     _container.read(windowFocusedProvider.notifier).state = true;
+    // The window came back, so the last minimize did land — the next close
+    // press minimizes again rather than quitting (#59).
+    _linuxCloseMayHaveBeenIgnored = false;
     // On macOS the window is re-shown natively from the Dock
     // (applicationShouldHandleReopen) without going through the tray restore
     // path, so sync the visible state here.
@@ -448,10 +497,24 @@ class _HollowWindowListener extends WindowListener {
       if (Platform.isLinux) {
         // Linux taskbar provides restore (click) + Quit (right-click).
         // If already minimized, the close event is from taskbar "Quit".
-        if (await windowManager.isMinimized()) {
+        // wlroots compositors (Hyprland, sway) implement no minimize at all,
+        // so gtk_window_iconify() is a silent no-op there: the window never
+        // moves, ICONIFIED is never set, and this quit branch was unreachable
+        // — the close button read as dead and the app could only be killed
+        // from a task manager (#59). `_linuxCloseMayHaveBeenIgnored` is the
+        // second door into it.
+        if (await windowManager.isMinimized() ||
+            _linuxCloseMayHaveBeenIgnored) {
           await _linuxQuit();
         } else {
           await windowManager.minimize();
+          // Arm the second door only after the poll window, so any focus
+          // churn the minimize itself caused has settled and can't clear the
+          // flag we just set.
+          if (!await _minimizeVisiblyTookEffect()) {
+            _linuxCloseMayHaveBeenIgnored = true;
+            _warnLinuxCloseIgnored();
+          }
         }
       } else if (Platform.isMacOS) {
         // macOS-native idiom: hide the window, app keeps running in the Dock

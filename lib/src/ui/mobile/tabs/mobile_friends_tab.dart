@@ -891,7 +891,7 @@ class _AddFriendSheetState extends ConsumerState<_AddFriendSheet> {
                       ),
                       const SizedBox(height: HollowSpacing.xs),
                       Text(
-                        'Claim a temporary nickname and share it — friends '
+                        'Claim a temporary nickname and share it. Friends '
                         'can use it instead of your full peer ID. It resets '
                         'when you go offline.',
                         style: HollowTypography.caption

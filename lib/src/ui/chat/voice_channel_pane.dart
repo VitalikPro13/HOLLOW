@@ -1173,7 +1173,7 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
         ref.read(voiceChannelProvider.notifier).localScreenShareRenderer;
     if (renderer == null) return const SizedBox.shrink();
     return HollowTooltip(
-      message: 'Your share — click to focus',
+      message: 'Click to focus your share',
       child: GestureDetector(
         onTap: () {
           final localPeerId = ref.read(identityProvider).peerId ?? '';

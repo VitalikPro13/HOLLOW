@@ -44,8 +44,8 @@ void main() {
 
   testWidgets('renders both scale controls at their defaults', (tester) async {
     await pumpSettings(tester);
-    expect(find.text('Interface Scale'), findsOneWidget);
-    expect(find.text('Chat Text Size'), findsOneWidget);
+    expect(find.text('Interface scale'), findsOneWidget);
+    expect(find.text('Chat text size'), findsOneWidget);
     // Both sit at 100%, and the min/max captions frame the desktop range.
     expect(find.text('100%'), findsNWidgets(2));
     expect(find.byType(Slider), findsNWidgets(2));

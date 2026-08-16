@@ -93,7 +93,7 @@ mod win {
 
         let ok = unsafe { CredWriteW(&cred, 0) };
         if ok == 0 {
-            return Err("CredWriteW failed — could not store key in Credential Manager".into());
+            return Err("CredWriteW failed: could not store key in Credential Manager".into());
         }
         Ok(())
     }

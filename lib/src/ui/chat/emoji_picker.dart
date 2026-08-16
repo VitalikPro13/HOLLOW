@@ -404,7 +404,7 @@ class _EmojiPickerBodyState extends ConsumerState<EmojiPickerBody> {
       if (!mounted || seq != _ffzQuerySeq) return;
       setState(() {
         _ffzLoading = false;
-        _ffzError = 'Search failed — check your connection';
+        _ffzError = 'Search failed. Check your connection';
       });
     });
   }
@@ -1094,7 +1094,7 @@ Future<String?> _promptEmoteNameImpl(
                 ),
                 const SizedBox(height: HollowSpacing.xs),
                 Text(
-                  'Used as :name: — 2-24 characters: a-z, 0-9, _',
+                  'Used as :name: (2-24 characters: a-z, 0-9, _)',
                   style: HollowTypography.caption
                       .copyWith(color: hollow.textTertiary),
                 ),

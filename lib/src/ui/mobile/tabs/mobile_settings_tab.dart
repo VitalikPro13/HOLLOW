@@ -35,6 +35,7 @@ import 'package:hollow/src/ui/settings/verify_proof_section.dart';
 import 'package:hollow/src/core/providers/theme_provider.dart';
 import 'package:hollow/src/core/providers/updater_provider.dart';
 import 'package:hollow/src/core/services/app_lock_service.dart';
+import 'package:hollow/src/core/services/sound_service.dart';
 import 'package:hollow/src/core/reduce_motion.dart';
 import 'package:hollow/src/rust/api/identity.dart' as identity_api;
 import 'package:hollow/src/rust/api/network.dart' as network_api;
@@ -395,7 +396,7 @@ class _MobileRelayCard extends ConsumerWidget {
             DailyUsageMeter(
               hollow: hollow,
               icon: LucideIcons.gauge,
-              label: 'Daily Relay Data',
+              label: 'Daily relay data',
               usageText: bandwidth.usageLabel,
               progress: bandwidth.usagePercent,
               trailing: showReset
@@ -1064,7 +1065,7 @@ class _ProfileTabState extends ConsumerState<_ProfileTab> {
         const SizedBox(height: HollowSpacing.xl),
 
         // Display name
-        Text('Display Name', style: HollowTypography.caption.copyWith(color: hollow.textSecondary)),
+        Text('Display name', style: HollowTypography.caption.copyWith(color: hollow.textSecondary)),
         const SizedBox(height: HollowSpacing.xs),
         HollowTextField(
           controller: _nameController,
@@ -1088,7 +1089,7 @@ class _ProfileTabState extends ConsumerState<_ProfileTab> {
         const SizedBox(height: HollowSpacing.lg),
 
         // About me
-        Text('About Me', style: HollowTypography.caption.copyWith(color: hollow.textSecondary)),
+        Text('About me', style: HollowTypography.caption.copyWith(color: hollow.textSecondary)),
         const SizedBox(height: HollowSpacing.xs),
         HollowTextField(
           controller: _aboutController,
@@ -1104,7 +1105,7 @@ class _ProfileTabState extends ConsumerState<_ProfileTab> {
         HollowButton.filled(
           onPressed: _saving ? null : _save,
           expand: true,
-          child: Text(_saving ? 'Saving...' : 'Save Profile'),
+          child: Text(_saving ? 'Saving...' : 'Save profile'),
         ),
 
         const SizedBox(height: HollowSpacing.xl),
@@ -1486,7 +1487,7 @@ class _NetworkTabState extends ConsumerState<_NetworkTab> {
             compact: true,
             icon: const Icon(LucideIcons.plus, size: 14),
             onPressed: () => setState(() => _showAddRelay = true),
-            child: const Text('Add Relay'),
+            child: const Text('Add relay'),
           ),
 
         // Apply & Close (only when relay changed)
@@ -1502,7 +1503,7 @@ class _NetworkTabState extends ConsumerState<_NetworkTab> {
               await Future.delayed(const Duration(milliseconds: 200));
               SystemNavigator.pop();
             },
-            child: const Text('Apply & Close App'),
+            child: const Text('Apply & close app'),
           ),
           Text(
             'App will close. Reopen to connect to the new relay.',
@@ -1604,6 +1605,102 @@ class _AudioTab extends StatelessWidget {
         const SizedBox(height: HollowSpacing.md),
         _RingtoneVolumeSlider(),
         const SizedBox(height: HollowSpacing.xl),
+        const _SectionLabel(label: 'Sound Effects'),
+        const SizedBox(height: HollowSpacing.sm),
+        _SoundEffectsControls(),
+        const SizedBox(height: HollowSpacing.xl),
+      ],
+    );
+  }
+}
+
+/// UI sound pack toggle + volume (issue #55) — desktop twin lives in
+/// `audio_section.dart`.
+class _SoundEffectsControls extends ConsumerWidget {
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final hollow = HollowTheme.of(context);
+    final enabled = ref.watch(soundEffectsEnabledProvider);
+    final volume = ref.watch(soundEffectsVolumeProvider);
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('Play sound effects',
+                      style: HollowTypography.bodySmall
+                          .copyWith(color: hollow.textSecondary)),
+                  const SizedBox(height: 2),
+                  Text(
+                    'Voice channel joins and leaves, screen shares, mute, '
+                    'notifications.',
+                    style: HollowTypography.caption.copyWith(
+                      color: hollow.textSecondary,
+                      fontSize: 11,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: HollowSpacing.md),
+            Switch(
+              value: enabled,
+              onChanged: (v) {
+                ref.read(soundEffectsEnabledProvider.notifier).setEnabled(v);
+                if (v) SoundService.instance.play(HollowSound.notification);
+              },
+              activeTrackColor: hollow.accent,
+              // The siblings in this file still pass the deprecated
+              // `activeColor`; same knob, current name.
+              activeThumbColor: Colors.white,
+              inactiveTrackColor: hollow.border,
+            ),
+          ],
+        ),
+        const SizedBox(height: HollowSpacing.sm),
+        AnimatedOpacity(
+          duration: const Duration(milliseconds: 150),
+          opacity: enabled ? 1.0 : 0.4,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Text('Effects volume',
+                      style: HollowTypography.bodySmall
+                          .copyWith(color: hollow.textSecondary)),
+                  Text('${(volume * 100).round()}%',
+                      style: HollowTypography.caption.copyWith(
+                        color: hollow.accent,
+                        fontWeight: FontWeight.w600,
+                      )),
+                ],
+              ),
+              Slider(
+                value: volume.clamp(0.0, 1.0),
+                min: 0.0,
+                max: 1.0,
+                divisions: 20,
+                activeColor: hollow.accent,
+                inactiveColor: hollow.border,
+                onChanged: enabled
+                    ? (v) => ref
+                        .read(soundEffectsVolumeProvider.notifier)
+                        .setVolume(v)
+                    : null,
+                onChangeEnd: enabled
+                    ? (_) => SoundService.instance.play(HollowSound.joinVoice)
+                    : null,
+              ),
+            ],
+          ),
+        ),
       ],
     );
   }
@@ -1727,7 +1824,7 @@ class _ExportDiagnosticsButton extends StatelessWidget {
       onPressed: () => _export(context),
       expand: true,
       icon: const Icon(LucideIcons.fileText, size: 16),
-      child: const Text('Export Debug Logs'),
+      child: const Text('Export debug logs'),
     );
   }
 
@@ -1777,7 +1874,7 @@ class _ExportDiagnosticsButton extends StatelessWidget {
     final bytes = Uint8List.fromList(utf8.encode(buf.toString()));
     try {
       final saved = await FilePicker.platform.saveFile(
-        dialogTitle: 'Export Debug Logs',
+        dialogTitle: 'Export debug logs',
         fileName: 'hollow_diagnostics.txt',
         bytes: bytes, // required on iOS/Android
       );
@@ -1816,7 +1913,7 @@ class _ThemeToggleRow extends ConsumerWidget {
             size: 18, color: hollow.textSecondary),
         const SizedBox(width: HollowSpacing.md),
         Expanded(
-          child: Text('Dark Mode', style: HollowTypography.body.copyWith(
+          child: Text('Dark mode', style: HollowTypography.body.copyWith(
             color: hollow.textPrimary,
           )),
         ),
@@ -1851,7 +1948,7 @@ class _AccentHueSection extends ConsumerWidget {
           children: [
             Icon(LucideIcons.palette, size: 18, color: hollow.textSecondary),
             const SizedBox(width: HollowSpacing.md),
-            Text('Accent Color', style: HollowTypography.body.copyWith(
+            Text('Accent color', style: HollowTypography.body.copyWith(
               color: hollow.textPrimary,
             )),
             const Spacer(),
@@ -2005,7 +2102,7 @@ class _BackgroundSection extends ConsumerWidget {
                 if (cropped == null) return;
                 ref.read(backgroundProvider.notifier).setImage(cropped);
               },
-              child: Text(bg.hasBackground ? 'Change' : 'Set Image'),
+              child: Text(bg.hasBackground ? 'Change' : 'Set image'),
             ),
             if (bg.hasBackground) ...[
               const SizedBox(width: HollowSpacing.xs),
@@ -2024,7 +2121,7 @@ class _BackgroundSection extends ConsumerWidget {
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              Text('Panel Opacity', style: HollowTypography.bodySmall.copyWith(
+              Text('Panel opacity', style: HollowTypography.bodySmall.copyWith(
                 color: hollow.textSecondary,
               )),
               Text('${(bg.panelOpacity * 100).round()}%',
@@ -2068,7 +2165,7 @@ class _ReduceMotionRow extends ConsumerWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text('Reduce Motion',
+                  Text('Reduce motion',
                       style: HollowTypography.body.copyWith(
                         color: hollow.textPrimary,
                       )),
@@ -2112,7 +2209,7 @@ class _ReduceTransparencyRow extends ConsumerWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text('Reduce Transparency', style: HollowTypography.body.copyWith(
+              Text('Reduce transparency', style: HollowTypography.body.copyWith(
                 color: hollow.textPrimary,
               )),
               Text('Turn off background blur and glass effects',
@@ -2170,7 +2267,7 @@ class _InvisibleToggleRow extends ConsumerWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text('Appear Invisible', style: HollowTypography.body.copyWith(
+              Text('Appear invisible', style: HollowTypography.body.copyWith(
                 color: hollow.textPrimary,
               )),
               Text('Show as offline to other users',
@@ -2266,13 +2363,13 @@ class _OfflineInboxSection extends ConsumerWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text('Hold My Messages While I\'m Offline',
+                  Text('Hold my messages while I\'m offline',
                       style: HollowTypography.body.copyWith(
                         color: hollow.textPrimary,
                       )),
                   Text(
                       'Messages sent TO YOU while you\'re offline wait on the '
-                      'relay, encrypted, and arrive when you return — even if '
+                      'relay, encrypted, and arrive when you return, even if '
                       'the sender has gone offline. Only affects what you '
                       'receive. The relay can\'t read any of it.',
                       style: HollowTypography.caption.copyWith(
@@ -2330,7 +2427,7 @@ class _ImageQualityPicker extends ConsumerWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text('Image Quality', style: HollowTypography.bodySmall.copyWith(
+        Text('Image quality', style: HollowTypography.bodySmall.copyWith(
           color: hollow.textSecondary,
         )),
         const SizedBox(height: HollowSpacing.sm),
@@ -2392,7 +2489,7 @@ class _AutoDownloadSlider extends ConsumerWidget {
         Row(
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
-            Text('Auto-Download', style: HollowTypography.bodySmall.copyWith(
+            Text('Auto-download', style: HollowTypography.bodySmall.copyWith(
               color: hollow.textSecondary,
             )),
             Text(label, style: HollowTypography.caption.copyWith(
@@ -2415,7 +2512,7 @@ class _AutoDownloadSlider extends ConsumerWidget {
         ),
         Text(
             off
-                ? 'Off — files show a download button instead'
+                ? 'Off: files show a download button instead'
                 : 'Files up to this size auto-download',
             style: HollowTypography.caption.copyWith(
               color: hollow.textSecondary, fontSize: 11,
@@ -2444,7 +2541,7 @@ class _CacheCapSlider extends ConsumerWidget {
         Row(
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
-            Text('Vault Cache Limit', style: HollowTypography.bodySmall.copyWith(
+            Text('Vault cache limit', style: HollowTypography.bodySmall.copyWith(
               color: hollow.textSecondary,
             )),
             Text(label, style: HollowTypography.caption.copyWith(
@@ -2488,7 +2585,7 @@ class _FilesCacheCapSlider extends ConsumerWidget {
         Row(
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
-            Text('Downloaded Files Limit',
+            Text('Downloaded files limit',
                 style: HollowTypography.bodySmall.copyWith(
                   color: hollow.textSecondary,
                 )),
@@ -2535,7 +2632,7 @@ class _AssetCacheCapSlider extends ConsumerWidget {
         Row(
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
-            Text('Emotes & GIFs Limit',
+            Text('Emotes & GIFs limit',
                 style: HollowTypography.bodySmall.copyWith(
                   color: hollow.textSecondary,
                 )),
@@ -2574,15 +2671,15 @@ class _AudioQualityPicker extends ConsumerWidget {
     final current = asyncPreset.valueOrNull ?? AudioQualityPreset.voice;
 
     const descriptions = {
-      AudioQualityPreset.voice: '32 kbps mono — speech',
-      AudioQualityPreset.music: '128 kbps stereo — music',
-      AudioQualityPreset.hifi: '256 kbps stereo — lossless',
+      AudioQualityPreset.voice: '32 kbps mono, speech',
+      AudioQualityPreset.music: '128 kbps stereo, music',
+      AudioQualityPreset.hifi: '256 kbps stereo, lossless',
     };
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text('Audio Quality',
+        Text('Audio quality',
             style: HollowTypography.bodySmall
                 .copyWith(color: hollow.textSecondary)),
         const SizedBox(height: HollowSpacing.sm),
@@ -2649,7 +2746,7 @@ class _MicGainSlider extends ConsumerWidget {
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              Text('Microphone Gain',
+              Text('Microphone gain',
                   style: HollowTypography.bodySmall
                       .copyWith(color: hollow.textSecondary)),
               Text(
@@ -2705,7 +2802,7 @@ class _VoiceEnhanceToggle extends ConsumerWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text('Voice Enhancement',
+                  Text('Voice enhancement',
                       style: HollowTypography.bodySmall
                           .copyWith(color: hollow.textSecondary)),
                   const SizedBox(height: 2),
@@ -2741,12 +2838,12 @@ class _VoiceEnhanceToggle extends ConsumerWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text('Dynamic Mode',
+                    Text('Dynamic mode',
                         style: HollowTypography.bodySmall
                             .copyWith(color: hollow.textSecondary)),
                     const SizedBox(height: 2),
                     Text(
-                      'Continuously balances your mic level for you — any '
+                      'Continuously balances your mic level for you. Any '
                       'microphone lands at the same natural loudness.',
                       style: HollowTypography.caption.copyWith(
                         color: hollow.textSecondary,
@@ -2814,7 +2911,7 @@ class _VoiceEnhanceToggle extends ConsumerWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text('AI Noise Suppression',
+                  Text('AI noise suppression',
                       style: HollowTypography.bodySmall
                           .copyWith(color: hollow.textSecondary)),
                   const SizedBox(height: 2),
@@ -2853,13 +2950,13 @@ class _AudioProcessingInfo extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text('Audio Processing',
+        Text('Audio processing',
             style: HollowTypography.bodySmall
                 .copyWith(color: hollow.textSecondary)),
         const SizedBox(height: HollowSpacing.xs),
-        _ProcessingRow(label: 'Echo Cancellation', hollow: hollow),
-        _ProcessingRow(label: 'Noise Suppression', hollow: hollow),
-        _ProcessingRow(label: 'Auto Gain Control', hollow: hollow),
+        _ProcessingRow(label: 'Echo cancellation', hollow: hollow),
+        _ProcessingRow(label: 'Noise suppression', hollow: hollow),
+        _ProcessingRow(label: 'Auto gain control', hollow: hollow),
       ],
     );
   }
@@ -2995,7 +3092,7 @@ class _RingtoneVolumeSlider extends ConsumerWidget {
         Row(
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
-            Text('Ringtone Volume',
+            Text('Ringtone volume',
                 style: HollowTypography.bodySmall
                     .copyWith(color: hollow.textSecondary)),
             Text('${(volume * 100).round()}%',
@@ -3114,7 +3211,7 @@ class _SecurityTabState extends ConsumerState<_SecurityTab> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text('App Lock', style: HollowTypography.body.copyWith(
+                    Text('App lock', style: HollowTypography.body.copyWith(
                       color: hollow.textPrimary,
                     )),
                     Text(
@@ -3214,7 +3311,7 @@ class _SecurityTabState extends ConsumerState<_SecurityTab> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text('Device Protection', style: HollowTypography.body.copyWith(
+                      Text('Device protection', style: HollowTypography.body.copyWith(
                         color: hollow.textPrimary,
                       )),
                       Text(
@@ -3571,7 +3668,7 @@ class _RecoveryPhraseButton extends ConsumerWidget {
         },
         expand: true,
         icon: const Icon(LucideIcons.key, size: 16),
-        child: const Text('Recovery Phrase'),
+        child: const Text('Recovery phrase'),
       );
     }
 
@@ -3579,7 +3676,7 @@ class _RecoveryPhraseButton extends ConsumerWidget {
       onPressed: () => showMnemonicDialog(context, mnemonic),
       expand: true,
       icon: const Icon(LucideIcons.key, size: 16),
-      child: const Text('Recovery Phrase'),
+      child: const Text('Recovery phrase'),
     );
   }
 }
@@ -3631,7 +3728,7 @@ class _BackupExportButtonState extends ConsumerState<_BackupExportButton> {
                     strokeWidth: 2, color: hollow.accent),
                 )
               : const Icon(LucideIcons.download, size: 16),
-          child: Text(_busy ? 'Exporting…' : 'Export Backup'),
+          child: Text(_busy ? 'Exporting…' : 'Export backup'),
         ),
       ],
     );
@@ -3654,7 +3751,7 @@ class _BackupExportButtonState extends ConsumerState<_BackupExportButton> {
       );
       final bytes = await File(tmpPath).readAsBytes();
       final savePath = await FilePicker.platform.saveFile(
-        dialogTitle: 'Save Backup',
+        dialogTitle: 'Save backup',
         fileName: 'hollow-backup.hollow',
         bytes: bytes,
       );
@@ -3837,7 +3934,7 @@ class _ResetDeviceListButton extends StatelessWidget {
       onPressed: () => _reset(context),
       expand: true,
       icon: const Icon(LucideIcons.refreshCw, size: 16),
-      child: const Text('Reset Device List'),
+      child: const Text('Reset device list'),
     );
   }
 

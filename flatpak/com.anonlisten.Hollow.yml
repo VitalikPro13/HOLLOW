@@ -18,11 +18,21 @@ finish-args:
   - --filesystem=xdg-download
   # Home directory for ~/.hollow data
   - --filesystem=home
+  # Session bus. The runner is a GtkApplication with an application-id
+  # (D-Bus-unique so hollow:// deep links reach the running instance), so
+  # g_application_register() has to own com.anonlisten.Hollow on the session
+  # bus. Behind the filtered bus proxy that RequestName came back as
+  # GDBus.Error:ServiceUnknown and the app exited before showing a window —
+  # every user had to grant this by hand in Flatseal first (issue #59).
+  - --socket=session-bus
+  - --own-name=com.anonlisten.Hollow
   # Desktop notifications
   - --talk-name=org.freedesktop.Notifications
   # Tray icon (AppIndicator)
   - --talk-name=org.kde.StatusNotifierWatcher
   - --talk-name=org.freedesktop.portal.Desktop
+  # OS keychain (identity-at-rest protection via libsecret)
+  - --talk-name=org.freedesktop.secrets
   # GPU acceleration
   - --device=dri
 

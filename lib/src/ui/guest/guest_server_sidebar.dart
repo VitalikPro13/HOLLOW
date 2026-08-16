@@ -69,7 +69,7 @@ class _GuestServerSidebarState extends ConsumerState<GuestServerSidebar> {
       }
       if (mode == GuestFetchMode.manual) {
         HollowToast.show(
-            context, 'Added as manual — 7 real-time servers reached',
+            context, 'Added as manual: 7 real-time servers reached',
             type: HollowToastType.info);
       }
       // Expand the newly added server and request its channels.

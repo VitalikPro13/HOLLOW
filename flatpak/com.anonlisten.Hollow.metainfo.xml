@@ -8,8 +8,8 @@
   <description>
     <p>
       Hollow is a fully distributed, end-to-end encrypted messaging platform.
-      No central servers — members collectively host the network.
-      Features text, voice, video, file sharing, and screen share.
+      There are no central servers. Members collectively host the network.
+      It includes text, voice, video, file sharing, and screen share.
     </p>
   </description>
   <url type="homepage">https://hollow.anonlisten.com</url>
@@ -20,9 +20,9 @@
   <launchable type="desktop-id">com.anonlisten.Hollow.desktop</launchable>
   <content_rating type="oars-1.1" />
   <releases>
-    <release version="0.4.2" date="2026-05-27">
+    <release version="0.9.4" date="2026-08-04">
       <description>
-        <p>Alpha release — identity protection redesign, Linux support (experimental).</p>
+        <p>Alpha release: screen share, link previews, etc.</p>
       </description>
     </release>
   </releases>

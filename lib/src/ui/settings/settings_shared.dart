@@ -351,11 +351,11 @@ class _InterfaceScaleControlState extends ConsumerState<InterfaceScaleControl> {
     return _ScaleSliderBlock(
       hollow: hollow,
       icon: LucideIcons.scaling,
-      title: 'Interface Scale',
+      title: 'Interface scale',
       subtitle: clampedTo != null
-          ? 'Limited to ${scalePercentLabel(clampedTo)} by this window size — '
-              'enlarge the window for more'
-          : 'Text, icons and spacing — applies when you release',
+          ? 'Limited to ${scalePercentLabel(clampedTo)} by this window size. '
+              'Enlarge the window for more'
+          : 'Text, icons and spacing (applies when you release)',
       value: shown,
       min: min,
       max: max,
@@ -401,7 +401,7 @@ class _ChatTextScaleControlState extends ConsumerState<ChatTextScaleControl> {
         _ScaleSliderBlock(
           hollow: hollow,
           icon: LucideIcons.aLargeSmall,
-          title: 'Chat Text Size',
+          title: 'Chat text size',
           subtitle: 'Message text and the box you type in',
           value: value,
           min: kChatTextScaleMin,

@@ -343,7 +343,7 @@ The entire body is wrapped in `try-catch` to prevent unhandled exceptions from k
 **`NetworkEvent_VoiceChannelLeft`** (serverId, channelId, peerId)
 - `voiceChannelProvider.notifier.onPeerLeft(serverId, channelId, peerId)`
 - If local peer: restores the previously cached channel (or falls back to first text channel), clears `preVcChannelId`, calls `onLocalLeft()`.
-- If remote peer: calls `onRemotePeerLeft(peerId)`.
+- If remote peer: calls `onRemotePeerLeft(peerId, inOurChannel: ...)`. The flag is computed HERE, from `voiceChannelProvider`'s `currentServerId`/`currentChannelId` against the event's server/channel: `VoiceChannelLeft` fires for peers leaving any visible channel, not just ours, and the notifier needs to know which so the leave cue (issue #55) does not play for a room we are not sitting in. The teardown the method also does is a harmless no-op for a peer we were never connected to.
 
 **`NetworkEvent_VoiceChannelSignal`** (serverId, channelId, peerId, signalType, payload)
 - `voiceChannelProvider.notifier.handleSignal(peerId, signalType, payload, serverId, channelId)`
@@ -503,15 +503,18 @@ Provider: `backgroundProvider` -- `NotifierProvider<BackgroundNotifier, Backgrou
 ## Layout Mode Provider
 
 File: `lib/src/core/providers/layout_provider.dart`
-Provider: `layoutModeProvider` -- `AsyncNotifierProvider<LayoutModeNotifier, LayoutMode>`
+Provider: `layoutModeProvider` -- `NotifierProvider<LayoutModeNotifier, LayoutMode>` (synchronous, NOT async)
 
 ### LayoutMode Enum
 - `classic` -- Discord-like 4-panel: ServerStrip (72px) | ChannelSidebar (240px) | ChatPane | MemberPanel (240px).
 - `dock` -- Default. FriendsBar (top) | ChannelSidebar + ChatPane + MemberPanel | BottomBar (bottom).
 
 ### LayoutModeNotifier Methods
-- `build()` -- Loads from `storage_api.loadSetting(key: 'layout_mode')`. Returns `dock` unless stored value is `'classic'`.
+- `build()` -- Returns `LayoutMode.dock`. It reads NOTHING: the shell watches this provider during the local-first render, and Rust `load_setting` throws until the SQLCipher store opens, so an eager read in `build()` always lost the race and left the provider in `AsyncError` (issue #58: Classic silently reverted to Dock on every launch, because every call site swallowed it with `.valueOrNull ?? LayoutMode.dock`).
+- `load()` -- Reads `storage_api.loadSetting(key: 'layout_mode')` and sets state (`'classic'` → classic, anything else → dock). Called from `HollowShell._bootstrap()` right after `themeModeProvider.load()`, and it is the ONLY read path. Failures are logged and leave the default in place.
 - `setMode(LayoutMode mode)` -- Persists as `'classic'` or `'dock'` string to settings, updates state.
+
+All six value call sites read it directly (`ref.watch(layoutModeProvider)` / `ref.read(...)`) with no `.valueOrNull` fallback: `hollow_shell.dart` x3 (layout dispatch, `_buildChatOrEmpty`, the split-view shortcut), `chat_pane.dart` + `channel_chat_pane.dart` (split-view button visibility), and `appearance_section.dart` (the Window layout picker). Desktop-only by nature: mobile runs `MobileShell` and never reads it.
 
 ---
 
@@ -521,7 +524,7 @@ File: `lib/src/core/providers/settings_provider.dart`
 
 All settings providers follow the same pattern: `AsyncNotifierProvider` that loads from `storage_api.loadSetting(key: ...)` in `build()` and persists via `storage_api.saveSetting(key: ..., value: ...)` on change. All use the `app_settings` table in SQLCipher.
 
-**The exception, and when you must take it:** a setting read by the FIRST frame cannot use this pattern. Rust `load_setting` returns `Err("Message store is not open")` until the SQLCipher store opens, so an eager `build()` read parks the provider in `AsyncError` and the saved value is silently lost on every launch (feedback_load_persisted_setting_from_bootstrap_not_build). Those settings are synchronous `Notifier`s with an explicit `load()` called from `HollowShell._bootstrap` — `themeModeProvider`, `accentHueProvider`, `backgroundProvider`, `invisibleModeProvider`, and the display-scale pair below.
+**The exception, and when you must take it:** a setting read by the FIRST frame cannot use this pattern. Rust `load_setting` returns `Err("Message store is not open")` until the SQLCipher store opens, so an eager `build()` read parks the provider in `AsyncError` and the saved value is silently lost on every launch (feedback_load_persisted_setting_from_bootstrap_not_build). Those settings are synchronous `Notifier`s with an explicit `load()` called from `HollowShell._bootstrap`: `themeModeProvider`, `accentHueProvider`, `backgroundProvider`, `invisibleModeProvider`, `layoutModeProvider` (issue #58, in `layout_provider.dart`), `alwaysRelayCallsProvider`, `peerForwardingProvider`, the sound-effects pair below, and the display-scale pair below. The list is long enough now that the async-in-`build()` form is the exception for anything the shell itself watches; ask "does the first frame need this?" before reaching for `AsyncNotifier`.
 
 ### Minimize to Tray
 Provider: `minimizeToTrayProvider` -- `AsyncNotifierProvider<MinimizeToTrayNotifier, bool>`
@@ -621,6 +624,7 @@ All three are seeded into `VoiceService`/`VoiceChannelService` at service creati
 **ringtoneVolumeProvider** -- `AsyncNotifierProvider<RingtoneVolumeNotifier, double>`
 - Key: `'ringtone_volume'`
 - Default: `0.5`. Range: 0.0 to 1.0.
+- Both `build()` and `setVolume()` publish the value to `SoundService.ringtoneVolume`, because the OUTGOING-call ringback plays from `SoundService` (a ref-less singleton) and rides this same slider. `_bootstrap()` awaits `ringtoneVolumeProvider.future` for exactly that reason: building the provider is what publishes it, and without the preload the first outgoing call of a session rings at the default instead of the user's setting.
 
 **ringtoneStartProvider** -- `AsyncNotifierProvider<RingtoneStartNotifier, double>`
 - Key: `'ringtone_start'`
@@ -629,6 +633,20 @@ All three are seeded into `VoiceService`/`VoiceChannelService` at service creati
 **ringtoneEndProvider** -- `AsyncNotifierProvider<RingtoneEndNotifier, double>`
 - Key: `'ringtone_end'`
 - Default: `30.0`. Clip end offset in seconds (or song duration if shorter).
+
+### UI Sound Effects (issue #55)
+Two synchronous `Notifier`s (the bootstrap-`load()` exception above), both mirrored into `SoundService`'s statics.
+
+**soundEffectsEnabledProvider** -- `NotifierProvider<SoundEffectsEnabledNotifier, bool>`
+- Key: `'sound_effects_enabled'`, `build()` returns `true`.
+- `load()` treats an ABSENT key as enabled (`state = val != 'false'`), so first run has sound; only an explicit `'false'` turns it off. Writes `SoundService.enabled` afterwards, whether or not the read threw.
+- `setEnabled(bool)` -- state, then `SoundService.enabled`, then persist.
+
+**soundEffectsVolumeProvider** -- `NotifierProvider<SoundEffectsVolumeNotifier, double>`
+- Key: `'sound_effects_volume'`, `build()` returns `0.5`. Clamped to [0.0, 1.0] on both read and write, persisted with 2 decimals.
+- `load()`/`setVolume(double)` mirror into `SoundService.volume`. Independent of the ringtone volume above.
+
+**Why statics instead of a `ref` read:** the sounds fire from inside `VoiceChannelNotifier` / `CallNotifier` / `SystemNotificationNotifier`, including teardown paths where re-entering the provider container is unsafe. The notifiers push their value out; `SoundService` never reads back. That also means the `load()` calls in `_bootstrap()` are load-bearing: skip them and the service keeps the compiled-in defaults for the whole session.
 
 ### Auto-Download Threshold (issue #41)
 Provider: `autoDownloadThresholdProvider` -- `AsyncNotifierProvider<AutoDownloadThresholdNotifier, int>`
@@ -746,6 +764,8 @@ State is a list of up to 3 `NotificationCard` objects (in-app overlay cards).
 **`notifyChannel(serverId, channelId, fromPeerId, text, replyToMid, channelName?, messageId?)`**
 - Checks notification level. If `nothing`: return. If `mentions`: checks for @mentions/@everyone/reply.
 - Same mobile-lifecycle / desktop-window-state routing as DM. Channel toast uses the **sender's** avatar (a real peer id).
+
+**`_addMessage(...)`** -- the single entry point for the in-app overlay cards (grouping, the 3-card cap, `withMessage`). It also plays `HollowSound.notification` (issue #55). The hook sits HERE and not at the top of `notifyDm`/`notifyChannel` on purpose: the native-toast path already rings with the OS notification sound, so hooking the shared entry would double up. One surface, one sound per message.
 
 **`dismissCard(sourceKey)`** / **`dismissAll()`** -- Removes a card / clears all.
 

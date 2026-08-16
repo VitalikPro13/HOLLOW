@@ -24,7 +24,7 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
       return (
         icon: LucideIcons.mic,
         color: hollow.accent,
-        tooltip: 'Transmitting — push to talk',
+        tooltip: 'Transmitting (push to talk)',
       );
     }
     final raw =
@@ -33,7 +33,7 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
     return (
       icon: LucideIcons.micOff,
       color: hollow.textTertiary,
-      tooltip: 'Push to talk — hold $key',
+      tooltip: 'Push to talk: hold $key',
     );
   }
   return (icon: LucideIcons.mic, color: idleColor, tooltip: 'Mute');

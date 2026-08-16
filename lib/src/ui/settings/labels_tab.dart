@@ -98,7 +98,7 @@ class _LabelsTabState extends ConsumerState<LabelsTab> {
       context: context,
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, setDialogState) => HollowDialog(
-          title: existing == null ? 'Create Label' : 'Edit Label',
+          title: existing == null ? 'Create label' : 'Edit label',
           content: Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -353,7 +353,7 @@ class _LabelsTabState extends ConsumerState<LabelsTab> {
                       if (label.access) ...[
                         const SizedBox(width: HollowSpacing.xs),
                         HollowTooltip(
-                          message: 'Access label — gates channels',
+                          message: 'Access label: gates channels',
                           child: Icon(LucideIcons.shieldCheck, size: 14,
                               color: parseLabelColor(label.color)),
                         ),

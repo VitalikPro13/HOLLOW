@@ -199,7 +199,7 @@ pub fn share_keep_and_seed(root_hash: String) -> Result<String, String> {
         let share = store.load_share(&root_hash)?
             .ok_or("Share not found")?;
         let old_path = share.disk_path
-            .ok_or("Share has no disk_path — not yet completed?")?;
+            .ok_or("Share has no disk_path. Is it still transferring?")?;
 
         let old = std::path::PathBuf::from(&old_path);
         if !old.exists() {

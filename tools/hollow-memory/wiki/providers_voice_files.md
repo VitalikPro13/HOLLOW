@@ -123,7 +123,7 @@ Called by event_provider on the `VoiceChannelLeft` event for the local peer. Two
 
 **`onRemotePeerJoined(peerId)`** -- called when a remote peer joins the local user's current channel. Calls `_service.onPeerJoinedMyChannel(peerId)`. If local is screen sharing, sends `screen_state` signal to the new peer (actual `screen_offer` is deferred to `onPeerConnected` callback). If local camera is on, sends `camera_state` signal.
 
-**`onRemotePeerLeft(peerId)`** -- calls `_service.onPeerLeftMyChannel(peerId)`, cleans up peer's screen share and camera state.
+**`onRemotePeerLeft(peerId, {bool inOurChannel = true})`** -- calls `_service.onPeerLeftMyChannel(peerId)`, cleans up peer's screen share and camera state. `inOurChannel` is computed by the CALLER (`event_provider`, comparing the event's server/channel against `currentServerId`/`currentChannelId`) because `VoiceChannelLeft` also fires for peers leaving OTHER channels of a server we can see: the teardown is a harmless no-op for a peer we were never connected to, but the leave cue must not fire for a channel we are not in.
 
 **`onPeerDisconnected(peerId)`** -- removes peer from ALL voice channels (complete disconnect). Tears down WebRTC connection, screen share, and camera for that peer.
 
@@ -240,6 +240,27 @@ The `handleSignal(peerId, signalType, payload, serverId, channelId)` method is t
 ### SFrame E2EE on Screen Share
 
 `_enableSframeOnScreenSharePc(pc, frameCryptor, peerId, {isSender})` -- enables SFrame encryption/decryption on a screen share `RTCPeerConnection`. For senders, iterates `pc.getSenders()` and calls `frameCryptor.enableForSender()` with kind `'screen_video'` or `'screen_audio'`. For receivers, iterates `pc.getReceivers()` and calls `frameCryptor.enableForReceiver()`. Uses the voice channel's existing `FrameCryptorService` instance from the audio service.
+
+### Sound Cues (issue #55)
+
+Every cue goes through `SoundService.instance.play(..., duringCall: true)` (see `services_media_storage.md` for the service and the iOS drop). Hook sites:
+
+| Where | Sound |
+|---|---|
+| `onLocalJoined` (after state is written) | `joinVoice`, you are in |
+| `onRemotePeerJoined` | `joinVoice`, somebody walked into the channel you are sitting in |
+| `onRemotePeerLeft` (only when `inOurChannel` and we are in a channel) | `leaveVoice` |
+| `onLocalLeft` (only when `isInVoiceChannel`) | `leaveVoice`, covering the user-initiated leave AND the server-forced one, which is exactly when an audible cue earns its keep |
+| `toggleMute` / `toggleDeafen` | `toggle` |
+| `toggleCamera` | `toggle`, AFTER `startCamera()` succeeds on the ON path (a camera that failed to open must not sound like it turned on) and next to the state write on the OFF path |
+| `startScreenShare` | `joinStream`, past every early return and the capture itself, so it only fires once the share is genuinely live |
+| `stopScreenShare` | `leaveStream`, after the `isScreenSharing`/`_stoppingScreenShare` guard |
+| `_handleScreenState` (a peer's share) | `joinStream` / `leaveStream` |
+
+**Two rules the hook sites encode, worth keeping when you add a cue:**
+
+1. **Edges only.** `_handleScreenState` compares against `peerScreenSharing[peerId]` before playing, because a late joiner gets a catch-up `screen_state` re-announcing a share that was already up, and that must not sound like a new one. `toggleCamera` sounds only on a real flip.
+2. **Deafened suppresses channel chatter, not your own clicks.** The remote join/leave and remote screen-share cues are gated on `!state.isDeafened`; `toggleMute` / `toggleDeafen` / `toggleCamera` are NOT, otherwise un-deafening feels like a dead button.
 
 ---
 
@@ -425,6 +446,24 @@ Two paths, routed by **call identity, NOT status**: `if (_service.hasActiveCall)
 **`_hexToBytes(hex)`** -- converts hex string to `Uint8List`.
 
 **`_scheduleStatsDump(peerId)`** -- logs WebRTC stats (outbound/inbound audio bytes/packets, ICE candidate pair) 5 seconds after call goes active. Uses `_callLog()` which writes to `hollow_debug.log`.
+
+### Sound Cues and Ringback (issue #55)
+
+The 1:1 twin of the voice-channel cue table above, same service and same `duringCall: true` on every play.
+
+**Ringback** (the outgoing ring you hear while waiting for a pickup): `startCall()` calls `SoundService.instance.startRingback()` immediately after the `ringing` state is written and before the `invite` signal goes out, so you hear the same Hollow ring the callee is hearing. It is stopped in exactly two places: `_handleAccept()` (they picked up, well before the media comes up) and `_cleanup()`, which is the single teardown chokepoint for reject, busy, ring timeout, remote end and local hang-up. The ringback plays the BUNDLED ringtone, never the user's custom pick.
+
+| Where | Sound |
+|---|---|
+| `_wireCallbacks` → `onConnected`, on the `connecting` → `active` transition | `joinVoice`. Edge-only by construction (the status guard), and fires on both sides |
+| `_cleanup()`, only when `status == CallStatus.active` | `leaveVoice`. A decline or ring timeout already announces itself (the ringback stopping, plus the busy toast), and a "left" tone there would read as "they hung up on you". There is no dedicated hang-up asset: leaving a call is the same event as leaving voice |
+| `toggleMute` / `toggleDeafen` | `toggle` |
+| `toggleVideo`, only when the returned `enabled != wasEnabled` | `toggle`. `toggleVideo` returns the unchanged state when there is no camera to open, and a no-op must stay silent |
+| `startScreenShare` (after the quality label is written) | `joinStream` |
+| `stopScreenShare`, only when `state.isScreenSharing` | `leaveStream` (the method is idempotent teardown) |
+| `_handleScreenState`, only when `enabled != state.remoteScreenSharing` and not deafened | `joinStream` / `leaveStream` |
+
+Same two rules as voice channels: edges only (a re-announce of a share that is already up stays silent), and deafened suppresses the remote screen-share cue while your own toggles keep clicking.
 
 ### Companion Providers
 

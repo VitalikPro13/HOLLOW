@@ -50,5 +50,5 @@ String? muteBannerText(MutedMemberFfi? mute) {
   final expires = DateTime.fromMillisecondsSinceEpoch(mute.expiresAtMs);
   final remaining = expires.difference(DateTime.now());
   if (remaining.isNegative) return null;
-  return 'You are muted on this server — ${formatMuteRemaining(remaining)} left';
+  return 'You are muted on this server: ${formatMuteRemaining(remaining)} left';
 }

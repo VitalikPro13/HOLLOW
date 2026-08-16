@@ -50,7 +50,7 @@ class _ShortcutsSettingsViewState extends ConsumerState<ShortcutsSettingsView> {
     if (binding.isBare && binding.isTypableTrigger) {
       HollowToast.show(
           context,
-          'Add a modifier (Ctrl/Shift/Alt) — a bare letter or digit would '
+          'Add a modifier (Ctrl/Shift/Alt). A bare letter or digit would '
           'trigger while typing.',
           type: HollowToastType.info);
       return;
@@ -136,15 +136,15 @@ class _ShortcutsSettingsViewState extends ConsumerState<ShortcutsSettingsView> {
         title: 'Voice (while in a call)',
         children: [
           _voiceShortcutRow(hollow,
-              label: 'Push to Talk (hold)',
+              label: 'Push to talk (hold)',
               provider: pttKeybindProvider,
               fallback: 'ctrl+space'),
           _voiceShortcutRow(hollow,
-              label: 'Toggle Mute',
+              label: 'Toggle mute',
               provider: muteKeybindProvider,
               fallback: 'ctrl+shift+m'),
           _voiceShortcutRow(hollow,
-              label: 'Toggle Deafen',
+              label: 'Toggle deafen',
               provider: deafenKeybindProvider,
               fallback: 'ctrl+shift+d'),
         ],
@@ -152,8 +152,8 @@ class _ShortcutsSettingsViewState extends ConsumerState<ShortcutsSettingsView> {
       SettingsCard(
         title: 'Chat Input',
         children: [
-          const _FixedRow(label: 'Send Message', shortcut: 'Enter'),
-          const _FixedRow(label: 'New Line', shortcut: 'Shift + Enter'),
+          const _FixedRow(label: 'Send message', shortcut: 'Enter'),
+          const _FixedRow(label: 'New line', shortcut: 'Shift + Enter'),
           for (final s in const [
             AppShortcut.formatBold,
             AppShortcut.formatItalic,

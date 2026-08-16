@@ -249,7 +249,7 @@ class _MessageProofDialogContentState
     final defaultName = 'hollow-proof-${proof.messageId ?? proof.timestampMs}.json';
     try {
       final savePath = await FilePicker.platform.saveFile(
-        dialogTitle: 'Export Message Proof',
+        dialogTitle: 'Export message proof',
         fileName: defaultName,
         type: FileType.custom,
         allowedExtensions: ['json'],

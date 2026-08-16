@@ -340,7 +340,7 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
         context: context,
         imageBytes: raw,
         aspectRatio: 1.0,
-        title: 'Crop Server Icon',
+        title: 'Crop server icon',
       );
       if (cropped == null || !mounted || gen != _iconPickGen) return;
       toSend = cropped;
@@ -422,7 +422,7 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
         context: context,
         imageBytes: raw,
         aspectRatio: 3.0,
-        title: 'Crop Server Banner',
+        title: 'Crop server banner',
       );
       if (cropped == null || !mounted || gen != _bannerPickGen) return;
       toSend = cropped;
@@ -613,7 +613,7 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
 
           // Server Avatar
           Text(
-            'Server Icon',
+            'Server icon',
             style:
                 HollowTypography.label.copyWith(color: hollow.textSecondary),
           ),
@@ -699,7 +699,7 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
           // Server Banner (issue #25) — shown at the top of the channel
           // sidebar. Same optimistic-staging pattern as the icon above.
           Text(
-            'Server Banner',
+            'Server banner',
             style:
                 HollowTypography.label.copyWith(color: hollow.textSecondary),
           ),
@@ -780,7 +780,7 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
 
           // Server Name
           Text(
-            'Server Name',
+            'Server name',
             style:
                 HollowTypography.label.copyWith(color: hollow.textSecondary),
           ),
@@ -824,7 +824,7 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
             child: HollowButton.filled(
               onPressed: _saving ? null : _saveDescription,
               compact: true,
-              child: const Text('Save Description'),
+              child: const Text('Save description'),
             ),
           ),
           const SizedBox(height: HollowSpacing.xl),
@@ -937,7 +937,7 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
             child: HollowButton.filled(
               onPressed: _savingAccess ? null : _saveAccessSettings,
               compact: true,
-              child: const Text('Save Access Settings'),
+              child: const Text('Save access settings'),
             ),
           ),
           const SizedBox(height: HollowSpacing.xl),
@@ -974,7 +974,7 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
                     Text(
                       'The relay keeps encrypted channel messages so members '
                       'catch up even when nobody else is online. Text and '
-                      'file cards only — the relay can\'t read any of it.',
+                      'file cards only, and the relay can\'t read any of it.',
                       style: HollowTypography.caption.copyWith(
                         color: hollow.textSecondary, fontSize: 11,
                       ),
@@ -1143,7 +1143,7 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
               const SizedBox(width: HollowSpacing.sm),
               Expanded(
                 child: Text(
-                  'Require Twitch Verification',
+                  'Require Twitch verification',
                   style: HollowTypography.body.copyWith(color: hollow.textPrimary),
                 ),
               ),
@@ -1158,7 +1158,7 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
             const SizedBox(height: HollowSpacing.lg),
 
             Text(
-              'Twitch Channel ID',
+              'Twitch channel ID',
               style: HollowTypography.label.copyWith(color: hollow.textSecondary),
             ),
             const SizedBox(height: HollowSpacing.xs),
@@ -1192,7 +1192,7 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
             const SizedBox(height: HollowSpacing.lg),
 
             Text(
-              'Channel Display Name',
+              'Channel display name',
               style: HollowTypography.label.copyWith(color: hollow.textSecondary),
             ),
             const SizedBox(height: HollowSpacing.xs),
@@ -1213,7 +1213,7 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
             const SizedBox(height: HollowSpacing.lg),
 
             Text(
-              'Minimum Follow Days',
+              'Minimum follow days',
               style: HollowTypography.label.copyWith(color: hollow.textSecondary),
             ),
             const SizedBox(height: HollowSpacing.xs),
@@ -1246,7 +1246,7 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
-                        'Require Subscription',
+                        'Require subscription',
                         style: HollowTypography.body.copyWith(color: hollow.textPrimary),
                       ),
                       Text(
@@ -1278,7 +1278,7 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
-                        'Owner-Online Verification',
+                        'Owner-online verification',
                         style: HollowTypography.body.copyWith(color: hollow.textPrimary),
                       ),
                       Text(
@@ -1305,7 +1305,7 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
               child: HollowButton.filled(
                 onPressed: _savingTwitch ? null : _saveTwitchSettings,
                 compact: true,
-                child: const Text('Save Twitch Settings'),
+                child: const Text('Save Twitch settings'),
               ),
             ),
           ] else ...[
@@ -1315,7 +1315,7 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
               child: HollowButton.filled(
                 onPressed: _savingTwitch ? null : _saveTwitchSettings,
                 compact: true,
-                child: const Text('Save Twitch Settings'),
+                child: const Text('Save Twitch settings'),
               ),
             ),
           ],
@@ -1337,7 +1337,7 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
         const SizedBox(height: HollowSpacing.md),
 
         Text(
-          'Server Nickname',
+          'Server nickname',
           style:
               HollowTypography.label.copyWith(color: hollow.textSecondary),
         ),

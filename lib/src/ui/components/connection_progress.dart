@@ -43,7 +43,7 @@ class ConnectionProgress extends StatelessWidget {
           LucideIcons.lock,
           'Encrypted',
           hollow.success,
-          'End-to-end encrypted — nobody in between can read this',
+          'End-to-end encrypted. Nobody in between can read this',
         ),
       ConnectionStage.customNetwork => (
           LucideIcons.radio,
@@ -55,7 +55,7 @@ class ConnectionProgress extends StatelessWidget {
           LucideIcons.users,
           'Only you',
           hollow.textSecondary,
-          "You're connected — nobody else is online here right now",
+          "You're connected. Nobody else is online here right now",
         ),
       ConnectionStage.offline => (
           LucideIcons.wifiOff,

@@ -72,7 +72,7 @@ Future<void> syncFromDeviceFlow(
       content: Text(
         'Pull servers and friends FROM "$name" onto THIS device. Use this if a '
         'server or friend exists on "$name" but is missing here. It only adds '
-        'what\'s missing — nothing is removed, and your messages are unaffected.\n\n'
+        'what\'s missing. Nothing is removed, and your messages are unaffected.\n\n'
         '"$name" must be online.',
         style: HollowTypography.body
             .copyWith(color: HollowTheme.of(ctx).textSecondary),
@@ -92,7 +92,7 @@ Future<void> syncFromDeviceFlow(
   if (confirmed != true) return;
   if (!device.online) {
     if (context.mounted) {
-      HollowToast.show(context, '"$name" is offline — bring it online first',
+      HollowToast.show(context, '"$name" is offline. Bring it online first',
           type: HollowToastType.error);
     }
     return;
@@ -357,7 +357,7 @@ class _DevicesListSectionState extends ConsumerState<DevicesListSection> {
       children: [
         Text(
           'Devices linked to your identity. Remove a device you no longer use or '
-          'have lost — it can no longer read your messages once removed.',
+          'have lost. It can no longer read your messages once removed.',
           style: widget.infoStyle(hollow),
         ),
         const SizedBox(height: HollowSpacing.sm),

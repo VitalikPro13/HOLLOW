@@ -161,14 +161,14 @@ class _NotificationLevelSelector extends StatelessWidget {
     return Row(
       children: [
         _LevelChip(
-          label: 'All Messages',
+          label: 'All messages',
           icon: LucideIcons.bell,
           isSelected: value == NotificationLevel.all,
           onTap: () => onChanged(NotificationLevel.all),
         ),
         const SizedBox(width: HollowSpacing.sm),
         _LevelChip(
-          label: 'Mentions Only',
+          label: 'Mentions only',
           icon: LucideIcons.atSign,
           isSelected: value == NotificationLevel.mentions,
           onTap: () => onChanged(NotificationLevel.mentions),
