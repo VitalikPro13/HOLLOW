@@ -39,6 +39,7 @@ All fields are immutable; updates go through `copyWith()`.
 
 **Computed getters on VoiceChannelState:**
 - `getParticipants(serverId, channelId)` -- returns `Set<String>` of peer IDs in a specific channel.
+- `selfParticipantId(serverId, channelId, master:, device:)` -- returns the entry in that set that is US, **in the id form the set uses**, or null when we are genuinely not in the channel. The set is keyed by ROUTABLE DEVICE ids and a fresh install always has device != master, so a bare `participants.contains(masterId)` is ALWAYS false while sitting in the channel. Panes that read that as "self missing" and inserted the master on top of the device entry rendered the local user TWICE (mobile VC "You" x2; the conference roster additionally showed a Kick button next to yourself). Ask this instead of hand-comparing ids, and key every downstream compare (isMe / isSelf / muted / deafened / speaking / canKick) off its return value. Locked by `test/vc_self_participant_test.dart`.
 - `isInVoiceChannel` -- true if `currentChannelId != null`.
 - `getPeerAudioState(peerId)` -- returns `PeerAudioState` (defaults to unmuted/undeafened).
 - (speaking checks: remote `ref.watch(vcSpeakingProvider.select((s) => s.contains(peerId)))`, self `ref.watch(vcLocalSpeakingProvider)` — no longer on VoiceChannelState. NEVER membership-test the set for ourselves.)

@@ -160,6 +160,8 @@ All local data is stored in **SQLCipher** (AES-256-CBC encrypted SQLite). The da
 
 **iOS shared-database constraint.** On iOS, the SQLCipher database is migrated into a shared **App Group container** (`group.com.anonlisten.hollow`) so the push Notification Service Extension can open the same encrypted database to decrypt incoming messages on-device (§13.5). Because two processes (the app and the extension) may open the database, it uses **rollback-journal mode (`journal_mode=TRUNCATE`) on iOS rather than WAL**. WAL keeps a persistent shared-memory lock; an app suspended while holding a file lock in a shared container is killed by iOS (`EXC_CRASH 0xdead10cc`). Rollback-journal mode locks only during a transaction, and a 4-second busy timeout lets the two processes wait on each other. All other platforms use WAL.
 
+Removing the *persistent* lock is necessary but not sufficient: **opening** the database also takes one. A newly opened connection holds no schema cache, so its first statement reads and parses the entire schema under a shared lock before any query runs, and a suspension landing inside that window is indistinguishable to the platform from holding a lock indefinitely. The constraint this imposes is architectural rather than incidental: on a shared-container platform, database access on a latency-sensitive path must go through a long-lived connection owned by a dedicated worker, never through a fresh connection opened per item on the event loop. Reads served that way answer from a warm connection outside any transaction, so the lock-holding window shrinks to the query itself.
+
 ### 2.5 Account Recovery
 
 Two recovery methods are implemented:

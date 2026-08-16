@@ -2166,22 +2166,34 @@ async fn run_event_loop(
                         // (covers channels created since anyone last registered)
                         // and replay any ring this connection hasn't pulled yet.
                         // Dedup-by-message_id makes a re-pull harmless.
-                        if let Some(state) = server_states.get(&server_id) {
-                            if state.relay_catchup_secs() > 0 {
+                        // The watermark lookup is awaited on the CrdtStore actor,
+                        // so gather the channel list and DROP the `server_states`
+                        // borrow before crossing the await.
+                        let fresh_channels: Vec<String> = match server_states.get(&server_id) {
+                            Some(state) if state.relay_catchup_secs() > 0 => {
                                 sync_handler::register_relay_catchup(&ws_cmd_tx, state, &server_id);
-                                for cid in &channel_ids {
-                                    if relay_catchup_done.insert((server_id.clone(), cid.clone())) {
-                                        let max_age_secs = sync_handler::catchup_watermark_age_secs(
-                                            &db_path, &db_passphrase, &server_id, cid,
-                                        );
-                                        hollow_log!("[HOLLOW-TOPIC] Catch-up request (channel open) {server_id}/{cid} max_age={max_age_secs}s");
-                                        let _ = ws_cmd_tx.send(super::ws_client::WsCommand::TopicCatchup {
-                                            room_code: server_id.clone(),
-                                            channel_id: cid.clone(),
-                                            max_age_secs,
-                                        });
-                                    }
-                                }
+                                channel_ids
+                                    .iter()
+                                    .filter(|cid| {
+                                        relay_catchup_done
+                                            .insert((server_id.clone(), (*cid).clone()))
+                                    })
+                                    .cloned()
+                                    .collect()
+                            }
+                            _ => Vec::new(),
+                        };
+                        if !fresh_channels.is_empty() {
+                            let ages = sync_handler::catchup_watermark_ages(
+                                &crdt_store, &server_id, fresh_channels,
+                            ).await;
+                            for (cid, max_age_secs) in ages {
+                                hollow_log!("[HOLLOW-TOPIC] Catch-up request (channel open) {server_id}/{cid} max_age={max_age_secs}s");
+                                let _ = ws_cmd_tx.send(super::ws_client::WsCommand::TopicCatchup {
+                                    room_code: server_id.clone(),
+                                    channel_id: cid,
+                                    max_age_secs,
+                                });
                             }
                         }
                     }
@@ -3711,25 +3723,38 @@ async fn run_event_loop(
                         // CRDT merge — idempotent with peer sync). Runs even when the
                         // room has zero peers: that empty room is exactly the gap
                         // this feature closes.
-                        if let Some(state) = server_states.get(&room) {
-                            if state.relay_catchup_secs() > 0 {
+                        // Gather the channel list first and drop the `server_states`
+                        // borrow: the watermark lookup is awaited on the CrdtStore
+                        // actor rather than opening a DB handle per channel here.
+                        let fresh_channels: Vec<String> = match server_states.get(&room) {
+                            Some(state) if state.relay_catchup_secs() > 0 => {
                                 sync_handler::register_relay_catchup(&ws_cmd_tx, state, &room);
-                                for ch in state.channels.values() {
-                                    if matches!(ch.channel_type, crate::crdt::server_state::ChannelType::Text)
-                                        && state.can_see_channel(&local_peer, &ch.channel_id)
-                                        && relay_catchup_done.insert((room.clone(), ch.channel_id.clone()))
-                                    {
-                                        let max_age_secs = sync_handler::catchup_watermark_age_secs(
-                                            &db_path, &db_passphrase, &room, &ch.channel_id,
-                                        );
-                                        hollow_log!("[HOLLOW-TOPIC] Catch-up request (connect) {room}/{} max_age={max_age_secs}s", ch.channel_id);
-                                        let _ = ws_cmd_tx.send(super::ws_client::WsCommand::TopicCatchup {
-                                            room_code: room.clone(),
-                                            channel_id: ch.channel_id.clone(),
-                                            max_age_secs,
-                                        });
-                                    }
-                                }
+                                state
+                                    .channels
+                                    .values()
+                                    .filter(|ch| {
+                                        matches!(ch.channel_type, crate::crdt::server_state::ChannelType::Text)
+                                            && state.can_see_channel(&local_peer, &ch.channel_id)
+                                    })
+                                    .map(|ch| ch.channel_id.clone())
+                                    .filter(|cid| {
+                                        relay_catchup_done.insert((room.clone(), cid.clone()))
+                                    })
+                                    .collect()
+                            }
+                            _ => Vec::new(),
+                        };
+                        if !fresh_channels.is_empty() {
+                            let ages = sync_handler::catchup_watermark_ages(
+                                &crdt_store, &room, fresh_channels,
+                            ).await;
+                            for (cid, max_age_secs) in ages {
+                                hollow_log!("[HOLLOW-TOPIC] Catch-up request (connect) {room}/{cid} max_age={max_age_secs}s");
+                                let _ = ws_cmd_tx.send(super::ws_client::WsCommand::TopicCatchup {
+                                    room_code: room.clone(),
+                                    channel_id: cid,
+                                    max_age_secs,
+                                });
                             }
                         }
 

@@ -5,9 +5,23 @@ import 'package:flutter/services.dart' show rootBundle;
 import 'package:flutter_local_notifications_platform_interface/flutter_local_notifications_platform_interface.dart'
     show NotificationResponse;
 import 'package:flutter_local_notifications_windows/flutter_local_notifications_windows.dart';
+import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/ui/chat/emote_image.dart'
     show emoteTokensToShortcodes;
 import 'package:local_notifier/local_notifier.dart';
+
+/// Notification-routing breadcrumbs into hollow_debug.log.
+///
+/// `debugPrint` is NOT enough here and never was: it goes nowhere in a release
+/// build, and "no notification appeared" is only ever reported FROM a release
+/// build. Every silent failure on this path (init threw, service not
+/// initialized, `show()` threw) used to be a `debugPrint` or nothing at all,
+/// so a completely dead toast path looked identical to a healthy one.
+void notifLog(String msg) {
+  network_api
+      .logFromDart(message: '[HOLLOW-NOTIF] $msg')
+      .catchError((_) {});
+}
 
 /// Desktop OS-level notifications (Windows / macOS / Linux).
 ///
@@ -54,6 +68,15 @@ class DesktopNotificationService {
 
   bool _initialized = false;
 
+  /// Single-flight guard for [init].
+  ///
+  /// `init()` is awaited from the shell bootstrap AND from every `showDm` /
+  /// `showChannel`. The old `if (_initialized) return;` was checked BEFORE two
+  /// awaits, so a burst of messages arriving during startup could run
+  /// `_win.initialize()` several times concurrently — and that registers a COM
+  /// class object for a fixed GUID, which is not something to do twice.
+  Future<void>? _initFuture;
+
   /// Absolute path to the bundled Hollow brand icon, written to a temp file at
   /// init (Flutter assets have no stable on-disk path). Shown next to the
   /// "Hollow" app name in the toast header. The peer avatar uses the separate
@@ -91,7 +114,9 @@ class DesktopNotificationService {
   static bool get isSupported =>
       Platform.isWindows || Platform.isMacOS || Platform.isLinux;
 
-  Future<void> init() async {
+  Future<void> init() => _initFuture ??= _init();
+
+  Future<void> _init() async {
     if (_initialized || !isSupported) return;
     try {
       if (Platform.isWindows) {
@@ -120,8 +145,17 @@ class DesktopNotificationService {
         );
       }
       _initialized = true;
+      notifLog('backend ready (${Platform.operatingSystem}, '
+          'brandIcon=${_brandIconPath != null})');
     } catch (e) {
+      // The one that mattered: on Windows this covers `_win.initialize()`,
+      // which registers the AUMID in HKCU and CoRegisterClassObject's the
+      // activation GUID. If it throws, `_initialized` stays false and EVERY
+      // toast below returns silently for the rest of the session.
       debugPrint('[HOLLOW] DesktopNotificationService init failed: $e');
+      notifLog('BACKEND INIT FAILED — no OS toast will fire this session: $e');
+      // Let a later message retry rather than caching the failure forever.
+      _initFuture = null;
     }
   }
 
@@ -173,7 +207,10 @@ class DesktopNotificationService {
     Uint8List? avatarBytes,
   }) async {
     await init();
-    if (!_initialized) return;
+    if (!_initialized) {
+      notifLog('DROPPED DM toast — backend never initialized');
+      return;
+    }
     // OS toasts can't render emote images — show ':name:' instead of the
     // raw [e:name:hash] wire token.
     body = emoteTokensToShortcodes(body);
@@ -201,7 +238,10 @@ class DesktopNotificationService {
     Uint8List? avatarBytes,
   }) async {
     await init();
-    if (!_initialized) return;
+    if (!_initialized) {
+      notifLog('DROPPED channel toast — backend never initialized');
+      return;
+    }
     body = emoteTokensToShortcodes(body);
     final key = '$serverId:$channelId';
     if (Platform.isWindows) {
@@ -284,8 +324,14 @@ class DesktopNotificationService {
           actions: actions,
         ),
       );
+      // A success line matters as much as the failure one: if this appears and
+      // no toast is on screen, the app did its job and the OS suppressed it
+      // (Do not disturb / Focus assist, or Hollow switched off under Windows
+      // Settings > System > Notifications).
+      notifLog('Windows toast posted id=$id avatar=${avatarPath != null}');
     } catch (e) {
       debugPrint('[HOLLOW] Windows toast failed: $e');
+      notifLog('Windows toast FAILED id=$id: $e');
     }
   }
 
@@ -312,8 +358,10 @@ class DesktopNotificationService {
     _activeNative[sourceKey] = notification;
     try {
       await notification.show();
+      notifLog('native toast posted $sourceKey');
     } catch (e) {
       debugPrint('[HOLLOW] native toast failed: $e');
+      notifLog('native toast FAILED $sourceKey: $e');
     }
   }
 }

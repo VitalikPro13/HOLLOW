@@ -54,6 +54,8 @@ import 'package:hollow/src/core/providers/share_tab_provider.dart';
 import 'package:hollow/src/core/providers/forwarder_info_provider.dart';
 import 'package:hollow/src/core/providers/ice_config_provider.dart';
 import 'package:hollow/src/core/providers/relay_bandwidth_provider.dart';
+import 'package:hollow/src/core/services/desktop_notification_service.dart'
+    show notifLog;
 import 'package:hollow/src/core/services/push_hints_cache.dart';
 import 'package:hollow/src/core/providers/license_key_provider.dart';
 import 'package:hollow/src/core/providers/room_budget_provider.dart';
@@ -447,6 +449,14 @@ class EventStreamNotifier extends Notifier<bool> {
                 replyToMid: replyToMid,
                 messageId: messageId,
               );
+        } else if (isViewingDm && !Platform.isAndroid && !Platform.isIOS) {
+          // The one path that produces NO notification and NO log downstream,
+          // because the notifier is never called. If this line shows up while
+          // the window was actually behind another app, `windowFocusedProvider`
+          // is stuck on true (a missed onWindowBlur) and THAT is the bug — not
+          // anything in the toast backend.
+          notifLog('DM suppressed by the viewing gate — '
+              'visible=$windowVisible focused=$appActive');
         }
 
       case NetworkEvent_ChannelMessageReceived(
@@ -518,6 +528,12 @@ class EventStreamNotifier extends Notifier<bool> {
             !senderMasterBlocked) {
           _notifyChannelWithName(
               serverId, channelId, fromPeer, text, isMentioned, messageId);
+        } else if (isViewingChannel &&
+            !Platform.isAndroid &&
+            !Platform.isIOS) {
+          // See the DM gate above — this is the silent branch.
+          notifLog('channel suppressed by the viewing gate — '
+              'focused=$chAppActive');
         }
 
       case NetworkEvent_SessionEstablished(:final peerId):

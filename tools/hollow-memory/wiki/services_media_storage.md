@@ -177,17 +177,27 @@ The seventh bundled asset, `sounds/default_ringtone.wav`, is not in the enum: it
 ### play(sound, {duringCall})
 
 1. Returns immediately when `enabled` is false.
-2. **`duringCall: true` drops the sound on iOS ONLY.** `audioplayers` sets the shared `AVAudioSession` category when it starts and DEACTIVATES the session when it ends, and doing either to a live `playAndRecord`/VoiceProcessingIO session is how you lose the mic mid-sentence. Android and desktop play everything (they take the no-focus context below). This is the only platform-conditional line in the file.
-3. Throttle: one play per sound per 150 ms (`_minGap`, a `_lastPlayed` map). Five peers joining at once, for instance a channel filling up after a relay reconnect, collapses to one sound.
+2. Throttle: one play per sound per 150 ms (`_minGap`, a `_lastPlayed` map). Five peers joining at once, for instance a channel filling up after a relay reconnect, collapses to one sound.
+3. **iOS goes through a native player, everything else through `audioplayers`** (`_useNative => Platform.isIOS`). See below.
 4. One `AudioPlayer` per `HollowSound`, built lazily and kept in `_players` (`playerId: 'hollow-sfx-<name>'`, `ReleaseMode.stop`). Each play does `stop()` then `play(AssetSource(...), volume: volume)`, so a re-trigger past the throttle window restarts from the top instead of queueing behind the previous tail.
+
+### iOS: `HollowSfxPlayer`, not audioplayers
+
+`audioplayers_darwin` applies the shared `AVAudioSession` CATEGORY whenever a player's audio context is set and calls `setActive(false)` when its last player stops. Either one aimed at a live `playAndRecord`/VoiceProcessingIO session takes the mic down mid-sentence, so v1 of the sound pack simply **DROPPED** every `duringCall: true` cue on iOS. That was the shipped behaviour and it was the bug: mute, screen share and VC join were silent on iPhone while `notification` (the one unguarded cue) rang fine.
+
+iOS now routes through **`HollowSfxPlayer` in `ios/Runner/AppDelegate.swift`** over the `hollow/sfx` MethodChannel (`play` / `startLoop` / `stopLoop`). It is in AppDelegate deliberately rather than a new source file, which would require a `project.pbxproj` edit. `AVAudioPlayer` plays into whatever session is already configured and never reconfigures it, so the cue lands and WebRTC's session is untouched.
+
+**Iron rule inside that class: NEVER `setCategory`, NEVER `setActive(false)`.** The single `setActive(true)` is opt-in from Dart and sent only when no call owns the session — which is what `duringCall` now means. It no longer silences anything; keep passing it for every call/VC cue. Asset keys cross as `'assets/${sound.asset}'` and resolve via `FlutterDartProject.lookupKey(forAsset:)` + `Bundle.main.path`.
+
+Android, desktop and the INCOMING ringtone (`mobile_incoming_call.dart`, a `DeviceFileSource`) are unchanged.
 
 **Audio context:** `AudioContextConfig(focus: AudioContextConfigFocus.mixWithOthers)`, shared by every player including the ringback. No audio focus is requested and playback mixes with whatever else is running, so a mute blip can never duck or interrupt call audio.
 
-**Every call/VC cue passes `duringCall: true`**, including the local join cue, which fires a beat before the mic opens but whose clip outlives that by roughly half a second. The message-notification cue does not, so it still plays on iOS.
+**Every call/VC cue passes `duringCall: true`**, including the local join cue, which fires a beat before the mic opens but whose clip outlives that by roughly half a second. The message-notification cue does not.
 
 ### startRingback() / stopRingback()
 
-The looping outgoing-call ring: you pressed Call and are waiting for the other side to pick up. `startRingback()` is idempotent (a second start while ringing is ignored rather than layering a second loop) and plays `sounds/default_ringtone.wav` on a dedicated `hollow-ringback` player in `ReleaseMode.loop` at `ringtoneVolume`. It deliberately uses the BUNDLED ringtone, never the user's custom pick: the custom one identifies an INCOMING call, and hearing your own alert song back at you while dialling reads as a bug. `stopRingback()` stops, disposes and clears the player, and is safe to call when nothing is ringing (every call teardown path funnels through it).
+The looping outgoing-call ring: you pressed Call and are waiting for the other side to pick up. `startRingback()` is idempotent (a second start while ringing is ignored rather than layering a second loop) and plays `sounds/default_ringtone.wav` on a dedicated `hollow-ringback` player in `ReleaseMode.loop` at `ringtoneVolume`. It deliberately uses the BUNDLED ringtone, never the user's custom pick: the custom one identifies an INCOMING call, and hearing your own alert song back at you while dialling reads as a bug. `stopRingback()` stops, disposes and clears the player, and is safe to call when nothing is ringing (every call teardown path funnels through it). Idempotence lives on a `_ringbackOn` bool rather than the player field, because on iOS the player is null: **the ringback also goes through `HollowSfxPlayer` (`startLoop`/`stopLoop`, `numberOfLoops = -1`)**. It matters more there than for the one-shots, since the ringback runs for the whole dial, i.e. straight through call setup, so letting audioplayers restate the session category there was a standing risk to the OUTGOING mic.
 
 ---
 

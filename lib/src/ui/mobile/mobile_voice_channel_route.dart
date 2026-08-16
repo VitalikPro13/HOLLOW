@@ -237,16 +237,30 @@ class _MobileVoiceChannelRouteState
 
   Widget _buildAudioView(
       HollowTheme hollow, VoiceChannelState vcState, String localPeerId) {
+    // Self lives in this set under the ROUTABLE DEVICE id, never the master —
+    // a plain `contains(localPeerId)` is false on every multi-device install
+    // (and every fresh one, since device != master there), so the old
+    // unconditional insert put a SECOND self entry beside the device entry and
+    // the pane rendered "You" twice. Insert only when we're really absent.
+    final myDevice = ref.watch(localDevicePeerIdProvider).valueOrNull;
     final participants =
         vcState.getParticipants(widget.serverId, widget.channelId).toList();
-    if (!participants.contains(localPeerId)) {
+    final selfInList = vcState.selfParticipantId(
+      widget.serverId,
+      widget.channelId,
+      master: localPeerId,
+      device: myDevice,
+    );
+    if (selfInList == null) {
       participants.insert(0, localPeerId);
     }
+    // The id form the rows below are keyed by for US.
+    final selfId = selfInList ?? localPeerId;
 
     final mutedSet = <String>{};
     final deafenedSet = <String>{};
     for (final p in participants) {
-      if (p == localPeerId) {
+      if (p == selfId) {
         if (vcState.isMuted) mutedSet.add(p);
         if (vcState.isDeafened) deafenedSet.add(p);
       } else {
@@ -268,12 +282,11 @@ class _MobileVoiceChannelRouteState
     final avatars = Center(
       child: Consumer(builder: (context, ref, _) {
         // Self comes from the dedicated local flag and is re-keyed under the
-        // id THIS list uses. The set is keyed by routable DEVICE ids, while
-        // the self entry above is inserted as the MASTER id — which is why a
-        // plain membership test never lit our own avatar.
+        // id THIS list uses ([selfId]) — the device id when we're in the set,
+        // the master only in the fallback case where we aren't.
         final speakingSet = {
           ...ref.watch(vcSpeakingProvider),
-          if (ref.watch(vcLocalSpeakingProvider)) localPeerId,
+          if (ref.watch(vcLocalSpeakingProvider)) selfId,
         };
         return MobileClusteredAvatars(
           participants: participants,

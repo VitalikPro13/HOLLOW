@@ -120,7 +120,10 @@ class SystemNotificationNotifier
     String? messageId,
   }) async {
     final notifSettings = ref.read(notificationSettingsProvider.notifier);
-    if (!notifSettings.isDmEnabled(fromPeerId)) return;
+    if (!notifSettings.isDmEnabled(fromPeerId)) {
+      notifLog('DM suppressed — notifications muted for this conversation');
+      return;
+    }
 
     final profiles = ref.read(profileProvider);
     final senderName = displayNameFor(profiles, fromPeerId);
@@ -159,15 +162,7 @@ class SystemNotificationNotifier
       return;
     }
 
-    final isHidden = await _isWindowHidden();
-    final isFocused = isHidden ? false : await _isWindowFocused();
-
-    // event_provider already guarantees we're NOT viewing this exact chat
-    // (focused + selected + at-bottom). Exactly ONE surface per message:
-    //  • Native OS toast when the window is hidden (tray) OR unfocused.
-    //  • In-app card only when visible AND focused (focused-but-other-chat) —
-    //    showing both toast and card for the same message was redundant noise.
-    if (isHidden || !isFocused) {
+    if (await _useNativeToast()) {
       final avatar = await _avatarFor(fromPeerId);
       DesktopNotificationService.instance.showDm(
         sourceKey: fromPeerId,
@@ -209,7 +204,10 @@ class SystemNotificationNotifier
     final level =
         notifSettings.effectiveChannelLevel(serverId, channelId);
 
-    if (level == NotificationLevel.nothing) return;
+    if (level == NotificationLevel.nothing) {
+      notifLog('channel suppressed — notifications off for $serverId/$channelId');
+      return;
+    }
     if (level == NotificationLevel.mentions && !isMention) return;
 
     final profiles = ref.read(profileProvider);
@@ -252,12 +250,7 @@ class SystemNotificationNotifier
       return;
     }
 
-    final isHidden = await _isWindowHidden();
-    final isFocused = isHidden ? false : await _isWindowFocused();
-
-    // One surface per message (see notifyDm): toast when hidden/unfocused,
-    // in-app card only when visible and focused on another conversation.
-    if (isHidden || !isFocused) {
+    if (await _useNativeToast()) {
       // Native OS toast — channel line carries the sender name (multiple people
       // post in a channel, unlike a DM). Use the SENDER's avatar (a real peer id;
       // passing the serverId to getPushProfile would never resolve).
@@ -358,6 +351,24 @@ class SystemNotificationNotifier
     return channels[channelId]?.name ?? 'channel';
   }
 
+  /// Which surface this message gets. `event_provider` already guaranteed we're
+  /// NOT viewing this exact chat (visible + focused + selected + at-bottom), so
+  /// exactly ONE surface fires here:
+  ///  • Native OS toast when the window is hidden (tray) OR unfocused.
+  ///  • In-app card only when the window is visible AND provably focused
+  ///    (focused-but-other-conversation) — a toast there as well was redundant
+  ///    noise.
+  ///
+  /// Ties go to the toast. The card is invisible whenever the window isn't on
+  /// top, so guessing "focused" loses the message outright, while guessing
+  /// "unfocused" only costs a redundant toast.
+  Future<bool> _useNativeToast() async {
+    if (await _isWindowHidden()) return true;
+    if (!await _isWindowFocused()) return true;
+    notifLog('window visible + focused — routing to the in-app card');
+    return false;
+  }
+
   Future<bool> _isWindowHidden() async {
     try {
       // On Linux Wayland, isVisible() returns true even when minimized to tray.
@@ -371,12 +382,45 @@ class SystemNotificationNotifier
     }
   }
 
+  /// Whether the user is *positively established* to be looking at our window.
+  ///
+  /// Two independent sources, and both must agree:
+  ///  • `windowFocusedProvider` — event-driven, fed by window_manager's
+  ///    `onWindowFocus`/`onWindowBlur` (WM_NCACTIVATE on Windows). This is the
+  ///    same source the event gate in `event_provider` uses.
+  ///  • `windowManager.isFocused()` — a live `GetForegroundWindow()` compare.
+  ///
+  /// The two branches downstream are NOT symmetric: the native toast is always
+  /// visible, the in-app card is invisible the moment another app is on top.
+  /// So "focused" has to be proven, never assumed — either source saying "not
+  /// focused" wins, and a query that throws counts as not focused. Before this,
+  /// the `catch` returned `true` and a single lying source was enough to route
+  /// a message into a card nobody could see (Flutter 3.47 field report).
   Future<bool> _isWindowFocused() async {
+    final eventFocused = ref.read(windowFocusedProvider);
+    bool nativeFocused;
     try {
-      return await windowManager.isFocused();
-    } catch (_) {
-      return true;
+      nativeFocused = await windowManager.isFocused();
+    } catch (e) {
+      notifLog('isFocused() threw ($e) — treating as unfocused');
+      nativeFocused = false;
     }
+    if (nativeFocused != eventFocused) {
+      // Whichever source is wrong, the next field report names it.
+      notifLog(
+          'focus sources disagree: native=$nativeFocused event=$eventFocused');
+      // One-way repair. A missed `onWindowBlur` leaves the provider stuck on
+      // `true`, and the gate in event_provider (which only has the provider)
+      // then reads "user is viewing this chat" and drops the message silently.
+      // Writing the live native `false` back un-sticks it for the next message.
+      // Deliberately never the other direction: `isFocused()` returning a wrong
+      // `true` is the very failure this method exists to survive, so it must
+      // not be allowed to overwrite a correct `false`.
+      if (!nativeFocused) {
+        ref.read(windowFocusedProvider.notifier).state = false;
+      }
+    }
+    return nativeFocused && eventFocused;
   }
 
   Future<void> _bringWindowToFront() async {

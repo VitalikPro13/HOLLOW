@@ -46,7 +46,7 @@ All UI uses custom Hollow widgets, no Material defaults: **HollowPressable**, **
 ## Key Architecture Notes
 - **Multi-node test harness (`node/test_harness.rs`) = PRIMARY testing for distributed logic.** ALWAYS verify ring-1/ring-2 changes before declaring done. NOT covered: media/pixels/FFI/native/relay C++. `feedback_harness_first_testing`.
 - **Node modules:** `swarm.rs` = event-loop dispatcher; domain logic in focused modules as `handle_*()` from its match arms; types in `types.rs`. No SwarmContext — pass state vars individually (`feedback_swarmcontext_borrow`). New envelope variants → the owning module's `handle_envelope_*()` (`feedback_envelope_dispatch_pattern`).
-- **Persistence actors:** `CrdtStore` + `CryptoStore` own long-lived SQLCipher conns in spawn_blocking threads, fire-and-forget mpsc; CrdtStore batch-drains one DB write per server. sync_handler saves use CrdtStore, MLS uses CryptoStore. NEVER `MessageStore::open()` in a sync handler (`feedback_sqlcipher_open_hygiene`).
+- **Persistence actors:** `CrdtStore` + `CryptoStore` own long-lived SQLCipher conns in spawn_blocking threads, fire-and-forget mpsc; CrdtStore batch-drains one DB write per server. sync_handler saves use CrdtStore, MLS uses CryptoStore. NEVER `MessageStore::open()` in a sync handler or on the event loop (`feedback_sqlcipher_open_hygiene`).
 - **Peer state in swarm.rs:** `ws_room_peers` + `synced_peers`; PeerJoined → key exchange + sync; 30s keepalive in ws_client.rs.
 - **Relay domain (self-hosting):** `relayDomainProvider` + `set_relay_url()` FFI, default `relay.anonlisten.com`; ALL WS/signaling/STUN/TURN URLs derive from it.
 - **Event streaming:** Rust→Dart via `StreamSink` — `watch_network_events()` → `EventStreamNotifier` (`event_provider.dart`).

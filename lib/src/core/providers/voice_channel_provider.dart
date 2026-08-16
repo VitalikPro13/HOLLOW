@@ -165,6 +165,28 @@ class VoiceChannelState {
     return participants[serverId]?[channelId] ?? {};
   }
 
+  /// The entry in a channel's participant set that is US, in the id form THAT
+  /// SET uses — or null when we're genuinely not in the channel.
+  ///
+  /// VC participant sets are keyed by the ROUTABLE DEVICE id, and a fresh
+  /// install ALWAYS has device != master, so a bare master membership test
+  /// never matches. Panes that read "self missing" from that and inserted the
+  /// master id on top of the device entry already present rendered the local
+  /// user TWICE. Ask this instead of comparing ids by hand.
+  String? selfParticipantId(
+    String serverId,
+    String channelId, {
+    required String master,
+    String? device,
+  }) {
+    for (final p in getParticipants(serverId, channelId)) {
+      if (p == master || (device != null && device.isNotEmpty && p == device)) {
+        return p;
+      }
+    }
+    return null;
+  }
+
   /// Whether the local user is in any voice channel.
   bool get isInVoiceChannel => currentChannelId != null;
 

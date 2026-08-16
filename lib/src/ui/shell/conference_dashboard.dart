@@ -1155,8 +1155,18 @@ class _ManagePanelContentState extends ConsumerState<_ManagePanelContent> {
     final localPeerId = ref.watch(identityProvider).peerId ?? '';
     final links = ref.watch(deviceLinkProvider);
 
+    // The participant set is DEVICE-keyed, so seeding it with the MASTER id
+    // listed us twice (once as "You", once under our own display name, with a
+    // Kick button beside it). Take the id form the set actually uses.
+    final selfId = vcState.selfParticipantId(
+          conf.activeServerId,
+          kConferenceChannelId,
+          master: localPeerId,
+          device: ref.watch(localDevicePeerIdProvider).valueOrNull,
+        ) ??
+        localPeerId;
     final participants = <String>{
-      localPeerId,
+      selfId,
       ...vcState.getParticipants(conf.activeServerId, kConferenceChannelId),
     }.where((p) => p.isNotEmpty).toList();
 
@@ -1166,8 +1176,7 @@ class _ManagePanelContentState extends ConsumerState<_ManagePanelContent> {
             .toList()
         : const <WaitingEntry>[];
     final shownParticipants = participants.where((p) {
-      final name =
-          p == localPeerId ? 'You' : conferenceDisplayName(ref, p);
+      final name = p == selfId ? 'You' : conferenceDisplayName(ref, p);
       return _matches(name, p);
     }).toList();
 
@@ -1199,8 +1208,8 @@ class _ManagePanelContentState extends ConsumerState<_ManagePanelContent> {
               for (final peerId in shownParticipants)
                 _ParticipantRow(
                   peerId: peerId,
-                  isSelf: peerId == localPeerId,
-                  canKick: conf.isHost && peerId != localPeerId,
+                  isSelf: peerId == selfId,
+                  canKick: conf.isHost && peerId != selfId,
                 ),
             ],
           ),
@@ -1480,8 +1489,17 @@ class _ParticipantsView extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final localPeerId = ref.watch(identityProvider).peerId ?? '';
+    // DEVICE-keyed set: seed it with the id form it actually uses, or we tile
+    // ourselves twice (see the roster above).
+    final selfId = vcState.selfParticipantId(
+          conf.activeServerId,
+          kConferenceChannelId,
+          master: localPeerId,
+          device: ref.watch(localDevicePeerIdProvider).valueOrNull,
+        ) ??
+        localPeerId;
     final participants = <String>{
-      localPeerId,
+      selfId,
       ...vcState.getParticipants(conf.activeServerId, kConferenceChannelId),
     }.where((p) => p.isNotEmpty).toList();
 
@@ -1501,7 +1519,7 @@ class _ParticipantsView extends ConsumerWidget {
                       for (final peerId in participants)
                         _ParticipantTile(
                           peerId: peerId,
-                          isSelf: peerId == localPeerId,
+                          isSelf: peerId == selfId,
                           vcState: vcState,
                         ),
                     ],

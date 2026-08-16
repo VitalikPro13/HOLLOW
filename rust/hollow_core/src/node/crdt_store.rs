@@ -14,6 +14,15 @@ pub(crate) enum CrdtStoreCmd {
     SaveBlob { server_id: String, key: String, value: String },
     DeleteServer(String),
     PruneOps(usize),
+    /// READ-ONLY: newest stored message timestamp (ms) per channel, for the
+    /// relay catch-up window. Answered on the actor's long-lived connection so
+    /// the caller never opens a transient SQLCipher handle — see
+    /// `channel_watermarks`.
+    ChannelWatermarks {
+        server_id: String,
+        channel_ids: Vec<String>,
+        reply: tokio::sync::oneshot::Sender<HashMap<String, i64>>,
+    },
 }
 
 /// A batched pending state save: either pre-serialized JSON (legacy path) or
@@ -55,13 +64,45 @@ impl CrdtStore {
 
             while let Some(cmd) = cmd_rx.blocking_recv() {
                 backlog.observe(cmd_rx.len());
+
+                // Collect the whole drain FIRST, then split reads from writes.
+                // Read-only commands are answered OUTSIDE the transaction:
+                // `begin_transaction` is `BEGIN IMMEDIATE`, i.e. a RESERVED
+                // write lock, and on iOS the DB lives in the App Group
+                // container where being suspended while holding a lock is
+                // exactly what RunningBoard kills the process for
+                // (EXC_CRASH 0xdead10cc). A batch that is all reads never
+                // opens a transaction at all.
+                let mut writes = Vec::new();
+                let mut queued = Some(cmd);
+                loop {
+                    let Some(cmd) = queued.take().or_else(|| cmd_rx.try_recv().ok()) else {
+                        break;
+                    };
+                    match cmd {
+                        CrdtStoreCmd::ChannelWatermarks { server_id, channel_ids, reply } => {
+                            let mut out: HashMap<String, i64> = HashMap::new();
+                            for cid in &channel_ids {
+                                if let Ok(Some(ts)) =
+                                    store.get_latest_channel_timestamp(&server_id, cid)
+                                {
+                                    if ts > 0 {
+                                        out.insert(cid.clone(), ts);
+                                    }
+                                }
+                            }
+                            let _ = reply.send(out);
+                        }
+                        other => writes.push(other),
+                    }
+                }
+                if writes.is_empty() {
+                    continue;
+                }
+
                 let _ = store.begin_transaction();
 
-                // Process first command
-                Self::process_cmd(&store, cmd, &mut pending_states, &mut pending_blobs);
-
-                // Drain all queued commands without blocking
-                while let Ok(cmd) = cmd_rx.try_recv() {
+                for cmd in writes {
                     Self::process_cmd(&store, cmd, &mut pending_states, &mut pending_blobs);
                 }
 
@@ -123,6 +164,9 @@ impl CrdtStore {
                     hollow_log!("CrdtStore: failed to delete server {server_id}: {e}");
                 }
             }
+            // Read-only: split out in the drain loop before the transaction
+            // opens, so it never reaches here.
+            CrdtStoreCmd::ChannelWatermarks { .. } => {}
             CrdtStoreCmd::PruneOps(keep) => {
                 match store.prune_crdt_ops(keep) {
                     Ok(n) if n > 0 => hollow_log!("[HOLLOW-CRDT] Pruned {n} old crdt_ops rows"),
@@ -167,5 +211,93 @@ impl CrdtStore {
     /// Fire-and-forget: prune old CRDT ops, keeping `keep_count` per server.
     pub fn prune_ops(&self, keep_count: usize) {
         let _ = self.cmd_tx.send(CrdtStoreCmd::PruneOps(keep_count));
+    }
+
+    /// Newest stored message timestamp (ms) per channel, for every channel in
+    /// `channel_ids` that has one. Channels with no messages are simply absent
+    /// from the map.
+    ///
+    /// The ONE read on this actor, and it exists for a reason: the caller used
+    /// to run `MessageStore::open()` per channel on the swarm event loop, and a
+    /// fresh handle re-reads and re-parses the whole schema while holding a
+    /// file lock. On iOS that lock is on the App Group container, so a
+    /// suspension landing inside the window got the process killed
+    /// (`EXC_CRASH 0xdead10cc`). Here it is one round trip on a warm
+    /// connection, off the event loop, outside any transaction.
+    ///
+    /// Returns an empty map if the actor is gone (caller falls back to the
+    /// full retention window, which is what a missing watermark means anyway).
+    pub async fn channel_watermarks(
+        &self,
+        server_id: String,
+        channel_ids: Vec<String>,
+    ) -> HashMap<String, i64> {
+        let (reply, rx) = tokio::sync::oneshot::channel();
+        if self
+            .cmd_tx
+            .send(CrdtStoreCmd::ChannelWatermarks { server_id, channel_ids, reply })
+            .is_err()
+        {
+            return HashMap::new();
+        }
+        rx.await.unwrap_or_default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::MessageStore;
+
+    /// The relay catch-up watermark must come back off the actor's long-lived
+    /// connection, batched, and WITHOUT the caller opening a DB handle — that
+    /// per-channel transient open on the event loop is what got the iOS app
+    /// killed for holding an App Group file lock across a suspend
+    /// (`EXC_CRASH 0xdead10cc`, TestFlight 0.9.5(50)).
+    ///
+    /// A file-backed DB on purpose: `:memory:` gives every connection its own
+    /// empty database, so it could not tell whether the actor sees our writes.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn channel_watermarks_answers_from_the_actor_connection() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let path = dir.path().join("watermarks.db");
+        let path_str = path.to_string_lossy().to_string();
+        let passphrase = "ab".repeat(32);
+
+        {
+            let store = MessageStore::open(&path_str, &passphrase).expect("seed store");
+            for (chan, ts) in [("general", 1_000i64), ("general", 5_000), ("random", 2_000)] {
+                store
+                    .insert_channel_message(
+                        "srv", chan, "sender", "hi", false, ts,
+                        None, None, Some(&format!("{chan}-{ts}")), None, None, None,
+                    )
+                    .expect("insert");
+            }
+        }
+
+        let actor = CrdtStore::open(path_str, passphrase).expect("actor");
+        let out = actor
+            .channel_watermarks(
+                "srv".to_string(),
+                vec!["general".into(), "random".into(), "empty".into()],
+            )
+            .await;
+
+        assert_eq!(out.get("general"), Some(&5_000), "newest row wins per channel");
+        assert_eq!(out.get("random"), Some(&2_000));
+        assert!(!out.contains_key("empty"), "a channel with no rows has no watermark");
+
+        // Answering a read must not leave the actor wedged: a second query, and
+        // a write behind it, still land.
+        let again = actor
+            .channel_watermarks("srv".to_string(), vec!["general".into()])
+            .await;
+        assert_eq!(again.get("general"), Some(&5_000));
+        actor.save_blob("srv".into(), "k".into(), "v".into());
+        let mixed = actor
+            .channel_watermarks("srv".to_string(), vec!["random".into()])
+            .await;
+        assert_eq!(mixed.get("random"), Some(&2_000));
     }
 }

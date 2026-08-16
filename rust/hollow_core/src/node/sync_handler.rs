@@ -702,32 +702,51 @@ pub(crate) fn register_relay_catchup(
 }
 
 /// Age window (seconds) for a relay topic catch-up request: how far back the
-/// relay should replay ring frames for this channel. Derived from the local
+/// relay should replay ring frames for each channel. Derived from the local
 /// channel watermark (newest stored message) + a 30-minute overlap, mirroring
 /// the peer-sync `SYNC_LOOKBACK_MS` pattern — frames older than what we
 /// already hold are undecryptable (MLS consumed those generations) and were
 /// pure SecretReuse noise on every reconnect. 0 = no watermark (fresh
 /// channel) → replay the whole retention window.
-pub(crate) fn catchup_watermark_age_secs(
-    db_path: &str,
-    db_passphrase: &str,
+///
+/// Batched over the whole server and answered on the `CrdtStore` actor's
+/// long-lived connection. The previous per-channel form opened a TRANSIENT
+/// `MessageStore` (fresh SQLCipher handle + full schema re-parse) inline on
+/// the swarm event loop, once per channel, at connect time. On iOS the DB
+/// lives in the App Group container, and RunningBoard kills any process
+/// suspended while holding a lock there — which is exactly the TestFlight
+/// 0.9.5(50) crash (`EXC_CRASH 0xdead10cc`, thread caught inside
+/// `MessageStore::open` → `execute_batch` → `sqlite3ReadSchema`). Returns
+/// pairs in the SAME order as `channel_ids` so the emitted requests stay
+/// deterministic.
+pub(crate) async fn catchup_watermark_ages(
+    crdt_store: &CrdtStore,
     server_id: &str,
-    channel_id: &str,
-) -> i64 {
+    channel_ids: Vec<String>,
+) -> Vec<(String, i64)> {
     const LOOKBACK_SECS: i64 = 1800;
-    let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) else {
-        return 0;
-    };
-    match store.get_latest_channel_timestamp(server_id, channel_id) {
-        Ok(Some(ts_ms)) if ts_ms > 0 => {
-            let now_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis() as i64;
-            ((now_ms - ts_ms) / 1000 + LOOKBACK_SECS).max(LOOKBACK_SECS)
-        }
-        _ => 0,
+    if channel_ids.is_empty() {
+        return Vec::new();
     }
+    let watermarks = crdt_store
+        .channel_watermarks(server_id.to_string(), channel_ids.clone())
+        .await;
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64;
+    channel_ids
+        .into_iter()
+        .map(|cid| {
+            let age = match watermarks.get(&cid) {
+                Some(&ts_ms) if ts_ms > 0 => {
+                    ((now_ms - ts_ms) / 1000 + LOOKBACK_SECS).max(LOOKBACK_SECS)
+                }
+                _ => 0,
+            };
+            (cid, age)
+        })
+        .collect()
 }
 
 // ── 2. CreateChannel ──────────────────────────────────────────────────
