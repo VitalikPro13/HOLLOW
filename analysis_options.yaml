@@ -13,6 +13,13 @@ analyzer:
   exclude:
     # flutter_rust_bridge codegen output — regenerated wholesale, lints don't apply
     - lib/src/rust/**
+    - build/**
+    - android/**
+    - ios/**
+    - web/**
+    - windows/**
+    - macos/**
+    - linux/**
 
 linter:
   # The lint rules applied to this project can be customized in the

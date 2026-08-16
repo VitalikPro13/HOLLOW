@@ -437,28 +437,16 @@ Singleton (`SharedTickers.instance`) that centralizes all repeating animation ti
 - `disabled` flag — when true, `start()` and `resume()` are no-ops. All animation widgets stay frozen. **Set by `ReduceMotionController`, not the settings UI directly** (see Reduce Motion ownership under HollowDurations above).
 
 
-## HollowShaderWarmUp
+## HollowShaderWarmUp (REMOVED, Flutter 3.47)
 
-File: `lib/src/ui/shader_warmup.dart`
+Was `lib/src/ui/shader_warmup.dart`, extending Flutter's `ShaderWarmUp`, executed in
+`main()` to pre-compile GPU shaders and avoid 20-200ms of jank on first use of each
+shader type.
 
-Extends Flutter's `ShaderWarmUp` class. Executed in `main()` before `RustLib.init()` to pre-compile GPU shaders at startup, eliminating 20-200ms jank per first-use of each shader type.
-
-**Canvas size:** 200x200.
-
-**Primitives pre-compiled (13 categories):**
-1. Solid filled rectangles (backgrounds, surfaces).
-2. Rounded rectangles at radii 4/6/8/12/16/24 — filled, stroked, stroked with alpha.
-3. Circles (avatars at 24px, status dots at 7px).
-4. Linear gradients — vertical (server strip bg) + horizontal (shimmer).
-5. Radial gradients — two blobs matching ambient background (teal + indigo).
-6. Box shadows — large (dialog, 24px blur) + small (button hover, 8px blur).
-7. Rounded rect clipping (avatar clips, RevealClip).
-8. Rect clipping (width/height factor clips).
-9. Lines (dividers, 1px stroke).
-10. Text rendering — regular (14px) + bold (16px, w700).
-11. Alpha compositing — `saveLayer` with 50% alpha + rounded rect fill.
-12. BackdropFilter / `ImageFilter.blur` (glassmorphism dialogs, sigma 12).
-13. Transform (scale + translate for ScaleTransition/SlideTransition).
+**Deleted in the Flutter 3.47 upgrade.** Runtime shader compilation was a Skia problem.
+Impeller, the default renderer on all desktop platforms as of 3.47, compiles a fixed
+shader set at build time, so warming shaders at startup buys nothing and just delays
+the first frame. Do not reintroduce it.
 
 
 ## HollowPressable

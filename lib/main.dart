@@ -22,7 +22,6 @@ import 'package:hollow/src/ui/app.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/core/hollow_data_dir.dart';
 import 'package:hollow/src/core/services/ios_data_dir_migration.dart';
-import 'package:hollow/src/ui/shader_warmup.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:window_manager/window_manager.dart';
 
@@ -189,10 +188,6 @@ Future<void> main(List<String> args) async {
       exit(0);
     }
   }
-
-  // Pre-compile GPU shaders before the first frame to eliminate
-  // shader compilation jank during animations.
-  await HollowShaderWarmUp().execute();
 
   // iOS: migrate the data dir into the App Group container so the Notification
   // Service Extension can open the SAME SQLCipher DB + identity to fetch &

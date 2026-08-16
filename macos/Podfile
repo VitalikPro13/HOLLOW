@@ -1,4 +1,4 @@
-platform :osx, '10.15'
+platform :osx, '12.0'
 
 # CocoaPods analytics sends network stats synchronously affecting flutter build latency.
 ENV['COCOAPODS_DISABLE_STATS'] = 'true'
@@ -38,11 +38,12 @@ end
 post_install do |installer|
   installer.pods_project.targets.each do |target|
     flutter_additional_macos_build_settings(target)
-    # Pin every pod to the app's 10.15 floor. Some pods (e.g. WebRTC-SDK) ship a
+    # Pin every pod to the app's 12.0 floor. Some pods (e.g. WebRTC-SDK) ship a
     # higher default that would otherwise drag the minimum back up. Every API
-    # above 10.15 in Hollow's native code is @available-guarded, so this is safe.
+    # above 12.0 in Hollow's native code is @available-guarded, so this is safe.
+    # Raised 10.15 -> 12.0 for Flutter 3.47, which requires macOS 12 as the minimum.
     target.build_configurations.each do |config|
-      config.build_settings['MACOSX_DEPLOYMENT_TARGET'] = '10.15'
+      config.build_settings['MACOSX_DEPLOYMENT_TARGET'] = '12.0'
     end
   end
 end
