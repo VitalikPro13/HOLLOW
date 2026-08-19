@@ -81,10 +81,10 @@ Your identity is a cryptographic keypair. Zero registrations. One recovery phras
 
 | Platform | Links |
 |----------|------|
-| Windows (10+) | [.exe](https://anonlisten.com/hollow/releases/hollow-0.9.4-win64-setup.exe) / [.zip](https://anonlisten.com/hollow/releases/hollow-0.9.4-win64.zip) |
-| macOS (10.15+) | [.dmg](https://anonlisten.com/hollow/releases/hollow-0.9.4.dmg) |
-| Linux | [Flatpak](https://anonlisten.com/hollow/releases/hollow-0.9.4-linux-x86_64.flatpak) / [.tar.gz](https://anonlisten.com/hollow/releases/hollow-0.9.4-linux.tar.gz) |
-| Android (7+) | [.apk](https://anonlisten.com/hollow/releases/hollow-0.9.4-android.apk) |
+| Windows (10+) | [.exe](https://anonlisten.com/hollow/releases/hollow-0.10.0-win64-setup.exe) / [.zip](https://anonlisten.com/hollow/releases/hollow-0.10.0-win64.zip) |
+| macOS (12+) | [.dmg](https://anonlisten.com/hollow/releases/hollow-0.10.0.dmg) |
+| Linux | [Flatpak](https://anonlisten.com/hollow/releases/hollow-0.10.0-linux-x86_64.flatpak) / [.tar.gz](https://anonlisten.com/hollow/releases/hollow-0.10.0-linux.tar.gz) |
+| Android (7+) | [.apk](https://anonlisten.com/hollow/releases/hollow-0.10.0-android.apk) |
 | iOS (16+) | [TestFlight](https://testflight.apple.com/join/5YG2S5e8) |
 | Web | Not planned |
 
@@ -212,9 +212,9 @@ flutter build macos --release
 The output is at `build/macos/Build/Products/Release/Hollow.app` (a universal
 x86_64 + arm64 bundle).
 
-> **Note:** Hollow runs on macOS 10.15 and later. Screen-share audio capture and
+> **Note:** Hollow runs on macOS 12 and later. Screen-share audio capture and
 > call recording require macOS 13.0+ (Apple exposes no system-audio API below
-> that); everything else, including screen-share video, works on 10.15.
+> that); everything else, including screen-share video, works on macOS 12.
 
 </details>
 

@@ -1,17 +1,17 @@
 {
-  "latest": "0.9.4",
+  "latest": "0.10.0",
   "versions": [
     {
-      "version": "0.9.4",
-      "date": "August 04, 2026",
-      "url_windows": "https://anonlisten.com/hollow/releases/hollow-0.9.4-win64.zip",
-      "url_windows_setup": "https://anonlisten.com/hollow/releases/hollow-0.9.4-win64-setup.exe",
-      "url_macos": "https://anonlisten.com/hollow/releases/hollow-0.9.4-macos.zip",
-      "url_macos_dmg": "https://anonlisten.com/hollow/releases/hollow-0.9.4.dmg",
-      "url_linux": "https://anonlisten.com/hollow/releases/hollow-0.9.4-linux-x86_64.flatpak",
-      "url_linux_targz": "https://anonlisten.com/hollow/releases/hollow-0.9.4-linux.tar.gz",
-      "url_android": "https://anonlisten.com/hollow/releases/hollow-0.9.4-android.apk",
-      "notes": "Screen Share Watching, Voice Hotkeys, Link Previews, Channel Access & Portable Mode"
+      "version": "0.10.0",
+      "date": "August 19, 2026",
+      "url_windows": "https://anonlisten.com/hollow/releases/hollow-0.10.0-win64.zip",
+      "url_windows_setup": "https://anonlisten.com/hollow/releases/hollow-0.10.0-win64-setup.exe",
+      "url_macos": "https://anonlisten.com/hollow/releases/hollow-0.10.0-macos.zip",
+      "url_macos_dmg": "https://anonlisten.com/hollow/releases/hollow-0.10.0.dmg",
+      "url_linux": "https://anonlisten.com/hollow/releases/hollow-0.10.0-linux-x86_64.flatpak",
+      "url_linux_targz": "https://anonlisten.com/hollow/releases/hollow-0.10.0-linux.tar.gz",
+      "url_android": "https://anonlisten.com/hollow/releases/hollow-0.10.0-android.apk",
+      "notes": "Screen Share Forwarding, Mobile Audio Devices, Interface Sounds & Flutter 3.47"
     }
   ]
 }

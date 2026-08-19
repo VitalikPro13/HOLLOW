@@ -1,3 +1,55 @@
+v0.10 - Screen Share Forwarding, Mobile Audio Devices, Interface Sounds & Flutter 3.47
+
+NOTE: This release raises the minimum operating system on two platforms, which the Flutter 3.47 upgrade requires: macOS 12 (was 10.15) and iOS 15 (was 13). Windows, Linux and Android are unchanged. Everything else stays compatible with 0.9.4, screen shares included.
+
+SCREEN SHARING
+
+- A screen share no longer costs you one encoded copy per viewer. Your machine sends one copy to a forwarder, which fans the already-encrypted packets out to everyone watching. The forwarder holds no key, never decodes a frame and never re-encodes one, so what leaves it is the same ciphertext you sent
+- Viewers who can reach you directly still do. Only the ones who cannot, usually behind a strict router, need a forwarder, and Hollow prefers another viewer's machine over ours: one person with a good route serves the rest. If that machine leaves, refuses, or runs out of budget, the affected viewers fall back to our forwarder and then to the old direct path. Nobody loses the picture, it just costs more
+- With "Always relay calls" on, you never touch another member's machine in either role, watching or forwarding. That is the whole point of the setting, and it is now enforced on both sides rather than trusted to one
+- The fixed limit of 15 viewers becomes a number that depends on the routes in the room instead of a hard stop
+- A share now sizes itself to each viewer's screen rather than sending everyone the source resolution. A 4K share into a room of 1080p displays costs roughly a quarter of the bandwidth and encoding it used to, and the quality label shows what you are actually receiving, live
+- The share sends two quality layers, so a viewer on a weak connection drops to the lower one instead of stuttering while everyone else stays sharp
+- Fixed a 10 to 15 second black screen for both viewers whenever a share handed over to a promoted forwarder
+- Fixed live quality changes being rejected on Windows, which had been true since those settings existed. Where the engine still refuses, the share reconnects with the new setting instead of reporting a change that never happened
+- A call that ends up routed through our relay when both sides could have connected directly now retries for the direct route once the connection settles, instead of paying for the relay all session
+- A dead share connection is now noticed in seconds instead of waiting out a timeout
+
+VOICE & CALLS
+
+- Fixed connected headphones being ignored on mobile. "Speaker on" was a hard route override, which outranks a headset, so plugging in wired headphones mid-call moved the sound to the phone's loudspeaker and the microphone to the phone's own mic, with nothing in the interface able to undo it. "Speaker on" now means the loudest sensible route, which is the headset whenever one is attached
+- Mobile gains a real audio device picker, in both DM calls and voice channels. The speaker button turns into a device button once a headset is attached, a long press always opens the list, and the icon shows where the audio actually is. The current route is read from the system rather than from our own last write, since the phone re-routes on its own
+- Fixed the screen blanking at every passing object during a call on headphones. Proximity blanking now checks that the audio is really on the earpiece
+- Call recording (issue #53) writes one mixed track instead of two. Most players only play the first track, which meant your own microphone was inaudible in every recording. A recording indicator now shows for everyone in the call or voice channel while one is running
+- The microphone test in Settings (issue #40) records your raw microphone, renders that take through the real capture chain offline, and offers Play processed and Play raw side by side, so you can hear what noise suppression and enhancement do to your voice instead of guessing
+- Fixed yourself being listed twice in a mobile voice channel, and in conferences, where the second copy of you even carried a Kick button
+
+INTERFACE SOUNDS (issue #55)
+
+- Hollow has sounds now: joining and leaving a voice channel, yours and other people's, someone starting or stopping a screen share, your own mute, deafen and camera toggles, and message notifications. Toggle and volume live in Settings > Audio, on desktop and mobile
+- Pressing Call rings a ringback until the other side picks up. Only the receiving end heard anything before
+- Cues fire on real changes only, so joining a busy channel does not replay everyone's arrival, and being deafened silences other people's cues while keeping your own
+- Fixed call and voice channel cues being silent on iPhone, where only the message sound was ever audible. They play through the system audio player now, which cannot disturb a live call's microphone
+
+INTERFACE & DESKTOP
+
+- Fixed the Classic layout not surviving a restart (issue #58). The setting was read before the database finished opening and lost that race every time, so it quietly fell back to Dock. The toggle is a Dock and Classic picker now, and Classic regained Browse public channels, Conferences and Help, which had no entry point there at all
+- Fixed Flatpak not launching (issue #59). The app gave up when it could not register with the session bus, which the package had never asked permission for
+- Fixed the window close button doing nothing on Hyprland and sway. Those compositors have no minimize, so Hollow now checks whether the minimize took effect and quits on a second press if it did not
+- Fixed the in-app updater failing to extract an update on Windows (issue #52), which affected every version up to 0.9.4
+- Fixed switching profiles locking you out of your own encryption keys (issue #47), which showed up as garbled voice audio afterwards
+- Settings labels are sentence case throughout. We had been shipping both "Toggle Mute" and "Toggle deafen", and "Dark Mode" beside "Dynamic mode". The README, privacy policy and terms got a writing pass at the same time
+
+PLATFORM
+
+- Upgraded to Flutter 3.47. Desktop renders through Impeller instead of Skia, which also removes the shader warm-up we used to run at startup to hide first-frame stutter
+- macOS now needs 12 or newer, and iOS 15 or newer, as the new toolchain requires
+- Fixed iPhone crashing while Hollow was suspended in the background. Every connection and every channel open was creating a fresh database handle on the networking thread, and iOS kills an app suspended while it holds that lock. Those reads are answered on the existing connection now
+
+RELAY
+
+- The relay no longer announces that you left a room while you are demonstrably still connected on a newer socket, which happened during quick reconnects and dropped you out of other people's member lists
+
 v0.9.4 - Screen Share Watching, Voice Hotkeys, Link Previews, Channel Access & Portable Mode
 
 NOTE: Hollow Share (the path for files over 34 MB) now negotiates its own direct connection, using a wire format older builds cannot read. Sharing with someone who has not updated will not connect. There is no relay fallback for Share by design, so failing outright is the correct outcome rather than quietly routing your file through our server. Everything else stays compatible.

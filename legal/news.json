@@ -1,5 +1,11 @@
 [
   {
+    "id": "2026-08-19-v0100",
+    "date": "August 19, 2026",
+    "title": "v0.10 - Screen Share Forwarding, Mobile Audio Devices, Interface Sounds & Flutter 3.47",
+    "body": "Probably one of the harshest updates shipped so far... in a nutshell, the screen share bandwidth logic works differently now. It's not encoded with one copy per viewer, which could have simply destroyed your upload bandwidth with a higher number of viewers. Now, you simply send one copy to the forwarder on the relay, which simply fans out the encrypted packets to everyone watching. If some can can reach directly (P2P), then that other viewer can become a 'servant' by uploading the packets to others, therefore reducing the pressure on the sharer.\n\nAnother optimization is simply that if you have a 4K monitor and stream in 4k60, while all the viewers have 1080p monitor, Hollow will automatically encode at that resolution (FPS is preserved), saving lots of bandwidth for everybody, and serving only to what monitor resolution other peers have. From other stuff, we upgraded the Flutter engine to 3.47 and desktop finally got a proper rendering support... kind of. I then discovered that only shader compilation was eliminated by this but the rendering is still not direct Vulcan as promised (but Mac has Metal, so lucky you, my dear Apple users). But it should feel a bit smoother and better in terms of performance.\n\nCreate more issues on the GitHub page, share your feedback and thanks for using Hollow! Doing my best, as always... even if it's hard sometimes."
+  },
+  {
     "id": "2026-08-04-v094",
     "date": "August 04, 2026",
     "title": "v0.9.4 - Screen Share Watching, Voice Hotkeys, Link Previews, Channel Access & Portable Mode",
