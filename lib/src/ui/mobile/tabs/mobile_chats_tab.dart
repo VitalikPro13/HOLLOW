@@ -994,35 +994,32 @@ class _ChannelListState extends ConsumerState<_ChannelList> {
     };
 
     final items = <_DisplayItem>[];
-    final placedIds = <String>{};
     String? currentCategory;
 
-    final layout = parseLayoutJson(layoutJson);
+    // Normalised, the same way the desktop sidebar, the sidebar's context
+    // menus and the Channels settings editor all do it: the stored layout,
+    // minus channels that are gone (or hidden from this user), plus the
+    // channels missing from it appended in list order. Appending those in a
+    // SEPARATE loop, as this used to, put them outside the pass that tracks
+    // the open category — so a channel drawn under a trailing category was
+    // not in it and stayed on screen when the category was collapsed.
+    final layout = effectiveLayoutFrom(parseLayoutJson(layoutJson), channels);
     for (final entry in layout) {
-      if (entry is CategoryItem) {
-        currentCategory = entry.name;
-        items.add(_CategoryDisplayItem(currentCategory));
-      } else if (entry is SeparatorItem) {
-        currentCategory = null;
-        items.add(_SeparatorDisplayItem());
-      } else if (entry is ChannelItem) {
-        final ch = channels[entry.channelId];
-        if (ch != null) {
-          placedIds.add(entry.channelId);
+      switch (entry) {
+        case CategoryItem(:final name):
+          currentCategory = name;
+          items.add(_CategoryDisplayItem(name));
+        case SeparatorItem():
+          currentCategory = null;
+          items.add(_SeparatorDisplayItem());
+        case ChannelItem(:final channelId):
+          final ch = channels[channelId];
+          if (ch == null) break;
           items.add(_ChannelDisplayItem(
             channel: ch,
             category: currentCategory,
           ));
-        }
       }
-    }
-
-    final unplaced = channels.values
-        .where((ch) => !placedIds.contains(ch.channelId))
-        .toList()
-      ..sort((a, b) => a.name.compareTo(b.name));
-    for (final ch in unplaced) {
-      items.add(_ChannelDisplayItem(channel: ch, category: null));
     }
 
     // Compute isLastInGroup: last channel before a category/separator/end

@@ -55,7 +55,9 @@ Signature: `fn leave_server(server_id: String) -> Result<(), String>`. Sends `No
 ## Channel CRUD (crdt.rs)
 
 ### crdt.rs:create_channel()
-Signature: `fn create_channel(server_id: String, name: String, category: Option<String>, channel_type: String) -> Result<String, String>`. Sends `NodeCommand::CreateChannel { server_id, name, category, channel_type }`. Returns `"pending"`. Actual channel_id comes via event. `channel_type` is "text" or "voice".
+Signature: `fn create_channel(server_id: String, name: String, category: Option<String>, channel_type: String) -> Result<String, String>`. MINTS the id with `node::new_channel_id(&server_id)`, sends `NodeCommand::CreateChannel { server_id, channel_id, name, category, channel_type }`, and **returns that channel_id**. `channel_type` is "text" or "voice".
+
+The id is minted here, not in the handler, because the UI needs it synchronously: "create a channel in this category" writes the new channel into the layout before any event comes back. This used to return the literal string `"pending"`, which issue #61 duly wrote into the layout as a channel id that nothing would ever match. Creation is still asynchronous and a permission failure still drops the command, so a caller storing this id must tolerate one that never materialises (layout normalisation does).
 
 ### crdt.rs:remove_channel()
 Signature: `fn remove_channel(server_id: String, channel_id: String) -> Result<(), String>`. Sends `NodeCommand::RemoveChannel { server_id, channel_id }`.

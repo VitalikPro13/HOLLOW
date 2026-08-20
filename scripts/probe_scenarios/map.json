@@ -1,0 +1,7 @@
+[
+  {"op": "log", "message": "map the home screen, then the server"},
+  {"op": "dump", "name": "home"},
+  {"op": "open_server", "name": "${SERVER}"},
+  {"op": "shot", "name": "server"},
+  {"op": "dump", "name": "server"}
+]

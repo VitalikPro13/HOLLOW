@@ -1,23 +1,49 @@
 # Drives the real app on Windows against a COPY of a real data directory and
-# leaves screenshots behind (issue #61 test tooling).
+# leaves screenshots, navigation maps and step results behind (issue #61 test
+# tooling).
 #
 # The point: check a UI change by looking at it, instead of asking a human to
 # reproduce it and describe what they saw. Widget tests mock FFI, so the seam
 # where most of the recent bugs lived  -  optimistic writes, reload races, a
 # disposed provider ref  -  is invisible to them. Here the DB and CRDT are real.
 #
-#   pwsh scripts\ui_probe.ps1                          # just boot and screenshot
-#   pwsh scripts\ui_probe.ps1 -Scenario channel_menu
-#   pwsh scripts\ui_probe.ps1 -Scenario create_category -Server test3
+#   powershell -File scripts\ui_probe.ps1                      # boot, shot, map
+#   powershell -File scripts\ui_probe.ps1 -Scenario channel_menu
+#   powershell -File scripts\ui_probe.ps1 -ScenarioFile my.json -ReuseData
+#   powershell -File scripts\ui_probe.ps1 -Steps '[{"op":"dump","name":"x"}]'
+#   powershell -File scripts\ui_probe.ps1 -Live                # command loop
 #
-# Screenshots land in build\ui_probe\*.png.
+# Scenarios are DATA, read at runtime (see scripts\probe_scenarios\*.json), so
+# a new one never means a rebuild. The op vocabulary and the target grammar are
+# documented in integration_test\probe\probe_runner.dart and probe_targets.dart.
+#
+# In -Live mode the app stays open and executes commands appended to
+# build\ui_probe\inbox.jsonl, answering into outbox.jsonl. Send one with
+# scripts\ui_probe_send.ps1. Windows PowerShell 5.1 is what is installed on
+# this machine, so both scripts stay 5.1-compatible: no pwsh-only syntax.
+#
+# Artifacts, all under build\ui_probe:
+#   *.png            screenshots
+#   map-*.md/.json   what is on screen + the provider state behind it
+#   results.jsonl    one line per step
+#   fail-*.png       automatic, on any failed step
 #
 # SAFETY: never points the app at the live data directory. It mirrors it to a
 # scratch copy first, because the probe clicks real buttons and writes real
 # CRDT ops. Re-copy with -Fresh after the live data changes.
 
 param(
+    # A file in scripts\probe_scenarios (without .json), or 'boot' for the
+    # built-in boot-and-map run.
     [string]$Scenario = 'boot',
+    # An explicit path to a scenario file, anywhere.
+    [string]$ScenarioFile = '',
+    # An inline JSON array of steps.
+    [string]$Steps = '',
+    # Stay open and take commands from build\ui_probe\inbox.jsonl.
+    [switch]$Live,
+    # How long the live loop waits for a command before giving up.
+    [int]$IdleMinutes = 20,
     [string]$Server = 'test3',
     [string]$SourceData = "$env:APPDATA\Hollow",
     [string]$ProbeData = "$env:TEMP\hollow_ui_probe_data",
@@ -31,7 +57,33 @@ $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $repoRoot
 
-Write-Host "[ui-probe] scenario=$Scenario server=$Server" -ForegroundColor Cyan
+# -- 0. Resolve the scenario ---
+$resolvedScenario = ''
+if ($ScenarioFile) {
+    if (-not (Test-Path $ScenarioFile)) { throw "scenario file not found: $ScenarioFile" }
+    $resolvedScenario = (Resolve-Path $ScenarioFile).Path
+} elseif ($Scenario -and $Scenario -ne 'boot') {
+    $candidate = Join-Path $repoRoot "scripts\probe_scenarios\$Scenario.json"
+    if (-not (Test-Path $candidate)) {
+        $known = (Get-ChildItem (Join-Path $repoRoot 'scripts\probe_scenarios') -Filter *.json |
+                  ForEach-Object { $_.BaseName }) -join ', '
+        throw "unknown scenario '$Scenario'. Known: $known (or pass -ScenarioFile)"
+    }
+    $resolvedScenario = (Resolve-Path $candidate).Path
+}
+
+$env:UI_PROBE_SCENARIO_FILE = $resolvedScenario
+$env:UI_PROBE_STEPS = $Steps
+$env:UI_PROBE_SERVER = $Server
+$env:SERVER = $Server
+$env:UI_PROBE_MODE = if ($Live) { 'live' } else { 'script' }
+$env:UI_PROBE_IDLE_MINUTES = "$IdleMinutes"
+
+$what = 'boot + map'
+if ($Live) { $what = 'live' }
+elseif ($resolvedScenario) { $what = $resolvedScenario }
+elseif ($Steps) { $what = 'inline steps' }
+Write-Host "[ui-probe] $what (server=$Server)" -ForegroundColor Cyan
 
 # -- 1. A running instance holds the lock file and the DB ---
 $running = Get-Process -Name 'hollow' -ErrorAction SilentlyContinue
@@ -86,17 +138,27 @@ $shots = Join-Path $repoRoot 'build\ui_probe'
 # Clear BEFORE either process starts: a stale PNG from a previous run looks
 # like a result. The app writes into this directory itself, and flutter drive
 # starts the app before the driver, so cleanup cannot live in the driver.
-if (Test-Path $shots) { Remove-Item $shots -Recurse -Force }
+#
+# The last run is kept one folder over rather than deleted. Comparing a map to
+# the one before it is the whole diagnosis for a layout bug, and the folder is
+# named for what it holds, so it cannot be mistaken for the current run.
+$prev = Join-Path $repoRoot 'build\ui_probe_prev'
+if (Test-Path $shots) {
+    if (Test-Path $prev) { Remove-Item $prev -Recurse -Force }
+    Move-Item $shots $prev
+}
 New-Item -ItemType Directory -Path $shots -Force | Out-Null
 Write-Host "[ui-probe] running flutter drive (this builds first, so give it a few minutes)" -ForegroundColor Cyan
+if ($Live) {
+    Write-Host "[ui-probe] once LIVE appears, send commands with:" -ForegroundColor Cyan
+    Write-Host '           powershell -File scripts\ui_probe_send.ps1 -Command ''{"op":"dump","name":"now"}'''
+}
 
 try {
     & flutter drive `
         --driver=test_driver/integration_test.dart `
         --target=integration_test/ui_probe_test.dart `
-        -d windows `
-        --dart-define=SCENARIO=$Scenario `
-        --dart-define=SERVER=$Server
+        -d windows
 
     $driveExit = $LASTEXITCODE
 } finally {
@@ -107,16 +169,29 @@ try {
 }
 
 # -- 5. Report ---
-if (Test-Path $shots) {
-    Write-Host "`n[ui-probe] screenshots:" -ForegroundColor Green
-    Get-ChildItem $shots -Filter *.png | ForEach-Object {
-        Write-Host ("  {0}  ({1:N0} KB)" -f $_.FullName, ($_.Length / 1KB))
+$results = Join-Path $shots 'results.jsonl'
+if (Test-Path $results) {
+    Write-Host "`n[ui-probe] steps:" -ForegroundColor Green
+    Get-Content $results | ForEach-Object {
+        $step = $_ | ConvertFrom-Json
+        $mark = if ($step.ok) { 'ok  ' } else { 'FAIL' }
+        $colour = if ($step.ok) { 'Gray' } else { 'Red' }
+        $first = ($step.message -split "`n")[0]
+        Write-Host ("  {0} {1,-2} {2,-16} {3}" -f $mark, $step.i, $step.op, $first) -ForegroundColor $colour
     }
+}
+
+if (Test-Path $shots) {
+    $pngs = Get-ChildItem $shots -Filter *.png
+    $maps = Get-ChildItem $shots -Filter map-*.md
+    Write-Host "`n[ui-probe] artifacts in $shots" -ForegroundColor Green
+    $pngs | ForEach-Object { Write-Host ("  {0}  ({1:N0} KB)" -f $_.Name, ($_.Length / 1KB)) }
+    $maps | ForEach-Object { Write-Host ("  {0}" -f $_.Name) }
 } else {
-    Write-Host "`n[ui-probe] no screenshots were written" -ForegroundColor Yellow
+    Write-Host "`n[ui-probe] no artifacts were written" -ForegroundColor Yellow
 }
 
 if ($driveExit -ne 0) {
-    Write-Host "[ui-probe] flutter drive exited $driveExit  -  the screenshots above still show how far it got" -ForegroundColor Yellow
+    Write-Host "[ui-probe] flutter drive exited $driveExit  -  the artifacts above still show how far it got" -ForegroundColor Yellow
 }
 exit $driveExit

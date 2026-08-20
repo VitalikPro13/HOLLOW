@@ -181,4 +181,41 @@ void main() {
     expect(ids, ['id-alpha', 'id-beta']);
     expect(ids, isNot(contains('deleted-id')));
   });
+
+  // The two properties the SIDEBAR depends on. It renders the effective layout
+  // rather than the stored one, and these say why it has to.
+
+  test('everything below a trailing category is inside it', () {
+    // The bug this pins down: the sidebar used to draw the stored layout and
+    // then append the channels missing from it, outside the loop that tracks
+    // the current category. A channel drawn directly under a category was
+    // therefore not IN it, so collapsing the category left the channel on
+    // screen. Normalisation says it is in it; the sidebar now agrees.
+    final effective = effectiveLayoutFrom(
+        parseLayoutJson('[{"type":"category","name":"Cat"}]'), channels());
+
+    expect(effective.first, isA<CategoryItem>());
+    expect(effective.skip(1).whereType<ChannelItem>().map((i) => i.channelId),
+        ['id-alpha', 'id-beta'],
+        reason: 'a category at the end of the layout owns every channel that '
+            'follows it, and unplaced channels follow it');
+  });
+
+  test('a dangling channel id shifts the categories after it', () {
+    // Categories are edited by INDEX, and every menu action resolves that
+    // index against the NORMALISED layout. Normalisation drops a reference to
+    // a channel that no longer exists, so an index taken from the stored
+    // layout points one item too far to the right. Rendering from the stored
+    // layout and editing against the normalised one is a silent mis-edit.
+    final stored = parseLayoutJson('[{"type":"channel","channel_id":"gone"},'
+        '{"type":"category","name":"Cat"}]');
+
+    expect(stored.indexWhere((i) => i is CategoryItem), 1);
+    expect(
+        effectiveLayoutFrom(stored, channels())
+            .indexWhere((i) => i is CategoryItem),
+        0,
+        reason: 'whoever renders the category must render the layout its '
+            'index will be resolved against');
+  });
 }

@@ -82,27 +82,36 @@ If `items` is empty, shows a centered "No channels" text instead of the `ListVie
 
 The `ListView` has vertical padding of `HollowSpacing.xs`.
 
-## Channel Layout JSON Parsing -- _buildLayoutItems()
+## Channel Layout -- _buildLayoutItems()
 
-`file:_ServerContentState._buildLayoutItems()` parses `channelLayoutJson` as a `List<dynamic>` via `jsonDecode`. Each element is a JSON object with a `type` field. The parser tracks `currentCategory` (nullable string) and a `placedChannels` set.
+`file:_ServerContentState._buildLayoutItems()` renders the **EFFECTIVE** layout, not the stored one:
 
-Three item types are recognized:
+```dart
+final layout = effectiveLayoutFrom(_getParsedLayout(), w.channels);
+```
 
-**`type: "category"`** -- reads `item['name']` as the category label. Adds a `_CategoryHeader` widget. Sets `currentCategory` to this name so subsequent channels know their parent.
+`_getParsedLayout()` caches `parseLayoutJson(channelLayoutJson)` and only re-parses when the JSON string changes. `effectiveLayoutFrom` (`core/providers/channel_provider.dart`) is the ONE normalisation shared with the sidebar's context menus and the Channels settings editor: the stored layout, minus references to channels that no longer exist (or that this user cannot see), plus every channel missing from it appended in sidebar order (alphabetical by name).
 
-**`type: "separator"`** -- resets `currentCategory` to null. Adds a horizontal `Divider` wrapped in `Padding` (horizontal `HollowSpacing.lg`, vertical `HollowSpacing.sm`).
+The loop tracks `currentCategory` (nullable string) and switches on the sealed `LayoutItem` type:
 
-**`type: "channel"`** -- reads `item['channel_id']`. Looks up the channel in the `channels` map. If found, adds it to `placedChannels` and checks whether it should be collapsed (its `currentCategory` is non-null and `_categoryCollapsedState[currentCategory]` is true). Renders either `_VoiceChannelTile` (for `ChannelType.voice`) or `_ChannelTile` (for text channels), then wraps in `_AnimatedChannelTile` with `visible: !collapsed` and a `ValueKey('ach-$channelId')`.
+**`CategoryItem`** -- adds a `_CategoryHeader` and sets `currentCategory` to its name so subsequent channels know their parent. The header is passed `layoutIndex: index`, the position **in the effective layout**, which is the identity its context menu edits by.
 
-After processing the JSON layout, any channels in the `channels` map NOT present in `placedChannels` are appended as "unplaced" channels. These are sorted alphabetically by `name` and rendered as either voice or text tiles without animation wrappers. This ensures newly created channels appear immediately even before the layout is synced via CRDT.
+**`SeparatorItem`** -- resets `currentCategory` to null. Adds a horizontal `Divider` wrapped in `Padding` (horizontal `HollowSpacing.lg`, vertical `HollowSpacing.sm`).
 
-The entire parse is wrapped in `try/catch` -- malformed JSON silently falls through to the unplaced-channels section.
+**`ChannelItem`** -- looks the channel up in the `channels` map (a miss means the map changed mid-frame; normalisation already dropped dead ids). Computes `collapsed` from `currentCategory` plus `_categoryCollapsedState`, renders `_VoiceChannelTile` or `_ChannelTile`, and wraps it in `_AnimatedChannelTile` with `visible: !collapsed` and a `ValueKey('ach-$channelId')`.
+
+**Why effective and not stored (issue #61).** The sidebar used to walk the raw JSON and then append the leftover channels in a SECOND loop, after the pass that tracks `currentCategory`. Two bugs followed, and both read as "the category does not really contain its channels":
+
+- A channel appended below a trailing category was drawn under it but carried no category, so collapsing the category left it on screen.
+- A stored layout holding a dead channel id shifts every index after it once normalisation drops the reference. The category menu edits by INDEX and resolves that index against the normalised layout, so a sidebar handing out stored indices would have edited the neighbouring item. (Issue #61 shipped exactly such an id: `create_channel` returned the literal string `"pending"`.)
+
+`test/sidebar_effective_layout_guard_test.dart` fails the build if either channel list (this one or `mobile/tabs/mobile_chats_tab.dart`) hand-rolls a second normalisation again. `firstTextChannelInLayout` walks the same effective layout, so "the first channel in the sidebar" cannot drift from what the sidebar draws.
 
 ## Category Folding -- Collapsible Headers
 
 Category collapsed state is stored in a **module-level** `Map<String, bool>` called `_categoryCollapsedState`. This persists across widget rebuilds and even across server switches within the same app session, since it is keyed by category name string.
 
-`file:_CategoryHeader` extends `StatefulWidget`. Props: `hollow`, `name`, `onToggle` (nullable `VoidCallback`).
+`file:_CategoryHeader` extends `StatefulWidget`. Props: `hollow`, `name`, `onToggle` (nullable `VoidCallback`), plus what its right-click menu needs: `layoutIndex` (position in the effective layout -- categories are addressed by POSITION, never by name, since duplicate names are legal), `serverId`, `layoutJson` and `canManage`. Secondary tap opens `showCategoryMenu` (`shell/channel_context_menus.dart`).
 
 `file:_CategoryHeaderState` reads `_categoryCollapsedState[widget.name] ?? false` to determine the collapsed state. The widget renders a `HollowPressable` (subtle mode) containing:
 - An `AnimatedRotation` chevron: `LucideIcons.chevronDown` (10px). When collapsed, rotates -0.25 turns (90 degrees clockwise, pointing right). When expanded, rotation is 0.

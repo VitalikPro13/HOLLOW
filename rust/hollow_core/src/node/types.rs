@@ -668,6 +668,18 @@ pub(crate) struct PendingJoin {
     pub(crate) nsfw_confirmed: bool,
 }
 
+/// A fresh channel id: the server's first 8 characters, then 4 random bytes.
+///
+/// ONE definition, called by whoever sends [NodeCommand::CreateChannel], so
+/// the id exists before the command does and can be handed straight back to
+/// the caller.
+pub(crate) fn new_channel_id(server_id: &str) -> String {
+    let mut buf = [0u8; 4];
+    getrandom::fill(&mut buf)
+        .expect("system RNG unavailable — cannot generate secure random bytes");
+    format!("{}-{}", &server_id[..8.min(server_id.len())], hex::encode(buf))
+}
+
 /// Commands the FFI layer can send into the swarm event loop.
 pub(crate) enum NodeCommand {
     SendMessage { peer_id: String, text: String, message_id: String, reply_to_mid: Option<String>, link_preview: Option<LinkPreviewRef> },
@@ -675,7 +687,12 @@ pub(crate) enum NodeCommand {
     JoinRoom { room_code: String },
     // -- CRDT commands (Phase 3) --
     CreateServer { name: String },
-    CreateChannel { server_id: String, name: String, category: Option<String>, channel_type: String },
+    /// [channel_id] is minted by the CALLER (`new_channel_id`), not here, so
+    /// the FFI can return the real id to Dart instead of a placeholder. The UI
+    /// needs it synchronously: "create channel in this category" has to put
+    /// the new channel into the layout, and a placeholder id writes a dangling
+    /// layout entry that no channel will ever match.
+    CreateChannel { server_id: String, channel_id: String, name: String, category: Option<String>, channel_type: String },
     RemoveChannel { server_id: String, channel_id: String },
     RenameServer { server_id: String, new_name: String },
     RenameChannel { server_id: String, channel_id: String, new_name: String },

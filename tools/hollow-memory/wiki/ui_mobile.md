@@ -65,10 +65,10 @@ Long-press on a channel row in the expanded accordion opens `showMobileChannelAc
 **File:** `lib/src/ui/mobile/tabs/mobile_chats_tab.dart` (`_ChannelList`)
 Channel accordion now respects layout ordering + categories:
 - Fetches both `ChannelListNotifier.fetchChannels()` AND `ChannelLayoutNotifier.fetchLayout()` via `Future.wait`
-- Parses layout JSON into `_DisplayItem` sealed class hierarchy: `_CategoryDisplayItem`, `_ChannelDisplayItem`, `_SeparatorDisplayItem`
+- Builds `effectiveLayoutFrom(parseLayoutJson(layoutJson), channels)` into a `_DisplayItem` sealed class hierarchy: `_CategoryDisplayItem`, `_ChannelDisplayItem`, `_SeparatorDisplayItem`
 - Categories render as collapsible `_CategoryHeaderRow` (uppercase, chevron toggle, `AnimatedRotation`)
 - Separators render as `_TreeSeparatorRow` (12px gap with vertical tree line)
-- Unplaced channels appended alphabetically at end
+- **Channels missing from the layout come out of the normalisation, NOT a second loop.** Appending them separately (as this did until issue #61) leaves them outside the pass that tracks `currentCategory`, so a channel drawn under a trailing category carries `category: null` and stays on screen when that category is collapsed. `test/sidebar_effective_layout_guard_test.dart` guards this list and the desktop sidebar together. `channels` is pre-filtered by `meCanSee`, so normalisation also drops layout entries for channels this user cannot see.
 - "+" `_CreateChannelRow` at bottom when `canManage` (calls `showCreateChannelDialog` with `onCreated: _loadChannels`)
 - Listens to `serverListProvider.select((s) => s[widget.serverId])` for per-server change detection
 - **CRITICAL — rows are keyed by item identity** (`ValueKey('srv-${id}')` / `ValueKey('dm-${id}')` in the conversation ListView) and `_ChannelList` reloads in `didUpdateWidget` when `serverId` changes. The list mixes DMs and servers and reorders constantly; without keys Flutter re-parented row State across DIFFERENT conversations — a newly joined server displayed ANOTHER server's channel structure while every logged ID looked correct. Any row widget holding per-item loaded state needs both protections.

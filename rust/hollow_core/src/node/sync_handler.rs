@@ -761,6 +761,7 @@ pub(crate) async fn handle_create_channel(
     bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     local_peer_str: &str,
     server_id: String,
+    channel_id: String,
     name: String,
     category: Option<String>,
     channel_type: String,
@@ -777,11 +778,9 @@ pub(crate) async fn handle_create_channel(
             }).await;
             return true;
         }
-        let channel_id = format!("{}-{}", &server_id[..8.min(server_id.len())], hex::encode(&{
-            let mut buf = [0u8; 4];
-            getrandom::fill(&mut buf).expect("system RNG unavailable — cannot generate secure random bytes");
-            buf
-        }));
+        // The id came in with the command: the caller already handed it to the
+        // UI (see `api::crdt::create_channel`), so minting another one here
+        // would leave the layout pointing at a channel that never exists.
         hollow_log!("[HOLLOW-CRDT] Creating channel '{name}' id={channel_id} in server {server_id}");
 
         let op = author_op(state, crdt_store, &server_id, CrdtPayload::ChannelAdded {

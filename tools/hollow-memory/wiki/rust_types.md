@@ -225,7 +225,7 @@ Commands sent from the Flutter FFI layer into the Rust swarm event loop via `mps
 ### CRDT / Server Commands
 
 - **`CreateServer { name }`** — create a new server. Handler: `sync_handler.rs:handle_create_server()`.
-- **`CreateChannel { server_id, name, category, channel_type }`** — add a channel. `channel_type` is "text" or "voice". `category: Option<String>` for channel grouping. Handler: `sync_handler.rs:handle_create_channel()`.
+- **`CreateChannel { server_id, channel_id, name, category, channel_type }`** — add a channel. `channel_type` is "text" or "voice". `category: Option<String>` for channel grouping. `channel_id` is minted by the SENDER via `new_channel_id()`, so the FFI can hand the real id back to the UI in the same call. Handler: `sync_handler.rs:handle_create_channel()`.
 - **`RemoveChannel { server_id, channel_id }`** — remove a channel. Handler: `sync_handler.rs:handle_remove_channel()`.
 - **`RenameServer { server_id, new_name }`** — rename a server. Handler: `sync_handler.rs`.
 - **`RenameChannel { server_id, channel_id, new_name }`** — rename a channel. Handler: `sync_handler.rs`.

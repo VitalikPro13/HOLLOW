@@ -111,7 +111,20 @@ pub fn create_server(name: String) -> Result<String, String> {
     Ok("pending".to_string())
 }
 
-/// Create a channel in a server. Returns "pending" (actual channel_id comes via event).
+/// Create a channel in a server. Returns the NEW channel's id.
+///
+/// The id is minted here rather than inside the handler, because the caller
+/// needs it in the same breath: "create a channel in this category" puts the
+/// new channel into the layout, and the layout is written before any event
+/// comes back. This used to return the string "pending", so that write left a
+/// dangling layout entry — the category looked right (the unplaced channel is
+/// drawn straight after it) while nothing was actually in it, and collapsing
+/// the category left the channel behind.
+///
+/// The channel itself is still created asynchronously, and a permission
+/// failure still drops the whole thing, so a caller that stores this id must
+/// tolerate an id that never materialises. Layout normalisation does: it drops
+/// references to channels that do not exist.
 #[frb]
 pub fn create_channel(
     server_id: String,
@@ -126,10 +139,12 @@ pub fn create_channel(
     // holding it across block_on(send) serializes all other FFI calls.
     drop(guard);
 
+    let channel_id = node::new_channel_id(&server_id);
     let rt = get_runtime();
     rt.block_on(
         cmd_tx.send(node::NodeCommand::CreateChannel {
             server_id,
+            channel_id: channel_id.clone(),
             name,
             category,
             channel_type,
@@ -137,7 +152,7 @@ pub fn create_channel(
     )
     .map_err(|e| format!("Failed to send command: {e}"))?;
 
-    Ok("pending".to_string())
+    Ok(channel_id)
 }
 
 /// Remove a channel from a server.

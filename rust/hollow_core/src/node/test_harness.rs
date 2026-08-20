@@ -3031,6 +3031,7 @@ async fn voice_channel_join_leave_and_signal_routing() {
     o.cmd_tx
         .send(NodeCommand::CreateChannel {
             server_id: server_id.clone(),
+            channel_id: crate::node::new_channel_id(&server_id),
             name: "Voice".to_string(),
             category: None,
             channel_type: "voice".to_string(),
@@ -3238,6 +3239,7 @@ async fn vc_self_participant_is_device_keyed_no_self_dial() {
     o.cmd_tx
         .send(NodeCommand::CreateChannel {
             server_id: server_id.clone(),
+            channel_id: crate::node::new_channel_id(&server_id),
             name: "Voice".to_string(),
             category: None,
             channel_type: "voice".to_string(),
@@ -3403,6 +3405,7 @@ async fn vc_screen_origin_attribution_round_trip() {
     o.cmd_tx
         .send(NodeCommand::CreateChannel {
             server_id: server_id.clone(),
+            channel_id: crate::node::new_channel_id(&server_id),
             name: "Voice".to_string(),
             category: None,
             channel_type: "voice".to_string(),
@@ -4860,6 +4863,7 @@ async fn restricted_channel_subgroup_enforces_visibility() {
     o.cmd_tx
         .send(NodeCommand::CreateChannel {
             server_id: server_id.clone(),
+            channel_id: crate::node::new_channel_id(&server_id),
             name: "secret".to_string(),
             category: None,
             channel_type: "text".to_string(),
@@ -5065,6 +5069,7 @@ async fn label_gated_channel_subgroup_and_fallback() {
     o.cmd_tx
         .send(NodeCommand::CreateChannel {
             server_id: server_id.clone(),
+            channel_id: crate::node::new_channel_id(&server_id),
             name: "vip-lounge".to_string(),
             category: None,
             channel_type: "text".to_string(),
@@ -5421,6 +5426,7 @@ async fn channel_grant_lifecycle_mls() {
     o.cmd_tx
         .send(NodeCommand::CreateChannel {
             server_id: server_id.clone(),
+            channel_id: crate::node::new_channel_id(&server_id),
             name: "war-room".to_string(),
             category: None,
             channel_type: "text".to_string(),
@@ -5543,6 +5549,7 @@ async fn channel_grant_expiry_sweep() {
     o.cmd_tx
         .send(NodeCommand::CreateChannel {
             server_id: server_id.clone(),
+            channel_id: crate::node::new_channel_id(&server_id),
             name: "airlock".to_string(),
             category: None,
             channel_type: "text".to_string(),
@@ -5731,6 +5738,7 @@ async fn restricted_voice_channel_subgroup_enforces_sframe_membership() {
     o.cmd_tx
         .send(NodeCommand::CreateChannel {
             server_id: server_id.clone(),
+            channel_id: crate::node::new_channel_id(&server_id),
             name: "war-room".to_string(),
             category: None,
             channel_type: "voice".to_string(),
@@ -5936,6 +5944,7 @@ async fn channel_visibility_posting_propagate_to_remote_member_realtime() {
     o.cmd_tx
         .send(NodeCommand::CreateChannel {
             server_id: server_id.clone(),
+            channel_id: crate::node::new_channel_id(&server_id),
             name: "topic".to_string(),
             category: None,
             channel_type: "text".to_string(),
@@ -8196,6 +8205,7 @@ async fn channel_relay_catchup_covers_all_channels() {
     o.cmd_tx
         .send(NodeCommand::CreateChannel {
             server_id: server_id.clone(),
+            channel_id: crate::node::new_channel_id(&server_id),
             name: "second".to_string(),
             category: None,
             channel_type: "text".to_string(),
@@ -11141,6 +11151,7 @@ async fn stale_epoch_vc_join_probe_converges_via_commit_replay() {
     o.cmd_tx
         .send(NodeCommand::CreateChannel {
             server_id: server_id.clone(),
+            channel_id: crate::node::new_channel_id(&server_id),
             name: "Voice Lounge".to_string(),
             category: None,
             channel_type: "voice".to_string(),
@@ -12188,6 +12199,7 @@ async fn vc_screen_assign_and_route_round_trip() {
     o.cmd_tx
         .send(NodeCommand::CreateChannel {
             server_id: server_id.clone(),
+            channel_id: crate::node::new_channel_id(&server_id),
             name: "Voice".to_string(),
             category: None,
             channel_type: "voice".to_string(),

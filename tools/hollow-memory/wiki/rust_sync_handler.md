@@ -66,13 +66,13 @@ No broadcast to OTHER members needed — the server has only one identity (the c
 
 `sync_handler.rs:handle_create_channel()` — Creates a channel within an existing server.
 
-Parameters: `server_states`, `mls`, `event_tx`, `ws_cmd_tx`, `ws_room_peers`, `bundle_keypair`, `local_peer_str`, `server_id`, `name`, `category`, `channel_type`
+Parameters: `server_states`, `mls`, `event_tx`, `ws_cmd_tx`, `ws_room_peers`, `bundle_keypair`, `local_peer_str`, `server_id`, `channel_id`, `name`, `category`, `channel_type`
 
 Returns `bool` — `true` if the caller should skip to next iteration (permission denied or server not found).
 
 Permission: `Permission::MANAGE_CHANNELS`
 
-Channel ID generation: `"{server_id_first_8_chars}-{random_4_bytes_hex}"` — e.g., `"a1b2c3d4-deadbeef"`.
+Channel ID: arrives WITH the command; the handler never mints one. `node::types::new_channel_id()` builds it (`"{server_id_first_8_chars}-{random_4_bytes_hex}"`, e.g. `"a1b2c3d4-deadbeef"`) and the FFI calls it so it can return the real id to Dart.
 
 CrdtPayload: `ChannelAdded { channel_id, name, category, channel_type }`
 

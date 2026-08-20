@@ -1,4 +1,3 @@
-import 'dart:convert';
 import 'dart:math' as math;
 
 import 'package:hollow/src/ui/chat/hollow_link_utils.dart';
@@ -8,6 +7,7 @@ import 'package:hollow/src/ui/components/speaking_border.dart';
 import 'package:hollow/src/ui/components/overlay_anchor.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/models/channel_info.dart';
+import 'package:hollow/src/core/models/channel_layout.dart';
 import 'package:hollow/src/core/models/chat_message.dart';
 import 'package:hollow/src/core/models/node_status.dart';
 import 'package:hollow/src/core/models/peer_info.dart';
@@ -21,6 +21,7 @@ import 'package:hollow/src/ui/animations/selection_shimmer.dart';
 import 'package:hollow/src/ui/dialogs/storage_dashboard_dialog.dart';
 import 'package:hollow/src/ui/shell/channel_context_menus.dart';
 import 'package:hollow/src/ui/animations/startup_reveal.dart';
+import 'package:hollow/src/core/providers/channel_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/friends_provider.dart';
 import 'package:hollow/src/core/providers/member_panel_provider.dart';
@@ -497,36 +498,47 @@ class _ServerContent extends StatefulWidget {
 
 class _ServerContentState extends State<_ServerContent> {
   /// Cached parsed layout — only re-parsed when the JSON string changes.
-  List<dynamic> _parsedLayout = [];
+  List<LayoutItem> _parsedLayout = const [];
   String _lastLayoutJson = '';
 
-  List<dynamic> _getParsedLayout() {
+  List<LayoutItem> _getParsedLayout() {
     if (widget.channelLayoutJson != _lastLayoutJson) {
       _lastLayoutJson = widget.channelLayoutJson;
-      try {
-        _parsedLayout = jsonDecode(widget.channelLayoutJson) as List<dynamic>;
-      } catch (_) {
-        _parsedLayout = [];
-      }
+      _parsedLayout = parseLayoutJson(widget.channelLayoutJson);
     }
     return _parsedLayout;
   }
 
+  /// The rows to draw, from the EFFECTIVE layout.
+  ///
+  /// Effective, not stored: [effectiveLayoutFrom] is the same normalisation
+  /// the context menus and the Channels settings editor already use, so all
+  /// three agree on what a category contains AND on what index a category has.
+  /// Drawing the stored layout instead cost two bugs:
+  ///
+  /// * Channels missing from the layout were appended AFTER the loop that
+  ///   tracks the current category, so one drawn under a trailing category was
+  ///   never treated as being in it. Collapsing the category left it on
+  ///   screen, which is what "the channels under it are not inside it" looked
+  ///   like from the outside.
+  /// * A stored layout holding a channel id that no longer exists shifted
+  ///   every index after it, because normalisation drops that reference — and
+  ///   the category menu edits by INDEX, so it would have edited its
+  ///   neighbour.
   List<Widget> _buildLayoutItems() {
     final w = widget;
     final widgets = <Widget>[];
-    final placedChannels = <String>{};
+    final layout = effectiveLayoutFrom(_getParsedLayout(), w.channels);
 
-    try {
-      final List<dynamic> layout = _getParsedLayout();
-      String? currentCategory;
-      for (var index = 0; index < layout.length; index++) {
-        final item = layout[index];
-        if (item['type'] == 'category') {
-          currentCategory = item['name'] as String;
+    String? currentCategory;
+    for (var index = 0; index < layout.length; index++) {
+      final item = layout[index];
+      switch (item) {
+        case CategoryItem(:final name):
+          currentCategory = name;
           widgets.add(_CategoryHeader(
             hollow: w.hollow,
-            name: currentCategory,
+            name: name,
             // Categories are addressed by POSITION in the layout, never by
             // name: two categories may legally share one.
             layoutIndex: index,
@@ -535,9 +547,8 @@ class _ServerContentState extends State<_ServerContent> {
             canManage: w.canManageChannels,
             onToggle: () => setState(() {}),
           ));
-        } else if (item['type'] == 'separator') {
+        case SeparatorItem():
           currentCategory = null;
-          // Add a small visual divider in the sidebar.
           widgets.add(Padding(
             padding: const EdgeInsets.symmetric(
               horizontal: HollowSpacing.lg,
@@ -545,64 +556,35 @@ class _ServerContentState extends State<_ServerContent> {
             ),
             child: Divider(height: 1, color: w.hollow.border),
           ));
-        } else if (item['type'] == 'channel') {
-          final channelId = item['channel_id'] as String;
+        case ChannelItem(:final channelId):
+          // Normalisation already dropped ids with no channel, so a miss here
+          // means the channel list changed under us this frame.
           final channel = w.channels[channelId];
-          if (channel != null) {
-            placedChannels.add(channelId);
-            final collapsed = currentCategory != null &&
-                (_categoryCollapsedState[currentCategory] ?? false);
-            final Widget tile;
-            if (channel.channelType == ChannelType.voice) {
-              tile = _VoiceChannelTile(
-                channel: channel,
-                serverId: w.serverId,
-                canManage: w.canManageChannels,
-                onChannelSelected: w.onChannelSelected,
-              );
-            } else {
-              tile = _ChannelTile(
-                channel: channel,
-                serverId: w.serverId,
-                canManage: w.canManageChannels,
-                isSelected: channel.channelId == w.selectedChannelId,
-                onTap: () => w.onChannelSelected(channel.channelId),
-              );
-            }
-            widgets.add(_AnimatedChannelTile(
-              key: ValueKey('ach-$channelId'),
-              visible: !collapsed,
-              child: tile,
-            ));
+          if (channel == null) break;
+          final collapsed = currentCategory != null &&
+              (_categoryCollapsedState[currentCategory] ?? false);
+          final Widget tile;
+          if (channel.channelType == ChannelType.voice) {
+            tile = _VoiceChannelTile(
+              channel: channel,
+              serverId: w.serverId,
+              canManage: w.canManageChannels,
+              onChannelSelected: w.onChannelSelected,
+            );
+          } else {
+            tile = _ChannelTile(
+              channel: channel,
+              serverId: w.serverId,
+              canManage: w.canManageChannels,
+              isSelected: channel.channelId == w.selectedChannelId,
+              onTap: () => w.onChannelSelected(channel.channelId),
+            );
           }
-        }
-      }
-    } catch (_) {}
-
-    // Always show channels not yet placed in the layout.
-    // This ensures newly created channels appear immediately.
-    final unplaced = w.channels.values
-        .where((ch) => !placedChannels.contains(ch.channelId))
-        .toList()
-      ..sort((a, b) => a.name.compareTo(b.name));
-    for (final channel in unplaced) {
-      if (channel.channelType == ChannelType.voice) {
-        widgets.add(_VoiceChannelTile(
-          key: ValueKey('uch-${channel.channelId}'),
-          channel: channel,
-          serverId: w.serverId,
-          canManage: w.canManageChannels,
-          onChannelSelected: w.onChannelSelected,
-        ));
-      } else {
-        widgets.add(_ChannelTile(
-          key: ValueKey('uch-${channel.channelId}'),
-          channel: channel,
-          serverId: w.serverId,
-          canManage: w.canManageChannels,
-          isSelected: channel.channelId == w.selectedChannelId,
-          onTap: () => w.onChannelSelected(channel.channelId),
-        ));
+          widgets.add(_AnimatedChannelTile(
+            key: ValueKey('ach-$channelId'),
+            visible: !collapsed,
+            child: tile,
+          ));
       }
     }
 
@@ -1310,8 +1292,9 @@ class _ChannelTile extends ConsumerWidget {
   /// picks which rows the context menu offers, while Rust re-checks every op.
   final bool canManage;
 
+  // No `key`: the keyed list element is the _AnimatedChannelTile that wraps
+  // this one (`ach-<channelId>`), and Flutter reparents on that.
   const _ChannelTile({
-    super.key,
     required this.channel,
     required this.serverId,
     required this.isSelected,
@@ -1454,8 +1437,8 @@ class _VoiceChannelTile extends ConsumerStatefulWidget {
   /// See [_ChannelTile.canManage].
   final bool canManage;
 
+  /// See [_ChannelTile]'s note on keys.
   const _VoiceChannelTile({
-    super.key,
     required this.channel,
     required this.serverId,
     required this.onChannelSelected,

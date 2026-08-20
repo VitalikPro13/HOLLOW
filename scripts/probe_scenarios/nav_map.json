@@ -1,0 +1,50 @@
+[
+  {"op": "log", "message": "One pass over the main screens, one map each. Feeds reports/UI_NAVIGATION_MAP.md."},
+
+  {"op": "dump", "name": "01-home"},
+  {"op": "shot", "name": "01-home"},
+
+  {"op": "open_server", "name": "${SERVER}"},
+  {"op": "dump", "name": "02-server"},
+  {"op": "shot", "name": "02-server"},
+
+  {"op": "log", "message": "channel row menu"},
+  {"op": "right_click", "target": "icon:hash", "soft": true},
+  {"op": "dump", "name": "03-channel-menu", "soft": true},
+  {"op": "shot", "name": "03-channel-menu", "soft": true},
+  {"op": "key", "value": "escape", "soft": true},
+
+  {"op": "log", "message": "sidebar background menu"},
+  {"op": "right_click_at",
+   "of": "type:_ServerContent", "align": "bottomLeft", "dx": 110, "dy": -40,
+   "soft": true},
+  {"op": "dump", "name": "04-sidebar-menu", "soft": true},
+  {"op": "shot", "name": "04-sidebar-menu", "soft": true},
+  {"op": "key", "value": "escape", "soft": true},
+
+  {"op": "log", "message": "server settings"},
+  {"op": "tap", "target": "semantics:Server settings", "soft": true},
+  {"op": "wait", "ms": 1500},
+  {"op": "dump", "name": "05-server-settings", "soft": true},
+  {"op": "shot", "name": "05-server-settings", "soft": true},
+
+  {"op": "log", "message": "the Channels editor, the other surface that owns the layout"},
+  {"op": "tap", "target": "text:Channels", "soft": true},
+  {"op": "wait", "ms": 1500},
+  {"op": "dump", "name": "06-channels-tab", "soft": true},
+  {"op": "shot", "name": "06-channels-tab", "soft": true},
+  {"op": "key", "value": "escape", "soft": true},
+  {"op": "wait", "ms": 800},
+
+  {"op": "log", "message": "member panel: a member card, which phase 3 attaches to"},
+  {"op": "tap", "target": "text:Members", "soft": true},
+  {"op": "wait", "ms": 800},
+  {"op": "dump", "name": "07-members", "soft": true},
+  {"op": "shot", "name": "07-members", "soft": true},
+
+  {"op": "log", "message": "back home"},
+  {"op": "tap", "target": "semantics:Home", "soft": true},
+  {"op": "wait", "ms": 1200},
+  {"op": "dump", "name": "08-home-dock", "soft": true},
+  {"op": "shot", "name": "08-home-dock", "soft": true}
+]

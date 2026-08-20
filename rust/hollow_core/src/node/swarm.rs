@@ -1240,11 +1240,11 @@ async fn run_event_loop(
                         ).await;
                     }
 
-                    NodeCommand::CreateChannel { server_id, name, category, channel_type } => {
+                    NodeCommand::CreateChannel { server_id, channel_id, name, category, channel_type } => {
                         if sync_handler::handle_create_channel(
                             &mut server_states, &mut mls, &event_tx, &ws_cmd_tx,
                             &ws_room_peers, &mut gossip_overlays, &bundle_keypair, &local_peer_str,
-                            server_id, name, category, channel_type,
+                            server_id, channel_id, name, category, channel_type,
                             &crypto_store, &crdt_store,
                         ).await { continue; }
                     }
