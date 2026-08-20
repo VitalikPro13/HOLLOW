@@ -38,16 +38,22 @@ class _ChannelsTabState extends ConsumerState<ChannelsTab> {
   bool _loaded = false;
 
   /// Compare current layout against saved to determine if changes exist.
-  bool get _dirty {
-    if (_layout.length != _savedLayout.length) return true;
-    for (int i = 0; i < _layout.length; i++) {
-      final a = _layout[i];
-      final b = _savedLayout[i];
-      if (a.runtimeType != b.runtimeType) return true;
-      if (a is CategoryItem && b is CategoryItem && a.name != b.name) return true;
-      if (a is ChannelItem && b is ChannelItem && a.channelId != b.channelId) return true;
+  bool get _dirty => !_sameLayout(_layout, _savedLayout);
+
+  static bool _sameLayout(List<LayoutItem> a, List<LayoutItem> b) {
+    if (a.length != b.length) return false;
+    for (int i = 0; i < a.length; i++) {
+      final x = a[i];
+      final y = b[i];
+      if (x.runtimeType != y.runtimeType) return false;
+      if (x is CategoryItem && y is CategoryItem && x.name != y.name) {
+        return false;
+      }
+      if (x is ChannelItem && y is ChannelItem && x.channelId != y.channelId) {
+        return false;
+      }
     }
-    return false;
+    return true;
   }
 
   @override
@@ -64,48 +70,54 @@ class _ChannelsTabState extends ConsumerState<ChannelsTab> {
         // Compute effective layout (includes newly created channels)
         // and use it as both current and saved baseline.
         final channels = ref.read(channelListProvider);
-        final effective = _effectiveLayoutFrom(layout, channels);
+        final effective = effectiveLayoutFrom(layout, channels);
         setState(() { _layout = effective; _savedLayout = List.from(effective); _loaded = true; });
       }
     } catch (_) {
       if (mounted) {
         final channels = ref.read(channelListProvider);
-        final effective = _effectiveLayoutFrom([], channels);
+        final effective = effectiveLayoutFrom([], channels);
         setState(() { _layout = effective; _savedLayout = List.from(effective); _loaded = true; });
       }
     }
   }
 
-  /// Like _effectiveLayout but takes an explicit base layout.
-  List<LayoutItem> _effectiveLayoutFrom(List<LayoutItem> base, Map<String, ChannelInfo> channels) {
-    final layout = List<LayoutItem>.from(base);
-    final layoutChannelIds = layout
-        .whereType<ChannelItem>()
-        .map((c) => c.channelId)
-        .toSet();
-    final missing = channels.keys
-        .where((id) => !layoutChannelIds.contains(id))
-        .toList()
-      ..sort((a, b) =>
-          (channels[a]?.name ?? '').compareTo(channels[b]?.name ?? ''));
-    for (final id in missing) {
-      layout.add(ChannelItem(id));
-    }
-    layout.removeWhere((item) =>
-        item is ChannelItem && !channels.containsKey(item.channelId));
-    return layout;
+  /// Build the effective layout: current layout + any channels not yet in it.
+  /// Shared with the sidebar's context menus (`effectiveLayoutFrom`) so both
+  /// surfaces place unplaced channels identically.
+  List<LayoutItem> _effectiveLayout(Map<String, ChannelInfo> channels) {
+    return effectiveLayoutFrom(_layout, channels);
   }
 
-  /// Build the effective layout: current layout + any channels not yet in it.
-  List<LayoutItem> _effectiveLayout(Map<String, ChannelInfo> channels) {
-    return _effectiveLayoutFrom(_layout, channels);
+  /// The tab's only layout writer.
+  ///
+  /// Routes through [ChannelLayoutNotifier.mutate] whenever this tab is
+  /// editing the SELECTED server, so the write is normalised, published to the
+  /// sidebar immediately, and shielded from the DB reload a server event would
+  /// otherwise land on top of it. Settings opened for a non-selected server
+  /// (mobile route, chats-tab long-press) has no provider to publish to and
+  /// writes directly.
+  void _writeLayout(List<LayoutItem> layout) {
+    if (ref.read(selectedServerProvider) == widget.serverId) {
+      ref.read(channelLayoutProvider.notifier).mutate(
+            widget.serverId,
+            ref.read(channelListProvider),
+            (_) => List<LayoutItem>.from(layout),
+          );
+      return;
+    }
+    try {
+      crdt_api
+          .updateChannelLayout(
+            serverId: widget.serverId,
+            layoutJson: layoutToJson(layout),
+          )
+          .catchError((_) {});
+    } catch (_) {}
   }
 
   void _save() {
-    crdt_api.updateChannelLayout(
-      serverId: widget.serverId,
-      layoutJson: layoutToJson(_layout),
-    );
+    _writeLayout(_layout);
 
     setState(() {
            _savedLayout = List.from(_layout);
@@ -373,93 +385,15 @@ class _ChannelsTabState extends ConsumerState<ChannelsTab> {
         if (info != null && !info.isPublic) targetIds.add(item.channelId);
       }
     }
-    if (targetIds.isEmpty) {
-      HollowToast.show(context, 'No channels in this category');
-      return;
-    }
-
-    final result = await showCategoryBulkAccessDialog(
-      context,
+    // Dialog + per-channel writes are shared with the sidebar's category
+    // right-click menu (issue #61).
+    await runCategoryBulkAccess(
+      context: context,
+      ref: ref,
       serverId: widget.serverId,
       categoryName: categoryName,
-      channelCount: targetIds.length,
+      channelIds: targetIds,
     );
-    if (result == null || !mounted) return;
-
-    final notifier = ref.read(channelListProvider.notifier);
-    final failed = <String>[];
-    for (final id in targetIds) {
-      final info = ref.read(channelListProvider)[id];
-      if (info == null) continue;
-      final prev = info;
-      try {
-        if (result.changeVisibility) {
-          if (result.visLabels.isNotEmpty) {
-            notifier.updateChannel(
-                id,
-                (ch) => ch.copyWith(
-                    visibilityLabels: result.visLabels,
-                    visibility: 'admin'));
-            await crdt_api.setChannelVisibilityLabels(
-              serverId: widget.serverId,
-              channelId: id,
-              labels: result.visLabels,
-            );
-          } else {
-            notifier.updateChannel(
-                id,
-                (ch) => ch.copyWith(
-                    visibility: result.visMode,
-                    visibilityLabels: const []));
-            await crdt_api.setChannelVisibility(
-              serverId: widget.serverId,
-              channelId: id,
-              visibility: result.visMode,
-            );
-          }
-        }
-        if (result.changePosting &&
-            info.channelType != ChannelType.voice) {
-          if (result.postLabels.isNotEmpty) {
-            notifier.updateChannel(
-                id,
-                (ch) => ch.copyWith(
-                    postingLabels: result.postLabels, posting: 'admin'));
-            await crdt_api.setChannelPostingLabels(
-              serverId: widget.serverId,
-              channelId: id,
-              labels: result.postLabels,
-            );
-          } else {
-            notifier.updateChannel(
-                id,
-                (ch) => ch.copyWith(
-                    posting: result.postMode, postingLabels: const []));
-            await crdt_api.setChannelPosting(
-              serverId: widget.serverId,
-              channelId: id,
-              posting: result.postMode,
-            );
-          }
-        }
-      } catch (_) {
-        notifier.updateChannel(id, (_) => prev);
-        failed.add(prev.name);
-      }
-    }
-    if (!mounted) return;
-    if (failed.isEmpty) {
-      HollowToast.show(
-          context, 'Access applied to ${targetIds.length} channels',
-          type: HollowToastType.success);
-    } else {
-      HollowToast.show(
-          context,
-          'Applied to ${targetIds.length - failed.length} of '
-          '${targetIds.length} channels. Failed: '
-          '${failed.map((n) => '#$n').join(', ')}',
-          type: HollowToastType.error);
-    }
   }
 
   /// Picking a plain tier on a label-gated channel widens access — confirm
@@ -611,22 +545,47 @@ class _ChannelsTabState extends ConsumerState<ChannelsTab> {
       return const Center(child: CircularProgressIndicator());
     }
 
+    // Adopt layout edits made OUTSIDE this editor — the sidebar's category
+    // right-click menu writes through `channelLayoutProvider`, and without
+    // this the tab kept showing its stale snapshot until you switched tabs.
+    // Only while the user has no unsaved edits of their own: their in-progress
+    // drag always outranks an incoming change.
+    if (!_dirty && ref.watch(selectedServerProvider) == widget.serverId) {
+      final incoming =
+          effectiveLayoutFrom(parseLayoutJson(ref.watch(channelLayoutProvider)),
+              channels);
+      if (!_sameLayout(incoming, _savedLayout)) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted || _dirty) return;
+          setState(() {
+            _layout = incoming;
+            _savedLayout = List.from(incoming);
+          });
+        });
+      }
+    }
+
     final effective = _effectiveLayout(channels);
-    // Sync local state if effective differs (new channels added/removed externally).
-    // Auto-save so sidebar updates immediately without requiring manual Save.
-    // Guard: skip when channels map is empty (server deselected / switching away).
+    // Sync local state if effective differs (new channels added/removed
+    // externally). Auto-save so the sidebar updates without a manual Save.
+    // Guard: skip when channels map is empty (server deselected / switching).
     if (channels.isNotEmpty && effective.length != _layout.length) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) {
-          setState(() {
-            _layout = effective;
-            _savedLayout = List.from(effective);
-          });
-          crdt_api.updateChannelLayout(
-            serverId: widget.serverId,
-            layoutJson: layoutToJson(effective),
-          );
-        }
+        if (!mounted) return;
+        // RECOMPUTE rather than reusing the value captured during build. The
+        // adopt-external-changes callback above may have replaced `_layout`
+        // since, and writing the pre-adoption value here would undo the very
+        // edit we just took in — which is how a category created in the
+        // sidebar came back reverted.
+        final channelsNow = ref.read(channelListProvider);
+        if (channelsNow.isEmpty) return;
+        final fresh = _effectiveLayout(channelsNow);
+        if (_sameLayout(fresh, _layout)) return;
+        setState(() {
+          _layout = fresh;
+          _savedLayout = List.from(fresh);
+        });
+        _writeLayout(fresh);
       });
     }
 

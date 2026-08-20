@@ -317,7 +317,21 @@ canManageChannels: selectedServer != null &&
     (ref.watch(myPermissionsProvider(selectedServer.serverId)).whenOrNull(
         data: (perms) => (perms & Permission.manageChannels) != 0) ?? false)
 ```
-The button only appears when the fallback "TEXT CHANNELS" header is shown (no categories in layout). When categories are present, there is no create channel button in the sidebar -- channel creation is done through server settings.
+The button only appears when the fallback "TEXT CHANNELS" header is shown (no categories in layout). When categories are present, there is no create channel button in the sidebar -- but since issue #61 the right-click menus cover that case (see below).
+
+## Context Menus (issue #61)
+
+Built in `lib/src/ui/shell/channel_context_menus.dart` on the shared `showHollowMenu` primitive. Before this, everything except "create channel" lived in Server Settings > Channels on desktop, while mobile could already long-press a channel and rename, re-gate or delete it.
+
+**Channel tile** (`_ChannelTile` and `_VoiceChannelTile`, both gained a `canManage` prop and an `onSecondaryTapUp` wrapper): Mark as read, Mute/Unmute, Rename, Visibility, Who can post, Temporary access, Delete. Visibility and Who-can-post are drill-in submenus offering the three tiers plus the access-label gate; picking a plain tier on a label-gated channel still confirms, because it widens access. Voice tiles omit Mark as read, Mute and Who can post -- a channel with no messages has no read state to clear and no posting gate.
+
+**Category header** (`_CategoryHeader`, which gained `layoutIndex` / `serverId` / `layoutJson` / `canManage`): Collapse/Expand, Create channel here, Rename, Set access for all channels, Delete. Categories are addressed by **layout POSITION, never by name** -- duplicate names are legal. "Create channel here" works because `showCreateChannelDialog`'s `onCreated` now hands back the new channel id, so it can be placed inside the category instead of landing unsorted at the bottom.
+
+**Sidebar background** (a `Consumer` + `GestureDetector` wrapping the list): Mark server as read, Create channel, Create category, Invite people, Server settings. `_ServerContent` gained `onOpenSettings` for it.
+
+Management rows appear only with `Permission.manageChannels`; Rust re-checks every op regardless. Layout edits go through `ChannelLayoutNotifier.mutate` -- never a direct `updateChannelLayout` (see `providers_server.md`). "Set access for all channels" shares `runCategoryBulkAccess` with the settings editor, so the two cannot disagree about what a category contains.
+
+Deleting a category removes only the header; its channels survive and become uncategorised.
 
 ## DockMode Behavior
 

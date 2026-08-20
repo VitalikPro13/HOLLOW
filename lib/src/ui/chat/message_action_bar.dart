@@ -6,7 +6,9 @@ import 'package:flutter/services.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
+import 'package:hollow/src/ui/components/hollow_menu.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/chat/emoji_picker.dart';
 import 'package:hollow/src/ui/chat/emote_image.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -91,6 +93,10 @@ class MessageHoverWrapper extends StatefulWidget {
   final VoidCallback? onCopyImage;
   final VoidCallback? onInfo;
 
+  /// Whether this message is currently pinned. Only affects wording: [onPin]
+  /// is a toggle either way. Surfaces without pins (DMs) leave it false.
+  final bool isPinned;
+
   const MessageHoverWrapper({
     super.key,
     required this.child,
@@ -109,6 +115,7 @@ class MessageHoverWrapper extends StatefulWidget {
     this.onCopy,
     this.onCopyImage,
     this.onInfo,
+    this.isPinned = false,
   });
 
   @override
@@ -389,6 +396,139 @@ class _MessageHoverWrapperState extends State<MessageHoverWrapper> {
     _scheduleDismiss();
   }
 
+  /// Opens the right-click menu at the pointer.
+  ///
+  /// Every row is built from the callbacks this wrapper already holds, so all
+  /// seven surfaces that use it (DM chat, channel chat, guest chat, the four
+  /// archive viewers) get the menu without touching their call sites, and a
+  /// row can never offer an action the surface did not wire up.
+  void _openContextMenu(Offset globalPosition) {
+    if (widget.isEditing) return;
+    // Window coordinates are not overlay coordinates under interface zoom.
+    final anchor = overlayPositionOf(context, globalPosition);
+    if (_buildMenuEntries(anchor).isEmpty) return;
+    _dismissNow();
+    showHollowMenu(
+      context: context,
+      anchor: anchor,
+      builder: (_, _) => _buildMenuEntries(anchor),
+    );
+  }
+
+  /// [anchor] is the pointer position in overlay space. Rows that open a
+  /// second popup anchor to IT, not to this widget's context: the wrapper's
+  /// render box is the whole message row, whose origin sits at the far left
+  /// of the chat pane, so anchoring there threw the emoji picker across the
+  /// window instead of opening it where the menu was.
+  List<HollowMenuEntry> _buildMenuEntries(Offset anchor) {
+    // Grouped, then joined with dividers, so an absent group never leaves a
+    // doubled or dangling separator behind.
+    final groups = <List<HollowMenuEntry>>[];
+
+    final onReaction = widget.onReaction;
+    if (onReaction != null) {
+      groups.add([
+        HollowMenuCustom(_QuickReactionStrip(onSelect: onReaction)),
+        HollowMenuItem(
+          icon: LucideIcons.smilePlus,
+          label: 'Add reaction',
+          onTap: () => showEmojiPicker(
+            context: context,
+            anchorPosition: anchor,
+            serverId: EmoteScope.of(context)?.serverId,
+            onSelect: onReaction,
+          ),
+        ),
+      ]);
+    }
+
+    if (widget.onReply != null) {
+      groups.add([
+        HollowMenuItem(
+          icon: LucideIcons.reply,
+          label: 'Reply',
+          onTap: widget.onReply,
+        ),
+      ]);
+    }
+
+    final edit = <HollowMenuEntry>[
+      if (widget.onCopy != null)
+        HollowMenuItem(
+          icon: LucideIcons.copy,
+          label: 'Copy text',
+          onTap: widget.onCopy,
+        ),
+      if (widget.onCopyImage != null)
+        HollowMenuItem(
+          icon: LucideIcons.image,
+          label: 'Copy image',
+          onTap: widget.onCopyImage,
+        ),
+      if (widget.onDownload != null)
+        HollowMenuItem(
+          icon: LucideIcons.download,
+          label: 'Download',
+          onTap: widget.onDownload,
+        ),
+      if (widget.onPin != null)
+        HollowMenuItem(
+          icon: widget.isPinned ? LucideIcons.pinOff : LucideIcons.pin,
+          label: widget.isPinned ? 'Unpin message' : 'Pin message',
+          onTap: widget.onPin,
+        ),
+      if (widget.onEditStart != null)
+        HollowMenuItem(
+          icon: LucideIcons.pencil,
+          label: 'Edit message',
+          onTap: widget.onEditStart,
+        ),
+    ];
+    if (edit.isNotEmpty) groups.add(edit);
+
+    if (widget.onDelete != null) {
+      groups.add([
+        HollowMenuItem(
+          icon: LucideIcons.trash2,
+          label: 'Delete message',
+          isDanger: true,
+          onTap: widget.onDelete,
+        ),
+      ]);
+    }
+
+    final messageId = widget.messageId;
+    final meta = <HollowMenuEntry>[
+      if (widget.onInfo != null)
+        HollowMenuItem(
+          icon: LucideIcons.shieldCheck,
+          label: 'Message proof',
+          onTap: widget.onInfo,
+        ),
+      if (messageId != null)
+        HollowMenuItem(
+          icon: LucideIcons.fingerprint,
+          label: 'Copy message ID',
+          onTap: () => _copyMessageId(messageId),
+        ),
+    ];
+    if (meta.isNotEmpty) groups.add(meta);
+
+    final entries = <HollowMenuEntry>[];
+    for (final group in groups) {
+      if (entries.isNotEmpty) entries.add(const HollowMenuDivider());
+      entries.addAll(group);
+    }
+    return entries;
+  }
+
+  Future<void> _copyMessageId(String messageId) async {
+    await Clipboard.setData(ClipboardData(text: messageId));
+    if (!mounted) return;
+    HollowToast.show(context, 'Message ID copied',
+        type: HollowToastType.success);
+  }
+
   @override
   Widget build(BuildContext context) {
     if (widget.isEditing) {
@@ -396,12 +536,9 @@ class _MessageHoverWrapperState extends State<MessageHoverWrapper> {
     }
 
     return GestureDetector(
-      onSecondaryTap: widget.onInfo != null
-          ? () {
-              _dismissNow();
-              widget.onInfo?.call();
-            }
-          : null,
+      // Right-click opens the full message menu (issue #61). Message Proof
+      // used to BE the right-click; it is now one row inside the menu.
+      onSecondaryTapUp: (details) => _openContextMenu(details.globalPosition),
       child: MouseRegion(
         onEnter: (_) => _onMessageEnter(),
         onExit: (_) => _onMessageExit(),
@@ -609,6 +746,48 @@ class _ActionBarContent extends StatelessWidget {
             ),
         ],
       ),
+    );
+  }
+}
+
+/// The one-click reaction row at the top of the message context menu.
+///
+/// Complements rather than duplicates the hover bar's smiley: that opens the
+/// full picker, this is a single click for the common six. Same
+/// [kQuickReactionEmojis] the mobile action sheet uses, so the two surfaces
+/// never drift apart.
+class _QuickReactionStrip extends StatelessWidget {
+  final void Function(String emoji) onSelect;
+
+  const _QuickReactionStrip({required this.onSelect});
+
+  static const _count = 6;
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+      children: [
+        for (var i = 0; i < _count; i++)
+          HollowPressable(
+            onTap: () {
+              HollowMenuScope.dismiss(context);
+              onSelect(kQuickReactionEmojis[i]);
+            },
+            semanticLabel: 'React ${kQuickReactionEmojis[i]}',
+            borderRadius: BorderRadius.circular(hollow.radiusSm),
+            child: Container(
+              width: 32,
+              height: 32,
+              alignment: Alignment.center,
+              child: Text(
+                kQuickReactionEmojis[i],
+                style: const TextStyle(fontSize: 17),
+              ),
+            ),
+          ),
+      ],
     );
   }
 }

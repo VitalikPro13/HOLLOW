@@ -181,7 +181,8 @@ class _MobileInChatBannerState extends ConsumerState<MobileInChatBanner>
           final layout = await ChannelLayoutNotifier.fetchLayout(serverId);
           if (!mounted) return;
           ref.read(channelListProvider.notifier).setChannels(channels);
-          ref.read(channelLayoutProvider.notifier).setLayout(layout);
+          ref.read(channelLayoutProvider.notifier)
+              .setLayout(layout, serverId: serverId);
           ref.read(selectedChannelProvider.notifier).state = channelId;
           ref.read(selectedServerProvider.notifier).state = serverId;
           ref.read(selectedPeerProvider.notifier).state = null;

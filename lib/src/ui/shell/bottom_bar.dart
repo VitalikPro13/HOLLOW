@@ -531,7 +531,7 @@ class _BottomBarState extends ConsumerState<BottomBar> {
     ref.read(selectedPeerProvider.notifier).state = null;
     ref.read(serverSettingsOpenProvider.notifier).state = false;
     ref.read(channelListProvider.notifier).setChannels(channels);
-    ref.read(channelLayoutProvider.notifier).setLayout(layout);
+    ref.read(channelLayoutProvider.notifier).setLayout(layout, serverId: serverId);
     ref.read(selectedChannelProvider.notifier).state = channelToSelect;
     ref.read(selectedServerProvider.notifier).state = serverId;
     if (channelToSelect != null) {

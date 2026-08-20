@@ -11,10 +11,14 @@ import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Shows a dialog to create a new channel in a server.
+///
+/// [onCreated] receives the NEW channel's id, so a caller can place it in the
+/// layout (the category right-click menu drops it into that category rather
+/// than letting it land unsorted at the bottom).
 void showCreateChannelDialog(
   BuildContext context,
   String serverId, {
-  VoidCallback? onCreated,
+  void Function(String channelId)? onCreated,
 }) {
   final nameController = TextEditingController();
   var isVoice = false;
@@ -28,13 +32,13 @@ void showCreateChannelDialog(
             final name = nameController.text.trim();
             if (name.isEmpty) return;
             Navigator.of(dialogContext).pop();
-            await crdt_api.createChannel(
+            final channelId = await crdt_api.createChannel(
               serverId: serverId,
               name: name,
               category: null,
               channelType: isVoice ? 'voice' : 'text',
             );
-            onCreated?.call();
+            onCreated?.call(channelId);
           }
 
           final hollow = HollowTheme.of(dialogContext);

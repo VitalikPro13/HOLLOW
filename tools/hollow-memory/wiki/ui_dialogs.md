@@ -656,7 +656,9 @@ Uses `HollowPressable` wrapper. Shows check icon when selected.
 ## MessageProofDialog -- Cryptographic Message Proof Verification
 
 **File:** `lib/src/ui/dialogs/message_proof_dialog.dart` (582 lines)
-**Trigger:** Right-click context menu on a message -> "Message Proof".
+**Trigger:** the message context menu (right-click) -> "Message proof". Since issue #61 right-click opens the
+FULL message menu rather than jumping straight here, so proof is one row among many; the hover toolbar's
+shieldCheck button is unchanged.
 **Entry point:** `showMessageProofDialog(BuildContext context, MessageProofData proof)`
 
 ### Data class: `MessageProofData`

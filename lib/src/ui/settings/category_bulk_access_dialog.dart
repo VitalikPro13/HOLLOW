@@ -1,10 +1,15 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/models/channel_info.dart';
+import 'package:hollow/src/core/providers/channel_provider.dart';
+import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
+import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/hollow_toggle.dart';
 import 'package:hollow/src/ui/settings/access_label_picker.dart';
 
@@ -26,6 +31,112 @@ class CategoryBulkAccess {
     required this.postMode,
     required this.postLabels,
   });
+}
+
+/// Shows the bulk-access dialog for [channelIds] and applies the result to
+/// every one of them.
+///
+/// Shared by the Channels settings editor and the sidebar's category
+/// right-click menu (issue #61) so the two cannot drift on what "apply to the
+/// category" means. The caller resolves the channel set, because each surface
+/// reads the layout from a different place; everything after that is here.
+///
+/// Each channel is updated optimistically and rolled back individually if its
+/// write throws, so one failure never leaves the list showing a change that
+/// did not happen.
+Future<void> runCategoryBulkAccess({
+  required BuildContext context,
+  required WidgetRef ref,
+  required String serverId,
+  required String categoryName,
+  required List<String> channelIds,
+}) async {
+  if (channelIds.isEmpty) {
+    HollowToast.show(context, 'No channels in this category');
+    return;
+  }
+
+  final result = await showCategoryBulkAccessDialog(
+    context,
+    serverId: serverId,
+    categoryName: categoryName,
+    channelCount: channelIds.length,
+  );
+  if (result == null || !context.mounted) return;
+
+  final notifier = ref.read(channelListProvider.notifier);
+  final failed = <String>[];
+
+  for (final id in channelIds) {
+    final info = ref.read(channelListProvider)[id];
+    if (info == null) continue;
+    final prev = info;
+    try {
+      if (result.changeVisibility) {
+        if (result.visLabels.isNotEmpty) {
+          notifier.updateChannel(
+              id,
+              (ch) => ch.copyWith(
+                  visibilityLabels: result.visLabels, visibility: 'admin'));
+          await crdt_api.setChannelVisibilityLabels(
+            serverId: serverId,
+            channelId: id,
+            labels: result.visLabels,
+          );
+        } else {
+          notifier.updateChannel(
+              id,
+              (ch) => ch.copyWith(
+                  visibility: result.visMode, visibilityLabels: const []));
+          await crdt_api.setChannelVisibility(
+            serverId: serverId,
+            channelId: id,
+            visibility: result.visMode,
+          );
+        }
+      }
+      // Voice channels have no posting gate to set.
+      if (result.changePosting && info.channelType != ChannelType.voice) {
+        if (result.postLabels.isNotEmpty) {
+          notifier.updateChannel(
+              id,
+              (ch) => ch.copyWith(
+                  postingLabels: result.postLabels, posting: 'admin'));
+          await crdt_api.setChannelPostingLabels(
+            serverId: serverId,
+            channelId: id,
+            labels: result.postLabels,
+          );
+        } else {
+          notifier.updateChannel(
+              id,
+              (ch) => ch.copyWith(
+                  posting: result.postMode, postingLabels: const []));
+          await crdt_api.setChannelPosting(
+            serverId: serverId,
+            channelId: id,
+            posting: result.postMode,
+          );
+        }
+      }
+    } catch (_) {
+      notifier.updateChannel(id, (_) => prev);
+      failed.add(prev.name);
+    }
+  }
+
+  if (!context.mounted) return;
+  if (failed.isEmpty) {
+    HollowToast.show(context, 'Access applied to ${channelIds.length} channels',
+        type: HollowToastType.success);
+  } else {
+    HollowToast.show(
+        context,
+        'Applied to ${channelIds.length - failed.length} of '
+        '${channelIds.length} channels. Failed: '
+        "${failed.map((n) => '#$n').join(', ')}",
+        type: HollowToastType.error);
+  }
 }
 
 /// Pick access settings to stamp onto every channel of a category. Pure

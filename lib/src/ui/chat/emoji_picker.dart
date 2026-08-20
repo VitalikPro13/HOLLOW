@@ -17,6 +17,7 @@ import '../../theme/hollow_typography.dart';
 import '../components/hollow_button.dart';
 import '../components/hollow_dialog.dart';
 import '../components/hollow_pressable.dart';
+import '../components/popup_animator.dart';
 import '../components/hollow_text_field.dart';
 import '../components/hollow_toast.dart';
 import '../components/hollow_tooltip.dart';
@@ -49,6 +50,7 @@ void showEmojiPicker({
 }) {
   final overlay = Overlay.of(context);
   late OverlayEntry entry;
+  final anim = PopupAnimationController();
 
   // Removal guard: a rapid double-tap on a cell fires onSelect twice before
   // the removal frame builds out (the overlay widget stays mounted until the
@@ -57,13 +59,20 @@ void showEmojiPicker({
   void teardown() {
     if (removed) return;
     removed = true;
-    entry.remove();
-    entry.dispose();
+    // Play the exit, THEN drop the entry.
+    anim.dismiss(() {
+      entry.remove();
+      entry.dispose();
+    });
   }
 
   entry = OverlayEntry(
-    builder: (ctx) => _EmojiPickerOverlay(
+    // wrapEntry: the barrier must stop taking clicks the instant the
+    // exit starts, or a dismiss immediately followed by another click
+    // eats the second one.
+    builder: (ctx) => anim.wrapEntry(_EmojiPickerOverlay(
       anchorPosition: anchorPosition,
+      anim: anim,
       serverId: serverId,
       onSelect: (emoji) {
         final first = !removed;
@@ -71,7 +80,7 @@ void showEmojiPicker({
         if (first) onSelect(emoji);
       },
       onDismiss: teardown,
-    ),
+    )),
   );
 
   overlay.insert(entry);
@@ -245,12 +254,14 @@ enum _PickerTab { emoji, server, mine, ffz }
 
 class _EmojiPickerOverlay extends StatelessWidget {
   final Offset anchorPosition;
+  final PopupAnimationController anim;
   final String? serverId;
   final void Function(String emoji) onSelect;
   final VoidCallback onDismiss;
 
   const _EmojiPickerOverlay({
     required this.anchorPosition,
+    required this.anim,
     required this.serverId,
     required this.onSelect,
     required this.onDismiss,
@@ -272,7 +283,13 @@ class _EmojiPickerOverlay extends StatelessWidget {
     if (left + pickerWidth > screenSize.width - 8) {
       left = screenSize.width - pickerWidth - 8;
     }
+    // Normally the picker opens ABOVE the anchor, so it grows out of its
+    // bottom edge. When there is no room above it flips below, and the growth
+    // origin has to flip with it or the animation reads as sliding away from
+    // the control that opened it.
+    var flippedBelow = false;
     if (top < 8) {
+      flippedBelow = true;
       top = (anchorPosition.dy + 30)
           .clamp(8.0, (screenSize.height - pickerHeight - 8).clamp(8.0, double.infinity));
     }
@@ -288,28 +305,33 @@ class _EmojiPickerOverlay extends StatelessWidget {
         Positioned(
           left: left,
           top: top,
-          child: Material(
-            color: Colors.transparent,
-            child: Container(
-              width: pickerWidth,
-              height: pickerHeight,
-              decoration: BoxDecoration(
-                color: hollow.surface,
-                borderRadius: BorderRadius.circular(hollow.radiusMd),
-                border: Border.all(color: hollow.border),
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.black.withValues(alpha: 0.25),
-                    blurRadius: 12,
-                    offset: const Offset(0, 4),
+          child: PopupAnimator(
+            controller: anim,
+            alignment:
+                flippedBelow ? Alignment.topRight : Alignment.bottomRight,
+            child: Material(
+              color: Colors.transparent,
+              child: Container(
+                width: pickerWidth,
+                height: pickerHeight,
+                decoration: BoxDecoration(
+                  color: hollow.surface,
+                  borderRadius: BorderRadius.circular(hollow.radiusMd),
+                  border: Border.all(color: hollow.border),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withValues(alpha: 0.25),
+                      blurRadius: 12,
+                      offset: const Offset(0, 4),
+                    ),
+                  ],
+                ),
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(hollow.radiusMd),
+                  child: EmojiPickerBody(
+                    serverId: serverId,
+                    onSelect: onSelect,
                   ),
-                ],
-              ),
-              child: ClipRRect(
-                borderRadius: BorderRadius.circular(hollow.radiusMd),
-                child: EmojiPickerBody(
-                  serverId: serverId,
-                  onSelect: onSelect,
                 ),
               ),
             ),

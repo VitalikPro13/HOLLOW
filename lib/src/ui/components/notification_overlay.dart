@@ -192,7 +192,8 @@ class _NotificationCardWidgetState
       ref.read(selectedPeerProvider.notifier).state = null;
       ref.read(serverSettingsOpenProvider.notifier).state = false;
       ref.read(channelListProvider.notifier).setChannels(channels);
-      ref.read(channelLayoutProvider.notifier).setLayout(layout);
+      ref.read(channelLayoutProvider.notifier)
+          .setLayout(layout, serverId: card.serverId);
       ref.read(selectedChannelProvider.notifier).state = card.channelId;
       ref.read(selectedServerProvider.notifier).state = card.serverId;
 

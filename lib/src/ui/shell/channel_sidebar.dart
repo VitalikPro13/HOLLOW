@@ -19,6 +19,7 @@ import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/animations/reveal_widgets.dart';
 import 'package:hollow/src/ui/animations/selection_shimmer.dart';
 import 'package:hollow/src/ui/dialogs/storage_dashboard_dialog.dart';
+import 'package:hollow/src/ui/shell/channel_context_menus.dart';
 import 'package:hollow/src/ui/animations/startup_reveal.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/friends_provider.dart';
@@ -232,6 +233,7 @@ class ChannelSidebar extends StatelessWidget {
                           selectedChannelId: selectedChannelId,
                           onChannelSelected: onChannelSelected,
                           onCreateChannel: onCreateChannel,
+                          onOpenSettings: onOpenSettings,
                           canManageChannels: canManageChannels,
                           channelLayoutJson: channelLayoutJson,
                         )
@@ -472,6 +474,7 @@ class _ServerContent extends StatefulWidget {
   final String? selectedChannelId;
   final ValueChanged<String> onChannelSelected;
   final VoidCallback onCreateChannel;
+  final VoidCallback onOpenSettings;
   final bool canManageChannels;
   final String channelLayoutJson;
 
@@ -483,6 +486,7 @@ class _ServerContent extends StatefulWidget {
     required this.selectedChannelId,
     required this.onChannelSelected,
     required this.onCreateChannel,
+    required this.onOpenSettings,
     this.canManageChannels = false,
     this.channelLayoutJson = '[]',
   });
@@ -516,12 +520,19 @@ class _ServerContentState extends State<_ServerContent> {
     try {
       final List<dynamic> layout = _getParsedLayout();
       String? currentCategory;
-      for (final item in layout) {
+      for (var index = 0; index < layout.length; index++) {
+        final item = layout[index];
         if (item['type'] == 'category') {
           currentCategory = item['name'] as String;
           widgets.add(_CategoryHeader(
             hollow: w.hollow,
             name: currentCategory,
+            // Categories are addressed by POSITION in the layout, never by
+            // name: two categories may legally share one.
+            layoutIndex: index,
+            serverId: w.serverId,
+            layoutJson: w.channelLayoutJson,
+            canManage: w.canManageChannels,
             onToggle: () => setState(() {}),
           ));
         } else if (item['type'] == 'separator') {
@@ -546,12 +557,14 @@ class _ServerContentState extends State<_ServerContent> {
               tile = _VoiceChannelTile(
                 channel: channel,
                 serverId: w.serverId,
+                canManage: w.canManageChannels,
                 onChannelSelected: w.onChannelSelected,
               );
             } else {
               tile = _ChannelTile(
                 channel: channel,
                 serverId: w.serverId,
+                canManage: w.canManageChannels,
                 isSelected: channel.channelId == w.selectedChannelId,
                 onTap: () => w.onChannelSelected(channel.channelId),
               );
@@ -578,6 +591,7 @@ class _ServerContentState extends State<_ServerContent> {
           key: ValueKey('uch-${channel.channelId}'),
           channel: channel,
           serverId: w.serverId,
+          canManage: w.canManageChannels,
           onChannelSelected: w.onChannelSelected,
         ));
       } else {
@@ -585,6 +599,7 @@ class _ServerContentState extends State<_ServerContent> {
           key: ValueKey('uch-${channel.channelId}'),
           channel: channel,
           serverId: w.serverId,
+          canManage: w.canManageChannels,
           isSelected: channel.channelId == w.selectedChannelId,
           onTap: () => w.onChannelSelected(channel.channelId),
         ));
@@ -634,17 +649,42 @@ class _ServerContentState extends State<_ServerContent> {
           ),
         if (!hasCategories) Divider(height: 1, color: w.hollow.border),
         Expanded(
-          child: items.isEmpty
-              ? Center(
-                  child: Text('No channels',
-                      style: HollowTypography.bodySmall
-                          .copyWith(color: w.hollow.textSecondary)),
-                )
-              : ListView.builder(
-                  padding: const EdgeInsets.symmetric(vertical: HollowSpacing.xs),
-                  itemCount: items.length,
-                  itemBuilder: (_, i) => items[i],
-                ),
+          // Right-click on empty sidebar space opens the server-level menu
+          // (issue #61). Opaque so the bare area below the last channel is a
+          // hit target too; a right-click that lands on a tile or a category
+          // header hits their own handler first, since the inner recognizer
+          // wins the arena.
+          child: Consumer(
+            builder: (context, ref, child) => GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onSecondaryTapUp: (details) => showChannelSidebarMenu(
+                context: context,
+                ref: ref,
+                serverId: w.serverId,
+                canManage: w.canManageChannels,
+                onOpenSettings: w.onOpenSettings,
+                onInvite: () {
+                  // Same web-form link the header's invite button copies.
+                  final link = webServerInviteLink(w.serverId);
+                  showInviteDialog(context, link, w.serverId);
+                },
+                anchor: overlayPositionOf(context, details.globalPosition),
+              ),
+              child: child,
+            ),
+            child: items.isEmpty
+                ? Center(
+                    child: Text('No channels',
+                        style: HollowTypography.bodySmall
+                            .copyWith(color: w.hollow.textSecondary)),
+                  )
+                : ListView.builder(
+                    padding:
+                        const EdgeInsets.symmetric(vertical: HollowSpacing.xs),
+                    itemCount: items.length,
+                    itemBuilder: (_, i) => items[i],
+                  ),
+          ),
         ),
       ],
     );
@@ -687,9 +727,20 @@ class _CategoryHeader extends StatefulWidget {
   final String name;
   final VoidCallback? onToggle;
 
+  /// Position of this category in the parsed layout — the identity the
+  /// context menu edits by. Names are not unique.
+  final int layoutIndex;
+  final String serverId;
+  final String layoutJson;
+  final bool canManage;
+
   const _CategoryHeader({
     required this.hollow,
     required this.name,
+    required this.layoutIndex,
+    required this.serverId,
+    required this.layoutJson,
+    this.canManage = false,
     this.onToggle,
   });
 
@@ -700,8 +751,33 @@ class _CategoryHeader extends StatefulWidget {
 class _CategoryHeaderState extends State<_CategoryHeader> {
   bool get _collapsed => _categoryCollapsedState[widget.name] ?? false;
 
+  void _toggle() {
+    setState(() => _categoryCollapsedState[widget.name] = !_collapsed);
+    widget.onToggle?.call();
+  }
+
   @override
   Widget build(BuildContext context) {
+    return Consumer(
+      builder: (context, ref, _) => GestureDetector(
+        onSecondaryTapUp: (details) => showCategoryMenu(
+          context: context,
+          ref: ref,
+          serverId: widget.serverId,
+          layoutJson: widget.layoutJson,
+          categoryIndex: widget.layoutIndex,
+          categoryName: widget.name,
+          canManage: widget.canManage,
+          isCollapsed: _collapsed,
+          onToggleCollapse: _toggle,
+          anchor: overlayPositionOf(context, details.globalPosition),
+        ),
+        child: _buildHeader(),
+      ),
+    );
+  }
+
+  Widget _buildHeader() {
     return Padding(
       padding: const EdgeInsets.fromLTRB(
         HollowSpacing.sm + 2,
@@ -711,11 +787,7 @@ class _CategoryHeaderState extends State<_CategoryHeader> {
       ),
       child: HollowPressable(
         subtle: true,
-        onTap: () {
-          setState(() =>
-              _categoryCollapsedState[widget.name] = !_collapsed);
-          widget.onToggle?.call();
-        },
+        onTap: _toggle,
         child: Row(
           children: [
             AnimatedRotation(
@@ -1234,12 +1306,17 @@ class _ChannelTile extends ConsumerWidget {
   final bool isSelected;
   final VoidCallback onTap;
 
+  /// Whether the local user holds MANAGE_CHANNELS here. Advisory only: it
+  /// picks which rows the context menu offers, while Rust re-checks every op.
+  final bool canManage;
+
   const _ChannelTile({
     super.key,
     required this.channel,
     required this.serverId,
     required this.isSelected,
     required this.onTap,
+    this.canManage = false,
   });
 
   @override
@@ -1346,12 +1423,22 @@ class _ChannelTile extends ConsumerWidget {
       );
     }
 
-    return Padding(
-      padding: const EdgeInsets.symmetric(
-        horizontal: HollowSpacing.sm,
-        vertical: HollowSpacing.xxs,
+    return GestureDetector(
+      onSecondaryTapUp: (details) => showChannelTileMenu(
+        context: context,
+        ref: ref,
+        serverId: serverId,
+        channel: channel,
+        canManage: canManage,
+        anchor: overlayPositionOf(context, details.globalPosition),
       ),
-      child: tile,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(
+          horizontal: HollowSpacing.sm,
+          vertical: HollowSpacing.xxs,
+        ),
+        child: tile,
+      ),
     );
   }
 }
@@ -1364,11 +1451,15 @@ class _VoiceChannelTile extends ConsumerStatefulWidget {
   final String serverId;
   final ValueChanged<String> onChannelSelected;
 
+  /// See [_ChannelTile.canManage].
+  final bool canManage;
+
   const _VoiceChannelTile({
     super.key,
     required this.channel,
     required this.serverId,
     required this.onChannelSelected,
+    this.canManage = false,
   });
 
   @override
@@ -1455,6 +1546,20 @@ class _VoiceChannelTileState extends ConsumerState<_VoiceChannelTile> {
         child: channelRow,
       );
     }
+
+    // Only the channel row itself — the participant rows below keep their own
+    // secondary-tap per-peer volume popup.
+    channelRow = GestureDetector(
+      onSecondaryTapUp: (details) => showChannelTileMenu(
+        context: context,
+        ref: ref,
+        serverId: widget.serverId,
+        channel: widget.channel,
+        canManage: widget.canManage,
+        anchor: overlayPositionOf(context, details.globalPosition),
+      ),
+      child: channelRow,
+    );
 
     return Padding(
       padding: const EdgeInsets.symmetric(

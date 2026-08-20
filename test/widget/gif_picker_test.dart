@@ -161,6 +161,9 @@ void main() {
     // Barrier tap dismisses.
     await tester.tapAt(const Offset(5, 5));
     await tester.pump();
+    // The picker plays a scale+fade exit before its overlay entry is
+    // removed, so dismissal is no longer a single-frame affair.
+    await tester.pump(const Duration(milliseconds: 200));
     expect(find.byType(GifPickerBody), findsNothing);
     expect(tokens, isEmpty);
   });
@@ -202,6 +205,9 @@ void main() {
     // without a second proxy hit.
     await tester.tapAt(const Offset(5, 5));
     await tester.pump();
+    // The picker plays a scale+fade exit before its overlay entry is
+    // removed, so dismissal is no longer a single-frame affair.
+    await tester.pump(const Duration(milliseconds: 200));
     await tester.tap(find.text('open'));
     await tester.pump();
     expect(find.bySemanticsLabel('Insert GIF trending one'), findsOneWidget);
@@ -209,6 +215,9 @@ void main() {
 
     await tester.tapAt(const Offset(5, 5));
     await tester.pump();
+    // The picker plays a scale+fade exit before its overlay entry is
+    // removed, so dismissal is no longer a single-frame affair.
+    await tester.pump(const Duration(milliseconds: 200));
   });
 
   testWidgets('picker: teardown while a search is in flight does not crash',
@@ -235,6 +244,9 @@ void main() {
     // mounted guard must swallow the result.
     await tester.tapAt(const Offset(5, 5));
     await tester.pump();
+    // The picker plays a scale+fade exit before its overlay entry is
+    // removed, so dismissal is no longer a single-frame affair.
+    await tester.pump(const Duration(milliseconds: 200));
     expect(find.byType(GifPickerBody), findsNothing);
     catalog.pending['dog|1']!.complete(_page([_item('d1')]));
     await tester.pump();
@@ -409,5 +421,8 @@ void main() {
 
     await tester.tapAt(const Offset(5, 5));
     await tester.pump();
+    // The picker plays a scale+fade exit before its overlay entry is
+    // removed, so dismissal is no longer a single-frame affair.
+    await tester.pump(const Duration(milliseconds: 200));
   });
 }

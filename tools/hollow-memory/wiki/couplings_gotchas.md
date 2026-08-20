@@ -397,6 +397,28 @@ Additionally, `handle_send_file()` skips writing ciphertext to temp file and ski
 
 **Correct approach:** Use `showDialog(barrierColor: Colors.transparent, ...)` which creates a new route that sits above `SelectionArea` in the widget tree. The dialog route has its own gesture arena that does not conflict with `SelectionArea`.
 
+**In practice:** this is why `showHollowMenu` (`components/hollow_menu.dart`, issue #61) uses a transparent-barrier `showGeneralDialog` for EVERY context menu rather than picking a host per call site. It also buys outside-click dismissal, Escape and a focus scope for free.
+
+### A context menu must dismiss before it acts
+
+**Rule:** Pop the menu by route IDENTITY (`ModalRoute.of(context)`), then run the row's action in a `postFrameCallback`.
+
+**Why:** `Navigator.pop()` is a guess that the menu is the topmost route, and rows routinely open a dialog of their own. Running the action synchronously races the pop, so the menu can end up sitting BEHIND the dialog it opened -- visible, inert, and still showing pre-edit values.
+
+### A menu builder's ref is NOT the caller's ref
+
+**Rule:** name the second parameter of a `showHollowMenu` builder `menuRef` (watch-only) and let actions capture the caller's `ref`. CI-guarded by `test/menu_builder_ref_guard_test.dart`.
+
+**Why:** the builder runs inside the menu route's own `Consumer`, which is DISPOSED once the menu closes -- and menus deliberately close before their actions run. Naming it `ref` shadows the caller's longer-lived ref, so every action closure captures the doomed one, `ref.read` throws inside an async gap, the exception goes to the zone handler, and the row silently does nothing. Ref-free rows keep working, which makes it look like a per-feature bug rather than one systematic one.
+
+### An animated popup must stop taking pointers when its exit starts
+
+**Rule:** wrap the whole overlay entry (dismiss barrier included) in an `IgnorePointer` gated on "exiting" -- `PopupAnimationController.wrapEntry` does this for the emoji/GIF/sticker pickers.
+
+**Why:** the barrier stays mounted, full screen and on top for the length of the exit animation, so a click that dismisses a popup and a click on the button that reopens it arrive well inside 140ms of each other and the second one lands on a corpse. Invisible before the pickers had exit animations, because teardown was instantaneous.
+
+Related: `FadeTransition` drops its subtree from the SEMANTICS tree at opacity 0 while `Opacity` still passes hit tests, so an entering popup is clickable but invisible to screen readers. Pass `alwaysIncludeSemantics: true`.
+
 ### Never wrap SelectionArea AROUND a scrolling message list
 
 **Rule:** Scope selection to the ROWS whenever the interface scale is not 100%. `reversedChatList` (and `archive_message_list.dart`, `guest_chat_pane.dart`) branch on `selectionMustBeScopedToRows(context)` and wrap each row in `chatSelectionArea()` instead of the list.

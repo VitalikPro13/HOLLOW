@@ -323,13 +323,24 @@ A JSON array string. Each element has a `"type"` field. Known types include `"ch
 
 ### Methods
 
-**`loadForServer(serverId)`** — calls `fetchLayout(serverId)` and sets state. Falls back to `"[]"` on error.
+**`mutate(serverId, channels, mutator)`** — **the ONLY way to change a layout** (issue #61). Everything that edits the layout goes through it: the sidebar's category context menu and the Channels settings editor both call it. It owns three things that must happen together, each of which was a live bug when it was left to call sites:
+
+1. **Normalisation.** `mutator` receives an EFFECTIVE layout (`effectiveLayoutFrom`): the stored layout plus every channel not yet in it, appended in the order the sidebar renders unplaced channels (alphabetical by name), with references to deleted channels dropped. A server that never had an explicit layout has `"[]"`, so without this, appending a category wrote "one category and no channels" — the sidebar drew an empty category while the settings editor, which normalises on read, drew every channel nested under it.
+2. **Optimistic publish, before the FFI.** `updateChannelLayout` only QUEUES a CRDT op, so a read-back returns the previous value.
+3. **A pending-write guard** (`_pendingServerId` + generation). See below.
+
+**`loadForServer(serverId)`** — calls `fetchLayout(serverId)` and sets state. Falls back to `"[]"` on error. **Suppressed while that server has a pending local write**, because server events fire this constantly and the DB still holds the pre-write layout.
 
 **`fetchLayout(serverId)`** — static method. Calls `crdt_api.getChannelLayout(serverId:)`. Returns the raw JSON string.
 
-**`setLayout(json)`** — direct state setter for batched updates.
+**`setLayout(json, {serverId})`** — direct state setter for batched updates. **Pass the server it was read for.** Every caller is a "navigate to server X" flow that just read the DB, so a read for the server mid-write is stale by construction and is ignored; a read for any other server applies and ends the guard (we are leaving). Omitting `serverId` is what made a category created in the sidebar jump back to the top and re-swallow every channel after a server switch.
 
 **`clear()`** — resets to `"[]"`.
+
+### The pending-write guard
+A local write holds the guard for ~1.5s, then RELEASES it without re-reading. There is deliberately **no timer reconcile**: the published state IS what was written, so the DB can only be equal to it or behind it — a reconcile read can never improve the value and can easily make it worse. Remote changes still arrive normally once the guard clears.
+
+Contract tests: `test/channel_layout_mutation_test.dart` (9 tests, run with NO FFI so the write throws and the reload fails — the hostile case the guards exist for).
 
 ### Batching
 Like `channelListProvider`, this provider has a static `fetchLayout` and a `setLayout` to support the atomic server-switching pattern. The server-switching code prefetches both channels and layout, then writes all four providers in one synchronous block.

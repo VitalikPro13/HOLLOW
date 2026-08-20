@@ -23,6 +23,7 @@ import '../components/hollow_button.dart';
 import '../components/hollow_pressable.dart';
 import '../components/hollow_text_field.dart';
 import '../components/hollow_toast.dart';
+import '../components/popup_animator.dart';
 import 'emote_image.dart';
 import 'gif_picker.dart' show GifMenuItem, showGifMenu;
 import 'sticker_pack_card.dart' show kStickerPackExtension;
@@ -95,19 +96,27 @@ void showStickerPicker({
 }) {
   final overlay = Overlay.of(context);
   late OverlayEntry entry;
+  final anim = PopupAnimationController();
 
   // Removal guard — same rapid-double-fire protection as the other pickers.
   var removed = false;
   void teardown() {
     if (removed) return;
     removed = true;
-    entry.remove();
-    entry.dispose();
+    // Play the exit, THEN drop the entry.
+    anim.dismiss(() {
+      entry.remove();
+      entry.dispose();
+    });
   }
 
   entry = OverlayEntry(
-    builder: (ctx) => _StickerPickerOverlay(
+    // wrapEntry: the barrier must stop taking clicks the instant the
+    // exit starts, or a dismiss immediately followed by another click
+    // eats the second one.
+    builder: (ctx) => anim.wrapEntry(_StickerPickerOverlay(
       anchorPosition: anchorPosition,
+      anim: anim,
       serverId: serverId,
       onSelect: onSelect,
       onSharePack: onSharePack == null
@@ -120,7 +129,7 @@ void showStickerPicker({
               await onSharePack(path, name);
             },
       onDismiss: teardown,
-    ),
+    )),
   );
 
   overlay.insert(entry);
@@ -128,6 +137,7 @@ void showStickerPicker({
 
 class _StickerPickerOverlay extends StatelessWidget {
   final Offset anchorPosition;
+  final PopupAnimationController anim;
   final void Function(String token) onSelect;
   final Future<void> Function(String path, String fileName)? onSharePack;
   final VoidCallback onDismiss;
@@ -135,6 +145,7 @@ class _StickerPickerOverlay extends StatelessWidget {
 
   const _StickerPickerOverlay({
     required this.anchorPosition,
+    required this.anim,
     required this.onSelect,
     required this.onDismiss,
     this.onSharePack,
@@ -157,7 +168,11 @@ class _StickerPickerOverlay extends StatelessWidget {
     if (left + pickerWidth > screenSize.width - 8) {
       left = screenSize.width - pickerWidth - 8;
     }
+    // Flips below the anchor when there is no room above; the growth origin
+    // flips with it so the animation always starts at the opening control.
+    var flippedBelow = false;
     if (top < 8) {
+      flippedBelow = true;
       top = (anchorPosition.dy + 30).clamp(
           8.0, (screenSize.height - pickerHeight - 8).clamp(8.0, double.infinity));
     }
@@ -173,32 +188,37 @@ class _StickerPickerOverlay extends StatelessWidget {
         Positioned(
           left: left,
           top: top,
-          child: Material(
-            color: Colors.transparent,
-            child: Container(
-              width: pickerWidth,
-              height: pickerHeight,
-              decoration: BoxDecoration(
-                color: hollow.surface,
-                borderRadius: BorderRadius.circular(hollow.radiusMd),
-                border: Border.all(color: hollow.border),
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.black.withValues(alpha: 0.25),
-                    blurRadius: 12,
-                    offset: const Offset(0, 4),
+          child: PopupAnimator(
+            controller: anim,
+            alignment:
+                flippedBelow ? Alignment.topRight : Alignment.bottomRight,
+            child: Material(
+              color: Colors.transparent,
+              child: Container(
+                width: pickerWidth,
+                height: pickerHeight,
+                decoration: BoxDecoration(
+                  color: hollow.surface,
+                  borderRadius: BorderRadius.circular(hollow.radiusMd),
+                  border: Border.all(color: hollow.border),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withValues(alpha: 0.25),
+                      blurRadius: 12,
+                      offset: const Offset(0, 4),
+                    ),
+                  ],
+                ),
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(hollow.radiusMd),
+                  // Deliberately NOT dismissing on pick: each pick SENDS, and
+                  // a vertical mosaic is several sticker messages in a row, so
+                  // the panel stays open the way the emoji picker does.
+                  child: StickerPickerBody(
+                    onSelect: onSelect,
+                    onSharePack: onSharePack,
+                    serverId: serverId,
                   ),
-                ],
-              ),
-              child: ClipRRect(
-                borderRadius: BorderRadius.circular(hollow.radiusMd),
-                // Deliberately NOT dismissing on pick: each pick SENDS, and a
-                // vertical mosaic is several sticker messages in a row, so the
-                // panel stays open the way the emoji picker does.
-                child: StickerPickerBody(
-                  onSelect: onSelect,
-                  onSharePack: onSharePack,
-                  serverId: serverId,
                 ),
               ),
             ),

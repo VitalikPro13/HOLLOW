@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/models/channel_info.dart';
+import 'package:hollow/src/core/models/channel_layout.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
@@ -263,12 +264,37 @@ final lastChannelPerServerProvider =
 /// Updated when channels load or server layout changes.
 class ChannelLayoutNotifier extends Notifier<String> {
   @override
-  String build() => '[]';
+  String build() {
+    _disposed = false;
+    ref.onDispose(() => _disposed = true);
+    return '[]';
+  }
+
+  /// Server whose layout has an in-flight local write, and the generation of
+  /// that write. See [mutate].
+  String? _pendingServerId;
+  int _writeGen = 0;
+  bool _disposed = false;
+
+  /// How long a local write shields itself from a DB reload. Covers the
+  /// queue-then-persist round trip of a CRDT op.
+  static const _pendingWindow = Duration(milliseconds: 1500);
 
   Future<void> loadForServer(String serverId) async {
+    // A local write for THIS server is still settling. `update_channel_layout`
+    // only queues a CRDT op, so the DB still holds the previous layout and
+    // reloading here would stomp the newer state with the older one. Server
+    // events fire this on every channel change, which is exactly when a local
+    // layout edit is most likely to be in flight.
+    if (_pendingServerId == serverId) return;
     try {
-      state = await fetchLayout(serverId);
+      final json = await fetchLayout(serverId);
+      // The await gave a local write a chance to start; do not land a stale
+      // read on top of it.
+      if (_disposed || _pendingServerId == serverId) return;
+      state = json;
     } catch (_) {
+      if (_disposed || _pendingServerId == serverId) return;
       state = '[]';
     }
   }
@@ -279,12 +305,110 @@ class ChannelLayoutNotifier extends Notifier<String> {
   }
 
   /// Set layout directly (used for batched provider updates).
-  void setLayout(String json) {
+  ///
+  /// Every caller is a "navigate to [serverId]" flow that just read the layout
+  /// from the DB. Pass the server it was read FOR: a read for the server whose
+  /// local write is still queued is stale by construction, and landing it would
+  /// undo the edit. Reading for any OTHER server means we are leaving this one,
+  /// so the guard is done.
+  ///
+  /// [serverId] is optional only so a caller with genuinely no server context
+  /// still compiles; prefer passing it.
+  void setLayout(String json, {String? serverId}) {
+    if (serverId != null && _pendingServerId == serverId) return;
+    _pendingServerId = null;
     state = json;
   }
 
-  void clear() => state = '[]';
+  /// THE way to change a channel layout.
+  ///
+  /// Everything that edits the layout goes through this one method so the
+  /// three things that must happen together cannot drift apart:
+  ///
+  /// 1. **Normalisation.** [mutator] receives an EFFECTIVE layout: the stored
+  ///    layout plus every channel not yet in it, appended in the order the
+  ///    sidebar renders them. A server that never had an explicit layout has
+  ///    an empty one, so without this a new category appended to `[]` produced
+  ///    a layout that named a category and no channels. The sidebar then drew
+  ///    the category as empty while the settings editor, which does its own
+  ///    normalisation, drew every channel underneath it.
+  /// 2. **Optimistic state.** The new JSON is published BEFORE the FFI call,
+  ///    because the write only queues an op and reading it back returns the
+  ///    previous value.
+  /// 3. **A pending guard.** [loadForServer] is suppressed for this server
+  ///    until the op has had time to land, then reconciles from the DB.
+  ///
+  /// [channels] is the channel map for [serverId] (`channelListProvider`).
+  void mutate(
+    String serverId,
+    Map<String, ChannelInfo> channels,
+    List<LayoutItem> Function(List<LayoutItem> layout) mutator,
+  ) {
+    final effective = effectiveLayout(state, channels);
+    final json = layoutToJson(mutator(effective));
+
+    final gen = ++_writeGen;
+    _pendingServerId = serverId;
+    state = json;
+
+    // try/catch AND catchError: an uninitialised bridge throws SYNCHRONOUSLY,
+    // before a Future exists, which catchError alone cannot intercept, while a
+    // later rejection escapes a bare try/catch to the zone crash handler.
+    try {
+      crdt_api
+          .updateChannelLayout(serverId: serverId, layoutJson: json)
+          .catchError((_) {});
+    } catch (_) {}
+
+    // Release the guard once the queued op has had time to persist, unless a
+    // newer write superseded this one.
+    //
+    // Deliberately NO re-read here. The state we just published IS what we
+    // wrote, and the DB can only be equal to it or behind it, so a reconcile
+    // read can never improve this value and can easily make it worse. Remote
+    // changes still arrive the normal way: the next `loadForServer` from a
+    // server event is no longer suppressed once the guard clears.
+    Future<void>.delayed(_pendingWindow, () {
+      if (_disposed || _writeGen != gen) return;
+      if (_pendingServerId == serverId) _pendingServerId = null;
+    });
+  }
+
+  void clear() {
+    _pendingServerId = null;
+    state = '[]';
+  }
 }
+
+/// The stored layout plus any channel missing from it, appended in the order
+/// the sidebar renders unplaced channels (alphabetical by name), and with
+/// references to channels that no longer exist dropped.
+///
+/// Normalising before a write is what keeps "what the sidebar shows" and
+/// "what the layout says" the same thing. ONE definition, shared by the
+/// sidebar's context menus and the Channels settings editor, so the two can
+/// never disagree about where an unplaced channel belongs.
+List<LayoutItem> effectiveLayoutFrom(
+    List<LayoutItem> base, Map<String, ChannelInfo> channels) {
+  final layout = List<LayoutItem>.from(base)
+    ..removeWhere(
+        (item) => item is ChannelItem && !channels.containsKey(item.channelId));
+
+  final placed =
+      layout.whereType<ChannelItem>().map((item) => item.channelId).toSet();
+
+  final unplaced = channels.values
+      .where((ch) => !placed.contains(ch.channelId))
+      .toList()
+    ..sort((a, b) => a.name.compareTo(b.name));
+
+  return [...layout, ...unplaced.map((ch) => ChannelItem(ch.channelId))];
+}
+
+/// [effectiveLayoutFrom] over a raw layout JSON string.
+List<LayoutItem> effectiveLayout(
+        String layoutJson, Map<String, ChannelInfo> channels) =>
+    effectiveLayoutFrom(parseLayoutJson(layoutJson), channels);
 
 final channelLayoutProvider =
     NotifierProvider<ChannelLayoutNotifier, String>(ChannelLayoutNotifier.new);

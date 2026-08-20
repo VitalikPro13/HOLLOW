@@ -1153,7 +1153,7 @@ class _ChannelListState extends ConsumerState<_ChannelList> {
       widgets.add(_CreateChannelRow(
         isLast: true,
         onTap: () => showCreateChannelDialog(
-          context, widget.serverId, onCreated: _loadChannels),
+          context, widget.serverId, onCreated: (_) => _loadChannels()),
       ));
     }
     widgets.add(const SizedBox(height: HollowSpacing.xs));

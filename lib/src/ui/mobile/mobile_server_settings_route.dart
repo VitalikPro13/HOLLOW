@@ -2318,7 +2318,7 @@ class _ChannelLayoutEditorState extends ConsumerState<_ChannelLayoutEditor> {
               onPressed: () => showCreateChannelDialog(
                 context,
                 widget.serverId,
-                onCreated: _load,
+                onCreated: (_) => _load(),
               ),
               compact: true,
               icon: const Icon(LucideIcons.plus, size: 14),

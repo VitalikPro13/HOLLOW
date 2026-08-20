@@ -250,7 +250,8 @@ class _HollowShellState extends ConsumerState<HollowShell>
     ref.read(selectedPeerProvider.notifier).state = null;
     ref.read(serverSettingsOpenProvider.notifier).state = false;
     ref.read(channelListProvider.notifier).setChannels(channels);
-    ref.read(channelLayoutProvider.notifier).setLayout(layout);
+    ref.read(channelLayoutProvider.notifier)
+        .setLayout(layout, serverId: serverId);
     ref.read(selectedChannelProvider.notifier).state = channelId;
     ref.read(selectedServerProvider.notifier).state = serverId;
     final map =
@@ -1947,7 +1948,8 @@ class _HollowShellState extends ConsumerState<HollowShell>
               migration.serverId!);
           ref.read(selectedPeerProvider.notifier).state = null;
           ref.read(channelListProvider.notifier).setChannels(channels);
-          ref.read(channelLayoutProvider.notifier).setLayout(layout);
+          ref.read(channelLayoutProvider.notifier)
+              .setLayout(layout, serverId: migration.serverId);
           ref.read(selectedServerProvider.notifier).state =
               migration.serverId;
           ref.read(selectedChannelProvider.notifier).state =

@@ -22,6 +22,7 @@ import '../components/hollow_text_field.dart';
 import '../components/hollow_toast.dart';
 import '../components/edge_scroll_row.dart';
 import '../components/overlay_anchor.dart';
+import '../components/popup_animator.dart';
 
 /// The GIF picker (issue #26): Popular / Favourites / Recent plus search
 /// through the Hollow website's no-log Klipy proxy, sharing chrome with the
@@ -41,26 +42,34 @@ void showGifPicker({
 }) {
   final overlay = Overlay.of(context);
   late OverlayEntry entry;
+  final anim = PopupAnimationController();
 
   // Removal guard — same rapid-double-fire protection as the emoji picker.
   var removed = false;
   void teardown() {
     if (removed) return;
     removed = true;
-    entry.remove();
-    entry.dispose();
+    // Play the exit, THEN drop the entry.
+    anim.dismiss(() {
+      entry.remove();
+      entry.dispose();
+    });
   }
 
   entry = OverlayEntry(
-    builder: (ctx) => _GifPickerOverlay(
+    // wrapEntry: the barrier must stop taking clicks the instant the
+    // exit starts, or a dismiss immediately followed by another click
+    // eats the second one.
+    builder: (ctx) => anim.wrapEntry(_GifPickerOverlay(
       anchorPosition: anchorPosition,
+      anim: anim,
       serverId: serverId,
       // A pick SENDS and the panel STAYS OPEN, mirroring the sticker picker
       // (issue #36) — picking used to tear the overlay down here, which made
       // sending two GIFs two round trips through the composer button.
       onSelect: onSelect,
       onDismiss: teardown,
-    ),
+    )),
   );
 
   overlay.insert(entry);
@@ -68,12 +77,14 @@ void showGifPicker({
 
 class _GifPickerOverlay extends StatelessWidget {
   final Offset anchorPosition;
+  final PopupAnimationController anim;
   final void Function(String token) onSelect;
   final VoidCallback onDismiss;
   final String? serverId;
 
   const _GifPickerOverlay({
     required this.anchorPosition,
+    required this.anim,
     required this.onSelect,
     required this.onDismiss,
     this.serverId,
@@ -95,7 +106,11 @@ class _GifPickerOverlay extends StatelessWidget {
     if (left + pickerWidth > screenSize.width - 8) {
       left = screenSize.width - pickerWidth - 8;
     }
+    // Flips below the anchor when there is no room above; the growth origin
+    // flips with it so the animation always starts at the opening control.
+    var flippedBelow = false;
     if (top < 8) {
+      flippedBelow = true;
       top = (anchorPosition.dy + 30).clamp(
           8.0, (screenSize.height - pickerHeight - 8).clamp(8.0, double.infinity));
     }
@@ -111,26 +126,31 @@ class _GifPickerOverlay extends StatelessWidget {
         Positioned(
           left: left,
           top: top,
-          child: Material(
-            color: Colors.transparent,
-            child: Container(
-              width: pickerWidth,
-              height: pickerHeight,
-              decoration: BoxDecoration(
-                color: hollow.surface,
-                borderRadius: BorderRadius.circular(hollow.radiusMd),
-                border: Border.all(color: hollow.border),
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.black.withValues(alpha: 0.25),
-                    blurRadius: 12,
-                    offset: const Offset(0, 4),
-                  ),
-                ],
-              ),
-              child: ClipRRect(
-                borderRadius: BorderRadius.circular(hollow.radiusMd),
-                child: GifPickerBody(onSelect: onSelect, serverId: serverId),
+          child: PopupAnimator(
+            controller: anim,
+            alignment:
+                flippedBelow ? Alignment.topRight : Alignment.bottomRight,
+            child: Material(
+              color: Colors.transparent,
+              child: Container(
+                width: pickerWidth,
+                height: pickerHeight,
+                decoration: BoxDecoration(
+                  color: hollow.surface,
+                  borderRadius: BorderRadius.circular(hollow.radiusMd),
+                  border: Border.all(color: hollow.border),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withValues(alpha: 0.25),
+                      blurRadius: 12,
+                      offset: const Offset(0, 4),
+                    ),
+                  ],
+                ),
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(hollow.radiusMd),
+                  child: GifPickerBody(onSelect: onSelect, serverId: serverId),
+                ),
               ),
             ),
           ),

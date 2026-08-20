@@ -2153,6 +2153,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
           ? (emoji) => _toggleReaction(msg, emoji)
           : null,
       onPin: _pinFor(msg),
+      isPinned: _isPinned(msg),
       onDownload: _downloadFor(context, msg),
       onCopy: _copyFor(context, msg),
       onCopyImage: _copyImageFor(context, msg),
@@ -2392,6 +2393,16 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
       HollowToast.show(context, 'Failed to update reaction',
           type: HollowToastType.error);
     }
+  }
+
+  /// Whether [msg] is currently pinned — the context menu says "Unpin" rather
+  /// than "Pin" for it. Reads the same `pinnedProvider` entry the pin-count
+  /// button watches, so the row is already rebuilding when a pin flips.
+  bool _isPinned(ChannelChatMessage msg) {
+    final mid = msg.messageId;
+    if (mid == null) return false;
+    final pinKey = '${widget.serverId}:${widget.channelId}';
+    return (ref.watch(pinnedProvider)[pinKey] ?? const <String>[]).contains(mid);
   }
 
   VoidCallback? _pinFor(ChannelChatMessage msg) {
