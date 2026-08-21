@@ -34,7 +34,7 @@ Measured, not estimated:
 | restage both copies (robocopy, only what changed) | under 1s |
 | boot to live-ready | 13s |
 | one interactive command | ~1s |
-| `friend_dm` / `server_invite_message` | 29s / 33s |
+| `friend_dm` / `server_invite_message` / `unread_line` | 29s / 33s / 2min |
 
 So: **`-Live` ONCE, then `-Attach` for scenario runs and `fleet_send.ps1` for everything
 else.** Booting restores the fixtures, which throws away whatever state you were looking at;
@@ -223,7 +223,8 @@ matters.
 ## The ladder (from the design, section 6)
 
 1. **Two peers, text.** ✅ `friend_dm` (request, accept, DM both ways, ~29s),
-   `server_invite_message` (create, invite, join, channel message both ways, delete, ~33s).
+   `server_invite_message` (create, invite, join, channel message both ways, delete, ~33s),
+   `unread_line` (the "new messages" line and its rail mark, ~2min).
 2. **Two peers, moderation.** Kick and watch them vanish from the member panel AND lose the server;
    ban and watch a rejoin fail; mute and watch the composer refuse. Not built.
 3. **Three or more, roles and visibility.** Restricted channels, access labels granted and revoked
@@ -240,3 +241,26 @@ matters.
 
 The fleet proves the app DOES the thing. It does not prove the thing FEELS right, and it does not
 replace Vitalik using Hollow. What it replaces is the part where he has to be the test harness.
+
+## What `unread_line` is actually for (2026-08-21)
+
+Worth reading before writing the next scenario, because it is the clearest example of the
+kind of thing ONLY this harness can answer.
+
+The unread line's index maths and its read pointer both have widget tests, and both hand the
+pointer in BY HAND. What no widget test can reach is the **moment** the pointer is captured:
+`markDmSeen` runs from five places (the sidebar's selection callback before the pane exists,
+the pane on load, the scroll handler, a context menu, a notification tap), any one of them can
+clobber the entry pointer, and every one of them is only real when a message actually arrives
+over the relay. So the journey is: a reads, a walks away, b sends, a returns — the line is
+there and STAYS there three seconds later; a quiet return draws none.
+
+Two things the scenario teaches about writing these:
+
+- **`expect_count` on a semantics label only sees BUILT widgets.** After twenty more messages
+  the line is far above the viewport, and a `ScrollablePositionedList` does not build an
+  off-screen row, so asserting the line at the bottom of a long conversation fails for a
+  correct app. That is not a bug in the test; it is the reason the rail carries the jump.
+  Assert the rail mark, tap it, THEN assert the line.
+- **A `HollowPressable` with a `semanticLabel` matches `semantics:X` TWICE.** Use
+  `index: 0` to tap it and a unique `tooltip:` target to count it.

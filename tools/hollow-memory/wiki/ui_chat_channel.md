@@ -74,7 +74,7 @@ ChatPane (`lib/src/ui/chat/chat_pane.dart`) handles 1:1 DMs with Olm encryption.
 
 ## Lifecycle: initState, dispose, didUpdateWidget
 
-**initState**: (1) Posts a frame callback to close the search bar (`channelSearchOpenProvider = false`) on entering a new channel. (2) Calls `_loadHistory()` to load messages from SQLCipher DB. (3) Registers `_onScrollPositionChanged` listener on `_itemPositionsListener`.
+**initState**: (1) Posts a frame callback to close the search bar (`chatSearchOpenProvider = false`) on entering a new channel. (2) Calls `_loadHistory()` to load messages from SQLCipher DB. (3) Registers `_onScrollPositionChanged` listener on `_itemPositionsListener`.
 
 **dispose**: (1) Dismisses @mention overlay. (2) Cancels URL debounce timer. (3) Removes scroll position listener. (4) Disposes all controllers and focus nodes.
 
@@ -110,7 +110,7 @@ Reversed-list model (2026-07-03 overhaul — see the "Reversed message list" sec
 4. **Connection status** -- `_ChannelConnectionStatus` widget (see below). Hidden when the header is under 280px wide.
 5. **Spacer**.
 5. **Pinned messages button** -- only shown when `pinnedIds.isNotEmpty`. Shows pin icon + count. Tooltip shows count. Taps open `_showPinnedMessages()` dialog.
-6. **Search button** -- toggles `channelSearchOpenProvider`. Icon tints accent when search is open.
+6. **Search button** -- toggles `chatSearchOpenProvider`. Icon tints accent when search is open.
 7. **Member panel toggle** -- toggles `memberPanelProvider`. Icon tints accent when panel is open.
 8. **Split view toggle** -- only shown in dock layout mode (`layoutModeProvider`) AND when the header is at least 200px wide. Shows columns icon. When split is active, closes this pane; when not split, opens split. Icon tints accent when split is active.
 
@@ -149,11 +149,11 @@ The dialog is a `Dialog` with `hollow.elevated` background, rounded rectangle sh
 
 ## In-Channel Search
 
-Activated by tapping the search icon in the header bar or via Ctrl+K shortcut (handled in `hollow_shell.dart` which toggles `channelSearchOpenProvider`).
+Activated by tapping the search icon in the header bar or via Ctrl+K shortcut (handled in `hollow_shell.dart` which toggles `chatSearchOpenProvider`).
 
-**Provider listening**: `_onSearchOpenChanged` (channelSearchOpenProvider listener via `_registerBuildListeners()`): when opened, focuses `_searchFocusNode` in post-frame callback. When closed, clears search controller and results.
+**Provider listening**: `_onSearchOpenChanged` (chatSearchOpenProvider listener via `_registerBuildListeners()`): when opened, focuses `_searchFocusNode` in post-frame callback. When closed, clears search controller and results.
 
-**Search bar UI**: Conditionally rendered below the header when `channelSearchOpenProvider` is true. Contains a `HollowTextField` with search icon prefix, hint "Search in #channelName...", autofocus, dense mode. `onChanged` calls `_onSearch()`.
+**Search bar UI**: Conditionally rendered below the header when `chatSearchOpenProvider` is true. Contains a `HollowTextField` with search icon prefix, hint "Search in #channelName...", autofocus, dense mode. `onChanged` calls `_onSearch()`.
 
 **`_onSearch(query)`**: If query is empty, clears results. Otherwise calls `storage_api.searchChannelMessages(serverId, channelId, query, limit: 20)`. Results stored in `_searchResults`. Each result rendered as a pressable row showing sender name (via `serverNicknamesProvider`), timestamp, and text snippet (max 2 lines). Tapping a result: finds the message index in the current message list, closes search, scrolls to that message via `_scrollToMessage(idx)`.
 
@@ -309,7 +309,7 @@ The `onDownload` callback in `MessageHoverWrapper` handles three scenarios:
 | Provider | Usage |
 |---|---|
 | `channelChatProvider` | Message list keyed by `serverId:channelId` |
-| `channelSearchOpenProvider` | Whether search bar is visible (StateProvider<bool>) |
+| `chatSearchOpenProvider` | Whether the search bar is visible (StateProvider<bool>). Renamed from `chatSearchOpenProvider` on 2026-08-21: ONE flag for the channel pane and the DM pane, because the global quick-search shortcut used to flip a channel-only flag and did nothing at all in a DM. Both panes reset it on mount. |
 | `profileProvider` | Profile map for display names and avatars |
 | `serverNicknamesProvider(serverId)` | Server nickname map for display name resolution |
 | `serverMembersProvider(serverId)` | Async member list (for @mention candidates, member count) |
@@ -375,3 +375,7 @@ Same reversed-list model as ui_chat_dm (reverse:true, newest = index 0, `_frozen
 ## Scrollbar rail (issue #54, 2026-08-21)
 
 The list is built by `reversedChatList`, which since 2026-08-21 hangs `ChatScrollRail` in a column beside it on desktop (index scrollbar + a jump cap at each end). The pane's only job is to pass `onJumpToNewest: _scrollToBottom` — "jump to present" MUST go through the pane, because the display list is frozen while reading (`_frozenLen`) and index 0 is not the newest message until that freeze is released. Mechanics and the traps (reversed index maths, the window-edge dead strip, why it is a column and not an overlay) live in `wiki/ui_chat_pane_shared.md`.
+
+## The unread line (issue #54, 2026-08-21)
+
+The pane reads `unreadMarkerProvider[channelMarkerKey(serverId, channelId)]` once per build, feeds `unreadDividerIndex` the display list, and hands the chronological index to `dateSeparatedChatRow(unreadDivider:)` and its REVERSED twin to `reversedChatList(unreadRevIndex:)`. One computation per build, so the index the rail marks and the index the row draws cannot disagree. Placement, rendering and the rail mark live in `wiki/ui_chat_pane_shared.md`; the pointer in `wiki/providers_event_settings.md`.

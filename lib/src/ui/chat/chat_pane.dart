@@ -36,6 +36,7 @@ import 'package:hollow/src/core/providers/speaking_provider.dart';
 import 'package:hollow/src/ui/components/call_duration_text.dart';
 import 'package:hollow/src/core/providers/recording_provider.dart';
 import 'package:hollow/src/ui/components/recording_indicator.dart';
+import 'package:hollow/src/core/providers/unread_marker_provider.dart';
 import 'package:hollow/src/core/providers/unread_provider.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:hollow/src/core/providers/local_nickname_provider.dart';
@@ -61,6 +62,7 @@ import 'package:hollow/src/ui/chat/voice_recorder_bar.dart';
 import 'package:hollow/src/core/services/voice_message_recorder.dart';
 import 'package:hollow/src/core/services/macos_version.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/profile_card_popup.dart';
 import 'package:hollow/src/ui/components/saved_messages_avatar.dart';
 import 'package:hollow/src/ui/components/share_quality_chip.dart';
@@ -101,7 +103,8 @@ export 'package:hollow/src/ui/chat/chat_pane_shared.dart'
         chatSelectionArea,
         selectionMustBeScopedToRows,
         ChatScrollRail,
-        chatListWithRail;
+        chatListWithRail,
+        unreadDividerIndex;
 
 /// Whether the DM profile panel is visible.
 final dmProfilePanelProvider = StateProvider<bool>((ref) => true);
@@ -410,6 +413,12 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
   DateTime? _lastTypingSent;
   int? _highlightIndex;
   bool _showScrollPill = false;
+  /// In-conversation message search (issue #54). The FFI has always been
+  /// there (`searchDmMessages`); only the DM header never called it, so the
+  /// global quick-search shortcut flipped a flag nothing in a DM read.
+  final TextEditingController _searchController = TextEditingController();
+  final FocusNode _searchFocusNode = FocusNode();
+  List<storage_api.StoredMessage> _searchResults = const [];
   /// Staged file attachment (user picked but hasn't sent yet).
   String? _stagedFilePath;
   String? _stagedFileName;
@@ -434,6 +443,12 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
   @override
   void initState() {
     super.initState();
+    // Close search when (re-)entering a conversation — cannot reset in
+    // dispose, where Riverpod forbids all ref usage. Same rule as the
+    // channel pane, and it is what lets both panes share one flag.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) ref.read(chatSearchOpenProvider.notifier).state = false;
+    });
     _loadHistory();
     _itemPositionsListener.itemPositions.addListener(_onScrollPositionChanged);
   }
@@ -594,6 +609,8 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     _itemPositionsListener.itemPositions.removeListener(_onScrollPositionChanged);
     _controller.dispose();
     _focusNode.dispose();
+    _searchController.dispose();
+    _searchFocusNode.dispose();
     super.dispose();
   }
 
@@ -1169,6 +1186,9 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
             isSavedMessages: isSavedMessages,
             showProfilePanel: showProfilePanel),
 
+        if (ref.watch(chatSearchOpenProvider))
+          _buildSearchBar(hollow, isSavedMessages),
+
         // Issue 1-C: pinned above the message list, not a toast — the warning
         // has to survive scrollback and restarts. Renders nothing when clear.
         if (!isSavedMessages) SecurityAlertBanner(peerId: widget.peerId),
@@ -1208,6 +1228,51 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     // the scroll handler only marks seen on a bottom re-ENTRY transition.
     // The user is now looking straight at the message; retire the unread.
     ref.listen<bool>(windowFocusedProvider, _onWindowFocusChanged);
+    // Opened by the global quick-search shortcut: focus the field, which the
+    // header button does for itself.
+    ref.listen<bool>(chatSearchOpenProvider, _onSearchOpenChanged);
+  }
+
+  void _onSearchOpenChanged(bool? prev, bool open) {
+    if (open) {
+      WidgetsBinding.instance
+          .addPostFrameCallback((_) => _searchFocusNode.requestFocus());
+      return;
+    }
+    if (_searchResults.isEmpty && _searchController.text.isEmpty) return;
+    _searchController.clear();
+    setState(() => _searchResults = const []);
+  }
+
+  Future<void> _onSearch(String query) async {
+    final q = query.trim();
+    if (q.isEmpty) {
+      setState(() => _searchResults = const []);
+      return;
+    }
+    try {
+      final results = await storage_api.searchDmMessages(
+        peerId: widget.peerId,
+        query: q,
+        limit: 20,
+      );
+      if (mounted) setState(() => _searchResults = results);
+    } catch (_) {
+      // Store closed or a transient FFI error — leave the last results up
+      // rather than blanking the list under the user's cursor.
+    }
+  }
+
+  /// Closes search and scrolls to the tapped result. The index is against the
+  /// DISPLAY (possibly frozen) list, which is what [_scrollToMessage] takes.
+  void _jumpToSearchResult(storage_api.StoredMessage msg) {
+    final messages =
+        _displayMessages(ref.read(chatProvider)[widget.peerId] ?? []);
+    final idx = messages.indexWhere((m) => m.messageId == msg.messageId);
+    ref.read(chatSearchOpenProvider.notifier).state = false;
+    _searchController.clear();
+    setState(() => _searchResults = const []);
+    if (idx != -1) _scrollToMessage(idx);
   }
 
   void _onMessageListGrowth(Map<String, List<ChatMessage>>? prev,
@@ -1267,6 +1332,8 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
             _buildVideoCallButton(hollow),
           ],
           const SizedBox(width: HollowSpacing.xs),
+          _buildSearchToggleButton(hollow),
+          const SizedBox(width: HollowSpacing.xs),
           _buildProfileToggleButton(hollow, showProfilePanel),
           // Notification mute toggle — hidden for Saved Messages (you
           // never get notified about your own self-DM).
@@ -1280,6 +1347,140 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
             _buildSplitToggleButton(hollow),
           ],
         ],
+      ),
+    );
+  }
+
+  /// HH:MM, 24h, zero-padded — the shape the channel search results use.
+  static String _hhmm(DateTime t) =>
+      '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
+
+  Widget _buildSearchToggleButton(HollowTheme hollow) {
+    final open = ref.watch(chatSearchOpenProvider);
+    return HollowTooltip(
+      message: 'Search messages',
+      child: HollowPressable(
+        semanticLabel: 'Search messages',
+        onTap: () {
+          ref.read(chatSearchOpenProvider.notifier).state = !open;
+          if (!open) {
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              _searchFocusNode.requestFocus();
+            });
+          }
+        },
+        borderRadius: BorderRadius.circular(hollow.radiusSm),
+        padding: const EdgeInsets.all(HollowSpacing.xs),
+        child: Icon(
+          LucideIcons.search,
+          size: 16,
+          color: open ? hollow.accent : hollow.textSecondary,
+        ),
+      ),
+    );
+  }
+
+  /// In-conversation message search: query field + up to 20 tappable results.
+  Widget _buildSearchBar(HollowTheme hollow, bool isSavedMessages) {
+    final name = isSavedMessages
+        ? 'Saved messages'
+        : displayNameFor(ref.watch(profileProvider), widget.peerId);
+    return Container(
+      padding: const EdgeInsets.symmetric(
+        horizontal: HollowSpacing.md,
+        vertical: HollowSpacing.sm,
+      ),
+      decoration: BoxDecoration(
+        color: hollow.surface,
+        border: Border(bottom: BorderSide(color: hollow.border)),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          HollowTextField(
+            controller: _searchController,
+            focusNode: _searchFocusNode,
+            hintText: 'Search in $name...',
+            autofocus: true,
+            isDense: true,
+            prefixIcon: const Icon(LucideIcons.search, size: 16),
+            onChanged: _onSearch,
+            style: HollowTypography.body.copyWith(
+              color: hollow.textPrimary,
+              fontSize: 13,
+            ),
+          ),
+          if (_searchResults.isNotEmpty)
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxHeight: 200),
+              child: ListView.builder(
+                shrinkWrap: true,
+                itemCount: _searchResults.length,
+                itemBuilder: (_, index) => _buildSearchResultTile(
+                    hollow, _searchResults[index], isSavedMessages),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSearchResultTile(
+      HollowTheme hollow, storage_api.StoredMessage msg, bool isSavedMessages) {
+    // A DM has exactly two sides, so the sender is a bool — no device→master
+    // resolution to do, unlike a channel's result list.
+    final name = msg.isMine
+        ? 'You'
+        : (isSavedMessages
+            ? 'You'
+            : displayNameFor(ref.watch(profileProvider), widget.peerId));
+    final time = DateTime.fromMillisecondsSinceEpoch(msg.timestamp.toInt());
+    return Padding(
+      padding: const EdgeInsets.only(top: HollowSpacing.xs),
+      child: HollowPressable(
+        subtle: true,
+        onTap: () => _jumpToSearchResult(msg),
+        borderRadius: BorderRadius.circular(hollow.radiusSm),
+        hoverColor: hollow.elevated,
+        padding: const EdgeInsets.symmetric(
+          horizontal: HollowSpacing.sm,
+          vertical: HollowSpacing.xs,
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Text(
+                  name,
+                  style: HollowTypography.caption.copyWith(
+                    color: hollow.accentText,
+                    fontWeight: FontWeight.w600,
+                    fontSize: 11,
+                  ),
+                ),
+                const SizedBox(width: HollowSpacing.sm),
+                Text(
+                  _hhmm(time),
+                  style: HollowTypography.caption.copyWith(
+                    color: hollow.textTertiary,
+                    fontSize: 10,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 2),
+            Text(
+              msg.text.startsWith('[file:') ? 'File' : msg.text,
+              style: HollowTypography.body.copyWith(
+                color: hollow.textPrimary,
+                fontSize: 12,
+              ),
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -1909,6 +2110,16 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
       for (var i = 0; i < messages.length; i++)
         if (messages[i].messageId != null) messages[i].messageId!: i,
     };
+    // Where reading left off (issue #54). Computed once per build against the
+    // list actually on screen, so the reversed index handed to the rail and
+    // the chronological one handed to the rows cannot disagree.
+    final unreadIndex = unreadDividerIndex(
+      count: messages.length,
+      entrySeenId:
+          ref.watch(unreadMarkerProvider)[dmMarkerKey(widget.peerId)],
+      messageIdAt: (i) => messages[i].messageId,
+      isMineAt: (i) => messages[i].isMe,
+    );
     return reversedChatList(
       context: context,
       listKey: ValueKey('dm-list-${widget.peerId}'),
@@ -1921,6 +2132,8 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
       // list is frozen while reading, so index 0 is not the newest message
       // until the freeze is released (issue #54).
       onJumpToNewest: _scrollToBottom,
+      unreadRevIndex:
+          unreadIndex == null ? null : messages.length - 1 - unreadIndex,
       itemBuilder: (context, revIndex) => _buildMessageRow(
         context,
         revIndex,
@@ -1928,6 +2141,7 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
         replyIndexById,
         profiles,
         localPeerId,
+        unreadIndex,
       ),
     );
   }
@@ -1941,6 +2155,7 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     Map<String, int> replyIndexById,
     Map<String, storage_api.UserProfile> profiles,
     String localPeerId,
+    int? unreadIndex,
   ) {
     // Map the reversed builder index back to chronological order — all row
     // logic below (grouping, separators, highlight, reply) stays in
@@ -1988,6 +2203,7 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
       // This list carries the scroll rail, so the date rule keeps its right
       // end level with its left instead of ending 34px from the pane edge.
       railGutter: true,
+      unreadDivider: index == unreadIndex,
       child: wrapper,
     );
   }

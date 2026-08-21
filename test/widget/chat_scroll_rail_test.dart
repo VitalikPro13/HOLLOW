@@ -23,7 +23,8 @@ const _kNewest = 'Jump to the newest message';
 late ItemScrollController _controller;
 late ItemPositionsListener _positions;
 
-Future<void> _pumpList(WidgetTester tester, {required int itemCount}) async {
+Future<void> _pumpList(WidgetTester tester,
+    {required int itemCount, int? unreadRevIndex}) async {
   tester.view.physicalSize = const Size(600, 800);
   tester.view.devicePixelRatio = 1.0;
   addTearDown(tester.view.reset);
@@ -44,6 +45,7 @@ Future<void> _pumpList(WidgetTester tester, {required int itemCount}) async {
               itemScrollController: _controller,
               itemPositionsListener: _positions,
               itemCount: itemCount,
+              unreadRevIndex: unreadRevIndex,
               indexByMessageId: {
                 for (var i = 0; i < itemCount; i++) 'm$i': i,
               },
@@ -337,6 +339,76 @@ void main() {
         reason: 'with a rail beside the list the rule reclaims its width, or '
             'it stops 34px from the pane edge while starting 16px from the '
             'other one');
+  });
+
+  // Issue #54's "jump to last red": the rail marks where reading left off.
+  // The mark is 3px in a 10px gutter, so the thing that decides whether it is
+  // usable is not the paint, it is the snap — see kRailUnreadSnap.
+  group('the unread mark', () {
+    testWidgets('is absent when the visit has no line', (tester) async {
+      await _pumpList(tester, itemCount: 200);
+      expect(find.bySemanticsLabel('Jump to the first unread message'),
+          findsNothing);
+    });
+
+    testWidgets('marks the message position in the conversation',
+        (tester) async {
+      // Reversed indexes: 150 of 200 is well up the track, toward the OLDEST
+      // end, which is the TOP. A mark that lands near the bottom means the
+      // reversed mapping was dropped somewhere.
+      await _pumpList(tester, itemCount: 200, unreadRevIndex: 150);
+      final mark =
+          find.bySemanticsLabel('Jump to the first unread message');
+      expect(mark, findsOneWidget);
+      final markRect = tester.getRect(mark);
+      final railRect = tester.getRect(find.byType(ChatScrollRail));
+      expect(markRect.center.dy, lessThan(railRect.center.dy),
+          reason: 'an older message is further UP the track');
+      // A quarter of the way down the conversation is a quarter of the way
+      // down the TRACK, not a quarter of the thumb's travel: a thumb filling
+      // most of a barely-overflowing track squeezes every mark into its
+      // middle, which is what it did on a real build before this.
+      final track =
+          tester.getRect(find.bySemanticsLabel('Message list scrollbar'));
+      final quarter = track.top + track.height * (1 - 150 / 199);
+      expect((markRect.center.dy - quarter).abs(), lessThan(3.0));
+      expect(markRect.height, kRailUnreadSnap * 2,
+          reason: '3px of ink is not a target; the hit box is the snap');
+      // Inside the track, not floating over the caps' reservations.
+      expect(markRect.top, greaterThan(railRect.top));
+      expect(markRect.bottom, lessThan(railRect.bottom));
+    });
+
+    testWidgets('the newest and oldest ends land at opposite ends',
+        (tester) async {
+      await _pumpList(tester, itemCount: 200, unreadRevIndex: 0);
+      final atNewest = tester
+          .getRect(find.bySemanticsLabel('Jump to the first unread message'))
+          .center
+          .dy;
+      await _pumpList(tester, itemCount: 200, unreadRevIndex: 199);
+      final atOldest = tester
+          .getRect(find.bySemanticsLabel('Jump to the first unread message'))
+          .center
+          .dy;
+      expect(atOldest, lessThan(atNewest),
+          reason: 'index 0 is the NEWEST message, pinned to the bottom');
+    });
+
+    testWidgets('a tap near the mark lands on the message, not near it',
+        (tester) async {
+      await _pumpList(tester, itemCount: 200, unreadRevIndex: 150);
+      final markCentre = tester
+          .getRect(find.bySemanticsLabel('Jump to the first unread message'))
+          .center;
+      // Miss it by 6px, which is inside kRailUnreadSnap: aiming at the line
+      // and hitting the line are the same intent, and "roughly there" is the
+      // one thing this control must not be.
+      await tester.tapAt(markCentre.translate(0, 6));
+      await tester.pumpAndSettle();
+      final visible = _positions.itemPositions.value.map((p) => p.index);
+      expect(visible, contains(150));
+    });
   });
 
   testWidgets('the rail is a column beside the list, not an overlay on it',

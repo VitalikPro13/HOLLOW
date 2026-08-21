@@ -279,7 +279,7 @@ Because it only fires on a crossing, it never fights the header toggle: while na
 
 **Channel sidebar (dock mode):** The `_DockSidebarSlider` shows/hides the sidebar based on whether a server is selected (`selectedServerId != null`). Same clip+align+fade animation pattern. During close, it shows the frozen child widget to prevent content collapse.
 
-**Channel search:** `channelSearchOpenProvider` (StateProvider<bool>, default `false`). Toggled by `Ctrl+K`.
+**Message search:** `chatSearchOpenProvider` (StateProvider<bool>, default `false`). Toggled by the `quickSearch` shortcut (`Ctrl+K` by default). ONE flag for both chat panes -- it was `channelSearchOpenProvider` until 2026-08-21, which only the channel pane read, so the shortcut was a silent no-op in a DM.
 
 **Server settings:** `serverSettingsOpenProvider` (StateProvider<bool>, default `false`). In non-split mode, toggles between settings panel and chat. In split mode, opens as a dialog instead.
 

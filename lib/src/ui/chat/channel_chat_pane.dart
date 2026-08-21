@@ -25,6 +25,7 @@ import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/layout_provider.dart';
 import 'package:hollow/src/core/providers/member_panel_provider.dart';
 import 'package:hollow/src/core/providers/split_view_provider.dart';
+import 'package:hollow/src/core/providers/unread_marker_provider.dart';
 import 'package:hollow/src/core/providers/unread_provider.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
@@ -178,7 +179,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
     // because Riverpod forbids all ref usage once the element is unmounted.
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) {
-        ref.read(channelSearchOpenProvider.notifier).state = false;
+        ref.read(chatSearchOpenProvider.notifier).state = false;
         // Re-derive the slow-mode cooldown for THIS channel (the pane remounts
         // per channel — the previous pane's ephemeral pill state is gone, but
         // the message history isn't).
@@ -1584,7 +1585,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
           children: [
             _buildHeader(hollow),
 
-            if (ref.watch(channelSearchOpenProvider)) _buildSearchBar(hollow),
+            if (ref.watch(chatSearchOpenProvider)) _buildSearchBar(hollow),
 
             _buildMessageArea(hollow, messages, allMessages),
 
@@ -1630,7 +1631,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
     // matching listener in chat_pane.dart.
     ref.listen<bool>(windowFocusedProvider, _onWindowFocusChanged);
     // Focus search field when opened via global shortcut (Ctrl+K).
-    ref.listen<bool>(channelSearchOpenProvider, _onSearchOpenChanged);
+    ref.listen<bool>(chatSearchOpenProvider, _onSearchOpenChanged);
     // "Mention" in a user context menu, posted from a surface that has no
     // reference to this composer (member panel, voice row, a sender name).
     ref.listen<ComposerInsert?>(composerInsertProvider, _onComposerInsert);
@@ -1851,8 +1852,8 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
       child: HollowPressable(
         semanticLabel: 'Search messages',
         onTap: () {
-          final current = ref.read(channelSearchOpenProvider);
-          ref.read(channelSearchOpenProvider.notifier).state = !current;
+          final current = ref.read(chatSearchOpenProvider);
+          ref.read(chatSearchOpenProvider.notifier).state = !current;
           if (!current) {
             // Opening — focus the search field after build.
             WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -1865,7 +1866,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
         child: Icon(
           LucideIcons.search,
           size: 18,
-          color: ref.watch(channelSearchOpenProvider)
+          color: ref.watch(chatSearchOpenProvider)
               ? hollow.accent
               : hollow.textSecondary,
         ),
@@ -2005,7 +2006,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
     final messages =
         _displayMessages(ref.read(channelChatProvider)[_stateKey] ?? []);
     final idx = messages.indexWhere((m) => m.messageId == msg.messageId);
-    ref.read(channelSearchOpenProvider.notifier).state = false;
+    ref.read(chatSearchOpenProvider.notifier).state = false;
     setState(() {
       _searchController.clear();
       _searchResults = [];
@@ -2122,6 +2123,15 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
         (localNickRaw != null && localNickRaw.isNotEmpty)
             ? '@$localNickRaw'
             : null;
+    // Where reading left off (issue #54) — one computation per build feeds
+    // both the rail's mark and the row that carries the line.
+    final unreadIndex = unreadDividerIndex(
+      count: messages.length,
+      entrySeenId: ref.watch(unreadMarkerProvider)[
+          channelMarkerKey(widget.serverId, widget.channelId)],
+      messageIdAt: (i) => messages[i].messageId,
+      isMineAt: (i) => messages[i].isMe,
+    );
     return reversedChatList(
       context: context,
       listKey: ValueKey('ch-list-${widget.serverId}-${widget.channelId}'),
@@ -2134,6 +2144,8 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
       // while reading, so index 0 is not the newest message until the freeze
       // is released (issue #54).
       onJumpToNewest: _scrollToBottom,
+      unreadRevIndex:
+          unreadIndex == null ? null : messages.length - 1 - unreadIndex,
       itemBuilder: (context, revIndex) => _buildMessageRow(
         context,
         revIndex,
@@ -2141,6 +2153,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
         replyIndexById,
         localMentionName,
         localMentionNick,
+        unreadIndex,
       ),
     );
   }
@@ -2154,6 +2167,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
     Map<String, int> replyIndexById,
     String localMentionName,
     String? localMentionNick,
+    int? unreadIndex,
   ) {
     // Map the reversed builder index back to chronological
     // order — all row logic below stays chronological.
@@ -2210,6 +2224,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
       // This list carries the scroll rail, so the date rule keeps its right
       // end level with its left instead of ending 34px from the pane edge.
       railGutter: true,
+      unreadDivider: index == unreadIndex,
       child: wrapper,
     );
   }

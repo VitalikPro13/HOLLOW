@@ -4,9 +4,14 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 /// Defaults to true (desktop shows it open).
 final memberPanelProvider = StateProvider<bool>((ref) => true);
 
-/// Whether the channel search bar is open.
-/// Toggled by Ctrl+K globally or the search icon in the channel header.
-final channelSearchOpenProvider = StateProvider<bool>((ref) => false);
+/// Whether the message search bar is open, in whichever chat is on screen.
+///
+/// One flag for both surfaces on purpose: the quick-search shortcut is global,
+/// and it used to flip a CHANNEL-only flag, so pressing it in a DM did nothing
+/// at all (issue #54, "or have some sort of search"). Both panes reset it when
+/// they mount, so it can never arrive open in a conversation the user did not
+/// open it in.
+final chatSearchOpenProvider = StateProvider<bool>((ref) => false);
 
 /// Whether the main window is currently visible (not hidden to tray).
 /// Updated by main.dart window/tray listeners.

@@ -1252,8 +1252,8 @@ class _HollowShellState extends ConsumerState<HollowShell>
     }
 
     if (match(AppShortcut.quickSearch)) {
-      final current = ref.read(channelSearchOpenProvider);
-      ref.read(channelSearchOpenProvider.notifier).state = !current;
+      final current = ref.read(chatSearchOpenProvider);
+      ref.read(chatSearchOpenProvider.notifier).state = !current;
       return true;
     }
 

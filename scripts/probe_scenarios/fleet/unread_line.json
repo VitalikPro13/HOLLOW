@@ -1,0 +1,611 @@
+{
+  "_": [
+    "Issue #54: the red 'new messages' line, and the rail mark that jumps to it.",
+    "",
+    "This is the one thing about the line that a widget test cannot answer. The",
+    "index math is guarded in test/widget/unread_divider_test.dart and the",
+    "capture rules in unread_marker_test.dart, but both of those hand the",
+    "pointer in by hand. What is unproven until two real apps do it is that the",
+    "pointer is captured at the right MOMENT: the sidebar marks a DM seen from",
+    "its selection callback before the pane exists, the pane marks it seen",
+    "again on load, and the scroll handler marks it seen a third time on",
+    "arrival at the bottom. Any one of those clobbering the entry pointer",
+    "erases the line the instant it is drawn, and every one of them is real",
+    "only when a message actually arrives over the relay.",
+    "",
+    "The journey: a and b become friends, a reads the conversation, a walks",
+    "away, b sends two messages, a comes back. The line belongs above b's",
+    "FIRST message and nowhere else.",
+    "",
+    "run: powershell -File scripts/fleet.ps1 -Scenario unread_line"
+  ],
+  "peers": [
+    "a",
+    "b"
+  ],
+  "steps": [
+    {
+      "peer": "all",
+      "op": "wait_for",
+      "target": "text:Connected",
+      "timeout_ms": 120000
+    },
+    {
+      "peer": "a",
+      "op": "capture",
+      "from": "provider",
+      "key": "peerId",
+      "as": "PEER_A"
+    },
+    {
+      "peer": "b",
+      "op": "tap",
+      "target": "semantics:Add friend",
+      "index": 0
+    },
+    {
+      "peer": "b",
+      "op": "tap",
+      "target": "text:Add Friend",
+      "index": 0
+    },
+    {
+      "peer": "b",
+      "op": "enter_text",
+      "target": "hint:Peer ID or nickname...",
+      "value": "${PEER_A}"
+    },
+    {
+      "peer": "b",
+      "op": "tap",
+      "target": "text:Send Request",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "semantics:Add friend",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "text:Incoming",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "semantics:Accept friend request",
+      "timeout_ms": 60000
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "semantics:Accept friend request",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "text:probe-b",
+      "timeout_ms": 60000
+    },
+    {
+      "peer": "b",
+      "op": "wait_for",
+      "target": "text:probe-a",
+      "timeout_ms": 60000
+    },
+    {
+      "peer": "all",
+      "op": "key",
+      "value": "escape"
+    },
+    {
+      "peer": "a",
+      "op": "log",
+      "message": "a reads the conversation to the bottom, so the pointer is at the newest"
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "tooltip:probe-b"
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 1500
+    },
+    {
+      "peer": "a",
+      "op": "enter_text",
+      "target": "field",
+      "value": "read this ${RUN}"
+    },
+    {
+      "peer": "a",
+      "op": "key",
+      "value": "enter"
+    },
+    {
+      "peer": "b",
+      "op": "wait_for",
+      "target": "text:read this ${RUN}",
+      "timeout_ms": 60000
+    },
+    {
+      "peer": "a",
+      "op": "log",
+      "message": "a walks away — this is what releases the line for the next visit"
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "tooltip:Home",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 1000
+    },
+    {
+      "peer": "a",
+      "op": "shot",
+      "name": "a-01-away"
+    },
+    {
+      "peer": "b",
+      "op": "log",
+      "message": "two messages land while a is elsewhere"
+    },
+    {
+      "peer": "b",
+      "op": "tap",
+      "target": "tooltip:probe-a"
+    },
+    {
+      "peer": "b",
+      "op": "wait",
+      "ms": 1500
+    },
+    {
+      "peer": "b",
+      "op": "enter_text",
+      "target": "field",
+      "value": "new one ${RUN}"
+    },
+    {
+      "peer": "b",
+      "op": "key",
+      "value": "enter"
+    },
+    {
+      "peer": "b",
+      "op": "wait",
+      "ms": 1500
+    },
+    {
+      "peer": "b",
+      "op": "enter_text",
+      "target": "field",
+      "value": "new two ${RUN}"
+    },
+    {
+      "peer": "b",
+      "op": "key",
+      "value": "enter"
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 4000
+    },
+    {
+      "peer": "a",
+      "op": "log",
+      "message": "a comes back: the line must be there, and must survive the pane's own mark-seen"
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "tooltip:probe-b"
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 2500
+    },
+    {
+      "peer": "a",
+      "op": "shot",
+      "name": "a-02-line"
+    },
+    {
+      "peer": "a",
+      "op": "dump",
+      "name": "a-line"
+    },
+    {
+      "peer": "a",
+      "op": "expect_count",
+      "target": "semantics:New messages",
+      "value": 1
+    },
+    {
+      "peer": "a",
+      "op": "log",
+      "message": "it does not evaporate a second later, which is exactly how it used to fail"
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 3000
+    },
+    {
+      "peer": "a",
+      "op": "expect_count",
+      "target": "semantics:New messages",
+      "value": 1
+    },
+    {
+      "peer": "a",
+      "op": "shot",
+      "name": "a-03-line-still-there"
+    },
+    {
+      "peer": "a",
+      "op": "log",
+      "message": "leaving and coming back with nothing new draws NO line"
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "tooltip:Home",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 1000
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "tooltip:probe-b"
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 2000
+    },
+    {
+      "peer": "a",
+      "op": "expect_count",
+      "target": "semantics:New messages",
+      "value": 0
+    },
+    {
+      "peer": "a",
+      "op": "shot",
+      "name": "a-04-quiet-return"
+    },
+    {
+      "peer": "a",
+      "op": "log",
+      "message": "now a long conversation, so the rail exists and can mark the line"
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "tooltip:Home",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 1000
+    },
+    {
+      "peer": "b",
+      "op": "log",
+      "message": "twenty messages: more items than the viewport holds, which is what makes the rail appear"
+    },
+    {
+      "peer": "b",
+      "op": "enter_text",
+      "target": "field",
+      "value": "bulk 01 ${RUN}"
+    },
+    {
+      "peer": "b",
+      "op": "key",
+      "value": "enter"
+    },
+    {
+      "peer": "b",
+      "op": "enter_text",
+      "target": "field",
+      "value": "bulk 02 ${RUN}"
+    },
+    {
+      "peer": "b",
+      "op": "key",
+      "value": "enter"
+    },
+    {
+      "peer": "b",
+      "op": "enter_text",
+      "target": "field",
+      "value": "bulk 03 ${RUN}"
+    },
+    {
+      "peer": "b",
+      "op": "key",
+      "value": "enter"
+    },
+    {
+      "peer": "b",
+      "op": "enter_text",
+      "target": "field",
+      "value": "bulk 04 ${RUN}"
+    },
+    {
+      "peer": "b",
+      "op": "key",
+      "value": "enter"
+    },
+    {
+      "peer": "b",
+      "op": "enter_text",
+      "target": "field",
+      "value": "bulk 05 ${RUN}"
+    },
+    {
+      "peer": "b",
+      "op": "key",
+      "value": "enter"
+    },
+    {
+      "peer": "b",
+      "op": "enter_text",
+      "target": "field",
+      "value": "bulk 06 ${RUN}"
+    },
+    {
+      "peer": "b",
+      "op": "key",
+      "value": "enter"
+    },
+    {
+      "peer": "b",
+      "op": "enter_text",
+      "target": "field",
+      "value": "bulk 07 ${RUN}"
+    },
+    {
+      "peer": "b",
+      "op": "key",
+      "value": "enter"
+    },
+    {
+      "peer": "b",
+      "op": "enter_text",
+      "target": "field",
+      "value": "bulk 08 ${RUN}"
+    },
+    {
+      "peer": "b",
+      "op": "key",
+      "value": "enter"
+    },
+    {
+      "peer": "b",
+      "op": "enter_text",
+      "target": "field",
+      "value": "bulk 09 ${RUN}"
+    },
+    {
+      "peer": "b",
+      "op": "key",
+      "value": "enter"
+    },
+    {
+      "peer": "b",
+      "op": "enter_text",
+      "target": "field",
+      "value": "bulk 10 ${RUN}"
+    },
+    {
+      "peer": "b",
+      "op": "key",
+      "value": "enter"
+    },
+    {
+      "peer": "b",
+      "op": "enter_text",
+      "target": "field",
+      "value": "bulk 11 ${RUN}"
+    },
+    {
+      "peer": "b",
+      "op": "key",
+      "value": "enter"
+    },
+    {
+      "peer": "b",
+      "op": "enter_text",
+      "target": "field",
+      "value": "bulk 12 ${RUN}"
+    },
+    {
+      "peer": "b",
+      "op": "key",
+      "value": "enter"
+    },
+    {
+      "peer": "b",
+      "op": "enter_text",
+      "target": "field",
+      "value": "bulk 13 ${RUN}"
+    },
+    {
+      "peer": "b",
+      "op": "key",
+      "value": "enter"
+    },
+    {
+      "peer": "b",
+      "op": "enter_text",
+      "target": "field",
+      "value": "bulk 14 ${RUN}"
+    },
+    {
+      "peer": "b",
+      "op": "key",
+      "value": "enter"
+    },
+    {
+      "peer": "b",
+      "op": "enter_text",
+      "target": "field",
+      "value": "bulk 15 ${RUN}"
+    },
+    {
+      "peer": "b",
+      "op": "key",
+      "value": "enter"
+    },
+    {
+      "peer": "b",
+      "op": "enter_text",
+      "target": "field",
+      "value": "bulk 16 ${RUN}"
+    },
+    {
+      "peer": "b",
+      "op": "key",
+      "value": "enter"
+    },
+    {
+      "peer": "b",
+      "op": "enter_text",
+      "target": "field",
+      "value": "bulk 17 ${RUN}"
+    },
+    {
+      "peer": "b",
+      "op": "key",
+      "value": "enter"
+    },
+    {
+      "peer": "b",
+      "op": "enter_text",
+      "target": "field",
+      "value": "bulk 18 ${RUN}"
+    },
+    {
+      "peer": "b",
+      "op": "key",
+      "value": "enter"
+    },
+    {
+      "peer": "b",
+      "op": "enter_text",
+      "target": "field",
+      "value": "bulk 19 ${RUN}"
+    },
+    {
+      "peer": "b",
+      "op": "key",
+      "value": "enter"
+    },
+    {
+      "peer": "b",
+      "op": "enter_text",
+      "target": "field",
+      "value": "bulk 20 ${RUN}"
+    },
+    {
+      "peer": "b",
+      "op": "key",
+      "value": "enter"
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 6000
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "tooltip:probe-b"
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 3000
+    },
+    {
+      "peer": "a",
+      "op": "shot",
+      "name": "a-05-rail-mark"
+    },
+    {
+      "peer": "a",
+      "op": "dump",
+      "name": "a-rail-mark"
+    },
+    {
+      "peer": "a",
+      "op": "log",
+      "message": "the line itself is far above the viewport - a list this long does not BUILD an off-screen row, which is exactly what the rail mark is for"
+    },
+    {
+      "peer": "a",
+      "op": "log",
+      "message": "the rail offers the jump, which is the issue's 'jump to last red'"
+    },
+    {
+      "peer": "a",
+      "op": "expect_count",
+      "target": "tooltip:Jump to new messages",
+      "value": 1
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "semantics:Jump to the first unread message",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 1500
+    },
+    {
+      "peer": "a",
+      "op": "shot",
+      "name": "a-06-jumped"
+    },
+    {
+      "peer": "a",
+      "op": "expect_count",
+      "target": "semantics:New messages",
+      "value": 1
+    },
+    {
+      "peer": "a",
+      "op": "dump",
+      "name": "a-jumped"
+    }
+  ],
+  "cleanup": [
+    {
+      "peer": "all",
+      "op": "log",
+      "message": "nothing to undo: every run restores the fixture data directories."
+    }
+  ]
+}

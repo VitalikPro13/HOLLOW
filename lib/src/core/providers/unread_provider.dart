@@ -5,6 +5,7 @@ import 'package:hollow/src/core/providers/notification_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
+import 'package:hollow/src/core/providers/unread_marker_provider.dart';
 
 /// Tracks unread message state per channel and per DM.
 ///
@@ -201,6 +202,11 @@ class UnreadNotifier extends Notifier<UnreadState> {
       String serverId, String channelId, String? latestMessageId) async {
     if (latestMessageId == null) return;
     final key = '$serverId:$channelId';
+    // Record where this visit STARTED before the pointer moves, so the chat
+    // can draw a "new messages" line where reading left off (issue #54). The
+    // marker notifier ignores everything but the first call of a visit.
+    ref.read(unreadMarkerProvider.notifier).noteSeen(
+        channelMarkerKey(serverId, channelId), state.channelLastSeen[key]);
     // No-op guard: already seen up to this message and nothing pending —
     // skip the map clones, state replacement, and FFI settings write.
     if (state.channelLastSeen[key] == latestMessageId &&
@@ -238,6 +244,9 @@ class UnreadNotifier extends Notifier<UnreadState> {
   /// Mark a DM as seen.
   Future<void> markDmSeen(String peerId, String? latestMessageId) async {
     if (latestMessageId == null) return;
+    // See markChannelSeen: the entry pointer is captured before it moves.
+    ref.read(unreadMarkerProvider.notifier)
+        .noteSeen(dmMarkerKey(peerId), state.dmLastSeen[peerId]);
     // No-op guard: already seen up to this message and no pending unread —
     // skip the map clones, state replacement, and FFI settings write.
     if (state.dmLastSeen[peerId] == latestMessageId &&

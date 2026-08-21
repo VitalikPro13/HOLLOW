@@ -6,6 +6,7 @@ import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/shared_tickers.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
+import 'package:hollow/src/theme/contrast.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
@@ -186,6 +187,22 @@ bool shouldShowDateSeparator(DateTime current, DateTime? previous) {
       current.day != previous.day;
 }
 
+/// "Today", "Yesterday", or "February 16, 2026". Shared by the date separator
+/// and by the unread line when the two merge into one rule.
+String chatDayLabel(DateTime date) {
+  final now = DateTime.now();
+  final today = DateTime(now.year, now.month, now.day);
+  final messageDay = DateTime(date.year, date.month, date.day);
+  final diff = today.difference(messageDay).inDays;
+  if (diff == 0) return 'Today';
+  if (diff == 1) return 'Yesterday';
+  const months = [
+    'January', 'February', 'March', 'April', 'May', 'June',
+    'July', 'August', 'September', 'October', 'November', 'December',
+  ];
+  return '${months[date.month - 1]} ${date.day}, ${date.year}';
+}
+
 /// ASOT-style date separator: ——— February 16, 2026 ———
 ///
 /// The only thing in a chat that draws all the way across, which makes its two
@@ -210,23 +227,7 @@ class DateSeparator extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
-    final now = DateTime.now();
-    final today = DateTime(now.year, now.month, now.day);
-    final messageDay = DateTime(date.year, date.month, date.day);
-    final diff = today.difference(messageDay).inDays;
-
-    final String label;
-    if (diff == 0) {
-      label = 'Today';
-    } else if (diff == 1) {
-      label = 'Yesterday';
-    } else {
-      const months = [
-        'January', 'February', 'March', 'April', 'May', 'June',
-        'July', 'August', 'September', 'October', 'November', 'December',
-      ];
-      label = '${months[date.month - 1]} ${date.day}, ${date.year}';
-    }
+    final label = chatDayLabel(date);
 
     return Padding(
       padding: EdgeInsets.only(
@@ -261,6 +262,146 @@ class DateSeparator extends StatelessWidget {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// Chronological index of the row the "new messages" line goes above, or null
+/// when this visit has no line to draw (issue #54, "jump to last red").
+///
+/// [entrySeenId] is the pointer from `unreadMarkerProvider`: the last message
+/// read BEFORE this visit. Null means nothing was recorded and there is no
+/// line; the empty string means the conversation had never been read, so every
+/// row in the window is new.
+///
+/// Two rules earn their keep:
+///
+///  * **An unrecognised pointer means "everything loaded is new."** The window
+///    is the last 200 rows, so a pointer older than that is simply off the
+///    front of the list, and starting at 0 is the honest answer.
+///  * **Your own messages never open the unread run.** Sending is not
+///    arriving, and a line above your own reply is the noisiest way to get
+///    this wrong. So the line lands on the first message after the pointer
+///    that somebody ELSE sent, and a run of nothing but your own gets none.
+int? unreadDividerIndex({
+  required int count,
+  required String? entrySeenId,
+  required String? Function(int index) messageIdAt,
+  required bool Function(int index) isMineAt,
+}) {
+  if (entrySeenId == null || count == 0) return null;
+  var start = 0;
+  if (entrySeenId.isNotEmpty) {
+    for (var i = count - 1; i >= 0; i--) {
+      if (messageIdAt(i) == entrySeenId) {
+        start = i + 1;
+        break;
+      }
+    }
+  }
+  for (var i = start; i < count; i++) {
+    if (!isMineAt(i)) return i;
+  }
+  return null;
+}
+
+/// The "new messages" line: a rule in [HollowTheme.error] with a badge at its
+/// right end, sitting directly above the first message that arrived while you
+/// were away.
+///
+/// **The badge is the app's own unread pill**, not a word in red. The sidebar
+/// and the dock already say "unread" with a filled `error` pill and white bold
+/// text; bare red text beside a red rule read as a stray word rather than as
+/// the same thing those badges mean.
+///
+/// **[date] non-null MERGES the day separator into this rule.** The most
+/// ordinary way to see this line at all is to come back the next day, and that
+/// is exactly when the row also carries a date — which stacked two full-width
+/// rules about 30px apart with nothing between them, the same double-rule
+/// problem the own-message bar had against the scrollbar. Merged, the day
+/// reads in the unread colour and there is one rule, which is also what
+/// Discord does.
+///
+/// Deliberately NOT centred, merged or not. A centred label reads as another
+/// date; the right end is where a marker goes.
+///
+/// The label colour is lifted to 4.5:1 against the pane rather than using the
+/// raw error red, which fails as small text on the light theme.
+class UnreadDivider extends StatelessWidget {
+  /// Padding on the rule's right end, matching [DateSeparator.endInset] so
+  /// the two line up when they do not merge.
+  final double endInset;
+
+  /// The day this row starts, when the date separator merges into this line.
+  /// Null = the line stands alone.
+  final DateTime? date;
+
+  const UnreadDivider({super.key, this.endInset = HollowSpacing.lg, this.date});
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+    final line = hollow.error.withValues(alpha: 0.75);
+    final label = Contrast.ensureContrast(hollow.error, hollow.background,
+        targetRatio: 4.5);
+    final day = date == null ? null : chatDayLabel(date!);
+    return Padding(
+      padding: EdgeInsets.only(
+        // Merged, this rule is also the day separator, so it takes that
+        // separator's breathing room above rather than the line's own.
+        top: day == null ? HollowSpacing.sm : HollowSpacing.md + 2,
+        bottom: HollowSpacing.xxs,
+        left: HollowSpacing.lg,
+        right: endInset,
+      ),
+      child: Semantics(
+        header: true,
+        label: day == null ? 'New messages' : 'New messages, $day',
+        child: ExcludeSemantics(
+          child: Row(
+            children: [
+              Expanded(child: Container(height: 1, color: line)),
+              if (day != null) ...[
+                Padding(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: HollowSpacing.md),
+                  child: Text(
+                    day,
+                    style: HollowTypography.caption.copyWith(
+                      color: label,
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+                Expanded(child: Container(height: 1, color: line)),
+              ],
+              Padding(
+                padding: const EdgeInsets.only(left: HollowSpacing.sm),
+                child: Container(
+                  height: 14,
+                  padding: const EdgeInsets.symmetric(horizontal: 5),
+                  alignment: Alignment.center,
+                  decoration: BoxDecoration(
+                    color: hollow.error,
+                    borderRadius: BorderRadius.circular(7),
+                  ),
+                  child: const Text(
+                    'New',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 9,
+                      fontWeight: FontWeight.w700,
+                      height: 1,
+                      letterSpacing: 0.3,
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
@@ -342,6 +483,9 @@ Widget reversedChatList({
   // a live feed.
   bool scrollRail = true,
   VoidCallback? onJumpToNewest,
+  // REVERSED index of the row the "new messages" line sits above, so the rail
+  // can mark it and offer "jump to last red" (issue #54).
+  int? unreadRevIndex,
 }) {
   // Issue #35: scoped to the rows when scaled — see
   // [selectionMustBeScopedToRows].
@@ -394,6 +538,7 @@ Widget reversedChatList({
         controller: itemScrollController,
         positions: itemPositionsListener,
         onJumpToNewest: onJumpToNewest,
+        unreadRevIndex: unreadRevIndex,
       ),
     ),
   );
@@ -497,6 +642,14 @@ Color railSegmentFill(HollowTheme hollow, {required bool active}) =>
 /// 34px out.
 const double kChatRuleEndInset = HollowSpacing.xxs;
 
+/// Height of the unread mark on the track: the thumb is 6px wide and this is
+/// a rule across the gutter, so 3 reads as a line rather than as a second,
+/// stubbier thumb.
+const double kRailUnreadMarkHeight = 3.0;
+
+/// How far from the unread mark a tap still counts as aiming at it.
+const double kRailUnreadSnap = 8.0;
+
 /// Clearance between the rail and the chrome above and below it.
 ///
 /// Without it the caps BUTT against the header's bottom border and the
@@ -545,12 +698,18 @@ class ChatScrollRail extends StatefulWidget {
   /// jumping to index 0 of a frozen list lands on the wrong message.
   final VoidCallback? onJumpToNewest;
 
+  /// REVERSED index of the row under the "new messages" line, or null when
+  /// this visit has no line. The rail marks it on the track and snaps a tap
+  /// near the mark straight onto it — that is the issue's "jump to last red".
+  final int? unreadRevIndex;
+
   const ChatScrollRail({
     super.key,
     required this.itemCount,
     required this.controller,
     required this.positions,
     this.onJumpToNewest,
+    this.unreadRevIndex,
   });
 
   @override
@@ -574,6 +733,46 @@ class _ChatScrollRailState extends State<ChatScrollRail> {
   void _jumpToOldest() {
     if (!widget.controller.isAttached || widget.itemCount == 0) return;
     widget.controller.jumpTo(index: widget.itemCount - 1);
+  }
+
+  /// Lands the unread line in the upper-middle of the viewport, the same
+  /// alignment the reply-jump uses, so the first new message reads downward
+  /// from there rather than sitting on the bottom edge.
+  void _jumpToUnread() {
+    final index = widget.unreadRevIndex;
+    if (index == null || !widget.controller.isAttached) return;
+    widget.controller.jumpTo(
+      index: index.clamp(0, widget.itemCount - 1),
+      alignment: 0.6,
+    );
+  }
+
+  /// Where the unread mark sits on a track of [trackHeight], or null when
+  /// there is nothing to mark.
+  ///
+  /// The mark is a LOCATOR — "the line is up there in the conversation" — so
+  /// it maps the message's position in the whole list onto the whole track,
+  /// not onto the thumb's travel the way the thumb itself does. The two agree
+  /// in a long conversation (a small thumb means travel is nearly the whole
+  /// track) and disagree exactly where the thumb mapping looks wrong: in a
+  /// barely-overflowing one, a thumb filling 85% of the track squeezes every
+  /// position into the middle 15%, so a run of new messages starting at the
+  /// very top of the conversation drew its mark halfway down. Measured on a
+  /// real build with 21 messages: mark at y=312 of a track running 130..545.
+  ///
+  /// Jumping stays exact either way — [_jumpToUnread] goes to the index, not
+  /// to a fraction — and a tap within [kRailUnreadSnap] of the PAINTED centre
+  /// snaps to it, so what you can see is what you can hit.
+  double? _unreadCentre(double trackHeight) {
+    final index = widget.unreadRevIndex;
+    if (index == null || widget.itemCount <= 1) return null;
+    final fraction =
+        (1.0 - index / (widget.itemCount - 1)).clamp(0.0, 1.0);
+    // Keep the whole target on the track: at either extreme half of it would
+    // otherwise hang off the end and clip.
+    final limit = trackHeight - kRailUnreadSnap;
+    if (limit <= kRailUnreadSnap) return trackHeight / 2;
+    return (fraction * trackHeight).clamp(kRailUnreadSnap, limit);
   }
 
   void _jumpToNewest() {
@@ -674,6 +873,7 @@ class _ChatScrollRailState extends State<ChatScrollRail> {
           // track now, so "thumb at the bottom" and "nothing below" are the
           // same picture.
           final top = metrics.offset * (trackHeight - thumbHeight);
+          final unreadCentre = _unreadCentre(trackHeight);
           return GestureDetector(
             behavior: HitTestBehavior.opaque,
             onTapDown: (d) =>
@@ -690,6 +890,37 @@ class _ChatScrollRailState extends State<ChatScrollRail> {
               label: 'Message list scrollbar',
               child: Stack(
                 children: [
+                  // The mark is a real control, not paint: 3px of ink inside
+                  // a target [kRailUnreadSnap] tall either way, so it can be
+                  // hit, hovered and reached by a screen reader. Taps on the
+                  // track outside it snap to it too (see _jumpFromPointer);
+                  // a DRAG that starts here still drags, because the track's
+                  // drag recognizer beats a child's tap once the pointer
+                  // moves.
+                  if (unreadCentre != null)
+                    Positioned(
+                      top: unreadCentre - kRailUnreadSnap,
+                      height: kRailUnreadSnap * 2,
+                      left: 0,
+                      right: 0,
+                      child: HollowTooltip(
+                        message: 'Jump to new messages',
+                        child: HollowPressable(
+                          semanticLabel: 'Jump to the first unread message',
+                          onTap: _jumpToUnread,
+                          child: Center(
+                            child: Container(
+                              height: kRailUnreadMarkHeight,
+                              decoration: BoxDecoration(
+                                color: hollow.error,
+                                borderRadius: BorderRadius.circular(
+                                    kRailUnreadMarkHeight / 2),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
                   Positioned(
                     top: top,
                     height: thumbHeight,
@@ -728,6 +959,16 @@ class _ChatScrollRailState extends State<ChatScrollRail> {
   void _jumpFromPointer(double dy, double trackHeight, double thumbHeight) {
     final travel = trackHeight - thumbHeight;
     if (travel <= 0) return;
+    // The unread mark is 3px of a 10px gutter, which is not a target anybody
+    // can hit exactly. Anything landing within [kRailUnreadSnap] of it means
+    // it, so snap to the message instead of to the pointer's fraction —
+    // "near the red line" and "on the red line" are the same intent, and
+    // approximately-there is the one place this rail must not be approximate.
+    final centre = _unreadCentre(trackHeight);
+    if (centre != null && (dy - centre).abs() <= kRailUnreadSnap) {
+      _jumpToUnread();
+      return;
+    }
     _jumpToFraction(((dy - thumbHeight / 2) / travel).clamp(0.0, 1.0));
   }
 
@@ -858,6 +1099,9 @@ Widget dateSeparatedChatRow({
   // rule can give that width back out of its right end and stay level. Off by
   // default: mobile and the pinned-message list have no rail.
   bool railGutter = false,
+  // This row is the first one that arrived while the reader was away, so the
+  // "new messages" line goes above it (issue #54). See [unreadDividerIndex].
+  bool unreadDivider = false,
 }) {
   final showDate = shouldShowDateSeparator(timestamp, prevTimestamp);
   final messageWidget = showHeader
@@ -866,18 +1110,32 @@ Widget dateSeparatedChatRow({
           child: child,
         )
       : child;
+  final endInset =
+      railGutter && !_isTouchForm ? kChatRuleEndInset : HollowSpacing.lg;
+  // A row carrying BOTH becomes one rule, not two: see [UnreadDivider.date].
   return KeyedSubtree(
     key: ValueKey<Object>(rowKey),
-    child: showDate
+    child: showDate || unreadDivider
         ? Column(
             mainAxisSize: MainAxisSize.min,
+            // STRETCH, not the default centre. A message row that shrink-wraps
+            // — a grouped continuation, which is any reply in a run — gets
+            // CENTRED by a Column that only exists because this row carries a
+            // separator. Measured on a real build: "bulk 01" sat mid-pane
+            // under the unread line while every row above and below it was
+            // flush left. Latent since the date separator was written; it
+            // stayed hidden because a new DAY almost always starts a new
+            // group, so the row under a date rule almost always has a header
+            // and fills the width by itself.
+            crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              DateSeparator(
-                date: timestamp,
-                endInset: railGutter && !_isTouchForm
-                    ? kChatRuleEndInset
-                    : HollowSpacing.lg,
-              ),
+              if (showDate && !unreadDivider)
+                DateSeparator(date: timestamp, endInset: endInset),
+              if (unreadDivider)
+                UnreadDivider(
+                  endInset: endInset,
+                  date: showDate ? timestamp : null,
+                ),
               messageWidget,
             ],
           )

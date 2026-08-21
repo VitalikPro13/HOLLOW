@@ -27,6 +27,7 @@ import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/saved_messages_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/typing_provider.dart';
+import 'package:hollow/src/core/providers/unread_marker_provider.dart';
 import 'package:hollow/src/core/providers/unread_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
@@ -1954,8 +1955,12 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
   Widget _buildMessageListShell<T>({
     required List<T> messages,
     required String? Function(T msg) messageIdOf,
-    required Widget Function(
-            List<T> messages, int revIndex, Map<String, int> indexById)
+    // The conversation's key in `unreadMarkerProvider`, so mobile draws the
+    // same "new messages" line the desktop panes do (issue #54).
+    required String markerKey,
+    required bool Function(T msg) isMine,
+    required Widget Function(List<T> messages, int revIndex,
+            Map<String, int> indexById, int? unreadIndex)
         rowBuilder,
   }) {
     if (messages.isEmpty) {
@@ -1972,6 +1977,13 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
         if (messageIdOf(messages[i]) != null) messageIdOf(messages[i])!: i,
     };
 
+    final unreadIndex = unreadDividerIndex(
+      count: messages.length,
+      entrySeenId: ref.watch(unreadMarkerProvider)[markerKey],
+      messageIdAt: (i) => messageIdOf(messages[i]),
+      isMineAt: (i) => isMine(messages[i]),
+    );
+
     return reversedChatList(
       context: context,
       itemScrollController: _scrollController,
@@ -1987,7 +1999,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
       // Touch keeps the jump buttons, never the drag track (issue #54).
       onJumpToNewest: _scrollToBottom,
       itemBuilder: (context, revIndex) =>
-          rowBuilder(messages, revIndex, indexById),
+          rowBuilder(messages, revIndex, indexById, unreadIndex),
     );
   }
 
@@ -2008,6 +2020,8 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     return _buildMessageListShell<ChatMessage>(
       messages: messages,
       messageIdOf: (m) => m.messageId,
+      markerKey: dmMarkerKey(widget.peerId!),
+      isMine: (m) => m.isMe,
       rowBuilder: _buildDmRow,
     );
   }
@@ -2048,8 +2062,8 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
         isEdited: m.editedAt != null,
       );
 
-  Widget _buildDmRow(
-      List<ChatMessage> messages, int revIndex, Map<String, int> indexById) {
+  Widget _buildDmRow(List<ChatMessage> messages, int revIndex,
+      Map<String, int> indexById, int? unreadIndex) {
     // Reversed builder index → chronological; all row logic below stays
     // chronological.
     final index = messages.length - 1 - revIndex;
@@ -2134,6 +2148,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
       timestamp: msg.timestamp,
       prevTimestamp: prev?.timestamp,
       showHeader: showHeader,
+      unreadDivider: index == unreadIndex,
       child: bubble,
     );
   }
@@ -2215,6 +2230,8 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
     return _buildMessageListShell<ChannelChatMessage>(
       messages: messages,
       messageIdOf: (m) => m.messageId,
+      markerKey: channelMarkerKey(widget.serverId!, widget.channelId!),
+      isMine: (m) => m.isMe,
       rowBuilder: _buildChannelRow,
     );
   }
@@ -2239,7 +2256,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
   }
 
   Widget _buildChannelRow(List<ChannelChatMessage> messages, int revIndex,
-      Map<String, int> indexById) {
+      Map<String, int> indexById, int? unreadIndex) {
     // Reversed builder index → chronological.
     final index = messages.length - 1 - revIndex;
     final msg = messages[index];
@@ -2331,6 +2348,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
       timestamp: msg.timestamp,
       prevTimestamp: prev?.timestamp,
       showHeader: showHeader,
+      unreadDivider: index == unreadIndex,
       child: bubble,
     );
   }

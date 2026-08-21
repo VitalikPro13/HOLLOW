@@ -1221,3 +1221,19 @@ Shell chrome the user can size and shape. Every one is a plain synchronous `Noti
 - **`collapsedMemberGroupsProvider`** — `Set<String>` of `serverId:label` keys, key `collapsed_member_groups`, stored newline-joined. `CollapsedMemberGroupsNotifier.keyFor(serverId, label)` builds the key; `toggle()` flips one section. Read by `_serverMemberEntriesProvider`, which drops the member rows of a folded section but keeps its divider and full count.
 
 Both width notifiers share `_PanelWidthNotifier` (same clamp + write-through, different key and bounds). Writes are optimistic: state moves on the frame, the DB write trails it, and a failed write is logged rather than surfaced — it only costs the width on next launch.
+
+## Unread entry marker (`core/providers/unread_marker_provider.dart`, issue #54, 2026-08-21)
+
+The second read pointer behind the chat's "new messages" line. `unreadProvider`'s `seen` cannot answer "where did I leave off", because OPENING the conversation is what moves it -- a divider computed from `seen` is erased the instant it is drawn.
+
+`unreadMarkerProvider` is a `Notifier<Map<String, String>>` holding the value `seen` had BEFORE this visit, keyed `dm:{peerId}` / `ch:{serverId}:{channelId}` (`dmMarkerKey` / `channelMarkerKey`). Value `""` means the conversation had never been read at all, which is a real answer ("everything here is new") and different from an absent key. **RAM only** -- coming back tomorrow must not redraw yesterday's line.
+
+**The arming rule is the whole design.** A conversation is armed whenever it is not the one on screen; the FIRST `noteSeen` after that records the pointer and disarms it, and every later one of the same visit is ignored. That is what stops the line sliding as the user reads, and what stops one appearing above their own message when they send.
+
+**The disarm rides the SELECTION providers, never the panes' lifecycles.** `build()` registers `ref.listen` on `selectedPeerProvider`, `selectedChannelProvider`, `selectedServerProvider` and `splitViewProvider`, and each listener only ever `_leave`s the conversation being LEFT. That matters because `markDmSeen` / `markChannelSeen` run from FIVE places -- the sidebar's selection callback (before the pane exists), the pane on load, the scroll handler on arrival at the bottom, a context menu, and a notification tap -- and a listener that only touches the previous key cannot race any of them. `initState` looks like the obvious home and is wrong: the sidebar sets the selection and marks seen in the SAME callback, so the pane mounts too late to see the old pointer.
+
+**Marking read from OUTSIDE the conversation records nothing and leaves it armed.** `noteSeen` checks `_isOnScreen(key)` first; a "Mark as read" on a sidebar tile is the user dismissing messages, not going to read them, and recording there would hand the next visit a line above messages already dismissed. `_isOnScreen` reads the selection providers LIVE rather than off the cached keys, because on the first navigation of a session the listeners have not run yet.
+
+`UnreadNotifier.markChannelSeen` / `markDmSeen` call `noteSeen(key, previousSeenId)` BEFORE their own no-op guard, so a conversation opened with nothing unread still records (and then draws no line, because the pointer is already the newest message).
+
+Consumers: both desktop chat panes and both mobile chat routes, via `unreadDividerIndex` in `wiki/ui_chat_pane_shared.md`. Guarded by `test/widget/unread_marker_test.dart` and, for the capture MOMENT, `scripts/probe_scenarios/fleet/unread_line.json` on two real instances.

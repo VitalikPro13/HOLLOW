@@ -1,0 +1,21 @@
+[
+  {"op": "log", "message": "issue #54: message search in a DM header"},
+  {"op": "tap", "target": "tooltip:MacOS"},
+  {"op": "shot", "name": "dm-01-open"},
+  {"op": "dump", "name": "dm-open"},
+
+  {"op": "log", "message": "the header now carries a search button"},
+  {"op": "tap", "target": "semantics:Search messages"},
+  {"op": "shot", "name": "dm-02-search-open"},
+  {"op": "dump", "name": "dm-search-open"},
+
+  {"op": "log", "message": "type a query the conversation actually contains"},
+  {"op": "enter_text", "target": "type:HollowTextField", "value": "шо"},
+  {"op": "wait", "ms": 700},
+  {"op": "shot", "name": "dm-03-search-results"},
+  {"op": "dump", "name": "dm-search-results"},
+
+  {"op": "log", "message": "the shortcut closes it again"},
+  {"op": "tap", "target": "semantics:Search messages"},
+  {"op": "shot", "name": "dm-04-closed"}
+]
