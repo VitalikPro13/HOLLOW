@@ -4,7 +4,7 @@ Source: `lib/src/ui/shell/member_panel.dart` (706 lines)
 
 ## MemberPanel Widget Overview
 
-`MemberPanel` is a `ConsumerWidget` that renders the right-side panel. Its width comes from `memberPanelWidthProvider` (issue #54): the shell passes nothing and the user drags the `PanelResizeHandle` seam on the panel's LEFT edge; a caller may still override with an explicit `width`. It sits at the rightmost edge of the shell layout in both Dock and Classic modes, docked at every width the desktop shell runs at — below `_kDesktopBreakpoint` it simply starts collapsed, and re-opening it pushes the chat over rather than covering it (`_syncMemberPanelToWidth`, see `wiki/ui_shell_layout.md`).
+`MemberPanel` is a `ConsumerWidget` that renders the right-side panel. Its width comes from `memberPanelWidthProvider` (issue #54): the shell passes nothing and the user drags the `PanelResizeHandle` seam on the panel's LEFT edge (and passes `edgeBorder: false`, because that seam paints the divider itself since 2026-08-21); a caller may still override with an explicit `width`. It sits at the rightmost edge of the shell layout in both Dock and Classic modes, docked at every width the desktop shell runs at — below `_kDesktopBreakpoint` it simply starts collapsed, and re-opening it pushes the chat over rather than covering it (`_syncMemberPanelToWidth`, see `wiki/ui_shell_layout.md`).
 
 The panel watches `selectedServerProvider` to determine which content mode to display:
 - **Server selected (`selectedServerId != null`):** Shows `_ServerMemberContent` keyed by `server-members-$serverId`.

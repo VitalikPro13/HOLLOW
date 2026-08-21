@@ -10,6 +10,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme_data.dart';
 import 'package:hollow/src/ui/chat/chat_pane_shared.dart';
 import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
@@ -186,6 +187,156 @@ void main() {
             'events in the outer 8px of the client area — a control centred '
             'in a rail that hugs the edge is simply dead, and every widget '
             'test still passes');
+  });
+
+  testWidgets('the rail clears the chrome above and below it', (tester) async {
+    // Measured on a real build before this existed: the top cap started at
+    // y=125 with the header's bottom border at y=124 — flush, not "nearly".
+    // The bottom cap sat on the composer's top border the same way. Two
+    // controls jammed into the corners of the message area is most of why the
+    // rail read as unfinished.
+    await _pumpList(tester, itemCount: 200);
+    final rail = tester.getRect(find.byType(ChatScrollRail));
+    final cap = tester.getRect(find.bySemanticsLabel(_kOldest));
+
+    expect(cap.top - rail.top, kRailEndInset,
+        reason: 'the cap must never touch the header above it');
+    expect(rail.right - cap.right, kWindowEdgeDeadStrip,
+        reason: 'and the whole control stays flush against the LIVE edge of '
+            'the gutter, which is where every other scrollbar in the app '
+            'draws itself');
+  });
+
+  testWidgets('a thumb at the end of the list is at the end of its track',
+      (tester) async {
+    // The complaint this exists for, in Vitalik's words: "when it's the last
+    // message, no way to scroll and it shows like there is something to
+    // scroll, but there are not." Measured on a real build at the time: the
+    // track painted down to y=548 while the thumb stopped at y=526, so 22px
+    // of empty track sat under it — one _kCapExtent, which the old rail
+    // reserved for a cap and then painted groove across anyway. A scrollbar
+    // that lies about how much is left is worse than no scrollbar.
+    await _pumpList(tester, itemCount: 200);
+    final track =
+        tester.getRect(find.bySemanticsLabel('Message list scrollbar'));
+    final thumb = tester.getRect(find.descendant(
+      of: find.bySemanticsLabel('Message list scrollbar'),
+      matching: find.byType(AnimatedContainer),
+    ));
+
+    expect(thumb.bottom, moreOrLessEquals(track.bottom, epsilon: 0.5),
+        reason: 'the list opens pinned to the newest message, so there is '
+            'nothing below — and the track must not show room below either');
+
+    await tester.tap(find.bySemanticsLabel(_kOldest));
+    await tester.pumpAndSettle();
+
+    final atTop = tester.getRect(find.descendant(
+      of: find.bySemanticsLabel('Message list scrollbar'),
+      matching: find.byType(AnimatedContainer),
+    ));
+    expect(atTop.top, moreOrLessEquals(track.top, epsilon: 0.5),
+        reason: 'and the same at the oldest end');
+
+    // The half that actually bites. The thumb always reached the ends of the
+    // TRACK; what lied was the painted groove, which ran the rail's whole
+    // height with the caps drawn inside its ends. Separated segments cannot:
+    // a gap between cap and track is proof the track stops where the travel
+    // stops. Before this, cap.bottom == track.top exactly.
+    final cap = tester.getRect(find.bySemanticsLabel(_kNewest));
+    expect(cap.top - track.bottom, kRailSegmentGap,
+        reason: 'the track must END above the cap, not run underneath it');
+  });
+
+  testWidgets('the caps hold their place when they stop being actionable',
+      (tester) async {
+    // They used to vanish at the end they point to, which resized the track
+    // between them and shifted the thumb every time you reached an end. The
+    // pill stays; it just stops being a button.
+    await _pumpList(tester, itemCount: 200);
+    final trackAtBottom =
+        tester.getRect(find.bySemanticsLabel('Message list scrollbar'));
+
+    await tester.drag(find.byType(Scrollable).first, const Offset(0, 600));
+    await tester.pumpAndSettle();
+    expect(find.bySemanticsLabel(_kNewest), findsOneWidget,
+        reason: 'scrolled up, "jump to present" becomes actionable');
+
+    expect(tester.getRect(find.bySemanticsLabel('Message list scrollbar')),
+        trackAtBottom,
+        reason: 'and the track it shares the column with does not move');
+  });
+
+  testWidgets('the thumb rides centred inside the groove', (tester) async {
+    // The groove is the thing that makes a cap, a thumb and a cap read as ONE
+    // control instead of three chips scattered down the gutter. A thumb
+    // shoved against one wall of its own track undoes that.
+    await _pumpList(tester, itemCount: 200);
+    final track =
+        tester.getRect(find.bySemanticsLabel('Message list scrollbar'));
+    final thumb = tester.getRect(find.descendant(
+      of: find.bySemanticsLabel('Message list scrollbar'),
+      matching: find.byType(AnimatedContainer),
+    ));
+
+    expect(thumb.left - track.left, track.right - thumb.right,
+        reason: 'centred in the track it rides in');
+    expect(thumb.width, 6);
+  });
+
+  test('a chat rule ends level with where it starts', () {
+    // Pure arithmetic, on purpose: this is the invariant that breaks the
+    // moment someone changes kChatRailWidth without looking at the date
+    // separator. The rule is the only thing in a chat that draws all the way
+    // across, so its two ends are where an unbalanced gutter shows. Measured
+    // before this held: 16px from the pane's left edge, 34px from its right.
+    expect((kChatRuleEndInset + kChatRailWidth - HollowSpacing.lg).abs(),
+        lessThanOrEqualTo(4.0),
+        reason: 'the rail already holds kChatRailWidth of the pane edge, so '
+            'the rule gives that back out of its own right padding — within '
+            'a few px of the HollowSpacing.lg its left end sits at');
+  });
+
+  testWidgets('the date rule gives the rail its width back', (tester) async {
+    tester.view.physicalSize = const Size(600, 400);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+
+    Future<double> rightEndOf({required bool railGutter}) async {
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: hollowTestOverrides(),
+          child: MaterialApp(
+            debugShowCheckedModeBanner: false,
+            theme: HollowThemeData.dark(),
+            home: Scaffold(
+              body: dateSeparatedChatRow(
+                rowKey: 'r',
+                timestamp: DateTime(2026, 8, 21),
+                prevTimestamp: null,
+                showHeader: true,
+                railGutter: railGutter,
+                child: const SizedBox(height: 20),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      final box = tester.getRect(find.byType(DateSeparator));
+      final rule = tester.getRect(find.descendant(
+        of: find.byType(DateSeparator),
+        matching: find.byType(Container),
+      ).last);
+      return box.right - rule.right;
+    }
+
+    expect(await rightEndOf(railGutter: false), HollowSpacing.lg,
+        reason: 'no rail (mobile, the pinned list) means symmetric padding');
+    expect(await rightEndOf(railGutter: true), kChatRuleEndInset,
+        reason: 'with a rail beside the list the rule reclaims its width, or '
+            'it stops 34px from the pane edge while starting 16px from the '
+            'other one');
   });
 
   testWidgets('the rail is a column beside the list, not an overlay on it',

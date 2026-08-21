@@ -1985,6 +1985,9 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
       timestamp: msg.timestamp,
       prevTimestamp: index > 0 ? messages[index - 1].timestamp : null,
       showHeader: showHeader,
+      // This list carries the scroll rail, so the date rule keeps its right
+      // end level with its left instead of ending 34px from the pane edge.
+      railGutter: true,
       child: wrapper,
     );
   }

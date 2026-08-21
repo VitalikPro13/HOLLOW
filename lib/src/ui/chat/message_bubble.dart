@@ -12,6 +12,7 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/chat/file_attachment_widget.dart';
 import 'package:hollow/src/ui/chat/hollow_link_card.dart';
 import 'package:hollow/src/ui/chat/bubble_perf.dart';
+import 'package:hollow/src/ui/chat/chat_pane_shared.dart';
 import 'package:hollow/src/ui/chat/hollow_link_utils.dart';
 import 'package:hollow/src/ui/chat/link_preview_card.dart';
 import 'package:hollow/src/ui/components/animated_gif_image.dart';
@@ -226,115 +227,115 @@ class MessageBubble extends ConsumerWidget {
           )
         : null;
 
-    final meDecoration = BoxDecoration(
-      border: Border(
-        right: BorderSide(color: hollow.accent, width: 2),
-      ),
-    );
 
+    // The row carries only the highlight wash now. Being YOURS is an
+    // [OwnMessageMarker] painted OVER the row, which costs it no layout.
     final highlightDecoration = isHighlighted
-        ? BoxDecoration(
-            color: hollow.accent.withValues(alpha: 0.08),
-            border: isMe ? meDecoration.border : null,
-          )
-        : (isMe ? meDecoration : null);
+        ? BoxDecoration(color: hollow.accent.withValues(alpha: 0.08))
+        : null;
 
     if (showHeader) {
-      return AnimatedContainer(
-        duration: const Duration(milliseconds: 400),
-        curve: Curves.easeOut,
-        padding: EdgeInsets.only(
-          top: 4,
-          // A group header never tiles upward (the run starts here), but it
-          // can tile into the continuation below it.
-          bottom: tileWithNext ? 0 : 4,
-          left: HollowSpacing.md,
-          right: HollowSpacing.md,
-        ),
-        decoration: highlightDecoration,
-        child: Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Padding(
-                padding: const EdgeInsets.only(top: 5),
-                child: ProfileTapTarget(
-                  peerId: senderId,
-                  child: HollowAvatar(peerId: senderId, size: avatarSize),
+      return markedAsOwn(
+        isMe: isMe,
+        row: AnimatedContainer(
+          duration: const Duration(milliseconds: 400),
+          curve: Curves.easeOut,
+          padding: EdgeInsets.only(
+            top: 4,
+            // A group header never tiles upward (the run starts here), but it
+            // can tile into the continuation below it.
+            bottom: tileWithNext ? 0 : 4,
+            left: HollowSpacing.md,
+            right: HollowSpacing.md,
+          ),
+          decoration: highlightDecoration,
+          child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.only(top: 5),
+                  child: ProfileTapTarget(
+                    peerId: senderId,
+                    child: HollowAvatar(peerId: senderId, size: avatarSize),
+                  ),
                 ),
-              ),
-              const SizedBox(width: avatarGap),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      children: [
-                        Flexible(
-                          child: ProfileTapTarget(
-                            peerId: senderId,
-                            child: Text(
-                              senderName,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: HollowTypography.body.copyWith(
-                                color: isMe
-                                    ? hollow.accent
-                                    : nameColorFromId(senderId),
-                                fontWeight: FontWeight.w600,
-                                fontSize: 13,
+                const SizedBox(width: avatarGap),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Flexible(
+                            child: ProfileTapTarget(
+                              peerId: senderId,
+                              child: Text(
+                                senderName,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: HollowTypography.body.copyWith(
+                                  color: isMe
+                                      ? hollow.accent
+                                      : nameColorFromId(senderId),
+                                  fontWeight: FontWeight.w600,
+                                  fontSize: 13,
+                                ),
                               ),
                             ),
                           ),
-                        ),
-                        const SizedBox(width: HollowSpacing.sm),
-                        Text(
-                          time,
-                          style: HollowTypography.caption.copyWith(
-                            color: hollow.textTertiary,
-                            fontSize: 10,
+                          const SizedBox(width: HollowSpacing.sm),
+                          Text(
+                            time,
+                            style: HollowTypography.caption.copyWith(
+                              color: hollow.textTertiary,
+                              fontSize: 10,
+                            ),
                           ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 3),
-                    ?replyWidget,
-                    ?messageTextWidget,
-                    ?linkPreviewWidget,
-                    ?hollowLinkWidgets,
-                    ?fileWidget,
-                    ?reactionBarWidget,
-                  ],
+                        ],
+                      ),
+                      const SizedBox(height: 3),
+                      ?replyWidget,
+                      ?messageTextWidget,
+                      ?linkPreviewWidget,
+                      ?hollowLinkWidgets,
+                      ?fileWidget,
+                      ?reactionBarWidget,
+                    ],
+                  ),
                 ),
-              ),
-            ],
-          ),
+              ],
+            ),
+        ),
       );
     }
 
 
     // Continuation message — indented, no avatar/name. A tiled seam drops the
     // row padding on that side; the block asset drops its own to match.
-    return AnimatedContainer(
-      duration: const Duration(milliseconds: 400),
-      curve: Curves.easeOut,
-      padding: EdgeInsets.only(
-        top: tileWithPrev ? 0 : 2,
-        bottom: tileWithNext ? 0 : 2,
-        left: HollowSpacing.md + indent,
-        right: HollowSpacing.md,
-      ),
-      decoration: highlightDecoration,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          ?replyWidget,
-          ?messageTextWidget,
-          ?linkPreviewWidget,
-          ?hollowLinkWidgets,
-          ?fileWidget,
-          ?reactionBarWidget,
-        ],
+    return markedAsOwn(
+      isMe: isMe,
+      row: AnimatedContainer(
+        duration: const Duration(milliseconds: 400),
+        curve: Curves.easeOut,
+        padding: EdgeInsets.only(
+          top: tileWithPrev ? 0 : 2,
+          bottom: tileWithNext ? 0 : 2,
+          left: HollowSpacing.md + indent,
+          right: HollowSpacing.md,
+        ),
+        decoration: highlightDecoration,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ?replyWidget,
+            ?messageTextWidget,
+            ?linkPreviewWidget,
+            ?hollowLinkWidgets,
+            ?fileWidget,
+            ?reactionBarWidget,
+          ],
+        ),
       ),
     );
   }

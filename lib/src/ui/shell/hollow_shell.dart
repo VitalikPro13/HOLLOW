@@ -1354,6 +1354,8 @@ class _HollowShellState extends ConsumerState<HollowShell>
     bool dockMode = false,
   }) {
     return ChannelSidebar(
+      // A _ChannelSidebarSeam always follows this one and paints the divider.
+      edgeBorder: false,
       peers: Map.from(peers),
       lastMessages: lastMessages,
       selectedPeerId: selectedPeerId,
@@ -2300,7 +2302,8 @@ class _MemberPanelWithSeam extends ConsumerWidget {
               ref.read(memberPanelWidthProvider.notifier).setWidth(w),
           onReset: () => ref.read(memberPanelWidthProvider.notifier).reset(),
         ),
-        const RepaintBoundary(child: MemberPanel()),
+        // The seam above paints the divider on this panel's left edge.
+        const RepaintBoundary(child: MemberPanel(edgeBorder: false)),
       ],
     );
   }

@@ -17,6 +17,7 @@ import 'package:hollow/src/ui/chat/staged_hollow_link_card.dart';
 import 'package:hollow/src/ui/chat/staged_link_preview_card.dart';
 import 'package:hollow/src/ui/components/animated_gif_image.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/components/hollow_scroll_behavior.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
 import 'package:hollow/src/ui/components/ui_scale.dart';
@@ -186,9 +187,25 @@ bool shouldShowDateSeparator(DateTime current, DateTime? previous) {
 }
 
 /// ASOT-style date separator: ——— February 16, 2026 ———
+///
+/// The only thing in a chat that draws all the way across, which makes its two
+/// ends the place an unbalanced gutter shows up. With the scroll rail holding
+/// [kChatRailWidth] of the pane's right edge, a symmetric [HollowSpacing.lg]
+/// padding put the rule 16px from the pane's LEFT edge and 34px from its
+/// right — measured on a real build, and the thing that read as "a gap on the
+/// side". [endInset] is how a list with a rail gives that back; lists without
+/// one (mobile, the pinned-message list) keep it symmetric.
 class DateSeparator extends StatelessWidget {
   final DateTime date;
-  const DateSeparator({super.key, required this.date});
+
+  /// Padding on the rule's right end. Defaults to matching the left.
+  final double endInset;
+
+  const DateSeparator({
+    super.key,
+    required this.date,
+    this.endInset = HollowSpacing.lg,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -212,11 +229,11 @@ class DateSeparator extends StatelessWidget {
     }
 
     return Padding(
-      padding: const EdgeInsets.only(
+      padding: EdgeInsets.only(
         top: HollowSpacing.md + 2,
         bottom: HollowSpacing.sm,
         left: HollowSpacing.lg,
-        right: HollowSpacing.lg,
+        right: endInset,
       ),
       child: Row(
         children: [
@@ -405,14 +422,21 @@ Widget chatListWithRail({required Widget list, required Widget rail}) {
 }
 
 /// Width of the chat's scrollbar column. The message list ends where this
-/// begins, which buys two things: the rail never paints over a row's right
-/// edge (the accent bar that marks your own messages lives exactly there),
-/// and it is the one strip of the pane the message hover ACTION BAR cannot
-/// reach — that bar right-aligns to `rowRight - HollowSpacing.md`, and it is
-/// an OverlayEntry, so anything floating INSIDE the list gets covered by it
-/// (issue #54 follow-up: the jump buttons started as round overlays over the
-/// bottom-right of the list and the last message's bar sat on top of them).
-const double kChatRailWidth = 22.0;
+/// begins, which buys the one strip of the pane the message hover ACTION BAR
+/// cannot reach — that bar right-aligns to `rowRight - HollowSpacing.md`, and
+/// it is an OverlayEntry, so anything floating INSIDE the list gets covered by
+/// it (issue #54 follow-up: the jump buttons started as round overlays over
+/// the bottom-right of the list and the last message's bar sat on top of
+/// them).
+///
+/// 18 = [kWindowEdgeDeadStrip] (8, unusable) + a 10px live strip, which is
+/// [kScrollGutter] — the same gutter every other scrollable in the app
+/// reserves. That makes the chat's scrollbar sit where all the others sit:
+/// content, 4px, a 6px thumb, then the pane edge. It was 22 while the rail
+/// was painting its thumb centred in the LIVE strip, which left 12px of dead
+/// space to its right and pushed it up against the own-message accent bar;
+/// the thumb is flush right now, so the extra 4px bought nothing.
+const double kChatRailWidth = kWindowEdgeDeadStrip + kScrollGutter;
 
 /// Dead strip along the window's outer edge, kept clear of anything clickable.
 ///
@@ -426,10 +450,61 @@ const double kChatRailWidth = 22.0;
 /// clicking it simply did nothing.
 const double kWindowEdgeDeadStrip = 8.0;
 
-/// Height reserved at each end of the rail for a jump cap. Reserved whether or
-/// not the cap is showing, so the thumb's travel does not change as the caps
-/// come and go.
+/// Width of the accent pill that marks your own messages.
+const double kOwnMessageBarWidth = 3.0;
+
+/// How far that pill floats inside the chat's left edge.
+///
+/// Not zero: flush against the edge, the pill welds itself to the divider
+/// between the chat and the channel list and reads as a highlight on the
+/// PANEL rather than a mark on the message. Sitting inside the row's own
+/// [HollowSpacing.md] padding puts it in the chat's left margin, opposite the
+/// scroll rail's groove in the margin on the other side — two rounded pills
+/// in the two margins, which is what makes them read as one design instead of
+/// two widgets stuck to the frame.
+const double kOwnMessageBarInset = HollowSpacing.xs;
+
+/// Height of a jump cap. Taller than the strip is wide: the cap fills the
+/// rail's live width, which is [kScrollGutter], so height is the only
+/// dimension left to make it a comfortable target.
 const double _kCapExtent = 22.0;
+
+/// Gap between a cap and the track.
+///
+/// Load bearing, not decoration: it is what proves the painted track stops
+/// where the thumb's travel stops. The old rail drew ONE groove across the
+/// whole rail with the caps inside its ends, so the track painted over the
+/// [_kCapExtent] the thumb cannot enter and showed scroll room that did not
+/// exist. Three separated segments cannot tell that lie.
+const double kRailSegmentGap = HollowSpacing.xs;
+
+/// Resting fill shared by all three segments of the rail.
+///
+/// Roughly a third of the thumb's own contrast: enough that a cap and the
+/// track read as the same control, not so much that a grey stripe runs down
+/// the chat. 0.05 was tried first and vanished at 1x — it only read when
+/// magnified.
+Color railSegmentFill(HollowTheme hollow, {required bool active}) =>
+    hollow.textSecondary.withValues(alpha: active ? 0.18 : 0.10);
+
+/// Right-end padding for a full-width chat rule on a list that carries the
+/// rail.
+///
+/// [kChatRailWidth] already sits between the list and the pane edge, so the
+/// rule only needs a hair more to keep off the groove: 2 + 18 lands its right
+/// end 20px from the pane's edge against the 16px its left end sits at, near
+/// enough that the rule reads level. Symmetric padding put those ends 16px and
+/// 34px out.
+const double kChatRuleEndInset = HollowSpacing.xxs;
+
+/// Clearance between the rail and the chrome above and below it.
+///
+/// Without it the caps BUTT against the header's bottom border and the
+/// composer's top border — measured on a real build, the top cap started at
+/// y=125 with the header's border at y=124, i.e. flush. Two controls jammed
+/// into the corners of the message area is what made the rail read as
+/// unfinished rather than as part of the chat.
+const double kRailEndInset = HollowSpacing.sm;
 
 /// True where a drag rail would fight the platform's own edge gestures.
 bool get _isTouchForm => Platform.isAndroid || Platform.isIOS;
@@ -525,54 +600,56 @@ class _ChatScrollRailState extends State<ChatScrollRail> {
     );
   }
 
-  /// Track plus the two caps, all inside the gutter.
+  /// Cap, track, cap — three segments of one width in one column, evenly
+  /// spaced.
+  ///
+  /// **The track is exactly as long as the thumb can travel.** It used to be
+  /// one continuous groove running the rail's whole height with the caps
+  /// drawn inside its ends, which painted track across the [_kCapExtent] the
+  /// thumb is not allowed into: pinned to the newest message the thumb
+  /// stopped 22px above the bottom of the groove, and that empty run read as
+  /// "there is more below" when there was nothing. A scrollbar that lies
+  /// about how much is left is worse than no scrollbar.
+  ///
+  /// The caps are ALWAYS drawn, dimmed and inert at the end they point to,
+  /// the way a native scrollbar greys its arrows. Showing and hiding them
+  /// resized the track underneath, so the thumb shifted every time you
+  /// reached an end. Inert means no `onTap` and no semantic label, so nothing
+  /// announces a button that would do nothing.
   Widget _rail(HollowTheme hollow, _RailMetrics metrics) {
     return Padding(
       // Everything interactive stays [kWindowEdgeDeadStrip] clear of the
-      // window's outer edge.
-      padding: const EdgeInsets.only(right: kWindowEdgeDeadStrip),
+      // window's outer edge, and [kRailEndInset] clear of the header above
+      // and the composer below.
+      padding: const EdgeInsets.only(
+        right: kWindowEdgeDeadStrip,
+        top: kRailEndInset,
+        bottom: kRailEndInset,
+      ),
       child: MouseRegion(
         onEnter: (_) => setState(() => _hovering = true),
         onExit: (_) => setState(() => _hovering = false),
-        child: Stack(
+        child: Column(
           children: [
-            // The track never runs under a cap: the ends are reserved either
-            // way, so the thumb keeps the same travel as the caps appear.
-            Positioned(
-              top: _kCapExtent,
-              bottom: _kCapExtent,
-              left: 0,
-              right: 0,
-              child: _track(hollow, metrics),
+            _RailCap(
+              hollow: hollow,
+              icon: LucideIcons.chevronsUp,
+              label: 'Jump to the oldest message',
+              tooltip: 'Jump to top',
+              onTap: _jumpToOldest,
+              enabled: !metrics.atOldest,
             ),
-            if (!metrics.atOldest)
-              Positioned(
-                top: 0,
-                left: 0,
-                right: 0,
-                height: _kCapExtent,
-                child: _RailCap(
-                  hollow: hollow,
-                  icon: LucideIcons.chevronsUp,
-                  label: 'Jump to the oldest message',
-                  tooltip: 'Jump to top',
-                  onTap: _jumpToOldest,
-                ),
-              ),
-            if (!metrics.atNewest)
-              Positioned(
-                bottom: 0,
-                left: 0,
-                right: 0,
-                height: _kCapExtent,
-                child: _RailCap(
-                  hollow: hollow,
-                  icon: LucideIcons.chevronsDown,
-                  label: 'Jump to the newest message',
-                  tooltip: 'Jump to present',
-                  onTap: _jumpToNewest,
-                ),
-              ),
+            const SizedBox(height: kRailSegmentGap),
+            Expanded(child: _track(hollow, metrics)),
+            const SizedBox(height: kRailSegmentGap),
+            _RailCap(
+              hollow: hollow,
+              icon: LucideIcons.chevronsDown,
+              label: 'Jump to the newest message',
+              tooltip: 'Jump to present',
+              onTap: _jumpToNewest,
+              enabled: !metrics.atNewest,
+            ),
           ],
         ),
       ),
@@ -581,52 +658,62 @@ class _ChatScrollRailState extends State<ChatScrollRail> {
 
   Widget _track(HollowTheme hollow, _RailMetrics metrics) {
     final active = _hovering || _dragging;
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final trackHeight = constraints.maxHeight;
-        final thumbHeight =
-            (metrics.extent * trackHeight).clamp(28.0, trackHeight);
-        // The thumb travels over `trackHeight - thumbHeight`, so its top is
-        // scaled into that shorter run: otherwise the oldest page could
-        // never be reached.
-        final top = metrics.offset * (trackHeight - thumbHeight);
-        return GestureDetector(
-          behavior: HitTestBehavior.opaque,
-          onTapDown: (d) =>
-              _jumpFromPointer(d.localPosition.dy, trackHeight, thumbHeight),
-          onVerticalDragStart: (d) {
-            setState(() => _dragging = true);
-            _jumpFromPointer(d.localPosition.dy, trackHeight, thumbHeight);
-          },
-          onVerticalDragUpdate: (d) =>
-              _jumpFromPointer(d.localPosition.dy, trackHeight, thumbHeight),
-          onVerticalDragEnd: (_) => setState(() => _dragging = false),
-          onVerticalDragCancel: () => setState(() => _dragging = false),
-          child: Semantics(
-            label: 'Message list scrollbar',
-            child: Stack(
-              children: [
-                Positioned(
-                  top: top,
-                  height: thumbHeight,
-                  // Centred in what is LEFT of the gutter once the window's
-                  // dead edge strip is taken out, not in the gutter itself.
-                  left: (constraints.maxWidth - 6) / 2,
-                  width: 6,
-                  child: AnimatedContainer(
-                    duration: HollowDurations.fast,
-                    decoration: BoxDecoration(
-                      color: hollow.textSecondary
-                          .withValues(alpha: active ? 0.55 : 0.28),
-                      borderRadius: BorderRadius.circular(3),
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: railSegmentFill(hollow, active: active),
+        borderRadius: BorderRadius.circular(kScrollGutter / 2),
+      ),
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final trackHeight = constraints.maxHeight;
+          final thumbHeight =
+              (metrics.extent * trackHeight).clamp(28.0, trackHeight);
+          // The thumb travels over `trackHeight - thumbHeight`, so its top is
+          // scaled into that shorter run: otherwise the oldest page could
+          // never be reached. Both ends of that run are ends of the painted
+          // track now, so "thumb at the bottom" and "nothing below" are the
+          // same picture.
+          final top = metrics.offset * (trackHeight - thumbHeight);
+          return GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTapDown: (d) =>
+                _jumpFromPointer(d.localPosition.dy, trackHeight, thumbHeight),
+            onVerticalDragStart: (d) {
+              setState(() => _dragging = true);
+              _jumpFromPointer(d.localPosition.dy, trackHeight, thumbHeight);
+            },
+            onVerticalDragUpdate: (d) =>
+                _jumpFromPointer(d.localPosition.dy, trackHeight, thumbHeight),
+            onVerticalDragEnd: (_) => setState(() => _dragging = false),
+            onVerticalDragCancel: () => setState(() => _dragging = false),
+            child: Semantics(
+              label: 'Message list scrollbar',
+              child: Stack(
+                children: [
+                  Positioned(
+                    top: top,
+                    height: thumbHeight,
+                    // Centred in the track it rides in, which is itself flush
+                    // against the live edge of the gutter — so the thumb
+                    // still lands where every other scrollbar in the app
+                    // draws one.
+                    left: (constraints.maxWidth - 6) / 2,
+                    width: 6,
+                    child: AnimatedContainer(
+                      duration: HollowDurations.fast,
+                      decoration: BoxDecoration(
+                        color: hollow.textSecondary
+                            .withValues(alpha: active ? 0.55 : 0.28),
+                        borderRadius: BorderRadius.circular(3),
+                      ),
                     ),
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
-          ),
-        );
-      },
+          );
+        },
+      ),
     );
   }
 
@@ -646,14 +733,22 @@ class _ChatScrollRailState extends State<ChatScrollRail> {
 
 }
 
-/// One end cap of the rail: scrollbar-arrow shaped, sized to the gutter, and
-/// out of reach of the message action bar.
+/// One end cap of the rail: a chevron on a pill the width of the gutter,
+/// matching the track's fill so cap and track read as one segmented control.
+///
+/// [enabled] false is the "you are already there" state: the pill stays, the
+/// chevron dims, and it stops being a button — no `onTap`, no tooltip, and no
+/// semantic label, so a screen reader is never offered an action that would do
+/// nothing. Keeping the pill is what holds the track's length still; hiding
+/// the cap instead resized the track and shifted the thumb every time you
+/// reached an end.
 class _RailCap extends StatelessWidget {
   final HollowTheme hollow;
   final IconData icon;
   final String label;
   final String tooltip;
   final VoidCallback onTap;
+  final bool enabled;
 
   const _RailCap({
     required this.hollow,
@@ -661,23 +756,47 @@ class _RailCap extends StatelessWidget {
     required this.label,
     required this.tooltip,
     required this.onTap,
+    required this.enabled,
   });
 
   @override
   Widget build(BuildContext context) {
-    return HollowTooltip(
-      message: tooltip,
-      child: HollowPressable(
-        semanticLabel: label,
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(hollow.radiusSm),
-        backgroundColor: hollow.elevated,
-        padding: EdgeInsets.zero,
-        child: Center(
-          child: Icon(icon, size: 12, color: hollow.textSecondary),
+    final radius = BorderRadius.circular(kScrollGutter / 2);
+    final pill = SizedBox(
+      height: _kCapExtent,
+      width: double.infinity,
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          color: railSegmentFill(hollow, active: false),
+          borderRadius: radius,
+        ),
+        child: HollowPressable(
+          semanticLabel: enabled ? label : null,
+          onTap: enabled ? onTap : null,
+          disabled: !enabled,
+          // `backgroundColor: null` makes the rest state the hover colour at
+          // ZERO ALPHA rather than `Colors.transparent`, so the lift is a pure
+          // fade and never lerps through black — and the track's fill shows
+          // through underneath (feedback_hover_state_patterns).
+          borderRadius: radius,
+          padding: EdgeInsets.zero,
+          child: Center(
+            // EXACTLY the pill's width. At `size: 12` the icon's box is wider
+            // than the [kScrollGutter] pill and gets clamped to it, which
+            // throws off the glyph's own centring: measured on a real build,
+            // the pill spanned columns 1246-1255 and the ink landed on
+            // 1249-1254 — three columns of margin on the left, one on the
+            // right, and visibly off to the right at 1x. Matching the box to
+            // the pill removes the clamp, so the glyph centres by
+            // construction. Widget tests cannot catch this (the test font
+            // draws every glyph as a filled box), which is why the numbers
+            // are written down here.
+            child: Icon(icon, size: kScrollGutter, color: hollow.textSecondary),
+          ),
         ),
       ),
     );
+    return enabled ? HollowTooltip(message: tooltip, child: pill) : pill;
   }
 }
 
@@ -735,6 +854,10 @@ Widget dateSeparatedChatRow({
   required DateTime? prevTimestamp,
   required bool showHeader,
   required Widget child,
+  // True on the surfaces [reversedChatList] hangs a rail beside, so the date
+  // rule can give that width back out of its right end and stay level. Off by
+  // default: mobile and the pinned-message list have no rail.
+  bool railGutter = false,
 }) {
   final showDate = shouldShowDateSeparator(timestamp, prevTimestamp);
   final messageWidget = showHeader
@@ -749,13 +872,68 @@ Widget dateSeparatedChatRow({
         ? Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              DateSeparator(date: timestamp),
+              DateSeparator(
+                date: timestamp,
+                endInset: railGutter && !_isTouchForm
+                    ? kChatRuleEndInset
+                    : HollowSpacing.lg,
+              ),
               messageWidget,
             ],
           )
         : messageWidget,
   );
 }
+
+/// Wraps a chat row with the accent pill that marks it as YOURS.
+///
+/// The pill runs the row's FULL height on purpose: a grouped run of your
+/// messages is several rows whose boxes touch, and any vertical inset would
+/// break the run into a dashed line.
+///
+/// History worth keeping. This was a `Border(right:)` on the row's own
+/// Container until 2026-08-21, which left it 4px from the scroll rail's thumb
+/// reading as one confused double rule. Moved to `Border(left:)` the same day,
+/// where it welded itself to the divider against the channel list — and a
+/// [Border] also INSETS its own Container's child, so every own-message avatar
+/// sat 2px right of everyone else's until the row gave that back out of its
+/// padding. A positioned pill costs the row no layout at all, so that wobble
+/// cannot come back.
+class OwnMessageMarker extends StatelessWidget {
+  final Widget child;
+
+  const OwnMessageMarker({super.key, required this.child});
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+    return Stack(
+      children: [
+        // Non-positioned, so the Stack sizes to the row. Never let this become
+        // a conditional `SizedBox.shrink()` or the whole row collapses
+        // (feedback_stack_nonpositioned_child_collapse).
+        child,
+        Positioned(
+          left: kOwnMessageBarInset,
+          top: 0,
+          bottom: 0,
+          width: kOwnMessageBarWidth,
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              color: hollow.accent,
+              borderRadius: BorderRadius.circular(kOwnMessageBarWidth / 2),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// Yours gets the pill; everyone else's row comes back untouched — so
+/// `find.byType(OwnMessageMarker)` is exactly the set of own-message rows.
+Widget markedAsOwn({required bool isMe, required Widget row}) =>
+    isMe ? OwnMessageMarker(child: row) : row;
 
 /// Reply-target preview bar shown above the input while composing a reply.
 class ChatReplyPreviewBar extends StatelessWidget {

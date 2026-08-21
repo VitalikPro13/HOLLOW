@@ -53,10 +53,10 @@ Same vertical stack of content widgets, but:
 
 ### Decoration Rules
 
-- **Own messages:** A 2px accent-colored right border (`meDecoration`).
-- **Highlighted messages:** Accent background at 8% alpha. If also own message, combines with the right border.
+- **Own messages:** `OwnMessageMarker` (from `chat_pane_shared.dart`) wraps the row and paints a `kOwnMessageBarWidth` (3px) accent pill with rounded ends, POSITIONED `kOwnMessageBarInset` (4px) inside the row's left edge. Not a border: it costs the row no layout, and it runs the row's FULL height so a grouped run of your messages reads as one continuous bar instead of a dashed line. Both bubbles apply it through `markedAsOwn({isMe, row})`, so `find.byType(OwnMessageMarker)` is exactly the set of own-message rows.
+- **Highlighted messages:** Accent background at 8% alpha, on the row's own `AnimatedContainer.decoration`. Independent of the marker now — the two used to be fused in one `BoxDecoration`.
 - **Other messages:** No decoration.
-- Decoration is applied via `AnimatedContainer.decoration` for smooth transition.
+- **History (2026-08-21, issue #54 follow-up):** the marker was a `Border(right:)` until the scroll rail took the gutter, where it landed 4px from the thumb and read as one confused double rule; then a `Border(left:)`, which welded it to the divider against the channel list so it read as a highlight on the PANEL. **A `Border` also INSETS its own Container's child**, so it shifted every own-message avatar 2px right of everyone else's until the row gave that back out of its padding — a positioned pill cannot, which is why that trap is retired. Guarded by `test/widget/message_accent_bar_test.dart`.
 
 ### Name Color Logic
 

@@ -140,8 +140,17 @@ class ChannelSidebar extends StatelessWidget {
   /// Whether to show the UserBar at the bottom. False in Dock layout.
   final bool showUserBar;
 
+  /// Whether to draw this panel's own divider on the edge facing the chat.
+  ///
+  /// False wherever a [PanelResizeHandle] sits against that edge: the seam
+  /// paints the divider itself, and two of them put a second line 6px inside
+  /// the first. True for a panel with no seam beside it (the split view's
+  /// right sidebar).
+  final bool edgeBorder;
+
   const ChannelSidebar({
     super.key,
+    this.edgeBorder = true,
     required this.peers,
     required this.lastMessages,
     required this.selectedPeerId,
@@ -200,8 +209,13 @@ class ChannelSidebar extends StatelessWidget {
       width: width,
       decoration: BoxDecoration(
         color: hollow.surface,
+        // When a PanelResizeHandle sits against this edge it paints the
+        // divider itself — drawing one here too would put a second line 6px
+        // inside the first.
         border: Border(
-          right: BorderSide(color: hollow.border),
+          right: edgeBorder
+              ? BorderSide(color: hollow.border)
+              : BorderSide.none,
         ),
       ),
       // The banner header is the only fixed-height slice of this column, and

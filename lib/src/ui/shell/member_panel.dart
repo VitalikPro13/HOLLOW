@@ -35,7 +35,15 @@ class MemberPanel extends ConsumerWidget {
   /// [memberPanelWidthProvider], which the seam on its left edge drags.
   final double? width;
 
-  const MemberPanel({super.key, this.width});
+  /// Whether to draw this panel's own divider on the edge facing the chat.
+  ///
+  /// False wherever a [PanelResizeHandle] sits against that edge: the seam
+  /// paints the divider itself, and two of them put a second line 6px inside
+  /// the first. True for a panel with no seam beside it (the split view's
+  /// right sidebar).
+  final bool edgeBorder;
+
+  const MemberPanel({super.key, this.width, this.edgeBorder = true});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -50,8 +58,13 @@ class MemberPanel extends ConsumerWidget {
       width: panelWidth,
       decoration: BoxDecoration(
         color: hollow.surface,
+        // The resize seam on this edge paints the divider — see
+        // [PanelResizeHandle]. Drawing one here as well put a second line 6px
+        // inside the first.
         border: Border(
-          left: BorderSide(color: hollow.border),
+          left: edgeBorder
+              ? BorderSide(color: hollow.border)
+              : BorderSide.none,
         ),
       ),
       // Panel zoom (issue #54): avatars, names and status dots together.
