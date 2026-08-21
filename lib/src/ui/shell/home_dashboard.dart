@@ -245,23 +245,23 @@ class _ScrollableColumnState extends State<_ScrollableColumn> {
     return SizedBox(
       width: widget.width,
       child: LayoutBuilder(
-        builder: (context, constraints) => Scrollbar(
+        // No explicit Scrollbar: HollowScrollBehavior gives every desktop
+        // vertical scrollable a gutter-reserved one (issue #54), and a manual
+        // wrapper here only painted a second thumb on top of it.
+        builder: (context, constraints) => SingleChildScrollView(
           controller: _controller,
-          child: SingleChildScrollView(
-            controller: _controller,
-            // minHeight + IntrinsicHeight, not a bare scroll view. The
-            // network column ends in `Expanded(_NewsPanel)` — it is MEANT to
-            // absorb the slack on a tall window and scroll internally — and
-            // an Expanded inside an unbounded scroll view is a hard error
-            // ("RenderFlex children have non-zero flex but incoming height
-            // constraints are unbounded"). This keeps the column exactly as
-            // it is whenever it fits, and lets it fall back to its intrinsic
-            // height — news panel at its natural size — when it does not,
-            // which is the case that needed a scrollbar.
-            child: ConstrainedBox(
-              constraints: BoxConstraints(minHeight: constraints.maxHeight),
-              child: IntrinsicHeight(child: widget.child),
-            ),
+          // minHeight + IntrinsicHeight, not a bare scroll view. The
+          // network column ends in `Expanded(_NewsPanel)` — it is MEANT to
+          // absorb the slack on a tall window and scroll internally — and
+          // an Expanded inside an unbounded scroll view is a hard error
+          // ("RenderFlex children have non-zero flex but incoming height
+          // constraints are unbounded"). This keeps the column exactly as
+          // it is whenever it fits, and lets it fall back to its intrinsic
+          // height — news panel at its natural size — when it does not,
+          // which is the case that needed a scrollbar.
+          child: ConstrainedBox(
+            constraints: BoxConstraints(minHeight: constraints.maxHeight),
+            child: IntrinsicHeight(child: widget.child),
           ),
         ),
       ),

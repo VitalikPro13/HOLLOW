@@ -17,6 +17,7 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:hollow/src/theme/hollow_theme_data.dart';
 import 'package:hollow/src/ui/chat/chat_pane_shared.dart';
 import 'package:hollow/src/ui/components/ui_scale.dart';
 import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
@@ -47,6 +48,9 @@ Future<void> _pumpScrolledList(
       overrides: hollowTestOverrides(),
       child: MaterialApp(
         debugShowCheckedModeBanner: false,
+        // The list carries its own scrollbar rail now (issue #54), and that
+        // reads the Hollow theme extension like every other Hollow widget.
+        theme: HollowThemeData.dark(),
         home: Scaffold(
           body: UiScaleBox(
             scale: scale,

@@ -58,8 +58,14 @@ void showChatProfile(
     return;
   }
 
-  final pos = overlayAnchorOf(context);
-  // Anchor just below the tapped name/avatar.
+  // A closure, not a point: the card re-reads it when the window is resized
+  // so it stays on the name it belongs to (issue #54).
+  Offset anchorOf() {
+    final pos = overlayAnchorOf(context);
+    // Anchor just below the tapped name/avatar.
+    return Offset(pos.dx, pos.dy + 24);
+  }
+
   showProfileCardPopup(
     context: context,
     ref: ref,
@@ -69,7 +75,7 @@ void showChatProfile(
     twitchUsername: twitchUsername,
     labels: labels,
     serverId: serverId,
-    anchor: Offset(pos.dx, pos.dy + 24),
+    anchorOf: anchorOf,
   );
 }
 

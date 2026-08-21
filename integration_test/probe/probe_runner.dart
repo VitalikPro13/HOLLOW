@@ -368,6 +368,9 @@ class ProbeRunner {
         await settle(frames: step['frames'] as int? ?? 20);
         return 'scrolled ${step['target']} by $dx,$dy';
 
+      case 'view':
+        return _view(step);
+
       case 'wait':
       case 'pump':
         final ms = step['ms'] as int?;
@@ -495,6 +498,30 @@ class ProbeRunner {
   ///
   /// `filter` narrows to targets or labels containing a substring; `max` caps
   /// the control list (default 45).
+  /// Resizes the FRAMEWORK viewport, which is what "the user maximized the
+  /// window" looks like to every widget: MediaQuery changes, the tree relays
+  /// out, and anything that captured a coordinate at open time (an anchored
+  /// popup) has to notice. The OS window is left alone deliberately — driving
+  /// window_manager against a window the probe never took through main()'s
+  /// setAsFrameless dance takes the whole process down with no Dart error.
+  Future<String> _view(Map<String, dynamic> step) async {
+    final frames = step['frames'] as int? ?? 25;
+    if (step['reset'] == true) {
+      tester.view.resetPhysicalSize();
+      await settle(frames: frames);
+      return 'view reset';
+    }
+    final width = (step['width'] as num?)?.toDouble();
+    final height = (step['height'] as num?)?.toDouble();
+    if (width == null || height == null) {
+      throw _ProbeFailure('view needs "width" and "height", or "reset": true');
+    }
+    final dpr = tester.view.devicePixelRatio;
+    tester.view.physicalSize = Size(width * dpr, height * dpr);
+    await settle(frames: frames);
+    return 'view is ${width.round()}x${height.round()} logical';
+  }
+
   Future<String> _look(Map<String, dynamic> step) async {
     final filter = (step['filter'] as String?)?.toLowerCase();
     final max = step['max'] as int? ?? 45;

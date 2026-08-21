@@ -112,6 +112,12 @@ class FileAttachmentWidget extends ConsumerWidget {
         // show a bogus error rather than "Downloading…".
         diskPath: isComplete ? diskPath : null,
         fileName: attachment.fileName,
+        // Without these the card said "Downloading…" under every pack that
+        // was never fetched — old rows, and anything the auto-download gate
+        // held back (issue #54).
+        isDownloading: isDownloading,
+        progress: progress,
+        onDownload: onDownload,
       );
     }
 

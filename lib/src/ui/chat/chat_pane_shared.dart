@@ -18,6 +18,7 @@ import 'package:hollow/src/ui/chat/staged_link_preview_card.dart';
 import 'package:hollow/src/ui/components/animated_gif_image.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
+import 'package:hollow/src/ui/components/hollow_tooltip.dart';
 import 'package:hollow/src/ui/components/ui_scale.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
@@ -320,10 +321,18 @@ Widget reversedChatList({
   // LongPressMessage action-sheet gesture on every bubble.
   bool selectionArea = true,
   EdgeInsets padding = const EdgeInsets.symmetric(vertical: HollowSpacing.sm),
+  // The scrollbar + jump controls (issue #54). Off for surfaces that are not
+  // a live feed.
+  bool scrollRail = true,
+  VoidCallback? onJumpToNewest,
 }) {
   // Issue #35: scoped to the rows when scaled — see
   // [selectionMustBeScopedToRows].
   final perRowSelection = selectionArea && selectionMustBeScopedToRows(context);
+  // Desktop only: the rail is a real column beside the list, not an overlay
+  // on top of it. See [ChatScrollRail] for why that distinction is load
+  // bearing.
+  final showRail = scrollRail && !_isTouchForm;
 
   final list = ScrollConfiguration(
     behavior: ScrollConfiguration.of(context).copyWith(scrollbars: false),
@@ -357,8 +366,363 @@ Widget reversedChatList({
           : itemBuilder,
     ),
   );
-  if (!selectionArea || perRowSelection) return ChatTextScale(child: list);
-  return ChatTextScale(child: chatSelectionArea(child: list));
+  final scrollable =
+      (!selectionArea || perRowSelection) ? list : chatSelectionArea(child: list);
+  if (!showRail) return ChatTextScale(child: scrollable);
+  return ChatTextScale(
+    child: chatListWithRail(
+      list: scrollable,
+      rail: ChatScrollRail(
+        itemCount: itemCount,
+        controller: itemScrollController,
+        positions: itemPositionsListener,
+        onJumpToNewest: onJumpToNewest,
+      ),
+    ),
+  );
+}
+
+/// Puts the scrollbar [rail] in a column of its own to the right of [list].
+///
+/// **Not a Stack overlay.** The obvious shape — `Stack([list,
+/// Positioned.fill(rail)])` — lays out and PAINTS correctly (the rail's box
+/// measured 584x171 at the right offset, the thumb and caps drew where they
+/// should) and then never receives a single pointer: no hover, no tap, not
+/// even a translucent `Listener` at its root firing. Every pointer over the
+/// rail went to the scrollable underneath instead. A column cannot have that
+/// argument with anything, and a reserved gutter is what the rest of the app
+/// does now anyway (`HollowScrollBehavior`), so the rail lives in one.
+Widget chatListWithRail({required Widget list, required Widget rail}) {
+  return Row(
+    // The Row is always inside a bounded box (the pane's Expanded), which is
+    // what `stretch` needs — see feedback_dart_patterns.
+    crossAxisAlignment: CrossAxisAlignment.stretch,
+    children: [
+      Expanded(child: list),
+      SizedBox(width: kChatRailWidth, child: rail),
+    ],
+  );
+}
+
+/// Width of the chat's scrollbar column. The message list ends where this
+/// begins, which buys two things: the rail never paints over a row's right
+/// edge (the accent bar that marks your own messages lives exactly there),
+/// and it is the one strip of the pane the message hover ACTION BAR cannot
+/// reach — that bar right-aligns to `rowRight - HollowSpacing.md`, and it is
+/// an OverlayEntry, so anything floating INSIDE the list gets covered by it
+/// (issue #54 follow-up: the jump buttons started as round overlays over the
+/// bottom-right of the list and the last message's bar sat on top of them).
+const double kChatRailWidth = 22.0;
+
+/// Dead strip along the window's outer edge, kept clear of anything clickable.
+///
+/// On Windows the frameless window's resize border lives INSIDE the client
+/// area: `window_manager` answers WM_NCHITTEST with HTRIGHT there, so those
+/// pixels never become a Flutter pointer event at all. Measured against a
+/// real build: a click 14px in works, 10px in works, 8px in does nothing.
+/// The chat is the rightmost pane whenever the member list is closed, so a
+/// rail that hugged the edge had its whole middle — thumb and both caps —
+/// inside that strip. It rendered perfectly and every widget test passed;
+/// clicking it simply did nothing.
+const double kWindowEdgeDeadStrip = 8.0;
+
+/// Height reserved at each end of the rail for a jump cap. Reserved whether or
+/// not the cap is showing, so the thumb's travel does not change as the caps
+/// come and go.
+const double _kCapExtent = 22.0;
+
+/// True where a drag rail would fight the platform's own edge gestures.
+bool get _isTouchForm => Platform.isAndroid || Platform.isIOS;
+
+/// The chat feed's scrollbar and jump controls (issue #54: "the main feed
+/// doesn't have a scrollbar or jump to top, jump to bottom").
+///
+/// [ScrollablePositionedList] has no pixel offset a normal [Scrollbar] could
+/// map onto: its position is "item N, aligned so far into the viewport",
+/// deliberately, because that is what keeps a list of variable-height messages
+/// still while it grows at both ends. So this is an INDEX scrollbar — the
+/// thumb spans the visible index range out of [itemCount] and a drag jumps to
+/// the index under the pointer. With rows of different heights the thumb is an
+/// estimate rather than a measurement; that is the honest trade for a list you
+/// can prepend to without the view moving.
+///
+/// Indexes here are the REVERSED builder indexes the list itself uses: 0 is
+/// the NEWEST message, pinned to the bottom (feedback_reverse_chat_lists), so
+/// a HIGHER index is further UP the track.
+///
+/// The jump-to-top / jump-to-present controls are CAPS at the two ends of the
+/// track, the way a native scrollbar puts its arrows there. They were round
+/// floating buttons over the bottom-right of the list at first, and the hover
+/// action bar of the last message sat on top of them: that bar is centred on
+/// whatever row the pointer is over, so there is no spot inside the list it
+/// cannot reach, and being an overlay it always wins the click.
+///
+/// Desktop only. On touch a 16px drag rail would sit under the platform's own
+/// edge-swipe gesture and its caps would be far below a comfortable tap
+/// target, so the mobile surfaces keep fling scrolling and the unread pill.
+class ChatScrollRail extends StatefulWidget {
+  final int itemCount;
+  final ItemScrollController controller;
+  final ItemPositionsListener positions;
+
+  /// Releases the "frozen while reading" display cap and snaps to the newest
+  /// message. The pane owns that state, so the rail cannot do it alone —
+  /// jumping to index 0 of a frozen list lands on the wrong message.
+  final VoidCallback? onJumpToNewest;
+
+  const ChatScrollRail({
+    super.key,
+    required this.itemCount,
+    required this.controller,
+    required this.positions,
+    this.onJumpToNewest,
+  });
+
+  @override
+  State<ChatScrollRail> createState() => _ChatScrollRailState();
+}
+
+class _ChatScrollRailState extends State<ChatScrollRail> {
+  bool _hovering = false;
+  bool _dragging = false;
+
+  /// Jumps so the message [fraction] down the track (0 = oldest) sits at the
+  /// bottom edge of the viewport. The list clamps an out-of-range jump, which
+  /// is what makes the two extremes land exactly on the first and last row.
+  void _jumpToFraction(double fraction) {
+    if (!widget.controller.isAttached || widget.itemCount == 0) return;
+    final f = fraction.clamp(0.0, 1.0);
+    final index = ((1.0 - f) * (widget.itemCount - 1)).round();
+    widget.controller.jumpTo(index: index.clamp(0, widget.itemCount - 1));
+  }
+
+  void _jumpToOldest() {
+    if (!widget.controller.isAttached || widget.itemCount == 0) return;
+    widget.controller.jumpTo(index: widget.itemCount - 1);
+  }
+
+  void _jumpToNewest() {
+    final release = widget.onJumpToNewest;
+    if (release != null) {
+      release();
+      return;
+    }
+    if (widget.controller.isAttached) {
+      widget.controller.jumpTo(index: 0, alignment: 0.0);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+    return ValueListenableBuilder<Iterable<ItemPosition>>(
+      valueListenable: widget.positions.itemPositions,
+      builder: (context, positions, _) {
+        final metrics = _RailMetrics.from(positions, widget.itemCount);
+        if (metrics == null) return const SizedBox.shrink();
+        return _rail(hollow, metrics);
+      },
+    );
+  }
+
+  /// Track plus the two caps, all inside the gutter.
+  Widget _rail(HollowTheme hollow, _RailMetrics metrics) {
+    return Padding(
+      // Everything interactive stays [kWindowEdgeDeadStrip] clear of the
+      // window's outer edge.
+      padding: const EdgeInsets.only(right: kWindowEdgeDeadStrip),
+      child: MouseRegion(
+        onEnter: (_) => setState(() => _hovering = true),
+        onExit: (_) => setState(() => _hovering = false),
+        child: Stack(
+          children: [
+            // The track never runs under a cap: the ends are reserved either
+            // way, so the thumb keeps the same travel as the caps appear.
+            Positioned(
+              top: _kCapExtent,
+              bottom: _kCapExtent,
+              left: 0,
+              right: 0,
+              child: _track(hollow, metrics),
+            ),
+            if (!metrics.atOldest)
+              Positioned(
+                top: 0,
+                left: 0,
+                right: 0,
+                height: _kCapExtent,
+                child: _RailCap(
+                  hollow: hollow,
+                  icon: LucideIcons.chevronsUp,
+                  label: 'Jump to the oldest message',
+                  tooltip: 'Jump to top',
+                  onTap: _jumpToOldest,
+                ),
+              ),
+            if (!metrics.atNewest)
+              Positioned(
+                bottom: 0,
+                left: 0,
+                right: 0,
+                height: _kCapExtent,
+                child: _RailCap(
+                  hollow: hollow,
+                  icon: LucideIcons.chevronsDown,
+                  label: 'Jump to the newest message',
+                  tooltip: 'Jump to present',
+                  onTap: _jumpToNewest,
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _track(HollowTheme hollow, _RailMetrics metrics) {
+    final active = _hovering || _dragging;
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final trackHeight = constraints.maxHeight;
+        final thumbHeight =
+            (metrics.extent * trackHeight).clamp(28.0, trackHeight);
+        // The thumb travels over `trackHeight - thumbHeight`, so its top is
+        // scaled into that shorter run: otherwise the oldest page could
+        // never be reached.
+        final top = metrics.offset * (trackHeight - thumbHeight);
+        return GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTapDown: (d) =>
+              _jumpFromPointer(d.localPosition.dy, trackHeight, thumbHeight),
+          onVerticalDragStart: (d) {
+            setState(() => _dragging = true);
+            _jumpFromPointer(d.localPosition.dy, trackHeight, thumbHeight);
+          },
+          onVerticalDragUpdate: (d) =>
+              _jumpFromPointer(d.localPosition.dy, trackHeight, thumbHeight),
+          onVerticalDragEnd: (_) => setState(() => _dragging = false),
+          onVerticalDragCancel: () => setState(() => _dragging = false),
+          child: Semantics(
+            label: 'Message list scrollbar',
+            child: Stack(
+              children: [
+                Positioned(
+                  top: top,
+                  height: thumbHeight,
+                  // Centred in what is LEFT of the gutter once the window's
+                  // dead edge strip is taken out, not in the gutter itself.
+                  left: (constraints.maxWidth - 6) / 2,
+                  width: 6,
+                  child: AnimatedContainer(
+                    duration: HollowDurations.fast,
+                    decoration: BoxDecoration(
+                      color: hollow.textSecondary
+                          .withValues(alpha: active ? 0.55 : 0.28),
+                      borderRadius: BorderRadius.circular(3),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  /// Maps a pointer on the track to a position, treating the pointer as the
+  /// MIDDLE of the thumb so the list does not jump out from under the grab.
+  ///
+  /// The top of the track is the OLDEST end — the same direction
+  /// [_RailMetrics.offset] measures — so the normalised pointer IS the
+  /// fraction, with no inversion. (There was one here; it sent every drag the
+  /// wrong way, which is what
+  /// test/widget/chat_scroll_rail_test.dart now pins down.)
+  void _jumpFromPointer(double dy, double trackHeight, double thumbHeight) {
+    final travel = trackHeight - thumbHeight;
+    if (travel <= 0) return;
+    _jumpToFraction(((dy - thumbHeight / 2) / travel).clamp(0.0, 1.0));
+  }
+
+}
+
+/// One end cap of the rail: scrollbar-arrow shaped, sized to the gutter, and
+/// out of reach of the message action bar.
+class _RailCap extends StatelessWidget {
+  final HollowTheme hollow;
+  final IconData icon;
+  final String label;
+  final String tooltip;
+  final VoidCallback onTap;
+
+  const _RailCap({
+    required this.hollow,
+    required this.icon,
+    required this.label,
+    required this.tooltip,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return HollowTooltip(
+      message: tooltip,
+      child: HollowPressable(
+        semanticLabel: label,
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(hollow.radiusSm),
+        backgroundColor: hollow.elevated,
+        padding: EdgeInsets.zero,
+        child: Center(
+          child: Icon(icon, size: 12, color: hollow.textSecondary),
+        ),
+      ),
+    );
+  }
+}
+
+/// Where the thumb sits and how big it is, derived from the visible index
+/// range. Null when the whole conversation fits and there is nothing to
+/// scroll.
+class _RailMetrics {
+  /// 0 = thumb at the top of its travel (oldest), 1 = at the bottom (newest).
+  final double offset;
+
+  /// Visible share of the conversation, 0..1.
+  final double extent;
+  final bool atNewest;
+  final bool atOldest;
+
+  const _RailMetrics({
+    required this.offset,
+    required this.extent,
+    required this.atNewest,
+    required this.atOldest,
+  });
+
+  static _RailMetrics? from(Iterable<ItemPosition> positions, int itemCount) {
+    if (itemCount <= 1 || positions.isEmpty) return null;
+    var minIndex = itemCount;
+    var maxIndex = -1;
+    for (final p in positions) {
+      if (p.index < minIndex) minIndex = p.index;
+      if (p.index > maxIndex) maxIndex = p.index;
+    }
+    if (maxIndex < 0) return null;
+    final visible = (maxIndex - minIndex + 1).clamp(1, itemCount);
+    if (visible >= itemCount) return null;
+    // Reversed indexes: the higher the top-most visible index, the closer to
+    // the OLDEST end, which is the TOP of the track.
+    final aboveViewport = itemCount - 1 - maxIndex;
+    final scrollable = itemCount - visible;
+    return _RailMetrics(
+      offset:
+          scrollable <= 0 ? 0 : (aboveViewport / scrollable).clamp(0.0, 1.0),
+      extent: visible / itemCount,
+      atNewest: minIndex <= 0,
+      atOldest: maxIndex >= itemCount - 1,
+    );
+  }
 }
 
 /// One keyed chat-row shell: optional date separator above, extra top padding

@@ -44,6 +44,7 @@ import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
+import 'package:hollow/src/ui/components/ui_scale.dart';
 import 'package:hollow/src/ui/dialogs/invite_dialog.dart';
 import 'package:hollow/src/ui/shell/user_bar.dart';
 import 'package:hollow/src/ui/shell/user_context_menu.dart';
@@ -208,58 +209,62 @@ class ChannelSidebar extends StatelessWidget {
       // `UiScale` lays out at `viewport / scale`). Measure what we actually
       // got so the header can yield instead of eating the channel list —
       // see `bannerHeaderHeight`.
-      child: LayoutBuilder(
-        builder: (context, constraints) {
-          final bannerHeight = bannerHeaderHeight(constraints.maxHeight);
-          return Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              // Header — crossfade between server name and "Direct Messages"
-              AnimatedSwitcher(
-                duration: HollowDurations.fast,
-                child: _buildHeader(context, hollow, bannerHeight),
-              ),
-
-              // Content — crossfade between server channels and home/DM view
-              Expanded(
-                child: AnimatedSwitcher(
-                  duration: HollowDurations.normal,
-                  switchInCurve: HollowCurves.enter,
-                  switchOutCurve: HollowCurves.exit,
-                  child: selectedServer != null
-                      ? _ServerContent(
-                          key: ValueKey('server-${selectedServer!.serverId}'),
-                          hollow: hollow,
-                          serverId: selectedServer!.serverId,
-                          channels: channels,
-                          selectedChannelId: selectedChannelId,
-                          onChannelSelected: onChannelSelected,
-                          onCreateChannel: onCreateChannel,
-                          onOpenSettings: onOpenSettings,
-                          canManageChannels: canManageChannels,
-                          channelLayoutJson: channelLayoutJson,
-                        )
-                      : _HomeContent(
-                          key: const ValueKey('home'),
-                          hollow: hollow,
-                          peers: peers,
-                          selectedPeerId: selectedPeerId,
-                          nodeStatus: nodeStatus,
-                          onPeerSelected: onPeerSelected,
-                          lastMessage: lastMessage,
-                          formatTime: formatTime,
-                        ),
+      // Panel zoom (issue #54): the column keeps its slot, the channel
+      // names, icons and avatars inside it grow together.
+      child: PanelScale(
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final bannerHeight = bannerHeaderHeight(constraints.maxHeight);
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // Header — crossfade between server name and "Direct Messages"
+                AnimatedSwitcher(
+                  duration: HollowDurations.fast,
+                  child: _buildHeader(context, hollow, bannerHeight),
                 ),
-              ),
 
-              // Voice channel controls (visible when in a voice channel)
-              const VoiceChannelPanel(),
+                // Content — crossfade between server channels and home/DM view
+                Expanded(
+                  child: AnimatedSwitcher(
+                    duration: HollowDurations.normal,
+                    switchInCurve: HollowCurves.enter,
+                    switchOutCurve: HollowCurves.exit,
+                    child: selectedServer != null
+                        ? _ServerContent(
+                            key: ValueKey('server-${selectedServer!.serverId}'),
+                            hollow: hollow,
+                            serverId: selectedServer!.serverId,
+                            channels: channels,
+                            selectedChannelId: selectedChannelId,
+                            onChannelSelected: onChannelSelected,
+                            onCreateChannel: onCreateChannel,
+                            onOpenSettings: onOpenSettings,
+                            canManageChannels: canManageChannels,
+                            channelLayoutJson: channelLayoutJson,
+                          )
+                        : _HomeContent(
+                            key: const ValueKey('home'),
+                            hollow: hollow,
+                            peers: peers,
+                            selectedPeerId: selectedPeerId,
+                            nodeStatus: nodeStatus,
+                            onPeerSelected: onPeerSelected,
+                            lastMessage: lastMessage,
+                            formatTime: formatTime,
+                          ),
+                  ),
+                ),
 
-              // User bar at bottom (hidden in dock mode)
-              ?userBar,
-            ],
-          );
-        },
+                // Voice channel controls (visible when in a voice channel)
+                const VoiceChannelPanel(),
+
+                // User bar at bottom (hidden in dock mode)
+                ?userBar,
+              ],
+            );
+          },
+        ),
       ),
     );
 

@@ -60,6 +60,30 @@ profile_card_body.dart and is RE-EXPORTED here (chat_pane imports it).
 Expand affordance: scrimmed circle button on the banner (a11y label "View
 full profile") → removes overlay instantly → `showProfileDialog`.
 
+**Anchoring is a FUNCTION, not a point (issue #54).** The parameter is
+`anchorOf: Offset Function()`, re-read after any viewport change: a point
+captured at click time leaves the card stranded in the middle of the chat
+when the window is maximized. The re-read runs POST-FRAME (during build the
+source has not been laid out at the new size yet, so it would hand back the
+pre-resize position) and TWICE (a resize can also start a panel animation;
+the first read lands mid-slide, the second after it settles). `Offset.zero`
+back from the closure means the source has no render box any more — the row
+scrolled away, or the whole panel folded — and the card dismisses rather than
+floating. Member-panel rows share one `memberCardAnchor(context)` helper;
+call sites with nothing to follow (the "View profile" menu row) pass a
+constant closure.
+
+Also since issue #54: Escape closes it (a raw OverlayEntry is not a route, so
+nothing else gave it a keyboard exit), `_dismissing` guards the double
+teardown that would otherwise dispose an entry twice, and the upward-opening
+branch is clamped so a short window cannot push the card off the top edge.
+
+**Which surface opens (issue #54):** `profileCardStyleProvider`
+(Settings > Appearance, "Open profiles expanded"). At
+`ProfileCardStyle.expanded` `showProfileCardPopup` forwards straight to
+`showProfileDialog` instead of inserting the compact overlay, so one click
+lands on the full profile with the showcase board.
+
 `serverId` (nullable, added issue #48) threads the whole chain:
 `_ServerMemberTile` (member_panel) and `showChatProfile` pass it →
 `showProfileCardPopup` → `_ProfileCardOverlay` → `ProfileCardBody`, and

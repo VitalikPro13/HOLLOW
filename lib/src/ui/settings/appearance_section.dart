@@ -17,6 +17,7 @@ import 'package:hollow/src/ui/components/hollow_tooltip.dart';
 import 'package:hollow/src/ui/dialogs/image_crop_dialog.dart';
 import 'package:hollow/src/ui/settings/settings_shared.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:hollow/src/core/providers/layout_prefs_provider.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Appearance category of the desktop Settings dialog: theme (dark mode +
@@ -33,6 +34,7 @@ class AppearanceSettingsView extends ConsumerWidget {
     final invisible = ref.watch(invisibleModeProvider);
     final isDesktop = Platform.isWindows || Platform.isLinux || Platform.isMacOS;
     final tray = ref.watch(minimizeToTrayProvider).valueOrNull ?? true;
+    final cardStyle = ref.watch(profileCardStyleProvider);
     return settingsCardList([
       SettingsCard(
         title: 'Theme',
@@ -120,6 +122,22 @@ class AppearanceSettingsView extends ConsumerWidget {
               value: tray,
               onChanged: (v) =>
                   ref.read(minimizeToTrayProvider.notifier).setEnabled(v),
+            ),
+          ],
+          if (isDesktop) ...[
+            const SizedBox(height: HollowSpacing.md),
+            // Issue #54: one click can go straight to the full profile
+            // instead of the small card with an expand button on it.
+            SettingsToggleRow(
+              icon: LucideIcons.idCard,
+              label: 'Open profiles expanded',
+              subtitle: 'Clicking a user opens the full profile, not the card',
+              value: cardStyle == ProfileCardStyle.expanded,
+              onChanged: (v) => ref
+                  .read(profileCardStyleProvider.notifier)
+                  .setStyle(v
+                      ? ProfileCardStyle.expanded
+                      : ProfileCardStyle.compact),
             ),
           ],
         ],

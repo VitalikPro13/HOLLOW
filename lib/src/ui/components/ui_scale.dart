@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/display_scale_provider.dart';
+import 'package:hollow/src/core/providers/layout_prefs_provider.dart';
 
 /// The smallest logical viewport the app is allowed to lay out in, whatever
 /// zoom the user picks. Desktop's floor is the Settings dialog's own
@@ -270,6 +271,72 @@ class UiScaleInfo extends InheritedWidget {
   @override
   bool updateShouldNotify(UiScaleInfo old) =>
       old.requested != requested || old.effective != effective;
+}
+
+/// Zooms ONE panel's contents (issue #54: "ability to manually adjust left
+/// server panel and user member panel icon size and text size").
+///
+/// Same machinery as [UiScale] and for the same reason: icon sizes live in
+/// hundreds of hardcoded `size:` literals, so a text scaler would leave 16px
+/// icons stranded next to 24px labels. The panel is laid out at
+/// `slot / scale` and painted back through one transform, so avatars, status
+/// dots, names and counts all grow together — and because
+/// [_RenderScaledViewport] implements `applyPaintTransform`, the popups these
+/// panels anchor (profile cards, context menus) still land in the right place
+/// through `overlay_anchor.dart`.
+///
+/// The panel's SLOT does not change: this makes the contents bigger, not the
+/// column wider. Widening is the resize handle's job, and the two are meant to
+/// be used together.
+class PanelScale extends ConsumerWidget {
+  final Widget child;
+
+  /// Layout height this panel's UNSHRINKABLE chrome needs, if it has any.
+  ///
+  /// A zoomed panel is laid out at `slot / scale`, so raising the zoom SHRINKS
+  /// the space its contents get. A panel that is one long list does not care
+  /// (it just scrolls), but the server strip is a fixed stack of icons with a
+  /// list wedged in the middle, and past a certain zoom that stack no longer
+  /// fits its own column — a RenderFlex overflow stripe down the rail. Same
+  /// answer as [effectiveUiScale] gives the window: cap the zoom at what this
+  /// box can actually show, never below 1.0.
+  final double minContentHeight;
+
+  const PanelScale({
+    super.key,
+    required this.child,
+    this.minContentHeight = 0,
+  });
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final requested = ref.watch(panelScaleProvider);
+    if ((requested - 1.0).abs() < 0.001) return child;
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        if (!constraints.hasBoundedWidth || !constraints.hasBoundedHeight) {
+          return child;
+        }
+        final slot = Size(constraints.maxWidth, constraints.maxHeight);
+        final scale = minContentHeight <= 0
+            ? requested
+            : math.min(
+                requested,
+                math.max(1.0, slot.height / minContentHeight),
+              );
+        if ((scale - 1.0).abs() < 0.001) return child;
+        final mq = MediaQuery.of(context);
+        // devicePixelRatio only: `size` here is still the WINDOW, and lying
+        // about it would mislead anything inside the panel that measures the
+        // screen. One of our logical pixels now covers `scale` more device
+        // pixels, which is what keeps avatar decoding sharp.
+        return MediaQuery(
+          data: mq.copyWith(devicePixelRatio: mq.devicePixelRatio * scale),
+          child: _ScaledViewport(scale: scale, viewport: slot, child: child),
+        );
+      },
+    );
+  }
 }
 
 /// A [TextScaler] that multiplies whatever the platform already applies.

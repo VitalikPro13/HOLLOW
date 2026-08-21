@@ -1984,6 +1984,8 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute> {
         horizontal: HollowSpacing.sm,
         vertical: HollowSpacing.sm,
       ),
+      // Touch keeps the jump buttons, never the drag track (issue #54).
+      onJumpToNewest: _scrollToBottom,
       itemBuilder: (context, revIndex) =>
           rowBuilder(messages, revIndex, indexById),
     );

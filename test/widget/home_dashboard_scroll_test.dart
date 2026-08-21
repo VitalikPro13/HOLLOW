@@ -138,15 +138,19 @@ void main() {
         (tester) async {
       await _pumpDashboard(tester, const Size(967, 581));
 
-      final bars = tester.widgetList<Scrollbar>(find.byType(Scrollbar));
-      expect(bars, hasLength(2),
+      // The scroll VIEWS are the assertion, not the scrollbars: since issue
+      // #54 the bar itself comes from HollowScrollBehavior (desktop only, in
+      // a reserved gutter), so a widget test running as Android sees no
+      // Scrollbar widget at all. What must hold either way is that both side
+      // columns scroll.
+      final columns = tester.widgetList<SingleChildScrollView>(
+        find.byWidgetPredicate(
+          (w) => w is SingleChildScrollView && w.controller != null,
+        ),
+      );
+      expect(columns, hasLength(2),
           reason: 'the profile and network columns must each scroll; without '
               'them their lower cards are clipped with no way to reach them');
-      // Default fade, matching the Recent Conversations list beside them.
-      // `thumbVisibility: true` pinned the thumb on screen permanently, which
-      // reads as a stuck UI element rather than a hint.
-      expect(bars.every((b) => b.thumbVisibility != true), isTrue,
-          reason: 'the column scrollbar must fade like every other one');
     });
 
     /// The regression this guards: the news panel is supposed to absorb the

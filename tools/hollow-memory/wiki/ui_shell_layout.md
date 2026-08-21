@@ -338,6 +338,17 @@ The zoom trio ignores Shift on `+`/`-` (on most layouts `+` IS Shift+`=`) and ac
 
 **canManageChannels:** Computed from `myPermissionsProvider(serverId)`, checking `Permission.manageChannels` bit.
 
+**width:** `width ?? ref.watch(channelSidebarWidthProvider)` — the user's dragged width (issue #54). The split view's right-pane sidebar overrides it with a fixed 200.
+
+## Resizable panels (issue #54)
+
+`PanelResizeHandle` (`ui/components/panel_resize_handle.dart`) is a 6px seam that occupies its OWN strip in the shell Row, never an overlay on a panel's edge — that edge is the panel's scrollbar gutter since `HollowScrollBehavior`, and a handle sitting on it would swallow the thumb. Drag resizes, double-click (or Home) resets, left/right arrows nudge, and it is focusable, so the splitter is not mouse-only.
+
+- `_ChannelSidebarSeam` sits directly after the channel sidebar in BOTH layouts. In Dock mode it rides INSIDE `_DockSidebarSlider`'s child Row, so it slides away with the panel it sizes instead of hanging in empty space.
+- `_MemberPanelWithSeam` is what `_MemberPanelSlider` renders: the seam on the panel's LEFT edge (`panelOnRight: true`, so dragging left widens it) plus the panel.
+- Widths live in `channelSidebarWidthProvider` / `memberPanelWidthProvider` (`core/providers/layout_prefs_provider.dart`), clamped in the notifier, persisted, and loaded from `_bootstrap` via `loadLayoutPrefs(ref)` — never from a provider's `build()`.
+- `panelScaleProvider` zooms the CONTENTS of the server strip, channel sidebar and member panel through `PanelScale` (the same `_ScaledViewport` render object the interface zoom uses). The server strip is the one panel whose WIDTH scales too (`kServerStripWidth * panelScale`): its icon rows are sized for exactly 72px, so zooming the content inside a fixed-width rail just pushes them out of the column. `PanelScale.minContentHeight` caps the zoom for panels with unshrinkable chrome — a zoomed panel lays out at `slot / scale`, so raising the zoom SHRINKS the room its fixed stack of icons gets.
+
 ## WindowTitleBar — Placement and Rationale
 
 **CRITICAL ARCHITECTURE:** The `WindowTitleBar` is NOT inside `HollowShell`. It lives in `MaterialApp.builder` in `lib/src/ui/app.dart`. This is documented as a critical rule in CLAUDE.md.
@@ -378,6 +389,18 @@ Widget classes in window_title_bar.dart:
 ## HollowApp — Theme and Background Transparency
 
 `lib/src/ui/app.dart` defines `HollowApp` (`ConsumerWidget`), the `MaterialApp` root.
+
+`scrollBehavior: const HollowScrollBehavior()` (issue #54,
+`ui/components/hollow_scroll_behavior.dart`): every VERTICAL scrollable on
+desktop gets `Scrollbar(child: Padding(right: kScrollGutter))` — the gutter
+sits INSIDE the scrollbar and OUTSIDE the viewport, so the thumb can never
+paint over the last 10px of a row (checkbox columns, text fields, trailing
+chevrons). Touch and horizontal axes are untouched, mirroring
+`MaterialScrollBehavior` exactly, and `copyWith(scrollbars: false)` still opts
+out (the chat panes and the 72px server strip do). Consequence to remember:
+a manual `Scrollbar` widget now paints a SECOND thumb, so do not add one —
+the one in `home_dashboard` was removed. Guarded by
+`test/widget/scroll_gutter_test.dart`.
 
 Providers read:
 - `themeModeProvider` — `ThemeMode.dark` or `.light`

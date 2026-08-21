@@ -1209,3 +1209,15 @@ Guest messages carry `FileAttachment` metadata (never bytes): sync builds it fro
 `MessageReceived`/`ChannelMessageReceived` ALWAYS emit from Rust, carrying `duplicate: bool` (true = the row already existed — a sync batch/pending-drain/fetch insert beat the live delivery). event_provider appends to the chat provider unconditionally (in-memory mid dedup = idempotent) then `if (duplicate) break;` BEFORE unread increments + notifications — replays must not double-count or re-toast. Never gate the emission itself on is_new (that left open panes stale while typing kept animating).
 
 `MessageSyncCompleted` → `recomputeServerUnread` only when `newMessageCount > 0`: every channel-open fires a sync, and unconditional server-wide recounts on no-op completions re-materialized stale sibling-channel badges.
+
+## Layout preferences (`core/providers/layout_prefs_provider.dart`, issue #54)
+
+Shell chrome the user can size and shape. Every one is a plain synchronous `Notifier` with an explicit `load()`, and `loadLayoutPrefs(ref)` runs them all from `HollowShell._bootstrap` right after the display-scale providers — never an `AsyncNotifier` awaiting `loadSetting` in `build()`, which throws until the SQLCipher store is open and silently loses the value on every launch (memory `feedback_load_persisted_setting_from_bootstrap_not_build`).
+
+- **`profileCardStyleProvider`** — `ProfileCardStyle.compact` (default) or `.expanded`. Key `profile_card_style`. Read by `showProfileCardPopup`, which forwards to `showProfileDialog` when expanded. Toggle: Settings > Appearance, "Open profiles expanded".
+- **`channelSidebarWidthProvider`** — double, key `channel_sidebar_width`, default 240, clamped 180..460. Dragged by `_ChannelSidebarSeam`.
+- **`memberPanelWidthProvider`** — double, key `member_panel_width`, default 240, clamped 180..420. Dragged by the seam inside `_MemberPanelWithSeam`. `MemberPanel` reads it whenever no explicit `width` is passed.
+- **`panelScaleProvider`** — double, key `panel_scale`, default 1.0, clamped 0.8..1.4. Zooms the CONTENTS of the server strip, channel sidebar and member panel via `PanelScale`. Slider: Settings > Accessibility, "Side panel size".
+- **`collapsedMemberGroupsProvider`** — `Set<String>` of `serverId:label` keys, key `collapsed_member_groups`, stored newline-joined. `CollapsedMemberGroupsNotifier.keyFor(serverId, label)` builds the key; `toggle()` flips one section. Read by `_serverMemberEntriesProvider`, which drops the member rows of a folded section but keeps its divider and full count.
+
+Both width notifiers share `_PanelWidthNotifier` (same clamp + write-through, different key and bounds). Writes are optimistic: state moves on the frame, the DB write trails it, and a failed write is logged rather than surfaced — it only costs the width on next launch.

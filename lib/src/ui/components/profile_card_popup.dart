@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/providers/layout_prefs_provider.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
@@ -11,11 +13,19 @@ import 'package:hollow/src/ui/dialogs/profile_dialog.dart';
 export 'package:hollow/src/ui/components/profile_card_body.dart'
     show showLocalNicknameDialog;
 
-/// Shows a profile card popup anchored near the tap position.
+/// Shows a profile card for [peerId].
 ///
-/// This is the COMPACT density of [ProfileCardBody] — the fast hover
-/// inspection surface. The expand affordance on the banner opens the full
-/// [ProfileDialog].
+/// Normally the COMPACT density of [ProfileCardBody] — the fast inspection
+/// card, anchored next to whatever was clicked, with an expand affordance on
+/// its banner that opens the full [ProfileDialog]. When the user has set
+/// [ProfileCardStyle.expanded] (Settings > Appearance), one click goes
+/// straight to the full profile instead (issue #54).
+///
+/// [anchorOf] is a FUNCTION, not a point: the window can be resized (or
+/// maximized) while the card is open, and a point captured at click time
+/// leaves the card stranded in the middle of the chat. It is re-read after any
+/// viewport change, so the card follows the thing it belongs to. Call sites
+/// with nothing to follow (a menu action) pass a constant closure.
 void showProfileCardPopup({
   required BuildContext context,
   required WidgetRef ref,
@@ -25,9 +35,22 @@ void showProfileCardPopup({
   String? twitchUsername,
   List<crdt_api.LabelFfi>? labels,
   String? serverId,
-  required Offset anchor,
+  required Offset Function() anchorOf,
   bool anchorBottom = false,
 }) {
+  if (ref.read(profileCardStyleProvider) == ProfileCardStyle.expanded) {
+    showProfileDialog(
+      context,
+      peerId: peerId,
+      nickname: nickname,
+      role: role,
+      twitchUsername: twitchUsername,
+      labels: labels,
+      serverId: serverId,
+    );
+    return;
+  }
+
   final overlay = Overlay.of(context);
   late final OverlayEntry entry;
 
@@ -39,7 +62,7 @@ void showProfileCardPopup({
       twitchUsername: twitchUsername,
       labels: labels,
       serverId: serverId,
-      anchor: anchor,
+      anchorOf: anchorOf,
       anchorBottom: anchorBottom,
       onDismiss: () { entry.remove(); entry.dispose(); },
     ),
@@ -59,7 +82,7 @@ class _ProfileCardOverlay extends ConsumerStatefulWidget {
   final String? twitchUsername;
   final List<crdt_api.LabelFfi>? labels;
   final String? serverId;
-  final Offset anchor;
+  final Offset Function() anchorOf;
   final bool anchorBottom;
   final VoidCallback onDismiss;
 
@@ -70,7 +93,7 @@ class _ProfileCardOverlay extends ConsumerStatefulWidget {
     this.twitchUsername,
     this.labels,
     this.serverId,
-    required this.anchor,
+    required this.anchorOf,
     this.anchorBottom = false,
     required this.onDismiss,
   });
@@ -86,9 +109,19 @@ class _ProfileCardOverlayState extends ConsumerState<_ProfileCardOverlay>
   late final Animation<double> _scaleAnim;
   late final Animation<double> _fadeAnim;
 
+  /// Where the card is pinned right now. Seeded at open, re-read from
+  /// [_ProfileCardOverlay.anchorOf] after the viewport changes size.
+  late Offset _anchor;
+  Size? _lastViewport;
+
   @override
   void initState() {
     super.initState();
+    _anchor = widget.anchorOf();
+    // A raw OverlayEntry is not a route, so nothing else gives this card an
+    // Escape key. Without it a card can be left stranded on screen with no
+    // keyboard way out.
+    HardwareKeyboard.instance.addHandler(_onKey);
     _controller = AnimationController(
       vsync: this,
       duration: HollowDurations.animationsDisabled ? Duration.zero : const Duration(milliseconds: 180),
@@ -103,12 +136,69 @@ class _ProfileCardOverlayState extends ConsumerState<_ProfileCardOverlay>
   }
 
   @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final viewport = MediaQuery.sizeOf(context);
+    if (_lastViewport != null && _lastViewport != viewport) _reanchor();
+    _lastViewport = viewport;
+  }
+
+  /// Re-reads the anchor AFTER the frame: this runs during build, and the
+  /// source widget has not been laid out at the new window size yet — reading
+  /// its render box now returns the position it had BEFORE the resize, which
+  /// is exactly the bug (issue #54).
+  ///
+  /// Twice, because a resize can also start a panel animation (the member
+  /// panel folds itself away on a narrow window): the first read lands
+  /// mid-slide, the second one after it settles.
+  void _reanchor() {
+    _applyAnchor();
+    Future.delayed(const Duration(milliseconds: 280), _applyAnchor);
+  }
+
+  void _applyAnchor() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final Offset next;
+      try {
+        next = widget.anchorOf();
+      } catch (_) {
+        return;
+      }
+      // Zero means the source has no render box any more — the row was
+      // scrolled out, or the whole panel folded away. A card pointing at
+      // something that is no longer there should leave, not float.
+      if (next == Offset.zero) {
+        _dismiss();
+        return;
+      }
+      if (next == _anchor) return;
+      setState(() => _anchor = next);
+    });
+  }
+
+  bool _onKey(KeyEvent event) {
+    if (event is! KeyDownEvent) return false;
+    if (event.logicalKey != LogicalKeyboardKey.escape) return false;
+    _dismiss();
+    return true;
+  }
+
+  @override
   void dispose() {
+    HardwareKeyboard.instance.removeHandler(_onKey);
     _controller.dispose();
     super.dispose();
   }
 
+  /// One dismiss only: [onDismiss] removes AND disposes the overlay entry, so
+  /// a second run (barrier tap during the fade, both re-anchor attempts
+  /// finding the source gone) would tear down an entry that is already gone.
+  bool _dismissing = false;
+
   void _dismiss() {
+    if (_dismissing) return;
+    _dismissing = true;
     _controller.reverse().then((_) => widget.onDismiss());
   }
 
@@ -135,7 +225,7 @@ class _ProfileCardOverlayState extends ConsumerState<_ProfileCardOverlay>
 
     // Position: card appears near the anchor
     final screenSize = MediaQuery.of(context).size;
-    double left = widget.anchor.dx;
+    double left = _anchor.dx;
 
     // Clamp horizontal
     if (left < 8) left = 8;
@@ -150,18 +240,23 @@ class _ProfileCardOverlayState extends ConsumerState<_ProfileCardOverlay>
     const estimatedCardHeight = 400.0;
     double? top;
     double? bottom;
+    // How far up the card may be pushed before its TOP leaves the window.
+    // Without this ceiling a short window (or one the user just shrank) lifts
+    // the card clean off the top edge, which is how a card ends up half
+    // painted behind the title bar (issue #54).
+    final maxBottom =
+        (screenSize.height - estimatedCardHeight - 8).clamp(8.0, double.infinity);
     if (widget.anchorBottom) {
       // anchor.dy is where the card's bottom should be
-      bottom = screenSize.height - widget.anchor.dy;
-      if (bottom < 8) bottom = 8;
+      bottom = (screenSize.height - _anchor.dy).clamp(8.0, maxBottom);
     } else {
       final wouldOverflowBottom =
-          widget.anchor.dy + estimatedCardHeight > screenSize.height - 8;
+          _anchor.dy + estimatedCardHeight > screenSize.height - 8;
       if (wouldOverflowBottom) {
         // Open upward: card's bottom sits at the anchor.
-        bottom = (screenSize.height - widget.anchor.dy).clamp(8.0, double.infinity);
+        bottom = (screenSize.height - _anchor.dy).clamp(8.0, maxBottom);
       } else {
-        top = widget.anchor.dy;
+        top = _anchor.dy;
         if (top < 8) top = 8;
       }
     }

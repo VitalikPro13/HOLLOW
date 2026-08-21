@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/accent_color_provider.dart';
 import 'package:hollow/src/core/providers/display_scale_provider.dart';
+import 'package:hollow/src/core/providers/layout_prefs_provider.dart';
 import 'package:hollow/src/core/shared_tickers.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
@@ -473,6 +474,31 @@ class _ChatTextPreview extends StatelessWidget {
           ],
         ),
       ),
+    );
+  }
+}
+
+/// Side-panel zoom (issue #54): the server strip, channel list and member
+/// list, without touching the chat. Live, because all three are visible
+/// behind the Settings dialog while it moves.
+class PanelScaleControl extends ConsumerWidget {
+  const PanelScaleControl({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final hollow = HollowTheme.of(context);
+    final value = ref.watch(panelScaleProvider);
+    return _ScaleSliderBlock(
+      hollow: hollow,
+      icon: LucideIcons.panelsLeftRight,
+      title: 'Side panel size',
+      subtitle: 'Icons and names in the server, channel and member lists',
+      value: value,
+      min: kPanelScaleMin,
+      max: kPanelScaleMax,
+      isDefault: (value - kPanelScaleDefault).abs() < 0.001,
+      onReset: () => ref.read(panelScaleProvider.notifier).reset(),
+      onChanged: (v) => ref.read(panelScaleProvider.notifier).setScale(v),
     );
   }
 }

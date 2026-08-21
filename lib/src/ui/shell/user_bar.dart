@@ -129,16 +129,16 @@ class UserBar extends ConsumerWidget {
                 borderRadius: BorderRadius.circular(hollow.radiusSm),
                 onTap: () {
                   if (localPeerId != null) {
-                    final pos = overlayAnchorOf(context);
-                    // Show card with bottom edge just above the user bar
+                    // Card's bottom edge just above the user bar; re-read on
+                    // resize so it stays there (issue #54).
                     showProfileCardPopup(
                       context: context,
                       ref: ref,
                       peerId: localPeerId,
-                      anchor: Offset(
-                        pos.dx,
-                        pos.dy - 8,
-                      ),
+                      anchorOf: () {
+                        final pos = overlayAnchorOf(context);
+                        return Offset(pos.dx, pos.dy - 8);
+                      },
                       anchorBottom: true,
                     );
                   }

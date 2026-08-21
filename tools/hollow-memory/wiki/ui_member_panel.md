@@ -4,7 +4,7 @@ Source: `lib/src/ui/shell/member_panel.dart` (706 lines)
 
 ## MemberPanel Widget Overview
 
-`MemberPanel` is a `ConsumerWidget` that renders the right-side panel (fixed 240px width by default, or null for mobile fill). It sits at the rightmost edge of the shell layout in both Dock and Classic modes, docked at every width the desktop shell runs at — below `_kDesktopBreakpoint` it simply starts collapsed, and re-opening it pushes the chat over rather than covering it (`_syncMemberPanelToWidth`, see `wiki/ui_shell_layout.md`).
+`MemberPanel` is a `ConsumerWidget` that renders the right-side panel. Its width comes from `memberPanelWidthProvider` (issue #54): the shell passes nothing and the user drags the `PanelResizeHandle` seam on the panel's LEFT edge; a caller may still override with an explicit `width`. It sits at the rightmost edge of the shell layout in both Dock and Classic modes, docked at every width the desktop shell runs at — below `_kDesktopBreakpoint` it simply starts collapsed, and re-opening it pushes the chat over rather than covering it (`_syncMemberPanelToWidth`, see `wiki/ui_shell_layout.md`).
 
 The panel watches `selectedServerProvider` to determine which content mode to display:
 - **Server selected (`selectedServerId != null`):** Shows `_ServerMemberContent` keyed by `server-members-$serverId`.
@@ -14,7 +14,7 @@ Content switches use `AnimatedSwitcher` with `HollowDurations.normal` duration, 
 
 The entire panel is wrapped in a `RevealClip` startup animation that clips horizontally from `Alignment.centerRight`, using `StartupRevealScope.interval(context, 0.45, 0.60)` for staggered reveal during app startup.
 
-Container styling: `hollow.surface` background, left `BorderSide` using `hollow.border`.
+Container styling: `hollow.surface` background, left `BorderSide` using `hollow.border`. The content inside that container is wrapped in `PanelScale` (issue #54) — the panel keeps its slot and its avatars, names, status dots and counts zoom together with `panelScaleProvider`. Widening is the seam's job, zooming is this one's.
 
 ### Providers Read
 - `selectedServerProvider` — determines server vs peer content mode
@@ -28,6 +28,11 @@ Container styling: `hollow.surface` background, left `BorderSide` using `hollow.
 - `count` (int) — member count shown at right end
 - `isOnline` (bool) — when true, the divider line has an animated glow sweep; when false, it is a static `hollow.border` line
 - `glowColor` (Color?) — optional override for the glow color; defaults to `hollow.accent`
+- `onToggle` (VoidCallback?) — non-null makes the section FOLDABLE (issue #54): the divider grows a chevron, becomes a `HollowPressable` row, and carries an "Expand/Collapse <label>, N members" label. Only the server member list passes it.
+- `collapsed` (bool) — which chevron to draw. The divider and its full count stay visible when folded; only the rows underneath go away.
+
+### Folding (issue #54)
+State lives in `collapsedMemberGroupsProvider`, keyed `serverId:label`, persisted and loaded from `HollowShell._bootstrap` like every other layout preference. `_serverMemberEntriesProvider` watches it and skips the member entries of a folded section while still emitting its divider — so the counts a user folds away stay honest. Per server, because "hide Offline" on a 200-member server says nothing about a 4-member one.
 
 ### Glow Animation (Online Sections)
 Uses `SharedTickers.instance.shimmer` (a global `ValueNotifier<double>` running a 4-second cycle) via `ValueListenableBuilder`. No per-instance `AnimationController` is created.

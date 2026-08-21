@@ -186,6 +186,18 @@ class HollowTheme extends ThemeExtension<HollowTheme> {
   /// Returns the background color with full opacity (for bars that should stay opaque).
   Color get opaqueBackground => background.withValues(alpha: 1.0);
 
+  /// Background for a notice strip tinted by [tint] — the guest banner, the
+  /// system-status bar, the "you are viewing this as a guest" chrome.
+  ///
+  /// A bare `tint.withValues(alpha: 0.1)` is transparent, so over the chat
+  /// area the bar shows whatever is behind it (the user's wallpaper) and
+  /// stops reading as part of the app at all (issue #54). Blending the tint
+  /// ONTO [surface] gives the same colour note on the same material the rest
+  /// of the chrome is made of — and it still honours the panel-opacity
+  /// setting, because that lives in [surface].
+  Color noticeSurface(Color tint, {double alpha = 0.14}) =>
+      Color.alphaBlend(tint.withValues(alpha: alpha), surface);
+
   /// Convenience accessor.
   static HollowTheme of(BuildContext context) =>
       Theme.of(context).extension<HollowTheme>()!;

@@ -430,7 +430,11 @@ class _SystemStatusBannerState extends ConsumerState<SystemStatusBanner> {
               vertical: 9,
             ),
             decoration: BoxDecoration(
-              color: color.withValues(alpha: 0.10),
+              // Tinted CHROME, not a 10% wash: this strip sits above the chat
+              // area, and over a wallpaper a translucent fill let the image
+              // straight through so the bar stopped looking like part of the
+              // app (issue #54).
+              color: hollow.noticeSurface(color),
               border: Border(
                 top: widget.anchor == StatusBannerAnchor.bottom
                     ? divider
@@ -520,7 +524,7 @@ class _HomeStatusCardState extends ConsumerState<HomeStatusCard> {
         vertical: HollowSpacing.sm,
       ),
       decoration: BoxDecoration(
-        color: operational ? hollow.surface : color.withValues(alpha: 0.08),
+        color: operational ? hollow.surface : hollow.noticeSurface(color, alpha: 0.10),
         borderRadius: BorderRadius.circular(hollow.radiusMd),
         border: Border.all(
           color: operational ? hollow.border : color.withValues(alpha: 0.35),

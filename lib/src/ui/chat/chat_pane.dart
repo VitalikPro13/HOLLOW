@@ -99,7 +99,9 @@ export 'package:hollow/src/ui/chat/chat_pane_shared.dart'
         TypingIndicatorBar,
         TypingDots,
         chatSelectionArea,
-        selectionMustBeScopedToRows;
+        selectionMustBeScopedToRows,
+        ChatScrollRail,
+        chatListWithRail;
 
 /// Whether the DM profile panel is visible.
 final dmProfilePanelProvider = StateProvider<bool>((ref) => true);
@@ -1915,6 +1917,10 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
       scrollOffsetController: _scrollOffsetController,
       itemCount: messages.length,
       indexByMessageId: replyIndexById,
+      // The rail's "jump to present" has to go through the pane: the display
+      // list is frozen while reading, so index 0 is not the newest message
+      // until the freeze is released (issue #54).
+      onJumpToNewest: _scrollToBottom,
       itemBuilder: (context, revIndex) => _buildMessageRow(
         context,
         revIndex,

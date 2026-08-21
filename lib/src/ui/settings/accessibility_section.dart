@@ -28,6 +28,10 @@ class AccessibilitySettingsView extends ConsumerWidget {
           InterfaceScaleControl(),
           SizedBox(height: HollowSpacing.lg),
           ChatTextScaleControl(),
+          SizedBox(height: HollowSpacing.lg),
+          PanelScaleControl(),
+          SizedBox(height: HollowSpacing.sm),
+          _PanelWidthFootnote(),
           SizedBox(height: HollowSpacing.sm),
           _DisplaySizeFootnote(),
         ],
@@ -87,6 +91,26 @@ class AccessibilitySettingsView extends ConsumerWidget {
         ],
       ),
     ]);
+  }
+}
+
+/// The panel WIDTHS are dragged, not set here — but a seam between two panes
+/// is invisible until you know it is there, so this says so.
+class _PanelWidthFootnote extends StatelessWidget {
+  const _PanelWidthFootnote();
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+    return Text(
+      'Drag the edge between the channel list, the chat and the member list '
+      'to make a panel wider or narrower. Double-click that edge to put it '
+      'back.',
+      style: HollowTypography.caption.copyWith(
+        color: hollow.textSecondary,
+        fontSize: 10,
+      ),
+    );
   }
 }
 

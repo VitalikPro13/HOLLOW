@@ -2130,6 +2130,10 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
       scrollOffsetController: _scrollOffsetController,
       itemCount: messages.length,
       indexByMessageId: replyIndexById,
+      // Through the pane, not the raw controller: the display list is frozen
+      // while reading, so index 0 is not the newest message until the freeze
+      // is released (issue #54).
+      onJumpToNewest: _scrollToBottom,
       itemBuilder: (context, revIndex) => _buildMessageRow(
         context,
         revIndex,

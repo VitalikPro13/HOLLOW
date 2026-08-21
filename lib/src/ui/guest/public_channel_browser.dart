@@ -31,14 +31,17 @@ class PublicChannelBrowser extends ConsumerWidget {
 
     return Column(
       children: [
-        // Teal guest banner
+        // Guest banner — accent-tinted CHROME, not a wash of accent over
+        // whatever is behind it. On a wallpapered chat the old 10%-alpha fill
+        // let the image straight through and the bar stopped looking like
+        // part of the app (issue #54).
         Container(
           padding: const EdgeInsets.symmetric(
             horizontal: HollowSpacing.lg,
             vertical: HollowSpacing.sm,
           ),
           decoration: BoxDecoration(
-            color: hollow.accent.withValues(alpha: 0.1),
+            color: hollow.noticeSurface(hollow.accent),
             border: Border(bottom: BorderSide(color: hollow.border)),
           ),
           child: Row(
@@ -51,7 +54,7 @@ class PublicChannelBrowser extends ConsumerWidget {
                       ? 'Viewing $serverName as guest'
                       : 'Public Channel Browser',
                   style: TextStyle(
-                    color: hollow.accent,
+                    color: hollow.accentText,
                     fontSize: 13,
                     fontWeight: FontWeight.w500,
                   ),
@@ -64,13 +67,13 @@ class PublicChannelBrowser extends ConsumerWidget {
                     vertical: 2,
                   ),
                   decoration: BoxDecoration(
-                    color: hollow.accent.withValues(alpha: 0.1),
+                    color: hollow.accent.withValues(alpha: 0.18),
                     borderRadius: BorderRadius.circular(hollow.radiusSm),
                   ),
                   child: Text(
                     serverMode.label,
                     style: TextStyle(
-                      color: hollow.accent,
+                      color: hollow.accentText,
                       fontSize: 11,
                       fontWeight: FontWeight.w500,
                     ),

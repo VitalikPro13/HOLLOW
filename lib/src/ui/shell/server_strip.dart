@@ -15,6 +15,7 @@ import 'package:hollow/src/ui/components/server_icon_image.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/server_strip_layout_provider.dart';
 import 'package:hollow/src/ui/components/server_folder_popup.dart';
+import 'package:hollow/src/core/providers/layout_prefs_provider.dart';
 import 'package:hollow/src/core/providers/notification_provider.dart';
 import 'package:hollow/src/core/providers/unread_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
@@ -23,6 +24,7 @@ import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
 import 'package:hollow/src/ui/components/hollow_menu.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
+import 'package:hollow/src/ui/components/ui_scale.dart';
 import 'package:hollow/src/ui/dialogs/create_server_dialog.dart';
 import 'package:hollow/src/ui/shell/server_context_menus.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -31,6 +33,10 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 ///
 /// Shows the Hollow home icon, server icons from [serverListProvider],
 /// and an "add server" button at the bottom.
+/// Width of the server rail at 100% panel zoom. Every icon row inside it is
+/// laid out for exactly this much.
+const double kServerStripWidth = 72.0;
+
 class ServerStrip extends ConsumerStatefulWidget {
   const ServerStrip({super.key});
 
@@ -51,6 +57,12 @@ class _ServerStripState extends ConsumerState<ServerStrip> {
     _initialServerIds ??= ref.read(serverStripLayoutProvider.notifier).allServerIds();
 
     final stripLayout = ref.watch(serverStripLayoutProvider);
+    // Panel zoom (issue #54). Unlike the two lists, this rail is a fixed 72px
+    // of icons sized to fill it, so zooming the CONTENT alone just pushes each
+    // icon row out of a column that got narrower — the rail has to widen with
+    // them. PanelScale then lays the column out at (72 * scale) / scale = 72,
+    // which is exactly the width the rows were written for.
+    final panelScale = ref.watch(panelScaleProvider);
 
     // DM unread count for Home button (pre-computed, notification-filtered).
     final dmUnreadTotal = ref.watch(dmUnreadBadgeProvider);
@@ -238,7 +250,7 @@ class _ServerStripState extends ConsumerState<ServerStrip> {
     );
 
     return Container(
-      width: 72,
+      width: kServerStripWidth * panelScale,
       decoration: BoxDecoration(
         gradient: LinearGradient(
           begin: Alignment.topCenter,
@@ -252,87 +264,101 @@ class _ServerStripState extends ConsumerState<ServerStrip> {
           right: BorderSide(color: hollow.border),
         ),
       ),
-      child: Column(
-        children: [
-          const SizedBox(height: HollowSpacing.md),
-          homeIcon,
-          const SizedBox(height: HollowSpacing.xs),
-          guestIcon,
-          const SizedBox(height: HollowSpacing.xs),
-          shareIcon,
-          const SizedBox(height: HollowSpacing.xs),
-          archiveIcon,
-          const SizedBox(height: HollowSpacing.xs),
-          conferenceIcon,
-          const SizedBox(height: HollowSpacing.sm),
-          divider,
-          const SizedBox(height: HollowSpacing.sm),
+      // Panel zoom (issue #54) — the strip keeps its 72px slot, its icons grow.
+      // minContentHeight: unlike the two lists, this column has a fixed stack
+      // of icons top and bottom that cannot shrink, so the zoom is capped at
+      // what the window can show (measured: the chrome needs ~505 logical px,
+      // and this leaves the server list about one icon of room at the cap).
+      child: PanelScale(
+        minContentHeight: 560,
+        child: Column(
+          children: [
+            const SizedBox(height: HollowSpacing.md),
+            homeIcon,
+            const SizedBox(height: HollowSpacing.xs),
+            guestIcon,
+            const SizedBox(height: HollowSpacing.xs),
+            shareIcon,
+            const SizedBox(height: HollowSpacing.xs),
+            archiveIcon,
+            const SizedBox(height: HollowSpacing.xs),
+            conferenceIcon,
+            const SizedBox(height: HollowSpacing.sm),
+            divider,
+            const SizedBox(height: HollowSpacing.sm),
 
-          // Server icon list
-          Expanded(
-            child: ListView.builder(
-              // Items interleaved with reorder gaps: gap0, item0, gap1, item1, ..., gapN
-              itemCount: stripLayout.length * 2 + 1,
-              padding: const EdgeInsets.symmetric(vertical: HollowSpacing.xs),
-              itemBuilder: (context, rawIndex) {
-                // Even indices = gap, odd indices = item
-                if (rawIndex.isEven) {
-                  final gapIndex = rawIndex ~/ 2;
-                  return _VerticalReorderGap(
-                    index: gapIndex,
-                    hollow: hollow,
-                    onAccept: (data) {
-                      ref.read(serverStripLayoutProvider.notifier)
-                          .reorder(data.sourceIndex, gapIndex);
-                    },
-                  );
-                }
+            // Server icon list. No scrollbar gutter here: this rail is 72px
+            // of centred icons, and reserving 10px of it would shove every one
+            // of them off centre. Discord's rail has no scrollbar either.
+            Expanded(
+              child: ScrollConfiguration(
+                behavior:
+                    ScrollConfiguration.of(context).copyWith(scrollbars: false),
+                child: ListView.builder(
+                  // Items interleaved with reorder gaps: gap0, item0, gap1, item1, ..., gapN
+                  itemCount: stripLayout.length * 2 + 1,
+                  padding: const EdgeInsets.symmetric(vertical: HollowSpacing.xs),
+                  itemBuilder: (context, rawIndex) {
+                    // Even indices = gap, odd indices = item
+                    if (rawIndex.isEven) {
+                      final gapIndex = rawIndex ~/ 2;
+                      return _VerticalReorderGap(
+                        index: gapIndex,
+                        hollow: hollow,
+                        onAccept: (data) {
+                          ref.read(serverStripLayoutProvider.notifier)
+                              .reorder(data.sourceIndex, gapIndex);
+                        },
+                      );
+                    }
 
-                final index = rawIndex ~/ 2;
-                final item = stripLayout[index];
+                    final index = rawIndex ~/ 2;
+                    final item = stripLayout[index];
 
-                Widget icon = switch (item) {
-                  ServerStripItem(:final serverId) => _buildServerIcon(
-                      index: index,
-                      serverId: serverId,
-                      selectedServerId: selectedServerId,
-                      hollow: hollow,
-                    ),
-                  FolderStripItem() => _buildFolderIcon(
-                      index: index,
-                      folder: item,
-                      selectedServerId: selectedServerId,
-                      hollow: hollow,
-                    ),
-                };
+                    Widget icon = switch (item) {
+                      ServerStripItem(:final serverId) => _buildServerIcon(
+                          index: index,
+                          serverId: serverId,
+                          selectedServerId: selectedServerId,
+                          hollow: hollow,
+                        ),
+                      FolderStripItem() => _buildFolderIcon(
+                          index: index,
+                          folder: item,
+                          selectedServerId: selectedServerId,
+                          hollow: hollow,
+                        ),
+                    };
 
-                // Animate newly created servers
-                final isNew = switch (item) {
-                  ServerStripItem(:final serverId) =>
-                    !_initialServerIds!.contains(serverId),
-                  FolderStripItem() => false,
-                };
-                if (isNew) {
-                  icon = _ScaleBounceEntry(
-                    key: ValueKey('bounce-${switch (item) {
-                      ServerStripItem(:final serverId) => serverId,
-                      FolderStripItem(:final id) => id,
-                    }}'),
-                    child: icon,
-                  );
-                }
+                    // Animate newly created servers
+                    final isNew = switch (item) {
+                      ServerStripItem(:final serverId) =>
+                        !_initialServerIds!.contains(serverId),
+                      FolderStripItem() => false,
+                    };
+                    if (isNew) {
+                      icon = _ScaleBounceEntry(
+                        key: ValueKey('bounce-${switch (item) {
+                          ServerStripItem(:final serverId) => serverId,
+                          FolderStripItem(:final id) => id,
+                        }}'),
+                        child: icon,
+                      );
+                    }
 
-                return Padding(
-                  padding: const EdgeInsets.only(bottom: HollowSpacing.xs),
-                  child: icon,
-                );
-              },
+                    return Padding(
+                      padding: const EdgeInsets.only(bottom: HollowSpacing.xs),
+                      child: icon,
+                    );
+                  },
+                ),
+              ),
             ),
-          ),
 
-          helpIcon,
-          addButton,
-        ],
+            helpIcon,
+            addButton,
+          ],
+        ),
       ),
     );
   }

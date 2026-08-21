@@ -28,7 +28,7 @@ The ChannelSidebar is the 240px left-hand panel that shows either the server cha
 - `channelLayoutJson` -- `String` JSON array defining category/separator/channel ordering
 
 **Layout props:**
-- `width` -- `double?`, default `240`. Pass null on mobile to fill available space.
+- `width` -- `double?`, default `240`. Pass null on mobile to fill available space. The shell passes `ref.watch(channelSidebarWidthProvider)` (issue #54) so the seam on the sidebar's right edge drags it; the split view's right pane still pins 200. The column's CONTENTS are wrapped in `PanelScale`, so channel names, icons and avatars zoom with `panelScaleProvider` while the column keeps its slot.
 - `dockMode` -- `bool`, default `false`. When true and no server is selected, the entire sidebar renders as `SizedBox.shrink()` (invisible).
 - `showUserBar` -- `bool`, default `true`. When false (dock layout), the `UserBar` at the bottom is hidden.
 

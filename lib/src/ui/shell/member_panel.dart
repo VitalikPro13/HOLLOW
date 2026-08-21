@@ -3,6 +3,7 @@ import 'package:hollow/src/ui/components/overlay_anchor.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
+import 'package:hollow/src/core/providers/layout_prefs_provider.dart';
 import 'package:hollow/src/core/providers/local_nickname_provider.dart';
 import 'package:hollow/src/core/providers/peers_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
@@ -23,45 +24,51 @@ import 'package:hollow/src/ui/components/hollow_menu.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/profile_card_popup.dart';
 import 'package:hollow/src/ui/components/status_dot.dart';
+import 'package:hollow/src/ui/components/ui_scale.dart';
 import 'package:hollow/src/ui/shell/user_context_menu.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:hollow/src/core/brand_icons.dart';
 
-/// Right-side member panel (240px) showing online peers or server members.
+/// Right-side member panel showing online peers or server members.
 class MemberPanel extends ConsumerWidget {
-  /// Fixed width for desktop/tablet. Pass null on mobile to fill available space.
+  /// Overrides the user's saved width. Null (the shell's case) uses
+  /// [memberPanelWidthProvider], which the seam on its left edge drags.
   final double? width;
 
-  const MemberPanel({super.key, this.width = 240});
+  const MemberPanel({super.key, this.width});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
     final selectedServerId = ref.watch(selectedServerProvider);
+    final panelWidth = width ?? ref.watch(memberPanelWidthProvider);
 
     final panelReveal =
         StartupRevealScope.interval(context, 0.45, 0.60);
 
     Widget panel = Container(
-      width: width,
+      width: panelWidth,
       decoration: BoxDecoration(
         color: hollow.surface,
         border: Border(
           left: BorderSide(color: hollow.border),
         ),
       ),
-      child: AnimatedSwitcher(
-        duration: HollowDurations.normal,
-        switchInCurve: HollowCurves.enter,
-        switchOutCurve: HollowCurves.exit,
-        child: selectedServerId != null
-            ? _ServerMemberContent(
-                key: ValueKey('server-members-$selectedServerId'),
-                serverId: selectedServerId,
-              )
-            : const _PeerMemberContent(
-                key: ValueKey('peer-members'),
-              ),
+      // Panel zoom (issue #54): avatars, names and status dots together.
+      child: PanelScale(
+        child: AnimatedSwitcher(
+          duration: HollowDurations.normal,
+          switchInCurve: HollowCurves.enter,
+          switchOutCurve: HollowCurves.exit,
+          child: selectedServerId != null
+              ? _ServerMemberContent(
+                  key: ValueKey('server-members-$selectedServerId'),
+                  serverId: selectedServerId,
+                )
+              : const _PeerMemberContent(
+                  key: ValueKey('peer-members'),
+                ),
+        ),
       ),
     );
 
@@ -74,6 +81,14 @@ class MemberPanel extends ConsumerWidget {
   }
 }
 
+/// Where a member row's profile card hangs: to the LEFT of the panel, lifted
+/// so a row near the bottom does not open a card that runs off the screen.
+/// Re-evaluated by the card itself after a window resize (issue #54).
+Offset memberCardAnchor(BuildContext context) {
+  final pos = overlayAnchorOf(context);
+  return Offset(pos.dx - kProfileCardPopupWidth - 10, pos.dy - 100);
+}
+
 /// Lightweight data entry for the flat member list. No widget allocation —
 /// ListView.builder creates widgets lazily from these entries.
 class _MemberListEntry {
@@ -83,6 +98,7 @@ class _MemberListEntry {
   final String? label;
   final int? count;
   final String? dividerRole;
+  final bool collapsed;
   // Member fields
   final String? peerId;
   final String? displayName;
@@ -98,6 +114,7 @@ class _MemberListEntry {
     this.label,
     this.count,
     this.dividerRole,
+    this.collapsed = false,
     this.peerId,
     this.displayName,
     this.role,
@@ -112,9 +129,11 @@ class _MemberListEntry {
     required int count,
     required bool isOnline,
     String? dividerRole,
+    bool collapsed = false,
   }) => _MemberListEntry._(
     isDivider: true, isOnline: isOnline,
     label: label, count: count, dividerRole: dividerRole,
+    collapsed: collapsed,
   );
 
   factory _MemberListEntry.member(dynamic m, {required bool isOnline, String? serverId}) =>
@@ -138,12 +157,20 @@ class _SectionDivider extends StatelessWidget {
   final bool isOnline;
   final Color? glowColor;
 
+  /// Non-null makes the section foldable (issue #54) — the member list on a
+  /// busy server is mostly Offline, and nobody scrolls past 200 grey names to
+  /// reach the people who are actually here.
+  final VoidCallback? onToggle;
+  final bool collapsed;
+
   const _SectionDivider({
     super.key,
     required this.label,
     required this.count,
     required this.isOnline,
     this.glowColor,
+    this.onToggle,
+    this.collapsed = false,
   });
 
   @override
@@ -157,13 +184,21 @@ class _SectionDivider extends StatelessWidget {
       fontSize: 11,
     );
 
-    return Padding(
+    final row = Padding(
       padding: const EdgeInsets.symmetric(
         horizontal: HollowSpacing.sm + 2,
         vertical: HollowSpacing.sm,
       ),
       child: Row(
         children: [
+          if (onToggle != null) ...[
+            Icon(
+              collapsed ? LucideIcons.chevronRight : LucideIcons.chevronDown,
+              size: 12,
+              color: hollow.textSecondary,
+            ),
+            const SizedBox(width: HollowSpacing.xxs),
+          ],
           Text(label, style: textStyle),
           const SizedBox(width: HollowSpacing.sm),
           Expanded(
@@ -215,6 +250,18 @@ class _SectionDivider extends StatelessWidget {
           Text('$count', style: textStyle),
         ],
       ),
+    );
+    if (onToggle == null) return row;
+    return HollowPressable(
+      subtle: true,
+      semanticButton: false,
+      semanticLabel: collapsed
+          ? 'Expand $label, $count members'
+          : 'Collapse $label, $count members',
+      onTap: onToggle,
+      borderRadius: BorderRadius.circular(hollow.radiusSm),
+      padding: EdgeInsets.zero,
+      child: row,
     );
   }
 }
@@ -305,6 +352,11 @@ final _serverMemberEntriesProvider = Provider.family
   final onlineIdentities = ref.watch(onlineIdentitiesProvider);
   final localPeerId = ref.watch(identityProvider).peerId;
   final amInvisible = ref.watch(invisibleModeProvider);
+  // Folded sections still render their divider (with its full count) — only
+  // the rows underneath go away (issue #54).
+  final collapsedGroups = ref.watch(collapsedMemberGroupsProvider);
+  bool isFolded(String label) => collapsedGroups
+      .contains(CollapsedMemberGroupsNotifier.keyFor(serverId, label));
 
   return membersAsync.when(
     data: (members) {
@@ -329,12 +381,16 @@ final _serverMemberEntriesProvider = Provider.family
       if (online.isNotEmpty) {
         final roles = online.map((m) => m.role).toSet();
         if (roles.length == 1 && roles.first == 'member') {
+          final folded = isFolded('Online');
           flatItems.add(_MemberListEntry.divider(
             label: 'Online', count: online.length, isOnline: true,
+            collapsed: folded,
           ));
-          for (final m in online) {
-            flatItems.add(
-                _MemberListEntry.member(m, isOnline: true, serverId: serverId));
+          if (!folded) {
+            for (final m in online) {
+              flatItems.add(_MemberListEntry.member(m,
+                  isOnline: true, serverId: serverId));
+            }
           }
         } else {
           final groups = <String, List<dynamic>>{};
@@ -344,12 +400,16 @@ final _serverMemberEntriesProvider = Provider.family
           for (final role in roleOrder) {
             final group = groups[role];
             if (group == null || group.isEmpty) continue;
+            final label = _roleDividerLabel(role);
+            final folded = isFolded(label);
             flatItems.add(_MemberListEntry.divider(
-              label: _roleDividerLabel(role),
+              label: label,
               count: group.length,
               isOnline: true,
               dividerRole: role,
+              collapsed: folded,
             ));
+            if (folded) continue;
             for (final m in group) {
               flatItems.add(_MemberListEntry.member(m,
                   isOnline: true, serverId: serverId));
@@ -358,12 +418,16 @@ final _serverMemberEntriesProvider = Provider.family
         }
       }
       if (offline.isNotEmpty) {
+        final folded = isFolded('Offline');
         flatItems.add(_MemberListEntry.divider(
           label: 'Offline', count: offline.length, isOnline: false,
+          collapsed: folded,
         ));
-        for (final m in offline) {
-          flatItems.add(
-              _MemberListEntry.member(m, isOnline: false, serverId: serverId));
+        if (!folded) {
+          for (final m in offline) {
+            flatItems.add(_MemberListEntry.member(m,
+                isOnline: false, serverId: serverId));
+          }
         }
       }
       return (flatItems, members.length, false, null);
@@ -477,6 +541,11 @@ class _ServerMemberContent extends ConsumerWidget {
                                 label: entry.label!,
                                 count: entry.count!,
                                 isOnline: entry.isOnline,
+                                collapsed: entry.collapsed,
+                                onToggle: () => ref
+                                    .read(collapsedMemberGroupsProvider
+                                        .notifier)
+                                    .toggle(serverId, entry.label!),
                                 glowColor: entry.dividerRole != null
                                     ? _roleGlowColor(entry.dividerRole!, hollow)
                                     : null,
@@ -631,8 +700,6 @@ class _ServerMemberTile extends ConsumerWidget {
           onTap: () {
             final box = context.findRenderObject() as RenderBox?;
             if (box == null) return;
-            final pos = overlayAnchorOf(context);
-            // Show card to the left of member panel (like Discord)
             showProfileCardPopup(
               context: context,
               ref: ref,
@@ -642,7 +709,9 @@ class _ServerMemberTile extends ConsumerWidget {
               twitchUsername: effectiveTwitch.isNotEmpty ? effectiveTwitch : null,
               labels: labels.isNotEmpty ? labels : null,
               serverId: serverId,
-              anchor: Offset(pos.dx - kProfileCardPopupWidth - 10, pos.dy - 100),
+              // Card to the left of the member panel (like Discord), re-read
+              // on resize so it follows the row (issue #54).
+              anchorOf: () => memberCardAnchor(context),
             );
           },
           padding: const EdgeInsets.symmetric(
@@ -765,13 +834,11 @@ class _MemberTile extends ConsumerWidget {
         onTap: () {
           final box = context.findRenderObject() as RenderBox?;
           if (box == null) return;
-          final pos = overlayAnchorOf(context);
-          // Show card to the left of member panel (like Discord)
           showProfileCardPopup(
             context: context,
             ref: ref,
             peerId: peerId,
-            anchor: Offset(pos.dx - kProfileCardPopupWidth - 10, pos.dy - 100),
+            anchorOf: () => memberCardAnchor(context),
           );
         },
         padding: const EdgeInsets.symmetric(

@@ -32,17 +32,33 @@ bool isStickerPackFile(String fileName) =>
 /// un-validated bytes. Every real check lives in `import_sticker_pack`, which
 /// re-hashes and re-decodes each blob.
 class StickerPackCard extends ConsumerStatefulWidget {
-  /// Local path of the downloaded pack file. Null while it is still in
-  /// flight, which renders the waiting state.
+  /// Local path of the downloaded pack file. Null until the bytes are here,
+  /// which renders either the in-flight state or the "fetch it" one.
   final String? diskPath;
 
   /// Name as it arrived, used as the label until the manifest is read.
   final String fileName;
 
+  /// True only while bytes are actually moving. A pack whose transfer never
+  /// started (or was declined by the auto-download gate, issue #41) is NOT
+  /// downloading — saying "Downloading…" under it forever is the bug this
+  /// separates out (issue #54).
+  final bool isDownloading;
+
+  /// 0..1 while [isDownloading].
+  final double progress;
+
+  /// Starts the ordinary manual download for this attachment. Null in
+  /// contexts that cannot fetch (an archive viewer).
+  final VoidCallback? onDownload;
+
   const StickerPackCard({
     super.key,
     required this.diskPath,
     required this.fileName,
+    this.isDownloading = false,
+    this.progress = 0,
+    this.onDownload,
   });
 
   @override
@@ -129,11 +145,19 @@ class _StickerPackCardState extends ConsumerState<StickerPackCard> {
             '');
   }
 
+  /// True when the bytes are not here and nothing is fetching them.
+  bool get _needsDownload => widget.diskPath == null && !widget.isDownloading;
+
   String get _subtitle {
     if (_error != null) return _error!;
     final preview = _preview;
     if (preview == null) {
-      return widget.diskPath == null ? 'Downloading…' : 'Reading pack…';
+      if (widget.diskPath != null) return 'Reading pack…';
+      if (widget.isDownloading) {
+        final pct = (widget.progress.clamp(0.0, 1.0) * 100).round();
+        return pct > 0 ? 'Downloading… $pct%' : 'Downloading…';
+      }
+      return 'Sticker pack';
     }
     final count = preview.count;
     final label = '$count sticker${count == 1 ? '' : 's'}';
@@ -205,6 +229,18 @@ class _StickerPackCardState extends ConsumerState<StickerPackCard> {
                 ),
               ],
             ),
+            if (_needsDownload && widget.onDownload != null) ...[
+              const SizedBox(height: HollowSpacing.sm),
+              SizedBox(
+                width: double.infinity,
+                child: HollowButton.ghost(
+                  icon: const Icon(LucideIcons.download, size: 14),
+                  onPressed: widget.onDownload,
+                  semanticLabel: 'Download this sticker pack',
+                  child: const Text('Download pack'),
+                ),
+              ),
+            ],
             if (ready) ...[
               const SizedBox(height: HollowSpacing.sm),
               SizedBox(

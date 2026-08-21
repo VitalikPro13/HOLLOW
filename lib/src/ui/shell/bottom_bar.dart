@@ -114,12 +114,14 @@ class _BottomBarState extends ConsumerState<BottomBar> {
               child: HollowPressable(
                 onTap: () {
                   if (localPeerId != null) {
-                    final pos = overlayAnchorOf(context);
                     showProfileCardPopup(
                       context: context,
                       ref: ref,
                       peerId: localPeerId,
-                      anchor: Offset(pos.dx + 8, pos.dy - 8),
+                      anchorOf: () {
+                        final pos = overlayAnchorOf(context);
+                        return Offset(pos.dx + 8, pos.dy - 8);
+                      },
                       anchorBottom: true,
                     );
                   }

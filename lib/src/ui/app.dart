@@ -10,6 +10,7 @@ import 'package:hollow/src/core/providers/theme_provider.dart';
 import 'package:hollow/src/theme/hollow_colors.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_theme_data.dart';
+import 'package:hollow/src/ui/components/hollow_scroll_behavior.dart';
 import 'package:hollow/src/ui/components/ui_scale.dart';
 import 'package:hollow/src/ui/dialogs/incoming_call_dialog.dart';
 import 'package:hollow/src/ui/mobile/call_proximity_controller.dart';
@@ -64,6 +65,9 @@ class HollowApp extends ConsumerWidget {
       title: 'Hollow',
       debugShowCheckedModeBanner: false,
       theme: themeData,
+      // Every desktop vertical scrollable gets a reserved scrollbar gutter
+      // instead of a thumb painted over its last 10px (issue #54).
+      scrollBehavior: const HollowScrollBehavior(),
       home: const HollowShell(),
       builder: (context, child) {
         // a11y 2.6: clear the keyboard focus ring as soon as the user reaches

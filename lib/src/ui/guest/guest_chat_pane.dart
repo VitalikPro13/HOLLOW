@@ -19,7 +19,12 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/chat/channel_message_bubble.dart';
 import 'package:hollow/src/ui/chat/chat_pane.dart'
-    show shouldGroup, chatSelectionArea, selectionMustBeScopedToRows;
+    show
+        shouldGroup,
+        chatSelectionArea,
+        selectionMustBeScopedToRows,
+        ChatScrollRail,
+        chatListWithRail;
 import 'package:hollow/src/ui/chat/message_action_bar.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
@@ -335,130 +340,136 @@ class _GuestChatPaneState extends ConsumerState<GuestChatPane> {
                 )
               : MessageActionBarScope(
                   child: Builder(
-                    builder: (scopeContext) =>
-                        NotificationListener<ScrollNotification>(
-                      onNotification: (notification) {
-                        if (notification is ScrollUpdateNotification) {
-                          MessageActionBarScope.of(scopeContext)?.dismissAll();
-                        }
-                        return false;
-                      },
-                      child: ChatTextScale(
-                        // Issue #35: when the interface scale is not 100% the
-                        // SelectionArea moves to the ROWS below — see
-                        // [selectionMustBeScopedToRows].
-                        child: _listSelectionWrap(
-                          perRowSelection,
-                          ScrollConfiguration(
-                            behavior: ScrollConfiguration.of(context)
-                                .copyWith(scrollbars: false),
-                            child: ScrollablePositionedList.builder(
-                              key: ValueKey(
-                                  'guest-list-${widget.serverId}-${widget.channelId}'),
-                              itemScrollController: _itemScrollController,
-                              itemPositionsListener: _itemPositionsListener,
-                              // reverse:true — newest message at builder index
-                              // 0, pinned to the bottom edge; the "Load more"
-                              // button becomes the LAST reversed index (the
-                              // oldest end = visual top). No sentinel row.
-                              reverse: true,
-                              initialScrollIndex: 0,
-                              initialAlignment: 0.0,
-                              padding: const EdgeInsets.symmetric(
-                                vertical: HollowSpacing.sm,
-                              ),
-                              itemCount: filtered.length + (hasMore ? 1 : 0),
-                              itemBuilder: (context, revIndex) {
-                                // "Load more" button at the visual top.
-                                if (hasMore && revIndex == filtered.length) {
-                                  return Center(
-                                    child: Padding(
-                                      padding: const EdgeInsets.all(
-                                          HollowSpacing.sm),
-                                      child: HollowButton.ghost(
-                                        compact: true,
-                                        onPressed: () {
-                                          final oldest = filtered.first.timestamp;
-                                          crdt_api.requestPublicChannelSync(
-                                            serverId: widget.serverId,
-                                            channelId: widget.channelId,
-                                            beforeTimestamp: oldest
-                                                .millisecondsSinceEpoch,
-                                          ).catchError((_) {});
-                                        },
-                                        child: const Text('Load more'),
-                                      ),
-                                    ),
-                                  );
-                                }
-
-                                // Reversed builder index → chronological.
-                                final msgIndex =
-                                    filtered.length - 1 - revIndex;
-
-                                final msg = filtered[msgIndex];
-                                final showHeader = msgIndex == 0 ||
-                                    !shouldGroup(
-                                      currentIsMe: msg.isMe,
-                                      previousIsMe:
-                                          filtered[msgIndex - 1].isMe,
-                                      currentTime: msg.timestamp,
-                                      previousTime:
-                                          filtered[msgIndex - 1].timestamp,
-                                      currentSenderId: msg.senderId,
-                                      previousSenderId:
-                                          filtered[msgIndex - 1].senderId,
-                                    );
-
-                                final row = MessageHoverWrapper(
-                                  isMe: false,
-                                  messageId: msg.messageId,
-                                  currentText: msg.text,
-                                  onCopy: () {
-                                    Clipboard.setData(
-                                        ClipboardData(text: msg.text));
-                                    HollowToast.show(
-                                        context, 'Copied to clipboard',
-                                        type: HollowToastType.success);
-                                  },
-                                  onInfo: () {
-                                    showMessageProofDialog(
-                                      context,
-                                      MessageProofData(
-                                        senderPeerId: msg.senderId,
-                                        senderDisplayName:
-                                            _senderName(msg.senderId),
-                                        text: msg.text,
-                                        timestampMs:
-                                            (msg.editedAt ?? msg.timestamp)
-                                                .millisecondsSinceEpoch,
-                                        signature: msg.signature,
-                                        publicKey: msg.publicKey,
-                                        messageId: msg.messageId,
-                                        context:
-                                            '${widget.serverId}:${widget.channelId}',
-                                        msgType: 'ch',
-                                        fileAttachment: msg.fileAttachment,
-                                      ),
-                                    );
-                                  },
-                                  onDownload: msg.fileAttachment == null
-                                      ? null
-                                      : () => _downloadFor(msg),
-                                  child: ChannelMessageBubble(
-                                    message: msg,
-                                    serverId: widget.serverId,
-                                    showHeader: showHeader,
+                    builder: (scopeContext) => chatListWithRail(
+                      rail: ChatScrollRail(
+                        itemCount: filtered.length + (hasMore ? 1 : 0),
+                        controller: _itemScrollController,
+                        positions: _itemPositionsListener,
+                      ),
+                      list: NotificationListener<ScrollNotification>(
+                          onNotification: (notification) {
+                            if (notification is ScrollUpdateNotification) {
+                              MessageActionBarScope.of(scopeContext)?.dismissAll();
+                            }
+                            return false;
+                          },
+                          child: ChatTextScale(
+                            // Issue #35: when the interface scale is not 100% the
+                            // SelectionArea moves to the ROWS below — see
+                            // [selectionMustBeScopedToRows].
+                            child: _listSelectionWrap(
+                              perRowSelection,
+                              ScrollConfiguration(
+                                behavior: ScrollConfiguration.of(context)
+                                    .copyWith(scrollbars: false),
+                                child: ScrollablePositionedList.builder(
+                                  key: ValueKey(
+                                      'guest-list-${widget.serverId}-${widget.channelId}'),
+                                  itemScrollController: _itemScrollController,
+                                  itemPositionsListener: _itemPositionsListener,
+                                  // reverse:true — newest message at builder index
+                                  // 0, pinned to the bottom edge; the "Load more"
+                                  // button becomes the LAST reversed index (the
+                                  // oldest end = visual top). No sentinel row.
+                                  reverse: true,
+                                  initialScrollIndex: 0,
+                                  initialAlignment: 0.0,
+                                  padding: const EdgeInsets.symmetric(
+                                    vertical: HollowSpacing.sm,
                                   ),
-                                );
-                                return perRowSelection
-                                    ? chatSelectionArea(child: row)
-                                    : row;
-                              },
+                                  itemCount: filtered.length + (hasMore ? 1 : 0),
+                                  itemBuilder: (context, revIndex) {
+                                    // "Load more" button at the visual top.
+                                    if (hasMore && revIndex == filtered.length) {
+                                      return Center(
+                                        child: Padding(
+                                          padding: const EdgeInsets.all(
+                                              HollowSpacing.sm),
+                                          child: HollowButton.ghost(
+                                            compact: true,
+                                            onPressed: () {
+                                              final oldest = filtered.first.timestamp;
+                                              crdt_api.requestPublicChannelSync(
+                                                serverId: widget.serverId,
+                                                channelId: widget.channelId,
+                                                beforeTimestamp: oldest
+                                                    .millisecondsSinceEpoch,
+                                              ).catchError((_) {});
+                                            },
+                                            child: const Text('Load more'),
+                                          ),
+                                        ),
+                                      );
+                                    }
+
+                                    // Reversed builder index → chronological.
+                                    final msgIndex =
+                                        filtered.length - 1 - revIndex;
+
+                                    final msg = filtered[msgIndex];
+                                    final showHeader = msgIndex == 0 ||
+                                        !shouldGroup(
+                                          currentIsMe: msg.isMe,
+                                          previousIsMe:
+                                              filtered[msgIndex - 1].isMe,
+                                          currentTime: msg.timestamp,
+                                          previousTime:
+                                              filtered[msgIndex - 1].timestamp,
+                                          currentSenderId: msg.senderId,
+                                          previousSenderId:
+                                              filtered[msgIndex - 1].senderId,
+                                        );
+
+                                    final row = MessageHoverWrapper(
+                                      isMe: false,
+                                      messageId: msg.messageId,
+                                      currentText: msg.text,
+                                      onCopy: () {
+                                        Clipboard.setData(
+                                            ClipboardData(text: msg.text));
+                                        HollowToast.show(
+                                            context, 'Copied to clipboard',
+                                            type: HollowToastType.success);
+                                      },
+                                      onInfo: () {
+                                        showMessageProofDialog(
+                                          context,
+                                          MessageProofData(
+                                            senderPeerId: msg.senderId,
+                                            senderDisplayName:
+                                                _senderName(msg.senderId),
+                                            text: msg.text,
+                                            timestampMs:
+                                                (msg.editedAt ?? msg.timestamp)
+                                                    .millisecondsSinceEpoch,
+                                            signature: msg.signature,
+                                            publicKey: msg.publicKey,
+                                            messageId: msg.messageId,
+                                            context:
+                                                '${widget.serverId}:${widget.channelId}',
+                                            msgType: 'ch',
+                                            fileAttachment: msg.fileAttachment,
+                                          ),
+                                        );
+                                      },
+                                      onDownload: msg.fileAttachment == null
+                                          ? null
+                                          : () => _downloadFor(msg),
+                                      child: ChannelMessageBubble(
+                                        message: msg,
+                                        serverId: widget.serverId,
+                                        showHeader: showHeader,
+                                      ),
+                                    );
+                                    return perRowSelection
+                                        ? chatSelectionArea(child: row)
+                                        : row;
+                                  },
+                                ),
+                              ),
                             ),
                           ),
                         ),
-                      ),
                     ),
                   ),
                 ),
@@ -471,6 +482,9 @@ class _GuestChatPaneState extends ConsumerState<GuestChatPane> {
             vertical: HollowSpacing.md,
           ),
           decoration: BoxDecoration(
+            // Same material as the composer it stands in for. Without a fill
+            // this read as bare text floating on the wallpaper (issue #54).
+            color: hollow.surface,
             border: Border(top: BorderSide(color: hollow.border)),
           ),
           child: Row(

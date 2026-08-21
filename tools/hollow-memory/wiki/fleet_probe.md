@@ -158,6 +158,13 @@ alive is worse than a noisy log.
 Every string in a step is `${VAR}`-substituted before it runs — captured values first, then the
 environment (so `${PEER}` resolves via `UI_PROBE_PEER`).
 
+A fourth op joined them for issue #54: **`view`** — `width`/`height` (or `reset: true`) resizes the
+FRAMEWORK viewport, which is what "the user maximized the window" looks like to every widget, and
+is how the profile card's re-anchoring was reproduced. Deliberately NOT `window_manager`: driving
+that against a window the probe never took through `main()`'s `setAsFrameless` dance kills the
+process with no Dart error. Caveat learned the hard way: a resize can auto-collapse panels, so a
+target's coordinates before and after are not comparable — re-resolve, do not cache.
+
 ## Rules that are not optional
 
 - **The fleet talks only to servers the fleet creates.** These are real identities on the real

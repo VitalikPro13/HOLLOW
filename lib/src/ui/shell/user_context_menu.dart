@@ -434,7 +434,9 @@ void _openProfile(
         (twitchUsername != null && twitchUsername.isNotEmpty) ? twitchUsername : null,
     labels: (labels != null && labels.isNotEmpty) ? labels : null,
     serverId: serverId,
-    anchor: anchor,
+    // Nothing to follow: this came from a menu row that is already gone, so
+    // the card keeps the point the menu was opened at.
+    anchorOf: () => anchor,
   );
 }
 

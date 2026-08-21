@@ -371,3 +371,7 @@ Same reversed-list model as ui_chat_dm (reverse:true, newest = index 0, `_frozen
 - Search-result taps index against `_displayMessages(...)` (the possibly-frozen list) and `_scrollToMessage(chrono)` converts to the reversed index.
 - The unread pill marks seen against `allMessages.last` (true newest, not the frozen view).
 - Element reuse: passes `findChildIndexCallback` (messageId via `replyIndexById` → reversed index) to the VENDORED `scrollable_positioned_list` so rows move instead of remounting on every arrival — see ui_chat_dm "Element reuse".
+
+## Scrollbar rail (issue #54, 2026-08-21)
+
+The list is built by `reversedChatList`, which since 2026-08-21 hangs `ChatScrollRail` in a column beside it on desktop (index scrollbar + a jump cap at each end). The pane's only job is to pass `onJumpToNewest: _scrollToBottom` — "jump to present" MUST go through the pane, because the display list is frozen while reading (`_frozenLen`) and index 0 is not the newest message until that freeze is released. Mechanics and the traps (reversed index maths, the window-edge dead strip, why it is a column and not an overlay) live in `wiki/ui_chat_pane_shared.md`.

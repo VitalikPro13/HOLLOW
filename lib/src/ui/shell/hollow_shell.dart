@@ -108,6 +108,8 @@ import 'package:hollow/src/ui/shell/archive_dashboard.dart';
 import 'package:hollow/src/ui/shell/conference_dashboard.dart';
 import 'package:hollow/src/ui/share/share_dashboard.dart';
 import 'package:hollow/src/ui/shell/home_dashboard.dart';
+import 'package:hollow/src/core/providers/layout_prefs_provider.dart';
+import 'package:hollow/src/ui/components/panel_resize_handle.dart';
 import 'package:hollow/src/ui/shell/member_panel.dart';
 import 'package:hollow/src/ui/shell/mobile_nav.dart';
 import 'package:hollow/src/ui/mobile/mobile_shell.dart';
@@ -979,6 +981,10 @@ class _HollowShellState extends ConsumerState<HollowShell>
     // until the store is open, so these load here, never in build().
     await ref.read(uiScaleProvider.notifier).load();
     await ref.read(chatTextScaleProvider.notifier).load();
+    // Panel widths, panel zoom, profile-card style and the folded member-list
+    // sections (issue #54) — same rule again: these are watched by the first
+    // frame, so they load HERE, never from a provider's build().
+    await loadLayoutPrefs(ref);
     await ref.read(backgroundProvider.notifier).load();
     await ref.read(accentPresetsProvider.notifier).load();
     // UI sound pack (#55): loaded here for the same reason as the theme, and
@@ -1344,7 +1350,7 @@ class _HollowShellState extends ConsumerState<HollowShell>
     required Map<String, ChannelInfo> channels,
     required String? selectedChannelId,
     required String channelLayoutJson,
-    double? width = 240,
+    double? width,
     bool dockMode = false,
   }) {
     return ChannelSidebar(
@@ -1352,7 +1358,8 @@ class _HollowShellState extends ConsumerState<HollowShell>
       lastMessages: lastMessages,
       selectedPeerId: selectedPeerId,
       nodeStatus: nodeStatus,
-      width: width,
+      // The user's dragged width (issue #54) unless a caller overrides it.
+      width: width ?? ref.watch(channelSidebarWidthProvider),
       dockMode: dockMode,
       showUserBar: !dockMode,
       onPeerSelected: (peerId) {
@@ -1838,6 +1845,7 @@ class _HollowShellState extends ConsumerState<HollowShell>
                   selectedChannelId: selectedChannelId,
                   channelLayoutJson: channelLayout,
                 ),
+                const _ChannelSidebarSeam(),
                 Expanded(
                   child: _chatRevealWrap(
                     RepaintBoundary(
@@ -2003,16 +2011,24 @@ class _HollowShellState extends ConsumerState<HollowShell>
                 // Channel sidebar — animated slide in/out in dock mode
                 _DockSidebarSlider(
                   visible: selectedServerId != null,
-                  child: _buildChannelSidebar(
-                    peers: peers,
-                    lastMessages: lastMessages,
-                    selectedPeerId: selectedPeerId,
-                    nodeStatus: nodeStatus,
-                    selectedServer: selectedServer,
-                    channels: channels,
-                    selectedChannelId: selectedChannelId,
-                    channelLayoutJson: channelLayout,
-                    dockMode: true,
+                  // The seam rides INSIDE the slider so it slides away with
+                  // the panel it sizes instead of hanging in empty space.
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      _buildChannelSidebar(
+                        peers: peers,
+                        lastMessages: lastMessages,
+                        selectedPeerId: selectedPeerId,
+                        nodeStatus: nodeStatus,
+                        selectedServer: selectedServer,
+                        channels: channels,
+                        selectedChannelId: selectedChannelId,
+                        channelLayoutJson: channelLayout,
+                        dockMode: true,
+                      ),
+                      const _ChannelSidebarSeam(),
+                    ],
                   ),
                 ),
 
@@ -2239,9 +2255,53 @@ class _MemberPanelSliderState extends State<_MemberPanelSlider>
                   (ref) => _frozenServerId,
                 ),
               ],
-              child: const RepaintBoundary(child: MemberPanel()),
+              child: const _MemberPanelWithSeam(),
             )
-          : const RepaintBoundary(child: MemberPanel()),
+          : const _MemberPanelWithSeam(),
+    );
+  }
+}
+
+/// The draggable seam on the channel sidebar's right edge (issue #54).
+///
+/// A strip of its own rather than an overlay on the panel edge: that edge is
+/// the channel list's scrollbar gutter now, and a handle sitting on it would
+/// eat the thumb.
+class _ChannelSidebarSeam extends ConsumerWidget {
+  const _ChannelSidebarSeam();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    return PanelResizeHandle(
+      label: 'Resize the channel list',
+      width: ref.watch(channelSidebarWidthProvider),
+      onResize: (w) =>
+          ref.read(channelSidebarWidthProvider.notifier).setWidth(w),
+      onReset: () => ref.read(channelSidebarWidthProvider.notifier).reset(),
+    );
+  }
+}
+
+/// The member panel plus the seam on its LEFT edge, so dragging left widens
+/// it (issue #54).
+class _MemberPanelWithSeam extends ConsumerWidget {
+  const _MemberPanelWithSeam();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        PanelResizeHandle(
+          label: 'Resize the member list',
+          panelOnRight: true,
+          width: ref.watch(memberPanelWidthProvider),
+          onResize: (w) =>
+              ref.read(memberPanelWidthProvider.notifier).setWidth(w),
+          onReset: () => ref.read(memberPanelWidthProvider.notifier).reset(),
+        ),
+        const RepaintBoundary(child: MemberPanel()),
+      ],
     );
   }
 }

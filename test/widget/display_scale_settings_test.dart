@@ -42,13 +42,16 @@ void main() {
     await tester.pump();
   }
 
-  testWidgets('renders both scale controls at their defaults', (tester) async {
+  testWidgets('renders the three scale controls at their defaults',
+      (tester) async {
     await pumpSettings(tester);
     expect(find.text('Interface scale'), findsOneWidget);
     expect(find.text('Chat text size'), findsOneWidget);
-    // Both sit at 100%, and the min/max captions frame the desktop range.
-    expect(find.text('100%'), findsNWidgets(2));
-    expect(find.byType(Slider), findsNWidgets(2));
+    // Side panel size joined them in issue #54.
+    expect(find.text('Side panel size'), findsOneWidget);
+    // All three sit at 100%, and the min/max captions frame each range.
+    expect(find.text('100%'), findsNWidgets(3));
+    expect(find.byType(Slider), findsNWidgets(3));
   });
 
   testWidgets('interface scale commits on release, not mid-drag',
@@ -79,7 +82,8 @@ void main() {
     await pumpSettings(tester);
     expect(container.read(chatTextScaleProvider), kChatTextScaleDefault);
 
-    final slider = find.byType(Slider).last;
+    // Order in the card: interface scale, chat text size, side panel size.
+    final slider = find.byType(Slider).at(1);
     final center = tester.getCenter(slider);
     final gesture = await tester.startGesture(center);
     await gesture.moveBy(const Offset(60, 0));
