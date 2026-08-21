@@ -25,6 +25,8 @@ import 'probe_targets.dart';
 /// | `tap` | `target`, `index` | primary click |
 /// | `right_click` | `target`, `index` | secondary click (context menus) |
 /// | `long_press` | `target`, `index` | long press (mobile-style actions) |
+/// | `hover` | `target`, `index` | parks a mouse pointer on it (hover bars) |
+/// | `hover_at` | same as `tap_at` | parks a mouse pointer on a POINT |
 /// | `tap_at` | `x`,`y` or `of`+`align`+`dx`,`dy` | click a POINT, for empty space |
 /// | `right_click_at` | same as `tap_at` | secondary click on a point |
 /// | `enter_text` | `value`, `target` (default `field`) | types into a field |
@@ -40,7 +42,9 @@ import 'probe_targets.dart';
 /// | `quit` | | ends a live session |
 ///
 /// Targets use the [ProbeTargets] grammar. Any step may carry `"soft": true`
-/// to record a failure and keep going.
+/// to record a failure and keep going, and a pointer step may carry
+/// `"allowMiss": true` to skip the check that its click actually lands on the
+/// widget it found (see [ProbeRunner._requireHittable]).
 class ProbeRunner {
   ProbeRunner({
     required this.tester,
@@ -278,12 +282,14 @@ class ProbeRunner {
 
       case 'tap':
         final finder = _finder(step);
+        _requireHittable(finder, step);
         await tester.tap(finder, warnIfMissed: false);
         await settle(frames: step['frames'] as int? ?? 25);
         return 'tapped ${step['target']}';
 
       case 'right_click':
         final finder = _finder(step);
+        _requireHittable(finder, step);
         await tester.tap(finder,
             buttons: kSecondaryButton, warnIfMissed: false);
         await settle(frames: step['frames'] as int? ?? 25);
@@ -291,9 +297,22 @@ class ProbeRunner {
 
       case 'long_press':
         final finder = _finder(step);
+        _requireHittable(finder, step);
         await tester.longPress(finder, warnIfMissed: false);
         await settle(frames: step['frames'] as int? ?? 25);
         return 'long-pressed ${step['target']}';
+
+      case 'hover':
+        final finder = _finder(step);
+        await _hover(tester.getCenter(finder));
+        await settle(frames: step['frames'] as int? ?? 25);
+        return 'hovering ${step['target']}';
+
+      case 'hover_at':
+        final point = _point(step);
+        await _hover(point);
+        await settle(frames: step['frames'] as int? ?? 25);
+        return 'hovering ${point.dx.round()},${point.dy.round()}';
 
       case 'tap_at':
       case 'right_click_at':
@@ -432,6 +451,88 @@ class ProbeRunner {
     buffer.write('Visible text (${texts.length}): ${shown.join(" | ")}'
         '${texts.length > shown.length ? " ..." : ""}');
     return buffer.toString();
+  }
+
+  /// Parks a mouse pointer at [point] and leaves it there.
+  ///
+  /// The message action bar, tooltips and every hover state only exist while a
+  /// mouse is over the thing, and `tester.tap` sends a touch-like pointer that
+  /// arrives and leaves. The gesture is deliberately NOT removed: the next
+  /// step usually wants to click what the hover just revealed.
+  Future<void> _hover(Offset point) async {
+    final gesture = _hoverGesture ??=
+        await tester.createGesture(kind: PointerDeviceKind.mouse);
+    await gesture.addPointer(location: point);
+    await gesture.moveTo(point);
+  }
+
+  TestGesture? _hoverGesture;
+
+  /// Fails when the point the tap will land on does not actually reach the
+  /// widget that was found.
+  ///
+  /// `tester.tap` aims at the widget's CENTRE, computed from its render box —
+  /// and a render box knows nothing about clipping. A list row scrolled half
+  /// out of its viewport still reports its full height, so the centre lands
+  /// past the clip, on whatever is painted there instead (a pinned footer
+  /// button, usually). The tap then quietly does nothing and the step passes,
+  /// which is the worst possible outcome for a tool whose entire job is to
+  /// report what the app did. This turns that into a named failure.
+  ///
+  /// Pass `"allowMiss": true` on a step that deliberately clicks through
+  /// something.
+  void _requireHittable(Finder finder, Map<String, dynamic> step) {
+    if (step['allowMiss'] == true) return;
+    final target = finder.evaluate().first.renderObject;
+    if (target is! RenderBox || !target.hasSize) return;
+
+    final point = tester.getCenter(finder);
+    final result = tester.hitTestOnBinding(point);
+    for (final entry in result.path) {
+      if (identical(entry.target, target)) return;
+    }
+
+    // Name what IS there instead, so the next attempt is informed.
+    final blockers = <String>[];
+    for (final entry in result.path) {
+      final hit = entry.target;
+      if (hit is! RenderBox) continue;
+      for (final element in tester.allElements) {
+        if (!identical(element.renderObject, hit)) continue;
+        final description = _describeElement(element);
+        if (description != null && !blockers.contains(description)) {
+          blockers.add(description);
+        }
+        break;
+      }
+      if (blockers.length >= 4) break;
+    }
+
+    final what = blockers.isEmpty
+        ? 'Nothing was hit there at all.'
+        : 'What is hit there instead: ${blockers.join(" < ")}';
+    throw _ProbeFailure(
+        '"${step['target']}" is on screen but a click at its centre '
+        '(${point.dx.round()},${point.dy.round()}) does not reach it: '
+        'it is clipped, covered, or not hit-testable.\n'
+        '$what\n'
+        'Scroll it fully into view, target a different widget, or pass '
+        '"allowMiss": true if the click is meant to land elsewhere.');
+  }
+
+  /// A short human name for a widget, for the blocker list above.
+  String? _describeElement(Element element) {
+    final widget = element.widget;
+    if (widget is Text) return 'Text "${widget.data}"';
+    if (widget is Semantics) {
+      final label = widget.properties.label;
+      if (label != null && label.isNotEmpty) return 'Semantics "$label"';
+    }
+    final name = widget.runtimeType.toString();
+    if (name.startsWith('_Render') || name.startsWith('RenderObject')) {
+      return null;
+    }
+    return name;
   }
 
   /// A point to click, either absolute (`x`,`y`) or relative to a widget

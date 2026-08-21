@@ -262,6 +262,48 @@ class UnreadNotifier extends Notifier<UnreadState> {
     );
   }
 
+  /// Marks the DM with [peerId] read up to its newest message.
+  ///
+  /// A caller that already holds the newest message should use [markDmSeen];
+  /// this is for surfaces that only know the peer — a sidebar tile's context
+  /// menu, or the Home button's "mark everything". The newest id comes from
+  /// the live map first and from the DB only when it is not there, because a
+  /// conversation that was never opened this session has no live entry.
+  ///
+  /// Returns true when the badge is now clear.
+  Future<bool> markDmSeenLatest(String peerId) async {
+    var latest = state.dmLatestId[peerId];
+    if (latest == null) {
+      try {
+        final rows = await storage_api.loadMessages(peerId: peerId, limit: 1);
+        latest = rows.isNotEmpty ? rows.first.messageId : null;
+      } catch (_) {}
+    }
+    if (latest != null) {
+      await markDmSeen(peerId, latest);
+      return true;
+    }
+    // A count with no message behind it at all: the conversation is gone but
+    // the badge outlived it. Drop the count — there is no watermark to move,
+    // and leaving it means a number the user can never clear.
+    if (!state.dmUnreadCounts.containsKey(peerId)) return true;
+    final counts = Map<String, int>.from(state.dmUnreadCounts);
+    counts.remove(peerId);
+    state = state.copyWith(dmUnreadCounts: counts);
+    return true;
+  }
+
+  /// Clears the unread badge on every DM that carries one.
+  ///
+  /// Returns how many conversations were cleared, so the caller can say so.
+  Future<int> markAllDmsSeen() async {
+    final peerIds = state.dmUnreadCounts.keys.toList();
+    for (final peerId in peerIds) {
+      await markDmSeenLatest(peerId);
+    }
+    return peerIds.length;
+  }
+
   /// Called when a new live channel message arrives.
   /// Increments unread count if the channel is not currently viewed.
   void onChannelMessage(String serverId, String channelId,

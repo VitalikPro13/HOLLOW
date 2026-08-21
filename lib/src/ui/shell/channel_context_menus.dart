@@ -7,18 +7,18 @@ import 'package:hollow/src/core/providers/channel_provider.dart';
 import 'package:hollow/src/core/providers/notification_provider.dart';
 import 'package:hollow/src/core/providers/unread_provider.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
-import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_menu.dart';
-import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/dialogs/create_channel_dialog.dart';
 import 'package:hollow/src/ui/settings/access_label_picker.dart';
 import 'package:hollow/src/ui/settings/category_bulk_access_dialog.dart';
 import 'package:hollow/src/ui/settings/channel_grants_dialog.dart';
+import 'package:hollow/src/ui/shell/server_context_menus.dart'
+    show markServerRead, promptForName;
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Right-click menus for the channel sidebar (issue #61, phase 2).
@@ -410,7 +410,7 @@ Future<bool> _confirmClearLabelGate(
 
 void _renameChannel(
     BuildContext context, String serverId, ChannelInfo channel) {
-  _promptForName(
+  promptForName(
     context: context,
     title: 'Rename channel',
     hintText: 'Channel name',
@@ -575,7 +575,7 @@ void _createChannelInCategory(BuildContext context, WidgetRef ref,
 
 void _renameCategory(BuildContext context, WidgetRef ref, String serverId,
     int categoryIndex, String currentName) {
-  _promptForName(
+  promptForName(
     context: context,
     title: 'Rename category',
     hintText: 'Category name',
@@ -682,7 +682,7 @@ void showChannelSidebarMenu({
       HollowMenuItem(
         icon: LucideIcons.checkCheck,
         label: 'Mark server as read',
-        onTap: () => _markServerRead(ref, serverId),
+        onTap: () => markServerRead(ref, serverId),
       ),
       if (canManage) ...[
         const HollowMenuDivider(),
@@ -712,19 +712,9 @@ void showChannelSidebarMenu({
   );
 }
 
-void _markServerRead(WidgetRef ref, String serverId) {
-  final chats = ref.read(channelChatProvider);
-  final unread = ref.read(unreadProvider.notifier);
-  for (final channelId in ref.read(channelListProvider).keys) {
-    final msgs = chats['$serverId:$channelId'];
-    final latestId =
-        (msgs != null && msgs.isNotEmpty) ? msgs.last.messageId : null;
-    unread.markChannelSeen(serverId, channelId, latestId);
-  }
-}
 
 void _createCategory(BuildContext context, WidgetRef ref, String serverId) {
-  _promptForName(
+  promptForName(
     context: context,
     title: 'Create category',
     hintText: 'Category name',
@@ -735,60 +725,6 @@ void _createCategory(BuildContext context, WidgetRef ref, String serverId) {
       // bottom. Before normalisation this landed on top of an empty layout and
       // appeared to swallow every channel below it.
       _mutateLayout(ref, serverId, (layout) => layout..add(CategoryItem(name)));
-    },
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Shared name prompt
-// ---------------------------------------------------------------------------
-
-/// One small "type a name" dialog behind rename-channel, rename-category and
-/// create-category. Submits on Enter as well as on the button.
-void _promptForName({
-  required BuildContext context,
-  required String title,
-  required String hintText,
-  required String initial,
-  required String confirmLabel,
-  required Future<void> Function(String name) onSubmit,
-}) {
-  final controller = TextEditingController(text: initial);
-  showHollowDialog(
-    context: context,
-    builder: (ctx) {
-      Future<void> submit() async {
-        final name = controller.text.trim();
-        if (name.isEmpty) {
-          Navigator.of(ctx).pop();
-          return;
-        }
-        Navigator.of(ctx).pop();
-        await onSubmit(name);
-      }
-
-      return HollowDialog(
-        title: title,
-        content: Padding(
-          padding: const EdgeInsets.only(top: HollowSpacing.xs),
-          child: HollowTextField(
-            controller: controller,
-            hintText: hintText,
-            autofocus: true,
-            onSubmitted: (_) => submit(),
-          ),
-        ),
-        actions: [
-          HollowButton.ghost(
-            onPressed: () => Navigator.of(ctx).pop(),
-            child: const Text('Cancel'),
-          ),
-          HollowButton.filled(
-            onPressed: submit,
-            child: Text(confirmLabel),
-          ),
-        ],
-      );
     },
   );
 }

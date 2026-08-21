@@ -24,6 +24,7 @@ import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/components/connection_visual.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
+import 'package:hollow/src/ui/components/hollow_menu.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
 import 'package:hollow/src/core/providers/archive_provider.dart';
@@ -34,6 +35,7 @@ import 'package:hollow/src/ui/components/server_folder_popup.dart';
 import 'package:hollow/src/ui/components/profile_card_popup.dart';
 import 'package:hollow/src/ui/components/status_dot.dart';
 import 'package:hollow/src/ui/dialogs/create_server_dialog.dart';
+import 'package:hollow/src/ui/shell/server_context_menus.dart';
 import 'package:hollow/src/ui/dialogs/mnemonic_dialog.dart';
 import 'package:hollow/src/ui/dialogs/user_settings_dialog.dart';
 import 'package:hollow/src/core/providers/guest_provider.dart';
@@ -197,6 +199,12 @@ class _BottomBarState extends ConsumerState<BottomBar> {
                   tooltip: 'Home',
                   backgroundColor: hollow.accent,
                   onTap: () => _goHome(ref),
+                  // Right click: "mark all DMs as read" (#61 phase 4).
+                  onContextMenu: (position) => showHomeMenu(
+                    context: context,
+                    ref: ref,
+                    anchor: position,
+                  ),
                   child: Text(
                     'H',
                     style: TextStyle(
@@ -474,6 +482,15 @@ class _BottomBarState extends ConsumerState<BottomBar> {
     ref.read(serverSettingsOpenProvider.notifier).state = false;
   }
 
+  /// Selects [serverId] then opens its settings — the panel reads the
+  /// SELECTED server, so flipping the flag alone opens the wrong one.
+  Future<void> _openServerSettings(WidgetRef ref, String serverId) async {
+    if (ref.read(selectedServerProvider) != serverId) {
+      await _selectServer(ref, serverId);
+    }
+    ref.read(serverSettingsOpenProvider.notifier).state = true;
+  }
+
   Future<void> _selectServer(WidgetRef ref, String serverId) async {
     final split = ref.read(splitViewProvider);
     if (split.isSplit && split.focusedPane == 1) {
@@ -639,6 +656,14 @@ class _BottomBarState extends ConsumerState<BottomBar> {
                   tooltip: _isDragging ? null : name,
                   backgroundColor: colorFromId(serverId),
                   onTap: () => _selectServer(ref, serverId),
+                  // The same server menu the Classic strip shows (#61).
+                  onContextMenu: (position) => showServerIconMenu(
+                    context: context,
+                    ref: ref,
+                    serverId: serverId,
+                    anchor: position,
+                    onOpenSettings: () => _openServerSettings(ref, serverId),
+                  ),
                   child: serverIconChild,
                 ),
               ),
@@ -720,14 +745,14 @@ class _BottomBarState extends ConsumerState<BottomBar> {
           child: AnimatedScale(
             scale: isDropTarget ? 1.08 : 1.0,
             duration: HollowDurations.fast,
-            child: GestureDetector(
-              onSecondaryTapUp: (_) {
-                showFolderRenameDialog(
-                  context: context,
-                  ref: ref,
-                  folder: folder,
-                );
-              },
+            child: ContextMenuTarget(
+              semanticLabel: 'Folder actions',
+              onOpen: (anchor) => showFolderIconMenu(
+                context: context,
+                ref: ref,
+                folder: folder,
+                anchor: anchor,
+              ),
               child: _BottomServerIcon(
                 isSelected: isSelected || isRightPaneServer,
                 showBorder: false,
@@ -795,6 +820,12 @@ class _BottomServerIcon extends StatefulWidget {
   final Widget child;
   final Color backgroundColor;
   final VoidCallback? onTap;
+
+  /// Right click, position already resolved to OVERLAY space (see the Classic
+  /// strip's twin). Folder icons pass their own detector instead, because
+  /// they sit inside the drag machinery.
+  final void Function(Offset overlayPosition)? onContextMenu;
+
   final String? tooltip;
   final bool isSelected;
   final bool showBorder;
@@ -804,6 +835,7 @@ class _BottomServerIcon extends StatefulWidget {
     required this.child,
     required this.backgroundColor,
     this.onTap,
+    this.onContextMenu,
     this.tooltip,
     this.isSelected = false,
     this.showBorder = true,
@@ -936,6 +968,17 @@ class _BottomServerIconState extends State<_BottomServerIcon> {
     final label = widget.tooltip;
     if (label != null && widget.onTap != null) {
       icon = Semantics(button: true, label: label, child: icon);
+    }
+
+    // ABOVE the focus ring, so Menu / Shift+F10 reach it while the icon is
+    // keyboard-focused (issue #61).
+    final onContextMenu = widget.onContextMenu;
+    if (onContextMenu != null) {
+      icon = ContextMenuTarget(
+        semanticLabel: '${label ?? 'Icon'} actions',
+        onOpen: onContextMenu,
+        child: icon,
+      );
     }
 
     return icon;

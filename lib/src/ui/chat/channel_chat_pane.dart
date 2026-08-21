@@ -16,6 +16,7 @@ import 'package:hollow/src/core/providers/channel_provider.dart';
 import 'package:hollow/src/core/providers/blocked_users_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/chat_provider.dart' show generateMessageId;
+import 'package:hollow/src/core/providers/composer_insert_provider.dart';
 import 'package:hollow/src/core/providers/connection_status_provider.dart';
 import 'package:hollow/src/core/providers/download_manager_provider.dart';
 import 'package:hollow/src/core/providers/event_provider.dart';
@@ -135,6 +136,9 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
   final LatePreviewAttacher _latePreview = LatePreviewAttacher();
   Timer? _urlDebounce;
   static final RegExp _urlRegex = RegExp(r'(?:https?|hollow)://[^\s<>"' "'" r')\]}]+');
+
+  /// Last [ComposerInsert] applied, so a rebuild cannot replay it.
+  int _lastComposerInsertSeq = 0;
 
   /// @mention autocomplete state.
   OverlayEntry? _mentionOverlay;
@@ -1627,6 +1631,38 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane> {
     ref.listen<bool>(windowFocusedProvider, _onWindowFocusChanged);
     // Focus search field when opened via global shortcut (Ctrl+K).
     ref.listen<bool>(channelSearchOpenProvider, _onSearchOpenChanged);
+    // "Mention" in a user context menu, posted from a surface that has no
+    // reference to this composer (member panel, voice row, a sender name).
+    ref.listen<ComposerInsert?>(composerInsertProvider, _onComposerInsert);
+  }
+
+  /// Appends the text of a [ComposerInsert] addressed to THIS channel.
+  ///
+  /// The scope check is what keeps a mention out of the other pane in split
+  /// view, and the sequence check is what stops the same request being applied
+  /// twice when an unrelated rebuild re-runs the listener registration.
+  void _onComposerInsert(ComposerInsert? prev, ComposerInsert? next) {
+    if (next == null) return;
+    if (next.scope != ComposerInsert.channelScope(
+        widget.serverId, widget.channelId)) {
+      return;
+    }
+    if (next.seq == _lastComposerInsertSeq) return;
+    _lastComposerInsertSeq = next.seq;
+    _appendToComposer(next.text);
+  }
+
+  /// Appends [text] at the caret (end of the current text), adding the space
+  /// that separates it from whatever was already typed.
+  void _appendToComposer(String text) {
+    final current = _controller.text;
+    final needsGap = current.isNotEmpty && !current.endsWith(' ');
+    final combined = '$current${needsGap ? ' ' : ''}$text';
+    _controller.value = TextEditingValue(
+      text: combined,
+      selection: TextSelection.collapsed(offset: combined.length),
+    );
+    _focusNode.requestFocus();
   }
 
   void _onMessageListGrowth(Map<String, List<ChannelChatMessage>>? prev,

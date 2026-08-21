@@ -591,7 +591,19 @@ Takes a map of `serverId -> List<channelId>` and a list of DM peer IDs. For each
 
 **`markDmSeen(peerId, latestMessageId)`**:
 - Same pattern: update `dmLastSeen`, clear `dmUnreadCounts`, persist.
+- **A null `latestMessageId` is a NO-OP**, exactly as in `markChannelSeen`. That is why
+  `openDmConversation`'s trailing `markDmSeen(peerId, null)` has never actually cleared anything, and why
+  anything that only knows a PEER has to resolve a watermark first (below).
 - **Called on SEND, not just on view:** `chatProvider.sendMessage` calls `markDmSeen(peerId, messageId)` after adding the sent message. Without this, the `seen:dm:{peer}` pointer never advanced when the local user was the last to speak, so after a restart `recomputeDmUnread` could re-light the unread pill on a conversation where the user's OWN message is the newest (the "self-message unread pill" bug). The Rust counts already filter `is_mine = 0`, so the only missing piece was advancing the seen-pointer on send. `chatProvider.loadHistory` additionally self-heals stale pointers from older builds: if the newest loaded message `isMe`, it calls `markDmSeen` on open. NOT a read-receipt feature.
+
+**`markDmSeenLatest(peerId)` / `markAllDmsSeen()`** (issue #61 phase 4):
+- For surfaces that know only the peer: a DM tile's context menu, and the Home button's "Mark all DMs as read".
+- Resolves the newest message id from `dmLatestId` first (live, set by `onDmMessage`), then from the DB via
+  `storage_api.loadMessages(peerId, limit: 1)` — a conversation never opened this session has no live entry.
+- **If neither yields an id, the COUNT is dropped without moving the watermark.** A badge with no message behind
+  it is a number the user can never clear by any other means, which is the whole reason the Home row exists.
+- `markAllDmsSeen()` loops `dmUnreadCounts.keys` through `markDmSeenLatest` and returns how many conversations it
+  touched, so the caller can say so in a toast.
 
 ### Query Methods (synchronous, read current state)
 

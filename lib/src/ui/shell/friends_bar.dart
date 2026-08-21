@@ -27,7 +27,9 @@ import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
+import 'package:hollow/src/ui/components/hollow_menu.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
+import 'package:hollow/src/ui/shell/user_context_menu.dart';
 import 'package:hollow/src/ui/components/status_dot.dart';
 import 'package:hollow/src/core/providers/help_panel_provider.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -1389,7 +1391,22 @@ class _FriendChip extends StatelessWidget {
 
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 3),
-      child: HollowTooltip(
+      // Right click gives the chip the same conversation menu the sidebar DM
+      // tile has (issue #61, phase 4). A Consumer rather than a ref field:
+      // passing a WidgetRef into a constructor cascades rebuilds.
+      child: Consumer(
+        builder: (context, ref, child) => ContextMenuTarget(
+          semanticLabel: 'Conversation actions',
+          onOpen: (anchor) => showUserContextMenu(
+            context: context,
+            ref: ref,
+            peerId: peerId,
+            surface: UserMenuSurface.dmTile,
+            anchor: anchor,
+          ),
+          child: child!,
+        ),
+        child: HollowTooltip(
         message: name,
         child: HollowPressable(
           onTap: onTap,
@@ -1479,6 +1496,7 @@ class _FriendChip extends StatelessWidget {
             ],
           ),
         ),
+      ),
       ),
     );
   }

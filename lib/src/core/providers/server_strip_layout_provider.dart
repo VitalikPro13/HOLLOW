@@ -66,11 +66,12 @@ class ServerStripLayoutNotifier extends Notifier<List<StripItem>> {
         final filtered =
             item.serverIds.where((id) => validIds.contains(id)).toList();
         if (filtered.length != item.serverIds.length) changed = true;
+        // Only an EMPTY folder is dissolved here. A one-server folder used to
+        // be collapsed too, which quietly undid "Move to folder > New folder"
+        // on the next launch (issue #61, phase 4) — the drag paths still
+        // dissolve explicitly when a drag empties a folder out.
         if (filtered.isEmpty) {
           items.removeAt(i);
-          changed = true;
-        } else if (filtered.length == 1) {
-          items[i] = ServerStripItem(serverId: filtered.first);
           changed = true;
         } else if (filtered.length != item.serverIds.length) {
           items[i] = item.copyWith(serverIds: filtered);
@@ -167,8 +168,6 @@ class ServerStripLayoutNotifier extends Notifier<List<StripItem>> {
           if (filtered.isEmpty) {
             items.removeAt(i);
             i--;
-          } else if (filtered.length == 1) {
-            items[i] = ServerStripItem(serverId: filtered.first);
           } else {
             items[i] = item.copyWith(serverIds: filtered);
           }
@@ -201,10 +200,12 @@ class ServerStripLayoutNotifier extends Notifier<List<StripItem>> {
       if (item is FolderStripItem && item.id == folderId) {
         final filtered =
             item.serverIds.where((id) => id != serverId).toList();
+        // ONE rule for folder lifetime, everywhere: a folder disappears when
+        // it is EMPTY, never at one server. Collapsing at one made "Move to
+        // folder > New folder" impossible to keep, and made drag-out and the
+        // menu disagree about what a folder is.
         if (filtered.isEmpty) {
           items.removeAt(i);
-        } else if (filtered.length == 1) {
-          items[i] = ServerStripItem(serverId: filtered.first);
         } else {
           items[i] = item.copyWith(serverIds: filtered);
         }
@@ -216,6 +217,92 @@ class ServerStripLayoutNotifier extends Notifier<List<StripItem>> {
     final clampedIndex = insertIndex.clamp(0, items.length);
     items.insert(clampedIndex, ServerStripItem(serverId: serverId));
 
+    state = items;
+    _save();
+  }
+
+  /// The id of the folder holding [serverId], or null when it sits at the
+  /// top level.
+  String? folderIdOf(String serverId) {
+    for (final item in state) {
+      if (item is FolderStripItem && item.serverIds.contains(serverId)) {
+        return item.id;
+      }
+    }
+    return null;
+  }
+
+  /// Every folder in the strip, in display order.
+  List<FolderStripItem> folders() =>
+      state.whereType<FolderStripItem>().toList();
+
+  /// Puts [serverId] in a brand new folder called [name], in place.
+  ///
+  /// A folder of one is legal: it is how "Move to folder > New folder" starts,
+  /// and the next server dropped or moved in joins it.
+  void createFolderWith(String serverId, String name) {
+    final items = List<StripItem>.from(state);
+    var insertAt = items.length;
+
+    for (var i = items.length - 1; i >= 0; i--) {
+      final item = items[i];
+      if (item is ServerStripItem && item.serverId == serverId) {
+        insertAt = i;
+        items.removeAt(i);
+      } else if (item is FolderStripItem && item.serverIds.contains(serverId)) {
+        final filtered =
+            item.serverIds.where((id) => id != serverId).toList();
+        insertAt = i + 1;
+        if (filtered.isEmpty) {
+          items.removeAt(i);
+          insertAt = i;
+        } else {
+          items[i] = item.copyWith(serverIds: filtered);
+        }
+      }
+    }
+
+    items.insert(
+      insertAt.clamp(0, items.length),
+      FolderStripItem(
+        id: DateTime.now().millisecondsSinceEpoch.toRadixString(16),
+        name: name,
+        serverIds: [serverId],
+      ),
+    );
+    state = items;
+    _save();
+  }
+
+  /// Takes [serverId] out of whatever folder holds it, back to the top level
+  /// immediately after that folder.
+  ///
+  /// When it was the folder's LAST server the folder goes away, so the server
+  /// lands in the folder's own slot rather than one past it — otherwise the
+  /// icon appears to jump over its neighbour on the way out.
+  void moveOutOfFolder(String serverId) {
+    final folderId = folderIdOf(serverId);
+    if (folderId == null) return;
+    final index =
+        state.indexWhere((e) => e is FolderStripItem && e.id == folderId);
+    if (index < 0) return;
+    final folder = state[index] as FolderStripItem;
+    final wasLast = folder.serverIds.length == 1;
+    removeFromFolder(folderId, serverId, wasLast ? index : index + 1);
+  }
+
+  /// Replaces a folder with the servers it held, in order.
+  void dissolveFolder(String folderId) {
+    final items = List<StripItem>.from(state);
+    final index =
+        items.indexWhere((e) => e is FolderStripItem && e.id == folderId);
+    if (index < 0) return;
+    final folder = items[index] as FolderStripItem;
+    items.removeAt(index);
+    items.insertAll(
+      index,
+      folder.serverIds.map((id) => ServerStripItem(serverId: id)),
+    );
     state = items;
     _save();
   }
@@ -278,8 +365,6 @@ class ServerStripLayoutNotifier extends Notifier<List<StripItem>> {
             item.serverIds.where((id) => id != serverId).toList();
         if (filtered.isEmpty) {
           items.removeAt(i);
-        } else if (filtered.length == 1) {
-          items[i] = ServerStripItem(serverId: filtered.first);
         } else {
           items[i] = item.copyWith(serverIds: filtered);
         }

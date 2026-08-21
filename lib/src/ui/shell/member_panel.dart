@@ -19,9 +19,11 @@ import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/animations/reveal_widgets.dart';
 import 'package:hollow/src/ui/animations/startup_reveal.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
+import 'package:hollow/src/ui/components/hollow_menu.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/profile_card_popup.dart';
 import 'package:hollow/src/ui/components/status_dot.dart';
+import 'package:hollow/src/ui/shell/user_context_menu.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:hollow/src/core/brand_icons.dart';
 
@@ -607,104 +609,121 @@ class _ServerMemberTile extends ConsumerWidget {
     return AnimatedOpacity(
       opacity: isOnline ? 1.0 : 0.5,
       duration: HollowDurations.fast,
-      child: HollowPressable(
-        subtle: true,
-        borderRadius: BorderRadius.circular(hollow.radiusSm),
-        onTap: () {
-          final box = context.findRenderObject() as RenderBox?;
-          if (box == null) return;
-          final pos = overlayAnchorOf(context);
-          // Show card to the left of member panel (like Discord)
-          showProfileCardPopup(
-            context: context,
-            ref: ref,
-            peerId: peerId,
-            nickname: nickname.isNotEmpty ? nickname : null,
-            role: role,
-            twitchUsername: effectiveTwitch.isNotEmpty ? effectiveTwitch : null,
-            labels: labels.isNotEmpty ? labels : null,
-            serverId: serverId,
-            anchor: Offset(pos.dx - kProfileCardPopupWidth - 10, pos.dy - 100),
-          );
-        },
-        padding: const EdgeInsets.symmetric(
-          horizontal: HollowSpacing.sm + 2,
-          vertical: HollowSpacing.xxs + 1,
+      // Left click keeps opening the profile card; right click opens the
+      // action menu with Profile as its first row (issue #61, phase 3).
+      child: ContextMenuTarget(
+        semanticLabel: 'Member actions',
+        onOpen: (anchor) => showUserContextMenu(
+          context: context,
+          ref: ref,
+          peerId: peerId,
+          serverId: serverId,
+          nickname: nickname.isNotEmpty ? nickname : null,
+          role: role,
+          twitchUsername:
+              effectiveTwitch.isNotEmpty ? effectiveTwitch : null,
+          labels: labels.isNotEmpty ? labels : null,
+          anchor: anchor,
         ),
-        child: Row(
-          children: [
-            // Avatar with status overlay
-            Stack(
-              children: [
-                HollowAvatar(peerId: peerId, size: 28),
-                Positioned(
-                  right: -1,
-                  bottom: -1,
-                  child: Container(
-                    decoration: BoxDecoration(
-                      color: hollow.surface,
-                      shape: BoxShape.circle,
-                    ),
-                    padding: const EdgeInsets.all(1.5),
-                    child: isSyncing
-                        ? _SpinningRefreshIcon(
-                            size: 9, color: hollow.accent)
-                        : StatusDot(
-                            color: isOnline
-                                ? hollow.success
-                                : hollow.textSecondary,
-                            size: 7,
-                            pulse: isOnline,
-                            filled: isOnline,
-                            semanticLabel: isOnline ? 'Online' : 'Offline',
-                          ),
-                  ),
-                ),
-              ],
-            ),
-
-            const SizedBox(width: HollowSpacing.sm),
-
-            // Display name + role + pledge info
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
+        child: HollowPressable(
+          subtle: true,
+          borderRadius: BorderRadius.circular(hollow.radiusSm),
+          onTap: () {
+            final box = context.findRenderObject() as RenderBox?;
+            if (box == null) return;
+            final pos = overlayAnchorOf(context);
+            // Show card to the left of member panel (like Discord)
+            showProfileCardPopup(
+              context: context,
+              ref: ref,
+              peerId: peerId,
+              nickname: nickname.isNotEmpty ? nickname : null,
+              role: role,
+              twitchUsername: effectiveTwitch.isNotEmpty ? effectiveTwitch : null,
+              labels: labels.isNotEmpty ? labels : null,
+              serverId: serverId,
+              anchor: Offset(pos.dx - kProfileCardPopupWidth - 10, pos.dy - 100),
+            );
+          },
+          padding: const EdgeInsets.symmetric(
+            horizontal: HollowSpacing.sm + 2,
+            vertical: HollowSpacing.xxs + 1,
+          ),
+          child: Row(
+            children: [
+              // Avatar with status overlay
+              Stack(
                 children: [
-                  Text(
-                    resolvedName,
-                    style: HollowTypography.bodySmall.copyWith(
-                      color: hollow.textPrimary,
-                      fontSize: 12,
-                    ),
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                  if (role != 'member')
-                    Text(
-                      role[0].toUpperCase() + role.substring(1),
-                      style: HollowTypography.caption.copyWith(
-                        color: _roleLabelColor(role, hollow),
-                        fontSize: 10,
+                  HollowAvatar(peerId: peerId, size: 28),
+                  Positioned(
+                    right: -1,
+                    bottom: -1,
+                    child: Container(
+                      decoration: BoxDecoration(
+                        color: hollow.surface,
+                        shape: BoxShape.circle,
                       ),
+                      padding: const EdgeInsets.all(1.5),
+                      child: isSyncing
+                          ? _SpinningRefreshIcon(
+                              size: 9, color: hollow.accent)
+                          : StatusDot(
+                              color: isOnline
+                                  ? hollow.success
+                                  : hollow.textSecondary,
+                              size: 7,
+                              pulse: isOnline,
+                              filled: isOnline,
+                              semanticLabel: isOnline ? 'Online' : 'Offline',
+                            ),
                     ),
-                  if (effectiveTwitch.isNotEmpty)
-                    Row(
-                      children: [
-                        const Icon(BrandIcons.twitch,
-                            size: 10, color: Color(0xFF9146FF)),
-                        const SizedBox(width: 3),
-                        Text(
-                          effectiveTwitch,
-                          style: HollowTypography.caption.copyWith(
-                            color: const Color(0xFF9146FF),
-                            fontSize: 9,
-                          ),
-                        ),
-                      ],
-                    ),
+                  ),
                 ],
               ),
-            ),
-          ],
+
+              const SizedBox(width: HollowSpacing.sm),
+
+              // Display name + role + pledge info
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      resolvedName,
+                      style: HollowTypography.bodySmall.copyWith(
+                        color: hollow.textPrimary,
+                        fontSize: 12,
+                      ),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    if (role != 'member')
+                      Text(
+                        role[0].toUpperCase() + role.substring(1),
+                        style: HollowTypography.caption.copyWith(
+                          color: _roleLabelColor(role, hollow),
+                          fontSize: 10,
+                        ),
+                      ),
+                    if (effectiveTwitch.isNotEmpty)
+                      Row(
+                        children: [
+                          const Icon(BrandIcons.twitch,
+                              size: 10, color: Color(0xFF9146FF)),
+                          const SizedBox(width: 3),
+                          Text(
+                            effectiveTwitch,
+                            style: HollowTypography.caption.copyWith(
+                              color: const Color(0xFF9146FF),
+                              fontSize: 9,
+                            ),
+                          ),
+                        ],
+                      ),
+                  ],
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -730,83 +749,94 @@ class _MemberTile extends ConsumerWidget {
         ? displayNameFor({peerId: profile}, peerId)
         : displayNameFor({}, peerId);
 
-    return HollowPressable(
-      subtle: true,
-      borderRadius: BorderRadius.circular(hollow.radiusSm),
-      onTap: () {
-        final box = context.findRenderObject() as RenderBox?;
-        if (box == null) return;
-        final pos = overlayAnchorOf(context);
-        // Show card to the left of member panel (like Discord)
-        showProfileCardPopup(
-          context: context,
-          ref: ref,
-          peerId: peerId,
-          anchor: Offset(pos.dx - kProfileCardPopupWidth - 10, pos.dy - 100),
-        );
-      },
-      padding: const EdgeInsets.symmetric(
-        horizontal: HollowSpacing.sm + 2,
-        vertical: HollowSpacing.xxs + 1,
+    // Left click opens the profile card, right click the action menu — the
+    // same pair as the server member rows above.
+    return ContextMenuTarget(
+      semanticLabel: 'Peer actions',
+      onOpen: (anchor) => showUserContextMenu(
+        context: context,
+        ref: ref,
+        peerId: peerId,
+        anchor: anchor,
       ),
-      child: Row(
-        children: [
-          // Avatar with online dot
-          Stack(
-            children: [
-              HollowAvatar(peerId: peerId, size: 28),
-              Positioned(
-                right: -1,
-                bottom: -1,
-                child: Container(
-                  decoration: BoxDecoration(
-                    color: hollow.surface,
-                    shape: BoxShape.circle,
+      child: HollowPressable(
+        subtle: true,
+        borderRadius: BorderRadius.circular(hollow.radiusSm),
+        onTap: () {
+          final box = context.findRenderObject() as RenderBox?;
+          if (box == null) return;
+          final pos = overlayAnchorOf(context);
+          // Show card to the left of member panel (like Discord)
+          showProfileCardPopup(
+            context: context,
+            ref: ref,
+            peerId: peerId,
+            anchor: Offset(pos.dx - kProfileCardPopupWidth - 10, pos.dy - 100),
+          );
+        },
+        padding: const EdgeInsets.symmetric(
+          horizontal: HollowSpacing.sm + 2,
+          vertical: HollowSpacing.xxs + 1,
+        ),
+        child: Row(
+          children: [
+            // Avatar with online dot
+            Stack(
+              children: [
+                HollowAvatar(peerId: peerId, size: 28),
+                Positioned(
+                  right: -1,
+                  bottom: -1,
+                  child: Container(
+                    decoration: BoxDecoration(
+                      color: hollow.surface,
+                      shape: BoxShape.circle,
+                    ),
+                    padding: const EdgeInsets.all(1.5),
+                    child: StatusDot(
+                        color: hollow.success, size: 7, pulse: true),
                   ),
-                  padding: const EdgeInsets.all(1.5),
-                  child: StatusDot(
-                      color: hollow.success, size: 7, pulse: true),
+                ),
+              ],
+            ),
+
+            const SizedBox(width: HollowSpacing.sm),
+
+            // Display name
+            Expanded(
+              child: Text(
+                peerName,
+                style: HollowTypography.bodySmall.copyWith(
+                  color: hollow.textSecondary,
+                  fontSize: 12,
+                ),
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+
+            // P2P direct connection indicator
+            if (ref.watch(webRtcProvider.select((s) =>
+                s.peers[peerId] == WebRtcPeerStatus.connected)))
+              Padding(
+                padding: const EdgeInsets.only(right: 4),
+                child: Icon(
+                  LucideIcons.radio,
+                  size: 11,
+                  color: hollow.accent,
                 ),
               ),
-            ],
-          ),
 
-          const SizedBox(width: HollowSpacing.sm),
-
-          // Display name
-          Expanded(
-            child: Text(
-              peerName,
-              style: HollowTypography.bodySmall.copyWith(
-                color: hollow.textSecondary,
-                fontSize: 12,
-              ),
-              overflow: TextOverflow.ellipsis,
-            ),
-          ),
-
-          // P2P direct connection indicator
-          if (ref.watch(webRtcProvider.select((s) =>
-              s.peers[peerId] == WebRtcPeerStatus.connected)))
-            Padding(
-              padding: const EdgeInsets.only(right: 4),
-              child: Icon(
-                LucideIcons.radio,
-                size: 11,
-                color: hollow.accent,
-              ),
-            ),
-
-          // Encryption badge or spinning icon
-          isEncrypted
-              ? Icon(
-                  LucideIcons.lock,
-                  size: 12,
-                  color: hollow.success,
-                )
-              : _SpinningRefreshIcon(
-                  size: 12, color: hollow.textSecondary),
-        ],
+            // Encryption badge or spinning icon
+            isEncrypted
+                ? Icon(
+                    LucideIcons.lock,
+                    size: 12,
+                    color: hollow.success,
+                  )
+                : _SpinningRefreshIcon(
+                    size: 12, color: hollow.textSecondary),
+          ],
+        ),
       ),
     );
   }

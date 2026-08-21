@@ -26,7 +26,9 @@ import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/stat_bar.dart';
 import 'package:hollow/src/ui/animations/startup_reveal.dart';
 import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
+import 'package:hollow/src/ui/components/hollow_menu.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/shell/user_context_menu.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/status_dot.dart';
 import 'package:hollow/src/ui/shell/system_status_banner.dart';
@@ -752,7 +754,18 @@ class _RecentConversationsColumn extends ConsumerWidget {
                   padding: const EdgeInsets.only(
                     bottom: HollowSpacing.xs,
                   ),
-                  child: HollowPressable(
+                  // Right click: the same conversation menu the sidebar DM
+                  // tile carries (issue #61, phase 4).
+                  child: ContextMenuTarget(
+                    semanticLabel: 'Conversation actions',
+                    onOpen: (anchor) => showUserContextMenu(
+                      context: context,
+                      ref: ref,
+                      peerId: conv.peerId,
+                      surface: UserMenuSurface.dmTile,
+                      anchor: anchor,
+                    ),
+                    child: HollowPressable(
                     onTap: () {
                       ref.read(selectedPeerProvider.notifier).state =
                           conv.peerId;
@@ -896,6 +909,7 @@ class _RecentConversationsColumn extends ConsumerWidget {
                         ],
                       ],
                     ),
+                  ),
                   ),
                 );
               },

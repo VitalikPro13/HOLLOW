@@ -1,5 +1,8 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/semantics.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/ui/components/overlay_anchor.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
@@ -111,6 +114,100 @@ class HollowMenuScope extends InheritedWidget {
 
   @override
   bool updateShouldNotify(HollowMenuScope oldWidget) => false;
+}
+
+/// Wraps anything that has a context menu, so the menu has more than one way
+/// in (issue #61, cross-cutting).
+///
+/// Right click is the obvious route and the only one most people use, but it
+/// is a POINTER route. Everything reachable only by right-clicking is
+/// unreachable without a mouse, and several of these menus own actions that
+/// live nowhere else. This adds the two standard alternatives:
+///
+/// * **Menu key / Shift+F10** while the wrapped control has keyboard focus,
+///   the platform convention on Windows and Linux. It only fires when focus is
+///   inside this subtree, so it never collides with the app shortcuts.
+/// * **A "Show menu" screen-reader action**, which is how VoiceOver, TalkBack
+///   and Narrator expose a secondary action; the focus mechanics above do not
+///   have to line up for it to work.
+///
+/// The child still has to be focusable for the keyboard route to reach it —
+/// [HollowPressable] and [HollowButton] both are.
+class ContextMenuTarget extends StatelessWidget {
+  final Widget child;
+
+  /// Opens the menu. [anchor] is already in OVERLAY space — pass it straight
+  /// to [showHollowMenu].
+  final void Function(Offset anchor) onOpen;
+
+  /// The screen-reader action label. Say what the menu is FOR when the
+  /// default reads as vague ("Channel actions", "Member actions").
+  final String semanticLabel;
+
+  /// False leaves [child] alone entirely: no gestures, no shortcuts, no
+  /// semantics action. Use it for rows whose menu would be empty.
+  final bool enabled;
+
+  final HitTestBehavior behavior;
+
+  const ContextMenuTarget({
+    super.key,
+    required this.child,
+    required this.onOpen,
+    this.semanticLabel = 'Show menu',
+    this.enabled = true,
+    this.behavior = HitTestBehavior.deferToChild,
+  });
+
+  /// Opens the menu hanging off the control itself, for the routes that have
+  /// no pointer position: keyboard and assistive tech.
+  void _openAtWidget(BuildContext context) {
+    final box = context.findRenderObject() as RenderBox?;
+    final size = box?.hasSize == true ? box!.size : Size.zero;
+    // Bottom-left of the control, the same place a menu-key press opens a
+    // menu everywhere else on the platform.
+    onOpen(overlayAnchorOf(context, localOffset: Offset(0, size.height)));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (!enabled) return child;
+    return Builder(
+      builder: (innerContext) => Semantics(
+        customSemanticsActions: {
+          CustomSemanticsAction(label: semanticLabel): () =>
+              _openAtWidget(innerContext),
+        },
+        child: Shortcuts(
+          shortcuts: const <ShortcutActivator, Intent>{
+            SingleActivator(LogicalKeyboardKey.contextMenu):
+                _ShowContextMenuIntent(),
+            SingleActivator(LogicalKeyboardKey.f10, shift: true):
+                _ShowContextMenuIntent(),
+          },
+          child: Actions(
+            actions: <Type, Action<Intent>>{
+              _ShowContextMenuIntent:
+                  CallbackAction<_ShowContextMenuIntent>(onInvoke: (_) {
+                _openAtWidget(innerContext);
+                return null;
+              }),
+            },
+            child: GestureDetector(
+              behavior: behavior,
+              onSecondaryTapUp: (details) =>
+                  onOpen(overlayPositionOf(innerContext, details.globalPosition)),
+              child: child,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _ShowContextMenuIntent extends Intent {
+  const _ShowContextMenuIntent();
 }
 
 const double _kMenuMinWidth = 210;

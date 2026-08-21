@@ -21,8 +21,10 @@ import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
+import 'package:hollow/src/ui/components/hollow_menu.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
 import 'package:hollow/src/ui/dialogs/create_server_dialog.dart';
+import 'package:hollow/src/ui/shell/server_context_menus.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Vertical server icon strip (72px wide) — like Discord's left column.
@@ -66,6 +68,12 @@ class _ServerStripState extends ConsumerState<ServerStrip> {
       isSelected: homeSelected,
       unreadCount: selectedServerId != null ? dmUnreadTotal : 0,
       child: _ServerIcon(
+        // Right click: the "mark all DMs as read" escape hatch (#61 phase 4).
+        onContextMenu: (position) => showHomeMenu(
+          context: context,
+          ref: ref,
+          anchor: position,
+        ),
         isSelected: homeSelected,
         backgroundColor: hollow.accent,
         semanticLabel: 'Home',
@@ -403,16 +411,28 @@ class _ServerStripState extends ConsumerState<ServerStrip> {
           child: AnimatedScale(
             scale: isMergeTarget ? 1.08 : 1.0,
             duration: HollowDurations.fast,
-            child: _ServerIconWithIndicator(
-              isSelected: isSelected,
-              unreadCount: serverUnreads,
-              mentionCount: serverMentions,
-              child: _ServerIcon(
+            // Right click opens the server menu (issue #61, phase 4): mark
+            // read, invite, settings, folder membership, leave.
+            child: ContextMenuTarget(
+              semanticLabel: 'Server actions',
+              onOpen: (anchor) => showServerIconMenu(
+                context: context,
+                ref: ref,
+                serverId: serverId,
+                anchor: anchor,
+                onOpenSettings: () => _openServerSettings(serverId),
+              ),
+              child: _ServerIconWithIndicator(
                 isSelected: isSelected,
-                backgroundColor: colorFromId(serverId),
-                tooltip: name,
-                onTap: () => _selectServer(serverId),
-                child: serverIconChild,
+                unreadCount: serverUnreads,
+                mentionCount: serverMentions,
+                child: _ServerIcon(
+                  isSelected: isSelected,
+                  backgroundColor: colorFromId(serverId),
+                  tooltip: name,
+                  onTap: () => _selectServer(serverId),
+                  child: serverIconChild,
+                ),
               ),
             ),
           ),
@@ -481,14 +501,14 @@ class _ServerStripState extends ConsumerState<ServerStrip> {
             child: _ServerIconWithIndicator(
               isSelected: isSelected,
               unreadCount: isSelected ? 0 : folderUnreads,
-              child: GestureDetector(
-                onSecondaryTapUp: (_) {
-                  showFolderRenameDialog(
-                    context: context,
-                    ref: ref,
-                    folder: folder,
-                  );
-                },
+              child: ContextMenuTarget(
+                semanticLabel: 'Folder actions',
+                onOpen: (anchor) => showFolderIconMenu(
+                  context: context,
+                  ref: ref,
+                  folder: folder,
+                  anchor: anchor,
+                ),
                 child: _ServerIcon(
                   isSelected: isSelected,
                   showBorder: false,
@@ -524,7 +544,19 @@ class _ServerStripState extends ConsumerState<ServerStrip> {
     );
   }
 
-  void _selectServer(String serverId) async {
+  /// Selects [serverId] and opens its settings panel.
+  ///
+  /// Selecting first is not optional: the settings panel reads the SELECTED
+  /// server, so flipping the flag alone would open the settings of whatever
+  /// was already on screen.
+  Future<void> _openServerSettings(String serverId) async {
+    if (ref.read(selectedServerProvider) != serverId) {
+      await _selectServer(serverId);
+    }
+    ref.read(serverSettingsOpenProvider.notifier).state = true;
+  }
+
+  Future<void> _selectServer(String serverId) async {
     // Fetch data from DB first — no provider writes yet, so no rebuilds.
     final channels = await ChannelListNotifier.fetchChannels(serverId);
     final layout = await ChannelLayoutNotifier.fetchLayout(serverId);
@@ -728,6 +760,13 @@ class _ServerIcon extends StatefulWidget {
   final Widget child;
   final Color backgroundColor;
   final VoidCallback? onTap;
+
+  /// Right click, with the position already resolved to OVERLAY space — the
+  /// caller opens a menu there. Only the Home button uses it; server and
+  /// folder icons carry their own GestureDetector because they also need to
+  /// sit inside the drag machinery.
+  final void Function(Offset overlayPosition)? onContextMenu;
+
   final String? tooltip;
   final String? semanticLabel;
   final bool isSelected;
@@ -737,6 +776,7 @@ class _ServerIcon extends StatefulWidget {
     required this.child,
     required this.backgroundColor,
     this.onTap,
+    this.onContextMenu,
     this.tooltip,
     this.semanticLabel,
     this.isSelected = false,
@@ -806,6 +846,17 @@ class _ServerIconState extends State<_ServerIcon> {
     final label = widget.semanticLabel ?? widget.tooltip;
     if (label != null && widget.onTap != null) {
       icon = Semantics(button: true, label: label, child: icon);
+    }
+
+    // ABOVE the focus ring, so Menu / Shift+F10 reach it while the icon is
+    // keyboard-focused (issue #61).
+    final onContextMenu = widget.onContextMenu;
+    if (onContextMenu != null) {
+      icon = ContextMenuTarget(
+        semanticLabel: '${label ?? 'Icon'} actions',
+        onOpen: onContextMenu,
+        child: icon,
+      );
     }
 
     return icon;

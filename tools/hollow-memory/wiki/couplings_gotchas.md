@@ -399,6 +399,31 @@ Additionally, `handle_send_file()` skips writing ciphertext to temp file and ski
 
 **In practice:** this is why `showHollowMenu` (`components/hollow_menu.dart`, issue #61) uses a transparent-barrier `showGeneralDialog` for EVERY context menu rather than picking a host per call site. It also buys outside-click dismissal, Escape and a focus scope for free.
 
+### A context menu opened from a bare onSecondaryTapUp is a MOUSE-ONLY feature
+
+**Rule:** open every context menu through `ContextMenuTarget` (`components/hollow_menu.dart`), never by calling a
+`show*Menu(` opener straight from `onSecondaryTapUp`. CI-guarded by
+`test/context_menu_keyboard_route_guard_test.dart`.
+
+**Why:** right click is a POINTER route. Several of these menus own actions that exist nowhere else in the UI —
+folder membership, "mark all DMs as read", the per-peer voice volume — so a mouse-only menu is a mouse-only
+FEATURE. `ContextMenuTarget` handles the right click AND adds Menu / Shift+F10 while the wrapped control has
+keyboard focus (a scoped `Shortcuts`, so it never fights `appShortcutsProvider`) plus a "Show menu"
+`CustomSemanticsAction` for screen readers.
+
+**Placement matters:** the wrapper must sit ABOVE the control's `HollowFocusRing`. `Shortcuts` only fires when
+focus is inside its subtree, so wrapping below the focus node silently gets you the right click and nothing
+else. In `_ServerIcon` / `_BottomServerIcon` that means wrapping the finished icon, after the tooltip and
+semantics, not the inner `GestureDetector`.
+
+### markDmSeen(peer, null) is a silent no-op
+
+`UnreadNotifier.markDmSeen` (and `markChannelSeen`) return immediately when `latestMessageId` is null. Anything
+that only knows a PEER has to resolve a watermark first, which is what `markDmSeenLatest` does (live
+`dmLatestId` → `storage_api.loadMessages(limit: 1)` → drop an orphaned count). `openDmConversation`'s trailing
+`markDmSeen(peerId, null)` has therefore never cleared anything; the DM panes do the real marking. See
+`providers_server.md`.
+
 ### A context menu must dismiss before it acts
 
 **Rule:** Pop the menu by route IDENTITY (`ModalRoute.of(context)`), then run the row's action in a `postFrameCallback`.

@@ -1,0 +1,23 @@
+[
+  {"op": "log", "message": "The message hover bar's overflow button: the whole message menu without a right click."},
+  {"op": "open_server", "name": "${SERVER}"},
+  {"op": "wait", "ms": 1500},
+
+  {"op": "log", "message": "park a mouse pointer on a message so the action bar appears"},
+  {"op": "hover", "target": "type:MessageHoverWrapper", "index": 1},
+  {"op": "wait", "ms": 800},
+  {"op": "shot", "name": "01-hover-bar"},
+  {"op": "dump", "name": "01-hover-bar"},
+  {"op": "log", "message": "the overflow button is there (a labelled HollowPressable matches twice: the widget and the Semantics it builds)"},
+  {"op": "expect_count", "target": "semantics:More message actions", "value": 2},
+
+  {"op": "log", "message": "click it: the same menu right-click gives"},
+  {"op": "tap", "target": "semantics:More message actions"},
+  {"op": "wait", "ms": 800},
+  {"op": "shot", "name": "02-overflow-menu"},
+  {"op": "dump", "name": "02-overflow-menu"},
+  {"op": "expect_text", "value": "Copy message ID"},
+  {"op": "key", "value": "escape"},
+  {"op": "wait", "ms": 400},
+  {"op": "expect_no_text", "value": "Copy message ID"}
+]

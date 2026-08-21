@@ -557,7 +557,7 @@ Each pill is a `HollowPressable` wrapping a `Container`:
 4. Mouse exits action bar: starts 60ms dismiss timer.
 5. If neither message nor bar are hovered after 60ms, overlays are removed.
 
-**Right-click:** If `onInfo` is provided, `GestureDetector.onSecondaryTap` triggers it (message proof dialog).
+**Right-click:** opens the full message context menu via `showHollowMenu` (issue #61). Message Proof used to BE the whole right-click; it is one row now. The rows are built from the callbacks this wrapper already holds, so all seven chat surfaces (DM, channel, guest, four archive viewers) got the menu with zero call-site changes, and a row can never offer an action the surface did not wire up.
 
 **Overlay Entries (two separate OverlayEntry instances):**
 
@@ -572,6 +572,10 @@ Position calculation:
 The action bar is only created if at least one action callback is non-null.
 
 Every action button calls `_dismissNow()` first (removes overlays) then invokes its callback. This prevents stale overlay state.
+
+**Overflow button (`_MoreButton`, issue #61):** a trailing `...` (`moreHorizontal`, semantic label "More message actions") that opens the SAME menu right-click gives. Without it the rows that live only in the menu (the quick-reaction strip, Copy message ID) were reachable by right-click and by nothing else. It captures its own position so the menu opens under the button rather than at the far-left origin of the message row.
+
+**Known gap:** message rows are not in the tab order (hundreds of rows would wreck Tab traversal), so Menu / Shift+F10 cannot reach this menu the way it reaches the sidebar and strip menus. Screen readers get it through the row's custom semantics action; keyboard-only sighted users get the overflow button, which still needs a hover to appear. A real fix means a message-focus model.
 
 ### _ActionBarContent
 

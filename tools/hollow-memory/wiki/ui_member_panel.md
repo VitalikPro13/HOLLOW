@@ -220,6 +220,41 @@ Inside a `HollowPressable` (subtle mode):
 ### Click Behavior
 Same pattern as `_ServerMemberTile`: gets global position, calls `showProfileCardPopup()` with `anchor: Offset(pos.dx - 290, pos.dy - 100)`. No server-specific fields (nickname, role, labels) are passed.
 
+## The User Context Menu (issue #61 phase 3)
+
+Both tiles are wrapped in a `ContextMenuTarget` that opens `showUserContextMenu`
+(`lib/src/ui/shell/user_context_menu.dart`). **Left click still opens the profile card** — the card is an
+identity surface (banner, showcase, roles) and a list of text rows cannot replace it, so the menu carries
+`Profile` as its first row instead of trying to be one.
+
+This is ONE menu shared by every surface that shows a person: these two tiles, a sender name or avatar in chat
+(`ProfileTapTarget`), the voice participant row in the channel sidebar, the DM tile (`PeerCard`), the friends
+bar chip, and the home dashboard's recent conversations. A `UserMenuSurface` (`generic` / `dmTile` / `voice`)
+adds the surface-specific rows.
+
+### Rows, in order
+Profile, Mention, Message, Start a call, Set nickname, Verify contact, Manage member, Mute member, Kick member,
+Ban member, Block, Report, Copy user ID. Yourself gets Profile and Copy user ID only.
+
+- **Mention** appears only while a TEXT channel is on screen, and posts a scoped `composerInsertProvider`
+  request (`serverId:channelId`) that the matching channel pane applies. The scope is what keeps it out of the
+  other pane in split view.
+- **Start a call** appears only when the identity is online and no call is already up.
+- **The `dmTile` surface** adds Mark as read, Mute conversation, the favourite toggle and Remove friend.
+- **The `voice` surface** puts the per-peer volume slider in as the menu's FIRST row (a `HollowMenuCustom`).
+  Right-clicking a participant used to open that slider and nothing else; folding it in keeps the control and
+  gains the row every other user action. The slider stays keyed by the ROUTABLE DEVICE id (`routablePeerId`)
+  because volume is a property of an audio stream; everything else collapses to the master via the resolver.
+
+### Gating: hide, never disable
+Moderation rows need `canManageRole(myRole, targetRole)` AND `Permission.kickMembers`, and the target must
+actually appear in `serverMembersProvider` — an owner right-clicking a non-member gets nothing. A greyed row
+still advertises an action the user cannot perform, and a shown-but-unusable one produces a confusing Rust
+rejection later. Rust re-checks `op_allowed` on every op regardless.
+
+The confirms themselves live in `lib/src/ui/settings/moderation_dialogs.dart`, shared with the Server Settings
+Members tab and the mobile members route (see `ui_server_settings.md`).
+
 ## VoiceChannelPanel Integration
 
 The `VoiceChannelPanel` (`lib/src/ui/shell/voice_channel_panel.dart`) is a separate widget that sits at the bottom of the channel sidebar (not inside MemberPanel). It appears when `vcState.isInVoiceChannel` is true and shows:

@@ -333,29 +333,34 @@ Watches `serverMembersProvider(serverId)` (async) and `myRoleProvider(serverId)`
 - Admin: [moderator, member]
 - Others: []
 
-**Action menu:** `PopupMenuButton` shown only if `canManage` (not self and `_canManageRole` passes). Contains:
+**Action menu:** the `...` button opens `showHollowMenu` (issue #61 — it was a Material `PopupMenuButton` before, the last one on this surface), anchored off the BUTTON via a `Builder` rather than the 600px row. Shown only if `canManage` (not self and `canManageRole` passes). Contains:
 - Role change options: for each assignable role that differs from current, shows icon + "Make {Role}" text
 - Divider (if any assignable roles exist)
 - "Kick Member" (userMinus icon, red)
 - "Mute Member" (volumeX icon, warning)
 - "Ban Member" (ban icon, red)
 
-**Role change (`_changeRole`):**
-- Shows `_ConfirmDialog` with title "Change Role", message "Change {name}'s role to {Role}?"
-- On confirm: calls `crdt_api.changeMemberRole(serverId, peerId, newRole)`, shows success toast
+### The confirms live in ONE place (issue #61)
 
-**Kick (`_confirmKick`):**
-- `_ConfirmDialog` with `isDanger: true`, "Are you sure you want to kick {name} from the server?"
-- On confirm: calls `crdt_api.kickMember(serverId, peerId)`, shows success toast
+`lib/src/ui/settings/moderation_dialogs.dart` owns all four. Each does the WHOLE job — confirm, FFI, invalidate
+`serverMembersProvider` + `mutedMembersProvider`, toast — so no call site awaits or handles anything.
 
-**Ban (`_confirmBan`):**
-- `_ConfirmDialog` with `isDanger: true`, "Are you sure you want to ban {name}? They will be removed and unable to rejoin."
-- On confirm: calls `crdt_api.banMember(serverId, peerId)`, shows success toast
+| Function | Surface | Wire call |
+|---|---|---|
+| `showChangeRoleDialog` | confirm, "Change {name}'s role to {Role}?" | `crdt_api.changeMemberRole` |
+| `showKickMemberDialog` | danger confirm | `crdt_api.kickMember` |
+| `showBanMemberDialog` | danger confirm | `crdt_api.banMember` |
+| `showMuteMemberDialog` | duration picker from `kMuteDurationOptions` (10 min / 1 h / 24 h / 7 d / Permanent) | `muteMemberFor` → `crdt_api.muteMember` |
 
-**Mute (`_showMuteDialog`):**
-- `_MuteDurationDialog` with duration options from `kMuteDurationOptions`: 10 minutes / 1 hour / 24 hours / 7 days / Permanent (0 = permanent, shown in error color)
-- On pick: calls `crdt_api.muteMember(serverId, peerId, durationSecs)` (`<= 0` = permanent), shows success toast
-- Same hierarchy gate as kick/ban (KICK_MEMBERS + outrank), enforced in Rust
+The duration IS the mute confirmation; there is no second "are you sure", because picking a length is already
+deliberate and a mute is reversible from the Muted Members section below.
+
+**Three consumers, no copies:** this tab, `mobile/mobile_members_route.dart`, and the desktop user context menu
+(`ui_member_panel.md`). Mobile keeps its own bottom-sheet duration PICKER because a sheet is what every other
+mobile action list is, but both platforms write through the shared `muteMemberFor` so the wording, the
+invalidations and the toast cannot drift. Mobile role changes now confirm, matching desktop.
+
+Same hierarchy gate throughout (KICK_MEMBERS + outrank), enforced in Rust regardless of what the UI allowed.
 
 ### Muted Members Section
 

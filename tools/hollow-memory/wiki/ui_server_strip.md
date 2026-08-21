@@ -25,7 +25,7 @@ File: `lib/src/core/providers/server_strip_layout_provider.dart`
 - `loadLayout()` reads JSON from storage, deserializes to `List<StripItem>`, then calls `_syncWithServers()`.
 - `_syncWithServers()` reconciles layout against `serverListProvider`:
   - Removes top-level `ServerStripItem`s whose `serverId` no longer exists in `serverListProvider`.
-  - Removes deleted server IDs from folders. Dissolves folders with 0 remaining servers (removed entirely) or 1 remaining server (replaced with a bare `ServerStripItem`).
+  - Removes deleted server IDs from folders. **Dissolves a folder only when it is EMPTY** (see the dissolution rule below).
   - Appends any server IDs present in `serverListProvider` but missing from the layout (new servers go to the end).
   - On first launch (empty state, non-empty server list), creates bare `ServerStripItem` entries for all servers.
 
@@ -35,8 +35,12 @@ All mutations clone `state`, modify the clone, assign back to `state`, then call
 
 - `reorder(oldIndex, newIndex)` — moves a top-level item. Adjusts `newIndex` down by 1 if it follows `oldIndex` (standard reorder correction). Bounds-checked.
 - `createFolder(serverId1, serverId2)` — finds both servers as top-level `ServerStripItem`s, removes both (higher index first to avoid shift), creates a `FolderStripItem` with hex-timestamp ID and `name: 'Folder'`, inserts at the lower of the two original indices.
-- `addToFolder(folderId, serverId)` — removes `serverId` from top-level and from any other folder (dissolving source folder if it drops to 0 or 1 member), then appends to target folder's `serverIds`.
-- `removeFromFolder(folderId, serverId, insertIndex)` — removes from folder (dissolving if needed), inserts as top-level `ServerStripItem` at clamped `insertIndex`.
+- `addToFolder(folderId, serverId)` — removes `serverId` from top-level and from any other folder (dissolving the source folder only if it empties), then appends to target folder's `serverIds`.
+- `removeFromFolder(folderId, serverId, insertIndex)` — removes from folder (dissolving only if it empties), inserts as top-level `ServerStripItem` at clamped `insertIndex`.
+- `createFolderWith(serverId, name)` (issue #61) — wraps ONE server in a new folder, in place: at its top-level index, or immediately after the folder it was pulled out of. This is what "Move to folder > New folder" calls.
+- `moveOutOfFolder(serverId)` (issue #61) — the menu's inverse of the drag-out. Inserts after the folder, or **into the folder's own slot when it was the last server**, so the icon does not appear to jump over its neighbour on the way out.
+- `dissolveFolder(folderId)` (issue #61) — replaces a folder with the servers it held, in order, at its index.
+- `folderIdOf(serverId)` / `folders()` (issue #61) — what the "Move to folder" submenu reads to check the current folder and list the rest.
 - `renameFolder(folderId, name)` — updates the folder's name via `copyWith`.
 - `reorderInsideFolder(folderId, oldIndex, newIndex)` — reorders `serverIds` within a folder.
 - `onServerCreated(serverId)` — appends to layout if not already present (checks both top-level and folder contents).
@@ -385,20 +389,23 @@ On remove:
 1. Finds the folder's index in the layout.
 2. Calls `removeFromFolder(folderId, serverId, folderIdx + 1)` — inserts the server right after the folder's position.
 
-### Folder Auto-Dissolution
+### Folder Auto-Dissolution — ONE rule, everywhere
 
-The `ServerStripLayoutNotifier` automatically dissolves folders in multiple places:
-- `_syncWithServers()`: during server list reconciliation.
-- `addToFolder()`: when removing a server from its source folder.
-- `removeFromFolder()`: when the removed server was the second-to-last.
-- `onServerDeleted()`: when a deleted server was in a folder.
+**A folder disappears when it is EMPTY. Never at one server.** Applied identically in `_syncWithServers()`,
+`addToFolder()`, `removeFromFolder()` and `onServerDeleted()`.
 
-Dissolution rules: 0 remaining = remove folder entirely. 1 remaining = replace `FolderStripItem` with `ServerStripItem(serverId: remainingId)`.
+This changed in issue #61 phase 4 and the reason matters: every one of those sites used to also collapse a
+folder holding a SINGLE server. "Move to folder > New folder" creates exactly that, so the layout would have
+silently undone the user's action on the next `loadLayout()`, in a place nothing would have shown it happening.
+Making a one-server folder legal is also what lets a folder be a deliberate container you drop a second server
+into later. `test/server_strip_folders_test.dart` guards it.
 
 ### Folder Rename
 
 Two entry points:
-1. **Right-click** on folder icon (`onSecondaryTapUp`) in both `ServerStrip` and `BottomBar`.
+1. **Right-click** on a folder icon in both `ServerStrip` and `BottomBar`, which opens the folder context menu
+   (below); Rename is one row in it. It used to jump straight into the rename dialog with no menu around it and
+   therefore no way to dissolve a folder at all.
 2. **Pencil button** in the folder popup header.
 
 Both call `showFolderRenameDialog()` which opens `showHollowDialog` containing `_FolderRenameDialog`.
@@ -409,6 +416,37 @@ Both call `showFolderRenameDialog()` which opens `showHollowDialog` containing `
 - `HollowTextField` with `maxLength: 32`, autofocus, submit-on-enter.
 - Cancel (ghost button) / Save (filled button) row.
 - Save trims input, calls `serverStripLayoutProvider.notifier.renameFolder(folder.id, name)`, then pops.
+
+## Context Menus (issue #61 phase 4)
+
+Built in `lib/src/ui/shell/server_context_menus.dart` on the shared `showHollowMenu` primitive, and opened
+through `ContextMenuTarget` so each one also answers Menu / Shift+F10 and a "Show menu" screen-reader action.
+**Both shells call this file**, so a row that exists in Classic and not in Dock is impossible by construction.
+
+**Server icon** — Mark as read, Mute/Unmute server, Invite people, Server settings, **Move to folder**, Leave
+server. Before this the strip had no menu at all and folder membership was drag-only.
+- `Mark as read` uses the shared `markServerRead(ref, serverId)` (also used by the channel sidebar's background
+  menu): the watermark per channel is the LAST message of the in-memory list, the ms-timestamp rule.
+- `Server settings` goes through each shell's `_openServerSettings`, which **selects the server first**. The
+  settings panel reads the SELECTED server, so flipping `serverSettingsOpenProvider` alone would open the
+  settings of whatever was already on screen.
+- `Move to folder` is a drill-in submenu: every existing folder (check-marked if it is the current one), `New
+  folder` (prompts for a name → `createFolderWith`), and `Remove from folder` when it is in one.
+- `Leave server` uses `confirmAndLeaveServer`, the same flow as the Danger Zone tab, reachable without opening
+  settings first.
+
+**Folder icon** — Mark all as read, Rename folder, Dissolve folder. The rows read the folder LIVE out of
+`serverStripLayoutProvider`, so a rename that lands while the menu is open shows.
+
+**Home button** — one row, "Mark all DMs as read", with the current unread total as the trailing hint. It exists
+because an unread badge on Home comes from the DM counts, and a conversation that is no longer reachable can
+leave one behind with no tile to click. See `markAllDmsSeen` in `providers_server.md`.
+
+**Where the right click is wired.** Server and folder icons carry their own `ContextMenuTarget` in
+`_buildServerIcon` / `_buildFolderIcon`, because they also sit inside the `DragTarget` + `LongPressDraggable`
+machinery. The Home button uses the `onContextMenu` prop on `_ServerIcon` / `_BottomServerIcon`, which wraps the
+icon ABOVE its `HollowFocusRing` — the `Shortcuts` has to be an ancestor of the focus node or the key route
+never fires.
 
 ## ServerFolderPopup (Overlay)
 

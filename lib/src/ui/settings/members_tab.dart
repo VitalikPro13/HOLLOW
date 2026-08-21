@@ -12,7 +12,10 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
-import 'package:hollow/src/ui/components/hollow_dialog.dart';
+import 'package:hollow/src/ui/components/hollow_menu.dart';
+import 'package:hollow/src/ui/components/hollow_tooltip.dart';
+import 'package:hollow/src/ui/components/overlay_anchor.dart';
+import 'package:hollow/src/ui/settings/moderation_dialogs.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
@@ -208,119 +211,31 @@ class _MemberRow extends ConsumerWidget {
                 ],
               ),
             ),
-            // Action menu (only visible if we can manage this member)
+            // Action menu (only visible if we can manage this member).
+            //
+            // The same `showHollowMenu` surface as every other context menu
+            // in the app (issue #61) rather than a Material PopupMenuButton,
+            // and the same shared confirms the mobile members route and the
+            // desktop user menu use.
             if (canManage) ...[
               const SizedBox(width: HollowSpacing.xs),
-              PopupMenuButton<String>(
-                icon: Icon(
-                  LucideIcons.moreVertical,
-                  size: 16,
-                  color: hollow.textSecondary,
+              // Builder so the menu anchors off the BUTTON rather than the
+              // whole row, which is 600px wide.
+              Builder(
+                builder: (buttonContext) => HollowTooltip(
+                  message: 'Member actions',
+                  child: HollowPressable(
+                    semanticLabel: 'Member actions',
+                    borderRadius: BorderRadius.circular(hollow.radiusSm),
+                    padding: const EdgeInsets.all(HollowSpacing.xs),
+                    onTap: () => _showActions(buttonContext, ref),
+                    child: Icon(
+                      LucideIcons.moreVertical,
+                      size: 16,
+                      color: hollow.textSecondary,
+                    ),
+                  ),
                 ),
-                color: hollow.elevated,
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(hollow.radiusMd),
-                  side: BorderSide(color: hollow.border),
-                ),
-                itemBuilder: (context) {
-                  final assignable = assignableRoles(myRole);
-                  return [
-                    // Role change options
-                    for (final r in assignable)
-                      if (r != role)
-                        PopupMenuItem(
-                          value: 'role:$r',
-                          child: Row(
-                            children: [
-                              Icon(
-                                _roleInfo(r, hollow).icon,
-                                size: 14,
-                                color: _roleInfo(r, hollow).color,
-                              ),
-                              const SizedBox(width: HollowSpacing.sm),
-                              Text(
-                                'Make ${r[0].toUpperCase()}${r.substring(1)}',
-                                style: HollowTypography.body.copyWith(
-                                  color: hollow.textPrimary,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                    // Divider + Kick
-                    if (assignable.isNotEmpty)
-                      const PopupMenuDivider(),
-                    PopupMenuItem(
-                      value: 'kick',
-                      child: Row(
-                        children: [
-                          Icon(
-                            LucideIcons.userMinus,
-                            size: 14,
-                            color: hollow.error,
-                          ),
-                          const SizedBox(width: HollowSpacing.sm),
-                          Text(
-                            'Kick member',
-                            style: HollowTypography.body.copyWith(
-                              color: hollow.error,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                    PopupMenuItem(
-                      value: 'mute',
-                      child: Row(
-                        children: [
-                          Icon(
-                            LucideIcons.volumeX,
-                            size: 14,
-                            color: hollow.warning,
-                          ),
-                          const SizedBox(width: HollowSpacing.sm),
-                          Text(
-                            'Mute member',
-                            style: HollowTypography.body.copyWith(
-                              color: hollow.warning,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                    PopupMenuItem(
-                      value: 'ban',
-                      child: Row(
-                        children: [
-                          Icon(
-                            LucideIcons.ban,
-                            size: 14,
-                            color: hollow.error,
-                          ),
-                          const SizedBox(width: HollowSpacing.sm),
-                          Text(
-                            'Ban member',
-                            style: HollowTypography.body.copyWith(
-                              color: hollow.error,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ];
-                },
-                onSelected: (value) {
-                  if (value.startsWith('role:')) {
-                    final newRole = value.substring(5);
-                    _changeRole(context, ref, newRole);
-                  } else if (value == 'kick') {
-                    _confirmKick(context, ref);
-                  } else if (value == 'ban') {
-                    _confirmBan(context, ref);
-                  } else if (value == 'mute') {
-                    _showMuteDialog(context, ref);
-                  }
-                },
               ),
             ],
           ],
@@ -329,237 +244,48 @@ class _MemberRow extends ConsumerWidget {
     );
   }
 
-  void _changeRole(BuildContext context, WidgetRef ref, String newRole) {
-    final roleName = newRole[0].toUpperCase() + newRole.substring(1);
-    showHollowDialog(
+  /// The member action menu: role changes, then the moderation trio.
+  void _showActions(BuildContext context, WidgetRef ref) {
+    final assignable =
+        assignableRoles(myRole).where((r) => r != role).toList();
+    showHollowMenu(
       context: context,
-      builder: (context) => _ConfirmDialog(
-        title: 'Change role',
-        message:
-            'Change $displayName\'s role to $roleName?',
-        confirmLabel: 'Change',
-        onConfirm: () async {
-          Navigator.of(context).pop();
-          try {
-            await crdt_api.changeMemberRole(
-              serverId: serverId,
-              peerId: peerId,
-              newRole: newRole,
-            );
-            if (context.mounted) {
-              HollowToast.show(
-                context,
-                '$displayName is now $roleName',
-                type: HollowToastType.success,
-              );
-            }
-          } catch (e) {
-            if (context.mounted) {
-              HollowToast.show(
-                context,
-                'Failed to change role: $e',
-                type: HollowToastType.error,
-              );
-            }
-          }
-        },
-      ),
-    );
-  }
-
-  void _confirmKick(BuildContext context, WidgetRef ref) {
-    showHollowDialog(
-      context: context,
-      builder: (context) => _ConfirmDialog(
-        title: 'Kick member',
-        message:
-            'Are you sure you want to kick $displayName from the server?',
-        confirmLabel: 'Kick',
-        isDanger: true,
-        onConfirm: () async {
-          Navigator.of(context).pop();
-          try {
-            await crdt_api.kickMember(
-              serverId: serverId,
-              peerId: peerId,
-            );
-            if (context.mounted) {
-              HollowToast.show(
-                context,
-                '$displayName has been kicked',
-                type: HollowToastType.success,
-              );
-            }
-          } catch (e) {
-            if (context.mounted) {
-              HollowToast.show(
-                context,
-                'Failed to kick member: $e',
-                type: HollowToastType.error,
-              );
-            }
-          }
-        },
-      ),
-    );
-  }
-
-  void _showMuteDialog(BuildContext context, WidgetRef ref) {
-    showHollowDialog(
-      context: context,
-      builder: (context) => _MuteDurationDialog(
-        displayName: displayName,
-        onMute: (durationSecs, label) async {
-          Navigator.of(context).pop();
-          try {
-            await crdt_api.muteMember(
-              serverId: serverId,
-              peerId: peerId,
-              durationSecs: durationSecs,
-            );
-            if (context.mounted) {
-              HollowToast.show(
-                context,
-                durationSecs <= 0
-                    ? '$displayName is now muted (permanent)'
-                    : '$displayName is muted for $label',
-                type: HollowToastType.success,
-              );
-            }
-          } catch (e) {
-            if (context.mounted) {
-              HollowToast.show(
-                context,
-                'Failed to mute member: $e',
-                type: HollowToastType.error,
-              );
-            }
-          }
-        },
-      ),
-    );
-  }
-
-  void _confirmBan(BuildContext context, WidgetRef ref) {
-    showHollowDialog(
-      context: context,
-      builder: (context) => _ConfirmDialog(
-        title: 'Ban member',
-        message:
-            'Are you sure you want to ban $displayName? They will be removed and unable to rejoin.',
-        confirmLabel: 'Ban',
-        isDanger: true,
-        onConfirm: () async {
-          Navigator.of(context).pop();
-          try {
-            await crdt_api.banMember(
-              serverId: serverId,
-              peerId: peerId,
-            );
-            if (context.mounted) {
-              HollowToast.show(
-                context,
-                '$displayName has been banned',
-                type: HollowToastType.success,
-              );
-            }
-          } catch (e) {
-            if (context.mounted) {
-              HollowToast.show(
-                context,
-                'Failed to ban member: $e',
-                type: HollowToastType.error,
-              );
-            }
-          }
-        },
-      ),
-    );
-  }
-}
-
-/// Mute duration options: label + seconds (0 = permanent).
-const kMuteDurationOptions = [
-  ('10 minutes', 600),
-  ('1 hour', 3600),
-  ('24 hours', 86400),
-  ('7 days', 604800),
-  ('Permanent', 0),
-];
-
-class _MuteDurationDialog extends StatelessWidget {
-  final String displayName;
-  final void Function(int durationSecs, String label) onMute;
-
-  const _MuteDurationDialog({
-    required this.displayName,
-    required this.onMute,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-
-    return Center(
-      child: Material(
-        color: Colors.transparent,
-        child: Container(
-          width: 360,
-          padding: const EdgeInsets.all(HollowSpacing.lg),
-          decoration: BoxDecoration(
-            color: hollow.surface.withValues(alpha: 0.92),
-            borderRadius: BorderRadius.circular(hollow.radiusLg),
-            border: Border.all(color: hollow.accent.withValues(alpha: 0.2)),
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withValues(alpha: 0.5),
-                blurRadius: 24,
-                offset: const Offset(0, 8),
-              ),
-            ],
+      anchor: overlayAnchorOf(context),
+      // `_` not `ref`: the menu route's ref dies with the menu, and every row
+      // here runs after it closes (test/menu_builder_ref_guard_test.dart).
+      builder: (menuContext, _) => <HollowMenuEntry>[
+        for (final r in assignable)
+          HollowMenuItem(
+            icon: _roleInfo(r, HollowTheme.of(menuContext)).icon,
+            label: 'Make ${r[0].toUpperCase()}${r.substring(1)}',
+            onTap: () => showChangeRoleDialog(context, ref,
+                serverId: serverId,
+                peerId: peerId,
+                displayName: displayName,
+                newRole: r),
           ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Text(
-                'Mute member',
-                textAlign: TextAlign.center,
-                style: HollowTypography.heading
-                    .copyWith(color: hollow.textPrimary, fontSize: 18),
-              ),
-              const SizedBox(height: HollowSpacing.md),
-              Text(
-                '$displayName won\'t be able to send messages in any channel of this server. How long?',
-                style: HollowTypography.body
-                    .copyWith(color: hollow.textSecondary),
-                textAlign: TextAlign.center,
-              ),
-              const SizedBox(height: HollowSpacing.lg),
-              for (final (label, secs) in kMuteDurationOptions)
-                Padding(
-                  padding: const EdgeInsets.only(bottom: HollowSpacing.xs),
-                  child: HollowButton.ghost(
-                    onPressed: () => onMute(secs, label),
-                    expand: true,
-                    child: Text(
-                      label,
-                      style: HollowTypography.body.copyWith(
-                        color: secs == 0 ? hollow.error : hollow.textPrimary,
-                      ),
-                    ),
-                  ),
-                ),
-              const SizedBox(height: HollowSpacing.sm),
-              HollowButton.ghost(
-                onPressed: () => Navigator.of(context).pop(),
-                expand: true,
-                child: const Text('Cancel'),
-              ),
-            ],
-          ),
+        if (assignable.isNotEmpty) const HollowMenuDivider(),
+        HollowMenuItem(
+          icon: LucideIcons.volumeX,
+          label: 'Mute member',
+          onTap: () => showMuteMemberDialog(context, ref,
+              serverId: serverId, peerId: peerId, displayName: displayName),
         ),
-      ),
+        HollowMenuItem(
+          icon: LucideIcons.userMinus,
+          label: 'Kick member',
+          isDanger: true,
+          onTap: () => showKickMemberDialog(context, ref,
+              serverId: serverId, peerId: peerId, displayName: displayName),
+        ),
+        HollowMenuItem(
+          icon: LucideIcons.ban,
+          label: 'Ban member',
+          isDanger: true,
+          onTap: () => showBanMemberDialog(context, ref,
+              serverId: serverId, peerId: peerId, displayName: displayName),
+        ),
+      ],
     );
   }
 }
@@ -829,88 +555,6 @@ class _BannedMembersSectionState extends ConsumerState<_BannedMembersSection> {
             ),
         ],
       ],
-    );
-  }
-}
-
-class _ConfirmDialog extends StatelessWidget {
-  final String title;
-  final String message;
-  final String confirmLabel;
-  final bool isDanger;
-  final VoidCallback onConfirm;
-
-  const _ConfirmDialog({
-    required this.title,
-    required this.message,
-    required this.confirmLabel,
-    this.isDanger = false,
-    required this.onConfirm,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-
-    return Center(
-      child: Material(
-        color: Colors.transparent,
-        child: Container(
-          width: 360,
-          padding: const EdgeInsets.all(HollowSpacing.lg),
-          decoration: BoxDecoration(
-            color: hollow.surface.withValues(alpha: 0.92),
-            borderRadius: BorderRadius.circular(hollow.radiusLg),
-            border: Border.all(color: hollow.accent.withValues(alpha: 0.2)),
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withValues(alpha: 0.5),
-                blurRadius: 24,
-                offset: const Offset(0, 8),
-              ),
-            ],
-          ),
-          child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text(
-              title,
-              style: HollowTypography.heading
-                  .copyWith(color: hollow.textPrimary, fontSize: 18),
-            ),
-            const SizedBox(height: HollowSpacing.md),
-            Text(
-              message,
-              style: HollowTypography.body.copyWith(color: hollow.textSecondary),
-              textAlign: TextAlign.center,
-            ),
-            const SizedBox(height: HollowSpacing.lg),
-            Row(
-              children: [
-                Expanded(
-                  child: HollowButton.ghost(
-                    onPressed: () => Navigator.of(context).pop(),
-                    child: const Text('Cancel'),
-                  ),
-                ),
-                const SizedBox(width: HollowSpacing.md),
-                Expanded(
-                  child: isDanger
-                      ? HollowButton.danger(
-                          onPressed: onConfirm,
-                          child: Text(confirmLabel),
-                        )
-                      : HollowButton.filled(
-                          onPressed: onConfirm,
-                          child: Text(confirmLabel),
-                        ),
-                ),
-              ],
-            ),
-          ],
-        ),
-      ),
-      ),
     );
   }
 }

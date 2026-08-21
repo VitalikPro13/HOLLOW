@@ -1,0 +1,21 @@
+[
+  {"op": "log", "message": "The guest panel's server menu, which stopped being a hand-rolled second menu surface."},
+  {"op": "tap", "target": "semantics:Browse public channels"},
+  {"op": "wait", "ms": 1500},
+  {"op": "shot", "name": "01-guest-panel"},
+  {"op": "dump", "name": "01-guest-panel"},
+
+  {"op": "log", "message": "soft: an empty guest panel has nothing to right-click, and that is not a failure"},
+  {"op": "right_click", "target": "type:_GuestServerSection", "soft": true},
+  {"op": "shot", "name": "02-guest-menu"},
+  {"op": "dump", "name": "02-guest-menu"},
+  {"op": "expect_text", "value": "FETCH MODE", "soft": true},
+  {"op": "expect_text", "value": "Copy server ID", "soft": true},
+  {"op": "key", "value": "escape"},
+  {"op": "wait", "ms": 400},
+
+  {"op": "log", "message": "back to Home"},
+  {"op": "tap", "target": "semantics:Home"},
+  {"op": "wait", "ms": 800},
+  {"op": "shot", "name": "03-home"}
+]

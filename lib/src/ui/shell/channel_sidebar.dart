@@ -4,7 +4,6 @@ import 'package:hollow/src/ui/chat/hollow_link_utils.dart';
 
 import 'package:flutter/material.dart';
 import 'package:hollow/src/ui/components/speaking_border.dart';
-import 'package:hollow/src/ui/components/overlay_anchor.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/models/channel_info.dart';
 import 'package:hollow/src/core/models/channel_layout.dart';
@@ -40,12 +39,14 @@ import 'package:hollow/src/ui/components/recording_indicator.dart';
 import 'package:hollow/src/ui/components/saved_messages_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
+import 'package:hollow/src/ui/components/hollow_menu.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
 import 'package:hollow/src/ui/dialogs/invite_dialog.dart';
 import 'package:hollow/src/ui/shell/user_bar.dart';
+import 'package:hollow/src/ui/shell/user_context_menu.dart';
 import 'package:hollow/src/ui/shell/voice_channel_panel.dart';
 import 'package:hollow/src/ui/sidebar/peer_card.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -637,9 +638,10 @@ class _ServerContentState extends State<_ServerContent> {
           // header hits their own handler first, since the inner recognizer
           // wins the arena.
           child: Consumer(
-            builder: (context, ref, child) => GestureDetector(
+            builder: (context, ref, child) => ContextMenuTarget(
               behavior: HitTestBehavior.opaque,
-              onSecondaryTapUp: (details) => showChannelSidebarMenu(
+              semanticLabel: 'Server actions',
+              onOpen: (anchor) => showChannelSidebarMenu(
                 context: context,
                 ref: ref,
                 serverId: w.serverId,
@@ -650,9 +652,9 @@ class _ServerContentState extends State<_ServerContent> {
                   final link = webServerInviteLink(w.serverId);
                   showInviteDialog(context, link, w.serverId);
                 },
-                anchor: overlayPositionOf(context, details.globalPosition),
+                anchor: anchor,
               ),
-              child: child,
+              child: child!,
             ),
             child: items.isEmpty
                 ? Center(
@@ -741,8 +743,9 @@ class _CategoryHeaderState extends State<_CategoryHeader> {
   @override
   Widget build(BuildContext context) {
     return Consumer(
-      builder: (context, ref, _) => GestureDetector(
-        onSecondaryTapUp: (details) => showCategoryMenu(
+      builder: (context, ref, _) => ContextMenuTarget(
+        semanticLabel: 'Category actions',
+        onOpen: (anchor) => showCategoryMenu(
           context: context,
           ref: ref,
           serverId: widget.serverId,
@@ -752,7 +755,7 @@ class _CategoryHeaderState extends State<_CategoryHeader> {
           canManage: widget.canManage,
           isCollapsed: _collapsed,
           onToggleCollapse: _toggle,
-          anchor: overlayPositionOf(context, details.globalPosition),
+          anchor: anchor,
         ),
         child: _buildHeader(),
       ),
@@ -1406,14 +1409,15 @@ class _ChannelTile extends ConsumerWidget {
       );
     }
 
-    return GestureDetector(
-      onSecondaryTapUp: (details) => showChannelTileMenu(
+    return ContextMenuTarget(
+      semanticLabel: 'Channel actions',
+      onOpen: (anchor) => showChannelTileMenu(
         context: context,
         ref: ref,
         serverId: serverId,
         channel: channel,
         canManage: canManage,
-        anchor: overlayPositionOf(context, details.globalPosition),
+        anchor: anchor,
       ),
       child: Padding(
         padding: const EdgeInsets.symmetric(
@@ -1532,14 +1536,15 @@ class _VoiceChannelTileState extends ConsumerState<_VoiceChannelTile> {
 
     // Only the channel row itself — the participant rows below keep their own
     // secondary-tap per-peer volume popup.
-    channelRow = GestureDetector(
-      onSecondaryTapUp: (details) => showChannelTileMenu(
+    channelRow = ContextMenuTarget(
+      semanticLabel: 'Channel actions',
+      onOpen: (anchor) => showChannelTileMenu(
         context: context,
         ref: ref,
         serverId: widget.serverId,
         channel: widget.channel,
         canManage: widget.canManage,
-        anchor: overlayPositionOf(context, details.globalPosition),
+        anchor: anchor,
       ),
       child: channelRow,
     );
@@ -1708,11 +1713,21 @@ class _VoiceParticipantRow extends ConsumerWidget {
         ? recState.isMyRecording
         : recState.remoteRecorders.contains(peerId);
 
-    return GestureDetector(
-      onSecondaryTapUp: isRemote
-          ? (details) =>
-              _showVolumePopup(context, ref, details.globalPosition)
-          : null,
+    // Right-click used to open the per-peer volume slider and nothing else.
+    // It opens the user menu now, with that slider as its first row, so the
+    // control survives and the row gains every other user action (#61).
+    return ContextMenuTarget(
+      enabled: isRemote,
+      semanticLabel: 'Participant actions',
+      onOpen: (anchor) => showUserContextMenu(
+        context: context,
+        ref: ref,
+        peerId: master,
+        routablePeerId: peerId,
+        serverId: serverId,
+        surface: UserMenuSurface.voice,
+        anchor: anchor,
+      ),
       child: Padding(
         padding: const EdgeInsets.symmetric(vertical: HollowSpacing.xxs),
         child: Row(
@@ -1777,103 +1792,6 @@ class _VoiceParticipantRow extends ConsumerWidget {
     );
   }
 
-  void _showVolumePopup(
-      BuildContext context, WidgetRef ref, Offset globalPosition) {
-    final position = overlayPositionOf(context, globalPosition);
-    final hollow = HollowTheme.of(context);
-    final overlay = Overlay.of(context);
-    final vcState = ref.read(voiceChannelProvider);
-    var volume = vcState.getPeerVolume(peerId);
-    OverlayEntry? entry;
-
-    void remove() {
-      entry?.remove();
-      entry = null;
-    }
-
-    entry = OverlayEntry(
-      builder: (ctx) {
-        return Stack(
-          children: [
-            // Tap-away barrier.
-            Positioned.fill(
-              child: GestureDetector(
-                onTap: remove,
-                behavior: HitTestBehavior.opaque,
-                child: const SizedBox.expand(),
-              ),
-            ),
-            Positioned(
-              left: position.dx,
-              top: position.dy,
-              child: Material(
-                color: hollow.elevated,
-                borderRadius: BorderRadius.circular(hollow.radiusSm),
-                elevation: 4,
-                child: StatefulBuilder(
-                  builder: (ctx, setPopupState) {
-                    return Padding(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 6, vertical: 2),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(LucideIcons.volume2,
-                              size: 12, color: hollow.textSecondary),
-                          SizedBox(
-                            width: 110,
-                            height: 24,
-                            child: SliderTheme(
-                              data: SliderThemeData(
-                                activeTrackColor: hollow.accent,
-                                inactiveTrackColor: hollow.border,
-                                thumbColor: hollow.accent,
-                                overlayColor:
-                                    hollow.accent.withValues(alpha: 0.08),
-                                trackHeight: 2,
-                                thumbShape: const RoundSliderThumbShape(
-                                    enabledThumbRadius: 4),
-                                overlayShape: const RoundSliderOverlayShape(
-                                    overlayRadius: 8),
-                              ),
-                              child: Slider(
-                                value: volume,
-                                min: 0.0,
-                                max: 2.0,
-                                onChanged: (v) {
-                                  setPopupState(() => volume = v);
-                                  ref
-                                      .read(voiceChannelProvider.notifier)
-                                      .setPeerVolume(peerId, v);
-                                },
-                              ),
-                            ),
-                          ),
-                          SizedBox(
-                            width: 28,
-                            child: Text(
-                              '${(volume * 100).round()}%',
-                              style: HollowTypography.caption.copyWith(
-                                color: hollow.textSecondary,
-                                fontSize: 10,
-                              ),
-                              textAlign: TextAlign.right,
-                            ),
-                          ),
-                        ],
-                      ),
-                    );
-                  },
-                ),
-              ),
-            ),
-          ],
-        );
-      },
-    );
-
-    overlay.insert(entry!);
-  }
 }
 
 // The speaking cue for a participant row is an outline AROUND the avatar

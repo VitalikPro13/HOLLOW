@@ -110,7 +110,9 @@ When `StartupRevealScope.interval()` returns non-null, each column is wrapped in
 
 4. **Unread badge (right side):** Only shown when `unreadCount > 0`. Red pill badge (`hollow.error`), 18px height, min-width 18px. Shows count or "99+" if over 99. White text, 10px, w700.
 
-**Tap action:** Sets `selectedPeerProvider` to `conv.peerId`, clears `selectedServerProvider` to null, clears `channelListProvider` and `selectedChannelProvider`, then calls `unreadProvider.notifier.markDmSeen(conv.peerId, null)`.
+**Tap action:** Sets `selectedPeerProvider` to `conv.peerId`, clears `selectedServerProvider` to null, clears `channelListProvider` and `selectedChannelProvider`, then calls `unreadProvider.notifier.markDmSeen(conv.peerId, null)` — which is a NO-OP on a null message id (see `couplings_gotchas.md`); the chat pane does the real marking on open.
+
+**Right click** (issue #61 phase 4): a `ContextMenuTarget` opens the shared user menu with the `dmTile` surface — Profile, Message, Mark as read, Mute conversation, favourite toggle, nickname, verify, block, report, Remove friend, Copy user ID. Same menu the sidebar `PeerCard` and the friends-bar chip use. See `ui_member_panel.md`.
 
 ---
 
@@ -372,6 +374,8 @@ Used for "Encrypted" (success green, `LucideIcons.shieldCheck`) and "Offline" (t
    - **Unread indicator (conditional):** If `unreadCount > 0`, red pill badge at top-left (-4, -4). 16px height, min-width 16px, `hollow.error` color with 1.5px `hollow.surface` border. Count text (or "99+" if > 99) in white, 9px, w700.
 
 2. **Name text:** `ConstrainedBox(maxWidth: 72)`. Caption style, 11px. `hollow.textPrimary` if selected, `hollow.textSecondary` if not. Bold (w600) if unread, normal (w400) otherwise. Single line ellipsis.
+
+**Right click** (issue #61 phase 4): wrapped in a `Consumer` + `ContextMenuTarget` opening the shared user menu with the `dmTile` surface. A `Consumer` rather than a `ref` constructor field, because passing a `WidgetRef` into a constructor cascades rebuilds.
 
 ---
 

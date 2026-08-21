@@ -5,8 +5,10 @@ import 'package:hollow/src/ui/components/overlay_anchor.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
+import 'package:hollow/src/ui/components/hollow_menu.dart';
 import 'package:hollow/src/ui/components/profile_card_popup.dart';
 import 'package:hollow/src/ui/mobile/mobile_profile_sheet.dart';
+import 'package:hollow/src/ui/shell/user_context_menu.dart';
 
 /// Opens the user profile card for [peerId] from inside a chat message.
 ///
@@ -101,21 +103,40 @@ class ProfileTapTarget extends ConsumerWidget {
       label: (name != null && name.isNotEmpty)
           ? "Open $name's profile"
           : 'Open profile',
-      child: MouseRegion(
-        cursor: SystemMouseCursors.click,
-        child: GestureDetector(
-          behavior: HitTestBehavior.opaque,
-          onTap: () => showChatProfile(
-            context,
-            ref,
-            peerId: peerId,
-            nickname: nickname,
-            role: role,
-            twitchUsername: twitchUsername,
-            labels: labels,
-            serverId: serverId,
+      // Right-clicking a sender name or avatar opens the user menu (issue
+      // #61, phase 3). Desktop only: on touch the profile sheet already
+      // carries these actions, and a long press here would fight the message
+      // action sheet the row above it owns.
+      child: ContextMenuTarget(
+        enabled: !Platform.isAndroid && !Platform.isIOS,
+        semanticLabel: 'User actions',
+        onOpen: (anchor) => showUserContextMenu(
+          context: context,
+          ref: ref,
+          peerId: peerId,
+          serverId: serverId,
+          nickname: nickname,
+          role: role,
+          twitchUsername: twitchUsername,
+          labels: labels,
+          anchor: anchor,
+        ),
+        child: MouseRegion(
+          cursor: SystemMouseCursors.click,
+          child: GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: () => showChatProfile(
+              context,
+              ref,
+              peerId: peerId,
+              nickname: nickname,
+              role: role,
+              twitchUsername: twitchUsername,
+              labels: labels,
+              serverId: serverId,
+            ),
+            child: child,
           ),
-          child: child,
         ),
       ),
     );

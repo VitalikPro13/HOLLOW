@@ -7,8 +7,12 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hollow/src/core/models/channel_info.dart';
 import 'package:hollow/src/core/models/channel_layout.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
+import 'package:hollow/src/core/models/strip_item.dart';
 import 'package:hollow/src/core/providers/layout_provider.dart';
+import 'package:hollow/src/core/providers/selected_peer_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
+import 'package:hollow/src/core/providers/server_strip_layout_provider.dart';
+import 'package:hollow/src/core/providers/unread_provider.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
@@ -327,6 +331,29 @@ class ProbeDump {
             })
         .toList();
 
+    // The server strip: which servers sit in which folder. Folder membership
+    // is now menu-driven (issue #61 phase 4), and a folder that quietly
+    // dissolves itself is exactly the class of bug the layout outline caught
+    // for channel categories.
+    final strip = read(serverStripLayoutProvider);
+    if (strip != null) {
+      out['stripOutline'] = [
+        for (final item in strip)
+          switch (item) {
+            ServerStripItem(:final serverId) =>
+              'server ${servers?[serverId]?.name ?? serverId}',
+            FolderStripItem(:final name, :final serverIds) =>
+              'folder "$name" [${serverIds.map((id) => servers?[id]?.name ?? id).join(", ")}]',
+          }
+      ];
+    }
+
+    out['selectedPeer'] = read(selectedPeerProvider);
+    final unread = read(unreadProvider);
+    if (unread != null) {
+      out['dmUnreadCounts'] = unread.dmUnreadCounts;
+    }
+
     if (layoutJson != null) {
       out['layoutJson'] = layoutJson;
       final stored = parseLayoutJson(layoutJson);
@@ -402,6 +429,22 @@ class ProbeDump {
     buffer.writeln('- channel: ${providers['selectedChannelName']} '
         '(${providers['selectedChannel']})');
     buffer.writeln('- layout mode: ${providers['layoutMode']}');
+    buffer.writeln('- peer: ${providers['selectedPeer']}');
+    final dmUnread = providers['dmUnreadCounts'] as Map?;
+    if (dmUnread != null && dmUnread.isNotEmpty) {
+      buffer.writeln('- DM unread: $dmUnread');
+    }
+    final strip = providers['stripOutline'] as List?;
+    if (strip != null) {
+      buffer.writeln();
+      buffer.writeln('### Server strip');
+      buffer.writeln();
+      buffer.writeln('```');
+      for (final line in strip) {
+        buffer.writeln(line);
+      }
+      buffer.writeln('```');
+    }
     final outline = (providers['layoutOutline'] as List?)?.cast<String>();
     if (outline != null) {
       buffer.writeln();

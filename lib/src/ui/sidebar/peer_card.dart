@@ -10,8 +10,10 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/animations/selection_shimmer.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
+import 'package:hollow/src/ui/components/hollow_menu.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/status_dot.dart';
+import 'package:hollow/src/ui/shell/user_context_menu.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 class PeerCard extends ConsumerWidget {
@@ -172,7 +174,20 @@ class PeerCard extends ConsumerWidget {
         horizontal: HollowSpacing.sm,
         vertical: HollowSpacing.xxs,
       ),
-      child: card,
+      // Right click opens the conversation menu (issue #61, phase 4): the
+      // full user menu plus the rows that only make sense on a DM row —
+      // mark read, mute, favourite, remove friend.
+      child: ContextMenuTarget(
+        semanticLabel: 'Conversation actions',
+        onOpen: (anchor) => showUserContextMenu(
+          context: context,
+          ref: ref,
+          peerId: peerId,
+          surface: UserMenuSurface.dmTile,
+          anchor: anchor,
+        ),
+        child: card,
+      ),
     );
   }
 }

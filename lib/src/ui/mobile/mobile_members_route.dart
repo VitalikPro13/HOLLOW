@@ -15,11 +15,11 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
-import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/status_dot.dart';
 import 'package:hollow/src/ui/mobile/mobile_profile_sheet.dart';
+import 'package:hollow/src/ui/settings/moderation_dialogs.dart';
 import 'package:hollow/src/core/brand_icons.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -522,13 +522,6 @@ class _MemberRow extends ConsumerWidget {
   void _showMuteSheet(BuildContext context, WidgetRef ref) {
     Navigator.pop(context);
     final hollow = HollowTheme.of(context);
-    const options = [
-      ('10 minutes', 600),
-      ('1 hour', 3600),
-      ('24 hours', 86400),
-      ('7 days', 604800),
-      ('Permanent', 0),
-    ];
 
     showModalBottomSheet(
       context: context,
@@ -556,7 +549,7 @@ class _MemberRow extends ConsumerWidget {
                 style: HollowTypography.caption.copyWith(color: hollow.textSecondary)),
             const SizedBox(height: HollowSpacing.md),
             Divider(height: 1, color: hollow.border),
-            for (final (label, secs) in options)
+            for (final (label, secs) in kMuteDurationOptions)
               HollowPressable(
                 onTap: () => _mute(context, ref, secs, label),
                 subtle: true,
@@ -582,129 +575,42 @@ class _MemberRow extends ConsumerWidget {
   }
 
   Future<void> _mute(
-      BuildContext context, WidgetRef ref, int durationSecs, String label) async {
+      BuildContext context, WidgetRef ref, int durationSecs, String label) {
     Navigator.pop(context);
-    try {
-      await crdt_api.muteMember(
+    return muteMemberFor(context, ref,
         serverId: serverId,
         peerId: member.peerId,
+        displayName: member.displayName,
         durationSecs: durationSecs,
-      );
-      ref.invalidate(serverMembersProvider(serverId));
-      ref.invalidate(mutedMembersProvider(serverId));
-      if (context.mounted) {
-        HollowToast.show(
-          context,
-          durationSecs <= 0
-              ? '${member.displayName} muted (permanent)'
-              : '${member.displayName} muted for $label',
-          type: HollowToastType.success,
-        );
-      }
-    } catch (e) {
-      if (context.mounted) {
-        HollowToast.show(context, 'Failed to mute', type: HollowToastType.error);
-      }
-    }
+        label: label);
   }
 
-  Future<void> _changeRole(BuildContext context, WidgetRef ref, String newRole) async {
+  // Kick / ban / role changes all run the shared confirms, so this route and
+  // the desktop surfaces cannot drift on wording, gating or invalidation.
+  Future<void> _changeRole(
+      BuildContext context, WidgetRef ref, String newRole) {
     Navigator.pop(context);
-    try {
-      await crdt_api.changeMemberRole(
-        serverId: serverId, peerId: member.peerId, newRole: newRole,
-      );
-      ref.invalidate(serverMembersProvider(serverId));
-      if (context.mounted) {
-        HollowToast.show(context, 'Role changed to $newRole',
-            type: HollowToastType.success);
-      }
-    } catch (e) {
-      if (context.mounted) {
-        HollowToast.show(context, 'Failed to change role',
-            type: HollowToastType.error);
-      }
-    }
+    return showChangeRoleDialog(context, ref,
+        serverId: serverId,
+        peerId: member.peerId,
+        displayName: member.displayName,
+        newRole: newRole);
   }
 
-  void _confirmKick(BuildContext context, WidgetRef ref) {
+  Future<void> _confirmKick(BuildContext context, WidgetRef ref) {
     Navigator.pop(context);
-    showHollowDialog(
-      context: context,
-      builder: (_) => HollowDialog(
-        title: 'Kick Member',
-        content: Text('Are you sure you want to kick ${member.displayName}?',
-            style: HollowTypography.body),
-        actions: [
-          HollowButton.ghost(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Cancel'),
-          ),
-          HollowButton.danger(
-            onPressed: () async {
-              Navigator.pop(context);
-              try {
-                await crdt_api.kickMember(
-                  serverId: serverId, peerId: member.peerId,
-                );
-                ref.invalidate(serverMembersProvider(serverId));
-                if (context.mounted) {
-                  HollowToast.show(context, 'Member kicked',
-                      type: HollowToastType.success);
-                }
-              } catch (e) {
-                if (context.mounted) {
-                  HollowToast.show(context, 'Failed to kick',
-                      type: HollowToastType.error);
-                }
-              }
-            },
-            child: const Text('Kick'),
-          ),
-        ],
-      ),
-    );
+    return showKickMemberDialog(context, ref,
+        serverId: serverId,
+        peerId: member.peerId,
+        displayName: member.displayName);
   }
 
-  void _confirmBan(BuildContext context, WidgetRef ref) {
+  Future<void> _confirmBan(BuildContext context, WidgetRef ref) {
     Navigator.pop(context);
-    showHollowDialog(
-      context: context,
-      builder: (_) => HollowDialog(
-        title: 'Ban Member',
-        content: Text(
-          'Are you sure you want to ban ${member.displayName}? They will not be able to rejoin.',
-          style: HollowTypography.body,
-        ),
-        actions: [
-          HollowButton.ghost(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Cancel'),
-          ),
-          HollowButton.danger(
-            onPressed: () async {
-              Navigator.pop(context);
-              try {
-                await crdt_api.banMember(
-                  serverId: serverId, peerId: member.peerId,
-                );
-                ref.invalidate(serverMembersProvider(serverId));
-                if (context.mounted) {
-                  HollowToast.show(context, 'Member banned',
-                      type: HollowToastType.success);
-                }
-              } catch (e) {
-                if (context.mounted) {
-                  HollowToast.show(context, 'Failed to ban',
-                      type: HollowToastType.error);
-                }
-              }
-            },
-            child: const Text('Ban'),
-          ),
-        ],
-      ),
-    );
+    return showBanMemberDialog(context, ref,
+        serverId: serverId,
+        peerId: member.peerId,
+        displayName: member.displayName);
   }
 }
 

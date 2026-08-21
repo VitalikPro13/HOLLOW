@@ -332,11 +332,19 @@ The button only appears when the fallback "TEXT CHANNELS" header is shown (no ca
 
 Built in `lib/src/ui/shell/channel_context_menus.dart` on the shared `showHollowMenu` primitive. Before this, everything except "create channel" lived in Server Settings > Channels on desktop, while mobile could already long-press a channel and rename, re-gate or delete it.
 
+Every one of them is opened through **`ContextMenuTarget`** (`hollow_menu.dart`), never a bare `onSecondaryTapUp`: it handles the right click AND adds Menu / Shift+F10 while the row has keyboard focus plus a "Show menu" `CustomSemanticsAction`. `test/context_menu_keyboard_route_guard_test.dart` fails the build on a regression.
+
 **Channel tile** (`_ChannelTile` and `_VoiceChannelTile`, both gained a `canManage` prop and an `onSecondaryTapUp` wrapper): Mark as read, Mute/Unmute, Rename, Visibility, Who can post, Temporary access, Delete. Visibility and Who-can-post are drill-in submenus offering the three tiers plus the access-label gate; picking a plain tier on a label-gated channel still confirms, because it widens access. Voice tiles omit Mark as read, Mute and Who can post -- a channel with no messages has no read state to clear and no posting gate.
 
 **Category header** (`_CategoryHeader`, which gained `layoutIndex` / `serverId` / `layoutJson` / `canManage`): Collapse/Expand, Create channel here, Rename, Set access for all channels, Delete. Categories are addressed by **layout POSITION, never by name** -- duplicate names are legal. "Create channel here" works because `showCreateChannelDialog`'s `onCreated` now hands back the new channel id, so it can be placed inside the category instead of landing unsorted at the bottom.
 
-**Sidebar background** (a `Consumer` + `GestureDetector` wrapping the list): Mark server as read, Create channel, Create category, Invite people, Server settings. `_ServerContent` gained `onOpenSettings` for it.
+**Sidebar background** (a `Consumer` + `ContextMenuTarget` with `HitTestBehavior.opaque` wrapping the list): Mark server as read, Create channel, Create category, Invite people, Server settings. `_ServerContent` gained `onOpenSettings` for it.
+
+**Voice participant row** (`_VoiceParticipantRow`, issue #61 phase 3): opens the shared USER menu with the per-peer volume slider as its first row. It used to open that slider and nothing else. See `ui_member_panel.md`.
+
+**DM tiles** in home mode (`PeerCard`, `sidebar/peer_card.dart`) open the same user menu with the `dmTile` surface. See `ui_member_panel.md`.
+
+`markServerRead` and the shared name prompt moved to `lib/src/ui/shell/server_context_menus.dart` so the strip menus can use the same definitions; this file imports them rather than keeping a second copy.
 
 Management rows appear only with `Permission.manageChannels`; Rust re-checks every op regardless. Layout edits go through `ChannelLayoutNotifier.mutate` -- never a direct `updateChannelLayout` (see `providers_server.md`). "Set access for all channels" shares `runCategoryBulkAccess` with the settings editor, so the two cannot disagree about what a category contains.
 

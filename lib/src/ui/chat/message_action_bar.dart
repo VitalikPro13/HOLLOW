@@ -325,6 +325,11 @@ class _MessageHoverWrapperState extends State<MessageHoverWrapper> {
                       widget.onInfo?.call();
                     }
                   : null,
+              // The hover bar shows the common actions; the rest of the menu
+              // (quick reactions, copy message ID, anything a surface wires up
+              // later) was reachable ONLY by right-clicking until this button.
+              onMore: (globalPosition) =>
+                  _openContextMenu(globalPosition),
             ),
           ),
         ),
@@ -615,6 +620,10 @@ class _ActionBarContent extends StatelessWidget {
   final VoidCallback? onCopyImage;
   final VoidCallback? onInfo;
 
+  /// Opens the full message menu. Receives the button's WINDOW position, the
+  /// same thing a right click hands over.
+  final void Function(Offset globalPosition)? onMore;
+
   const _ActionBarContent({
     required this.hollow,
     this.onCopy,
@@ -626,6 +635,7 @@ class _ActionBarContent extends StatelessWidget {
     this.onDownload,
     this.onCopyImage,
     this.onInfo,
+    this.onMore,
   });
 
   @override
@@ -744,7 +754,41 @@ class _ActionBarContent extends StatelessWidget {
                 color: hollow.error,
               ),
             ),
+          if (onMore != null)
+            _MoreButton(hollow: hollow, onMore: onMore!),
         ],
+      ),
+    );
+  }
+}
+
+/// Overflow button: the whole message menu, without a right click.
+///
+/// Captures its own position so the menu opens under the button rather than
+/// at the far-left origin of the message row.
+class _MoreButton extends StatelessWidget {
+  final HollowTheme hollow;
+  final void Function(Offset globalPosition) onMore;
+
+  const _MoreButton({required this.hollow, required this.onMore});
+
+  @override
+  Widget build(BuildContext context) {
+    return HollowPressable(
+      semanticLabel: 'More message actions',
+      borderRadius: BorderRadius.circular(hollow.radiusSm),
+      padding: const EdgeInsets.all(6),
+      onTap: () {
+        final box = context.findRenderObject() as RenderBox?;
+        final position = box == null
+            ? Offset.zero
+            : box.localToGlobal(Offset(0, box.size.height));
+        onMore(position);
+      },
+      child: Icon(
+        LucideIcons.moreHorizontal,
+        size: 14,
+        color: hollow.textSecondary,
       ),
     );
   }

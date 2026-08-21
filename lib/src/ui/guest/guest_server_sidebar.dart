@@ -1,5 +1,4 @@
 ﻿import 'package:flutter/material.dart';
-import 'package:hollow/src/ui/components/overlay_anchor.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/channel_chat_provider.dart';
@@ -16,6 +15,7 @@ import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/chat/hollow_link_utils.dart';
 import 'package:hollow/src/ui/animations/selection_shimmer.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
+import 'package:hollow/src/ui/components/hollow_menu.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
@@ -361,9 +361,9 @@ class _GuestServerSection extends ConsumerWidget {
             horizontal: HollowSpacing.sm,
             vertical: HollowSpacing.xxs,
           ),
-          child: GestureDetector(
-            onSecondaryTapUp: (details) =>
-                _showContextMenu(context, details.globalPosition),
+          child: ContextMenuTarget(
+            semanticLabel: 'Server actions',
+            onOpen: (anchor) => _showContextMenu(context, anchor),
             child: HollowPressable(
               onTap: onToggleExpand,
               subtle: true,
@@ -545,84 +545,39 @@ class _GuestServerSection extends ConsumerWidget {
     );
   }
 
-  void _showContextMenu(BuildContext context, Offset globalPosition) {
-    final position = overlayPositionOf(context, globalPosition);
-    final hollow = HollowTheme.of(context);
-    showDialog<void>(
+  /// The guest server's context menu.
+  ///
+  /// This used to hand-roll its own `showDialog` + `Stack` + two private row
+  /// widgets, which is a second context-menu surface with its own positioning,
+  /// its own dismissal and its own idea of what a menu row looks like. It goes
+  /// through [showHollowMenu] like every other menu in the app now (issue
+  /// #61), so the fetch modes get real check marks and the whole thing gets
+  /// the keyboard and screen-reader routes for free.
+  void _showContextMenu(BuildContext context, Offset anchor) {
+    showHollowMenu(
       context: context,
-      barrierColor: Colors.transparent,
-      builder: (ctx) => Stack(
-        children: [
-          Positioned.fill(
-            child: GestureDetector(
-              onTap: () => Navigator.pop(ctx),
-              behavior: HitTestBehavior.opaque,
-              child: const SizedBox.expand(),
-            ),
+      anchor: anchor,
+      builder: (_, _) => <HollowMenuEntry>[
+        const HollowMenuSection('Fetch mode'),
+        for (final mode in GuestFetchMode.values)
+          HollowMenuItem(
+            label: mode.label,
+            isChecked: server.fetchMode == mode,
+            onTap: () => onFetchModeChanged(mode),
           ),
-          Positioned(
-            left: position.dx,
-            top: position.dy,
-            child: Material(
-              color: Colors.transparent,
-              child: Container(
-                width: 200,
-                decoration: BoxDecoration(
-                  color: hollow.surface,
-                  borderRadius: BorderRadius.circular(hollow.radiusMd),
-                  border: Border.all(color: hollow.border),
-                  boxShadow: [
-                    BoxShadow(
-                      color: Colors.black.withValues(alpha: 0.3),
-                      blurRadius: 12,
-                    ),
-                  ],
-                ),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    // Fetch mode submenu header
-                    _ContextMenuHeader(
-                      label: 'Fetch Mode',
-                      hollow: hollow,
-                    ),
-                    for (final mode in GuestFetchMode.values)
-                      _ContextMenuItem(
-                        label: mode.label,
-                        hollow: hollow,
-                        isSelected: server.fetchMode == mode,
-                        onTap: () {
-                          Navigator.pop(ctx);
-                          onFetchModeChanged(mode);
-                        },
-                      ),
-                    Divider(height: 1, color: hollow.border),
-                    _ContextMenuItem(
-                      label: 'Copy Server ID',
-                      hollow: hollow,
-                      icon: LucideIcons.copy,
-                      onTap: () {
-                        Navigator.pop(ctx);
-                        onCopyId();
-                      },
-                    ),
-                    _ContextMenuItem(
-                      label: 'Remove',
-                      hollow: hollow,
-                      icon: LucideIcons.trash2,
-                      isDestructive: true,
-                      onTap: () {
-                        Navigator.pop(ctx);
-                        onRemove();
-                      },
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ),
-        ],
-      ),
+        const HollowMenuDivider(),
+        HollowMenuItem(
+          icon: LucideIcons.copy,
+          label: 'Copy server ID',
+          onTap: onCopyId,
+        ),
+        HollowMenuItem(
+          icon: LucideIcons.trash2,
+          label: 'Remove',
+          isDanger: true,
+          onTap: onRemove,
+        ),
+      ],
     );
   }
 }
@@ -712,73 +667,3 @@ class _GuestChannelTile extends StatelessWidget {
 }
 
 // ── Context menu helpers ──
-
-class _ContextMenuHeader extends StatelessWidget {
-  final String label;
-  final HollowTheme hollow;
-
-  const _ContextMenuHeader({required this.label, required this.hollow});
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
-      child: Text(
-        label,
-        style: TextStyle(
-          color: hollow.textSecondary,
-          fontSize: 11,
-          fontWeight: FontWeight.w600,
-        ),
-      ),
-    );
-  }
-}
-
-class _ContextMenuItem extends StatelessWidget {
-  final String label;
-  final HollowTheme hollow;
-  final IconData? icon;
-  final bool isSelected;
-  final bool isDestructive;
-  final VoidCallback onTap;
-
-  const _ContextMenuItem({
-    required this.label,
-    required this.hollow,
-    this.icon,
-    this.isSelected = false,
-    this.isDestructive = false,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final color =
-        isDestructive ? hollow.error : hollow.textPrimary;
-    return HollowPressable(
-      onTap: onTap,
-      hoverColor: hollow.elevated,
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-      child: Row(
-        children: [
-          if (icon != null) ...[
-            Icon(icon, size: 14, color: color),
-            const SizedBox(width: 8),
-          ],
-          Expanded(
-            child: Text(
-              label,
-              style: TextStyle(
-                color: color,
-                fontSize: 13,
-              ),
-            ),
-          ),
-          if (isSelected)
-            Icon(LucideIcons.check, size: 14, color: hollow.accent),
-        ],
-      ),
-    );
-  }
-}
