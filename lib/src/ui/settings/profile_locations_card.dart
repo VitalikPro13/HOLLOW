@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:hollow/src/core/app_relaunch.dart';
 import 'package:hollow/src/core/hollow_data_dir.dart';
 import 'package:hollow/src/core/profile_registry.dart';
+import 'package:hollow/src/rust/api/identity.dart' as identity_api;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
@@ -33,20 +34,6 @@ class ProfileLocationsCard extends StatefulWidget {
   State<ProfileLocationsCard> createState() => _ProfileLocationsCardState();
 }
 
-class _ProfileRow {
-  final String name;
-  final String path;
-  final IconData icon;
-  final bool builtin; // Default / Portable — no rename/remove
-
-  const _ProfileRow({
-    required this.name,
-    required this.path,
-    required this.icon,
-    required this.builtin,
-  });
-}
-
 class _ProfileLocationsCardState extends State<ProfileLocationsCard> {
   ProfileRegistry _registry = const ProfileRegistry();
   bool _busy = false;
@@ -57,51 +44,15 @@ class _ProfileLocationsCardState extends State<ProfileLocationsCard> {
     _registry = readProfileRegistrySync();
   }
 
-  /// The data root this process is actually running on (env override included),
-  /// for the ACTIVE badge and the erase-route decision.
-  String get _runningRoot {
-    final env = Platform.environment['HOLLOW_DATA_DIR'];
-    if (env != null && env.isNotEmpty) return env;
-    if (isPinnedProfile || isPortableMode) return hollowDataDir;
-    return defaultDesktopDataRoot();
-  }
+  String get _runningRoot => runningProfileRoot();
 
-  bool get _envOverrideActive {
-    final env = Platform.environment['HOLLOW_DATA_DIR'];
-    return env != null && env.isNotEmpty;
-  }
+  bool get _envOverrideActive => dataDirEnvOverrideActive;
 
-  List<_ProfileRow> _buildRows() {
-    final rows = <_ProfileRow>[
-      _ProfileRow(
-        name: 'Default',
-        path: defaultDesktopDataRoot(),
-        icon: LucideIcons.hardDrive,
-        builtin: true,
-      ),
-    ];
-    // Always listed (not only once the folder exists): an empty hollow_data
-    // folder no longer auto-activates portable mode, so this row IS the way
-    // to start a portable profile — switching to it creates the folder.
-    final portable = portableCandidatePath();
-    if (portable != null) {
-      rows.add(_ProfileRow(
-        name: 'Portable folder',
-        path: portable,
-        icon: LucideIcons.usb,
-        builtin: true,
-      ));
-    }
-    for (final custom in _registry.custom) {
-      if (rows.any((r) => sameProfilePath(r.path, custom.path))) continue;
-      rows.add(_ProfileRow(
-        name: custom.name,
-        path: custom.path,
-        icon: LucideIcons.folder,
-        builtin: false,
-      ));
-    }
-    return rows;
+  List<ProfileRow> _buildRows() => listProfileRows(_registry);
+
+  IconData _iconFor(ProfileRow row) {
+    if (row.portable) return LucideIcons.usb;
+    return row.builtin ? LucideIcons.hardDrive : LucideIcons.folder;
   }
 
   // ── Shared helpers ─────────────────────────────────────────────────
@@ -151,7 +102,7 @@ class _ProfileLocationsCardState extends State<ProfileLocationsCard> {
 
   // ── Switch ─────────────────────────────────────────────────────────
 
-  Future<void> _confirmSwitch(_ProfileRow row) async {
+  Future<void> _confirmSwitch(ProfileRow row) async {
     final proceed = await showHollowDialog<bool>(
       context: context,
       builder: (dialogContext) => HollowDialog(
@@ -284,7 +235,7 @@ class _ProfileLocationsCardState extends State<ProfileLocationsCard> {
     }
   }
 
-  Future<void> _renameProfile(_ProfileRow row) async {
+  Future<void> _renameProfile(ProfileRow row) async {
     final name = await _promptName(initial: row.name);
     if (name == null || !mounted) return;
     try {
@@ -304,7 +255,7 @@ class _ProfileLocationsCardState extends State<ProfileLocationsCard> {
     }
   }
 
-  Future<void> _removeProfile(_ProfileRow row) async {
+  Future<void> _removeProfile(ProfileRow row) async {
     try {
       await _saveRegistry(_registry.copyWith(
         custom: [
@@ -326,42 +277,48 @@ class _ProfileLocationsCardState extends State<ProfileLocationsCard> {
 
   // ── Erase ──────────────────────────────────────────────────────────
 
-  Future<void> _confirmErase(_ProfileRow row) async {
+  /// What this profile's own identity file demands before it may be deleted.
+  ///
+  /// Erasing an offline profile is a plain recursive delete of somebody's
+  /// identity, and until now it asked for nothing: anyone at an unlocked
+  /// Hollow could wipe a DIFFERENT, password-protected profile without ever
+  /// knowing its password. The check reads that profile's `identity.key`
+  /// directly, because the running process has only ever unlocked its own.
+  Future<_EraseChallenge> _eraseChallengeFor(ProfileRow row) async {
+    try {
+      final status =
+          await identity_api.identityProtectionStatusAt(dataDir: row.path);
+      if (!status.isEncrypted) return _EraseChallenge.none;
+      if (status.hasPassword) return _EraseChallenge.password;
+      // Keychain-only protection unlocks silently at launch on this machine,
+      // so a machine that can still unwrap the file has already proved as much
+      // as a prompt would. One that cannot (a folder copied from another
+      // computer) falls back to typing the name.
+      final unwrappable =
+          await identity_api.verifyIdentityPasswordAt(dataDir: row.path);
+      return unwrappable ? _EraseChallenge.none : _EraseChallenge.name;
+    } catch (_) {
+      // An identity file we cannot read is one we cannot clear, so fail closed
+      // rather than open.
+      return _EraseChallenge.name;
+    }
+  }
+
+  Future<void> _confirmErase(ProfileRow row) async {
     final isRunning = sameProfilePath(row.path, _runningRoot);
+
+    setState(() => _busy = true);
+    final challenge = await _eraseChallengeFor(row);
+    if (!mounted) return;
+    setState(() => _busy = false);
+
     final proceed = await showHollowDialog<bool>(
       context: context,
-      builder: (dialogContext) => HollowDialog(
-        title: 'Erase profile',
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              'This permanently deletes the identity key, message history, '
-              'and downloaded files of "${row.name}":',
-              style: HollowTypography.body,
-            ),
-            const SizedBox(height: HollowSpacing.xs),
-            Text(row.path, style: HollowTypography.mono.copyWith(fontSize: 11)),
-            const SizedBox(height: HollowSpacing.sm),
-            Text(
-              'Without its 24-word recovery phrase this identity cannot be '
-              'restored.${isRunning ? ' Hollow will restart to finish and '
-                  'open first-time setup.' : ''}',
-              style: HollowTypography.bodySmall,
-            ),
-          ],
-        ),
-        actions: [
-          HollowButton.ghost(
-            onPressed: () => Navigator.of(dialogContext).pop(false),
-            child: const Text('Cancel'),
-          ),
-          HollowButton.danger(
-            onPressed: () => Navigator.of(dialogContext).pop(true),
-            child: Text(isRunning ? 'Erase & restart' : 'Erase profile'),
-          ),
-        ],
+      builder: (dialogContext) => _EraseProfileDialog(
+        name: row.name,
+        path: row.path,
+        isRunning: isRunning,
+        challenge: challenge,
       ),
     );
     if (proceed != true || !mounted) return;
@@ -491,7 +448,7 @@ class _ProfileLocationsCardState extends State<ProfileLocationsCard> {
     );
   }
 
-  Widget _buildRow(HollowTheme hollow, _ProfileRow row) {
+  Widget _buildRow(HollowTheme hollow, ProfileRow row) {
     final active = sameProfilePath(row.path, _runningRoot);
     final exists = Directory(row.path).existsSync();
 
@@ -507,7 +464,7 @@ class _ProfileLocationsCardState extends State<ProfileLocationsCard> {
       ),
       child: Row(
         children: [
-          Icon(row.icon, size: 16,
+          Icon(_iconFor(row), size: 16,
               color: active ? hollow.accentText : hollow.textSecondary),
           const SizedBox(width: HollowSpacing.sm),
           Expanded(
@@ -602,6 +559,168 @@ class _ProfileLocationsCardState extends State<ProfileLocationsCard> {
           ],
         ],
       ),
+    );
+  }
+}
+
+/// What a profile asks for before it may be erased.
+enum _EraseChallenge {
+  /// Unprotected, or protected in a way this machine already satisfies.
+  none,
+
+  /// Password-protected: the password must actually unwrap its identity file.
+  password,
+
+  /// Protected but not unwrappable here. There is no secret to check against,
+  /// so the profile name is typed instead. Not authentication, just a wall
+  /// high enough that nobody clears it by accident.
+  name,
+}
+
+/// The erase confirmation. Stateful because the challenge is verified INSIDE
+/// the dialog: a wrong password reports itself in the field the user is
+/// looking at, instead of closing the dialog and firing a toast.
+class _EraseProfileDialog extends StatefulWidget {
+  final String name;
+  final String path;
+  final bool isRunning;
+  final _EraseChallenge challenge;
+
+  const _EraseProfileDialog({
+    required this.name,
+    required this.path,
+    required this.isRunning,
+    required this.challenge,
+  });
+
+  @override
+  State<_EraseProfileDialog> createState() => _EraseProfileDialogState();
+}
+
+class _EraseProfileDialogState extends State<_EraseProfileDialog> {
+  final _controller = TextEditingController();
+  String? _error;
+  bool _checking = false;
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  bool get _needsChallenge => widget.challenge != _EraseChallenge.none;
+
+  Future<void> _confirm() async {
+    if (_checking) return;
+    final navigator = Navigator.of(context);
+    if (!_needsChallenge) {
+      navigator.pop(true);
+      return;
+    }
+
+    final typed = _controller.text.trim();
+    if (typed.isEmpty) return;
+
+    if (widget.challenge == _EraseChallenge.name) {
+      if (typed.toLowerCase() != widget.name.trim().toLowerCase()) {
+        setState(() => _error = 'That is not this profile\'s name.');
+        return;
+      }
+      navigator.pop(true);
+      return;
+    }
+
+    setState(() {
+      _checking = true;
+      _error = null;
+    });
+    try {
+      final ok = await identity_api.verifyIdentityPasswordAt(
+        dataDir: widget.path,
+        password: typed,
+      );
+      if (!mounted) return;
+      if (!ok) {
+        setState(() {
+          _checking = false;
+          _error = 'Wrong password.';
+        });
+        return;
+      }
+      navigator.pop(true);
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _checking = false;
+        _error = 'Could not check the password: $e';
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final canConfirm = !_checking &&
+        (!_needsChallenge || _controller.text.trim().isNotEmpty);
+
+    return HollowDialog(
+      title: 'Erase profile',
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'This permanently deletes the identity key, message history, '
+            'and downloaded files of "${widget.name}":',
+            style: HollowTypography.body,
+          ),
+          const SizedBox(height: HollowSpacing.xs),
+          Text(widget.path,
+              style: HollowTypography.mono.copyWith(fontSize: 11)),
+          const SizedBox(height: HollowSpacing.sm),
+          Text(
+            'Without its 24-word recovery phrase this identity cannot be '
+            'restored.${widget.isRunning ? ' Hollow will restart to finish and '
+                'open first-time setup.' : ''}',
+            style: HollowTypography.bodySmall,
+          ),
+          if (_needsChallenge) ...[
+            const SizedBox(height: HollowSpacing.md),
+            Text(
+              widget.challenge == _EraseChallenge.password
+                  ? 'This profile is password-protected. Enter its password to '
+                      'erase it.'
+                  : 'This profile is protected and cannot be unlocked on this '
+                      'computer. Type its name to erase it anyway.',
+              style: HollowTypography.bodySmall,
+            ),
+            const SizedBox(height: HollowSpacing.sm),
+            HollowTextField(
+              controller: _controller,
+              autofocus: true,
+              isDense: true,
+              obscureText: widget.challenge == _EraseChallenge.password,
+              hintText: widget.challenge == _EraseChallenge.password
+                  ? 'Profile password'
+                  : widget.name,
+              errorText: _error,
+              onChanged: (_) => setState(() => _error = null),
+              onSubmitted: (_) => _confirm(),
+            ),
+          ],
+        ],
+      ),
+      actions: [
+        HollowButton.ghost(
+          onPressed: _checking ? null : () => Navigator.of(context).pop(false),
+          child: const Text('Cancel'),
+        ),
+        HollowButton.danger(
+          onPressed: canConfirm ? _confirm : null,
+          child: Text(_checking
+              ? 'Checking...'
+              : (widget.isRunning ? 'Erase & restart' : 'Erase profile')),
+        ),
+      ],
     );
   }
 }

@@ -6,62 +6,52 @@ Every modal dialog in the project. All files live under `lib/src/ui/dialogs/`. M
 
 ## WelcomeDialog -- First-launch Onboarding
 
-**File:** `lib/src/ui/dialogs/welcome_dialog.dart` (443 lines)
-**Trigger:** Called by the bootstrap flow when no identity exists on disk (first launch).
-**Entry point:** `showWelcomeDialog(BuildContext context)` -- returns `Future<String?>`.
+**File:** `lib/src/ui/dialogs/welcome_dialog.dart`
+**Trigger:** Called by the bootstrap flow when no identity exists on disk. That is first launch AND the state you land on after erasing the running profile (see `project_profile_switcher_issue47`).
+**Entry point:** `showWelcomeDialog(BuildContext context)` -- returns `Future<WelcomeResult?>`, a record `({String action, String relayDomain})`.
 **Barrier:** Non-dismissible (`barrierDismissible: false`).
 
 ### Return values
-- `'create_new'` -- user chose Create New Account
-- `'restored_mnemonic'` -- identity restored from recovery phrase
-- `'restored_backup'` -- identity imported from .hollow backup file
-- `null` -- dialog dismissed without selection (should not happen due to non-dismissible barrier)
+- `'create_new'` -- Create New Identity
+- `'link_device'` -- Link a device (creates a THROWAWAY identity just to connect; hollow_shell handles the rest)
+- `'restored_backup'` -- identity imported from a .hollow backup file
+- `null` -- dismissed without selection (should not happen)
+
+`relayDomain` rides alongside every action: the Advanced section lets a self-hoster set the relay before the identity exists, and hollow_shell applies it via `relayDomainProvider` + `savedRelayListProvider` when it differs from `kDefaultRelayDomain`.
+
+**Restore from Recovery Phrase was REMOVED** (Step 9C/C6). A 24-word phrase alone regenerates the master keypair but carries NO synced data, and a stale messages.db on disk caused a "Loading… forever" mismatch. Use Link a device or Restore from Backup. The mnemonic-restore FFI still serves the in-app recovery dialogs.
 
 ### Widget: `_WelcomeContent` (StatefulWidget)
 
 **State fields:**
-- `_view` -- `_WelcomeView` enum: `.menu` (default) or `.restorePhrase`
-- `_phraseController` -- `TextEditingController` for the 24-word input
-- `_phraseError` -- nullable error string shown below the text field
-- `_restoring` -- bool, true during async restore operation
+- `_relayController` -- relay domain, defaults to `kDefaultRelayDomain`
+- `_showAdvanced` -- relay-domain section expanded
+- `_restoring` -- true while `importBackup` decrypts + restores (seconds on a large backup; frozen silence here reads as a hang)
+- `_showProfiles` / `_switching` -- the profile switcher below
 
-**View: menu (`_buildMenu`)**
-- Shield icon in accent-tinted 56px container
-- "Welcome to Hollow" heading + "Choose how to set up your account" subtitle
-- Three `_OptionCard` widgets:
-  1. `LucideIcons.userPlus` "Create New Account" -- pops with `'create_new'`
-  2. `LucideIcons.keyRound` "Restore from Recovery Phrase" -- switches `_view` to `.restorePhrase`
-  3. `LucideIcons.folderInput` "Restore from Backup" -- calls `_onRestoreFromBackup()`
+**Layout:** shield icon, "Welcome to Hollow", "Choose how to set up your identity", the profile line (below), three `_OptionCard`s (Create New Identity / Link a device / Restore from Backup), the profile switcher, then Advanced. The whole menu sits in a `SingleChildScrollView` inside a 480px-max `ConstrainedBox` so a short screen scrolls rather than overflows.
 
-**View: restorePhrase (`_buildRestorePhrase`)**
-- Back arrow + "Restore from Recovery Phrase" title row
-- Instruction text: "Enter your 24-word recovery phrase, separated by spaces."
-- `HollowTextField` with 4 `maxLines`, hint "word1 word2 word3 ... word24"
-- Error text (conditionally shown when `_phraseError != null`)
-- Cancel (ghost) + Restore (filled) buttons; Restore shows spinner when `_restoring`
+### Profile switcher (issue #47 follow-up, 2026-08-21)
 
-**Method: `_onRestoreFromPhrase()`**
-- Splits text on whitespace, validates exactly 24 words
-- Calls `identity_api.restoreIdentityFromMnemonic(phrase:)`
-- On success: pops with `'restored_mnemonic'`
-- On failure: sets `_phraseError`
+Desktop-only, for the same reason the Settings card is (sandboxed mobile roots; the iOS NSE opens one fixed App Group DB path). Before this the screen had ZERO profile awareness, so erasing your active profile left the only way on being a new identity inside the folder you had just emptied.
 
-**Method: `_onRestoreFromBackup()`**
-- Opens `FilePicker` for `.hollow` extension
-- Opens a nested `AlertDialog` for passphrase input (obscured text, autofocus)
-- Calls `storage_api.importBackup(backupPath:, passphrase:)`
-- On success: pops with `'restored_backup'`
-- On failure: shows error toast
+- `_allProfiles` = `listProfileRows(readProfileRegistrySync())` -- the SAME shared list Settings renders.
+- `_otherProfiles` = rows that are not `runningProfileRoot()` and where `profileHasIdentity(path)` is true. **Both the folder line and the switcher are gated on this being non-empty**, so a genuine first-ever launch sees the dialog exactly as before.
+- **Folder line** under the subtitle: `Setting up the "X" profile` + the data root in mono. `_currentProfileName` matches the running root against the row list and falls back to the last path segment (an env override or a folder added on another machine is not in the list, and must not claim to be "Default"). This line is also the answer to "where did my restored backup go": `import_backup` writes to the ACTIVE `identity::data_dir()`, and now the screen names it before you pick anything.
+- **`Use a different profile (N)`** -- a collapsible row in the Advanced style, listing each other profile with name, path and a **Switch** button. Switch = pin in `profiles.json` (explicitly, even for Default -- the pin has to beat portable auto-detection) then `relaunchApp()`. No confirm dialog: nothing is in progress on this screen and it is reversible from the same place. When `dataDirEnvOverrideActive` the footer warns in `hollow.warning` that `HOLLOW_DATA_DIR` overrides the selection.
+
+### Method: `_onRestoreFromBackup()`
+- `FilePicker` filtered to `.hollow`, except on iOS/Android where the custom extension is not a known UTI/MIME and the filter would HIDE the file (`FileType.any` there).
+- Nested passphrase `AlertDialog` (obscured, autofocus).
+- `storage_api.importBackup(backupPath:, passphrase:)` under `_restoring`; pops `'restored_backup'` on success, error toast on failure.
 
 ### Widget: `_OptionCard` (StatefulWidget)
-- Tracks `_hovered` bool for hover styling
-- `MouseRegion` + `GestureDetector` wrapping an `AnimatedContainer`
+- Tracks `_hovered`; `MouseRegion` + `GestureDetector` around an `AnimatedContainer` (150ms)
 - Props: `icon`, `title`, `subtitle`, `hollow`, `onTap`
-- Hover: surface alpha 0.4 -> 0.8, border accent alpha 0 -> 0.3
-- Layout: 40px icon box | title + subtitle column | chevron-right icon
+- Hover: surface alpha 0.4 -> 0.8, border `hollow.border` -> accent alpha 0.3
+- Layout: 40px icon box | title + subtitle column | chevron-right
 
 ### FFI calls
-- `identity_api.restoreIdentityFromMnemonic(phrase:)`
 - `storage_api.importBackup(backupPath:, passphrase:)`
 
 ---

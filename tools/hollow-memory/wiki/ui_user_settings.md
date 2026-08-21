@@ -95,7 +95,21 @@ Built by `_buildProfileTab(HollowTheme hollow)`. Layout is a `SingleChildScrollV
 
 ### Profiles block (`ProfileLocationsCard`, profile_locations_card.dart)
 
-Switch/erase separate identities, each in its own data folder. Rows: **Default** (OS data root), **Portable folder** (`hollow_data` next to the exe — ALWAYS listed; if missing shows "Not created yet…" and hides Erase; switching creates it), and custom entries from `profiles.json` (Rename/Remove). Active row = accent border + ACTIVE chip; active detection compares against the RUNNING root (env override included). Switch = confirm dialog → pin path in registry (even for Default — the pin must beat portable folder auto-detection) → `relaunchApp()`. Erase: running profile → `stashPendingWipe()` + `relaunchApp()` (in-process SQLCipher deletes fail on Windows); offline profile → recursive delete guarded by a live-lock PID check and a looks-like-Hollow-data check (`identity.key`/`messages.db`/etc. or empty), keeping `profiles.json` + `*.lock`. "Add Profile Folder" (FilePicker) refuses non-empty non-Hollow folders; picking the portable folder redirects to its row. Card copy warns the OS-keychain protection holds ONE identity per computer (fixed Credential Manager slot). Desktop-only — no mobile twin (sandboxed roots; iOS NSE opens one fixed App Group DB path). See memory `project_profile_switcher_issue47`.
+Switch/erase separate identities, each in its own data folder. Rows come from the SHARED `listProfileRows(registry)` in `core/hollow_data_dir.dart` (the welcome screen renders the same list, so the two cannot drift): **Default** (OS data root), **Portable folder** (`hollow_data` next to the exe — ALWAYS listed; if missing shows "Not created yet…" and hides Erase; switching creates it), and custom entries from `profiles.json` (Rename/Remove). Icons are chosen per surface, not carried in the row. Active row = accent border + ACTIVE chip; active detection compares against `runningProfileRoot()` (env override included). Switch = confirm dialog → pin path in registry (even for Default — the pin must beat portable folder auto-detection) → `relaunchApp()`. "Add Profile Folder" (FilePicker) refuses non-empty non-Hollow folders; picking the portable folder redirects to its row. Card copy warns the OS-keychain protection holds ONE identity per computer (fixed Credential Manager slot). Desktop-only — no mobile twin (sandboxed roots; iOS NSE opens one fixed App Group DB path). See memory `project_profile_switcher_issue47`.
+
+**Erase routes.** Running profile → `stashPendingWipe()` + `relaunchApp()` (in-process SQLCipher deletes fail on Windows while the node holds handles); offline profile → recursive delete guarded by a live-lock PID check and a looks-like-Hollow-data check (`identity.key`/`messages.db`/etc. or empty), keeping `profiles.json` + `*.lock`.
+
+**Erase is gated on the TARGET profile's own protection** (2026-08-21). `_eraseChallengeFor(row)` reads that profile's `identity.key` through two path-taking FFI — `identity_protection_status_at(dataDir)` and `verify_identity_password_at(dataDir, password)` — because `getIdentityProtectionStatus()` only ever describes the RUNNING root, and the profile being erased is by definition not the one this process unlocked. Ladder:
+
+| what the file says | `_EraseChallenge` | what the dialog asks |
+|---|---|---|
+| plaintext, or no identity file | `none` | nothing extra |
+| password flag set | `password` | the password, verified by FFI |
+| keychain-only AND this machine can unwrap it | `none` | nothing (it unlocks silently at launch anyway) |
+| keychain-only and NOT unwrappable here | `name` | type the profile name |
+| status call threw | `name` | type the profile name (fails closed) |
+
+`_EraseProfileDialog` is a StatefulWidget so verification happens INSIDE the dialog: the danger button stays disabled until the field is non-empty, shows "Checking…" during the FFI, and a wrong password sets `errorText` ("Wrong password.") without closing. The Navigator is captured before the await (BuildContext async-gap rule). NOTE for probe scenarios: the dialog TITLE and its confirm button are both "Erase profile" — scope taps to `dialog > type:HollowButton > text:Erase profile`.
 
 ### Left Column: Profile Preview Card (200px wide)
 A live-updating miniature profile card showing how the user's profile will appear.

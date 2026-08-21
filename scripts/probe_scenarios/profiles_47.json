@@ -1,0 +1,188 @@
+[
+  {
+    "op": "log",
+    "message": "Issue #47: the erase gate. 'Locked test' is password-protected, 'Plain test' is not."
+  },
+  {
+    "op": "tap",
+    "target": "semantics:Settings"
+  },
+  {
+    "op": "wait",
+    "ms": 1800
+  },
+  {
+    "op": "tap",
+    "target": "text:Profile"
+  },
+  {
+    "op": "wait",
+    "ms": 1200
+  },
+  {
+    "op": "expect_text",
+    "value": "PROFILES ON THIS COMPUTER"
+  },
+  {
+    "op": "scroll",
+    "target": "text:CONNECTIONS",
+    "dy": -700
+  },
+  {
+    "op": "wait",
+    "ms": 700
+  },
+  {
+    "op": "scroll",
+    "target": "text:PROFILES ON THIS COMPUTER",
+    "dy": -700
+  },
+  {
+    "op": "wait",
+    "ms": 700
+  },
+  {
+    "op": "shot",
+    "name": "01-profiles-card"
+  },
+  {
+    "op": "dump",
+    "name": "01-profiles-card"
+  },
+  {
+    "op": "expect_text",
+    "value": "Locked test"
+  },
+  {
+    "op": "expect_text",
+    "value": "Plain test"
+  },
+  {
+    "op": "expect_count",
+    "target": "text:Erase",
+    "value": 3
+  },
+  {
+    "op": "log",
+    "message": "a PROTECTED profile must ask for its password before it can be erased"
+  },
+  {
+    "op": "tap",
+    "target": "text:Erase",
+    "index": 2
+  },
+  {
+    "op": "wait",
+    "ms": 1500
+  },
+  {
+    "op": "shot",
+    "name": "02-locked-erase"
+  },
+  {
+    "op": "dump",
+    "name": "02-locked-erase"
+  },
+  {
+    "op": "expect_text",
+    "value": "C:\\Users\\Jabun\\AppData\\Local\\Temp\\hollow_probe_profiles\\locked"
+  },
+  {
+    "op": "expect_text",
+    "value": "This profile is password-protected. Enter its password to erase it."
+  },
+  {
+    "op": "log",
+    "message": "a wrong password is refused IN the dialog, and erases nothing"
+  },
+  {
+    "op": "enter_text",
+    "value": "not the password",
+    "target": "field"
+  },
+  {
+    "op": "wait",
+    "ms": 400
+  },
+  {
+    "op": "tap",
+    "target": "dialog > type:HollowButton > text:Erase profile"
+  },
+  {
+    "op": "wait",
+    "ms": 2000
+  },
+  {
+    "op": "shot",
+    "name": "03-wrong-password"
+  },
+  {
+    "op": "dump",
+    "name": "03-wrong-password"
+  },
+  {
+    "op": "expect_text",
+    "value": "Wrong password."
+  },
+  {
+    "op": "expect_text",
+    "value": "Erase profile"
+  },
+  {
+    "op": "key",
+    "value": "escape"
+  },
+  {
+    "op": "wait",
+    "ms": 900
+  },
+  {
+    "op": "log",
+    "message": "an UNPROTECTED profile still erases on the plain confirm, no field"
+  },
+  {
+    "op": "tap",
+    "target": "text:Erase",
+    "index": 1
+  },
+  {
+    "op": "wait",
+    "ms": 1500
+  },
+  {
+    "op": "shot",
+    "name": "04-plain-erase"
+  },
+  {
+    "op": "dump",
+    "name": "04-plain-erase"
+  },
+  {
+    "op": "expect_text",
+    "value": "C:\\Users\\Jabun\\AppData\\Local\\Temp\\hollow_probe_profiles\\plain"
+  },
+  {
+    "op": "expect_no_text",
+    "value": "This profile is password-protected. Enter its password to erase it."
+  },
+  {
+    "op": "tap",
+    "target": "dialog > type:HollowButton > text:Erase profile"
+  },
+  {
+    "op": "wait",
+    "ms": 2500
+  },
+  {
+    "op": "shot",
+    "name": "05-plain-erased"
+  },
+  {
+    "op": "expect_no_text",
+    "value": "This permanently deletes the identity key, message history, and downloaded files of \"Plain test\":"
+  },
+  {
+    "op": "log",
+    "message": "check on disk: locked/ still has identity.key, plain/ is empty"
+  }
+]

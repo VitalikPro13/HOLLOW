@@ -6,7 +6,7 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `keychain_key_that_decrypts`
+// These functions are ignored because they are not marked as `pub`: `keychain_key_that_decrypts_opts`, `keychain_key_that_decrypts`, `protection_status_of`
 
 /// Set the data directory path (Android/iOS: pass app documents dir).
 /// Must be called before load_or_create_identity() or start_node().
@@ -95,6 +95,34 @@ Future<void> disableOsKeychainProtection() =>
 /// Get the current protection status of the identity file.
 Future<ProtectionStatus> getIdentityProtectionStatus() =>
     RustLib.instance.api.crateApiIdentityGetIdentityProtectionStatus();
+
+/// Protection status of the identity file inside an ARBITRARY data root.
+///
+/// The profile switcher (issue #47) needs to know whether the profile it is
+/// about to erase is protected, and that profile is by definition not the one
+/// this process unlocked, so `get_identity_protection_status` (which only ever
+/// looks at the running `data_dir()`) cannot answer it.
+Future<ProtectionStatus> identityProtectionStatusAt({
+  required String dataDir,
+}) => RustLib.instance.api.crateApiIdentityIdentityProtectionStatusAt(
+  dataDir: dataDir,
+);
+
+/// Verify that `password` (or, when it is None, a key this machine's keystore
+/// already holds) really unwraps the identity file in `data_dir`.
+///
+/// A GATE, not an unlock: it never touches the session key and never heals the
+/// keystore slots, so asking about another profile cannot disturb the running
+/// one. A plaintext identity has nothing to prove and answers true. A wrong
+/// password is `Ok(false)`, not an error - only a missing or malformed file
+/// errors.
+Future<bool> verifyIdentityPasswordAt({
+  required String dataDir,
+  String? password,
+}) => RustLib.instance.api.crateApiIdentityVerifyIdentityPasswordAt(
+  dataDir: dataDir,
+  password: password,
+);
 
 /// Check if the identity is currently unlocked (session wrapping key is set).
 Future<bool> isIdentityUnlocked() =>

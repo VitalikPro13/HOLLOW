@@ -1,0 +1,86 @@
+[
+  {
+    "op": "log",
+    "message": "Issue #47: an empty data root is what erasing the active profile leaves you on."
+  },
+  {
+    "op": "wait",
+    "ms": 4000
+  },
+  {
+    "op": "shot",
+    "name": "01-welcome"
+  },
+  {
+    "op": "dump",
+    "name": "01-welcome"
+  },
+  {
+    "op": "expect_text",
+    "value": "Welcome to Hollow"
+  },
+  {
+    "op": "log",
+    "message": "the screen now says WHICH folder it is setting up - the answer to 'where did my restored backup go'"
+  },
+  {
+    "op": "expect_text",
+    "value": "Setting up the \"hollow_ui_probe_empty\" profile"
+  },
+  {
+    "op": "expect_text",
+    "value": "Use a different profile"
+  },
+  {
+    "op": "log",
+    "message": "and offers a way back to the profiles that still hold an identity"
+  },
+  {
+    "op": "tap",
+    "target": "text:Use a different profile"
+  },
+  {
+    "op": "wait",
+    "ms": 900
+  },
+  {
+    "op": "shot",
+    "name": "02-profiles-open"
+  },
+  {
+    "op": "dump",
+    "name": "02-profiles-open"
+  },
+  {
+    "op": "expect_text",
+    "value": "Default"
+  },
+  {
+    "op": "expect_text",
+    "value": "Switch"
+  },
+  {
+    "op": "look",
+    "max": 60
+  },
+  {
+    "op": "log",
+    "message": "NOT clicking Switch: it would restart the app and pin a profile for real."
+  },
+  {
+    "op": "tap",
+    "target": "text:Use a different profile"
+  },
+  {
+    "op": "wait",
+    "ms": 700
+  },
+  {
+    "op": "shot",
+    "name": "03-collapsed"
+  },
+  {
+    "op": "expect_no_text",
+    "value": "Switch"
+  }
+]

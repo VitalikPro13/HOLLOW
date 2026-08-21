@@ -178,3 +178,87 @@ Future<void> initHollowDataDir({bool forcePortable = false}) async {
 void overrideHollowDataDir(String path) {
   _cached = path;
 }
+
+// ── Profile rows (issue #47) ─────────────────────────────────────────────────
+//
+// One list, two surfaces: Settings > Profile and the first-run welcome screen.
+// They must agree on which profiles exist, what they are called and which one
+// is running, so neither builds its own.
+
+/// A profile as the UI lists it: the OS-default root, the portable
+/// `hollow_data` folder next to the executable, then the user's own entries.
+class ProfileRow {
+  final String name;
+  final String path;
+
+  /// Default and Portable are derived from the environment, never stored, and
+  /// so cannot be renamed or removed from the list.
+  final bool builtin;
+
+  /// The `hollow_data` folder next to the executable.
+  final bool portable;
+
+  const ProfileRow({
+    required this.name,
+    required this.path,
+    required this.builtin,
+    required this.portable,
+  });
+}
+
+/// Every profile on this computer, deduplicated by path.
+///
+/// The portable row is listed whether or not the folder exists yet: an empty
+/// `hollow_data` folder no longer auto-activates portable mode, so this row IS
+/// the way to start a portable profile.
+List<ProfileRow> listProfileRows(ProfileRegistry registry) {
+  final rows = <ProfileRow>[
+    ProfileRow(
+      name: 'Default',
+      path: defaultDesktopDataRoot(),
+      builtin: true,
+      portable: false,
+    ),
+  ];
+  final portable = portableCandidatePath();
+  if (portable != null) {
+    rows.add(ProfileRow(
+      name: 'Portable folder',
+      path: portable,
+      builtin: true,
+      portable: true,
+    ));
+  }
+  for (final custom in registry.custom) {
+    if (rows.any((r) => sameProfilePath(r.path, custom.path))) continue;
+    rows.add(ProfileRow(
+      name: custom.name,
+      path: custom.path,
+      builtin: false,
+      portable: false,
+    ));
+  }
+  return rows;
+}
+
+/// The data root this process is actually running on, environment override
+/// included. What the ACTIVE badge marks, and what decides whether erasing a
+/// profile takes the restart route or the direct-delete one.
+String runningProfileRoot() {
+  final env = Platform.environment['HOLLOW_DATA_DIR'];
+  if (env != null && env.isNotEmpty) return env;
+  if (isPinnedProfile || isPortableMode) return hollowDataDir;
+  return defaultDesktopDataRoot();
+}
+
+/// True while `HOLLOW_DATA_DIR` is pointing the app somewhere: the pin in
+/// profiles.json is still written, but it will not decide the next launch.
+bool get dataDirEnvOverrideActive {
+  final env = Platform.environment['HOLLOW_DATA_DIR'];
+  return env != null && env.isNotEmpty;
+}
+
+/// True when a profile folder already holds an identity, as opposed to being
+/// empty and waiting for first-time setup.
+bool profileHasIdentity(String path) =>
+    File('$path${Platform.pathSeparator}identity.key').existsSync();

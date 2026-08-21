@@ -2,6 +2,9 @@
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:hollow/src/core/app_relaunch.dart';
+import 'package:hollow/src/core/hollow_data_dir.dart';
+import 'package:hollow/src/core/profile_registry.dart';
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
@@ -37,6 +40,55 @@ class _WelcomeContentState extends State<_WelcomeContent> {
   // Busy state for "Restore from Backup" — importBackup decrypts + restores
   // the whole DB and can take seconds.
   bool _restoring = false;
+
+  // Profiles (issue #47). Erasing the active profile drops you here, and
+  // without this the only way on was to build a new identity inside the folder
+  // you just emptied: no route back to Default or Portable, and no sign of
+  // which folder a restored backup would land in.
+  bool _showProfiles = false;
+  bool _switching = false;
+  late final bool _isDesktop =
+      Platform.isWindows || Platform.isMacOS || Platform.isLinux;
+  late final String _currentRoot = _isDesktop ? runningProfileRoot() : '';
+  late final List<ProfileRow> _allProfiles =
+      _isDesktop ? listProfileRows(readProfileRegistrySync()) : const [];
+
+  /// The other profiles worth offering: ones that already hold an identity.
+  /// A first-ever launch has none, and sees the dialog exactly as before.
+  late final List<ProfileRow> _otherProfiles = _allProfiles
+      .where((r) =>
+          !sameProfilePath(r.path, _currentRoot) && profileHasIdentity(r.path))
+      .toList();
+
+  /// What to call the profile being set up. An unlisted root (an environment
+  /// override, a folder added on another machine) falls back to its folder
+  /// name rather than claiming to be Default.
+  String get _currentProfileName {
+    for (final row in _allProfiles) {
+      if (sameProfilePath(row.path, _currentRoot)) return row.name;
+    }
+    final parts = _currentRoot
+        .split(RegExp(r'[\\/]'))
+        .where((s) => s.isNotEmpty);
+    return parts.isEmpty ? _currentRoot : parts.last;
+  }
+
+  Future<void> _switchTo(ProfileRow row) async {
+    if (_switching) return;
+    setState(() => _switching = true);
+    try {
+      final registry = readProfileRegistrySync();
+      // Pin explicitly even for Default: the pin has to beat portable
+      // auto-detection on the way back to the OS root.
+      await saveProfileRegistry(registry.copyWith(activePath: row.path));
+      await relaunchApp();
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _switching = false);
+      HollowToast.show(context, 'Failed to switch profile: $e',
+          type: HollowToastType.error);
+    }
+  }
 
   String get _relayDomain {
     final text = _relayController.text.trim();
@@ -206,6 +258,46 @@ class _WelcomeContentState extends State<_WelcomeContent> {
           ),
         ),
 
+        // Which folder this is setting up. Shown only once more than one
+        // profile is in play, so a first-ever launch is untouched. It is also
+        // the answer to "where did my restored backup go": everything on this
+        // screen lands in the folder named here.
+        if (_otherProfiles.isNotEmpty) ...[
+          const SizedBox(height: HollowSpacing.sm),
+          Column(
+            children: [
+              Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(LucideIcons.folder, size: 12, color: hollow.textSecondary),
+                  const SizedBox(width: HollowSpacing.xs),
+                  Flexible(
+                    child: Text(
+                      'Setting up the "$_currentProfileName" profile',
+                      style: HollowTypography.caption.copyWith(
+                        color: hollow.textSecondary,
+                        fontSize: 11,
+                      ),
+                      textAlign: TextAlign.center,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 2),
+              Text(
+                _currentRoot,
+                style: HollowTypography.mono.copyWith(
+                  color: hollow.textTertiary,
+                  fontSize: 9,
+                ),
+                textAlign: TextAlign.center,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ],
+          ),
+        ],
+
         const SizedBox(height: HollowSpacing.xl),
 
         // Option cards
@@ -246,6 +338,11 @@ class _WelcomeContentState extends State<_WelcomeContent> {
           hollow: hollow,
           onTap: _onRestoreFromBackup,
         ),
+
+        if (_otherProfiles.isNotEmpty) ...[
+          const SizedBox(height: HollowSpacing.lg),
+          _buildProfilesSection(hollow),
+        ],
 
         const SizedBox(height: HollowSpacing.lg),
 
@@ -294,6 +391,128 @@ class _WelcomeContentState extends State<_WelcomeContent> {
           ),
         ],
       ],
+    );
+  }
+
+  /// The other identities on this computer, collapsed behind one row.
+  ///
+  /// Desktop only, for the same reason the Settings card is: mobile data roots
+  /// are sandboxed and the iOS push extension opens one fixed App Group path.
+  Widget _buildProfilesSection(HollowTheme hollow) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        HollowFocusRing(
+          enabled: true,
+          onActivate: () => setState(() => _showProfiles = !_showProfiles),
+          borderRadius: BorderRadius.circular(hollow.radiusSm),
+          child: GestureDetector(
+            onTap: () => setState(() => _showProfiles = !_showProfiles),
+            child: Row(
+              children: [
+                Icon(
+                  _showProfiles
+                      ? LucideIcons.chevronDown
+                      : LucideIcons.chevronRight,
+                  size: 14,
+                  color: hollow.textSecondary,
+                ),
+                const SizedBox(width: HollowSpacing.xs),
+                Text(
+                  'Use a different profile',
+                  style: HollowTypography.caption.copyWith(
+                    color: hollow.textSecondary,
+                    fontSize: 12,
+                  ),
+                ),
+                const SizedBox(width: HollowSpacing.xs),
+                Text(
+                  '(${_otherProfiles.length})',
+                  style: HollowTypography.caption.copyWith(
+                    color: hollow.textTertiary,
+                    fontSize: 11,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+        if (_showProfiles) ...[
+          const SizedBox(height: HollowSpacing.sm),
+          for (final row in _otherProfiles) ...[
+            _buildProfileRow(hollow, row),
+            const SizedBox(height: HollowSpacing.xs),
+          ],
+          Text(
+            dataDirEnvOverrideActive
+                ? 'HOLLOW_DATA_DIR is set. It overrides the profile selection '
+                    'until Hollow is started without it.'
+                : 'Switching restarts Hollow. This folder stays as it is.',
+            style: HollowTypography.caption.copyWith(
+              color: dataDirEnvOverrideActive
+                  ? hollow.warning
+                  : hollow.textSecondary,
+              fontSize: 11,
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+
+  Widget _buildProfileRow(HollowTheme hollow, ProfileRow row) {
+    return Container(
+      padding: const EdgeInsets.symmetric(
+        horizontal: HollowSpacing.md,
+        vertical: HollowSpacing.sm,
+      ),
+      decoration: BoxDecoration(
+        color: hollow.surface.withValues(alpha: 0.4),
+        borderRadius: BorderRadius.circular(hollow.radiusMd),
+        border: Border.all(color: hollow.border),
+      ),
+      child: Row(
+        children: [
+          Icon(
+            row.portable ? LucideIcons.usb : LucideIcons.hardDrive,
+            size: 16,
+            color: hollow.textSecondary,
+          ),
+          const SizedBox(width: HollowSpacing.sm),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  row.name,
+                  style: HollowTypography.body.copyWith(
+                    color: hollow.textPrimary,
+                    fontWeight: FontWeight.w600,
+                    fontSize: 13,
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                Text(
+                  row.path,
+                  style: HollowTypography.mono.copyWith(
+                    color: hollow.textSecondary,
+                    fontSize: 9,
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: HollowSpacing.sm),
+          HollowButton.outline(
+            onPressed: _switching ? null : () => _switchTo(row),
+            compact: true,
+            child: const Text('Switch'),
+          ),
+        ],
+      ),
     );
   }
 }

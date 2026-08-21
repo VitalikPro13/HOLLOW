@@ -74,6 +74,15 @@ pub fn restore_identity_from_mnemonic(phrase: String) -> Result<IdentityInfo, St
 /// device key, discards the MLS identity + groups, and turns voice into
 /// undecryptable garbage audio (issue #47 → #27).
 fn keychain_key_that_decrypts(bytes: &[u8]) -> Option<[u8; 32]> {
+    keychain_key_that_decrypts_opts(bytes, true)
+}
+
+/// `heal = false` is the read-only form: it answers "can this machine unwrap
+/// this file" WITHOUT re-storing the winning key. Every unlock path wants the
+/// healing form; the profile-erase gate must not use it, because the file it
+/// is testing belongs to a DIFFERENT profile and writing that key back into
+/// the shared slots is exactly the overwrite that caused issue #47 -> #27.
+fn keychain_key_that_decrypts_opts(bytes: &[u8], heal: bool) -> Option<[u8; 32]> {
     use crate::identity::{encryption, platform_keystore};
     let candidates = platform_keystore::retrieve_key_candidates().ok()?;
     for key_vec in candidates {
@@ -83,7 +92,9 @@ fn keychain_key_that_decrypts(bytes: &[u8]) -> Option<[u8; 32]> {
         let mut key = [0u8; 32];
         key.copy_from_slice(&key_vec);
         if encryption::decrypt_identity(bytes, &key).is_ok() {
-            let _ = platform_keystore::store_key(&key);
+            if heal {
+                let _ = platform_keystore::store_key(&key);
+            }
             return Some(key);
         }
     }
@@ -474,10 +485,63 @@ pub fn disable_os_keychain_protection() -> Result<(), String> {
 /// Get the current protection status of the identity file.
 #[frb]
 pub fn get_identity_protection_status() -> Result<ProtectionStatus, String> {
+    let dir = crate::identity::data_dir()?;
+    protection_status_of(&dir.join("identity.key"))
+}
+
+/// Protection status of the identity file inside an ARBITRARY data root.
+///
+/// The profile switcher (issue #47) needs to know whether the profile it is
+/// about to erase is protected, and that profile is by definition not the one
+/// this process unlocked, so `get_identity_protection_status` (which only ever
+/// looks at the running `data_dir()`) cannot answer it.
+#[frb]
+pub fn identity_protection_status_at(data_dir: String) -> Result<ProtectionStatus, String> {
+    protection_status_of(&std::path::Path::new(&data_dir).join("identity.key"))
+}
+
+/// Verify that `password` (or, when it is None, a key this machine's keystore
+/// already holds) really unwraps the identity file in `data_dir`.
+///
+/// A GATE, not an unlock: it never touches the session key and never heals the
+/// keystore slots, so asking about another profile cannot disturb the running
+/// one. A plaintext identity has nothing to prove and answers true. A wrong
+/// password is `Ok(false)`, not an error - only a missing or malformed file
+/// errors.
+#[frb]
+pub fn verify_identity_password_at(
+    data_dir: String,
+    password: Option<String>,
+) -> Result<bool, String> {
     use crate::identity::encryption;
 
-    let dir = crate::identity::data_dir()?;
-    let path = dir.join("identity.key");
+    let path = std::path::Path::new(&data_dir).join("identity.key");
+    if !path.exists() {
+        return Err("No identity file found".into());
+    }
+    let bytes =
+        std::fs::read(&path).map_err(|e| format!("Failed to read identity file: {e}"))?;
+
+    match encryption::detect_format(&bytes)? {
+        encryption::IdentityFormat::Plaintext => Ok(true),
+        encryption::IdentityFormat::Encrypted { flags, salt, .. } => {
+            if let Some(pw) = password.as_deref() {
+                if !encryption::flags_has_password(flags) {
+                    return Ok(false);
+                }
+                let key = encryption::derive_wrapping_key_from_password(pw, &salt)?;
+                return Ok(encryption::decrypt_identity(&bytes, &key).is_ok());
+            }
+            if encryption::flags_has_os_keychain(flags) {
+                return Ok(keychain_key_that_decrypts_opts(&bytes, false).is_some());
+            }
+            Ok(false)
+        }
+    }
+}
+
+fn protection_status_of(path: &std::path::Path) -> Result<ProtectionStatus, String> {
+    use crate::identity::encryption;
 
     if !path.exists() {
         return Ok(ProtectionStatus {
@@ -488,8 +552,8 @@ pub fn get_identity_protection_status() -> Result<ProtectionStatus, String> {
         });
     }
 
-    let bytes = std::fs::read(&path)
-        .map_err(|e| format!("Failed to read identity file: {e}"))?;
+    let bytes =
+        std::fs::read(path).map_err(|e| format!("Failed to read identity file: {e}"))?;
 
     match encryption::detect_format(&bytes)? {
         encryption::IdentityFormat::Plaintext => Ok(ProtectionStatus {
@@ -511,4 +575,86 @@ pub fn get_identity_protection_status() -> Result<ProtectionStatus, String> {
 #[frb]
 pub fn is_identity_unlocked() -> Result<bool, String> {
     Ok(crate::identity::encryption::get_session_key().is_some())
+}
+
+#[cfg(test)]
+mod profile_erase_gate_tests {
+    use super::*;
+    use crate::identity::encryption;
+
+    /// A protobuf-shaped keypair blob, the shape `decrypt_identity` insists on
+    /// seeing after a successful unwrap.
+    fn dummy_keypair() -> Vec<u8> {
+        let mut buf = vec![0x08, 0x01, 0x12, 0x40];
+        buf.extend_from_slice(&[0xAA; 32]);
+        buf.extend_from_slice(&[0xBB; 32]);
+        buf
+    }
+
+    fn write_password_protected(dir: &std::path::Path, password: &str) {
+        let salt = [0x07u8; 16];
+        let key = encryption::derive_wrapping_key_from_password(password, &salt).unwrap();
+        let blob = encryption::encrypt_identity(&dummy_keypair(), &key, &salt, true, false).unwrap();
+        std::fs::write(dir.join("identity.key"), blob).unwrap();
+    }
+
+    #[test]
+    fn status_reads_a_foreign_profile() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_password_protected(tmp.path(), "correct horse");
+
+        let status =
+            identity_protection_status_at(tmp.path().to_string_lossy().to_string()).unwrap();
+        assert!(status.is_encrypted);
+        assert!(status.has_password);
+        assert!(!status.has_os_keychain);
+    }
+
+    #[test]
+    fn status_of_a_profile_with_no_identity_is_unprotected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let status =
+            identity_protection_status_at(tmp.path().to_string_lossy().to_string()).unwrap();
+        assert!(!status.is_encrypted);
+        assert!(!status.has_password);
+    }
+
+    #[test]
+    fn verify_accepts_the_right_password_and_rejects_the_wrong_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_password_protected(tmp.path(), "correct horse");
+        let dir = tmp.path().to_string_lossy().to_string();
+
+        assert!(verify_identity_password_at(dir.clone(), Some("correct horse".into())).unwrap());
+        // A wrong password is an ANSWER, not an error - the erase dialog shows
+        // it inline instead of a red toast about a failed call.
+        assert!(!verify_identity_password_at(dir.clone(), Some("wrong horse".into())).unwrap());
+        // No password offered and no keychain flag set: nothing to verify with.
+        assert!(!verify_identity_password_at(dir, None).unwrap());
+    }
+
+    #[test]
+    fn verify_passes_a_plaintext_identity_and_errors_on_a_missing_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_string_lossy().to_string();
+        assert!(verify_identity_password_at(dir.clone(), None).is_err());
+
+        std::fs::write(tmp.path().join("identity.key"), dummy_keypair()).unwrap();
+        assert!(verify_identity_password_at(dir.clone(), None).unwrap());
+        assert!(verify_identity_password_at(dir, Some("anything".into())).unwrap());
+    }
+
+    /// The session key belongs to the RUNNING profile. Asking about another
+    /// profile must not set, clear or otherwise disturb it.
+    #[test]
+    fn verify_leaves_the_session_key_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_password_protected(tmp.path(), "correct horse");
+        let dir = tmp.path().to_string_lossy().to_string();
+
+        let before = encryption::get_session_key();
+        let _ = verify_identity_password_at(dir.clone(), Some("correct horse".into()));
+        let _ = verify_identity_password_at(dir, Some("wrong horse".into()));
+        assert_eq!(before, encryption::get_session_key());
+    }
 }
