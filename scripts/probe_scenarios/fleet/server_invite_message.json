@@ -1,0 +1,75 @@
+{
+  "_": [
+    "Rung 1 of the fleet ladder: two real instances, text only.",
+    "A creates a server, A copies the invite, B joins by it, each sends a",
+    "message and the OTHER one has to see it. Then A deletes the server and",
+    "both of them have to lose it.",
+    "",
+    "Nothing here is provable by one instance. The Rust harness proves the ops",
+    "converge; this proves the widgets agree - the member panel, the channel",
+    "list, the message row and the server strip all showing what the CRDT says.",
+    "",
+    "The server is created by this run and deleted by its cleanup, which runs",
+    "even when the run fails. These are real identities on the real relay, so",
+    "that discipline is not optional.",
+    "",
+    "${RUN} is unique per run and belongs in every message: the relay holds",
+    "undelivered traffic for three days and these identities are stable, so a",
+    "fixed string can be matched by an earlier run's message.",
+    "",
+    "run: powershell -File scripts/fleet.ps1 -Scenario server_invite_message"
+  ],
+  "peers": ["a", "b"],
+  "steps": [
+    { "peer": "all", "op": "wait_for", "target": "text:Connected", "timeout_ms": 120000 },
+
+    { "peer": "a", "op": "tap", "target": "semantics:Create a server" },
+    { "peer": "a", "op": "enter_text", "target": "hint:My Awesome Server", "value": "fleet-probe" },
+    { "peer": "a", "op": "tap", "target": "text:Create", "index": 0 },
+    { "peer": "a", "op": "wait_for", "target": "server:fleet-probe", "timeout_ms": 30000 },
+    { "peer": "a", "op": "open_server", "name": "fleet-probe" },
+    { "peer": "a", "op": "wait_for", "target": "channel:general", "timeout_ms": 30000 },
+
+    { "peer": "a", "op": "right_click", "target": "server:fleet-probe" },
+    { "peer": "a", "op": "tap", "target": "menu > text:Invite people" },
+    { "peer": "a", "op": "wait_for", "target": "type:SelectableText", "timeout_ms": 20000 },
+    { "peer": "a", "op": "capture", "target": "type:SelectableText", "as": "INVITE" },
+    { "peer": "a", "op": "key", "value": "escape" },
+
+    { "peer": "b", "op": "tap", "target": "semantics:Create a server" },
+    { "peer": "b", "op": "enter_text", "target": "hint:Invite link or server ID", "value": "${INVITE}" },
+    { "peer": "b", "op": "tap", "target": "text:Join", "index": 0 },
+    { "peer": "b", "op": "wait_for", "target": "server:fleet-probe", "timeout_ms": 90000 },
+    { "peer": "b", "op": "open_server", "name": "fleet-probe" },
+    { "peer": "b", "op": "open_channel", "name": "general" },
+
+    { "peer": "a", "op": "log", "message": "the member panel has to show B, not just the CRDT" },
+    { "peer": "a", "op": "wait_for", "target": "text:probe-b", "timeout_ms": 60000 },
+
+    { "peer": "a", "op": "open_channel", "name": "general" },
+    { "peer": "a", "op": "enter_text", "target": "field", "value": "hello from a ${RUN}" },
+    { "peer": "a", "op": "key", "value": "enter" },
+    { "peer": "b", "op": "wait_for", "target": "text:hello from a ${RUN}", "timeout_ms": 60000 },
+
+    { "peer": "b", "op": "enter_text", "target": "field", "value": "hello back from b ${RUN}" },
+    { "peer": "b", "op": "key", "value": "enter" },
+    { "peer": "a", "op": "wait_for", "target": "text:hello back from b ${RUN}", "timeout_ms": 60000 },
+
+    { "peer": "a", "op": "log", "message": "one row per message, not two: the optimistic write and the one that arrives must reconcile" },
+    { "peer": "a", "op": "expect_count", "target": "text:hello from a ${RUN}", "value": 1 },
+    { "peer": "b", "op": "expect_count", "target": "text:hello from a ${RUN}", "value": 1 },
+
+    { "peer": "all", "op": "dump", "name": "converged" }
+  ],
+  "cleanup": [
+    { "peer": "a", "op": "right_click", "target": "server:fleet-probe" },
+    { "peer": "a", "op": "tap", "target": "menu > text:Server settings" },
+    { "peer": "a", "op": "tap", "target": "text:Danger", "index": 0 },
+    { "peer": "a", "op": "tap", "target": "text:Delete server", "index": 0 },
+    { "peer": "a", "op": "log", "message": "index 1: index 0 is the dialog's TITLE, and tapping a title silently does nothing" },
+    { "peer": "a", "op": "tap", "target": "dialog > text:Delete server", "index": 1 },
+    { "peer": "a", "op": "wait_for", "gone": "server:fleet-probe", "timeout_ms": 30000 },
+    { "peer": "b", "op": "log", "message": "the delete tombstone has to reach B's server strip too" },
+    { "peer": "b", "op": "wait_for", "gone": "server:fleet-probe", "timeout_ms": 90000 }
+  ]
+}

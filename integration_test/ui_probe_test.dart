@@ -8,6 +8,7 @@ import 'package:hollow/src/core/reduce_motion.dart';
 import 'package:hollow/src/rust/frb_generated.dart';
 import 'package:hollow/src/ui/app.dart';
 import 'package:integration_test/integration_test.dart';
+import 'package:window_manager/window_manager.dart';
 
 import 'probe/probe_runner.dart';
 
@@ -46,6 +47,11 @@ import 'probe/probe_runner.dart';
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
 
+  final env = Platform.environment;
+  final outDir = env['UI_PROBE_OUT'] ?? 'build/ui_probe';
+  final mode = env['UI_PROBE_MODE'] ?? 'script';
+  final idleMinutes = int.tryParse(env['UI_PROBE_IDLE_MINUTES'] ?? '') ?? 20;
+
   // RustLib.init() MUST run here, not inside the test body. It does real
   // async work (loading the native lib and handshaking), and the test body
   // runs in a zone where that never completes, so an init from inside boot()
@@ -53,12 +59,72 @@ void main() {
   // the first widget that reads one takes the whole run down.
   setUpAll(() async {
     await RustLib.init();
+    // The probe boots HollowApp directly and never runs main(), so anything
+    // main() set up is missing unless it is set up here. Deliberately only
+    // this call: setAsFrameless and the size/show dance belong to a real
+    // launch, and the probe wants an ordinary window it can tile next to its
+    // siblings.
+    //
+    // KNOWN LIMITATION, and this call does NOT fix it: the annotation toggle
+    // (the pencil in the title bar) still takes the whole PROCESS down here,
+    // with no Dart exception and nothing in any log. AnnotationOverlay drives
+    // maximize/setBackgroundColor/setAlwaysOnTop against a window that never
+    // went through main()'s waitUntilReadyToShow + setAsFrameless, and the
+    // native side does not survive it. It works in the real app. Do not aim a
+    // scenario at it; in a fleet run it looks like an instance that simply
+    // stops answering.
+    if (Platform.isWindows || Platform.isLinux || Platform.isMacOS) {
+      try {
+        await windowManager.ensureInitialized();
+      } catch (e) {
+        debugPrint('[ui-probe] window_manager init failed: $e');
+      }
+    }
   });
 
-  final env = Platform.environment;
-  final outDir = env['UI_PROBE_OUT'] ?? 'build/ui_probe';
-  final mode = env['UI_PROBE_MODE'] ?? 'script';
-  final idleMinutes = int.tryParse(env['UI_PROBE_IDLE_MINUTES'] ?? '') ?? 20;
+  // The app's own log, written from inside rather than by redirecting the
+  // process's stdout.
+  //
+  // Redirection was the obvious way and it is a trap: PowerShell's
+  // -RedirectStandardOutput flips Start-Process into inherit-handles mode, so
+  // every launched instance keeps a duplicate of the launcher's stdout pipe,
+  // and `fleet.ps1 -Live | anything` then never returns even though the script
+  // finished. Measured: 1s launching plain, 45s (the timeout) with redirection.
+  // Overriding debugPrint costs nothing, cannot leak a handle, and catches the
+  // same lines - every [ui-probe] step and every Flutter error dump.
+  final logFile = File('$outDir/stdout.log');
+  final previousDebugPrint = debugPrint;
+  debugPrint = (String? message, {int? wrapWidth}) {
+    previousDebugPrint(message, wrapWidth: wrapWidth);
+    try {
+      final dir = Directory(outDir);
+      if (!dir.existsSync()) dir.createSync(recursive: true);
+      logFile.writeAsStringSync('${message ?? ''}\n', mode: FileMode.append);
+    } catch (_) {
+      // A log that cannot be written must never be the thing that fails a run.
+    }
+  };
+
+  // An unhandled app exception ends the test body, and the body IS the app, so
+  // the process exits and takes the reason with it. In a fleet run that shows
+  // up as one instance that silently never answers again. Writing every error
+  // out as it happens means the reason survives the death, and the orchestrator
+  // can print it instead of a bare timeout.
+  final previousOnError = FlutterError.onError;
+  FlutterError.onError = (details) {
+    try {
+      final dir = Directory(outDir);
+      if (!dir.existsSync()) dir.createSync(recursive: true);
+      File('$outDir/errors.log').writeAsStringSync(
+        '${DateTime.now().toIso8601String()} ${details.exceptionAsString()}\n'
+        '${details.stack}\n\n',
+        mode: FileMode.append,
+      );
+    } catch (_) {
+      // Never let the error reporter be the thing that fails the run.
+    }
+    previousOnError?.call(details);
+  };
 
   /// Root boundary the screenshots are painted from.
   final shotKey = GlobalKey();

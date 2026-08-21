@@ -1436,7 +1436,15 @@ Multi-device bugs hide in the gap between the *master-collapsed* view that the U
 
 The harness self-verifies the **distributed-logic core**: DM messaging and sync/backfill (direction, signatures, deduplication, edits/deletes/reactions), friends and profiles, presence and typing, CRDT servers/channels/roles/permissions/bans, MLS group formation across per-device leaves at a shared epoch with cross-device channel decryption, public channels, device revocation (tombstone propagation, Olm/MLS cutoff, and the ghost-device liveness guard), and Olm key exchange and glare. It also covers the **control and signaling plane** for calls, voice channels, recovery pools, and file transfer (including the actual bytes over the relay fallback path). The harness runs in continuous integration as a required check, gating merges.
 
-It deliberately does **not** cover the WebRTC media plane (audio/video pixels, SFrame on live tracks, ICE/TURN/DTLS), the Flutter UI, the FFI bridge, native push delivery (FCM/APNs and the iOS extension), identity at-rest unlock, or the real relay's C++ implementation. Those remain the subject of manual platform testing. The honest claim when the harness is green is therefore precise: *the distributed-logic core and the control/signaling plane behave correctly across many devices*, not that the entire application is verified.
+It deliberately does **not** cover the WebRTC media plane (audio/video pixels, SFrame on live tracks, ICE/TURN/DTLS), the Flutter UI, the FFI bridge, native push delivery (FCM/APNs and the iOS extension), identity at-rest unlock, or the real relay's C++ implementation. The application layer is addressed separately (§20.4); the remainder stays the subject of manual platform testing. The honest claim when the harness is green is therefore precise: *the distributed-logic core and the control/signaling plane behave correctly across many devices*, not that the entire application is verified.
+
+### 20.4 Application-Layer Probes
+
+A second harness closes part of the gap the first one leaves. An instrumented build of the real client, running the production interface code, foreign-function bridge, encrypted local database and node against the real relay, is driven through its own widget tree by a scripted command stream. It can address any control, read the application's own state, and assert on what is actually rendered rather than on what the protocol layer believes.
+
+Several such instances run side by side on one machine, each with a separate identity and data directory, so a journey that spans peers (a friend request accepted, an invitation joined, a message delivered, a member removed) is asserted from both sides at once. This answers a class of question the multi-node harness cannot: not whether an operation converged, but whether the interface agrees with it once it has.
+
+The layer stops short of the media plane. Video surfaces are composited outside the widget tree, so no capture of a rendered frame can demonstrate that video is flowing; only decoder and renderer statistics can, and that remains future work.
 
 ---
 

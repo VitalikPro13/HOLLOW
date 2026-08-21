@@ -1,21 +1,21 @@
 # HOLLOW — Project Instructions for Claude Code
 
 ## What Is This
-Hollow is a fully distributed, encrypted Discord alternative: no central servers, members collectively host. `HOLLOW_PLAN.md` = architecture, phase history, TODO checklist.
+Distributed, encrypted Discord alternative: no central servers, members collectively host. `HOLLOW_PLAN.md` = architecture, phases, TODO.
 
 ## Tech Stack
-- **UI:** Flutter (Dart) — all platforms (Windows, macOS, Linux, Android, iOS, Web)
-- **Backend:** Rust via `flutter_rust_bridge` v2.11.1 FFI
-- **Networking:** WSS relay (signaling + text/CRDT/MLS) + WebRTC data channels (files/shards P2P) + WebRTC media (voice/video P2P).
-- **E2EE:** vodozemac (Olm/Double Ratchet) for DMs, OpenMLS 0.8 for servers, SFrame (AES-128-GCM) for voice/video/screen share
-- **Local DB:** SQLCipher (encrypted SQLite)
-- **Identity:** Ed25519 keypairs via BIP-39 mnemonic (ed25519-dalek, NativeKeypair)
+- **UI:** Flutter (Dart), all 6 platforms (Windows, macOS, Linux, Android, iOS, Web)
+- **Backend:** Rust via `flutter_rust_bridge` v2.11.1
+- **Networking:** WSS relay (signaling + text/CRDT/MLS) + WebRTC data channels (files/shards) + WebRTC media (voice/video).
+- **E2EE:** vodozemac (Olm/Double Ratchet) DMs, OpenMLS 0.8 servers, SFrame (AES-128-GCM) voice/video/screen share
+- **Local DB:** SQLCipher
+- **Identity:** Ed25519 via BIP-39 mnemonic (ed25519-dalek, NativeKeypair)
 - **Org ID:** com.anonlisten · **Project:** hollow
 
 ## Project Structure
-- `lib/` Dart/Flutter: `main.dart` entry (ProviderScope + RustLib.init + window_manager); `src/core/` models+providers+service wrappers, `src/theme/` design system, `src/ui/` shell chat settings sidebar components dialogs animations mobile.
-- `rust/hollow_core/src/`: `api/` FFI (frb scans these); `node/` swarm.rs (event-loop dispatcher) + focused modules (types, handlers, ws_client, crdt_store, test_harness cfg(test)); `crypto/` Olm+MLS+persistence (store.rs = CryptoStore); `identity/` Ed25519; `storage/` SQLCipher.
-- `relay-uws/` production relay (uWebSockets C++, native TLS, OVH VPS); `relay/` legacy. `packages/flutter_webrtc/` FORK 1.5.2, libwebrtc m144 = OUR patched build, `screen_audio_capturer.exe` = SEPARATE target. `rust_builder/` cargokit. `vendor/ffmpeg/` bundled (gitignored). `legal/` policy+terms.
+- `lib/`: `main.dart` entry (ProviderScope + RustLib.init + window_manager); `src/core/` models+providers+service wrappers, `src/theme/` design system, `src/ui/` shell chat settings sidebar components dialogs animations mobile.
+- `rust/hollow_core/src/`: `api/` FFI (frb scans these); `node/` swarm.rs + focused modules (types, handlers, ws_client, crdt_store, test_harness cfg(test)); `crypto/` Olm+MLS+persistence (store.rs = CryptoStore); `identity/` Ed25519; `storage/` SQLCipher.
+- `relay-uws/` production relay (native TLS); `relay/` legacy. `packages/flutter_webrtc/` FORK 1.5.2, libwebrtc m144 = OUR patched build, `screen_audio_capturer.exe` = SEPARATE target. `rust_builder/` cargokit. `vendor/ffmpeg/` bundled, gitignored. `legal/` policy+terms.
 
 ## Build & Run Commands
 ```bash
@@ -174,8 +174,8 @@ All UI uses custom Hollow widgets, no Material defaults: **HollowPressable**, **
 - **Android:** SQLCipher needs vendored prebuilt OpenSSL 1.1.1w per-arch; target-prefixed env vars must be SYSTEM env vars (Cargo `[env]` doesn't reach cargokit); Rust TLS uses `webpki-roots`, NEVER `native-roots` (silently breaks all WSS). `feedback_android_platform`.
 - **Mobile lifecycle:** `WidgetsBindingObserver` — resume: WiFi lock + rejoin WS rooms; pause: release lock.
 - **Mobile UI:** `lib/src/ui/mobile/`; `MobileShell` (4-tab) below 600px; floating pills in MobileShell + MobileChatRoute stacks, NEVER in `app.dart` builder; selection providers cleared in `.then()`, NOT `dispose()`. `feedback_mobile_ui_patterns`.
-- **Widget tests:** `pumpHollowMobile()` (`test/helpers/test_app.dart`) mocks FFI (~1s, no device). **VERIFY UI BY DRIVING THE APP, never from source:** `scripts\ui_probe.ps1` (`feedback_verify_ui_by_driving`). **Feature matrix:** `reports/FEATURE_MATRIX.md`.
-- **Forked `flutter_webrtc`** at `packages/flutter_webrtc/` (pubspec `path:`). When iterating its native C++, delete `build/windows/x64/plugins/flutter_webrtc/` before rebuilding, and ALWAYS build `--release` if testing from the Release folder.
+- **Widget tests:** `pumpHollowMobile()` (`test/helpers/test_app.dart`) mocks FFI (~1s, no device). **VERIFY UI BY DRIVING THE APP, never from source:** `scripts\ui_probe.ps1` (`feedback_verify_ui_by_driving`). **Peer-to-peer UI = `scripts\fleet.ps1`** (N real instances, peer-tagged scenarios): ONLY servers it creates AND deletes, `${RUN}` in every message, no window under 960px. wiki `fleet_probe`. **Feature matrix:** `reports/FEATURE_MATRIX.md`.
+- **Forked `flutter_webrtc`** at `packages/flutter_webrtc/` (pubspec `path:`). When iterating its native C++, delete `build/windows/x64/plugins/flutter_webrtc/` first; ALWAYS `--release` if testing from the Release folder.
 - **CRITICAL: desktop libwebrtc (dll+so) is OUR patched build**, vendored at `third_party/libwebrtc/` (recipe: BUILDING.md). Screen shares ride `ScreenContentProfile`, NEVER hint 'motion'. Encoding caps ride `addTransceiver` init `sendEncodings` (pre-negotiation setParameters is DROPPED at O/A). `project_webrtc_engine_screenshare_research`.
 - **CRITICAL: Linux window close: minimize to taskbar, never tray**; second close while minimized = quit. wlroots (Hyprland/sway) has NO minimize, so poll then arm a 2nd-press quit; never quit on `isMinimized()` false alone. `project_linux_window_fix`.
 - **CRITICAL: Linux audio capture NEVER via `record`** (needs `parecord`, absent on PipeWire): mic test = WebRTC loopback, voice msgs = `LinuxPulseCapture` (libpulse ffi). `feedback_linux_mic_parecord`.

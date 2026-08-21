@@ -38,6 +38,9 @@ import 'probe_targets.dart';
 /// | `expect_text` | `value` | fails unless the text is on screen |
 /// | `expect_no_text` | `value` | fails when the text IS on screen |
 /// | `expect_count` | `target`, `value` | fails unless the count matches |
+/// | `look` | `filter`, `max` | what is on screen, IN the answer |
+/// | `wait_for` | `target` or `gone`, `timeout_ms`, `count` | polls until it holds |
+/// | `capture` | `as`, `target` or `from` | reads a value out of the app |
 /// | `log` | `message` | a note in the results |
 /// | `quit` | | ends a live session |
 ///
@@ -45,6 +48,11 @@ import 'probe_targets.dart';
 /// to record a failure and keep going, and a pointer step may carry
 /// `"allowMiss": true` to skip the check that its click actually lands on the
 /// widget it found (see [ProbeRunner._requireHittable]).
+///
+/// Every string in a step is `${VAR}`-substituted before it runs, from values
+/// captured by [captured] first and the environment second. That is what lets
+/// a fleet scenario pull an invite link out of one instance and paste it into
+/// another (see `scripts/fleet.ps1`).
 class ProbeRunner {
   ProbeRunner({
     required this.tester,
@@ -65,6 +73,16 @@ class ProbeRunner {
 
   final List<Map<String, dynamic>> results = [];
   int _seq = 0;
+
+  /// Values pulled out of the app by the `capture` op, substituted into later
+  /// steps as `${NAME}`. In a fleet run the orchestrator also reads them out
+  /// of the answer and substitutes them into the OTHER instance's steps, which
+  /// is how an invite link crosses from one app to another.
+  final Map<String, String> captured = {};
+
+  /// Which instance this is, when there is more than one (`UI_PROBE_PEER`).
+  /// Stamped on every answer so a tail of several outboxes stays readable.
+  final String? peer = Platform.environment['UI_PROBE_PEER'];
 
   bool get failed => results.any((r) => r['ok'] == false);
 
@@ -220,7 +238,8 @@ class ProbeRunner {
   // One step
   // ---------------------------------------------------------------------------
 
-  Future<Map<String, dynamic>> runStep(Map<String, dynamic> step) async {
+  Future<Map<String, dynamic>> runStep(Map<String, dynamic> rawStep) async {
+    final step = _substitute(rawStep).cast<String, dynamic>();
     final op = '${step['op']}';
     final started = DateTime.now();
     var ok = true;
@@ -261,6 +280,8 @@ class ProbeRunner {
         'dump',
         'log',
         'shot',
+        'capture',
+        'look',
         'expect_text',
         'expect_no_text',
         'expect_count',
@@ -394,6 +415,15 @@ class ProbeRunner {
         }
         return '$target matched $got';
 
+      case 'look':
+        return _look(step);
+
+      case 'wait_for':
+        return _waitFor(step);
+
+      case 'capture':
+        return _capture(step, extra);
+
       case 'log':
         return '${step['message'] ?? ''}';
 
@@ -451,6 +481,242 @@ class ProbeRunner {
     buffer.write('Visible text (${texts.length}): ${shown.join(" | ")}'
         '${texts.length > shown.length ? " ..." : ""}');
     return buffer.toString();
+  }
+
+  /// What is on screen right now, as the answer's message.
+  ///
+  /// The same list `dump` writes to disk, filtered to the things a step can
+  /// actually address and small enough to read in a terminal. `dump` is still
+  /// the right tool for a real diagnosis - it carries the provider state and
+  /// the layout outline - but most of the time the only question is "what do I
+  /// click next", and answering that by writing a file and then reading and
+  /// grepping it costs a whole extra round trip. Batch it after the step that
+  /// changed the screen: `[{"op":"tap",...},{"op":"look"}]`.
+  ///
+  /// `filter` narrows to targets or labels containing a substring; `max` caps
+  /// the control list (default 45).
+  Future<String> _look(Map<String, dynamic> step) async {
+    final filter = (step['filter'] as String?)?.toLowerCase();
+    final max = step['max'] as int? ?? 45;
+    final entries =
+        ProbeDump.collect(tester, tester.view.physicalSize / tester.view.devicePixelRatio);
+
+    // The kinds a step can act on. `text` is handled separately because half
+    // the app's rows ARE their label; `keyed` and `surface` are out because
+    // there are hundreds of them and a scenario almost never wants one.
+    const actionable = {
+      'semantics', 'pressable', 'button', 'field', 'input', 'tooltip', 'icon',
+    };
+    final controls = <String>[];
+    final texts = <String>[];
+    for (final entry in entries) {
+      final target = entry['target'] as String?;
+      if (target == null || target.isEmpty) continue;
+      final label = '${entry['label'] ?? ''}';
+      if (filter != null &&
+          !target.toLowerCase().contains(filter) &&
+          !label.toLowerCase().contains(filter)) {
+        continue;
+      }
+      final kind = '${entry['kind']}';
+      final count = entry['matches'] as int? ?? 1;
+      final line = count > 1 ? '$target  x$count' : target;
+      if (actionable.contains(kind)) {
+        if (!controls.contains(line)) controls.add(line);
+      } else if (kind == 'text') {
+        if (!texts.contains(label) && label.trim().isNotEmpty) texts.add(label);
+      }
+    }
+
+    final overlays = _overlaySummary();
+    final buffer = StringBuffer();
+    buffer.writeln(overlays['dialog'] == true
+        ? 'dialog OPEN'
+        : 'no dialog');
+    final rows = overlays['menuRows'] as List?;
+    if (rows != null && rows.isNotEmpty) {
+      buffer.writeln('menu: ${rows.join(" | ")}');
+    }
+    buffer.writeln('controls (${controls.length}'
+        '${controls.length > max ? ', first $max' : ''}):');
+    for (final line in controls.take(max)) {
+      buffer.writeln('  $line');
+    }
+    if (texts.isNotEmpty) {
+      buffer.write('text (${texts.length}): ${texts.take(60).join(" | ")}');
+    }
+    return buffer.toString().trimRight();
+  }
+
+  /// Polls until a condition holds, instead of guessing a fixed wait.
+  ///
+  /// A fixed `wait` is fine when one app talks to itself. Put a relay round
+  /// trip in the middle and it becomes a coin flip: too short and it fails on
+  /// a slow run, too long and every scenario crawls. This is the op that makes
+  /// a fleet suite trustworthy rather than flaky.
+  ///
+  /// * `target` — wait until it is on screen
+  /// * `gone` — wait until it is NOT on screen
+  /// * `count` — with `target`, wait until it matches exactly that many
+  ///
+  /// Note "gone" means BECAME absent: it returns the moment the condition
+  /// holds, so it proves a disappearance, not a permanent absence. To assert
+  /// something never shows up, `wait` a fixed time and then `expect_no_text`.
+  Future<String> _waitFor(Map<String, dynamic> step) async {
+    final target = step['target'] as String?;
+    final gone = step['gone'] as String? ?? step['absent'] as String?;
+    if (target == null && gone == null) {
+      throw _ProbeFailure('wait_for needs a "target" or a "gone"');
+    }
+    final want = step['count'] as int?;
+    final timeout = Duration(milliseconds: step['timeout_ms'] as int? ?? 15000);
+    final spec = target ?? gone!;
+    final started = DateTime.now();
+    var polls = 0;
+    var last = -1;
+
+    while (true) {
+      polls++;
+      last = ProbeTargets.resolve(spec).evaluate().length;
+      final held = gone != null
+          ? last == 0
+          : (want == null ? last > 0 : last == want);
+      if (held) {
+        final ms = DateTime.now().difference(started).inMilliseconds;
+        return gone != null
+            ? '"$gone" went away after ${ms}ms ($polls polls)'
+            : '"$target" appeared after ${ms}ms ($polls polls, $last match'
+                '${last == 1 ? '' : 'es'})';
+      }
+      if (DateTime.now().difference(started) >= timeout) break;
+      // ~200ms per poll: fast enough to feel immediate, slow enough that a
+      // 30s wait is 150 finder evaluations rather than thousands.
+      await settle(frames: 4, step: const Duration(milliseconds: 50));
+    }
+
+    final ms = DateTime.now().difference(started).inMilliseconds;
+    if (gone != null) {
+      throw _ProbeFailure('"$gone" was still on screen after ${ms}ms '
+          '($last matches).');
+    }
+    throw _ProbeFailure(
+        '"$target" did not ${want == null ? 'appear' : 'reach $want matches'} '
+        'within ${ms}ms (last count $last).\n${_nearby(target!)}');
+  }
+
+  /// Reads a value out of the app and remembers it as `${as}`.
+  ///
+  /// * `target` (default) — the text of the matched widget and its subtree
+  /// * `from: "provider"` + `key` — a value from the dump's provider snapshot
+  /// * `from: "clipboard"` — whatever the app last copied
+  /// * `regex` — narrows the value to the first capture group
+  ///
+  /// The value also comes back in the answer, which is how a fleet run moves
+  /// an invite link from the instance that generated it to the one that has
+  /// to paste it.
+  Future<String> _capture(
+      Map<String, dynamic> step, Map<String, dynamic> extra) async {
+    final name = step['as'] as String?;
+    if (name == null) throw _ProbeFailure('capture needs an "as"');
+    final from = '${step['from'] ?? 'widget'}';
+
+    String value;
+    if (from == 'provider') {
+      // The same snapshot the dump prints, so anything readable there is
+      // capturable here: `peerId` (this instance's identity, which is how a
+      // friend request finds it), `selectedChannel`, `connection`, and the
+      // rest. Reading state beats reading the screen whenever the screen only
+      // shows a truncated form of it.
+      final key = step['key'] as String?;
+      if (key == null) {
+        throw _ProbeFailure('capture from a provider needs a "key"');
+      }
+      final snapshot = ProbeDump.providerSnapshot(container);
+      final held = snapshot[key];
+      if (held == null) {
+        final known = snapshot.keys.toList()..sort();
+        throw _ProbeFailure('no provider value "$key". '
+            'Readable now: ${known.join(", ")}');
+      }
+      value = held is String ? held : jsonEncode(held);
+    } else if (from == 'clipboard') {
+      final data = await tester.runAsync(
+          () => Clipboard.getData(Clipboard.kTextPlain));
+      value = data?.text ?? '';
+      if (value.isEmpty) {
+        throw _ProbeFailure('the clipboard is empty (or unreadable from the '
+            'test binding). Capture from a widget instead.');
+      }
+    } else {
+      final finder = _finder(step);
+      value = _textOf(finder);
+      if (value.isEmpty) {
+        throw _ProbeFailure(
+            '"${step['target']}" holds no text to capture.\n'
+            '${_nearby('${step['target']}')}');
+      }
+    }
+
+    final pattern = step['regex'] as String?;
+    if (pattern != null) {
+      final match = RegExp(pattern).firstMatch(value);
+      if (match == null) {
+        throw _ProbeFailure('regex "$pattern" does not match "$value"');
+      }
+      value = match.groupCount >= 1 ? (match.group(1) ?? '') : match.group(0)!;
+    }
+
+    captured[name] = value;
+    extra['captured'] = {name: value};
+    extra['value'] = value;
+    return 'captured $name = "$value"';
+  }
+
+  /// All the text a widget carries, itself or anywhere below it.
+  String _textOf(Finder finder) {
+    String? direct(Widget widget) {
+      if (widget is Text) return widget.data ?? widget.textSpan?.toPlainText();
+      if (widget is SelectableText) {
+        return widget.data ?? widget.textSpan?.toPlainText();
+      }
+      if (widget is EditableText) return widget.controller.text;
+      if (widget is TextField) return widget.controller?.text;
+      return null;
+    }
+
+    final self = direct(finder.evaluate().first.widget);
+    if (self != null && self.isNotEmpty) return self;
+
+    final parts = <String>[];
+    for (final element in find
+        .descendant(of: finder, matching: find.byWidgetPredicate((_) => true))
+        .evaluate()) {
+      final text = direct(element.widget);
+      if (text != null && text.trim().isNotEmpty && !parts.contains(text)) {
+        parts.add(text);
+      }
+    }
+    return parts.join('\n');
+  }
+
+  /// Replaces `${NAME}` in every string of a step, from [captured] first and
+  /// the environment second. An unknown name is left alone, so a literal
+  /// `${...}` in a message survives rather than turning into an empty string.
+  dynamic _substitute(dynamic value) {
+    if (value is String) {
+      return value.replaceAllMapped(RegExp(r'\$\{(\w+)\}'), (match) {
+        final name = match.group(1)!;
+        return captured[name] ??
+            Platform.environment[name] ??
+            Platform.environment['UI_PROBE_$name'] ??
+            match.group(0)!;
+      });
+    }
+    if (value is Map) {
+      return {for (final e in value.entries) e.key: _substitute(e.value)};
+    }
+    if (value is List) return value.map(_substitute).toList();
+    return value;
   }
 
   /// Parks a mouse pointer at [point] and leaves it there.
@@ -635,6 +901,7 @@ class ProbeRunner {
   }) {
     final result = <String, dynamic>{
       'i': _seq++,
+      if (peer != null) 'peer': peer,
       'op': step['op'],
       if (step['target'] != null) 'target': step['target'],
       if (step['name'] != null) 'name': step['name'],

@@ -8,6 +8,11 @@ import 'package:hollow/src/core/models/channel_info.dart';
 import 'package:hollow/src/core/models/channel_layout.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
 import 'package:hollow/src/core/models/strip_item.dart';
+import 'package:hollow/src/core/providers/chat_provider.dart';
+import 'package:hollow/src/core/providers/channel_chat_provider.dart';
+import 'package:hollow/src/core/providers/connection_status_provider.dart';
+import 'package:hollow/src/core/providers/friends_provider.dart';
+import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/layout_provider.dart';
 import 'package:hollow/src/core/providers/selected_peer_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
@@ -48,8 +53,8 @@ class ProbeDump {
     ProviderContainer? container,
   }) async {
     final screen = tester.view.physicalSize / tester.view.devicePixelRatio;
-    final entries = _collect(tester, screen);
-    final providers = _providerSnapshot(container);
+    final entries = collect(tester, screen);
+    final providers = providerSnapshot(container);
 
     final map = <String, dynamic>{
       'name': name,
@@ -75,7 +80,12 @@ class ProbeDump {
   // Widgets
   // -------------------------------------------------------------------------
 
-  static List<Map<String, dynamic>> _collect(WidgetTester tester, Size screen) {
+  /// Every on-screen widget the target grammar can address, with its rect and
+  /// the exact target string for it. Public because the runner's `look` op
+  /// serves the same list inline in an answer - the whole point of `look` is
+  /// that deciding what to click next should not cost a second round trip
+  /// through a file on disk.
+  static List<Map<String, dynamic>> collect(WidgetTester tester, Size screen) {
     final out = <Map<String, dynamic>>[];
     final seen = <String>{};
 
@@ -285,7 +295,7 @@ class ProbeDump {
   /// already built and never initialises a provider itself. Observing must not
   /// change what is being observed: initialising, say, a FutureProvider here
   /// would fire real FFI that the app under test never asked for.
-  static Map<String, dynamic> _providerSnapshot(ProviderContainer? container) {
+  static Map<String, dynamic> providerSnapshot(ProviderContainer? container) {
     if (container == null) return {'note': 'no container'};
     final out = <String, dynamic>{};
 
@@ -352,6 +362,64 @@ class ProbeDump {
     final unread = read(unreadProvider);
     if (unread != null) {
       out['dmUnreadCounts'] = unread.dmUnreadCounts;
+    }
+
+    // Everything below is what a FLEET run needs: which instance am I, who do
+    // I think my friends are, am I actually connected, and did the message
+    // land. One instance can never disagree with itself about these; two can,
+    // and that disagreement IS the bug class the fleet exists to catch.
+    final identity = read(identityProvider);
+    if (identity != null) {
+      out['peerId'] = identity.peerId;
+      out['identityLoaded'] = identity.isLoaded;
+      if (identity.error != null) out['identityError'] = identity.error;
+    }
+    out['connection'] = read(overallConnectionProvider)?.name;
+
+    final friends = read(friendsProvider);
+    if (friends != null) {
+      out['friends'] = [
+        for (final f in friends.values)
+          {
+            'peerId': f.peerId,
+            'status': f.status,
+            if (f.direction.isNotEmpty) 'direction': f.direction,
+          }
+      ];
+    }
+
+    // Counts, not bodies: a dump is read by eye, and forty message bodies bury
+    // the one line that matters. The last few are enough to see WHICH message
+    // arrived, and the count answers whether a duplicate slipped through.
+    final dms = read(chatProvider);
+    if (dms != null && dms.isNotEmpty) {
+      out['dms'] = {
+        for (final e in dms.entries)
+          e.key: {
+            'count': e.value.length,
+            'last': e.value.isEmpty
+                ? null
+                : e.value
+                    .skip(e.value.length > 3 ? e.value.length - 3 : 0)
+                    .map((m) => m.text)
+                    .toList(),
+          }
+      };
+    }
+    final channelChats = read(channelChatProvider);
+    if (channelChats != null && channelChats.isNotEmpty) {
+      out['channelMessages'] = {
+        for (final e in channelChats.entries)
+          e.key: {
+            'count': e.value.length,
+            'last': e.value.isEmpty
+                ? null
+                : e.value
+                    .skip(e.value.length > 3 ? e.value.length - 3 : 0)
+                    .map((m) => m.text)
+                    .toList(),
+          }
+      };
     }
 
     if (layoutJson != null) {
@@ -430,6 +498,35 @@ class ProbeDump {
         '(${providers['selectedChannel']})');
     buffer.writeln('- layout mode: ${providers['layoutMode']}');
     buffer.writeln('- peer: ${providers['selectedPeer']}');
+    if (providers.containsKey('peerId')) {
+      buffer.writeln('- identity: ${providers['peerId']} '
+          '(loaded: ${providers['identityLoaded']})');
+    }
+    if (providers['identityError'] != null) {
+      buffer.writeln('- identity ERROR: ${providers['identityError']}');
+    }
+    if (providers['connection'] != null) {
+      buffer.writeln('- connection: ${providers['connection']}');
+    }
+    final friends = providers['friends'] as List?;
+    if (friends != null) {
+      buffer.writeln('- friends (${friends.length}):');
+      for (final f in friends.cast<Map>()) {
+        buffer.writeln('  - ${f['peerId']} — ${f['status']}'
+            '${f['direction'] == null ? '' : ' (${f['direction']})'}');
+      }
+    }
+    for (final key in const ['dms', 'channelMessages']) {
+      final conversations = providers[key] as Map?;
+      if (conversations == null || conversations.isEmpty) continue;
+      buffer.writeln('- $key:');
+      for (final e in conversations.entries) {
+        final value = e.value as Map;
+        final last = (value['last'] as List?)?.join(' / ') ?? '';
+        buffer.writeln('  - ${e.key}: ${value['count']} loaded'
+            '${last.isEmpty ? '' : ' — last: $last'}');
+      }
+    }
     final dmUnread = providers['dmUnreadCounts'] as Map?;
     if (dmUnread != null && dmUnread.isNotEmpty) {
       buffer.writeln('- DM unread: $dmUnread');

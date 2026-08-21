@@ -1,0 +1,65 @@
+{
+  "_": [
+    "Rung 1 of the fleet ladder: friend request, accept, DM both ways.",
+    "",
+    "This is the journey that has been hardest to debug by hand, because it",
+    "needs two machines and it fails in the seam rather than in the protocol:",
+    "the request arrives in the provider but the Incoming tab does not show it,",
+    "the accept lands but the friend row stays pending, the DM arrives but the",
+    "unread pill sits on the wrong side. The Rust harness cannot see any of",
+    "that, and one instance cannot produce any of it.",
+    "",
+    "Note step 2: the Accept button only exists on the INCOMING tab. Landing on",
+    "the Friends tab and waiting for it is a 30-second timeout that reads like a",
+    "delivery failure and is not one - the provider dump in the artifacts says",
+    "'pending (incoming)' the whole time.",
+    "",
+    "${RUN} is unique per run and belongs in every message: the relay holds",
+    "undelivered traffic for three days and these identities are stable, so a",
+    "fixed string can be matched by an earlier run's message.",
+    "",
+    "run: powershell -File scripts/fleet.ps1 -Scenario friend_dm"
+  ],
+  "peers": ["a", "b"],
+  "steps": [
+    { "peer": "all", "op": "wait_for", "target": "text:Connected", "timeout_ms": 120000 },
+    { "peer": "a", "op": "capture", "from": "provider", "key": "peerId", "as": "PEER_A" },
+
+    { "peer": "b", "op": "tap", "target": "semantics:Add friend", "index": 0 },
+    { "peer": "b", "op": "tap", "target": "text:Add Friend", "index": 0 },
+    { "peer": "b", "op": "enter_text", "target": "hint:Peer ID or nickname...", "value": "${PEER_A}" },
+    { "peer": "b", "op": "tap", "target": "text:Send Request", "index": 0 },
+
+    { "peer": "a", "op": "tap", "target": "semantics:Add friend", "index": 0 },
+    { "peer": "a", "op": "tap", "target": "text:Incoming", "index": 0 },
+    { "peer": "a", "op": "wait_for", "target": "semantics:Accept friend request", "timeout_ms": 60000 },
+    { "peer": "a", "op": "tap", "target": "semantics:Accept friend request", "index": 0 },
+
+    { "peer": "a", "op": "log", "message": "the accepted friend must reach the UI on BOTH sides, not just the friends table" },
+    { "peer": "a", "op": "wait_for", "target": "text:probe-b", "timeout_ms": 60000 },
+    { "peer": "b", "op": "wait_for", "target": "text:probe-a", "timeout_ms": 60000 },
+
+    { "peer": "a", "op": "key", "value": "escape" },
+    { "peer": "a", "op": "tap", "target": "tooltip:probe-b" },
+    { "peer": "a", "op": "wait", "ms": 1500 },
+    { "peer": "a", "op": "enter_text", "target": "field", "value": "dm from a ${RUN}" },
+    { "peer": "a", "op": "key", "value": "enter" },
+    { "peer": "b", "op": "wait_for", "target": "text:dm from a ${RUN}", "timeout_ms": 60000 },
+
+    { "peer": "b", "op": "key", "value": "escape" },
+    { "peer": "b", "op": "tap", "target": "tooltip:probe-a" },
+    { "peer": "b", "op": "wait", "ms": 1500 },
+    { "peer": "b", "op": "enter_text", "target": "field", "value": "dm from b ${RUN}" },
+    { "peer": "b", "op": "key", "value": "enter" },
+    { "peer": "a", "op": "wait_for", "target": "text:dm from b ${RUN}", "timeout_ms": 60000 },
+
+    { "peer": "a", "op": "log", "message": "one row per message: the optimistic write and the one that arrives must reconcile" },
+    { "peer": "a", "op": "expect_count", "target": "text:dm from a ${RUN}", "value": 1 },
+    { "peer": "b", "op": "expect_count", "target": "text:dm from b ${RUN}", "value": 1 },
+
+    { "peer": "all", "op": "dump", "name": "converged" }
+  ],
+  "cleanup": [
+    { "peer": "all", "op": "log", "message": "nothing to undo: every run restores the fixture data directories, so the friendship and the DMs are gone before the next one starts. A server would still need deleting - it lives in other members' state too." }
+  ]
+}
