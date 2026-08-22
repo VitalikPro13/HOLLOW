@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/providers/profile_anim_provider.dart';
 import 'package:hollow/src/core/providers/banner_provider.dart';
 import 'package:hollow/src/core/providers/blocked_users_provider.dart';
 import 'package:hollow/src/core/providers/friends_provider.dart';
@@ -105,7 +106,8 @@ class MobileProfileSheet extends ConsumerWidget {
         ? profile.displayName
         : (peerId.length > 8 ? '${peerId.substring(0, 8)}...' : peerId);
     final isOnline = identityIsOnline(ref, peerId);
-    final bannerBytes = ref.watch(bannerProvider(peerId)).valueOrNull;
+    final bannerBytes = watchAnimatedBanner(ref, peerId) ??
+        ref.watch(bannerProvider(peerId)).valueOrNull;
     final bannerColor = bannerColorFromId(peerId);
     final myPeerId = ref.watch(identityProvider).peerId ?? '';
     final isMe = peerId == myPeerId;

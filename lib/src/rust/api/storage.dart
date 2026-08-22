@@ -935,6 +935,14 @@ class UserProfile {
   /// pulled on demand via `request_assets(kind: "frame")`.
   final String avatarFrame;
 
+  /// Asset-rail hash of this person's ANIMATED avatar; `""` = still only.
+  /// `avatar_bytes` above is the STILL companion — the animation is pulled
+  /// via `request_assets(kind: "profile")` and painted over it when held.
+  final String avatarAnim;
+
+  /// Asset-rail hash of this person's ANIMATED banner; `""` = still only.
+  final String bannerAnim;
+
   const UserProfile({
     required this.peerId,
     required this.displayName,
@@ -946,6 +954,8 @@ class UserProfile {
     required this.twitchUsername,
     required this.showcaseBoard,
     required this.avatarFrame,
+    required this.avatarAnim,
+    required this.bannerAnim,
   });
 
   @override
@@ -959,7 +969,9 @@ class UserProfile {
       bannerBytes.hashCode ^
       twitchUsername.hashCode ^
       showcaseBoard.hashCode ^
-      avatarFrame.hashCode;
+      avatarFrame.hashCode ^
+      avatarAnim.hashCode ^
+      bannerAnim.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -975,5 +987,7 @@ class UserProfile {
           bannerBytes == other.bannerBytes &&
           twitchUsername == other.twitchUsername &&
           showcaseBoard == other.showcaseBoard &&
-          avatarFrame == other.avatarFrame;
+          avatarFrame == other.avatarFrame &&
+          avatarAnim == other.avatarAnim &&
+          bannerAnim == other.bannerAnim;
 }

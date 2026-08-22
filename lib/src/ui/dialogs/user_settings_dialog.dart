@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/app_relaunch.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
+import 'package:hollow/src/core/providers/profile_anim_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/relay_domain_provider.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
@@ -202,11 +203,19 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
   String _liveDisplayName = '';
   String _liveStatus = '';
 
-  // Pending avatar/banner (null = no change, empty = clear).
+  // Pending avatar/banner (null = no change, empty = clear). These are the
+  // bytes the PREVIEW paints — for an animated pick that is the animation.
   Uint8List? _pendingAvatarBytes;
   Uint8List? _pendingBannerBytes;
   bool _avatarChanged = false;
   bool _bannerChanged = false;
+  // An animated pick splits in two: the animation is cached on the asset rail
+  // under a hash and only the STILL companion rides the profile push. Null on
+  // a still pick, which is also what CLEARS a previous animation on save.
+  Uint8List? _pendingAvatarStill;
+  Uint8List? _pendingBannerStill;
+  String? _pendingAvatarAnim;
+  String? _pendingBannerAnim;
   // In-flight WebP processing (never-throwing futures — errors are handled
   // inside). The preview stages the raw CROPPED bytes instantly; processing
   // swaps in the WebP when done. Save AWAITS these so an early "Save Profile"
@@ -270,18 +279,21 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
   }
 
   /// Shared prologue for the avatar/banner pickers: pick an image file and,
-  /// for ANIMATED input, take the raw bytes as-is (skipping crop preserves
-  /// animation) with a size cap. Returns null when nothing further should
-  /// happen; otherwise the raw bytes still needing the crop dialog.
+  /// for ANIMATED input, hand the raw bytes straight to [onAnimatedPicked]
+  /// (skipping the crop dialog is what preserves animation). Returns null when
+  /// nothing further should happen; otherwise the raw bytes still needing the
+  /// crop dialog.
+  ///
+  /// There is deliberately no SOURCE size check here. Rust rejects on what it
+  /// PRODUCES — a 1.98 MB GIF that converts to 971 KB is a fine avatar, and
+  /// refusing it on the file size was refusing something that fits.
   ///
   /// The animated test reads the BYTES, never the extension. Branching on
   /// `.gif` sent animated WebP and APNG through the cropper, which rasterises
   /// to a still PNG — the upload succeeded and the avatar simply never moved,
   /// with nothing shown to explain it.
   Future<Uint8List?> _pickImageRaw({
-    required int maxGifBytes,
-    required String gifTooLargeMessage,
-    required void Function(Uint8List gifBytes) onGifPicked,
+    required void Function(Uint8List rawBytes) onAnimatedPicked,
   }) async {
     final result = await FilePicker.platform.pickFiles(type: FileType.image);
     if (result == null || result.files.isEmpty) return null;
@@ -291,15 +303,7 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
     if (!mounted) return null;
 
     if (isAnimatedImageBytes(raw)) {
-      // Skip crop to preserve animation — use raw bytes directly.
-      if (raw.length > maxGifBytes) {
-        if (mounted) {
-          HollowToast.show(context, gifTooLargeMessage,
-              type: HollowToastType.error);
-        }
-        return null;
-      }
-      onGifPicked(Uint8List.fromList(raw));
+      onAnimatedPicked(Uint8List.fromList(raw));
       return null;
     }
     return raw;
@@ -307,17 +311,7 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
 
   Future<void> _pickAvatar() async {
     final raw = await _pickImageRaw(
-      maxGifBytes: 1000000,
-      gifTooLargeMessage: 'GIF too large (max 1MB)',
-      onGifPicked: (gifBytes) => setState(() {
-        // Raw GIF is final (no crop/processing) — invalidate any in-flight
-        // crop processing so its late result can't clobber this pick.
-        _avatarPickGen++;
-        _avatarBusy = false;
-        _pendingAvatarBytes = gifBytes;
-        _avatarChanged = true;
-        _profileDirty = true;
-      }),
+      onAnimatedPicked: (rawBytes) => _processAnimated(rawBytes, avatar: true),
     );
     if (raw == null || !mounted) return;
 
@@ -337,6 +331,10 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
     final gen = ++_avatarPickGen;
     setState(() {
       _pendingAvatarBytes = cropped;
+      // A still pick drops any previous animation (null here becomes the
+      // explicit clear at save time).
+      _pendingAvatarStill = null;
+      _pendingAvatarAnim = null;
       _avatarChanged = true;
       _profileDirty = true;
       _avatarBusy = true;
@@ -370,6 +368,8 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
       _avatarPickGen++;
       _avatarBusy = false;
       _pendingAvatarBytes = Uint8List(0);
+      _pendingAvatarStill = null;
+      _pendingAvatarAnim = null;
       _avatarChanged = true;
       _profileDirty = true;
     });
@@ -377,15 +377,7 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
 
   Future<void> _pickBanner() async {
     final raw = await _pickImageRaw(
-      maxGifBytes: 2000000,
-      gifTooLargeMessage: 'GIF too large (max 2MB)',
-      onGifPicked: (gifBytes) => setState(() {
-        _bannerPickGen++;
-        _bannerBusy = false;
-        _pendingBannerBytes = gifBytes;
-        _bannerChanged = true;
-        _profileDirty = true;
-      }),
+      onAnimatedPicked: (rawBytes) => _processAnimated(rawBytes, avatar: false),
     );
     if (raw == null || !mounted) return;
 
@@ -403,6 +395,8 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
     final gen = ++_bannerPickGen;
     setState(() {
       _pendingBannerBytes = cropped;
+      _pendingBannerStill = null;
+      _pendingBannerAnim = null;
       _bannerChanged = true;
       _profileDirty = true;
       _bannerBusy = true;
@@ -433,9 +427,74 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
       _bannerPickGen++;
       _bannerBusy = false;
       _pendingBannerBytes = Uint8List(0);
+      _pendingBannerStill = null;
+      _pendingBannerAnim = null;
       _bannerChanged = true;
       _profileDirty = true;
     });
+  }
+
+  /// An ANIMATED pick: Rust crops, walks the quality ladder and caches the
+  /// result on the asset rail, handing back the hash, the animation (for the
+  /// preview) and the still companion that rides the profile push.
+  ///
+  /// The failure toast shows Rust's message verbatim because those messages
+  /// are the useful ones: "about 9s fits at 600x200" beats "too large".
+  void _processAnimated(Uint8List rawBytes, {required bool avatar}) {
+    final gen = avatar ? ++_avatarPickGen : ++_bannerPickGen;
+    setState(() {
+      if (avatar) {
+        _avatarBusy = true;
+      } else {
+        _bannerBusy = true;
+      }
+      _profileDirty = true;
+    });
+    final work = () async {
+      try {
+        final media = avatar
+            ? await network_api.processAndStoreAvatarAnim(rawBytes: rawBytes)
+            : await network_api.processAndStoreBannerAnim(rawBytes: rawBytes);
+        if (!mounted || gen != (avatar ? _avatarPickGen : _bannerPickGen)) {
+          return;
+        }
+        // Seed the rail cache so every surface paints it immediately: the
+        // blob is already stored, this just skips the round trip back out.
+        ref.read(profileAnimProvider.notifier).seed(media.hash, media.bytes);
+        setState(() {
+          if (avatar) {
+            _pendingAvatarBytes = media.bytes;
+            _pendingAvatarStill = media.still;
+            _pendingAvatarAnim = media.hash;
+            _avatarChanged = true;
+            _avatarBusy = false;
+          } else {
+            _pendingBannerBytes = media.bytes;
+            _pendingBannerStill = media.still;
+            _pendingBannerAnim = media.hash;
+            _bannerChanged = true;
+            _bannerBusy = false;
+          }
+        });
+      } catch (e) {
+        if (!mounted || gen != (avatar ? _avatarPickGen : _bannerPickGen)) {
+          return;
+        }
+        setState(() {
+          if (avatar) {
+            _avatarBusy = false;
+          } else {
+            _bannerBusy = false;
+          }
+        });
+        HollowToast.show(context, '$e', type: HollowToastType.error);
+      }
+    }();
+    if (avatar) {
+      _avatarProcessing = work;
+    } else {
+      _bannerProcessing = work;
+    }
   }
 
   @override
@@ -503,10 +562,19 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
             displayName: displayName,
             status: status,
             aboutMe: aboutMe,
-            avatarBytes: _avatarChanged ? _pendingAvatarBytes : null,
-            bannerBytes: _bannerChanged ? _pendingBannerBytes : null,
+            // The STILL is what rides the push; the animation is already on
+            // the rail and travels as its hash. An empty hash on a still pick
+            // is what drops a previous animation.
+            avatarBytes: _avatarChanged
+                ? (_pendingAvatarStill ?? _pendingAvatarBytes)
+                : null,
+            bannerBytes: _bannerChanged
+                ? (_pendingBannerStill ?? _pendingBannerBytes)
+                : null,
             twitchUsername: twitchUsername,
             avatarFrame: _frameChanged ? (_pendingFrameId ?? '') : null,
+            avatarAnim: _avatarChanged ? (_pendingAvatarAnim ?? '') : null,
+            bannerAnim: _bannerChanged ? (_pendingBannerAnim ?? '') : null,
           );
 
       if (!mounted) return;

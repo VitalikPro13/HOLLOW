@@ -33,6 +33,7 @@ import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/server_strip_layout_provider.dart';
 import 'package:hollow/src/core/providers/service_providers.dart';
 import 'package:hollow/src/core/providers/shell_tab.dart';
+import 'package:hollow/src/core/providers/profile_anim_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/sync_progress_provider.dart';
 import 'package:hollow/src/core/providers/typing_provider.dart';
@@ -593,6 +594,7 @@ class EventStreamNotifier extends Notifier<bool> {
         ref.read(serverBannerProvider.notifier).onAssetsReceived(hashes);
         ref.read(serverAvatarAnimProvider.notifier).onAssetsReceived(hashes);
         ref.read(avatarFrameProvider.notifier).onAssetsReceived(hashes);
+        ref.read(profileAnimProvider.notifier).onAssetsReceived(hashes);
         // GIF-sized blobs can grow the asset cache quickly — enforce the
         // cap here too, not just on file downloads.
         _enforceStorageCaps();
@@ -863,6 +865,7 @@ class EventStreamNotifier extends Notifier<bool> {
         // which is when a frame we asked for while they were offline can
         // finally be pulled (the rail asks once per session).
         ref.read(avatarFrameProvider.notifier).onProfileUpdated(peerId);
+        ref.read(profileAnimProvider.notifier).onProfileUpdated(peerId);
         _refreshPushHints();
 
       case NetworkEvent_DeviceListUpdated(:final masterPeerId):
@@ -1915,8 +1918,11 @@ class EventStreamNotifier extends Notifier<bool> {
                 showcaseBoard: existing?.showcaseBoard ?? '',
                 // Frames stay OFF the guest sync path (it ships a 64px avatar
                 // thumb and should stay minimal), so this only carries
-                // through a frame we already knew about.
+                // through a frame we already knew about. Same for the
+                // animated avatar/banner hashes.
                 avatarFrame: existing?.avatarFrame ?? '',
+                avatarAnim: existing?.avatarAnim ?? '',
+                bannerAnim: existing?.bannerAnim ?? '',
               );
             }
           }

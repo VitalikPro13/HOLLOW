@@ -253,34 +253,26 @@ fn skip_gif_sub_blocks(data: &[u8], mut i: usize) -> usize {
     i
 }
 
-/// Convert an animated GIF to animated WebP at the given quality tier.
+/// Convert ANY animated source (GIF, APNG, animated WebP) to animated WebP at
+/// the given quality tier.
 ///
-/// Decodes each GIF frame (the `image` crate handles disposal methods and
-/// compositing), then encodes into animated WebP via `webp_animation::Encoder`.
-/// Frame delays are preserved with the browser convention: delays < 20ms are
-/// treated as 100ms (matching `animated_gif_image.dart`).
+/// Was GIF-only, which is why an APNG dropped into chat used to arrive as a
+/// frozen first frame: the caller branched on the file EXTENSION and a `.png`
+/// went down the still path. One decoder for all three shapes
+/// ([`decode_animation_frames`]) is what makes "decide from bytes" possible at
+/// the call sites.
 ///
 /// All quality tiers convert — even lossless WebP beats GIF's LZW compression.
 ///
 /// Returns `(webp_bytes, width, height)`.
-pub fn convert_gif_to_animated_webp(
+pub fn convert_animation_to_webp(
     data: &[u8],
     quality: WebpQuality,
 ) -> Result<(Vec<u8>, u32, u32), String> {
-    let decoder = GifDecoder::new(Cursor::new(data))
-        .map_err(|e| format!("Failed to decode GIF: {e}"))?;
-    let frames = decoder
-        .into_frames()
-        .collect_frames()
-        .map_err(|e| format!("Failed to collect GIF frames: {e}"))?;
-
-    if frames.is_empty() {
-        return Err("GIF has no frames".into());
-    }
-
-    let (w, h) = (frames[0].buffer().width(), frames[0].buffer().height());
+    let timed = decode_animation_frames(data)?;
+    let (w, h) = (timed[0].0.width(), timed[0].0.height());
     if w == 0 || h == 0 {
-        return Err("GIF has zero dimensions".into());
+        return Err("Animation has zero dimensions".into());
     }
 
     // The file-send pipeline carries arbitrary content, so it keeps libwebp's
@@ -291,16 +283,6 @@ pub fn convert_gif_to_animated_webp(
         WebpQuality::Balanced => webp_anim::AnimParams::plain(50.0),
         WebpQuality::Small => webp_anim::AnimParams::plain(30.0),
     };
-
-    // Browser convention: delays < 20ms → 100ms.
-    let timed: Vec<(image::RgbaImage, i32)> = frames
-        .into_iter()
-        .map(|f| {
-            let delay: std::time::Duration = f.delay().into();
-            let ms = delay.as_millis() as i32;
-            (f.into_buffer(), if ms < 20 { 100 } else { ms })
-        })
-        .collect();
 
     let webp_data = webp_anim::encode_animation(&timed, (w, h), &params)?;
     Ok((webp_data, w, h))
@@ -418,18 +400,14 @@ fn encode_lossy_webp_via_animation(rgba: &[u8], w: u32, h: u32, quality: f32) ->
 /// Frame delays under 20ms become 100ms, the browser convention, so a GIF
 /// authored with 0ms delays does not play at ticker speed.
 pub fn decode_animation_frames(data: &[u8]) -> Result<Vec<(image::RgbaImage, i32)>, String> {
-    let frames = if data.starts_with(b"GIF8") {
+    let frames: image::Frames<'_> = if data.starts_with(b"GIF8") {
         GifDecoder::new(Cursor::new(data))
             .map_err(|e| format!("Failed to decode GIF: {e}"))?
             .into_frames()
-            .collect_frames()
-            .map_err(|e| format!("Failed to collect GIF frames: {e}"))?
     } else if is_animated_webp(data) {
         image::codecs::webp::WebPDecoder::new(Cursor::new(data))
             .map_err(|e| format!("Failed to decode animated WebP: {e}"))?
             .into_frames()
-            .collect_frames()
-            .map_err(|e| format!("Failed to collect WebP frames: {e}"))?
     } else if data.starts_with(b"\x89PNG") {
         let decoder = image::codecs::png::PngDecoder::new(Cursor::new(data))
             .map_err(|e| format!("Failed to decode PNG: {e}"))?;
@@ -440,24 +418,41 @@ pub fn decode_animation_frames(data: &[u8]) -> Result<Vec<(image::RgbaImage, i32
             .apng()
             .map_err(|e| format!("Failed to decode APNG: {e}"))?
             .into_frames()
-            .collect_frames()
-            .map_err(|e| format!("Failed to collect APNG frames: {e}"))?
     } else {
         return Err("Not an animated image".into());
     };
 
-    if frames.is_empty() {
+    // Collected one frame at a time against a running RGBA budget rather
+    // than `collect_frames()`. A compact source can decode to orders of
+    // magnitude more than its file size (a 16 MB 1920x1080 GIF is gigabytes
+    // of RGBA), and this is the only place that ever holds a whole animation
+    // in memory.
+    let mut out: Vec<(image::RgbaImage, i32)> = Vec::new();
+    let mut decoded = 0usize;
+    for frame in frames {
+        let frame = frame.map_err(|e| format!("Failed to decode frame: {e}"))?;
+        let delay: std::time::Duration = frame.delay().into();
+        let ms = delay.as_millis() as i32;
+        let buf = frame.into_buffer();
+        decoded += buf.width() as usize * buf.height() as usize * 4;
+        if decoded > MAX_DECODE_RGBA_BYTES {
+            return Err("Animation is too large to decode".into());
+        }
+        out.push((buf, if ms < 20 { 100 } else { ms }));
+    }
+
+    if out.is_empty() {
         return Err("Animation has no frames".into());
     }
-    Ok(frames
-        .into_iter()
-        .map(|f| {
-            let delay: std::time::Duration = f.delay().into();
-            let ms = delay.as_millis() as i32;
-            (f.into_buffer(), if ms < 20 { 100 } else { ms })
-        })
-        .collect())
+    Ok(out)
 }
+
+/// Hard ceiling on the decoded RGBA of ANY animation we open for authoring.
+/// Generous - it exists to stop a pathological source (a long recording at
+/// screen resolution) taking the process down, not to shape anybody's art.
+/// The per-asset limits that shape art are much tighter and live with each
+/// processor.
+const MAX_DECODE_RGBA_BYTES: usize = 256 * 1024 * 1024;
 
 /// Centre-crop every frame to `crop` then resize to `(dw, dh)`.
 ///
@@ -735,7 +730,7 @@ mod tests {
     fn gif_to_animated_webp_balanced() {
         let gif = make_test_gif(64, 48);
         let (webp_bytes, w, h) =
-            convert_gif_to_animated_webp(&gif, WebpQuality::Balanced).expect("encode");
+            convert_animation_to_webp(&gif, WebpQuality::Balanced).expect("encode");
         assert_eq!(w, 64);
         assert_eq!(h, 48);
         // WebP magic bytes: starts with "RIFF" ... "WEBP".
@@ -748,7 +743,7 @@ mod tests {
     fn gif_to_animated_webp_small() {
         let gif = make_test_gif(64, 48);
         let (webp_bytes, w, h) =
-            convert_gif_to_animated_webp(&gif, WebpQuality::Small).expect("encode");
+            convert_animation_to_webp(&gif, WebpQuality::Small).expect("encode");
         assert_eq!(w, 64);
         assert_eq!(h, 48);
         assert!(webp_bytes.len() > 12);
@@ -759,7 +754,7 @@ mod tests {
     fn gif_to_animated_webp_lossless() {
         let gif = make_test_gif(64, 48);
         let (webp_bytes, w, h) =
-            convert_gif_to_animated_webp(&gif, WebpQuality::Lossless).expect("encode");
+            convert_animation_to_webp(&gif, WebpQuality::Lossless).expect("encode");
         assert_eq!(w, 64);
         assert_eq!(h, 48);
         assert!(webp_bytes.len() > 12);
@@ -769,7 +764,7 @@ mod tests {
 
     #[test]
     fn gif_to_animated_webp_rejects_invalid() {
-        let result = convert_gif_to_animated_webp(b"not a gif", WebpQuality::Balanced);
+        let result = convert_animation_to_webp(b"not a gif", WebpQuality::Balanced);
         assert!(result.is_err());
     }
 
@@ -837,6 +832,185 @@ mod tests {
         assert_eq!(get_image_dimensions(&out).unwrap(), (AVATAR_DIM, AVATAR_DIM));
     }
 
+    // ── A REAL APNG, built by hand ──────────────────────────────────────
+    //
+    // The fixture this replaces bolted an `acTL` chunk onto a still PNG. That
+    // proved DETECTION and nothing else — no fcTL, no fdAT, so no frame ever
+    // decoded, and every processor that quietly flattened an APNG passed
+    // anyway. Steam serves animated avatar frames as APNG, so "it uploads and
+    // then just sits there" was the single most likely thing a user would hit.
+    //
+    // Self-contained on purpose: no zlib or crc32 dependency for a test
+    // fixture. Deflate "stored" blocks are uncompressed by definition, which
+    // is exactly what a 64px test image wants.
+
+    fn crc32(data: &[u8]) -> u32 {
+        let mut crc = 0xFFFF_FFFFu32;
+        for &b in data {
+            crc ^= b as u32;
+            for _ in 0..8 {
+                crc = if crc & 1 != 0 { (crc >> 1) ^ 0xEDB8_8320 } else { crc >> 1 };
+            }
+        }
+        !crc
+    }
+
+    fn adler32(data: &[u8]) -> u32 {
+        let (mut a, mut b) = (1u32, 0u32);
+        for &x in data {
+            a = (a + x as u32) % 65521;
+            b = (b + a) % 65521;
+        }
+        (b << 16) | a
+    }
+
+    /// zlib stream made of uncompressed ("stored") deflate blocks.
+    fn zlib_stored(data: &[u8]) -> Vec<u8> {
+        let mut out = vec![0x78, 0x01];
+        let mut it = data.chunks(65_535).peekable();
+        if it.peek().is_none() {
+            out.extend_from_slice(&[0x01, 0x00, 0x00, 0xFF, 0xFF]);
+        }
+        while let Some(c) = it.next() {
+            out.push(if it.peek().is_none() { 1 } else { 0 });
+            out.extend_from_slice(&(c.len() as u16).to_le_bytes());
+            out.extend_from_slice(&(!(c.len() as u16)).to_le_bytes());
+            out.extend_from_slice(c);
+        }
+        out.extend_from_slice(&adler32(data).to_be_bytes());
+        out
+    }
+
+    fn png_chunk(kind: &[u8; 4], data: &[u8]) -> Vec<u8> {
+        let mut out = (data.len() as u32).to_be_bytes().to_vec();
+        out.extend_from_slice(kind);
+        out.extend_from_slice(data);
+        let mut crc_in = kind.to_vec();
+        crc_in.extend_from_slice(data);
+        out.extend_from_slice(&crc32(&crc_in).to_be_bytes());
+        out
+    }
+
+    /// Raw RGBA scanlines (filter 0), with a transparent centre square of
+    /// `hole` (as a fraction of the canvas) so frame art can clear the
+    /// see-through-middle gate.
+    fn apng_rows(w: u32, h: u32, hole: f32, rgb: [u8; 3]) -> Vec<u8> {
+        let (hw, hh) = ((w as f32 * hole) as u32, (h as f32 * hole) as u32);
+        let (x0, y0) = ((w - hw) / 2, (h - hh) / 2);
+        let mut rows = Vec::with_capacity((h * (1 + w * 4)) as usize);
+        for y in 0..h {
+            rows.push(0); // filter: none
+            for x in 0..w {
+                let inside =
+                    hole > 0.0 && x >= x0 && x < x0 + hw && y >= y0 && y < y0 + hh;
+                if inside {
+                    rows.extend_from_slice(&[0, 0, 0, 0]);
+                } else {
+                    rows.extend_from_slice(&[rgb[0], rgb[1], rgb[2], 255]);
+                }
+            }
+        }
+        rows
+    }
+
+    /// A genuine 2-frame APNG: `acTL`, an `fcTL` BEFORE `IDAT` (so the default
+    /// image is frame 0, which is how Steam writes them), then `fcTL` + `fdAT`
+    /// for frame 1.
+    fn make_test_apng(w: u32, h: u32, hole: f32) -> Vec<u8> {
+        let mut out = b"\x89PNG\r\n\x1a\n".to_vec();
+
+        let mut ihdr = w.to_be_bytes().to_vec();
+        ihdr.extend_from_slice(&h.to_be_bytes());
+        ihdr.extend_from_slice(&[8, 6, 0, 0, 0]); // 8-bit RGBA, no interlace
+        out.extend_from_slice(&png_chunk(b"IHDR", &ihdr));
+
+        let mut actl = 2u32.to_be_bytes().to_vec(); // 2 frames
+        actl.extend_from_slice(&0u32.to_be_bytes()); // loop forever
+        out.extend_from_slice(&png_chunk(b"acTL", &actl));
+
+        let fctl = |seq: u32| {
+            let mut f = seq.to_be_bytes().to_vec();
+            f.extend_from_slice(&w.to_be_bytes());
+            f.extend_from_slice(&h.to_be_bytes());
+            f.extend_from_slice(&0u32.to_be_bytes()); // x_offset
+            f.extend_from_slice(&0u32.to_be_bytes()); // y_offset
+            f.extend_from_slice(&100u16.to_be_bytes()); // delay numerator
+            f.extend_from_slice(&1000u16.to_be_bytes()); // denominator -> 100ms
+            f.extend_from_slice(&[0, 0]); // dispose NONE, blend SOURCE
+            f
+        };
+
+        out.extend_from_slice(&png_chunk(b"fcTL", &fctl(0)));
+        out.extend_from_slice(&png_chunk(
+            b"IDAT",
+            &zlib_stored(&apng_rows(w, h, hole, [220, 40, 40])),
+        ));
+        out.extend_from_slice(&png_chunk(b"fcTL", &fctl(1)));
+        let mut fdat = 2u32.to_be_bytes().to_vec();
+        fdat.extend_from_slice(&zlib_stored(&apng_rows(w, h, hole, [40, 40, 220])));
+        out.extend_from_slice(&png_chunk(b"fdAT", &fdat));
+        out.extend_from_slice(&png_chunk(b"IEND", b""));
+        out
+    }
+
+    #[test]
+    fn a_real_apng_decodes_into_its_frames() {
+        let apng = make_test_apng(64, 64, 0.0);
+        assert!(is_apng(&apng));
+        assert!(is_animated_image(&apng));
+        assert!(!is_animated_webp(&apng), "an APNG is not an animated WebP");
+
+        let frames = decode_animation_frames(&apng).expect("decode apng");
+        assert_eq!(frames.len(), 2, "both the IDAT frame and the fdAT frame");
+        assert_eq!((frames[0].0.width(), frames[0].0.height()), (64, 64));
+        assert_eq!(frames[0].1, 100, "100/1000s reads as 100ms");
+    }
+
+    /// The bug Vitalik hit: a Steam APNG frame uploaded "successfully" and
+    /// then never moved, because every processor below branched on `GIF8` and
+    /// let an APNG fall through to the still path.
+    #[test]
+    fn an_apng_stays_animated_through_every_processor() {
+        // Frame art needs a see-through middle to clear the authoring gate.
+        let frame_src = make_test_apng(128, 128, 0.6);
+        let (art, animated) = process_avatar_frame(&frame_src).expect("frame");
+        assert!(animated, "an APNG avatar frame must stay ANIMATED");
+        assert!(is_animated_webp(&art));
+
+        let src = make_test_apng(128, 128, 0.0);
+
+        let (emote, animated) = process_emote_image(&src).expect("emote");
+        assert!(animated, "an APNG emote must stay animated");
+        assert!(is_animated_webp(&emote));
+
+        let (banner, animated) = process_server_banner_image(&src).expect("server banner");
+        assert!(animated, "an APNG server banner must stay animated");
+        assert!(is_animated_webp(&banner));
+
+        let (sticker, _, _, animated) = process_sticker_for_send(&src).expect("sticker");
+        assert!(animated, "an APNG sticker must stay animated");
+        assert!(is_animated_webp(&sticker));
+
+        let (gif, _, _, animated) = process_gif_for_send(&src).expect("gif send");
+        assert!(animated, "an APNG picked as a GIF must stay animated");
+        assert!(is_animated_webp(&gif));
+
+        let art = process_showcase_artwork(&src).expect("showcase artwork");
+        assert!(is_animated_webp(&art), "APNG showcase artwork must stay animated");
+
+        // The file-send pipeline, which used to branch on the `.png` EXTENSION.
+        let (file, _, _) =
+            convert_animation_to_webp(&src, WebpQuality::Balanced).expect("file send");
+        assert!(is_animated_webp(&file), "an APNG sent as a file must stay animated");
+
+        let (anim, still) = process_user_avatar_anim(&src).expect("avatar");
+        assert!(is_animated_webp(&anim));
+        assert!(!is_animated_image(&still), "the companion is a still");
+
+        let (anim, _) = process_user_banner_anim(&src).expect("banner");
+        assert!(is_animated_webp(&anim));
+    }
+
     #[test]
     fn apng_reads_as_animated_and_a_still_png_does_not() {
         // num_frames = 2, num_plays = 0
@@ -878,20 +1052,103 @@ mod tests {
         assert!(!is_animated_image(&[]));
     }
 
-    /// An APNG used to upload "successfully" as a frozen first frame. It now
-    /// goes through the same decode/re-encode path a GIF does.
+    /// An APNG used to upload "successfully" as a frozen first frame.
     #[test]
     fn server_avatar_anim_accepts_an_apng() {
-        let apng = png_with_chunk(b"acTL", &[0, 0, 0, 2, 0, 0, 0, 0]);
-        // The decoy PNG has no real fcTL/fdAT frames, so decoding is allowed
-        // to fail — what must NOT happen is the old flat "not animated"
-        // rejection before the decoder is ever consulted.
-        if let Err(e) = process_server_avatar_anim(&apng) {
-            assert!(
-                !e.contains("Not an animated image"),
-                "APNG must reach the decoder, got: {e}"
-            );
+        let icon = process_server_avatar_anim(&make_test_apng(128, 128, 0.0))
+            .expect("an APNG server icon must convert");
+        assert!(is_animated_webp(&icon), "and must stay animated");
+    }
+
+    // ── Animated profile media (avatar + banner on the asset rail) ──────
+
+    /// The wire cap and the authoring limit are the SAME number by
+    /// construction. If they ever drift, one side silently produces blobs the
+    /// other refuses — the failure looks like "my avatar just doesn't arrive".
+    #[test]
+    fn profile_anim_authoring_limit_equals_the_receipt_cap() {
+        assert_eq!(
+            MAX_PROFILE_ANIM_BYTES,
+            crate::node::assets::AssetKind::Profile.recv_cap(),
+        );
+    }
+
+    #[test]
+    fn animated_avatar_lands_at_avatar_dim_with_a_still_companion() {
+        let gif = make_test_gif(400, 260);
+        let (anim, still) = process_user_avatar_anim(&gif).expect("process avatar");
+
+        assert!(is_animated_webp(&anim), "the animated half must stay animated");
+        assert_eq!(
+            get_image_dimensions(&anim).unwrap(),
+            (AVATAR_DIM, AVATAR_DIM),
+            "a source above the ceiling is square-cropped down to it"
+        );
+        assert!(anim.len() <= MAX_PROFILE_ANIM_BYTES);
+
+        assert!(!is_animated_image(&still), "the companion is a STILL");
+        assert_eq!(get_image_dimensions(&still).unwrap(), (AVATAR_DIM, AVATAR_DIM));
+    }
+
+    /// The whole point of the ceiling: a small source keeps its own size.
+    /// Upscaling invents no detail and multiplies the decoded RGBA every
+    /// viewer holds while the animation plays.
+    #[test]
+    fn a_small_animated_source_is_never_upscaled() {
+        let gif = make_test_gif(96, 96);
+        let (anim, still) = process_user_avatar_anim(&gif).expect("process avatar");
+        assert_eq!(get_image_dimensions(&anim).unwrap(), (96, 96));
+        assert_eq!(get_image_dimensions(&still).unwrap(), (96, 96));
+
+        // Vitalik's own banner shape: 300x120 crops to 300x100 and stays there.
+        let gif = make_test_gif(300, 120);
+        let (anim, still) = process_user_banner_anim(&gif).expect("process banner");
+        assert_eq!(get_image_dimensions(&anim).unwrap(), (300, 100));
+        assert_eq!(get_image_dimensions(&still).unwrap(), (300, 100));
+
+        // ...and the STILL path carries the same rule.
+        let png = make_test_png(300, 120);
+        let still = process_banner_image(&png).expect("still banner");
+        assert_eq!(get_image_dimensions(&still).unwrap(), (300, 100));
+    }
+
+    #[test]
+    fn animated_banner_crops_to_3to1_under_the_600x200_ceiling() {
+        let gif = make_test_gif(1200, 900);
+        let (anim, still) = process_user_banner_anim(&gif).expect("process banner");
+        assert_eq!(get_image_dimensions(&anim).unwrap(), (BANNER_W, BANNER_W / 3));
+        assert_eq!(get_image_dimensions(&still).unwrap(), (BANNER_W, BANNER_W / 3));
+        assert!(anim.len() <= MAX_PROFILE_ANIM_BYTES);
+    }
+
+    /// A screen recording used as a banner is refused with advice, never
+    /// silently decimated — degrading somebody's art behind their back is
+    /// worse than telling them what fits.
+    #[test]
+    fn an_over_long_animation_is_refused_with_the_length_that_fits() {
+        let per_frame = BANNER_W as usize * (BANNER_W / 3) as usize * 4;
+        let budget = MAX_PROFILE_DECODED_BYTES / per_frame;
+
+        use image::codecs::gif::GifEncoder;
+        use image::{Delay, Frame, Rgba, RgbaImage};
+        let mut buf = Vec::new();
+        {
+            let mut encoder = GifEncoder::new(&mut buf);
+            for i in 0..(budget + 4) {
+                let shade = (i % 256) as u8;
+                encoder
+                    .encode_frame(Frame::from_parts(
+                        RgbaImage::from_pixel(BANNER_W, BANNER_W / 3, Rgba([shade, 20, 40, 255])),
+                        0,
+                        0,
+                        Delay::from_numer_denom_ms(100, 1),
+                    ))
+                    .unwrap();
+            }
         }
+        let err = process_user_banner_anim(&buf).expect_err("must refuse");
+        assert!(err.contains("too long"), "unexpected error: {err}");
+        assert!(err.contains('s'), "the message must name a length: {err}");
     }
 
     #[test]
@@ -1065,6 +1322,65 @@ pub const AVATAR_DIM: u32 = 184;
 /// asset rail, so every extra kilobyte replicates to every member.
 pub const SERVER_ICON_DIM: u32 = 128;
 
+/// A person's banner is 3:1 and at most `BANNER_W` x `BANNER_W / 3`
+/// (600x200) — a CEILING rather than a target, so a source already smaller
+/// keeps its own size. Upscaling manufactures no detail and multiplies the
+/// decoded RGBA every viewer holds while the profile card is open.
+///
+/// Only the width is a constant because a 3:1 crop is always wider than it is
+/// tall, so bounding the longest edge bounds the box.
+pub const BANNER_W: u32 = 600;
+
+/// Byte ceiling on an animated avatar or banner. This is DELIBERATELY equal
+/// to `AssetKind::Profile::recv_cap()`, and a test pins the equality: the
+/// wire cap and the authoring limit are the same number by construction, so
+/// they cannot drift into "we encode what nobody will accept".
+pub const MAX_PROFILE_ANIM_BYTES: usize = 1_048_576;
+
+/// Decoded-RGBA budget for one animated profile asset (`frames × w × h × 4`).
+///
+/// The cost that matters for animation is not the stored bytes, it is what a
+/// viewer holds decoded while it plays. A 24-second screen recording used as
+/// a banner is 238 frames at 600x200 = 109 MB of RGBA, against a real
+/// animated banner's 6 MB. This refuses that with an explanation instead of
+/// silently dropping frames — nobody's art gets degraded behind their back.
+const MAX_PROFILE_DECODED_BYTES: usize = 48 * 1024 * 1024;
+
+/// Source-file ceiling for animated profile media. The picker rejects on what
+/// we PRODUCE, not on what was picked, so this is the one bound left on the
+/// input side.
+const MAX_PROFILE_SOURCE_BYTES: usize = 16 * 1024 * 1024;
+
+/// Largest centred square of a `(w, h)` canvas, as `(x, y, w, h)`.
+fn crop_rect_square(w: u32, h: u32) -> (u32, u32, u32, u32) {
+    let side = w.min(h);
+    ((w - side) / 2, (h - side) / 2, side, side)
+}
+
+/// Largest centred 3:1 region of a `(w, h)` canvas, as `(x, y, w, h)`.
+fn crop_rect_3to1(w: u32, h: u32) -> (u32, u32, u32, u32) {
+    let (cw, ch) = if w >= h * 3 {
+        (h * 3, h)
+    } else {
+        (w, (w / 3).max(1))
+    };
+    ((w - cw) / 2, (h - ch) / 2, cw, ch)
+}
+
+/// Shrink `(w, h)` so its longest edge is at most `max_dim`, keeping aspect.
+/// NEVER enlarges — a source under the ceiling is handed back untouched.
+fn fit_dims(w: u32, h: u32, max_dim: u32) -> (u32, u32) {
+    if w.max(h) > max_dim {
+        let scale = max_dim as f32 / w.max(h) as f32;
+        (
+            ((w as f32 * scale).max(1.0)) as u32,
+            ((h as f32 * scale).max(1.0)) as u32,
+        )
+    } else {
+        (w, h)
+    }
+}
+
 /// Process a raw image into a person's avatar: centre-crop square, resize to
 /// [`AVATAR_DIM`], encode as WebP.
 pub fn process_avatar_image(data: &[u8]) -> Result<Vec<u8>, String> {
@@ -1145,8 +1461,8 @@ pub fn process_showcase_cover(data: &[u8]) -> Result<Vec<u8>, String> {
 /// WebP (Balanced), stills keep their aspect capped at 800px on the longest
 /// side. Per-asset ceiling keeps the replicated bundle sane.
 pub fn process_showcase_artwork(data: &[u8]) -> Result<Vec<u8>, String> {
-    if data.starts_with(b"GIF8") {
-        let (webp, _w, _h) = convert_gif_to_animated_webp(data, WebpQuality::Balanced)?;
+    if is_animated_image(data) {
+        let (webp, _w, _h) = convert_animation_to_webp(data, WebpQuality::Balanced)?;
         if webp.len() > 600_000 {
             return Err("Animated artwork too large after processing (>600KB)".into());
         }
@@ -1183,37 +1499,15 @@ pub fn process_emote_image(data: &[u8]) -> Result<(Vec<u8>, bool), String> {
     const MAX_STILL: usize = 32_000;
     const MAX_ANIMATED: usize = 262_144;
 
-    if data.starts_with(b"GIF8") {
-        let decoder = GifDecoder::new(Cursor::new(data))
-            .map_err(|e| format!("Failed to decode GIF: {e}"))?;
-        let frames = decoder
-            .into_frames()
-            .collect_frames()
-            .map_err(|e| format!("Failed to collect GIF frames: {e}"))?;
-        if frames.is_empty() {
-            return Err("GIF has no frames".into());
-        }
-        let (w, h) = (frames[0].buffer().width(), frames[0].buffer().height());
+    // GIF or APNG (see `process_avatar_frame` for why APNG cannot fall
+    // through to the still path).
+    if is_animated_image(data) && !is_animated_webp(data) {
+        let timed = decode_animation_frames(data)?;
+        let (w, h) = (timed[0].0.width(), timed[0].0.height());
         if w == 0 || h == 0 {
-            return Err("GIF has zero dimensions".into());
+            return Err("Animation has zero dimensions".into());
         }
-        let (nw, nh) = if w.max(h) > MAX_DIM {
-            let scale = MAX_DIM as f32 / w.max(h) as f32;
-            (
-                ((w as f32 * scale).max(1.0)) as u32,
-                ((h as f32 * scale).max(1.0)) as u32,
-            )
-        } else {
-            (w, h)
-        };
-        let timed: Vec<(image::RgbaImage, i32)> = frames
-            .into_iter()
-            .map(|f| {
-                let delay: std::time::Duration = f.delay().into();
-                let ms = delay.as_millis() as i32;
-                (f.into_buffer(), if ms < 20 { 100 } else { ms })
-            })
-            .collect();
+        let (nw, nh) = fit_dims(w, h, MAX_DIM);
         let scaled = crop_resize_frames(&timed, (0, 0, w, h), nw, nh);
         let webp =
             webp_anim::encode_animation(&scaled, (nw, nh), &webp_anim::AnimParams::art(75.0))?;
@@ -1258,8 +1552,14 @@ pub fn process_emote_image(data: &[u8]) -> Result<(Vec<u8>, bool), String> {
     Ok((buf, false))
 }
 
-/// Process a raw image into banner format: center-crop to 3:1 aspect, resize to 600x200, encode as WebP.
-/// Accepts any image — crops the widest 3:1 region it can find, or stretches if very small.
+/// Process a raw image into a person's still banner: centre-crop to 3:1,
+/// then shrink to at most [`BANNER_W`] wide — a CEILING, never a resize
+/// target.
+///
+/// The ceiling matters even for a still: upscaling a 300x120 source to
+/// 600x200 invents no detail, and the resample manufactures intermediate
+/// colours that were not in the source and cost real bytes in a blob that is
+/// PUSHED to everyone who syncs with you.
 pub fn process_banner_image(data: &[u8]) -> Result<Vec<u8>, String> {
     let img = image::load_from_memory(data)
         .map_err(|e| format!("Failed to decode image: {e}"))?;
@@ -1269,24 +1569,20 @@ pub fn process_banner_image(data: &[u8]) -> Result<Vec<u8>, String> {
         return Err("Image has zero dimensions".into());
     }
 
-    // Target aspect 3:1 — crop the largest 3:1 region from center
-    let (cw, ch) = if w >= h * 3 {
-        // Image is wider than 3:1 — crop width
-        (h * 3, h)
-    } else {
-        // Image is taller than 3:1 — crop height
-        (w, (w / 3).max(1))
-    };
-    let x = (w - cw) / 2;
-    let y = (h - ch) / 2;
+    let (x, y, cw, ch) = crop_rect_3to1(w, h);
+    let (dw, dh) = fit_dims(cw, ch, BANNER_W);
 
     let cropped = img.crop_imm(x, y, cw, ch);
-    let resized = cropped.resize_exact(600, 200, FilterType::Lanczos3);
+    // Skip the resample when the crop already fits — see `crop_resize_frames`.
+    let rgba = if (cw, ch) == (dw, dh) {
+        cropped.to_rgba8()
+    } else {
+        cropped.resize_exact(dw, dh, FilterType::Lanczos3).to_rgba8()
+    };
 
     // Lossy for the same reason as avatars/covers: lossless size is
     // content-dependent, so photographic banners randomly failed to upload.
-    let rgba = resized.to_rgba8();
-    let buf = encode_lossy_webp_via_animation(rgba.as_raw(), 600, 200, 80.0)?;
+    let buf = encode_lossy_webp_via_animation(rgba.as_raw(), dw, dh, 80.0)?;
 
     if buf.len() > 200_000 {
         return Err("Banner image too large after processing (>200KB)".into());
@@ -1311,39 +1607,15 @@ pub fn process_server_banner_image(data: &[u8]) -> Result<(Vec<u8>, bool), Strin
     const MAX_STILL: usize = 150_000;
     const MAX_ANIMATED: usize = 1_048_576;
 
-    // Largest centered 3:1 region of a (w, h) canvas.
-    fn crop_rect_3to1(w: u32, h: u32) -> (u32, u32, u32, u32) {
-        let (cw, ch) = if w >= h * 3 {
-            (h * 3, h)
-        } else {
-            (w, (w / 3).max(1))
-        };
-        ((w - cw) / 2, (h - ch) / 2, cw, ch)
-    }
-
-    if data.starts_with(b"GIF8") {
-        let decoder = GifDecoder::new(Cursor::new(data))
-            .map_err(|e| format!("Failed to decode GIF: {e}"))?;
-        let frames = decoder
-            .into_frames()
-            .collect_frames()
-            .map_err(|e| format!("Failed to collect GIF frames: {e}"))?;
-        if frames.is_empty() {
-            return Err("GIF has no frames".into());
-        }
-        let (w, h) = (frames[0].buffer().width(), frames[0].buffer().height());
+    // GIF or APNG (see `process_avatar_frame` for why APNG cannot fall
+    // through to the still path).
+    if is_animated_image(data) && !is_animated_webp(data) {
+        let timed = decode_animation_frames(data)?;
+        let (w, h) = (timed[0].0.width(), timed[0].0.height());
         if w == 0 || h == 0 {
-            return Err("GIF has zero dimensions".into());
+            return Err("Animation has zero dimensions".into());
         }
         let crop = crop_rect_3to1(w, h);
-        let timed: Vec<(image::RgbaImage, i32)> = frames
-            .into_iter()
-            .map(|f| {
-                let delay: std::time::Duration = f.delay().into();
-                let ms = delay.as_millis() as i32;
-                (f.into_buffer(), if ms < 20 { 100 } else { ms })
-            })
-            .collect();
         let scaled = crop_resize_frames(&timed, crop, BANNER_W, BANNER_H);
         let webp = webp_anim::encode_animation(
             &scaled,
@@ -1547,12 +1819,6 @@ pub fn process_server_avatar_anim(data: &[u8]) -> Result<Vec<u8>, String> {
     const ICON_DIM: u32 = 128;
     const MAX_ANIMATED: usize = 524_288;
 
-    // Largest centered square of a (w, h) canvas.
-    fn crop_rect_square(w: u32, h: u32) -> (u32, u32, u32, u32) {
-        let side = w.min(h);
-        ((w - side) / 2, (h - side) / 2, side, side)
-    }
-
     // Already an animated WebP at or under the icon size: pass the bytes
     // through untouched. Re-encoding here would only add a generation of
     // loss, and a content-addressed blob that survives byte-identically
@@ -1586,6 +1852,126 @@ pub fn process_server_avatar_anim(data: &[u8]) -> Result<Vec<u8>, String> {
         return Err("Animated icon too large after processing (>512KB)".into());
     }
     Ok(webp)
+}
+
+/// Process an animated source into a person's ANIMATED AVATAR plus its STILL
+/// companion, returned as `(animated, still)`.
+///
+/// The animated half is a content-addressed asset (`AssetKind::Profile`)
+/// PULLED on demand; the still half is what rides the pushed profile blob, so
+/// an old client and the guest thumb still see a face. Square centre crop,
+/// [`AVATAR_DIM`] ceiling, ART preset — the same split
+/// `process_server_avatar_anim` makes for server icons.
+pub fn process_user_avatar_anim(data: &[u8]) -> Result<(Vec<u8>, Vec<u8>), String> {
+    // Quality first (cheap), then one step down in size — the ladder shape
+    // `process_asset_for_send` established.
+    const LADDER: [(u32, f32); 4] = [
+        (AVATAR_DIM, 85.0),
+        (AVATAR_DIM, 80.0),
+        (AVATAR_DIM, 75.0),
+        (138, 80.0),
+    ];
+    process_profile_anim(data, crop_rect_square, &LADDER, 100_000, "avatar")
+}
+
+/// Process an animated source into a person's ANIMATED BANNER plus its STILL
+/// companion, returned as `(animated, still)`. 3:1 centre crop,
+/// [`BANNER_W`] CEILING (600x200), ART preset.
+///
+/// The ceiling is load-bearing. A 300x120 source stays 300x120: targeting
+/// 600x200 unconditionally would upscale it, tripling the decoded RGBA every
+/// viewer holds for detail that is not in the file.
+pub fn process_user_banner_anim(data: &[u8]) -> Result<(Vec<u8>, Vec<u8>), String> {
+    const LADDER: [(u32, f32); 4] = [
+        (BANNER_W, 85.0),
+        (BANNER_W, 80.0),
+        (BANNER_W, 75.0),
+        (450, 80.0),
+    ];
+    process_profile_anim(data, crop_rect_3to1, &LADDER, 200_000, "banner")
+}
+
+/// The one animated path behind both profile media kinds: decode ONCE, crop
+/// every frame at native resolution, walk a `(ceiling, quality)` ladder until
+/// the encode fits [`MAX_PROFILE_ANIM_BYTES`], and encode frame 0 as the still
+/// companion off the same decode.
+///
+/// There is deliberately NO already-an-animated-WebP passthrough here, unlike
+/// the server-icon path. The crop, the never-upscale ceiling and the decoded
+/// RGBA guard all need real dimensions and a real frame count, so a
+/// passthrough would be the one shape none of those rules could see. libwebp
+/// encodes deterministically, so re-uploading the same file still lands on the
+/// same content hash and peers still skip the re-pull.
+///
+/// Taking the still from the decoded frame 0 rather than
+/// `image::load_from_memory` is not incidental either: that decoder reports
+/// alpha 255 for every pixel of an ANMF WebP (see `process_sticker_for_send`),
+/// which would quietly matte a cut-out avatar onto black.
+fn process_profile_anim(
+    data: &[u8],
+    crop: fn(u32, u32) -> (u32, u32, u32, u32),
+    ladder: &[(u32, f32)],
+    max_still_bytes: usize,
+    label: &str,
+) -> Result<(Vec<u8>, Vec<u8>), String> {
+    // Reject an absurd source before opening it. The picker no longer caps on
+    // SOURCE bytes (a 1.98 MB GIF converts to 971 KB and should be allowed),
+    // so this is what keeps "pick a file" bounded.
+    if data.len() > MAX_PROFILE_SOURCE_BYTES {
+        return Err(format!("That {label} file is too big to convert (16MB max)"));
+    }
+    let frames = decode_animation_frames(data)?;
+    let (w, h) = (frames[0].0.width(), frames[0].0.height());
+    if w == 0 || h == 0 {
+        return Err("Animation has zero dimensions".into());
+    }
+    let (cx, cy, cw, ch) = crop(w, h);
+
+    // Rung 0's dimensions ARE the ceiling, so the still is encoded there and
+    // stays full size even when the animation had to step down to fit.
+    let (sw, sh) = fit_dims(cw, ch, ladder[0].0);
+    let still_frames = crop_resize_frames(&frames[..1], (cx, cy, cw, ch), sw, sh);
+    let still = encode_lossy_webp_via_animation(still_frames[0].0.as_raw(), sw, sh, 80.0)?;
+    if still.len() > max_still_bytes {
+        return Err(format!("{label} is too detailed to store as a still"));
+    }
+
+    // Refuse on the ceiling only: the guard is about what a viewer holds
+    // decoded, later rungs are smaller, and sizing the advice off the ceiling
+    // keeps it honest ("this is how long fits", not "how long fits at a
+    // quality nobody asked for").
+    let per_frame = sw as usize * sh as usize * 4;
+    let budget_frames = (MAX_PROFILE_DECODED_BYTES / per_frame.max(1)).max(1);
+    if frames.len() > budget_frames {
+        let total_ms: i64 = frames.iter().map(|(_, ms)| *ms as i64).sum();
+        let fits_s = (total_ms * budget_frames as i64) / (frames.len() as i64 * 1000).max(1);
+        return Err(format!(
+            "Animated {label} is too long: about {fits_s}s fits at {sw}x{sh}"
+        ));
+    }
+
+    // The first three rungs share the ceiling and drop only quality, so the
+    // cropped/scaled frames are reused across them - re-cropping 160 frames
+    // per rung is wall-clock the author waits on.
+    let mut scaled: Vec<(image::RgbaImage, i32)> = Vec::new();
+    let mut scaled_dims = (0u32, 0u32);
+    for &(ceiling, quality) in ladder {
+        // A ceiling, not a target: `fit_dims` only ever shrinks, and
+        // `crop_resize_frames` skips the resample entirely when the crop
+        // already equals it (resampling flat art costs real bytes).
+        let (dw, dh) = fit_dims(cw, ch, ceiling);
+        if scaled_dims != (dw, dh) {
+            scaled = crop_resize_frames(&frames, (cx, cy, cw, ch), dw, dh);
+            scaled_dims = (dw, dh);
+        }
+        let webp = encode_animation_frames(&scaled, (dw, dh), quality)?;
+        if webp.len() <= MAX_PROFILE_ANIM_BYTES {
+            return Ok((webp, still));
+        }
+    }
+    Err(format!(
+        "Animated {label} is too large after conversion (over 1MB)"
+    ))
 }
 
 /// Encode pre-sized RGBA frames (frame, duration-ms) as a lossy animated WebP
@@ -1661,18 +2047,6 @@ fn process_asset_for_send(
 ) -> Result<(Vec<u8>, u32, u32, bool), String> {
     const MAX_FRAMES: usize = 300;
 
-    fn fit_dims(w: u32, h: u32, max_dim: u32) -> (u32, u32) {
-        if w.max(h) > max_dim {
-            let scale = max_dim as f32 / w.max(h) as f32;
-            (
-                ((w as f32 * scale).max(1.0)) as u32,
-                ((h as f32 * scale).max(1.0)) as u32,
-            )
-        } else {
-            (w, h)
-        }
-    }
-
     let mut frames: Vec<(image::RgbaImage, i32)> = Vec::new();
     let mut target: Option<(u32, u32)> = None;
 
@@ -1723,6 +2097,20 @@ fn process_asset_for_send(
             prev_ts = frame.timestamp();
             frames.push((rgba, duration_ms));
         }
+    } else if is_animated_image(data) {
+        // APNG. Not folded into either branch above: those stream through
+        // their own codecs and resize as they go, while APNG comes back from
+        // the shared decoder as whole frames (bounded by its RGBA budget).
+        let decoded = decode_animation_frames(data)?;
+        if decoded.len() > MAX_FRAMES {
+            return Err(format!("{label} is too long to send"));
+        }
+        let (w, h) = (decoded[0].0.width(), decoded[0].0.height());
+        if w == 0 || h == 0 {
+            return Err("APNG has zero dimensions".into());
+        }
+        let (nw, nh) = fit_dims(w, h, max_dim);
+        frames = crop_resize_frames(&decoded, (0, 0, w, h), nw, nh);
     } else {
         // Still source (e.g. a still WebP full variant) — single-frame asset.
         let img = image::load_from_memory(data)
@@ -1843,33 +2231,20 @@ fn frame_crop_rect(w: u32, h: u32) -> (u32, u32, u32, u32) {
 /// or the decoration simply hides the thing it decorates. See
 /// [`frame_centre_opacity`].
 pub fn process_avatar_frame(data: &[u8]) -> Result<(Vec<u8>, bool), String> {
-    if data.starts_with(b"GIF8") {
-        let decoder = GifDecoder::new(Cursor::new(data))
-            .map_err(|e| format!("Failed to decode GIF: {e}"))?;
-        let frames = decoder
-            .into_frames()
-            .collect_frames()
-            .map_err(|e| format!("Failed to collect GIF frames: {e}"))?;
-        if frames.is_empty() {
-            return Err("GIF has no frames".into());
-        }
-        let (w, h) = (frames[0].buffer().width(), frames[0].buffer().height());
+    // GIF or APNG. Steam serves its animated frames as APNG, which is the
+    // single most common source for this feature, so routing it to the still
+    // path below would flatten exactly the art people bring here — silently,
+    // because a frozen frame still uploads "successfully".
+    if is_animated_image(data) && !is_animated_webp(data) {
+        let frames = decode_animation_frames(data)?;
+        let (w, h) = (frames[0].0.width(), frames[0].0.height());
         if w == 0 || h == 0 {
-            return Err("GIF has zero dimensions".into());
+            return Err("Animation has zero dimensions".into());
         }
         let (x, y, cw, ch) = frame_crop_rect(w, h);
 
-        let mut prepared: Vec<(image::RgbaImage, i32)> = Vec::with_capacity(frames.len());
-        let mut opacity_sum = 0.0f32;
-        for frame in &frames {
-            let cropped = image::imageops::crop_imm(frame.buffer(), x, y, cw, ch).to_image();
-            let resized =
-                image::imageops::resize(&cropped, FRAME_DIM, FRAME_DIM, FilterType::Lanczos3);
-            opacity_sum += frame_centre_opacity(&resized);
-            let delay: std::time::Duration = frame.delay().into();
-            let delay_ms = delay.as_millis() as i32;
-            prepared.push((resized, if delay_ms < 20 { 100 } else { delay_ms }));
-        }
+        let prepared = crop_resize_frames(&frames, (x, y, cw, ch), FRAME_DIM, FRAME_DIM);
+        let opacity_sum: f32 = prepared.iter().map(|(f, _)| frame_centre_opacity(f)).sum();
         if opacity_sum / prepared.len() as f32 > FRAME_HOLE_MAX_OPAQUE {
             return Err(frame_hole_error());
         }

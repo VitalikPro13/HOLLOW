@@ -9,7 +9,7 @@ import 'package:freezed_annotation/freezed_annotation.dart' hide protected;
 import 'showcase.dart';
 part 'network.freezed.dart';
 
-// These functions are ignored because they are not marked as `pub`: `event_forwarding_task`, `get_event_rx`, `get_http_runtime`, `get_license_key`, `get_node`, `get_proxy_config`, `get_proxy_socks_addr`, `get_relay_domain`, `get_runtime`, `open_local_store`, `send_node_command`, `set_proxy_socks_addr`, `to_ffi_event`
+// These functions are ignored because they are not marked as `pub`: `event_forwarding_task`, `get_event_rx`, `get_http_runtime`, `get_license_key`, `get_node`, `get_proxy_config`, `get_proxy_socks_addr`, `get_relay_domain`, `get_runtime`, `open_local_store`, `send_node_command`, `set_proxy_socks_addr`, `store_profile_media`, `to_ffi_event`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `NodeState`, `ProxyConfig`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `fmt`, `from`, `from`, `from`, `from`
 
@@ -646,6 +646,11 @@ Future<void> requestChannelSync({
 /// `avatar_frame`: None = unchanged, Some("") = clear, Some(id) = set — a
 /// built-in `b:<hue>` or the 64-hex hash of a frame blob already stored by
 /// [`process_and_store_avatar_frame`] (issue #54). Never bytes.
+/// `avatar_anim` / `banner_anim`: the same three states for the ANIMATED
+/// variants, whose bytes ride the asset rail — pass the hash returned by
+/// [`process_and_store_avatar_anim`] / [`process_and_store_banner_anim`] and
+/// its `still` as the matching `avatar_bytes` / `banner_bytes`. A still-only
+/// pick must pass `Some("")` so a previous animation is dropped.
 Future<void> updateProfile({
   required String displayName,
   required String status,
@@ -656,6 +661,8 @@ Future<void> updateProfile({
   String? showcaseBoard,
   List<ShowcaseAsset>? showcaseAssets,
   String? avatarFrame,
+  String? avatarAnim,
+  String? bannerAnim,
 }) => RustLib.instance.api.crateApiNetworkUpdateProfile(
   displayName: displayName,
   status: status,
@@ -666,9 +673,12 @@ Future<void> updateProfile({
   showcaseBoard: showcaseBoard,
   showcaseAssets: showcaseAssets,
   avatarFrame: avatarFrame,
+  avatarAnim: avatarAnim,
+  bannerAnim: bannerAnim,
 );
 
-/// Process a raw image into avatar format (128x128 WebP). Returns processed bytes.
+/// Process a raw image into a person's avatar (184x184 WebP — see
+/// `image_convert::AVATAR_DIM`). Returns processed bytes.
 Future<Uint8List> processAvatar({required List<int> rawBytes}) =>
     RustLib.instance.api.crateApiNetworkProcessAvatar(rawBytes: rawBytes);
 
@@ -684,6 +694,45 @@ Future<ProcessedFrame> processAndStoreAvatarFrame({
 }) => RustLib.instance.api.crateApiNetworkProcessAndStoreAvatarFrame(
   rawBytes: rawBytes,
 );
+
+/// Process a user-picked animated image into an ANIMATED AVATAR and cache it
+/// content-addressed under `AssetKind::Profile`. The caller then names the
+/// returned hash in `update_profile(avatar_anim: Some(hash))` and passes
+/// `still` as `avatar_bytes`; the animation rides the asset rail on demand,
+/// never the profile push.
+///
+/// Errors are user-facing: over the 1 MB cap even after the quality ladder, or
+/// too many frames to hold decoded (a screen recording used as profile art).
+Future<ProcessedProfileMedia> processAndStoreAvatarAnim({
+  required List<int> rawBytes,
+}) => RustLib.instance.api.crateApiNetworkProcessAndStoreAvatarAnim(
+  rawBytes: rawBytes,
+);
+
+/// The banner twin of [`process_and_store_avatar_anim`] (3:1 crop, 600x200
+/// ceiling). Pass `still` as `banner_bytes` and the hash as `banner_anim`.
+Future<ProcessedProfileMedia> processAndStoreBannerAnim({
+  required List<int> rawBytes,
+}) => RustLib.instance.api.crateApiNetworkProcessAndStoreBannerAnim(
+  rawBytes: rawBytes,
+);
+
+/// One-shot migration for a profile authored BEFORE animated media moved to
+/// the asset rail: the animation used to sit in `avatar`/`banner` as raw
+/// source bytes and rode every profile push. Converts ours in place — the
+/// animation onto the rail under its hash, a 184px / 600x200 still into the
+/// blob — and re-announces once.
+///
+/// Without this the bandwidth win only lands for people who happen to re-pick
+/// their avatar, and everyone else keeps re-shipping megabytes of unchanged
+/// GIF on every reconnect. Called once from the Dart bootstrap after the node
+/// starts; a settings marker makes it idempotent, and a conversion FAILURE
+/// still sets the marker — a source we cannot convert keeps working exactly as
+/// it did, it just never becomes cheap.
+///
+/// Returns true when something was actually converted.
+Future<bool> migrateProfileMediaOnce() =>
+    RustLib.instance.api.crateApiNetworkMigrateProfileMediaOnce();
 
 /// Process a raw image into banner format (600x200 WebP). Returns processed bytes.
 Future<Uint8List> processBanner({required List<int> rawBytes}) =>
@@ -2286,6 +2335,41 @@ class ProcessedFrame {
           hash == other.hash &&
           animated == other.animated &&
           bytes == other.bytes;
+}
+
+/// An animated avatar or banner that has been processed and cached locally,
+/// ready to be named in `update_profile(avatar_anim: ...)`.
+class ProcessedProfileMedia {
+  /// 64-hex SHA-256 of the ANIMATED bytes — the identity that rides the
+  /// profile announce, and what peers pull on the asset rail.
+  final String hash;
+
+  /// The animated WebP, so the picker previews exactly what everyone else
+  /// will see without a round trip back through the blob store.
+  final Uint8List bytes;
+
+  /// The STILL companion (frame 0, same ceiling). This is what the caller
+  /// must pass as `avatar_bytes` / `banner_bytes`: it stays inside the
+  /// pushed profile so old clients and the guest thumb still see a face.
+  final Uint8List still;
+
+  const ProcessedProfileMedia({
+    required this.hash,
+    required this.bytes,
+    required this.still,
+  });
+
+  @override
+  int get hashCode => hash.hashCode ^ bytes.hashCode ^ still.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ProcessedProfileMedia &&
+          runtimeType == other.runtimeType &&
+          hash == other.hash &&
+          bytes == other.bytes &&
+          still == other.still;
 }
 
 /// FFI-facing public channel entry for guest viewer.

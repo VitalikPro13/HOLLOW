@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/color_utils.dart';
 import 'package:hollow/src/core/providers/avatar_frame_provider.dart';
 import 'package:hollow/src/core/providers/avatar_provider.dart';
+import 'package:hollow/src/core/providers/profile_anim_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/ui/components/animated_gif_image.dart';
@@ -93,6 +94,13 @@ class HollowAvatar extends ConsumerWidget {
     final hollow = HollowTheme.of(context);
 
     Uint8List? bytes = imageBytes;
+    if (bytes == null && peerId.isNotEmpty) {
+      // The ANIMATED variant, when this person has one and we hold it: the
+      // profile blob carries only the still, and the animation is pulled off
+      // the asset rail. Until it lands (or if it was evicted) the still below
+      // keeps rendering, so a face is never blank waiting for a pull.
+      bytes = watchAnimatedAvatar(ref, peerId);
+    }
     if (bytes == null && peerId.isNotEmpty) {
       bytes = ref.watch(avatarProvider.select((c) => c[peerId]));
       if (bytes == null) {

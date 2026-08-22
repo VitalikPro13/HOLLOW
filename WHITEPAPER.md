@@ -823,7 +823,7 @@ CRDT operations are validated on receipt:
 
 ### 10.7 Custom Emotes and the Asset Rail (Content-Addressed Asset Replication)
 
-Custom emotes are small images usable inline in messages and as reactions. Their design extends the CRDT model with a content-addressed asset layer, the *asset rail*, that also carries the other media kinds built on it (server banners, animated server icons, stickers, GIFs, avatar frames), which differ only in their size bounds:
+Custom emotes are small images usable inline in messages and as reactions. Their design extends the CRDT model with a content-addressed asset layer, the *asset rail*, that also carries the other media kinds built on it (server banners, animated server icons, stickers, GIFs, avatar frames, and animated profile media), which differ only in their size bounds:
 
 - **Metadata and bytes are separated.** The replicated CRDT entry (`EmojiAdded`) carries only a name and the SHA-256 hash of the processed image. The image bytes never ride CRDT operations, message envelopes, or relay buffers.
 - **Bytes replicate on demand, peer-to-peer.** A client that must render an unknown hash requests it from a single source: the message sender's devices (direct messages) or one online server member (channels). Any member holding the bytes can serve them: content addressing makes every copy equally trustworthy, because the receiver recomputes the hash (and enforces format and size bounds) before caching. A tampered or substituted image simply fails verification and is discarded.
@@ -838,6 +838,27 @@ Server emote sets are capped and gated by a dedicated permission bit (§11.2); n
 **Animated server icons** apply the split retroactively to a field that predates the rail: the small still icon remains inline in replicated server state (older clients and pre-join surfaces keep working unchanged), while an animated upload additionally publishes only the hash of a size-bounded animated variant, whose bytes ride the rail under the same requested-only, receiver-verified rules. Animation never rides state snapshots, sync frames, or pre-join wire paths.
 
 **Avatar frames** extend the same separation to a *personal* profile, where the pressure runs the other way. A profile update is pushed to everyone who synchronises with its owner, so any decoration carried inline is paid for by every recipient whether or not they ever look at it. The profile therefore carries only a short identifier: either a procedurally drawn built-in, which costs nothing on the wire, or the hash of an uploaded image whose bytes travel the rail on demand and are the first thing evicted under a client's own cache bound. The identifier is validated on ingest against exactly three permitted shapes, and an unrecognised value is treated as absent rather than as a clear, so a malformed field from a future client cannot erase what a recipient already holds. That validation is not cosmetic: the field arrives in plaintext on the unencrypted profile path and is used to key a network request, so an unconstrained string would let a sender direct a recipient's fetches.
+
+**Animated avatars and banners follow the frame's reasoning to its conclusion.** They were the
+last profile media whose bytes travelled inline, and they are the costliest case of the pressure
+described above: an animation is an order of magnitude larger than the still it replaces, and it
+was pushed in full to every peer on every reconnection, whether or not that peer ever rendered
+it. The profile now carries a *still* image and, separately, the hash of an animated variant. The
+still is what a recipient sees by default and what a client predating the split still receives, so
+nothing degrades to a blank; the animation travels the rail on demand and is evictable like any
+other asset, so a recipient who never opens a profile card never pays for its animation, and one
+who evicts it loses motion rather than a face. The hash is validated on ingest exactly as the
+frame identifier is, for the same reason: it arrives in plaintext on the unencrypted profile path
+and keys a network request. It is deliberately outside the profile signature, on the same
+reasoning that excludes the frame: substituting one decoration hash for another swaps art the
+substituter already possesses, while the still image that the signature does cover continues to
+render beneath it.
+
+A consequence worth stating plainly: because the still and the animation are separate objects
+with separate lifetimes, a recipient's view of someone's avatar can be *behind* in motion while
+being current in identity. That is the intended trade. Identity is what the signature covers and
+what arrives with the push; motion is decoration, and decoration is what a bandwidth or storage
+bound should be allowed to shed first.
 
 **Sticker packs are distributed as files, and there is no directory.** A personal collection of stickers can be exported as a single signed archive and shared the way any other file is shared: sent into a conversation over the ordinary encrypted transfer path. There is deliberately no pack link, no catalog, and no discovery surface, and the reason is structural rather than stylistic: the network has nowhere to host bytes. A server invitation works because the link carries only an identifier and the join happens over the relay into a room the inviter already occupies; a pack has no such room behind it, so any URL form would require either serving arbitrary strangers from the author's own node (a discovery and reachability surface the design refuses) or a central content host, which the architecture does not have. Distributing a file is also the more private primitive of the two: a live subscription to someone's collection would tell its author who had adopted it and let them push new bytes to those people later, whereas a file is a one-time copy that establishes no ongoing relationship in either direction.
 

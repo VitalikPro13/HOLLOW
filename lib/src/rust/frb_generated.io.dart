@@ -438,6 +438,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   ProcessedFrame dco_decode_processed_frame(dynamic raw);
 
   @protected
+  ProcessedProfileMedia dco_decode_processed_profile_media(dynamic raw);
+
+  @protected
   ProcessedSticker dco_decode_processed_sticker(dynamic raw);
 
   @protected
@@ -1066,6 +1069,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   ProcessedFrame sse_decode_processed_frame(SseDeserializer deserializer);
+
+  @protected
+  ProcessedProfileMedia sse_decode_processed_profile_media(
+    SseDeserializer deserializer,
+  );
 
   @protected
   ProcessedSticker sse_decode_processed_sticker(SseDeserializer deserializer);
@@ -1891,6 +1899,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_processed_frame(
     ProcessedFrame self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_processed_profile_media(
+    ProcessedProfileMedia self,
     SseSerializer serializer,
   );
 

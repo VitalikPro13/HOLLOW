@@ -70,6 +70,8 @@ class _SeededProfiles extends ProfileNotifier {
           twitchUsername: '',
           showcaseBoard: '',
           avatarFrame: frame,
+          avatarAnim: '',
+          bannerAnim: '',
         ),
       };
 }

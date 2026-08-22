@@ -8,6 +8,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/brand_icons.dart';
 import 'package:hollow/src/core/hollow_data_dir.dart';
+import 'package:hollow/src/core/providers/profile_anim_provider.dart';
 import 'package:hollow/src/core/providers/accent_color_provider.dart';
 import 'package:hollow/src/core/providers/background_provider.dart';
 import 'package:hollow/src/core/providers/banner_provider.dart';
@@ -700,6 +701,13 @@ class _ProfileTabState extends ConsumerState<_ProfileTab> {
   bool _saving = false;
   Uint8List? _pendingAvatar;
   Uint8List? _pendingBanner;
+  // An animated pick splits in two: the animation is cached on the asset rail
+  // under a hash and only the STILL companion rides the profile push. Null on
+  // a still pick, which is also what CLEARS a previous animation on save.
+  Uint8List? _pendingAvatarStill;
+  Uint8List? _pendingBannerStill;
+  String? _pendingAvatarAnim;
+  String? _pendingBannerAnim;
   bool _avatarChanged = false;
   bool _bannerChanged = false;
   // In-flight WebP processing (never-throwing futures — errors handled
@@ -764,13 +772,10 @@ class _ProfileTabState extends ConsumerState<_ProfileTab> {
     // Animated? Decide from the BYTES, never the extension — an animated
     // WebP or an APNG named anything but `.gif` used to go through the
     // cropper and come out a frozen still, silently.
+    // No SOURCE size check: Rust rejects on what it PRODUCES, and a 1.98 MB
+    // GIF that converts to 971 KB is a fine avatar.
     if (isAnimatedImageBytes(bytes)) {
-      if (bytes.length > 1024 * 1024) {
-        HollowToast.show(context, 'Animated avatar must be under 1 MB', type: HollowToastType.error);
-        return;
-      }
-      // Raw animated bytes are final — invalidate any in-flight crop processing.
-      setState(() { _avatarPickGen++; _avatarBusy = false; _pendingAvatar = bytes; _avatarChanged = true; });
+      _processAnimated(bytes, avatar: true);
       return;
     }
 
@@ -789,7 +794,14 @@ class _ProfileTabState extends ConsumerState<_ProfileTab> {
     final prevBytes = _pendingAvatar;
     final prevChanged = _avatarChanged;
     final gen = ++_avatarPickGen;
-    setState(() { _pendingAvatar = cropped; _avatarChanged = true; _avatarBusy = true; });
+    setState(() {
+      _pendingAvatar = cropped;
+      // A still pick drops any previous animation.
+      _pendingAvatarStill = null;
+      _pendingAvatarAnim = null;
+      _avatarChanged = true;
+      _avatarBusy = true;
+    });
     _avatarProcessing = () async {
       try {
         final processed = await network_api.processAvatar(rawBytes: cropped);
@@ -811,11 +823,7 @@ class _ProfileTabState extends ConsumerState<_ProfileTab> {
 
     // Animated? Decide from the BYTES, never the extension (see _pickAvatar).
     if (isAnimatedImageBytes(bytes)) {
-      if (bytes.length > 2 * 1024 * 1024) {
-        HollowToast.show(context, 'Animated banner must be under 2 MB', type: HollowToastType.error);
-        return;
-      }
-      setState(() { _bannerPickGen++; _bannerBusy = false; _pendingBanner = bytes; _bannerChanged = true; });
+      _processAnimated(bytes, avatar: false);
       return;
     }
 
@@ -832,7 +840,13 @@ class _ProfileTabState extends ConsumerState<_ProfileTab> {
     final prevBytes = _pendingBanner;
     final prevChanged = _bannerChanged;
     final gen = ++_bannerPickGen;
-    setState(() { _pendingBanner = cropped; _bannerChanged = true; _bannerBusy = true; });
+    setState(() {
+      _pendingBanner = cropped;
+      _pendingBannerStill = null;
+      _pendingBannerAnim = null;
+      _bannerChanged = true;
+      _bannerBusy = true;
+    });
     _bannerProcessing = () async {
       try {
         final processed = await network_api.processBanner(rawBytes: cropped);
@@ -844,6 +858,65 @@ class _ProfileTabState extends ConsumerState<_ProfileTab> {
         HollowToast.show(context, 'Failed to process', type: HollowToastType.error);
       }
     }();
+  }
+
+  /// An ANIMATED pick: Rust crops, walks the quality ladder and caches the
+  /// result on the asset rail, handing back the hash, the animation (for the
+  /// preview) and the still companion that rides the profile push. Mirrors the
+  /// desktop dialog exactly.
+  void _processAnimated(Uint8List rawBytes, {required bool avatar}) {
+    final gen = avatar ? ++_avatarPickGen : ++_bannerPickGen;
+    setState(() {
+      if (avatar) {
+        _avatarBusy = true;
+      } else {
+        _bannerBusy = true;
+      }
+    });
+    final work = () async {
+      try {
+        final media = avatar
+            ? await network_api.processAndStoreAvatarAnim(rawBytes: rawBytes)
+            : await network_api.processAndStoreBannerAnim(rawBytes: rawBytes);
+        if (!mounted || gen != (avatar ? _avatarPickGen : _bannerPickGen)) {
+          return;
+        }
+        ref.read(profileAnimProvider.notifier).seed(media.hash, media.bytes);
+        setState(() {
+          if (avatar) {
+            _pendingAvatar = media.bytes;
+            _pendingAvatarStill = media.still;
+            _pendingAvatarAnim = media.hash;
+            _avatarChanged = true;
+            _avatarBusy = false;
+          } else {
+            _pendingBanner = media.bytes;
+            _pendingBannerStill = media.still;
+            _pendingBannerAnim = media.hash;
+            _bannerChanged = true;
+            _bannerBusy = false;
+          }
+        });
+      } catch (e) {
+        if (!mounted || gen != (avatar ? _avatarPickGen : _bannerPickGen)) {
+          return;
+        }
+        setState(() {
+          if (avatar) {
+            _avatarBusy = false;
+          } else {
+            _bannerBusy = false;
+          }
+        });
+        // Rust's message is the useful one ("about 9s fits at 600x200").
+        HollowToast.show(context, '$e', type: HollowToastType.error);
+      }
+    }();
+    if (avatar) {
+      _avatarProcessing = work;
+    } else {
+      _bannerProcessing = work;
+    }
   }
 
   Future<void> _pickFrame() async {
@@ -884,10 +957,16 @@ class _ProfileTabState extends ConsumerState<_ProfileTab> {
         displayName: _nameController.text.trim(),
         status: _statusController.text.trim(),
         aboutMe: _aboutController.text.trim(),
-        avatarBytes: _avatarChanged ? _pendingAvatar : null,
-        bannerBytes: _bannerChanged ? _pendingBanner : null,
+        // The STILL rides the push; the animation is already on the rail and
+        // travels as its hash. An empty hash on a still pick drops it.
+        avatarBytes:
+            _avatarChanged ? (_pendingAvatarStill ?? _pendingAvatar) : null,
+        bannerBytes:
+            _bannerChanged ? (_pendingBannerStill ?? _pendingBanner) : null,
         twitchUsername: twitchUsername,
         avatarFrame: _frameChanged ? (_pendingFrameId ?? '') : null,
+        avatarAnim: _avatarChanged ? (_pendingAvatarAnim ?? '') : null,
+        bannerAnim: _bannerChanged ? (_pendingBannerAnim ?? '') : null,
       );
 
       if (mounted) {
@@ -911,7 +990,8 @@ class _ProfileTabState extends ConsumerState<_ProfileTab> {
     final peerId = ref.watch(identityProvider).peerId ?? '';
     ref.watch(profileProvider);
     if (!_populated) _tryPopulate();
-    final bannerBytes = ref.watch(bannerProvider(peerId)).valueOrNull;
+    final bannerBytes = watchAnimatedBanner(ref, peerId) ??
+        ref.watch(bannerProvider(peerId)).valueOrNull;
     final bannerColor = bannerColorFromId(peerId);
 
     final previewName = _nameController.text.trim().isNotEmpty
@@ -938,7 +1018,14 @@ class _ProfileTabState extends ConsumerState<_ProfileTab> {
               GestureDetector(
                 onTap: _pickBanner,
                 onLongPress: _bannerChanged || bannerBytes != null
-                    ? () => setState(() { _bannerPickGen++; _bannerBusy = false; _pendingBanner = Uint8List(0); _bannerChanged = true; })
+                    ? () => setState(() {
+                        _bannerPickGen++;
+                        _bannerBusy = false;
+                        _pendingBanner = Uint8List(0);
+                        _pendingBannerStill = null;
+                        _pendingBannerAnim = null;
+                        _bannerChanged = true;
+                      })
                     : null,
                 child: SizedBox(
                   height: 100,
@@ -981,7 +1068,14 @@ class _ProfileTabState extends ConsumerState<_ProfileTab> {
                       GestureDetector(
                         onTap: _pickAvatar,
                         onLongPress: _avatarChanged
-                            ? () => setState(() { _avatarPickGen++; _avatarBusy = false; _pendingAvatar = null; _avatarChanged = false; })
+                            ? () => setState(() {
+                                _avatarPickGen++;
+                                _avatarBusy = false;
+                                _pendingAvatar = null;
+                                _pendingAvatarStill = null;
+                                _pendingAvatarAnim = null;
+                                _avatarChanged = false;
+                              })
                             : null,
                         child: Stack(
                           children: [

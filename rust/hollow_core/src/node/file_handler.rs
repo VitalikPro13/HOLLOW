@@ -512,6 +512,34 @@ fn convert_image_data(
     override_width: Option<u32>,
     override_height: Option<u32>,
 ) -> (Vec<u8>, String, Option<u32>, Option<u32>) {
+    // ANIMATED sources first, decided from the BYTES. Branching on the
+    // extension is what froze an APNG (`.png` -> the still WebP path) and an
+    // animated WebP (`.webp` -> a decode+re-encode that keeps only frame 0).
+    // Re-encoding through the animation encoder drops metadata too, which is
+    // the whole reason the still paths re-encode.
+    if image_convert::is_animated_image(&file_data) {
+        match image_convert::convert_animation_to_webp(&file_data, webp_quality) {
+            Ok((webp_data, w, h)) => {
+                hollow_log!(
+                    "[HOLLOW-FILE] Converted animation to animated WebP ({:?}): {}KB -> {}KB ({}x{})",
+                    webp_quality, file_data.len() / 1024, webp_data.len() / 1024, w, h
+                );
+                return (webp_data, "webp".to_string(), Some(w), Some(h));
+            }
+            Err(e) => {
+                // Send the original rather than a frozen frame: a GIF gets its
+                // metadata stripped in place, anything else rides as-is.
+                hollow_log!("[HOLLOW-FILE] Animation conversion failed, sending original: {e}");
+                let out = if original_ext == "gif" {
+                    image_convert::strip_gif_metadata(&file_data)
+                } else {
+                    std::mem::take(&mut file_data)
+                };
+                let dims = image_convert::get_image_dimensions(&out).ok();
+                return (out, original_ext.to_string(), dims.map(|d| d.0), dims.map(|d| d.1));
+            }
+        }
+    }
     if image_convert::should_convert_to_webp(original_ext) {
         match image_convert::convert_to_webp_with_quality(&file_data, webp_quality) {
             Ok((webp_data, w, h)) => {
@@ -531,27 +559,6 @@ fn convert_image_data(
             .unwrap_or_else(|_| std::mem::take(&mut file_data));
         let dims = image_convert::get_image_dimensions(&stripped).ok();
         (stripped, original_ext.to_string(), dims.map(|d| d.0), dims.map(|d| d.1))
-    } else if original_ext == "gif" {
-        // GIF → animated WebP at all quality tiers (even lossless
-        // WebP beats GIF's LZW compression).
-        match image_convert::convert_gif_to_animated_webp(&file_data, webp_quality) {
-            Ok((webp_data, w, h)) => {
-                hollow_log!(
-                    "[HOLLOW-FILE] Converted GIF to animated WebP ({:?}): {}KB -> {}KB ({}x{})",
-                    webp_quality, file_data.len() / 1024, webp_data.len() / 1024, w, h
-                );
-                (webp_data, "webp".to_string(), Some(w), Some(h))
-            }
-            Err(e) => {
-                // Fallback: strip metadata and send as GIF.
-                hollow_log!(
-                    "[HOLLOW-FILE] GIF->WebP conversion failed, sending as GIF: {e}"
-                );
-                let stripped = image_convert::strip_gif_metadata(&file_data);
-                let dims = image_convert::get_image_dimensions(&stripped).ok();
-                (stripped, original_ext.to_string(), dims.map(|d| d.0), dims.map(|d| d.1))
-            }
-        }
     } else {
         (file_data, original_ext.to_string(), override_width, override_height)
     }

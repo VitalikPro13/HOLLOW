@@ -525,6 +525,8 @@ pub(crate) async fn handle_update_profile(
     showcase_board: Option<String>,
     showcase_assets: Option<Vec<u8>>,
     avatar_frame: Option<String>,
+    avatar_anim: Option<String>,
+    banner_anim: Option<String>,
     db_path: &str,
     db_passphrase: &str,
 ) {
@@ -554,9 +556,13 @@ pub(crate) async fn handle_update_profile(
     // None = "unchanged", so the advertised hashes must describe what's persisted.
     // Same for the showcase board: broadcast the STORED value so receivers
     // converge even when this update didn't touch the board.
-    let (avatar_hash, banner_hash, stored_showcase, stored_assets_hash, stored_frame) = {
+    let (
+        avatar_hash, banner_hash, stored_showcase, stored_assets_hash, stored_frame,
+        stored_avatar_anim, stored_banner_anim,
+    ) = {
         let mut stored = (
             String::new(), String::new(), String::new(), String::new(), String::new(),
+            String::new(), String::new(),
         );
         if let Ok(db) = crate::storage::MessageStore::open(db_path, db_passphrase) {
             if let Err(e) = db.save_profile(
@@ -564,7 +570,7 @@ pub(crate) async fn handle_update_profile(
                 avatar_bytes.as_deref(), banner_bytes.as_deref(), &twitch_username,
                 showcase_board.as_deref(), showcase_assets.as_deref(),
                 None, // proof written below, once the stored blob's hash is known
-                avatar_frame.as_deref(),
+                avatar_frame.as_deref(), avatar_anim.as_deref(), banner_anim.as_deref(),
             ) {
                 hollow_log!("[HOLLOW-SWARM] Failed to save own profile: {e}");
             }
@@ -575,6 +581,8 @@ pub(crate) async fn handle_update_profile(
                     p.showcase_board,
                     profile_blob_hash(p.showcase_assets.as_deref()),
                     p.avatar_frame,
+                    p.avatar_anim,
+                    p.banner_anim,
                 );
             }
         }
@@ -600,7 +608,7 @@ pub(crate) async fn handle_update_profile(
             local_peer_str, &display_name, &status, &about_me, now,
             None, None, &twitch_username, None, None,
             Some(crate::storage::ProfileProof { sig, pk, avatar_hash: &avatar_hash }),
-            None,
+            None, None, None,
         );
     }
 
@@ -627,6 +635,8 @@ pub(crate) async fn handle_update_profile(
         showcase_assets_b64: showcase_assets_b64.clone(),
         showcase_assets_hash: stored_assets_hash.clone(),
         avatar_frame: Some(stored_frame.clone()),
+        avatar_anim: Some(stored_avatar_anim.clone()),
+        banner_anim: Some(stored_banner_anim.clone()),
         profile_sig: profile_sig.clone(),
         profile_pk: profile_pk.clone(),
     };
@@ -662,6 +672,8 @@ pub(crate) async fn handle_update_profile(
         showcase_assets_b64,
         showcase_assets_hash: stored_assets_hash,
         avatar_frame: Some(stored_frame),
+        avatar_anim: Some(stored_avatar_anim),
+        banner_anim: Some(stored_banner_anim),
         profile_sig,
         profile_pk,
     };
@@ -723,6 +735,8 @@ pub(crate) fn save_incoming_profile(
     showcase_assets: Option<&[u8]>,
     proof: Option<crate::storage::ProfileProof<'_>>,
     avatar_frame: Option<&str>,
+    avatar_anim: Option<&str>,
+    banner_anim: Option<&str>,
     db_path: &str,
     db_passphrase: &str,
 ) -> (String, bool) {
@@ -753,7 +767,7 @@ pub(crate) fn save_incoming_profile(
     if let Err(e) = db.save_profile(
         &master, display_name, status, about_me, updated_at,
         avatar_bytes, banner_bytes, twitch_username, showcase_board,
-        showcase_assets, Some(proof), avatar_frame,
+        showcase_assets, Some(proof), avatar_frame, avatar_anim, banner_anim,
     ) {
         hollow_log!("[HOLLOW-PROFILE] Failed to save incoming profile for {master}: {e}");
         return (master, false);
@@ -787,6 +801,28 @@ pub(crate) fn sanitize_incoming_frame(avatar_frame: Option<&str>) -> Option<&str
     match avatar_frame {
         Some("") => Some(""),
         Some(s) if valid_avatar_frame_id(s) => Some(s),
+        _ => None,
+    }
+}
+
+/// Receive-side gate for an ANIMATED avatar/banner reference. Exactly two
+/// shapes reach the DB:
+///   * `""`   — no animated variant (or cleared),
+///   * 64-hex — an asset-rail blob hash.
+///
+/// Anything else is ABSENT (`None` = preserve what we stored), which is also
+/// what an old client sends. Same reasoning as [`sanitize_incoming_frame`],
+/// and it matters for the same reason: this value keys a network PULL, so an
+/// unvalidated string would be a request-anything primitive.
+///
+/// Deliberately NOT covered by the profile signature, matching `avatar_frame`
+/// — a rewritten hash points a viewer at some other blob the rewriter already
+/// holds, which is a decoration swap, not an identity claim, and the still
+/// avatar the signature DOES cover keeps rendering underneath.
+pub(crate) fn sanitize_incoming_anim(anim: Option<&str>) -> Option<&str> {
+    match anim {
+        Some("") => Some(""),
+        Some(s) if crate::crdt::valid_emote_hash(s) => Some(s),
         _ => None,
     }
 }
@@ -974,14 +1010,14 @@ fn send_own_profile_inner(
         // predates 0.8.5 - see `own_profile_proof`.
         let (profile_sig, profile_pk, signed_avatar_hash) =
             own_profile_proof(master_keypair, local_peer_str, profile.as_ref());
-        let (display_name, status, about_me, updated_at, avatar_bytes, banner_bytes, twitch_username, showcase_board, showcase_assets, avatar_frame) =
+        let (display_name, status, about_me, updated_at, avatar_bytes, banner_bytes, twitch_username, showcase_board, showcase_assets, avatar_frame, avatar_anim, banner_anim) =
             match profile {
                 Some(p) => (
                     p.display_name, p.status, p.about_me, p.updated_at,
                     p.avatar_bytes, p.banner_bytes, p.twitch_username, p.showcase_board,
-                    p.showcase_assets, p.avatar_frame,
+                    p.showcase_assets, p.avatar_frame, p.avatar_anim, p.banner_anim,
                 ),
-                None => (String::new(), String::new(), String::new(), 0, None, None, String::new(), String::new(), None, String::new()),
+                None => (String::new(), String::new(), String::new(), 0, None, None, String::new(), String::new(), None, String::new(), String::new(), String::new()),
             };
         let avatar_hash = signed_avatar_hash;
         let banner_hash = profile_blob_hash(banner_bytes.as_deref());
@@ -1007,8 +1043,10 @@ fn send_own_profile_inner(
             master_keypair, device_peer_id, db_path, db_passphrase,
         );
         // The board is small capped text — it rides the LIGHT announce too
-        // (only blobs are hash-pulled). So does the avatar frame, which is an
-        // ID rather than art for exactly this reason.
+        // (only blobs are hash-pulled). So do the avatar frame and the two
+        // animated-media hashes, which are IDs rather than art for exactly
+        // this reason: 64 bytes on every announce, and the bytes behind them
+        // are pulled once and cached.
         let msg = HavenMessage::ProfileUpdate {
             display_name, status, about_me, updated_at,
             avatar_b64, banner_b64, is_invisible, twitch_username,
@@ -1017,6 +1055,8 @@ fn send_own_profile_inner(
             showcase_board: Some(showcase_board),
             showcase_assets_b64, showcase_assets_hash,
             avatar_frame: Some(avatar_frame),
+            avatar_anim: Some(avatar_anim),
+            banner_anim: Some(banner_anim),
             profile_sig, profile_pk,
         };
         send_message_to_peer(ws_cmd_tx, ws_room_peers, target_peer, msg);
@@ -1123,6 +1163,8 @@ pub(crate) async fn handle_envelope_profile_update(
     showcase_assets_b64: String,
     showcase_assets_hash: String,
     avatar_frame: Option<String>,
+    avatar_anim: Option<String>,
+    banner_anim: Option<String>,
     profile_sig: Option<String>,
     profile_pk: Option<String>,
     db_path: &str,
@@ -1188,6 +1230,8 @@ pub(crate) async fn handle_envelope_profile_update(
         sanitize_incoming_showcase(showcase_board.as_deref()),
         showcase_assets_bytes.as_deref(), proof,
         sanitize_incoming_frame(avatar_frame.as_deref()),
+        sanitize_incoming_anim(avatar_anim.as_deref()),
+        sanitize_incoming_anim(banner_anim.as_deref()),
         db_path, db_passphrase,
     );
     // Light announce with hashes we don't match → pull the full profile once.
@@ -1347,10 +1391,12 @@ pub(crate) async fn handle_profile_relay(
                 }),
                 _ => None,
             };
+            // A relay carries no frame and no animated-media hashes either —
+            // `None` preserves whatever we already stored for this identity.
             let _ = store.save_profile(
                 &source_peer_id, &display_name, &status, &about_me, updated_at,
                 avatar_bytes.as_deref(), None, &twitch_username, None, None,
-                proof, None,
+                proof, None, None, None,
             );
             hollow_log!("[HOLLOW-PROFILE] Saved relayed profile for {source_peer_id}");
         } else {

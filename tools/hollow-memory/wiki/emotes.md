@@ -6,15 +6,15 @@ End-to-end map of the custom emote system (shipped 2026-07-10). Architecture rat
 
 The emote byte-replication system is now the generic content-addressed asset rail (`node/assets.rs` + the emote wire path). Epic: memory `project-asset-rail-epic`.
 
-- **Kinds** `AssetKind::{Emote, Banner, Sticker, Gif, Avatar, Frame}` — differ ONLY in receipt cap (`recv_cap`: 256 KB / 1 MB / 512 KB / 2 MB / 512 KB / 256 KB) and per-request hash bound (`max_request_hashes`: 20 / 2 / 8 / 4 / 4 / 4). `emote_blobs.kind` TEXT column (additive migration, default 'emote') records what a blob was pulled AS. `Avatar` = the ANIMATED server-icon variant (see "Animated Server Icons" below); `Frame` = a user's avatar frame (see "Avatar Frames" below) and deliberately takes the tight EMOTE ceiling, not the rail's 512 KB, because it is decoration on every avatar you have ever seen.
+- **Kinds** `AssetKind::{Emote, Banner, Sticker, Gif, Avatar, Frame, Profile}` — differ ONLY in receipt cap (`recv_cap`: 256 KB / 1 MB / 512 KB / 2 MB / 512 KB / 256 KB / 1 MB) and per-request hash bound (`max_request_hashes`: 20 / 2 / 8 / 4 / 4 / 4 / 4). `emote_blobs.kind` TEXT column (additive migration, default 'emote') records what a blob was pulled AS. `Avatar` = the ANIMATED server-icon variant (see "Animated Server Icons" below); `Frame` = a user's avatar frame (see "Avatar Frames" below) and deliberately takes the tight EMOTE ceiling, not the rail's 512 KB, because it is decoration on every avatar you have ever seen; `Profile` = a user's ANIMATED avatar OR banner (see "Animated Profile Media" below) — ONE kind for both, because they share a replication profile (one of each per person you have ever met) and nothing downstream needs to tell them apart. Its `recv_cap` is `image_convert::MAX_PROFILE_ANIM_BYTES` BY CONSTRUCTION (a test pins the equality), so the wire cap and the authoring limit cannot drift.
 - **Kind never rides the wire.** Requesting side records hash→kind in swarm's `requested_asset_kinds: HashMap<String, AssetKind>` (replaced `requested_emote_hashes`; same lifecycle, cleared on `WsEvent::Disconnected`). `handle_emote_assets` accepts ONLY hashes present in that map and sizes the cap from the RECORDED kind — unsolicited bundles are dropped wholesale (cache-stuffing gate, new in this phase), and an invalid answer frees the slot for retry.
 - **Responder reply budget** `MAX_BUNDLE_REPLY_BYTES` = 8 MB (with GIFs cached, the old 20-hash bound alone could balloon a bundle to ~40 MB).
 - **Every animated blob on the rail is encoded by `node/webp_anim.rs`** (direct libwebp `WebPAnimEncoder`, `AnimParams::art()`), NOT `webp-animation` — that crate silently drops `method` and defaults `segments` to 1. See wiki `rust_file_handler` and memory `project_animated_avatar_encoding`.
-- **PLANNED, not built:** user avatars and banners are still the only two paths storing SOURCE bytes untouched on the PUSHED profile blob. They get ONE new `AssetKind` covering both (same replication profile: one per person you have ever met), `recv_cap` 1 MB == the authoring limit, 4 hashes/request. Do NOT raise `AssetKind::Avatar` for this — that kind is the 128px animated SERVER icon and 512 KB is right for it. User-scoped requests pass `peerHint`, not `serverId` (avatar frames are the precedent).
+- **Animated profile media is BUILT** (2026-08-22) — see "Animated Profile Media" below. User avatars/banners were the last two paths storing SOURCE bytes untouched on the PUSHED profile blob.
 - **Wire token** `[a:kind:hash:w:h]` (kind `s`|`g`, hash 64-hex, dims 1..=4096) — dual-defined: Rust `node/emotes.rs::parse_asset_token`, Dart `emote_image.dart::assetTokenRegex`/`parseAssetToken`. Emotes keep `[e:name:hash]` untouched. w/h let receivers reserve the EXACT box pre-pull (no reflow). `emote_tokens_to_shortcodes` (Rust + Dart) maps asset tokens → `[GIF]`/`[Sticker]` for plain-text notification surfaces.
 - **Render** `message_text_parser.dart` `_TokenKind.asset` → `ChatAssetImage` (emote_image.dart): token alone on its own line = block (GIF ≤480px / sticker ≤160px wide, never upscaled past source, interface-scale only — NOT chat text scale, same rule as attachments); inline = 2 line-heights riding the text scaler. Missing blob = sized placeholder + `requestAssetOnce(hash, kind: ...)` (emote_provider.dart, shares the session dedup set + `EmoteAssetsReceived` invalidation).
 - **FFI** `request_assets(hashes, kind, server_id, peer_hint)` beside `request_emotes` (which is now the emote-kind shorthand). `NodeCommand::RequestEmotes` gained a `kind` field.
-- **Storage Manager**: `StorageBreakdown.asset_blob_bytes/count`; "Emotes & GIFs" segment + cleanup-menu action (`clear_unreferenced_asset_blobs`); cap slider (default 512 MB, key `asset_cache_cap_mb`, desktop + mobile) enforced via `enforce_storage_caps` (new `asset_cap_mb` arg) on FileCompleted AND EmoteAssetsReceived. LRU-evict by `added_at` (`evict_asset_blobs`, 0.8 hysteresis) — hashes referenced by personal_emotes / server CRDT emotes / `server_banner` settings / OUR OWN avatar frame are NEVER evicted (`referenced_asset_hashes`).
+- **Storage Manager**: `StorageBreakdown.asset_blob_bytes/count`; "Emotes & GIFs" segment + cleanup-menu action (`clear_unreferenced_asset_blobs`); cap slider (default 512 MB, key `asset_cache_cap_mb`, desktop + mobile) enforced via `enforce_storage_caps` (new `asset_cap_mb` arg) on FileCompleted AND EmoteAssetsReceived. LRU-evict by `added_at` (`evict_asset_blobs`, 0.8 hysteresis) — hashes referenced by personal_emotes / server CRDT emotes / `server_banner` settings / OUR OWN avatar frame and animated avatar/banner are NEVER evicted (`referenced_asset_hashes`).
 - **Harness tests**: `asset_cap_enforced_per_kind` (300 KB blob refused as emote, accepted as gif — proves the cap follows OUR recorded kind and failed receipts retry), `asset_request_not_answered_for_unrequested_hash` (unsolicited valid bundle dropped; uses `MockRelay::inject_direct`). Widget: `test/widget/asset_token_render_test.dart`.
 
 ## Server Banners (issue #25, asset-rail Phase 2, 2026-07-28)
@@ -411,3 +411,88 @@ carries an ID, never the art. Full design + iron rules: memory `project_avatar_f
   `animate: true`. `AvatarFrameCache` is what makes it affordable: a shared frame-0 image
   per ID (LRU 48) for lists, and the full refcounted frame list only while something plays
   it. Decoding every frame per widget instance would be hundreds of MB on a member panel.
+
+## Animated Profile Media (asset-rail follow-up, 2026-08-22)
+
+The last two paths that stored SOURCE bytes untouched on the PUSHED profile blob. A profile
+update is pushed to everyone who syncs with you; the rail is pulled on demand and LRU-evicted.
+So the **still** stays base64 in the profile blob (old clients and the guest thumb read it) and
+the **animation** becomes a 64-hex hash on `AssetKind::Profile` — the same split
+`settings["server_avatar_anim"]` already made for server icons. Memory:
+`project-profile-media-asset-rail`.
+
+- **Wire** `HavenMessage::ProfileUpdate` and `MessageEnvelope::ProfileUpdate` gained
+  `avatar_anim` / `banner_anim`: `Option<String>`, absent = PRESERVE (an old client, or any
+  update that didn't touch the media), `Some("")` = clear, 64-hex = a rail hash.
+  `social::sanitize_incoming_anim` is the SOLE validator — same reasoning as
+  `sanitize_incoming_frame`: the field is plaintext on the fallback path AND it keys a network
+  PULL, so an unvalidated string would be a request-anything primitive. Rides the LIGHT announce
+  (it is an ID, not art). Deliberately NOT inside `profile_signing_payload`, matching
+  `avatar_frame` — a rewritten hash swaps decoration the rewriter already holds, and the still
+  the signature DOES cover keeps rendering underneath.
+- **Storage** `user_profiles.avatar_anim` / `banner_anim` (additive migrations, default `''`).
+  `StoredProfile` + the FFI `UserProfile` carry both; the LIGHT profile loaders carry them too,
+  because every list that renders an avatar needs to know whether an animated variant exists.
+- **Processing** `image_convert::process_user_avatar_anim` / `process_user_banner_anim` return
+  `(animated, still)` off ONE decode. Avatar = square crop, `AVATAR_DIM` (184) ceiling; banner =
+  3:1 crop, `BANNER_W` (600x200) ceiling. **Ceilings never upscale** (`fit_dims` only shrinks):
+  a 300x120 banner stays 300x120, because upscaling invents no detail and multiplies the decoded
+  RGBA every viewer holds. Quality ladder 85 -> 80 -> 75 -> one step down in size, with cropped
+  frames reused across rungs that share a ceiling. `MAX_PROFILE_DECODED_BYTES` (48 MB of
+  `frames × w × h × 4`) refuses a screen-recording-as-banner with "about Ns fits at WxH" rather
+  than silently decimating it. The still comes from decoded frame 0, NOT
+  `image::load_from_memory` — that reports alpha 255 for every pixel of an ANMF WebP and would
+  matte a cut-out avatar onto black. No animated-WebP passthrough here (unlike the server-icon
+  path): the crop, the ceiling and the frame guard all need real dimensions and a real frame
+  count.
+- **FFI** `process_and_store_avatar_anim` / `process_and_store_banner_anim` ->
+  `ProcessedProfileMedia{hash, bytes, still}` (caches the blob under `kind='profile'`);
+  `update_profile` gained `avatar_anim` / `banner_anim` with the same three-state semantics.
+  **A STILL pick must pass `Some("")`, not `None`**, or the previous animation keeps playing over
+  the new still.
+- **Dart** `profile_anim_provider.dart` — hash-keyed, shaped like `AvatarFrameNotifier`
+  (`_awaiting` + `onProfileUpdated` retry, so media whose owner was offline is re-asked on their
+  reconnect; both wired in event_provider's `EmoteAssetsReceived` / `ProfileUpdated` arms).
+  Render order is `imageBytes` > rail animation > still: holding the animation and painting the
+  still makes the feature do nothing, and missing the still while a pull is in flight blanks the
+  face. `HollowAvatar` does this for avatars, the four banner surfaces via `watchAnimatedBanner`.
+  **Consequence:** when the animation is held, `HollowAvatar` never asks `avatarProvider`, so that
+  cache stays EMPTY for exactly the people who most obviously have an avatar — anything using it
+  to answer "does this person have an avatar" must also check `avatarAnim`.
+- **Migration** `migrate_profile_media_once()` (called fire-and-forget from `_bootstrap` after the
+  node starts) converts a pre-split animated avatar/banner in place and re-announces once.
+  Without it the bandwidth win only reaches people who happen to re-pick their avatar.
+  Settings-marker idempotent, marker checked BEFORE `load_profile` (which pulls blobs); a
+  conversion failure still sets the marker, so an unconvertible source keeps working as it did.
+- **Tests** harness `animated_profile_media_hash_replicates_and_bytes_pull_on_demand` (hash
+  converges, bytes stay OFF the push, rail pull byte-exact, no-touch preserves, `""` clears);
+  widget `test/widget/profile_anim_rail_test.dart` (both render-precedence failure directions);
+  probe scenario `scripts/probe_scenarios/profile_media_rail.json`.
+
+## APNG, actually end to end (2026-08-22)
+
+Steam serves animated avatar frames as APNG. Six of seven processors branched on
+`data.starts_with(b"GIF8")` (or, in the file-send path, `original_ext == "gif"`), so an APNG fell
+through to the STILL path and was flattened — silently, because a frozen frame still uploads
+"successfully". **Every processor now decides animation from BYTES via `is_animated_image`**
+(GIF + APNG + animated WebP); `is_animated_webp` is the NARROWER predicate and gates
+byte-for-byte passthrough ONLY. `convert_gif_to_animated_webp` became `convert_animation_to_webp`
+and goes through `decode_animation_frames`, which is what let the call sites stop asking the
+filename. Fixed in `process_avatar_frame`, `process_emote_image`, `process_server_banner_image`,
+`process_asset_for_send` (GIF sends + stickers), `process_showcase_artwork`, and
+`file_handler::convert_image_data`.
+
+Same pass: the file-send path ran an animated WebP through `strip_webp_metadata`
+(`load_from_memory` + re-encode = frame 0 only), so dragging one into chat flattened it too.
+Animated sources now re-encode through the animation encoder, which preserves every frame AND
+drops metadata. Memory: `feedback-animated-source-detect-from-bytes`.
+
+**Flutter's own codec animates APNG** (`instantiateImageCodec` reports frameCount 2,
+repetitionCount -1 — measured), so the render side was never implicated and a raw APNG in an
+older client's profile blob still animates for us.
+
+**KNOWN, unfixed:** an animated encode spends ~85x its time on `method: 6` to save ~1.2% of the
+bytes (12,685 ms vs 150 ms on a 224x224 / 28-frame APNG, RELEASE). `sharp_yuv` is not the lever.
+Method 6 pays on STILLS, not on animation — `WebPAnimEncoder` evaluates several candidate
+encodings per frame, so its cost multiplies while the gain shrinks. Parked for the performance
+session; see memory `project-animated-avatar-encoding`.

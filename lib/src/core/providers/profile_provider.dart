@@ -42,6 +42,11 @@ class ProfileNotifier extends Notifier<Map<String, storage_api.UserProfile>> {
   /// showcaseAssets: null = no change, [] = clear, else the full asset set.
   /// avatarFrame: null = no change, '' = clear, else the frame ID (issue #54)
   /// — a built-in `b:<hue>` or the hash of an already-stored frame blob.
+  /// avatarAnim/bannerAnim: the same three states for the ANIMATED variants,
+  /// whose bytes ride the asset rail. Pass the hash from
+  /// `processAndStoreAvatarAnim`/`processAndStoreBannerAnim` together with its
+  /// `still` as avatarBytes/bannerBytes — and pass `''` for a STILL pick, or
+  /// the previous animation keeps playing over the new still.
   Future<void> updateMyProfile({
     required String displayName,
     String status = '',
@@ -52,6 +57,8 @@ class ProfileNotifier extends Notifier<Map<String, storage_api.UserProfile>> {
     String? showcaseBoard,
     List<showcase_api.ShowcaseAsset>? showcaseAssets,
     String? avatarFrame,
+    String? avatarAnim,
+    String? bannerAnim,
   }) async {
     // NOTE: `updateProfile` resolves once the command is QUEUED on the node's
     // channel — the surfaced failures are "Node is not running", oversized
@@ -68,6 +75,8 @@ class ProfileNotifier extends Notifier<Map<String, storage_api.UserProfile>> {
         showcaseBoard: showcaseBoard,
         showcaseAssets: showcaseAssets,
         avatarFrame: avatarFrame,
+        avatarAnim: avatarAnim,
+        bannerAnim: bannerAnim,
       );
     } catch (e) {
       // Rethrow so save UIs can show a REAL failure instead of a false
@@ -109,6 +118,8 @@ class ProfileNotifier extends Notifier<Map<String, storage_api.UserProfile>> {
           twitchUsername: current.twitchUsername,
           showcaseBoard: encoded,
           avatarFrame: current.avatarFrame,
+          avatarAnim: current.avatarAnim,
+          bannerAnim: current.bannerAnim,
         ),
       };
     }

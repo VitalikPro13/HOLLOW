@@ -6584,6 +6584,8 @@ async fn showcase_board_replicates_preserves_and_clears() {
         showcase_board: board,
         showcase_assets: assets,
         avatar_frame: None,
+        avatar_anim: None,
+        banner_anim: None,
     };
 
     // --- 1. A composes an ENRICHED game-block board (+ a two-asset bundle:
@@ -10101,6 +10103,8 @@ async fn avatar_frame_id_replicates_and_art_pulls_on_demand() {
         showcase_board: None,
         showcase_assets: None,
         avatar_frame: frame,
+        avatar_anim: None,
+        banner_anim: None,
     };
 
     // --- 1. A built-in frame is just a short string: it rides the announce
@@ -10203,6 +10207,166 @@ async fn avatar_frame_id_replicates_and_art_pulls_on_demand() {
     sleep_ms(300).await;
     let p = b.store().load_profile(&a_master).unwrap().expect("profile row");
     assert_eq!(p.avatar_frame, "", "an explicit empty frame must clear on B");
+
+    drop(a);
+    drop(b);
+}
+
+// ---------------------------------------------------------------------------
+// Animated profile media on the asset rail: a person's ANIMATED avatar and
+// banner stop riding the pushed profile blob. The still companion stays in
+// `avatar`/`banner` (old clients and the guest thumb read it); the animation
+// becomes a 64-hex hash on the LIGHT announce, with the bytes pulled on
+// demand at AssetKind::Profile from the owner's devices.
+//
+// This is the bandwidth fix: before it, every re-announce path re-shipped
+// megabytes of unchanged GIF. Only a live multi-node run can show that the
+// hash converges while the bytes stay OFF the push.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn animated_profile_media_hash_replicates_and_bytes_pull_on_demand() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    const A_MASTER: u8 = 171;
+    const A_DEV: u8 = 172;
+    const B_MASTER: u8 = 173;
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
+    let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
+
+    let mut a = spawn_node_with_friends(&relay, A_MASTER, A_DEV, &[&b_master]).await;
+    let mut b = spawn_node_with_friends(&relay, B_MASTER, B_MASTER, &[&a_master]).await;
+    sleep_ms(2000).await;
+    drain_events(&mut a);
+    drain_events(&mut b);
+
+    // A 2-frame animated GIF is what a real upload looks like arriving; the
+    // FFI decomposes into exactly this command.
+    let source = {
+        use image::codecs::gif::GifEncoder;
+        use image::{Delay, Frame, Rgba, RgbaImage};
+        let mut buf = Vec::new();
+        {
+            let mut enc = GifEncoder::new(&mut buf);
+            for colour in [Rgba([220, 40, 40, 255]), Rgba([40, 40, 220, 255])] {
+                enc.encode_frame(Frame::from_parts(
+                    RgbaImage::from_pixel(240, 240, colour),
+                    0,
+                    0,
+                    Delay::from_numer_denom_ms(100, 1),
+                ))
+                .unwrap();
+            }
+        }
+        buf
+    };
+    let (anim, still) =
+        super::image_convert::process_user_avatar_anim(&source).expect("process avatar");
+    use sha2::{Digest, Sha256};
+    let hash = hex::encode(Sha256::digest(&anim));
+    a.store()
+        .save_asset_blob(&hash, &anim, true, "profile")
+        .expect("A caches the animation it authored");
+
+    let send_update = |status: &str,
+                       avatar: Option<Vec<u8>>,
+                       anim: Option<String>| NodeCommand::UpdateProfile {
+        display_name: "Anon A".to_string(),
+        status: status.to_string(),
+        about_me: String::new(),
+        avatar_bytes: avatar,
+        banner_bytes: None,
+        twitch_username: String::new(),
+        showcase_board: None,
+        showcase_assets: None,
+        avatar_frame: None,
+        avatar_anim: anim,
+        banner_anim: None,
+    };
+
+    // --- 1. The hash replicates, the still rides the push, the bytes do not. ---
+    a.cmd_tx
+        .send(send_update("hi", Some(still.clone()), Some(hash.clone())))
+        .await
+        .unwrap();
+    let got = wait_event(&mut b, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::ProfileUpdated { .. })
+    })
+    .await;
+    assert!(got, "B must receive A's profile update");
+    sleep_ms(300).await;
+    let p = b.store().load_profile(&a_master).unwrap()
+        .expect("B must hold A's profile keyed by A's MASTER (device != master)");
+    assert_eq!(p.avatar_anim, hash, "the animation HASH must replicate");
+    assert_eq!(
+        p.avatar_bytes.as_deref(),
+        Some(still.as_slice()),
+        "the STILL companion still rides the profile push (old clients read it)"
+    );
+    assert!(
+        !b.store().has_emote_blob(&hash).unwrap(),
+        "the animation must NOT ride the profile push - that is the whole point"
+    );
+
+    // --- 2. B pulls the animation from A's devices, exactly as the renderer
+    // does when it meets a hash it has no bytes for. ---
+    b.cmd_tx
+        .send(NodeCommand::RequestEmotes {
+            hashes: vec![hash.clone()],
+            kind: super::assets::AssetKind::Profile,
+            server_id: None,
+            peer_hint: Some(a_master.clone()),
+        })
+        .await
+        .unwrap();
+    let got_bytes = wait_event(&mut b, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::EmoteAssetsReceived { hashes } if hashes.contains(&hash))
+    })
+    .await;
+    assert!(got_bytes, "B must receive the animation from A over the rail");
+    sleep_ms(300).await;
+    assert_eq!(
+        b.store().load_emote_blob(&hash).unwrap().as_deref(),
+        Some(anim.as_slice()),
+        "the pulled animation must match A's blob byte-exact (hash-verified)"
+    );
+
+    // --- 3. An update that doesn't touch the media must PRESERVE it - which
+    // is also exactly what an old client sends. ---
+    drain_events(&mut b);
+    a.cmd_tx.send(send_update("status changed", None, None)).await.unwrap();
+    let got = wait_event(&mut b, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::ProfileUpdated { .. })
+    })
+    .await;
+    assert!(got, "B must receive A's second update");
+    sleep_ms(300).await;
+    let p = b.store().load_profile(&a_master).unwrap().expect("profile row");
+    assert_eq!(p.status, "status changed", "the untouched field must update");
+    assert_eq!(
+        p.avatar_anim, hash,
+        "an update that didn't touch the animation must NOT lose it"
+    );
+
+    // --- 4. A still-only pick clears the animation explicitly. ---
+    drain_events(&mut b);
+    a.cmd_tx
+        .send(send_update("still now", Some(still.clone()), Some(String::new())))
+        .await
+        .unwrap();
+    let got = wait_event(&mut b, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::ProfileUpdated { .. })
+    })
+    .await;
+    assert!(got, "B must receive A's clear update");
+    sleep_ms(300).await;
+    let p = b.store().load_profile(&a_master).unwrap().expect("profile row");
+    assert_eq!(p.avatar_anim, "", "an explicit empty hash must clear on B");
 
     drop(a);
     drop(b);

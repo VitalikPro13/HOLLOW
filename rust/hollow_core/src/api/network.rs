@@ -3187,6 +3187,11 @@ pub fn request_channel_sync(server_id: String, channel_id: String) -> Result<(),
 /// `avatar_frame`: None = unchanged, Some("") = clear, Some(id) = set — a
 /// built-in `b:<hue>` or the 64-hex hash of a frame blob already stored by
 /// [`process_and_store_avatar_frame`] (issue #54). Never bytes.
+/// `avatar_anim` / `banner_anim`: the same three states for the ANIMATED
+/// variants, whose bytes ride the asset rail — pass the hash returned by
+/// [`process_and_store_avatar_anim`] / [`process_and_store_banner_anim`] and
+/// its `still` as the matching `avatar_bytes` / `banner_bytes`. A still-only
+/// pick must pass `Some("")` so a previous animation is dropped.
 #[frb]
 #[allow(clippy::too_many_arguments)]
 pub fn update_profile(
@@ -3199,6 +3204,8 @@ pub fn update_profile(
     showcase_board: Option<String>,
     showcase_assets: Option<Vec<super::showcase::ShowcaseAsset>>,
     avatar_frame: Option<String>,
+    avatar_anim: Option<String>,
+    banner_anim: Option<String>,
 ) -> Result<(), String> {
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
@@ -3242,6 +3249,23 @@ pub fn update_profile(
             }
         }
     }
+    // Same for the animated avatar/banner: validate here so a malformed hash
+    // is a visible authoring error rather than something every receiver drops
+    // in silence, and mirror ours into a setting the evictor can pin.
+    for (value, key) in [
+        (&avatar_anim, super::storage::MY_AVATAR_ANIM_SETTING),
+        (&banner_anim, super::storage::MY_BANNER_ANIM_SETTING),
+    ] {
+        let Some(hash) = value else { continue };
+        if !hash.is_empty() && !crate::crdt::valid_emote_hash(hash) {
+            return Err("Invalid animated profile media reference".into());
+        }
+        if let Ok(guard) = super::storage::get_store().lock() {
+            if let Some(ms) = guard.as_ref() {
+                let _ = ms.save_setting(key, hash);
+            }
+        }
+    }
 
     let rt = get_runtime();
     rt.block_on(
@@ -3255,6 +3279,8 @@ pub fn update_profile(
             showcase_board,
             showcase_assets: showcase_assets_bundle,
             avatar_frame,
+            avatar_anim,
+            banner_anim,
         }),
     )
     .map_err(|e| format!("Failed to send command: {e}"))?;
@@ -3302,6 +3328,165 @@ pub fn process_and_store_avatar_frame(raw_bytes: Vec<u8>) -> Result<ProcessedFra
         ms.save_asset_blob(&hash, &bytes, animated, "frame")?;
     }
     Ok(ProcessedFrame { hash, animated, bytes })
+}
+
+/// An animated avatar or banner that has been processed and cached locally,
+/// ready to be named in `update_profile(avatar_anim: ...)`.
+pub struct ProcessedProfileMedia {
+    /// 64-hex SHA-256 of the ANIMATED bytes — the identity that rides the
+    /// profile announce, and what peers pull on the asset rail.
+    pub hash: String,
+    /// The animated WebP, so the picker previews exactly what everyone else
+    /// will see without a round trip back through the blob store.
+    pub bytes: Vec<u8>,
+    /// The STILL companion (frame 0, same ceiling). This is what the caller
+    /// must pass as `avatar_bytes` / `banner_bytes`: it stays inside the
+    /// pushed profile so old clients and the guest thumb still see a face.
+    pub still: Vec<u8>,
+}
+
+/// Process a user-picked animated image into an ANIMATED AVATAR and cache it
+/// content-addressed under `AssetKind::Profile`. The caller then names the
+/// returned hash in `update_profile(avatar_anim: Some(hash))` and passes
+/// `still` as `avatar_bytes`; the animation rides the asset rail on demand,
+/// never the profile push.
+///
+/// Errors are user-facing: over the 1 MB cap even after the quality ladder, or
+/// too many frames to hold decoded (a screen recording used as profile art).
+#[frb]
+pub fn process_and_store_avatar_anim(raw_bytes: Vec<u8>) -> Result<ProcessedProfileMedia, String> {
+    let (bytes, still) = crate::node::image_convert::process_user_avatar_anim(&raw_bytes)?;
+    store_profile_media(bytes, still)
+}
+
+/// The banner twin of [`process_and_store_avatar_anim`] (3:1 crop, 600x200
+/// ceiling). Pass `still` as `banner_bytes` and the hash as `banner_anim`.
+#[frb]
+pub fn process_and_store_banner_anim(raw_bytes: Vec<u8>) -> Result<ProcessedProfileMedia, String> {
+    let (bytes, still) = crate::node::image_convert::process_user_banner_anim(&raw_bytes)?;
+    store_profile_media(bytes, still)
+}
+
+fn store_profile_media(bytes: Vec<u8>, still: Vec<u8>) -> Result<ProcessedProfileMedia, String> {
+    let hash = {
+        use sha2::{Digest, Sha256};
+        hex::encode(Sha256::digest(&bytes))
+    };
+    {
+        let store = super::storage::get_store();
+        let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+        let ms = guard.as_ref().ok_or("Message store is not open")?;
+        ms.save_asset_blob(&hash, &bytes, true, "profile")?;
+    }
+    Ok(ProcessedProfileMedia { hash, bytes, still })
+}
+
+/// One-shot migration for a profile authored BEFORE animated media moved to
+/// the asset rail: the animation used to sit in `avatar`/`banner` as raw
+/// source bytes and rode every profile push. Converts ours in place — the
+/// animation onto the rail under its hash, a 184px / 600x200 still into the
+/// blob — and re-announces once.
+///
+/// Without this the bandwidth win only lands for people who happen to re-pick
+/// their avatar, and everyone else keeps re-shipping megabytes of unchanged
+/// GIF on every reconnect. Called once from the Dart bootstrap after the node
+/// starts; a settings marker makes it idempotent, and a conversion FAILURE
+/// still sets the marker — a source we cannot convert keeps working exactly as
+/// it did, it just never becomes cheap.
+///
+/// Returns true when something was actually converted.
+#[frb]
+pub fn migrate_profile_media_once() -> Result<bool, String> {
+    const MARKER: &str = "profile_media_rail_migrated";
+
+    let peer_id = super::storage::get_peer_id()?.to_string();
+    let (display_name, status, about_me, twitch_username, avatar, banner) = {
+        let store = super::storage::get_store();
+        let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+        let ms = guard.as_ref().ok_or("Message store is not open")?;
+        // Marker first: `load_profile` pulls the BLOBS, and this runs on every
+        // launch for the rest of the install's life.
+        if ms.load_setting(MARKER)?.is_some() {
+            return Ok(false);
+        }
+        match ms.load_profile(&peer_id)? {
+            Some(p) => (
+                p.display_name,
+                p.status,
+                p.about_me,
+                p.twitch_username,
+                // Only an UNMIGRATED animated blob is a candidate: a hash
+                // already present means this ran, or the media was authored
+                // after the split.
+                p.avatar_anim.is_empty().then_some(p.avatar_bytes).flatten(),
+                p.banner_anim.is_empty().then_some(p.banner_bytes).flatten(),
+            ),
+            None => return Ok(false), // nothing authored yet; leave the marker unset
+        }
+    };
+
+    let convert = |bytes: Option<Vec<u8>>, avatar: bool| -> Option<(String, Vec<u8>)> {
+        let raw = bytes?;
+        if !crate::node::image_convert::is_animated_image(&raw) {
+            return None;
+        }
+        let converted = if avatar {
+            crate::node::image_convert::process_user_avatar_anim(&raw)
+        } else {
+            crate::node::image_convert::process_user_banner_anim(&raw)
+        };
+        match converted {
+            Ok((anim, still)) => {
+                use sha2::{Digest, Sha256};
+                let hash = hex::encode(Sha256::digest(&anim));
+                let stored = super::storage::get_store()
+                    .lock()
+                    .ok()
+                    .and_then(|g| {
+                        g.as_ref()
+                            .map(|ms| ms.save_asset_blob(&hash, &anim, true, "profile"))
+                    })
+                    .is_some_and(|r| r.is_ok());
+                stored.then_some((hash, still))
+            }
+            Err(e) => {
+                hollow_log!("[HOLLOW-PROFILE] Media migration skipped ({e}) — the existing blob keeps working");
+                None
+            }
+        }
+    };
+    let migrated_avatar = convert(avatar, true);
+    let migrated_banner = convert(banner, false);
+
+    let mark = || {
+        if let Ok(guard) = super::storage::get_store().lock() {
+            if let Some(ms) = guard.as_ref() {
+                let _ = ms.save_setting(MARKER, "1");
+            }
+        }
+    };
+
+    if migrated_avatar.is_none() && migrated_banner.is_none() {
+        mark();
+        return Ok(false);
+    }
+
+    update_profile(
+        display_name,
+        status,
+        about_me,
+        migrated_avatar.as_ref().map(|(_, still)| still.clone()),
+        migrated_banner.as_ref().map(|(_, still)| still.clone()),
+        twitch_username,
+        None,
+        None,
+        None,
+        migrated_avatar.map(|(hash, _)| hash),
+        migrated_banner.map(|(hash, _)| hash),
+    )?;
+    mark();
+    hollow_log!("[HOLLOW-PROFILE] Moved our animated profile media onto the asset rail");
+    Ok(true)
 }
 
 /// Process a raw image into banner format (600x200 WebP). Returns processed bytes.

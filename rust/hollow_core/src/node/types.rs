@@ -772,7 +772,7 @@ pub(crate) enum NodeCommand {
     SetTwitchUsername { server_id: String, peer_id: String, twitch_username: String },
     NotifyShutdown,
     // -- Profile commands (Phase 3.5) --
-    UpdateProfile { display_name: String, status: String, about_me: String, avatar_bytes: Option<Vec<u8>>, banner_bytes: Option<Vec<u8>>, twitch_username: String, showcase_board: Option<String>, showcase_assets: Option<Vec<u8>>, avatar_frame: Option<String> },
+    UpdateProfile { display_name: String, status: String, about_me: String, avatar_bytes: Option<Vec<u8>>, banner_bytes: Option<Vec<u8>>, twitch_username: String, showcase_board: Option<String>, showcase_assets: Option<Vec<u8>>, avatar_frame: Option<String>, avatar_anim: Option<String>, banner_anim: Option<String> },
     // -- Message editing (Phase 3.5) --
     EditChannelMessage { server_id: String, channel_id: String, message_id: String, new_text: String },
     EditDmMessage { peer_id: String, message_id: String, new_text: String },
@@ -1574,6 +1574,19 @@ pub(crate) enum HavenMessage {
         /// somebody's frame); `Some("")` = explicit clear.
         #[serde(default)]
         avatar_frame: Option<String>,
+        /// Asset-rail hash of the sender's ANIMATED avatar (issue #54's
+        /// follow-up): `""` = none, 64-hex = a blob to pull under
+        /// `AssetKind::Profile`. NEVER the bytes — only the still companion
+        /// rides `avatar_b64`, so a profile push stays kilobytes while the
+        /// animation is PULLED on demand and LRU-evicted. `None` from clients
+        /// that predate this, which receivers PRESERVE (a status edit from an
+        /// old client must not wipe somebody's animated avatar); `Some("")` =
+        /// explicit clear.
+        #[serde(default)]
+        avatar_anim: Option<String>,
+        /// Asset-rail hash of the sender's ANIMATED banner. See `avatar_anim`.
+        #[serde(default)]
+        banner_anim: Option<String>,
         /// Owner's signature over the relayable subset of this profile
         /// (`crypto_handler::profile_signing_payload`). REQUIRED on ingest —
         /// receivers store it so they can forward it in a `ProfileRelay`, which
@@ -2952,6 +2965,12 @@ pub(crate) enum MessageEnvelope {
         /// Avatar frame ID — see HavenMessage::ProfileUpdate.
         #[serde(default)]
         avatar_frame: Option<String>,
+        /// Animated avatar/banner asset-rail hashes — see
+        /// HavenMessage::ProfileUpdate.
+        #[serde(default)]
+        avatar_anim: Option<String>,
+        #[serde(default)]
+        banner_anim: Option<String>,
         /// Owner's profile signature — see HavenMessage::ProfileUpdate.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         profile_sig: Option<String>,

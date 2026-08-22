@@ -28,6 +28,17 @@ pub(crate) enum AssetKind {
     /// PULLED on demand and LRU-evicted. Decoration must be the first thing
     /// evicted, never something that inflates every profile push.
     Frame,
+    /// A person's ANIMATED avatar or banner. Both share one kind on purpose:
+    /// they share a replication profile (one of each per person you have ever
+    /// met), so they share a budget, and nothing here needs to tell them
+    /// apart — the cap, the request bound and storage accounting are all
+    /// blind to which of the two a blob is.
+    ///
+    /// The STILL companion stays base64 inside the pushed profile (old
+    /// clients and the guest thumb read it); only the animated variant rides
+    /// the pulled rail, the same split `server_avatar_anim` already makes for
+    /// server icons.
+    Profile,
 }
 
 impl AssetKind {
@@ -40,6 +51,7 @@ impl AssetKind {
             AssetKind::Gif => "gif",
             AssetKind::Avatar => "avatar",
             AssetKind::Frame => "frame",
+            AssetKind::Profile => "profile",
         }
     }
 
@@ -51,6 +63,7 @@ impl AssetKind {
             "gif" => Some(AssetKind::Gif),
             "avatar" => Some(AssetKind::Avatar),
             "frame" => Some(AssetKind::Frame),
+            "profile" => Some(AssetKind::Profile),
             _ => None,
         }
     }
@@ -74,6 +87,11 @@ impl AssetKind {
             // ceiling (64 KB still, 256 KB animated) rather than the
             // one-per-server budgets above.
             AssetKind::Frame => 262_144,      // 256 KB (animated ceiling)
+            // == `image_convert::MAX_PROFILE_ANIM_BYTES`, and that equality is
+            // a rule, not a coincidence: the wire cap IS the authoring limit,
+            // so the two can never drift into "we encode what nobody will
+            // accept". A test pins it.
+            AssetKind::Profile => 1_048_576,  // 1 MB
         }
     }
 
@@ -87,6 +105,7 @@ impl AssetKind {
             AssetKind::Gif => 4,
             AssetKind::Avatar => 4,
             AssetKind::Frame => 4,
+            AssetKind::Profile => 4,
         }
     }
 }

@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/brand_icons.dart';
 import 'package:hollow/src/core/models/showcase_board.dart';
 import 'package:hollow/src/ui/dialogs/showcase_editor.dart';
+import 'package:hollow/src/core/providers/profile_anim_provider.dart';
 import 'package:hollow/src/core/providers/banner_provider.dart';
 import 'package:hollow/src/core/providers/blocked_users_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
@@ -761,7 +762,10 @@ class _Banner extends ConsumerWidget {
       end: Alignment.bottomRight,
       colors: [fallbackColor, fallbackColor.withValues(alpha: 0.7)],
     );
-    final bannerBytes = ref.watch(bannerProvider(peerId)).valueOrNull;
+    // The animated variant off the asset rail when we hold it, else the
+    // still from the profile blob (see [watchAnimatedBanner]).
+    final bannerBytes = watchAnimatedBanner(ref, peerId) ??
+        ref.watch(bannerProvider(peerId)).valueOrNull;
     if (bannerBytes != null && bannerBytes.isNotEmpty) {
       return SizedBox(
         height: height,

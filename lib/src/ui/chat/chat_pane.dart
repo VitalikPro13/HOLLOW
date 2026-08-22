@@ -11,6 +11,7 @@ import 'package:hollow/src/ui/chat/gif_picker.dart';
 import 'package:hollow/src/ui/chat/sticker_picker.dart';
 import 'package:hollow/src/ui/chat/emote_composer.dart';
 import 'package:hollow/src/ui/chat/emote_image.dart';
+import 'package:hollow/src/core/providers/profile_anim_provider.dart';
 import 'package:hollow/src/core/providers/emote_provider.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/models/chat_message.dart';
@@ -4643,7 +4644,8 @@ class _DmProfilePanel extends ConsumerWidget {
     final displayName = profile?.displayName ?? '';
     final status = profile?.status ?? '';
     final aboutMe = profile?.aboutMe ?? '';
-    final bannerBytes = ref.watch(bannerProvider(peerId)).valueOrNull;
+    final bannerBytes = watchAnimatedBanner(ref, peerId) ??
+        ref.watch(bannerProvider(peerId)).valueOrNull;
 
     final shownName = displayName.isNotEmpty
         ? displayName

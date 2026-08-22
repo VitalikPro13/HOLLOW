@@ -1073,6 +1073,17 @@ class _HollowShellState extends ConsumerState<HollowShell>
     // (theme/accent/background/nicknames/strip layout already loaded in the
     // local-first phase above, before the network calls.)
 
+    // One-shot: move an animated avatar/banner authored before the asset-rail
+    // split off the pushed profile blob. Fire-and-forget with an explicit
+    // catchError - an un-awaited FFI rejection otherwise reaches the zone
+    // crash handler, and a migration that cannot run is not worth a crash.
+    network_api.migrateProfileMediaOnce().then((moved) {
+      if (moved) ref.read(profileProvider.notifier).loadAll();
+    }).catchError((e) {
+      debugPrint('[HOLLOW] Profile media migration skipped: $e');
+      return false;
+    });
+
     // Load server avatars (+ animated icons) + banners.
     final serverIds = ref.read(serverListProvider).keys.toList();
     ref.read(serverAvatarProvider.notifier).loadAll(serverIds);

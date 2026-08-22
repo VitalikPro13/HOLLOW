@@ -1,0 +1,30 @@
+[
+  {"op": "log", "message": "Animated profile media on the asset rail: an avatar/banner authored before the split is migrated on boot, and every surface must still paint it."},
+
+  {"op": "wait", "ms": 4000},
+  {"op": "shot", "name": "rail-01-home"},
+  {"op": "dump", "name": "rail-home"},
+
+  {"op": "log", "message": "the settings profile preview: avatar (animated) over the banner"},
+  {"op": "tap", "target": "semantics:Settings"},
+  {"op": "wait", "ms": 1800},
+  {"op": "tap", "target": "text:Profile"},
+  {"op": "wait", "ms": 1500},
+  {"op": "shot", "name": "rail-02-settings-preview"},
+  {"op": "dump", "name": "rail-settings-preview"},
+  {"op": "expect_text", "value": "Banner"},
+  {"op": "expect_text", "value": "Avatar"},
+  {"op": "key", "value": "escape"},
+  {"op": "wait", "ms": 1200},
+
+  {"op": "log", "message": "and the profile card, the surface that paints both largest"},
+  {"op": "open_server", "name": "${SERVER}"},
+  {"op": "wait", "ms": 2000},
+  {"op": "shot", "name": "rail-03-server"},
+  {"op": "tap", "target": "type:_ServerMemberTile", "soft": true},
+  {"op": "wait", "ms": 1500},
+  {"op": "shot", "name": "rail-04-profile-card"},
+  {"op": "dump", "name": "rail-profile-card"},
+  {"op": "key", "value": "escape"},
+  {"op": "wait", "ms": 800}
+]

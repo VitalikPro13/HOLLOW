@@ -292,6 +292,8 @@ class _MockProfileNotifier extends ProfileNotifier {
           twitchUsername: '',
           showcaseBoard: '',
           avatarFrame: '',
+          avatarAnim: '',
+          bannerAnim: '',
         ),
       };
 }

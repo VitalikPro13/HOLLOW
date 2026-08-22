@@ -2,6 +2,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/brand_icons.dart';
+import 'package:hollow/src/core/providers/profile_anim_provider.dart';
 import 'package:hollow/src/core/providers/avatar_provider.dart';
 import 'package:hollow/src/core/providers/banner_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
@@ -205,7 +206,8 @@ class ProfileSection extends ConsumerWidget {
         ),
       ),
     );
-    final savedBanner = ref.watch(bannerProvider(localPeerId)).valueOrNull;
+    final savedBanner = watchAnimatedBanner(ref, localPeerId) ??
+        ref.watch(bannerProvider(localPeerId)).valueOrNull;
     final displayBanner = bannerChanged ? pendingBannerBytes : savedBanner;
     Widget banner = fallback;
     if (displayBanner != null && displayBanner.isNotEmpty) {
@@ -372,9 +374,14 @@ class ProfileSection extends ConsumerWidget {
 
   Widget _buildAvatarRow(HollowTheme hollow, WidgetRef ref) {
     final savedAvatar = ref.watch(avatarProvider)[localPeerId];
+    // An ANIMATED avatar counts even when the still cache is cold: HollowAvatar
+    // paints the rail blob and never asks for the still, so `avatarProvider`
+    // stays empty for exactly the people who most obviously have an avatar.
+    final savedAnimated = isProfileAnimHash(ref.watch(
+        profileProvider.select((p) => p[localPeerId]?.avatarAnim ?? '')));
     final hasAvatar = avatarChanged
         ? (pendingAvatarBytes != null && pendingAvatarBytes!.isNotEmpty)
-        : (savedAvatar != null && savedAvatar.isNotEmpty);
+        : (savedAnimated || (savedAvatar != null && savedAvatar.isNotEmpty));
     return _ImageRow(
       label: 'Avatar',
       onPick: onPickAvatar,
@@ -384,7 +391,8 @@ class ProfileSection extends ConsumerWidget {
   }
 
   Widget _buildBannerRow(HollowTheme hollow, WidgetRef ref) {
-    final savedBanner = ref.watch(bannerProvider(localPeerId)).valueOrNull;
+    final savedBanner = watchAnimatedBanner(ref, localPeerId) ??
+        ref.watch(bannerProvider(localPeerId)).valueOrNull;
     final hasBanner = bannerChanged
         ? (pendingBannerBytes != null && pendingBannerBytes!.isNotEmpty)
         : (savedBanner != null && savedBanner.isNotEmpty);
