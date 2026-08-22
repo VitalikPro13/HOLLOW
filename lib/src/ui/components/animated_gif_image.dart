@@ -9,14 +9,15 @@ import 'package:hollow/src/core/reduce_motion.dart';
 
 /// Whether [bytes] actually carry more than one frame.
 ///
-/// Mirrors Rust's `image_convert::is_animated_image` — GIF magic, or a WebP
-/// VP8X chunk with the animation bit set. Deciding this from the BYTES rather
-/// than a filename is the rule: the avatar picker gets it wrong the other way
-/// (it skips its cropper only for a `.gif` extension, so an animated WebP is
-/// flattened to a still), which is a separate bug.
+/// Mirrors Rust's `image_convert::is_animated_image` — GIF magic, a WebP VP8X
+/// chunk with the animation bit set, or a PNG carrying an `acTL` chunk (APNG).
+/// Keep the two in step: the pickers gate their cropper on this, and Rust
+/// decides on the same question when routing an upload.
 ///
-/// APNG is not detected here because the upload pipeline cannot produce one
-/// yet — an APNG is stored as its first frame today.
+/// Deciding from the BYTES rather than a filename is the rule. The pickers
+/// used to branch on a `.gif` extension, so an animated WebP or an APNG went
+/// through the still cropper and came out frozen, with no error and no
+/// warning.
 bool isAnimatedImageBytes(Uint8List bytes) {
   if (bytes.length >= 6 &&
       bytes[0] == 0x47 && // G
@@ -24,7 +25,7 @@ bool isAnimatedImageBytes(Uint8List bytes) {
       bytes[2] == 0x46) {
     return true;
   }
-  return bytes.length > 20 &&
+  if (bytes.length > 20 &&
       bytes[0] == 0x52 && // R
       bytes[1] == 0x49 && // I
       bytes[2] == 0x46 && // F
@@ -37,7 +38,35 @@ bool isAnimatedImageBytes(Uint8List bytes) {
       bytes[13] == 0x50 && // P
       bytes[14] == 0x38 && // 8
       bytes[15] == 0x58 && // X
-      (bytes[20] & 0x02) != 0;
+      (bytes[20] & 0x02) != 0) {
+    return true;
+  }
+  return _isApng(bytes);
+}
+
+/// Whether [bytes] are a PNG carrying an `acTL` (animation control) chunk.
+///
+/// Walks the chunk table by length rather than searching for the literal
+/// bytes, which can occur by chance inside compressed pixel data. `acTL` is
+/// required to precede the first `IDAT`, so the walk stops there instead of
+/// scanning a whole multi-megabyte file.
+bool _isApng(Uint8List b) {
+  const sig = <int>[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+  if (b.length < sig.length + 12) return false;
+  for (var i = 0; i < sig.length; i++) {
+    if (b[i] != sig[i]) return false;
+  }
+  var i = sig.length;
+  // Each chunk: 4-byte big-endian length, 4-byte type, payload, 4-byte CRC.
+  while (i + 8 <= b.length) {
+    final len = (b[i] << 24) | (b[i + 1] << 16) | (b[i + 2] << 8) | b[i + 3];
+    final t = String.fromCharCodes(b, i + 4, i + 8);
+    if (t == 'acTL') return true;
+    if (t == 'IDAT' || t == 'IEND') return false;
+    if (len < 0) return false; // length overflowed into the sign bit
+    i += 12 + len;
+  }
+  return false;
 }
 
 /// Renders an animated GIF from raw bytes with proper frame delay handling.
@@ -216,6 +245,14 @@ class _AnimatedGifImageState extends State<AnimatedGifImage>
       width: widget.width,
       height: widget.height,
       fit: widget.fit,
+      // Explicit, not inherited: stored animated avatars are 184px and the
+      // profile card paints them at 110, so this path now ALWAYS downscales.
+      // `low` is plain bilinear, which undersamples past ~1.33x and aliases
+      // the hard edges this art is made of; `medium` is triangle + mipmap and
+      // is the correct filter for a downscale. It happens to be RawImage's
+      // default today — pinning it means a framework default can't silently
+      // move under us. Matches AvatarFrame, which sets the same.
+      filterQuality: FilterQuality.medium,
     );
   }
 }

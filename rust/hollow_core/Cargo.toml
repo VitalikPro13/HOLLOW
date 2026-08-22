@@ -48,6 +48,10 @@ openmls_traits = "0.5"
 openmls_memory_storage = "0.5"
 image = { version = "0.25", default-features = false, features = ["webp", "png", "jpeg", "gif", "bmp"] }
 webp-animation = "0.9"
+# Direct libwebp for animated encodes: webp-animation 0.9 never applies
+# `method` and defaults `segments` to 1, so the animated path could not reach
+# libwebp's own quality knobs at all (see node/webp_anim.rs).
+libwebp-sys2 = { version = "0.1", features = ["0_5", "0_6", "1_2", "demux", "mux"] }
 scraper = "0.26"
 reed-solomon-erasure = "6.0"
 tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }

@@ -330,17 +330,84 @@ Three user-configurable tiers stored in `app_settings`:
 
 `image_convert.rs:process_avatar_image()` -- Processes raw image into avatar format:
 1. Center-crops to square (smallest dimension).
-2. Resizes to 128x128 using Lanczos3 filter.
-3. Encodes as lossless WebP.
-4. Rejects if result > 100 KB.
+2. Resizes to **`AVATAR_DIM` = 184x184** with Lanczos3 -- **skipped entirely when the
+   crop is already 184**, because resampling flat art manufactures intermediate
+   colours that cost real bytes (a 224px animated source encoded 64% LARGER after a
+   Lanczos3 downscale than untouched). A Steam avatar arrives at exactly 184.
+3. Encodes as LOSSY WebP Q80 through the ART preset (see `webp_anim.rs` below).
+4. Rejects if result > 100 KB. (Measured headroom: real photos land 1.6-8 KB at 184;
+   pure random noise, the worst case, is 24 KB.)
+
+184 because the profile card paints the avatar at 110 LOGICAL px
+(`profile_card_body.dart`) = 165 physical at 1.5x, so the old 128 was being upscaled
+on the surface that shows an avatar largest. Full rationale + measurements: memory
+`project_animated_avatar_encoding`.
+
+`process_still_avatar(data, dim)` is the same at an explicit edge.
+**`set_server_avatar` passes `SERVER_ICON_DIM` = 128**, NOT `AVATAR_DIM`: a server
+still is base64 INSIDE the CRDT, so every extra kilobyte replicates to every member,
+and a server renders far smaller than a profile card.
 
 ## process_banner_image()
 
 `image_convert.rs:process_banner_image()` -- Processes raw image into banner format:
 1. Center-crops to 3:1 aspect ratio (crops the widest 3:1 region from center).
 2. Resizes to 600x200 using Lanczos3 filter.
-3. Encodes as lossless WebP.
+3. Encodes as LOSSY WebP Q80 (ART preset).
 4. Rejects if result > 200 KB.
+
+## webp_anim.rs -- ALL animated WebP encoding
+
+`node/webp_anim.rs` drives libwebp's `WebPAnimEncoder` directly. **Every animated
+encode in the app goes through it** (server icons, server banners, emotes, stickers,
+GIF sends, avatar frames) plus the single-frame still path via
+`encode_lossy_webp_via_animation`.
+
+It exists because **`webp-animation` 0.9 drops two knobs on the floor**:
+- **`EncodingConfig.method` is a DEAD FIELD** -- its `apply_to()` writes only
+  `lossless` and `quality` into the `WebPConfig`, so method 6 was *unreachable*.
+- **`LossyEncodingConfig::default()` sets `segments: 1`**; libwebp's default is 4.
+
+`AnimParams::default()` mirrors **libwebp's** defaults, not that crate's, so a bare
+`..Default::default()` cannot silently reintroduce the deviation. A regression test
+(`method_and_segments_reach_libwebp`) fails if the knobs ever stop arriving.
+
+Presets:
+- **`art(q)`** -- user artwork (avatars, banners, icons, emotes, stickers, frames).
+  libwebp's drawing tuning (sns 25 / filter strength 10 / sharpness 6) + method 6 +
+  segments 4 + **`use_sharp_yuv`**, which was the best quality-per-byte knob measured:
+  it beat Q95 on PSNR at 15-30% fewer bytes because it fixes edge chroma bleed on
+  saturated hard edges, which is what makes lossy WebP read as "damaged" on line art.
+- **`plain(q)`** -- the file-send pipeline, where content is arbitrary and the user
+  picked a quality tier. Keeps libwebp's general tuning.
+- **`lossless(effort)`** -- the explicit Lossless tier only. Measured 5-8x LARGER than
+  lossy on real animated avatars, and `allow_mixed` never once picked it.
+
+Uploads are one-off, so trading encode CPU for permanently smaller, better-looking
+bytes is the right side of that deal every time.
+
+## Animation detection: BYTES, never a filename
+
+- **`is_animated_image(data)`** -- GIF magic, animated-WebP VP8X flag, **or an APNG
+  `acTL` chunk**. The "does this move at all" question.
+- **`is_animated_webp(data)`** -- VP8X flag only. **Separate on purpose**: four call
+  sites ask the narrower "is this ALREADY an animated WebP I can pass through or hand
+  to the WebP decoder". Answering the broad question there would route a GIF or an
+  APNG into the WebP decoder and put a non-WebP blob on a rail whose readers all
+  assume WebP.
+- **APNG detection walks the chunk table BY LENGTH**, not by searching for literal
+  `acTL` bytes (those can occur inside compressed pixel data); it stops at IDAT, which
+  `acTL` is required to precede. Mirrored exactly in Dart `_isApng`
+  (`animated_gif_image.dart`), which backs `isAnimatedImageBytes`.
+- **`decode_animation_frames(data)`** -- GIF, animated WebP and APNG to
+  `(RgbaImage, duration_ms)` in one place. Delays under 20ms become 100ms (browser
+  convention). `process_server_avatar_anim` runs everything except an
+  already-correct-size animated WebP through it, so an APNG now re-encodes instead of
+  uploading as a frozen first frame.
+- **The pickers gate on `isAnimatedImageBytes`, NOT on a `.gif` extension.** Both
+  `user_settings_dialog.dart` and `mobile_settings_tab.dart` used to branch on the
+  extension, so an animated WebP or APNG went through the still cropper, got
+  rasterised, and came out frozen with no error shown.
 
 ---
 

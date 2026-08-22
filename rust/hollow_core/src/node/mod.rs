@@ -33,6 +33,7 @@ pub(crate) mod voice_handler;
 pub(crate) mod ws_stream_transfer;
 mod swarm;
 pub(crate) mod ws_client;
+pub(crate) mod webp_anim;
 
 #[cfg(test)]
 mod test_harness;

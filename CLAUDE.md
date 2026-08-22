@@ -13,9 +13,9 @@ Distributed, encrypted Discord alternative: no central servers, members collecti
 - **Org ID:** com.anonlisten · **Project:** hollow
 
 ## Project Structure
-- `lib/`: `main.dart` entry (ProviderScope + RustLib.init + window_manager); `src/core/` models+providers+service wrappers, `src/theme/` design system, `src/ui/` shell chat settings sidebar components dialogs animations mobile.
-- `rust/hollow_core/src/`: `api/` FFI (frb scans these); `node/` swarm.rs + focused modules (types, handlers, ws_client, crdt_store, test_harness cfg(test)); `crypto/` Olm+MLS+persistence (store.rs = CryptoStore); `identity/` Ed25519; `storage/` SQLCipher.
-- `relay-uws/` production relay (native TLS); `relay/` legacy. `packages/flutter_webrtc/` FORK 1.5.2, libwebrtc m144 = OUR patched build, `screen_audio_capturer.exe` = SEPARATE target. `rust_builder/` cargokit. `vendor/ffmpeg/` bundled, gitignored. `legal/` policy+terms.
+- `lib/`: `main.dart` entry (ProviderScope + RustLib.init + window_manager); `src/core/` models+providers+services, `src/theme/` design system, `src/ui/` shell chat settings sidebar components dialogs animations mobile.
+- `rust/hollow_core/src/`: `api/` FFI (frb scans these); `node/` swarm.rs + focused modules (types, handlers, ws_client, crdt_store, image_convert/webp_anim, test_harness cfg(test)); `crypto/` Olm+MLS (store.rs = CryptoStore); `identity/` Ed25519; `storage/` SQLCipher.
+- `relay-uws/` production relay (native TLS); `relay/` legacy. `packages/flutter_webrtc/` FORK 1.5.2, libwebrtc m144 = OUR patched build, `screen_audio_capturer.exe` = SEPARATE target. `rust_builder/` cargokit. `vendor/ffmpeg/` gitignored. `legal/` policy+terms.
 
 ## Build & Run Commands
 ```bash
@@ -30,8 +30,8 @@ cargo test --lib  # full Rust suite
 # FRB codegen after Rust API changes (MUST run from project root)
 flutter_rust_bridge_codegen generate --rust-input "crate::api" --rust-root "rust/hollow_core" --dart-output "lib/src/rust"
 
-# Relay deploy (scp src/*.cpp *.h → ~/relay-uws/src/, then)
-ssh ubuntu@141.227.186.209 "cd ~/relay-uws/build && cmake .. -DCMAKE_BUILD_TYPE=Release && make -j2 && sudo setcap cap_net_bind_service=+ep hollow-relay && sudo systemctl restart hollow-relay"
+# Relay deploy: scp src/*.cpp *.h → ~/relay-uws/src/, then cmake+make+setcap+restart
+# (full command in `feedback_relay_rules`)
 
 # Windows release (build→sign→installer→zip; Certum PIN prompt)
 pwsh scripts\build_release.ps1  # full pipeline (-SkipBuild to repackage)
@@ -40,7 +40,7 @@ pwsh scripts\sign_release.ps1  # sign every .exe/.dll in Release
 **Certum signing:** self-healing CNG binding; output `installer\Output\` (`reference_certum_signing_procedure`). **Release zips: .NET '/' zipping, NEVER Compress-Archive** (`feedback_compress_archive_backslash_zip`).
 
 ## Hollow Design System
-All UI uses custom Hollow widgets, no Material defaults: **HollowPressable**, **HollowButton** (`.filled()/.ghost()/.outline()/.danger()`), **HollowTextField**, **HollowDialog** (`showHollowDialog()`), **HollowTooltip**, **HollowToast**, **HollowToggle**, **StatusDot**, **StatBar**.
+All UI uses custom Hollow widgets, no Material defaults (`src/ui/components/`): HollowPressable, HollowButton (`.filled()/.ghost()/.outline()/.danger()`), HollowTextField, HollowDialog (`showHollowDialog()`), HollowTooltip, HollowToast, HollowToggle, StatusDot, StatBar.
 - **CRITICAL: hover/dialog patterns:** NEVER animate a color from `Colors.transparent` (lerps via black — pass `backgroundColor: null`); hover never paints outside the control. Dialogs = ghost Cancel + filled confirm; `.danger` ONLY destructive; selection = chips, never `.filled`. `feedback_hover_state_patterns`.
 
 ## Key Architecture Notes
@@ -50,15 +50,16 @@ All UI uses custom Hollow widgets, no Material defaults: **HollowPressable**, **
 - **Peer state in swarm.rs:** `ws_room_peers` + `synced_peers`; PeerJoined → key exchange + sync; 30s keepalive in ws_client.rs.
 - **Relay domain (self-hosting):** `relayDomainProvider` + `set_relay_url()` FFI, default `relay.anonlisten.com`; ALL WS/signaling/STUN/TURN URLs derive from it.
 - **Event streaming:** Rust→Dart via `StreamSink` — `watch_network_events()` → `EventStreamNotifier` (`event_provider.dart`).
-- **Profiles/avatars:** profiles load light (`getAllProfilesLight()`, no blobs); `HollowAvatar` auto-fetches from `avatarProvider` — never pass `imageBytes:`; banners via `bannerProvider`; `ProfileUpdated` invalidates BOTH on EVERY save, so a reload MUST return the SAME `Uint8List` when unchanged (`reuseIfUnchanged`) or every animated surface re-decodes. `feedback_lazy_avatar_pattern`, `feedback_reload_unchanged_bytes_identity`.
+- **Profiles/avatars:** profiles load light (`getAllProfilesLight()`, no blobs); `HollowAvatar` auto-fetches from `avatarProvider` — never pass `imageBytes:`; banners via `bannerProvider`; a reload MUST reuse the SAME `Uint8List` when unchanged (`reuseIfUnchanged`). `feedback_lazy_avatar_pattern`, `feedback_reload_unchanged_bytes_identity`.
 - **CRITICAL: profile announces are LIGHT:** hashes only, NO blobs (blobs ride ONLY `ProfileRequest` response + `handle_update_profile`); sweeps per-conversation, ONE source, throttled. `feedback_profile_light_announce_bandwidth_leak`.
 - **CRITICAL: avatar frames (#54):** profile carries an ID (`""`/`b:<hue>`/64-hex), art rides the ASSET RAIL (`AssetKind::Frame`), NEVER the pushed blob. Zero layout cost, none on voice/call surfaces, hover = the ROW — all 3 CI-guarded. `project_avatar_frames`.
-- **CRITICAL: Profile Showcase Board:** wire field `Option<String>` (absent = old client → PRESERVE; `""` = clear); NO relational blocks (VETOED); IGDB authoring-only; images LOSSY WebP; fetchers refuse non-Hollow-CDN URLs. `project_showcase_board_impl`.
+- **CRITICAL: Profile Showcase Board:** wire field `Option<String>` (absent = old client → PRESERVE; `""` = clear); NO relational blocks (VETOED); IGDB authoring-only; fetchers refuse non-Hollow-CDN URLs. `project_showcase_board_impl`.
 - **CRITICAL: asset rail (emotes/banners/stickers/GIFs):** content-addressed WebP; bytes NEVER ride CRDT/envelopes/relay; receipt cap = kind WE recorded, unsolicited DROPPED; FFZ/Klipy proxies authoring-only, key SERVER-side; send sites read `expandedText()` NEVER `.text`. `project_asset_rail_epic`, wiki `emotes`.
+- **CRITICAL: animated WebP encoding = `node/webp_anim.rs`** (`webp-animation` drops `method`); detect animation from BYTES; `is_animated_webp` (passthrough) is NOT `is_animated_image` (+APNG). Avatar 184 / icon 128. `project_animated_avatar_encoding`.
 - **CRITICAL: stickers/GIFs:** identity = HASH not name; Klipy sticker ids carry `~` EVERYWHERE, GIF ids BARE. **ONE block asset per message**, gated at send (`exceedsAssetLimit`), never receive. Pack import re-hashes, never re-encodes. `project_stickers_phase5`, `feedback_antialiased_seam_bleed`.
 - **Emoji font:** NotoColorEmoji MUST stay emoji-only subset — `scripts/subset_emoji_font.py`.
 - **CRITICAL: CRDT sync batches parse tolerantly:** always `parse_ops_tolerant`, never `from_str::<Vec<CrdtOp>>` — one unknown NEWER-client variant poisons the batch and wedges older clients' sync. `project_custom_emotes_ffz`.
-- **CRITICAL: Dart traps that fail SILENTLY:** `CrossAxisAlignment.stretch` Row needs bounded height (wrap in `IntrinsicHeight`); a Column wrapped around content CENTRES whatever shrink-wraps; `ref.listen` ONLY in build(); never `Flexible` beside `Expanded`; srcIn tints need TRANSPARENT ink; `whenComplete(() => map.remove(k))` self-deadlocks; a bare `Stack` CLIPS (hardEdge) — an avatar frame's overhang then survives only at its corners, reading as a z-order bug. `feedback_dart_patterns`.
+- **CRITICAL: Dart traps that fail SILENTLY:** `CrossAxisAlignment.stretch` Row needs bounded height (wrap in `IntrinsicHeight`); a Column wrapped around content CENTRES whatever shrink-wraps; `ref.listen` ONLY in build(); never `Flexible` beside `Expanded`; srcIn tints need TRANSPARENT ink; `whenComplete(() => map.remove(k))` self-deadlocks; a bare `Stack` CLIPS (hardEdge). `feedback_dart_patterns`, `feedback_badge_stack_clips_avatar_frame`.
 - **CRITICAL: blocking & Saved messages:** block list = MASTER-keyed, process-global (`node/blocklist.rs`) — inbound DM-surface handlers drop via `blocklist::is_blocked(sender)` BEFORE store+emit. Saved messages = self-DM (fan-out skips self). `project_saved_messages_block_report`.
 - **Navigation shell:** `layoutModeProvider` (sync Notifier loaded in `_bootstrap`, NEVER AsyncNotifier-in-build, #58): Dock (default, new UI in `bottom_bar.dart`) / Classic (4-panel, must not inherit Dock surfaces). Centre tabs = ONE selection via `setShellTab()` (CI-guarded). `feedback_shell_centre_tabs_exclusive`.
 - **Theme:** `HollowTheme.dark()/.light()` + hue variants, `themeModeProvider` persisted. Contrast: `accentText` for accent TEXT (raw `accent` = fills only), `textTertiary` for faded metadata — both 4.5:1 (`contrast.dart`, CI-guarded).

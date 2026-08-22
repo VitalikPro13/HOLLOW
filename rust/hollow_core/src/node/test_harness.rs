@@ -10284,8 +10284,13 @@ async fn server_avatar_anim_hash_replicates_and_bytes_pull_on_demand() {
         super::emotes::webp_is_animated(&anim_bytes),
         "processed icon must be an ANIMATED WebP"
     );
-    let still_bytes =
-        super::image_convert::process_avatar_image(&gif_bytes).expect("process still icon");
+    // Mirror `set_server_avatar`: a SERVER still is SERVER_ICON_DIM, not a
+    // person's AVATAR_DIM.
+    let still_bytes = super::image_convert::process_still_avatar(
+        &gif_bytes,
+        super::image_convert::SERVER_ICON_DIM,
+    )
+    .expect("process still icon");
     let hash = hex::encode(Sha256::digest(&anim_bytes));
     o.store()
         .save_asset_blob(&hash, &anim_bytes, true, "avatar")

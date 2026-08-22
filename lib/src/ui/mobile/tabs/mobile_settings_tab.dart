@@ -761,13 +761,15 @@ class _ProfileTabState extends ConsumerState<_ProfileTab> {
     final bytes = await result.files.first.xFile.readAsBytes();
     if (!mounted) return;
 
-    final ext = result.files.first.extension?.toLowerCase() ?? '';
-    if (ext == 'gif') {
+    // Animated? Decide from the BYTES, never the extension — an animated
+    // WebP or an APNG named anything but `.gif` used to go through the
+    // cropper and come out a frozen still, silently.
+    if (isAnimatedImageBytes(bytes)) {
       if (bytes.length > 1024 * 1024) {
-        HollowToast.show(context, 'GIF must be under 1 MB', type: HollowToastType.error);
+        HollowToast.show(context, 'Animated avatar must be under 1 MB', type: HollowToastType.error);
         return;
       }
-      // Raw GIF is final — invalidate any in-flight crop processing.
+      // Raw animated bytes are final — invalidate any in-flight crop processing.
       setState(() { _avatarPickGen++; _avatarBusy = false; _pendingAvatar = bytes; _avatarChanged = true; });
       return;
     }
@@ -807,10 +809,10 @@ class _ProfileTabState extends ConsumerState<_ProfileTab> {
     final bytes = await result.files.first.xFile.readAsBytes();
     if (!mounted) return;
 
-    final ext = result.files.first.extension?.toLowerCase() ?? '';
-    if (ext == 'gif') {
+    // Animated? Decide from the BYTES, never the extension (see _pickAvatar).
+    if (isAnimatedImageBytes(bytes)) {
       if (bytes.length > 2 * 1024 * 1024) {
-        HollowToast.show(context, 'GIF must be under 2 MB', type: HollowToastType.error);
+        HollowToast.show(context, 'Animated banner must be under 2 MB', type: HollowToastType.error);
         return;
       }
       setState(() { _bannerPickGen++; _bannerBusy = false; _pendingBanner = bytes; _bannerChanged = true; });

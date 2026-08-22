@@ -5,6 +5,8 @@ use image::imageops::FilterType;
 use image::{AnimationDecoder, ImageFormat};
 use std::io::Cursor;
 
+use super::webp_anim;
+
 /// User-configurable image quality tier for the outgoing image pipeline.
 ///
 /// Applied to every user-uploaded image that goes through the file-send
@@ -281,52 +283,27 @@ pub fn convert_gif_to_animated_webp(
         return Err("GIF has zero dimensions".into());
     }
 
-    let encoding_config = match quality {
-        WebpQuality::Lossless => webp_animation::EncodingConfig {
-            encoding_type: webp_animation::EncodingType::Lossless,
-            ..Default::default()
-        },
-        WebpQuality::Balanced => webp_animation::EncodingConfig {
-            quality: 50.0,
-            encoding_type: webp_animation::EncodingType::Lossy(Default::default()),
-            ..Default::default()
-        },
-        WebpQuality::Small => webp_animation::EncodingConfig {
-            quality: 30.0,
-            encoding_type: webp_animation::EncodingType::Lossy(Default::default()),
-            ..Default::default()
-        },
+    // The file-send pipeline carries arbitrary content, so it keeps libwebp's
+    // general tuning rather than the art preset.
+    let params = match quality {
+        // Lossless effort 60: past that the returns are tiny and the wait is not.
+        WebpQuality::Lossless => webp_anim::AnimParams::lossless(60.0),
+        WebpQuality::Balanced => webp_anim::AnimParams::plain(50.0),
+        WebpQuality::Small => webp_anim::AnimParams::plain(30.0),
     };
 
-    let mut encoder = webp_animation::Encoder::new_with_options(
-        (w, h),
-        webp_animation::EncoderOptions {
-            encoding_config: Some(encoding_config),
-            ..Default::default()
-        },
-    )
-    .map_err(|e| format!("Failed to create WebP encoder: {e}"))?;
+    // Browser convention: delays < 20ms → 100ms.
+    let timed: Vec<(image::RgbaImage, i32)> = frames
+        .into_iter()
+        .map(|f| {
+            let delay: std::time::Duration = f.delay().into();
+            let ms = delay.as_millis() as i32;
+            (f.into_buffer(), if ms < 20 { 100 } else { ms })
+        })
+        .collect();
 
-    let mut timestamp_ms: i32 = 0;
-
-    for frame in &frames {
-        let rgba = frame.buffer();
-        encoder
-            .add_frame(rgba.as_raw(), timestamp_ms)
-            .map_err(|e| format!("Failed to add WebP frame: {e}"))?;
-
-        // Extract frame delay — browser convention: < 20ms → 100ms.
-        let delay: std::time::Duration = frame.delay().into();
-        let delay_ms = delay.as_millis() as i32;
-        let effective_delay = if delay_ms < 20 { 100 } else { delay_ms };
-        timestamp_ms += effective_delay;
-    }
-
-    let webp_data = encoder
-        .finalize(timestamp_ms)
-        .map_err(|e| format!("Failed to finalize animated WebP: {e}"))?;
-
-    Ok((webp_data.to_vec(), w, h))
+    let webp_data = webp_anim::encode_animation(&timed, (w, h), &params)?;
+    Ok((webp_data, w, h))
 }
 
 /// Convert image bytes to lossless WebP.
@@ -422,30 +399,92 @@ pub fn convert_to_webp_preview(data: &[u8], max_dim_px: u32) -> Result<(Vec<u8>,
 }
 
 /// Encode a single RGBA frame as lossy WebP at the given quality (0-100)
-/// using the `webp_animation` crate's single-frame encoder. Sharing this
-/// path with the animated encoder means only one libwebp-sys variant ends
-/// up in the final binary (eliminates the macOS duplicate-symbol issue).
+/// through the same libwebp animation encoder the animated paths use.
+/// Sharing that path means only one libwebp-sys variant ends up in the final
+/// binary (eliminates the macOS duplicate-symbol issue).
+///
+/// Uses the ART preset, because every caller here is user-uploaded artwork
+/// (avatars, banners, emotes, showcase covers) rather than photography.
 fn encode_lossy_webp_via_animation(rgba: &[u8], w: u32, h: u32, quality: f32) -> Result<Vec<u8>, String> {
-    let mut encoder = webp_animation::Encoder::new_with_options(
-        (w, h),
-        webp_animation::EncoderOptions {
-            encoding_config: Some(webp_animation::EncodingConfig {
-                encoding_type: webp_animation::EncodingType::Lossy(Default::default()),
-                quality,
-                ..Default::default()
-            }),
-            ..Default::default()
-        },
-    )
-    .map_err(|e| format!("WebP encoder init: {e:?}"))?;
+    let img = image::RgbaImage::from_raw(w, h, rgba.to_vec())
+        .ok_or_else(|| format!("Frame buffer is not {w}x{h} RGBA"))?;
+    webp_anim::encode_animation(&[(img, 1)], (w, h), &webp_anim::AnimParams::art(quality))
+}
 
-    encoder
-        .add_frame(rgba, 0)
-        .map_err(|e| format!("WebP add_frame: {e:?}"))?;
-    let webp = encoder
-        .finalize(1)
-        .map_err(|e| format!("WebP finalize: {e:?}"))?;
-    Ok(webp.to_vec())
+/// Decode an animated source into `(frame, display-duration-ms)` pairs.
+///
+/// One place decides what "animated" means on the way IN, mirroring
+/// [`is_animated_image`] on the way out: GIF, animated WebP, or an APNG.
+/// Frame delays under 20ms become 100ms, the browser convention, so a GIF
+/// authored with 0ms delays does not play at ticker speed.
+pub fn decode_animation_frames(data: &[u8]) -> Result<Vec<(image::RgbaImage, i32)>, String> {
+    let frames = if data.starts_with(b"GIF8") {
+        GifDecoder::new(Cursor::new(data))
+            .map_err(|e| format!("Failed to decode GIF: {e}"))?
+            .into_frames()
+            .collect_frames()
+            .map_err(|e| format!("Failed to collect GIF frames: {e}"))?
+    } else if is_animated_webp(data) {
+        image::codecs::webp::WebPDecoder::new(Cursor::new(data))
+            .map_err(|e| format!("Failed to decode animated WebP: {e}"))?
+            .into_frames()
+            .collect_frames()
+            .map_err(|e| format!("Failed to collect WebP frames: {e}"))?
+    } else if data.starts_with(b"\x89PNG") {
+        let decoder = image::codecs::png::PngDecoder::new(Cursor::new(data))
+            .map_err(|e| format!("Failed to decode PNG: {e}"))?;
+        if !decoder.is_apng().map_err(|e| format!("Failed to read PNG: {e}"))? {
+            return Err("PNG is not animated".into());
+        }
+        decoder
+            .apng()
+            .map_err(|e| format!("Failed to decode APNG: {e}"))?
+            .into_frames()
+            .collect_frames()
+            .map_err(|e| format!("Failed to collect APNG frames: {e}"))?
+    } else {
+        return Err("Not an animated image".into());
+    };
+
+    if frames.is_empty() {
+        return Err("Animation has no frames".into());
+    }
+    Ok(frames
+        .into_iter()
+        .map(|f| {
+            let delay: std::time::Duration = f.delay().into();
+            let ms = delay.as_millis() as i32;
+            (f.into_buffer(), if ms < 20 { 100 } else { ms })
+        })
+        .collect())
+}
+
+/// Centre-crop every frame to `crop` then resize to `(dw, dh)`.
+///
+/// Skips the resize when the crop is already the target size. That is not
+/// just a shortcut: resampling flat art manufactures intermediate colours
+/// that were not in the source, and those cost real bytes. Measured on a
+/// 224px animated source, a Lanczos3 downscale to 184 encoded 64% LARGER
+/// than the untouched 224px original.
+fn crop_resize_frames(
+    frames: &[(image::RgbaImage, i32)],
+    crop: (u32, u32, u32, u32),
+    dw: u32,
+    dh: u32,
+) -> Vec<(image::RgbaImage, i32)> {
+    let (x, y, cw, ch) = crop;
+    frames
+        .iter()
+        .map(|(buf, ms)| {
+            let cropped = image::imageops::crop_imm(buf, x, y, cw, ch).to_image();
+            let out = if (cw, ch) == (dw, dh) {
+                cropped
+            } else {
+                image::imageops::resize(&cropped, dw, dh, FilterType::Lanczos3)
+            };
+            (out, *ms)
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -746,6 +785,115 @@ mod tests {
         encoder.finalize(240).unwrap().to_vec()
     }
 
+    /// Build a PNG and splice a chunk of `kind` in ahead of the first IDAT,
+    /// which is where APNG's `acTL` is required to sit.
+    fn png_with_chunk(kind: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+        let png = make_test_png(8, 8);
+        let idat = png
+            .windows(4)
+            .position(|w| w == b"IDAT")
+            .expect("test PNG has an IDAT")
+            - 4; // back up over the length field
+        let mut chunk = Vec::new();
+        chunk.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        chunk.extend_from_slice(kind);
+        chunk.extend_from_slice(payload);
+        chunk.extend_from_slice(&[0, 0, 0, 0]); // CRC — never checked here
+        let mut out = png[..idat].to_vec();
+        out.extend_from_slice(&chunk);
+        out.extend_from_slice(&png[idat..]);
+        out
+    }
+
+    /// A person's avatar has to out-resolve the profile card, which paints it
+    /// at 110 logical = 165 physical at 1.5x. A server icon does not, and its
+    /// still replicates inside the CRDT, so the two edges stay different.
+    #[test]
+    fn avatar_out_resolves_the_profile_card_and_server_icons_stay_small() {
+        assert!(
+            AVATAR_DIM >= 165,
+            "AVATAR_DIM {AVATAR_DIM} would be upscaled by the 110pt profile card at 1.5x"
+        );
+        assert!(SERVER_ICON_DIM < AVATAR_DIM);
+
+        let png = make_test_png(400, 260);
+        let avatar = process_avatar_image(&png).expect("avatar");
+        assert_eq!(get_image_dimensions(&avatar).unwrap(), (AVATAR_DIM, AVATAR_DIM));
+
+        let icon = process_still_avatar(&png, SERVER_ICON_DIM).expect("server icon");
+        assert_eq!(
+            get_image_dimensions(&icon).unwrap(),
+            (SERVER_ICON_DIM, SERVER_ICON_DIM)
+        );
+    }
+
+    /// A source already at the target edge must not be resampled — Lanczos3
+    /// ringing on flat art measurably COSTS bytes (a 224px animated source
+    /// encoded 64% larger after a downscale to 184 than it did untouched).
+    #[test]
+    fn a_source_already_at_the_target_edge_is_not_resampled() {
+        let exact = make_test_png(AVATAR_DIM, AVATAR_DIM);
+        let out = process_avatar_image(&exact).expect("avatar");
+        assert_eq!(get_image_dimensions(&out).unwrap(), (AVATAR_DIM, AVATAR_DIM));
+    }
+
+    #[test]
+    fn apng_reads_as_animated_and_a_still_png_does_not() {
+        // num_frames = 2, num_plays = 0
+        let apng = png_with_chunk(b"acTL", &[0, 0, 0, 2, 0, 0, 0, 0]);
+        assert!(is_apng(&apng), "acTL before IDAT must read as APNG");
+        assert!(is_animated_image(&apng));
+        // ...but it is NOT an animated WebP, which is what gates passthrough.
+        assert!(!is_animated_webp(&apng));
+
+        let still = make_test_png(8, 8);
+        assert!(!is_apng(&still));
+        assert!(!is_animated_image(&still));
+    }
+
+    /// `acTL` occurring by chance inside compressed pixel data must not count.
+    /// Walking chunks by length (rather than searching for the literal bytes)
+    /// is what makes that true.
+    #[test]
+    fn actl_bytes_inside_a_chunk_payload_are_not_an_apng() {
+        let decoy = png_with_chunk(b"tEXt", b"note\0acTL and more text");
+        assert!(
+            !is_apng(&decoy),
+            "acTL inside a tEXt payload must not read as APNG"
+        );
+        assert!(!is_animated_image(&decoy));
+    }
+
+    #[test]
+    fn animated_webp_and_gif_still_read_as_animated() {
+        let webp = make_test_animated_webp(16, 16);
+        assert!(is_animated_webp(&webp));
+        assert!(is_animated_image(&webp));
+
+        let gif = make_test_gif(16, 16);
+        assert!(is_animated_image(&gif));
+        assert!(!is_animated_webp(&gif), "a GIF is not an animated WebP");
+
+        assert!(!is_animated_image(b"not an image at all"));
+        assert!(!is_animated_image(&[]));
+    }
+
+    /// An APNG used to upload "successfully" as a frozen first frame. It now
+    /// goes through the same decode/re-encode path a GIF does.
+    #[test]
+    fn server_avatar_anim_accepts_an_apng() {
+        let apng = png_with_chunk(b"acTL", &[0, 0, 0, 2, 0, 0, 0, 0]);
+        // The decoy PNG has no real fcTL/fdAT frames, so decoding is allowed
+        // to fail — what must NOT happen is the old flat "not animated"
+        // rejection before the decoder is ever consulted.
+        if let Err(e) = process_server_avatar_anim(&apng) {
+            assert!(
+                !e.contains("Not an animated image"),
+                "APNG must reach the decoder, got: {e}"
+            );
+        }
+    }
+
     #[test]
     fn gif_for_send_reencodes_and_downsizes_gif() {
         let gif = make_test_gif(600, 300);
@@ -902,23 +1050,53 @@ pub fn convert_from_webp(
     Ok(buf)
 }
 
-/// Process a raw image into avatar format: center-crop to square, resize to 128x128, encode as WebP.
+/// A person's avatar, stored and rendered edge.
+///
+/// The profile card paints the avatar at 110 LOGICAL pixels
+/// (`profile_card_body.dart`), which is 165 physical on a 1.5x display and 220
+/// on a 2x one — so the old 128 was already being upscaled on the surface that
+/// shows an avatar largest. 184 is also exactly a Steam avatar's native size,
+/// which is where most animated uploads come from, so the common case now
+/// needs no resampling at all.
+pub const AVATAR_DIM: u32 = 184;
+
+/// A server's still icon. Servers render far smaller than a profile card (the
+/// strip is ~48px), and this one is base64 INSIDE the CRDT rather than on the
+/// asset rail, so every extra kilobyte replicates to every member.
+pub const SERVER_ICON_DIM: u32 = 128;
+
+/// Process a raw image into a person's avatar: centre-crop square, resize to
+/// [`AVATAR_DIM`], encode as WebP.
 pub fn process_avatar_image(data: &[u8]) -> Result<Vec<u8>, String> {
+    process_still_avatar(data, AVATAR_DIM)
+}
+
+/// The same, at an explicit edge. Server icons pass [`SERVER_ICON_DIM`].
+pub fn process_still_avatar(data: &[u8], dim: u32) -> Result<Vec<u8>, String> {
     let img = image::load_from_memory(data)
         .map_err(|e| format!("Failed to decode image: {e}"))?;
 
     let (w, h) = (img.width(), img.height());
+    if w == 0 || h == 0 {
+        return Err("Image has zero dimensions".into());
+    }
     let side = w.min(h);
     let x = (w - side) / 2;
     let y = (h - side) / 2;
 
     let cropped = img.crop_imm(x, y, side, side);
-    let resized = cropped.resize_exact(128, 128, FilterType::Lanczos3);
+    // Skip the resample when the crop is already the target: resizing flat art
+    // manufactures intermediate colours that cost real bytes, and a Steam
+    // avatar arrives at exactly AVATAR_DIM.
+    let rgba = if side == dim {
+        cropped.to_rgba8()
+    } else {
+        cropped.resize_exact(dim, dim, FilterType::Lanczos3).to_rgba8()
+    };
 
     // Lossy, like the showcase encoders: lossless WebP size is
     // content-dependent, so photographic avatars randomly blew the cap.
-    let rgba = resized.to_rgba8();
-    let buf = encode_lossy_webp_via_animation(rgba.as_raw(), 128, 128, 80.0)?;
+    let buf = encode_lossy_webp_via_animation(rgba.as_raw(), dim, dim, 80.0)?;
 
     if buf.len() > 100_000 {
         return Err("Avatar image too large after processing (>100KB)".into());
@@ -1028,41 +1206,21 @@ pub fn process_emote_image(data: &[u8]) -> Result<(Vec<u8>, bool), String> {
         } else {
             (w, h)
         };
-        let mut encoder = webp_animation::Encoder::new_with_options(
-            (nw, nh),
-            webp_animation::EncoderOptions {
-                encoding_config: Some(webp_animation::EncodingConfig {
-                    quality: 75.0,
-                    encoding_type: webp_animation::EncodingType::Lossy(Default::default()),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            },
-        )
-        .map_err(|e| format!("Failed to create WebP encoder: {e}"))?;
-        let mut timestamp_ms: i32 = 0;
-        for frame in &frames {
-            let resized;
-            let rgba = if (nw, nh) != (w, h) {
-                resized = image::imageops::resize(frame.buffer(), nw, nh, FilterType::Lanczos3);
-                &resized
-            } else {
-                frame.buffer()
-            };
-            encoder
-                .add_frame(rgba.as_raw(), timestamp_ms)
-                .map_err(|e| format!("Failed to add WebP frame: {e}"))?;
-            let delay: std::time::Duration = frame.delay().into();
-            let delay_ms = delay.as_millis() as i32;
-            timestamp_ms += if delay_ms < 20 { 100 } else { delay_ms };
-        }
-        let webp = encoder
-            .finalize(timestamp_ms)
-            .map_err(|e| format!("Failed to finalize animated WebP: {e}"))?;
+        let timed: Vec<(image::RgbaImage, i32)> = frames
+            .into_iter()
+            .map(|f| {
+                let delay: std::time::Duration = f.delay().into();
+                let ms = delay.as_millis() as i32;
+                (f.into_buffer(), if ms < 20 { 100 } else { ms })
+            })
+            .collect();
+        let scaled = crop_resize_frames(&timed, (0, 0, w, h), nw, nh);
+        let webp =
+            webp_anim::encode_animation(&scaled, (nw, nh), &webp_anim::AnimParams::art(75.0))?;
         if webp.len() > MAX_ANIMATED {
             return Err("Animated emote too large after processing (>256KB)".into());
         }
-        return Ok((webp.to_vec(), true));
+        return Ok((webp, true));
     }
 
     // Animated WebP passthrough (verify container + first-frame decode + cap).
@@ -1177,37 +1335,25 @@ pub fn process_server_banner_image(data: &[u8]) -> Result<(Vec<u8>, bool), Strin
         if w == 0 || h == 0 {
             return Err("GIF has zero dimensions".into());
         }
-        let (x, y, cw, ch) = crop_rect_3to1(w, h);
-        let mut encoder = webp_animation::Encoder::new_with_options(
+        let crop = crop_rect_3to1(w, h);
+        let timed: Vec<(image::RgbaImage, i32)> = frames
+            .into_iter()
+            .map(|f| {
+                let delay: std::time::Duration = f.delay().into();
+                let ms = delay.as_millis() as i32;
+                (f.into_buffer(), if ms < 20 { 100 } else { ms })
+            })
+            .collect();
+        let scaled = crop_resize_frames(&timed, crop, BANNER_W, BANNER_H);
+        let webp = webp_anim::encode_animation(
+            &scaled,
             (BANNER_W, BANNER_H),
-            webp_animation::EncoderOptions {
-                encoding_config: Some(webp_animation::EncodingConfig {
-                    quality: 80.0,
-                    encoding_type: webp_animation::EncodingType::Lossy(Default::default()),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            },
-        )
-        .map_err(|e| format!("Failed to create WebP encoder: {e}"))?;
-        let mut timestamp_ms: i32 = 0;
-        for frame in &frames {
-            let cropped = image::imageops::crop_imm(frame.buffer(), x, y, cw, ch).to_image();
-            let resized = image::imageops::resize(&cropped, BANNER_W, BANNER_H, FilterType::Lanczos3);
-            encoder
-                .add_frame(resized.as_raw(), timestamp_ms)
-                .map_err(|e| format!("Failed to add WebP frame: {e}"))?;
-            let delay: std::time::Duration = frame.delay().into();
-            let delay_ms = delay.as_millis() as i32;
-            timestamp_ms += if delay_ms < 20 { 100 } else { delay_ms };
-        }
-        let webp = encoder
-            .finalize(timestamp_ms)
-            .map_err(|e| format!("Failed to finalize animated WebP: {e}"))?;
+            &webp_anim::AnimParams::art(80.0),
+        )?;
         if webp.len() > MAX_ANIMATED {
             return Err("Animated banner too large after processing (>1MB)".into());
         }
-        return Ok((webp.to_vec(), true));
+        return Ok((webp, true));
     }
 
     // Animated WebP passthrough (verify container + first-frame decode + cap).
@@ -1265,18 +1411,65 @@ pub fn process_server_banner_thumb(data: &[u8]) -> Result<Vec<u8>, String> {
     Ok(buf)
 }
 
-/// True when the raw bytes are an animated source: GIF, or a WebP whose
-/// VP8X header carries the animation flag. Gates the animated-icon split in
-/// `set_server_avatar` (still inputs never touch the asset rail).
+/// True when the raw bytes are an animated source: a GIF, a WebP whose VP8X
+/// header carries the animation flag, or a PNG carrying an `acTL` chunk
+/// (APNG). Gates the animated-icon split in `set_server_avatar` (still inputs
+/// never touch the asset rail).
+///
+/// Decided from BYTES, never a filename. `isAnimatedImageBytes` in
+/// `animated_gif_image.dart` mirrors this exactly, because the avatar picker
+/// used to branch on a `.gif` extension and therefore sent animated WebP and
+/// APNG through the still cropper, which rasterised them to a frozen PNG with
+/// no error shown.
 pub fn is_animated_image(data: &[u8]) -> bool {
-    if data.starts_with(b"GIF8") {
-        return true;
-    }
+    data.starts_with(b"GIF8") || is_animated_webp(data) || is_apng(data)
+}
+
+/// True only for a WebP whose VP8X header carries the animation flag.
+///
+/// Distinct from [`is_animated_image`] on purpose: the passthrough and
+/// decode branches below ask "is this ALREADY an animated WebP I can hand to
+/// the WebP decoder or store untouched", which is a narrower question than
+/// "does this move". Answering the broad question at those sites would route
+/// a GIF or an APNG into the WebP decoder and store a non-WebP blob on a rail
+/// whose readers all assume WebP.
+pub fn is_animated_webp(data: &[u8]) -> bool {
     data.len() > 20
         && &data[0..4] == b"RIFF"
         && &data[8..12] == b"WEBP"
         && &data[12..16] == b"VP8X"
         && (data[20] & 0x02) != 0
+}
+
+/// True for a PNG that carries an `acTL` (animation control) chunk.
+///
+/// APNG puts `acTL` before the first `IDAT`, so the scan stops there rather
+/// than walking a whole multi-megabyte file. Chunks are walked properly by
+/// length rather than searched for the literal bytes, since `acTL` can occur
+/// inside compressed pixel data by chance.
+fn is_apng(data: &[u8]) -> bool {
+    const SIG: usize = 8; // PNG signature
+    if data.len() < SIG + 12 || !data.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return false;
+    }
+    let mut i = SIG;
+    // Each chunk: 4-byte length, 4-byte type, payload, 4-byte CRC.
+    while i + 8 <= data.len() {
+        let len = u32::from_be_bytes([data[i], data[i + 1], data[i + 2], data[i + 3]]) as usize;
+        let kind = &data[i + 4..i + 8];
+        if kind == b"acTL" {
+            return true;
+        }
+        // acTL is required to precede IDAT, so anything past here is pixels.
+        if kind == b"IEND" || kind == b"IDAT" {
+            return false;
+        }
+        match i.checked_add(12).and_then(|n| n.checked_add(len)) {
+            Some(next) => i = next,
+            None => return false, // length overflow: malformed
+        }
+    }
+    false
 }
 
 /// Validate an ALREADY-ENCODED sticker blob and report its true
@@ -1343,11 +1536,10 @@ pub fn validate_sticker_blob(data: &[u8]) -> Result<(u32, u32, bool), String> {
 /// Process an animated source into the ANIMATED server-icon variant
 /// (content-addressed asset, `AssetKind::Avatar`): square center crop →
 /// 128x128.
-/// - animated GIF → per-frame cropped/resized animated WebP, Q=80, ≤512KB;
-/// - already-animated WebP → accepted AS-IS under the 512KB cap (the image
-///   crate can't re-encode animation; container magic + first-frame decode
-///   are still verified — rendering uses BoxFit.cover, so a non-square
-///   source is a visual crop, not an error).
+/// - animated WebP already at or under 128px → accepted AS-IS under the
+///   512KB cap (no second generation of loss, and the content hash survives);
+/// - anything else animated (GIF, APNG, an oversized animated WebP) →
+///   decoded, centre-cropped square, resized and re-encoded at Q=80, ≤512KB.
 ///
 /// The still companion in `settings["server_avatar"]` comes from
 /// `process_avatar_image` (frame 0) — this produces ONLY the animated blob.
@@ -1361,95 +1553,49 @@ pub fn process_server_avatar_anim(data: &[u8]) -> Result<Vec<u8>, String> {
         ((w - side) / 2, (h - side) / 2, side, side)
     }
 
-    if data.starts_with(b"GIF8") {
-        let decoder = GifDecoder::new(Cursor::new(data))
-            .map_err(|e| format!("Failed to decode GIF: {e}"))?;
-        let frames = decoder
-            .into_frames()
-            .collect_frames()
-            .map_err(|e| format!("Failed to collect GIF frames: {e}"))?;
-        if frames.is_empty() {
-            return Err("GIF has no frames".into());
-        }
-        let (w, h) = (frames[0].buffer().width(), frames[0].buffer().height());
-        if w == 0 || h == 0 {
-            return Err("GIF has zero dimensions".into());
-        }
-        let (x, y, cw, ch) = crop_rect_square(w, h);
-        let mut encoder = webp_animation::Encoder::new_with_options(
-            (ICON_DIM, ICON_DIM),
-            webp_animation::EncoderOptions {
-                encoding_config: Some(webp_animation::EncodingConfig {
-                    quality: 80.0,
-                    encoding_type: webp_animation::EncodingType::Lossy(Default::default()),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            },
-        )
-        .map_err(|e| format!("Failed to create WebP encoder: {e}"))?;
-        let mut timestamp_ms: i32 = 0;
-        for frame in &frames {
-            let cropped = image::imageops::crop_imm(frame.buffer(), x, y, cw, ch).to_image();
-            let resized = image::imageops::resize(&cropped, ICON_DIM, ICON_DIM, FilterType::Lanczos3);
-            encoder
-                .add_frame(resized.as_raw(), timestamp_ms)
-                .map_err(|e| format!("Failed to add WebP frame: {e}"))?;
-            let delay: std::time::Duration = frame.delay().into();
-            let delay_ms = delay.as_millis() as i32;
-            timestamp_ms += if delay_ms < 20 { 100 } else { delay_ms };
-        }
-        let webp = encoder
-            .finalize(timestamp_ms)
-            .map_err(|e| format!("Failed to finalize animated WebP: {e}"))?;
-        if webp.len() > MAX_ANIMATED {
-            return Err("Animated icon too large after processing (>512KB)".into());
-        }
-        return Ok(webp.to_vec());
-    }
-
-    // Animated WebP passthrough (verify container + first-frame decode + cap).
-    if is_animated_image(data) {
+    // Already an animated WebP at or under the icon size: pass the bytes
+    // through untouched. Re-encoding here would only add a generation of
+    // loss, and a content-addressed blob that survives byte-identically
+    // keeps its hash across a re-upload.
+    if is_animated_webp(data) {
         if data.len() > MAX_ANIMATED {
             return Err("Animated icon too large (>512KB)".into());
         }
-        image::load_from_memory(data)
-            .map_err(|e| format!("Failed to decode animated WebP: {e}"))?;
-        return Ok(data.to_vec());
+        let (w, h) = get_image_dimensions(data)?;
+        if w <= ICON_DIM && h <= ICON_DIM {
+            return Ok(data.to_vec());
+        }
+        // Oversized: fall through and re-encode down to ICON_DIM rather than
+        // storing a blob every reader then has to downscale at paint time.
     }
 
-    Err("Not an animated image".into())
+    // Everything animated we can decode — GIF, APNG, or an oversized animated
+    // WebP — goes through one path: decode, centre-crop square, resize, encode.
+    let frames = decode_animation_frames(data)?;
+    let (w, h) = (frames[0].0.width(), frames[0].0.height());
+    if w == 0 || h == 0 {
+        return Err("Animation has zero dimensions".into());
+    }
+    let scaled = crop_resize_frames(&frames, crop_rect_square(w, h), ICON_DIM, ICON_DIM);
+    let webp = webp_anim::encode_animation(
+        &scaled,
+        (ICON_DIM, ICON_DIM),
+        &webp_anim::AnimParams::art(80.0),
+    )?;
+    if webp.len() > MAX_ANIMATED {
+        return Err("Animated icon too large after processing (>512KB)".into());
+    }
+    Ok(webp)
 }
 
-/// Encode pre-sized RGBA frames (frame, duration-ms) as a lossy animated WebP.
+/// Encode pre-sized RGBA frames (frame, duration-ms) as a lossy animated WebP
+/// at the ART preset — every caller is user-uploaded artwork.
 fn encode_animation_frames(
     frames: &[(image::RgbaImage, i32)],
     dims: (u32, u32),
     quality: f32,
 ) -> Result<Vec<u8>, String> {
-    let mut encoder = webp_animation::Encoder::new_with_options(
-        dims,
-        webp_animation::EncoderOptions {
-            encoding_config: Some(webp_animation::EncodingConfig {
-                quality,
-                encoding_type: webp_animation::EncodingType::Lossy(Default::default()),
-                ..Default::default()
-            }),
-            ..Default::default()
-        },
-    )
-    .map_err(|e| format!("Failed to create WebP encoder: {e}"))?;
-    let mut timestamp_ms: i32 = 0;
-    for (rgba, duration_ms) in frames {
-        encoder
-            .add_frame(rgba.as_raw(), timestamp_ms)
-            .map_err(|e| format!("Failed to add WebP frame: {e}"))?;
-        timestamp_ms += (*duration_ms).max(1);
-    }
-    encoder
-        .finalize(timestamp_ms)
-        .map(|d| d.to_vec())
-        .map_err(|e| format!("Failed to finalize animated WebP: {e}"))
+    webp_anim::encode_animation(frames, dims, &webp_anim::AnimParams::art(quality))
 }
 
 /// Process a picked GIF (downloaded from the GIF proxy's `full` variant) into
@@ -1552,7 +1698,7 @@ fn process_asset_for_send(
             let delay_ms = delay.as_millis() as i32;
             frames.push((rgba, if delay_ms < 20 { 100 } else { delay_ms }));
         }
-    } else if is_animated_image(data) {
+    } else if is_animated_webp(data) {
         let decoder = webp_animation::Decoder::new(data)
             .map_err(|e| format!("Failed to decode animated WebP: {e:?}"))?;
         // Decoder timestamps are cumulative end-of-frame times.
@@ -1739,7 +1885,7 @@ pub fn process_avatar_frame(data: &[u8]) -> Result<(Vec<u8>, bool), String> {
     // source rides as-is under the cap (same trade as animated server
     // icons). The container is still verified, and every frame is decoded
     // for the transparency gate.
-    if is_animated_image(data) {
+    if is_animated_webp(data) {
         if data.len() > MAX_FRAME_ANIMATED_BYTES {
             return Err("Animated frame is too large (over 256 KB)".into());
         }

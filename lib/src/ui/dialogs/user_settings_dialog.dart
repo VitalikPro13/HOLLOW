@@ -13,6 +13,7 @@ import 'package:hollow/src/rust/api/twitch.dart' as twitch_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
+import 'package:hollow/src/ui/components/animated_gif_image.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
@@ -269,9 +270,14 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
   }
 
   /// Shared prologue for the avatar/banner pickers: pick an image file and,
-  /// for GIFs, take the raw bytes as-is (skipping crop preserves animation)
-  /// with a size cap. Returns null when nothing further should happen;
-  /// otherwise the raw bytes still needing the crop dialog.
+  /// for ANIMATED input, take the raw bytes as-is (skipping crop preserves
+  /// animation) with a size cap. Returns null when nothing further should
+  /// happen; otherwise the raw bytes still needing the crop dialog.
+  ///
+  /// The animated test reads the BYTES, never the extension. Branching on
+  /// `.gif` sent animated WebP and APNG through the cropper, which rasterises
+  /// to a still PNG — the upload succeeded and the avatar simply never moved,
+  /// with nothing shown to explain it.
   Future<Uint8List?> _pickImageRaw({
     required int maxGifBytes,
     required String gifTooLargeMessage,
@@ -284,9 +290,8 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
     final raw = await File(path).readAsBytes();
     if (!mounted) return null;
 
-    final isGif = path.toLowerCase().endsWith('.gif');
-    if (isGif) {
-      // Skip crop for GIFs to preserve animation — use raw bytes directly
+    if (isAnimatedImageBytes(raw)) {
+      // Skip crop to preserve animation — use raw bytes directly.
       if (raw.length > maxGifBytes) {
         if (mounted) {
           HollowToast.show(context, gifTooLargeMessage,

@@ -461,7 +461,13 @@ pub fn update_server_setting(server_id: String, key: String, value: String) -> R
 /// hash and the bytes ride the asset rail, never the CRDT.
 #[frb]
 pub fn set_server_avatar(server_id: String, raw_bytes: Vec<u8>) -> Result<(), String> {
-    let processed = crate::node::image_convert::process_avatar_image(&raw_bytes)?;
+    // SERVER_ICON_DIM, not a person's AVATAR_DIM: this still is base64 INSIDE
+    // the CRDT, so it replicates to every member, and a server renders far
+    // smaller than a profile card.
+    let processed = crate::node::image_convert::process_still_avatar(
+        &raw_bytes,
+        crate::node::image_convert::SERVER_ICON_DIM,
+    )?;
 
     let anim_hash = if crate::node::image_convert::is_animated_image(&raw_bytes) {
         let anim = crate::node::image_convert::process_server_avatar_anim(&raw_bytes)?;

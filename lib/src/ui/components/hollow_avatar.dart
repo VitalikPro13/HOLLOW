@@ -260,6 +260,10 @@ class _StaticFirstFrameState extends State<_StaticFirstFrame> {
       width: widget.size,
       height: widget.size,
       fit: BoxFit.cover,
+      // Pinned for the same reason as AnimatedGifImage: this still and the
+      // animation that sits over it on hover must resample identically, or
+      // the avatar visibly changes sharpness the moment the pointer arrives.
+      filterQuality: FilterQuality.medium,
     );
   }
 }

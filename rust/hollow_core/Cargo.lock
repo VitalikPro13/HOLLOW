@@ -1717,6 +1717,7 @@ dependencies = [
  "hollow_dfn",
  "image",
  "jni",
+ "libwebp-sys2",
  "log",
  "openmls",
  "openmls_basic_credential",

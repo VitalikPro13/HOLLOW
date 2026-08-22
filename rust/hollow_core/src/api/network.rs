@@ -3262,7 +3262,8 @@ pub fn update_profile(
     Ok(())
 }
 
-/// Process a raw image into avatar format (128x128 WebP). Returns processed bytes.
+/// Process a raw image into a person's avatar (184x184 WebP — see
+/// `image_convert::AVATAR_DIM`). Returns processed bytes.
 #[frb]
 pub fn process_avatar(raw_bytes: Vec<u8>) -> Result<Vec<u8>, String> {
     crate::node::image_convert::process_avatar_image(&raw_bytes)
