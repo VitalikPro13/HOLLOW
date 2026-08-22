@@ -735,6 +735,7 @@ class _ServerMemberTile extends ConsumerWidget {
             children: [
               // Avatar with status overlay
               Stack(
+                clipBehavior: Clip.none,
                 children: [
                   HollowAvatar(peerId: peerId, size: 28),
                   Positioned(
@@ -862,6 +863,7 @@ class _MemberTile extends ConsumerWidget {
           children: [
             // Avatar with online dot
             Stack(
+              clipBehavior: Clip.none,
               children: [
                 HollowAvatar(peerId: peerId, size: 28),
                 Positioned(

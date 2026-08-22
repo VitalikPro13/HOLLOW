@@ -3184,7 +3184,11 @@ pub fn request_channel_sync(server_id: String, channel_id: String) -> Result<(),
 /// `showcase_board`: None = unchanged, Some("") = clear, Some(json) = set.
 /// `showcase_assets`: None = unchanged, Some(empty list) = clear, else the
 /// full replacement asset set for the board.
+/// `avatar_frame`: None = unchanged, Some("") = clear, Some(id) = set — a
+/// built-in `b:<hue>` or the 64-hex hash of a frame blob already stored by
+/// [`process_and_store_avatar_frame`] (issue #54). Never bytes.
 #[frb]
+#[allow(clippy::too_many_arguments)]
 pub fn update_profile(
     display_name: String,
     status: String,
@@ -3194,6 +3198,7 @@ pub fn update_profile(
     twitch_username: String,
     showcase_board: Option<String>,
     showcase_assets: Option<Vec<super::showcase::ShowcaseAsset>>,
+    avatar_frame: Option<String>,
 ) -> Result<(), String> {
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
@@ -3219,6 +3224,25 @@ pub fn update_profile(
         }
     }
 
+    // Validate here rather than on ingest only: a malformed ID would ride the
+    // announce to everyone and be dropped by each of them, so the author
+    // should hear about it instead.
+    if let Some(id) = &avatar_frame {
+        if !id.is_empty() && !node::social::valid_avatar_frame_id(id) {
+            return Err("Invalid avatar frame".into());
+        }
+    }
+    // Mirror our own frame into a setting so the asset evictor can pin it
+    // (see `referenced_asset_hashes`). Best effort: a failure here costs an
+    // eviction, not the frame.
+    if let Some(id) = &avatar_frame {
+        if let Ok(guard) = super::storage::get_store().lock() {
+            if let Some(ms) = guard.as_ref() {
+                let _ = ms.save_setting(super::storage::MY_AVATAR_FRAME_SETTING, id);
+            }
+        }
+    }
+
     let rt = get_runtime();
     rt.block_on(
         cmd_tx.send(node::NodeCommand::UpdateProfile {
@@ -3230,6 +3254,7 @@ pub fn update_profile(
             twitch_username,
             showcase_board,
             showcase_assets: showcase_assets_bundle,
+            avatar_frame,
         }),
     )
     .map_err(|e| format!("Failed to send command: {e}"))?;
@@ -3241,6 +3266,41 @@ pub fn update_profile(
 #[frb]
 pub fn process_avatar(raw_bytes: Vec<u8>) -> Result<Vec<u8>, String> {
     crate::node::image_convert::process_avatar_image(&raw_bytes)
+}
+
+/// A frame blob that has been processed and cached locally, ready to be
+/// named in `update_profile(avatar_frame: ...)`.
+pub struct ProcessedFrame {
+    /// 64-hex SHA-256 of the processed bytes — the frame's identity, and what
+    /// rides the profile announce.
+    pub hash: String,
+    pub animated: bool,
+    /// The processed bytes, so the picker can preview exactly what everyone
+    /// else will see without a round trip back through the blob store.
+    pub bytes: Vec<u8>,
+}
+
+/// Process a user-picked image or GIF into an AVATAR FRAME and cache it
+/// content-addressed under `AssetKind::Frame` (issue #54). The caller then
+/// names the returned hash in `update_profile(avatar_frame: Some(hash))`;
+/// the bytes ride the asset rail on demand, never the profile push.
+///
+/// Errors are user-facing: over the cap, or the authoring gate that a frame's
+/// middle has to be see-through (frames paint IN FRONT of the avatar).
+#[frb]
+pub fn process_and_store_avatar_frame(raw_bytes: Vec<u8>) -> Result<ProcessedFrame, String> {
+    let (bytes, animated) = crate::node::image_convert::process_avatar_frame(&raw_bytes)?;
+    let hash = {
+        use sha2::{Digest, Sha256};
+        hex::encode(Sha256::digest(&bytes))
+    };
+    {
+        let store = super::storage::get_store();
+        let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+        let ms = guard.as_ref().ok_or("Message store is not open")?;
+        ms.save_asset_blob(&hash, &bytes, animated, "frame")?;
+    }
+    Ok(ProcessedFrame { hash, animated, bytes })
 }
 
 /// Process a raw image into banner format (600x200 WebP). Returns processed bytes.

@@ -21,6 +21,13 @@ pub(crate) enum AssetKind {
     /// still icon stays base64 inside `server_avatar` for old clients and
     /// the public-sync thumb; only the animated variant rides the rail.
     Avatar,
+    /// Avatar frame (issue #54): the decoration painted IN FRONT of a
+    /// person's avatar. `UserProfile.avatar_frame` carries only the hash —
+    /// the bytes ride the rail, never `ProfileUpdate`, because a profile
+    /// update is PUSHED to everyone who syncs with you while the rail is
+    /// PULLED on demand and LRU-evicted. Decoration must be the first thing
+    /// evicted, never something that inflates every profile push.
+    Frame,
 }
 
 impl AssetKind {
@@ -32,6 +39,7 @@ impl AssetKind {
             AssetKind::Sticker => "sticker",
             AssetKind::Gif => "gif",
             AssetKind::Avatar => "avatar",
+            AssetKind::Frame => "frame",
         }
     }
 
@@ -42,6 +50,7 @@ impl AssetKind {
             "sticker" => Some(AssetKind::Sticker),
             "gif" => Some(AssetKind::Gif),
             "avatar" => Some(AssetKind::Avatar),
+            "frame" => Some(AssetKind::Frame),
             _ => None,
         }
     }
@@ -60,6 +69,11 @@ impl AssetKind {
             AssetKind::Sticker => 524_288,    // 512 KB
             AssetKind::Gif => 2_097_152,      // 2 MB
             AssetKind::Avatar => 524_288,     // 512 KB (128px animated icon)
+            // Deliberately NOT the rail's 512 KB: a frame is decoration on
+            // every avatar you have ever seen, so it gets the tight emote
+            // ceiling (64 KB still, 256 KB animated) rather than the
+            // one-per-server budgets above.
+            AssetKind::Frame => 262_144,      // 256 KB (animated ceiling)
         }
     }
 
@@ -72,6 +86,7 @@ impl AssetKind {
             AssetKind::Sticker => 8,
             AssetKind::Gif => 4,
             AssetKind::Avatar => 4,
+            AssetKind::Frame => 4,
         }
     }
 }

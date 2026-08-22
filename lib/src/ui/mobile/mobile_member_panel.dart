@@ -314,6 +314,7 @@ class _MemberTile extends ConsumerWidget {
             SizedBox(
               width: 36, height: 36,
               child: Stack(
+                       clipBehavior: Clip.none,
                 children: [
                   HollowAvatar(peerId: member.peerId, size: 36),
                   Positioned(

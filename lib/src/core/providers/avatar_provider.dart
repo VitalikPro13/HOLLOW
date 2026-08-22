@@ -2,6 +2,12 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 
+import 'banner_provider.dart' show reuseIfUnchanged;
+
+/// The instance last handed out per peer, so an unchanged avatar keeps its
+/// IDENTITY across reloads (see [reuseIfUnchanged]).
+final _lastAvatar = <String, Uint8List>{};
+
 /// Lazy avatar cache: peer_id → avatar bytes.
 /// Avatars are loaded on-demand when HollowAvatar mounts, not at startup.
 class AvatarNotifier extends Notifier<Map<String, Uint8List>> {
@@ -26,7 +32,15 @@ class AvatarNotifier extends Notifier<Map<String, Uint8List>> {
     try {
       final bytes = await storage_api.getAvatar(peerId: peerId);
       if (bytes != null && bytes.isNotEmpty) {
-        state = {...state, peerId: bytes};
+        // Reuse the previous instance when nothing changed: an ANIMATED
+        // avatar re-decodes every frame on `!identical` bytes, and
+        // ProfileUpdated invalidates this cache on every profile save
+        // whether or not the avatar was touched. Same rule (and the same
+        // bug) as the banner - see [reuseIfUnchanged].
+        state = {
+          ...state,
+          peerId: reuseIfUnchanged(_lastAvatar, peerId, bytes),
+        };
       } else {
         _missing.add(peerId);
       }
@@ -43,6 +57,9 @@ class AvatarNotifier extends Notifier<Map<String, Uint8List>> {
   }
 
   void invalidate(String peerId) {
+    // Deliberately NOT clearing `_lastAvatar`: the whole point is that the
+    // reload can recognise unchanged bytes and hand back the instance the
+    // widgets are already rendering.
     if (state.containsKey(peerId)) {
       final next = Map<String, Uint8List>.from(state);
       next.remove(peerId);

@@ -349,6 +349,7 @@ class _MemberRow extends ConsumerWidget {
             SizedBox(
               width: 40, height: 40,
               child: Stack(
+                       clipBehavior: Clip.none,
                 children: [
                   HollowAvatar(peerId: member.peerId, size: 40),
                   Positioned(

@@ -137,7 +137,9 @@ class MobileSpeakingAvatar extends ConsumerWidget {
           borderRadius: BorderRadius.circular(radius + 4),
           child: Stack(
             children: [
-              HollowAvatar(peerId: displayId, size: size),
+              // No frame under a speaking ring: the two are the same picture.
+              // See the note in chat_pane's call avatars.
+              HollowAvatar(peerId: displayId, size: size, frameId: ''),
               // Muted badge bottom-left, deafened badge bottom-right.
               if (isMuted)
                 Positioned(

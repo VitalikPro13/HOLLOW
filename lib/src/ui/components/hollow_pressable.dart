@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
+import 'package:hollow/src/ui/components/hover_scope.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
 
@@ -67,6 +68,12 @@ class _HollowPressableState extends State<HollowPressable>
   bool _hovering = false;
   bool _pressing = false;
 
+  /// Row-hover for descendants (see [HoverScope]). Deliberately a notifier
+  /// rather than another setState: a pointer crossing a member list must
+  /// rebuild the avatars that listen, not every row it passes over. Set even
+  /// when the row is NOT interactive — a plain row still hovers.
+  final ValueNotifier<bool> _rowHovered = ValueNotifier<bool>(false);
+
   @override
   void initState() {
     super.initState();
@@ -100,6 +107,7 @@ class _HollowPressableState extends State<HollowPressable>
   @override
   void dispose() {
     _controller?.dispose();
+    _rowHovered.dispose();
     super.dispose();
   }
 
@@ -157,7 +165,7 @@ class _HollowPressableState extends State<HollowPressable>
         // bounds — hover must never read bigger than the control's outline.
       ),
       padding: widget.padding,
-      child: widget.child,
+      child: HoverScope(hovered: _rowHovered, child: widget.child),
     );
 
     final Widget inner;
@@ -187,9 +195,11 @@ class _HollowPressableState extends State<HollowPressable>
           ? SystemMouseCursors.click
           : SystemMouseCursors.basic,
       onEnter: (_) {
+        _rowHovered.value = true;
         if (isInteractive) setState(() => _hovering = true);
       },
       onExit: (_) {
+        _rowHovered.value = false;
         setState(() => _hovering = false);
       },
       child: Listener(

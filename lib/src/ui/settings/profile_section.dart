@@ -52,10 +52,17 @@ class ProfileSection extends ConsumerWidget {
   final bool savingProfile;
   final bool avatarProcessing;
   final bool bannerProcessing;
+
+  /// Pending avatar frame ID (issue #54): null = unchanged, '' = cleared.
+  final String? pendingFrameId;
+  final bool frameChanged;
+
   final VoidCallback onPickAvatar;
   final VoidCallback onClearAvatar;
   final VoidCallback onPickBanner;
   final VoidCallback onClearBanner;
+  final VoidCallback onPickFrame;
+  final VoidCallback onClearFrame;
   final VoidCallback onSaveProfile;
   final VoidCallback onAboutMeChanged;
 
@@ -75,10 +82,14 @@ class ProfileSection extends ConsumerWidget {
     required this.savingProfile,
     required this.avatarProcessing,
     required this.bannerProcessing,
+    required this.pendingFrameId,
+    required this.frameChanged,
     required this.onPickAvatar,
     required this.onClearAvatar,
     required this.onPickBanner,
     required this.onClearBanner,
+    required this.onPickFrame,
+    required this.onClearFrame,
     required this.onSaveProfile,
     required this.onAboutMeChanged,
   });
@@ -108,6 +119,8 @@ class ProfileSection extends ConsumerWidget {
                     _buildAvatarRow(hollow, ref),
                     const SizedBox(height: HollowSpacing.xs),
                     _buildBannerRow(hollow, ref),
+                    const SizedBox(height: HollowSpacing.xs),
+                    _buildFrameRow(hollow, ref),
                   ],
                 ),
               ),
@@ -259,6 +272,7 @@ class ProfileSection extends ConsumerWidget {
                 peerId: localPeerId,
                 size: 56,
                 imageBytes: avatarChanged ? pendingAvatarBytes : null,
+                frameId: frameChanged ? (pendingFrameId ?? '') : null,
                 animate: true,
               ),
             ),
@@ -382,6 +396,21 @@ class ProfileSection extends ConsumerWidget {
     );
   }
 
+  /// Avatar frame (issue #54). Reads the SAVED frame when nothing is pending,
+  /// so Clear only offers itself when there is a frame to clear.
+  Widget _buildFrameRow(HollowTheme hollow, WidgetRef ref) {
+    final saved = ref.watch(
+        profileProvider.select((p) => p[localPeerId]?.avatarFrame ?? ''));
+    final current = frameChanged ? (pendingFrameId ?? '') : saved;
+    return _ImageRow(
+      label: 'Frame',
+      icon: LucideIcons.frame,
+      onPick: onPickFrame,
+      onClear: current.isNotEmpty ? onClearFrame : null,
+      hollow: hollow,
+    );
+  }
+
   Widget _buildEditFields() {
     return Column(
       mainAxisSize: MainAxisSize.min,
@@ -425,12 +454,14 @@ class ProfileSection extends ConsumerWidget {
 /// Image row: "Avatar -------- [trash]" or "Banner -------- [trash]"
 class _ImageRow extends StatelessWidget {
   final String label;
+  final IconData icon;
   final VoidCallback onPick;
   final VoidCallback? onClear;
   final HollowTheme hollow;
 
   const _ImageRow({
     required this.label,
+    this.icon = LucideIcons.image,
     required this.onPick,
     this.onClear,
     required this.hollow,
@@ -450,7 +481,7 @@ class _ImageRow extends StatelessWidget {
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(LucideIcons.image, size: 12, color: hollow.accent),
+              Icon(icon, size: 12, color: hollow.accent),
               const SizedBox(width: HollowSpacing.xs),
               Text(
                 label,

@@ -5,6 +5,7 @@ import 'package:hollow/src/ui/components/overlay_anchor.dart';
 import 'package:flutter/services.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
+import 'package:hollow/src/ui/components/hover_scope.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_menu.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
@@ -125,6 +126,12 @@ class MessageHoverWrapper extends StatefulWidget {
 class _MessageHoverWrapperState extends State<MessageHoverWrapper> {
   bool _hovered = false;
   bool _barHovered = false;
+
+  /// Row-hover for descendants (see [HoverScope]) — an animated avatar or
+  /// avatar frame in this row plays while the pointer is anywhere over the
+  /// MESSAGE, not only over the 36px of artwork. A notifier, because this
+  /// wrapper drives its own overlays without rebuilding.
+  final ValueNotifier<bool> _rowHovered = ValueNotifier<bool>(false);
   OverlayEntry? _highlightEntry;
   OverlayEntry? _actionBarEntry;
   Timer? _dismissTimer;
@@ -208,6 +215,7 @@ class _MessageHoverWrapperState extends State<MessageHoverWrapper> {
     _removeOverlays();
     _editController.dispose();
     _editFocusNode.dispose();
+    _rowHovered.dispose();
     super.dispose();
   }
 
@@ -389,6 +397,7 @@ class _MessageHoverWrapperState extends State<MessageHoverWrapper> {
   }
 
   void _onMessageEnter() {
+    _rowHovered.value = true;
     if (widget.isEditing) return;
     _dismissTimer?.cancel();
     _controller?.claim(this, _forceClose);
@@ -397,6 +406,7 @@ class _MessageHoverWrapperState extends State<MessageHoverWrapper> {
   }
 
   void _onMessageExit() {
+    _rowHovered.value = false;
     _hovered = false;
     _scheduleDismiss();
   }
@@ -549,7 +559,7 @@ class _MessageHoverWrapperState extends State<MessageHoverWrapper> {
         onExit: (_) => _onMessageExit(),
         child: KeyedSubtree(
           key: _messageKey,
-          child: widget.child,
+          child: HoverScope(hovered: _rowHovered, child: widget.child),
         ),
       ),
     );

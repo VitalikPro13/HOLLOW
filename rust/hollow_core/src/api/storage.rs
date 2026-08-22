@@ -265,6 +265,10 @@ pub struct UserProfile {
     pub twitch_username: String,
     /// Showcase board JSON (profile blocks; empty = no board).
     pub showcase_board: String,
+    /// Avatar frame ID (issue #54). `""` = none, `"b:<hue>"` = a built-in
+    /// procedural frame, 64-hex = an asset-rail blob hash whose bytes are
+    /// pulled on demand via `request_assets(kind: "frame")`.
+    pub avatar_frame: String,
 }
 
 /// Get a profile for a specific peer (or ourselves). Returns None if no profile stored.
@@ -285,6 +289,7 @@ pub fn get_profile(peer_id: String) -> Result<Option<UserProfile>, String> {
             banner_bytes: p.banner_bytes,
             twitch_username: p.twitch_username,
             showcase_board: p.showcase_board,
+            avatar_frame: p.avatar_frame,
         })),
         None => Ok(None),
     }
@@ -310,6 +315,7 @@ pub fn get_all_profiles() -> Result<Vec<UserProfile>, String> {
             banner_bytes: p.banner_bytes,
             twitch_username: p.twitch_username,
             showcase_board: p.showcase_board,
+            avatar_frame: p.avatar_frame,
         })
         .collect())
 }
@@ -334,6 +340,7 @@ pub fn get_all_profiles_light() -> Result<Vec<UserProfile>, String> {
             banner_bytes: None,
             twitch_username: p.twitch_username,
             showcase_board: p.showcase_board,
+            avatar_frame: p.avatar_frame,
         })
         .collect())
 }
@@ -356,6 +363,7 @@ pub fn get_profile_light(peer_id: String) -> Result<Option<UserProfile>, String>
             banner_bytes: None,
             twitch_username: p.twitch_username,
             showcase_board: p.showcase_board,
+            avatar_frame: p.avatar_frame,
         })),
         None => Ok(None),
     }
@@ -1016,8 +1024,24 @@ fn referenced_asset_hashes(ms: &crate::storage::MessageStore) -> std::collection
             }
         }
     }
+    // OUR OWN avatar frame (issue #54). Only ours: other people's frames are
+    // decoration and are meant to be the first thing evicted, then re-pulled
+    // from their owner. Ours has no other holder to pull it back from until
+    // somebody who has seen it comes online, so it stays pinned. Mirrored
+    // into a setting by `set_my_avatar_frame` because this function has no
+    // identity to look the profile row up by. A sibling device that inherited
+    // the frame over the wire re-pulls it like anyone else.
+    if let Ok(Some(hash)) = ms.load_setting(MY_AVATAR_FRAME_SETTING)
+        && crate::crdt::valid_emote_hash(&hash)
+    {
+        keep.insert(hash);
+    }
     keep
 }
+
+/// `app_settings` key mirroring our own `UserProfile.avatar_frame`, so the
+/// asset evictor can pin it without resolving our identity.
+pub(crate) const MY_AVATAR_FRAME_SETTING: &str = "my_avatar_frame";
 
 /// Delete every cached asset blob not referenced by a personal set or a
 /// server's CRDT state (Storage Manager "clear" action). Returns bytes freed.

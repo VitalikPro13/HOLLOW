@@ -7,6 +7,39 @@ import 'package:flutter/scheduler.dart';
 
 import 'package:hollow/src/core/reduce_motion.dart';
 
+/// Whether [bytes] actually carry more than one frame.
+///
+/// Mirrors Rust's `image_convert::is_animated_image` — GIF magic, or a WebP
+/// VP8X chunk with the animation bit set. Deciding this from the BYTES rather
+/// than a filename is the rule: the avatar picker gets it wrong the other way
+/// (it skips its cropper only for a `.gif` extension, so an animated WebP is
+/// flattened to a still), which is a separate bug.
+///
+/// APNG is not detected here because the upload pipeline cannot produce one
+/// yet — an APNG is stored as its first frame today.
+bool isAnimatedImageBytes(Uint8List bytes) {
+  if (bytes.length >= 6 &&
+      bytes[0] == 0x47 && // G
+      bytes[1] == 0x49 && // I
+      bytes[2] == 0x46) {
+    return true;
+  }
+  return bytes.length > 20 &&
+      bytes[0] == 0x52 && // R
+      bytes[1] == 0x49 && // I
+      bytes[2] == 0x46 && // F
+      bytes[3] == 0x46 && // F
+      bytes[8] == 0x57 && // W
+      bytes[9] == 0x45 && // E
+      bytes[10] == 0x42 && // B
+      bytes[11] == 0x50 && // P
+      bytes[12] == 0x56 && // V
+      bytes[13] == 0x50 && // P
+      bytes[14] == 0x38 && // 8
+      bytes[15] == 0x58 && // X
+      (bytes[20] & 0x02) != 0;
+}
+
 /// Renders an animated GIF from raw bytes with proper frame delay handling.
 ///
 /// Unlike Flutter's built-in Image.memory which can play GIFs too fast

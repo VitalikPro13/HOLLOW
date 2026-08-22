@@ -585,6 +585,7 @@ class _DmRow extends ConsumerWidget {
             width: 44,
             height: 44,
             child: Stack(
+                     clipBehavior: Clip.none,
               children: [
                 HollowAvatar(peerId: peerId, size: 44),
                 Positioned(

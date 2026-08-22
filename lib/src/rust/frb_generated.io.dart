@@ -435,6 +435,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   ProcessedEmote dco_decode_processed_emote(dynamic raw);
 
   @protected
+  ProcessedFrame dco_decode_processed_frame(dynamic raw);
+
+  @protected
   ProcessedSticker dco_decode_processed_sticker(dynamic raw);
 
   @protected
@@ -1060,6 +1063,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   ProcessedEmote sse_decode_processed_emote(SseDeserializer deserializer);
+
+  @protected
+  ProcessedFrame sse_decode_processed_frame(SseDeserializer deserializer);
 
   @protected
   ProcessedSticker sse_decode_processed_sticker(SseDeserializer deserializer);
@@ -1879,6 +1885,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_processed_emote(
     ProcessedEmote self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_processed_frame(
+    ProcessedFrame self,
     SseSerializer serializer,
   );
 

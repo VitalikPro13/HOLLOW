@@ -6,13 +6,13 @@ End-to-end map of the custom emote system (shipped 2026-07-10). Architecture rat
 
 The emote byte-replication system is now the generic content-addressed asset rail (`node/assets.rs` + the emote wire path). Epic: memory `project-asset-rail-epic`.
 
-- **Kinds** `AssetKind::{Emote, Banner, Sticker, Gif, Avatar}` — differ ONLY in receipt cap (`recv_cap`: 256 KB / 1 MB / 512 KB / 2 MB / 512 KB) and per-request hash bound (`max_request_hashes`: 20 / 2 / 8 / 4 / 4). `emote_blobs.kind` TEXT column (additive migration, default 'emote') records what a blob was pulled AS. `Avatar` = the ANIMATED server-icon variant (see "Animated Server Icons" below).
+- **Kinds** `AssetKind::{Emote, Banner, Sticker, Gif, Avatar, Frame}` — differ ONLY in receipt cap (`recv_cap`: 256 KB / 1 MB / 512 KB / 2 MB / 512 KB / 256 KB) and per-request hash bound (`max_request_hashes`: 20 / 2 / 8 / 4 / 4 / 4). `emote_blobs.kind` TEXT column (additive migration, default 'emote') records what a blob was pulled AS. `Avatar` = the ANIMATED server-icon variant (see "Animated Server Icons" below); `Frame` = a user's avatar frame (see "Avatar Frames" below) and deliberately takes the tight EMOTE ceiling, not the rail's 512 KB, because it is decoration on every avatar you have ever seen.
 - **Kind never rides the wire.** Requesting side records hash→kind in swarm's `requested_asset_kinds: HashMap<String, AssetKind>` (replaced `requested_emote_hashes`; same lifecycle, cleared on `WsEvent::Disconnected`). `handle_emote_assets` accepts ONLY hashes present in that map and sizes the cap from the RECORDED kind — unsolicited bundles are dropped wholesale (cache-stuffing gate, new in this phase), and an invalid answer frees the slot for retry.
 - **Responder reply budget** `MAX_BUNDLE_REPLY_BYTES` = 8 MB (with GIFs cached, the old 20-hash bound alone could balloon a bundle to ~40 MB).
 - **Wire token** `[a:kind:hash:w:h]` (kind `s`|`g`, hash 64-hex, dims 1..=4096) — dual-defined: Rust `node/emotes.rs::parse_asset_token`, Dart `emote_image.dart::assetTokenRegex`/`parseAssetToken`. Emotes keep `[e:name:hash]` untouched. w/h let receivers reserve the EXACT box pre-pull (no reflow). `emote_tokens_to_shortcodes` (Rust + Dart) maps asset tokens → `[GIF]`/`[Sticker]` for plain-text notification surfaces.
 - **Render** `message_text_parser.dart` `_TokenKind.asset` → `ChatAssetImage` (emote_image.dart): token alone on its own line = block (GIF ≤480px / sticker ≤160px wide, never upscaled past source, interface-scale only — NOT chat text scale, same rule as attachments); inline = 2 line-heights riding the text scaler. Missing blob = sized placeholder + `requestAssetOnce(hash, kind: ...)` (emote_provider.dart, shares the session dedup set + `EmoteAssetsReceived` invalidation).
 - **FFI** `request_assets(hashes, kind, server_id, peer_hint)` beside `request_emotes` (which is now the emote-kind shorthand). `NodeCommand::RequestEmotes` gained a `kind` field.
-- **Storage Manager**: `StorageBreakdown.asset_blob_bytes/count`; "Emotes & GIFs" segment + cleanup-menu action (`clear_unreferenced_asset_blobs`); cap slider (default 512 MB, key `asset_cache_cap_mb`, desktop + mobile) enforced via `enforce_storage_caps` (new `asset_cap_mb` arg) on FileCompleted AND EmoteAssetsReceived. LRU-evict by `added_at` (`evict_asset_blobs`, 0.8 hysteresis) — hashes referenced by personal_emotes / server CRDT emotes / `server_banner` settings are NEVER evicted (`referenced_asset_hashes`).
+- **Storage Manager**: `StorageBreakdown.asset_blob_bytes/count`; "Emotes & GIFs" segment + cleanup-menu action (`clear_unreferenced_asset_blobs`); cap slider (default 512 MB, key `asset_cache_cap_mb`, desktop + mobile) enforced via `enforce_storage_caps` (new `asset_cap_mb` arg) on FileCompleted AND EmoteAssetsReceived. LRU-evict by `added_at` (`evict_asset_blobs`, 0.8 hysteresis) — hashes referenced by personal_emotes / server CRDT emotes / `server_banner` settings / OUR OWN avatar frame are NEVER evicted (`referenced_asset_hashes`).
 - **Harness tests**: `asset_cap_enforced_per_kind` (300 KB blob refused as emote, accepted as gif — proves the cap follows OUR recorded kind and failed receipts retry), `asset_request_not_answered_for_unrequested_hash` (unsolicited valid bundle dropped; uses `MockRelay::inject_direct`). Widget: `test/widget/asset_token_render_test.dart`.
 
 ## Server Banners (issue #25, asset-rail Phase 2, 2026-07-28)
@@ -363,3 +363,49 @@ column could only ever be set at upload time.
 
 Personal-emote and personal-sticker sibling sync; revisit the composer button
 row (emoji / GIF / sticker is three buttons on a narrow phone).
+
+## Avatar Frames (issue #54, 2026-08-22)
+
+Decoration painted IN FRONT of a person's avatar, Steam/Discord style. The profile
+carries an ID, never the art. Full design + iron rules: memory `project_avatar_frames`.
+
+- **Wire** `UserProfile.avatar_frame` (`#[serde(default)]`, additive `user_profiles`
+  column) on BOTH `HavenMessage::ProfileUpdate` and `MessageEnvelope::ProfileUpdate`.
+  Three shapes and nothing else: `""` = cleared, `b:<hue>` = a built-in procedural ring
+  (hue 0-359, canonical decimal — no leading zeros), 64-hex = an asset-rail blob hash.
+  `None` = an old client, which PRESERVES what the receiver stored (COALESCE), exactly
+  like `showcase_board`. It is a short string, so it rides the LIGHT announce.
+- **Ingest** `social::sanitize_incoming_frame` is the ONLY validator, and anything
+  unrecognised is treated as ABSENT (preserve), never as a clear. It matters because the
+  field is plaintext on the `HavenMessage` fallback AND it keys a network PULL — an
+  unvalidated string would be a request-anything primitive. `valid_avatar_frame_id` must
+  stay 1:1 with Dart's `builtinFrameHue`/`isFrameHash`.
+- **Bytes** ride the rail at `AssetKind::Frame`, pulled with `peer_hint` = the owner's
+  MASTER (so `send_raw_to_identity` fans to their live devices). Never the profile blob:
+  a profile update is PUSHED to everyone who syncs with you, the rail is PULLED and
+  LRU-evicted. Only OUR OWN frame is pinned against eviction, mirrored into the
+  `my_avatar_frame` app setting because `referenced_asset_hashes` has no identity to look
+  a profile row up by.
+- **Processing** `image_convert::process_avatar_frame(data) -> (webp, animated)`: square
+  centre crop → 128x128, animated WebP Q80 for GIF, animated-WebP passthrough ≤256 KB,
+  still lossy WebP ≤64 KB. Plus the AUTHORING GATE that makes a foreground frame work —
+  `frame_centre_opacity` samples the middle 42% disc (mean across frames) and refuses over
+  40% opaque, because a frame with a solid middle just hides the avatar it decorates.
+- **FFI** `process_and_store_avatar_frame -> ProcessedFrame{hash, animated, bytes}` and a
+  new `avatar_frame: Option<String>` on `update_profile` (validated there too, so a
+  malformed ID is reported to its author instead of being dropped by every receiver).
+- **Render** `AvatarFrame` (`ui/components/avatar_frame.dart`) inside `HollowAvatar`, so
+  all 78 avatar call sites inherit it at once. ZERO layout cost: a `Stack(clipBehavior:
+  none)` whose only non-positioned child is the avatar, with the art in a `Positioned`
+  inset by `-frameOverhang` and `BoxFit.contain` into `size * kFrameScale` (1.33).
+  Skipped under 24px. **Any ancestor that clips to the avatar's bounds eats it** — chiefly
+  the badge `Stack` that hangs a status dot, which defaults to `Clip.hardEdge`
+  (CI-guarded, `test/avatar_frame_clip_guard_test.dart`).
+- **No frames on ANY voice or call surface** (`frameId: ''`): a built-in is a coloured
+  ring in the accent family, which is the language the VAD cue speaks. Ringing screens
+  keep theirs. CI-guarded, `test/avatar_frame_surface_guard_test.dart`.
+- **Playback** frame 0 in lists, animated while the enclosing ROW is hovered (`HoverScope`,
+  published by `HollowPressable` and `MessageHoverWrapper`), fully animated where
+  `animate: true`. `AvatarFrameCache` is what makes it affordable: a shared frame-0 image
+  per ID (LRU 48) for lists, and the full refcounted frame list only while something plays
+  it. Decoding every frame per widget instance would be hundreds of MB on a member panel.

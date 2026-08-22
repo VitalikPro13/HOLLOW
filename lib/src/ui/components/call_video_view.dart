@@ -93,6 +93,7 @@ class _CallVideoViewState extends ConsumerState<CallVideoView> {
                             HollowAvatar(
                               peerId: peerId,
                               size: 64,
+                              frameId: '',
                             ),
                             const SizedBox(height: HollowSpacing.sm),
                             Text(

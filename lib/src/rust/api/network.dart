@@ -643,6 +643,9 @@ Future<void> requestChannelSync({
 /// `showcase_board`: None = unchanged, Some("") = clear, Some(json) = set.
 /// `showcase_assets`: None = unchanged, Some(empty list) = clear, else the
 /// full replacement asset set for the board.
+/// `avatar_frame`: None = unchanged, Some("") = clear, Some(id) = set — a
+/// built-in `b:<hue>` or the 64-hex hash of a frame blob already stored by
+/// [`process_and_store_avatar_frame`] (issue #54). Never bytes.
 Future<void> updateProfile({
   required String displayName,
   required String status,
@@ -652,6 +655,7 @@ Future<void> updateProfile({
   required String twitchUsername,
   String? showcaseBoard,
   List<ShowcaseAsset>? showcaseAssets,
+  String? avatarFrame,
 }) => RustLib.instance.api.crateApiNetworkUpdateProfile(
   displayName: displayName,
   status: status,
@@ -661,11 +665,25 @@ Future<void> updateProfile({
   twitchUsername: twitchUsername,
   showcaseBoard: showcaseBoard,
   showcaseAssets: showcaseAssets,
+  avatarFrame: avatarFrame,
 );
 
 /// Process a raw image into avatar format (128x128 WebP). Returns processed bytes.
 Future<Uint8List> processAvatar({required List<int> rawBytes}) =>
     RustLib.instance.api.crateApiNetworkProcessAvatar(rawBytes: rawBytes);
+
+/// Process a user-picked image or GIF into an AVATAR FRAME and cache it
+/// content-addressed under `AssetKind::Frame` (issue #54). The caller then
+/// names the returned hash in `update_profile(avatar_frame: Some(hash))`;
+/// the bytes ride the asset rail on demand, never the profile push.
+///
+/// Errors are user-facing: over the cap, or the authoring gate that a frame's
+/// middle has to be see-through (frames paint IN FRONT of the avatar).
+Future<ProcessedFrame> processAndStoreAvatarFrame({
+  required List<int> rawBytes,
+}) => RustLib.instance.api.crateApiNetworkProcessAndStoreAvatarFrame(
+  rawBytes: rawBytes,
+);
 
 /// Process a raw image into banner format (600x200 WebP). Returns processed bytes.
 Future<Uint8List> processBanner({required List<int> rawBytes}) =>
@@ -2237,6 +2255,37 @@ sealed class NetworkEvent with _$NetworkEvent {
     required String channelName,
     String? category,
   }) = NetworkEvent_PublicChannelConfigChanged;
+}
+
+/// A frame blob that has been processed and cached locally, ready to be
+/// named in `update_profile(avatar_frame: ...)`.
+class ProcessedFrame {
+  /// 64-hex SHA-256 of the processed bytes — the frame's identity, and what
+  /// rides the profile announce.
+  final String hash;
+  final bool animated;
+
+  /// The processed bytes, so the picker can preview exactly what everyone
+  /// else will see without a round trip back through the blob store.
+  final Uint8List bytes;
+
+  const ProcessedFrame({
+    required this.hash,
+    required this.animated,
+    required this.bytes,
+  });
+
+  @override
+  int get hashCode => hash.hashCode ^ animated.hashCode ^ bytes.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ProcessedFrame &&
+          runtimeType == other.runtimeType &&
+          hash == other.hash &&
+          animated == other.animated &&
+          bytes == other.bytes;
 }
 
 /// FFI-facing public channel entry for guest viewer.

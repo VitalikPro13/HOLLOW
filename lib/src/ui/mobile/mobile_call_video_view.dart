@@ -409,7 +409,7 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
             child: Container(
               color: hollow.elevated,
               child: Center(
-                child: HollowAvatar(peerId: widget.peerId, size: 80),
+                child: HollowAvatar(peerId: widget.peerId, size: 80, frameId: ''),
               ),
             ),
           ),

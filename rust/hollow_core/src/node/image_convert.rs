@@ -490,6 +490,62 @@ mod tests {
         frame.data()[((y * w + x) * 4 + 3) as usize]
     }
 
+    // ── Avatar frames (issue #54) ─────────────────────────────────────
+
+    /// A frame-shaped source: opaque ring around the outside, fully
+    /// transparent middle. `hole` is the transparent square's side as a
+    /// fraction of the canvas.
+    fn make_frame_png(w: u32, h: u32, hole: f32) -> Vec<u8> {
+        let mut img = image::RgbaImage::from_pixel(w, h, image::Rgba([200, 90, 40, 255]));
+        let hw = (w as f32 * hole) as u32;
+        let hh = (h as f32 * hole) as u32;
+        let (x0, y0) = ((w - hw) / 2, (h - hh) / 2);
+        for y in y0..(y0 + hh) {
+            for x in x0..(x0 + hw) {
+                img.put_pixel(x, y, image::Rgba([0, 0, 0, 0]));
+            }
+        }
+        let mut buf = Vec::new();
+        img.write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
+            .expect("encode test png");
+        buf
+    }
+
+    #[test]
+    fn avatar_frame_accepts_a_see_through_middle() {
+        // A 60% hole comfortably clears the 42% sampled disc.
+        let png = make_frame_png(256, 256, 0.6);
+        let (webp, animated) = process_avatar_frame(&png).expect("process frame");
+        assert!(!animated, "a PNG source is a still frame");
+        assert!(webp.len() <= 65_536, "still frame must fit the 64 KB cap");
+        // 128x128, and the middle still reads through.
+        assert_eq!(alpha_at(&webp, 64, 64, 128), 0, "the middle must stay transparent");
+        assert_eq!(alpha_at(&webp, 2, 2, 128), 255, "the art must survive");
+    }
+
+    #[test]
+    fn avatar_frame_refuses_a_blocked_middle() {
+        // No hole at all — the classic "I uploaded my avatar as a frame".
+        let png = make_test_png(256, 256);
+        let err = process_avatar_frame(&png).expect_err("a solid image is not a frame");
+        assert!(
+            err.contains("transparent"),
+            "the refusal must say what is wrong: {err}"
+        );
+        // A hole smaller than the sampled disc is still a blocked middle.
+        let png = make_frame_png(256, 256, 0.15);
+        assert!(process_avatar_frame(&png).is_err(), "a 15% hole blocks the avatar");
+    }
+
+    #[test]
+    fn avatar_frame_centre_crops_to_square() {
+        // Wide source: the centred square is what survives, so the hole
+        // stays centred in the output rather than sliding off.
+        let png = make_frame_png(400, 200, 0.7);
+        let (webp, _) = process_avatar_frame(&png).expect("process frame");
+        assert_eq!(alpha_at(&webp, 64, 64, 128), 0);
+    }
+
     #[test]
     fn webp_preview_encodes_smaller_image() {
         let png = make_test_png(200, 100);
@@ -1570,3 +1626,166 @@ fn process_asset_for_send(
     ))
 }
 
+
+// ── Avatar frames (issue #54) ─────────────────────────────────────────
+
+/// Frame art is 128x128, the same square an avatar is stored at.
+const FRAME_DIM: u32 = 128;
+/// `AssetKind::Frame` receipt cap. A frame is decoration on every avatar you
+/// have ever seen, so it gets the emote ceiling, not the rail's 512 KB.
+const MAX_FRAME_ANIMATED_BYTES: usize = 262_144;
+/// Stills are held to a quarter of that — there is no animation to pay for.
+const MAX_FRAME_STILL_BYTES: usize = 65_536;
+/// Diameter of the centre disc the transparency gate samples, as a fraction
+/// of the frame box. The avatar fills the middle 1/1.33 = 75% of the box, so
+/// a 42% disc sits comfortably inside it: art may hug or cross the avatar's
+/// EDGES (which is the whole point of a foreground frame) and only a frame
+/// that blocks the middle is refused.
+const FRAME_HOLE_DIAMETER: f32 = 0.42;
+/// Refuse when more than this fraction of the sampled disc is opaque,
+/// averaged over every frame. Averaging is deliberate: a bird that flies
+/// across the middle for three frames of thirty is fine, a permanent blob
+/// is not.
+const FRAME_HOLE_MAX_OPAQUE: f32 = 0.40;
+/// Alpha at or above this counts as "you cannot see the avatar here".
+const FRAME_HOLE_OPAQUE_ALPHA: u8 = 128;
+
+/// Fraction of the centre disc of `img` that is opaque.
+fn frame_centre_opacity(img: &image::RgbaImage) -> f32 {
+    let (w, h) = (img.width() as f32, img.height() as f32);
+    let radius = w.min(h) * FRAME_HOLE_DIAMETER / 2.0;
+    let (cx, cy) = (w / 2.0, h / 2.0);
+    let r2 = radius * radius;
+    let mut sampled = 0u32;
+    let mut opaque = 0u32;
+    for (x, y, px) in img.enumerate_pixels() {
+        let dx = x as f32 + 0.5 - cx;
+        let dy = y as f32 + 0.5 - cy;
+        if dx * dx + dy * dy > r2 {
+            continue;
+        }
+        sampled += 1;
+        if px.0[3] >= FRAME_HOLE_OPAQUE_ALPHA {
+            opaque += 1;
+        }
+    }
+    if sampled == 0 {
+        return 0.0;
+    }
+    opaque as f32 / sampled as f32
+}
+
+/// The message a frame with a blocked middle is refused with. Sentence case,
+/// no em dashes (user-visible copy rule).
+fn frame_hole_error() -> String {
+    "The middle of a frame has to be transparent so your avatar shows through".into()
+}
+
+/// Largest centred square of a (w, h) canvas.
+fn frame_crop_rect(w: u32, h: u32) -> (u32, u32, u32, u32) {
+    let side = w.min(h);
+    ((w - side) / 2, (h - side) / 2, side, side)
+}
+
+/// Process a user-picked image into an AVATAR FRAME blob
+/// (content-addressed asset, `AssetKind::Frame`): square centre crop ->
+/// 128x128, animated WebP Q80 for GIF / animated-WebP input and a still
+/// lossy WebP otherwise. Returns `(bytes, animated)`.
+///
+/// Frames paint IN FRONT of the avatar, so this also enforces the authoring
+/// gate that makes that work: the centre of the box has to be see-through,
+/// or the decoration simply hides the thing it decorates. See
+/// [`frame_centre_opacity`].
+pub fn process_avatar_frame(data: &[u8]) -> Result<(Vec<u8>, bool), String> {
+    if data.starts_with(b"GIF8") {
+        let decoder = GifDecoder::new(Cursor::new(data))
+            .map_err(|e| format!("Failed to decode GIF: {e}"))?;
+        let frames = decoder
+            .into_frames()
+            .collect_frames()
+            .map_err(|e| format!("Failed to collect GIF frames: {e}"))?;
+        if frames.is_empty() {
+            return Err("GIF has no frames".into());
+        }
+        let (w, h) = (frames[0].buffer().width(), frames[0].buffer().height());
+        if w == 0 || h == 0 {
+            return Err("GIF has zero dimensions".into());
+        }
+        let (x, y, cw, ch) = frame_crop_rect(w, h);
+
+        let mut prepared: Vec<(image::RgbaImage, i32)> = Vec::with_capacity(frames.len());
+        let mut opacity_sum = 0.0f32;
+        for frame in &frames {
+            let cropped = image::imageops::crop_imm(frame.buffer(), x, y, cw, ch).to_image();
+            let resized =
+                image::imageops::resize(&cropped, FRAME_DIM, FRAME_DIM, FilterType::Lanczos3);
+            opacity_sum += frame_centre_opacity(&resized);
+            let delay: std::time::Duration = frame.delay().into();
+            let delay_ms = delay.as_millis() as i32;
+            prepared.push((resized, if delay_ms < 20 { 100 } else { delay_ms }));
+        }
+        if opacity_sum / prepared.len() as f32 > FRAME_HOLE_MAX_OPAQUE {
+            return Err(frame_hole_error());
+        }
+
+        let webp = encode_animation_frames(&prepared, (FRAME_DIM, FRAME_DIM), 80.0)?;
+        if webp.len() > MAX_FRAME_ANIMATED_BYTES {
+            return Err("Animated frame is too large after processing (over 256 KB)".into());
+        }
+        return Ok((webp, true));
+    }
+
+    // Animated WebP: the image crate cannot re-encode animation, so the
+    // source rides as-is under the cap (same trade as animated server
+    // icons). The container is still verified, and every frame is decoded
+    // for the transparency gate.
+    if is_animated_image(data) {
+        if data.len() > MAX_FRAME_ANIMATED_BYTES {
+            return Err("Animated frame is too large (over 256 KB)".into());
+        }
+        let decoder = webp_animation::Decoder::new(data)
+            .map_err(|e| format!("Failed to decode animated WebP: {e}"))?;
+        let mut count = 0u32;
+        let mut opacity_sum = 0.0f32;
+        for frame in decoder.into_iter() {
+            let (fw, fh) = frame.dimensions();
+            if fw == 0 || fh == 0 {
+                return Err("Animated frame has zero dimensions".into());
+            }
+            let rgba = image::RgbaImage::from_raw(fw, fh, frame.data().to_vec())
+                .ok_or("Animated frame has a malformed pixel buffer")?;
+            opacity_sum += frame_centre_opacity(&rgba);
+            count += 1;
+            if count > 300 {
+                return Err("Animated frame has too many frames".into());
+            }
+        }
+        if count == 0 {
+            return Err("Animated frame has no frames".into());
+        }
+        if opacity_sum / count as f32 > FRAME_HOLE_MAX_OPAQUE {
+            return Err(frame_hole_error());
+        }
+        return Ok((data.to_vec(), true));
+    }
+
+    let img = image::load_from_memory(data)
+        .map_err(|e| format!("Failed to decode image: {e}"))?;
+    let (w, h) = (img.width(), img.height());
+    if w == 0 || h == 0 {
+        return Err("Image has zero dimensions".into());
+    }
+    let (x, y, cw, ch) = frame_crop_rect(w, h);
+    let resized = img
+        .crop_imm(x, y, cw, ch)
+        .resize_exact(FRAME_DIM, FRAME_DIM, FilterType::Lanczos3)
+        .to_rgba8();
+    if frame_centre_opacity(&resized) > FRAME_HOLE_MAX_OPAQUE {
+        return Err(frame_hole_error());
+    }
+    let buf = encode_lossy_webp_via_animation(resized.as_raw(), FRAME_DIM, FRAME_DIM, 80.0)?;
+    if buf.len() > MAX_FRAME_STILL_BYTES {
+        return Err("Frame is too large after processing (over 64 KB)".into());
+    }
+    Ok((buf, false))
+}

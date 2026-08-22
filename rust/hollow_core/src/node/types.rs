@@ -772,7 +772,7 @@ pub(crate) enum NodeCommand {
     SetTwitchUsername { server_id: String, peer_id: String, twitch_username: String },
     NotifyShutdown,
     // -- Profile commands (Phase 3.5) --
-    UpdateProfile { display_name: String, status: String, about_me: String, avatar_bytes: Option<Vec<u8>>, banner_bytes: Option<Vec<u8>>, twitch_username: String, showcase_board: Option<String>, showcase_assets: Option<Vec<u8>> },
+    UpdateProfile { display_name: String, status: String, about_me: String, avatar_bytes: Option<Vec<u8>>, banner_bytes: Option<Vec<u8>>, twitch_username: String, showcase_board: Option<String>, showcase_assets: Option<Vec<u8>>, avatar_frame: Option<String> },
     // -- Message editing (Phase 3.5) --
     EditChannelMessage { server_id: String, channel_id: String, message_id: String, new_text: String },
     EditDmMessage { peer_id: String, message_id: String, new_text: String },
@@ -1566,6 +1566,14 @@ pub(crate) enum HavenMessage {
         showcase_assets_b64: String,
         #[serde(default)]
         showcase_assets_hash: String,
+        /// Avatar frame ID (issue #54): `""` = none, `"b:<hue>"` = a
+        /// built-in procedural frame, 64-hex = an asset-rail blob hash. Never
+        /// the bytes — the art is PULLED on demand so it can be evicted,
+        /// unlike this push. `None` from clients that predate frames, which
+        /// receivers PRESERVE (a status edit from an old client must not wipe
+        /// somebody's frame); `Some("")` = explicit clear.
+        #[serde(default)]
+        avatar_frame: Option<String>,
         /// Owner's signature over the relayable subset of this profile
         /// (`crypto_handler::profile_signing_payload`). REQUIRED on ingest —
         /// receivers store it so they can forward it in a `ProfileRelay`, which
@@ -2941,6 +2949,9 @@ pub(crate) enum MessageEnvelope {
         showcase_assets_b64: String,
         #[serde(default)]
         showcase_assets_hash: String,
+        /// Avatar frame ID — see HavenMessage::ProfileUpdate.
+        #[serde(default)]
+        avatar_frame: Option<String>,
         /// Owner's profile signature — see HavenMessage::ProfileUpdate.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         profile_sig: Option<String>,

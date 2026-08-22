@@ -220,6 +220,8 @@ Lazy avatar cache. Same pattern as `ServerAvatarNotifier`. Avatars are loaded on
 
 **`invalidate(peerId)`** — removes cached entry and clears loading flag. Called from event handler on `ProfileUpdated`.
 
+**Byte IDENTITY is preserved across reloads** (2026-08-22). `loadAvatar` returns the fresh bytes through `reuseIfUnchanged(_lastAvatar, peerId, bytes)` (defined in `banner_provider.dart`), which hands back the PREVIOUS `Uint8List` instance when the content is unchanged. `invalidate` deliberately does NOT clear that cache — recognising unchanged bytes is the entire point. Reason: `AnimatedGifImage` re-decodes on `!identical(old.bytes, widget.bytes)` (it cannot compare megabytes per rebuild), and `ProfileUpdated` invalidates these caches on EVERY profile save whether or not the media changed. See memory `feedback_reload_unchanged_bytes_identity`.
+
 ## BannerProvider
 
 **File:** `lib/src/core/providers/banner_provider.dart`
@@ -227,9 +229,24 @@ Lazy avatar cache. Same pattern as `ServerAvatarNotifier`. Avatars are loaded on
 
 Lazy banner loading per peer. Calls `storage_api.getBanner(peerId:)`. Used by profile card popup, DM profile header, and user settings dialog. Invalidated via `ref.invalidate(bannerProvider(peerId))` on `ProfileUpdated`.
 
+Returns through `reuseIfUnchanged` (defined here, shared with `avatarProvider`) so an unchanged banner keeps its instance. Without it, saving a profile made a 1.1 MB animated GIF banner re-decode from scratch and the settings preview sat on its gradient placeholder for seconds — which read as "the save wiped my banner". Nothing was ever lost. See memory `feedback_reload_unchanged_bytes_identity`.
+
+## AvatarFrameProvider (issue #54)
+
+**File:** `lib/src/core/providers/avatar_frame_provider.dart`
+**Provider:** `avatarFrameProvider` — `NotifierProvider<AvatarFrameNotifier, Map<String, Uint8List>>`
+
+Avatar-frame ART, keyed by FRAME ID (not peer). The profile carries only the ID; built-in `b:<hue>` frames are procedural and never reach this cache.
+
+- `ensure(id, peerHint:)` — safe to call from `build` (defers the FFI). Reads `getEmoteBytes`, and on a miss calls `requestAssetOnce(id, kind: 'frame', peerHint:)` with the owner's MASTER.
+- **Negative cache `_awaiting`** — a hash we asked for and have not got. Without it every rebuild of every avatar wearing an unpulled frame fires a fresh SQLCipher query across the FFI (the same hole `avatarProvider` closed with `_missing`).
+- `onAssetsReceived(hashes)` — from `EmoteAssetsReceived`, re-reads anything ours.
+- `onProfileUpdated(peerId)` — the rail asks ONCE per session, so a frame whose owner was offline would stay blank forever; a fresh profile announce is the reconnect signal to clear the request marker and retry.
+- `seed(id, bytes)` — puts freshly authored art straight in, so the picker and settings preview paint without a round trip through the blob store.
+
 ### Profile Update Propagation
 
-`ProfileNotifier.updateMyProfile(displayName, status, aboutMe, avatarBytes, bannerBytes)` calls `network_api.updateProfile(...)`. The Rust side:
+`ProfileNotifier.updateMyProfile(displayName, status, aboutMe, avatarBytes, bannerBytes, showcaseBoard, showcaseAssets, avatarFrame)` calls `network_api.updateProfile(...)`. `avatarFrame` carries the same three-state semantics as `showcaseBoard`: null = unchanged, `''` = clear, else the frame ID. The Rust side:
 1. Saves the profile to SQLCipher locally.
 2. Broadcasts the profile to all connected peers.
 3. Emits `NetworkEvent_ProfileUpdated` for our own peer ID, which triggers `reloadProfile` to update the Dart cache.

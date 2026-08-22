@@ -27,6 +27,10 @@ pub(crate) struct StoredProfile {
     pub showcase_board: String,
     /// Showcase asset bundle blob (game covers/artwork keyed by hash).
     pub showcase_assets: Option<Vec<u8>>,
+    /// Avatar frame ID (issue #54). `""` = none, `"b:<hue>"` = a built-in
+    /// procedural frame, 64-hex = an asset-rail blob hash. Never bytes: the
+    /// art rides the rail so it can be evicted, unlike a profile push.
+    pub avatar_frame: String,
     /// The SUBJECT's own signature over the relayable subset of this profile
     /// (`crypto_handler::profile_signing_payload`). Persisted so we can forward
     /// it in a `ProfileRelay` — a relayed profile with no owner signature is
@@ -308,7 +312,7 @@ fn stored_file_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredFile>
 
 /// Map one full profile row (peer_id, display_name, status, about_me,
 /// updated_at, avatar, banner, twitch_username, showcase_board,
-/// showcase_assets) to a StoredProfile.
+/// showcase_assets, proof triple, avatar_frame) to a StoredProfile.
 fn profile_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredProfile> {
     Ok(StoredProfile {
         peer_id: row.get(0)?,
@@ -324,11 +328,14 @@ fn profile_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredProfile> 
         profile_sig: row.get(10).unwrap_or(None),
         profile_pk: row.get(11).unwrap_or(None),
         profile_avatar_hash: row.get(12).unwrap_or(None),
+        avatar_frame: row.get::<_, String>(13).unwrap_or_default(),
     })
 }
 
 /// Map one light profile row (peer_id, display_name, status, about_me,
-/// updated_at, twitch_username, showcase_board — no blobs) to a StoredProfile.
+/// updated_at, twitch_username, showcase_board, avatar_frame — no blobs) to a
+/// StoredProfile. The frame is an ID, not bytes, so it rides the light load:
+/// every list that renders an avatar needs it.
 fn profile_light_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredProfile> {
     Ok(StoredProfile {
         peer_id: row.get(0)?,
@@ -345,6 +352,7 @@ fn profile_light_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredPro
         profile_sig: None,
         profile_pk: None,
         profile_avatar_hash: None,
+        avatar_frame: row.get::<_, String>(7).unwrap_or_default(),
     })
 }
 
@@ -835,6 +843,9 @@ impl MessageStore {
         migrate(conn, "ALTER TABLE user_profiles ADD COLUMN profile_sig TEXT;");
         migrate(conn, "ALTER TABLE user_profiles ADD COLUMN profile_pk TEXT;");
         migrate(conn, "ALTER TABLE user_profiles ADD COLUMN profile_avatar_hash TEXT;");
+        // -- issue #54: avatar frame ID. "" = none, "b:<hue>" = built-in,
+        // 64-hex = an asset-rail blob hash. Never the bytes.
+        migrate(conn, "ALTER TABLE user_profiles ADD COLUMN avatar_frame TEXT NOT NULL DEFAULT '';");
 
         // -- Migration: content_id column on files (vault ↔ file_id link) --
         migrate(conn, "ALTER TABLE files ADD COLUMN content_id TEXT;");
@@ -2536,6 +2547,8 @@ impl MessageStore {
     /// (pass empty slice to clear).
     /// `showcase_board` is optional: `None` preserves the existing board (e.g. an update from an
     /// old client that predates boards), `Some("")` clears, `Some(json)` sets.
+    /// `avatar_frame` carries the same three-state semantics (issue #54).
+    #[allow(clippy::too_many_arguments)]
     pub fn save_profile(
         &self,
         peer_id: &str,
@@ -2552,6 +2565,7 @@ impl MessageStore {
         // stored untouched (COALESCE) — a partial update must not orphan an
         // existing signature.
         proof: Option<ProfileProof<'_>>,
+        avatar_frame: Option<&str>,
     ) -> Result<(), String> {
         let profile_sig = proof.map(|p| p.sig);
         let profile_pk = proof.map(|p| p.pk);
@@ -2567,8 +2581,8 @@ impl MessageStore {
 
         self.conn
             .execute(
-                "INSERT INTO user_profiles (peer_id, display_name, status, about_me, updated_at, avatar, banner, twitch_username, showcase_board, showcase_assets, profile_sig, profile_pk, profile_avatar_hash)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, COALESCE(?9, ''), ?10, ?11, ?12, ?13)
+                "INSERT INTO user_profiles (peer_id, display_name, status, about_me, updated_at, avatar, banner, twitch_username, showcase_board, showcase_assets, profile_sig, profile_pk, profile_avatar_hash, avatar_frame)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, COALESCE(?9, ''), ?10, ?11, ?12, ?13, COALESCE(?14, ''))
                  ON CONFLICT(peer_id) DO UPDATE SET
                     display_name = excluded.display_name,
                     status = excluded.status,
@@ -2581,11 +2595,12 @@ impl MessageStore {
                     showcase_assets = COALESCE(excluded.showcase_assets, user_profiles.showcase_assets),
                     profile_sig = COALESCE(excluded.profile_sig, user_profiles.profile_sig),
                     profile_pk = COALESCE(excluded.profile_pk, user_profiles.profile_pk),
-                    profile_avatar_hash = COALESCE(excluded.profile_avatar_hash, user_profiles.profile_avatar_hash)
+                    profile_avatar_hash = COALESCE(excluded.profile_avatar_hash, user_profiles.profile_avatar_hash),
+                    avatar_frame = COALESCE(?14, user_profiles.avatar_frame)
                  WHERE excluded.updated_at >= user_profiles.updated_at
                     OR (excluded.updated_at < user_profiles.updated_at
                         AND ABS(excluded.updated_at - user_profiles.updated_at) < 86400000)",
-                params![peer_id, display_name, status, about_me, updated_at, avatar_val, banner_val, twitch_username, showcase_board, assets_val, profile_sig, profile_pk, profile_avatar_hash],
+                params![peer_id, display_name, status, about_me, updated_at, avatar_val, banner_val, twitch_username, showcase_board, assets_val, profile_sig, profile_pk, profile_avatar_hash, avatar_frame],
             )
             .map_err(|e| format!("Failed to save profile: {e}"))?;
 
@@ -2616,7 +2631,7 @@ impl MessageStore {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT peer_id, display_name, status, about_me, updated_at, avatar, banner, twitch_username, showcase_board, showcase_assets, profile_sig, profile_pk, profile_avatar_hash
+                "SELECT peer_id, display_name, status, about_me, updated_at, avatar, banner, twitch_username, showcase_board, showcase_assets, profile_sig, profile_pk, profile_avatar_hash, avatar_frame
                  FROM user_profiles WHERE peer_id = ?1",
             )
             .map_err(|e| format!("Failed to prepare profile query: {e}"))?;
@@ -2635,7 +2650,7 @@ impl MessageStore {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT peer_id, display_name, status, about_me, updated_at, avatar, banner, twitch_username, showcase_board, showcase_assets, profile_sig, profile_pk, profile_avatar_hash
+                "SELECT peer_id, display_name, status, about_me, updated_at, avatar, banner, twitch_username, showcase_board, showcase_assets, profile_sig, profile_pk, profile_avatar_hash, avatar_frame
                  FROM user_profiles",
             )
             .map_err(|e| format!("Failed to prepare all profiles query: {e}"))?;
@@ -2650,7 +2665,7 @@ impl MessageStore {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT peer_id, display_name, status, about_me, updated_at, twitch_username, showcase_board
+                "SELECT peer_id, display_name, status, about_me, updated_at, twitch_username, showcase_board, avatar_frame
                  FROM user_profiles",
             )
             .map_err(|e| format!("Failed to prepare light profiles query: {e}"))?;
@@ -2665,7 +2680,7 @@ impl MessageStore {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT peer_id, display_name, status, about_me, updated_at, twitch_username, showcase_board
+                "SELECT peer_id, display_name, status, about_me, updated_at, twitch_username, showcase_board, avatar_frame
                  FROM user_profiles WHERE peer_id = ?1",
             )
             .map_err(|e| format!("Failed to prepare light profile query: {e}"))?;

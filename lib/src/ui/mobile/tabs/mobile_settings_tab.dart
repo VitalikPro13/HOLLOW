@@ -48,6 +48,7 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/animated_gif_image.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
+import 'package:hollow/src/ui/dialogs/avatar_frame_picker.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
@@ -715,6 +716,10 @@ class _ProfileTabState extends ConsumerState<_ProfileTab> {
   bool _avatarBusy = false;
   bool _bannerBusy = false;
   bool _populated = false;
+  // Pending avatar frame (issue #54): null + !_frameChanged = no change,
+  // '' = clear.
+  String? _pendingFrameId;
+  bool _frameChanged = false;
 
   @override
   void initState() {
@@ -839,6 +844,22 @@ class _ProfileTabState extends ConsumerState<_ProfileTab> {
     }();
   }
 
+  Future<void> _pickFrame() async {
+    final peerId = ref.read(identityProvider).peerId ?? '';
+    final saved =
+        ref.read(profileProvider)[peerId]?.avatarFrame ?? '';
+    final pick = await showAvatarFramePicker(
+      context: context,
+      peerId: peerId,
+      currentId: _frameChanged ? (_pendingFrameId ?? '') : saved,
+    );
+    if (pick == null || !mounted) return;
+    setState(() {
+      _pendingFrameId = pick.id;
+      _frameChanged = true;
+    });
+  }
+
   Future<void> _save() async {
     if (_saving) return;
     setState(() => _saving = true);
@@ -864,10 +885,15 @@ class _ProfileTabState extends ConsumerState<_ProfileTab> {
         avatarBytes: _avatarChanged ? _pendingAvatar : null,
         bannerBytes: _bannerChanged ? _pendingBanner : null,
         twitchUsername: twitchUsername,
+        avatarFrame: _frameChanged ? (_pendingFrameId ?? '') : null,
       );
 
       if (mounted) {
-        setState(() { _avatarChanged = false; _bannerChanged = false; });
+        setState(() {
+          _avatarChanged = false;
+          _bannerChanged = false;
+          _frameChanged = false;
+        });
         HollowToast.show(context, 'Profile updated', type: HollowToastType.success);
       }
     } catch (e) {
@@ -962,12 +988,14 @@ class _ProfileTabState extends ConsumerState<_ProfileTab> {
                                 borderRadius: BorderRadius.circular(hollow.radiusMd + 2),
                                 border: Border.all(color: hollow.surface, width: 3),
                               ),
-                              child: _avatarChanged && _pendingAvatar != null
-                                  ? ClipRRect(
-                                      borderRadius: BorderRadius.circular(hollow.radiusMd - 1),
-                                      child: Image.memory(_pendingAvatar!, width: 64, height: 64, fit: BoxFit.cover),
-                                    )
-                                  : HollowAvatar(peerId: peerId, size: 64),
+                              // One widget for both states so the frame
+                              // preview survives picking a new avatar.
+                              child: HollowAvatar(
+                                peerId: peerId,
+                                size: 64,
+                                imageBytes: _avatarChanged ? _pendingAvatar : null,
+                                frameId: _frameChanged ? (_pendingFrameId ?? '') : null,
+                              ),
                             ),
                             if (_avatarBusy)
                               Positioned(
@@ -1061,6 +1089,16 @@ class _ProfileTabState extends ConsumerState<_ProfileTab> {
         Text('Tap banner or avatar to change',
             textAlign: TextAlign.center,
             style: HollowTypography.caption.copyWith(color: hollow.textSecondary)),
+
+        const SizedBox(height: HollowSpacing.md),
+
+        // Avatar frame (issue #54)
+        HollowButton.outline(
+          onPressed: _pickFrame,
+          expand: true,
+          icon: const Icon(LucideIcons.frame, size: 14),
+          child: const Text('Avatar frame'),
+        ),
 
         const SizedBox(height: HollowSpacing.xl),
 

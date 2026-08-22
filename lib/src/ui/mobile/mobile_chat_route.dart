@@ -2905,6 +2905,7 @@ class _MobileChatHeader extends ConsumerWidget {
       SizedBox(
         width: 32, height: 32,
         child: Stack(
+                 clipBehavior: Clip.none,
           children: [
             HollowAvatar(peerId: peerId!, size: 32),
             Positioned(

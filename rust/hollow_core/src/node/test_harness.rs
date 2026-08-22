@@ -6583,6 +6583,7 @@ async fn showcase_board_replicates_preserves_and_clears() {
         twitch_username: String::new(),
         showcase_board: board,
         showcase_assets: assets,
+        avatar_frame: None,
     };
 
     // --- 1. A composes an ENRICHED game-block board (+ a two-asset bundle:
@@ -10055,6 +10056,156 @@ async fn banner_write_rejected_without_manage_server() {
 
     drop(o);
     drop(j);
+}
+
+// ---------------------------------------------------------------------------
+// Avatar frames (issue #54): the profile carries an ID, never the art. A
+// built-in `b:<hue>` costs nothing on the wire; an uploaded frame puts a
+// 64-hex hash on the LIGHT announce and the bytes ride the asset rail at
+// AssetKind::Frame, pulled on demand from the owner's devices. An update
+// that doesn't touch the frame must preserve it (old clients send None), and
+// an explicit "" must clear it.
+//
+// This is the half a widget test cannot reach: whether the ID converges and
+// whether the bytes stay OFF the profile push.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn avatar_frame_id_replicates_and_art_pulls_on_demand() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    const A_MASTER: u8 = 111;
+    const A_DEV: u8 = 112;
+    const B_MASTER: u8 = 113;
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
+    let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
+
+    let mut a = spawn_node_with_friends(&relay, A_MASTER, A_DEV, &[&b_master]).await;
+    let mut b = spawn_node_with_friends(&relay, B_MASTER, B_MASTER, &[&a_master]).await;
+    sleep_ms(2000).await;
+    drain_events(&mut a);
+    drain_events(&mut b);
+
+    let send_update = |status: &str, frame: Option<String>| NodeCommand::UpdateProfile {
+        display_name: "Anon A".to_string(),
+        status: status.to_string(),
+        about_me: String::new(),
+        avatar_bytes: None,
+        banner_bytes: None,
+        twitch_username: String::new(),
+        showcase_board: None,
+        showcase_assets: None,
+        avatar_frame: frame,
+    };
+
+    // --- 1. A built-in frame is just a short string: it rides the announce
+    // with no blob anywhere. ---
+    a.cmd_tx.send(send_update("hi", Some("b:200".into()))).await.unwrap();
+    let got = wait_event(&mut b, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::ProfileUpdated { .. })
+    })
+    .await;
+    assert!(got, "B must receive A's profile update");
+    sleep_ms(300).await;
+    let p = b.store().load_profile(&a_master).unwrap()
+        .expect("B must hold A's profile keyed by A's MASTER (device != master)");
+    assert_eq!(p.avatar_frame, "b:200", "a built-in frame ID must replicate");
+
+    // --- 2. An uploaded frame: the ID is a hash, the ART stays local until
+    // pulled. This is the whole reason frames are not profile blobs. ---
+    let frame_png = {
+        // Opaque ring, transparent middle - the shape the authoring gate wants.
+        let mut img = image::RgbaImage::from_pixel(64, 64, image::Rgba([200, 90, 40, 255]));
+        for y in 10..54 {
+            for x in 10..54 {
+                img.put_pixel(x, y, image::Rgba([0, 0, 0, 0]));
+            }
+        }
+        let mut buf = Vec::new();
+        img.write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
+            .expect("encode frame png");
+        buf
+    };
+    let (art, animated) =
+        super::image_convert::process_avatar_frame(&frame_png).expect("process frame");
+    assert!(!animated, "a PNG source is a still frame");
+    use sha2::{Digest, Sha256};
+    let hash = hex::encode(Sha256::digest(&art));
+    a.store()
+        .save_asset_blob(&hash, &art, false, "frame")
+        .expect("A caches the frame it authored");
+
+    drain_events(&mut b);
+    a.cmd_tx.send(send_update("hi", Some(hash.clone()))).await.unwrap();
+    let got = wait_event(&mut b, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::ProfileUpdated { .. })
+    })
+    .await;
+    assert!(got, "B must receive A's frame-hash update");
+    sleep_ms(300).await;
+    let p = b.store().load_profile(&a_master).unwrap().expect("profile row");
+    assert_eq!(p.avatar_frame, hash, "the frame HASH must replicate");
+    assert!(
+        !b.store().has_emote_blob(&hash).unwrap(),
+        "the art must NOT ride the profile push - that is the whole design"
+    );
+
+    // B pulls it from A's devices with a peer hint, exactly as the renderer
+    // does when it meets a hash it has no bytes for.
+    b.cmd_tx
+        .send(NodeCommand::RequestEmotes {
+            hashes: vec![hash.clone()],
+            kind: super::assets::AssetKind::Frame,
+            server_id: None,
+            peer_hint: Some(a_master.clone()),
+        })
+        .await
+        .unwrap();
+    let got_art = wait_event(&mut b, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::EmoteAssetsReceived { hashes } if hashes.contains(&hash))
+    })
+    .await;
+    assert!(got_art, "B must receive the frame art from A over the rail");
+    sleep_ms(300).await;
+    assert_eq!(
+        b.store().load_emote_blob(&hash).unwrap().as_deref(),
+        Some(art.as_slice()),
+        "the pulled frame must match A's blob byte-exact (hash-verified)"
+    );
+
+    // --- 3. An update that doesn't touch the frame must PRESERVE it (this is
+    // also what an old client that has never heard of frames sends). ---
+    drain_events(&mut b);
+    a.cmd_tx.send(send_update("status changed", None)).await.unwrap();
+    let got = wait_event(&mut b, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::ProfileUpdated { .. })
+    })
+    .await;
+    assert!(got, "B must receive A's second update");
+    sleep_ms(300).await;
+    let p = b.store().load_profile(&a_master).unwrap().expect("profile row");
+    assert_eq!(p.status, "status changed", "the non-frame field must update");
+    assert_eq!(p.avatar_frame, hash, "an update that didn't touch the frame must NOT lose it");
+
+    // --- 4. Explicit clear. ---
+    drain_events(&mut b);
+    a.cmd_tx.send(send_update("cleared", Some(String::new()))).await.unwrap();
+    let got = wait_event(&mut b, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::ProfileUpdated { .. })
+    })
+    .await;
+    assert!(got, "B must receive A's clear update");
+    sleep_ms(300).await;
+    let p = b.store().load_profile(&a_master).unwrap().expect("profile row");
+    assert_eq!(p.avatar_frame, "", "an explicit empty frame must clear on B");
+
+    drop(a);
+    drop(b);
 }
 
 // ---------------------------------------------------------------------------

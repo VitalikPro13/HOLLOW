@@ -5,9 +5,13 @@ import 'package:flutter/foundation.dart' show listEquals;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/color_utils.dart';
+import 'package:hollow/src/core/providers/avatar_frame_provider.dart';
 import 'package:hollow/src/core/providers/avatar_provider.dart';
+import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/ui/components/animated_gif_image.dart';
+import 'package:hollow/src/ui/components/avatar_frame.dart';
+import 'package:hollow/src/ui/components/hover_scope.dart';
 
 /// Avatar widget — shows a real image when available, falls back to
 /// deterministic color + initials from peer ID.
@@ -17,6 +21,18 @@ import 'package:hollow/src/ui/components/animated_gif_image.dart';
 ///
 /// Set [animate] to true for focused profile contexts (profile card,
 /// DM panel, settings preview). Defaults to false (static first frame).
+/// It un-gates the avatar's own animation AND its frame's.
+///
+/// Elsewhere both hold frame 0 and play while the enclosing ROW is hovered
+/// (see [HoverScope]) — the row, not the 32px of artwork, because aiming at
+/// an avatar to make it move is a pixel-hunting game. Outside a row (a
+/// preview, a picker tile) the avatar IS the target and hovers itself.
+///
+/// The person's avatar FRAME (issue #54) is painted here too, from the
+/// profile's `avatarFrame` ID, so every surface in the app inherits it at
+/// once. It costs the layout nothing: see [AvatarFrame]. Pass [frameId] to
+/// override the stored value (a settings preview showing a pending pick;
+/// `''` renders no frame).
 ///
 /// Accessibility: pass [semanticLabel] (the person's display name) so a screen
 /// reader announces "`name`, image". When null the avatar is excluded from the
@@ -30,6 +46,9 @@ class HollowAvatar extends ConsumerWidget {
   final Uint8List? imageBytes;
   final bool animate;
 
+  /// Overrides the frame from the peer's profile. `''` = draw none.
+  final String? frameId;
+
   /// Screen-reader label — the person's display name. Null = excluded from
   /// semantics (decorative).
   final String? semanticLabel;
@@ -40,6 +59,7 @@ class HollowAvatar extends ConsumerWidget {
     this.size = 36,
     this.imageBytes,
     this.animate = false,
+    this.frameId,
     this.semanticLabel,
   });
 
@@ -87,6 +107,10 @@ class HollowAvatar extends ConsumerWidget {
       }
     }
 
+    // The enclosing row's hover, where there is one. An animated avatar plays
+    // while the pointer is anywhere over the ROW, not only over the artwork.
+    final rowHovered = HoverScope.maybeOf(context);
+
     Widget visual;
     if (bytes != null && bytes.isNotEmpty) {
       Widget image;
@@ -100,11 +124,35 @@ class HollowAvatar extends ConsumerWidget {
           errorWidget: _buildFallback(hollow),
         );
       } else {
-        image = _StaticFirstFrame(
+        final still = _StaticFirstFrame(
           imageBytes: bytes,
           size: size,
           fallback: _buildFallback(hollow),
         );
+        // Play on row hover, without paying for the decode until then.
+        // AnimatedGifImage decodes EVERY frame up front, so it is mounted
+        // only while hovered — which the pointer bounds to one row at a
+        // time. It sits OVER the still rather than replacing it: the still
+        // keeps its decoded frame, so there is no blank while the animation
+        // decodes and no re-decode when the pointer leaves.
+        //
+        // The Stack appears only for bytes that are really animated inside a
+        // real row, so the tree shape does not flip as the pointer moves —
+        // only the second child comes and goes.
+        image = (rowHovered != null && isAnimatedImageBytes(bytes))
+            ? Stack(
+                children: [
+                  still,
+                  if (rowHovered)
+                    AnimatedGifImage(
+                      bytes: bytes,
+                      width: size,
+                      height: size,
+                      fit: BoxFit.cover,
+                    ),
+                ],
+              )
+            : still;
       }
 
       visual = ClipRRect(
@@ -113,6 +161,24 @@ class HollowAvatar extends ConsumerWidget {
       );
     } else {
       visual = _buildFallback(hollow);
+    }
+
+    // Frames (issue #54) sit IN FRONT of the avatar in a box that takes no
+    // layout space at all. Below ~24px the art is mush, so it is skipped.
+    if (size >= kFrameMinAvatarSize) {
+      final id = frameId ??
+          ref.watch(profileProvider.select((p) => p[peerId]?.avatarFrame)) ??
+          '';
+      if (isRenderableFrame(id)) {
+        visual = AvatarFrame(
+          id: id,
+          size: size,
+          radius: hollow.radiusMd,
+          peerHint: peerId,
+          animate: animate,
+          child: visual,
+        );
+      }
     }
 
     // A named avatar announces "<name>, image"; an unnamed one is decorative

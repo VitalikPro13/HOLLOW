@@ -40,6 +40,8 @@ class ProfileNotifier extends Notifier<Map<String, storage_api.UserProfile>> {
   /// Pass avatarBytes/bannerBytes to update images. null = no change. Empty Uint8List = clear.
   /// showcaseBoard: null = no change, '' = clear, else the board JSON.
   /// showcaseAssets: null = no change, [] = clear, else the full asset set.
+  /// avatarFrame: null = no change, '' = clear, else the frame ID (issue #54)
+  /// — a built-in `b:<hue>` or the hash of an already-stored frame blob.
   Future<void> updateMyProfile({
     required String displayName,
     String status = '',
@@ -49,6 +51,7 @@ class ProfileNotifier extends Notifier<Map<String, storage_api.UserProfile>> {
     String twitchUsername = '',
     String? showcaseBoard,
     List<showcase_api.ShowcaseAsset>? showcaseAssets,
+    String? avatarFrame,
   }) async {
     // NOTE: `updateProfile` resolves once the command is QUEUED on the node's
     // channel — the surfaced failures are "Node is not running", oversized
@@ -64,6 +67,7 @@ class ProfileNotifier extends Notifier<Map<String, storage_api.UserProfile>> {
         twitchUsername: twitchUsername,
         showcaseBoard: showcaseBoard,
         showcaseAssets: showcaseAssets,
+        avatarFrame: avatarFrame,
       );
     } catch (e) {
       // Rethrow so save UIs can show a REAL failure instead of a false
@@ -104,6 +108,7 @@ class ProfileNotifier extends Notifier<Map<String, storage_api.UserProfile>> {
           bannerBytes: current.bannerBytes,
           twitchUsername: current.twitchUsername,
           showcaseBoard: encoded,
+          avatarFrame: current.avatarFrame,
         ),
       };
     }

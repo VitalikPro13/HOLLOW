@@ -384,6 +384,7 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
                     HollowAvatar(
                       peerId: displayId,
                       size: 48,
+                      frameId: '',
                     ),
                     const SizedBox(height: HollowSpacing.xs),
                     Text(
@@ -541,6 +542,7 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
                                         .watch(deviceLinkProvider)
                                         .identityOf(peerId),
                                     size: 28,
+                                    frameId: '',
                                   ),
                                 ),
                               ),
@@ -804,7 +806,7 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              HollowAvatar(peerId: displayId, size: 64),
+              HollowAvatar(peerId: displayId, size: 64, frameId: ''),
               const SizedBox(height: HollowSpacing.md),
               Text('$name is sharing their screen',
                   style: HollowTypography.body
@@ -917,6 +919,7 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
                   HollowAvatar(
                     peerId: displayId,
                     size: 64,
+                    frameId: '',
                   ),
                   const SizedBox(height: HollowSpacing.md),
                   Text(
@@ -1032,7 +1035,7 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              HollowAvatar(peerId: displayId, size: 48),
+              HollowAvatar(peerId: displayId, size: 48, frameId: ''),
               const SizedBox(height: HollowSpacing.sm),
               Text(
                 '$name is sharing their screen',
@@ -1316,6 +1319,7 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
                         HollowAvatar(
                           peerId: displayId,
                           size: 18,
+                          frameId: '',
                         ),
                         const SizedBox(width: HollowSpacing.xs),
                         Text(
@@ -1833,7 +1837,7 @@ class _UnwatchedShareBanner extends ConsumerWidget {
                     Icon(LucideIcons.monitor,
                         size: 14, color: hollow.textSecondary),
                     const SizedBox(width: HollowSpacing.xs),
-                    HollowAvatar(peerId: displayId, size: 18),
+                    HollowAvatar(peerId: displayId, size: 18, frameId: ''),
                     const SizedBox(width: HollowSpacing.xs),
                     Flexible(
                       child: Text(

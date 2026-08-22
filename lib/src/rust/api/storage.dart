@@ -930,6 +930,11 @@ class UserProfile {
   /// Showcase board JSON (profile blocks; empty = no board).
   final String showcaseBoard;
 
+  /// Avatar frame ID (issue #54). `""` = none, `"b:<hue>"` = a built-in
+  /// procedural frame, 64-hex = an asset-rail blob hash whose bytes are
+  /// pulled on demand via `request_assets(kind: "frame")`.
+  final String avatarFrame;
+
   const UserProfile({
     required this.peerId,
     required this.displayName,
@@ -940,6 +945,7 @@ class UserProfile {
     this.bannerBytes,
     required this.twitchUsername,
     required this.showcaseBoard,
+    required this.avatarFrame,
   });
 
   @override
@@ -952,7 +958,8 @@ class UserProfile {
       avatarBytes.hashCode ^
       bannerBytes.hashCode ^
       twitchUsername.hashCode ^
-      showcaseBoard.hashCode;
+      showcaseBoard.hashCode ^
+      avatarFrame.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -967,5 +974,6 @@ class UserProfile {
           avatarBytes == other.avatarBytes &&
           bannerBytes == other.bannerBytes &&
           twitchUsername == other.twitchUsername &&
-          showcaseBoard == other.showcaseBoard;
+          showcaseBoard == other.showcaseBoard &&
+          avatarFrame == other.avatarFrame;
 }

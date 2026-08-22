@@ -17,6 +17,7 @@ import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
+import 'package:hollow/src/ui/dialogs/avatar_frame_picker.dart';
 import 'package:hollow/src/ui/dialogs/image_crop_dialog.dart';
 import 'package:hollow/src/ui/settings/about_section.dart';
 import 'package:hollow/src/ui/settings/accessibility_section.dart';
@@ -219,6 +220,12 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
   bool _avatarBusy = false;
   bool _bannerBusy = false;
   bool _savingProfile = false;
+
+  // Pending avatar frame (issue #54). null + !_frameChanged = no change;
+  // '' = clear. The picker stores an upload's blob immediately, so only the
+  // ID is pending here.
+  String? _pendingFrameId;
+  bool _frameChanged = false;
 
   // Active category + rail search filter.
   late _SettingsCategory _activeTab;
@@ -437,6 +444,31 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
   }
 
   /// Save the Profile category. Profile keeps an explicit Save button (text
+  Future<void> _pickFrame() async {
+    final saved = ref.read(
+        profileProvider.select((p) => p[widget.localPeerId]?.avatarFrame)) ??
+        '';
+    final pick = await showAvatarFramePicker(
+      context: context,
+      peerId: widget.localPeerId,
+      currentId: _frameChanged ? (_pendingFrameId ?? '') : saved,
+    );
+    if (pick == null || !mounted) return;
+    setState(() {
+      _pendingFrameId = pick.id;
+      _frameChanged = true;
+      _profileDirty = true;
+    });
+  }
+
+  void _clearFrame() {
+    setState(() {
+      _pendingFrameId = '';
+      _frameChanged = true;
+      _profileDirty = true;
+    });
+  }
+
   /// fields + cropped images benefit from a single commit); every other
   /// category auto-saves on change. Does NOT close the dialog — the user can
   /// keep browsing other categories afterward.
@@ -469,6 +501,7 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
             avatarBytes: _avatarChanged ? _pendingAvatarBytes : null,
             bannerBytes: _bannerChanged ? _pendingBannerBytes : null,
             twitchUsername: twitchUsername,
+            avatarFrame: _frameChanged ? (_pendingFrameId ?? '') : null,
           );
 
       if (!mounted) return;
@@ -476,6 +509,7 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
         _profileDirty = false;
         _avatarChanged = false;
         _bannerChanged = false;
+        _frameChanged = false;
       });
       HollowToast.show(context, 'Profile saved', type: HollowToastType.success);
     } catch (e) {
@@ -769,6 +803,10 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
       onClearAvatar: _clearAvatar,
       onPickBanner: _pickBanner,
       onClearBanner: _clearBanner,
+      pendingFrameId: _pendingFrameId,
+      frameChanged: _frameChanged,
+      onPickFrame: _pickFrame,
+      onClearFrame: _clearFrame,
       onSaveProfile: _saveProfile,
       onAboutMeChanged: () => setState(() {}),
     );

@@ -25,6 +25,7 @@ import 'package:hollow/src/core/providers/peers_provider.dart';
 import 'package:hollow/src/core/providers/security_alerts_provider.dart';
 import 'package:hollow/src/core/providers/selected_peer_provider.dart';
 import 'package:hollow/src/core/providers/split_view_provider.dart';
+import 'package:hollow/src/core/providers/avatar_frame_provider.dart';
 import 'package:hollow/src/core/providers/server_avatar_anim_provider.dart';
 import 'package:hollow/src/core/providers/server_avatar_provider.dart';
 import 'package:hollow/src/core/providers/server_banner_provider.dart';
@@ -591,6 +592,7 @@ class EventStreamNotifier extends Notifier<bool> {
         }
         ref.read(serverBannerProvider.notifier).onAssetsReceived(hashes);
         ref.read(serverAvatarAnimProvider.notifier).onAssetsReceived(hashes);
+        ref.read(avatarFrameProvider.notifier).onAssetsReceived(hashes);
         // GIF-sized blobs can grow the asset cache quickly — enforce the
         // cap here too, not just on file downloads.
         _enforceStorageCaps();
@@ -857,6 +859,10 @@ class EventStreamNotifier extends Notifier<bool> {
         ref.read(avatarProvider.notifier).invalidate(peerId);
         ref.invalidate(bannerProvider(peerId));
         ref.invalidate(showcaseAssetsProvider(peerId));
+        // A re-announce is our one signal that this peer is reachable again,
+        // which is when a frame we asked for while they were offline can
+        // finally be pulled (the rail asks once per session).
+        ref.read(avatarFrameProvider.notifier).onProfileUpdated(peerId);
         _refreshPushHints();
 
       case NetworkEvent_DeviceListUpdated(:final masterPeerId):
@@ -1907,6 +1913,10 @@ class EventStreamNotifier extends Notifier<bool> {
                 bannerBytes: null,
                 twitchUsername: existing?.twitchUsername ?? '',
                 showcaseBoard: existing?.showcaseBoard ?? '',
+                // Frames stay OFF the guest sync path (it ships a 64px avatar
+                // thumb and should stay minimal), so this only carries
+                // through a frame we already knew about.
+                avatarFrame: existing?.avatarFrame ?? '',
               );
             }
           }

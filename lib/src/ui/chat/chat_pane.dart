@@ -201,6 +201,7 @@ Widget _dmSourcePill({
                   HollowAvatar(
                     peerId: source.peerId,
                     size: 18,
+                    frameId: '',
                   ),
                   const SizedBox(width: HollowSpacing.xs),
                   Text(
@@ -3152,6 +3153,7 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
                             HollowAvatar(
                               peerId: ref.read(identityProvider).peerId ?? '',
                               size: 48,
+                              frameId: '',
                             ),
                             const SizedBox(height: HollowSpacing.xs),
                             Text(
@@ -3198,6 +3200,7 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
                             HollowAvatar(
                               peerId: widget.peerId,
                               size: 48,
+                              frameId: '',
                             ),
                             const SizedBox(height: HollowSpacing.xs),
                             Text(
@@ -3507,7 +3510,14 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
 
     return Stack(
       children: [
-        HollowAvatar(peerId: peerId, size: 60),
+        // A speaking ring is drawn AROUND this avatar, and a built-in frame
+        // is a coloured ring in the same accent family - side by side they
+        // are the same picture, so a quiet person with a teal frame reads as
+        // talking. The functional cue wins: no frame on an avatar that
+        // carries a speaking ring of its own. Tile-rim cues (the VC grid,
+        // video PiPs) are a different shape in a different place and keep
+        // theirs. See avatar_frame.dart.
+        HollowAvatar(peerId: peerId, size: 60, frameId: ''),
         if (muted)
           Positioned(left: 0, bottom: 0, child: badge(LucideIcons.micOff)),
         if (deafened)
@@ -3813,7 +3823,7 @@ class _ScreenShareFullView extends ConsumerWidget {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            HollowAvatar(peerId: peerId, size: 64),
+            HollowAvatar(peerId: peerId, size: 64, frameId: ''),
             const SizedBox(height: HollowSpacing.md),
             Text(
               '$name is sharing their screen',
@@ -4028,7 +4038,7 @@ class _ScreenShareFullView extends ConsumerWidget {
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                HollowAvatar(peerId: peerId, size: 48),
+                HollowAvatar(peerId: peerId, size: 48, frameId: ''),
                 const SizedBox(height: HollowSpacing.sm),
                 Text(
                   'Sharing their screen',

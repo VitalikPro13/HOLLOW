@@ -71,6 +71,7 @@ Reduce Motion (formerly "Disable Animations") moved out of Appearance into the n
 - `_pendingCacheCap` (int, MB) — from `vaultCacheCapProvider` (async), default 1024
 - `_initialAccentHue` (double) — from `accentHueProvider`
 - `_pendingAvatarBytes` / `_pendingBannerBytes` (Uint8List?) — null = no change, empty = clear
+- `_pendingFrameId` (String?) + `_frameChanged` (bool) — avatar frame (issue #54): not-changed = no change, `''` = clear, else the frame ID. Only the ID is pending; an uploaded frame's blob is stored content-addressed by `processAndStoreAvatarFrame` the moment it is picked (an unreferenced blob just gets evicted, so nothing leaks if Save is never pressed)
 - `_avatarChanged` / `_bannerChanged` (bool) — whether user modified the image
 - `_liveDisplayName` / `_liveStatus` (String) — updated on every keystroke via `_onFieldChanged()` listener for live preview
 
@@ -115,6 +116,8 @@ Switch/erase separate identities, each in its own data folder. Rows come from th
 A live-updating miniature profile card showing how the user's profile will appear.
 
 **Banner area** (70px tall): Shows `_pendingBannerBytes` if `_bannerChanged`, else saved `profileProvider` banner. Uses `AnimatedGifImage` for GIF support. Falls back to deterministic gradient from `_bannerColorFromId()`.
+
+**Image rows** are Avatar / Banner / **Frame**, each `_ImageRow(label, icon, onPick, onClear)` — Frame uses `LucideIcons.frame` so it does not read as a third image slot. Frame opens `showAvatarFramePicker` (`ui/dialogs/avatar_frame_picker.dart`): a live 72px preview of the current pick, 12 named built-in colours plus the user's own accent hue, and an Upload button. Selection is a CHECK BADGE with a neutral tile border, never a tinted border — a coloured ring is the frame's own language, and the accent-hued frame would render an accent border invisible. The preview avatar takes `frameId:` so it shows the PENDING pick, not what is saved. Mobile parity: an "Avatar frame" button in the mobile profile tab opening the same picker.
 
 **Avatar** (56px): `HollowAvatar` with 3px surface-colored border. Offset -28px to overlap the banner. Shows pending avatar if changed, else saved avatar. `animate: true` for GIF avatars.
 
