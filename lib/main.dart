@@ -23,6 +23,7 @@ import 'package:hollow/src/ui/app.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/core/hollow_data_dir.dart';
 import 'package:hollow/src/core/services/ios_data_dir_migration.dart';
+import 'package:hollow/src/ui/shader_warmup.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:window_manager/window_manager.dart';
 
@@ -188,6 +189,22 @@ Future<void> main(List<String> args) async {
     if (!_acquireSingleInstanceLock()) {
       exit(0);
     }
+  }
+
+  // Pre-compile GPU shaders before the first frame, so Skia does not compile
+  // them mid-animation (20-200ms each, dropped frames).
+  //
+  // DESKTOP-SKIA ONLY, and deliberately so: this is paired with
+  // `ImpellerSwitch::Disabled` in windows/runner/main.cpp and
+  // `fl_dart_project_set_enable_impeller(project, FALSE)` in
+  // linux/runner/my_application.cc, which put both back on Skia because
+  // Impeller's render targets cost several hundred MB (tmp4.md section 18).
+  //
+  // macOS, iOS and Android still run Impeller, which compiles its shaders at
+  // build time, so warming them there only delays the first frame. Whenever a
+  // platform goes back to Impeller, drop it from this condition.
+  if (Platform.isWindows || Platform.isLinux) {
+    await HollowShaderWarmUp().execute();
   }
 
   // iOS: migrate the data dir into the App Group container so the Notification

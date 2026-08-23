@@ -35,6 +35,26 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
 
   flutter::DartProject project(L"data");
 
+  // Windows runs SKIA, not Impeller. Impeller became the Windows default in
+  // Flutter 3.47 and it is GLES over ANGLE over D3D11, not Vulkan. Measured
+  // on the same build, same 1280x800 window, same screen:
+  //
+  //            Impeller    Skia
+  //   VRAM       247 MB    54 MB     4.5x
+  //   commit  483-732 MB   214 MB    steady instead of swinging
+  //   idle CPU    12.7%    10.5%     Skia slightly cheaper
+  //
+  // The cost scales with WINDOW AREA (~52 MB + ~189 MB per megapixel), so a
+  // 1440p window would sit near 750 MB of VRAM doing nothing. The engine
+  // exposes no sample-count or render-target-pool control to apps
+  // (flutter/flutter#178264). Full workings in tmp4.md section 18.
+  //
+  // This is TEMPORARY. Flutter's docs say the opt-out will be removed in a
+  // future release, so RE-TEST THIS ON EVERY FLUTTER UPGRADE: if the engine's
+  // render-target memory improves, delete this line and drop
+  // HollowShaderWarmUp from lib/main.dart with it.
+  project.set_impeller_switch(flutter::ImpellerSwitch::Disabled);
+
   std::vector<std::string> command_line_arguments =
       GetCommandLineArguments();
 

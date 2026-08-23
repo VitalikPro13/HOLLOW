@@ -1947,9 +1947,13 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
         _localScreenPreviewRenderer = null;
       }
 
-      // Stop capture stream.
-      _screenCaptureStream?.getTracks().forEach((t) => t.stop());
-      _screenCaptureStream?.dispose();
+      // Stop capture stream. Both of these are async: forEach dropped every
+      // track.stop() future on the floor, and the dispose was not awaited at
+      // all, so the capture device outlived the share.
+      for (final t in _screenCaptureStream?.getTracks() ?? []) {
+        try { await t.stop(); } catch (_) {}
+      }
+      await _screenCaptureStream?.dispose();
       _screenCaptureStream = null;
 
       // Broadcast screen_state(enabled: false).
@@ -4536,7 +4540,9 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       _localScreenPreviewRenderer = null;
     }
 
-    _screenCaptureStream?.getTracks().forEach((t) => t.stop());
+    for (final t in _screenCaptureStream?.getTracks() ?? []) {
+      try { await t.stop(); } catch (_) {}
+    }
     await _screenCaptureStream?.dispose();
     _screenCaptureStream = null;
     _earlyScreenIce.clear();

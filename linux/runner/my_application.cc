@@ -81,6 +81,15 @@ static void my_application_activate(GApplication* application) {
   }
 
   g_autoptr(FlDartProject) project = fl_dart_project_new();
+
+  // Linux runs SKIA, not Impeller, for the same reason Windows does (see
+  // windows/runner/main.cpp and tmp4.md section 18): Impeller became the
+  // desktop default in Flutter 3.47 and it is GLES, not Vulkan, so its render
+  // targets cost several hundred MB that scale with window area.
+  //
+  // TEMPORARY, and to be re-tested on every Flutter upgrade.
+  fl_dart_project_set_enable_impeller(project, FALSE);
+
   fl_dart_project_set_dart_entrypoint_arguments(
       project, self->dart_entrypoint_arguments);
 

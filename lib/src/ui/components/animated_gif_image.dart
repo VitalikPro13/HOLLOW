@@ -132,12 +132,17 @@ class _AnimatedGifImageState extends State<AnimatedGifImage> {
   /// route to stop animating. A Ticker got that for free; a Timer has to ask.
   bool _tickerModeEnabled = true;
 
+  /// devicePixelRatio the frames were decoded at, so an interface-zoom change
+  /// re-decodes instead of stretching a now-too-small texture.
+  double _decodedDpr = 0;
+  bool _decodeStarted = false;
+
   @override
   void initState() {
     super.initState();
-    _decode();
-    // Reduce-motion treats GIF playback as motion: show the static first
-    // frame. React live when the OS / in-app flag flips.
+    // The decode target comes from MediaQuery.devicePixelRatio, which cannot
+    // be read in initState, so the first decode runs from
+    // didChangeDependencies instead.
     ReduceMotionController.instance.effective.addListener(_syncPlayback);
   }
 
@@ -154,6 +159,13 @@ class _AnimatedGifImageState extends State<AnimatedGifImage> {
     if (enabled != _tickerModeEnabled) {
       _tickerModeEnabled = enabled;
       _syncPlayback();
+    }
+    // UiScale folds the interface zoom INTO devicePixelRatio, so this single
+    // number is the whole logical-to-physical conversion for the decode.
+    final dpr = MediaQuery.of(context).devicePixelRatio;
+    if (!_decodeStarted || (dpr - _decodedDpr).abs() > 0.01) {
+      _decodedDpr = dpr;
+      _decode();
     }
   }
 
@@ -207,9 +219,28 @@ class _AnimatedGifImageState extends State<AnimatedGifImage> {
     }
   }
 
+  /// Physical-pixel decode target for one axis, or null when this widget is
+  /// laid out flexibly on that axis and the size is not knowable here.
+  int? _targetPx(double? logical) {
+    if (logical == null || !logical.isFinite || logical <= 0) return null;
+    return (logical * (_decodedDpr > 0 ? _decodedDpr : 1.0)).ceil();
+  }
+
   Future<void> _decode() async {
+    _decodeStarted = true;
     try {
-      final codec = await ui.instantiateImageCodec(widget.bytes);
+      // Decode at the size actually painted, not the size the file happens to
+      // be. An animated image holds EVERY frame as a live GPU texture, so a
+      // 184px source in a 32px slot costs ~33x the texture memory it needs,
+      // multiplied by the frame count. allowUpscaling: false caps the target
+      // at the intrinsic size, so a source SMALLER than its slot is never
+      // blown up into a bigger texture than the file itself.
+      final codec = await ui.instantiateImageCodec(
+        widget.bytes,
+        targetWidth: _targetPx(widget.width),
+        targetHeight: _targetPx(widget.height),
+        allowUpscaling: false,
+      );
       final frameCount = codec.frameCount;
       final frames = <_GifFrame>[];
 

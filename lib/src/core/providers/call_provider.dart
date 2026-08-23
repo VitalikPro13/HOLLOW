@@ -1299,7 +1299,13 @@ class CallNotifier extends Notifier<CallState> {
       await _dmScreenPreviewRenderer!.dispose();
       _dmScreenPreviewRenderer = null;
     }
-    _dmScreenStream?.getTracks().forEach((t) => t.stop());
+    // track.stop() is async (it calls native trackDispose), so forEach would
+    // fire all of them and return before any had finished, letting the stream
+    // dispose out from under its own tracks. Unawaited WebRTC teardown is the
+    // ~200 MB-per-session leak.
+    for (final t in _dmScreenStream?.getTracks() ?? []) {
+      try { await t.stop(); } catch (_) {}
+    }
     await _dmScreenStream?.dispose();
     _dmScreenStream = null;
   }
