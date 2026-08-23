@@ -201,5 +201,5 @@ All UI uses custom Hollow widgets, no Material defaults (`src/ui/components/`): 
 - Ask before making architectural decisions not covered in HOLLOW_PLAN.md.
 - **HOLLOW_PLAN.md is the authoritative source** for phase details, feature checklists, completion status; don't duplicate it here or in memory files.
 - **HARD budget: 40,000 chars.** Entries = 1–3 lines: rule + memory pointer; war stories go in memory files.
-- **VPS SSH:** `ssh ubuntu@141.227.186.209` (key-only, free for config checks/logs/deploys); never store credentials.
+- **SSH hosts (relay VPS, Mac, VM):** in `BUILD_GUIDE.md` (gitignored); key-only, free for checks/logs/deploys.
 - **Local dev:** `cargo check/test/clippy`, codegen, `flutter analyze` run freely; Vitalik runs `flutter run -d windows` himself.

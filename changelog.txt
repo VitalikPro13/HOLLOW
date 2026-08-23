@@ -1,3 +1,54 @@
+v0.10.1 - Right-Click Menus, Chat Scrollbar, Unread Line, Avatar Frames & Performance
+
+RIGHT-CLICK MENUS (issue #61)
+
+- Right-click works across the desktop app now: messages, channels, categories, the empty space in the channel sidebar, people, server icons, folders and Home. Messages used to jump straight to Message Proof, and nearly everything else lived in Server Settings
+- The message menu carries reactions, reply, copy, download, pin, edit and delete, with Message Proof as one row among them, on all seven chat surfaces
+- Right-clicking a person opens the same menu wherever they appear: the member list, a name in chat, a voice participant, DM tiles, the friends bar and the home dashboard. Left click still opens the profile card, so Profile is the menu's first row rather than a replacement for it
+- Moderation rows are hidden when you cannot use them instead of shown greyed out. A menu should not offer an action that is going to be refused
+- Right-clicking a voice participant keeps that person's volume slider and adds everything else around it
+- Every menu has a keyboard route, so none of them are mouse-only
+- Channel menus cover rename, visibility, who can post, temporary access and delete, and "Create channel here" now places the channel inside the category you opened it from
+- Changing someone's role on mobile asks for confirmation, matching desktop
+
+CHAT, SCROLLBAR & PANELS (issue #54)
+
+- The chat feed has a scrollbar. Draggable thumb, and a jump to the top or the bottom from either end
+- A line marks where you left off. It stays put while you read instead of sliding away as messages are marked seen, it never appears above your own message, and the rail marks its position so you can jump straight to it even when it is far off screen
+- Marking a conversation read from outside it no longer moves that line. Dismissing messages is not the same as going to read them
+- Scrollbars everywhere else moved into a reserved gutter instead of painting over the rows they belong to
+- Side panels resize by dragging their seam, with double-click to reset and arrow keys to nudge, and "Side panel size" in Accessibility zooms their contents. Widths, zoom, folded sections and the profile card style all survive a restart
+- Member list sections fold, keeping their divider and their full count
+- DM search. Ctrl+K in a DM had been a silent no-op, and the search itself was built and never connected to anything, so DMs now carry the same search bar channels have
+- Profile cards follow the row they belong to when the window changes size, and Escape closes them
+- Fixed four dark notches at the corners of the chat, where the resizable panels left a 6px seam that painted nothing next to the header and composer bars
+- Fixed the chat scrollbar stopping 22px above the bottom of its own track while pinned to the newest message, so it advertised room that was not there
+- Fixed sticker packs saying "Downloading..." forever instead of showing the real transfer state
+- Fixed the guest banner showing the wallpaper through it
+
+AVATARS & PROFILES
+
+- Avatar frames: decoration drawn over your avatar, Steam style, so hats, ears and wings all work. They cost the layout nothing, and they are off on voice and call surfaces, where a frame sits exactly where the speaking ring goes
+- Animated avatars and banners no longer travel with your profile to everyone who syncs with you. The still image still does, so everybody sees a face, and the animation is fetched only when something actually shows it. Before this, every reconnect re-sent megabytes nobody had asked to see. Animated avatars you already have move over on their own at the next launch
+- Fixed animated APNG avatars arriving frozen. Steam serves animated frames as APNG, and Hollow was deciding whether an image moves by looking at its filename instead of the file, so an APNG went down the still path and was flattened without any complaint. The same bug was flattening animated WebP images sent as files
+- Avatars are stored at a larger size, because the profile card paints them big enough that the old one was being enlarged on the surface that shows an avatar largest
+- Better quality per byte on avatars, with noticeably cleaner edges on line art at 15%-30% fewer bytes
+- Fixed saving your profile appearing to wipe your banner. Nothing was ever lost, the preview just sat on its placeholder while the image decoded again
+
+PROFILES ON THIS DEVICE (issue #47)
+
+- Erasing the active profile used to strand you. The restart drops you on the welcome screen, which knew nothing about profiles, so the only way forward was a new identity inside the folder you had just emptied. The welcome screen now names the profile you are setting up and lists the others you can switch to
+- Erasing a password-protected profile asked for nothing at all, which meant anyone at an unlocked Hollow could wipe it without knowing its password. It asks now, and a wrong password is refused in the field instead of closing the dialog behind a message
+- A restored backup lands in the profile you are standing in. That is intended, so the welcome screen names the destination folder before you choose anything
+
+PERFORMANCE
+
+- Idle CPU went from 10% to roughly 1%-2% (tested on Intel i7-13620H [10c16t]). The cause was a bug in tickers (5%) and a decorative progress bar (2.5%), running an animation that was restarted before it could ever finish and therefore asked for a new frame at every screen refresh, forever. On a 240Hz monitor that is 240 frames a second spent on an app doing nothing. Other animations with their tickers were fixed too.
+- Fixed all of that burn continuing at full speed while the window sat behind another application
+- Windows and Linux go back to the renderer they used before v0.10 (Skia). The one v0.10 shipped (Impeller) sizes its video memory by window area rather than by what the app draws, therefore consuming more RAM/VRAM (and simply because they don't have direct Vulkan rendering yet). macOS stays on the new renderer (direct Metal rendering), iOS and Android are unaffected
+- Preparing an avatar frame went from 12.7 seconds to 188 milliseconds. The slowest encoder setting turned out to be 74x to 87x slower for 2%-14% percent fewer bytes, and it scored slightly worse on quality while doing it
+- Fixed a still image being encoded as a one-frame animation, which made it take twice as long to produce exactly the same file
+
 v0.10 - Screen Share Forwarding, Mobile Audio Devices, Interface Sounds & Flutter 3.47
 
 NOTE: This release raises the minimum operating system on two platforms, which the Flutter 3.47 upgrade requires: macOS 12 (was 10.15) and iOS 15 (was 13). Windows, Linux and Android are unchanged. Everything else stays compatible with 0.9.4, screen shares included.

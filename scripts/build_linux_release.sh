@@ -50,6 +50,37 @@ if [ ! -f "$ROOT_DIR/build/linux/x64/release/bundle/screen_audio_capturer" ]; th
   exit 1
 fi
 
+# --- 1c. Split debug symbols out of the Rust library ---------------------
+# `[profile.release] debug = "line-tables-only"` (rust/hollow_core/Cargo.toml)
+# is free on Windows: symbols go to a SEPARATE .pdb that hollow.iss and
+# build_release.ps1 already exclude. On ELF there is no separate file, so the
+# DWARF lands INSIDE libhollow_core.so — it went 67 MB -> 310 MB in 0.10.1,
+# taking the tarball from 74 MB to 118 MB. Keep the symbols (profiling them is
+# WHY that profile line exists) but ship them beside the bundle, not in it.
+# The flatpak needs no such step: flatpak-builder already splits debug info
+# into the com.anonlisten.Hollow.Debug extension.
+echo "==> 1c. Split debug symbols"
+SO="$ROOT_DIR/build/linux/x64/release/bundle/lib/libhollow_core.so"
+DBG_DIR="$ROOT_DIR/build/linux/x64/release/debug-symbols"
+DBG="$DBG_DIR/libhollow_core-$VERSION.so.debug"
+if readelf -S "$SO" | grep -q debug_info; then
+  mkdir -p "$DBG_DIR"
+  # Prove the strip touches no code: .text must be byte-identical afterwards.
+  objcopy -O binary --only-section=.text "$SO" /tmp/hollow_text_pre.bin
+  objcopy --only-keep-debug "$SO" "$DBG"
+  strip --strip-debug "$SO"
+  objcopy --add-gnu-debuglink="$DBG" "$SO"
+  objcopy -O binary --only-section=.text "$SO" /tmp/hollow_text_post.bin
+  if ! cmp -s /tmp/hollow_text_pre.bin /tmp/hollow_text_post.bin; then
+    echo "ERROR: stripping changed .text — refusing to ship this bundle"
+    exit 1
+  fi
+  rm -f /tmp/hollow_text_pre.bin /tmp/hollow_text_post.bin
+  echo "    -> stripped: $(du -h "$SO" | cut -f1)  symbols: $DBG"
+else
+  echo "    (no debug_info present, nothing to split)"
+fi
+
 # --- 2. Tarball ---------------------------------------------------------
 echo "==> 2. Tarball"
 REL="$ROOT_DIR/build/linux/x64/release"

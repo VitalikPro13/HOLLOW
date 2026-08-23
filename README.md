@@ -12,8 +12,8 @@
   <img src="https://img.shields.io/badge/license-AGPL--3.0-blue" alt="License">
   <img src="https://img.shields.io/badge/platform-Windows%20·%20macOS%20·%20Linux%20·%20Android%20·%20iOS-0078D4" alt="Platform">
   <img src="https://img.shields.io/badge/encryption-end--to--end-blueviolet" alt="Encryption">
-  <a href="https://codecov.io/gh/VitalikPro13/HOLLOW" > 
-  <img src="https://codecov.io/gh/VitalikPro13/HOLLOW/graph/badge.svg?token=F0TBC256BF" alt="Rust Coverage"></a>
+  <a href="https://codecov.io/gh/VitalikPro13/HOLLOW">
+  <img src="https://codecov.io/gh/VitalikPro13/HOLLOW/graph/badge.svg" alt="Rust Coverage"></a>
   <img src="https://img.shields.io/badge/status-beta-00BFA6" alt="Status">
 </p>
 
@@ -81,14 +81,14 @@ Your identity is a cryptographic keypair. Zero registrations. One recovery phras
 
 | Platform | Links |
 |----------|------|
-| Windows (10+) | [.exe](https://anonlisten.com/hollow/releases/hollow-0.10.0-win64-setup.exe) / [.zip](https://anonlisten.com/hollow/releases/hollow-0.10.0-win64.zip) |
-| macOS (12+) | [.dmg](https://anonlisten.com/hollow/releases/hollow-0.10.0.dmg) |
-| Linux | [Flatpak](https://anonlisten.com/hollow/releases/hollow-0.10.0-linux-x86_64.flatpak) / [.tar.gz](https://anonlisten.com/hollow/releases/hollow-0.10.0-linux.tar.gz) |
-| Android (7+) | [.apk](https://anonlisten.com/hollow/releases/hollow-0.10.0-android.apk) |
+| Windows (10+) | [.exe](https://anonlisten.com/hollow/releases/hollow-0.10.1-win64-setup.exe) / [.zip](https://anonlisten.com/hollow/releases/hollow-0.10.1-win64.zip) |
+| macOS (12+) | [.dmg](https://anonlisten.com/hollow/releases/hollow-0.10.1.dmg) |
+| Linux | [Flatpak](https://anonlisten.com/hollow/releases/hollow-0.10.1-linux-x86_64.flatpak) / [.tar.gz](https://anonlisten.com/hollow/releases/hollow-0.10.1-linux.tar.gz) |
+| Android (7+) | [.apk](https://anonlisten.com/hollow/releases/hollow-0.10.1-android.apk) |
 | iOS (16+) | [TestFlight](https://testflight.apple.com/join/5YG2S5e8) |
 | Web | Not planned |
 
-Current Progress: Tons of changes, all thanks to awesome contributors from the Issues page! Check out the full [changelog.](https://github.com/VitalikPro13/HOLLOW/blob/main/changelog.txt)
+Current Progress: I finally did proper optimization and it's amazing how bad it can be... reminds me when game devs don't do it. Basically the same, but getting my CPU usage down from 10% to 1%-2% is a good thing, that's for sure. Other optimizations are included with the new version too plus cool avatar frames.
 
 ## Tech Stack
 

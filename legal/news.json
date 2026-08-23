@@ -1,5 +1,11 @@
 [
   {
+    "id": "2026-08-23-v0101",
+    "date": "August 23, 2026",
+    "title": "v0.10.1 - Right-Click Menus, Chat Scrollbar, Unread Line, Avatar Frames & Performance",
+    "body": "I'm either one of the smartest or the dumbest engineers because only I can come up with animations to 'make the app more alive' and make it consume 10% of the entire 10-core CPU on idle... well, the main bug with how tickers/frames work were consuming 5% of that, and another 2.5% was a stupid 7s progress bar animation on the relay stats card. I've also noticed that Hollow suddenly started using literally 900 MB of RAM out of nowhere! Turns out, the Impeller rendering that Flutter team made a new default on v3.47 doesn't have the direct Vulkan rendering for Windows/Linux yet, as I was talking about it previously, but I didn't expect it to turn out this badly! Reverted back to Skia, the RAM consumption shold be around 250 MB now, which is still much better than Electron apps, in my opinion.\n\nAlso, we've added avatar frames! Full support of aPNG (animated) format too! You can literally download some Steam avatar frame from their points shop as the file and apply in Hollow and it would work perfectly. I tested one with spinning cats, it looked cool. Overall, lessons learned, performance is now better and it's time to never repeat it again! Better learn on mistakes than never admitting them. Enjoy!"
+  },
+  {
     "id": "2026-08-19-v0100",
     "date": "August 19, 2026",
     "title": "v0.10 - Screen Share Forwarding, Mobile Audio Devices, Interface Sounds & Flutter 3.47",
