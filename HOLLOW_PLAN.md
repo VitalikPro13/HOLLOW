@@ -1645,6 +1645,18 @@ DevTools profiling (Apr 6) confirmed: CPU usage in background is caused entirely
 - [x] `chat_pane.dart` — `TypingDots` uses `SharedTickers.typingDots` (1.2s). StatefulWidget → StatelessWidget
 - [x] `chat_pane.dart` + `channel_chat_pane.dart` — call overlay shimmer already uses SelectionShimmer (now shared). SpinningRefreshIcon uses RotationTransition (GPU-composited, negligible cost)
 
+**CORRECTION (2026-08-23):** this fixed the TRAY/minimized case only. Foreground
+idle was never measured and was still **69% of one core** — because the "single
+shared `Ticker`" celebrated above IS a standing request for a frame at every
+vsync, and three more Tickers plus a decorative 7s progress bar (an
+`AnimationController` restarted by a 7s poll, so it never finished and never
+stopped) held the pipeline at the display's refresh rate. On a 240Hz monitor
+that is 240fps on an idle app. `onWindowBlur` also never called `pause()`, so
+the burn ran the whole time the window sat behind another app. Now: two `Timer`
+lanes (30fps/1fps) gated on listeners, no raw `Ticker`s left in `lib/`, idle
+~2.5%. See memory `project_idle_cpu_frame_scheduling` and
+`feedback_ticker_is_a_frame_request`.
+
 #### TODO — Features
 
 - [X] Fix the camera turning on when calling with video call

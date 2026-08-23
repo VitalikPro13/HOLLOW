@@ -364,7 +364,6 @@ class _MemberRow extends ConsumerWidget {
                             ? hollow.warning
                             : isOnline ? hollow.success : hollow.textSecondary,
                         size: 10,
-                        pulse: isSyncing || isOnline,
                         filled: isSyncing || isOnline,
                         semanticLabel: isSyncing
                             ? 'Syncing'

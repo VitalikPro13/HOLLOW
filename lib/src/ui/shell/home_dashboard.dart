@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -338,7 +339,6 @@ class _ProfileColumn extends ConsumerWidget {
                   ? hollow.textSecondary
                   : (isOnline ? hollow.success : hollow.textSecondary),
               size: 8,
-              pulse: amInvisible ? false : isOnline,
               filled: !amInvisible && isOnline,
             ),
             const SizedBox(width: HollowSpacing.xs),
@@ -808,7 +808,6 @@ class _RecentConversationsColumn extends ConsumerWidget {
                                       ? hollow.success
                                       : hollow.textSecondary,
                                   size: 8,
-                                  pulse: conv.isOnline,
                                   filled: conv.isOnline,
                                   semanticLabel:
                                       conv.isOnline ? 'Online' : 'Offline',
@@ -1064,7 +1063,6 @@ class _NetworkColumn extends ConsumerWidget {
                         ? hollow.warning
                         : hollow.textSecondary),
                 size: 8,
-                pulse: overall.isOnline,
                 // Adjacent overall.label text names the state; ring = not online.
                 filled: overall.isOnline,
               ),
@@ -1568,43 +1566,82 @@ class _RelayStatsCard extends ConsumerStatefulWidget {
   ConsumerState<_RelayStatsCard> createState() => _RelayStatsCardState();
 }
 
-class _RelayStatsCardState extends ConsumerState<_RelayStatsCard>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _controller;
+class _RelayStatsCardState extends ConsumerState<_RelayStatsCard> {
+  /// Progress of the decorative poll-cycle sweep, 0..1.
+  ///
+  /// Deliberately a [Timer] and a [ValueNotifier] rather than an
+  /// [AnimationController]. The controller's duration was 7 seconds and
+  /// `didUpdateWidget` restarted it on every stats fetch — which arrives
+  /// every 7 seconds. It therefore never finished before being restarted, so
+  /// its Ticker never stopped, so this card asked the engine for a frame at
+  /// every vsync for as long as Home was open.
+  ///
+  /// Measured before the change: an idle Home ran at **fps=240** on a 240Hz
+  /// display, 1.8ms of raster each, or 43% of a CPU core — to sweep a bar
+  /// three pixels tall. Nothing about the animation was wrong; the cost was
+  /// entirely in asking for 240 frames a second to draw it.
+  ///
+  /// A ramp over seven seconds does not need vsync, and it turns out it does
+  /// not want to be a ramp at all: it advances ONE STEP PER SECOND, seven
+  /// steps to fill. That reads as what it actually is — a countdown to the
+  /// next poll — where a smooth crawl just read as a loading bar. Seven
+  /// frames per cycle instead of 1,680, and it is the ONE thing on an
+  /// otherwise still Home screen, so those seven frames are the whole cost.
+  final ValueNotifier<double> _sweep = ValueNotifier<double>(0);
+  final Stopwatch _since = Stopwatch();
+  Timer? _timer;
   int _lastFetchCount = 0;
+
+  /// One step per second, seven to fill — matched to the 7s stats poll in
+  /// `relay_stats_provider.dart`. Keep them in step if either moves.
+  static const _sweepStep = Duration(seconds: 1);
+  static const _sweepSteps = 7;
 
   @override
   void initState() {
     super.initState();
-    _controller = AnimationController(
-      vsync: this,
-      duration: const Duration(seconds: 7),
-    );
-    // Decorative poll-cycle sweep — hold it static under reduce-motion.
+    _restartSweep();
+  }
+
+  void _restartSweep() {
+    _timer?.cancel();
+    // Reduce motion holds it full rather than sweeping.
     if (ReduceMotionController.instance.isReduced) {
-      _controller.value = 1.0;
-    } else {
-      _controller.forward();
+      _sweep.value = 1.0;
+      return;
     }
+    _sweep.value = 0;
+    _since
+      ..reset()
+      ..start();
+    _timer = Timer.periodic(_sweepStep, (t) {
+      final step = (_since.elapsedMilliseconds / _sweepStep.inMilliseconds)
+          .floor()
+          .clamp(0, _sweepSteps);
+      _sweep.value = step / _sweepSteps;
+      // Full: stop asking for frames until the next fetch restarts it.
+      if (step >= _sweepSteps) {
+        t.cancel();
+        _timer = null;
+        _since.stop();
+      }
+    });
   }
 
   @override
   void didUpdateWidget(_RelayStatsCard oldWidget) {
     super.didUpdateWidget(oldWidget);
-    // Reset animation when a new fetch completes.
+    // Reset the sweep when a new fetch completes.
     if (widget.stats.fetchCount != _lastFetchCount) {
       _lastFetchCount = widget.stats.fetchCount;
-      if (ReduceMotionController.instance.isReduced) {
-        _controller.value = 1.0;
-      } else {
-        _controller.forward(from: 0.0);
-      }
+      _restartSweep();
     }
   }
 
   @override
   void dispose() {
-    _controller.dispose();
+    _timer?.cancel();
+    _sweep.dispose();
     super.dispose();
   }
 
@@ -1681,20 +1718,22 @@ class _RelayStatsCardState extends ConsumerState<_RelayStatsCard>
           ],
           const SizedBox(height: HollowSpacing.sm),
           // Poll cycle bar — synced to 5s fetch interval
-          AnimatedBuilder(
-            animation: _controller,
-            builder: (context, _) => SizedBox(
+          RepaintBoundary(
+            child: ValueListenableBuilder<double>(
+            valueListenable: _sweep,
+            builder: (context, sweep, _) => SizedBox(
               height: 3,
               child: ClipRRect(
                 borderRadius: BorderRadius.circular(2),
                 child: LinearProgressIndicator(
-                  value: _controller.value,
+                  value: sweep,
                   backgroundColor: hollow.border,
                   valueColor: AlwaysStoppedAnimation<Color>(
                     hollow.accent.withValues(alpha: 0.4),
                   ),
                 ),
               ),
+            ),
             ),
           ),
         ],

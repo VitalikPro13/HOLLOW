@@ -492,7 +492,6 @@ class _MobileStorageRouteState extends ConsumerState<MobileStorageRoute> {
         Row(children: [
           StatusDot(
             color: color, size: 8,
-            pulse: activeUploads > 0 || activeDownloads > 0 || hasFailed,
           ),
           const SizedBox(width: HollowSpacing.sm),
           Text(statusText, style: HollowTypography.body.copyWith(

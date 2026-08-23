@@ -306,11 +306,14 @@ File: `lib/src/ui/animations/ambient_background.dart`
 
 **Background check:** Watches `backgroundProvider.hasBackground`. If a custom background image is set, skips blobs entirely and returns `child` directly.
 
-**Animation:** Uses `SharedTickers.instance.ambient` (`ValueNotifier<double>`, ~15fps, 45-second cycle). The `ValueListenableBuilder` computes figure-8 positions:
+**Animation:** Uses `SharedTickers.instance.ambient` (`GatedNotifier`, **1fps**, 45-second cycle — one step per second moves a blob less than the blur on its own edge). The `ValueListenableBuilder` computes figure-8 positions:
 - Blob 1: `x1 = 0.5 + 0.25 * sin(t)`, `y1 = 0.5 + 0.15 * sin(2t)`.
 - Blob 2: `x2 = 0.5 - 0.2 * sin(t + 0.7pi)`, `y2 = 0.5 - 0.2 * sin(2t + pi)`.
 
-**Rendering:** `RepaintBoundary` wrapping Stack: child (passed as `ValueListenableBuilder.child` for caching) + `Positioned.fill` with `IgnorePointer` + `CustomPaint`.
+**Rendering:** `Stack` of TWO separate layers: `RepaintBoundary(child)` and a
+`Positioned.fill` overlay that has its OWN `RepaintBoundary` around the
+`ValueListenableBuilder` + `CustomPaint`. They must stay separate: one boundary
+around both means a blob repaint re-rasters the whole pane underneath it.
 
 ### _AmbientPainter
 
@@ -418,7 +421,22 @@ File: `lib/src/ui/animations/selection_shimmer.dart`
 
 File: `lib/src/core/shared_tickers.dart`
 
-Singleton (`SharedTickers.instance`) that centralizes all repeating animation tickers into a single `Ticker` + one ambient `Timer`. Implements `WidgetsBindingObserver` for lifecycle management.
+Singleton (`SharedTickers.instance`) that centralizes all repeating decorative
+animation into **two `Timer` lanes** — 30fps (`shimmer`, `typingDots`) and 1fps
+(`ambient`). Implements `WidgetsBindingObserver` for lifecycle management.
+
+**Deliberately timers, NOT `Ticker`s (2026-08-23).** A running `Ticker` requests
+a frame at every vsync whether or not the picture changed; on a 240Hz display
+that alone held an idle app at 69% of a CPU core. A timer publishes at a rate we
+choose rather than one the monitor chooses. Never reintroduce a `Ticker` here —
+see memory `feedback_ticker_is_a_frame_request`.
+
+**Both lanes are gated on listeners** via `GatedNotifier`, a `ValueNotifier`
+that reports unwatched->watched transitions so a clock stops when nothing is
+listening. A screen pays only for the animations actually on it (Home has no
+shimmer, so the 30fps lane never runs there).
+
+`pulse` is GONE — `StatusDot` is always static.
 
 **Shared ValueNotifiers (0.0 to 1.0 repeating):**
 

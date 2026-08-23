@@ -16,6 +16,7 @@ import 'package:hollow/src/rust/frb_generated.dart';
 import 'package:hollow/src/core/perf_sentinel.dart';
 import 'package:hollow/src/core/services/deep_link_service.dart';
 import 'package:hollow/src/core/services/tray_service.dart';
+import 'package:hollow/src/core/frame_schedule_probe.dart';
 import 'package:hollow/src/core/shared_tickers.dart';
 import 'package:hollow/src/core/reduce_motion.dart';
 import 'package:hollow/src/ui/app.dart';
@@ -157,7 +158,7 @@ Future<void> _initCrashLogging() async {
 }
 
 Future<void> main(List<String> args) async {
-  WidgetsFlutterBinding.ensureInitialized();
+  final binding = FrameScheduleProbe.ensureInitialized();
 
   // Phones and tablets are portrait-only for now: the UI is the mobile shell
   // on all Android/iOS devices, and landscape/tablet layouts are unhandled
@@ -225,6 +226,9 @@ Future<void> main(List<String> args) async {
   // Performance sentinels: frame-stall logger + slow platform-channel
   // watchdog. Quiet by default — anomalies only, into hollow_debug.log.
   PerfSentinel.init();
+  // One burst, 20s in, naming whatever keeps asking for frames on an idle
+  // window. Disarms itself after reporting.
+  binding.startBurst(sink: PerfSentinel.emit);
 
   // Initialize Firebase early (required before FCM token generation).
   if (Platform.isAndroid || Platform.isIOS) {
@@ -477,6 +481,12 @@ class _HollowWindowListener extends WindowListener {
     // Window lost focus (alt-tabbed / clicked another app). Drives native-toast
     // gating so messages in the open conversation still notify while we're away.
     _container.read(windowFocusedProvider.notifier).state = false;
+    // ...and stop painting decoration nobody is looking at. Measured: an idle
+    // but VISIBLE window ran the render pipeline at vsync forever, 69% of one
+    // core, because only minimize and hide-to-tray ever called pause(). A
+    // window sitting behind another app is the common case, so this was most
+    // of Hollow's idle cost. onWindowFocus resumes.
+    SharedTickers.instance.pause();
   }
 
   @override

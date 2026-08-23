@@ -24,31 +24,36 @@ class SelectionShimmer extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return ValueListenableBuilder<double>(
-      valueListenable: SharedTickers.instance.shimmer,
-      builder: (context, value, child) {
-        final pos = value * 4.0 - 1.5;
-        return Stack(
-          children: [
-            child!,
-            Positioned.fill(
-              child: IgnorePointer(
-                child: ClipRRect(
-                  borderRadius: borderRadius ?? BorderRadius.zero,
-                  child: CustomPaint(
-                    painter: _ShimmerPainter(
-                      position: pos,
-                      highlightColor: highlightColor,
-                      vertical: vertical,
-                    ),
-                  ),
+    // The sweep gets its own layer, so a 60fps repaint costs the sweep and
+    // not the row under it. Passing `child` through the builder spares the
+    // rebuild but NOT the raster: without a boundary between them, the
+    // painter's markNeedsPaint walks up to whatever layer the surrounding
+    // list or panel happens to own, and re-rasters all of it, every frame.
+    return Stack(
+      children: [
+        child,
+        Positioned.fill(
+          child: IgnorePointer(
+            child: RepaintBoundary(
+              child: ClipRRect(
+                borderRadius: borderRadius ?? BorderRadius.zero,
+                child: ValueListenableBuilder<double>(
+                  valueListenable: SharedTickers.instance.shimmer,
+                  builder: (context, value, _) {
+                    return CustomPaint(
+                      painter: _ShimmerPainter(
+                        position: value * 4.0 - 1.5,
+                        highlightColor: highlightColor,
+                        vertical: vertical,
+                      ),
+                    );
+                  },
                 ),
               ),
             ),
-          ],
-        );
-      },
-      child: child,
+          ),
+        ),
+      ],
     );
   }
 }

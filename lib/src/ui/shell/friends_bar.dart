@@ -687,7 +687,6 @@ class _FriendsListTab extends ConsumerWidget {
                               ? hollow.success
                               : hollow.textSecondary,
                           size: 7,
-                          pulse: isOnline,
                           filled: isOnline,
                           semanticLabel: isOnline ? 'Online' : 'Offline',
                         ),
@@ -1440,7 +1439,6 @@ class _FriendChip extends StatelessWidget {
                       child: StatusDot(
                         color: isOnline ? hollow.success : hollow.textSecondary,
                         size: 7,
-                        pulse: isOnline,
                         filled: isOnline,
                         semanticLabel: isOnline ? 'Online' : 'Offline',
                       ),

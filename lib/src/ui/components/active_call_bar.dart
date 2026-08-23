@@ -155,7 +155,7 @@ class _ActiveCallBarState extends ConsumerState<ActiveCallBar> {
                 child: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    StatusDot(color: hollow.success, size: 8, pulse: true),
+                    StatusDot(color: hollow.success, size: 8),
                     const SizedBox(width: HollowSpacing.sm),
                     if (call.status == CallStatus.connecting)
                       Text(

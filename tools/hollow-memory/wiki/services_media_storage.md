@@ -439,7 +439,7 @@ final identityServiceProvider = Provider<IdentityService>((_) => IdentityService
 
 File: `lib/src/core/shared_tickers.dart`
 
-Singleton that provides centralized animation tickers shared across the entire app. Instead of each animated widget spawning its own `AnimationController` + `Ticker`, all decorative animations read from shared `ValueNotifier`s driven by a single `Ticker` (plus one low-framerate `Timer` for ambient).
+Singleton that provides centralized animation clocks shared across the entire app. Instead of each animated widget spawning its own `AnimationController` + `Ticker`, all decorative animations read from shared `ValueNotifier`s driven by two `Timer` lanes — 30fps and 1fps, never a `Ticker` (see memory `feedback_ticker_is_a_frame_request`) — and each lane stops when nothing listens (`GatedNotifier`). (Historically one `Ticker` plus one low-framerate `Timer` for ambient).
 
 Used by: `SelectionShimmer`, `StatusDot`, `TypingDots`, `AmbientBackground`, and various divider/glow effects throughout the shell and panels.
 

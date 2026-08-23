@@ -21,7 +21,19 @@ class PerfSentinel {
 
   static bool _initialized = false;
   static late final FrameStallAggregator _frames;
+  static late final FrameCensus _census;
   static late final SlowCallLog _slowCalls;
+
+  /// Emit a steady-state frame census line every [FrameCensus.intervalMs].
+  ///
+  /// The stall aggregator answers "did a frame take too long". This answers
+  /// the different and, for idle cost, more important question: "how many
+  /// frames are we producing at all, and is the time going to build or to
+  /// raster". An app doing nothing should be producing almost none.
+  static bool frameCensus = true;
+
+  /// Public so one-shot diagnostics can share the same log sink.
+  static void emit(String line) => _emit(line);
 
   static void _emit(String line) {
     // Fire-and-forget FFI: swallow rejections here or they hit the zone
@@ -36,15 +48,19 @@ class PerfSentinel {
     if (_initialized) return;
     _initialized = true;
     _frames = FrameStallAggregator(sink: _emit);
+    _census = FrameCensus(sink: _emit);
     _slowCalls = SlowCallLog(sink: _emit, thresholdMs: slowChannelMs);
 
     SchedulerBinding.instance.addTimingsCallback((List<FrameTiming> timings) {
       final now = _nowMs();
       for (final t in timings) {
+        final buildUs = t.buildDuration.inMicroseconds;
+        final rasterUs = t.rasterDuration.inMicroseconds;
         _frames.onFrame(
-          t.buildDuration.inMilliseconds + t.rasterDuration.inMilliseconds,
+          (buildUs + rasterUs) ~/ 1000,
           now,
         );
+        if (frameCensus) _census.onFrame(buildUs, rasterUs, now);
       }
     });
 
@@ -139,6 +155,54 @@ class FrameStallAggregator {
       }
       _lastFlushMs = nowMs;
     }
+  }
+}
+
+/// Steady-state frame census: one line per [intervalMs] carrying how many
+/// frames were produced and where their time went.
+///
+/// This exists because an idle Hollow was burning most of a core, and every
+/// theory about WHY was argued from source rather than from frame counts.
+/// Build against raster is the split that matters: build time is Dart
+/// rebuilding widgets, raster time is the engine turning the scene into
+/// pixels (on Windows, through ANGLE onto D3D11, which is CPU work).
+///
+/// Silent when no frames were produced, so a genuinely idle app stays quiet.
+/// Pure logic (injected clock + sink) so it is unit-testable.
+class FrameCensus {
+  FrameCensus({required this.sink, this.intervalMs = 10000});
+
+  final void Function(String line) sink;
+  final int intervalMs;
+
+  int _windowStartMs = 0;
+  int _frames = 0;
+  int _buildUs = 0;
+  int _rasterUs = 0;
+  int _worstRasterUs = 0;
+
+  void onFrame(int buildUs, int rasterUs, int nowMs) {
+    if (_windowStartMs == 0) _windowStartMs = nowMs;
+    _frames++;
+    _buildUs += buildUs;
+    _rasterUs += rasterUs;
+    if (rasterUs > _worstRasterUs) _worstRasterUs = rasterUs;
+
+    final elapsed = nowMs - _windowStartMs;
+    if (elapsed < intervalMs) return;
+
+    final fps = (_frames * 1000 / elapsed).toStringAsFixed(1);
+    final build = (_buildUs / _frames / 1000).toStringAsFixed(2);
+    final raster = (_rasterUs / _frames / 1000).toStringAsFixed(2);
+    final worst = (_worstRasterUs / 1000).toStringAsFixed(1);
+    sink('[SENTINEL] frames fps=$fps n=$_frames '
+        'build=${build}ms raster=${raster}ms worstRaster=${worst}ms');
+
+    _windowStartMs = nowMs;
+    _frames = 0;
+    _buildUs = 0;
+    _rasterUs = 0;
+    _worstRasterUs = 0;
   }
 }
 

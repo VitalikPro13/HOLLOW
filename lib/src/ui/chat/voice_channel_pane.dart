@@ -1478,7 +1478,7 @@ class _VoiceControlsPillState extends ConsumerState<_VoiceControlsPill> {
           mainAxisSize: MainAxisSize.min,
           children: [
             // Status dot
-            StatusDot(color: hollow.success, size: 8, pulse: true),
+            StatusDot(color: hollow.success, size: 8),
             const SizedBox(width: HollowSpacing.sm),
             // Duration
             Text(

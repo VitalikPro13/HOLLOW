@@ -338,7 +338,7 @@ pub fn convert_to_webp_with_quality(
 
     let rgba = img.to_rgba8();
     let (ew, eh) = (rgba.width(), rgba.height());
-    let bytes = encode_lossy_webp_via_animation(rgba.as_raw(), ew, eh, q_value)?;
+    let bytes = encode_lossy_webp_still(rgba.as_raw(), ew, eh, q_value)?;
     Ok((bytes, ew, eh))
 }
 
@@ -376,21 +376,25 @@ pub fn convert_to_webp_preview(data: &[u8], max_dim_px: u32) -> Result<(Vec<u8>,
 
     let rgba = resized.to_rgba8();
     let (ew, eh) = (rgba.width(), rgba.height());
-    let bytes = encode_lossy_webp_via_animation(rgba.as_raw(), ew, eh, 50.0)?;
+    let bytes = encode_lossy_webp_still(rgba.as_raw(), ew, eh, 50.0)?;
     Ok((bytes, ew, eh))
 }
 
-/// Encode a single RGBA frame as lossy WebP at the given quality (0-100)
-/// through the same libwebp animation encoder the animated paths use.
-/// Sharing that path means only one libwebp-sys variant ends up in the final
-/// binary (eliminates the macOS duplicate-symbol issue).
+/// Encode a single RGBA frame as lossy WebP at the given quality (0-100),
+/// straight through libwebp's still encoder.
 ///
 /// Uses the ART preset, because every caller here is user-uploaded artwork
-/// (avatars, banners, emotes, showcase covers) rather than photography.
-fn encode_lossy_webp_via_animation(rgba: &[u8], w: u32, h: u32, quality: f32) -> Result<Vec<u8>, String> {
-    let img = image::RgbaImage::from_raw(w, h, rgba.to_vec())
-        .ok_or_else(|| format!("Frame buffer is not {w}x{h} RGBA"))?;
-    webp_anim::encode_animation(&[(img, 1)], (w, h), &webp_anim::AnimParams::art(quality))
+/// (avatars, banners, emotes, showcase covers) rather than photography — the
+/// same preset the animated paths use, so a picture does not change
+/// appearance depending on whether it moves.
+///
+/// It used to go through `WebPAnimEncoder` with a one-frame animation, so that
+/// only one vendored libwebp ended up in the binary. Same libwebp-sys2 is used
+/// either way, so nothing is duplicated — and the animation encoder was
+/// costing 2x for a byte-identical result, because it encodes every frame
+/// several ways and picks the smallest even when there is exactly one frame.
+fn encode_lossy_webp_still(rgba: &[u8], w: u32, h: u32, quality: f32) -> Result<Vec<u8>, String> {
+    webp_anim::encode_still(rgba, w, h, &webp_anim::AnimParams::art(quality))
 }
 
 /// Decode an animated source into `(frame, display-duration-ms)` pairs.
@@ -1280,6 +1284,7 @@ mod tests {
         let err = validate_sticker_blob(&fake).expect_err("must fail");
         assert!(err.contains("512 KB"), "got: {err}");
     }
+
 }
 
 /// Convert a WebP file to another format (for "Save As").
@@ -1412,7 +1417,7 @@ pub fn process_still_avatar(data: &[u8], dim: u32) -> Result<Vec<u8>, String> {
 
     // Lossy, like the showcase encoders: lossless WebP size is
     // content-dependent, so photographic avatars randomly blew the cap.
-    let buf = encode_lossy_webp_via_animation(rgba.as_raw(), dim, dim, 80.0)?;
+    let buf = encode_lossy_webp_still(rgba.as_raw(), dim, dim, 80.0)?;
 
     if buf.len() > 100_000 {
         return Err("Avatar image too large after processing (>100KB)".into());
@@ -1450,7 +1455,7 @@ pub fn process_showcase_cover(data: &[u8]) -> Result<Vec<u8>, String> {
     // SILENTLY at authoring while flat cartoon art sailed through.
     let rgba = resized.to_rgba8();
     let (w, h) = (rgba.width(), rgba.height());
-    let buf = encode_lossy_webp_via_animation(rgba.as_raw(), w, h, 75.0)?;
+    let buf = encode_lossy_webp_still(rgba.as_raw(), w, h, 75.0)?;
     if buf.len() > 150_000 {
         return Err("Cover too large after processing (>150KB)".into());
     }
@@ -1479,7 +1484,7 @@ pub fn process_showcase_artwork(data: &[u8]) -> Result<Vec<u8>, String> {
     // content-dependent and busts the cap on noisy images.
     let rgba = resized.to_rgba8();
     let (w, h) = (rgba.width(), rgba.height());
-    let buf = encode_lossy_webp_via_animation(rgba.as_raw(), w, h, 75.0)?;
+    let buf = encode_lossy_webp_still(rgba.as_raw(), w, h, 75.0)?;
     if buf.len() > 400_000 {
         return Err("Artwork too large after processing (>400KB)".into());
     }
@@ -1545,7 +1550,7 @@ pub fn process_emote_image(data: &[u8]) -> Result<(Vec<u8>, bool), String> {
     };
     let rgba = resized.to_rgba8();
     let (ew, eh) = (rgba.width(), rgba.height());
-    let buf = encode_lossy_webp_via_animation(rgba.as_raw(), ew, eh, 90.0)?;
+    let buf = encode_lossy_webp_still(rgba.as_raw(), ew, eh, 90.0)?;
     if buf.len() > MAX_STILL {
         return Err("Emote too large after processing (>32KB)".into());
     }
@@ -1582,7 +1587,7 @@ pub fn process_banner_image(data: &[u8]) -> Result<Vec<u8>, String> {
 
     // Lossy for the same reason as avatars/covers: lossless size is
     // content-dependent, so photographic banners randomly failed to upload.
-    let buf = encode_lossy_webp_via_animation(rgba.as_raw(), dw, dh, 80.0)?;
+    let buf = encode_lossy_webp_still(rgba.as_raw(), dw, dh, 80.0)?;
 
     if buf.len() > 200_000 {
         return Err("Banner image too large after processing (>200KB)".into());
@@ -1653,7 +1658,7 @@ pub fn process_server_banner_image(data: &[u8]) -> Result<(Vec<u8>, bool), Strin
     let cropped = img.crop_imm(x, y, cw, ch);
     let resized = cropped.resize_exact(BANNER_W, BANNER_H, FilterType::Lanczos3);
     let rgba = resized.to_rgba8();
-    let buf = encode_lossy_webp_via_animation(rgba.as_raw(), BANNER_W, BANNER_H, 80.0)?;
+    let buf = encode_lossy_webp_still(rgba.as_raw(), BANNER_W, BANNER_H, 80.0)?;
     if buf.len() > MAX_STILL {
         return Err("Banner image too large after processing (>150KB)".into());
     }
@@ -1676,7 +1681,7 @@ pub fn process_server_banner_thumb(data: &[u8]) -> Result<Vec<u8>, String> {
     let cropped = img.crop_imm((w - cw) / 2, (h - ch) / 2, cw, ch);
     let resized = cropped.resize_exact(400, 133, FilterType::Lanczos3);
     let rgba = resized.to_rgba8();
-    let buf = encode_lossy_webp_via_animation(rgba.as_raw(), 400, 133, 75.0)?;
+    let buf = encode_lossy_webp_still(rgba.as_raw(), 400, 133, 75.0)?;
     if buf.len() > 40_000 {
         return Err("Banner thumb too large (>40KB)".into());
     }
@@ -1931,7 +1936,7 @@ fn process_profile_anim(
     // stays full size even when the animation had to step down to fit.
     let (sw, sh) = fit_dims(cw, ch, ladder[0].0);
     let still_frames = crop_resize_frames(&frames[..1], (cx, cy, cw, ch), sw, sh);
-    let still = encode_lossy_webp_via_animation(still_frames[0].0.as_raw(), sw, sh, 80.0)?;
+    let still = encode_lossy_webp_still(still_frames[0].0.as_raw(), sw, sh, 80.0)?;
     if still.len() > max_still_bytes {
         return Err(format!("{label} is too detailed to store as a still"));
     }
@@ -2006,7 +2011,7 @@ pub fn process_gif_for_send(data: &[u8]) -> Result<(Vec<u8>, u32, u32, bool), St
 /// TRANSPARENCY SURVIVES, and that is load-bearing — a cut-out matted onto
 /// black is a visible defect, not a nuance. libwebp carries alpha in its own
 /// plane at `alpha_quality: 100` by default, and
-/// [encode_lossy_webp_via_animation] keeps those defaults.
+/// [encode_lossy_webp_still] keeps those defaults.
 ///
 /// One trap when verifying that: every asset this module emits is a WebP
 /// ANIMATION container (`ANMF`), even a single-frame still — deliberate, so
@@ -2149,7 +2154,7 @@ fn process_asset_for_send(
         let bytes = if animated {
             encode_animation_frames(attempt, (nw, nh), quality)?
         } else {
-            encode_lossy_webp_via_animation(attempt[0].0.as_raw(), nw, nh, quality)?
+            encode_lossy_webp_still(attempt[0].0.as_raw(), nw, nh, quality)?
         };
         if bytes.len() <= max_bytes {
             return Ok((bytes, nw, nh, animated));
@@ -2304,7 +2309,7 @@ pub fn process_avatar_frame(data: &[u8]) -> Result<(Vec<u8>, bool), String> {
     if frame_centre_opacity(&resized) > FRAME_HOLE_MAX_OPAQUE {
         return Err(frame_hole_error());
     }
-    let buf = encode_lossy_webp_via_animation(resized.as_raw(), FRAME_DIM, FRAME_DIM, 80.0)?;
+    let buf = encode_lossy_webp_still(resized.as_raw(), FRAME_DIM, FRAME_DIM, 80.0)?;
     if buf.len() > MAX_FRAME_STILL_BYTES {
         return Err("Frame is too large after processing (over 64 KB)".into());
     }

@@ -2926,7 +2926,7 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
       child: Row(
         children: [
           // Left: timer + status
-          StatusDot(color: hollow.success, size: 8, pulse: true),
+          StatusDot(color: hollow.success, size: 8),
           const SizedBox(width: HollowSpacing.sm),
           if (call.status == CallStatus.connecting || call.startedAt == null)
             Text(
@@ -4488,7 +4488,7 @@ class _ScreenShareControlsOverlayState
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          StatusDot(color: hollow.success, size: 8, pulse: true),
+          StatusDot(color: hollow.success, size: 8),
           const SizedBox(width: HollowSpacing.sm),
           if (call.status == CallStatus.connecting)
             Text(
@@ -4807,7 +4807,6 @@ class _DmProfilePanel extends ConsumerWidget {
             child: StatusDot(
               color: isOnline ? hollow.success : hollow.textSecondary,
               size: 10,
-              pulse: isOnline,
               filled: isOnline,
               semanticLabel: isOnline ? 'Online' : 'Offline',
             ),

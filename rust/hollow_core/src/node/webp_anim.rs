@@ -35,7 +35,7 @@ use libwebp_sys as webp;
 ///
 /// Construct through the presets below rather than field-by-field — the
 /// presets are what the bench actually validated.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AnimParams {
     /// Lossless coding. `quality` then means EFFORT (0 fast .. 100 best),
     /// not fidelity.
@@ -77,16 +77,44 @@ impl Default for AnimParams {
 }
 
 impl AnimParams {
-    /// The house preset for user-facing animated ART: avatars, banners,
-    /// server icons, emotes, stickers, avatar frames.
+    /// The house preset for user-facing ART: avatars, banners, server icons,
+    /// emotes, stickers, avatar frames. Still or animated, both.
     ///
     /// libwebp's "drawing" tuning (low noise shaping, light and sharp
-    /// deblocking) plus sharp YUV and the slow method. Built for flat colour
-    /// with hard edges, which is what essentially all of this content is.
+    /// deblocking) plus sharp YUV. Built for flat colour with hard edges,
+    /// which is what essentially all of this content is.
+    ///
+    /// # Why `method` is 4 and not 6
+    ///
+    /// `quality` sets the target fidelity; `method` (0..6, libwebp default 4)
+    /// only sets how hard the encoder searches for the cheapest way to hit it,
+    /// by deepening rate-distortion optimisation until method 6 runs trellis
+    /// quantisation on every block. So the expected difference is BYTES, and a
+    /// deeper search spends fewer bits at the same target — which means it can
+    /// land marginally LOWER on fidelity, and measurably does.
+    ///
+    /// Measured in release on a real 28-frame Steam APNG (`tmp_cats.png`,
+    /// 224x224), method 6 against method 4 at the same quality:
+    ///
+    /// | | bytes | ms | PSNR dB | SSIM |
+    /// |---|---|---|---|---|
+    /// | animated 184x184, m6 | 430,728 | 22,753 | 39.461 | 0.99727 |
+    /// | animated 184x184, m4 | 439,208 | **260** | **39.608** | **0.99756** |
+    /// | still 184x184, m6 | 12,532 | 670 | 38.111 | 0.99574 |
+    /// | still 184x184, m4 | 14,528 | **9** | **38.263** | **0.99615** |
+    ///
+    /// 87x the time for 1.9% of the bytes on the animation, 74x for 13.7% on
+    /// the still — and worse on both metrics in both cases. Method 6 is not
+    /// cheaper on stills, it just buys more there; that gain is real but it is
+    /// 2 KB, and it is not worth two thirds of a second per image across the
+    /// fourteen call sites that encode one.
+    ///
+    /// Not a licence to reach for method 6 by hand. The one place it survives
+    /// is [`AnimParams::lossless`], an explicitly opt-in tier.
     pub fn art(quality: f32) -> Self {
         Self {
             quality,
-            method: 6,
+            method: 4,
             sns_strength: 25,
             filter_strength: 10,
             filter_sharpness: 6,
@@ -95,15 +123,32 @@ impl AnimParams {
         }
     }
 
-    /// Plain lossy animation for the file-send pipeline, where the content is
-    /// arbitrary and the user picked a quality tier. Keeps libwebp's general
-    /// tuning; still gets method 6 and 4 segments.
+    /// Plain lossy for the file-send pipeline, where the content is arbitrary
+    /// and the user picked a quality tier. Keeps libwebp's general tuning, and
+    /// `method` 4 for the reason spelled out on [`AnimParams::art`].
     pub fn plain(quality: f32) -> Self {
         Self {
             quality,
-            method: 6,
             ..Default::default()
         }
+    }
+
+    /// Write every knob onto a `WebPConfig`. One place, so the still encoder
+    /// and the animation encoder cannot drift apart: an avatar must not change
+    /// appearance the moment it starts moving.
+    ///
+    /// # Safety
+    /// `cfg` must be an initialised `WebPConfig` (`WebPConfigInit`).
+    unsafe fn apply_to(&self, cfg: &mut webp::WebPConfig) {
+        cfg.lossless = self.lossless as i32;
+        cfg.quality = self.quality;
+        cfg.method = self.method;
+        cfg.segments = self.segments;
+        cfg.sns_strength = self.sns_strength;
+        cfg.filter_strength = self.filter_strength;
+        cfg.filter_sharpness = self.filter_sharpness;
+        cfg.use_sharp_yuv = self.sharp_yuv as i32;
+        cfg.thread_level = 1;
     }
 
     /// Lossless animation. `effort` is 0 (fast, larger) .. 100 (slow, best).
@@ -117,6 +162,91 @@ impl AnimParams {
             method: 6,
             ..Default::default()
         }
+    }
+}
+
+/// libwebp's byte-emission hook, appending into the `Vec<u8>` that
+/// [`encode_still`] hangs off `WebPPicture::custom_ptr`. Used instead of
+/// `WebPMemoryWriter` because libwebp-sys2 types the hook as a SAFE
+/// `extern "C" fn`, which its own `WebPMemoryWrite` (declared inside an
+/// `extern` block, so `unsafe extern "C" fn`) cannot coerce to.
+extern "C" fn vec_writer(data: *const u8, size: usize, pic: *const webp::WebPPicture) -> i32 {
+    if size == 0 {
+        return 1;
+    }
+    // SAFETY: `custom_ptr` is the `&mut Vec<u8>` encode_still set, and libwebp
+    // calls this only from inside `WebPEncode`, while that borrow is live.
+    unsafe {
+        let out = (*pic).custom_ptr as *mut Vec<u8>;
+        if out.is_null() || data.is_null() {
+            return 0;
+        }
+        (*out).extend_from_slice(std::slice::from_raw_parts(data, size));
+    }
+    1
+}
+
+/// Encode ONE pre-sized RGBA frame as a still WebP, straight through
+/// `WebPEncode`.
+///
+/// This exists because routing a single frame through `WebPAnimEncoder` costs
+/// **2x for a byte-identical result**: 1,367 ms and 12,548 bytes against
+/// 682 ms and 12,532 bytes for a 184x184 avatar, measured in release (the 16
+/// bytes are container overhead). The animation encoder encodes every frame
+/// several ways — keyframe against sub-frame, dispose and blend variants — and
+/// keeps the smallest, and it does that even when there is one frame and
+/// nothing to compare against. `WebPEncode` just encodes the picture.
+///
+/// The other 74x on that path is `method` itself, which is a separate
+/// question: see [`AnimParams::art_anim`].
+///
+/// Same libwebp, same `libwebp-sys2`, so this adds no dependency and no second
+/// vendored copy of the encoder (which is what the animation path was shared
+/// to avoid).
+pub fn encode_still(rgba: &[u8], w: u32, h: u32, params: &AnimParams) -> Result<Vec<u8>, String> {
+    if w == 0 || h == 0 {
+        return Err("Image has zero dimensions".into());
+    }
+    let expected = (w as usize) * (h as usize) * 4;
+    if rgba.len() != expected {
+        return Err(format!("Frame buffer is not {w}x{h} RGBA"));
+    }
+
+    // SAFETY: the picture is freed on every path out, including the error
+    // paths, and the output Vec is plain owned memory.
+    unsafe {
+        let mut cfg: webp::WebPConfig = std::mem::zeroed();
+        if webp::WebPConfigInit(&mut cfg) == 0 {
+            return Err("Failed to init WebP config".into());
+        }
+        params.apply_to(&mut cfg);
+        if webp::WebPValidateConfig(&cfg) == 0 {
+            return Err("Invalid WebP encoding config".into());
+        }
+
+        let mut pic: webp::WebPPicture = std::mem::zeroed();
+        if webp::WebPPictureInit(&mut pic) == 0 {
+            return Err("Failed to init WebP picture".into());
+        }
+        pic.use_argb = 1;
+        pic.width = w as i32;
+        pic.height = h as i32;
+        if webp::WebPPictureImportRGBA(&mut pic, rgba.as_ptr(), (w * 4) as i32) == 0 {
+            webp::WebPPictureFree(&mut pic);
+            return Err("Failed to import pixels".into());
+        }
+
+        let mut out: Vec<u8> = Vec::new();
+        pic.writer = Some(vec_writer);
+        pic.custom_ptr = &mut out as *mut Vec<u8> as *mut std::ffi::c_void;
+
+        let ok = webp::WebPEncode(&cfg, &mut pic);
+        let code = pic.error_code;
+        webp::WebPPictureFree(&mut pic);
+        if ok == 0 {
+            return Err(format!("Failed to encode WebP (error {code})"));
+        }
+        Ok(out)
     }
 }
 
@@ -177,15 +307,7 @@ pub fn encode_animation(
         if webp::WebPConfigInit(&mut cfg) == 0 {
             return Err(fail(enc, "Failed to init WebP config".into()));
         }
-        cfg.lossless = params.lossless as i32;
-        cfg.quality = params.quality;
-        cfg.method = params.method;
-        cfg.segments = params.segments;
-        cfg.sns_strength = params.sns_strength;
-        cfg.filter_strength = params.filter_strength;
-        cfg.filter_sharpness = params.filter_sharpness;
-        cfg.use_sharp_yuv = params.sharp_yuv as i32;
-        cfg.thread_level = 1;
+        params.apply_to(&mut cfg);
         if webp::WebPValidateConfig(&cfg) == 0 {
             return Err(fail(enc, "Invalid WebP encoding config".into()));
         }
@@ -285,6 +407,39 @@ mod tests {
         assert!(is_animated_webp(&out), "expected an animated WebP container");
         let (w, h) = crate::node::image_convert::get_image_dimensions(&out).unwrap();
         assert_eq!((w, h), (64, 64));
+    }
+
+    /// Method 6 costs 74 to 87x the wall time of method 4 for 2 to 14% of the
+    /// bytes, at marginally LOWER PSNR and SSIM, on both stills and animation
+    /// (the table on [`AnimParams::art`] has the measurements). A regression
+    /// here is a 12-to-22 second avatar upload, and it is invisible in a test
+    /// that only checks the output decodes.
+    ///
+    /// `lossless` is deliberately exempt: that tier is an explicit opt-in to
+    /// waiting.
+    #[test]
+    fn art_and_plain_are_method_4() {
+        assert_eq!(AnimParams::art(85.0).method, 4);
+        assert_eq!(AnimParams::plain(50.0).method, 4);
+        assert_eq!(AnimParams::lossless(60.0).method, 6);
+    }
+
+    /// One preset serves stills and animation, so an avatar cannot change
+    /// appearance the moment it starts moving. If that ever splits into two
+    /// presets again, they must not differ in anything a viewer can see.
+    #[test]
+    fn art_is_the_same_encode_still_or_animated() {
+        let params = AnimParams::art(85.0);
+        let one = encode_animation(&frames(64, 64, 1), (64, 64), &params).unwrap();
+        let direct = encode_still(frames(64, 64, 1)[0].0.as_raw(), 64, 64, &params).unwrap();
+        // Same encoder, same config: the animation container adds a little
+        // overhead, nothing else.
+        assert!(
+            direct.len() <= one.len(),
+            "direct still {} should not exceed the one-frame animation {}",
+            direct.len(),
+            one.len()
+        );
     }
 
     /// The whole point of going direct: `method` and `segments` must actually

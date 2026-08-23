@@ -216,7 +216,7 @@ class MobileProfileSheet extends ConsumerWidget {
                 children: [
                   StatusDot(
                     color: isOnline ? hollow.success : hollow.textSecondary,
-                    size: 8, pulse: isOnline,
+                    size: 8, 
                     filled: isOnline,
                   ),
                   const SizedBox(width: HollowSpacing.xs),

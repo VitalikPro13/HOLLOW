@@ -600,7 +600,6 @@ class _DmRow extends ConsumerWidget {
                     child: StatusDot(
                       color: isOnline ? hollow.success : hollow.textSecondary,
                       size: 10,
-                      pulse: isOnline,
                       filled: isOnline,
                       semanticLabel: isOnline ? 'Online' : 'Offline',
                     ),

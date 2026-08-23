@@ -216,7 +216,11 @@ class _SectionDivider extends StatelessWidget {
           const SizedBox(width: HollowSpacing.sm),
           Expanded(
             child: isOnline
-                ? ValueListenableBuilder<double>(
+                // Own layer: this rebuilds a gradient Container at vsync, once
+                // per online member. Unscoped, each of those repaints dirtied
+                // the whole member panel 60 times a second.
+                ? RepaintBoundary(
+                    child: ValueListenableBuilder<double>(
                     valueListenable: SharedTickers.instance.shimmer,
                     builder: (context, value, _) {
                       // Ping-pong: 0→1→0 with easeInOut curve.
@@ -253,6 +257,7 @@ class _SectionDivider extends StatelessWidget {
                         ),
                       );
                     },
+                    ),
                   )
                 : Container(
                     height: 1,
@@ -755,7 +760,6 @@ class _ServerMemberTile extends ConsumerWidget {
                                   ? hollow.success
                                   : hollow.textSecondary,
                               size: 7,
-                              pulse: isOnline,
                               filled: isOnline,
                               semanticLabel: isOnline ? 'Online' : 'Offline',
                             ),
@@ -876,7 +880,7 @@ class _MemberTile extends ConsumerWidget {
                     ),
                     padding: const EdgeInsets.all(1.5),
                     child: StatusDot(
-                        color: hollow.success, size: 7, pulse: true),
+                        color: hollow.success, size: 7),
                   ),
                 ),
               ],

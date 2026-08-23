@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 import 'dart:ui' as ui;
@@ -74,7 +75,8 @@ bool _isApng(Uint8List b) {
 /// Unlike Flutter's built-in Image.memory which can play GIFs too fast
 /// (treating 0ms/10ms delays literally), this widget:
 /// - Defaults frame delays < 20ms to 100ms (matching browser behavior)
-/// - Drives animation via Ticker for smooth playback
+/// - Drives animation from a per-frame Timer, so a 10fps GIF costs 10
+///   frames a second rather than one per vsync (see [_AnimatedGifImageState._timer])
 /// - Properly loops the animation
 ///
 /// For non-GIF images (PNG, WebP, JPEG), shows a static image.
@@ -104,14 +106,31 @@ class AnimatedGifImage extends StatefulWidget {
   State<AnimatedGifImage> createState() => _AnimatedGifImageState();
 }
 
-class _AnimatedGifImageState extends State<AnimatedGifImage>
-    with SingleTickerProviderStateMixin {
+class _AnimatedGifImageState extends State<AnimatedGifImage> {
   List<_GifFrame>? _frames;
   int _currentFrame = 0;
   bool _failed = false;
-  Ticker? _ticker;
-  Duration _elapsed = Duration.zero;
-  Duration _nextFrameAt = Duration.zero;
+
+  /// Playback is driven by a [Timer] armed for the CURRENT frame's display
+  /// duration, NOT by a [Ticker].
+  ///
+  /// A Ticker is a standing request for a frame every vsync, and the engine
+  /// then renders one whether or not the picture changed. A 10fps avatar was
+  /// therefore costing 240 frames a second on a 240Hz monitor: measured, the
+  /// idle Home screen ran at fps=240 with raster=1.81ms per frame, which is
+  /// 43% of a CPU core to show two small looping images. Arming a timer for
+  /// exactly as long as the current frame is shown produces one frame per GIF
+  /// frame, which is all there ever was to draw.
+  ///
+  /// It also retires the fast-forward bug this widget used to have: there is
+  /// no accruing `elapsed` to fall behind and then catch up on
+  /// (feedback_gif_ticker_mute_fast_forward). A missed deadline just means
+  /// the next frame shows a little late, once.
+  Timer? _timer;
+
+  /// Mirrors [TickerMode], which is how Flutter tells widgets under a pushed
+  /// route to stop animating. A Ticker got that for free; a Timer has to ask.
+  bool _tickerModeEnabled = true;
 
   @override
   void initState() {
@@ -122,19 +141,57 @@ class _AnimatedGifImageState extends State<AnimatedGifImage>
     ReduceMotionController.instance.effective.addListener(_syncPlayback);
   }
 
+  /// Reduce motion holds the still; a pushed route pauses in place.
   bool get _shouldPlay =>
-      widget.animate && !ReduceMotionController.instance.isReduced;
+      widget.animate &&
+      _tickerModeEnabled &&
+      !ReduceMotionController.instance.isReduced;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final enabled = TickerMode.valuesOf(context).enabled;
+    if (enabled != _tickerModeEnabled) {
+      _tickerModeEnabled = enabled;
+      _syncPlayback();
+    }
+  }
 
   void _syncPlayback() {
     if (!mounted || _frames == null || _frames!.length <= 1) return;
     if (!_shouldPlay) {
-      _ticker?.stop();
-      if (_currentFrame != 0) setState(() => _currentFrame = 0);
-    } else if (_ticker != null && !_ticker!.isActive) {
-      _elapsed = Duration.zero;
-      _nextFrameAt = _frames![0].duration;
-      _ticker!.start();
+      _timer?.cancel();
+      _timer = null;
+      // Reduce motion is a request to SHOW THE STILL, so rewind to it. Being
+      // muted under a dialog is not — that pauses where it stands and picks
+      // up from the same frame, with no blink when the dialog closes.
+      if (ReduceMotionController.instance.isReduced && _currentFrame != 0) {
+        setState(() => _currentFrame = 0);
+      }
+    } else if (_timer == null) {
+      _scheduleNext();
     }
+  }
+
+  void _scheduleNext() {
+    final frames = _frames;
+    if (frames == null || frames.length <= 1) return;
+    _timer?.cancel();
+    _timer = Timer(frames[_currentFrame].duration, _advance);
+  }
+
+  void _advance() {
+    if (!mounted || !_shouldPlay) {
+      _timer = null;
+      return;
+    }
+    final frames = _frames;
+    if (frames == null || frames.length <= 1) {
+      _timer = null;
+      return;
+    }
+    setState(() => _currentFrame = (_currentFrame + 1) % frames.length);
+    _scheduleNext();
   }
 
   @override
@@ -143,8 +200,6 @@ class _AnimatedGifImageState extends State<AnimatedGifImage>
     if (!identical(old.bytes, widget.bytes)) {
       _disposeFrames();
       _currentFrame = 0;
-      _elapsed = Duration.zero;
-      _nextFrameAt = Duration.zero;
       _failed = false;
       _decode();
     } else if (old.animate != widget.animate) {
@@ -180,42 +235,17 @@ class _AnimatedGifImageState extends State<AnimatedGifImage>
       setState(() => _frames = frames);
 
       // Start animation if multi-frame (unless gated: hold frame 0).
-      if (frames.length > 1) {
-        _nextFrameAt = frames[0].duration;
-        _ticker = createTicker(_onTick);
-        if (_shouldPlay) {
-          _ticker!.start();
-        }
+      if (frames.length > 1 && _shouldPlay) {
+        _scheduleNext();
       }
     } catch (_) {
       if (mounted) setState(() => _failed = true);
     }
   }
 
-  void _onTick(Duration elapsed) {
-    _elapsed = elapsed;
-    if (_frames == null || _frames!.length <= 1) return;
-
-    if (_elapsed >= _nextFrameAt) {
-      final nextIdx = (_currentFrame + 1) % _frames!.length;
-      _nextFrameAt += _frames![nextIdx].duration;
-      // NEVER play catch-up after a stall. When a dialog is pushed on top,
-      // TickerMode MUTES this ticker: ticks stop but `elapsed` keeps
-      // accruing, so on resume the schedule is seconds in the past and
-      // advancing one frame per 60fps tick fast-forwards the GIF until it
-      // "catches up" to wall clock. Resync the schedule to now instead —
-      // playback just continues at normal speed from the current frame.
-      if (_nextFrameAt <= _elapsed) {
-        _nextFrameAt = _elapsed + _frames![nextIdx].duration;
-      }
-      setState(() => _currentFrame = nextIdx);
-    }
-  }
-
   void _disposeFrames() {
-    _ticker?.stop();
-    _ticker?.dispose();
-    _ticker = null;
+    _timer?.cancel();
+    _timer = null;
     if (_frames != null) {
       for (final f in _frames!) {
         f.image.dispose();

@@ -97,4 +97,39 @@ void main() {
       ]);
     });
   });
+
+  group('FrameCensus', () {
+    test('emits one line per interval with fps and the build/raster split', () {
+      final lines = <String>[];
+      final census = FrameCensus(sink: lines.add, intervalMs: 1000);
+
+      // 60 frames over exactly one second: 1ms build, 7ms raster each.
+      for (var i = 0; i < 60; i++) {
+        census.onFrame(1000, 7000, 1000 + i * 1000 ~/ 60);
+      }
+      expect(lines, isEmpty, reason: 'window not elapsed yet');
+
+      census.onFrame(1000, 7000, 2000);
+      expect(lines, hasLength(1));
+      expect(lines.single, contains('fps=61.0'));
+      expect(lines.single, contains('build=1.00ms'));
+      expect(lines.single, contains('raster=7.00ms'));
+    });
+
+    test('stays silent when no frames are produced', () {
+      final lines = <String>[];
+      FrameCensus(sink: lines.add, intervalMs: 1000);
+      // The census is frame-driven: no onFrame, no line, however long it sits.
+      expect(lines, isEmpty);
+    });
+
+    test('reports the worst raster in the window, not just the mean', () {
+      final lines = <String>[];
+      final census = FrameCensus(sink: lines.add, intervalMs: 100);
+      census.onFrame(1000, 2000, 0);
+      census.onFrame(1000, 40000, 50);
+      census.onFrame(1000, 2000, 200);
+      expect(lines.single, contains('worstRaster=40.0ms'));
+    });
+  });
 }

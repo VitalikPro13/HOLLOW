@@ -3,7 +3,7 @@ import 'package:hollow/src/core/providers/connection_status_provider.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 
 /// How an [OverallConnection] renders in a user panel: dot color, dot shape,
-/// pulse, and the word beside it.
+/// and the word beside it.
 ///
 /// Both user panels render from this ONE helper so the indicator can never
 /// disagree between layouts again. Before: the Dock bar coloured its dot from
@@ -15,9 +15,6 @@ class ConnectionVisual {
   final String label;
   final Color color;
 
-  /// Breathing glow — a live state (connected, or making progress).
-  final bool pulse;
-
   /// Solid disc vs hollow ring. Shape is the non-color cue (a11y): only a
   /// settled "connected" is filled.
   final bool filled;
@@ -25,7 +22,6 @@ class ConnectionVisual {
   const ConnectionVisual({
     required this.label,
     required this.color,
-    required this.pulse,
     required this.filled,
   });
 }
@@ -40,7 +36,6 @@ ConnectionVisual connectionVisual(
     return ConnectionVisual(
       label: 'Invisible',
       color: hollow.textSecondary,
-      pulse: false,
       filled: false,
     );
   }
@@ -48,7 +43,6 @@ ConnectionVisual connectionVisual(
     OverallConnection.connected => ConnectionVisual(
         label: 'Online',
         color: hollow.success,
-        pulse: true,
         filled: true,
       ),
     // In progress — pulsing ring: something is happening, not settled yet.
@@ -58,13 +52,11 @@ ConnectionVisual connectionVisual(
       ConnectionVisual(
         label: connection.label,
         color: hollow.textSecondary,
-        pulse: true,
         filled: false,
       ),
     OverallConnection.offline || OverallConnection.error => ConnectionVisual(
         label: connection.label,
         color: hollow.warning,
-        pulse: false,
         filled: false,
       ),
   };

@@ -361,7 +361,7 @@ and a server renders far smaller than a profile card.
 `node/webp_anim.rs` drives libwebp's `WebPAnimEncoder` directly. **Every animated
 encode in the app goes through it** (server icons, server banners, emotes, stickers,
 GIF sends, avatar frames) plus the single-frame still path via
-`encode_lossy_webp_via_animation`.
+`encode_lossy_webp_still`.
 
 It exists because **`webp-animation` 0.9 drops two knobs on the floor**:
 - **`EncodingConfig.method` is a DEAD FIELD** -- its `apply_to()` writes only

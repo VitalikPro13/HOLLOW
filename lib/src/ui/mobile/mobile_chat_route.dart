@@ -2917,7 +2917,7 @@ class _MobileChatHeader extends ConsumerWidget {
                 padding: const EdgeInsets.all(1),
                 child: StatusDot(
                   color: isOnline ? hollow.success : hollow.textSecondary,
-                  size: 8, pulse: isOnline,
+                  size: 8, 
                   filled: isOnline,
                   semanticLabel: isOnline ? 'Online' : 'Offline',
                 ),

@@ -21,7 +21,7 @@ The emote byte-replication system is now the generic content-addressed asset rai
 
 First consumer of the generalized rail beyond emotes. The CRDT carries ONLY the hash: `settings["server_banner"]` = 64-hex SHA-256 (`""` = cleared), `settings["server_banner_animated"]` = `"1"|""` — plain `ServerSettingChanged` ops, MANAGE_SERVER-gated at author AND ingest, ZERO new swarm/sync_handler plumbing. Bytes live in `emote_blobs` with `kind='banner'` and pull on demand at `AssetKind::Banner` (1 MB cap).
 
-- **Processing** `image_convert::process_server_banner_image(data) -> (webp, animated)`: 3:1 center crop → 960x320 lossy Q80; GIF → per-frame crop/resize animated WebP ≤1MB; animated-WebP passthrough ≤1MB; still ≤150KB. Thumb helper `process_server_banner_thumb` → 400x133 ≤40KB still. SIDE FIX in the same pass: `process_avatar_image` + profile `process_banner_image` switched from LOSSLESS `write_to(WebP)` to lossy Q80 (`encode_lossy_webp_via_animation`) — lossless size is content-dependent, photographic uploads randomly blew the caps and failed at authoring.
+- **Processing** `image_convert::process_server_banner_image(data) -> (webp, animated)`: 3:1 center crop → 960x320 lossy Q80; GIF → per-frame crop/resize animated WebP ≤1MB; animated-WebP passthrough ≤1MB; still ≤150KB. Thumb helper `process_server_banner_thumb` → 400x133 ≤40KB still. SIDE FIX in the same pass: `process_avatar_image` + profile `process_banner_image` switched from LOSSLESS `write_to(WebP)` to lossy Q80 (`encode_lossy_webp_still`) — lossless size is content-dependent, photographic uploads randomly blew the caps and failed at authoring.
 - **FFI** (`api/crdt.rs` beside the avatar trio): `set_server_banner` (process → `save_asset_blob(kind='banner')` → two `update_server_setting` writes, animated flag FIRST so the hash write lands complete), `clear_server_banner`, `get_server_banner -> Option<ServerBannerData{hash, animated, bytes: Option}>` (`bytes: None` = pull needed).
 - **Dart** `server_banner_provider.dart`: `ServerBannerNotifier` (Map serverId → `ServerBannerEntry{bytes, hash, animated}`) — avatar-notifier clone incl. `applyLocalWrite` optimistic seed + `_writeGen`/`_writePending`; on hash-without-blob it fires `requestAssetOnce(hash, kind:'banner')` and records hash→serverId in `_pendingPulls`; `onAssetsReceived` (wired in event_provider's `EmoteAssetsReceived` arm) reloads the matching server. Loads on ServerUpdated + SyncCompleted + boot `loadAll` (hollow_shell).
 - **Header UI** `channel_sidebar.dart _buildHeader`: no banner = unchanged 48px; banner = 120px, `AnimatedGifImage` background under a bottom-up scrim toward `hollow.surface` (alpha-0 surface color, never `Colors.transparent`), name + 3 action icons overlaid. Switcher key = `'header-$label-${banner.hash}'` so re-uploads crossfade. Animation gate = `windowFocusedProvider` via the new `AnimatedGifImage.animate` flag (reduce-motion stays internal to the widget; selected+mounted implied — the sidebar renders only the selected server). Polish rules (2026-07-28 review): scrim is a 6-stop eased ramp ending at FULL alpha (coarse stops band on dark themes; <1.0 leaves a banner sliver reading as a line), NO bottom border in banner mode, banner+scrim bleed 1px right over the sidebar's border column via `Positioned(right:-1)`+`Clip.none` (Container insets children by its border), and BOTH header variants pad right=sm so the action icons column-align with the channel header's "+".
@@ -491,8 +491,12 @@ drops metadata. Memory: `feedback-animated-source-detect-from-bytes`.
 repetitionCount -1 — measured), so the render side was never implicated and a raw APNG in an
 older client's profile blob still animates for us.
 
-**KNOWN, unfixed:** an animated encode spends ~85x its time on `method: 6` to save ~1.2% of the
-bytes (12,685 ms vs 150 ms on a 224x224 / 28-frame APNG, RELEASE). `sharp_yuv` is not the lever.
-Method 6 pays on STILLS, not on animation — `WebPAnimEncoder` evaluates several candidate
-encodings per frame, so its cost multiplies while the gain shrinks. Parked for the performance
-session; see memory `project-animated-avatar-encoding`.
+**FIXED 2026-08-23: `method` is 4 for every lossy preset, stills included.**
+Method 6 cost 74-87x the wall time for 2-14% of the bytes AND scored marginally
+LOWER on PSNR and SSIM in both cases — `quality` sets the target fidelity,
+`method` only sets how hard the encoder searches for the cheapest way to hit it,
+so a deeper search spends fewer bits at the same target. There was no quality to
+trade. Stills also stopped going through `WebPAnimEncoder` (a one-frame
+"animation" cost 2x for a byte-identical result); `webp_anim::encode_still()`
+calls `WebPEncode` directly. `process_avatar_frame` 12,700ms -> 188ms. See
+memory `project-animated-avatar-encoding`.

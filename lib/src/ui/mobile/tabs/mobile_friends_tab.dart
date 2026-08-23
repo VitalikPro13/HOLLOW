@@ -338,7 +338,7 @@ class _FriendRow extends ConsumerWidget {
                     padding: const EdgeInsets.all(1.5),
                     child: StatusDot(
                       color: isOnline ? hollow.success : hollow.textSecondary,
-                      size: 10, pulse: isOnline,
+                      size: 10, 
                       filled: isOnline,
                       semanticLabel: isOnline ? 'Online' : 'Offline',
                     ),

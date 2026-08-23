@@ -37,24 +37,33 @@ class AmbientBackground extends ConsumerWidget {
     // Skip blobs when custom background is active.
     if (hasCustomBg) return child;
 
-    return RepaintBoundary(
-      child: ValueListenableBuilder<double>(
-        valueListenable: SharedTickers.instance.ambient,
-        builder: (context, value, child) {
-          final t = value * 2 * math.pi;
+    // The blobs and the content are SEPARATE layers on purpose.
+    //
+    // This used to be one RepaintBoundary wrapped around both, with the
+    // content passed through the builder as `child`. Passing it through spared
+    // the REBUILD, but not the RASTER: a repaint inside a boundary re-rasters
+    // the whole boundary, so every blob tick re-rendered the entire pane
+    // underneath it. Fifteen times a second, over the largest surface in the
+    // app. Giving the overlay its own boundary means a blob tick re-rasters
+    // two soft circles and composites them over an untouched content layer.
+    return Stack(
+      children: [
+        RepaintBoundary(child: child),
+        Positioned.fill(
+          child: IgnorePointer(
+            child: RepaintBoundary(
+              child: ValueListenableBuilder<double>(
+                valueListenable: SharedTickers.instance.ambient,
+                builder: (context, value, _) {
+                  final t = value * 2 * math.pi;
 
-          final x1 = 0.5 + 0.25 * math.sin(t);
-          final y1 = 0.5 + 0.15 * math.sin(t * 2);
+                  final x1 = 0.5 + 0.25 * math.sin(t);
+                  final y1 = 0.5 + 0.15 * math.sin(t * 2);
 
-          final x2 = 0.5 - 0.2 * math.sin(t + math.pi * 0.7);
-          final y2 = 0.5 - 0.2 * math.sin(t * 2 + math.pi);
+                  final x2 = 0.5 - 0.2 * math.sin(t + math.pi * 0.7);
+                  final y2 = 0.5 - 0.2 * math.sin(t * 2 + math.pi);
 
-          return Stack(
-            children: [
-              child!,
-              Positioned.fill(
-                child: IgnorePointer(
-                  child: CustomPaint(
+                  return CustomPaint(
                     painter: _AmbientPainter(
                       color1: color1.withValues(alpha: opacity),
                       color1Fade: color1.withValues(alpha: 0),
@@ -63,14 +72,13 @@ class AmbientBackground extends ConsumerWidget {
                       center1: Offset(x1, y1),
                       center2: Offset(x2, y2),
                     ),
-                  ),
-                ),
+                  );
+                },
               ),
-            ],
-          );
-        },
-        child: child,
-      ),
+            ),
+          ),
+        ),
+      ],
     );
   }
 }

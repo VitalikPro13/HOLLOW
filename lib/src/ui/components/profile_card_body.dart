@@ -300,7 +300,6 @@ class _ProfileCardBodyState extends ConsumerState<ProfileCardBody> {
                   StatusDot(
                     color: isOnline ? hollow.success : hollow.textSecondary,
                     size: _compact ? 7 : 8,
-                    pulse: isOnline,
                     filled: isOnline,
                   ),
                   const SizedBox(width: HollowSpacing.xs),

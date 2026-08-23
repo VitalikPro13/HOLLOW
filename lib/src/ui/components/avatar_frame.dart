@@ -76,8 +76,7 @@ class AvatarFrame extends ConsumerStatefulWidget {
   ConsumerState<AvatarFrame> createState() => _AvatarFrameState();
 }
 
-class _AvatarFrameState extends ConsumerState<AvatarFrame>
-    with SingleTickerProviderStateMixin {
+class _AvatarFrameState extends ConsumerState<AvatarFrame> {
   /// Only used where no [HoverScope] encloses us (a picker tile, a preview).
   /// Inside a row, the ROW's hover is what plays the frame - see
   /// [_rowHovered].
@@ -95,8 +94,17 @@ class _AvatarFrameState extends ConsumerState<AvatarFrame>
   String? _heldId;
   AvatarFrameArt? _art;
   int _frame = 0;
-  Ticker? _ticker;
-  Duration _nextFrameAt = Duration.zero;
+
+  /// Armed for the CURRENT frame's delay, never a [Ticker]. A Ticker asks the
+  /// engine for a frame every vsync and then this only changes the picture
+  /// when one is actually due, so a 10fps frame animation was costing 240
+  /// rendered frames a second on a 240Hz display. Same fix, same reason, as
+  /// AnimatedGifImage: one rendered frame per animation frame.
+  ///
+  /// Losing the Ticker also loses TickerMode's automatic mute under a pushed
+  /// route, which costs nothing here: playback already requires hover AND
+  /// window focus, and a dialog on top takes both.
+  Timer? _timer;
 
   bool get _wantsPlayback =>
       (widget.animate || _hovering) &&
@@ -124,8 +132,6 @@ class _AvatarFrameState extends ConsumerState<AvatarFrame>
   void dispose() {
     ReduceMotionController.instance.effective.removeListener(_redraw);
     AvatarFrameCache.instance.removeListener(widget.id, _redraw);
-    _ticker?.dispose();
-    _ticker = null;
     _release();
     super.dispose();
   }
@@ -135,7 +141,8 @@ class _AvatarFrameState extends ConsumerState<AvatarFrame>
   }
 
   void _release() {
-    _ticker?.stop();
+    _timer?.cancel();
+    _timer = null;
     if (_heldId != null) {
       AvatarFrameCache.instance.release(_heldId!);
       _heldId = null;
@@ -162,28 +169,26 @@ class _AvatarFrameState extends ConsumerState<AvatarFrame>
           _art = art;
           _frame = 0;
         });
-        if (art.images.length > 1) {
-          _nextFrameAt = art.delays[0];
-          _ticker ??= createTicker(_onTick);
-          if (!_ticker!.isActive) _ticker!.start();
-        }
+        if (art.images.length > 1) _scheduleNext();
       });
     } else if (_heldId != null) {
       _release();
     }
   }
 
-  void _onTick(Duration elapsed) {
+  void _scheduleNext() {
     final art = _art;
     if (art == null || art.images.length <= 1) return;
-    if (elapsed < _nextFrameAt) return;
-    final next = (_frame + 1) % art.images.length;
-    _nextFrameAt += art.delays[next];
-    // Never play catch-up after a stall: a muted ticker keeps accruing
-    // `elapsed`, and advancing one frame per tick to close the gap
-    // fast-forwards the animation. Same rule as AnimatedGifImage.
-    if (_nextFrameAt <= elapsed) _nextFrameAt = elapsed + art.delays[next];
-    setState(() => _frame = next);
+    _timer?.cancel();
+    _timer = Timer(art.delays[_frame], _advance);
+  }
+
+  void _advance() {
+    _timer = null;
+    final art = _art;
+    if (!mounted || art == null || art.images.length <= 1) return;
+    setState(() => _frame = (_frame + 1) % art.images.length);
+    _scheduleNext();
   }
 
   @override

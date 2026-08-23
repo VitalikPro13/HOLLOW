@@ -33,7 +33,6 @@ import 'package:hollow/src/core/providers/shell_tab.dart';
 import 'package:hollow/src/ui/components/download_icon_button.dart';
 import 'package:hollow/src/ui/components/server_folder_popup.dart';
 import 'package:hollow/src/ui/components/profile_card_popup.dart';
-import 'package:hollow/src/ui/components/status_dot.dart';
 import 'package:hollow/src/ui/dialogs/create_server_dialog.dart';
 import 'package:hollow/src/ui/shell/server_context_menus.dart';
 import 'package:hollow/src/ui/dialogs/mnemonic_dialog.dart';
@@ -148,13 +147,6 @@ class _BottomBarState extends ConsumerState<BottomBar> {
                     Expanded(
                       child: Row(
                         children: [
-                          StatusDot(
-                            color: visual.color,
-                            size: 7,
-                            pulse: visual.pulse,
-                            filled: visual.filled,
-                            semanticLabel: visual.label,
-                          ),
                           const SizedBox(width: 4),
                           Expanded(
                             // a11y Phase 3: fixed-height dock chrome — cap the

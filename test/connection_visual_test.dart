@@ -17,11 +17,10 @@ void main() {
     final v = connectionVisual(hollow, OverallConnection.connected);
     expect(v.label, 'Online');
     expect(v.filled, isTrue);
-    expect(v.pulse, isTrue);
     expect(v.color, hollow.success);
   });
 
-  test('in-progress states pulse as a hollow ring', () {
+  test('in-progress states read as a hollow ring', () {
     for (final c in [
       OverallConnection.connecting,
       OverallConnection.reconnecting,
@@ -29,16 +28,14 @@ void main() {
     ]) {
       final v = connectionVisual(hollow, c);
       expect(v.filled, isFalse, reason: '$c must not read as connected');
-      expect(v.pulse, isTrue, reason: '$c is live progress');
       expect(v.label, c.label);
     }
   });
 
-  test('offline and error are static, warning-coloured', () {
+  test('offline and error are warning-coloured rings', () {
     for (final c in [OverallConnection.offline, OverallConnection.error]) {
       final v = connectionVisual(hollow, c);
       expect(v.filled, isFalse);
-      expect(v.pulse, isFalse);
       expect(v.color, hollow.warning);
     }
   });
@@ -48,7 +45,6 @@ void main() {
       final v = connectionVisual(hollow, c, invisible: true);
       expect(v.label, 'Invisible');
       expect(v.filled, isFalse);
-      expect(v.pulse, isFalse);
     }
   });
 

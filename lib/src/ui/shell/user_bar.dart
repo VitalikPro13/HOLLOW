@@ -57,19 +57,16 @@ class UserBar extends ConsumerWidget {
         ServerSyncStatus.syncing => ConnectionVisual(
             label: 'Syncing...',
             color: hollow.accentText,
-            pulse: true,
             filled: false,
           ),
         ServerSyncStatus.retrying => ConnectionVisual(
             label: 'Retrying...',
             color: hollow.warning,
-            pulse: true,
             filled: false,
           ),
         ServerSyncStatus.failed => ConnectionVisual(
             label: 'Sync failed',
             color: hollow.error,
-            pulse: false,
             filled: false,
           ),
         ServerSyncStatus.idle ||
@@ -81,7 +78,6 @@ class UserBar extends ConsumerWidget {
 
     final statusText = visual.label;
     final statusColor = visual.color;
-    final statusPulse = visual.pulse;
     final statusFilled = visual.filled;
 
     final roomBudget = ref.watch(roomBudgetProvider);
@@ -171,7 +167,6 @@ class UserBar extends ConsumerWidget {
                         StatusDot(
                           color: statusColor,
                           size: 7,
-                          pulse: statusPulse,
                           // Shape cue: only a settled "Online" is a solid disc.
                           // Everything else is a hollow ring — the adjacent
                           // status word labels it.

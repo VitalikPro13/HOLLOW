@@ -718,7 +718,6 @@ class _StorageDashboardContentState
             StatusDot(
               color: color,
               size: 8,
-              pulse: activeUploads > 0 || activeDownloads > 0 || hasFailed,
             ),
             const SizedBox(width: HollowSpacing.sm),
             Text(

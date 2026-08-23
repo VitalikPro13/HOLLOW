@@ -80,7 +80,6 @@ class PeerCard extends ConsumerWidget {
                       child: StatusDot(
                         color: isOnline ? hollow.success : hollow.textSecondary,
                         size: 8,
-                        pulse: isOnline,
                         filled: isOnline,
                         semanticLabel: isOnline ? 'Online' : 'Offline',
                       ),

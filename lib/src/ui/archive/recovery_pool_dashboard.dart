@@ -57,7 +57,6 @@ class RecoveryPoolDashboard extends ConsumerWidget {
             children: [
               StatusDot(
                 color: pool.isActive ? const Color(0xFF4CAF50) : hollow.textSecondary,
-                pulse: pool.isActive,
                 size: 10,
               ),
               const SizedBox(width: HollowSpacing.sm),
