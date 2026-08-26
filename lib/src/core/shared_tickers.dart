@@ -8,15 +8,15 @@ import 'package:flutter/widgets.dart';
 /// Instead of each widget spawning its own [AnimationController] + [Ticker]
 /// for repeating animations (shimmer sweeps, pulse glows, ambient drift),
 /// all widgets read from a small set of shared [ValueNotifier]s driven by
-/// two timers.
+/// one timer.
 ///
 /// Deliberately timers and NOT tickers: a running [Ticker] is a standing
 /// request for a frame every vsync, and on this stack a frame is expensive
-/// even when nothing in it changed. See [_tickIntervalMs].
+/// even when nothing in it changed. See [_fastIntervalMs].
 ///
 /// Benefits:
-/// - N tickers → 1 clock per rate (CPU savings scale with the number of
-///   visible animated widgets).
+/// - N tickers → one clock (CPU savings scale with the number of visible
+///   animated widgets).
 /// - Single call to [pause] / [resume] stops ALL decorative animations
 ///   when the window is hidden, minimized, or unfocused.
 ///
@@ -41,8 +41,6 @@ class SharedTickers with WidgetsBindingObserver {
 
   // ── Shared value notifiers (0.0 → 1.0 repeating) ──
 
-  // ── FAST lane: motion you can see step ──
-
   /// 4-second shimmer sweep cycle (used by SelectionShimmer,
   /// _ShimmerDivider, _SectionDivider glow).
   late final shimmer = GatedNotifier(_syncFast);
@@ -50,21 +48,24 @@ class SharedTickers with WidgetsBindingObserver {
   /// 1.2-second typing dots cycle (used by TypingDots).
   late final typingDots = GatedNotifier(_syncFast);
 
-  // ── SLOW lane: motion too slow for anyone to see step ──
-
-  /// 45-second ambient drift cycle (used by AmbientBackground).
+  /// 45-second ambient drift cycle (used by AmbientBackground, and by the
+  /// mobile Chats header glow, which reads it at 4.5x for a ~10s sweep).
   ///
-  /// Stays on the slow lane deliberately. Over 45 seconds, one step per
-  /// second moves each blob 1/45th of its path — smaller than the blur on its
-  /// own edge. Running it at 30fps would buy nothing anybody can see and cost
-  /// 30x the frames.
-  late final ambient = GatedNotifier(_syncSlow);
+  /// This one briefly ran on a 1fps clock, on the reasoning that 1/45th of a
+  /// path per step is a smaller move than the blur on the blob's own edge.
+  /// That is true of the blob's AVERAGE speed and false where it matters: a
+  /// sine is fastest through the middle of its travel, the pane is the widest
+  /// surface in the app, so a step there is a visible jump of a soft edge. And
+  /// the header glow rides the same clock at 4.5x, crossing the screen in five
+  /// seconds — at 1fps that is five frames, which reads as the app dropping
+  /// them. Decorative motion that steps looks like a stutter, and a stutter
+  /// reads as a slow app, which is the opposite of what a cheap clock is for.
+  late final ambient = GatedNotifier(_syncFast);
 
   // ── Internal state ──
 
   Timer? _ticker;
   final _tickerStopwatch = Stopwatch();
-  Timer? _ambientTimer;
   bool _running = false;
   bool _paused = false;
 
@@ -78,20 +79,26 @@ class SharedTickers with WidgetsBindingObserver {
   static const _typingCycleUs = 1200000; // 1.2s
   static const _ambientCycleUs = 45000000; // 45s
 
-  /// Publish rates for the two lanes.
+  /// The one publish rate.
   ///
-  /// Neither is a [Ticker], and that is the point. A running Ticker asks for a
-  /// frame at every vsync whether or not the picture changed, and on Windows
-  /// that is expensive: Impeller renders through ANGLE, so each frame's GL
-  /// commands are translated to D3D11 on the CPU. Measured on an idle Home
-  /// screen against a 240Hz display, a single always-running Ticker held the
-  /// app at **fps=240 and 69% of one core**. A timer publishes at a rate we
-  /// choose instead of one the monitor chooses.
+  /// It is a timer and not a [Ticker], and that is the point. A running Ticker
+  /// asks for a frame at every vsync whether or not the picture changed, and a
+  /// frame is never free. Measured on an idle Home screen against a 240Hz
+  /// display (on Impeller, which rendered through ANGLE and paid to translate
+  /// each frame's GL commands to D3D11 on the CPU), a single always-running
+  /// Ticker held the app at **fps=240 and 69% of one core**. A timer publishes
+  /// at a rate we choose instead of one the monitor chooses.
   ///
-  /// 30fps for motion you would notice stepping; 1fps for motion you would
-  /// not. Both are gated on having listeners — see [_syncFast].
+  /// One rate, 30fps, gated on having listeners — see [_syncFast]. The saving
+  /// is in the gate and in not being a Ticker, not in running visible motion
+  /// slowly: this costs 30 frames a second while something on screen is drawn
+  /// by it, and nothing whatsoever when there is not.
+  ///
+  /// The one animation that genuinely wants a slow clock keeps its own: the
+  /// relay card's poll-cycle sweep in `home_dashboard.dart` steps once a
+  /// second, seven steps to fill, then stops. That is a countdown, not motion,
+  /// and drawing it smoothly would only make it read as a loading bar.
   static const _fastIntervalMs = 33; // ~30fps
-  static const _slowIntervalMs = 1000; // 1fps
 
   /// Start the shared ticker. Call once at app startup.
   /// No-ops if [disabled] is true.
@@ -103,20 +110,21 @@ class SharedTickers with WidgetsBindingObserver {
     WidgetsBinding.instance.addObserver(this);
 
     _syncFast();
-    _syncSlow();
   }
 
-  /// Whether a lane may run at all right now.
+  /// Whether the clock may run at all right now.
   bool get _live => _running && !_paused && !disabled;
 
-  /// Run the fast lane only while something is listening to it.
+  /// Run the clock only while something is listening to it.
   ///
-  /// This is what keeps an idle Home screen cheap. The shimmer is on the
-  /// SELECTED row and the member-panel divider; the typing dots exist only
-  /// while somebody is typing. On a screen showing neither, a 30fps clock
-  /// would be 30 frames a second rendered so that nothing could change.
+  /// This is what keeps an idle screen cheap, and it is the whole saving. The
+  /// shimmer is on the SELECTED row and the member-panel divider; the typing
+  /// dots exist only while somebody is typing; the ambient blobs are hidden
+  /// outright behind a custom background. On a screen showing none of them,
+  /// 30fps would be 30 frames a second rendered so that nothing could change.
   void _syncFast() {
-    final wanted = _live && (shimmer.isWatched || typingDots.isWatched);
+    final wanted = _live &&
+        (shimmer.isWatched || typingDots.isWatched || ambient.isWatched);
     if (wanted == (_ticker != null)) return;
     if (!wanted) {
       _ticker?.cancel();
@@ -138,28 +146,8 @@ class SharedTickers with WidgetsBindingObserver {
 
     // Typing dots: linear 0→1 over 1.2s, repeating.
     typingDots.value = (us % _typingCycleUs) / _typingCycleUs;
-  }
 
-  void _syncSlow() {
-    final wanted = _live && ambient.isWatched;
-    if (wanted == (_ambientTimer != null)) return;
-    if (!wanted) {
-      _ambientTimer?.cancel();
-      _ambientTimer = null;
-      return;
-    }
-    _ambientTimer = Timer.periodic(
-      const Duration(milliseconds: _slowIntervalMs),
-      _onAmbientTick,
-    );
-  }
-
-  // Track ambient phase manually since Timer doesn't give elapsed.
-  final _ambientStopwatch = Stopwatch();
-
-  void _onAmbientTick(Timer _) {
-    if (!_ambientStopwatch.isRunning) _ambientStopwatch.start();
-    final us = _ambientStopwatch.elapsedMicroseconds;
+    // Ambient drift: linear 0→1 over 45s, repeating.
     ambient.value = (us % _ambientCycleUs) / _ambientCycleUs;
   }
 
@@ -168,9 +156,7 @@ class SharedTickers with WidgetsBindingObserver {
     if (_paused) return;
     _paused = true;
     _tickerStopwatch.stop();
-    _ambientStopwatch.stop();
     _syncFast();
-    _syncSlow();
   }
 
   /// Resume all decorative animations (window shown / focused).
@@ -178,12 +164,10 @@ class SharedTickers with WidgetsBindingObserver {
   void resume() {
     if (!_paused || disabled) return;
     _paused = false;
-    // The elapsed clocks keep their phase across a pause, so an animation
-    // picks up where it left off instead of snapping back to the start.
+    // The elapsed clock keeps its phase across a pause, so an animation picks
+    // up where it left off instead of snapping back to the start.
     _tickerStopwatch.start();
-    _ambientStopwatch.start();
     _syncFast();
-    _syncSlow();
   }
 
   bool get isPaused => _paused;

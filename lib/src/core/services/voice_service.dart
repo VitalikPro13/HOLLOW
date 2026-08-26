@@ -6,9 +6,11 @@ import 'dart:typed_data';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
 import '../../rust/api/network.dart' as network_api;
+import '../call_setup_trace.dart';
 import 'frame_cryptor_service.dart';
 import 'ice_route_probe.dart';
 import 'local_speaking_detector.dart';
+import 'pending_ice_queue.dart';
 import 'remote_track_volume.dart';
 
 /// Log to hollow_debug.log (visible in release builds).
@@ -35,8 +37,9 @@ class VoiceService {
   String? _activeCallId;
   bool _isMuted = false;
 
-  /// ICE candidates received before setRemoteDescription is called.
-  final List<RTCIceCandidate> _pendingCandidates = [];
+  /// ICE candidates received before setRemoteDescription is called, keyed by
+  /// the call they belong to. See [PendingIceQueue] for why the key matters.
+  late final PendingIceQueue _pendingCandidates = PendingIceQueue(log: _log);
   bool _remoteDescriptionSet = false;
 
   // -- Video state --
@@ -156,7 +159,7 @@ class VoiceService {
     // overwrites _localStream/_localVideoStream, so without this a re-entrant
     // call (or a leftover session) would orphan the previous streams + their
     // mic/V4L2 capturers. _initPeerConnection's PC guard alone is not enough.
-    await _teardownMedia();
+    await _teardownMedia(keepCandidatesForCallId: callId);
 
     _activePeerId = peerId;
     _activeCallId = callId;
@@ -164,11 +167,14 @@ class VoiceService {
     try {
       // Pre-capture media BEFORE creating the PC.
       await _captureLocalAudio();
+      CallSetupTrace.markCurrent(CallSetupTrace.kGumAudio);
       if (withVideo) {
         await _captureLocalVideo();
+        CallSetupTrace.markCurrent(CallSetupTrace.kGumVideo);
       }
 
       await _initPeerConnection(peerId, callId);
+      CallSetupTrace.markCurrent(CallSetupTrace.kPc);
       _addLocalAudioTracks();
 
       if (withVideo && _localVideoStream != null) {
@@ -179,8 +185,11 @@ class VoiceService {
 
       final offer = await _pc!.createOffer();
       final mungedOffer = _mungeOpusParams(offer.sdp!);
+      CallSetupTrace.markCurrent(CallSetupTrace.kSdp);
       await _pc!.setLocalDescription(
           RTCSessionDescription(mungedOffer, offer.type));
+      // Gathering starts here, not at createPeerConnection.
+      CallSetupTrace.markCurrent(CallSetupTrace.kSld);
 
       _log('[HOLLOW-VOICE] Offer created, SDP length=${mungedOffer.length}');
       _dumpSdp('OFFER-OUT', mungedOffer);
@@ -214,7 +223,7 @@ class VoiceService {
     // Tear down any prior session's media BEFORE capturing new media (see
     // createOffer) so a second inbound offer during the capture window can't
     // orphan the first session's streams/PC.
-    await _teardownMedia();
+    await _teardownMedia(keepCandidatesForCallId: callId);
 
     _activePeerId = peerId;
     _activeCallId = callId;
@@ -224,11 +233,14 @@ class VoiceService {
     try {
       // Pre-capture media BEFORE creating the PC.
       await _captureLocalAudio();
+      CallSetupTrace.markCurrent(CallSetupTrace.kGumAudio);
       if (withVideo) {
         await _captureLocalVideo();
+        CallSetupTrace.markCurrent(CallSetupTrace.kGumVideo);
       }
 
       await _initPeerConnection(peerId, callId);
+      CallSetupTrace.markCurrent(CallSetupTrace.kPc);
       _addLocalAudioTracks();
 
       if (withVideo && _localVideoStream != null) {
@@ -243,8 +255,11 @@ class VoiceService {
 
       final answer = await _pc!.createAnswer();
       final mungedAnswer = _mungeOpusParams(answer.sdp!);
+      CallSetupTrace.markCurrent(CallSetupTrace.kSdp);
       await _pc!.setLocalDescription(
           RTCSessionDescription(mungedAnswer, answer.type));
+      // Gathering starts here, not at createPeerConnection.
+      CallSetupTrace.markCurrent(CallSetupTrace.kSld);
 
       _log('[HOLLOW-VOICE] Answer created, SDP length=${mungedAnswer.length}');
       _dumpSdp('ANSWER-OUT', mungedAnswer);
@@ -478,12 +493,13 @@ class VoiceService {
   /// Candidates are queued until setRemoteDescription has been called — adding
   /// them before that causes silent rejection by libwebrtc (the native layer
   /// returns an error if there's no remote description yet).
-  Future<void> handleIceCandidate(
-      String candidate, String? sdpMid, int? sdpMLineIndex) async {
+  Future<void> handleIceCandidate(String callId, String candidate,
+      String? sdpMid, int? sdpMLineIndex) async {
     final iceCandidate = RTCIceCandidate(candidate, sdpMid, sdpMLineIndex);
+    CallSetupTrace.markCurrent(CallSetupTrace.kRemoteCand);
 
     if (!_remoteDescriptionSet || _pc == null) {
-      _pendingCandidates.add(iceCandidate);
+      _pendingCandidates.add(callId, iceCandidate);
       return;
     }
 
@@ -1192,13 +1208,18 @@ class VoiceService {
   /// libwebrtc thread-set). Used by [endCall] AND at the start of
   /// [createOffer]/[handleOffer] so a re-entrant call (e.g. a second inbound
   /// offer during the capture window) can't orphan the prior session's streams.
-  Future<void> _teardownMedia() async {
+  ///
+  /// [keepCandidatesForCallId] survives the teardown: when this runs at the
+  /// START of a new call, the peer may already have trickled candidates for
+  /// that call and they must not be swept out with the previous session's.
+  Future<void> _teardownMedia({String? keepCandidatesForCallId}) async {
     await _teardownLocalStreams();
     await _teardownRenderersAndRemoteStream();
     await _teardownPeerConnection();
     await _teardownFrameCryptor();
 
-    _pendingCandidates.clear();
+    _discardPendingCandidates('teardown',
+        keepCallId: keepCandidatesForCallId);
     _isVideoEnabled = false;
     _remoteDescriptionSet = false;
   }
@@ -1422,7 +1443,7 @@ class VoiceService {
       await _pc!.dispose();
       _pc = null;
     }
-    _pendingCandidates.clear();
+    _discardPendingCandidates('initPeerConnection', keepCallId: callId);
     _remoteDescriptionSet = false;
 
     _logIceServerConfig();
@@ -1440,11 +1461,19 @@ class VoiceService {
     // ICE connection state handler (ICE layer — checking/connected/failed/disconnected).
     pc.onIceConnectionState = (iceState) {
       _log('[HOLLOW-VOICE] ICE connection state: $iceState');
+      if (iceState == RTCIceConnectionState.RTCIceConnectionStateConnected ||
+          iceState == RTCIceConnectionState.RTCIceConnectionStateCompleted) {
+        CallSetupTrace.markCurrent(CallSetupTrace.kIceConnected);
+      }
     };
 
     // ICE gathering state handler.
     pc.onIceGatheringState = (gatherState) {
       _log('[HOLLOW-VOICE] ICE gathering state: $gatherState');
+      if (gatherState ==
+          RTCIceGatheringState.RTCIceGatheringStateComplete) {
+        CallSetupTrace.markCurrent(CallSetupTrace.kGatherDone);
+      }
     };
 
     // Connection state handler.
@@ -1479,6 +1508,9 @@ class VoiceService {
                 ? 'relay'
                 : 'unknown';
     _log('[HOLLOW-VOICE] ICE candidate: $type mid=${candidate.sdpMid}');
+    // First of each type only (the trace keeps the first write) — when the
+    // srflx arrives is what decides whether a direct pair could have raced.
+    if (type != 'unknown') CallSetupTrace.markCurrent('cand-$type');
     final payload = jsonEncode({
       'call_id': callId,
       'candidate': candidate.candidate,
@@ -1517,6 +1549,8 @@ class VoiceService {
     _log('[HOLLOW-VOICE] Connection state: $state');
     switch (state) {
       case RTCPeerConnectionState.RTCPeerConnectionStateConnected:
+        // Mark BEFORE the callback: the provider finishes the trace there.
+        CallSetupTrace.markCurrent(CallSetupTrace.kConnected);
         onConnected?.call(peerId);
         _logIceRoute(pc, peerId);
       case RTCPeerConnectionState.RTCPeerConnectionStateFailed:
@@ -1916,17 +1950,38 @@ class VoiceService {
   // Private — Helpers
   // ---------------------------------------------------------------------------
 
+  /// Drop queued candidates that do NOT belong to [keepCallId], saying so
+  /// when there were any. A null [keepCallId] drops everything (call over).
+  ///
+  /// Dropping a candidate for the call currently being set up is a real loss,
+  /// not bookkeeping: the peer sends each candidate exactly once, so a
+  /// discarded one is gone for the lifetime of the call and the connection has
+  /// to survive on whatever travels the other way. That is why this is keyed
+  /// rather than a blanket clear, and why it marks the setup trace.
+  void _discardPendingCandidates(String where, {String? keepCallId}) {
+    final dropped = _pendingCandidates.discardExcept(keepCallId);
+    if (dropped == 0) return;
+    _log('[HOLLOW-VOICE] Discarding $dropped queued ICE candidate(s) at $where');
+    CallSetupTrace.markCurrent(CallSetupTrace.kCandDropped);
+  }
+
+  /// Hand the active call's queued candidates to the peer connection.
+  ///
+  /// Only the active call's: an entry for any other call is stale by
+  /// definition and libwebrtc would reject it against these ICE credentials.
   Future<void> _flushPendingCandidates() async {
-    if (_pendingCandidates.isEmpty || _pc == null) return;
-    _log('[HOLLOW-VOICE] Flushing ${_pendingCandidates.length} pending ICE candidates');
-    for (final candidate in _pendingCandidates) {
+    final callId = _activeCallId;
+    if (_pc == null || callId == null) return;
+    final ready = _pendingCandidates.take(callId);
+    if (ready.isEmpty) return;
+    _log('[HOLLOW-VOICE] Flushing ${ready.length} pending ICE candidates');
+    for (final candidate in ready) {
       try {
         await _pc!.addCandidate(candidate);
       } catch (e) {
         _log('[HOLLOW-VOICE] Failed to add queued ICE candidate: $e');
       }
     }
-    _pendingCandidates.clear();
   }
 
   /// Dump key SDP lines for debugging.

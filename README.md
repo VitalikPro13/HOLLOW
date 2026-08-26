@@ -31,7 +31,7 @@
 <br>
 
 <p align="center">
-  <img src="assets/Home_Screenshot_v031.png" width="800" alt="Hollow home screen">
+  <img src="assets/Home_Screenshot_v0101.png" width="800" alt="Hollow home screen">
 </p>
 
 <details>

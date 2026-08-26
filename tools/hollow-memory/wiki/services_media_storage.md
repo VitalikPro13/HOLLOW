@@ -439,9 +439,9 @@ final identityServiceProvider = Provider<IdentityService>((_) => IdentityService
 
 File: `lib/src/core/shared_tickers.dart`
 
-Singleton that provides centralized animation clocks shared across the entire app. Instead of each animated widget spawning its own `AnimationController` + `Ticker`, all decorative animations read from shared `ValueNotifier`s driven by two `Timer` lanes — 30fps and 1fps, never a `Ticker` (see memory `feedback_ticker_is_a_frame_request`) — and each lane stops when nothing listens (`GatedNotifier`). (Historically one `Ticker` plus one low-framerate `Timer` for ambient).
+Singleton that provides centralized animation clocks shared across the entire app. Instead of each animated widget spawning its own `AnimationController` + `Ticker`, all decorative animations read from shared `ValueNotifier`s driven by **one 30fps `Timer`**, never a `Ticker` (see memory `feedback_ticker_is_a_frame_request`) — and it stops when nothing listens (`GatedNotifier`). (Historically one `Ticker` plus a low-framerate `Timer` for ambient; then briefly a second 1fps lane for `ambient`, reverted 2026-08-26 because slowing visible motion reads as lag.)
 
-Used by: `SelectionShimmer`, `StatusDot`, `TypingDots`, `AmbientBackground`, and various divider/glow effects throughout the shell and panels.
+Used by: `SelectionShimmer`, `TypingDots`, `AmbientBackground`, the mobile Chats header glow, and various divider/glow effects throughout the shell and panels. `pulse` is GONE — `StatusDot` is always static.
 
 ### Initialization
 
@@ -452,25 +452,24 @@ Called once in `main()`: `SharedTickers.instance.start()`. Registers as a `Widge
 | Notifier | Cycle | Shape | Used By |
 |----------|-------|-------|---------|
 | `shimmer` | 4s (`_shimmerCycleUs = 4000000`) | Linear 0.0 -> 1.0, repeating | SelectionShimmer, _ShimmerDivider, _SectionDivider glow |
-| `pulse` | 6s total / 3s per direction (`_pulseCycleUs = 6000000`) | Ping-pong 0 -> 1 -> 0 with `Curves.easeInOut` | StatusDot breathing glow |
 | `typingDots` | 1.2s (`_typingCycleUs = 1200000`) | Linear 0.0 -> 1.0, repeating | TypingDots indicator |
-| `ambient` | 45s (`_ambientCycleUs = 45000000`) | Linear 0.0 -> 1.0, repeating, ~15fps | AmbientBackground drift |
+| `ambient` | 45s (`_ambientCycleUs = 45000000`) | Linear 0.0 -> 1.0, repeating | AmbientBackground drift; mobile Chats header glow at 4.5x |
 
 ### Tick implementation
 
-**Main ticker** (`_ticker: Ticker`): Drives `shimmer`, `pulse`, and `typingDots` at full framerate (vsync). The `_onTick(Duration elapsed)` callback computes each value from `elapsed.inMicroseconds` modulo the cycle duration.
+**One `Timer.periodic(33ms)`** (`_ticker`, `_fastIntervalMs = 33`) drives all three notifiers. `_onTick()` reads a `Stopwatch` and computes each value from `elapsedMicroseconds` modulo its cycle duration.
 
 - **Shimmer:** `(us % 4000000) / 4000000` -- straight linear ramp.
-- **Pulse:** Two-step transform: (1) linear ping-pong via `pulseLinear < 0.5 ? pulseLinear * 2.0 : 2.0 - pulseLinear * 2.0`, then (2) `Curves.easeInOut.transform()` for smooth breathing.
 - **TypingDots:** `(us % 1200000) / 1200000` -- straight linear ramp.
+- **Ambient:** `(us % 45000000) / 45000000` -- straight linear ramp.
 
-**Ambient timer** (`_ambientTimer: Timer`): Runs at ~15fps (67ms interval) to save CPU for the slow 45-second ambient background cycle. Uses a manual `Stopwatch` since `Timer.periodic` doesn't provide elapsed time.
+`_syncFast()` starts the timer only while `shimmer`, `typingDots` or `ambient` has a listener, and cancels it when the last one goes away. Writing a value nobody listens to is free, so the three are computed unconditionally.
 
 ### Pause/Resume
 
-**`pause()`:** Stops the `Ticker`, cancels the ambient `Timer`, stops the ambient `Stopwatch`. Called when the window is hidden, minimized, or unfocused.
+**`pause()`:** Stops the `Stopwatch` and cancels the timer. Called when the window is hidden, minimized, or unfocused.
 
-**`resume()`:** Disposes the old `Ticker` (Tickers cannot restart once stopped), creates a new one, restarts the ambient stopwatch and timer. No-ops if `disabled` is true.
+**`resume()`:** Restarts the `Stopwatch` — phase is preserved across a pause, so an animation resumes where it left off instead of snapping back to the start — then re-syncs. No-ops if `disabled` is true.
 
 ### Disable flag
 

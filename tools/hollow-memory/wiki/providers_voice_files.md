@@ -396,10 +396,15 @@ Master dispatcher `handleCallSignal(peerId, signalType, payload)` routes by `sig
 
 **`_handleInvite(peerId, payload)`**
 - Parses JSON `{call_id, video, sframe_key}`.
-- If busy (not idle), sends `busy` signal back.
-- **Glare resolution:** If both peers invite simultaneously, the peer with the lower `localPeerId` (lexicographic) is "polite" and accepts the remote invite. The "impolite" peer ignores the remote invite. SECURITY: During glare, the local SFrame key is preserved (not replaced by attacker-injectable remote key).
-- Sets state to `ringing` / `incoming`.
-- Starts 30-second auto-reject timer.
+- Routes through the pure `decideInviteAction()` (`core/call_invite_decision.dart`) → `glarePolite` / `glareImpolite` / `busy` / `ring`.
+- **CRITICAL — glare is decided BEFORE the busy guard** (2026-08-26). `ringing` is not `idle`, so with busy first the glare branch was unreachable dead code and two people dialling at once busy-rejected each other. The ordering is pinned by `test/call_invite_decision_test.dart`.
+- **Glare detection resolves identities:** an outgoing `state.peerId` is a MASTER (what `startCall` targets) while an inbound signal carries the sender's DEVICE, so the old raw `state.peerId == peerId` never matched a multi-device peer. Now `deviceLinkProvider.sameIdentity`.
+- **Tiebreak is MASTER vs MASTER** (`identityOf` both sides): the two ends must compare the same pair of strings or both can elect themselves polite. Contrast the VC mesh (DEVICE vs DEVICE) — the invariant is the pairing, not which kind of id.
+- **Polite side takes THEIR sframe key**, falling through to the ordinary incoming path. The caller always encrypts with the key it generated in `startCall` (`_handleAccept` never reads the one `acceptCall` echoes back), so preserving ours left the two ends on different keys. Matches WHITEPAPER §6.1. It also stops the ringback and sends `end` for the abandoned invite.
+- `Busy, rejecting` logs via `_callLog` (release-visible), not `debugPrint`.
+- Sets state to `ringing` / `incoming`, begins the `[CALL-SETUP]` trace, starts the 30-second auto-reject timer.
+
+See memory `feedback_call_glare_before_busy`.
 
 **`_handleAccept(peerId, payload)`**
 - Only processes if `ringing` + `outgoing` + matching `callId`.

@@ -306,7 +306,7 @@ File: `lib/src/ui/animations/ambient_background.dart`
 
 **Background check:** Watches `backgroundProvider.hasBackground`. If a custom background image is set, skips blobs entirely and returns `child` directly.
 
-**Animation:** Uses `SharedTickers.instance.ambient` (`GatedNotifier`, **1fps**, 45-second cycle — one step per second moves a blob less than the blur on its own edge). The `ValueListenableBuilder` computes figure-8 positions:
+**Animation:** Uses `SharedTickers.instance.ambient` (`GatedNotifier`, **30fps**, 45-second cycle). It briefly ran on a 1fps lane on the reasoning that one step moves a blob less than the blur on its own edge — true of the blob's AVERAGE speed, false through the middle of a sine's travel across the widest surface in the app, where it reads as a stutter. See memory `feedback_ticker_is_a_frame_request`. The `ValueListenableBuilder` computes figure-8 positions:
 - Blob 1: `x1 = 0.5 + 0.25 * sin(t)`, `y1 = 0.5 + 0.15 * sin(2t)`.
 - Blob 2: `x2 = 0.5 - 0.2 * sin(t + 0.7pi)`, `y2 = 0.5 - 0.2 * sin(2t + pi)`.
 
@@ -422,8 +422,8 @@ File: `lib/src/ui/animations/selection_shimmer.dart`
 File: `lib/src/core/shared_tickers.dart`
 
 Singleton (`SharedTickers.instance`) that centralizes all repeating decorative
-animation into **two `Timer` lanes** — 30fps (`shimmer`, `typingDots`) and 1fps
-(`ambient`). Implements `WidgetsBindingObserver` for lifecycle management.
+animation into **ONE 30fps `Timer` lane** (`shimmer`, `typingDots`, `ambient`).
+Implements `WidgetsBindingObserver` for lifecycle management.
 
 **Deliberately timers, NOT `Ticker`s (2026-08-23).** A running `Ticker` requests
 a frame at every vsync whether or not the picture changed; on a 240Hz display
@@ -431,10 +431,17 @@ that alone held an idle app at 69% of a CPU core. A timer publishes at a rate we
 choose rather than one the monitor chooses. Never reintroduce a `Ticker` here —
 see memory `feedback_ticker_is_a_frame_request`.
 
-**Both lanes are gated on listeners** via `GatedNotifier`, a `ValueNotifier`
-that reports unwatched->watched transitions so a clock stops when nothing is
-listening. A screen pays only for the animations actually on it (Home has no
-shimmer, so the 30fps lane never runs there).
+**The lane is gated on listeners** via `GatedNotifier`, a `ValueNotifier` that
+reports unwatched->watched transitions so the clock stops when nothing is
+listening. A screen pays only for the animations actually on it. **The gate,
+not the rate, is where the saving lives** — a second 1fps lane was tried for
+`ambient` (2026-08-23) and reverted (2026-08-26) because slowing visible motion
+reads as the app lagging. Measured after the revert: idle 31.8fps, build
+0.20ms, raster 1.3ms, roughly 5% of one core against ~2.5% at 1fps.
+
+The one animation that genuinely wants a slow clock keeps its own:
+`_RelayStatsCard`'s poll sweep (`home_dashboard.dart`) steps once a second,
+seven steps to fill, then stops. That is a countdown, not motion.
 
 `pulse` is GONE — `StatusDot` is always static.
 
@@ -442,15 +449,14 @@ shimmer, so the 30fps lane never runs there).
 
 | Notifier | Cycle | Driven By | Used By |
 |----------|-------|-----------|---------|
-| `shimmer` | 4s linear | Main ticker | `SelectionShimmer`, divider glows |
-| `pulse` | 6s ping-pong (3s each way) with easeInOut | Main ticker | `StatusDot` |
-| `typingDots` | 1.2s linear | Main ticker | Typing indicator dots |
-| `ambient` | 45s linear at ~15fps | Separate `Timer.periodic(67ms)` | `AmbientBackground` |
+| `shimmer` | 4s linear | 30fps lane | `SelectionShimmer`, divider glows |
+| `typingDots` | 1.2s linear | 30fps lane | Typing indicator dots |
+| `ambient` | 45s linear | 30fps lane | `AmbientBackground`, mobile Chats header glow (reads it at 4.5x for a ~10s ping-pong sweep) |
 
 **Lifecycle:**
-- `start()` — creates `Ticker` + ambient timer, registers as lifecycle observer. No-op if `disabled`.
-- `pause()` — stops ticker, cancels ambient timer, stops ambient stopwatch.
-- `resume()` — disposes old ticker, creates new one (Ticker cannot restart once stopped), restarts ambient timer.
+- `start()` — registers as lifecycle observer, syncs the lane. No-op if `disabled`.
+- `pause()` — stops the stopwatch and cancels the timer.
+- `resume()` — restarts the stopwatch (phase is preserved across a pause, so an animation picks up where it left off) and re-syncs.
 - `didChangeAppLifecycleState` — pauses on `paused`/`hidden`/`detached`, resumes on `resumed`, keeps running on `inactive`.
 - `disabled` flag — when true, `start()` and `resume()` are no-ops. All animation widgets stay frozen. **Set by `ReduceMotionController`, not the settings UI directly** (see Reduce Motion ownership under HollowDurations above).
 

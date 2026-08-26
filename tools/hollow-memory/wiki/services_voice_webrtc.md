@@ -271,11 +271,13 @@ Audio quality: `opusBitrate` (default 32000), `opusStereo` (default false). Set 
 
 ### ICE Candidate Handling
 
-`VoiceService.handleIceCandidate(candidate, sdpMid, sdpMLineIndex)`:
-- If remote description not yet set or no PC, queues the candidate
+`VoiceService.handleIceCandidate(callId, candidate, sdpMid, sdpMLineIndex)`:
+- If remote description not yet set or no PC, queues the candidate **against its call id**
 - Otherwise adds directly via `pc.addCandidate()`
 
-`_flushPendingCandidates()`: Iterates and adds all queued candidates, clears the list.
+**CRITICAL — the queue is call-keyed** (`services/pending_ice_queue.dart`, 2026-08-26). The answerer queues candidates while `_captureLocalAudio()` is still opening the mic (~220ms cold), and then builds the peer connection on top of them, so a blanket `.clear()` at construction discarded the candidates for the very call being set up. `PendingIceQueue.discardExcept(keepCallId)` drops only other calls'; `_teardownMedia(keepCandidatesForCallId:)` and `_initPeerConnection` both pass the call in flight. The failure was intermittent rather than obvious because ICE still succeeds one-directionally via peer-reflexive discovery. See memory `feedback_pending_ice_queue_call_keyed`.
+
+`_flushPendingCandidates()`: takes only the ACTIVE call's queued candidates (`take(callId)`) and adds them; an entry for any other call is stale and libwebrtc would reject it against these ICE credentials. A queue cap of 256 latches one `[SENTINEL]` line per overflow episode.
 
 ### Peer Connection Setup
 

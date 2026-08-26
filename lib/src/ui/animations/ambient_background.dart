@@ -10,9 +10,9 @@ import 'package:hollow/src/core/shared_tickers.dart';
 /// Two soft radial gradient blobs (teal + purple/blue) at low opacity
 /// drift in a slow figure-8 pattern over ~45 seconds.
 ///
-/// Uses [SharedTickers.ambient] at ~15fps instead of a 60fps ticker —
-/// the motion is so slow that 15fps is visually identical but uses ~75%
-/// less CPU.
+/// Driven by [SharedTickers.ambient], a shared 30fps timer rather than a
+/// per-widget [Ticker], so the cost is 30 frames a second while the blobs are
+/// on screen and none at all when they are not.
 ///
 /// When a custom background image is set, blobs are hidden (image is
 /// rendered at the shell level behind everything).
@@ -43,7 +43,7 @@ class AmbientBackground extends ConsumerWidget {
     // content passed through the builder as `child`. Passing it through spared
     // the REBUILD, but not the RASTER: a repaint inside a boundary re-rasters
     // the whole boundary, so every blob tick re-rendered the entire pane
-    // underneath it. Fifteen times a second, over the largest surface in the
+    // underneath it. Thirty times a second, over the largest surface in the
     // app. Giving the overlay its own boundary means a blob tick re-rasters
     // two soft circles and composites them over an untouched content layer.
     return Stack(

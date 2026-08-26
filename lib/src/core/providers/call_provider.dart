@@ -9,6 +9,9 @@ import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
+import 'package:hollow/src/core/call_invite_decision.dart';
+import 'package:hollow/src/core/call_setup_trace.dart';
+import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/audio_route_provider.dart';
 import 'package:hollow/src/core/providers/ice_config_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
@@ -311,6 +314,8 @@ class CallNotifier extends Notifier<CallState> {
     };
     _voiceService!.onConnected = (peerId) {
       debugPrint('[HOLLOW-CALL] Voice connected with $peerId');
+      // Media is flowing — emit the setup timeline (see call_setup_trace.dart).
+      CallSetupTrace.finishCurrent();
       if (state.status == CallStatus.connecting) {
         state = state.copyWith(
           status: CallStatus.active,
@@ -750,6 +755,7 @@ class CallNotifier extends Notifier<CallState> {
     // nowhere left zero evidence on the caller.
     _callLog('[HOLLOW-CALL] Starting ${withVideo ? 'video' : 'voice'} call '
         'to $peerId call=$callId');
+    CallSetupTrace.begin(callId: callId, outgoing: true);
     state = CallState(
       status: CallStatus.ringing,
       peerId: peerId,
@@ -800,6 +806,8 @@ class CallNotifier extends Notifier<CallState> {
     final callId = state.callId!;
 
     _ringTimer?.cancel();
+    // Everything before this was the user deciding; machine time starts here.
+    CallSetupTrace.markCurrent(CallSetupTrace.kAccept);
     state = state.copyWith(status: CallStatus.connecting);
 
     // Leave any voice channel before the call media comes up (issue #49) —
@@ -1618,37 +1626,55 @@ class CallNotifier extends Notifier<CallState> {
       callId = payload;
     }
 
-    if (state.status != CallStatus.idle) {
-      debugPrint('[HOLLOW-CALL] Busy, rejecting invite from $peerId');
-      _sendSignal(peerId, 'busy', callId);
-      return;
+    // Glare has to be settled BEFORE the busy guard: `ringing` is not `idle`,
+    // so with busy first the glare branch was unreachable and two people
+    // dialling at once busy-rejected each other. See [decideInviteAction],
+    // which exists to keep that ordering under test.
+    //
+    // Identity, not raw ids: our outgoing `state.peerId` is a MASTER (that is
+    // what startCall targets) while an inbound signal carries the sender's
+    // DEVICE, so the old `state.peerId == peerId` never matched a
+    // multi-device peer even when the ordering was right.
+    final links = ref.read(deviceLinkProvider);
+    final action = decideInviteAction(
+      ringingOutgoingToSamePerson: state.status == CallStatus.ringing &&
+          state.direction == CallDirection.outgoing &&
+          links.sameIdentity(state.peerId ?? '', peerId),
+      idle: state.status == CallStatus.idle,
+      ourMaster: links.identityOf(localPeerId),
+      theirMaster: links.identityOf(peerId),
+    );
+
+    switch (action) {
+      case InviteAction.glareImpolite:
+        _callLog('[HOLLOW-CALL] Glare with $peerId: impolite, keeping our '
+            'call=${state.callId}');
+        return;
+      case InviteAction.busy:
+        // _callLog, not debugPrint: a rejected invite is exactly what you go
+        // looking for in a release log, and it was invisible there.
+        _callLog('[HOLLOW-CALL] Busy, rejecting invite from $peerId');
+        _sendSignal(peerId, 'busy', callId);
+        return;
+      case InviteAction.glarePolite:
+        final abandoned = state.callId;
+        _callLog('[HOLLOW-CALL] Glare with $peerId: polite, taking theirs '
+            '(abandoning call=$abandoned)');
+        // We were the caller a heartbeat ago, so our own ringback has to stop
+        // before we become the callee.
+        SoundService.instance.stopRingback();
+        // Retire our invite so a peer that read it while idle (and so never
+        // saw the glare) is not left ringing for a call we have dropped.
+        if (abandoned != null) _sendSignal(peerId, 'end', abandoned);
+      case InviteAction.ring:
+        break;
     }
 
-    // Glare: if we sent an outgoing invite at the same time.
-    if (state.status == CallStatus.ringing &&
-        state.direction == CallDirection.outgoing &&
-        state.peerId == peerId) {
-      if (localPeerId.compareTo(peerId) < 0) {
-        debugPrint('[HOLLOW-CALL] Glare: we are polite, accepting theirs');
-        _ringTimer?.cancel();
-        // SECURITY (Phase 6.25): Preserve OUR SFrame key during glare
-        // resolution. Accepting the remote peer's key would let an attacker
-        // inject their own key via a timed spoofed invite.
-        state = CallState(
-          status: CallStatus.ringing,
-          peerId: peerId,
-          callId: callId,
-          direction: CallDirection.incoming,
-          isVideoCall: withVideo,
-          sframeKey: state.sframeKey,
-        );
-        return;
-      } else {
-        debugPrint('[HOLLOW-CALL] Glare: we are impolite, ignoring theirs');
-        return;
-      }
-    }
-
+    // The polite glare path deliberately falls through to the ordinary
+    // incoming setup, THEIR sframe key included. The caller always encrypts
+    // with the key it generated in startCall — `_handleAccept` never reads the
+    // one acceptCall echoes back — so keeping ours here would leave the two
+    // ends on different keys: a call that connects and cannot be understood.
     state = CallState(
       status: CallStatus.ringing,
       peerId: peerId,
@@ -1657,6 +1683,8 @@ class CallNotifier extends Notifier<CallState> {
       isVideoCall: withVideo,
       sframeKey: sframeKey,
     );
+    // The ring starts the clock on this side.
+    CallSetupTrace.begin(callId: callId, outgoing: false);
 
     // 30-second auto-reject timeout.
     _ringTimer?.cancel();
@@ -1688,6 +1716,8 @@ class CallNotifier extends Notifier<CallState> {
 
     _ringTimer?.cancel();
     // They picked up — the ring stops here, well before the media comes up.
+    // Machine time starts here too: everything earlier was them deciding.
+    CallSetupTrace.markCurrent(CallSetupTrace.kAccept);
     SoundService.instance.stopRingback();
     state = state.copyWith(status: CallStatus.connecting);
 
@@ -1717,6 +1747,7 @@ class CallNotifier extends Notifier<CallState> {
 
     final sdpPayload = jsonEncode({'call_id': callId, 'sdp': sdp});
     _sendSignal(peerId, 'sdp_offer', sdpPayload);
+    CallSetupTrace.markCurrent(CallSetupTrace.kSdpSent);
   }
 
   Future<void> _handleReject(String peerId, String callId) async {
@@ -1837,6 +1868,7 @@ class CallNotifier extends Notifier<CallState> {
         });
       }
     } else {
+      CallSetupTrace.markCurrent(CallSetupTrace.kRemoteSdp);
       // Ensure device preferences are loaded before starting media.
       await _ensureDevicePreferences();
       // Initial call setup — create a dedicated voice PC, capture audio,
@@ -1861,6 +1893,7 @@ class CallNotifier extends Notifier<CallState> {
 
       final answerPayload = jsonEncode({'call_id': callId, 'sdp': answerSdp});
       _sendSignal(peerId, 'sdp_answer', answerPayload);
+      CallSetupTrace.markCurrent(CallSetupTrace.kSdpSent);
     }
   }
 
@@ -1871,6 +1904,8 @@ class CallNotifier extends Notifier<CallState> {
 
     if (state.callId != callId) return;
 
+    // The deadline gathering had to beat: checks can start from here.
+    CallSetupTrace.markCurrent(CallSetupTrace.kRemoteSdp);
     await _service.handleAnswer(sdp);
     // Our renegotiation round-trip just settled (PC back to stable) —
     // process any remote offer that collided with it.
@@ -1904,6 +1939,7 @@ class CallNotifier extends Notifier<CallState> {
     if (state.callId != callId) return;
 
     await _service.handleIceCandidate(
+      callId,
       json['candidate'] as String,
       json['sdpMid'] as String?,
       (json['sdpMLineIndex'] as num?)?.toInt(),
@@ -2116,6 +2152,9 @@ class CallNotifier extends Notifier<CallState> {
   }
 
   Future<void> _cleanup() async {
+    // A call that never reached `connected` still has a story worth reading
+    // (where it stopped); no-op once finishCurrent() ran on connect.
+    CallSetupTrace.finishCurrent(reason: 'torn-down');
     _ringTimer?.cancel();
     _ringTimer = null;
     // The single teardown chokepoint — reject, busy, ring timeout, remote end
