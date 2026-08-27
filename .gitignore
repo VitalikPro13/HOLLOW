@@ -91,6 +91,12 @@ rust/target/
 relay/target/
 loadtest/target/
 
+# Coverage + lint reports. CI regenerates these every run (`cargo llvm-cov`,
+# `cargo clippy --message-format=json`); they are inputs to Codecov and Sonar,
+# never source.
+lcov.info
+clippy-report.json
+
 # Bundled native binaries (fetched via scripts/fetch_ffmpeg.{ps1,sh})
 vendor/ffmpeg/
 

@@ -24,8 +24,8 @@ flutter build windows
 flutter test test/  # widget tests
 cd rust/hollow_core && cargo check  # + clippy
 
-cargo test --lib test_harness -- --nocapture  # multi-node harness over MockRelay
-cargo test --lib  # full Rust suite
+cargo test --lib test_harness -- --nocapture  # multi-node harness
+cargo nextest run --lib  # full suite 80s vs 16min
 
 # FRB codegen after Rust API changes (MUST run from project root)
 flutter_rust_bridge_codegen generate --rust-input "crate::api" --rust-root "rust/hollow_core" --dart-output "lib/src/rust"

@@ -1,0 +1,55 @@
+# nextest runs each test in its OWN PROCESS, which is the whole reason it is
+# worth having here.
+#
+# The multi-node harness is ~830 seconds of deliberate `sleep_ms` spread over
+# 89 tests, and every one of them holds `resolver::test_lock()` — a
+# process-wide mutex guarding the global resolver map. Under `cargo test` that
+# lock makes those sleeps strictly additive: the suite takes ~16 minutes with
+# the CPU idle for 87% of it. One process per test means one resolver map per
+# test, so the lock stops being a bottleneck and the sleeps overlap: ~80s.
+#
+# The catch is that process isolation ALSO removes the protection of any
+# in-process lock guarding something the OS shares between processes. There is
+# exactly one of those (see the test group below); everything else the tests
+# touch is either a `static` (per-process, so isolation helps) or a tempdir.
+
+[profile.default]
+# Report every failure in one run. The default stops at the first, which turns
+# a full-suite run into a guessing game about what else is broken.
+fail-fast = false
+
+# The harness sleeps on purpose, so "slow" is not news; this is a hang killer,
+# not a performance budget. The slowest real test is ~45s.
+slow-timeout = { period = "120s", terminate-after = 5 }
+
+# `identity::platform_keystore` writes to the REAL OS credential store
+# (Windows Credential Manager / the macOS keychain), which is MACHINE-global.
+# Its `cred_test_lock()` is an in-process mutex, so it protects nothing once
+# each test is its own process, and the tests exercise the real wrapping-key
+# slot names: two of them interleaving does not just flake, it can leave a
+# keychain-protected dev profile's key restored from the wrong snapshot.
+# `SlotGuard` captures and restores those slots, and that capture/restore pair
+# has to be atomic against every other test that touches them.
+[test-groups.os-keychain]
+max-threads = 1
+
+[[profile.default.overrides]]
+filter = 'test(platform_keystore)'
+test-group = 'os-keychain'
+
+# CI: same thing, plus retries. A harness test that fails once on a loaded
+# shared runner and passes on retry is a timing artifact of the runner, not a
+# regression — but it is still reported as flaky rather than hidden.
+[profile.ci]
+fail-fast = false
+retries = 1
+
+# The suite is SLEEP-bound, not CPU-bound, so thread count is the only dial
+# and oversubscribing helps: locally 8 threads = 128s, 16 = 80s, 24 = 64s.
+# nextest would otherwise default to the runner's core count, which on a
+# small GitHub runner means 2-4 threads and gives most of the win back.
+# Peak memory across 16 concurrent test processes was 682 MB, so this is
+# safe on a 16 GB runner.
+test-threads = 16
+slow-timeout = { period = "180s", terminate-after = 5 }
+failure-output = "immediate-final"
