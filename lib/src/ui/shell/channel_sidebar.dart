@@ -28,6 +28,7 @@ import 'package:hollow/src/core/providers/server_banner_provider.dart';
 import 'package:hollow/src/core/providers/notification_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
+import 'package:hollow/src/core/providers/link_health_provider.dart';
 import 'package:hollow/src/core/providers/recording_provider.dart';
 import 'package:hollow/src/core/providers/saved_messages_provider.dart';
 import 'package:hollow/src/core/providers/unread_provider.dart';
@@ -43,6 +44,7 @@ import 'package:hollow/src/ui/components/hollow_menu.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
+import 'package:hollow/src/ui/components/link_health_chip.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
 import 'package:hollow/src/ui/components/ui_scale.dart';
 import 'package:hollow/src/ui/dialogs/invite_dialog.dart';
@@ -1774,6 +1776,19 @@ class _VoiceParticipantRow extends ConsumerWidget {
                 overflow: TextOverflow.ellipsis,
               ),
             ),
+            // Per-peer link flair. In a mesh one member on bad Wi-Fi is that
+            // member's leg, so it is labelled on THEIR row and never as a
+            // channel-wide alarm. Our own row has no leg of its own to report.
+            if (isRemote)
+              Consumer(builder: (context, ref, _) {
+                final health =
+                    ref.watch(vcLinkHealthProvider.select((m) => m[peerId]));
+                if (health == null) return const SizedBox.shrink();
+                return Padding(
+                  padding: const EdgeInsets.only(left: HollowSpacing.xxs),
+                  child: LinkHealthChip(snapshot: health, compact: true),
+                );
+              }),
             // Screen sharing indicator — green monitor icon.
             if (isScreenSharing)
               const Padding(

@@ -21,7 +21,7 @@ Distributed, encrypted Discord alternative: no central servers, members host it.
 ```bash
 flutter run -d windows
 flutter build windows
-flutter test test/  # widget tests, no device
+flutter test test/  # widget tests
 cd rust/hollow_core && cargo check  # + clippy
 
 cargo test --lib test_harness -- --nocapture  # multi-node harness over MockRelay
@@ -139,7 +139,7 @@ All UI = custom Hollow widgets, no Material defaults (`src/ui/components/`): Hol
 - **CRITICAL: EVERY remote-reachable store write sits behind a gate; the enumeration is wiki `security_write_gates.md` — add a row when you add an ingest path.** `project_close_all_known_holes_085`.
 - **CRITICAL: link previews (#45):** receivers NEVER fetch to RENDER (inline video = explicit tap); `lp_set` re-signs, never `edited_at`; new `LinkPreviewRef` fields go in boxed `RichCard`; digest RECOMPUTED from the shipped card, never the wire. Full rules: `project_link_preview_revamp_plan`.
 - **CRITICAL: message dedup is by message_id, NEVER content:** every insert pre-checks `dm/channel_message_exists(mid)`. Receive events ALWAYS emit a `duplicate` flag — never suppress emission on "row exists". `feedback_sync_dedup_watermark_events`.
-- **CRITICAL: `WsEvent::Disconnected` clears ALL sync-gating state:** `synced_peers`, `key_request_in_flight`, `mls_bootstrap_requested`, `pending_messages` — alongside `ws_room_peers`.
+- **CRITICAL: `WsEvent::Disconnected` purges sync-gating state + remote VC participants; `is_new` is NOT "a new socket"** — an unclean drop sends no `PeerLeft`, so reconnect work goes OUTSIDE it. `feedback_is_new_is_not_a_new_socket`.
 - **CRITICAL: AltGr = Ctrl+Alt on Windows:** hand-rolled `isControlPressed` needs `&& !isAltPressed` (else AZERTY @/€ swallowed); `SingleActivator` immune. `feedback_altgr_ctrl_alt_shortcuts`.
 - **App shortcuts REBINDABLE:** no hardcoded key checks — match `appShortcutsProvider` via `matchesEvent`; shell handler no-ops during keybind capture. `project_rebindable_shortcuts`.
 - **CRITICAL: no raw `OverlayEntry` inside `SelectionArea`** — use `showDialog` with `barrierColor: Colors.transparent`.
@@ -202,4 +202,4 @@ All UI = custom Hollow widgets, no Material defaults (`src/ui/components/`): Hol
 - **HOLLOW_PLAN.md is the authoritative source** for phase details, feature checklists, completion status; don't duplicate it here or in memory files.
 - **HARD budget: 40,000 chars.** Entries = 1–3 lines: rule + memory pointer; war stories go in memory files.
 - **SSH hosts (relay VPS, Mac, VM):** in `BUILD_GUIDE.md` (gitignored); key-only, free for checks/logs/deploys.
-- **Local dev:** `cargo check/test/clippy`, codegen, `flutter analyze` run freely; Vitalik runs `flutter run -d windows`.
+- **Local dev:** checks/tests/codegen run freely; Vitalik runs `flutter run -d windows`.

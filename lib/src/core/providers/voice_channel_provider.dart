@@ -668,13 +668,23 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
   }
 
   /// Handle a peer joining a voice channel (from event).
-  void onPeerJoined(String serverId, String channelId, String peerId) {
+  /// Returns true only for a peer that was NOT already in this channel's
+  /// roster, which is what separates a real arrival from a re-announce.
+  ///
+  /// Two things re-announce: one join arrives TWICE by design (the MLS
+  /// broadcast and the plaintext fan), and a peer rejoining the relay room
+  /// gets told our voice presence again so its signal gate can be refilled.
+  /// Neither is someone walking in, and neither should sound like it.
+  bool onPeerJoined(String serverId, String channelId, String peerId) {
+    final already =
+        state.participants[serverId]?[channelId]?.contains(peerId) ?? false;
     final updated = _deepCopyParticipants();
     updated.putIfAbsent(serverId, () => {});
     updated[serverId]!.putIfAbsent(channelId, () => {});
     updated[serverId]![channelId] =
         {...updated[serverId]![channelId]!, peerId};
     state = state.copyWith(participants: updated);
+    return !already;
   }
 
   /// Handle a peer leaving a voice channel (from event).
@@ -890,6 +900,15 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     svc.canSignal = () =>
         ref.read(connectionStatusProvider).relayStatus ==
         RelayConnectionStatus.connected;
+    // A leg whose hold-open window was spent keeps being reached for while its
+    // member is still in the channel — the provider owns the participant sets,
+    // so it answers the question the service cannot.
+    svc.isChannelParticipant = (peerId) {
+      final sid = state.currentServerId;
+      final cid = state.currentChannelId;
+      if (sid == null || cid == null) return false;
+      return state.getParticipants(sid, cid).contains(peerId);
+    };
     // Lever 2 hand-off: a repaired audio PC changes our route hint, which is
     // what lets the sharer promote us off the relay path.
     svc.onIceRouteRepaired = (peerId, direct) {
@@ -1141,13 +1160,16 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
   }
 
   /// Called when a remote peer joins our current voice channel.
-  Future<void> onRemotePeerJoined(String peerId) async {
+  Future<void> onRemotePeerJoined(String peerId,
+      {bool isNewArrival = true}) async {
     if (_service == null || !state.isInVoiceChannel) return;
     // Someone walked into the channel you're sitting in — the cue the feature
     // request was actually about ("we can't know what's happening right now").
     // Deafened means silence, so channel chatter cues stay out; your own
     // toggles still click, otherwise un-deafening feels like a dead button.
-    if (!state.isDeafened) {
+    // [isNewArrival] false means this is a re-announce for someone already in
+    // the roster, which is not an arrival and must stay silent.
+    if (isNewArrival && !state.isDeafened) {
       SoundService.instance.play(HollowSound.joinVoice, duringCall: true);
     }
     await _service!.onPeerJoinedMyChannel(peerId);
@@ -1381,6 +1403,10 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     } catch (e) {
       debugPrint('[HOLLOW-VC] call teardown error: $e');
       _service = null;
+    } finally {
+      // No legs left to have health, and a teardown that threw part-way must
+      // not leave a member's row wearing a flair for a channel we have left.
+      ref.read(vcLinkHealthProvider.notifier).clear();
     }
   }
 

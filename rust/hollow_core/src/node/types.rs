@@ -3321,6 +3321,22 @@ pub(crate) enum MessageEnvelope {
         target: Option<String>,
     },
 
+    /// Targeted: "our leg is broken, please re-offer it".
+    ///
+    /// The mesh gives the offer to the lexicographically LOWER peer id, so a
+    /// leg that only the OTHER side can see as broken had no way to be
+    /// rebuilt: the higher id would close its side and then wait forever for
+    /// an offer nobody was going to send (field-caught 2026-08-27). This is
+    /// the request that lets it ask. Payload-free: the sid/cid already ride
+    /// the envelope, and the sender is the leg.
+    #[serde(rename = "vc_leg_restart")]
+    VoiceChannelLegRestart {
+        sid: String,
+        cid: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<String>,
+    },
+
     /// Broadcast: camera state (on/off) in a voice channel.
     #[serde(rename = "vc_camera_state")]
     VoiceChannelCameraState {
@@ -3518,6 +3534,7 @@ impl MessageEnvelope {
             | Self::VoiceChannelScreenAssign { target, .. }
             | Self::VoiceChannelRenegOffer { target, .. }
             | Self::VoiceChannelRenegAnswer { target, .. }
+            | Self::VoiceChannelLegRestart { target, .. }
             | Self::VoiceChannelCameraState { target, .. }
             | Self::VoiceChannelRecordingState { target, .. } => target.as_deref(),
             Self::FileHeader { inner } => inner.target.as_deref(),

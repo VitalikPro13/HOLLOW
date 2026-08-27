@@ -945,6 +945,11 @@ fn build_vc_signal_envelope(
         "reneg_answer" => parsed.map(|v| MessageEnvelope::VoiceChannelRenegAnswer {
             sid, cid, sdp: jstr(&v, "sdp"), target: None,
         }),
+        // Payload-free: the sid/cid ride the envelope and the sender IS the
+        // leg being complained about, so there is nothing else to carry.
+        "leg_restart" => Some(MessageEnvelope::VoiceChannelLegRestart {
+            sid, cid, target: None,
+        }),
         "camera_state" => parsed.map(|v| MessageEnvelope::VoiceChannelCameraState {
             sid, cid,
             enabled: v["enabled"].as_bool().unwrap_or(false),
@@ -1448,6 +1453,25 @@ pub(crate) async fn handle_envelope_voice_channel_reneg_offer(
     sender_peer_id: String, sid: String, cid: String, sdp: String, ice_restart: bool,
 ) {
     emit_vc_sdp_signal(voice_channel_participants, event_tx, sender_peer_id, sid, cid, sdp, "reneg_offer", "Reneg offer", ice_restart).await;
+}
+
+/// A peer whose side of the mesh cannot dial (the glare rule gives the offer
+/// to the lower id) is asking US to rebuild the leg between us.
+pub(crate) async fn handle_envelope_voice_channel_leg_restart(
+    voice_channel_participants: &HashMap<String, std::collections::HashSet<String>>,
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    sender_peer_id: String, sid: String, cid: String,
+) {
+    let vc_key = format!("{sid}:{cid}");
+    if !is_vc_participant(voice_channel_participants, &vc_key, &sender_peer_id) {
+        hollow_log!("[HOLLOW-SECURITY] BLOCKED VC leg restart from non-participant {sender_peer_id} in {cid}");
+        return;
+    }
+    hollow_log!("[HOLLOW-VC] Leg restart requested by {sender_peer_id} in {cid}");
+    let _ = event_tx.send(NetworkEvent::VoiceChannelSignal {
+        server_id: sid, channel_id: cid, peer_id: sender_peer_id,
+        signal_type: "leg_restart".to_string(), payload: "{}".to_string(),
+    }).await;
 }
 
 pub(crate) async fn handle_envelope_voice_channel_reneg_answer(

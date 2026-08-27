@@ -371,6 +371,13 @@ mesh, and (partly) screen share.
 | `providers/link_health_provider.dart` | `callLinkHealthProvider`, `vcLinkHealthProvider`. |
 | `ui/components/link_health_chip.dart` | `LinkHealthChip` / `LinkHealthBanner` / `LinkHealthHeader`. |
 
+Where the flair renders: DM = call bar, mobile pill, panel header, mobile video
+view. Mesh = **per participant row** (`_VoiceParticipantRow` in the channel
+sidebar, `MobileSpeakingAvatar` on mobile) plus the camera tile, never
+channel-wide — one member on bad Wi-Fi is that member's leg. `VoiceChannelPanel`'s
+header is the one channel-wide line, and it reports OUR OWN link only, through
+`overallConnectionProvider` + `connectionVisual()` like the user bars.
+
 ### The ladder
 
 1. `disconnected` opens a lapse. The peer connection, tracks and call all stay
@@ -404,17 +411,46 @@ connection fixes both, and is the same path a call start takes.
   `_pendingMediaRestart`, which `_handleSdpOffer` awaits so the offer lands on
   the INITIAL path. Call id, SFrame key and CallState survive: the user sees the
   flair clear, not a hangup and a new ring.
-- **VC mesh**: `closePeer` + `onPeerJoinedMyChannel`. **Known broken** — the
-  higher-id side closes and never re-dials (glare rule), and can destroy a leg
-  the peer just rebuilt. See `tmp.md` / the memory file.
+- **VC mesh** (`VoiceChannelService._rebuildLeg`): the dialing side (lower peer
+  id, `shouldInitiateIceRepair`) does `closePeer` + `connectToPeer`; the other
+  side sends **`leg_restart`** and lets them re-offer. Never both — two crossing
+  rebuilds ping-pong, because `_createPeerConnection` closes what it finds.
 
-Both ends are eligible to initiate, so `_mediaRestartAt` gives the first one a
-10s window; receiving a peer's `media_restart` claims it too.
+Both ends are eligible to initiate, so `_mediaRestartAt` (DM) / `_legRebuiltAt`
+(mesh, per peer) gives the first one a 10s window; receiving a peer's
+`media_restart`, or accepting a rebuild offer for a leg you already held, claims
+it too.
+
+A mesh leg whose window is spent is NOT abandoned the way a DM call is hung up:
+`_scheduleLegRedial` keeps reaching for it (10s→60s backoff) while
+`isChannelParticipant` says the member is still in the channel.
+
+**A reconnecting peer must be re-told we are in the channel.**
+`WsEvent::Disconnected` purges every remote peer from
+`voice_channel_participants`, and that set gates EVERY inbound VC signal — so
+without a re-announce the reconnecting side can send and never receive. The
+re-announce lives in the `PeerJoined` handler and MUST stay OUTSIDE the
+`is_new`/`synced_peers` guard: `synced_peers` is a once-per-session flag that
+survives a peer's whole disconnect cycle, because the relay broadcasts
+`PeerLeft` only for a CLEAN leave. Reproduce this class with
+`MockRelay::drop_socket_silently()`, never `set_online(false)` (which announces
+the leave and hides the bug).
 
 **A fresh peer connection does not carry mute, deafen, PTT or the camera.**
 `_restoreAfterMediaRestart` re-applies them via `_applyTxGate(force: true)`.
 `force` matters: `setMuted` early-returns when its cached flag agrees, and the
 flag describes the track it was last applied to, which the rebuild replaced.
+
+- The camera flag is a LATCH (`_claimVideoRestore()`), never an assignment: a
+  rebuild clears `isVideoEnabled` as it starts, so a second claim on the same
+  recovery would read the cleared flag and forget the camera. The restore is
+  staggered by `_cameraAutoEnableDelayMs` (300/1500ms), because a rebuild leaves
+  BOTH ends audio-only and both restores are renegotiations onto the same PC.
+- The mesh keeps ONE `_localAudioStream` across every leg, so mute survives a
+  leg rebuild untouched. **Deafen and per-peer volume do not** — they are set on
+  the RECEIVER, which the rebuild replaced, so `_restorePeerAudioState` puts
+  them back on connect (twice: `setVolume` on a track that has not yet carried
+  media is a tolerated no-op, not an error).
 
 ### Relay reconnect is call-aware
 

@@ -254,7 +254,19 @@ class CallNotifier extends Notifier<CallState> {
   /// What to put back once the rebuilt session connects. A rebuild is a fresh
   /// peer connection, so mute and camera come back at their defaults and would
   /// otherwise silently contradict what the UI is showing.
+  ///
+  /// A LATCH, never an assignment: a rebuild sets `isVideoEnabled` false as it
+  /// starts, so a second claim on the same recovery (ours, then the peer's
+  /// crossing `media_restart`) read that cleared flag and forgot the camera
+  /// had ever been on. Field-caught 2026-08-27: audio came back, the picture
+  /// never did. Cleared only once the camera is actually restored, or by
+  /// [_cleanup].
   bool _restoreVideoAfterRestart = false;
+
+  /// Remember that the camera was on before a rebuild took it down.
+  void _claimVideoRestore() {
+    if (state.isVideoEnabled) _restoreVideoAfterRestart = true;
+  }
 
   /// Last user-chosen remote volume — restored when un-deafening.
   double _lastRemoteVolume = 1.0;
@@ -449,13 +461,7 @@ class CallNotifier extends Notifier<CallState> {
         // with a camera goes through the mid-call addTrack/renegotiate
         // path which is the proven-working flow for cross-peer video.
         if (state.isVideoCall) {
-          // Stagger the auto-enable deterministically: both sides firing
-          // toggleVideo ~simultaneously creates renegotiation glare (both
-          // offers collide, one is never processed → one-way video). The
-          // polite peer (lower peer_id, same convention as invite glare)
-          // goes first; the other waits for that round-trip to settle.
-          final autoEnableMs =
-              localPeerId.compareTo(peerId) < 0 ? 300 : 1500;
+          final autoEnableMs = _cameraAutoEnableDelayMs(peerId);
           _callLog('[HOLLOW-CALL] Video call connected — scheduling '
               'auto-toggle in ${autoEnableMs}ms');
           Future.delayed(Duration(milliseconds: autoEnableMs), () {
@@ -770,7 +776,7 @@ class CallNotifier extends Notifier<CallState> {
       // peer connection that is about to be replaced.
       _sendSignal(peerId, 'media_restart', callId);
 
-      _restoreVideoAfterRestart = state.isVideoEnabled;
+      _claimVideoRestore();
       state = state.copyWith(isVideoEnabled: false, remoteVideoEnabled: false);
       // Fresh transport, fresh budget, and no stale rung to re-apply.
       _linkWatch?.noteConnectionRebuilt();
@@ -805,7 +811,7 @@ class CallNotifier extends Notifier<CallState> {
     _mediaRestartAt = DateTime.now();
     _callLog('[HOLLOW-CALL] Peer is rebuilding the media session — dropping '
         'our side so the next offer is treated as a fresh one');
-    _restoreVideoAfterRestart = state.isVideoEnabled;
+    _claimVideoRestore();
     state = state.copyWith(isVideoEnabled: false, remoteVideoEnabled: false);
     _linkWatch?.noteConnectionRebuilt();
     // Assigned BEFORE the await so a fast-following offer can see it even if
@@ -823,13 +829,38 @@ class CallNotifier extends Notifier<CallState> {
     // track while the cached flag stayed behind, which is exactly the case the
     // ordinary early-return would swallow.
     _applyTxGate(force: true);
-    if (_restoreVideoAfterRestart) {
-      _restoreVideoAfterRestart = false;
-      _callLog('[HOLLOW-CALL] Restoring camera after the media rebuild');
-      unawaited(Future<void>.delayed(
-          const Duration(milliseconds: 400), toggleVideo));
-    }
+    if (!_restoreVideoAfterRestart) return;
+    _restoreVideoAfterRestart = false;
+    final peerId = state.peerId;
+    if (peerId == null) return;
+    // Both ends restore their own camera onto the same fresh, audio-only peer
+    // connection, and each restore is a renegotiation — so the two must not
+    // fire together. Same deterministic stagger the call-start auto-enable
+    // uses, for the same reason.
+    final delayMs = _cameraAutoEnableDelayMs(peerId);
+    _callLog('[HOLLOW-CALL] Restoring camera after the media rebuild '
+        'in ${delayMs}ms');
+    unawaited(Future<void>.delayed(Duration(milliseconds: delayMs), () {
+      if (state.status != CallStatus.active) return;
+      // The user can beat us to it while the rebuild settles; toggling then
+      // would turn the camera they just switched on straight back off.
+      if (state.isVideoEnabled) {
+        _callLog('[HOLLOW-CALL] Camera already back on — restore not needed');
+        return;
+      }
+      toggleVideo();
+    }));
   }
+
+  /// How long to wait before auto-enabling the camera, so two ends bringing a
+  /// camera up on the same connection do not collide.
+  ///
+  /// Both offers crossing is textbook renegotiation glare: one of them is
+  /// never processed and the video ends up one-way. The polite peer (lower
+  /// peer_id, the convention invite glare already uses) goes first; the other
+  /// waits for that round trip to settle.
+  int _cameraAutoEnableDelayMs(String peerId) =>
+      localPeerId.compareTo(peerId) < 0 ? 300 : 1500;
 
   /// End the call because the link is genuinely gone.
   ///

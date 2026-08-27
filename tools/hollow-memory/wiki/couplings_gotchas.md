@@ -267,6 +267,39 @@ final iceServers = turnUris.map((uri) => {
 
 ---
 
+## Relay Presence Gotchas
+
+### `is_new` / `synced_peers` is NOT "this peer's socket is new" (2026-08-27)
+
+`swarm.rs`'s `WsEvent::PeerJoined` handler runs most of its work under
+`let is_new = synced_peers.insert(peer_id)`. That set means "have we synced
+with this peer AT ALL this session". It is cleared for our own disconnect, and
+per-peer only on `WsEvent::PeerLeft` or a `RoomMembers` vanish diff.
+
+**The relay broadcasts `PeerLeft` only for a CLEAN leave.** A pulled adapter or
+a DNS failure closes the socket with nobody told (verified in a field log: zero
+`PeerLeft` lines for a peer gone 26 seconds). So a peer that dropped and came
+back reads `is_new == false` and skips the entire cascade — and that peer is
+the one that needs it most, because its own `WsEvent::Disconnected` purged its
+state.
+
+**Anything that must run when a peer COMES BACK belongs OUTSIDE that guard.**
+
+What it cost: the voice mesh's presence re-announce sat inside it.
+`WsEvent::Disconnected` purges every remote peer from
+`voice_channel_participants`, that set gates EVERY inbound VC signal
+(`is_vc_participant`), and nothing else refills it — so a reconnected node
+could SEND voice signals and never receive one. `BLOCKED VC SDP offer from
+non-participant` on the side that was asking for the rebuild.
+
+### Reconnect tests must drop the socket SILENTLY
+
+`MockRelay::set_online(peer, false)` broadcasts `PeerLeft` to everyone, which
+clears `synced_peers` and makes `is_new` true. That is the POLITE disconnect
+and the one case the bug above does not occur in, so it can never catch this
+class. Use `MockRelay::drop_socket_silently(peer)` instead — it kills the
+socket and tells nobody, mirroring the field.
+
 ## File Transfer Gotchas
 
 ### A pushed file stream cannot be declined mid-flight (issue #41)

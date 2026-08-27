@@ -219,6 +219,23 @@ impl MockRelay {
     /// it from every room (broadcasting PeerLeft), so peers see it leave. Its
     /// event loop keeps running but receives nothing until it comes back.
     fn set_online(&self, peer_id: &str, online: bool) {
+        self.set_online_inner(peer_id, online, true)
+    }
+
+    /// A socket that dies WITHOUT the other members being told.
+    ///
+    /// The real relay only broadcasts `PeerLeft` for a clean leave. A pulled
+    /// adapter or a DNS failure closes the socket with nobody informed, and
+    /// the peers keep the dead node in `synced_peers` — so when it comes back
+    /// their `is_new` guard reads false and the whole reconnect cascade is
+    /// skipped. `set_online(false)` is the POLITE version and cannot reproduce
+    /// that. Verified against `hollow_debug.log` 2026-08-27: ZERO `PeerLeft`
+    /// lines for a peer that was gone for 26 seconds.
+    fn drop_socket_silently(&self, peer_id: &str) {
+        self.set_online_inner(peer_id, false, false)
+    }
+
+    fn set_online_inner(&self, peer_id: &str, online: bool, announce_leave: bool) {
         let mut inner = self.inner.lock().unwrap();
         if let Some(conn) = inner.conns.get_mut(peer_id) {
             conn.online = online;
@@ -232,7 +249,7 @@ impl MockRelay {
                     .get_mut(&room)
                     .map(|s| s.remove(peer_id))
                     .unwrap_or(false);
-                if was_present {
+                if was_present && announce_leave {
                     inner.broadcast_except(&room, peer_id, WsEvent::PeerLeft {
                         room: room.clone(),
                         peer_id: peer_id.to_string(),
@@ -3611,6 +3628,289 @@ async fn vc_screen_origin_attribution_round_trip() {
     let healthy = next_signal(&mut j, "screen_answer", 4).await
         .expect("the node must stay healthy after dropping a spoofed signal");
     assert_eq!(healthy["sdp"], serde_json::json!("v=0 healthy"));
+}
+
+// ---------------------------------------------------------------------------
+// Ring-2 CONTROL PLANE: a voice peer that reconnects must be able to RECEIVE
+// again, not just send.
+//
+// `WsEvent::Disconnected` purges every remote peer from
+// `voice_channel_participants`, and that set gates EVERY inbound VC signal.
+// Nothing refilled it: the peer on the other side never left its own channel,
+// so it had no reason to announce anything, and the one path that did
+// re-announce sat behind the `is_new`/`synced_peers` guard — which is false
+// for exactly the peer that just came back.
+//
+// Field-caught 2026-08-27: the reconnecting node asked for a leg rebuild four
+// times, its peer dialed four times, and it dropped all four offers as
+// `BLOCKED VC SDP offer from non-participant` while its own requests still
+// arrived. One-way signalling, permanently silent voice channel.
+//
+// The socket is dropped SILENTLY here on purpose: the real relay broadcast no
+// `PeerLeft`, which is what left `is_new` false and skipped the cascade.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
+async fn vc_reconnecting_peer_can_receive_signals_again() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    const O_MASTER: u8 = 115;
+    const J_MASTER: u8 = 125;
+    let o_master = NativeKeypair::from_secret_bytes(&seed_bytes(O_MASTER)).peer_id();
+    let j_master = NativeKeypair::from_secret_bytes(&seed_bytes(J_MASTER)).peer_id();
+
+    let mut o = spawn_node_with_friends(&relay, O_MASTER, O_MASTER, &[&j_master]).await;
+    sleep_ms(1200).await;
+    let mut j = spawn_node_with_friends(&relay, J_MASTER, J_MASTER, &[&o_master]).await;
+    sleep_ms(4000).await; // Olm confirm (targeted VC signals ride Olm)
+
+    let server_id = create_server_and_wait(&mut o, "Reconnect Server").await;
+    o.cmd_tx
+        .send(NodeCommand::CreateChannel {
+            server_id: server_id.clone(),
+            channel_id: crate::node::new_channel_id(&server_id),
+            name: "Voice".to_string(),
+            category: None,
+            channel_type: "voice".to_string(),
+        })
+        .await
+        .unwrap();
+    let mut voice_cid = None;
+    let made = wait_event(&mut o, std::time::Duration::from_secs(3), |ev| {
+        if let NetworkEvent::ChannelAdded { channel_id, channel_type, .. } = ev {
+            if channel_type == "voice" {
+                voice_cid = Some(channel_id.clone());
+                return true;
+            }
+        }
+        false
+    })
+    .await;
+    assert!(made, "owner should create a voice channel");
+    let voice_cid = voice_cid.expect("voice channel id");
+    sleep_ms(300).await;
+
+    j.cmd_tx
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
+        .await
+        .unwrap();
+    let joined = wait_event(&mut j, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
+    })
+    .await;
+    assert!(joined, "joiner should join the server");
+    sleep_ms(1500).await;
+
+    // Both in the voice channel.
+    for (node, label) in [(&mut o, "owner"), (&mut j, "joiner")] {
+        node.cmd_tx
+            .send(NodeCommand::VoiceChannelJoin {
+                server_id: server_id.clone(),
+                channel_id: voice_cid.clone(),
+            })
+            .await
+            .unwrap();
+        let _ = label;
+    }
+    sleep_ms(2000).await;
+    drain_events(&mut o);
+    drain_events(&mut j);
+
+    // Sanity: signalling works BEFORE the outage, so a failure after it is the
+    // reconnect and not the fixture.
+    o.cmd_tx
+        .send(NodeCommand::VoiceChannelSendSignal {
+            server_id: server_id.clone(),
+            channel_id: voice_cid.clone(),
+            peer_id: j_master.clone(),
+            signal_type: "sdp_offer".to_string(),
+            payload: serde_json::json!({"sdp": "v=0 before"}).to_string(),
+        })
+        .await
+        .unwrap();
+    let before = wait_event(&mut j, std::time::Duration::from_secs(5), |ev| {
+        matches!(ev, NetworkEvent::VoiceChannelSignal { signal_type, .. } if signal_type == "sdp_offer")
+    })
+    .await;
+    assert!(before, "the joiner must receive VC offers before the outage");
+
+    // --- the outage: J's socket dies with nobody told, then comes back ---
+    relay.drop_socket_silently(&j.device_id);
+    sleep_ms(1500).await;
+    relay.set_online(&j.device_id, true);
+    sleep_ms(4000).await; // reconnect + the owner's presence re-announce
+    drain_events(&mut j);
+
+    // The owner never left the channel and has no reason of its own to
+    // announce anything: if nothing repopulated J's participant set, this
+    // offer is dropped as "non-participant" and J hears nothing, forever.
+    o.cmd_tx
+        .send(NodeCommand::VoiceChannelSendSignal {
+            server_id: server_id.clone(),
+            channel_id: voice_cid.clone(),
+            peer_id: j_master.clone(),
+            signal_type: "sdp_offer".to_string(),
+            payload: serde_json::json!({"sdp": "v=0 after"}).to_string(),
+        })
+        .await
+        .unwrap();
+    let after = wait_event(&mut j, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::VoiceChannelSignal { signal_type, payload, .. }
+            if signal_type == "sdp_offer" && payload.contains("v=0 after"))
+    })
+    .await;
+    assert!(
+        after,
+        "a reconnected peer must receive VC offers again — its participant set          was purged on disconnect and only the peer's presence re-announce can          refill it, so a silent drop here is the one-way signalling bug"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Ring-2 CONTROL PLANE: the voice mesh's `leg_restart` request.
+//
+// The mesh gives the SDP offer to the lexicographically lower peer id, so the
+// higher side has no way to rebuild a leg it alone can see is broken: before
+// this signal it closed its connection and waited for an offer nobody was
+// going to send (field-caught 2026-08-27, no audio for the rest of the call).
+// A VC signal type is WHITELISTED in Rust across three separate touches, and
+// missing one drops it SILENTLY, so this guards the whole path: it must reach
+// the peer, in both directions, carrying the sender's id.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
+async fn vc_leg_restart_signal_round_trips() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    const O_MASTER: u8 = 113;
+    const J_MASTER: u8 = 123;
+    let o_master = NativeKeypair::from_secret_bytes(&seed_bytes(O_MASTER)).peer_id();
+    let j_master = NativeKeypair::from_secret_bytes(&seed_bytes(J_MASTER)).peer_id();
+
+    let mut o = spawn_node_with_friends(&relay, O_MASTER, O_MASTER, &[&j_master]).await;
+    sleep_ms(1200).await;
+    let mut j = spawn_node_with_friends(&relay, J_MASTER, J_MASTER, &[&o_master]).await;
+    sleep_ms(4000).await; // Olm confirm (targeted VC signals ride Olm)
+
+    let server_id = create_server_and_wait(&mut o, "Leg Restart Server").await;
+    o.cmd_tx
+        .send(NodeCommand::CreateChannel {
+            server_id: server_id.clone(),
+            channel_id: crate::node::new_channel_id(&server_id),
+            name: "Voice".to_string(),
+            category: None,
+            channel_type: "voice".to_string(),
+        })
+        .await
+        .unwrap();
+    let mut voice_cid = None;
+    let made = wait_event(&mut o, std::time::Duration::from_secs(3), |ev| {
+        if let NetworkEvent::ChannelAdded { channel_id, channel_type, .. } = ev {
+            if channel_type == "voice" {
+                voice_cid = Some(channel_id.clone());
+                return true;
+            }
+        }
+        false
+    })
+    .await;
+    assert!(made, "owner should create a voice channel");
+    let voice_cid = voice_cid.expect("voice channel id");
+    sleep_ms(300).await;
+
+    j.cmd_tx
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
+        .await
+        .unwrap();
+    let joined = wait_event(&mut j, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
+    })
+    .await;
+    assert!(joined, "joiner should join the server");
+    sleep_ms(1500).await;
+
+    // BOTH sides join: the receive guard checks the SENDER is a participant,
+    // and the request travels in whichever direction the id compare dictates.
+    j.cmd_tx
+        .send(NodeCommand::VoiceChannelJoin {
+            server_id: server_id.clone(),
+            channel_id: voice_cid.clone(),
+        })
+        .await
+        .unwrap();
+    let o_saw_join = wait_event(&mut o, std::time::Duration::from_secs(4), |ev| {
+        matches!(ev, NetworkEvent::VoiceChannelJoined { channel_id, .. } if *channel_id == voice_cid)
+    })
+    .await;
+    assert!(o_saw_join, "owner must see the joiner enter the voice channel");
+    o.cmd_tx
+        .send(NodeCommand::VoiceChannelJoin {
+            server_id: server_id.clone(),
+            channel_id: voice_cid.clone(),
+        })
+        .await
+        .unwrap();
+    let j_saw_join = wait_event(&mut j, std::time::Duration::from_secs(4), |ev| {
+        matches!(ev, NetworkEvent::VoiceChannelJoined { channel_id, .. } if *channel_id == voice_cid)
+    })
+    .await;
+    assert!(j_saw_join, "joiner must see the owner enter the voice channel");
+    drain_events(&mut o);
+    drain_events(&mut j);
+
+    // Helper: wait for a leg_restart naming a given sender.
+    async fn saw_leg_restart(node: &mut TestNode, from: &str, cid: &str, secs: u64) -> bool {
+        wait_event(node, std::time::Duration::from_secs(secs), |ev| {
+            matches!(
+                ev,
+                NetworkEvent::VoiceChannelSignal { signal_type, peer_id, channel_id, .. }
+                    if signal_type == "leg_restart" && peer_id == from && channel_id == cid
+            )
+        })
+        .await
+    }
+
+    // --- J asks O to re-offer the leg ---
+    j.cmd_tx
+        .send(NodeCommand::VoiceChannelSendSignal {
+            server_id: server_id.clone(),
+            channel_id: voice_cid.clone(),
+            peer_id: o_master.clone(),
+            signal_type: "leg_restart".to_string(),
+            payload: "{}".to_string(),
+        })
+        .await
+        .unwrap();
+    assert!(
+        saw_leg_restart(&mut o, &j_master, &voice_cid, 5).await,
+        "the dialing side must receive leg_restart — a missing whitelist touch          drops it silently and the leg is never rebuilt"
+    );
+
+    // --- and the other direction, since either id can end up the higher one ---
+    drain_events(&mut j);
+    o.cmd_tx
+        .send(NodeCommand::VoiceChannelSendSignal {
+            server_id: server_id.clone(),
+            channel_id: voice_cid.clone(),
+            peer_id: j_master.clone(),
+            signal_type: "leg_restart".to_string(),
+            payload: "{}".to_string(),
+        })
+        .await
+        .unwrap();
+    assert!(
+        saw_leg_restart(&mut j, &o_master, &voice_cid, 5).await,
+        "leg_restart must travel in both directions"
+    );
 }
 
 // ---------------------------------------------------------------------------

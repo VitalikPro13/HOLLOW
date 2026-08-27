@@ -3116,6 +3116,55 @@ async fn run_event_loop(
                             rebalance_pending.insert(room.clone());
                         }
 
+                        // Voice presence: tell a peer that just (re)appeared in this
+                        // room which of its voice channels we are in.
+                        //
+                        // DELIBERATELY OUTSIDE the `is_new` guard below, which is
+                        // where this used to live. `synced_peers` means "have we
+                        // synced with this peer at all this session", and it is NOT
+                        // cleared when a peer's socket dies: the relay only broadcasts
+                        // PeerLeft for a CLEAN leave, so a peer that dropped and came
+                        // back is `is_new == false` and skips the entire cascade. That
+                        // is precisely the peer that needs this.
+                        //
+                        // Why it is load-bearing: `WsEvent::Disconnected` purges every
+                        // REMOTE participant from `voice_channel_participants`, and
+                        // that set gates EVERY inbound VC signal. Nothing else refills
+                        // it, so the reconnecting side blackholes the offers its own
+                        // peer is sending while its own requests still arrive.
+                        // Field-caught 2026-08-27: the VM asked for a leg rebuild four
+                        // times, the host dialed four times, and the VM dropped all
+                        // four as `BLOCKED VC SDP offer from non-participant`.
+                        //
+                        // One small plaintext frame, idempotent at the receiver (a Set
+                        // insert), and plaintext because a reconnecting peer's MLS
+                        // epoch is very likely stale.
+                        if !is_fwd_room && peer_id != local_peer_str && peer_id != device_peer_id {
+                            for (vc_key, vc_peers) in voice_channel_participants.iter() {
+                                if !vc_peers.contains(&device_peer_id)
+                                    && !vc_peers.contains(&local_peer_str)
+                                {
+                                    continue;
+                                }
+                                // vc_key = "server_id:channel_id", and for a server
+                                // voice channel the WS room code IS the server id.
+                                let Some(colon) = vc_key.find(':') else { continue };
+                                let (vc_sid, vc_cid) = (&vc_key[..colon], &vc_key[colon + 1..]);
+                                if vc_sid != room { continue; }
+                                hollow_log!("[HOLLOW-VC] Re-announcing our presence in {vc_cid} to {peer_id} (rejoined the room)");
+                                // The room is KNOWN here, so send into it directly
+                                // rather than through `ws_room_for_peer` (first-match
+                                // is the silent one-way-loss trap).
+                                super::crypto_handler::send_message_to_peer_in_room(
+                                    &ws_cmd_tx, &room, &peer_id,
+                                    HavenMessage::VoiceChannelJoin {
+                                        server_id: vc_sid.to_string(),
+                                        channel_id: vc_cid.to_string(),
+                                    },
+                                );
+                            }
+                        }
+
                             // Update gossip overlay: add this peer and maybe connect.
                             // Multi-device: the relay reports US under our DEVICE id, which
                             // differs from local_peer_str (= master). Exclude both, else a
@@ -3363,28 +3412,6 @@ async fn run_event_loop(
                                                 }
                                             }
 
-                                            // Voice channel: re-broadcast our join to the reconnecting peer
-                                            // so they know we're in a voice channel.
-                                            for (vc_key, vc_peers) in voice_channel_participants.iter() {
-                                                if vc_peers.contains(&device_peer_id) || vc_peers.contains(&local_peer_str) {
-                                                    // vc_key = "server_id:channel_id"
-                                                    if let Some(colon) = vc_key.find(':') {
-                                                        let vc_sid = &vc_key[..colon];
-                                                        let vc_cid = &vc_key[colon+1..];
-                                                        if vc_sid == sid {
-                                                            hollow_log!("[HOLLOW-VC] Re-broadcasting VC join to reconnected peer {peer_id} for {vc_cid}");
-                                                            // Plaintext — MLS epoch is likely stale on reconnecting peer.
-                                                            send_message_to_peer(
-                                                                &ws_cmd_tx, &ws_room_peers,
-                                                                &peer_id, HavenMessage::VoiceChannelJoin {
-                                                                    server_id: vc_sid.to_string(),
-                                                                    channel_id: vc_cid.to_string(),
-                                                                },
-                                                            );
-                                                        }
-                                                    }
-                                                }
-                                            }
                                         }
                                     }
 
@@ -8779,6 +8806,12 @@ async fn handle_incoming_request(
                         }).await;
                     }
                 }
+                Ok(MessageEnvelope::VoiceChannelLegRestart { sid, cid, .. }) => {
+                    voice_handler::handle_envelope_voice_channel_leg_restart(
+                        voice_channel_participants, event_tx,
+                        peer_str.to_string(), sid, cid,
+                    ).await;
+                }
 
                 // -- Media forwarder control plane (step 3) --
                 // Client-bound signals from a forwarder. Rust enforces only the
@@ -10846,6 +10879,7 @@ async fn handle_incoming_request(
                             | MessageEnvelope::VoiceChannelScreenFeedState { .. }
                             | MessageEnvelope::VoiceChannelRenegOffer { .. }
                             | MessageEnvelope::VoiceChannelRenegAnswer { .. }
+                            | MessageEnvelope::VoiceChannelLegRestart { .. }
                             | MessageEnvelope::VoiceChannelCameraState { .. }
                             | MessageEnvelope::VoiceChannelRecordingState { .. }
                             if !voice_handler::vc_rate_check(vc_signal_rate_tokens, peer_str) => {
@@ -10962,6 +10996,12 @@ async fn handle_incoming_request(
                                 voice_handler::handle_envelope_voice_channel_reneg_answer(
                                     voice_channel_participants, event_tx,
                                     peer_str.to_string(), sid, cid, sdp,
+                                ).await;
+                            }
+                            MessageEnvelope::VoiceChannelLegRestart { sid, cid, .. } => {
+                                voice_handler::handle_envelope_voice_channel_leg_restart(
+                                    voice_channel_participants, event_tx,
+                                    peer_str.to_string(), sid, cid,
                                 ).await;
                             }
                             MessageEnvelope::VoiceChannelCameraState { sid, cid, enabled, .. } => {

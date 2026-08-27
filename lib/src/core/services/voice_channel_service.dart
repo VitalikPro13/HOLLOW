@@ -8,6 +8,7 @@ import 'package:hollow/src/core/services/frame_cryptor_service.dart';
 import 'package:hollow/src/core/services/ice_repair.dart';
 import 'package:hollow/src/core/providers/link_health_provider.dart';
 import 'package:hollow/src/core/services/ice_route_probe.dart';
+import 'package:hollow/src/core/services/link_resilience.dart';
 import 'package:hollow/src/core/services/link_watchdog.dart';
 import 'package:hollow/src/core/services/video_quality_ladder.dart';
 import 'package:hollow/src/core/services/remote_track_volume.dart';
@@ -174,6 +175,37 @@ class VoiceChannelService {
   /// which reports `closed` straight back into the state handler, and the
   /// watchdog reads that as the remote end going away.
   final Set<String> _closingPeers = {};
+
+  /// When a rebuild of this peer's leg last began, on EITHER side.
+  ///
+  /// The mesh's twin of the DM lane's `_mediaRestartAt`. Both ends watch the
+  /// same leg and both can decide it is broken, seconds apart: without a
+  /// window, the second one to notice tears down the connection the first one
+  /// had just rebuilt, and neither dials again (field-caught 2026-08-27).
+  /// Claimed when we rebuild, when we ask the peer to, and when we accept a
+  /// rebuild offer of theirs.
+  final Map<String, DateTime> _legRebuiltAt = {};
+
+  /// How long one rebuild owns the recovery of a leg. Comfortably longer than
+  /// a PC bring-up, which is what a rebuild is.
+  static const _legRebuildWindow = Duration(seconds: 10);
+
+  /// Slow retries for legs whose whole hold-open window was spent.
+  ///
+  /// A DM call that gives up hangs up, and the user can call again. A voice
+  /// channel has no such moment: the member is still sitting in the roster, so
+  /// a leg abandoned here would be silent forever. Keyed by peer.
+  final Map<String, Timer> _legRedial = {};
+
+  /// Whether [peerId] is still in the voice channel we are in. Injected by the
+  /// provider, which owns the participant sets; null means "assume yes".
+  bool Function(String peerId)? isChannelParticipant;
+
+  /// Deafen and the per-peer volumes live on the RECEIVER, not on the peer, so
+  /// a rebuilt leg arrives with a brand new receiver at full volume. Held here
+  /// so [_restorePeerAudioState] can put them back.
+  bool _isDeafened = false;
+  final Map<String, double> _peerVolumes = {};
 
   /// Publish a peer leg's health for the UI.
   void Function(String peerId, LinkHealthSnapshot snapshot)? onLinkHealth;
@@ -353,6 +385,8 @@ class VoiceChannelService {
         await _handleRenegOffer(peerId, payload, serverId, channelId);
       case 'reneg_answer':
         await _handleRenegAnswer(peerId, payload);
+      case 'leg_restart':
+        await _handleLegRestart(peerId);
     }
   }
 
@@ -369,6 +403,13 @@ class VoiceChannelService {
     if (!_peerConnections.containsKey(peerId) && _peerConnections.length >= maxVoicePcs) {
       _vcLog('[HOLLOW-VC] Rejecting SDP offer from $peerId — voice PC cap ($maxVoicePcs) reached');
       return;
+    }
+
+    // A fresh initial offer for a leg we already hold IS the peer's rebuild.
+    // Claim the window so our own watchdog does not decide, a second later,
+    // to tear down the connection they have just rebuilt.
+    if (_peerConnections.containsKey(peerId)) {
+      _legRebuiltAt[peerId] = DateTime.now();
     }
 
     _vcLog('[HOLLOW-VC] Received SDP offer from $peerId');
@@ -523,6 +564,11 @@ class VoiceChannelService {
   Future<void> closePeer(String peerId) async {
     _closingPeers.add(peerId);
     _linkWatch.remove(peerId)?.stop();
+    // Whatever was last said about this leg is moot now, and a leg torn down
+    // AFTER its watchdog was already gone (a give-up, then a re-dial) has
+    // nothing left to retract it. Callers that mean to keep a flair up
+    // republish it straight after.
+    onLinkHealth?.call(peerId, const LinkHealthSnapshot());
     final pc = _peerConnections.remove(peerId);
     if (pc != null) {
       _vcLog('[HOLLOW-VC] Closing connection to $peerId');
@@ -775,6 +821,13 @@ class VoiceChannelService {
     _vcLog('[HOLLOW-VC] Closing all connections');
     _stopVadTimer();
     _connecting.clear();
+    for (final t in _legRedial.values) {
+      t.cancel();
+    }
+    _legRedial.clear();
+    _legRebuiltAt.clear();
+    _peerVolumes.clear();
+    _isDeafened = false;
 
     // Stop camera stream directly (no renegotiation — we're closing everything).
     if (_localVideoStream != null) {
@@ -862,8 +915,12 @@ class VoiceChannelService {
   /// deafen would silence some voices and leave the rest playing, and the
   /// throw surfaced as a platform error in the crash log.
   Future<void> setDeafened(bool deafened) async {
-    final volume = deafened ? 0.0 : 1.0;
+    _isDeafened = deafened;
     for (final entry in _peerConnections.entries) {
+      // Un-deafening restores the volume the user chose for THAT member, not a
+      // flat 1.0: a peer they had turned down came back at full volume, which
+      // reads as the slider forgetting itself.
+      final volume = deafened ? 0.0 : (_peerVolumes[entry.key] ?? 1.0);
       try {
         final receivers = await entry.value.getReceivers();
         for (final r in receivers) {
@@ -978,6 +1035,14 @@ class VoiceChannelService {
   }
 
   Future<void> setRemoteVolume(String peerId, double volume) async {
+    _peerVolumes[peerId] = volume;
+    await _applyRemoteVolume(peerId, volume);
+  }
+
+  /// Apply a playback volume WITHOUT recording it as the user's choice — the
+  /// deafen restore passes 0.0 through here, and remembering that would erase
+  /// the per-peer volume it is meant to be protecting.
+  Future<void> _applyRemoteVolume(String peerId, double volume) async {
     final pc = _peerConnections[peerId];
     if (pc == null) return;
     final receivers = await pc.getReceivers();
@@ -1859,7 +1924,15 @@ class VoiceChannelService {
       onPeerConnected?.call(peerId);
       _logIceRoute(peerId, pc);
       scheduleIceRepair(peerId);
+      // Clear the flair explicitly: a leg we had given up on is republished as
+      // `lost`, and the FRESH watchdog that replaces it starts out believing
+      // it has already published "healthy", so it would never say so.
+      onLinkHealth?.call(peerId, const LinkHealthSnapshot());
       _startLinkWatch(peerId);
+      // The leg is back: stop reaching for it, and put back the receive-side
+      // state the fresh receiver does not carry (deafen, per-peer volume).
+      _legRedial.remove(peerId)?.cancel();
+      unawaited(_restorePeerAudioState(peerId));
     }
     // Our own teardown reports `closed` right back here; that is not the
     // remote end going away.
@@ -1890,26 +1963,174 @@ class VoiceChannelService {
       peerConnection: () => _peerConnections[peerId],
       isPolite: shouldInitiateIceRepair(localPeerId, peerId),
       onHealth: (snapshot) => onLinkHealth?.call(peerId, snapshot),
-      onRecoverLink: () async {
-        // The mesh's version of "rebuild the media session" is simply to drop
-        // the leg and dial it again, which is what a member rejoining does.
-        // `_createPeerConnection` closes any existing PC first, so the fresh
-        // offer rebuilds BOTH ends, and both get new SFrame cryptors created
-        // in the known-good order rather than repaired in place.
-        //
-        // `onPeerJoinedMyChannel` keeps the glare rule: only the lower id
-        // dials, the other end answers the offer it receives.
-        _vcLog('[HOLLOW-VC] $peerId: rebuilding the leg');
-        await closePeer(peerId);
-        await onPeerJoinedMyChannel(peerId);
-      },
+      onRecoverLink: () => _rebuildLeg(peerId),
       onApplyRung: (rung) => applyVideoRungFor(peerId, rung),
       canSignal: canSignal,
       onGiveUp: () {
         _vcLog('[HOLLOW-VC] $peerId: hold-open window spent, closing the leg');
-        unawaited(closePeer(peerId));
+        unawaited(closePeer(peerId).then((_) {
+          // `closePeer` stops the watchdog, and a stopped watchdog publishes a
+          // HEALTHY snapshot — which would wipe the flair off a member we can
+          // no longer hear at all. Say what is true and keep saying it until
+          // the leg is actually back.
+          onLinkHealth?.call(
+              peerId, const LinkHealthSnapshot(health: LinkHealth.lost));
+        }));
+        // Not the end of the story the way a DM hangup is: this member is
+        // still sitting in the channel, so keep trying to reach them.
+        _scheduleLegRedial(peerId);
       },
     )..start();
+  }
+
+  /// Rebuild the media leg to [peerId] without leaving the channel.
+  ///
+  /// The mesh's version of the DM lane's `_restartMediaSession`: drop the leg
+  /// and bring it up again from scratch, which is exactly what a member
+  /// joining does. `_createPeerConnection` closes any existing PC first, so
+  /// the fresh offer rebuilds BOTH ends, and both get new SFrame cryptors
+  /// created in the known-good order rather than repaired in place.
+  ///
+  /// The mesh gives the offer to the lexicographically LOWER id (the glare
+  /// rule `onPeerJoinedMyChannel` dials by). That left the higher side with no
+  /// recovery at all: it closed its leg and then waited for an offer nobody
+  /// was going to send. It asks now, with [_sendLegRestart].
+  Future<void> _rebuildLeg(String peerId) async {
+    if (_serverId == null || _channelId == null) return;
+    if (_legRebuiltRecently(peerId)) {
+      _vcLog('[HOLLOW-VC] $peerId: a leg rebuild is already under way — '
+          'standing down rather than crossing it');
+      return;
+    }
+    _legRebuiltAt[peerId] = DateTime.now();
+    if (shouldInitiateIceRepair(localPeerId, peerId)) {
+      await _redialLeg(peerId);
+      return;
+    }
+    _vcLog('[HOLLOW-VC] $peerId: asking them to rebuild the leg (they dial)');
+    await _sendLegRestart(peerId);
+  }
+
+  /// Whether a rebuild of this leg began recently enough to still own it.
+  bool _legRebuiltRecently(String peerId) {
+    final at = _legRebuiltAt[peerId];
+    return at != null && DateTime.now().difference(at) < _legRebuildWindow;
+  }
+
+  /// Tear the leg down and offer a fresh one. Only ever called on the DIALING
+  /// side: two crossing rebuilds would ping-pong closing each other's fresh
+  /// peer connection, since `_createPeerConnection` closes what it finds.
+  Future<void> _redialLeg(String peerId) async {
+    _vcLog('[HOLLOW-VC] $peerId: rebuilding the leg (we dial)');
+    await closePeer(peerId);
+    // `closePeer` stops the watchdog, and a stopped watchdog publishes HEALTHY
+    // — so without this the flair blinks off for the whole rebuild, exactly
+    // when the member is least able to hear us. The connect handler clears it.
+    onLinkHealth?.call(
+        peerId, const LinkHealthSnapshot(health: LinkHealth.reconnecting));
+    if (_serverId == null || _channelId == null) return;
+    if (_connecting.contains(peerId)) return;
+    _connecting.add(peerId);
+    try {
+      await connectToPeer(peerId);
+    } catch (e) {
+      _vcLog('[HOLLOW-VC] $peerId: leg rebuild dial failed: $e');
+      onLinkHealth?.call(
+          peerId, const LinkHealthSnapshot(health: LinkHealth.lost));
+    } finally {
+      _connecting.remove(peerId);
+    }
+  }
+
+  /// Ask [peerId] to re-offer the leg between us.
+  Future<void> _sendLegRestart(String peerId) async {
+    if (_serverId == null || _channelId == null) return;
+    try {
+      await network_api.voiceChannelSendSignal(
+        serverId: _serverId!,
+        channelId: _channelId!,
+        peerId: peerId,
+        signalType: 'leg_restart',
+        payload: '{}',
+      );
+    } catch (e) {
+      _vcLog('[HOLLOW-VC] leg_restart to $peerId failed: $e');
+    }
+  }
+
+  /// [peerId] cannot dial us (we hold the lower id) and is asking for a fresh
+  /// leg.
+  Future<void> _handleLegRestart(String peerId) async {
+    if (!shouldInitiateIceRepair(localPeerId, peerId)) {
+      // Only the dialing side may act on this. Honouring it here would mint a
+      // second dialer and put us straight back into the glare this avoids.
+      _vcLog('[HOLLOW-VC] Ignoring leg_restart from $peerId — they are the '
+          'dialing side, not us');
+      return;
+    }
+    if (_legRebuiltRecently(peerId)) {
+      _vcLog('[HOLLOW-VC] $peerId asked for a leg rebuild, but one is already '
+          'under way — standing down');
+      return;
+    }
+    _legRebuiltAt[peerId] = DateTime.now();
+    _vcLog('[HOLLOW-VC] $peerId asked us to rebuild the leg');
+    await _redialLeg(peerId);
+  }
+
+  /// Keep reaching for a leg whose hold-open window was spent.
+  ///
+  /// Slow on purpose: a leg only reaches here after the ladder has held it for
+  /// the full window, so the network is properly down rather than wobbling.
+  /// Stops on its own once the leg comes back (the watchdog owns it again) or
+  /// the member leaves the channel.
+  void _scheduleLegRedial(String peerId, {int attempt = 1}) {
+    _legRedial.remove(peerId)?.cancel();
+    final seconds = (10 * attempt).clamp(10, 60);
+    _legRedial[peerId] = Timer(Duration(seconds: seconds), () async {
+      _legRedial.remove(peerId);
+      if (!isActive) return;
+      if (isChannelParticipant?.call(peerId) == false) {
+        _vcLog('[HOLLOW-VC] $peerId left the channel — giving up the re-dial');
+        return;
+      }
+      // A live watchdog means the leg connected again and is being held open
+      // by the ladder; this retry has nothing left to do.
+      if (_linkWatch.containsKey(peerId)) return;
+      if (canSignal?.call() == false) {
+        // Our own relay link is down, so the offer would be dropped before it
+        // left the machine. Wait rather than spend an attempt on nothing.
+        _scheduleLegRedial(peerId, attempt: attempt);
+        return;
+      }
+      _vcLog('[HOLLOW-VC] $peerId: reaching for the leg again '
+          '(attempt $attempt)');
+      _legRebuiltAt.remove(peerId);
+      await _rebuildLeg(peerId);
+      _scheduleLegRedial(peerId, attempt: attempt + 1);
+    });
+  }
+
+  /// Put back what a fresh receiver does not carry over.
+  ///
+  /// Mute rides the shared local track and survives a rebuild untouched, but
+  /// deafen and any per-peer volume are set ON the receiver, which the rebuild
+  /// replaced — without this, un-deafening was the only way to get a rebuilt
+  /// leg back to the volume the user had chosen.
+  Future<void> _restorePeerAudioState(String peerId) async {
+    double wanted() => _isDeafened ? 0.0 : (_peerVolumes[peerId] ?? 1.0);
+    if (wanted() == 1.0) return;
+    _vcLog('[HOLLOW-VC] Restoring playback volume ${wanted()} for $peerId');
+    await _applyRemoteVolume(peerId, wanted());
+    // Re-assert once the track has actually carried a packet: a receiver whose
+    // track has never delivered media is not in the platform's registry yet,
+    // and `setVolume` on it is a TOLERATED no-op rather than an error, so the
+    // first attempt can vanish without a sound. Silently leaving a deafened
+    // member audible is the failure worth the second call.
+    await Future<void>.delayed(const Duration(milliseconds: 800));
+    if (!_peerConnections.containsKey(peerId)) return;
+    if (wanted() == 1.0) return;
+    await _applyRemoteVolume(peerId, wanted());
   }
 
   /// Hold the camera we send to ONE peer to [rung].

@@ -2,11 +2,13 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
+import 'package:hollow/src/core/providers/link_health_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
+import 'package:hollow/src/ui/components/link_health_chip.dart';
 import 'package:hollow/src/ui/components/speaking_border.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -173,6 +175,19 @@ class MobileSpeakingAvatar extends ConsumerWidget {
           ),
           overflow: TextOverflow.ellipsis,
         ),
+        // Per-peer link flair, under the name. In a mesh a member on bad
+        // Wi-Fi is that member's leg: it belongs on their avatar, never on
+        // the channel. Our own avatar has no leg of its own to report.
+        if (!isMe)
+          Consumer(builder: (context, ref, _) {
+            final health =
+                ref.watch(vcLinkHealthProvider.select((m) => m[peerId]));
+            if (health == null) return const SizedBox.shrink();
+            return Padding(
+              padding: const EdgeInsets.only(top: HollowSpacing.xxs),
+              child: LinkHealthChip(snapshot: health, compact: true),
+            );
+          }),
       ],
     );
   }

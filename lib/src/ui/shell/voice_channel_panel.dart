@@ -3,10 +3,12 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
+import 'package:hollow/src/core/providers/connection_status_provider.dart';
 import 'package:hollow/src/core/providers/voice_channel_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
+import 'package:hollow/src/ui/components/connection_visual.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
 import 'package:hollow/src/ui/components/ptt_mic_visual.dart';
@@ -52,6 +54,14 @@ class VoiceChannelPanel extends ConsumerWidget {
     final channelName =
         channels[vcState.currentChannelId]?.name ?? 'Voice';
 
+    // OUR OWN link, not the mesh's. A per-peer leg in trouble is labelled on
+    // that member's row; this line is the one case that affects everyone, and
+    // a hardcoded green "Voice Connected" said the opposite of the truth while
+    // the relay was down. Same source and same helper as the user bars.
+    final connection = ref.watch(overallConnectionProvider);
+    final visual = connectionVisual(hollow, connection);
+    final connected = connection.isOnline;
+
     return Container(
       padding: const EdgeInsets.symmetric(
         horizontal: HollowSpacing.md,
@@ -69,11 +79,16 @@ class VoiceChannelPanel extends ConsumerWidget {
           // Header: connection status + channel name
           Row(
             children: [
+              // Shape carries the state as well as colour (a11y): only a
+              // settled connection is a filled disc.
               Container(
                 width: 8,
                 height: 8,
-                decoration: const BoxDecoration(
-                  color: Colors.green,
+                decoration: BoxDecoration(
+                  color: connected ? visual.color : Colors.transparent,
+                  border: connected
+                      ? null
+                      : Border.all(color: visual.color, width: 1.5),
                   shape: BoxShape.circle,
                 ),
               ),
@@ -83,9 +98,9 @@ class VoiceChannelPanel extends ConsumerWidget {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      'Voice Connected',
+                      connected ? 'Voice connected' : visual.label,
                       style: HollowTypography.caption.copyWith(
-                        color: Colors.green,
+                        color: connected ? hollow.success : visual.color,
                         fontWeight: FontWeight.w600,
                       ),
                     ),

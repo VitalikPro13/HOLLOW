@@ -122,10 +122,139 @@ void main() {
     final mesh = _read('lib/src/core/services/voice_channel_service.dart');
     final recover = _between(mesh, 'onRecoverLink:', 'onGiveUp:');
     expect(recover, isNotNull, reason: 'the mesh lost its recovery callback.');
-    expect(recover!.contains('closePeer'), isTrue,
-        reason: 'the mesh rebuilds a leg by dropping and re-dialling it, '
-            'which is what a member rejoining does.');
+    expect(recover!.contains('_rebuildLeg'), isTrue,
+        reason: 'the mesh recovers a leg through _rebuildLeg, which drops and '
+            're-dials it — what a member rejoining does.');
     expect(recover.contains('restartIceOn'), isFalse);
+
+    final redial = _between(mesh, 'Future<void> _redialLeg(', '\n  }');
+    expect(redial, isNotNull, reason: '_redialLeg moved; re-point this guard.');
+    expect(redial!.contains('closePeer'), isTrue);
+    expect(redial.contains('connectToPeer'), isTrue);
+  });
+
+  test('the side that cannot dial ASKS instead of waiting forever', () {
+    // The mesh gives the offer to the lexicographically lower peer id. The
+    // higher side's recovery used to be `closePeer` and then nothing at all:
+    // it tore its leg down and waited for an offer nobody was going to send,
+    // and could destroy a leg the peer had just rebuilt. Field-caught
+    // 2026-08-27 — no audio for the rest of the session.
+    final mesh = _read('lib/src/core/services/voice_channel_service.dart');
+    final rebuild = _between(mesh, 'Future<void> _rebuildLeg(', '\n  }');
+    expect(rebuild, isNotNull, reason: '_rebuildLeg moved; re-point this guard.');
+    expect(rebuild!.contains('shouldInitiateIceRepair'), isTrue,
+        reason: 'the rebuild must branch on the SAME glare rule the join '
+            'machinery dials by, or both sides dial and ping-pong.');
+    expect(rebuild.contains('_sendLegRestart'), isTrue,
+        reason: 'the non-dialing side must ask its peer to re-offer. Dropping '
+            'this is the bug: a silent leg with nobody dialing.');
+
+    // Both ends watch the same leg and both can decide it is broken seconds
+    // apart. Without a window the second one tears down what the first just
+    // rebuilt — the mesh twin of _mediaRestartRecentlyStarted.
+    expect(mesh.contains('_legRebuiltRecently'), isTrue,
+        reason: 'whichever rebuild starts first must own the leg.');
+    final onOffer = _between(mesh, 'Future<void> _handleSdpOffer(', '\n  }');
+    expect(onOffer, isNotNull);
+    expect(onOffer!.contains('_legRebuiltAt[peerId] = DateTime.now()'), isTrue,
+        reason: "accepting a peer's rebuild offer must claim the window too, "
+            'or our own watchdog closes the leg they just rebuilt.');
+  });
+
+  test('the leg_restart signal has all THREE Rust touches', () {
+    // Voice-channel signal types are WHITELISTED in Rust exactly like call
+    // signals; a type missing any touch is dropped SILENTLY, which for this
+    // one means the higher-id side asks and nothing ever happens.
+    const touches = {
+      'rust/hollow_core/src/node/types.rs': 'VoiceChannelLegRestart',
+      'rust/hollow_core/src/node/voice_handler.rs': '"leg_restart"',
+      'rust/hollow_core/src/node/swarm.rs': 'VoiceChannelLegRestart',
+    };
+    touches.forEach((path, needle) {
+      expect(_read(path).contains(needle), isTrue,
+          reason: '$path is missing the leg_restart touch ($needle). A new VC '
+              'signal needs the types.rs variant, the send match arm, and the '
+              'swarm.rs dispatch arm.');
+    });
+  });
+
+  test('voice presence is re-announced OUTSIDE the is_new guard', () {
+    // A peer whose socket dies is purged from our `voice_channel_participants`,
+    // and that set gates every inbound VC signal. Only the peer's own presence
+    // re-announce refills it. That re-announce used to sit inside the
+    // `is_new`/`synced_peers` cascade, which is false for exactly the peer that
+    // just reconnected: the real relay broadcasts PeerLeft only for a CLEAN
+    // leave, so a dropped peer is never removed from `synced_peers`.
+    // Field-caught 2026-08-27: four offers dialed, four dropped as
+    // `BLOCKED VC SDP offer from non-participant`, permanently silent channel.
+    // Behaviour is pinned by `vc_reconnecting_peer_can_receive_signals_again`
+    // in the harness (verified to FAIL when this block is disabled).
+    final swarm = _read('rust/hollow_core/src/node/swarm.rs');
+    final announce = swarm.indexOf('Re-announcing our presence');
+    expect(announce, greaterThan(-1),
+        reason: 'the voice presence re-announce is gone. Without it a peer '
+            'that reconnects can send VC signals but never receive them.');
+    final isNewGuard = swarm.indexOf('let is_new = synced_peers.insert');
+    expect(isNewGuard, greaterThan(-1),
+        reason: 'the is_new guard moved; re-point this guard.');
+    expect(announce, lessThan(isNewGuard),
+        reason: 'the re-announce is back inside the is_new cascade. That guard '
+            'means "have we synced with this peer at all this session" and is '
+            'FALSE for a peer that dropped and came back, which is the only '
+            'peer that needs it.');
+  });
+
+  test('a mesh leg that was given up on is still reached for', () {
+    // A DM call that gives up hangs up, and the user can call again. A voice
+    // channel has no such moment: the member stays in the roster, so a leg
+    // abandoned here is silent for as long as they sit there.
+    final mesh = _read('lib/src/core/services/voice_channel_service.dart');
+    expect(mesh.contains('_scheduleLegRedial'), isTrue,
+        reason: 'a spent hold-open window must start a slow retry, not end '
+            'the leg for good.');
+    final giveUp = _between(mesh, 'onGiveUp: () {', '\n      },');
+    expect(giveUp, isNotNull);
+    expect(giveUp!.contains('_scheduleLegRedial'), isTrue);
+  });
+
+  test('a rebuilt leg gets the receive-side state put back', () {
+    // Mute rides the shared local track and survives untouched, but deafen and
+    // the per-peer volume are set ON the receiver, which the rebuild replaced.
+    final mesh = _read('lib/src/core/services/voice_channel_service.dart');
+    expect(mesh.contains('_restorePeerAudioState'), isTrue,
+        reason: 'a fresh receiver arrives at full volume: a deafened member '
+            'would become audible again on every reconnect.');
+    final connected = _between(
+        mesh, 'RTCPeerConnectionStateConnected) {', '\n    }');
+    expect(connected, isNotNull);
+    expect(connected!.contains('_restorePeerAudioState'), isTrue);
+  });
+
+  test('a crossing rebuild cannot make the call forget the camera', () {
+    // Field-caught 2026-08-27: audio came back, the picture never did. A
+    // rebuild sets isVideoEnabled false as it starts, so the SECOND claim on
+    // the same recovery (ours, then the peer's crossing media_restart) read
+    // that cleared flag and concluded the camera had never been on.
+    final provider = _read('lib/src/core/providers/call_provider.dart');
+    expect(provider.contains('_claimVideoRestore()'), isTrue,
+        reason: 'the restore flag must be LATCHED, never assigned from the '
+            'state a rebuild has already cleared.');
+    expect(
+      RegExp(r'_restoreVideoAfterRestart = state\.isVideoEnabled')
+          .hasMatch(provider),
+      isFalse,
+      reason: 'the assignment is back, and with it the forgotten camera.',
+    );
+
+    // Both ends restore their own camera onto the same fresh, audio-only peer
+    // connection, and each restore is a renegotiation.
+    final restore =
+        _between(provider, 'void _restoreAfterMediaRestart()', '\n  }');
+    expect(restore, isNotNull);
+    expect(restore!.contains('_cameraAutoEnableDelayMs'), isTrue,
+        reason: 'two cameras coming back at the same moment is textbook '
+            'renegotiation glare: one offer is never processed and the video '
+            'ends up one-way. Stagger it like the call-start auto-enable.');
   });
 
   test('the media_restart signal has all THREE Rust touches', () {

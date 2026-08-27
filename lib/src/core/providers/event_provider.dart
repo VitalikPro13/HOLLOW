@@ -1412,7 +1412,8 @@ class EventStreamNotifier extends Notifier<bool> {
       case NetworkEvent_VoiceChannelJoined(
             :final serverId, :final channelId, :final peerId, :final isSelf):
         final vcNotifier = ref.read(voiceChannelProvider.notifier);
-        vcNotifier.onPeerJoined(serverId, channelId, peerId);
+        final isNewArrival =
+            vcNotifier.onPeerJoined(serverId, channelId, peerId);
         // Conferences are virtual servers ('conf:...') with no channel list —
         // their call renders in the Conferences tab, so never touch the
         // selected-channel providers for them.
@@ -1435,7 +1436,8 @@ class EventStreamNotifier extends Notifier<bool> {
           final vcState = ref.read(voiceChannelProvider);
           if (vcState.currentServerId == serverId &&
               vcState.currentChannelId == channelId) {
-            vcNotifier.onRemotePeerJoined(peerId);
+            vcNotifier.onRemotePeerJoined(peerId,
+                isNewArrival: isNewArrival);
           }
         }
 
