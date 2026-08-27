@@ -13,6 +13,13 @@ analyzer:
   exclude:
     # flutter_rust_bridge codegen output — regenerated wholesale, lints don't apply
     - lib/src/rust/**
+    # Vendored cargokit. It is its OWN Dart package (rust_builder/cargokit/
+    # build_tool/pubspec.yaml), and a clean checkout never runs pub get inside
+    # it, so every import there resolves to nothing and `flutter analyze`
+    # reports 43 phantom errors. It resolves on a dev box only because a
+    # Windows build happened to fetch its deps. Out of scope for us, the same
+    # way sonar-project.properties leaves it out.
+    - rust_builder/**
     - build/**
     - android/**
     - ios/**
