@@ -938,7 +938,10 @@ impl TestNode {
             .send(NodeCommand::DebugSnapshot { reply: tx })
             .await
             .ok()?;
-        tokio::time::timeout(std::time::Duration::from_secs(2), rx)
+        // 5s, not 2: under a full parallel run the event loop is busy and a
+        // 2s round trip timed out, which `olm_status` then reports as "absent"
+        // and `mls_members` as an empty group. Both read as real state.
+        tokio::time::timeout(std::time::Duration::from_secs(5), rx)
             .await
             .ok()?
             .ok()
@@ -946,6 +949,17 @@ impl TestNode {
 
     /// The MLS group's leaf DEVICE ids for `server_id` (raw, device-keyed — the
     /// truth under the master-keyed member panel). Empty if no group / no reply.
+    /// `mls_members`, but telling "the loop did not reply" (None) apart from
+    /// "the group holds no such leaf" (Some). An EVICTION wait must use this: a
+    /// timed-out snapshot yields an empty list, which reads exactly like a
+    /// successful removal and would pass the test without the eviction ever
+    /// having happened.
+    pub(crate) async fn mls_members_checked(&self, group_id: &str) -> Option<Vec<String>> {
+        let mut v = self.debug_snapshot().await?.mls_members.get(group_id).cloned().unwrap_or_default();
+        v.sort();
+        Some(v)
+    }
+
     pub(crate) async fn mls_members(&self, server_id: &str) -> Vec<String> {
         let mut v = self
             .debug_snapshot()
@@ -1281,6 +1295,176 @@ async fn sleep_ms(ms: u64) {
     tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
 }
 
+/// Poll `cond` until it holds, or `secs` elapse. Returns whether it held.
+///
+/// **This is the default settle primitive, not `sleep_ms`.** A fixed sleep has
+/// to be long enough for the slowest machine that will ever run it, so it is
+/// dead time on every other machine AND a silent flake on the one where it
+/// turned out not to be long enough: the assert that follows just fails, with
+/// no hint that time was the problem. Polling finishes the moment the thing has
+/// actually happened, usually two orders of magnitude sooner, and when it does
+/// not happen it says so.
+///
+/// Reach for `sleep_ms` ONLY to prove an ABSENCE ("wait a window, then assert
+/// nothing arrived"). There is no state to poll for something that must never
+/// happen, so that window has to be real time. Everything else has a condition,
+/// and `TestNode` exposes it.
+///
+/// POLL LIVE STATE, NEVER A RUNNING NODE'S DB. `olm_status`, `mls_members` and
+/// `mls_epoch` round-trip a `DebugSnapshot` over the node's own channel and are
+/// free to ask repeatedly. Everything else here (`servers`, `server_state` and
+/// so everything built on it: `channel_visibility`, `can_see_channel`,
+/// `has_grant_now`, `known_devices`) calls `store()`, which opens a NEW
+/// SQLCipher connection each time. Asking on a loop starves the node's own
+/// writer, which waits `busy_timeout = 4000`ms for locks the test keeps taking:
+/// a 250ms poll for a channel-row heal stopped it landing inside 15s where a
+/// plain sleep saw it in under 4. If the only settle signal is on disk, use a
+/// sleep and say why.
+async fn wait_until(secs: u64, mut cond: impl AsyncFnMut() -> bool) -> bool {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(secs);
+    // Backs off 25ms -> 250ms. Some predicates here open SQLCipher, whose key
+    // derivation is deliberately expensive, so a flat 25ms poll would spend more
+    // CPU on the KDF than the thing being waited for.
+    let mut interval = 25;
+    loop {
+        if cond().await {
+            return true;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        sleep_ms(interval).await;
+        interval = (interval * 2).min(250);
+    }
+}
+
+/// Sleep until a wall-clock DEADLINE (plus `grace_ms`), not for a duration.
+///
+/// Use this wherever a test has to outlast a real timestamp: a grant expiry, a
+/// TTL, a sweep window. The duration form silently depends on how long the steps
+/// ABOVE happened to take, which is fine right up until those steps stop
+/// sleeping a fixed amount and start finishing as soon as their condition holds.
+/// `channel_grant_expiry_sweep` failed exactly that way: its "now ~= 11s after
+/// the grant" sleep was sized against 6s of fixed sleeps that had just become
+/// 1.5s of polling, so it woke up BEFORE the grant it was waiting to expire.
+async fn sleep_until_ms(deadline_ms: u64, grace_ms: u64) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    sleep_ms(deadline_ms.saturating_sub(now) + grace_ms).await;
+}
+
+/// Wait until `a` and `b` hold a CONFIRMED Olm session with each other, and
+/// panic with both directions' status if they do not.
+///
+/// Replaces the `sleep_ms(4000)` that stood at the top of every test whose
+/// payloads ride Olm. Bidirectional on purpose: an outbound-only session is not
+/// usable yet and deliberately does not count (see the comment at swarm.rs:92),
+/// which is exactly the half-built state a too-short fixed sleep left behind.
+async fn expect_olm_confirmed(a: &TestNode, b: &TestNode, secs: u64) {
+    let ok = wait_until(secs, async || {
+        a.olm_status(&b.device_id).await == "confirmed"
+            && b.olm_status(&a.device_id).await == "confirmed"
+    })
+    .await;
+    assert!(
+        ok,
+        "Olm never confirmed both ways within {}s: {} -> {} is {:?}, {} -> {} is {:?}",
+        secs,
+        a.device_id,
+        b.device_id,
+        a.olm_status(&b.device_id).await,
+        b.device_id,
+        a.device_id,
+        b.olm_status(&a.device_id).await,
+    );
+}
+
+/// Wait until a freshly spawned friend PAIR is actually usable: confirmed Olm
+/// both ways, AND both devices present in the DM room their traffic rides.
+///
+/// This is what the `sleep_ms(4000)` after a friend-pair spawn was really
+/// covering, and waiting only for the Olm session is not enough. The session
+/// confirms well before both nodes have finished joining their rooms, so tests
+/// converted to Olm-only started sending into a room the recipient had not
+/// joined yet: `dm_file_transfer_completes_and_decrypts` and
+/// `dm_relay_buffer_delivers_after_sender_goes_offline_and_clears` both went
+/// intermittent, once hard-failing twice in a row. A sleep that "waits for Olm"
+/// is rarely waiting only for Olm, which is the whole hazard in replacing one
+/// with a narrower condition.
+async fn expect_dm_pair_ready(relay: &MockRelay, a: &TestNode, b: &TestNode, secs: u64) {
+    expect_olm_confirmed(a, b, secs).await;
+    let room = super::types::dm_room_code(&a.master_id, &b.master_id);
+    let ok = wait_until(secs, async || {
+        let members = relay.room_devices(&room);
+        members.contains(&a.device_id) && members.contains(&b.device_id)
+    })
+    .await;
+    assert!(
+        ok,
+        "{} and {} never both joined DM room {} within {}s, got {:?}",
+        a.device_id,
+        b.device_id,
+        room,
+        secs,
+        relay.room_devices(&room),
+    );
+}
+
+/// Wait until `holder`'s MLS group for `group_id` carries `leaf`'s device, and
+/// panic with the leaf list if it never does. `group_id` is a `server_id` for
+/// the server-wide group, or `subgroup_id(server, channel)` for a per-channel
+/// one. Replaces "let the MLS leaf form" sleeps: KeyPackage -> add -> Welcome is
+/// a round trip whose duration is a property of the machine, not of the code.
+async fn expect_mls_leaf(holder: &TestNode, group_id: &str, leaf: &str, secs: u64) {
+    let ok = wait_until(secs, async || {
+        holder.mls_members(group_id).await.iter().any(|m| m == leaf)
+    })
+    .await;
+    assert!(
+        ok,
+        "MLS group {} on {} never gained leaf {} within {}s, got {:?}",
+        group_id,
+        holder.device_id,
+        leaf,
+        secs,
+        holder.mls_members(group_id).await,
+    );
+}
+
+/// Wait until EVERY node in `nodes` sees EVERY node's leaf in `group_id`, which
+/// is what "the server-wide group has formed" actually means: one member's view
+/// converging says nothing about the others'.
+/// Wait until `holder`'s MLS group for `group_id` no longer carries `leaf`.
+/// An eviction is a convergence like any other, not an absence: the leaf is gone
+/// once the commit that removed it has been applied, and that is observable, so
+/// it gets polled rather than slept on.
+async fn expect_no_mls_leaf(holder: &TestNode, group_id: &str, leaf: &str, secs: u64) {
+    let ok = wait_until(secs, async || {
+        // Some(..) required: a snapshot that never came back is not an eviction.
+        matches!(holder.mls_members_checked(group_id).await, Some(v) if !v.iter().any(|m| m == leaf))
+    })
+    .await;
+    assert!(
+        ok,
+        "MLS group {} on {} never dropped leaf {} within {}s, got {:?}",
+        group_id,
+        holder.device_id,
+        leaf,
+        secs,
+        holder.mls_members(group_id).await,
+    );
+}
+
+async fn expect_mls_group(nodes: &[&TestNode], group_id: &str, secs: u64) {
+    for holder in nodes {
+        for leaf in nodes {
+            expect_mls_leaf(holder, group_id, &leaf.device_id, secs).await;
+        }
+    }
+}
+
 /// Drive `CreateServer` on `node` and return the new `server_id` (captured from
 /// the `ServerCreated` event the owner emits). The default `#general` channel id
 /// is `format!("{}-general", &server_id[..8])`.
@@ -1378,12 +1562,13 @@ async fn peer_fallback_recovers_own_sends_correct_direction() {
     sleep_ms(1500).await;
     let mut b = spawn_node_with_friends(&relay, M_MASTER, B_DEV, &[&a_master]).await;
 
-    // Let rooms join + Olm key exchange (KeyRequest/KeyBundle/SessionAck over
-    // SendDirect) FULLY CONFIRM between A and the live devices. Glare resolution
-    // (lower peer sends PreKey/SessionAck, higher creates inbound) needs a couple
-    // of round-trips; give it generous time so sessions are bidirectional before
-    // any DM is sent (else the DM rides an unconfirmed ratchet and fails decrypt).
-    sleep_ms(6000).await;
+    // Olm key exchange (KeyRequest/KeyBundle/SessionAck over SendDirect) must
+    // FULLY CONFIRM between A and the live devices before any DM is sent, or the
+    // DM rides an unconfirmed ratchet and fails to decrypt. Glare resolution
+    // takes a couple of round trips, so this waits for the sessions themselves
+    // rather than guessing how long the round trips take.
+    expect_dm_pair_ready(&relay, &a, &b, 20).await;
+    expect_dm_pair_ready(&relay, &a, &c, 20).await;
     drain_events(&mut a);
     drain_events(&mut b);
     drain_events(&mut c);
@@ -1533,15 +1718,7 @@ async fn server_join_forms_mls_and_channel_message_decrypts() {
     let mut o = spawn_node_with_friends(&relay, O_MASTER, O_MASTER, &[&j_master]).await;
     sleep_ms(1500).await;
     let mut j = spawn_node_with_friends(&relay, J_MASTER, J_MASTER, &[&o_master]).await;
-    // Let Olm sessions confirm bidirectionally before the join handshake rides them.
-    sleep_ms(4000).await;
-
-    // Olm sanity (live-state inspector): O <-> J sessions are confirmed.
-    assert_eq!(
-        o.olm_status(&j.device_id).await,
-        "confirmed",
-        "owner must hold a confirmed Olm session with the joiner before join"
-    );
+    expect_dm_pair_ready(&relay, &o, &j, 15).await;
 
     // --- Owner creates a server (+ implicit #general channel) ---
     let server_id = create_server_and_wait(&mut o, "Test Server").await;
@@ -1694,7 +1871,10 @@ async fn public_channel_message_from_multidevice_sender_attributes_to_master() {
         .await
         .unwrap();
     // Let accept + device-list/profile pushes + Olm key exchange settle.
-    sleep_ms(4000).await;
+    expect_dm_pair_ready(&relay, &o, &j, 15).await;
+    // ...and J's resolver has learned O's device -> master mapping, which is
+    // the precondition the assertion below states.
+    wait_until(15, async || super::resolver::resolve(&o_dev) == o_master).await;
     drain_events(&mut o);
     drain_events(&mut j);
 
@@ -1827,7 +2007,7 @@ async fn nsfw_server_gates_join_until_confirmed() {
     let mut o = spawn_node_with_friends(&relay, O_MASTER, O_MASTER, &[&j_master]).await;
     sleep_ms(1500).await;
     let mut j = spawn_node_with_friends(&relay, J_MASTER, J_MASTER, &[&o_master]).await;
-    sleep_ms(4000).await;
+    expect_dm_pair_ready(&relay, &o, &j, 15).await;
 
     // Owner creates a server and flags it NSFW via the settings CRDT.
     let server_id = create_server_and_wait(&mut o, "Adult Server").await;
@@ -1915,7 +2095,7 @@ async fn channel_typing_roundtrips_master_attributed() {
     let mut o = spawn_node_with_friends(&relay, O_MASTER, O_MASTER, &[&j_master]).await;
     sleep_ms(1500).await;
     let mut j = spawn_node_with_friends(&relay, J_MASTER, J_MASTER, &[&o_master]).await;
-    sleep_ms(4000).await;
+    expect_dm_pair_ready(&relay, &o, &j, 15).await;
 
     // Owner creates a server, joiner joins, MLS group forms across both.
     let server_id = create_server_and_wait(&mut o, "Typing Server").await;
@@ -2540,11 +2720,14 @@ async fn dm_file_transfer_completes_and_decrypts() {
     let mut a = spawn_node_with_friends(&relay, A_MASTER, A_MASTER, &[&b_master]).await;
     sleep_ms(1200).await;
     let mut b = spawn_node_with_friends(&relay, B_MASTER, B_MASTER, &[&a_master]).await;
-    sleep_ms(4000).await; // let Olm sessions confirm (the FileHeader rides Olm)
-    assert_eq!(
-        a.olm_status(&b.device_id).await, "confirmed",
-        "sender needs a confirmed Olm session for the FileHeader"
-    );
+    expect_dm_pair_ready(&relay, &a, &b, 15).await;
+    // Residual, and it earns its place: a file/voice/video send PRE-NEGOTIATES
+    // the recipient's auto-download preference, and that advert exchange has no
+    // live probe (DebugSnapshotReply carries MLS + Olm only). Every test that
+    // went intermittent while this file was being de-slept was in this family,
+    // and none outside it. Delete this when the pref becomes observable, not
+    // before.
+    sleep_ms(1000).await;
     drain_events(&mut a);
     drain_events(&mut b);
 
@@ -2630,8 +2813,14 @@ async fn dm_auto_download_off_declines_push_then_manual_request_completes() {
     let mut a = spawn_node_with_friends(&relay, A_MASTER, A_MASTER, &[&b_master]).await;
     sleep_ms(1200).await;
     let mut b = spawn_node_with_friends(&relay, B_MASTER, B_MASTER, &[&a_master]).await;
-    sleep_ms(4000).await;
-    assert_eq!(a.olm_status(&b.device_id).await, "confirmed");
+    expect_dm_pair_ready(&relay, &a, &b, 15).await;
+    // Residual, and it earns its place: a file/voice/video send PRE-NEGOTIATES
+    // the recipient's auto-download preference, and that advert exchange has no
+    // live probe (DebugSnapshotReply carries MLS + Olm only). Every test that
+    // went intermittent while this file was being de-slept was in this family,
+    // and none outside it. Delete this when the pref becomes observable, not
+    // before.
+    sleep_ms(1000).await;
     drain_events(&mut a);
     drain_events(&mut b);
 
@@ -2751,8 +2940,14 @@ async fn dm_receiver_pref_prenegotiation_skips_push_bytes() {
     let mut a = spawn_node_with_friends(&relay, A_MASTER, A_MASTER, &[&b_master]).await;
     sleep_ms(1200).await;
     let mut b = spawn_node_with_friends(&relay, B_MASTER, B_MASTER, &[&a_master]).await;
-    sleep_ms(4000).await; // Olm confirm + auto_dl_pref adverts exchange
-    assert_eq!(a.olm_status(&b.device_id).await, "confirmed");
+    expect_dm_pair_ready(&relay, &a, &b, 15).await;
+    // Residual, and it earns its place: a file/voice/video send PRE-NEGOTIATES
+    // the recipient's auto-download preference, and that advert exchange has no
+    // live probe (DebugSnapshotReply carries MLS + Olm only). Every test that
+    // went intermittent while this file was being de-slept was in this family,
+    // and none outside it. Delete this when the pref becomes observable, not
+    // before.
+    sleep_ms(1000).await;
     drain_events(&mut a);
     drain_events(&mut b);
 
@@ -2868,8 +3063,14 @@ async fn dm_voice_message_bypasses_auto_download_gate() {
     let mut a = spawn_node_with_friends(&relay, A_MASTER, A_MASTER, &[&b_master]).await;
     sleep_ms(1200).await;
     let mut b = spawn_node_with_friends(&relay, B_MASTER, B_MASTER, &[&a_master]).await;
-    sleep_ms(4000).await;
-    assert_eq!(a.olm_status(&b.device_id).await, "confirmed");
+    expect_dm_pair_ready(&relay, &a, &b, 15).await;
+    // Residual, and it earns its place: a file/voice/video send PRE-NEGOTIATES
+    // the recipient's auto-download preference, and that advert exchange has no
+    // live probe (DebugSnapshotReply carries MLS + Olm only). Every test that
+    // went intermittent while this file was being de-slept was in this family,
+    // and none outside it. Delete this when the pref becomes observable, not
+    // before.
+    sleep_ms(1000).await;
     drain_events(&mut a);
     drain_events(&mut b);
 
@@ -2950,8 +3151,14 @@ async fn dm_video_send_carries_poster_thumb_and_dims() {
     let mut a = spawn_node_with_friends(&relay, A_MASTER, A_MASTER, &[&b_master]).await;
     sleep_ms(1200).await;
     let mut b = spawn_node_with_friends(&relay, B_MASTER, B_MASTER, &[&a_master]).await;
-    sleep_ms(4000).await;
-    assert_eq!(a.olm_status(&b.device_id).await, "confirmed");
+    expect_dm_pair_ready(&relay, &a, &b, 15).await;
+    // Residual, and it earns its place: a file/voice/video send PRE-NEGOTIATES
+    // the recipient's auto-download preference, and that advert exchange has no
+    // live probe (DebugSnapshotReply carries MLS + Olm only). Every test that
+    // went intermittent while this file was being de-slept was in this family,
+    // and none outside it. Delete this when the pref becomes observable, not
+    // before.
+    sleep_ms(1000).await;
     drain_events(&mut a);
     drain_events(&mut b);
 
@@ -3041,7 +3248,7 @@ async fn voice_channel_join_leave_and_signal_routing() {
     let mut o = spawn_node_with_friends(&relay, O_MASTER, O_MASTER, &[&j_master]).await;
     sleep_ms(1200).await;
     let mut j = spawn_node_with_friends(&relay, J_MASTER, J_MASTER, &[&o_master]).await;
-    sleep_ms(4000).await; // Olm confirm (targeted VC signals would need it)
+    expect_dm_pair_ready(&relay, &o, &j, 15).await;
 
     // Owner creates a server; add a VOICE channel (the default #general is Text).
     let server_id = create_server_and_wait(&mut o, "VC Server").await;
@@ -3249,7 +3456,7 @@ async fn vc_self_participant_is_device_keyed_no_self_dial() {
     let mut o = spawn_node_with_friends(&relay, O_MASTER, O_DEVICE, &[&j_master]).await;
     sleep_ms(1200).await;
     let mut j = spawn_node_with_friends(&relay, J_MASTER, J_DEVICE, &[&o_master]).await;
-    sleep_ms(4000).await; // Olm confirm (targeted VC signals ride Olm)
+    expect_dm_pair_ready(&relay, &o, &j, 15).await;
     assert_ne!(j.device_id, j.master_id, "test precondition: device != master");
 
     let server_id = create_server_and_wait(&mut o, "Ghost Server").await;
@@ -3416,7 +3623,7 @@ async fn vc_screen_origin_attribution_round_trip() {
     let mut o = spawn_node_with_friends(&relay, O_MASTER, O_MASTER, &[&j_master]).await;
     sleep_ms(1200).await;
     let mut j = spawn_node_with_friends(&relay, J_MASTER, J_MASTER, &[&o_master]).await;
-    sleep_ms(4000).await; // Olm confirm (targeted VC signals ride Olm)
+    expect_dm_pair_ready(&relay, &o, &j, 15).await;
 
     let server_id = create_server_and_wait(&mut o, "Origin Server").await;
     o.cmd_tx
@@ -3667,7 +3874,7 @@ async fn vc_reconnecting_peer_can_receive_signals_again() {
     let mut o = spawn_node_with_friends(&relay, O_MASTER, O_MASTER, &[&j_master]).await;
     sleep_ms(1200).await;
     let mut j = spawn_node_with_friends(&relay, J_MASTER, J_MASTER, &[&o_master]).await;
-    sleep_ms(4000).await; // Olm confirm (targeted VC signals ride Olm)
+    expect_dm_pair_ready(&relay, &o, &j, 15).await;
 
     let server_id = create_server_and_wait(&mut o, "Reconnect Server").await;
     o.cmd_tx
@@ -3743,6 +3950,9 @@ async fn vc_reconnecting_peer_can_receive_signals_again() {
     relay.drop_socket_silently(&j.device_id);
     sleep_ms(1500).await;
     relay.set_online(&j.device_id, true);
+    // STAYS A SLEEP. The reconnect itself is observable, but the owner's
+    // presence re-announce is the thing under test: polling for it would be
+    // asserting the fix in the setup and the test could no longer fail.
     sleep_ms(4000).await; // reconnect + the owner's presence re-announce
     drain_events(&mut j);
 
@@ -3799,7 +4009,7 @@ async fn vc_leg_restart_signal_round_trips() {
     let mut o = spawn_node_with_friends(&relay, O_MASTER, O_MASTER, &[&j_master]).await;
     sleep_ms(1200).await;
     let mut j = spawn_node_with_friends(&relay, J_MASTER, J_MASTER, &[&o_master]).await;
-    sleep_ms(4000).await; // Olm confirm (targeted VC signals ride Olm)
+    expect_dm_pair_ready(&relay, &o, &j, 15).await;
 
     let server_id = create_server_and_wait(&mut o, "Leg Restart Server").await;
     o.cmd_tx
@@ -4050,7 +4260,7 @@ async fn sibling_recovers_own_channel_messages_from_present_member() {
     })
     .await;
     assert!(b_joined, "device B should join the server");
-    sleep_ms(4000).await; // let B's MLS leaf form (KeyPackage → batch-add → Welcome)
+    expect_mls_leaf(&a, &server_id, &b.device_id, 15).await;
     drain_events(&mut a);
     drain_events(&mut b);
 
@@ -4192,7 +4402,7 @@ async fn corrupt_device_keyed_channel_row_self_heals_from_verified_sync() {
     let mut a = spawn_node_with_friends(&relay, A_MASTER, A_MASTER, &[&j_master]).await;
     sleep_ms(1500).await;
     let mut j = spawn_node_with_friends(&relay, J_MASTER, J_MASTER, &[&a_master]).await;
-    sleep_ms(4000).await; // Olm confirm A↔J
+    expect_dm_pair_ready(&relay, &a, &j, 15).await;
     drain_events(&mut a);
     drain_events(&mut j);
 
@@ -4209,6 +4419,10 @@ async fn corrupt_device_keyed_channel_row_self_heals_from_verified_sync() {
     })
     .await;
     assert!(joined, "J must join the server");
+    // STAYS A SLEEP. Narrowing this to "A sees J's leaf" returns much sooner and
+    // breaks the test: the heal at the end of it stopped happening at all. The
+    // leaf appearing is not the same event as J having finished joining, and the
+    // corrupt-row/rejoin/sync sequence below depends on the latter.
     sleep_ms(4000).await; // MLS leaf forms
 
     // A sends a channel message; J receives + stores it CORRECTLY (verified, keyed to
@@ -4263,6 +4477,12 @@ async fn corrupt_device_keyed_channel_row_self_heals_from_verified_sync() {
         .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
         .await
         .unwrap();
+    // STAYS A SLEEP, and this one was measured. Polling
+    // `raw_channel_message_sender` (which opens a NEW SQLCipher connection every
+    // call) at 250ms stopped the heal from landing inside 15s, when a plain sleep
+    // saw it in under 4. Reading a node's DB from the test is not free and not
+    // passive: the connection teardown takes locks the node's own writer then
+    // waits on (busy_timeout = 4000). Poll LIVE state, never a running node's DB.
     sleep_ms(4000).await; // let the ChannelSyncRequest round-trip + heal commit
 
     // --- THE ASSERTION: J's row is repaired back to A's master (raw, device-keyed
@@ -4469,7 +4689,7 @@ async fn admin_flips_owner_setting_and_all_nodes_converge() {
     let mut a = spawn_node_with_friends(&relay, A_MASTER, A_MASTER, &[&o_master]).await;
     sleep_ms(1200).await;
     let mut m = spawn_node_with_friends(&relay, M_MASTER, M_MASTER, &[&o_master]).await;
-    sleep_ms(4000).await; // let Olm confirm all around
+    expect_dm_pair_ready(&relay, &o, &m, 15).await;
     drain_events(&mut o);
     drain_events(&mut a);
     drain_events(&mut m);
@@ -4771,7 +4991,7 @@ async fn offline_member_reconciles_server_deletion_on_reconnect() {
     let mut o = spawn_node_with_friends(&relay, O_MASTER, O_MASTER, &[&m_master]).await;
     sleep_ms(1500).await;
     let mut m = spawn_node_with_friends(&relay, M_MASTER, M_MASTER, &[&o_master]).await;
-    sleep_ms(4000).await; // Olm confirm (server join handshake rides it)
+    expect_dm_pair_ready(&relay, &o, &m, 15).await;
     drain_events(&mut o);
     drain_events(&mut m);
 
@@ -4869,7 +5089,7 @@ async fn server_create_auto_onboards_online_sibling() {
     })
     .await;
     assert!(c_onboarded, "sibling C must auto-onboard the newly-created server (ServerJoined)");
-    sleep_ms(4000).await; // let C's MLS leaf form (KeyPackage → sibling-re-add → Welcome)
+    expect_mls_leaf(&b, &server_id, &c.device_id, 15).await;
 
     // C's UI lists the server.
     assert!(
@@ -4967,7 +5187,7 @@ async fn server_create_reannounces_to_offline_sibling_on_reconnect() {
         c_onboarded,
         "reconnected sibling C must auto-onboard the server it missed while offline (ServerJoined)"
     );
-    sleep_ms(4000).await; // let C's MLS leaf form (KeyPackage → sibling-re-add → Welcome)
+    expect_mls_leaf(&b, &server_id, &c.device_id, 15).await;
 
     assert!(
         c.servers().contains(&server_id),
@@ -5133,7 +5353,11 @@ async fn restricted_channel_subgroup_enforces_visibility() {
     let mut a = spawn_node_with_friends(&relay, A_MASTER, A_MASTER, &[&o_master, &m_master]).await;
     sleep_ms(1500).await;
     let mut m = spawn_node_with_friends(&relay, M_MASTER, M_MASTER, &[&o_master, &a_master]).await;
-    sleep_ms(5000).await; // let Olm confirm all around
+    // Mutual friends, so all three pairs confirm; waiting on the sessions
+    // themselves is both faster and louder than a fixed 5s.
+    expect_dm_pair_ready(&relay, &o, &a, 20).await;
+    expect_dm_pair_ready(&relay, &o, &m, 20).await;
+    expect_dm_pair_ready(&relay, &a, &m, 20).await;
     drain_events(&mut o);
     drain_events(&mut a);
     drain_events(&mut m);
@@ -5152,9 +5376,8 @@ async fn restricted_channel_subgroup_enforces_visibility() {
         })
         .await;
         assert!(joined, "{who} should join the server");
-        sleep_ms(2500).await;
     }
-    sleep_ms(4000).await; // server-wide MLS group forms across all three
+    expect_mls_group(&[&o, &a, &m], &server_id, 20).await;
     drain_events(&mut o);
     drain_events(&mut a);
     drain_events(&mut m);
@@ -5192,9 +5415,12 @@ async fn restricted_channel_subgroup_enforces_visibility() {
         .unwrap();
     // Visibility op fans out; the owner (subgroup coordinator) creates the subgroup
     // and pulls qualifying members' KeyPackages; the 2s batch timer commits them.
-    sleep_ms(6000).await;
-
     let subgroup = crate::crypto::subgroup_id(&server_id, &restricted_cid);
+    // The subgroup exists once its coordinator (the owner) holds its own leaf.
+    expect_mls_leaf(&o, &subgroup, &o.device_id, 20).await;
+    // Residual window: what follows asserts who is NOT in it yet, and an
+    // absence only means something once real time has passed.
+    sleep_ms(800).await;
 
     // --- Pre-promotion: only the OWNER qualifies (owner short-circuits can_see).
     // A and M are plain Members → NOT leaves of the subgroup. ---
@@ -5251,7 +5477,8 @@ async fn restricted_channel_subgroup_enforces_visibility() {
         })
         .await
         .unwrap();
-    sleep_ms(6000).await; // role fans out; reconcile pulls KP; batch timer commits + welcomes
+    expect_mls_leaf(&o, &subgroup, &a.device_id, 20).await;
+    expect_mls_leaf(&a, &subgroup, &a.device_id, 20).await;
 
     let owner_sub_leaves2 = o.mls_members(&subgroup).await;
     assert!(
@@ -5302,7 +5529,7 @@ async fn restricted_channel_subgroup_enforces_visibility() {
         })
         .await
         .unwrap();
-    sleep_ms(6000).await; // role fans out; reconcile queues removal; batch timer commits
+    expect_no_mls_leaf(&o, &subgroup, &a.device_id, 20).await;
 
     let owner_sub_leaves3 = o.mls_members(&subgroup).await;
     assert!(
@@ -5341,7 +5568,11 @@ async fn label_gated_channel_subgroup_and_fallback() {
     let mut v = spawn_node_with_friends(&relay, V_MASTER, V_MASTER, &[&o_master, &m_master]).await;
     sleep_ms(1500).await;
     let mut m = spawn_node_with_friends(&relay, M_MASTER, M_MASTER, &[&o_master, &v_master]).await;
-    sleep_ms(5000).await;
+    // Mutual friends, so all three pairs confirm; waiting on the sessions
+    // themselves is both faster and louder than a fixed 5s.
+    expect_dm_pair_ready(&relay, &o, &v, 20).await;
+    expect_dm_pair_ready(&relay, &o, &m, 20).await;
+    expect_dm_pair_ready(&relay, &v, &m, 20).await;
     drain_events(&mut o);
     drain_events(&mut v);
     drain_events(&mut m);
@@ -5358,9 +5589,8 @@ async fn label_gated_channel_subgroup_and_fallback() {
         })
         .await;
         assert!(joined, "{who} should join the server");
-        sleep_ms(2500).await;
     }
-    sleep_ms(4000).await;
+    expect_mls_group(&[&o, &v, &m], &server_id, 20).await;
     drain_events(&mut o);
     drain_events(&mut v);
     drain_events(&mut m);
@@ -5420,7 +5650,14 @@ async fn label_gated_channel_subgroup_and_fallback() {
         })
         .await
         .unwrap();
-    sleep_ms(6000).await; // stamp + gate ops fan out; owner founds the subgroup
+    let subgroup = crate::crypto::subgroup_id(&server_id, &vip_cid);
+    // The owner founding the subgroup is live state and gets polled.
+    expect_mls_leaf(&o, &subgroup, &o.device_id, 20).await;
+    // The other half of this step is the stamp + gate op reaching V and M, which
+    // is only visible in THEIR DBs. Nothing to poll without hammering them, and
+    // the owner's own progress does not prove they got it, so this stays a real
+    // window.
+    sleep_ms(2000).await;
 
     // Gate + legacy admin stamp replicated to ALL nodes (the stamp is what an
     // old client would honor).
@@ -5439,7 +5676,6 @@ async fn label_gated_channel_subgroup_and_fallback() {
     assert!(!v.can_see_channel(&server_id, &vip_cid, &v_master), "V has no label yet");
     assert!(!m.can_see_channel(&server_id, &vip_cid, &m_master));
 
-    let subgroup = crate::crypto::subgroup_id(&server_id, &vip_cid);
     let owner_leaves = o.mls_members(&subgroup).await;
     assert!(owner_leaves.contains(&o.device_id), "owner holds the subgroup leaf");
     assert!(!owner_leaves.contains(&v.device_id), "V must not be a leaf pre-label");
@@ -5473,7 +5709,11 @@ async fn label_gated_channel_subgroup_and_fallback() {
         })
         .await
         .unwrap();
-    sleep_ms(6000).await; // assign fans out; reconcile pulls V's KP; batch commits
+    expect_mls_leaf(&o, &subgroup, &v.device_id, 20).await;
+    expect_mls_leaf(&v, &subgroup, &v.device_id, 20).await;
+    // Residual window for the CRDT/grant half of this step, which is only
+    // readable from the node DB and so is not polled (see wait_until).
+    sleep_ms(500).await;
 
     assert!(v.can_see_channel(&server_id, &vip_cid, &v_master), "label holder sees the channel");
     let owner_leaves2 = o.mls_members(&subgroup).await;
@@ -5519,7 +5759,10 @@ async fn label_gated_channel_subgroup_and_fallback() {
         })
         .await
         .unwrap();
-    sleep_ms(6000).await;
+    expect_no_mls_leaf(&o, &subgroup, &v.device_id, 20).await;
+    // Residual window for the CRDT/grant half of this step, which is only
+    // readable from the node DB and so is not polled (see wait_until).
+    sleep_ms(500).await;
     let owner_leaves3 = o.mls_members(&subgroup).await;
     assert!(
         !owner_leaves3.contains(&v.device_id),
@@ -5576,7 +5819,7 @@ async fn access_label_self_assign_locked() {
     let mut o = spawn_node_with_friends(&relay, O_MASTER, O_MASTER, &[&m_master]).await;
     sleep_ms(1500).await;
     let mut m = spawn_node_with_friends(&relay, M_MASTER, M_MASTER, &[&o_master]).await;
-    sleep_ms(4000).await;
+    expect_dm_pair_ready(&relay, &o, &m, 15).await;
     drain_events(&mut o);
     drain_events(&mut m);
 
@@ -5705,7 +5948,7 @@ async fn channel_grant_lifecycle_mls() {
     let mut o = spawn_node_with_friends(&relay, O_MASTER, O_MASTER, &[&m_master]).await;
     sleep_ms(1500).await;
     let mut m = spawn_node_with_friends(&relay, M_MASTER, M_MASTER, &[&o_master]).await;
-    sleep_ms(4000).await;
+    expect_dm_pair_ready(&relay, &o, &m, 15).await;
     drain_events(&mut o);
     drain_events(&mut m);
 
@@ -5767,7 +6010,10 @@ async fn channel_grant_lifecycle_mls() {
         })
         .await
         .unwrap();
-    sleep_ms(6000).await;
+    expect_mls_leaf(&o, &subgroup, &m.device_id, 20).await;
+    // Residual window for the CRDT/grant half of this step, which is only
+    // readable from the node DB and so is not polled (see wait_until).
+    sleep_ms(500).await;
     assert!(m.has_grant_now(&server_id, &cid, &m_master), "grant must replicate to M");
     assert!(m.can_see_channel(&server_id, &cid, &m_master), "granted M sees the channel");
     let leaves = o.mls_members(&subgroup).await;
@@ -5800,7 +6046,10 @@ async fn channel_grant_lifecycle_mls() {
         })
         .await
         .unwrap();
-    sleep_ms(6000).await;
+    expect_no_mls_leaf(&o, &subgroup, &m.device_id, 20).await;
+    // Residual window for the CRDT/grant half of this step, which is only
+    // readable from the node DB and so is not polled (see wait_until).
+    sleep_ms(500).await;
     assert!(!m.has_grant_now(&server_id, &cid, &m_master), "revoke must replicate");
     assert!(!m.can_see_channel(&server_id, &cid, &m_master));
     let leaves2 = o.mls_members(&subgroup).await;
@@ -5829,7 +6078,7 @@ async fn channel_grant_expiry_sweep() {
     let mut o = spawn_node_with_friends(&relay, O_MASTER, O_MASTER, &[&m_master]).await;
     sleep_ms(1500).await;
     let mut m = spawn_node_with_friends(&relay, M_MASTER, M_MASTER, &[&o_master]).await;
-    sleep_ms(4000).await;
+    expect_dm_pair_ready(&relay, &o, &m, 15).await;
     drain_events(&mut o);
     drain_events(&mut m);
 
@@ -5875,8 +6124,12 @@ async fn channel_grant_expiry_sweep() {
         })
         .await
         .unwrap();
-    sleep_ms(6000).await;
     let subgroup = crate::crypto::subgroup_id(&server_id, &cid);
+    // The subgroup exists once its coordinator (the owner) holds its own leaf.
+    expect_mls_leaf(&o, &subgroup, &o.device_id, 20).await;
+    // Residual window: what follows asserts who is NOT in it yet, and an
+    // absence only means something once real time has passed.
+    sleep_ms(800).await;
 
     // 10-second grant: long enough for the subgroup admission to complete,
     // short enough to observe the expiry inside the test.
@@ -5894,7 +6147,10 @@ async fn channel_grant_expiry_sweep() {
         })
         .await
         .unwrap();
-    sleep_ms(6000).await; // grant fans out; reconcile admits M; batch commits
+    expect_mls_leaf(&o, &subgroup, &m.device_id, 20).await;
+    // Residual window for the CRDT/grant half of this step, which is only
+    // readable from the node DB and so is not polled (see wait_until).
+    sleep_ms(500).await;
     assert!(m.has_grant_now(&server_id, &cid, &m_master), "grant active mid-window");
     assert!(m.can_see_channel(&server_id, &cid, &m_master));
     assert!(
@@ -5903,7 +6159,9 @@ async fn channel_grant_expiry_sweep() {
     );
 
     // Wait past expiry: the predicate flips immediately with NO revoke op.
-    sleep_ms(5000).await; // now ≥ 11s after the grant
+    // Against the DEADLINE, not for a duration, because the steps above no
+    // longer take a fixed amount of time.
+    sleep_until_ms(expires_at, 1_000).await;
     assert!(!m.has_grant_now(&server_id, &cid, &m_master), "expired grant reads as denied (lazy)");
     assert!(!m.can_see_channel(&server_id, &cid, &m_master));
 
@@ -5972,7 +6230,11 @@ async fn restricted_voice_channel_subgroup_enforces_sframe_membership() {
     let mut a = spawn_node_with_friends(&relay, A_MASTER, A_MASTER, &[&o_master, &m_master]).await;
     sleep_ms(1500).await;
     let mut m = spawn_node_with_friends(&relay, M_MASTER, M_MASTER, &[&o_master, &a_master]).await;
-    sleep_ms(5000).await;
+    // Mutual friends, so all three pairs confirm; waiting on the sessions
+    // themselves is both faster and louder than a fixed 5s.
+    expect_dm_pair_ready(&relay, &o, &a, 20).await;
+    expect_dm_pair_ready(&relay, &o, &m, 20).await;
+    expect_dm_pair_ready(&relay, &a, &m, 20).await;
     drain_events(&mut o);
     drain_events(&mut a);
     drain_events(&mut m);
@@ -5991,7 +6253,6 @@ async fn restricted_voice_channel_subgroup_enforces_sframe_membership() {
         })
         .await;
         assert!(joined, "{who} should join the server");
-        sleep_ms(2500).await;
     }
     // Wait until ALL THREE distinct identities are leaves of the server-wide MLS
     // group — the precondition for an MLS-broadcast ChannelAdded op to reach them.
@@ -6009,7 +6270,7 @@ async fn restricted_voice_channel_subgroup_enforces_sframe_membership() {
     let mut srv_ok = false;
     let mut last_leaves: Vec<String> = Vec::new();
     for _ in 0..30 {
-        sleep_ms(2000).await;
+        expect_mls_group(&[&o, &a, &m], &server_id, 20).await;
         let leaves = o.mls_members(&server_id).await;
         if leaves.contains(&o.device_id)
             && leaves.contains(&a.device_id)
@@ -6081,9 +6342,12 @@ async fn restricted_voice_channel_subgroup_enforces_sframe_membership() {
         })
         .await
         .unwrap();
-    sleep_ms(6000).await; // owner forms the subgroup (no qualifying member yet besides owner)
-
     let subgroup = crate::crypto::subgroup_id(&server_id, &voice_cid);
+    // The subgroup exists once its coordinator (the owner) holds its own leaf.
+    expect_mls_leaf(&o, &subgroup, &o.device_id, 20).await;
+    // Residual window: what follows asserts who is NOT in it yet, and an
+    // absence only means something once real time has passed.
+    sleep_ms(800).await;
 
     // --- Pre-promotion: only the OWNER is a subgroup leaf (== SFrame holder). ---
     let leaves0 = o.mls_members(&subgroup).await;
@@ -6141,7 +6405,8 @@ async fn restricted_voice_channel_subgroup_enforces_sframe_membership() {
         })
         .await
         .unwrap();
-    sleep_ms(6000).await;
+    expect_mls_leaf(&o, &subgroup, &a.device_id, 20).await;
+    expect_mls_leaf(&a, &subgroup, &a.device_id, 20).await;
 
     let leaves1 = o.mls_members(&subgroup).await;
     assert!(
@@ -6189,7 +6454,7 @@ async fn restricted_voice_channel_subgroup_enforces_sframe_membership() {
         })
         .await
         .unwrap();
-    sleep_ms(6000).await;
+    expect_no_mls_leaf(&o, &subgroup, &a.device_id, 20).await;
 
     let leaves2 = o.mls_members(&subgroup).await;
     assert!(
@@ -6225,7 +6490,7 @@ async fn channel_visibility_posting_propagate_to_remote_member_realtime() {
     let mut o = spawn_node_with_friends(&relay, O_MASTER, O_MASTER, &[&v_master]).await;
     sleep_ms(1500).await;
     let mut v = spawn_node_with_friends(&relay, V_MASTER, V_MASTER, &[&o_master]).await;
-    sleep_ms(4000).await; // Olm confirm
+    expect_dm_pair_ready(&relay, &o, &v, 15).await;
 
     let server_id = create_server_and_wait(&mut o, "Vis Server").await;
     sleep_ms(500).await;
@@ -6386,7 +6651,7 @@ async fn moderation_trio_mute_slowmode_mediaonly() {
     let mut o = spawn_node_with_friends(&relay, O_MASTER, O_MASTER, &[&v_master]).await;
     sleep_ms(1500).await;
     let mut v = spawn_node_with_friends(&relay, V_MASTER, V_MASTER, &[&o_master]).await;
-    sleep_ms(4000).await; // Olm confirm
+    expect_dm_pair_ready(&relay, &o, &v, 15).await;
 
     let server_id = create_server_and_wait(&mut o, "Mod Server").await;
     sleep_ms(500).await;
@@ -8293,11 +8558,14 @@ async fn dm_relay_buffer_delivers_after_sender_goes_offline_and_clears() {
     let mut a = spawn_node_with_friends(&relay, A_MASTER, A_MASTER, &[&b_master]).await;
     sleep_ms(1200).await;
     let mut b = spawn_node_with_friends(&relay, B_MASTER, B_MASTER, &[&a_master]).await;
-    sleep_ms(4000).await; // Olm sessions confirm
-    assert_eq!(
-        a.olm_status(&b.device_id).await, "confirmed",
-        "sender needs a confirmed Olm session before the recipient goes offline"
-    );
+    expect_dm_pair_ready(&relay, &a, &b, 15).await;
+    // Residual, and it earns its place: a file/voice/video send PRE-NEGOTIATES
+    // the recipient's auto-download preference, and that advert exchange has no
+    // live probe (DebugSnapshotReply carries MLS + Olm only). Every test that
+    // went intermittent while this file was being de-slept was in this family,
+    // and none outside it. Delete this when the pref becomes observable, not
+    // before.
+    sleep_ms(1000).await;
     drain_events(&mut a);
     drain_events(&mut b);
 
@@ -8380,7 +8648,7 @@ async fn channel_relay_catchup_delivers_when_all_other_members_offline() {
     let mut o = spawn_node_with_friends(&relay, O_MASTER, O_MASTER, &[&j_master]).await;
     sleep_ms(1200).await;
     let mut j = spawn_node_with_friends(&relay, J_MASTER, J_MASTER, &[&o_master]).await;
-    sleep_ms(4000).await;
+    expect_dm_pair_ready(&relay, &o, &j, 15).await;
 
     let server_id = create_server_and_wait(&mut o, "Catchup Server").await;
     let general = general_channel_of(&server_id);
@@ -8499,7 +8767,7 @@ async fn channel_relay_catchup_covers_all_channels() {
     let mut o = spawn_node_with_friends(&relay, O_MASTER, O_MASTER, &[&j_master]).await;
     sleep_ms(1200).await;
     let mut j = spawn_node_with_friends(&relay, J_MASTER, J_MASTER, &[&o_master]).await;
-    sleep_ms(4000).await;
+    expect_dm_pair_ready(&relay, &o, &j, 15).await;
 
     let server_id = create_server_and_wait(&mut o, "Two Chan Server").await;
     let general = general_channel_of(&server_id);
@@ -8637,7 +8905,7 @@ async fn channel_relay_catchup_delivers_file_message_and_header() {
     let mut o = spawn_node_with_friends(&relay, O_MASTER, O_MASTER, &[&j_master]).await;
     sleep_ms(1200).await;
     let mut j = spawn_node_with_friends(&relay, J_MASTER, J_MASTER, &[&o_master]).await;
-    sleep_ms(4000).await;
+    expect_dm_pair_ready(&relay, &o, &j, 15).await;
 
     let server_id = create_server_and_wait(&mut o, "File Catchup Server").await;
     let general = general_channel_of(&server_id);
@@ -8756,7 +9024,7 @@ async fn channel_file_request_reroutes_to_online_holder_when_sender_offline() {
     let mut b = spawn_node_with_friends(&relay, B_MASTER, B_MASTER, &[&o_master]).await;
     sleep_ms(1200).await;
     let mut c = spawn_node_with_friends(&relay, C_MASTER, C_MASTER, &[&o_master]).await;
-    sleep_ms(4000).await; // Olm confirm all around
+    expect_dm_pair_ready(&relay, &o, &c, 15).await;
 
     let server_id = create_server_and_wait(&mut o, "Reroute Server").await;
     let general = general_channel_of(&server_id);
@@ -9668,7 +9936,7 @@ async fn server_emote_replicates_and_bytes_pull_on_demand() {
     let mut o = spawn_node_with_friends(&relay, O_MASTER, O_MASTER, &[&j_master]).await;
     sleep_ms(1500).await;
     let mut j = spawn_node_with_friends(&relay, J_MASTER, J_MASTER, &[&o_master]).await;
-    sleep_ms(4000).await;
+    expect_dm_pair_ready(&relay, &o, &j, 15).await;
 
     let server_id = create_server_and_wait(&mut o, "Emote Server").await;
     sleep_ms(300).await;
@@ -9824,7 +10092,7 @@ async fn sticker_set_replicates_and_converges_on_removal() {
     let mut o = spawn_node_with_friends(&relay, O_MASTER, O_MASTER, &[&j_master]).await;
     sleep_ms(1500).await;
     let mut j = spawn_node_with_friends(&relay, J_MASTER, J_MASTER, &[&o_master]).await;
-    sleep_ms(4000).await;
+    expect_dm_pair_ready(&relay, &o, &j, 15).await;
 
     let server_id = create_server_and_wait(&mut o, "Sticker Server").await;
     sleep_ms(300).await;
@@ -10010,7 +10278,7 @@ async fn asset_cap_enforced_per_kind() {
     let o = spawn_node_with_friends(&relay, O_MASTER, O_MASTER, &[&j_master]).await;
     sleep_ms(1500).await;
     let mut j = spawn_node_with_friends(&relay, J_MASTER, J_MASTER, &[&o_master]).await;
-    sleep_ms(4000).await;
+    expect_dm_pair_ready(&relay, &o, &j, 15).await;
 
     // O holds a 300 KB blob with a valid WebP container (the wire check is
     // container magic + content hash — it need not decode).
@@ -10096,7 +10364,7 @@ async fn asset_request_not_answered_for_unrequested_hash() {
     let mut o = spawn_node_with_friends(&relay, O_MASTER, O_MASTER, &[&j_master]).await;
     sleep_ms(1500).await;
     let mut j = spawn_node_with_friends(&relay, J_MASTER, J_MASTER, &[&o_master]).await;
-    sleep_ms(4000).await;
+    expect_dm_pair_ready(&relay, &o, &j, 15).await;
 
     let server_id = create_server_and_wait(&mut o, "Stuffing Server").await;
     sleep_ms(300).await;
@@ -10173,7 +10441,7 @@ async fn server_banner_hash_replicates_and_bytes_pull_on_demand() {
     let mut o = spawn_node_with_friends(&relay, O_MASTER, O_MASTER, &[&j_master]).await;
     sleep_ms(1500).await;
     let mut j = spawn_node_with_friends(&relay, J_MASTER, J_MASTER, &[&o_master]).await;
-    sleep_ms(4000).await;
+    expect_dm_pair_ready(&relay, &o, &j, 15).await;
 
     let server_id = create_server_and_wait(&mut o, "Banner Server").await;
     sleep_ms(300).await;
@@ -10315,7 +10583,7 @@ async fn banner_write_rejected_without_manage_server() {
     let mut o = spawn_node_with_friends(&relay, O_MASTER, O_MASTER, &[&j_master]).await;
     sleep_ms(1500).await;
     let mut j = spawn_node_with_friends(&relay, J_MASTER, J_MASTER, &[&o_master]).await;
-    sleep_ms(4000).await;
+    expect_dm_pair_ready(&relay, &o, &j, 15).await;
 
     let server_id = create_server_and_wait(&mut o, "Locked Banner Server").await;
     sleep_ms(300).await;
@@ -10699,7 +10967,7 @@ async fn server_avatar_anim_hash_replicates_and_bytes_pull_on_demand() {
     let mut o = spawn_node_with_friends(&relay, O_MASTER, O_MASTER, &[&j_master]).await;
     sleep_ms(1500).await;
     let mut j = spawn_node_with_friends(&relay, J_MASTER, J_MASTER, &[&o_master]).await;
-    sleep_ms(4000).await;
+    expect_dm_pair_ready(&relay, &o, &j, 15).await;
 
     let server_id = create_server_and_wait(&mut o, "Animated Icon Server").await;
     sleep_ms(300).await;
@@ -11391,7 +11659,7 @@ async fn setup_sframe_heal_pair(
     let mut o = spawn_node_with_friends(relay, o_tag, o_tag, &[&b_master]).await;
     sleep_ms(1500).await;
     let mut b = spawn_node_with_friends(relay, b_tag, b_tag, &[&o_master]).await;
-    sleep_ms(4000).await;
+    expect_dm_pair_ready(relay, &o, &b, 15).await;
     drain_events(&mut o);
     drain_events(&mut b);
 
@@ -11606,7 +11874,9 @@ async fn setup_epoch_race_trio(
     let mut b = spawn_node_with_friends(relay, b_tag, b_tag, &[&o_master, &c_master]).await;
     sleep_ms(1500).await;
     let mut c = spawn_node_with_friends(relay, c_tag, c_tag, &[&o_master, &b_master]).await;
-    sleep_ms(4000).await;
+    expect_dm_pair_ready(relay, &o, &b, 15).await;
+    expect_dm_pair_ready(relay, &o, &c, 15).await;
+    expect_dm_pair_ready(relay, &b, &c, 15).await;
     drain_events(&mut o);
     drain_events(&mut b);
     drain_events(&mut c);
@@ -12093,7 +12363,7 @@ async fn clearing_a_link_preview_re_signs_and_propagates() {
     let mut a = spawn_node_with_friends(&relay, A_MASTER, A_MASTER, &[&m_master]).await;
     sleep_ms(1200).await;
     let mut b = spawn_node_with_friends(&relay, M_MASTER, M_MASTER, &[&a_master]).await;
-    sleep_ms(4000).await;
+    expect_dm_pair_ready(&relay, &a, &b, 15).await;
     drain_events(&mut a);
     drain_events(&mut b);
 
@@ -12220,7 +12490,7 @@ async fn backfilled_member_gets_link_preview_through_channel_sync() {
     let mut o = spawn_node_with_friends(&relay, O_MASTER, O_MASTER, &[&j_master]).await;
     sleep_ms(1200).await;
     let mut j = spawn_node_with_friends(&relay, J_MASTER, J_MASTER, &[&o_master]).await;
-    sleep_ms(4000).await;
+    expect_dm_pair_ready(&relay, &o, &j, 15).await;
 
     let server_id = create_server_and_wait(&mut o, "Preview Server").await;
     let general = general_channel_of(&server_id);
@@ -12296,6 +12566,9 @@ async fn backfilled_member_gets_link_preview_through_channel_sync() {
     })
     .await;
     assert!(joined, "member J should join the server");
+    // STAYS A SLEEP: the settle signal is a row in J's DB, and polling for it
+    // means opening J's DB while J is writing the backfill into it. See the note
+    // in corrupt_device_keyed_channel_row_self_heals_from_verified_sync.
     sleep_ms(4000).await;
 
     let row = j
@@ -12406,7 +12679,7 @@ async fn freshly_linked_device_backfills_dm_link_previews_from_its_sibling() {
     let mut a = spawn_node_with_friends(&relay, A_MASTER, A_MASTER, &[&m_master]).await;
     sleep_ms(1200).await;
     let mut b = spawn_node_with_friends(&relay, M_MASTER, B_DEV, &[&a_master]).await;
-    sleep_ms(4000).await;
+    expect_dm_pair_ready(&relay, &a, &b, 15).await;
     drain_events(&mut a);
     drain_events(&mut b);
 
@@ -12591,6 +12864,9 @@ async fn forwarder_room_and_signal_round_trip() {
         .await
         .unwrap();
     // Key exchange (KeyRequest -> KeyBundle -> PreKey drain) takes a moment.
+    // STAYS A SLEEP. What follows is an ABSENCE proof, and absence has no
+    // state to poll: the window has to be real time for "it never happened"
+    // to mean anything.
     sleep_ms(4000).await;
 
     // 3. F received the client-bound fwd envelope and IGNORED it (no
@@ -12718,6 +12994,9 @@ async fn fwd_room_join_skips_discovery_but_keeps_olm() {
         .unwrap();
     // Long enough for the full cascade to have fired if it were going to, and
     // for key exchange (KeyRequest -> KeyBundle -> confirm) to complete.
+    // STAYS A SLEEP. What follows is an ABSENCE proof, and absence has no
+    // state to poll: the window has to be real time for "it never happened"
+    // to mean anything.
     sleep_ms(4000).await;
 
     // 1. No discovery emission for the forwarder, and no profile pushed at it.
@@ -12813,7 +13092,7 @@ async fn vc_screen_assign_and_route_round_trip() {
     let mut o = spawn_node_with_friends(&relay, O_MASTER, O_MASTER, &[&j_master]).await;
     sleep_ms(1200).await;
     let mut j = spawn_node_with_friends(&relay, J_MASTER, J_MASTER, &[&o_master]).await;
-    sleep_ms(4000).await; // Olm confirm (targeted VC signals ride Olm)
+    expect_dm_pair_ready(&relay, &o, &j, 15).await;
 
     let server_id = create_server_and_wait(&mut o, "Assign Server").await;
     o.cmd_tx
@@ -13013,4 +13292,83 @@ async fn vc_screen_assign_and_route_round_trip() {
 
     drop(o);
     drop(j);
+}
+
+// ---------------------------------------------------------------------------
+// CI guard: the harness's FIXED-sleep budget.
+// ---------------------------------------------------------------------------
+
+/// Fail when the total `sleep_ms` budget in this file grows.
+///
+/// This is how the suite reached 16 minutes: 471 fixed sleeps totalling 831
+/// seconds, 87% of the runtime, with the CPU idle the whole time. Each one was a
+/// settle with a condition nobody polled for. nextest made them overlap, which
+/// hid the cost without removing it, and a suite that is 87% sleep grows back to
+/// 40 minutes one reasonable-looking `sleep_ms(2000)` at a time.
+///
+/// So the budget is a number in a test now. A new sleep has to come out of the
+/// existing total or be argued for by raising this cap in a diff someone reads.
+/// The alternatives are in the module above: `wait_until`, `expect_olm_confirmed`,
+/// `expect_mls_leaf`, `expect_mls_group`, `expect_no_mls_leaf`. Keep `sleep_ms`
+/// for the two cases that genuinely have no condition to poll: proving an
+/// ABSENCE, and a settle whose only signal is a running node's SQLCipher DB.
+#[test]
+fn harness_fixed_sleep_budget_does_not_grow() {
+    const BUDGET_MS: u64 = 566_000;
+
+    let src = include_str!("test_harness.rs");
+    // Built from pieces so this scan does not count its own source text.
+    let needle = concat!("sleep_", "ms(");
+
+    let mut total = 0u64;
+    let mut calls = 0usize;
+    let mut current = "<file scope>";
+    let mut per_fn: Vec<(&str, u64)> = Vec::new();
+
+    for line in src.lines() {
+        let trimmed = line.trim_start();
+        if let Some(rest) = trimmed.strip_prefix("async fn ").or_else(|| trimmed.strip_prefix("fn ")) {
+            if let Some(name) = rest.split('(').next() {
+                current = name;
+            }
+        }
+        if trimmed.starts_with("//") {
+            continue;
+        }
+        let mut rest = line;
+        while let Some(at) = rest.find(needle) {
+            rest = &rest[at + needle.len()..];
+            let Some(close) = rest.find(')') else { break };
+            let Ok(ms) = rest[..close].parse::<u64>() else { continue };
+            total += ms;
+            calls += 1;
+            match per_fn.iter_mut().find(|(f, _)| *f == current) {
+                Some((_, sum)) => *sum += ms,
+                None => per_fn.push((current, ms)),
+            }
+        }
+    }
+
+    // A direct tokio sleep would slip past the scan above.
+    assert_eq!(
+        src.matches(concat!("tokio::time::", "sleep(")).count(),
+        1,
+        "fixed sleeps go through sleep_ms so this budget can see them;          found a second direct tokio::time::sleep call"
+    );
+
+    per_fn.sort_by(|a, b| b.1.cmp(&a.1));
+    let worst: Vec<String> = per_fn
+        .iter()
+        .take(5)
+        .map(|(f, ms)| format!("{f} {:.1}s", *ms as f64 / 1000.0))
+        .collect();
+
+    assert!(
+        total <= BUDGET_MS,
+        "harness fixed-sleep budget grew to {:.1}s across {} calls (cap {:.1}s).          Worst: {}. Wait for the condition instead: wait_until / expect_olm_confirmed /          expect_mls_leaf / expect_mls_group / expect_no_mls_leaf. If the settle really has          no pollable signal (an ABSENCE proof, or a row in a running node's DB), say so at          the call site and raise BUDGET_MS deliberately.",
+        total as f64 / 1000.0,
+        calls,
+        BUDGET_MS as f64 / 1000.0,
+        worst.join(", "),
+    );
 }
