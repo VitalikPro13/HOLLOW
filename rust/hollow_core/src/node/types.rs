@@ -973,6 +973,12 @@ pub(crate) enum NodeCommand {
     // -- Gossip relay tree commands (Phase 5D) --
     /// Internal: check if a pending server join timed out.
     CheckPendingJoinTimeout { server_id: String },
+    /// Internal: a pending join has gone unanswered past the coordinator's
+    /// window — re-send the request so EVERY online member serves it, not just
+    /// the elected one. The fast path is one responder; this is the safety net
+    /// for the case where the members' election named a coordinator that is
+    /// already gone (presence skew), which would otherwise be a 15s failure.
+    RetryPendingJoin { server_id: String },
     /// Dart reports data channel keepalive RTT for peer scoring.
     WebRtcPingReport { peer_id: String, rtt_ms: u32 },
     /// Dart reports the ICE route class of a live connection (Tier 3
@@ -1163,6 +1169,7 @@ impl NodeCommand {
             Self::ConferenceSendChat { .. } => "ConferenceSendChat",
             Self::StoreShardOnPeer { .. } => "StoreShardOnPeer",
             Self::CheckPendingJoinTimeout { .. } => "CheckPendingJoinTimeout",
+            Self::RetryPendingJoin { .. } => "RetryPendingJoin",
             Self::WebRtcPingReport { .. } => "WebRtcPingReport",
             Self::WebRtcRouteReport { .. } => "WebRtcRouteReport",
             Self::WebRtcBroadcastReceived { .. } => "WebRtcBroadcastReceived",

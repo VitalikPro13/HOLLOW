@@ -237,6 +237,27 @@ matters.
    `framesDecoded` climbing), which needs a new `expect_stats` op. Start every instance MUTED: four
    live captures on one machine is a feedback loop. Not built.
 
+## Trap 7 and 8, and when a journey is a SCRIPT (2026-08-27)
+
+7. **A double-quoted PowerShell string eats `${RUN}` before `Expand-FleetVars` sees it.** It expands
+   as a (nonexistent) PS variable, so the app is sent `"from a "` and the `wait_for` waits for a
+   string nobody will ever send. Message literals in a hand-written driver must be SINGLE quoted;
+   scenario JSON is immune.
+8. **`enter_text` reports success into a composer that stays EMPTY.** Twice, both times on the send
+   immediately after a peer RECONNECTED, where the burst (PeerJoined, key exchange, sync, profile
+   updates) rebuilds the chat pane and the text lands on a controller about to be replaced. Neither
+   `field` nor `hint:Message #general` helped. **TAP the composer first**, the way a user does. And
+   make every send `wait_for` its OWN optimistic row before another peer waits on it, or a send that
+   never happened is indistinguishable from a delivery failure and you debug the wrong app. The `ok`
+   lied and `look` lied; the SCREENSHOT settled it in one glance.
+
+**A journey where a peer has to LEAVE and COME BACK is a script, not a scenario JSON.**
+`scripts/fleet_owner_offline.ps1` (owner-offline join, ~3 min, rung 2 of the ladder): `quit` has no
+relaunch, so the owner could never return to delete its own server, which the cleanup rule requires.
+Dot-source `fleet_lib.ps1`, set `$script:FleetVars` before it, and relaunch one peer by replicating
+`Start-Peer` WITHOUT `Reset-PeerData` — a fixture restore would throw away the very server the
+journey is about. Reset `$script:FleetConsumed[$peer]` when you wipe its outbox.
+
 ## Honest scope
 
 The fleet proves the app DOES the thing. It does not prove the thing FEELS right, and it does not

@@ -6,6 +6,23 @@ use tokio::sync::mpsc;
 
 pub(crate) const MLS_BOOTSTRAP_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// How long undecryptable frames have to keep arriving before the ladder calls
+/// the group broken. Below this it is a BURST (a relay catch-up replay on
+/// rejoin), which is one event and not evidence of a broken group.
+pub(crate) const MLS_DECRYPT_FAIL_WINDOW: Duration = Duration::from_secs(3);
+
+/// How long the decrypt-fail ladder holds off after an epoch probe went out.
+/// A commit catch-up is one round trip and costs no epoch churn; the ladder's
+/// remove + re-add costs two epochs and rekeys everyone, so the probe gets first
+/// refusal. Short enough that a probe nobody answers barely delays the heal.
+pub(crate) const EPOCH_PROBE_GRACE: Duration = Duration::from_secs(5);
+
+/// How long a served `ServerJoinRequest` is remembered, so a REPEAT ask from the
+/// same joiner is recognised as the joiner's 4s retry and bypasses the
+/// coordinator gate. Comfortably longer than that retry and shorter than the
+/// 15s join timeout, so one pending join produces at most one escalation.
+pub(crate) const JOIN_SERVE_RETRY_WINDOW: Duration = Duration::from_secs(12);
+
 /// How long an in-flight Olm KeyRequest is considered "live" before the
 /// session-reconciliation sweep is allowed to resend it. The relay never ACKs a
 /// direct message, so a dropped KeyRequest/KeyBundle would otherwise strand the
@@ -983,6 +1000,9 @@ async fn run_event_loop(
     // Track server_ids we're trying to join (waiting for SyncResponse from existing members).
     // Value is the optional Twitch proof JSON to attach to join requests.
     let mut pending_server_joins: HashMap<String, PendingJoin> = HashMap::new();
+    // "{server_id}|{joiner_device}" -> when we last saw that join request, so the
+    // coordinator gate can tell a first ask from the joiner's escalation retry.
+    let mut join_request_seen: HashMap<String, std::time::Instant> = HashMap::new();
     // Pending friend requests: peer_id → requested_at timestamp.
     // Queued when peer isn't reachable (no shared rooms), sent when they appear.
     let mut pending_friend_requests: HashMap<String, i64> = HashMap::new();
@@ -1078,7 +1098,7 @@ async fn run_event_loop(
     mls_batch_timer.tick().await; // consume immediate first tick
 
     // MLS decrypt failure counter per server — triggers recovery after 3 consecutive failures.
-    let mut mls_decrypt_failures: HashMap<String, u32> = HashMap::new();
+    let mut mls_decrypt_failures: HashMap<String, (u32, std::time::Instant)> = HashMap::new();
 
     // Multi-peer fan-out sync coordinator.
     // Collects connected peers for 500ms, then assigns channels evenly across peers.
@@ -2687,6 +2707,13 @@ async fn run_event_loop(
                         );
                     }
 
+                    // -- Server join: coordinator window elapsed, ask everyone --
+                    NodeCommand::RetryPendingJoin { server_id } => {
+                        sync_handler::handle_retry_pending_join(
+                            &pending_server_joins, &ws_cmd_tx, &ws_room_peers, server_id,
+                        );
+                    }
+
                     // -- Server join timeout --
                     NodeCommand::CheckPendingJoinTimeout { server_id } => {
                         sync_handler::handle_check_pending_join_timeout(
@@ -2741,6 +2768,7 @@ async fn run_event_loop(
                                 &mut server_states, &bundle_keypair,
                                 &master_keypair, &device_keypair, &master_peer_str, &device_peer_id,
                                 &mut pending_server_joins,
+                                                                &mut join_request_seen,
                                 &mut pending_sync_requests, &mut mls,
                                 &mut mls_bootstrap_requested,
                                 &mut pending_shard_assembly, &mut pending_file_streams,
@@ -4699,6 +4727,7 @@ async fn run_event_loop(
                                         &mut server_states, &bundle_keypair,
                                         &master_keypair, &device_keypair, &master_peer_str, &device_peer_id,
                                         &mut pending_server_joins,
+                                                                                &mut join_request_seen,
                                         &mut pending_sync_requests, &mut mls,
                                         &mut mls_bootstrap_requested,
                                         &mut pending_shard_assembly, &mut pending_file_streams,
@@ -5840,6 +5869,7 @@ async fn handle_incoming_request(
     master_peer_str: &str,
     device_peer_id: &str,
     pending_server_joins: &mut HashMap<String, PendingJoin>,
+    join_request_seen: &mut HashMap<String, std::time::Instant>,
     pending_sync_requests: &mut HashMap<String, Vec<(String, String, i64)>>,
     mls: &mut Option<MlsManager>,
     mls_bootstrap_requested: &mut HashMap<String, std::time::Instant>,
@@ -5851,7 +5881,7 @@ async fn handle_incoming_request(
     decrypt_fail_cooldown: &mut HashMap<String, std::time::Instant>,
     pending_mls_key_packages: &mut HashMap<String, Vec<(String, Vec<u8>)>>,
     pending_mls_removals: &mut HashMap<String, Vec<String>>,
-    mls_decrypt_failures: &mut HashMap<String, u32>,
+    mls_decrypt_failures: &mut HashMap<String, (u32, std::time::Instant)>,
     mls_epoch_hint_cooldown: &mut HashMap<String, std::time::Instant>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
@@ -8988,6 +9018,7 @@ async fn handle_incoming_request(
                     mls_mgr, ws_cmd_tx, ws_room_peers, server_states,
                     pending_mls_removals, mls_epoch_hint_cooldown,
                     &server_id, None, their_epoch, peer_str, local_peer_str,
+                    false, // incidental hint on a sync — elect one responder
                 );
             }
         }
@@ -9646,6 +9677,52 @@ async fn handle_incoming_request(
                 // normal snapshot + MLS-leaf add below.
                 let is_sibling = super::resolver::same_identity(peer_str, local_peer_str)
                     && peer_str != local_peer_str;
+
+                // COORDINATOR GATE. This handler is the expensive half of a join:
+                // a MemberAdded op, a full ServerStateSnapshot and the ENTIRE op
+                // log, all aimed at one joiner. Nothing used to gate it, so every
+                // online member ran the whole thing — N snapshots, N op logs and N
+                // duplicate MemberAdded ops per join. Measured 2026-08-27 with the
+                // relay meter: ~48 SendDirect commands per join at 5 members, ~170
+                // at 9, ~342 at 13. Super-linear, while steady-state messaging sat
+                // flat at 2 deliveries per other-member. The MLS half was already
+                // election-gated to a single committer; this brings the CRDT half
+                // onto the SAME election, so the two agree on who is serving.
+                //
+                // A repeat request inside the window means the joiner's 4s retry
+                // fired: our elected coordinator did not answer (its socket died
+                // between the relay's presence snapshot and now), so everyone
+                // serves and the cost degrades to the old fan-out rather than to a
+                // failed join. Siblings are never gated — a sibling IS us.
+                let seen_key = format!("{server_id}|{peer_str}");
+                let repeat_ask = join_request_seen
+                    .get(&seen_key)
+                    .is_some_and(|t: &std::time::Instant| t.elapsed() < JOIN_SERVE_RETRY_WINDOW);
+                // Entries are only meaningful for one window; drop the expired ones
+                // rather than letting a long-lived node accumulate one per join.
+                if join_request_seen.len() > 256 {
+                    join_request_seen.retain(|_, t| t.elapsed() < JOIN_SERVE_RETRY_WINDOW);
+                }
+                join_request_seen.insert(seen_key, std::time::Instant::now());
+                if !is_sibling && !repeat_ask {
+                    // Candidates are the CRDT members (every one of them holds the
+                    // state a joiner needs), minus the joiner itself — a REJOINING
+                    // member is already in `members` and electing them would leave
+                    // nobody serving.
+                    let candidates: Vec<String> = state.members.keys()
+                        .filter(|m| !super::resolver::same_identity(peer_str, m))
+                        .cloned()
+                        .collect();
+                    let coordinator = crate::node::crypto_handler::elect_server_coordinator(
+                        state, &candidates, local_peer_str, &ws_room_peers,
+                    );
+                    if coordinator.as_deref()
+                        .is_some_and(|c| !super::resolver::same_identity(c, local_peer_str))
+                    {
+                        hollow_log!("[HOLLOW-CRDT] Not the join coordinator for {server_id} (it is {coordinator:?}), leaving the join to them");
+                        return;
+                    }
+                }
 
                 // Ban check: reject banned peers before any other verification.
                 if !is_sibling && state.is_banned(peer_str) {
@@ -11121,11 +11198,41 @@ async fn handle_incoming_request(
                             }
                         }
 
-                        // Track consecutive failures — trigger recovery after 3.
-                        let count = mls_decrypt_failures.entry(group_key.clone()).or_insert(0);
-                        *count += 1;
+                        // Track consecutive failures — trigger recovery after 3 that
+                        // are actually SUSTAINED. The count alone counted a burst: on
+                        // rejoin the relay's availability cache replays every buffered
+                        // channel frame at once, so a returning member saw three
+                        // undecryptable frames in the same millisecond and nuked its
+                        // group before the first `SyncRequest` (which carries the epoch
+                        // hint) had even arrived. That is ONE event, not three, and the
+                        // heal it pre-empted was the cheap one. Measured in the fleet
+                        // 2026-08-27: probe sent, catch-up served, then "Ignoring
+                        // MlsCommitCatchup for group we don't hold".
+                        let entry = mls_decrypt_failures
+                            .entry(group_key.clone())
+                            .or_insert_with(|| (0, std::time::Instant::now()));
+                        entry.0 += 1;
+                        let sustained = entry.1.elapsed() >= MLS_DECRYPT_FAIL_WINDOW;
+                        let count = &mut entry.0;
 
-                        if *count >= 3 && !mls_bootstrap_requested.get(&group_key).is_some_and(|t| t.elapsed() < MLS_BOOTSTRAP_TIMEOUT) {
+                        // An epoch probe already in flight is about to answer with a
+                        // commit catch-up, which costs NO epoch churn. Dropping the
+                        // group out from under it wastes that answer ("Ignoring
+                        // MlsCommitCatchup for group we don't hold") and heals the
+                        // heavy way instead: remove + re-add, two epochs, rekeying
+                        // everyone. Seen in the fleet 2026-08-27 — a returning owner
+                        // rejoins, the relay's availability cache replays three
+                        // buffered channel frames instantly, and the ladder beat the
+                        // probe's round trip every time. Hold the group for one grace
+                        // window; if the answer does not come, the ladder still runs.
+                        let probe_in_flight = mls_epoch_hint_cooldown
+                            .get(&format!("{group_key}|probe"))
+                            .is_some_and(|t| t.elapsed() < EPOCH_PROBE_GRACE);
+                        if *count >= 3 && !sustained {
+                            hollow_log!("[HOLLOW-MLS] {} decrypt failures for {group_key} in one burst — waiting for it to be sustained before dropping the group", count);
+                        } else if *count >= 3 && probe_in_flight {
+                            hollow_log!("[HOLLOW-MLS] {} decrypt failures for {group_key}, but an epoch probe is in flight — holding the group for the catch-up", count);
+                        } else if *count >= 3 && !mls_bootstrap_requested.get(&group_key).is_some_and(|t| t.elapsed() < MLS_BOOTSTRAP_TIMEOUT) {
                             hollow_log!("[HOLLOW-MLS] {} consecutive decrypt failures — initiating MLS recovery for {group_key}", count);
                             *count = 0;
 
@@ -11502,6 +11609,7 @@ async fn handle_incoming_request(
                     pending_mls_removals, mls_epoch_hint_cooldown,
                     &server_id, pr_channel_id.as_deref(), epoch,
                     peer_str, local_peer_str,
+                    true, // addressed to us — answer it, do not re-elect
                 );
             }
         }
@@ -11565,11 +11673,21 @@ async fn handle_incoming_request(
 
 
             // Respond with our KeyPackage if we have an MLS identity.
-            // Skip if we already have the MLS group (reconnecting peer, not a new joiner).
+            //
+            // HOLDING the group is NOT a reason to refuse. The requester is the
+            // authority on whether our leaf needs replacing and it only asks on a
+            // real signal: the PeerJoined coordinator asks when we hold no leaf,
+            // and `handle_epoch_hint`'s repair arm asks when our epoch is stale and
+            // the commit cache cannot bridge it — it has already queued the removal
+            // of our old leaf. Refusing there deadlocked the repair (we think the
+            // group is fine, they have just evicted us) and left the peer waiting
+            // for the decrypt-fail ladder. Re-adding an existing leaf is safe: the
+            // batch processor's "sender already a leaf" branch drops the stale one
+            // sharing our credential and adds the new one in the SAME commit, so
+            // it is one epoch advance and no fork.
             if let Some(mls_mgr) = mls {
                 if mls_mgr.has_group(&group_key) {
-                    hollow_log!("[HOLLOW-MLS] Already in MLS group {group_key}, ignoring KeyPackageRequest");
-                    return;
+                    hollow_log!("[HOLLOW-MLS] KeyPackageRequest for {group_key} while we hold it — answering anyway (leaf repair)");
                 }
                 match mls_mgr.generate_key_package() {
                     Ok(kp_bytes) => {

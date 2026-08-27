@@ -152,6 +152,33 @@ Convenience wrapper: checks if a group exists for `server_id`, gets the member l
 
 The coordinator is responsible for processing MLS membership changes (adding/removing members via commits).
 
+**Committer vs catch-up authority — these are DIFFERENT elections and must stay that way (2026-08-27).**
+`elect_server_coordinator` prefers the OWNER for the server group, because a single authoritative
+committer keeps epochs linear. `group_authority` mirrors that for "who speaks for this group".
+But `epoch_catchup_responder(state, channel_id, local, ws, behind)` — who answers a commit
+catch-up — runs the same election with the peer that is BEHIND excluded, because **the authority
+cannot serve itself.** An owner that went offline across an epoch it did not author comes back
+stale, `group_authority` names it again the moment it is reachable, so its own `send_epoch_probe`
+bailed ("our epoch defines the group") and the member actually holding the newer epoch refused
+("not the authority"). Both deferred to the owner, and the owner was the stale one. `send_epoch_probe`
+passes ITSELF as `behind`; `handle_epoch_hint`'s serve branch passes the requester, so both sides
+elect the same single responder and there is still no room-wide echo.
+
+`handle_epoch_hint` also takes `direct_probe: bool`. An `MlsEpochProbe` is ADDRESSED to us, so we
+answer it and skip the election — re-electing there reopens the deadlock from the other side, since
+the asker picks its target from ITS membership view and a returning owner's CRDT is a delta behind
+by definition. Only the `SyncRequest`-rider call site elects. A hint from a peer we do not yet know
+as a member gets no epoch SERVICE, but if it reports a HIGHER epoch we still self-probe: that is the
+reconnect race, where a member admitted while we were away hints us before our CRDT delta lands, and
+returning there used to discard the only heal trigger with nothing to re-send it.
+
+**`MlsKeyPackageRequest` answers even when we already hold the group.** Holding it is not a reason to
+refuse: the requester is the authority on whether our leaf needs replacing, and it only asks on a real
+signal (the PeerJoined coordinator when we hold no leaf; `handle_epoch_hint`'s repair arm when our
+epoch is stale and the commit cache cannot bridge it, having already queued our removal). Refusing
+deadlocked that repair. Re-adding an existing leaf is safe — the batch processor's "sender already a
+leaf" branch drops the stale one sharing our credential in the SAME commit.
+
 **KeyPackage handler exception:** When processing an incoming KeyPackage, the sender is excluded from coordinator election (they sent it because they lost their group). The handler builds a custom candidate list filtering out `peer_str` instead of using `is_mls_coordinator()`. Without this, the lowest-peer-ID member losing their group creates a permanent recovery deadlock.
 
 ### Unit Tests

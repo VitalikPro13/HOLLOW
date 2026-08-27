@@ -13295,6 +13295,538 @@ async fn vc_screen_assign_and_route_round_trip() {
 }
 
 // ---------------------------------------------------------------------------
+// OWNER OFFLINE: a plain member has to carry a stranger's whole join.
+//
+// The owner-preferred coordinator model says the owner is PREFERRED, not
+// REQUIRED. Nothing covered the fallback end to end: `server_join_forms_mls_
+// and_channel_message_decrypts` only ever joins against a LIVE owner, so the
+// claim that a member can admit someone on its own — the CRDT side (MemberAdded
+// + state snapshot + op log) AND the MLS side (batch commit + Welcome) — was
+// argued from `elect_server_coordinator`'s fallback arm and never driven.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn join_succeeds_while_owner_is_offline() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    const O_MASTER: u8 = 34; // owner — offline for the entire join
+    const A_MASTER: u8 = 35; // plain member — the fallback coordinator
+    const B_MASTER: u8 = 36; // stranger holding an invite, friends with nobody
+    let o_master = NativeKeypair::from_secret_bytes(&seed_bytes(O_MASTER)).peer_id();
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
+    let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
+
+    let mut o = spawn_node_with_friends(&relay, O_MASTER, O_MASTER, &[&a_master]).await;
+    let mut a = spawn_node_with_friends(&relay, A_MASTER, A_MASTER, &[&o_master]).await;
+    expect_dm_pair_ready(&relay, &o, &a, 15).await;
+
+    let server_id = create_server_and_wait(&mut o, "Owner Away").await;
+    let general = general_channel_of(&server_id);
+
+    // A joins the normal way, against a live owner: group = {O, A}.
+    a.cmd_tx
+        .send(NodeCommand::JoinServer {
+            server_id: server_id.clone(),
+            twitch_proof_json: None,
+            nsfw_confirmed: false,
+        })
+        .await
+        .unwrap();
+    assert!(
+        wait_event(&mut a, std::time::Duration::from_secs(10), |ev| matches!(
+            ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id
+        ))
+        .await,
+        "member A joins normally while the owner is online"
+    );
+    expect_mls_group(&[&o, &a], &server_id, 20).await;
+
+    // --- The owner leaves. A has to OBSERVE it: `elect_server_coordinator`
+    // reads A's own `ws_room_peers`, so until the PeerLeft lands A still elects
+    // the (unreachable) owner and drops the joiner's KeyPackage on the floor. ---
+    drain_events(&mut a);
+    relay.set_online(&o.device_id, false);
+    assert!(
+        wait_event(&mut a, std::time::Duration::from_secs(10), |ev| matches!(
+            ev, NetworkEvent::PeerDisconnected { peer_id } if *peer_id == o.device_id
+        ))
+        .await,
+        "A must see the owner drop before the join, or it elects a ghost committer"
+    );
+
+    // --- A stranger joins with only A there to serve it. ---
+    let mut b = spawn_node_with_friends(&relay, B_MASTER, B_MASTER, &[]).await;
+    b.cmd_tx
+        .send(NodeCommand::JoinServer {
+            server_id: server_id.clone(),
+            twitch_proof_json: None,
+            nsfw_confirmed: false,
+        })
+        .await
+        .unwrap();
+    assert!(
+        wait_event(&mut b, std::time::Duration::from_secs(15), |ev| matches!(
+            ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id
+        ))
+        .await,
+        "CRDT admission must not need the owner — A serves the snapshot + op log"
+    );
+
+    // MLS: A is the fallback committer, so B's leaf lands on both sides…
+    expect_mls_leaf(&a, &server_id, &b.device_id, 30).await;
+    expect_mls_leaf(&b, &server_id, &b.device_id, 30).await;
+    // …and the ABSENT owner's leaf survives the commit (an add must never
+    // double as an eviction of whoever happened to be offline).
+    expect_mls_leaf(&b, &server_id, &o.device_id, 30).await;
+
+    // CRDT: three master-keyed members on the joiner.
+    let mut expect_members = vec![o_master.clone(), a_master.clone(), b_master.clone()];
+    expect_members.sort();
+    assert!(
+        wait_until(20, async || b.raw_crdt_member_keys(&server_id) == expect_members).await,
+        "joiner CRDT members must be all three masters, got {:?}",
+        b.raw_crdt_member_keys(&server_id),
+    );
+
+    // The group actually WORKS for the joiner: A encrypts at the epoch A itself
+    // committed, B decrypts. A leaf in a list proves nothing on its own.
+    drain_events(&mut b);
+    a.cmd_tx
+        .send(NodeCommand::SendChannelMessage {
+            server_id: server_id.clone(),
+            channel_id: general.clone(),
+            text: "owner is asleep".to_string(),
+            message_id: "owner-away-1".to_string(),
+            reply_to_mid: None,
+            link_preview: None,
+        })
+        .await
+        .unwrap();
+    assert!(
+        wait_event(&mut b, std::time::Duration::from_secs(15), |ev| matches!(
+            ev, NetworkEvent::ChannelMessageReceived { text, .. } if text == "owner is asleep"
+        ))
+        .await,
+        "the joiner must decrypt a channel message keyed to the epoch A committed"
+    );
+
+    drop(o);
+    drop(a);
+    drop(b);
+}
+
+// ---------------------------------------------------------------------------
+// …and the owner comes BACK. It slept through an epoch advance it did not
+// author, which is the exact shape of a present-but-stale group: the owner
+// still holds a leaf, so nothing keyed on `has_group` or leaf-missing fires.
+//
+// This was BROKEN until 2026-08-27 and the regression it guards is subtle, so
+// the shape is worth keeping written down. Both epoch hints the reconnect
+// generates used to be dropped, for two separate reasons:
+//
+//  1. The hint from the NEW member races the CRDT delta. `handle_epoch_hint`
+//     gates on `state.members`, the returning owner has not ingested
+//     MemberAdded yet, so it returned and nothing re-sent the hint.
+//  2. The owner-as-authority deadlock. `group_authority` prefers the owner for
+//     the server group, so the owner (theirs > ours) bailed out of
+//     `send_epoch_probe` with "our epoch defines the group — nobody to ask",
+//     and the member that actually HELD the newer epoch refused to serve
+//     because it was not the authority. Both deferred to the owner and the
+//     owner was the stale one.
+//
+// Measured then: the owner dropped the first 3 channel messages before the
+// decrypt-fail ladder rescued it. In a VOICE-only channel no MLS ciphertext
+// ever flows to fail a decrypt, so there was no ladder and no end to it.
+//
+// The fix is `epoch_catchup_responder`: owner-preference is right for the
+// COMMITTER (linear epochs) and wrong for the catch-up AUTHORITY, which is
+// whoever holds the higher epoch. Both sides now elect with the peer that is
+// BEHIND excluded, so they agree on one responder and a stale authority still
+// gets served. The non-member branch self-probes instead of returning.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn owner_returns_from_a_join_it_missed_and_converges() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    const O_MASTER: u8 = 37;
+    const A_MASTER: u8 = 38;
+    const B_MASTER: u8 = 39;
+    let o_master = NativeKeypair::from_secret_bytes(&seed_bytes(O_MASTER)).peer_id();
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
+    let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
+
+    let mut o = spawn_node_with_friends(&relay, O_MASTER, O_MASTER, &[&a_master]).await;
+    let mut a = spawn_node_with_friends(&relay, A_MASTER, A_MASTER, &[&o_master]).await;
+    expect_dm_pair_ready(&relay, &o, &a, 15).await;
+
+    let server_id = create_server_and_wait(&mut o, "Owner Returns").await;
+    let general = general_channel_of(&server_id);
+
+    a.cmd_tx
+        .send(NodeCommand::JoinServer {
+            server_id: server_id.clone(),
+            twitch_proof_json: None,
+            nsfw_confirmed: false,
+        })
+        .await
+        .unwrap();
+    assert!(
+        wait_event(&mut a, std::time::Duration::from_secs(10), |ev| matches!(
+            ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id
+        ))
+        .await,
+        "member A joins normally while the owner is online"
+    );
+    expect_mls_group(&[&o, &a], &server_id, 20).await;
+    let epoch_before = o.mls_epoch(&server_id).await.expect("owner holds the group");
+
+    drain_events(&mut a);
+    relay.set_online(&o.device_id, false);
+    assert!(
+        wait_event(&mut a, std::time::Duration::from_secs(10), |ev| matches!(
+            ev, NetworkEvent::PeerDisconnected { peer_id } if *peer_id == o.device_id
+        ))
+        .await,
+        "A must see the owner drop before the join"
+    );
+
+    let mut b = spawn_node_with_friends(&relay, B_MASTER, B_MASTER, &[]).await;
+    b.cmd_tx
+        .send(NodeCommand::JoinServer {
+            server_id: server_id.clone(),
+            twitch_proof_json: None,
+            nsfw_confirmed: false,
+        })
+        .await
+        .unwrap();
+    assert!(
+        wait_event(&mut b, std::time::Duration::from_secs(15), |ev| matches!(
+            ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id
+        ))
+        .await,
+        "the stranger joins on A alone"
+    );
+    expect_mls_leaf(&a, &server_id, &b.device_id, 30).await;
+    let epoch_after = a.mls_epoch(&server_id).await.expect("A holds the group");
+    assert!(
+        epoch_after > epoch_before,
+        "the add must have advanced the epoch past the owner ({epoch_before} -> {epoch_after})"
+    );
+
+    // --- The owner comes back, an epoch behind. ---
+    drain_events(&mut o);
+    relay.set_online(&o.device_id, true);
+
+    // CRDT first: the plaintext op broadcast + reconnect sync must tell the
+    // owner there is a third member now. Asserted on DB TRUTH, not on an event:
+    // the reconnect delta arrives as a SyncResponse op-log merge, which is a
+    // different emit path from the live `CrdtOpBroadcast` ingest.
+    let mut expect_members = vec![o_master.clone(), a_master.clone(), b_master.clone()];
+    expect_members.sort();
+    assert!(
+        wait_until(30, async || o.raw_crdt_member_keys(&server_id) == expect_members).await,
+        "returning owner CRDT members must converge, got {:?}",
+        o.raw_crdt_member_keys(&server_id),
+    );
+
+    // Then MLS, and THIS is the claim the fix makes: the heal is TRAFFIC-FREE.
+    // Before it, nothing healed until 3 channel messages had failed to decrypt
+    // (measured), so a quiet server — or a VOICE-only channel, where no MLS
+    // ciphertext ever flows to fail — left the owner stale indefinitely. The
+    // reconnect's own epoch hint is now enough, so assert the leaf and the epoch
+    // converge with NOTHING yet sent in the channel.
+    expect_mls_leaf(&o, &server_id, &b.device_id, 45).await;
+    assert!(
+        wait_until(30, async || {
+            let e = o.mls_epoch(&server_id).await;
+            e.is_some() && e == a.mls_epoch(&server_id).await && e == b.mls_epoch(&server_id).await
+        })
+        .await,
+        "all three must converge on one epoch with no traffic, got owner={:?} A={:?} B={:?}",
+        o.mls_epoch(&server_id).await,
+        a.mls_epoch(&server_id).await,
+        b.mls_epoch(&server_id).await,
+    );
+
+    // And once healed it stays healed: every message lands LIVE, not via the
+    // backfill that used to paper over the stale window.
+    drain_events(&mut o);
+    let mut delivered: Vec<u32> = Vec::new();
+    for n in 1..=3u32 {
+        b.cmd_tx
+            .send(NodeCommand::SendChannelMessage {
+                server_id: server_id.clone(),
+                channel_id: general.clone(),
+                text: format!("welcome back {n}"),
+                message_id: format!("owner-back-{n}"),
+                reply_to_mid: None,
+                link_preview: None,
+            })
+            .await
+            .unwrap();
+        let want = format!("welcome back {n}");
+        if wait_event(&mut o, std::time::Duration::from_secs(15), |ev| matches!(
+            ev, NetworkEvent::ChannelMessageReceived { text, .. } if *text == want
+        ))
+        .await
+        {
+            delivered.push(n);
+        }
+    }
+    assert_eq!(
+        delivered,
+        (1..=3).collect::<Vec<u32>>(),
+        "a healed owner must decrypt every message live (got {delivered:?} of 1..=3)"
+    );
+
+    drop(o);
+    drop(a);
+    drop(b);
+}
+
+// ---------------------------------------------------------------------------
+// EVERY member offline: there is nobody to serve the join, and the joiner has
+// to be TOLD so rather than hanging. Then one member returns and the same join
+// completes — the failure has to be retryable, not terminal.
+//
+// This is the structural ceiling of the peer-served join: the relay buffers
+// messages for an offline peer, but a join is a REQUEST that needs an answer,
+// and an empty room has no answerer.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn join_fails_when_every_member_is_offline_then_succeeds_on_retry() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    const O_MASTER: u8 = 25;
+    const A_MASTER: u8 = 26;
+    const B_MASTER: u8 = 27;
+    let o_master = NativeKeypair::from_secret_bytes(&seed_bytes(O_MASTER)).peer_id();
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
+    let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
+
+    let mut o = spawn_node_with_friends(&relay, O_MASTER, O_MASTER, &[&a_master]).await;
+    let mut a = spawn_node_with_friends(&relay, A_MASTER, A_MASTER, &[&o_master]).await;
+    expect_dm_pair_ready(&relay, &o, &a, 15).await;
+
+    let server_id = create_server_and_wait(&mut o, "Ghost Town").await;
+
+    a.cmd_tx
+        .send(NodeCommand::JoinServer {
+            server_id: server_id.clone(),
+            twitch_proof_json: None,
+            nsfw_confirmed: false,
+        })
+        .await
+        .unwrap();
+    assert!(
+        wait_event(&mut a, std::time::Duration::from_secs(10), |ev| matches!(
+            ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id
+        ))
+        .await,
+        "member A joins normally first"
+    );
+    expect_mls_group(&[&o, &a], &server_id, 20).await;
+
+    // --- Both members go dark. ---
+    relay.set_online(&o.device_id, false);
+    relay.set_online(&a.device_id, false);
+    assert!(
+        wait_until(10, async || relay.room_devices(&server_id).is_empty()).await,
+        "the server room must be empty, got {:?}",
+        relay.room_devices(&server_id),
+    );
+
+    let mut b = spawn_node_with_friends(&relay, B_MASTER, B_MASTER, &[]).await;
+    b.cmd_tx
+        .send(NodeCommand::JoinServer {
+            server_id: server_id.clone(),
+            twitch_proof_json: None,
+            nsfw_confirmed: false,
+        })
+        .await
+        .unwrap();
+
+    // The 15s pending-join timer is the ONLY thing that ends this, and it has to
+    // surface as a failure the UI can show, not a silent hang.
+    assert!(
+        wait_event(&mut b, std::time::Duration::from_secs(30), |ev| matches!(
+            ev, NetworkEvent::ServerJoinFailed { server_id: sid, .. } if *sid == server_id
+        ))
+        .await,
+        "a join into an empty server must fail loudly within the pending-join timeout"
+    );
+    assert!(
+        !b.servers().contains(&server_id),
+        "a failed join must leave no half-built server behind"
+    );
+
+    // --- ONE non-owner member returns; the same join now completes. ---
+    relay.set_online(&a.device_id, true);
+    assert!(
+        wait_until(20, async || relay.room_devices(&server_id).contains(&a.device_id)).await,
+        "A must rejoin the server room on reconnect, got {:?}",
+        relay.room_devices(&server_id),
+    );
+
+    drain_events(&mut b);
+    b.cmd_tx
+        .send(NodeCommand::JoinServer {
+            server_id: server_id.clone(),
+            twitch_proof_json: None,
+            nsfw_confirmed: false,
+        })
+        .await
+        .unwrap();
+    assert!(
+        wait_event(&mut b, std::time::Duration::from_secs(20), |ev| matches!(
+            ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id
+        ))
+        .await,
+        "the retry must succeed once a single member (not the owner) is back"
+    );
+    let mut expect_members = vec![o_master.clone(), a_master.clone(), b_master.clone()];
+    expect_members.sort();
+    assert!(
+        wait_until(20, async || b.raw_crdt_member_keys(&server_id) == expect_members).await,
+        "retried join converges to all three masters, got {:?}",
+        b.raw_crdt_member_keys(&server_id),
+    );
+
+    drop(o);
+    drop(a);
+    drop(b);
+}
+
+// ---------------------------------------------------------------------------
+// The join coordinator gate's failure mode, driven.
+//
+// Joins are served by ONE elected member now (the CRDT accept path used to run
+// in full on every online member: N snapshots, N op logs, N duplicate
+// MemberAdded ops at a single joiner). The election reads each member's OWN
+// `ws_room_peers`, so a coordinator whose socket died WITHOUT a PeerLeft is
+// still elected by everyone and answers for nobody — the whole join would hang
+// to the 15s timeout. `drop_socket_silently` is exactly that loss mode.
+//
+// The safety net is the joiner's 4s re-ask, which members recognise as a repeat
+// and serve unconditionally. So the gate costs one responder on the happy path
+// and degrades to the OLD fan-out, not to a failed join.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn join_survives_a_coordinator_that_vanished_silently() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    const O_MASTER: u8 = 24; // owner — elected coordinator, then silently gone
+    const A_MASTER: u8 = 28; // the member that has to notice and step in
+    const B_MASTER: u8 = 29; // joiner
+    let o_master = NativeKeypair::from_secret_bytes(&seed_bytes(O_MASTER)).peer_id();
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
+    let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
+
+    let mut o = spawn_node_with_friends(&relay, O_MASTER, O_MASTER, &[&a_master]).await;
+    let mut a = spawn_node_with_friends(&relay, A_MASTER, A_MASTER, &[&o_master]).await;
+    expect_dm_pair_ready(&relay, &o, &a, 15).await;
+
+    let server_id = create_server_and_wait(&mut o, "Vanishing Coordinator").await;
+    let general = general_channel_of(&server_id);
+
+    a.cmd_tx
+        .send(NodeCommand::JoinServer {
+            server_id: server_id.clone(),
+            twitch_proof_json: None,
+            nsfw_confirmed: false,
+        })
+        .await
+        .unwrap();
+    assert!(
+        wait_event(&mut a, std::time::Duration::from_secs(10), |ev| matches!(
+            ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id
+        ))
+        .await,
+        "member A joins normally first"
+    );
+    expect_mls_group(&[&o, &a], &server_id, 20).await;
+
+    // --- The owner's socket dies with NOBODY told. A keeps it in
+    // `ws_room_peers`, so A's election still names the owner: the polite
+    // `set_online(false)` cannot reproduce this, which is the whole point. ---
+    drain_events(&mut a);
+    relay.drop_socket_silently(&o.device_id);
+    assert!(
+        !relay.room_devices(&server_id).contains(&o.device_id),
+        "the relay must have dropped the owner from the room"
+    );
+
+    let mut b = spawn_node_with_friends(&relay, B_MASTER, B_MASTER, &[]).await;
+    b.cmd_tx
+        .send(NodeCommand::JoinServer {
+            server_id: server_id.clone(),
+            twitch_proof_json: None,
+            nsfw_confirmed: false,
+        })
+        .await
+        .unwrap();
+
+    // The first ask goes unserved (A defers to a coordinator that is gone). The
+    // 4s re-ask is what has to rescue it, well inside the 15s failure.
+    assert!(
+        wait_event(&mut b, std::time::Duration::from_secs(14), |ev| matches!(
+            ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id
+        ))
+        .await,
+        "the re-ask must rescue a join whose elected coordinator vanished"
+    );
+    let mut expect_members = vec![o_master.clone(), a_master.clone(), b_master.clone()];
+    expect_members.sort();
+    assert!(
+        wait_until(20, async || b.raw_crdt_member_keys(&server_id) == expect_members).await,
+        "rescued join converges to all three masters, got {:?}",
+        b.raw_crdt_member_keys(&server_id),
+    );
+
+    // SCOPE, deliberately. The MLS leaf does NOT follow here, and that is not
+    // this fix regressing: the same assertion fails identically with the
+    // coordinator gate reverted (checked 2026-08-27). The MLS committer election
+    // reads the same stale `ws_room_peers` and elects the same ghost, and a
+    // KeyPackage has no re-ask of its own. In production the relay's own
+    // keepalive evicts the dead socket and broadcasts the presence change, which
+    // corrects the view and lets the existing bootstrap paths finish the add;
+    // `drop_socket_silently` models the window BEFORE that, where by construction
+    // nothing ever corrects it. So the joiner is a CRDT member reading an empty
+    // channel until presence catches up — worth closing, separate from this.
+    assert!(
+        b.mls_members(&server_id).await.is_empty(),
+        "if the MLS add now lands here too, the residual is fixed — tighten this test          to assert the leaf and the decrypt instead of pinning the gap"
+    );
+
+    drop(o);
+    drop(a);
+    drop(b);
+}
+
+// ---------------------------------------------------------------------------
 // CI guard: the harness's FIXED-sleep budget.
 // ---------------------------------------------------------------------------
 

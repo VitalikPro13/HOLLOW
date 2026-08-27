@@ -1104,6 +1104,22 @@ pub(crate) async fn handle_join_server(
     // If no peers found yet, the PeerJoined/RoomMembers handler
     // will pick up pending_server_joins and send the request then.
 
+    // Members serve a join through their elected coordinator (one responder
+    // instead of N — see the gate in the `ServerJoinRequest` handler). That
+    // election reads each member's OWN presence view, so a coordinator whose
+    // socket has just died can be elected by everyone and answer for nobody.
+    // Re-send at 4s while still pending: the second request is served by every
+    // member, so the worst case degrades to the old fan-out instead of the 15s
+    // failure. Costs nothing on the happy path, where the join is long gone.
+    let retry_cmd_tx = cmd_tx.clone();
+    let retry_sid = server_id.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+        let _ = retry_cmd_tx.send(NodeCommand::RetryPendingJoin {
+            server_id: retry_sid,
+        }).await;
+    });
+
     // Spawn 15s timeout — if still pending, emit ServerJoinFailed.
     let timeout_cmd_tx = cmd_tx.clone();
     let timeout_sid = server_id.clone();
@@ -1113,6 +1129,36 @@ pub(crate) async fn handle_join_server(
             server_id: timeout_sid,
         }).await;
     });
+}
+
+// ── 8b. RetryPendingJoin ──────────────────────────────────────────────
+
+/// Re-send a still-pending `ServerJoinRequest` to every peer in the server room.
+/// Members gate the FIRST request to their elected coordinator; a repeat inside
+/// their retry window is served by all of them, so this is what rescues a join
+/// whose elected coordinator turned out to be gone.
+pub(crate) fn handle_retry_pending_join(
+    pending_server_joins: &HashMap<String, PendingJoin>,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    server_id: String,
+) {
+    let Some(pending) = pending_server_joins.get(&server_id) else { return };
+    let Some(room_peers) = ws_room_peers.get(&server_id) else { return };
+    hollow_log!(
+        "[HOLLOW-CRDT] Join for {server_id} still pending after the coordinator window — re-asking {} peer(s)",
+        room_peers.len()
+    );
+    for peer in room_peers.iter() {
+        send_message_to_peer(
+            ws_cmd_tx, ws_room_peers,
+            peer, HavenMessage::ServerJoinRequest {
+                server_id: server_id.clone(),
+                twitch_proof_json: pending.twitch_proof_json.clone(),
+                nsfw_confirmed: pending.nsfw_confirmed,
+            },
+        );
+    }
 }
 
 // ── 9. ChangeRole ─────────────────────────────────────────────────────

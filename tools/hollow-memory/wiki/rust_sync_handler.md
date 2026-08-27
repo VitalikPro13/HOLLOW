@@ -161,7 +161,7 @@ Flow:
 4. Join WS relay room: `WsCommand::JoinRoom { room_code: server_id }`
 5. Send `HavenMessage::ServerJoinRequest { server_id, twitch_proof_json }` to all peers already visible in the WS room
 6. If no peers found yet, the `PeerJoined`/`RoomMembers` handler in `swarm.rs` will pick up `pending_server_joins` and send the request later
-7. Spawn 15-second timeout task: sends `NodeCommand::CheckPendingJoinTimeout { server_id }` after delay
+7. Spawn a **4-second** `NodeCommand::RetryPendingJoin { server_id }` task, then the 15-second `NodeCommand::CheckPendingJoinTimeout { server_id }` task. Members serve a join through their elected coordinator (one responder instead of N), and that election reads each member's OWN presence view — so a coordinator whose socket just died is elected by everyone and answers for nobody. `handle_retry_pending_join()` re-asks every peer in the room; members recognise the repeat and all serve it, so the failure mode is the old fan-out rather than a 15s `ServerJoinFailed`. No-op once the join has completed.
 
 The actual join completion happens in `swarm.rs` when a `ServerJoinResponse` is received — that handler applies the full `ServerState`, creates CRDT ops, and adds the member to the MLS group.
 

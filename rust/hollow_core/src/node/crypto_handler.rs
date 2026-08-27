@@ -2938,6 +2938,58 @@ fn group_authority(
     }
 }
 
+/// Who answers an epoch catch-up for a group, given that `behind` is the peer
+/// that needs one.
+///
+/// Normally that is [`group_authority`], but the authority CANNOT SERVE ITSELF,
+/// and for the server group the authority is the owner — so an owner that went
+/// offline across an epoch advance it did not author came back stale into a
+/// deadlock: `group_authority` named the owner again the moment it was
+/// reachable, so the owner's own probe bailed ("our epoch defines the group")
+/// and the member that actually held the newer epoch refused to serve ("not the
+/// authority"). Both sides deferred to the owner and the owner was the stale
+/// one. Measured 2026-08-27: the returning owner dropped 3 channel messages
+/// before the decrypt-fail ladder rescued it, and in a VOICE-only channel no
+/// ciphertext ever flows to fail a decrypt, so there was no ladder at all.
+///
+/// Excluding the peer that is behind fixes it symmetrically: the asker (in
+/// [`send_epoch_probe`], passing itself) and the answerer (in
+/// [`handle_epoch_hint`], passing the requester) run the SAME election and land
+/// on the same single responder, so there is still exactly one — no room-wide
+/// echo. Owner-preference stays where it belongs: on the COMMITTER, which is
+/// what keeps server-group epochs linear (`feedback_owner_coordinator_mls_recovery`).
+fn epoch_catchup_responder(
+    state: &crate::crdt::server_state::ServerState,
+    channel_id: Option<&str>,
+    local_peer: &str,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    behind: &str,
+) -> Option<String> {
+    let authority = group_authority(state, channel_id, local_peer, ws_room_peers);
+    if let Some(a) = &authority
+        && !super::resolver::same_identity(a, behind)
+    {
+        return authority;
+    }
+    // The authority IS the peer that is behind. Deterministic fallback: the
+    // lowest online master among the rest (subgroup: among the members that
+    // qualify for the channel, since a non-qualifying member never holds it).
+    let candidates: Vec<String> = state
+        .members
+        .keys()
+        .filter(|m| !super::resolver::same_identity(m, behind))
+        .filter(|m| match channel_id {
+            Some(cid) => state.can_see_channel(m, cid),
+            None => true,
+        })
+        .cloned()
+        .collect();
+    // `elect_coordinator` always counts US as a candidate, so filter again:
+    // when WE are the one behind the answer must never be ourselves.
+    elect_coordinator(&candidates, local_peer, ws_room_peers)
+        .filter(|c| !super::resolver::same_identity(c, behind))
+}
+
 /// React to a peer's MLS epoch hint (`SyncRequest.mls_epoch` / `MlsEpochProbe`)
 /// — the detector for present-but-stale groups, which are otherwise invisible:
 /// commits ride an unbuffered 0x03 broadcast, all other recovery triggers key
@@ -2968,6 +3020,15 @@ pub(crate) fn handle_epoch_hint(
     their_epoch: u64,
     from_peer: &str,
     local_peer_str: &str,
+    // True when this arrived as an `MlsEpochProbe` — a request ADDRESSED to us,
+    // so we answer it ourselves and skip the responder election. The election
+    // exists to stop a room-wide echo when many members incidentally hint a
+    // reconnecting peer via `SyncRequest`; running it on a direct probe instead
+    // re-opens the deadlock from the other side, because the asker picks its
+    // target from ITS view of the membership and we would re-elect from ours.
+    // A returning owner's CRDT is a delta behind by definition, so those two
+    // views disagree exactly when the heal matters most.
+    direct_probe: bool,
 ) {
     // Conferences re-emit only (heal rule): admission is Welcome-based, and a
     // conf group must never be dragged through hint-driven repair.
@@ -2979,20 +3040,36 @@ pub(crate) fn handle_epoch_hint(
         None => server_id.to_string(),
     };
     let Some(state) = server_states.get(server_id) else { return };
-    // Membership gate: only members of this server get epoch service.
-    if !state.members.keys().any(|m| super::resolver::same_identity(m, from_peer)) {
-        hollow_log!("[HOLLOW-MLS] Ignoring epoch hint from non-member {from_peer} for {group_key}");
-        return;
-    }
     if !mls_mgr.has_group(&group_key) {
         return; // group-less recovery is owned by the existing bootstrap paths
     }
     let Ok(own_epoch) = mls_mgr.epoch(&group_key) else { return };
 
+    // Membership gate: only members of this server get epoch SERVICE.
+    if !state.members.keys().any(|m| super::resolver::same_identity(m, from_peer)) {
+        hollow_log!("[HOLLOW-MLS] No epoch service for non-member {from_peer} for {group_key}");
+        // …but their hint may still be the only evidence that WE are behind, and
+        // acting on it costs one throttled probe to a peer we ALREADY trust — we
+        // never reply to the unknown sender. This is the reconnect race: a member
+        // admitted while we were offline hints us before our CRDT delta lands, and
+        // dropping it here discarded the only heal trigger, with nothing to re-send it.
+        if their_epoch > own_epoch {
+            send_epoch_probe(
+                mls_mgr, ws_cmd_tx, ws_room_peers, state,
+                server_id, channel_id, local_peer_str, epoch_hint_cooldown,
+            );
+        }
+        return;
+    }
+
     if their_epoch < own_epoch {
-        // Only the authority serves — one responder, no room-wide echo.
-        let authority = group_authority(state, channel_id, local_peer_str, ws_room_peers);
-        if !authority.as_deref().is_some_and(|a| super::resolver::same_identity(a, local_peer_str)) {
+        // ONE responder, no room-wide echo — but the responder is elected with the
+        // peer that is behind excluded, so a stale AUTHORITY still gets an answer.
+        // A direct probe skips the election: it was addressed to us.
+        let responder = epoch_catchup_responder(state, channel_id, local_peer_str, ws_room_peers, from_peer);
+        if !direct_probe
+            && !responder.as_deref().is_some_and(|r| super::resolver::same_identity(r, local_peer_str))
+        {
             return;
         }
         let from_master = super::resolver::resolve(from_peer);
@@ -3071,12 +3148,15 @@ pub(crate) fn send_epoch_probe(
         None => server_id.to_string(),
     };
     let Ok(own_epoch) = mls_mgr.epoch(&group_key) else { return };
-    let Some(authority) = group_authority(state, channel_id, local_peer_str, ws_room_peers) else {
-        return;
+    // WE are the peer that would be behind, so we are excluded from the election:
+    // "we are the authority" says who COMMITS, never who holds the newest epoch,
+    // and treating it as the latter is what left a returning owner with nobody to
+    // ask. See `epoch_catchup_responder`.
+    let Some(authority) =
+        epoch_catchup_responder(state, channel_id, local_peer_str, ws_room_peers, local_peer_str)
+    else {
+        return; // no other online member — nobody to ask
     };
-    if super::resolver::same_identity(&authority, local_peer_str) {
-        return; // our epoch defines the group — nobody to ask
-    }
     let cd_key = format!("{group_key}|probe");
     if epoch_hint_cooldown.get(&cd_key).is_some_and(|t| t.elapsed() < EPOCH_HINT_COOLDOWN) {
         return;
