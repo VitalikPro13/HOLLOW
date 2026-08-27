@@ -7,6 +7,7 @@ import 'package:wakelock_plus/wakelock_plus.dart';
 import 'package:hollow/src/core/providers/audio_route_provider.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
+import 'package:hollow/src/core/providers/link_health_provider.dart';
 import 'package:hollow/src/core/providers/speaking_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
@@ -16,6 +17,7 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/call_duration_text.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/components/link_health_chip.dart';
 import 'package:hollow/src/ui/components/share_volume_control.dart';
 import 'package:hollow/src/ui/components/speaking_border.dart';
 import 'package:hollow/src/ui/mobile/mobile_audio_route_sheet.dart';
@@ -423,6 +425,19 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
               isSpeaking: showLocalFull ? speaking.local : speaking.remote,
               borderRadius: BorderRadius.zero,
             );
+          }),
+        ),
+        // Held-open flair. Top-centre, above the video and clear of the PiP
+        // corner, so a soft picture or a silent couple of seconds reads as the
+        // network rather than as the app breaking.
+        Positioned(
+          top: MediaQuery.viewPaddingOf(context).top + HollowSpacing.sm,
+          left: HollowSpacing.md,
+          right: HollowSpacing.md,
+          child: Consumer(builder: (context, ref, _) {
+            final health = ref.watch(callLinkHealthProvider);
+            if (!health.hasFlair) return const SizedBox.shrink();
+            return Center(child: LinkHealthBanner(snapshot: health));
           }),
         ),
         // Local PiP — portrait proportioned (3:4)

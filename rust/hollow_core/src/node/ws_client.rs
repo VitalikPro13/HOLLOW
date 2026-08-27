@@ -348,6 +348,47 @@ pub fn spawn_ws_client(
     })
 }
 
+/// Whether a real-time session (a DM call, a voice channel, a conference) is
+/// live right now. Set from Dart the moment one starts and cleared when the
+/// last one ends.
+///
+/// ## Why the reconnect policy has to know
+///
+/// The exponential backoff below exists so a fleet of clients does not hammer a
+/// relay that is down: with no rate limits by design, an unbacked-off retry
+/// storm is the relay's problem, not the client's. That reasoning is sound
+/// while the app is idle, where nobody notices a thirty second gap.
+///
+/// It is exactly wrong during a call, because a call has a DEADLINE. Recovering
+/// a lapsed media link needs an ICE restart, the offer carrying it rides this
+/// socket, and the hold-open window is measured in tens of seconds. Field-caught
+/// 2026-08-27: a VM lost its network for 25 seconds, the ladder had already
+/// climbed to a 30 second sleep, and the socket did not even TRY to reconnect
+/// until eleven seconds after the call had been given up on. The network had
+/// been back for over twenty of those seconds.
+///
+/// So the policy is conditional rather than capped: back off normally when
+/// idle, and retry at a steady [REALTIME_RETRY_SECS] while a call is live. Only
+/// clients actually in a call retry fast, which is a tiny fraction of them and
+/// only for as long as their call is in trouble.
+static REALTIME_ACTIVE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Retry interval while a real-time session is live. Fast enough that the
+/// socket is back within a second of the network returning, which is the whole
+/// point: a user whose internet is working again must not sit watching
+/// "Reconnecting" because we are asleep.
+const REALTIME_RETRY_SECS: u64 = 1;
+
+/// Set from the FFI when a call / voice channel / conference starts or ends.
+pub fn set_realtime_active(active: bool) {
+    REALTIME_ACTIVE.store(active, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub(crate) fn realtime_active() -> bool {
+    REALTIME_ACTIVE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 async fn ws_client_loop(
     relay_url: String,
     peer_id: String,
@@ -626,10 +667,24 @@ async fn ws_client_loop(
             }
         }
 
-        // Exponential backoff.
-        hollow_log!("[HOLLOW-WS] Reconnecting in {backoff_secs}s...");
-        tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
-        backoff_secs = (backoff_secs * 2).min(30);
+        // Backoff, unless a call is riding on this socket.
+        //
+        // A live session retries at a steady short interval and does NOT let
+        // the ladder climb, so the moment the network is back the socket is
+        // back, and an ICE restart can actually be delivered inside the call's
+        // hold-open window. See REALTIME_ACTIVE for why this is conditional
+        // rather than a lower cap for everyone.
+        if realtime_active() {
+            hollow_log!(
+                "[HOLLOW-WS] Reconnecting in {REALTIME_RETRY_SECS}s (call in progress)..."
+            );
+            tokio::time::sleep(Duration::from_secs(REALTIME_RETRY_SECS)).await;
+            backoff_secs = 1;
+        } else {
+            hollow_log!("[HOLLOW-WS] Reconnecting in {backoff_secs}s...");
+            tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
+            backoff_secs = (backoff_secs * 2).min(30);
+        }
     }
 }
 

@@ -438,6 +438,16 @@ Each MLS epoch produces a unique 32-byte SFrame key. When the epoch advances (me
 
 **1:1 DM calls:** A random 32-byte key is generated per call and transmitted inside the Olm-encrypted `CallInvite` message.
 
+The key is bound to the *call*, not to the transport carrying it. A call whose
+media path is interrupted may have its peer connection rebuilt in place while
+the call continues, and the same key is re-applied to the new connection: network
+recovery is not a re-keying event and requires no further key exchange. This is
+deliberate. Re-keying on every network interruption would mean a key exchange at
+precisely the moment the network is least able to carry one, and it would buy
+nothing: the participants are unchanged, so there is no membership change to
+give forward secrecy against. Key rotation remains tied to the events that
+change who can listen, which for a DM call is the call itself ending.
+
 ### 6.2 Encryption
 
 - **Algorithm:** AES-128-GCM

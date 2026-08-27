@@ -4,9 +4,11 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
+import 'package:hollow/src/core/providers/link_health_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/recording_provider.dart';
 import 'package:hollow/src/core/providers/selected_peer_provider.dart';
+import 'package:hollow/src/core/services/link_resilience.dart';
 import 'package:hollow/src/core/services/macos_version.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
@@ -14,6 +16,7 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
+import 'package:hollow/src/ui/components/link_health_chip.dart';
 import 'package:hollow/src/ui/components/ptt_mic_visual.dart';
 import 'package:hollow/src/ui/components/recording_indicator.dart';
 import 'package:hollow/src/ui/components/status_dot.dart';
@@ -65,6 +68,7 @@ class _ActiveCallBarState extends ConsumerState<ActiveCallBar> {
   Widget build(BuildContext context) {
     final call = ref.watch(callProvider);
     final rec = ref.watch(recordingProvider);
+    final linkHealth = ref.watch(callLinkHealthProvider);
 
     // Surface recording lifecycle as toast notifications.
     ref.listen<RecordingState>(recordingProvider, (prev, next) {
@@ -142,7 +146,13 @@ class _ActiveCallBarState extends ConsumerState<ActiveCallBar> {
                   color: hollow.elevated,
                   borderRadius: BorderRadius.circular(hollow.radiusLg),
                   border: Border.all(
-                    color: hollow.success.withValues(alpha: 0.3),
+                    // The bar's edge is the first thing read at a glance, and
+                    // a confident green outline around a call that is silently
+                    // reconnecting is the wrong signal.
+                    color: (linkHealth.health == LinkHealth.healthy
+                            ? hollow.success
+                            : hollow.warning)
+                        .withValues(alpha: 0.3),
                   ),
                   boxShadow: [
                     BoxShadow(
@@ -155,7 +165,16 @@ class _ActiveCallBarState extends ConsumerState<ActiveCallBar> {
                 child: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    StatusDot(color: hollow.success, size: 8),
+                    StatusDot(
+                      color: linkHealth.health == LinkHealth.healthy
+                          ? hollow.success
+                          : hollow.warning,
+                      // StatusDot carries meaning as SHAPE, never as colour
+                      // alone: a hollow dot for a link in trouble stays
+                      // readable without colour vision.
+                      filled: linkHealth.health == LinkHealth.healthy,
+                      size: 8,
+                    ),
                     const SizedBox(width: HollowSpacing.sm),
                     if (call.status == CallStatus.connecting)
                       Text(
@@ -183,6 +202,13 @@ class _ActiveCallBarState extends ConsumerState<ActiveCallBar> {
                           fontFeatures: [const FontFeature.tabularFigures()],
                         ),
                       ),
+                      // The call is being held open through network trouble;
+                      // say so, or a couple of seconds of silence and a soft
+                      // picture read as the app misbehaving.
+                      if (linkHealth.hasFlair) ...[
+                        const SizedBox(width: HollowSpacing.sm),
+                        LinkHealthChip(snapshot: linkHealth),
+                      ],
                       if (rec.isMyRecording) ...[
                         const SizedBox(width: HollowSpacing.sm),
                         RecordingIndicator(startedAt: rec.myStartedAt),

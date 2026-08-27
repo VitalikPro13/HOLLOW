@@ -8,10 +8,12 @@ import 'package:flutter_webrtc/flutter_webrtc.dart';
 import '../../rust/api/network.dart' as network_api;
 import '../call_setup_trace.dart';
 import 'frame_cryptor_service.dart';
+import 'ice_repair.dart';
 import 'ice_route_probe.dart';
 import 'local_speaking_detector.dart';
 import 'pending_ice_queue.dart';
 import 'remote_track_volume.dart';
+import 'video_quality_ladder.dart';
 
 /// Log to hollow_debug.log (visible in release builds).
 void _log(String msg) {
@@ -64,8 +66,28 @@ class VoiceService {
 
   // Callbacks
   void Function(String peerId)? onConnected;
-  void Function(String peerId)? onDisconnected;
+
+  /// Raw transport-state changes for the call's peer connection.
+  ///
+  /// Deliberately raw. This service used to collapse `disconnected`, `failed`
+  /// and `closed` into a single "the call is over" callback, and the provider
+  /// answered it by signalling `end` to the peer and cleaning up. Since
+  /// `disconnected` only means ICE consent has gone unanswered for a couple of
+  /// seconds, which is the ordinary signature of a Wi-Fi stutter, one side's
+  /// blip hung the call up on both machines.
+  ///
+  /// The hold-open policy now lives in CallNotifier (see [LinkResilience]),
+  /// because only it knows the peer, the call id and when an `end` is
+  /// warranted. NOTHING in this service may end a call on its own.
+  void Function(RTCPeerConnectionState state)? onTransportState;
+
   void Function(String peerId)? onRemoteVideoTrack;
+
+  /// Set for the duration of our own teardown. `closed` is reported both when
+  /// the remote end goes away and when we call `pc.close()` ourselves, and the
+  /// policy owner reads it as terminal; forwarding our own teardown back to it
+  /// would race the cleanup that is already running.
+  bool _tearingDown = false;
 
   /// Preferred device IDs (set by CallNotifier from settings providers).
   String? preferredAudioInputDeviceId;
@@ -249,6 +271,18 @@ class VoiceService {
         await _initLocalRenderer();
       }
 
+      // Record the BASELINE ICE credentials, even though this is not a
+      // restart. Without it the callee starts the call with no remembered
+      // ufrag, so its FIRST renegotiation reads as "nothing changed" and the
+      // ICE-restart detection misses it entirely.
+      //
+      // Field-caught 2026-08-27: the callee's SFrame was therefore never
+      // re-asserted after a recovery. Its sender cryptor stayed bound to a
+      // transport that no longer existed while the caller re-created its
+      // receiver, so the callee's microphone went silent to the other side and
+      // the caller's audio failed to decrypt. Both directions, one missing
+      // baseline.
+      _noteRemoteIceCredentials(sdp);
       await _pc!.setRemoteDescription(RTCSessionDescription(sdp, 'offer'));
       _remoteDescriptionSet = true;
       await _flushPendingCandidates();
@@ -319,11 +353,16 @@ class VoiceService {
     _dumpSdp('RENEG-OFFER-IN', sdp);
 
     try {
+      final iceRestarted = _noteRemoteIceCredentials(sdp);
       await _pc!.setRemoteDescription(RTCSessionDescription(sdp, 'offer'));
       _remoteDescriptionSet = true;
 
       final answer = await _pc!.createAnswer();
       await _pc!.setLocalDescription(answer);
+
+      // The transport was rebuilt under us, so the frame cryptors are stale.
+      // After setLocalDescription, so the new transport exists to bind to.
+      if (iceRestarted) await healSframeAfterTransportRebuild();
 
       _log('[HOLLOW-VOICE] Renegotiation answer created, SDP length=${answer.sdp?.length}');
       _dumpSdp('RENEG-ANSWER-OUT', answer.sdp!);
@@ -481,9 +520,14 @@ class VoiceService {
     }
     _dumpSdp('ANSWER-IN', sdp);
     _log('[HOLLOW-VOICE] Setting remote description (answer)');
+    final iceRestarted = _noteRemoteIceCredentials(sdp);
     await _pc!.setRemoteDescription(RTCSessionDescription(sdp, 'answer'));
     _remoteDescriptionSet = true;
     await _flushPendingCandidates();
+
+    // Answering an ICE restart obliges the far end to produce fresh
+    // credentials too, so this fires on the offering side as well.
+    if (iceRestarted) await healSframeAfterTransportRebuild();
 
     // Defer the safety net by a frame so onTrack has a chance to fire first.
     Future.delayed(const Duration(milliseconds: 150), _checkRemoteVideoTrack);
@@ -516,11 +560,20 @@ class VoiceService {
 
   /// Set microphone mute (idempotent — the PTT gate calls this on every key
   /// edge, so repeats must be harmless).
-  void setMuted(bool muted) {
+  /// [force] re-applies the state to the CURRENT capture track even when the
+  /// cached flag already agrees.
+  ///
+  /// The flag describes the track it was last applied to, and a media rebuild
+  /// replaces that track underneath it. `createOffer` tears media down without
+  /// clearing `_isMuted`, so after a rebuild the flag says "muted" while the
+  /// freshly captured track is live, and the ordinary early-return below turns
+  /// the re-apply into a no-op. Field-caught 2026-08-27: the call recovered,
+  /// the mute button still showed muted, and the microphone was open.
+  void setMuted(bool muted, {bool force = false}) {
     if (_localStream == null) return;
     final audioTracks = _localStream!.getAudioTracks();
     if (audioTracks.isEmpty) return;
-    if (_isMuted == muted) return;
+    if (_isMuted == muted && !force) return;
     _isMuted = muted;
     audioTracks.first.enabled = !_isMuted;
     // Freeze the capture processor's dynamic servo while muted — the APM
@@ -696,6 +749,12 @@ class VoiceService {
         await _constrainCameraCodecs(videoTrack.id!);
       }
 
+      // Hold the fresh sender to whatever rung this call has already fallen
+      // to. Best-effort here (the sender is not negotiated yet, and a
+      // pre-negotiation setParameters is dropped on the native path); the
+      // quality sampler re-asserts it until it takes.
+      await applyVideoRung(_videoRung);
+
       _isVideoEnabled = true;
       await _initLocalRenderer();
       _log('[HOLLOW-VOICE] Video enabled, camera active');
@@ -768,6 +827,7 @@ class VoiceService {
       if (videoTrack.id != null) {
         await _constrainCameraCodecs(videoTrack.id!);
       }
+      await applyVideoRung(_videoRung);
       _isVideoEnabled = true;
       await _initLocalRenderer();
       _log('[HOLLOW-VOICE] Video enabled, camera active');
@@ -1319,6 +1379,9 @@ class VoiceService {
 
   Future<void> endCall() async {
     _log('[HOLLOW-VOICE] Ending call with $_activePeerId');
+    // Our own `pc.close()` is about to report `closed`; the policy owner reads
+    // that as the remote end going away.
+    _tearingDown = true;
     stopVad();
 
     await _teardownMedia();
@@ -1407,6 +1470,116 @@ class VoiceService {
   /// the new track is never decrypted. Harmless on the initial track (drop
   /// is a no-op / re-binds the same receiver); skipped before key exchange
   /// (setSframeKey binds the receiver itself once the key lands).
+  /// The remote ICE username fragment from the last remote description.
+  ///
+  /// A change in this is the signal that an ICE RESTART happened, and it is
+  /// the same signal on BOTH sides: the offerer restarts, and per spec the
+  /// answerer must generate fresh credentials to answer a restart offer. So
+  /// one check, applied wherever a remote description is set, catches both.
+  String? _remoteIceUfrag;
+
+  /// When the last SFrame re-assert ran, to collapse the two triggers that
+  /// legitimately arrive together on one recovery.
+  DateTime? _lastSframeHeal;
+
+  /// Record the remote ICE credentials from [sdp]. Returns true when they
+  /// CHANGED, meaning the transport underneath us was rebuilt.
+  bool _noteRemoteIceCredentials(String sdp) {
+    final ufrag = iceUfragOf(sdp);
+    if (ufrag == null) return false;
+    final changed = _remoteIceUfrag != null && _remoteIceUfrag != ufrag;
+    _remoteIceUfrag = ufrag;
+    return changed;
+  }
+
+  /// Re-assert SFrame after the ICE transport was rebuilt underneath us.
+  ///
+  /// ## The bug this exists for (field-caught 2026-08-27)
+  ///
+  /// After a long outage the call recovered, the audio came back, and it was
+  /// NOISE: the receiving cryptor was gone, so ciphertext went straight to the
+  /// decoder. An ICE restart keeps the same SSRC and the same msid, so no new
+  /// transceiver appears, `onTrack` never fires, and the one existing rebind
+  /// path (`_rebindSframeAudioReceiver`) is never reached. The cryptor was not
+  /// FAILING either, it was detached, so `onFrameCryptorStateChanged` reported
+  /// nothing and the heal ping never fired. The logs from that call contain
+  /// zero SFrame lines after recovery, which is exactly the signature.
+  ///
+  /// The cryptors are idempotent per (peer, kind), so a plain re-enable is a
+  /// no-op on a stale binding. The binding has to be dropped first, which is
+  /// why this is a ladder and not a call.
+  ///
+  /// ## Why this is NOT run on every renegotiation
+  ///
+  /// [FrameCryptorService.disableSender] disposes the cryptor, so between the
+  /// drop and the re-enable there is a window where outbound frames carry no
+  /// SFrame layer. For a DM call that window is still inside DTLS-SRTP, but on
+  /// the forwarder lane a terminating hop is exactly what SFrame defends
+  /// against. A camera toggle or a mic switch does not rebuild the transport
+  /// and does not need this, so it is spent only where the alternative is
+  /// audio that is already broken.
+  Future<void> healSframeAfterTransportRebuild() async {
+    final peerId = _activePeerId;
+    final fc = _frameCryptor;
+    if (peerId == null || fc == null || !fc.isEnabled) return;
+
+    // Two independent triggers reach this (a changed remote ufrag, and a lapse
+    // that recovered after we tried restarts), and on a healthy recovery they
+    // fire within milliseconds of each other. Re-asserting twice would drop
+    // and re-create working cryptors for no reason, which is its own audible
+    // blip. Short window on purpose: a genuine SECOND rebuild seconds later
+    // still gets its own heal.
+    final now = DateTime.now();
+    final last = _lastSframeHeal;
+    if (last != null && now.difference(last) < const Duration(seconds: 2)) {
+      _log('[HOLLOW-VOICE] SFrame re-assert skipped (just did one)');
+      return;
+    }
+    _lastSframeHeal = now;
+
+    _log('[HOLLOW-VOICE] Transport rebuilt — re-asserting SFrame on both '
+        'directions');
+    try {
+      RTCRtpSender? outbound;
+      final senders = await _pc?.getSenders() ?? const <RTCRtpSender>[];
+      for (final sender in senders) {
+        if (sender.track?.kind == 'audio') {
+          outbound = sender;
+          break;
+        }
+      }
+
+      // The NEWEST audio receiver: transceivers are in creation order, and
+      // dead ones from earlier switches come first.
+      RTCRtpReceiver? inbound;
+      final receivers = await _pc?.getReceivers() ?? const <RTCRtpReceiver>[];
+      for (final r in receivers) {
+        if (r.track?.kind == 'audio') inbound = r;
+      }
+
+      // WHICH objects we bound to, not just that we bound. A re-assert that
+      // reports success and still decrypts to noise is almost always bound to
+      // a stale transceiver, and without the ids that is unanswerable from a
+      // log. Counts included: more than one live audio receiver means the
+      // "newest wins" rule above is picking between real candidates.
+      final audioSenders =
+          senders.where((x) => x.track?.kind == 'audio').length;
+      final audioReceivers =
+          receivers.where((x) => x.track?.kind == 'audio').length;
+      _log('[HOLLOW-VOICE] SFrame re-assert targets: '
+          'senders=$audioSenders receivers=$audioReceivers '
+          'sendTrack=${outbound?.track?.id} recvTrack=${inbound?.track?.id} '
+          'recvMuted=${inbound?.track?.muted}');
+
+      // One atomic ladder, not five separate mutations: the heal ping and a
+      // device switch can both be touching these cryptors at the same moment.
+      await fc.reassert(peerId: peerId, sender: outbound, receiver: inbound);
+      _log('[HOLLOW-VOICE] SFrame re-asserted after transport rebuild');
+    } catch (e) {
+      _log('[HOLLOW-VOICE] SFrame re-assert failed: $e');
+    }
+  }
+
   Future<void> _rebindSframeAudioReceiver(RTCRtpReceiver? receiver) async {
     final peerId = _activePeerId;
     if (peerId == null) return;
@@ -1438,6 +1611,9 @@ class VoiceService {
   // ---------------------------------------------------------------------------
 
   Future<void> _initPeerConnection(String peerId, String callId) async {
+    _tearingDown = false;
+    _remoteIceUfrag = null;
+    _lastSframeHeal = null;
     if (_pc != null) {
       await _pc!.close();
       await _pc!.dispose();
@@ -1544,22 +1720,36 @@ class VoiceService {
   }
 
   /// Body of pc.onConnectionState.
+  ///
+  /// Reports what happened and decides nothing. Every state, `disconnected`
+  /// included, is forwarded to [onTransportState] untouched.
   void _onConnectionStateChanged(RTCPeerConnection pc, String peerId,
       RTCPeerConnectionState state) {
     _log('[HOLLOW-VOICE] Connection state: $state');
-    switch (state) {
-      case RTCPeerConnectionState.RTCPeerConnectionStateConnected:
-        // Mark BEFORE the callback: the provider finishes the trace there.
-        CallSetupTrace.markCurrent(CallSetupTrace.kConnected);
-        onConnected?.call(peerId);
-        _logIceRoute(pc, peerId);
-      case RTCPeerConnectionState.RTCPeerConnectionStateFailed:
-      case RTCPeerConnectionState.RTCPeerConnectionStateClosed:
-      case RTCPeerConnectionState.RTCPeerConnectionStateDisconnected:
-        onDisconnected?.call(peerId);
-      default:
-        break;
+    if (state == RTCPeerConnectionState.RTCPeerConnectionStateConnected) {
+      // Mark BEFORE the callback: the provider finishes the trace there.
+      CallSetupTrace.markCurrent(CallSetupTrace.kConnected);
+      onConnected?.call(peerId);
+      _logIceRoute(pc, peerId);
     }
+    if (_tearingDown) return;
+    onTransportState?.call(state);
+  }
+
+  /// Restart ICE on the live call, so the next renegotiation offer carries
+  /// fresh credentials and re-runs the connectivity checks.
+  ///
+  /// Make-before-break by construction: media keeps flowing on the existing
+  /// candidate pair until the new one connects, so a restart fired at a link
+  /// that was about to heal on its own costs nothing but one offer.
+  ///
+  /// The caller must follow this with a renegotiation offer; see
+  /// `restartIceOn` in `ice_repair.dart` for why it is `restartIce()` and not
+  /// an `iceRestart` constraint on `createOffer`.
+  Future<bool> restartIce() async {
+    final pc = _pc;
+    if (pc == null) return false;
+    return restartIceOn(pc);
   }
 
   /// Post-connect diagnostic: log which ICE route (TURN / STUN / LAN / P2P)
@@ -2151,6 +2341,63 @@ class VoiceService {
   /// description recv parameters") while its hardware codec path is still
   /// cold — first call black, all later calls fine. Also covers the older
   /// macOS issue (Apple H.264 hw profile not decoding on Windows).
+  /// The rung the camera sender is currently held to. Kept so a sender built
+  /// later in the call (a camera toggle, a device switch, a renegotiation)
+  /// inherits the ladder position instead of springing back to full quality on
+  /// a link that has already proved it cannot carry it.
+  VideoRung _videoRung = kCameraLadder.first;
+
+  VideoRung get videoRung => _videoRung;
+
+  /// Hold the outbound camera to [rung].
+  ///
+  /// Returns whether the sender accepted it. A live `setParameters` on a
+  /// negotiated sender is the one path the spec guarantees, and it is what the
+  /// screen share lane has used since 2026-07; the DM camera had no cap at all
+  /// until now, which is why a congested uplink took the whole call with it.
+  ///
+  /// [VideoRung.paused] deactivates the encoding rather than removing the
+  /// track: the transceiver, its SFrame cryptor and the negotiated m-line all
+  /// stay in place, so coming back up is another `setParameters` rather than a
+  /// renegotiation on a link that is already struggling.
+  Future<bool> applyVideoRung(VideoRung rung) async {
+    _videoRung = rung;
+    final pc = _pc;
+    if (pc == null) return false;
+    try {
+      final senders = await pc.getSenders();
+      for (final sender in senders) {
+        if (sender.track?.kind != 'video') continue;
+        final params = sender.parameters;
+        final encodings = params.encodings;
+        if (encodings == null || encodings.isEmpty) {
+          // Nothing negotiated yet. The rung is remembered above and applied
+          // by the next call, once the sender has an encoding to hold.
+          return false;
+        }
+        for (final e in encodings) {
+          e.active = !rung.isPaused;
+          e.maxBitrate = rung.isPaused ? null : rung.maxBitrateBps;
+          e.maxFramerate = rung.maxFramerate;
+          e.scaleResolutionDownBy = rung.scaleDownBy;
+        }
+        // Faces stay legible longer when the frame rate goes before the
+        // resolution, which is the opposite of what a screen share wants.
+        params.degradationPreference =
+            RTCDegradationPreference.MAINTAIN_RESOLUTION;
+        final ok = await sender.setParameters(params);
+        _log('[HOLLOW-VOICE] Video rung "${rung.label}" '
+            '(scale=${rung.scaleDownBy} '
+            'max=${(rung.maxBitrateBps / 1000).round()}kbps '
+            'fps=${rung.maxFramerate}) accepted=$ok');
+        return ok;
+      }
+    } catch (e) {
+      _log('[HOLLOW-VOICE] applyVideoRung failed: $e');
+    }
+    return false;
+  }
+
   Future<void> _constrainCameraCodecs(String trackId) async {
     if (_pc == null) return;
     try {
@@ -2178,6 +2425,21 @@ class VoiceService {
     }
   }
 }
+
+/// The ICE username fragment carried by [sdp], or null when there is none.
+///
+/// A change in this value between two remote descriptions IS an ICE restart:
+/// the offerer generates fresh credentials, and per RFC 8445 the answerer must
+/// generate fresh ones to answer a restart offer, so the same check works on
+/// both sides. That is the signal SFrame has to be re-asserted on, because an
+/// ICE restart rebuilds the transport while keeping the SSRC and msid, which
+/// means nothing else in the stack announces it.
+///
+/// Deliberately takes the FIRST occurrence: with BUNDLE every media section
+/// carries the same credentials, and without BUNDLE the first section's
+/// restart is still a restart.
+String? iceUfragOf(String sdp) =>
+    RegExp(r'^a=ice-ufrag:(\S+)', multiLine: true).firstMatch(sdp)?.group(1);
 
 /// Default ICE servers (STUN only — used if no config injected).
 Map<String, dynamic> _defaultIceServers({String domain = 'relay.anonlisten.com'}) => {

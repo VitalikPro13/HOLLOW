@@ -1223,9 +1223,25 @@ class ScreenShareService {
         _startLivenessWatchdog();
       case RTCPeerConnectionState.RTCPeerConnectionStateFailed:
       case RTCPeerConnectionState.RTCPeerConnectionStateClosed:
-      case RTCPeerConnectionState.RTCPeerConnectionStateDisconnected:
         _stopLivenessWatchdog();
         onDisconnected?.call();
+      case RTCPeerConnectionState.RTCPeerConnectionStateDisconnected:
+        // Hold, do not tear down.
+        //
+        // `disconnected` means ICE consent has gone unanswered for a couple of
+        // seconds, which a Wi-Fi stutter produces routinely and which clears
+        // itself most of the time. Firing the recovery ladder here rebuilt a
+        // leg that was about to heal, and every rebuild is a visible blink in
+        // the share plus a fresh SFrame binding.
+        //
+        // Nothing is lost by waiting, because the consent watchdog above is
+        // still running and is the STRICTER test: it declares the leg dead
+        // after three seconds of no inbound activity on the nominated pair,
+        // which is exactly what a genuinely dead leg looks like and is still
+        // ahead of libwebrtc's own 5 to 7 second expiry. A leg that recovers
+        // never reaches it.
+        _log('[HOLLOW-SCREEN] transport disconnected — holding the leg while '
+            'the consent watchdog decides');
       default:
         break;
     }

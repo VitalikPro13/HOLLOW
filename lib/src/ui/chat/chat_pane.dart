@@ -41,6 +41,7 @@ import 'package:hollow/src/core/providers/unread_marker_provider.dart';
 import 'package:hollow/src/core/providers/unread_provider.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:hollow/src/core/providers/local_nickname_provider.dart';
+import 'package:hollow/src/core/providers/link_health_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 import 'package:hollow/src/core/providers/saved_messages_provider.dart';
@@ -71,6 +72,7 @@ import 'package:hollow/src/ui/components/share_volume_control.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/large_file_share_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
+import 'package:hollow/src/ui/components/link_health_chip.dart';
 import 'package:hollow/src/ui/components/ptt_mic_visual.dart';
 import 'package:hollow/src/core/providers/verified_peers_provider.dart';
 import 'package:hollow/src/ui/components/security_alert_banner.dart';
@@ -2825,6 +2827,10 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
         child: Column(
           mainAxisSize: isScreenShare ? MainAxisSize.max : MainAxisSize.min,
           children: [
+            // Held-open status, as a header for the whole call panel. Above
+            // the video rather than beside it: this is about the call, not
+            // about one participant's tile.
+            _buildLinkHealthBanner(),
             // Video / screen share area — screen share fills available
             // space; camera uses fixed (drag-resizable) height.
             if (hasVideoArea) ...[
@@ -2845,6 +2851,9 @@ class _InlineCallPanelState extends ConsumerState<_InlineCallPanel> {
       ),
     );
   }
+
+  Widget _buildLinkHealthBanner() =>
+      LinkHealthHeader(snapshot: ref.watch(callLinkHealthProvider));
 
   Widget _buildCameraArea(
     CallState call,

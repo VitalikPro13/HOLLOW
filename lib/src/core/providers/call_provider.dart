@@ -14,7 +14,9 @@ import 'package:hollow/src/core/call_setup_trace.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/audio_route_provider.dart';
 import 'package:hollow/src/core/providers/ice_config_provider.dart';
+import 'package:hollow/src/core/providers/connection_status_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
+import 'package:hollow/src/core/providers/link_health_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/recording_provider.dart';
 import 'package:hollow/src/core/providers/relay_domain_provider.dart';
@@ -26,7 +28,9 @@ import 'package:hollow/src/core/services/audio_route.dart';
 import 'package:hollow/src/core/services/desktop_capture_support.dart';
 import 'package:hollow/src/core/services/ice_repair.dart';
 import 'package:hollow/src/core/services/ice_route_probe.dart';
+import 'package:hollow/src/core/services/link_watchdog.dart';
 import 'package:hollow/src/core/services/macos_version.dart';
+import 'package:hollow/src/core/services/realtime_session_flag.dart';
 import 'package:hollow/src/core/services/screen_audio_receiver.dart';
 import 'package:hollow/src/core/services/share_audio_level.dart';
 import 'package:hollow/src/core/services/screen_share_service.dart';
@@ -202,6 +206,56 @@ class CallNotifier extends Notifier<CallState> {
   Timer? _iceRepairTimer;
   bool _iceRepairDone = false;
 
+  /// Holds the call open across network trouble instead of hanging it up, and
+  /// governs the outbound camera so the picture degrades before the call does.
+  /// Created on connect, torn down in [_cleanup]. Null outside a live call.
+  ///
+  /// This is the ONLY thing allowed to end a call because of network state.
+  LinkWatchdog? _linkWatch;
+
+  /// A hangup the peer never heard, held for the next time the relay is up.
+  ///
+  /// Giving up on a link is often something we can only do while our OWN relay
+  /// connection is down, which is precisely when the `end` signal announcing it
+  /// gets dropped before it leaves the machine. Field-caught 2026-08-27: the
+  /// VM tore its call down, the `end` logged `DROPPED — not in any WS room`,
+  /// and the host was left sitting in a call with nobody in it.
+  ///
+  /// The peer's own hold-open ladder would eventually notice and resolve it,
+  /// but a minute of talking to a corpse is a bad way to find that out.
+  ({String peerId, String callId})? _undeliveredEnd;
+
+  /// A media-session rebuild we are performing because the peer asked for one.
+  /// Held so the `sdp_offer` that follows waits for our teardown and is then
+  /// handled as an INITIAL offer rather than as a renegotiation.
+  Future<void>? _pendingMediaRestart;
+
+  /// Guards against starting a second rebuild while one is in flight.
+  bool _mediaRestartInFlight = false;
+
+  /// When a rebuild last began on EITHER side. Both ends are eligible to
+  /// initiate (the polite one just goes first), and in the field both did: the
+  /// polite side's `media_restart` was dropped while its peer's relay was
+  /// still down, and the peer initiated its own moments later. Two crossing
+  /// rebuilds would tear down each other's fresh connection, so whichever
+  /// starts first owns the window and the other stands down.
+  DateTime? _mediaRestartAt;
+
+  /// How long one rebuild owns the recovery. Comfortably longer than a call
+  /// setup, which is what a rebuild is.
+  static const _mediaRestartWindow = Duration(seconds: 10);
+
+  bool get _mediaRestartRecentlyStarted {
+    final at = _mediaRestartAt;
+    return at != null &&
+        DateTime.now().difference(at) < _mediaRestartWindow;
+  }
+
+  /// What to put back once the rebuilt session connects. A rebuild is a fresh
+  /// peer connection, so mute and camera come back at their defaults and would
+  /// otherwise silently contradict what the UI is showing.
+  bool _restoreVideoAfterRestart = false;
+
   /// Last user-chosen remote volume — restored when un-deafening.
   double _lastRemoteVolume = 1.0;
 
@@ -314,6 +368,10 @@ class CallNotifier extends Notifier<CallState> {
     };
     _voiceService!.onConnected = (peerId) {
       debugPrint('[HOLLOW-CALL] Voice connected with $peerId');
+      // A rebuilt media session lands here with the call ALREADY active, so it
+      // never enters the setup branch below. Mute and camera came back at
+      // their defaults on the fresh connection and have to be re-applied.
+      if (state.status == CallStatus.active) _restoreAfterMediaRestart();
       // Media is flowing — emit the setup timeline (see call_setup_trace.dart).
       CallSetupTrace.finishCurrent();
       if (state.status == CallStatus.connecting) {
@@ -329,6 +387,7 @@ class CallNotifier extends Notifier<CallState> {
         _applyTxGate();
         _scheduleStatsDump(peerId);
         _scheduleIceRepair(peerId);
+        _startLinkWatch(peerId);
 
         // AI-NS fallback check for calls that STARTED with the toggle on
         // (the toggle listener only covers mid-call flips): if DFN proves
@@ -418,12 +477,26 @@ class CallNotifier extends Notifier<CallState> {
       }
     };
 
-    _voiceService!.onDisconnected = (peerId) async {
-      debugPrint('[HOLLOW-CALL] Voice disconnected from $peerId');
-      if (state.status == CallStatus.active ||
-          state.status == CallStatus.connecting) {
-        _sendSignal(peerId, 'end', state.callId ?? '');
-        await _cleanup();
+    // Transport states go to the hold-open ladder, never straight to a
+    // hangup. `disconnected` means ICE consent has gone unanswered for a
+    // couple of seconds, which is what a Wi-Fi stutter looks like; answering
+    // it by signalling `end` hung the call up on BOTH machines over a blip.
+    // See [LinkWatchdog] and `link_resilience.dart`.
+    _voiceService!.onTransportState = (transportState) {
+      final watch = _linkWatch;
+      if (watch != null) {
+        watch.noteTransportState(transportState);
+        return;
+      }
+      // No watchdog yet: the call has not connected, so this is a setup
+      // failure and the pre-existing fail-fast behaviour is the right one.
+      if (transportState ==
+              RTCPeerConnectionState.RTCPeerConnectionStateFailed ||
+          transportState ==
+              RTCPeerConnectionState.RTCPeerConnectionStateClosed) {
+        _callLog('[HOLLOW-CALL] Transport $transportState before connect — '
+            'treating as a setup failure');
+        unawaited(_endCallForLinkLoss('setup-$transportState'));
       }
     };
 
@@ -626,6 +699,169 @@ class CallNotifier extends Notifier<CallState> {
     }
   }
 
+  /// Start holding this call open across network trouble.
+  ///
+  /// Called once the call goes active, because everything before that is
+  /// call setup and belongs to the ring timeout instead. From here on, the
+  /// watchdog owns every network-driven decision about this call: when to
+  /// restart ICE, how far to step the camera down, what the flair says, and
+  /// the one case that still ends the call.
+  void _startLinkWatch(String peerId) {
+    _linkWatch?.stop();
+    _linkWatch = LinkWatchdog(
+      label: 'CALL-LINK',
+      log: _callLog,
+      peerConnection: () => _voiceService?.peerConnection,
+      // Same lexicographic convention the rest of the codebase arbitrates
+      // renegotiation glare with, so the two ends do not restart into each
+      // other. Both sides stay eligible; the impolite one just waits longer.
+      isPolite: shouldInitiateIceRepair(localPeerId, peerId),
+      onHealth: (snapshot) =>
+          ref.read(callLinkHealthProvider.notifier).set(snapshot),
+      onRecoverLink: _restartMediaSession,
+      onApplyRung: (rung) => _service.applyVideoRung(rung),
+      // A recovery that followed an ICE restart may have rebuilt the transport
+      // without any SDP completing, which is the one case the ufrag detector
+      // cannot see. The re-assert itself collapses the duplicate when both
+      // triggers fire.
+      onTransportRebuilt: () =>
+          unawaited(_service.healSframeAfterTransportRebuild()),
+      // An ICE restart is only half a recovery: the offer carrying the fresh
+      // credentials goes over the relay. With our own relay link down it is
+      // dropped before it leaves the machine (`DROPPED — not in any WS room`),
+      // so there is nothing to gain by firing one and the attempt waits.
+      canSignal: () =>
+          ref.read(connectionStatusProvider).relayStatus ==
+          RelayConnectionStatus.connected,
+      onGiveUp: () => unawaited(_endCallForLinkLoss('hold-open window spent')),
+    )..start();
+  }
+
+  /// Rebuild this call's media session from scratch, keeping the call alive.
+  ///
+  /// This replaced an in-place `restartIce()` plus renegotiation. That
+  /// recovered the transport and destroyed SFrame with it: the cryptors end up
+  /// bound to a transport that no longer exists, and repairing them afterwards
+  /// was attempted four separate ways in the field (re-bind, atomic ladder,
+  /// re-key, both trigger paths) without ever once producing working audio.
+  ///
+  /// A fresh peer connection fixes both at once, and it is not a new code path
+  /// to get wrong: it is exactly what `_handleAccept` does at call start, which
+  /// has always worked. The call id, the SFrame key, the UI state and the
+  /// conversation all survive, so the user sees the "Reconnecting" flair go
+  /// away rather than a hangup followed by a new ring.
+  Future<void> _restartMediaSession() async {
+    final peerId = state.peerId;
+    final callId = state.callId;
+    if (peerId == null || callId == null) return;
+    if (state.status != CallStatus.active) return;
+    if (_mediaRestartInFlight) return;
+    if (_mediaRestartRecentlyStarted) {
+      _callLog('[HOLLOW-CALL] A media rebuild is already under way — standing '
+          'down rather than crossing it');
+      return;
+    }
+    _mediaRestartInFlight = true;
+    _mediaRestartAt = DateTime.now();
+    try {
+      _callLog('[HOLLOW-CALL] Rebuilding the media session for call=$callId');
+      // Tell the peer FIRST. It tears its own connection down, so the offer
+      // below lands on its initial-offer path instead of being applied to a
+      // peer connection that is about to be replaced.
+      _sendSignal(peerId, 'media_restart', callId);
+
+      _restoreVideoAfterRestart = state.isVideoEnabled;
+      state = state.copyWith(isVideoEnabled: false, remoteVideoEnabled: false);
+      // Fresh transport, fresh budget, and no stale rung to re-apply.
+      _linkWatch?.noteConnectionRebuilt();
+
+      // Audio-only, exactly like call setup: the camera goes back on through
+      // the proven mid-call addTrack path once this is connected.
+      final sdp = await _service.createOffer(peerId, callId, withVideo: false);
+
+      final keyHex = state.sframeKey;
+      if (keyHex.isNotEmpty) {
+        final keyBytes = _hexToBytes(keyHex);
+        await _service.setSframeKey(peerId, keyBytes);
+        keyBytes.fillRange(0, keyBytes.length, 0);
+      }
+
+      _sendSignal(peerId, 'sdp_offer',
+          jsonEncode({'call_id': callId, 'sdp': sdp}));
+      _callLog('[HOLLOW-CALL] Media rebuild offer sent');
+    } catch (e) {
+      _callLog('[HOLLOW-CALL] Media rebuild failed: $e');
+    } finally {
+      _mediaRestartInFlight = false;
+    }
+  }
+
+  /// The peer is rebuilding the media session. Tear ours down so the offer
+  /// that follows is handled as an initial one.
+  Future<void> _handleMediaRestart(String peerId, String callId) async {
+    if (state.callId != callId) return;
+    // Their rebuild owns the window now, so ours (if it was about to fire)
+    // stands down.
+    _mediaRestartAt = DateTime.now();
+    _callLog('[HOLLOW-CALL] Peer is rebuilding the media session — dropping '
+        'our side so the next offer is treated as a fresh one');
+    _restoreVideoAfterRestart = state.isVideoEnabled;
+    state = state.copyWith(isVideoEnabled: false, remoteVideoEnabled: false);
+    _linkWatch?.noteConnectionRebuilt();
+    // Assigned BEFORE the await so a fast-following offer can see it even if
+    // the teardown has not finished.
+    _pendingMediaRestart = _service.endCall();
+    await _pendingMediaRestart;
+  }
+
+  /// Put back what a fresh peer connection does not carry over. Called once
+  /// the rebuilt session is connected.
+  void _restoreAfterMediaRestart() {
+    // Through the tx gate, not a bare setMuted: mute is only one of the three
+    // things that silence the microphone, and deafen and push-to-talk have to
+    // come back with it. `force` because the rebuild replaced the capture
+    // track while the cached flag stayed behind, which is exactly the case the
+    // ordinary early-return would swallow.
+    _applyTxGate(force: true);
+    if (_restoreVideoAfterRestart) {
+      _restoreVideoAfterRestart = false;
+      _callLog('[HOLLOW-CALL] Restoring camera after the media rebuild');
+      unawaited(Future<void>.delayed(
+          const Duration(milliseconds: 400), toggleVideo));
+    }
+  }
+
+  /// End the call because the link is genuinely gone.
+  ///
+  /// The ONLY path from a network problem to a hangup. Everything short of
+  /// this (a lapse, a failed ICE check, an ICE restart, a peer that vanished
+  /// from the relay) holds the call open instead.
+  Future<void> _endCallForLinkLoss(String reason) async {
+    if (state.status != CallStatus.active &&
+        state.status != CallStatus.connecting) {
+      return;
+    }
+    _callLog('[HOLLOW-CALL] Ending call: $reason');
+    // If we cannot reach the relay right now, the `end` below is dropped
+    // before it leaves the machine. Remember it and say it when we can.
+    final peerId = state.peerId;
+    final callId = state.callId;
+    if (peerId != null &&
+        callId != null &&
+        ref.read(connectionStatusProvider).relayStatus !=
+            RelayConnectionStatus.connected) {
+      _undeliveredEnd = (peerId: peerId, callId: callId);
+      _callLog('[HOLLOW-CALL] Relay is down — holding the hangup for $peerId '
+          'until it is back');
+    }
+    // The FULL teardown, not just a state reset. The path this replaced sent
+    // `end` and cleaned up the state while leaving the peer connection, the
+    // microphone and the camera running: the call vanished from the UI with
+    // the capture device still held, and an undisposed PC costs about 200 MB
+    // per session (`feedback_webrtc_close_dispose_eventchannel`).
+    await endCall();
+  }
+
   /// One-shot "direct whenever direct is possible" repair for the call PC.
   ///
   /// libwebrtc nominates whichever candidate pair completes its check first,
@@ -741,6 +977,11 @@ class CallNotifier extends Notifier<CallState> {
 
   /// Start an outgoing call to a peer.
   Future<void> startCall(String peerId, {bool withVideo = false}) async {
+    // The relay socket stops backing off while a call is live, so a network
+    // blip is recovered from in about a second instead of up to thirty. Taken
+    // at the START of the call, not at connect: the invite and the accept ride
+    // that socket too.
+    RealtimeSessionFlag.acquire('dm-call');
     if (state.status != CallStatus.idle) return;
 
     await _leaveVoiceChannelIfActive();
@@ -797,6 +1038,11 @@ class CallNotifier extends Notifier<CallState> {
 
   /// Accept an incoming call.
   Future<void> acceptCall() async {
+    // The relay socket stops backing off while a call is live, so a network
+    // blip is recovered from in about a second instead of up to thirty. Taken
+    // at the START of the call, not at connect: the invite and the accept ride
+    // that socket too.
+    RealtimeSessionFlag.acquire('dm-call');
     if (state.status != CallStatus.ringing ||
         state.direction != CallDirection.incoming) {
       return;
@@ -865,7 +1111,7 @@ class CallNotifier extends Notifier<CallState> {
   bool _pttMode = false;
   bool _pttTransmit = false;
 
-  void _applyTxGate() {
+  void _applyTxGate({bool force = false}) {
     final gated =
         state.isMuted || state.isDeafened || (_pttMode && !_pttTransmit);
     if (_pttMode && state.status == CallStatus.active) {
@@ -873,7 +1119,7 @@ class CallNotifier extends Notifier<CallState> {
           '(muted=${state.isMuted} deafened=${state.isDeafened} '
           'held=$_pttTransmit)');
     }
-    _service.setMuted(gated);
+    _service.setMuted(gated, force: force);
   }
 
   /// Hotkey layer: PTT key edge (true = held). Idempotent.
@@ -1507,6 +1753,8 @@ class CallNotifier extends Notifier<CallState> {
           await _handleEnd(peerId, payload);
         case 'busy':
           _handleBusy(peerId, payload);
+        case 'media_restart':
+          await _handleMediaRestart(peerId, payload);
         case 'sdp_offer':
           await _handleSdpOffer(peerId, payload);
         case 'sdp_answer':
@@ -1537,20 +1785,63 @@ class CallNotifier extends Notifier<CallState> {
     }
   }
 
-  /// Handle peer going offline — auto-end any call with them.
+  /// Handle the relay reporting this peer offline.
+  ///
+  /// This used to end the call outright, which was wrong: relay presence and
+  /// the media path are different sockets. A WS reconnect on a flaky line
+  /// makes a peer vanish from the relay's rooms for a few seconds while a
+  /// perfectly healthy TURN or peer-to-peer path carries their voice, and
+  /// hanging up on that turned a signalling blip into a dropped call.
+  ///
+  /// Once the call is up it is therefore corroboration, not a verdict: it
+  /// shortens the hold-open window only if the media link is ALSO in trouble,
+  /// so someone who really did close their laptop resolves in seconds while a
+  /// working call is left alone. Before the call connects there is no media
+  /// path to judge by, so the old behaviour stands.
   Future<void> handlePeerDisconnected(String peerId) async {
     ref.read(recordingProvider.notifier).onPeerDisconnected(peerId);
-    if (state.peerId == peerId && state.status != CallStatus.idle) {
-      debugPrint('[HOLLOW-CALL] Peer $peerId disconnected, ending call');
+    if (state.peerId != peerId || state.status == CallStatus.idle) return;
+
+    final watch = _linkWatch;
+    if (watch == null) {
+      debugPrint('[HOLLOW-CALL] Peer $peerId disconnected before connect, '
+          'ending call');
       await _service.endCall();
       await _cleanup();
+      return;
     }
+    watch.notePeerPresenceLost();
+  }
+
+  /// Our relay connection is back. Deliver any hangup the peer never heard.
+  ///
+  /// Deliberately fire-and-forget and deliberately unconditional: by now the
+  /// call is long gone locally, and a duplicate `end` for a call the peer has
+  /// already dropped is ignored by `_handleEnd`'s call-id check.
+  void handleRelayReconnected() {
+    final pending = _undeliveredEnd;
+    if (pending == null) return;
+    _undeliveredEnd = null;
+    _callLog('[HOLLOW-CALL] Relay back — delivering the held hangup to '
+        '${pending.peerId}');
+    _sendSignal(pending.peerId, 'end', pending.callId);
+  }
+
+  /// The relay says this peer is back in its rooms. Withdraws the
+  /// corroboration above so a peer who merely reconnected does not keep a
+  /// shortened window hanging over the call.
+  void handlePeerReconnected(String peerId) {
+    if (state.peerId != peerId) return;
+    _linkWatch?.notePeerPresenceReturned();
   }
 
   /// Dispose (app shutdown).
   Future<void> disposeAll() async {
+    RealtimeSessionFlag.release('dm-call');
     _ringTimer?.cancel();
     _statsTimer?.cancel();
+    _linkWatch?.stop();
+    _linkWatch = null;
     await _voiceService?.dispose();
     state = const CallState();
   }
@@ -1816,6 +2107,14 @@ class CallNotifier extends Notifier<CallState> {
     final sdp = json['sdp'] as String;
 
     if (state.callId != callId) return;
+
+    // A rebuild we were asked for may still be tearing down. Wait for it, so
+    // the branch below sees no active call and takes the initial-offer path.
+    final restarting = _pendingMediaRestart;
+    if (restarting != null) {
+      await restarting;
+      _pendingMediaRestart = null;
+    }
 
     // Route by call identity, NOT by status: `active` is only set in
     // onConnected (ICE/DTLS complete), which lags seconds behind the SDP
@@ -2170,6 +2469,17 @@ class CallNotifier extends Notifier<CallState> {
     }
     _statsTimer?.cancel();
     _statsTimer = null;
+    _linkWatch?.stop();
+    _linkWatch = null;
+    _mediaRestartAt = null;
+    _mediaRestartInFlight = false;
+    _pendingMediaRestart = null;
+    _restoreVideoAfterRestart = false;
+    RealtimeSessionFlag.release('dm-call');
+    ref.read(callLinkHealthProvider.notifier).clear();
+    // NOTE: _undeliveredEnd is deliberately NOT cleared here. _cleanup runs as
+    // part of the very teardown that queued it, and clearing it would throw
+    // away the message the peer is waiting for. It is cleared on delivery.
     _iceRepairTimer?.cancel();
     _iceRepairTimer = null;
     _iceRepairDone = false;

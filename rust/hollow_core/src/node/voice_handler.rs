@@ -164,7 +164,8 @@ pub(crate) fn handle_call_send_signal(
     let reachable = ws_room_peers.values().any(|ps| ps.contains(&target));
     let control = matches!(
         signal_type.as_str(),
-        "invite" | "accept" | "reject" | "end" | "busy" | "recording_start" | "recording_stop"
+        "invite" | "accept" | "reject" | "end" | "busy" | "media_restart"
+            | "recording_start" | "recording_stop"
     );
     if control || !reachable {
         hollow_log!(
@@ -190,6 +191,9 @@ fn build_call_signal(signal_type: &str, payload: String) -> Option<HavenMessage>
         "reject" => Some(HavenMessage::CallReject { call_id: payload }),
         "end" => Some(HavenMessage::CallEnd { call_id: payload }),
         "busy" => Some(HavenMessage::CallBusy { call_id: payload }),
+        // Bare call id, like reject/end/busy — NOT a JSON payload, so it
+        // belongs here and not in build_call_json_signal.
+        "media_restart" => Some(HavenMessage::CallMediaRestart { call_id: payload }),
         _ => build_call_json_signal(signal_type, &payload),
     }
 }

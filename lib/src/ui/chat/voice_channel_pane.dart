@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
+import 'package:hollow/src/core/providers/link_health_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/voice_channel_provider.dart';
 import 'package:hollow/src/core/providers/speaking_provider.dart';
@@ -16,6 +17,7 @@ import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/chat/channel_chat_pane.dart';
 import 'package:hollow/src/ui/chat/chat_pane_shared.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
+import 'package:hollow/src/ui/components/link_health_chip.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
@@ -420,6 +422,22 @@ class _VoiceChannelPaneState extends ConsumerState<VoiceChannelPane> {
                     ),
                   ),
                 ),
+              ),
+
+            // Per-peer link flair (top-right). A member on a bad connection is
+            // labelled on THEIR tile: in a mesh their leg is their own, and a
+            // channel-wide alarm would be both wrong and alarming. Never on
+            // our own tile, where the whole flair would just be us.
+            if (!isLocal)
+              Positioned(
+                right: 6,
+                top: 6,
+                child: Consumer(builder: (context, ref, _) {
+                  final health = ref.watch(
+                      vcLinkHealthProvider.select((m) => m[peerId]));
+                  if (health == null) return const SizedBox.shrink();
+                  return LinkHealthChip(snapshot: health, compact: true);
+                }),
               ),
           ],
         ),

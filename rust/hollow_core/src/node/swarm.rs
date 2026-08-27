@@ -13093,6 +13093,14 @@ async fn handle_incoming_request(
                 payload: call_id,
             }).await;
         }
+        HavenMessage::CallMediaRestart { call_id } => {
+            hollow_log!("[HOLLOW-CALL] CallMediaRestart from {peer_str} call={call_id}");
+            let _ = event_tx.send(NetworkEvent::CallSignal {
+                peer_id: peer_str.to_string(),
+                signal_type: "media_restart".to_string(),
+                payload: call_id,
+            }).await;
+        }
         HavenMessage::CallSdpOffer { call_id, sdp } => {
             // SECURITY (Phase 6.25): SDP size limit.
             if sdp.len() > MAX_SDP_SIZE {

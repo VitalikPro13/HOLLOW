@@ -1,10 +1,10 @@
 # HOLLOW — Project Instructions for Claude Code
 
 ## What Is This
-Distributed, encrypted Discord alternative: no central servers, members collectively host. `HOLLOW_PLAN.md` = architecture, phases, TODO.
+Distributed, encrypted Discord alternative: no central servers, members host it. `HOLLOW_PLAN.md` = architecture, phases, TODO.
 
 ## Tech Stack
-- **UI:** Flutter (Dart), all 6 platforms (Windows, macOS, Linux, Android, iOS, Web)
+- **UI:** Flutter (Dart), all 6 platforms (Win, macOS, Linux, Android, iOS, Web)
 - **Backend:** Rust via `flutter_rust_bridge` v2.11.1
 - **Networking:** WSS relay (signaling + text/CRDT/MLS) + WebRTC data channels (files/shards) + WebRTC media (voice/video).
 - **E2EE:** vodozemac (Olm/Double Ratchet) DMs, OpenMLS 0.8 servers, SFrame (AES-128-GCM) voice/video/screen share
@@ -30,8 +30,7 @@ cargo test --lib  # full Rust suite
 # FRB codegen after Rust API changes (MUST run from project root)
 flutter_rust_bridge_codegen generate --rust-input "crate::api" --rust-root "rust/hollow_core" --dart-output "lib/src/rust"
 
-# Relay deploy: scp src/*.cpp *.h → ~/relay-uws/src/, then cmake+make+setcap+restart
-# (full command in `feedback_relay_rules`)
+# Relay deploy: scp src/*.cpp *.h → ~/relay-uws/src/, cmake+make+setcap+restart (`feedback_relay_rules`)
 
 # Windows release (build→sign→installer→zip; Certum PIN prompt)
 pwsh scripts\build_release.ps1  # full pipeline (-SkipBuild to repackage)
@@ -40,11 +39,11 @@ pwsh scripts\sign_release.ps1  # sign every .exe/.dll in Release
 **Certum signing:** self-healing CNG binding; output `installer\Output\` (`reference_certum_signing_procedure`). **Release zips: .NET '/' zipping, NEVER Compress-Archive** (`feedback_compress_archive_backslash_zip`).
 
 ## Hollow Design System
-All UI uses custom Hollow widgets, no Material defaults (`src/ui/components/`): HollowPressable, HollowButton (`.filled()/.ghost()/.outline()/.danger()`), HollowTextField, HollowDialog (`showHollowDialog()`), HollowTooltip, HollowToast, HollowToggle, StatusDot, StatBar.
+All UI = custom Hollow widgets, no Material defaults (`src/ui/components/`): HollowPressable, HollowButton (`.filled()/.ghost()/.outline()/.danger()`), HollowTextField, HollowDialog (`showHollowDialog()`), HollowTooltip, HollowToast, HollowToggle, StatusDot, StatBar.
 - **CRITICAL: hover/dialog patterns:** NEVER animate a color from `Colors.transparent` (lerps via black — pass `backgroundColor: null`); hover never paints outside the control. Dialogs = ghost Cancel + filled confirm; `.danger` ONLY destructive; selection = chips, never `.filled`. `feedback_hover_state_patterns`.
 
 ## Key Architecture Notes
-- **Multi-node test harness (`node/test_harness.rs`) = PRIMARY testing for distributed logic.** ALWAYS verify ring-1/ring-2 changes before declaring done. NOT covered: media/native/relay C++ (pixels = the UI probe). `feedback_harness_first_testing`.
+- **Multi-node harness (`node/test_harness.rs`) = PRIMARY testing for distributed logic.** ALWAYS verify ring-1/ring-2 changes before declaring done. NOT covered: media/native/relay C++ (pixels = the UI probe). `feedback_harness_first_testing`.
 - **Node modules:** `swarm.rs` = event-loop dispatcher; domain logic in focused modules as `handle_*()`; types in `types.rs`. No SwarmContext — pass state vars individually (`feedback_swarmcontext_borrow`). New envelope variants → the owner's `handle_envelope_*()` (`feedback_envelope_dispatch_pattern`).
 - **Persistence actors:** `CrdtStore` + `CryptoStore` own long-lived SQLCipher conns in spawn_blocking threads, fire-and-forget mpsc (CrdtStore batches one DB write per server). NEVER `MessageStore::open()` in a sync handler or on the event loop. `feedback_sqlcipher_open_hygiene`.
 - **Peer state in swarm.rs:** `ws_room_peers` + `synced_peers`; PeerJoined → key exchange + sync; 30s keepalive in ws_client.rs.
@@ -67,7 +66,7 @@ All UI uses custom Hollow widgets, no Material defaults (`src/ui/components/`): 
 - **Accessibility iron rules:** PURPOSE labels on icon-only controls; focus rides `HollowFocusRing` (both CI-guarded); reduce motion ONLY via `ReduceMotionController` + `hollowMobileRoute()`; StatusDot = SHAPE (`filled:`); never `dart format` mid-edit. `project_accessibility_*`.
 - **CRITICAL: interface scale = ONE root scaled viewport** (`UiScale`, `app.dart`): window coords ≠ overlay coords, so anchor via `overlayAnchorOf`/`overlayPositionOf`, NEVER bare `localToGlobal`; `MediaQuery.size` is the SLOT; zoom SHRINKS the viewport. Chat text = `ChatTextScale`. `project_display_scaling`.
 - **CRITICAL: user-visible text carries ZERO em dashes** (UI strings, README, WHITEPAPER, legal, Rust errors, website); comments/logs exempt. Settings labels = SENTENCE case; Title Case only for card/section titles, permission names, doc titles, proper nouns. `feedback_vitalik_writing_voice`.
-- **Icons:** `lucide_icons_flutter ^3.1.14` (camelCase); `brand_icons.dart`; `atlas_icons ^0.0.12` (snake_case; NSFW `Atlas.adult_18`).
+- **Icons:** `lucide_icons_flutter ^3.1.14` (camelCase), `brand_icons.dart`, `atlas_icons ^0.0.12` (snake_case; NSFW `Atlas.adult_18`).
 - **Identity at-rest protection:** two opt-in modes (Settings > Security): password (Argon2id + AES-256-GCM, blocks launch) or OS keychain (silent). `unlock_identity()` before any identity/DB op; recovery = 24-word mnemonic. Byte format (HKEYV1) + design rules in `project_identity_protection`.
 - **License keys:** relay `keys.json` gates WS auth (hot-reload 30s); app caches via `set_license_key()` FFI.
 - **Temp nicknames:** relay-scoped RAM claims, reset on `RelayDisconnected`. `project_temporary_nicknames`.
@@ -116,11 +115,12 @@ All UI uses custom Hollow widgets, no Material defaults (`src/ui/components/`): 
 - **CRITICAL: mic gain/loudness:** WebRTC APM AGC DISABLED, NEVER re-enable. Voice Enhancement owns loudness (`setCaptureGain`/`setVoiceEnhance`; `setVolume()`=NO-OP); NEVER a per-sample leveler or bypass of iOS VPIO. Chain/servo/3 ports + g++ harness: `project_voice_agc_loudness_rvox`.
 - **AI noise suppression LIVE:** RNNoise default (DFN3 = desktop selector), ABI v3; WebRTC NS auto-disabled; its VAD gates upward boost; `frames>0` or the test didn't happen; capture buffers ALWAYS fullband mono. `project_dfn3_noise_suppression`, `project_voice_enhance_chain`.
 - **CRITICAL: SFrame:** `setKeyIndexForPeer` after every enable; `rotateKey` (not `setSharedKey`) in `setSframeKey`; cryptors idempotent per (peer,kind); enables SYMMETRIC + self-healing; commit evicting OUR leaf = INACTIVE group. Reneg/new-PC re-enable ladder: `project_sframe_heal_ladder`.
-- **CRITICAL: Share WebRTC reconnection: receiver-initiates, sender-catches**: `feedback_webrtc_patterns`.
+- **CRITICAL: Share WebRTC reconnection = receiver-initiates, sender-catches.** `feedback_webrtc_patterns`.
 - **CRITICAL: call/VC signal types are WHITELISTED in Rust** (voice_handler.rs) — unknown types silently dropped. A new one needs 3 touches: types.rs variant (`#[serde(default)]`), the send match arm, the swarm.rs dispatch arm. `feedback_mobile_call_audio_route`.
 - **CRITICAL: a connected headset ALWAYS beats the loudspeaker (mobile):** "speaker on" = `AudioRoutes.preferLoudRoute()`, NEVER a raw `.speaker` override (outranks headphones, moves capture to the built-in mic); check availableInputs. `feedback_mobile_call_audio_route`.
 - **CRITICAL: vc_screen_* carry `origin` (boxed StreamOrigin):** receivers key attribution/consent/SFrame (`'screen:$originator'`) on the ORIGINATOR, transport on the sender; absent = sender. `inbound_origin_ok` DROPS spoofed origins — never weaken.
 - **CRITICAL: media forwarder lane (`fwd_*`, own `fwd:{id}` room):** CLIENT legs = **ZERO ice servers**, EXEMPT from Always-relay (media never touches a member's machine in ANY role). MEDIA LEGS = truth; assign trust = ORIGINATOR; feeder = SUPPLY NEVER AUTHORITY. Field iron rules: `project_media_forwarding_epic`.
+- **CRITICAL: `disconnected` is NOT a hangup, and NEVER restarts ICE:** lanes HOLD it (`LinkWatchdog`, 45s); recovery REBUILDS the media session (in-place restart kills SFrame), only after `failed`; ONLY `onGiveUp` ends a call. Cameras carry a rung cap. `project_call_hold_open_resilience`
 - **CRITICAL: renegotiation glare:** never drop an inbound `sdp_offer` — queue while busy + retry (`_queueRenegOffer`); camera auto-enable is STAGGERED (polite 300ms / other 1500ms). Any new reneg trigger must consider both sides acting simultaneously. `feedback_renegotiation_glare`.
 - **CRITICAL: DM/VC camera codecs are VP8-ONLY** (`_constrainCameraCodecs`; anything else kills the iOS answerer); failed inbound reneg ROLLS BACK to stable; route inbound `sdp_offer` by CALL IDENTITY, never `status == active`. `project_ios_camera_black_screen_debug`.
 - **CRITICAL: always `await` WebRTC disposal** (renderer/PC/stream) — unawaited leaks ~200 MB per session. Fork native: per-PC EventChannel teardown belongs in Dispose (after Dart cancels), NEVER Close. `feedback_webrtc_close_dispose_eventchannel`.
@@ -142,15 +142,15 @@ All UI uses custom Hollow widgets, no Material defaults (`src/ui/components/`): 
 - **CRITICAL: `WsEvent::Disconnected` clears ALL sync-gating state:** `synced_peers`, `key_request_in_flight`, `mls_bootstrap_requested`, `pending_messages` — alongside `ws_room_peers`.
 - **CRITICAL: AltGr = Ctrl+Alt on Windows:** hand-rolled `isControlPressed` needs `&& !isAltPressed` (else AZERTY @/€ swallowed); `SingleActivator` immune. `feedback_altgr_ctrl_alt_shortcuts`.
 - **App shortcuts REBINDABLE:** no hardcoded key checks — match `appShortcutsProvider` via `matchesEvent`; shell handler no-ops during keybind capture. `project_rebindable_shortcuts`.
-- **CRITICAL: never use raw `OverlayEntry` inside `SelectionArea`**: use `showDialog` with `barrierColor: Colors.transparent`.
+- **CRITICAL: no raw `OverlayEntry` inside `SelectionArea`** — use `showDialog` with `barrierColor: Colors.transparent`.
 - **CRITICAL: never construct `TextSelectionControls` in `build()`** (identity churn → app-wide selection-overlay crash); raw-OverlayEntry teardown needs a `removed` guard. `feedback_textfield_overlay_selectioncontrols`.
-- **CRITICAL: `HollowToast` from non-widget code passes `overlayState:`** (`hollowNavigatorKey.currentState?.overlay`) — `Overlay.of(navKey.currentContext)` throws; run critical teardown BEFORE the toast. `feedback_toast_from_nonwidget_overlaystate`.
+- **CRITICAL: `HollowToast` from non-widget code passes `overlayState:`** (`hollowNavigatorKey.currentState?.overlay`) — `Overlay.of(navKey.currentContext)` throws; run teardown BEFORE the toast. `feedback_toast_from_nonwidget_overlaystate`.
 - **CRITICAL: sender side needs `FileCompleted` emit too:** any new `FileHeader`/`StoredFile` field is missing from the sender's UI unless the send path also emits it. `feedback_sender_file_completed`.
 - **CRITICAL: Share-backed large files (>34 MB):** `FileHeader.share_ref` bypasses size checks in 3 places; skip `PendingFileStream` when `share_ref.is_some()`; >34 MB prompts `confirmLargeFileShare`. `feedback_share_backed_files`.
 - **CRITICAL: sender stream temps (`.stream_send_*.tmp`) deleted after WS-relay sends** unless `pending_webrtc_sends` owns them; boot-time sweep mops orphans. `feedback_stream_send_temp_cleanup`.
 - **Storage Manager:** "Files & Storage" dashboard; caps ENFORCED via `enforce_storage_caps` on `FileCompleted`. `project_storage_manager`.
 - **MLS coordinator model:** deterministic election (lowest online peer_id), server-group ops PREFER the OWNER. **Commits broadcast via `broadcast_mls_commit`** (ONE SendToRoom + epoch guard), NEVER per-device loops; plaintext twin via `broadcast_crdt_op_to_members`. `feedback_owner_coordinator_mls_recovery`.
-- **CRITICAL: `get_missing_file_ids()` checks DISK, not just DB**: files can exist without a valid `completed_at`.
+- **CRITICAL: `get_missing_file_ids()` checks DISK, not just DB** — files can exist without `completed_at`.
 - **CRITICAL: public channels:** sends branch on `is_channel_public()` → plaintext signed `PublicChannelMessage` (files too). Voice NEVER public — read `effective_public()` only. FileRequest serving GATED; guest bytes ride `PublicFileHeader` against the receipt cap. `project_public_channels`, wiki `security_write_gates` §7.
 - **CRITICAL: conferences are VIRTUAL SERVERS:** `conf:{id}` = WS room = MLS group = server_id (channel `"main"`); admission IS the MLS add; chat = RAM-only, NEVER persisted; guards branch on `is_conference_sid`. wiki `conferences`.
 - **CRITICAL: unread counts compare MILLISECOND timestamps only** (never rowid/order_us — seen comes from a ms-sorted `.last`); `recomputeServerUnread` gated on `newMessageCount > 0`. `feedback_unread_ghost_ms_seen`.
@@ -177,8 +177,8 @@ All UI uses custom Hollow widgets, no Material defaults (`src/ui/components/`): 
 - **CRITICAL: never wrap `SelectionArea` AROUND a scrolling message list:** under `UiScale` the selection delegate mis-locates the drag edge → clicks jump the viewport, autoscroll never stops (#35). Scope to ROWS via `selectionMustBeScopedToRows()`. `feedback_selection_area_scaled_viewport`.
 - **`showHollowDialog` overlays need a `Material` ancestor** for `Text` widgets (else yellow debug underline).
 - **Android:** SQLCipher needs vendored prebuilt OpenSSL 1.1.1w per-arch; target-prefixed env vars must be SYSTEM env vars (Cargo `[env]` doesn't reach cargokit); Rust TLS uses `webpki-roots`, NEVER `native-roots` (silently breaks all WSS). `feedback_android_platform`.
-- **Mobile lifecycle:** `WidgetsBindingObserver` — resume: WiFi lock + rejoin WS rooms; pause: release lock.
-- **Mobile UI:** `lib/src/ui/mobile/`; `MobileShell` (4-tab) below 600px; floating pills in MobileShell + MobileChatRoute stacks, NEVER in `app.dart` builder; selection providers cleared in `.then()`, NOT `dispose()`. `feedback_mobile_ui_patterns`.
+- **Mobile lifecycle:** `WidgetsBindingObserver` — resume: WiFi lock + rejoin rooms; pause: release.
+- **Mobile UI:** `lib/src/ui/mobile/`; `MobileShell` (4-tab) below 600px; floating pills in MobileShell + MobileChatRoute stacks, NEVER `app.dart` builder; selection providers cleared in `.then()`, NOT `dispose()`. `feedback_mobile_ui_patterns`.
 - **Widget tests:** `pumpHollowMobile()` mocks FFI, no device. **VERIFY UI BY DRIVING THE APP, never from source:** `scripts\ui_probe.ps1`; peer-to-peer = `scripts\fleet.ps1` (ONLY servers it creates AND deletes, wiki `fleet_probe`). Matrix `reports/FEATURE_MATRIX.md`. `feedback_verify_ui_by_driving`.
 - **Forked `flutter_webrtc`** at `packages/flutter_webrtc/` (pubspec `path:`). When iterating its native C++, delete `build/windows/x64/plugins/flutter_webrtc/` first; ALWAYS `--release` if testing from the Release folder.
 - **CRITICAL: Windows + Linux run SKIA, not Impeller** (`ImpellerSwitch::Disabled` / `fl_dart_project_set_enable_impeller`): Impeller render targets scale with WINDOW AREA (~189 MB/Mpx VRAM). `HollowShaderWarmUp` is gated to exactly those two — move both together. TEMPORARY. `project_desktop_skia_revert`.
@@ -202,4 +202,4 @@ All UI uses custom Hollow widgets, no Material defaults (`src/ui/components/`): 
 - **HOLLOW_PLAN.md is the authoritative source** for phase details, feature checklists, completion status; don't duplicate it here or in memory files.
 - **HARD budget: 40,000 chars.** Entries = 1–3 lines: rule + memory pointer; war stories go in memory files.
 - **SSH hosts (relay VPS, Mac, VM):** in `BUILD_GUIDE.md` (gitignored); key-only, free for checks/logs/deploys.
-- **Local dev:** `cargo check/test/clippy`, codegen, `flutter analyze` run freely; Vitalik runs `flutter run -d windows` himself.
+- **Local dev:** `cargo check/test/clippy`, codegen, `flutter analyze` run freely; Vitalik runs `flutter run -d windows`.

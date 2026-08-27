@@ -22,6 +22,41 @@ class FrameCryptorService {
   /// Receiver-side frame cryptors: "peerId:kind" -> FrameCryptor.
   final Map<String, FrameCryptor> _receiverCryptors = {};
 
+  /// Serializes every mutation of the cryptor maps.
+  ///
+  /// ## The bug this exists for (field-caught 2026-08-27)
+  ///
+  /// [enableForReceiver] and [enableForSender] check their map for an existing
+  /// cryptor, then `await` the native create, then insert. That is a
+  /// check-then-act across a suspension point: two callers arriving together
+  /// BOTH pass the guard, BOTH create a native cryptor on the same
+  /// receiver, and the map keeps only the second. The first is orphaned but
+  /// still attached natively, and the two fight over the same frames.
+  ///
+  /// It is not hypothetical. The SFrame heal ping fires two paths at once by
+  /// design (`rebindSframeReceivers()` un-awaited, plus the provider re-applying
+  /// the key), and the recovery log shows the signature plainly: two
+  /// "Receiver decryption enabled" lines for the same key with no drop between
+  /// them, followed by DecryptionFailed and MissingKey.
+  ///
+  /// Serializing is the fix rather than a smarter guard, because the real
+  /// invariant is that a cryptor ladder (drop, re-create, set index) must not
+  /// interleave with another ladder halfway through.
+  Future<void> _mutations = Future<void>.value();
+
+  /// Run [op] after every previously queued mutation has finished.
+  ///
+  /// CRITICAL: never call this from inside another [_serialize] block. The
+  /// public methods take the lock and delegate to `_*Unlocked` internals for
+  /// exactly that reason; a nested acquisition would wait on itself forever.
+  Future<T> _serialize<T>(Future<T> Function() op) {
+    final result = _mutations.then((_) => op());
+    // The chain must survive a failing op, or one thrown error wedges every
+    // later cryptor change for the life of the call.
+    _mutations = result.then((_) {}, onError: (Object _) {});
+    return result;
+  }
+
   /// Whether key material has been set (rotateKey / setSharedKey / setKey).
   /// Enable paths gate on this: cryptors are only useful once a key exists.
   bool _enabled = false;
@@ -94,7 +129,12 @@ class FrameCryptorService {
   /// Enable frame encryption for an RTP sender (our outgoing audio/video).
   ///
   /// [kind] distinguishes audio vs video cryptors for the same peer.
-  Future<void> enableForSender(String peerId, RTCRtpSender sender, {String kind = 'audio'}) async {
+  Future<void> enableForSender(String peerId, RTCRtpSender sender,
+          {String kind = 'audio'}) =>
+      _serialize(() => _enableForSenderUnlocked(peerId, sender, kind: kind));
+
+  Future<void> _enableForSenderUnlocked(String peerId, RTCRtpSender sender,
+      {String kind = 'audio'}) async {
     if (_keyProvider == null) return;
     final key = '$peerId:$kind';
     if (_senderCryptors.containsKey(key)) return;
@@ -122,7 +162,12 @@ class FrameCryptorService {
   /// Enable frame decryption for an RTP receiver (incoming audio/video from peer).
   ///
   /// [kind] distinguishes audio vs video cryptors for the same peer.
-  Future<void> enableForReceiver(String peerId, RTCRtpReceiver receiver, {String kind = 'audio'}) async {
+  Future<void> enableForReceiver(String peerId, RTCRtpReceiver receiver,
+          {String kind = 'audio'}) =>
+      _serialize(() => _enableForReceiverUnlocked(peerId, receiver, kind: kind));
+
+  Future<void> _enableForReceiverUnlocked(String peerId, RTCRtpReceiver receiver,
+      {String kind = 'audio'}) async {
     if (_keyProvider == null) return;
     final key = '$peerId:$kind';
     if (_receiverCryptors.containsKey(key)) return;
@@ -174,7 +219,11 @@ class FrameCryptorService {
   /// addTrack) can be re-enabled. Without this, [enableForSender] — which is
   /// idempotent per key — silently keeps the cryptor bound to the removed
   /// sender and the new track goes out unencrypted-side undecryptable.
-  Future<void> disableSender(String peerId, {String kind = 'audio'}) async {
+  Future<void> disableSender(String peerId, {String kind = 'audio'}) =>
+      _serialize(() => _disableSenderUnlocked(peerId, kind: kind));
+
+  Future<void> _disableSenderUnlocked(String peerId,
+      {String kind = 'audio'}) async {
     final key = '$peerId:$kind';
     final sender = _senderCryptors.remove(key);
     if (sender == null) return;
@@ -192,7 +241,11 @@ class FrameCryptorService {
   /// NEW inbound transceiver via renegotiation; without dropping the old
   /// cryptor, [enableForReceiver] (idempotent per key) silently skips the
   /// new receiver and the fresh track plays as ciphertext gibberish.
-  Future<void> disableReceiver(String peerId, {String kind = 'audio'}) async {
+  Future<void> disableReceiver(String peerId, {String kind = 'audio'}) =>
+      _serialize(() => _disableReceiverUnlocked(peerId, kind: kind));
+
+  Future<void> _disableReceiverUnlocked(String peerId,
+      {String kind = 'audio'}) async {
     final key = '$peerId:$kind';
     final receiver = _receiverCryptors.remove(key);
     if (receiver == null) return;
@@ -206,7 +259,10 @@ class FrameCryptorService {
   }
 
   /// Set the key index on all cryptors for a specific peer (e.g. newly created screen share cryptors).
-  Future<void> setKeyIndexForPeer(String peerId, int index) async {
+  Future<void> setKeyIndexForPeer(String peerId, int index) =>
+      _serialize(() => _setKeyIndexForPeerUnlocked(peerId, index));
+
+  Future<void> _setKeyIndexForPeerUnlocked(String peerId, int index) async {
     for (final entry in _senderCryptors.entries) {
       if (entry.key.startsWith('$peerId:')) {
         await entry.value.setKeyIndex(index);
@@ -218,6 +274,41 @@ class FrameCryptorService {
       }
     }
   }
+
+  /// Re-bind BOTH directions for one peer as a single atomic ladder.
+  ///
+  /// For a transport that was rebuilt underneath us (an ICE restart): the
+  /// cryptors are idempotent per (peer, kind), so a plain re-enable is a no-op
+  /// on a stale binding and the old one has to be dropped first.
+  ///
+  /// Runs under one lock for the whole ladder, not one per step. Taking the
+  /// lock five times would let another path (the heal ping, a mic switch)
+  /// interleave between the drop and the re-create, which is how a receiver
+  /// ends up with two competing native cryptors or none at all.
+  Future<void> reassert({
+    required String peerId,
+    RTCRtpSender? sender,
+    RTCRtpReceiver? receiver,
+    String kind = 'audio',
+    int keyIndex = 0,
+  }) =>
+      _serialize(() async {
+        await _disableSenderUnlocked(peerId, kind: kind);
+        await _disableReceiverUnlocked(peerId, kind: kind);
+        if (sender != null) {
+          await _enableForSenderUnlocked(peerId, sender, kind: kind);
+        }
+        if (receiver != null) {
+          await _enableForReceiverUnlocked(peerId, receiver, kind: kind);
+        }
+        // A freshly created cryptor defaults to index 0. DM calls do use 0, but
+        // stating it is the rule everywhere else (`feedback_sframe_key_index`)
+        // and a silent MissingKey is the failure this whole method exists to
+        // stop.
+        await _setKeyIndexForPeerUnlocked(peerId, keyIndex);
+        _fcLog('[HOLLOW-SFRAME] Re-asserted $peerId:$kind '
+            '(sender=${sender != null} receiver=${receiver != null})');
+      });
 
   /// Disable and clean up cryptors for a specific peer (audio, video, and screen share).
   Future<void> disableForPeer(String peerId) async {

@@ -6,7 +6,10 @@ import 'dart:typed_data';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:hollow/src/core/services/frame_cryptor_service.dart';
 import 'package:hollow/src/core/services/ice_repair.dart';
+import 'package:hollow/src/core/providers/link_health_provider.dart';
 import 'package:hollow/src/core/services/ice_route_probe.dart';
+import 'package:hollow/src/core/services/link_watchdog.dart';
+import 'package:hollow/src/core/services/video_quality_ladder.dart';
 import 'package:hollow/src/core/services/remote_track_volume.dart';
 import 'package:hollow/src/core/services/local_speaking_detector.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
@@ -156,6 +159,28 @@ class VoiceChannelService {
   /// Callback when a peer's audio connection reaches connected/stable state.
   /// Used by the provider to send screen share offers after the connection is ready.
   void Function(String peerId)? onPeerConnected;
+
+  /// One hold-open watchdog per peer leg, created when that leg first
+  /// connects. The mesh used to close a peer outright on `failed` with no
+  /// recovery attempt at all, so a member whose Wi-Fi hiccuped dropped out of
+  /// the channel and had to be re-invited by the join machinery.
+  ///
+  /// Per peer, not per channel: in a mesh, one member on hotel Wi-Fi is a
+  /// problem with that member's leg, and there is no reason for it to cost
+  /// anyone else their audio or their picture.
+  final Map<String, LinkWatchdog> _linkWatch = {};
+
+  /// Peers we are deliberately tearing down. `closePeer` calls `pc.close()`,
+  /// which reports `closed` straight back into the state handler, and the
+  /// watchdog reads that as the remote end going away.
+  final Set<String> _closingPeers = {};
+
+  /// Publish a peer leg's health for the UI.
+  void Function(String peerId, LinkHealthSnapshot snapshot)? onLinkHealth;
+
+  /// Whether our relay link can carry a renegotiation offer right now.
+  /// Injected by the provider so the service never reaches into Riverpod.
+  bool Function()? canSignal;
 
   /// Peers that need camera renegotiation once their PC reaches stable state.
   final Set<String> _pendingCameraReneg = {};
@@ -496,12 +521,15 @@ class VoiceChannelService {
 
   /// Close connection to a specific peer.
   Future<void> closePeer(String peerId) async {
+    _closingPeers.add(peerId);
+    _linkWatch.remove(peerId)?.stop();
     final pc = _peerConnections.remove(peerId);
     if (pc != null) {
       _vcLog('[HOLLOW-VC] Closing connection to $peerId');
       await pc.close();
       await pc.dispose();
     }
+    _closingPeers.remove(peerId);
     _pendingCandidates.remove(peerId);
     _remoteDescSet.remove(peerId);
     _pendingCameraReneg.remove(peerId);
@@ -1831,13 +1859,90 @@ class VoiceChannelService {
       onPeerConnected?.call(peerId);
       _logIceRoute(peerId, pc);
       scheduleIceRepair(peerId);
+      _startLinkWatch(peerId);
     }
-    if (state ==
-            RTCPeerConnectionState.RTCPeerConnectionStateFailed ||
-        state ==
-            RTCPeerConnectionState.RTCPeerConnectionStateClosed) {
+    // Our own teardown reports `closed` right back here; that is not the
+    // remote end going away.
+    if (_closingPeers.contains(peerId)) return;
+
+    final watch = _linkWatch[peerId];
+    if (watch != null) {
+      // The leg has been up before, so trouble now earns the hold-open ladder:
+      // hold it, restart ICE, and only close the peer once the window is spent.
+      watch.noteTransportState(state);
+      return;
+    }
+    // Never connected: this is a setup failure for this leg, and the mesh's
+    // own join machinery is what retries it.
+    if (state == RTCPeerConnectionState.RTCPeerConnectionStateFailed ||
+        state == RTCPeerConnectionState.RTCPeerConnectionStateClosed) {
       closePeer(peerId);
     }
+  }
+
+  /// Begin holding [peerId]'s leg open across network trouble. Idempotent:
+  /// a leg that reconnects keeps the watchdog it already had.
+  void _startLinkWatch(String peerId) {
+    if (_linkWatch.containsKey(peerId)) return;
+    _linkWatch[peerId] = LinkWatchdog(
+      label: 'VC-LINK',
+      log: _vcLog,
+      peerConnection: () => _peerConnections[peerId],
+      isPolite: shouldInitiateIceRepair(localPeerId, peerId),
+      onHealth: (snapshot) => onLinkHealth?.call(peerId, snapshot),
+      onRecoverLink: () async {
+        // The mesh's version of "rebuild the media session" is simply to drop
+        // the leg and dial it again, which is what a member rejoining does.
+        // `_createPeerConnection` closes any existing PC first, so the fresh
+        // offer rebuilds BOTH ends, and both get new SFrame cryptors created
+        // in the known-good order rather than repaired in place.
+        //
+        // `onPeerJoinedMyChannel` keeps the glare rule: only the lower id
+        // dials, the other end answers the offer it receives.
+        _vcLog('[HOLLOW-VC] $peerId: rebuilding the leg');
+        await closePeer(peerId);
+        await onPeerJoinedMyChannel(peerId);
+      },
+      onApplyRung: (rung) => applyVideoRungFor(peerId, rung),
+      canSignal: canSignal,
+      onGiveUp: () {
+        _vcLog('[HOLLOW-VC] $peerId: hold-open window spent, closing the leg');
+        unawaited(closePeer(peerId));
+      },
+    )..start();
+  }
+
+  /// Hold the camera we send to ONE peer to [rung].
+  ///
+  /// Per peer, because in a mesh each leg has its own sender and its own
+  /// uplink problem. One member on a bad connection gets a smaller picture of
+  /// us; nobody else pays for it.
+  Future<bool> applyVideoRungFor(String peerId, VideoRung rung) async {
+    final pc = _peerConnections[peerId];
+    if (pc == null) return false;
+    try {
+      final senders = await pc.getSenders();
+      for (final sender in senders) {
+        if (sender.track?.kind != 'video') continue;
+        final params = sender.parameters;
+        final encodings = params.encodings;
+        if (encodings == null || encodings.isEmpty) return false;
+        for (final e in encodings) {
+          e.active = !rung.isPaused;
+          e.maxBitrate = rung.isPaused ? null : rung.maxBitrateBps;
+          e.maxFramerate = rung.maxFramerate;
+          e.scaleResolutionDownBy = rung.scaleDownBy;
+        }
+        params.degradationPreference =
+            RTCDegradationPreference.MAINTAIN_RESOLUTION;
+        final ok = await sender.setParameters(params);
+        _vcLog('[HOLLOW-VC] $peerId video rung "${rung.label}" accepted=$ok');
+        return ok;
+      }
+    } catch (e) {
+      _vcLog('[HOLLOW-VC] applyVideoRungFor($peerId) failed: $e');
+    }
+    return false;
   }
 
   /// Log which ICE route (TURN/STUN/LAN) the succeeded candidate pair took.

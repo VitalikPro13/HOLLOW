@@ -2105,6 +2105,19 @@ pub(crate) enum HavenMessage {
     #[serde(rename = "call_busy")]
     CallBusy { call_id: String },
 
+    /// Rebuild the call's media session from scratch, keeping the call alive.
+    ///
+    /// Sent when a link has been recovered but its transport was torn down
+    /// underneath SFrame. Repairing cryptors in place on a rebuilt transport
+    /// was tried four times in the field and never once produced working
+    /// audio; a FRESH peer connection is the one path that has never failed,
+    /// because it is exactly what a call start does. The receiver tears its
+    /// peer connection down and treats the offer that follows as an initial
+    /// one. The call id, the SFrame key and the UI state all survive, so the
+    /// user sees a "Reconnecting" flair rather than a hangup and a new ring.
+    #[serde(rename = "call_media_restart")]
+    CallMediaRestart { call_id: String },
+
     /// SDP offer for voice call WebRTC connection.
     #[serde(rename = "call_sdp_offer")]
     CallSdpOffer { call_id: String, sdp: String },

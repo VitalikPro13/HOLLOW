@@ -9,6 +9,11 @@ Covers five Riverpod providers that manage real-time media, file transfers, and 
 **File:** `lib/src/core/providers/voice_channel_provider.dart`
 **Provider:** `voiceChannelProvider` — `NotifierProvider<VoiceChannelNotifier, VoiceChannelState>`
 
+Per-peer link health is published to `vcLinkHealthProvider` (keyed by DEVICE
+id) via `VoiceChannelService.onLinkHealth`; in a mesh one member's bad Wi-Fi is
+that member's leg, never a channel-wide alarm. **Known gap:** the chip is only
+rendered on video tiles, so a camera-less voice channel shows nothing.
+
 Manages multi-user voice channels within servers, including audio, camera video, and screen sharing. Coordinates with `VoiceChannelService` (the WebRTC audio/video service) and `ScreenShareService` (dedicated per-peer screen share PCs).
 
 ### State Shape: VoiceChannelState
@@ -271,6 +276,17 @@ Every cue goes through `SoundService.instance.play(..., duringCall: true)` (see 
 **Provider:** `callProvider` -- `NotifierProvider<CallNotifier, CallState>`
 
 Manages 1:1 DM calls (audio and video) with a single remote peer. Uses `VoiceService` for the audio/video WebRTC connection and `ScreenShareService` for screen sharing (separate PCs).
+
+**Network trouble never ends a call by itself (2026-08-27).** `onTransportState`
+feeds a `LinkWatchdog`, which holds the call open, rebuilds the media session
+when needed, and reaches a hangup through exactly one door
+(`_endCallForLinkLoss`, called only from the watchdog's `onGiveUp`). Relay
+`PeerDisconnected` no longer ends a call: it corroborates, shortening the window
+only when the media link is ALSO lapsing. Health is published to
+`callLinkHealthProvider`, deliberately NOT to `CallState` — a lapse leaves the
+call `active`, which is the whole point, and 46 `status == CallStatus.active`
+guards would otherwise need auditing. Full mechanics: wiki
+`services_voice_webrtc.md` "Link resilience".
 
 ### State Shape: CallState
 

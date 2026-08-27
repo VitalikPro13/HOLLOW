@@ -356,6 +356,73 @@ Identical to VoiceChannelService's `_mungeOpusParams()`. Finds Opus payload type
 
 ---
 
+## Link resilience (all real-time lanes, 2026-08-27)
+
+One shared stack holds a media link open across network trouble instead of
+hanging up. Pure decision modules plus one driver, used by DM calls, the voice
+mesh, and (partly) screen share.
+
+| File | Role |
+|---|---|
+| `services/link_resilience.dart` | The hold-open ladder. Pure, no timers. |
+| `services/video_quality_ladder.dart` | Outbound camera rungs, floor = `VideoRung.paused`. |
+| `services/media_quality_probe.dart` | `getStats()` to loss/RTT/bandwidth verdicts. |
+| `services/link_watchdog.dart` | Composes the three, owns the 1s timer. |
+| `providers/link_health_provider.dart` | `callLinkHealthProvider`, `vcLinkHealthProvider`. |
+| `ui/components/link_health_chip.dart` | `LinkHealthChip` / `LinkHealthBanner` / `LinkHealthHeader`. |
+
+### The ladder
+
+1. `disconnected` opens a lapse. The peer connection, tracks and call all stay
+   alive; the UI shows a flair. **A `disconnected` link is NEVER restarted**,
+   however long it lasts — libwebrtc resumes its own consent checks when the
+   path returns, and that is what recovers every real outage.
+2. Only `failed`, and only after 8 seconds there, earns recovery. It stays
+   eligible for the rest of the lapse even if it climbs back to `disconnected`
+   (a half-recovery is not a cure).
+3. Recovery **rebuilds the media session**; it does not restart ICE in place.
+   See below.
+4. Attempts repeat every 5s, gated on the relay being reachable
+   (`setSignalingReady`) — an ICE-level offer that cannot be delivered is not an
+   attempt and is not counted.
+5. Give up only when the grace window expires (45s call / 20s share), counting
+   only time we could actually use, capped by `absoluteCeiling` (90s / 40s).
+
+`LinkAction.giveUp` is the ONLY path from a network problem to a hangup.
+
+### Why recovery rebuilds instead of restarting ICE
+
+An in-place `restartIce()` recovers the transport and destroys SFrame with it:
+the cryptors end up bound to a transport that no longer exists. Repairing them
+was attempted four ways (re-bind receiver, atomic drop/re-create ladder,
+re-key, both trigger paths) and never once produced working audio. A fresh peer
+connection fixes both, and is the same path a call start takes.
+
+- **DM** (`CallNotifier._restartMediaSession`): send `media_restart{call_id}` so
+  the peer drops its side first, then `createOffer` on a fresh PC, re-apply the
+  same SFrame key, send `sdp_offer`. The receiver holds its teardown in
+  `_pendingMediaRestart`, which `_handleSdpOffer` awaits so the offer lands on
+  the INITIAL path. Call id, SFrame key and CallState survive: the user sees the
+  flair clear, not a hangup and a new ring.
+- **VC mesh**: `closePeer` + `onPeerJoinedMyChannel`. **Known broken** — the
+  higher-id side closes and never re-dials (glare rule), and can destroy a leg
+  the peer just rebuilt. See `tmp.md` / the memory file.
+
+Both ends are eligible to initiate, so `_mediaRestartAt` gives the first one a
+10s window; receiving a peer's `media_restart` claims it too.
+
+**A fresh peer connection does not carry mute, deafen, PTT or the camera.**
+`_restoreAfterMediaRestart` re-applies them via `_applyTxGate(force: true)`.
+`force` matters: `setMuted` early-returns when its cached flag agrees, and the
+flag describes the track it was last applied to, which the rebuild replaced.
+
+### Relay reconnect is call-aware
+
+`ws_client.rs` backs off exponentially to 30s when idle, but retries every 1s
+while `REALTIME_ACTIVE` is set (FFI `set_realtime_session_active`, pushed by
+`RealtimeSessionFlag`, which refcounts `dm-call` / `voice-channel` holders).
+A 30s backoff is fatal mid-call: the offer carrying recovery rides that socket.
+
 ## WebRtcService
 
 File: `lib/src/core/services/webrtc_service.dart`

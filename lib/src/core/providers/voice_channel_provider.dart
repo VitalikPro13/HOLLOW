@@ -16,6 +16,9 @@ import 'package:hollow/src/core/viewer_display.dart';
 import 'package:hollow/src/core/providers/forwarder_info_provider.dart';
 import 'package:hollow/src/core/providers/ice_config_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
+import 'package:hollow/src/core/providers/connection_status_provider.dart';
+import 'package:hollow/src/core/providers/link_health_provider.dart';
+import 'package:hollow/src/core/services/realtime_session_flag.dart';
 import 'package:hollow/src/core/providers/recording_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/core/providers/speaking_provider.dart';
@@ -708,6 +711,10 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
 
   /// Join a voice channel. If already in one, leave it first.
   Future<void> joinChannel(String serverId, String channelId) async {
+    // Same reasoning as the DM call lane: while a voice session is live the
+    // relay socket retries every second instead of backing off toward thirty,
+    // so a member whose Wi-Fi blinks is back in seconds.
+    RealtimeSessionFlag.acquire('voice-channel');
     // Block if in a 1:1 call. Say so — a silent return reads as a dead
     // button (issue #49).
     final callState = ref.read(callProvider);
@@ -874,6 +881,15 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     // owns the PCs and the reneg path, the provider owns policy. Forced-relay
     // users are NEVER repaired — that routing is their deliberate choice.
     svc.isForcedRelay = () => ref.read(alwaysRelayCallsProvider);
+    // Per-peer link health for the tiles: a member on a bad connection is
+    // labelled on their own tile, never as a channel-wide alarm.
+    svc.onLinkHealth = (peerId, snapshot) =>
+        ref.read(vcLinkHealthProvider.notifier).setFor(peerId, snapshot);
+    // See the DM twin: an ICE restart offer needs the relay to carry it, so a
+    // restart fired while our own relay link is down is a wasted attempt.
+    svc.canSignal = () =>
+        ref.read(connectionStatusProvider).relayStatus ==
+        RelayConnectionStatus.connected;
     // Lever 2 hand-off: a repaired audio PC changes our route hint, which is
     // what lets the sharer promote us off the relay path.
     svc.onIceRouteRepaired = (peerId, direct) {
@@ -1283,6 +1299,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
 
   /// Leave the current voice channel.
   Future<void> leaveChannel() async {
+    RealtimeSessionFlag.release('voice-channel');
     if (!state.isInVoiceChannel || _leaving) return;
     _leaving = true;
     // Retire the current join immediately: a bring-up still walking its awaits

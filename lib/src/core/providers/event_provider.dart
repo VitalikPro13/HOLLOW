@@ -321,6 +321,10 @@ class EventStreamNotifier extends Notifier<bool> {
             '[HOLLOW] Peer discovered: ${peer.peerId} at ${peer.addresses}');
         ref.read(peersProvider.notifier).addPeer(peer.peerId, peer.addresses);
         ref.read(connectionStatusProvider.notifier).onPeerConnected(peer.peerId);
+        // A peer we are in a call with is back in the relay's rooms, so the
+        // shortened hold-open window their absence justified no longer
+        // applies. See CallNotifier.handlePeerDisconnected.
+        ref.read(callProvider.notifier).handlePeerReconnected(peer.peerId);
 
       case NetworkEvent_TurnCredentials(
           :final username, :final password, :final uris):
@@ -1083,6 +1087,9 @@ class EventStreamNotifier extends Notifier<bool> {
         ref
             .read(connectionStatusProvider.notifier)
             .onRelayStatusChanged('connected');
+        // A hangup we could not deliver while the relay was down: say it now,
+        // so a peer is never left sitting in a call we already left.
+        ref.read(callProvider.notifier).handleRelayReconnected();
 
       case NetworkEvent_RelayConnecting(:final reconnecting):
         ref

@@ -3,11 +3,14 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
+import 'package:hollow/src/core/providers/link_health_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
+import 'package:hollow/src/core/services/link_resilience.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/components/link_health_chip.dart';
 import 'package:hollow/src/ui/components/status_dot.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -57,6 +60,7 @@ class _MobileActiveCallPillState extends ConsumerState<MobileActiveCallPill> {
   @override
   Widget build(BuildContext context) {
     final call = ref.watch(callProvider);
+    final linkHealth = ref.watch(callLinkHealthProvider);
 
     final isVisible = call.status == CallStatus.active ||
         call.status == CallStatus.connecting;
@@ -109,7 +113,10 @@ class _MobileActiveCallPillState extends ConsumerState<MobileActiveCallPill> {
                 color: hollow.elevated,
                 borderRadius: BorderRadius.circular(24),
                 border: Border.all(
-                  color: hollow.success.withValues(alpha: 0.3),
+                  color: (linkHealth.health == LinkHealth.healthy
+                          ? hollow.success
+                          : hollow.warning)
+                      .withValues(alpha: 0.3),
                 ),
                 boxShadow: [
                   BoxShadow(
@@ -122,8 +129,20 @@ class _MobileActiveCallPillState extends ConsumerState<MobileActiveCallPill> {
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  StatusDot(color: hollow.success, size: 8),
+                  StatusDot(
+                    color: linkHealth.health == LinkHealth.healthy
+                        ? hollow.success
+                        : hollow.warning,
+                    filled: linkHealth.health == LinkHealth.healthy,
+                    size: 8,
+                  ),
                   const SizedBox(width: HollowSpacing.sm),
+                  // Icon only: the pill is already tight, and the label still
+                  // reaches the tooltip and assistive tech.
+                  if (linkHealth.hasFlair) ...[
+                    LinkHealthChip(snapshot: linkHealth, compact: true),
+                    const SizedBox(width: HollowSpacing.sm),
+                  ],
                   if (call.status == CallStatus.connecting)
                     Text(
                       'Connecting...',

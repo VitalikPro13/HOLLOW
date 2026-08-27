@@ -16,6 +16,23 @@ part 'network.freezed.dart';
 Future<void> setLicenseKey({String? key}) =>
     RustLib.instance.api.crateApiNetworkSetLicenseKey(key: key);
 
+/// Tell the relay client that a real-time session (DM call, voice channel,
+/// conference) is live, or has ended.
+///
+/// The only thing this changes is the reconnect policy: while it is true the
+/// socket retries every second instead of backing off toward thirty. A call
+/// recovering from a network blip needs an ICE restart, that offer rides this
+/// socket, and the call's hold-open window is measured in tens of seconds, so a
+/// socket asleep in a long backoff is the difference between a call that
+/// recovers and one that is given up on. See `ws_client::REALTIME_ACTIVE`.
+///
+/// Safe to call repeatedly with the same value. Dart refcounts the sessions and
+/// only pushes the edges.
+Future<void> setRealtimeSessionActive({required bool active}) => RustLib
+    .instance
+    .api
+    .crateApiNetworkSetRealtimeSessionActive(active: active);
+
 Future<void> setRelayUrl({String? domain}) =>
     RustLib.instance.api.crateApiNetworkSetRelayUrl(domain: domain);
 
