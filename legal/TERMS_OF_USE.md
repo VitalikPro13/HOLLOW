@@ -1,6 +1,6 @@
 # Hollow: Terms of Use
 
-**Last updated: August 16, 2026**
+**Last updated: August 28, 2026**
 
 These Terms of Use ("Terms") govern your access to and use of the Hollow application and related services ("Services") provided by AnonListen ("we", "us", "our"). By using Hollow, you agree to these Terms.
 
@@ -80,7 +80,7 @@ We will make reasonable efforts to maintain service availability but do not guar
 
 ### Fair use limits
 
-To keep the shared relay infrastructure available to everyone, we enforce technical fair-use limits per IP address. These currently include a daily data budget (10 GB per day, counting traffic routed through the relay in both directions) and caps on simultaneous connections. Exceeding a limit results in disconnection from the relay until the limit resets; it never affects your account, your keys, or your data. In practice, only heavy file traffic routed through the relay can approach this budget: ordinary messaging uses a negligible amount, voice and video calls travel peer-to-peer without touching it, and large file transfers are designed to travel peer-to-peer and do not consume the relay budget either. We may adjust these limits over time to preserve service quality, and the current usage is visible in the application.
+To keep the shared relay infrastructure available to everyone, we apply technical fair-use measures per IP address. These currently include caps on simultaneous connections and on the rate of new connections, and fair sharing of the relay's network capacity whenever it is saturated, so that no single connection can crowd out others. There is no data volume quota: you are never disconnected for the amount of data you transfer, and none of these measures affect your account, your keys, or your data. In practice, ordinary messaging uses a negligible amount of relay capacity, and voice and video calls and large file transfers are designed to travel peer-to-peer. The relay's TURN service carries traffic only between Hollow clients; it cannot be used to reach other hosts. We may adjust these measures over time to preserve service quality.
 
 During limited-access phases, access to our hosted relay may additionally require an access key, which we may revoke for violations of these Terms. Revocation or disconnection applies only to our hosted infrastructure, never to your copy of the application, your identity, or your data. You are always free to self-host your own relay; the software is open source.
 

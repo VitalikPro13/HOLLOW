@@ -1050,24 +1050,10 @@ File: `lib/src/core/providers/relay_domain_provider.dart`
 - Always includes `kDefaultRelayDomain` as first entry.
 - `loadCached()`, `addRelay(String)`, `removeRelay(String)` — all persist to DB.
 
-## Relay Bandwidth Provider (daily byte budget)
+## Relay Bandwidth Provider — REMOVED (2026-08-28)
 
-File: `lib/src/core/providers/relay_bandwidth_provider.dart`
-Provider: `relayBandwidthProvider` -- `NotifierProvider.autoDispose<RelayBandwidthNotifier, RelayBandwidth>`
+`relay_bandwidth_provider.dart`, `DailyUsageMeter`, the `NetworkEvent_BandwidthStatus` / `NetworkEvent_BandwidthLimited` cases and the `request_relay_bandwidth()` FFI are gone with the 10 GB/day relay budget. Relay cards show RAM + Bandwidth `StatBar`s only. See `relay_uws_server.md` → "No byte quotas".
 
-This connection's daily relay byte budget (10 GB/day per IP, relay-RAM counter, binary frames both directions, UTC-day window).
-
-### RelayBandwidth Model
-- `usedBytes`, `budgetBytes` -- from the relay's `bandwidth_status` reply.
-- `resetAt` -- `DateTime?` local UTC deadline of the day rollover, computed at receipt from the relay's `reset_in_secs` (clock-skew immune; `StatusCountdown` ticks against it).
-- `limited` -- true after a `1008 "bandwidth_limit"` close; cleared by the first reply showing headroom.
-- `hasData` (`budgetBytes > 0`), `usagePercent`, `usageLabel` (`"X of Y"` via `formatBytes`).
-
-### RelayBandwidthNotifier
-- Demand-driven autoDispose: 30s `Timer.periodic` fire-and-forgets `request_relay_bandwidth()` FFI (`.catchError((_) {})` — node may not be running) ONLY while a relay card watches. Lifecycle-gated like relayStatsProvider.
-- ALSO re-requests on `overallConnectionProvider` offline→online — at app launch the card mounts before the relay WS is up, so without this the meter only appeared at the first 30s tick.
-- Data arrives via the event stream: event_provider dispatches `NetworkEvent_BandwidthStatus` → `onStatus(...)`; `NetworkEvent_BandwidthLimited` → `onLimited()` + error toast (overlayState pattern).
-- Consumers: desktop `_RelayStatsCard` (Home) + mobile `_MobileRelayCard` (Settings, gated on tab 3) — both render `DailyUsageMeter` "Daily Relay Data" (renamed 2026-07-06; desktop adds a tooltip: per-IP, shared across the network, both directions, P2P excluded) only when `usedBytes > 0`.
 
 ## Blocked Users Provider (2026-07-07)
 

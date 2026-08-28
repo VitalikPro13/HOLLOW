@@ -41,19 +41,38 @@ Reads CLI flags sequentially. `TURN_SECRET` is loaded from the environment varia
 | `MAX_GUEST_ROOMS` | 3 | Max rooms a guest can join |
 | `GUEST_IDLE_SECS` | 1800 | Guest idle timeout (30 min no binary activity) |
 | `GUEST_BINARY_PER_MIN` | 10 | Max 0x03 binary frames per minute for guests |
-| `DAILY_BYTE_BUDGET` | 10 GiB | Per-IP daily byte budget (binary frames both directions, fixed UTC-day window) |
 
 ### Per-IP keying: `ip_limit_key()` (ws_handler.cpp)
 
-ALL per-IP accounting (connection caps + byte budget) keys through `ip_limit_key(getRemoteAddressAsText())`:
+ALL per-IP accounting (connection caps) keys through `ip_limit_key(getRemoteAddressAsText())`:
 - IPv4 → the dotted-quad address.
 - **v4-MAPPED addresses are unmapped first** — the relay listens dual-stack on `[::]:443`, so every IPv4 client arrives as `::ffff:a.b.c.d` (uWS prints uncompressed v6 hex; uSockets does NOT unmap). Truncating those to /64 without unmapping collapses ALL IPv4 users into one `::/64` bucket → MAX_CONNS_PER_IP becomes a global cap (caught live 2026-07-05).
 - Real IPv6 → truncated to the **/64 prefix** (`"2001:db8:1:2::/64"`) — one host owns a whole /64, per-address caps are trivially bypassed.
 Any future per-IP feature MUST reuse this helper.
 
-### Daily byte budget (anti-drain backstop)
+### No byte quotas (2026-08-28)
 
-10 GiB/day per `ip_limit_key` (~300× a heavy chatter's organic relay traffic). Counts BINARY frames BOTH directions: inbound in `.message`, outbound in `send_to_peer()` attributed to the RECIPIENT (download drains count). TEXT frames aren't counted but the budget IS enforced at text entry — commands like `topic_catchup` pull large binary replays. Enforcement = explicit `ws->end(1008, "bandwidth_limit")` (NEVER a silent drop) at the next inbound frame/command; never closes mid-fan-out inside `send_to_peer` (iterator safety). Lazy UTC-day rollover on touch (`roll_budget_day`), no timer. `get_bandwidth` text command returns `{"type":"bandwidth_status","used","budget","reset_in_secs"}` over the counted connection. `sweep_ip_budgets()` (300s timer) purges zero-connection stale-day entries. RAM-only, never logged; a relay restart resets all counters (deliberate).
+The 10 GiB/day per-IP byte budget (`DAILY_BYTE_BUDGET`, `bytes_today`/`budget_day`, `get_bandwidth`, the `1008 "bandwidth_limit"` close, `sweep_ip_budgets`) was REMOVED end to end. It metered every binary WS frame both ways (so share audio over `0x03`, sync, asset pulls all counted) while never touching TURN, a separate process. Volume fairness now lives BELOW the relay:
+
+- **CAKE on the host NIC** — `tc qdisc replace dev ens16 root cake bandwidth 950mbit besteffort dual-dsthost` (persisted as `hollow-cake.service`). Per-destination-host fair share engages ONLY when egress saturates; an idle line is free to anyone. `besteffort` ignores DSCP so a client cannot jump the queue by marking packets. 950 Mbit sits ~9 percent under the MEASURED raw ceiling (2026-08-28, cake removed, 32 curl streams, NIC counters: 1047 Mbit egress to Cloudflare `__up`, 882 Mbit ingress from `proof.ovh.net`), because the shaper must be the bottleneck for fairness to exist. With cake on, the same test pins at exactly the configured number. The earlier ~830 figure was the download source throttling; never size the shaper from a single-source test or the nominal port. `/server-stats` reports `bandwidth_cap_mbps` = the shaper ceiling.
+- **coturn peer lock** — see the TURN section below. The WS relay was already closed by construction (room-membership gated, no exit to the internet); the lock gives TURN the same shape.
+
+Older clients still send `get_bandwidth` every 30 s; it is an unknown command and falls through silently. Rule stays: abuse is bounded by fair share, NEVER by a cap or a silent drop.
+
+### coturn peer lock (2026-08-28)
+
+`/etc/turnserver.conf` on the VPS (backup `turnserver.conf.bak-2026-08-28`; template in `relay-uws/turnserver.conf.example`):
+
+```
+denied-peer-ip=0.0.0.0-255.255.255.255
+denied-peer-ip=::-ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff
+allowed-peer-ip=<relay v4>
+allowed-peer-ip=<relay v6, BOTH global addresses>
+no-tcp-relay
+```
+
+A TURN allocation may only exchange packets with the relay host itself, i.e. another authenticated Hollow client's allocation on the same coturn. Before the lock the live config had NO `denied-peer-ip` at all and TCP relay (RFC 6062) enabled: an open UDP+TCP proxy for anyone holding 1-hour credentials. Calls lose nothing: `relay<->srflx` pairs now fail at CreatePermission (403) and libwebrtc prunes them, ICE settles on `relay<->relay`, same bytes on the line. Verified with `turnutils_uclient -W <secret>` on the VPS: external peer → `channel bind: error 403 (Forbidden IP)`; client-to-client (`-y`) → 20/20; TCP relay (`-T`) → `error 442`. Multi-relay future: every relay's addresses join the allow list (or each relay allows itself + siblings).
+
 
 ### IPv6 (2026-07-05)
 
@@ -76,16 +95,14 @@ Attached to every WebSocket via uWebSockets' templated user data. Fields:
 | `binary_frames_this_minute` | `uint32_t` | Guest rate limit counter (reset every 60s) |
 | `minute_window_start` | `steady_clock::time_point` | Start of current rate limit window |
 
-### IpState (per-IP connection tracking + byte budget)
+### IpState (per-IP connection tracking)
 
-In-memory only — never logged, never persisted. On close, erased only when `active_count == 0` AND `bytes_today == 0` (after day-roll) — an entry that consumed budget today survives its last disconnect so a reconnect can't reset the counter; `sweep_ip_budgets` purges stale-day leftovers.
+In-memory only — never logged, never persisted. Erased on close once `active_count == 0`.
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `active_count` | `uint32_t` | Currently open connections from this IP |
 | `recent_connects` | `deque<steady_clock::time_point>` | Sliding window of connection timestamps for rate limiting |
-| `bytes_today` | `uint64_t` | Daily byte-budget counter (binary frames both directions) |
-| `budget_day` | `uint32_t` | Unix day (secs/86400) the counter belongs to — lazily rolled on touch |
 
 ### PeerEntry (signaling registration)
 

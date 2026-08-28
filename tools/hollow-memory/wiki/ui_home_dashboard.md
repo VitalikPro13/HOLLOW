@@ -175,21 +175,20 @@ Used for "FRIENDS", "RELAY SERVER", and "NEWS" section headers in `_NetworkColum
 
 ## _RelayStatsCard — Relay Server Metrics
 
-`home_dashboard.dart:_RelayStatsCard` is a `ConsumerStatefulWidget` with `SingleTickerProviderStateMixin`. Displays RAM usage, bandwidth usage, the user's daily relay byte budget, and a poll cycle indicator.
+`home_dashboard.dart:_RelayStatsCard` is a `ConsumerStatefulWidget` with `SingleTickerProviderStateMixin`. Displays RAM usage, bandwidth usage and a poll cycle indicator (the daily relay byte budget meter was removed 2026-08-28).
 
-**Props:** `hollow` (HollowTheme), `stats` (RelayStats). Also watches `relayBandwidthProvider` internally (keeps its autoDispose 30s WS poll alive exactly while the card is mounted).
+**Props:** `hollow` (HollowTheme), `stats` (RelayStats).
 
 **Animation:** `AnimationController` with 7-second duration, auto-forwards on init. Resets (`forward(from: 0.0)`) when `stats.fetchCount` changes (tracked via `_lastFetchCount`), indicating a new relay stats fetch completed.
 
 **Layout:** Full-width container, `hollow.surface` background, `radiusMd` corners, `hollow.border` border, `HollowSpacing.sm + 2` padding.
 
-Contains four elements:
+Contains three elements:
 1. **RAM bar:** `StatBar(icon: LucideIcons.memoryStick, label: 'RAM', value: stats.memLabel, progress: stats.memUsagePercent)`
 2. **Bandwidth bar:** `StatBar(icon: LucideIcons.activity, label: 'Bandwidth', value: stats.bandwidthLabel, progress: stats.bandwidthUsagePercent)`
-3. **"Daily Relay Data" meter** (renamed 2026-07-06 from "Your File Usage" — the old name read as a personal upload quota): `DailyUsageMeter(icon: LucideIcons.gauge, tooltip: ...)` — this connection's daily relay byte budget from `relayBandwidthProvider`. The `tooltip` (hover on the header row) explains it's all relay traffic both directions, shared per network/IP, P2P excluded. Rendered ONLY when `usedBytes > 0` (a "0 B of 10 GB" bar is noise). Caption line under the bar: usage text left ("25.7 KB of 10.0 GB"), `StatusCountdown` "resets in Xh Ym" right (`hollow.error` when limited, else `textTertiary`).
-4. **Poll cycle bar:** `AnimatedBuilder` driven by the animation controller. 3px height `LinearProgressIndicator` with `hollow.border` background and `hollow.accent` at 40% opacity as value color. Value tracks `_controller.value` (0.0 to 1.0 over 7 seconds).
+3. **Poll cycle bar:** `AnimatedBuilder` driven by the animation controller. 3px height `LinearProgressIndicator` with `hollow.border` background and `hollow.accent` at 40% opacity as value color. Value tracks `_controller.value` (0.0 to 1.0 over 7 seconds).
 
-`StatBar`/`DailyUsageMeter` live in the shared `lib/src/ui/components/stat_bar.dart` (promoted from a private `_StatBar` so the mobile Settings `_MobileRelayCard` renders identical bars). See `ui_share_animations_components.md` → StatBar.
+`StatBar` lives in the shared `lib/src/ui/components/stat_bar.dart` (promoted from a private `_StatBar` so the mobile Settings `_MobileRelayCard` renders identical bars). The "Daily Relay Data" `DailyUsageMeter` that used to sit between the Bandwidth bar and the poll bar was removed 2026-08-28 with the relay byte budget. See `ui_share_animations_components.md` → StatBar.
 
 ---
 

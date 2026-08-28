@@ -12,7 +12,3 @@ void sweep_offline_buffer(RelayState& state);
 // Release multi-device link codes whose 5-minute TTL has elapsed (server-side
 // backstop; the live countdown is client-side). Called from main's timer loop.
 void sweep_link_codes(RelayState& state);
-
-// Purge zero-connection ip_states entries whose daily byte-budget counter is
-// stale (previous UTC day) or empty. Called from main's timer loop.
-void sweep_ip_budgets(RelayState& state);

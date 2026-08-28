@@ -15,7 +15,6 @@ import 'package:hollow/src/core/providers/peers_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/selected_peer_provider.dart';
 import 'package:hollow/src/core/providers/news_provider.dart';
-import 'package:hollow/src/core/providers/relay_bandwidth_provider.dart';
 import 'package:hollow/src/core/providers/relay_stats_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/updater_provider.dart';
@@ -1649,14 +1648,6 @@ class _RelayStatsCardState extends ConsumerState<_RelayStatsCard> {
   Widget build(BuildContext context) {
     final hollow = widget.hollow;
     final stats = widget.stats;
-    // Watching keeps the autoDispose 30s WS poll alive exactly while this
-    // card is mounted (same demand-driven model as relayStatsProvider).
-    final bandwidth = ref.watch(relayBandwidthProvider);
-    final resetAt = bandwidth.resetAt;
-    final showReset = bandwidth.hasData &&
-        resetAt != null &&
-        resetAt.isAfter(DateTime.now().toUtc());
-
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.all(HollowSpacing.sm + 2),
@@ -1685,37 +1676,6 @@ class _RelayStatsCardState extends ConsumerState<_RelayStatsCard> {
             value: stats.bandwidthLabel,
             progress: stats.bandwidthUsagePercent,
           ),
-          // Shown only once today's usage is non-zero — a "0 B of 10 GB" bar
-          // is noise; the meter appears with the first counted bytes and
-          // disappears again after the UTC-day reset.
-          if (bandwidth.hasData && bandwidth.usedBytes > 0) ...[
-            const SizedBox(height: HollowSpacing.sm),
-            // This connection's daily relay data budget (per-IP, from the
-            // relay over the authed WS — see relayBandwidthProvider). The
-            // usage reading + reset countdown share one caption line under
-            // the bar instead of dangling as their own rows.
-            DailyUsageMeter(
-              hollow: hollow,
-              icon: LucideIcons.gauge,
-              label: 'Daily relay data',
-              tooltip: 'Relay traffic for your connection today: uploads and '
-                  'downloads (files, images, sync). Shared by every device on '
-                  'your network (counted per IP). Direct P2P transfers don\'t '
-                  'count.',
-              usageText: bandwidth.usageLabel,
-              progress: bandwidth.usagePercent,
-              trailing: showReset
-                  ? StatusCountdown(
-                      until: resetAt,
-                      label: 'resets in',
-                      color: bandwidth.limited
-                          ? hollow.error
-                          : hollow.textTertiary,
-                      fontSize: 9,
-                    )
-                  : null,
-            ),
-          ],
           const SizedBox(height: HollowSpacing.sm),
           // Poll cycle bar — synced to 5s fetch interval
           RepaintBoundary(

@@ -129,10 +129,6 @@ pub enum WsCommand {
     /// re-replayed every session — MLS can't decrypt consumed generations and
     /// the retries were pure noise). 0 = replay everything in retention.
     TopicCatchup { room_code: String, channel_id: String, max_age_secs: i64 },
-    /// Ask the relay for this connection's daily byte-budget status. The
-    /// reply rides the same socket whose bytes are counted, so attribution
-    /// is exact (an HTTP poll could resolve to the other address family).
-    GetBandwidth,
     /// File a user report with the relay. One-shot — deliberately NOT cached
     /// in `track_room_change`, so it is never re-sent on reconnect (the relay
     /// also dedups per (reporter, target, category) via hashed keys).
@@ -198,10 +194,6 @@ pub enum WsEvent {
     LinkCodeError { error: String, code: String },
     /// Link code resolved to the populated sibling's peer_id.
     LinkCodeResolved { code: String, peer_id: String },
-    /// Response to GetBandwidth — this IP's daily relay byte budget.
-    BandwidthStatus { used: u64, budget: u64, reset_in_secs: u64 },
-    /// The relay closed us with 1008 "bandwidth_limit" — daily budget spent.
-    BandwidthLimited,
 }
 
 impl WsEvent {
@@ -234,8 +226,6 @@ impl WsEvent {
             Self::LinkCodeReleased => "LinkCodeReleased",
             Self::LinkCodeError { .. } => "LinkCodeError",
             Self::LinkCodeResolved { .. } => "LinkCodeResolved",
-            Self::BandwidthStatus { .. } => "BandwidthStatus",
-            Self::BandwidthLimited => "BandwidthLimited",
         }
     }
 }
@@ -298,11 +288,6 @@ enum ServerMsg {
     LinkCodeReleased,
     LinkCodeError { error: String, #[serde(default)] code: String },
     LinkCodeResolved { code: String, peer_id: String },
-    BandwidthStatus {
-        #[serde(default)] used: u64,
-        #[serde(default)] budget: u64,
-        #[serde(default)] reset_in_secs: u64,
-    },
 }
 
 // -- State --
@@ -589,18 +574,14 @@ async fn ws_client_loop(
                                     // already refreshed above; nothing else to do.
                                 }
                                 Some(Ok(Message::Close(frame))) => {
-                                    // Surface the relay's close reason — a
-                                    // "bandwidth_limit" close means the daily
-                                    // byte budget is spent and the UI must say
-                                    // so (the relay NEVER silently drops).
+                                    // Log the relay's close reason (it never
+                                    // closes silently: bad_license, auth
+                                    // timeout, superseded ...).
                                     let reason = frame
                                         .as_ref()
                                         .map(|f| f.reason.to_string())
                                         .unwrap_or_default();
                                     hollow_log!("[HOLLOW-WS] Connection closed by server: {reason}");
-                                    if reason == "bandwidth_limit" {
-                                        let _ = event_tx.send(WsEvent::BandwidthLimited);
-                                    }
                                     break;
                                 }
                                 None => {
@@ -890,14 +871,6 @@ async fn send_command(write: &mut WsSink, cmd: &WsCommand) -> bool {
             let text = msg.to_string();
             if let Err(e) = bounded_send(write, Message::Text(text.into())).await {
                 hollow_log!("[HOLLOW-WS] GetMediaForwarder send failed: {e}");
-                return false;
-            }
-            return true;
-        }
-        WsCommand::GetBandwidth => {
-            let msg = serde_json::json!({ "type": "get_bandwidth" });
-            if let Err(e) = bounded_send(write, Message::Text(msg.to_string().into())).await {
-                hollow_log!("[HOLLOW-WS] GetBandwidth send failed: {e}");
                 return false;
             }
             return true;
@@ -1293,9 +1266,6 @@ async fn handle_server_message(event_tx: &mpsc::UnboundedSender<WsEvent>, msg: S
         ServerMsg::LinkCodeResolved { code, peer_id } => {
             hollow_log!("[HOLLOW-LINK] Link code resolved: {code} -> {peer_id}");
             WsEvent::LinkCodeResolved { code, peer_id }
-        }
-        ServerMsg::BandwidthStatus { used, budget, reset_in_secs } => {
-            WsEvent::BandwidthStatus { used, budget, reset_in_secs }
         }
         ServerMsg::AuthOk | ServerMsg::AuthFailed { .. } => return,
     };

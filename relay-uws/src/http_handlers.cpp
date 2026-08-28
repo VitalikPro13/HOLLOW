@@ -229,8 +229,8 @@ static void handle_health(HttpResponse* res) {
 
 // NOTE: the open HTTP GET /turn-credentials endpoint was REMOVED. It handed
 // out valid time-limited TURN credentials to any unauthenticated caller, which
-// made the TURN service farmable for free relay bandwidth against the per-IP
-// daily budget. TURN credentials are issued ONLY over the authenticated,
+// made the TURN service farmable for free relay bandwidth by anyone at all.
+// TURN credentials are issued ONLY over the authenticated,
 // non-guest WebSocket (`get_turn_credentials` in ws_handler.cpp), which has
 // been the client path since 0.7.1. Do not reintroduce an HTTP variant: there
 // is no caller identity at the HTTP layer to bind the credential to.
@@ -315,7 +315,7 @@ static void handle_server_stats(HttpResponse* res, RelayState& state) {
         {"mem_used_kb", mem_used_kb},
         {"rx_mbps", round2(rx_mbps)},
         {"tx_mbps", round2(tx_mbps)},
-        {"bandwidth_cap_mbps", 1000},
+        {"bandwidth_cap_mbps", 950},  // = the CAKE shaper ceiling on this box (measured raw 1047), not the nominal port
         {"online_users", state.online_users()},
         // Delivery diagnostics (non-identifying counters; see DeliveryDiag).
         {"send_backpressure", state.diag.send_backpressure},

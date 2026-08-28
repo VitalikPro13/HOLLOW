@@ -568,7 +568,7 @@ Ghost/outline rest bg is the hover color at ZERO ALPHA, not `Colors.transparent`
 **Padding:** compact = `HollowSpacing.md` horizontal / `HollowSpacing.sm` vertical; normal = `HollowSpacing.lg` / `HollowSpacing.sm + 2`.
 
 
-## StatBar / DailyUsageMeter
+## StatBar
 
 File: `lib/src/ui/components/stat_bar.dart` (promoted 2026-07-05 from `home_dashboard.dart`'s private `_StatBar` so desktop Home and mobile Settings render identical bars).
 
@@ -576,7 +576,7 @@ File: `lib/src/ui/components/stat_bar.dart` (promoted 2026-07-05 from `home_dash
 
 **The label is `Expanded`, NOT `Flexible`, and there is no `Spacer` (2026-07-31).** It used to be `Text + Spacer + Text` with both bare, which overflowed the 260px network column by 8px at EVERY window size — never a zoom bug, just an invisible one, since the `Spacer` claimed the free space and left a long label ("Daily Relay Data") and a long value ("480 / 7940 MB") nowhere to go. `Flexible` beside a `Spacer` is equally wrong: they each take half the room and the label ellipses far too early. The value never truncates — it is the number the user came to read. Guarded by `test/widget/home_dashboard_scroll_test.dart`.
 
-**DailyUsageMeter** (`StatelessWidget`): same visual system for the relay daily byte budget where value + countdown don't fit one header row. Header (icon + label, optionally wrapped in `HollowTooltip` via the `tooltip` param — desktop hover explanation of what counts toward the meter) → bar → ONE caption line: `usageText` left (9px `textTertiary`), optional `trailing` widget right (callers pass a `StatusCountdown` "resets in Xh Ym"). Used by desktop `_RelayStatsCard` and mobile `_MobileRelayCard` with label "Daily Relay Data" (renamed 2026-07-06), rendered only when used > 0.
+**DailyUsageMeter** — REMOVED 2026-08-28 together with the relay daily byte budget (it was the caption-line variant of `StatBar` for value + reset countdown). `_ThresholdBar` stays as `StatBar`'s bar.
 
 
 ## HollowTextField

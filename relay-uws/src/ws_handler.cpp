@@ -45,32 +45,6 @@ static std::string ip_limit_key(const std::string& ip) {
     return std::string(buf) + "/64";
 }
 
-// --- Per-IP daily byte budget (RAM only, never logged) ---
-static uint32_t unix_day() {
-    return static_cast<uint32_t>(now_unix_secs() / 86400);
-}
-
-// Lazily roll the fixed UTC-day window on every touch — no reset timer needed.
-static void roll_budget_day(IpState& s) {
-    uint32_t d = unix_day();
-    if (s.budget_day != d) {
-        s.budget_day = d;
-        s.bytes_today = 0;
-    }
-}
-
-static void count_budget_bytes(IpState* s, size_t n) {
-    if (!s) return;
-    roll_budget_day(*s);
-    s->bytes_today += n;
-}
-
-static bool over_budget(IpState* s) {
-    if (!s) return false;
-    roll_budget_day(*s);
-    return s->bytes_today > DAILY_BYTE_BUDGET;
-}
-
 static bool is_guest_peer(const RelayState& state, const std::string& peer_id) {
     auto it = state.peer_sockets.find(peer_id);
     if (it == state.peer_sockets.end()) return false;
@@ -129,13 +103,6 @@ static DeliveryDiag* g_diag = nullptr;
 static std::string g_forwarder_peer_id;
 
 static void send_to_peer(SSLWebSocket* ws, std::string_view data, uWS::OpCode op) {
-    // Outbound half of the daily byte budget — attributed to the RECIPIENT's
-    // IP so download-drains are counted too. Never closes here (a mid-fan-out
-    // end() would mutate room state under the broadcast iterator); an
-    // over-budget peer is closed at its next inbound frame or text command.
-    if (op == uWS::OpCode::BINARY) {
-        count_budget_bytes(ws->getUserData()->ip_state, data.size());
-    }
     // uWS silently returns DROPPED past maxBackpressure — count it or a
     // delivery failure leaves zero trace anywhere (field 2026-08-06: large
     // frames to the forwarder vanished with every hop looking healthy).
@@ -1786,37 +1753,9 @@ static void handle_text_message(SSLWebSocket* ws, PerSocketData* data,
                            {"peer_id", config.forwarder_peer_id},
                            {"online", state.peer_sockets.count(config.forwarder_peer_id) > 0}});
         }
-    } else if (type == "get_bandwidth") {
-        // Own daily byte-budget status over the LIVE connection — the reply
-        // rides the exact socket whose bytes are counted, so attribution is
-        // always right (an HTTP poll could resolve to the other address
-        // family and read a different IP's bucket). RAM-only counter, never
-        // logged. reset_in_secs = seconds until the fixed UTC-day rollover.
-        uint64_t used = 0;
-        if (data->ip_state) {
-            roll_budget_day(*data->ip_state);
-            used = data->ip_state->bytes_today;
-        }
-        send_json(ws, {{"type", "bandwidth_status"},
-                       {"used", used},
-                       {"budget", DAILY_BYTE_BUDGET},
-                       {"reset_in_secs", 86400 - (now_unix_secs() % 86400)}});
     }
-}
-
-// Purge idle byte-budget leftovers: entries with no live connections whose
-// counter belongs to a previous UTC day (or never accrued bytes). Keeps
-// ip_states bounded to today's unique IPs. Runs on the 300s sweep timer.
-void sweep_ip_budgets(RelayState& state) {
-    uint32_t today = unix_day();
-    for (auto it = state.ip_states.begin(); it != state.ip_states.end(); ) {
-        if (it->second.active_count == 0 &&
-            (it->second.budget_day != today || it->second.bytes_today == 0)) {
-            it = state.ip_states.erase(it);
-        } else {
-            ++it;
-        }
-    }
+    // `get_bandwidth` (older clients still poll it every 30 s) is an unknown
+    // command now and falls through silently, like any other.
 }
 
 // DoS protection: per-IP limits (34 conns, 10 new/min), guest rate limiting (10 binary/min),
@@ -1918,9 +1857,6 @@ void setup_ws_handler(uWS::SSLApp& app, RelayState& state, const Config& config)
 
             ip_state.active_count++;
             ip_state.recent_connects.push_back(now);
-            // Accepted — cache the IpState pointer for per-frame byte
-            // accounting (stable: never erased while active_count > 0).
-            data->ip_state = &ip_state;
 
             // 10-second auth timeout
             auto* loop = reinterpret_cast<struct us_loop_t*>(uWS::Loop::get());
@@ -1950,21 +1886,10 @@ void setup_ws_handler(uWS::SSLApp& app, RelayState& state, const Config& config)
                 return;
             }
 
-            // Daily byte-budget enforcement: explicit close, NEVER a silent
-            // drop. Checked on TEXT too — text commands (e.g. topic_catchup)
-            // can pull large binary replays, so a download-drain that only
-            // ever sends text still gets closed once outbound counting has
-            // exhausted its budget.
-            if (over_budget(data->ip_state)) {
-                ws->end(1008, "bandwidth_limit");
-                return;
-            }
-
             if (opCode == uWS::OpCode::TEXT) {
                 if (message.size() > 1024 * 1024) return;
                 handle_text_message(ws, data, message, state, config);
             } else if (opCode == uWS::OpCode::BINARY) {
-                count_budget_bytes(data->ip_state, message.size());
                 // 1-byte 0x00 = guest keepalive, don't process or count
                 if (message.size() == 1 && static_cast<uint8_t>(message[0]) == 0x00) {
                     return;
@@ -2025,19 +1950,13 @@ void setup_ws_handler(uWS::SSLApp& app, RelayState& state, const Config& config)
         .close = [&state](SSLWebSocket* ws, int /*code*/, std::string_view /*reason*/) {
             auto* data = ws->getUserData();
 
-            // IP tracking cleanup (in-memory only). An entry that consumed
-            // budget bytes TODAY must survive its last disconnect — erasing
-            // it would let a reconnect reset the daily counter. Stale-day
-            // leftovers are purged by sweep_ip_budgets (300s timer).
+            // IP tracking cleanup (in-memory only).
             if (!data->ip_key.empty()) {
                 auto it = state.ip_states.find(data->ip_key);
                 if (it != state.ip_states.end()) {
                     if (it->second.active_count > 0) it->second.active_count--;
                     if (it->second.active_count == 0) {
-                        roll_budget_day(it->second);
-                        if (it->second.bytes_today == 0) {
-                            state.ip_states.erase(it);
-                        }
+                        state.ip_states.erase(it);
                     }
                 }
             }

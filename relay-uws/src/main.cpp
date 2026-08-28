@@ -129,7 +129,6 @@ int main(int argc, char** argv) {
                 auto* s = *reinterpret_cast<RelayState**>(us_timer_ext(t));
                 sweep_offline_buffer(*s);
                 sweep_link_codes(*s);
-                sweep_ip_budgets(*s);
                 s->reports.save_if_dirty();
             }, 300000, 300000);
 

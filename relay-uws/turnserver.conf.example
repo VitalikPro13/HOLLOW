@@ -8,3 +8,17 @@ no-multicast-peers
 denied-peer-ip=10.0.0.0-10.255.255.255
 denied-peer-ip=172.16.0.0-172.31.255.255
 denied-peer-ip=192.168.0.0-192.168.255.255
+
+# --- Peer lock (recommended, this is what relay.anonlisten.com runs) ---
+# TURN may only exchange packets with the relay host itself, i.e. with another
+# authenticated Hollow client allocation on this same coturn. This removes the
+# open proxy shape (relaying to any UDP/TCP host on the internet) at zero cost
+# to calls: a relay<->relay ICE pair carries exactly the same bytes as
+# relay<->srflx. Order per coturn docs: an address on BOTH lists is allowed.
+# List EVERY public address of this host (IPv4 and IPv6).
+denied-peer-ip=0.0.0.0-255.255.255.255
+denied-peer-ip=::-ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff
+allowed-peer-ip=YOUR_PUBLIC_IPV4
+#allowed-peer-ip=YOUR_PUBLIC_IPV6
+# Hollow never relays TCP to a peer (WebRTC media is UDP).
+no-tcp-relay

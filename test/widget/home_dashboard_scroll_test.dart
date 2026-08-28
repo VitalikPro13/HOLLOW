@@ -20,7 +20,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hollow/src/core/providers/news_provider.dart';
-import 'package:hollow/src/core/providers/relay_bandwidth_provider.dart';
 import 'package:hollow/src/core/providers/relay_stats_provider.dart';
 import 'package:hollow/src/core/providers/updater_provider.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
@@ -68,14 +67,6 @@ class _StubRelayStats extends RelayStatsNotifier {
   RelayStats build() => const RelayStats();
 }
 
-/// Fires `request_relay_bandwidth()` from `build()`. Real numbers so the
-/// relay card renders the long label/value pair that used to overflow.
-class _StubBandwidth extends RelayBandwidthNotifier {
-  @override
-  RelayBandwidth build() =>
-      const RelayBandwidth(usedBytes: 1200000, budgetBytes: 10000000000);
-}
-
 /// Viewports the desktop shell actually renders `HomeDashboard` at. Below 600
 /// logical wide `hollow_shell` switches to `MobileShell`, so 640 is the floor
 /// worth pinning — 798x480 is 200% zoom on the reporter's 1596x991 window,
@@ -119,7 +110,6 @@ Future<Set<String>> _pumpDashboard(WidgetTester tester, Size size) async {
         newsProvider.overrideWith(_StubNews.new),
         updaterProvider.overrideWith(_StubUpdater.new),
         relayStatsProvider.overrideWith(_StubRelayStats.new),
-        relayBandwidthProvider.overrideWith(_StubBandwidth.new),
       ]),
       child: MaterialApp(
         theme: HollowThemeData.dark(),

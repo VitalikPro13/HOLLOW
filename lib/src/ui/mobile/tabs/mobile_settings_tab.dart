@@ -19,7 +19,6 @@ import 'package:hollow/src/core/providers/friends_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/news_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
-import 'package:hollow/src/core/providers/relay_bandwidth_provider.dart';
 import 'package:hollow/src/core/providers/relay_domain_provider.dart';
 import 'package:hollow/src/core/providers/relay_stats_provider.dart';
 import 'package:hollow/src/ui/shell/mobile_nav.dart';
@@ -337,19 +336,11 @@ class _MobileRelayCard extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
     // Poll gate: all four mobile tabs stay mounted, so only WATCH the relay
-    // providers while the Settings tab is the visible one — both are
-    // autoDispose, so dropping the watch stops the 7s HTTP poll AND the 30s
-    // WS budget poll entirely.
+    // stats provider while the Settings tab is the visible one. It is
+    // autoDispose, so dropping the watch stops the 7s HTTP poll entirely.
     final onSettingsTab = ref.watch(mobileTabProvider) == 3;
     final stats =
         onSettingsTab ? ref.watch(relayStatsProvider) : const RelayStats();
-    final bandwidth = onSettingsTab
-        ? ref.watch(relayBandwidthProvider)
-        : const RelayBandwidth();
-    final resetAt = bandwidth.resetAt;
-    final showReset = bandwidth.hasData &&
-        resetAt != null &&
-        resetAt.isAfter(DateTime.now().toUtc());
 
     return Container(
       width: double.infinity,
@@ -392,27 +383,6 @@ class _MobileRelayCard extends ConsumerWidget {
             value: stats.bandwidthLabel,
             progress: stats.bandwidthUsagePercent,
           ),
-          // Shown only once today's usage is non-zero (mirrors desktop).
-          if (bandwidth.hasData && bandwidth.usedBytes > 0) ...[
-            const SizedBox(height: HollowSpacing.sm),
-            DailyUsageMeter(
-              hollow: hollow,
-              icon: LucideIcons.gauge,
-              label: 'Daily relay data',
-              usageText: bandwidth.usageLabel,
-              progress: bandwidth.usagePercent,
-              trailing: showReset
-                  ? StatusCountdown(
-                      until: resetAt,
-                      label: 'resets in',
-                      color: bandwidth.limited
-                          ? hollow.error
-                          : hollow.textTertiary,
-                      fontSize: 9,
-                    )
-                  : null,
-            ),
-          ],
         ],
       ),
     );

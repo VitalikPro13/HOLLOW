@@ -255,9 +255,9 @@ TURN credentials also moved off HTTP: `WsCommand::GetTurnCredentials` → relay 
 
 ### Daily byte-budget status over WS (2026-07-05)
 
-Same request/response shape: Dart `request_relay_bandwidth()` FFI → `NodeCommand::GetRelayBandwidth` → `WsCommand::GetBandwidth` → relay `get_bandwidth` → `ServerMsg::BandwidthStatus { used, budget, reset_in_secs }` → `WsEvent::BandwidthStatus` → `NetworkEvent::BandwidthStatus { used_bytes, budget_bytes, reset_in_secs }` → Dart `relayBandwidthProvider`. Deliberately WS not HTTP: the reply rides the exact connection whose bytes the relay counts — a dual-stack client's HTTP poll can resolve to the other address family and read a different IP bucket. Dart owns the cadence (30s while a relay card is visible + on reconnect); no Rust timer.
+The relay byte-budget query that used the same shape (`request_relay_bandwidth()` → `get_bandwidth` → `BandwidthStatus`) was REMOVED 2026-08-28 with the budget itself.
 
-**Close reasons are now read** (previously discarded via `Message::Close(_)`): ws_client parses the relay's Close frame reason and a `"bandwidth_limit"` close (daily 10 GB budget spent — relay never silently drops) emits `WsEvent::BandwidthLimited` → `NetworkEvent::BandwidthLimited` → Dart error toast + the usage meter pins red. Any future relay close reason that needs UI surfacing follows this path.
+**Close reasons are read** (previously discarded via `Message::Close(_)`): ws_client logs the relay's Close frame reason (`bad_license`, auth timeout, superseded ...). The `bandwidth_limit` reason and its `BandwidthLimited` event are gone with the budget (2026-08-28).
 
 ---
 

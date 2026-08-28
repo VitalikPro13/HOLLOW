@@ -250,12 +250,6 @@ pub(crate) enum NetworkEvent {
     /// A WS connect attempt is in progress. `reconnecting` is true when this
     /// follows a prior drop (backoff retry), false for the initial connect.
     RelayConnecting { reconnecting: bool },
-    /// Reply to `request_relay_bandwidth()` — this IP's daily relay byte
-    /// budget (binary frames both directions, fixed UTC-day window).
-    BandwidthStatus { used_bytes: u64, budget_bytes: u64, reset_in_secs: u64 },
-    /// The relay closed the connection with "bandwidth_limit" — the daily
-    /// byte budget is spent until the UTC-day rollover. UI must surface it.
-    BandwidthLimited,
     ChannelNotificationHint {
         server_id: String, channel_id: String, from_peer: String,
         message_id: String,
@@ -843,9 +837,6 @@ pub(crate) enum NodeCommand {
     /// RAM-only on the relay, re-registered on every reconnect by ws_client.
     /// See `WsCommand::SetOfflineBuffer`.
     SetOfflineInbox { enabled: bool, retention_secs: i64 },
-    /// Query the relay for this connection's daily byte-budget status.
-    /// Reply arrives as `NetworkEvent::BandwidthStatus`.
-    GetRelayBandwidth,
     // -- Typing indicators (Phase 3.5) --
     SendTypingIndicator { server_id: String, channel_id: String },
     // -- Presence (Phase 6.75) --
@@ -1121,7 +1112,6 @@ impl NodeCommand {
             Self::RegisterPushToken { .. } => "RegisterPushToken",
             Self::SetPushPrefs { .. } => "SetPushPrefs",
             Self::SetOfflineInbox { .. } => "SetOfflineInbox",
-            Self::GetRelayBandwidth => "GetRelayBandwidth",
             Self::SendTypingIndicator { .. } => "SendTypingIndicator",
             Self::SetInvisible { .. } => "SetInvisible",
             Self::SubscribeChannels { .. } => "SubscribeChannels",

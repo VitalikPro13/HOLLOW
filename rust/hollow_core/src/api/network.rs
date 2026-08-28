@@ -234,12 +234,6 @@ pub enum NetworkEvent {
     /// A WS connect attempt is in progress. `reconnecting` distinguishes a
     /// backoff retry (after a drop) from the initial connect.
     RelayConnecting { reconnecting: bool },
-    /// Reply to `request_relay_bandwidth()` — this IP's daily relay byte
-    /// budget (binary frames both directions, fixed UTC-day window).
-    BandwidthStatus { used_bytes: u64, budget_bytes: u64, reset_in_secs: u64 },
-    /// The relay closed us with "bandwidth_limit" — daily byte budget spent
-    /// until the UTC-day rollover.
-    BandwidthLimited,
     ChannelNotificationHint {
         server_id: String, channel_id: String, from_peer: String,
         message_id: String,
@@ -1020,12 +1014,6 @@ fn to_ffi_event(event: node::NetworkEvent) -> NetworkEvent {
         }
         node::NetworkEvent::RelayConnecting { reconnecting } => {
             NetworkEvent::RelayConnecting { reconnecting }
-        }
-        node::NetworkEvent::BandwidthStatus { used_bytes, budget_bytes, reset_in_secs } => {
-            NetworkEvent::BandwidthStatus { used_bytes, budget_bytes, reset_in_secs }
-        }
-        node::NetworkEvent::BandwidthLimited => {
-            NetworkEvent::BandwidthLimited
         }
         node::NetworkEvent::ChannelNotificationHint {
             server_id, channel_id, from_peer, message_id, has_everyone, mentioned_names, is_reply_to_own,
@@ -2503,24 +2491,6 @@ pub fn claim_nickname(nickname: String) -> Result<(), String> {
 
     let rt = get_runtime();
     rt.block_on(cmd_tx.send(node::NodeCommand::ClaimNickname { nickname }))
-        .map_err(|e| format!("Failed to send command: {e}"))?;
-    Ok(())
-}
-
-/// Ask the relay for this connection's daily byte-budget status (used /
-/// budget / seconds until the UTC-day reset). Fire-and-forget: the reply
-/// arrives as `NetworkEvent::BandwidthStatus` on the event stream.
-#[frb]
-pub fn request_relay_bandwidth() -> Result<(), String> {
-    let node = get_node();
-    let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
-    let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
-    // Release the global node mutex BEFORE the (possibly waiting) send —
-    // holding it across block_on(send) serializes all other FFI calls.
-    drop(guard);
-
-    let rt = get_runtime();
-    rt.block_on(cmd_tx.send(node::NodeCommand::GetRelayBandwidth))
         .map_err(|e| format!("Failed to send command: {e}"))?;
     Ok(())
 }

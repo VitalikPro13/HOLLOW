@@ -1,6 +1,6 @@
 # Hollow: Privacy Policy
 
-**Last updated: August 16, 2026**
+**Last updated: August 28, 2026**
 
 Hollow is built on one principle: your conversations are yours. We cannot read your messages, listen to your calls, or identify you. This policy explains what data exists, where it exists, and what we can and cannot access.
 
@@ -35,7 +35,7 @@ Hollow uses a WebSocket relay server for signaling and message routing. The rela
 
 **Offline delivery (in-memory, encrypted).** To deliver messages sent while you are offline, the relay can hold end-to-end encrypted payloads in memory for a limited time: 3 days by default. You can adjust or disable this for your own messages in Settings, and server owners can disable it for their channels. These buffers contain only ciphertext the relay cannot read, are subject to small volume caps, are deleted on delivery or expiry, are never written to disk, and are lost if the relay restarts. The buffer is a convenience, not a requirement. If the relay never held a message, you still receive it directly from your peers when you are both online.
 
-**Fair-use accounting (in-memory).** To keep the relay usable for everyone, it keeps per-IP-address counters in memory: the number of simultaneous connections and the amount of data relayed per day (see the Terms of Use for the current limits). These counters exist only in memory, are never written to disk or to logs, reset daily, and are lost on restart.
+**Fair-use accounting (in-memory).** To keep the relay usable for everyone, it keeps per-IP-address counters in memory: the number of simultaneous connections and the rate of new connections. There is no data volume counter. These counters exist only in memory, are never written to disk or to logs, and are lost on restart. When the relay's network link is saturated, capacity is shared fairly between client addresses by the operating system's network queue; this involves no per-user accounting and records nothing.
 
 **Push notification tokens (mobile).** If you use Hollow on Android or iOS, the relay holds your device's push token in memory only (never on disk) so it can send a wake signal when a message arrives while the app is closed. See "Push notifications (mobile)" below.
 

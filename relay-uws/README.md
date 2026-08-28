@@ -68,7 +68,7 @@ The output is a single binary: `build/hollow-relay` (~636 KB).
 
 ```bash
 cp .env.example .env              # edit with your domain, IP, TURN secret
-cp turnserver.conf.example turnserver.conf  # edit realm + secret
+cp turnserver.conf.example turnserver.conf  # edit realm + secret + allowed-peer-ip (your public IPs)
 docker compose up -d
 ```
 
