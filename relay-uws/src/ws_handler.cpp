@@ -1,5 +1,6 @@
 #include "ws_handler.h"
 #include "crypto.h"
+#include "device_list.h"
 #include "json.hpp"
 #include <cstdio>
 #include <cstring>
@@ -281,8 +282,119 @@ static void handle_auth(SSLWebSocket* ws, PerSocketData* data,
     // privacy: no connection logging
 }
 
+// --- Inbox mailbox (async friending) ---------------------------------------
+//
+// A friend request addressed to a STRANGER is addressed to their MASTER id, and
+// no socket ever authenticates as a master — so the frame lands in
+// offline_buffer[master] and, until now, nobody was ever replayed it. The
+// mailbox closes that gap: a socket may PROVE it owns `inbox:{M}` by carrying
+// M's master-signed device list on the join, and only then is M's mailbox
+// replayed to it.
+//
+// Nothing new is stored and nothing new is logged. The relay never learns who
+// deposited or read what: the proof is verified, used, and dropped on the
+// stack. See feedback_relay_rules (no metadata logging).
+static constexpr char INBOX_ROOM_PREFIX[] = "inbox:";
+
+// Parse the optional `inbox_proof` object carried on a join into a
+// SignedDeviceList. Strict: every field must be present and the right shape.
+// A malformed proof is simply "no proof" — the join still succeeds, the
+// mailbox just never opens.
+static bool parse_inbox_proof(const json& j, SignedDeviceList& out) {
+    if (!j.is_object()) return false;
+
+    auto str_field = [&](const char* key, std::string& dst) {
+        auto it = j.find(key);
+        if (it == j.end() || !it->is_string()) return false;
+        dst = it->get<std::string>();
+        return true;
+    };
+    auto str_array = [&](const char* key, std::vector<std::string>& dst) {
+        auto it = j.find(key);
+        if (it == j.end() || !it->is_array()) return false;
+        for (const auto& e : *it) {
+            if (!e.is_string()) return false;
+            dst.push_back(e.get<std::string>());
+        }
+        return true;
+    };
+
+    if (!str_field("master_pubkey_b64", out.master_pubkey_b64)) return false;
+    if (!str_field("master_peer_id", out.master_peer_id)) return false;
+    if (!str_field("sig_b64", out.sig_b64)) return false;
+    if (!str_array("devices", out.devices)) return false;
+    if (!str_array("revoked", out.revoked)) return false;
+
+    auto vit = j.find("version");
+    // serde serializes the u64 version unsigned; anything else (negative,
+    // float, string) is not a list this relay can have the signed bytes for.
+    if (vit == j.end() || !vit->is_number_unsigned()) return false;
+    out.version = vit->get<uint64_t>();
+    return true;
+}
+
+// TTL-only mailbox replay: send every buffered frame for `mailbox_peer_id` that
+// belongs to `room`, and DO NOT remove it.
+//
+// This is the one deliberate difference from replay_buffered_msgs (the
+// device-keyed DM replay, which deletes on delivery): every sibling device of
+// the master must be able to collect the same request on its own next boot, so
+// a read cannot consume the mailbox. The receiver dedups on its friends row (a
+// request already pending/accepted/declined is a no-op at ingest), and the TTL
+// sweep still expires the entry normally. Rejoining the same socket therefore
+// re-delivers — that is required, not a bug; do not add per-socket delivery
+// tracking to "fix" it.
+static void replay_mailbox_no_delete(SSLWebSocket* ws,
+                                     const std::string& mailbox_peer_id,
+                                     const std::string& room,
+                                     RelayState& state) {
+    auto it = state.offline_buffer.find(mailbox_peer_id);
+    if (it == state.offline_buffer.end()) return;
+    for (const auto& m : it->second) {
+        if (m.room == room) {
+            send_to_peer(ws, m.frame, uWS::OpCode::BINARY);
+        }
+    }
+    // buffer_total_bytes is untouched on purpose: nothing left the buffer.
+    // No logging — which device read whose mailbox is social-graph metadata.
+}
+
+// Ownership check for an `inbox:{M}` join. ALL of these must hold, else replay
+// NOTHING — and say nothing: no error frame, no log line. A failed proof is
+// indistinguishable from a plain join, so a prober learns neither whether the
+// mailbox exists nor whether it holds anything.
+//
+//   a. the device list signature verifies under master_pubkey_b64;
+//   b. derive_peer_id(master_pubkey_b64) == master_peer_id  (inside verify);
+//   c. this socket's AUTHENTICATED device id is in `devices` and not `revoked`;
+//   d. the joined room string equals "inbox:" + master_peer_id.
+//
+// (c) is what makes the proof non-transferable: the list is public-ish (it is
+// gossiped between devices), but replaying someone else's list only opens the
+// mailbox for a socket that already authenticated as one of ITS devices, and
+// auth binds peer_id to the key (handle_auth).
+static void maybe_replay_inbox_mailbox(SSLWebSocket* ws, PerSocketData* data,
+                                        const std::string& room,
+                                        const json& proof_json,
+                                        RelayState& state) {
+    // Guests never own an identity, so they can never own a mailbox.
+    if (data->is_guest) return;
+    if (room.rfind(INBOX_ROOM_PREFIX, 0) != 0) return;
+
+    SignedDeviceList dl;
+    if (!parse_inbox_proof(proof_json, dl)) return;
+    if (!verify_signed_device_list(dl)) return;                       // a + b
+    if (room != std::string(INBOX_ROOM_PREFIX) + dl.master_peer_id) return;  // d
+    if (!device_list_owns_device(dl, data->peer_id)) return;          // c
+
+    replay_mailbox_no_delete(ws, dl.master_peer_id, room, state);
+}
+
+// `inbox_proof` is optional and may be null: a plain JoinRoom carries none, and
+// an old client never sends one. It is only consulted for an `inbox:` room.
 static void handle_join(SSLWebSocket* ws, PerSocketData* data,
-                         const std::string& room, RelayState& state) {
+                         const std::string& room, RelayState& state,
+                         const json* inbox_proof = nullptr) {
     if (!is_valid_room_code(room)) {
         send_json(ws, {{"type", "error"}, {"error", "Invalid room code"}});
         return;
@@ -364,6 +476,13 @@ static void handle_join(SSLWebSocket* ws, PerSocketData* data,
     // have offline buffers (they don't register push tokens).
     if (!data->is_guest) {
         replay_buffered_msgs(ws, data->peer_id, room, !data->is_fetch, state);
+    }
+
+    // ...and, IN ADDITION, the master's mailbox when this join proved it owns
+    // one. Device-keyed replay above is unchanged and still deletes on
+    // delivery; the mailbox replay is TTL-only.
+    if (inbox_proof) {
+        maybe_replay_inbox_mailbox(ws, data, room, *inbox_proof, state);
     }
 }
 
@@ -1623,7 +1742,13 @@ static void handle_text_message(SSLWebSocket* ws, PerSocketData* data,
     std::string type = j.value("type", "");
 
     if (type == "join") {
-        handle_join(ws, data, j.value("room", ""), state);
+        // Optional ownership proof for an `inbox:{master}` join. Absent on every
+        // ordinary join (and on every old client), in which case handle_join
+        // behaves exactly as before.
+        auto pit = j.find("inbox_proof");
+        const json* inbox_proof =
+            (pit != j.end() && pit->is_object()) ? &(*pit) : nullptr;
+        handle_join(ws, data, j.value("room", ""), state, inbox_proof);
     } else if (type == "leave") {
         leave_room(state, data->peer_id, j.value("room", ""));
     } else if (type == "msg") {

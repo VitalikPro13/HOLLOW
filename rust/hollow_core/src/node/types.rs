@@ -108,6 +108,92 @@ pub(crate) struct SignedDeviceList {
     pub sig_b64: String,
 }
 
+/// An Olm prekey bundle CARRIED inside a friend request, so the handshake needs
+/// no co-presence at all (async friending).
+///
+/// Why this is not a [`HavenMessage::KeyBundle`]: the live bundle is addressed to
+/// a recipient DEVICE and is only valid for `KEY_EXCHANGE_SKEW_SECS` (5 minutes),
+/// because a live bundle that outlives a rotation is a replay. A carried bundle
+/// is addressed to a recipient MASTER (a stranger has no device of ours to name)
+/// and has to survive sitting in a relay mailbox until the recipient next boots,
+/// so it gets its OWN freshness rule (`MAX_CARRIED_BUNDLE_AGE_SECS`) and its OWN
+/// domain-separated signing payload. Replay protection here is the one-time key
+/// being single-use, not the clock.
+///
+/// SECURITY: `sig_b64` is made by the sender's DEVICE key over
+/// `carried_bundle_signing_payload`, and `device_pk_b64` derives the sender
+/// device id. Verification (`crypto_handler::verify_carried_bundle`) additionally
+/// requires that device to appear in the sender's master-SIGNED device list, so
+/// the chain master -> signed device list -> device key -> signed bundle -> Olm
+/// keys is unbroken, exactly like the live path.
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub(crate) struct CarriedBundle {
+    /// Sender device's Olm Curve25519 identity key (base64).
+    #[serde(default)]
+    pub identity_key: String,
+    /// A FRESH one-time key minted for this request (base64).
+    #[serde(default)]
+    pub one_time_key: String,
+    /// Recipient MASTER peer id (NOT a device) this bundle is addressed to.
+    #[serde(default)]
+    pub to_master: String,
+    /// Unix SECONDS (not millis) the bundle was minted.
+    #[serde(default)]
+    pub ts: i64,
+    /// Sender DEVICE signature over the carried payload (base64).
+    #[serde(default)]
+    pub sig_b64: String,
+    /// Sender DEVICE Ed25519 pubkey protobuf (base64) -> derives the sender device id.
+    #[serde(default)]
+    pub device_pk_b64: String,
+}
+
+/// The sender's own master-SIGNED profile, carried inside a `FriendRequest` so
+/// the receiver can render the incoming card with a real name (and eventually an
+/// avatar) even when the sender is long offline — a stranger has never sent us a
+/// `ProfileUpdate`, so without this the card falls back to a raw peer id.
+///
+/// LIGHT, exactly like every other profile announce: the avatar HASH only, never
+/// the bytes. The still/animation follow via the asset rail / `ProfileRequest`
+/// once the two are online. This mirrors the signed subset a [`crate::node::types::HavenMessage::ProfileRelay`]
+/// carries and is ingested the same way — verified with
+/// `crypto_handler::verify_profile_signature`, stored with `save_profile` — so a
+/// forwarded/relayed profile and a request-carried one obey one identical rule:
+/// only the subject's own signature can assert the subject's name and avatar.
+///
+/// SECURITY: `profile_sig` is REQUIRED on ingest and made by `source_peer_id`'s
+/// MASTER key. An absent or invalid signature drops the PROFILE, never the
+/// request (`if sig.is_some()` is the bypass — we verify, we do not log-and-store).
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub(crate) struct CarriedProfile {
+    /// The subject's MASTER peer_id — profiles are one per identity, master-keyed.
+    /// The receiver binds this to the request sender's resolved master and drops
+    /// the profile on a mismatch (a sender must not assert a third party's).
+    #[serde(default)]
+    pub source_peer_id: String,
+    #[serde(default)]
+    pub display_name: String,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub about_me: String,
+    #[serde(default)]
+    pub updated_at: i64,
+    #[serde(default)]
+    pub twitch_username: String,
+    /// Hex SHA-256 of the avatar blob the OWNER signed; empty = no avatar. NEVER
+    /// the bytes — the still is pulled on demand, same as every light announce.
+    #[serde(default)]
+    pub avatar_hash: String,
+    /// The subject's signature over the signed subset (`profile_signing_payload`).
+    /// REQUIRED — an unsigned carried profile is dropped, the request kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_sig: Option<String>,
+    /// Subject MASTER public key (base64 protobuf) paired with `profile_sig`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_pk: Option<String>,
+}
+
 /// One accepted-friend entry shared between a master identity's own devices
 /// (multi-device, Phase 6). Carries identity + relationship metadata only — no
 /// message history. See `HavenMessage::FriendListSync`.
@@ -1615,6 +1701,24 @@ pub(crate) enum HavenMessage {
     #[serde(rename = "friend_request")]
     FriendRequest {
         requested_at: i64,
+        /// Async friending: the sender's Olm prekey bundle, so the accepter can
+        /// build a session without ever being online at the same moment.
+        /// Absent = a pre-async-friending client; the receiver falls back to
+        /// today's lazy co-presence key exchange.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        carried_bundle: Option<CarriedBundle>,
+        /// The sender's own master-signed device list, so the accepter can check
+        /// the carried bundle's device really speaks for that master WITHOUT
+        /// having ingested a ProfileUpdate first (a stranger, by definition, has
+        /// not).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        device_list: Option<SignedDeviceList>,
+        /// The sender's own master-signed profile, so the receiver can fill the
+        /// incoming card (name + avatar hash) for a stranger it holds no profile
+        /// for — verified + stored exactly like a `ProfileRelay`. Absent from
+        /// pre-carried-profile clients; the card then falls back to the peer id.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        carried_profile: Option<CarriedProfile>,
     },
 
     #[serde(rename = "friend_accept")]

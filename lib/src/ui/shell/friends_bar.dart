@@ -1115,6 +1115,23 @@ class _RequestsTabState extends ConsumerState<_RequestsTab> {
                           fontSize: 10,
                         ),
                       ),
+                      // Reassure the sender that a pending outgoing request is
+                      // not lost while the other person is offline — it waits in
+                      // their mailbox and lands on their next boot (async
+                      // friending), even if the sender has since gone offline.
+                      if (direction == 'outgoing')
+                        Padding(
+                          padding: const EdgeInsets.only(top: 2),
+                          child: Text(
+                            "They'll get this the next time they're online, "
+                            "even if you've gone offline by then.",
+                            style: HollowTypography.caption.copyWith(
+                              color: hollow.textSecondary,
+                              fontSize: 10,
+                              height: 1.3,
+                            ),
+                          ),
+                        ),
                     ],
                   ),
                 ),

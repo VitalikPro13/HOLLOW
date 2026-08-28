@@ -8,6 +8,16 @@ Imports from: `crypto_handler::{peer_is_reachable, send_mls_broadcast, send_mess
 
 ---
 
+## Async friending (2026-08-28) — carried bundle, inbox mailbox, anti-downgrade guard
+
+Friend requests can complete with ZERO overlap (both parties offline at different moments). Full design + the KNOWN DECLINE BUGS still open live in memory `project_pending_joins_async_friending`.
+
+- **`FriendRequest` carries** (all `#[serde(default)]`, backward-compatible): a `CarriedBundle` (fresh Olm one-time key + identity key, signed over the domain-separated `hollow-carried-keybundle:` payload, addressed to the recipient MASTER), the sender's `SignedDeviceList`, and a `carried_profile` (signed subset, verified + stored via `store_carried_profile` so the incoming card renders the sender's name/avatar). `FriendAccept` stays a UNIT variant (a struct variant would break the externally-tagged wire).
+- **Accepter** builds the outbound Olm session from the carried bundle at accept time, glare-gated to run ONLY when the requester is offline and session-less (`live_at_receipt`), then sends one `Encrypted` `FRIEND_HANDSHAKE_SENTINEL` that establishes the requester's inbound session with no visible DM row. `verify_carried_bundle` is its OWN freshness path (`MAX_CARRIED_BUNDLE_AGE_SECS = 7d`, never the live 300s `KEY_EXCHANGE_SKEW_SECS`).
+- **Relay inbox mailbox (DEPLOYED):** `handle_send_friend_request` deposits into `inbox:{target_master}` when no device is known; the relay replays it only to a device presenting a master-signed ownership proof on its inbox join, TTL-only (not delete-on-replay) so every sibling collects it. See `security_write_gates.md` §5.
+- **Anti-downgrade guard (swarm.rs `FriendRequest` arm, after the carried-bundle store, before `is_mutual`) — FIXES the reported bug:** the TTL-only mailbox re-delivers on every inbox join, so the guard reads `get_friend_row` and refuses to walk a friendship backwards — `accepted` → return (the DM was leaving Recent Conversations / the friend flipping back to Incoming), `declined` → return if `requested_at <= stored`, `pending/incoming` → return if `<= stored` (a strictly-newer request falls through). Carried profile stored before the `FriendRequestReceived` emit.
+- **Decline tombstone — KNOWN-BROKEN end-to-end (fix next session):** `handle_reject_friend_request` writes `save_friend(master, "declined", "", original_requested_at)` instead of deleting; the sender-side `FriendReject` handler clears the re-deposit queue. BUT `FriendReject` is best-effort (no offline redelivery), so an OFFLINE requester never learns → its Outgoing row persists and it keeps re-depositing; and a re-deposit carrying a fresh `requested_at` correctly falls through the guard as a new request. See the memory's next-session bug list.
+
 ## handle_send_friend_request()
 
 `social.rs:handle_send_friend_request(event_tx, ws_cmd_tx, ws_room_peers, sig_cmd_tx, pending_friend_requests, local_peer_str, peer_id_str, db_path, db_passphrase)`

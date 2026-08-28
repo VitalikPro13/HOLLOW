@@ -86,6 +86,7 @@ and sender.
 |---|---|
 | Device-list ingest | `verify_device_list` — master-signed, monotonic version, revocation tombstones |
 | Olm key exchange | `REQUIRE_SIGNED_KEY_EXCHANGE` — device-signed bundle/request, recipient + freshness bound |
+| Async friend request — carried bundle + device list (`FriendRequest` optional fields, 2026-08-28) | The carried `SignedDeviceList` rides the SAME `verify_device_list` gate as any device-list ingest (new SITE, unchanged master-signature/monotonic-version/revocation checks). The carried Olm bundle is gated by `verify_carried_bundle` — device signature over the DOMAIN-SEPARATED `hollow-carried-keybundle:` payload (distinct prefix + `to_master` third segment, so it can never verify as a live bundle or the reverse), sender device present and un-revoked in that master-signed list, `to_master == our master`, freshness by `MAX_CARRIED_BUNDLE_AGE_SECS` (7d) NOT the live 300 s rule; REJECT-on-fail, an absent signature is never a bypass. Only store write it gates is the `app_settings` KV record `friendreq_in:{master}` (no friends-table schema change). The outbound-session bootstrap re-runs `verify_carried_bundle` at USE time (the row sat on disk since receipt) and is additionally glare-gated: it builds a session only when the requester is offline AND session-less, else it defers to the live key exchange. The relay mailbox that carries the request holds ciphertext only and is read-gated by a master-signed ownership proof (`verify_signed_device_list`, C++ mirror KAT-pinned to the Rust payload) — availability, never authority. See `project_pending_joins_async_friending`. |
 | `save_profile` | 0.8.5: `profile_signing_payload` / `verify_profile_signature`. See below |
 | MLS commit catch-up ingest (`MlsCommitCatchup`, epoch-race fix 2026-08-07) | sender must be a server member; every frame revalidated by OpenMLS through the SAME `handle_mls_commit_frame` path as a live `MlsCommit` (epoch guard, group-member leaf signature, eviction check); additionally each frame must be exactly `own_epoch + 1` — a gapped/garbage frame is refused BEFORE it can reach the drop-group recovery, making catch-up strictly safer than the broadcast path it supplements; ≤16 frames per message |
 | MLS epoch hints (`SyncRequest.mls_epoch` / `MlsEpochProbe`) | member-gated (`handle_epoch_hint`); a hint can NEVER drop a group (that would be a remote group-reset primitive) — a low hint only triggers authority-gated commit-replay/re-add service (10 s per-peer cooldown), a high hint only a throttled self-probe to the authority |
@@ -131,6 +132,20 @@ Now the owner signs, relayers forward the signature, receivers verify:
 - Announces sign on the fly when the stored row predates 0.8.5
   (`own_profile_proof`) — without that, requiring the signature would blank
   every upgraded user at their peers until they happened to edit their profile.
+- **Carried profile on a friend request** (`FriendRequest.carried_profile`,
+  2026-08-28) is a NEW SITE on this SAME gate, not a new gate: a stranger's
+  request now carries the sender's own signed profile so the incoming card
+  renders a real name instead of a raw peer id (a stranger has never sent us a
+  `ProfileUpdate`, and in the offline case is gone before it can push one).
+  `social::store_carried_profile` runs the identical rule as `ProfileRelay`
+  ingest — REQUIRED `verify_profile_signature`, over-long fields REJECTED (not
+  truncated), persisted via `save_profile` behind the verify — and ADDS a
+  sender-binding check (`resolve(source_peer_id) == request sender's master`) so
+  a sender can carry only its OWN identity's profile, never a captured third
+  party's. LIGHT: the avatar HASH rides (in the proof), never the bytes. A bad
+  or absent signature drops ONLY the profile; the friend request itself still
+  lands (the sig is verified, never logged-and-stored — `if sig.is_some()` would
+  be the bypass). Old senders omit the field; old receivers ignore it.
 
 ## 6. Local-only — not reachable from a remote frame
 

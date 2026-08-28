@@ -911,7 +911,11 @@ class ProfileFriendAction extends ConsumerWidget {
     final hollow = HollowTheme.of(context);
     final friendInfo = ref.watch(friendsProvider)[peerId];
 
-    if (friendInfo == null) {
+    // A `declined` row (a sticky reject tombstone) is neither pending nor
+    // accepted — treat it like no row at all: show "Add Friend", so the
+    // person can be re-added and never renders as an accepted friend.
+    if (friendInfo == null ||
+        (friendInfo.status != 'pending' && friendInfo.status != 'accepted')) {
       return HollowButton.outline(
         // Success feedback is the button itself flipping to "Request Sent"
         // (provider refresh); failure needs an explicit toast.

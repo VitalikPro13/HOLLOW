@@ -332,6 +332,49 @@ impl MockRelay {
                 // Replay this peer's buffered offline messages for this room.
                 inner.replay_offline(from, &room_code);
             }
+            WsCommand::JoinInbox { room_code, proof } => {
+                // Same join as above, PLUS the master-keyed mailbox replay the real
+                // relay does for a proven inbox owner (async friending, Change 1).
+                let existing: Vec<String> = inner
+                    .rooms
+                    .get(&room_code)
+                    .map(|s| s.iter().cloned().collect())
+                    .unwrap_or_default();
+                inner.rooms.entry(room_code.clone()).or_default().insert(from.to_string());
+                let mut members = existing.clone();
+                members.push(from.to_string());
+                if let Some(conn) = inner.conns.get(from) {
+                    let _ = conn.event_tx.send(WsEvent::RoomMembers {
+                        room: room_code.clone(),
+                        peers: members,
+                    });
+                }
+                for m in &existing {
+                    if let Some(conn) = inner.conns.get(m) {
+                        let _ = conn.event_tx.send(WsEvent::PeerJoined {
+                            room: room_code.clone(),
+                            peer_id: from.to_string(),
+                        });
+                    }
+                }
+                inner.replay_offline(from, &room_code);
+
+                // OWNERSHIP CHECK — every clause, exactly as the real relay must:
+                //   a. the device list verifies under its own master pubkey;
+                //   b. that pubkey derives to the claimed master peer_id
+                //      (`verify_device_list` folds a + b together);
+                //   c. THIS authenticated socket is a live, un-revoked member of it;
+                //   d. the room really is this master's inbox.
+                // Any failure replays NOTHING and returns no error, so a stranger
+                // learns nothing about whether a mailbox exists.
+                let owner_ok = super::crypto_handler::verify_device_list(&proof)
+                    && proof.devices.iter().any(|d| d == from)
+                    && !proof.revoked.iter().any(|r| r == from)
+                    && room_code == format!("inbox:{}", proof.master_peer_id);
+                if owner_ok {
+                    inner.replay_mailbox(from, &proof.master_peer_id);
+                }
+            }
             WsCommand::LeaveRoom { room_code } => {
                 let was = inner
                     .rooms
@@ -589,6 +632,35 @@ impl RelayInner {
                 direct,
             });
             0
+        }
+    }
+
+    /// Replay a MASTER's mailbox to a socket that has PROVEN it owns that inbox.
+    ///
+    /// TTL-only, NOT delete-on-replay — the one real difference from
+    /// [`Self::replay_offline`]. Every sibling device of the master must be able
+    /// to collect the same request on its own next boot, so consuming it for the
+    /// first device to ask would silently hide it from the rest. The receiver is
+    /// idempotent (it dedups on its friends row), which is what makes re-delivery
+    /// to the SAME socket on every rejoin harmless. Do not add per-socket
+    /// "already delivered" tracking: that is delete-on-replay wearing a hat.
+    fn replay_mailbox(&mut self, peer: &str, master: &str) {
+        let Some(buf) = self.offline.get(master) else { return };
+        let frames: Vec<(String, String, Vec<u8>, bool)> = buf
+            .iter()
+            .map(|m| (m.room.clone(), m.from.clone(), m.data.clone(), m.direct))
+            .collect();
+        let Some(conn) = self.conns.get(peer) else { return };
+        if !conn.online {
+            return;
+        }
+        for (room, from, data, direct) in frames {
+            let ev = if direct {
+                WsEvent::DirectMessage { room, from, data }
+            } else {
+                WsEvent::Message { room, from, data }
+            };
+            let _ = conn.event_tx.send(ev);
         }
     }
 
@@ -13822,6 +13894,1056 @@ async fn join_survives_a_coordinator_that_vanished_silently() {
     );
 
     drop(o);
+    drop(a);
+    drop(b);
+}
+
+// ---------------------------------------------------------------------------
+// ASYNC FRIENDING — two people who are NEVER online at the same moment.
+//
+// Three legs had to land together for this to work at all, and each one fails
+// silently on its own:
+//   1. the request is addressed to a MASTER, which no socket authenticates as,
+//      so the relay buffers it under a key nobody would ever replay -> a
+//      mailbox, gated by an ownership proof;
+//   2. the accept rides the existing device-keyed buffer, but only because the
+//      accepter learned the requester's device from the request itself;
+//   3. the Olm handshake used to need co-presence and refused anything older
+//      than five minutes -> the bundle rides INSIDE the request, under its own
+//      freshness rule.
+// The tests below drive each leg, then the whole thing end to end.
+//
+// "Offline" here is `set_online(false)`: the relay drops the socket from every
+// room and stops delivering, which is exactly what the feature has to survive.
+// The two nodes are never both reachable at any point in the end-to-end test.
+// ---------------------------------------------------------------------------
+
+/// A raw socket on the MockRelay with no node behind it: the only way to drive a
+/// join a real node would never send (a stranger claiming someone else's inbox,
+/// or a forged proof).
+struct RawSocket {
+    cmd_tx: mpsc::UnboundedSender<WsCommand>,
+    event_rx: mpsc::UnboundedReceiver<WsEvent>,
+}
+
+fn raw_socket(relay: &MockRelay, device_id: &str) -> RawSocket {
+    let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<WsCommand>();
+    let (event_tx, event_rx) = mpsc::unbounded_channel::<WsEvent>();
+    relay.register(device_id.to_string(), cmd_rx, event_tx);
+    RawSocket { cmd_tx, event_rx }
+}
+
+impl RawSocket {
+    /// Collect every DirectMessage payload delivered within `ms`. Absence is the
+    /// assertion in most of these cases, and an absence has no condition to poll,
+    /// so this deliberately waits out a real window.
+    async fn direct_payloads(&mut self, ms: u64) -> Vec<Vec<u8>> {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(ms);
+        let mut out = Vec::new();
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return out;
+            }
+            match tokio::time::timeout(remaining, self.event_rx.recv()).await {
+                Ok(Some(WsEvent::DirectMessage { data, .. })) => out.push(data),
+                Ok(Some(_)) => {}
+                _ => return out,
+            }
+        }
+    }
+}
+
+/// The friends row for `master` as (status, direction), or None.
+fn friend_row(node: &TestNode, master: &str) -> Option<(String, String)> {
+    node.store().get_friend_status_direction(master).ok().flatten()
+}
+
+// ---------------------------------------------------------------------------
+// Leg 1. A requests B while B has never connected, then A goes dark. B boots
+// ALONE and must still find the request waiting. Before the mailbox this was
+// impossible: the request was a targeted send to a master id, so it reached no
+// socket, and the queue meant to retry it only ever fired on a co-presence that
+// by definition never came.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests vs the global resolver
+async fn friend_request_delivered_with_no_overlap() {
+    let _g = test_guard();
+    super::blocklist::clear_for_test();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+    const A_MASTER: u8 = 61;
+    const A_DEV: u8 = 62;
+    const B_MASTER: u8 = 63;
+    const B_DEV: u8 = 64;
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
+    let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
+
+    // B does not exist yet — not offline, ABSENT. Nothing about the deposit may
+    // depend on the target ever having connected.
+    let mut a = spawn_node_with_friends(&relay, A_MASTER, A_DEV, &[]).await;
+    a.cmd_tx
+        .send(NodeCommand::SendFriendRequest { peer_id: b_master.clone() })
+        .await
+        .unwrap();
+    assert!(
+        wait_until(10, async || relay.buffered_count(&b_master) > 0).await,
+        "the request must be buffered under B's MASTER — that is the mailbox",
+    );
+
+    // A leaves. From here the two are never reachable together.
+    relay.set_online(&a.device_id.clone(), false);
+    drain_events(&mut a);
+
+    // B's first ever boot. Its `Connected` joins inbox:{b_master} WITH the
+    // ownership proof, which is what makes the relay hand the mailbox over.
+    let mut b = spawn_node_with_friends(&relay, B_MASTER, B_DEV, &[]).await;
+    assert!(
+        wait_event(&mut b, std::time::Duration::from_secs(10), |ev| {
+            matches!(ev, NetworkEvent::FriendRequestReceived { .. })
+        })
+        .await,
+        "B must surface the mailbox request on its first boot",
+    );
+
+    assert_eq!(
+        friend_row(&b, &a_master),
+        Some(("pending".to_string(), "incoming".to_string())),
+        "the row must key on A's MASTER — the carried device list is what teaches B that",
+    );
+
+    drop(a);
+    drop(b);
+}
+
+// ---------------------------------------------------------------------------
+// Legs 2 and 3, the acceptance test from the contract in full: request, accept,
+// and DMs BOTH ways, with zero overlap at any point.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests vs the global resolver
+async fn friend_accept_and_dms_with_zero_overlap() {
+    let _g = test_guard();
+    super::blocklist::clear_for_test();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+    const A_MASTER: u8 = 71;
+    const A_DEV: u8 = 72;
+    const B_MASTER: u8 = 73;
+    const B_DEV: u8 = 74;
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
+    let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
+
+    // --- 1. A alone: request B, who does not exist yet. ---
+    let mut a = spawn_node_with_friends(&relay, A_MASTER, A_DEV, &[]).await;
+    let a_device = a.device_id.clone();
+    a.cmd_tx
+        .send(NodeCommand::SendFriendRequest { peer_id: b_master.clone() })
+        .await
+        .unwrap();
+    assert!(
+        wait_until(10, async || relay.buffered_count(&b_master) > 0).await,
+        "request must reach B's mailbox",
+    );
+
+    // --- 2. A goes dark. ---
+    relay.set_online(&a_device, false);
+    drain_events(&mut a);
+
+    // --- 3. B alone: collect the request and accept it. ---
+    let mut b = spawn_node_with_friends(&relay, B_MASTER, B_DEV, &[]).await;
+    let b_device = b.device_id.clone();
+    let mut requester_id = None;
+    assert!(
+        wait_event(&mut b, std::time::Duration::from_secs(10), |ev| {
+            if let NetworkEvent::FriendRequestReceived { peer_id } = ev {
+                requester_id = Some(peer_id.clone());
+                true
+            } else {
+                false
+            }
+        })
+        .await,
+        "B must see the mailbox request",
+    );
+    // Accept with the id the UI actually holds, exactly as a person would.
+    let accept_id = requester_id.expect("captured requester id");
+    b.cmd_tx
+        .send(NodeCommand::AcceptFriendRequest { peer_id: accept_id })
+        .await
+        .unwrap();
+
+    // Our profile, the accept, and the ONE pre-key establisher all have to be
+    // waiting for A. They are addressed at A's DEVICE in the deterministic DM
+    // room, so the relay buffers them under that device.
+    assert!(
+        wait_until(10, async || relay.buffered_count(&a_device) >= 3).await,
+        "profile + accept + establisher must be buffered for the absent requester, got {}",
+        relay.buffered_count(&a_device),
+    );
+    // B holds the outbound half already, built from the CARRIED bundle with the
+    // requester nowhere in sight.
+    assert!(
+        wait_until(10, async || b.olm_status(&a_device).await != "absent").await,
+        "B must build its Olm session from the carried bundle at accept time",
+    );
+
+    // --- 4. B goes dark, A comes back. Still never both up. ---
+    relay.set_online(&b_device, false);
+    drain_events(&mut b);
+    relay.set_online(&a_device, true);
+
+    // --- 5. A alone: learns it was accepted and ends up with a live session. ---
+    assert!(
+        wait_until(20, async || {
+            friend_row(&a, &b_master).map(|(st, _)| st) == Some("accepted".to_string())
+        })
+        .await,
+        "A must record the acceptance from the buffered FriendAccept, got {:?}",
+        friend_row(&a, &b_master),
+    );
+    assert!(
+        wait_until(20, async || a.olm_status(&b_device).await == "confirmed").await,
+        "the establisher must give A a CONFIRMED inbound session, got {:?}",
+        a.olm_status(&b_device).await,
+    );
+    // The establisher is control traffic: it must never render as a message.
+    assert!(
+        a.dm_thread(&b_master).is_empty(),
+        "the handshake sentinel must not insert a DM row, got {:?}",
+        a.dm_thread(&b_master),
+    );
+    drain_events(&mut a);
+
+    // --- 6. A sends a DM while B is still gone. ---
+    a.cmd_tx
+        .send(NodeCommand::SendMessage {
+            peer_id: b_master.clone(),
+            text: "from A, alone".to_string(),
+            message_id: "af-1".to_string(),
+            reply_to_mid: None,
+            link_preview: None,
+        })
+        .await
+        .unwrap();
+    assert!(
+        wait_until(10, async || relay.buffered_count(&b_device) > 0).await,
+        "A's DM must be buffered for the offline B",
+    );
+
+    // --- 7. A goes dark, B comes back, reads it, and replies. ---
+    relay.set_online(&a_device, false);
+    drain_events(&mut a);
+    relay.set_online(&b_device, true);
+    assert!(
+        wait_until(20, async || {
+            b.dm_thread(&a_master).iter().any(|m| m.text == "from A, alone" && !m.is_mine)
+        })
+        .await,
+        "B must decrypt A's DM, got {:?}",
+        b.dm_thread(&a_master),
+    );
+    assert!(
+        wait_until(10, async || b.olm_status(&a_device).await == "confirmed").await,
+        "decrypting A's message confirms B's half, got {:?}",
+        b.olm_status(&a_device).await,
+    );
+    drain_events(&mut b);
+    b.cmd_tx
+        .send(NodeCommand::SendMessage {
+            peer_id: a_master.clone(),
+            text: "from B, alone".to_string(),
+            message_id: "af-2".to_string(),
+            reply_to_mid: None,
+            link_preview: None,
+        })
+        .await
+        .unwrap();
+    assert!(
+        wait_until(10, async || relay.buffered_count(&a_device) > 0).await,
+        "B's reply must be buffered for the offline A",
+    );
+
+    // --- 8. B goes dark, A comes back and reads the reply. ---
+    relay.set_online(&b_device, false);
+    drain_events(&mut b);
+    relay.set_online(&a_device, true);
+    assert!(
+        wait_until(20, async || {
+            a.dm_thread(&b_master).iter().any(|m| m.text == "from B, alone" && !m.is_mine)
+        })
+        .await,
+        "A must decrypt B's reply, got {:?}",
+        a.dm_thread(&b_master),
+    );
+
+    // Both halves confirmed, and neither node was ever reachable while the other
+    // was — the whole point of the feature.
+    assert_eq!(a.olm_status(&b_device).await, "confirmed");
+    assert_eq!(b.olm_status(&a_device).await, "confirmed");
+
+    drop(a);
+    drop(b);
+}
+
+// ---------------------------------------------------------------------------
+// FIX A — the accepted-friend DOWNGRADE. The inbox mailbox is TTL-only: it
+// re-delivers the ORIGINAL request to a device on EVERY `inbox:` join (so every
+// sibling collects it). Before the anti-downgrade guard, an accepter who had
+// already accepted, then rebooted, had the replay walk its "accepted" row back
+// to "pending incoming" and re-fire FriendRequestReceived — the field symptom
+// where the DM vanished from Recent Conversations and the person reappeared as
+// an Incoming request. This drives that exact sequence: request → accept →
+// reboot (which re-runs JoinInbox and re-delivers) and asserts the friendship
+// survives, with no second FriendRequestReceived. A reboot is modelled as an
+// offline→online cycle: the relay re-emits Connected, so the node re-runs its
+// whole join flow from scratch (the same code path a fresh process runs), and
+// the guard's decision reads the DURABLE friends row, not in-memory state.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests vs the global resolver
+async fn friend_accept_survives_mailbox_redelivery() {
+    let _g = test_guard();
+    super::blocklist::clear_for_test();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+    const A_MASTER: u8 = 101;
+    const A_DEV: u8 = 102;
+    const B_MASTER: u8 = 103;
+    const B_DEV: u8 = 104;
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
+    let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
+
+    // 1. A alone requests B (absent) → the request lands in B's TTL-only mailbox.
+    let mut a = spawn_node_with_friends(&relay, A_MASTER, A_DEV, &[]).await;
+    let a_device = a.device_id.clone();
+    a.cmd_tx
+        .send(NodeCommand::SendFriendRequest { peer_id: b_master.clone() })
+        .await
+        .unwrap();
+    assert!(
+        wait_until(10, async || relay.buffered_count(&b_master) > 0).await,
+        "request must reach B's mailbox",
+    );
+
+    // 2. A goes dark; the two are never reachable together again.
+    relay.set_online(&a_device, false);
+    drain_events(&mut a);
+
+    // 3. B boots, collects the request, and ACCEPTS. Row for A becomes "accepted".
+    let mut b = spawn_node_with_friends(&relay, B_MASTER, B_DEV, &[]).await;
+    let b_device = b.device_id.clone();
+    let mut requester_id = None;
+    assert!(
+        wait_event(&mut b, std::time::Duration::from_secs(10), |ev| {
+            if let NetworkEvent::FriendRequestReceived { peer_id } = ev {
+                requester_id = Some(peer_id.clone());
+                true
+            } else {
+                false
+            }
+        })
+        .await,
+        "B must see the mailbox request on its first boot",
+    );
+    b.cmd_tx
+        .send(NodeCommand::AcceptFriendRequest {
+            peer_id: requester_id.expect("captured requester id"),
+        })
+        .await
+        .unwrap();
+    assert!(
+        wait_until(10, async || {
+            friend_row(&b, &a_master).map(|(s, _)| s) == Some("accepted".to_string())
+        })
+        .await,
+        "B's row for A must reach accepted, got {:?}",
+        friend_row(&b, &a_master),
+    );
+
+    // 4. B reboots (offline → online). Its reconnect re-runs the JoinInbox flow,
+    //    and the TTL-only mailbox re-delivers the ORIGINAL request — the exact
+    //    field trigger. Drain FIRST so the first-boot event cannot be miscounted.
+    drain_events(&mut b);
+    relay.set_online(&b_device, false);
+    relay.set_online(&b_device, true);
+
+    // 5. ASSERT the guard held. The absence check rides `wait_event`'s timeout
+    //    (not a fixed `sleep_ms`, so it costs nothing against the sleep budget),
+    //    a window long enough for the in-process replay to have been processed.
+    let saw_second = wait_event(&mut b, std::time::Duration::from_secs(3), |ev| {
+        matches!(ev, NetworkEvent::FriendRequestReceived { peer_id }
+            if super::resolver::resolve(peer_id) == a_master)
+    })
+    .await;
+    assert!(
+        !saw_second,
+        "a re-delivered mailbox request for an ALREADY-ACCEPTED friend must NOT \
+         re-emit FriendRequestReceived",
+    );
+    assert_eq!(
+        friend_row(&b, &a_master),
+        Some(("accepted".to_string(), String::new())),
+        "the accepted friendship must survive the mailbox replay — no downgrade to \
+         pending incoming",
+    );
+
+    drop(a);
+    drop(b);
+}
+
+// ---------------------------------------------------------------------------
+// FIX B — a friend request carries the sender's OWN signed profile, so a
+// stranger's incoming card renders a real name (and, once online, avatar)
+// instead of a raw peer id. LIGHT: the avatar HASH rides, never the bytes.
+// Verified + stored exactly like a ProfileRelay: a valid carried profile makes
+// the receiver hold the sender's display name; a TAMPERED signature is rejected
+// — the request still lands, but the profile is not stored (never store-and-log
+// an unverified profile).
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests vs the global resolver
+async fn friend_request_carries_sender_profile() {
+    let _g = test_guard();
+    super::blocklist::clear_for_test();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+    const A_MASTER: u8 = 111;
+    const A_DEV: u8 = 112;
+    const B_MASTER: u8 = 113;
+    const B_DEV: u8 = 114;
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
+    let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
+
+    // --- 1. A sets a profile, THEN requests B (absent). The request carries A's
+    //        signed profile into B's mailbox. ---
+    let mut a = spawn_node_with_friends(&relay, A_MASTER, A_DEV, &[]).await;
+    let a_device = a.device_id.clone();
+    a.cmd_tx
+        .send(NodeCommand::UpdateProfile {
+            display_name: "Alice Example".to_string(),
+            status: "around".to_string(),
+            about_me: String::new(),
+            avatar_bytes: None,
+            banner_bytes: None,
+            twitch_username: String::new(),
+            showcase_board: None,
+            showcase_assets: None,
+            avatar_frame: None,
+            avatar_anim: None,
+            banner_anim: None,
+        })
+        .await
+        .unwrap();
+    // A emits ProfileUpdated once its own row is written — a request built after
+    // this will carry it.
+    assert!(
+        wait_event(&mut a, std::time::Duration::from_secs(10), |ev| {
+            matches!(ev, NetworkEvent::ProfileUpdated { .. })
+        })
+        .await,
+        "A must persist its own profile before sending the request",
+    );
+    a.cmd_tx
+        .send(NodeCommand::SendFriendRequest { peer_id: b_master.clone() })
+        .await
+        .unwrap();
+    assert!(
+        wait_until(10, async || relay.buffered_count(&b_master) > 0).await,
+        "request (carrying A's profile) must reach B's mailbox",
+    );
+
+    // --- 2. A goes dark; B boots ALONE and collects the request. ---
+    relay.set_online(&a_device, false);
+    drain_events(&mut a);
+    let mut b = spawn_node_with_friends(&relay, B_MASTER, B_DEV, &[]).await;
+    assert!(
+        wait_event(&mut b, std::time::Duration::from_secs(10), |ev| {
+            matches!(ev, NetworkEvent::FriendRequestReceived { .. })
+        })
+        .await,
+        "B must see the mailbox request",
+    );
+    // The carried profile is verified + stored BEFORE the request event fires, so
+    // by the time we saw it B already holds A's name keyed under A's MASTER — no
+    // ProfileRequest round trip needed.
+    let stored = b.store().load_profile(&a_master).unwrap();
+    assert_eq!(
+        stored.map(|p| p.display_name),
+        Some("Alice Example".to_string()),
+        "B must hold A's carried display name for the incoming card",
+    );
+
+    // --- 3. A TAMPERED carried profile from a THIRD identity C: valid device
+    //        list, but the signature covers a DIFFERENT name than the one carried.
+    //        The profile is rejected; the request still lands; nothing is stored
+    //        for C. Injected directly as a hostile peer would push it. ---
+    const C_MASTER: u8 = 115;
+    const C_DEV: u8 = 116;
+    let c_master_kp = NativeKeypair::from_secret_bytes(&seed_bytes(C_MASTER));
+    let c_dev = NativeKeypair::from_secret_bytes(&seed_bytes(C_DEV)).peer_id();
+    let c_master = c_master_kp.peer_id();
+    let c_list = super::crypto_handler::build_signed_device_list(
+        &c_master_kp, 1, vec![c_dev.clone()], Vec::new(),
+    );
+    // Sign over the REAL name, then carry a DIFFERENT one — a genuine tamper the
+    // signature cannot cover.
+    use base64::Engine as _;
+    let c_pub_b64 = base64::engine::general_purpose::STANDARD
+        .encode(c_master_kp.public_key_protobuf());
+    let (sig, pk) = super::crypto_handler::sign_profile(
+        &c_master_kp, &c_pub_b64, &c_master, 1_700_000_000_000,
+        "Real Name", "", "", "", "",
+    );
+    let tampered = super::types::CarriedProfile {
+        source_peer_id: c_master.clone(),
+        display_name: "Tampered Name".to_string(), // NOT what was signed
+        status: String::new(),
+        about_me: String::new(),
+        updated_at: 1_700_000_000_000,
+        twitch_username: String::new(),
+        avatar_hash: String::new(),
+        profile_sig: sig,
+        profile_pk: pk,
+    };
+    let frame = super::types::HavenMessage::FriendRequest {
+        requested_at: 1_700_000_000_001,
+        carried_bundle: None,
+        device_list: Some(c_list),
+        carried_profile: Some(tampered),
+    };
+    let data = serde_json::to_vec(&frame).unwrap();
+    let inbox = format!("inbox:{b_master}");
+    relay.inject_direct(&inbox, &c_dev, &b.device_id, data);
+
+    assert!(
+        wait_event(&mut b, std::time::Duration::from_secs(10), |ev| {
+            matches!(ev, NetworkEvent::FriendRequestReceived { peer_id } if *peer_id == c_dev)
+        })
+        .await,
+        "the request must still land even though its carried profile is unverifiable",
+    );
+    assert!(
+        b.store().load_profile(&c_master).unwrap().is_none(),
+        "a tampered carried profile must NOT be stored",
+    );
+
+    drop(a);
+    drop(b);
+}
+
+// ---------------------------------------------------------------------------
+// DECLINE IS STICKY. Reject writes a "declined" tombstone (preserving the
+// original requested_at) instead of deleting the row. Under the TTL-only mailbox
+// a deleted row let the buffered request re-deliver on every reboot for 3 days
+// and resurface in Incoming. This drives request → decline → reboot (re-delivery)
+// and asserts the decline holds, then that a genuinely NEWER request (a cancel +
+// re-add) still falls through and shows again.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests vs the global resolver
+async fn declined_request_does_not_resurrect_on_mailbox_redelivery() {
+    let _g = test_guard();
+    super::blocklist::clear_for_test();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+    const A_MASTER: u8 = 121;
+    const A_DEV: u8 = 122;
+    const B_MASTER: u8 = 123;
+    const B_DEV: u8 = 124;
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
+    let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
+
+    // 1. A alone requests B (absent) → the request lands in B's TTL-only mailbox.
+    let mut a = spawn_node_with_friends(&relay, A_MASTER, A_DEV, &[]).await;
+    let a_device = a.device_id.clone();
+    a.cmd_tx
+        .send(NodeCommand::SendFriendRequest { peer_id: b_master.clone() })
+        .await
+        .unwrap();
+    assert!(
+        wait_until(10, async || relay.buffered_count(&b_master) > 0).await,
+        "request must reach B's mailbox",
+    );
+
+    // 2. A goes dark; B boots, collects the request, and DECLINES it.
+    relay.set_online(&a_device, false);
+    drain_events(&mut a);
+    let mut b = spawn_node_with_friends(&relay, B_MASTER, B_DEV, &[]).await;
+    let b_device = b.device_id.clone();
+    let mut requester_id = None;
+    assert!(
+        wait_event(&mut b, std::time::Duration::from_secs(10), |ev| {
+            if let NetworkEvent::FriendRequestReceived { peer_id } = ev {
+                requester_id = Some(peer_id.clone());
+                true
+            } else {
+                false
+            }
+        })
+        .await,
+        "B must see the mailbox request on its first boot",
+    );
+    b.cmd_tx
+        .send(NodeCommand::RejectFriendRequest {
+            peer_id: requester_id.expect("captured requester id"),
+        })
+        .await
+        .unwrap();
+    assert!(
+        wait_until(10, async || {
+            friend_row(&b, &a_master).map(|(s, _)| s) == Some("declined".to_string())
+        })
+        .await,
+        "reject must write a sticky declined tombstone, got {:?}",
+        friend_row(&b, &a_master),
+    );
+
+    // 3. B reboots (offline → online). The TTL-only mailbox re-delivers the SAME
+    //    original request. Drain FIRST so the first-boot event cannot be miscounted.
+    drain_events(&mut b);
+    relay.set_online(&b_device, false);
+    relay.set_online(&b_device, true);
+
+    // 4. ASSERT the decline stuck: no second FriendRequestReceived (bounded via
+    //    wait_event's timeout, budget-free), and the row is STILL declined — never
+    //    resurrected as pending incoming.
+    let saw_replay = wait_event(&mut b, std::time::Duration::from_secs(3), |ev| {
+        matches!(ev, NetworkEvent::FriendRequestReceived { peer_id }
+            if super::resolver::resolve(peer_id) == a_master)
+    })
+    .await;
+    assert!(
+        !saw_replay,
+        "a re-delivered mailbox request for a DECLINED person must NOT re-emit \
+         FriendRequestReceived",
+    );
+    assert_eq!(
+        friend_row(&b, &a_master),
+        Some(("declined".to_string(), String::new())),
+        "the decline must survive the mailbox replay — no resurrection as pending \
+         incoming",
+    );
+
+    // 5. A genuinely NEWER request (a cancel + re-add mints a fresh requested_at)
+    //    MUST fall through and show again. Injected directly as A pushing it, with
+    //    a requested_at strictly newer than the tombstone's.
+    drain_events(&mut b);
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let newer_at = now_ms + 60_000;
+    let a_master_kp = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER));
+    let a_list = super::crypto_handler::build_signed_device_list(
+        &a_master_kp, 1, vec![a_device.clone()], Vec::new(),
+    );
+    let frame = super::types::HavenMessage::FriendRequest {
+        requested_at: newer_at,
+        carried_bundle: None,
+        device_list: Some(a_list),
+        carried_profile: None,
+    };
+    let data = serde_json::to_vec(&frame).unwrap();
+    let inbox = format!("inbox:{b_master}");
+    relay.inject_direct(&inbox, &a_device, &b.device_id, data);
+
+    assert!(
+        wait_event(&mut b, std::time::Duration::from_secs(10), |ev| {
+            matches!(ev, NetworkEvent::FriendRequestReceived { peer_id }
+                if super::resolver::resolve(peer_id) == a_master)
+        })
+        .await,
+        "a genuinely NEWER request must fall through the declined guard and show again",
+    );
+    assert!(
+        wait_until(10, async || {
+            matches!(
+                friend_row(&b, &a_master).as_ref().map(|(s, d)| (s.as_str(), d.as_str())),
+                Some(("pending", "incoming"))
+            )
+        })
+        .await,
+        "the newer request must land as pending incoming, got {:?}",
+        friend_row(&b, &a_master),
+    );
+
+    drop(a);
+    drop(b);
+}
+
+// ---------------------------------------------------------------------------
+// The mailbox is only as safe as its gate. A master's inbox room name is public,
+// so without the ownership proof anyone could join `inbox:{victim}` and read
+// every request the victim has not collected yet.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests vs the global resolver
+async fn mailbox_requires_ownership_proof() {
+    let _g = test_guard();
+    let relay = MockRelay::new();
+
+    let b_master_kp = NativeKeypair::from_secret_bytes(&seed_bytes(81));
+    let b_master = b_master_kp.peer_id();
+    let b_dev2 = NativeKeypair::from_secret_bytes(&seed_bytes(82)).peer_id();
+    let stranger_master = NativeKeypair::from_secret_bytes(&seed_bytes(83));
+    let stranger_dev = NativeKeypair::from_secret_bytes(&seed_bytes(84)).peer_id();
+    let inbox = format!("inbox:{b_master}");
+
+    // A depositor drops one frame addressed at B's MASTER. B is absent, so the
+    // relay buffers it under the master exactly as it would in production.
+    let depositor = raw_socket(&relay, "depositor-device");
+    depositor.cmd_tx.send(WsCommand::JoinRoom { room_code: inbox.clone() }).unwrap();
+    depositor.cmd_tx.send(WsCommand::SendDirect {
+        room_code: inbox.clone(),
+        target_peer: b_master.clone(),
+        data: b"the-request".to_vec(),
+    }).unwrap();
+    assert!(
+        wait_until(5, async || relay.buffered_count(&b_master) == 1).await,
+        "precondition: the frame is buffered under the master",
+    );
+
+    // 1. A stranger joins the inbox with NO proof. The join succeeds (the room is
+    //    not a secret) and hands over nothing.
+    let mut stranger = raw_socket(&relay, &stranger_dev);
+    stranger.cmd_tx.send(WsCommand::JoinRoom { room_code: inbox.clone() }).unwrap();
+    assert!(
+        stranger.direct_payloads(600).await.is_empty(),
+        "an unproven join must collect NOTHING from the mailbox",
+    );
+
+    // 2. The same stranger with a proof it can genuinely sign: its OWN master's
+    //    device list. The signature is real, the master is wrong, and the room
+    //    check is what refuses it.
+    let own_list = super::crypto_handler::build_signed_device_list(
+        &stranger_master, 1, vec![stranger_dev.clone()], Vec::new(),
+    );
+    stranger.cmd_tx.send(WsCommand::JoinInbox {
+        room_code: inbox.clone(),
+        proof: own_list,
+    }).unwrap();
+    assert!(
+        stranger.direct_payloads(600).await.is_empty(),
+        "a valid list for the WRONG master must not open this mailbox",
+    );
+
+    // 3. A FORGED proof: B's real master id, signed by nobody holding B's key.
+    //    This is the attack the signature exists to stop.
+    let mut forged = super::crypto_handler::build_signed_device_list(
+        &stranger_master, 9, vec![stranger_dev.clone()], Vec::new(),
+    );
+    forged.master_peer_id = b_master.clone();
+    forged.devices = vec![stranger_dev.clone()];
+    stranger.cmd_tx.send(WsCommand::JoinInbox {
+        room_code: inbox.clone(),
+        proof: forged,
+    }).unwrap();
+    assert!(
+        stranger.direct_payloads(600).await.is_empty(),
+        "a forged proof must collect NOTHING",
+    );
+
+    // 4. A genuine list of B's, but naming a device that is NOT this socket.
+    //    Holding someone's real device list is not owning their inbox.
+    let not_us = super::crypto_handler::build_signed_device_list(
+        &b_master_kp, 1, vec![b_dev2.clone()], Vec::new(),
+    );
+    stranger.cmd_tx.send(WsCommand::JoinInbox {
+        room_code: inbox.clone(),
+        proof: not_us,
+    }).unwrap();
+    assert!(
+        stranger.direct_payloads(600).await.is_empty(),
+        "a list that does not name THIS socket must not open the mailbox",
+    );
+
+    // 5. B's own second device, with a valid proof naming itself. THIS collects.
+    let mut b2 = raw_socket(&relay, &b_dev2);
+    let good = super::crypto_handler::build_signed_device_list(
+        &b_master_kp, 2, vec![b_dev2.clone()], Vec::new(),
+    );
+    b2.cmd_tx.send(WsCommand::JoinInbox {
+        room_code: inbox.clone(),
+        proof: good.clone(),
+    }).unwrap();
+    assert_eq!(
+        b2.direct_payloads(1500).await,
+        vec![b"the-request".to_vec()],
+        "a proven owner collects the mailbox",
+    );
+
+    // 6. TTL-only, NOT delete-on-replay. Every sibling device has to be able to
+    //    collect the same request on its own next boot, so reading can never
+    //    consume it. The receiver's friends-row dedup is what makes the repeat
+    //    harmless — do NOT "fix" this by tracking per-socket delivery.
+    assert_eq!(
+        relay.buffered_count(&b_master), 1,
+        "the mailbox must survive being read",
+    );
+    b2.cmd_tx.send(WsCommand::JoinInbox {
+        room_code: inbox.clone(),
+        proof: good,
+    }).unwrap();
+    assert_eq!(
+        b2.direct_payloads(1500).await,
+        vec![b"the-request".to_vec()],
+        "a rejoin re-collects it",
+    );
+
+    // 7. A device the master has REVOKED is not an owner any more.
+    let revoked_list = super::crypto_handler::build_signed_device_list(
+        &b_master_kp, 3, vec![b_dev2.clone()], vec![b_dev2.clone()],
+    );
+    let mut b2_revoked = raw_socket(&relay, &b_dev2);
+    b2_revoked.cmd_tx.send(WsCommand::JoinInbox {
+        room_code: inbox.clone(),
+        proof: revoked_list,
+    }).unwrap();
+    assert!(
+        b2_revoked.direct_payloads(600).await.is_empty(),
+        "a revoked device must not open the mailbox",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The two freshness rules are independent, and that independence is the point:
+// the carried rule has to be days long, and widening the LIVE rule to reach it
+// would have handed every peer a days-long key-exchange replay window.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn carried_bundle_freshness_is_its_own_rule() {
+    use super::crypto_handler::{
+        build_signed_device_list, carried_bundle_signing_payload, key_bundle_signing_payload,
+        key_exchange_now, signed_carried_bundle, verify_carried_bundle, verify_key_exchange,
+        KeyExchangeAuth, KEY_EXCHANGE_SKEW_SECS,
+    };
+    use super::types::CarriedBundle;
+    use base64::Engine;
+
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let sender_master = NativeKeypair::from_secret_bytes(&seed_bytes(91));
+    let sender_device = NativeKeypair::from_secret_bytes(&seed_bytes(92));
+    let sender_device_id = sender_device.peer_id();
+    let our_master = NativeKeypair::from_secret_bytes(&seed_bytes(93)).peer_id();
+    let our_device = NativeKeypair::from_secret_bytes(&seed_bytes(94)).peer_id();
+    let list = build_signed_device_list(
+        &sender_master, 1, vec![sender_device_id.clone()], Vec::new(),
+    );
+    let now = key_exchange_now();
+
+    // A CARRIED bundle three days old is fine: it has been sitting in a mailbox,
+    // which is the entire feature. Replay protection here is the one-time key.
+    let three_days = now - 3 * 24 * 3600;
+    let payload = carried_bundle_signing_payload(
+        &sender_device_id, &our_master, "ik", "otk", three_days,
+    );
+    let old_carried = CarriedBundle {
+        identity_key: "ik".to_string(),
+        one_time_key: "otk".to_string(),
+        to_master: our_master.clone(),
+        ts: three_days,
+        sig_b64: b64.encode(sender_device.sign(payload.as_bytes())),
+        device_pk_b64: b64.encode(sender_device.public_key_protobuf()),
+    };
+    assert!(
+        verify_carried_bundle(&our_master, &list, &old_carried),
+        "a three-day-old CARRIED bundle must still be accepted",
+    );
+
+    // A LIVE bundle six minutes old is still refused. Same key material, same
+    // signer, different rule — which stays true only because they are separate
+    // functions with separate constants.
+    let six_min_ago = now - 360;
+    assert!(six_min_ago < now - KEY_EXCHANGE_SKEW_SECS);
+    let live_payload = key_bundle_signing_payload(
+        &sender_device_id, &our_device, "ik", "otk", six_min_ago,
+    );
+    let sig = b64.encode(sender_device.sign(live_payload.as_bytes()));
+    let pk = b64.encode(sender_device.public_key_protobuf());
+    assert_eq!(
+        verify_key_exchange(
+            &sender_device_id, &our_device, Some(&our_device), Some(six_min_ago),
+            Some(&sig), Some(&pk), &live_payload,
+        ),
+        KeyExchangeAuth::Invalid,
+        "the LIVE key-exchange window must NOT have been widened",
+    );
+
+    // The domains cannot be crossed either: a carried bundle's signature is over
+    // a different message, so it can never be replayed at the live verifier.
+    let fresh = signed_carried_bundle(
+        &sender_device, &sender_device_id, &our_master,
+        "ik".to_string(), "otk".to_string(),
+    );
+    let as_live = key_bundle_signing_payload(
+        &sender_device_id, &our_master, "ik", "otk", fresh.ts,
+    );
+    assert_eq!(
+        verify_key_exchange(
+            &sender_device_id, &our_master, Some(&our_master), Some(fresh.ts),
+            Some(&fresh.sig_b64), Some(&fresh.device_pk_b64), &as_live,
+        ),
+        KeyExchangeAuth::Invalid,
+        "a carried bundle reflected at the live verifier must fail",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Re-depositing on every connect is the design (a relay buffer has a TTL and
+// dies with a relay restart), so the receiver has to be idempotent. It dedups on
+// the friends row, and the bundle is minted ONCE per target so every copy
+// carries the same one-time key.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests vs the global resolver
+async fn mailbox_redeposit_dedups() {
+    let _g = test_guard();
+    super::blocklist::clear_for_test();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+    const A_MASTER: u8 = 101;
+    const A_DEV: u8 = 102;
+    const B_MASTER: u8 = 103;
+    const B_DEV: u8 = 104;
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
+    let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
+
+    let mut a = spawn_node_with_friends(&relay, A_MASTER, A_DEV, &[]).await;
+    let a_device = a.device_id.clone();
+    a.cmd_tx
+        .send(NodeCommand::SendFriendRequest { peer_id: b_master.clone() })
+        .await
+        .unwrap();
+    assert!(wait_until(10, async || relay.buffered_count(&b_master) > 0).await);
+
+    // Five reconnects, each re-depositing the same request.
+    for i in 0..5u64 {
+        relay.set_online(&a_device, false);
+        relay.set_online(&a_device, true);
+        let want = (2 + i) as usize;
+        assert!(
+            wait_until(10, async || relay.buffered_count(&b_master) >= want).await,
+            "reconnect {i} must re-deposit, mailbox holds {}",
+            relay.buffered_count(&b_master),
+        );
+        drain_events(&mut a);
+    }
+    let deposits = relay.buffered_count(&b_master);
+    assert!(deposits >= 6, "expected repeated deposits, got {deposits}");
+
+    relay.set_online(&a_device, false);
+    drain_events(&mut a);
+
+    // B boots once and drains all of them.
+    let mut b = spawn_node_with_friends(&relay, B_MASTER, B_DEV, &[]).await;
+    assert!(
+        wait_event(&mut b, std::time::Duration::from_secs(10), |ev| {
+            matches!(ev, NetworkEvent::FriendRequestReceived { .. })
+        })
+        .await,
+        "B must see the request",
+    );
+
+    // ONE row, whatever the mailbox held.
+    let rows: Vec<_> = b.store().load_friends(None).unwrap_or_default()
+        .into_iter()
+        .filter(|(pid, _, _, _, _)| super::resolver::same_identity(pid, &a_master))
+        .collect();
+    assert_eq!(
+        rows.len(), 1,
+        "duplicate deposits must collapse to ONE friend row, got {rows:?}",
+    );
+    assert_eq!(rows[0].1, "pending");
+    assert_eq!(rows[0].2, "incoming");
+
+    // And ONE usable session: every copy carried the same minted one-time key, so
+    // accepting builds exactly one Olm session instead of spending a key per copy
+    // and stranding the requester on a ratchet it cannot answer.
+    b.cmd_tx
+        .send(NodeCommand::AcceptFriendRequest { peer_id: a_master.clone() })
+        .await
+        .unwrap();
+    assert!(
+        wait_until(10, async || b.olm_status(&a_device).await != "absent").await,
+        "accepting must build the session from the carried bundle",
+    );
+
+    drop(a);
+    drop(b);
+}
+
+// ---------------------------------------------------------------------------
+// Blocking is receiver-side self-protection, and a mailbox is a new way in. The
+// guard has to run on the replayed path too, BEFORE any row, event or ingest.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests vs the global resolver
+async fn blocked_sender_mailbox_request_dropped() {
+    let _g = test_guard();
+    super::blocklist::clear_for_test();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+    const A_MASTER: u8 = 111;
+    const A_DEV: u8 = 112;
+    const B_MASTER: u8 = 113;
+    const B_DEV: u8 = 114;
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
+    let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
+
+    // B blocks A (master-keyed, exactly as the FFI wrapper does after persisting).
+    super::blocklist::block(&a_master);
+
+    let mut a = spawn_node_with_friends(&relay, A_MASTER, A_DEV, &[]).await;
+    let a_device = a.device_id.clone();
+    a.cmd_tx
+        .send(NodeCommand::SendFriendRequest { peer_id: b_master.clone() })
+        .await
+        .unwrap();
+    assert!(
+        wait_until(10, async || relay.buffered_count(&b_master) > 0).await,
+        "the deposit still happens — blocking is enforced by the RECEIVER",
+    );
+    relay.set_online(&a_device, false);
+    drain_events(&mut a);
+
+    let mut b = spawn_node_with_friends(&relay, B_MASTER, B_DEV, &[]).await;
+    // An absence has no condition to poll, so this waits out a real window.
+    let leaked = wait_event(&mut b, std::time::Duration::from_secs(5), |ev| {
+        matches!(ev, NetworkEvent::FriendRequestReceived { .. })
+    })
+    .await;
+    assert!(!leaked, "a blocked sender's mailbox request must emit NO event");
+    assert_eq!(
+        friend_row(&b, &a_master), None,
+        "and must leave NO friends row",
+    );
+
+    super::blocklist::clear_for_test();
     drop(a);
     drop(b);
 }

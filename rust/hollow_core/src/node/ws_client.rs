@@ -49,6 +49,17 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 #[derive(Debug, Clone)]
 pub enum WsCommand {
     JoinRoom { room_code: String },
+    /// Join OUR OWN `inbox:{master}` room carrying an ownership PROOF, so the
+    /// relay also replays the master-keyed mailbox (async friending). A friend
+    /// request for an offline stranger is addressed to their MASTER, which no
+    /// socket authenticates as, so the relay buffers it under a key nobody would
+    /// ever replay. `proof` is our master-signed device list: the relay checks
+    /// the signature, that the pubkey derives to the claimed master, that OUR
+    /// authenticated device is a live (un-revoked) member of it, and that the
+    /// room really is `inbox:{that master}` — then, and only then, replays.
+    /// Never used for someone ELSE's inbox: delivering a request there is a
+    /// plain `JoinRoom`.
+    JoinInbox { room_code: String, proof: super::types::SignedDeviceList },
     LeaveRoom { room_code: String },
     /// Broadcast an encrypted message to all peers in a room.
     SendToRoom { room_code: String, data: Vec<u8> },
@@ -248,7 +259,14 @@ enum ClientMsg {
         #[serde(default, skip_serializing_if = "is_false")]
         fetch: bool,
     },
-    Join { room: String },
+    Join {
+        room: String,
+        /// Async friending: the joiner's master-signed device list, proving it
+        /// owns `inbox:{master}`. Skipped when absent, so an old relay simply
+        /// ignores an unknown field and an old client never sends one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        inbox_proof: Option<super::types::SignedDeviceList>,
+    },
     Leave { room: String },
 }
 
@@ -312,6 +330,11 @@ struct WsClientState {
     /// relay registry is RAM-per-relay-lifetime, so replay it on every
     /// reconnect like subscriptions. None = never set this session.
     offline_optin: Arc<RwLock<Option<(bool, i64)>>>,
+    /// Ownership proofs for `inbox:` rooms joined via [`WsCommand::JoinInbox`],
+    /// keyed by room. The reconnect replay below re-sends every joined room as a
+    /// plain `Join`, which on a NEW socket would silently drop the mailbox
+    /// replay — the proof has to ride the re-join too.
+    inbox_proofs: Arc<RwLock<std::collections::HashMap<String, super::types::SignedDeviceList>>>,
 }
 
 // -- Public API --
@@ -389,6 +412,7 @@ async fn ws_client_loop(
         last_join_attempt: Arc::new(RwLock::new(None)),
         subscriptions: Arc::new(RwLock::new(std::collections::HashMap::new())),
         offline_optin: Arc::new(RwLock::new(None)),
+        inbox_proofs: Arc::new(RwLock::new(std::collections::HashMap::new())),
     };
 
     let mut backoff_secs = 1u64;
@@ -410,8 +434,12 @@ async fn ws_client_loop(
                 let (mut ws_write, mut ws_read) = ws_stream.split();
                 {
                     let rooms = state.joined_rooms.read().await;
+                    let proofs = state.inbox_proofs.read().await;
                     for room in rooms.iter() {
-                        let join_msg = serde_json::to_string(&ClientMsg::Join { room: room.clone() })
+                        let join_msg = serde_json::to_string(&ClientMsg::Join {
+                            room: room.clone(),
+                            inbox_proof: proofs.get(room).cloned(),
+                        })
                             .unwrap_or_default();
                         let _ = bounded_send(&mut ws_write, Message::Text(join_msg.into())).await;
                     }
@@ -1107,7 +1135,16 @@ async fn send_command(write: &mut WsSink, cmd: &WsCommand) -> bool {
 
     let json = match cmd {
         WsCommand::JoinRoom { room_code } => {
-            serde_json::to_string(&ClientMsg::Join { room: room_code.clone() })
+            serde_json::to_string(&ClientMsg::Join {
+                room: room_code.clone(),
+                inbox_proof: None,
+            })
+        }
+        WsCommand::JoinInbox { room_code, proof } => {
+            serde_json::to_string(&ClientMsg::Join {
+                room: room_code.clone(),
+                inbox_proof: Some(proof.clone()),
+            })
         }
         WsCommand::LeaveRoom { room_code } => {
             serde_json::to_string(&ClientMsg::Leave { room: room_code.clone() })
@@ -1132,10 +1169,22 @@ async fn track_room_change(state: &WsClientState, cmd: &WsCommand, event_tx: &mp
             rooms.insert(room_code.clone());
             rooms.len() as u32
         }
+        WsCommand::JoinInbox { room_code, proof } => {
+            *state.last_join_attempt.write().await = Some(room_code.clone());
+            state
+                .inbox_proofs
+                .write()
+                .await
+                .insert(room_code.clone(), proof.clone());
+            let mut rooms = state.joined_rooms.write().await;
+            rooms.insert(room_code.clone());
+            rooms.len() as u32
+        }
         WsCommand::LeaveRoom { room_code } => {
             let mut rooms = state.joined_rooms.write().await;
             rooms.remove(room_code);
             state.subscriptions.write().await.remove(room_code);
+            state.inbox_proofs.write().await.remove(room_code);
             // Confirm our own leave to the swarm so it purges the room from
             // `ws_room_peers` — see WsEvent::LeftRoom.
             let _ = event_tx.send(WsEvent::LeftRoom { room: room_code.clone() });
@@ -1309,10 +1358,31 @@ mod tests {
 
     #[test]
     fn test_join_message_format() {
-        let msg = ClientMsg::Join { room: "server123".into() };
+        let msg = ClientMsg::Join { room: "server123".into(), inbox_proof: None };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("\"type\":\"join\""));
         assert!(json.contains("\"room\":\"server123\""));
+        // A plain join must stay byte-identical to what it always was, so an old
+        // relay parsing it never sees a field it does not know.
+        assert!(!json.contains("inbox_proof"), "the proof is skipped when absent");
+    }
+
+    /// The inbox join carries the ownership proof the relay checks before it
+    /// replays a master-keyed mailbox (async friending).
+    #[test]
+    fn test_join_message_carries_inbox_proof() {
+        let master = crate::identity::native_identity::NativeKeypair::from_secret_bytes(&[0x7a; 32]);
+        let proof = super::super::crypto_handler::build_signed_device_list(
+            &master, 1, vec!["device-1".to_string()], Vec::new(),
+        );
+        let room = format!("inbox:{}", proof.master_peer_id);
+        let msg = ClientMsg::Join { room: room.clone(), inbox_proof: Some(proof) };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"type\":\"join\""));
+        assert!(json.contains(&format!("\"room\":\"{room}\"")));
+        assert!(json.contains("\"inbox_proof\""));
+        assert!(json.contains("\"master_pubkey_b64\""));
+        assert!(json.contains("\"sig_b64\""));
     }
 
     #[test]

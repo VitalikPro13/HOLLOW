@@ -3684,6 +3684,33 @@ impl MessageStore {
         }
     }
 
+    /// Returns `(status, direction, requested_at)` for a friend row, or `None`.
+    /// The `requested_at` is what the anti-downgrade guard on the FriendRequest
+    /// handler needs to tell a duplicate mailbox re-delivery (same or older
+    /// `requested_at`, already displayed) from a genuine re-request (a strictly
+    /// newer one that must fall through and refresh).
+    pub fn get_friend_row(
+        &self,
+        peer_id: &str,
+    ) -> Result<Option<(String, String, i64)>, String> {
+        let result = self.conn.query_row(
+            "SELECT status, direction, requested_at FROM friends WHERE peer_id = ?1",
+            params![peer_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            },
+        );
+        match result {
+            Ok(sdr) => Ok(Some(sdr)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(format!("Failed to read friend row: {e}")),
+        }
+    }
+
     // ── Blocked peers (local block list, MASTER-keyed) ───────────
 
     pub fn block_peer(&self, master_peer_id: &str) -> Result<(), String> {

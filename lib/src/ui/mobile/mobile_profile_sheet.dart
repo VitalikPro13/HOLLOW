@@ -589,7 +589,11 @@ class _FriendActionRow extends ConsumerWidget {
     final friends = ref.watch(friendsProvider);
     final friendInfo = friends[peerId];
 
-    if (friendInfo == null) {
+    // A `declined` row (a sticky reject tombstone) is neither pending nor
+    // accepted — treat it like no row at all: show "Add Friend", so the
+    // person can be re-added and never renders as an accepted friend.
+    if (friendInfo == null ||
+        (friendInfo.status != 'pending' && friendInfo.status != 'accepted')) {
       return HollowButton.ghost(
         onPressed: () async {
           try {

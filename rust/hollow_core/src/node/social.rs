@@ -6,9 +6,322 @@ use tokio::sync::mpsc;
 use crate::crdt::server_state::ServerState;
 use crate::crypto::MlsManager;
 use super::crypto_handler::{
-    peer_is_reachable, send_mls_broadcast, send_message_to_peer, send_raw_to_peer,
+    peer_is_reachable, persist_crypto_state, send_encrypted_text_to_peer, send_mls_broadcast,
+    send_message_to_peer, send_message_to_peer_in_room, send_raw_to_peer,
 };
 use super::types::*;
+
+// -- Async friending (a stranger who is offline, requested by someone who may
+//    also be offline) ------------------------------------------------------
+
+/// Plaintext of the ONE Olm pre-key message the accepter sends so the requester
+/// ends up with an inbound session having never been online at the same moment.
+///
+/// A leading NUL keeps it out of the space of anything a person can type, and the
+/// `Encrypted` receive arm matches it BEFORE the `MessageEnvelope` parse, so it
+/// never reaches the legacy raw-text fallback that would render it as a bubble.
+pub(crate) const FRIEND_HANDSHAKE_SENTINEL: &str = "\u{0}hollow-friend-handshake";
+
+/// Ceiling on outstanding pending-OUTGOING friend requests.
+///
+/// Each one holds a minted one-time key whose private half lives in the Olm
+/// account, and the account keeps a bounded number of those. Minting without a
+/// ceiling would silently rotate the oldest keys out from under bundles already
+/// sitting in a relay mailbox, so a carried bundle would verify and then build a
+/// session the requester could not decrypt. Refusing at the cap, visibly, is the
+/// honest failure.
+pub(crate) const MAX_OUTSTANDING_FRIEND_REQUESTS: usize = 32;
+
+/// The carried bundle plus the device list that authenticates it, as persisted
+/// between "the request arrived" and "the human clicked Accept" (which may be a
+/// reboot apart), and between "we sent a request" and "we re-deposit it on the
+/// next connect".
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+pub(crate) struct CarriedRequestRecord {
+    #[serde(default)]
+    pub bundle: CarriedBundle,
+    #[serde(default)]
+    pub device_list: SignedDeviceList,
+    /// True when the request reached us while the requester was actually in a
+    /// room with us, rather than out of the relay mailbox.
+    ///
+    /// This is the glare gate, and it is load-bearing. Bootstrapping a session
+    /// from the carried bundle is a THIRD way to establish Olm, alongside
+    /// KeyRequest/KeyBundle and the DM-room co-presence heal. Run it while a live
+    /// path is also running and the two sides end up holding halves of two
+    /// different sessions, which is the classic every-frame-fails-to-decrypt
+    /// state. So the carried path serves only the case the live path CANNOT: a
+    /// requester who was not there.
+    #[serde(default)]
+    pub live_at_receipt: bool,
+}
+
+/// `app_settings` key for the bundle WE minted for `target_master`. Reused for
+/// every re-send and mailbox re-deposit: minting per send would burn a one-time
+/// key on every reconnect AND hand the target a bundle whose private half our
+/// account had already rotated away.
+fn out_bundle_key(target_master: &str) -> String {
+    format!("friendreq_out:{target_master}")
+}
+
+/// `app_settings` key for the VERIFIED bundle a requester sent US. Read at accept
+/// time. Kept after acceptance (never deleted) so a second, idempotent accept
+/// still finds it; the `has_session` guard stops it building a second session on
+/// a one-time key that is already spent.
+pub(crate) fn in_bundle_key(requester_master: &str) -> String {
+    format!("friendreq_in:{requester_master}")
+}
+
+/// Build the `FriendRequest` for `target_master`, carrying the Olm prekey bundle
+/// that lets the target establish a session at ACCEPT time with no co-presence.
+///
+/// The bundle is minted ONCE per target and cached; every later send of the same
+/// request (presence-drain, mailbox re-deposit, reconnect) reuses it, so the
+/// target dedups on the friends row and the one-time key stays valid.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_friend_request(
+    olm: &mut crate::crypto::OlmManager,
+    crypto_store: &crate::crypto::CryptoStore,
+    master_keypair: &crate::identity::native_identity::NativeKeypair,
+    device_keypair: &crate::identity::native_identity::NativeKeypair,
+    device_peer_id: &str,
+    target_master: &str,
+    requested_at: i64,
+    db_path: &str,
+    db_passphrase: &str,
+) -> HavenMessage {
+    let device_list = super::crypto_handler::build_local_device_list(
+        master_keypair, device_peer_id, db_path, db_passphrase,
+    );
+    let key = out_bundle_key(target_master);
+    let store = crate::storage::MessageStore::open(db_path, db_passphrase).ok();
+
+    // Reuse a cached bundle while it is still inside the carried freshness rule.
+    let cached: Option<CarriedBundle> = store
+        .as_ref()
+        .and_then(|st| st.load_setting(&key).ok().flatten())
+        .and_then(|json| serde_json::from_str::<CarriedRequestRecord>(&json).ok())
+        .map(|rec| rec.bundle)
+        .filter(|b| {
+            let age = super::crypto_handler::key_exchange_now() - b.ts;
+            !b.one_time_key.is_empty()
+                && b.to_master == target_master
+                && age <= super::crypto_handler::MAX_CARRIED_BUNDLE_AGE_SECS
+        });
+
+    let bundle = match cached {
+        Some(b) => b,
+        None => {
+            let one_time_key = olm.generate_one_time_key();
+            let identity_key = olm.identity_key_base64();
+            // The PRIVATE half of that one-time key lives in the account pickle.
+            // Persist before the bundle can leave, or a restart between mint and
+            // accept strands the target with a key we can no longer answer.
+            persist_crypto_state(olm, crypto_store, target_master);
+            let b = super::crypto_handler::signed_carried_bundle(
+                device_keypair, device_peer_id, target_master, identity_key, one_time_key,
+            );
+            if let (Some(st), Some(dl)) = (store.as_ref(), device_list.as_ref()) {
+                let rec = CarriedRequestRecord {
+                    bundle: b.clone(),
+                    device_list: dl.clone(),
+                    live_at_receipt: false,
+                };
+                if let Ok(json) = serde_json::to_string(&rec) {
+                    let _ = st.save_setting(&key, &json);
+                }
+            }
+            b
+        }
+    };
+
+    // Carry our own signed profile so a stranger's incoming card renders our name
+    // (and, once online, our avatar) instead of a raw peer id. LIGHT — hash only,
+    // never bytes — and signed on the fly if the stored row predates signing, the
+    // same way `own_profile_proof` does for the announce path. Absent when we have
+    // no profile yet; the receiver then falls back to the peer id, as today.
+    let carried_profile = build_own_carried_profile(
+        master_keypair, &master_keypair.peer_id(), db_path, db_passphrase,
+    );
+
+    HavenMessage::FriendRequest {
+        requested_at,
+        carried_bundle: Some(bundle),
+        device_list,
+        carried_profile,
+    }
+}
+
+/// Build OUR OWN signed profile to carry inside a friend request. `None` when we
+/// hold no profile row yet, or it is blank, or it cannot be signed — in every one
+/// of those cases the receiver's card simply falls back to the peer id, exactly
+/// as a pre-carried-profile client leaves it.
+///
+/// LIGHT by contract: the avatar HASH rides (inside the proof), never the bytes.
+/// Reuses `own_profile_proof`, so a row written before 0.8.5 (no stored sig) is
+/// signed fresh here rather than shipping unsigned — a receiver REQUIRES the
+/// signature and would otherwise drop the whole carried profile.
+pub(crate) fn build_own_carried_profile(
+    master_keypair: &crate::identity::native_identity::NativeKeypair,
+    local_master: &str,
+    db_path: &str,
+    db_passphrase: &str,
+) -> Option<CarriedProfile> {
+    let store = crate::storage::MessageStore::open(db_path, db_passphrase).ok()?;
+    let p = store.load_profile(local_master).ok().flatten()?;
+    // Nothing worth carrying — an all-blank profile would only overwrite nothing
+    // and burn wire bytes; leave the card on its peer-id fallback.
+    if p.display_name.is_empty()
+        && p.status.is_empty()
+        && p.about_me.is_empty()
+        && p.twitch_username.is_empty()
+    {
+        return None;
+    }
+    let (sig, pk, avatar_hash) = own_profile_proof(master_keypair, local_master, Some(&p));
+    // A profile we cannot sign cannot be ingested by the receiver — omit it.
+    let (profile_sig, profile_pk) = (sig?, pk?);
+    Some(CarriedProfile {
+        source_peer_id: local_master.to_string(),
+        display_name: p.display_name,
+        status: p.status,
+        about_me: p.about_me,
+        updated_at: p.updated_at,
+        twitch_username: p.twitch_username,
+        avatar_hash,
+        profile_sig: Some(profile_sig),
+        profile_pk: Some(profile_pk),
+    })
+}
+
+/// Verify + persist a `CarriedProfile` that rode in on a friend request from
+/// `sender_master`. Returns the MASTER the profile was stored under (so the
+/// caller can emit `ProfileUpdated`), or `None` when nothing was stored.
+///
+/// Same trust rule as a `ProfileRelay` ingest: the subject's own signature is
+/// REQUIRED, checked over the fields EXACTLY as received (before any clamp), and
+/// over-long fields are DROPPED rather than truncated. It additionally binds the
+/// profile to the request sender — a sender may carry only ITS OWN identity's
+/// profile, never a captured third party's (that is what `ProfileRelay`, with
+/// its relay-source semantics, is for). Any failure drops JUST the profile; the
+/// request the caller is processing is untouched. `if sig.is_some()` would be the
+/// bypass, so we verify and never store-and-log.
+pub(crate) fn store_carried_profile(
+    profile: &CarriedProfile,
+    sender_master: &str,
+    db_path: &str,
+    db_passphrase: &str,
+) -> Option<String> {
+    // Bind to the sender: resolve both sides so a device-id source still matches
+    // its master. A mismatch means the sender is asserting someone else — drop it.
+    let source_master = super::resolver::resolve(&profile.source_peer_id);
+    if source_master != sender_master {
+        hollow_log!(
+            "[HOLLOW-FRIENDS] Ignoring carried profile from {sender_master} — it asserts a different identity ({source_master})"
+        );
+        return None;
+    }
+    // Length limits mirror the ProfileRelay ingest EXACTLY, checked BEFORE any
+    // clamp so we verify the string the signer actually signed. Over-long =
+    // dropped, never truncated (a genuine client is bounded by the same limits).
+    if profile.display_name.len() > 64
+        || profile.status.len() > 96
+        || profile.about_me.len() > 256
+        || profile.twitch_username.len() > 64
+    {
+        hollow_log!("[HOLLOW-SECURITY] REJECTED carried profile for {source_master} — field exceeds its limit");
+        return None;
+    }
+    // REQUIRED signature over the signed subset. `verify_profile_signature` is
+    // false for BOTH an absent and an invalid signature — either drops the
+    // profile (never the request).
+    if !super::crypto_handler::verify_profile_signature(
+        &source_master,
+        profile.updated_at,
+        &profile.display_name,
+        &profile.status,
+        &profile.about_me,
+        &profile.twitch_username,
+        &profile.avatar_hash,
+        profile.profile_sig.as_deref(),
+        profile.profile_pk.as_deref(),
+    ) {
+        hollow_log!(
+            "[HOLLOW-SECURITY] REJECTED carried profile for {source_master} — {}",
+            if profile.profile_sig.is_none() { "NO owner signature" } else { "owner signature INVALID" }
+        );
+        return None;
+    }
+    let (Some(sig), Some(pk)) =
+        (profile.profile_sig.as_deref(), profile.profile_pk.as_deref())
+    else {
+        return None;
+    };
+    let store = crate::storage::MessageStore::open(db_path, db_passphrase).ok()?;
+    // LIGHT: no avatar/banner bytes ride — the signed avatar HASH lands via the
+    // proof and the still is pulled on demand (asset rail / ProfileRequest).
+    // `save_profile` enforces the `updated_at` monotonicity itself, so a stale
+    // carried copy can never roll a fresher stored profile backwards.
+    match store.save_profile(
+        &source_master,
+        &profile.display_name,
+        &profile.status,
+        &profile.about_me,
+        profile.updated_at,
+        None,
+        None,
+        &profile.twitch_username,
+        None,
+        None,
+        Some(crate::storage::ProfileProof { sig, pk, avatar_hash: &profile.avatar_hash }),
+        None,
+        None,
+        None,
+    ) {
+        Ok(()) => {
+            hollow_log!("[HOLLOW-FRIENDS] Stored carried profile for {source_master} from friend request");
+            Some(source_master)
+        }
+        Err(e) => {
+            hollow_log!("[HOLLOW-FRIENDS] Failed to store carried profile for {source_master}: {e}");
+            None
+        }
+    }
+}
+
+/// How many pending-OUTGOING friend requests are on the books right now.
+fn outstanding_outgoing_requests(db_path: &str, db_passphrase: &str) -> usize {
+    crate::storage::MessageStore::open(db_path, db_passphrase)
+        .ok()
+        .and_then(|st| st.load_friends(Some("pending")).ok())
+        .map(|rows| {
+            rows.iter()
+                .filter(|(_, _, direction, _, _)| direction == "outgoing")
+                .count()
+        })
+        .unwrap_or(0)
+}
+
+/// Deposit a friend request into `inbox:{target_master}` so the relay buffers it
+/// under the MASTER, where only a device that PROVES it owns that inbox can
+/// collect it. This is the leg that makes a request survive both people being
+/// offline: a plain targeted send to a master reaches no socket and is dropped.
+///
+/// Joins the inbox first (the relay gates every frame on SENDER room membership)
+/// and STAYS: while a request is still pending, the target's device appearing in
+/// that room is what drains the live queue. The inbox is left only once the
+/// request has actually been delivered to a device (the drain sites do that).
+pub(crate) fn deposit_friend_request_to_inbox(
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    target_master: &str,
+    msg: &HavenMessage,
+) {
+    let inbox_room = format!("inbox:{target_master}");
+    let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinRoom {
+        room_code: inbox_room.clone(),
+    });
+    send_message_to_peer_in_room(ws_cmd_tx, &inbox_room, target_master, msg.clone());
+}
 
 /// The concrete, ONLINE device peer_ids to target when we want to reach a friend
 /// identity. A bare master id authenticates as no socket, so a send addressed to it
@@ -52,12 +365,17 @@ pub(crate) fn friend_device_targets(
 /// Handle `NodeCommand::SendFriendRequest`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_send_friend_request(
+    olm: &mut crate::crypto::OlmManager,
+    crypto_store: &crate::crypto::CryptoStore,
     event_tx: &mpsc::Sender<NetworkEvent>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     pending_friend_requests: &mut HashMap<String, i64>,
     pending_friend_removals: &mut std::collections::HashSet<String>,
     local_peer_str: &str,
+    master_keypair: &crate::identity::native_identity::NativeKeypair,
+    device_keypair: &crate::identity::native_identity::NativeKeypair,
+    device_peer_id: &str,
     peer_id_str: String,
     db_path: &str,
     db_passphrase: &str,
@@ -68,6 +386,38 @@ pub(crate) async fn handle_send_friend_request(
             message: "Cannot send a friend request to yourself".into(),
         }).await;
         return;
+    }
+
+    // Outstanding-request ceiling. Every pending outgoing request holds a minted
+    // one-time key, and the Olm account's supply of those is bounded — past the
+    // cap, minting silently rotates keys out from under bundles already sitting
+    // in a relay mailbox. An already-pending target is exempt: re-requesting the
+    // same person reuses its cached bundle and mints nothing.
+    {
+        let already_pending = crate::storage::MessageStore::open(db_path, db_passphrase)
+            .ok()
+            .and_then(|st| {
+                st.get_friend_status_direction(&super::resolver::resolve(&peer_id_str))
+                    .ok()
+                    .flatten()
+            })
+            .map(|(status, dir)| status == "pending" && dir == "outgoing")
+            .unwrap_or(false);
+        if !already_pending
+            && outstanding_outgoing_requests(db_path, db_passphrase)
+                >= MAX_OUTSTANDING_FRIEND_REQUESTS
+        {
+            hollow_log!(
+                "[HOLLOW-FRIENDS] Refused friend request to {peer_id_str}: {} outstanding (cap {MAX_OUTSTANDING_FRIEND_REQUESTS})",
+                outstanding_outgoing_requests(db_path, db_passphrase)
+            );
+            let _ = event_tx.send(NetworkEvent::Error {
+                message: format!(
+                    "You have {MAX_OUTSTANDING_FRIEND_REQUESTS} friend requests still waiting for a reply. Cancel one before sending another."
+                ),
+            }).await;
+            return;
+        }
     }
 
     hollow_log!("[HOLLOW-FRIENDS] Sending friend request to {peer_id_str}");
@@ -124,12 +474,21 @@ pub(crate) async fn handle_send_friend_request(
     // resolve to) a bare MASTER, which no socket authenticates as — a direct
     // `send_message_to_peer(master)` is silently dropped AND would have skipped
     // the queue below, losing the request entirely.
+    // ONE message for every leg: the live send, the mailbox deposit, and every
+    // later re-send. It carries our Olm prekey bundle + our master-signed device
+    // list, which is what lets the target accept and build a session while we are
+    // long gone (async friending).
+    let request_msg = build_friend_request(
+        olm, crypto_store, master_keypair, device_keypair, device_peer_id,
+        &master, now, db_path, db_passphrase,
+    );
+
     let targets = friend_device_targets(&ws_room_peers, &peer_id_str, &master);
     if !targets.is_empty() {
         for t in &targets {
             send_message_to_peer(
                 &ws_cmd_tx, &ws_room_peers,
-                t, HavenMessage::FriendRequest { requested_at: now },
+                t, request_msg.clone(),
             );
         }
         // Defense in depth: we only joined the TARGET's inbox to DELIVER the request.
@@ -142,11 +501,17 @@ pub(crate) async fn handle_send_friend_request(
             room_code: inbox_room.clone(),
         });
     } else {
-        // Peer not in any WS room yet — queue the request.
-        // It will be sent when the peer appears via PeerJoined/RoomMembers
-        // (e.g., when we join their inbox room and the relay confirms).
+        // Peer not in any WS room yet — queue the request AND deposit it into the
+        // target's master-keyed mailbox. The queue alone only ever fired while
+        // both people were online at once: the target is addressed by MASTER, no
+        // socket authenticates as a master, so a targeted send reaches nobody and
+        // the request waited for a co-presence that async friending is defined by
+        // never happening. The deposit is buffered by the relay under the master
+        // and collected on the target's next boot, when it joins its own inbox
+        // with an ownership proof.
         pending_friend_requests.insert(peer_id_str.clone(), now);
-        hollow_log!("[HOLLOW-FRIENDS] Peer {peer_id_str} not reachable yet, queued friend request for inbox delivery");
+        deposit_friend_request_to_inbox(ws_cmd_tx, &master, &request_msg);
+        hollow_log!("[HOLLOW-FRIENDS] Peer {peer_id_str} not reachable yet, deposited friend request in inbox:{master} and queued it");
     }
 
     let _ = event_tx.send(NetworkEvent::FriendRequestReceived {
@@ -157,6 +522,8 @@ pub(crate) async fn handle_send_friend_request(
 /// Handle `NodeCommand::AcceptFriendRequest`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_accept_friend_request(
+    olm: &mut crate::crypto::OlmManager,
+    crypto_store: &crate::crypto::CryptoStore,
     event_tx: &mpsc::Sender<NetworkEvent>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
@@ -206,6 +573,103 @@ pub(crate) async fn handle_accept_friend_request(
     // That last source is what makes this work when we DON'T yet hold the friend's
     // device list (so `devices_for` is empty) but their device is right there in our
     // DM/inbox room: the master id alone is unreachable.
+    // Join the shared DM room BEFORE anything is addressed into it. The relay
+    // gates every frame on SENDER room membership, so a buffered accept sent from
+    // outside the room is dropped rather than buffered — which is the whole
+    // zero-overlap case. (The join is idempotent; it used to sit below.)
+    let dm_room = dm_room_code(local_peer_str, &master);
+    let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinRoom {
+        room_code: dm_room.clone(),
+    });
+
+    // -- Async friending: establish the Olm session from the CARRIED bundle. --
+    //
+    // This is the leg that makes acceptance work with zero overlap. The requester
+    // shipped a prekey bundle inside the request; we build the outbound half now
+    // and send ONE pre-key establisher, which the relay buffers. When the
+    // requester next boots, that single frame gives it an inbound session and the
+    // pair can DM in both directions without ever having been online together.
+    //
+    // Failure is never fatal: an unverifiable, missing or already-used bundle just
+    // falls back to today's lazy co-presence key exchange.
+    {
+        let stored: Option<CarriedRequestRecord> =
+            crate::storage::MessageStore::open(db_path, db_passphrase)
+                .ok()
+                .and_then(|st| st.load_setting(&in_bundle_key(&master)).ok().flatten())
+                .and_then(|json| serde_json::from_str::<CarriedRequestRecord>(&json).ok());
+
+        if let Some(rec) = stored {
+            let requester_device =
+                super::crypto_handler::carried_bundle_sender_device(&rec.bundle);
+            // Re-verify at USE time, not just at receive time: the row has been on
+            // disk since the request arrived, and the freshness window may have
+            // lapsed while it sat there.
+            let ok = super::crypto_handler::verify_carried_bundle(
+                local_peer_str, &rec.device_list, &rec.bundle,
+            );
+            match (ok, requester_device) {
+                (true, Some(device)) => {
+                    // ONLY when the live path cannot serve this: the request came
+                    // out of the mailbox, the requester is in no room with us now,
+                    // and we hold no session with it. Any of those being false means
+                    // the live key exchange is already running (or has run), and a
+                    // second session built from the carried bundle at that moment is
+                    // Olm glare: the two sides end up holding halves of two
+                    // different sessions and every frame fails to decrypt.
+                    let reachable = super::crypto_handler::ws_room_for_peer(
+                        ws_room_peers, &device,
+                    ).is_some();
+                    if reachable || rec.live_at_receipt {
+                        hollow_log!("[HOLLOW-FRIENDS] Requester {device} is present — leaving the session to the live key exchange");
+                    } else {
+                        // Teach the requester OUR device -> master mapping FIRST,
+                        // over the same buffered room. It learned nothing about us
+                        // from its own request, and without this it wakes holding a
+                        // session with a device id it cannot attribute, so its own
+                        // reply targets nobody.
+                        send_own_profile_to_peer_in_room(
+                            ws_cmd_tx, ws_room_peers, local_peer_str, master_keypair,
+                            device_peer_id, &device, &dm_room, is_invisible,
+                            db_path, db_passphrase,
+                        );
+                        // The accept itself, addressed into the DETERMINISTIC DM
+                        // room so the relay buffers it for an absent requester (a
+                        // first-match room lookup finds nothing when they are gone).
+                        send_message_to_peer_in_room(
+                            ws_cmd_tx, &dm_room, &device, HavenMessage::FriendAccept,
+                        );
+                        if olm.has_session(&device) {
+                            hollow_log!("[HOLLOW-FRIENDS] Carried bundle from {device}: session already exists, skipping bootstrap");
+                        } else {
+                            match olm.create_outbound_session(
+                                &device, &rec.bundle.identity_key, &rec.bundle.one_time_key,
+                            ) {
+                                Ok(()) => {
+                                    persist_crypto_state(olm, crypto_store, &device);
+                                    hollow_log!("[HOLLOW-FRIENDS] Built outbound Olm session with {device} from the carried bundle");
+                                    // ONE pre-key establisher. Control-only: the
+                                    // sentinel is matched before the envelope parse
+                                    // on the far side, so it never becomes a bubble.
+                                    send_encrypted_text_to_peer(
+                                        olm, crypto_store, &device, dm_room.clone(),
+                                        FRIEND_HANDSHAKE_SENTINEL, event_tx, ws_cmd_tx,
+                                    ).await;
+                                }
+                                Err(e) => {
+                                    hollow_log!("[HOLLOW-FRIENDS] Carried bundle from {device} unusable ({e}) — falling back to lazy key exchange");
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    hollow_log!("[HOLLOW-SECURITY] REJECTED carried bundle from {master} at accept time — falling back to lazy key exchange");
+                }
+            }
+        }
+    }
+
     let targets = friend_device_targets(&ws_room_peers, &peer_id_str, &master);
     for t in &targets {
         send_message_to_peer(
@@ -229,15 +693,8 @@ pub(crate) async fn handle_accept_friend_request(
         targets.len()
     );
 
-    // Register DM room code with signaling for internet discovery. Use the MASTER so
-    // both sides compute the SAME pure `dm_room_code` (resolving inside it would
-    // diverge the room per-side).
-    let local_peer = local_peer_str.to_string();
-    let room = dm_room_code(&local_peer, &master);
-    // Join WS relay room for this DM.
-    let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinRoom {
-        room_code: room,
-    });
+    // The DM room (`dm_room_code`, pure f(masters) so both sides compute the same
+    // one) was joined above, before anything was addressed into it.
 
     // Push OUR profile + device list to the friend now (over the inbox/DM room where
     // they're reachable), so they learn our device→master mapping. We are the ACCEPTER:
@@ -272,8 +729,9 @@ pub(crate) async fn handle_reject_friend_request(
 ) {
     // The UI may pass a DEVICE id (a pending incoming request is keyed under the
     // sender's device id until the device-list ingest re-keys it) OR a master.
-    // Delete BOTH the resolved-master row and the original-id row so the pending
-    // request is cleared regardless of which key it currently lives under.
+    // We fold any device-stranded row up to the master, then tombstone the master
+    // row as "declined" (below) so the decline sticks regardless of which key the
+    // pending request currently lives under.
     let master = super::resolver::resolve(&peer_id_str);
     hollow_log!("[HOLLOW-FRIENDS] Rejecting friend request from {peer_id_str} (master {master})");
 
@@ -288,13 +746,29 @@ pub(crate) async fn handle_reject_friend_request(
     pending_friend_accepts.remove(&master);
     pending_friend_accepts.remove(&peer_id_str);
 
-    // Remove from friends table (both possible keys).
+    // Write a STICKY "declined" tombstone instead of deleting the row. The relay
+    // inbox mailbox is TTL-only (3 days), so a DELETED row let the buffered
+    // request re-deliver on every reboot and resurface in Incoming for the whole
+    // TTL. The tombstone is what the anti-downgrade guard on the FriendRequest
+    // handler reads to drop a re-delivery of the SAME (or older) request. We
+    // PRESERVE the original `requested_at` so that guard's freshness check works:
+    // a genuinely NEWER request (a cancel + re-add) is strictly greater and still
+    // shows. A later re-add overwrites this row with pending-outgoing (save_friend
+    // is an upsert), so declining never permanently blocks re-friending.
     {
         if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
-            let _ = store.remove_friend(&master);
+            // Fold any device-stranded row up to the master first (parity with the
+            // accept/removal paths) so the tombstone lands on the one master key.
             if master != peer_id_str {
-                let _ = store.remove_friend(&peer_id_str);
+                let _ = store.migrate_friend_to_master(&peer_id_str, &master);
             }
+            let original_requested_at = store
+                .get_friend_row(&master)
+                .ok()
+                .flatten()
+                .map(|(_, _, requested_at)| requested_at)
+                .unwrap_or(0);
+            let _ = store.save_friend(&master, "declined", "", original_requested_at);
         }
     }
 
@@ -956,7 +1430,34 @@ pub(crate) fn send_own_profile_to_peer(
 ) {
     send_own_profile_inner(
         ws_cmd_tx, ws_room_peers, local_peer_str, master_keypair, device_peer_id,
-        target_peer, is_invisible, db_path, db_passphrase, false,
+        target_peer, is_invisible, db_path, db_passphrase, false, None,
+    );
+}
+
+/// Light profile announce addressed into an EXPLICIT room, so the relay buffers
+/// it for a recipient who is not online at all.
+///
+/// Async friending needs this in one place: the accepter. The requester learned
+/// OUR master from the carried request; we have to teach it the reverse, and the
+/// normal announce is a `ws_room_for_peer` lookup that finds nothing for someone
+/// who is simply gone. Without it the requester wakes up holding an Olm session
+/// with a DEVICE it cannot map to an identity, so its own reply targets nobody.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn send_own_profile_to_peer_in_room(
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    local_peer_str: &str,
+    master_keypair: &crate::identity::native_identity::NativeKeypair,
+    device_peer_id: &str,
+    target_peer: &str,
+    room_code: &str,
+    is_invisible: bool,
+    db_path: &str,
+    db_passphrase: &str,
+) {
+    send_own_profile_inner(
+        ws_cmd_tx, ws_room_peers, local_peer_str, master_keypair, device_peer_id,
+        target_peer, is_invisible, db_path, db_passphrase, false, Some(room_code),
     );
 }
 
@@ -975,7 +1476,7 @@ pub(crate) fn send_own_profile_full_to_peer(
 ) {
     send_own_profile_inner(
         ws_cmd_tx, ws_room_peers, local_peer_str, master_keypair, device_peer_id,
-        target_peer, is_invisible, db_path, db_passphrase, true,
+        target_peer, is_invisible, db_path, db_passphrase, true, None,
     );
 }
 
@@ -991,6 +1492,9 @@ fn send_own_profile_inner(
     db_path: &str,
     db_passphrase: &str,
     include_blobs: bool,
+    // Some(room) = address the announce into THAT room (so an offline recipient
+    // gets it buffered); None = today's reachable-peer lookup.
+    room_code: Option<&str>,
 ) {
     if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
         // CRITICAL (presence collapse): ALWAYS attach + send the device list, even
@@ -1059,7 +1563,10 @@ fn send_own_profile_inner(
             banner_anim: Some(banner_anim),
             profile_sig, profile_pk,
         };
-        send_message_to_peer(ws_cmd_tx, ws_room_peers, target_peer, msg);
+        match room_code {
+            Some(room) => send_message_to_peer_in_room(ws_cmd_tx, room, target_peer, msg),
+            None => send_message_to_peer(ws_cmd_tx, ws_room_peers, target_peer, msg),
+        }
     }
 }
 

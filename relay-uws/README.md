@@ -44,6 +44,7 @@ Key: `SSL_MODE_RELEASE_BUFFERS` frees OpenSSL's 16 KB read/write buffers between
 - **Backpressure handling** — 64 MB hard ceiling (`.maxBackpressure`). No soft cap or message dropping — removed because it silently broke CRDT sync. Dead connections are caught by the hard limit. Clients auto-resync via CRDT/gossip if messages are lost.
 - **Payload limits** — 64 MB max payload (`maxPayloadLength`). Text frame 1 MB size cap. Per-peer room cap (10,000 rooms). No binary rate limiting — authenticated peers are trusted; Ed25519 auth + license key revocation is the DoS defense model.
 - **Room membership enforcement** — peers cannot send to rooms they haven't joined.
+- **Inbox mailbox ownership proof**: a friend request for an offline stranger is buffered under their MASTER id, which no socket ever authenticates as. A device reads that mailbox only by carrying its master-signed device list as `inbox_proof` on the `inbox:{master}` join. Four things must all hold: the signature verifies, the public key derives to the claimed master id, the joining device is still listed and not revoked, and the room is that master's own inbox. A failed proof replays nothing and answers nothing. A read never consumes the mailbox, so every sibling device collects the request once, and the relay records nothing about who deposited or read what.
 - TURN credentials are time-limited (1 hour TTL) and derived from an environment variable (`TURN_SECRET`), never hardcoded.
 
 ## Building

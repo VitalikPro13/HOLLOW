@@ -648,6 +648,21 @@ class _PendingRow extends ConsumerWidget {
                     style: HollowTypography.bodySmall.copyWith(
                       color: hollow.textSecondary,
                     )),
+                // Reassure the sender that a pending outgoing request survives
+                // both people being offline — it waits in the recipient's
+                // mailbox and lands on their next boot (async friending).
+                if (!isIncoming)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 2),
+                    child: Text(
+                      "They'll get this the next time they're online, "
+                      "even if you've gone offline by then.",
+                      style: HollowTypography.caption.copyWith(
+                        color: hollow.textSecondary,
+                        height: 1.3,
+                      ),
+                    ),
+                  ),
               ],
             ),
           ),

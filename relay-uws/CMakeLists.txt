@@ -20,6 +20,7 @@ target_include_directories(uSockets PUBLIC uSockets/src)
 add_executable(hollow-relay
     src/main.cpp
     src/crypto.cpp
+    src/device_list.cpp
     src/license.cpp
     src/reports.cpp
     src/http_handlers.cpp

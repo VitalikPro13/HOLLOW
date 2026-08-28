@@ -603,6 +603,140 @@ pub(crate) fn key_exchange_device_unauthorized(sender_device: &str) -> bool {
         .any(|d| d == sender_device)
 }
 
+// -- Carried Olm key exchange (async friending) --
+
+/// How long a bundle CARRIED inside a friend request stays usable.
+///
+/// Deliberately NOT [`KEY_EXCHANGE_SKEW_SECS`]: that 300s rule guards a LIVE
+/// bundle, which is a round trip between two co-present devices and has no
+/// business surviving a rotation. A carried bundle has the opposite job. It sits
+/// in the relay's mailbox until the recipient next boots, which for the whole
+/// point of async friending may be days later, so a clock-tight rule would make
+/// the feature impossible. What stops a replay here is that the one-time key is
+/// single-use: the second use of the same bundle builds nothing.
+///
+/// The two rules stay in SEPARATE functions on purpose. Loosening the live path
+/// to serve this one would have widened the live replay window for every peer.
+pub(crate) const MAX_CARRIED_BUNDLE_AGE_SECS: i64 = 7 * 24 * 3600;
+
+/// Canonical payload for signing a [`CarriedBundle`].
+///
+/// Format:
+/// "hollow-carried-keybundle:{sender_device}:{recipient_master}:{identity_key}:{one_time_key}:{ts}"
+///
+/// The PREFIX differs from [`key_bundle_signing_payload`] and the third segment
+/// names a MASTER rather than a device, so a carried bundle can never verify as a
+/// live one (or the reverse) even if an attacker reflects the bytes: the two
+/// domains produce different signed messages for the same key material.
+pub(crate) fn carried_bundle_signing_payload(
+    sender_device: &str,
+    recipient_master: &str,
+    identity_key: &str,
+    one_time_key: &str,
+    ts: i64,
+) -> String {
+    format!(
+        "hollow-carried-keybundle:{sender_device}:{recipient_master}:{identity_key}:{one_time_key}:{ts}"
+    )
+}
+
+/// Build a DEVICE-signed [`CarriedBundle`] addressed to a recipient MASTER.
+/// Mirrors [`signed_key_bundle`], but for the carried domain.
+pub(crate) fn signed_carried_bundle(
+    device_keypair: &crate::identity::native_identity::NativeKeypair,
+    device_peer_id: &str,
+    to_master: &str,
+    identity_key: String,
+    one_time_key: String,
+) -> CarriedBundle {
+    let ts = key_exchange_now();
+    let payload = carried_bundle_signing_payload(
+        device_peer_id, to_master, &identity_key, &one_time_key, ts,
+    );
+    let pub_b64 = base64::engine::general_purpose::STANDARD
+        .encode(device_keypair.public_key_protobuf());
+    let sig = device_keypair.sign(payload.as_bytes());
+    CarriedBundle {
+        identity_key,
+        one_time_key,
+        to_master: to_master.to_string(),
+        ts,
+        sig_b64: base64::engine::general_purpose::STANDARD.encode(sig),
+        device_pk_b64: pub_b64,
+    }
+}
+
+/// The sender DEVICE peer_id a [`CarriedBundle`] claims, derived from its own
+/// public key. `None` when the key does not decode to a peer_id at all.
+pub(crate) fn carried_bundle_sender_device(b: &CarriedBundle) -> Option<String> {
+    use base64::engine::general_purpose::STANDARD as B64;
+    use crate::identity::native_identity::NativeKeypair;
+    let pk_bytes = B64.decode(&b.device_pk_b64).ok()?;
+    NativeKeypair::peer_id_from_pubkey_protobuf(&pk_bytes)
+}
+
+/// Verify a [`CarriedBundle`] that arrived inside a friend request.
+///
+/// REJECTS (returns false); never logs-and-continues. Gate order mirrors the live
+/// path (`verify_key_exchange` + `key_exchange_device_unauthorized`):
+/// 1. the signature verifies under `device_pk_b64` over the CARRIED payload, and
+///    the key derives to the device the payload names (so a valid signature can
+///    never be re-paired with substituted Olm keys);
+/// 2. the sender's own device list is master-signed and genuinely lists that
+///    device, un-revoked (a signature alone proves only that SOME device signed);
+/// 3. the bundle is addressed to OUR master (blocks reflecting a bundle at a
+///    third party);
+/// 4. freshness, by the CARRIED rule: at most `MAX_CARRIED_BUNDLE_AGE_SECS` old,
+///    and never from further than `KEY_EXCHANGE_SKEW_SECS` in the future.
+pub(crate) fn verify_carried_bundle(
+    our_master: &str,
+    sender_device_list: &SignedDeviceList,
+    b: &CarriedBundle,
+) -> bool {
+    // 1. Signature, bound to the device its own public key derives to.
+    let Some(sender_device) = carried_bundle_sender_device(b) else {
+        return false;
+    };
+    let payload = carried_bundle_signing_payload(
+        &sender_device, &b.to_master, &b.identity_key, &b.one_time_key, b.ts,
+    );
+    if !verify_message_signature(
+        &sender_device,
+        Some(b.sig_b64.as_str()),
+        Some(b.device_pk_b64.as_str()),
+        &payload,
+    ) {
+        return false;
+    }
+
+    // 2. That device must speak for the master the list claims.
+    if !verify_device_list(sender_device_list) {
+        return false;
+    }
+    if sender_device_list.revoked.iter().any(|r| r == &sender_device) {
+        return false;
+    }
+    if !sender_device_list.devices.iter().any(|d| d == &sender_device) {
+        return false;
+    }
+
+    // 3. Addressed to US (our MASTER, not a device).
+    if b.to_master != our_master {
+        return false;
+    }
+
+    // 4. Freshness — the CARRIED rule, not the live one.
+    let now = key_exchange_now();
+    if now - b.ts > MAX_CARRIED_BUNDLE_AGE_SECS {
+        return false;
+    }
+    if b.ts - now > KEY_EXCHANGE_SKEW_SECS {
+        return false;
+    }
+
+    true
+}
+
 // -- Multi-device signed device list (Phase 6) --
 
 /// Canonical payload for signing a device list.
@@ -4316,6 +4450,261 @@ mod tests {
             ),
             BackfillSig::Forged,
             "order_us tamper on a synced item must be rejected",
+        );
+    }
+
+    // -- Async friending: carried bundle + the shared SignedDeviceList KAT -----
+
+    /// Cross-agent KAT. The relay's C++ ownership check has to rebuild EXACTLY
+    /// these bytes to verify an `inbox_proof`, so the vector is pinned here and
+    /// mirrored there. Run with `--nocapture` to print the whole vector.
+    #[test]
+    fn signed_device_list_kat_vector() {
+        // FIXED seeds - the whole point is reproducibility across languages.
+        let master = kp(0x7a);
+        let device_a = kp(0x1b).peer_id();
+        let device_b = kp(0x2c).peer_id();
+
+        let mut devices = vec![device_a.clone(), device_b.clone()];
+        devices.sort();
+        let revoked = vec![kp(0x3d).peer_id()];
+        let list = build_signed_device_list(&master, 3, devices.clone(), revoked.clone());
+
+        let payload = device_list_signing_payload(
+            &list.master_peer_id, list.version, &list.devices, &list.revoked,
+        );
+
+        println!("--- SignedDeviceList KAT (master seed = 0x7a repeated 32x) ---");
+        println!("master_peer_id     = {}", list.master_peer_id);
+        println!("master_pubkey_b64  = {}", list.master_pubkey_b64);
+        println!("devices            = {:?}", list.devices);
+        println!("revoked            = {:?}", list.revoked);
+        println!("version            = {}", list.version);
+        println!("signed_payload     = {payload}");
+        println!("sig_b64            = {}", list.sig_b64);
+        println!("json               = {}", serde_json::to_string(&list).unwrap());
+        println!("--- end KAT ---");
+
+        assert!(verify_device_list(&list), "the KAT vector must verify");
+
+        // The exact bytes the C++ side must rebuild.
+        assert_eq!(
+            payload,
+            format!(
+                "hollow-devices:{}:3:{}:{}",
+                list.master_peer_id,
+                list.devices.join(","),
+                list.revoked.join(","),
+            ),
+        );
+
+        // A reordered devices array must NOT change the verdict (both sides sort
+        // before rebuilding), while a MEMBERSHIP change must break it.
+        let mut reordered = list.clone();
+        reordered.devices.reverse();
+        assert!(verify_device_list(&reordered), "sorting is part of the payload rule");
+        let mut tampered = list.clone();
+        tampered.devices.push(kp(0x4e).peer_id());
+        assert!(!verify_device_list(&tampered), "an added device must break the signature");
+        let mut unrevoked = list.clone();
+        unrevoked.revoked.clear();
+        assert!(!verify_device_list(&unrevoked), "stripping a tombstone must break the signature");
+    }
+
+    /// The two new `FriendRequest` fields must be invisible to a peer that has
+    /// never heard of them, and `FriendAccept` must stay byte-identical. Getting
+    /// this wrong does not fail loudly: an old client simply stops being able to
+    /// accept anyone.
+    #[test]
+    fn friend_request_wire_stays_backward_compatible() {
+        // A request with no bundle serializes exactly as it always did.
+        let bare = HavenMessage::FriendRequest {
+            requested_at: 1234,
+            carried_bundle: None,
+            device_list: None,
+            carried_profile: None,
+        };
+        let json = serde_json::to_string(&bare).unwrap();
+        assert_eq!(json, r#"{"type":"friend_request","requested_at":1234}"#);
+
+        // And an OLD peer's request still parses here, with the new fields absent.
+        let old_wire = r#"{"type":"friend_request","requested_at":99}"#;
+        match serde_json::from_str::<HavenMessage>(old_wire).unwrap() {
+            HavenMessage::FriendRequest { requested_at, carried_bundle, device_list, carried_profile } => {
+                assert_eq!(requested_at, 99);
+                assert!(carried_bundle.is_none(), "no bundle means fall back to lazy key exchange");
+                assert!(device_list.is_none());
+                assert!(carried_profile.is_none(), "old wire carries no profile");
+            }
+            other => panic!("expected FriendRequest, got {other:?}"),
+        }
+
+        // FriendAccept stays a UNIT variant. Turning it into a struct would change
+        // the wire shape and an old client's bare accept would stop parsing.
+        assert_eq!(
+            serde_json::to_string(&HavenMessage::FriendAccept).unwrap(),
+            r#"{"type":"friend_accept"}"#,
+        );
+        assert!(matches!(
+            serde_json::from_str::<HavenMessage>(r#"{"type":"friend_accept"}"#).unwrap(),
+            HavenMessage::FriendAccept,
+        ));
+
+        // A NEW request round-trips its bundle intact.
+        let device = kp(0x1b);
+        let bundle = signed_carried_bundle(
+            &device, &device.peer_id(), "master-x", "ik".into(), "otk".into(),
+        );
+        let list = build_signed_device_list(&kp(0x7a), 1, vec![device.peer_id()], Vec::new());
+        let full = HavenMessage::FriendRequest {
+            requested_at: 7,
+            carried_bundle: Some(bundle.clone()),
+            device_list: Some(list),
+            carried_profile: None,
+        };
+        let wire = serde_json::to_string(&full).unwrap();
+        match serde_json::from_str::<HavenMessage>(&wire).unwrap() {
+            HavenMessage::FriendRequest { carried_bundle: Some(b), device_list: Some(_), .. } => {
+                assert_eq!(b.one_time_key, bundle.one_time_key);
+                assert_eq!(b.sig_b64, bundle.sig_b64);
+            }
+            other => panic!("expected a bundled FriendRequest, got {other:?}"),
+        }
+    }
+
+    /// The carried payload is pure signature math (no clock), so it pins exactly.
+    #[test]
+    fn carried_bundle_signing_payload_kat() {
+        let device = kp(0x1b);
+        let device_id = device.peer_id();
+        let recipient_master = kp(0x7a).peer_id();
+        let ts = 1_700_000_000i64;
+        let payload = carried_bundle_signing_payload(
+            &device_id, &recipient_master, "IDENTITYKEY", "ONETIMEKEY", ts,
+        );
+        println!("--- CarriedBundle payload KAT ---");
+        println!("sender_device      = {device_id}");
+        println!("recipient_master   = {recipient_master}");
+        println!("signed_payload     = {payload}");
+        println!(
+            "sig_b64            = {}",
+            base64::engine::general_purpose::STANDARD.encode(device.sign(payload.as_bytes())),
+        );
+        println!("--- end KAT ---");
+
+        assert_eq!(
+            payload,
+            format!("hollow-carried-keybundle:{device_id}:{recipient_master}:IDENTITYKEY:ONETIMEKEY:{ts}"),
+        );
+        // DOMAIN SEPARATION: the live payload for the same material must differ,
+        // so a carried bundle can never be reflected as a live one.
+        let live = key_bundle_signing_payload(
+            &device_id, &recipient_master, "IDENTITYKEY", "ONETIMEKEY", ts,
+        );
+        assert_ne!(payload, live);
+        assert!(payload.starts_with("hollow-carried-keybundle:"));
+        assert!(live.starts_with("hollow-keybundle:"));
+    }
+
+    /// A valid carried bundle verifies; every tamper is REJECTED (never logged
+    /// and continued). One assert per gate, in the order the function checks them.
+    #[test]
+    fn verify_carried_bundle_accepts_valid_and_rejects_tampered() {
+        let sender_master = kp(0x51);
+        let sender_device = kp(0x52);
+        let sender_device_id = sender_device.peer_id();
+        let our_master = kp(0x53).peer_id();
+
+        let list = build_signed_device_list(
+            &sender_master, 1, vec![sender_device_id.clone()], Vec::new(),
+        );
+        let good = signed_carried_bundle(
+            &sender_device, &sender_device_id, &our_master,
+            "aWRlbnRpdHk".to_string(), "b25ldGltZQ".to_string(),
+        );
+        assert!(verify_carried_bundle(&our_master, &list, &good), "a freshly built bundle must verify");
+        assert_eq!(
+            carried_bundle_sender_device(&good).as_deref(),
+            Some(sender_device_id.as_str()),
+        );
+
+        // 1. Signature gates: swapped keys, cleared signature, moved timestamp.
+        let mut swapped = good.clone();
+        swapped.one_time_key = "b3RoZXI".to_string();
+        assert!(!verify_carried_bundle(&our_master, &list, &swapped), "substituted one-time key");
+        let mut swapped_ik = good.clone();
+        swapped_ik.identity_key = "b3RoZXI".to_string();
+        assert!(!verify_carried_bundle(&our_master, &list, &swapped_ik), "substituted identity key");
+        let mut unsigned = good.clone();
+        unsigned.sig_b64 = String::new();
+        assert!(!verify_carried_bundle(&our_master, &list, &unsigned), "a missing signature is a REJECT, never a bypass");
+        let mut ts_moved = good.clone();
+        ts_moved.ts += 1;
+        assert!(!verify_carried_bundle(&our_master, &list, &ts_moved), "ts is signed");
+
+        // 2. The signing device must be in the sender's master-signed list.
+        let stranger = kp(0x54);
+        let stranger_id = stranger.peer_id();
+        let stranger_bundle = signed_carried_bundle(
+            &stranger, &stranger_id, &our_master,
+            "aWRlbnRpdHk".to_string(), "b25ldGltZQ".to_string(),
+        );
+        assert!(
+            !verify_carried_bundle(&our_master, &list, &stranger_bundle),
+            "a device outside the signed list must be refused even with a valid signature",
+        );
+        let revoked_list = build_signed_device_list(
+            &sender_master, 2, vec![sender_device_id.clone()], vec![sender_device_id.clone()],
+        );
+        assert!(
+            !verify_carried_bundle(&our_master, &revoked_list, &good),
+            "a REVOKED device must be refused",
+        );
+        let mut forged_list = list.clone();
+        forged_list.version = 99;
+        assert!(
+            !verify_carried_bundle(&our_master, &forged_list, &good),
+            "a device list whose own signature does not verify must be refused",
+        );
+
+        // 3. Addressed to US.
+        let elsewhere = signed_carried_bundle(
+            &sender_device, &sender_device_id, &kp(0x55).peer_id(),
+            "aWRlbnRpdHk".to_string(), "b25ldGltZQ".to_string(),
+        );
+        assert!(
+            !verify_carried_bundle(&our_master, &list, &elsewhere),
+            "a bundle addressed at a third party must not verify here",
+        );
+
+        // 4. Freshness, by the CARRIED rule.
+        let sign_at = |ts: i64| {
+            let payload = carried_bundle_signing_payload(
+                &sender_device_id, &our_master, "aWRlbnRpdHk", "b25ldGltZQ", ts,
+            );
+            CarriedBundle {
+                identity_key: "aWRlbnRpdHk".to_string(),
+                one_time_key: "b25ldGltZQ".to_string(),
+                to_master: our_master.clone(),
+                ts,
+                sig_b64: base64::engine::general_purpose::STANDARD
+                    .encode(sender_device.sign(payload.as_bytes())),
+                device_pk_b64: base64::engine::general_purpose::STANDARD
+                    .encode(sender_device.public_key_protobuf()),
+            }
+        };
+        let now = key_exchange_now();
+        assert!(
+            verify_carried_bundle(&our_master, &list, &sign_at(now - 3 * 24 * 3600)),
+            "three days old is well inside the carried window",
+        );
+        assert!(
+            !verify_carried_bundle(&our_master, &list, &sign_at(now - MAX_CARRIED_BUNDLE_AGE_SECS - 60)),
+            "past the carried window is a REJECT",
+        );
+        assert!(
+            !verify_carried_bundle(&our_master, &list, &sign_at(now + KEY_EXCHANGE_SKEW_SECS + 60)),
+            "a bundle from the future is a REJECT",
         );
     }
 }

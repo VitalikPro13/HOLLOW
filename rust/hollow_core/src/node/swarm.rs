@@ -2032,10 +2032,12 @@ async fn run_event_loop(
 
                     NodeCommand::SendFriendRequest { peer_id: peer_id_str } => {
                         social::handle_send_friend_request(
+                            &mut olm, &crypto_store,
                             &event_tx, &ws_cmd_tx, &ws_room_peers,
                             &mut pending_friend_requests,
                             &mut pending_friend_removals,
-                            &local_peer_str, peer_id_str,
+                            &local_peer_str, &master_keypair, &device_keypair, &device_peer_id,
+                            peer_id_str,
                             &db_path, &db_passphrase,
                         ).await;
                     }
@@ -2124,6 +2126,7 @@ async fn run_event_loop(
 
                     NodeCommand::AcceptFriendRequest { peer_id: peer_id_str } => {
                         social::handle_accept_friend_request(
+                            &mut olm, &crypto_store,
                             &event_tx, &ws_cmd_tx, &ws_room_peers,
                             &local_peer_str, &master_keypair, &device_peer_id, is_invisible,
                             peer_id_str,
@@ -2935,10 +2938,59 @@ async fn run_event_loop(
                         // (media legs survive the signaling blip).
                         #[cfg(all(feature = "forwarder", not(any(target_os = "android", target_os = "ios"))))]
                         embedded_fwd.on_ws_connected(&ws_cmd_tx);
-                        // Join personal inbox room (for receiving friend requests from strangers).
-                        let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinRoom {
-                            room_code: format!("inbox:{}", local_peer_str),
-                        });
+                        // Join personal inbox room (for receiving friend requests
+                        // from strangers). Carry an ownership PROOF: a request for
+                        // an offline stranger is addressed to their MASTER, which
+                        // no socket authenticates as, so the relay buffers it under
+                        // the master and only replays it to a device that proves it
+                        // owns that inbox. Without the proof this join still works
+                        // exactly as before, it just collects nothing from the
+                        // mailbox — which is the pre-async-friending behaviour.
+                        {
+                            let inbox_room = format!("inbox:{}", local_peer_str);
+                            match crypto_handler::build_local_device_list(
+                                &master_keypair, &device_peer_id, &db_path, &db_passphrase,
+                            ) {
+                                Some(proof) => {
+                                    let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinInbox {
+                                        room_code: inbox_room,
+                                        proof,
+                                    });
+                                }
+                                None => {
+                                    let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinRoom {
+                                        room_code: inbox_room,
+                                    });
+                                }
+                            }
+                        }
+                        // ASYNC FRIENDING: re-deposit every still-pending outgoing
+                        // request into the target's master-keyed mailbox. A target we
+                        // have no DEVICE for is unreachable by any targeted send, so
+                        // the presence drains never fire for them — the mailbox is
+                        // the only leg that reaches someone who is simply not here.
+                        // Re-depositing every connect is cheap and idempotent (the
+                        // receiver dedups on its friends row) and it is what makes
+                        // the request survive a relay restart clearing the buffer.
+                        {
+                            let targets: Vec<(String, i64)> = pending_friend_requests
+                                .iter()
+                                .map(|(k, v)| (k.clone(), *v))
+                                .collect();
+                            for (target, requested_at) in targets {
+                                let target_master = super::resolver::resolve(&target);
+                                let msg = social::build_friend_request(
+                                    &mut olm, &crypto_store, &master_keypair,
+                                    &device_keypair, &device_peer_id,
+                                    &target_master, requested_at,
+                                    &db_path, &db_passphrase,
+                                );
+                                social::deposit_friend_request_to_inbox(
+                                    &ws_cmd_tx, &target_master, &msg,
+                                );
+                            }
+                        }
+
                         // Auto-join rooms for all servers we're a member of.
                         for server_id in server_states.keys() {
                             let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinRoom {
@@ -3235,9 +3287,19 @@ async fn run_event_loop(
                                 if let Some(target_key) = pending_target {
                                     if let Some(requested_at) = pending_friend_requests.remove(&target_key) {
                                         hollow_log!("[HOLLOW-FRIENDS] Peer {peer_id} appeared (target {target_key}), sending queued friend request");
+                                        // Same bundled message the mailbox holds:
+                                        // `build_friend_request` reuses the cached
+                                        // bundle, so a live drain and a deposit are
+                                        // the same request and the target dedups.
+                                        let req_msg = social::build_friend_request(
+                                            &mut olm, &crypto_store, &master_keypair,
+                                            &device_keypair, &device_peer_id,
+                                            &super::resolver::resolve(&target_key), requested_at,
+                                            &db_path, &db_passphrase,
+                                        );
                                         send_message_to_peer(
                                             &ws_cmd_tx, &ws_room_peers,
-                                            &peer_id, HavenMessage::FriendRequest { requested_at },
+                                            &peer_id, req_msg,
                                         );
                                         // Defense in depth: leave the target's inbox now that the
                                         // request is delivered (ordered after the send). Accept comes
@@ -4113,9 +4175,15 @@ async fn run_event_loop(
                                     if let Some(target_key) = req_key {
                                         if let Some(requested_at) = pending_friend_requests.remove(&target_key) {
                                             hollow_log!("[HOLLOW-FRIENDS] Peer {pid_str} appeared in RoomMembers (target {target_key}), sending queued friend request");
+                                            let req_msg = social::build_friend_request(
+                                                &mut olm, &crypto_store, &master_keypair,
+                                                &device_keypair, &device_peer_id,
+                                                &super::resolver::resolve(&target_key), requested_at,
+                                                &db_path, &db_passphrase,
+                                            );
                                             send_message_to_peer(
                                                 &ws_cmd_tx, &ws_room_peers,
-                                                pid_str, HavenMessage::FriendRequest { requested_at },
+                                                pid_str, req_msg,
                                             );
                                             let _ = ws_cmd_tx.send(super::ws_client::WsCommand::LeaveRoom {
                                                 room_code: format!("inbox:{}", target_key),
@@ -4321,10 +4389,12 @@ async fn run_event_loop(
                                 super::resolver::resolve(&peer_id)
                             };
                             social::handle_send_friend_request(
+                                &mut olm, &crypto_store,
                                 &event_tx, &ws_cmd_tx, &ws_room_peers,
                                 &mut pending_friend_requests,
                                 &mut pending_friend_removals,
-                                &local_peer_str, target,
+                                &local_peer_str, &master_keypair, &device_keypair, &device_peer_id,
+                                target,
                                 &db_path, &db_passphrase,
                             ).await;
                         }
@@ -6394,6 +6464,17 @@ async fn handle_incoming_request(
 
             // Detect message envelope and route accordingly.
             let text = String::from_utf8_lossy(&plaintext).to_string();
+
+            // ASYNC FRIENDING: the accepter's ONE pre-key establisher. Its whole job
+            // was done by the decrypt above, which created our inbound session with
+            // them. It is control traffic, so it stops here — checked BEFORE the
+            // envelope parse because it is deliberately not JSON, and the parse
+            // failure path renders unknown plaintext as a legacy raw-text DM bubble.
+            if text == social::FRIEND_HANDSHAKE_SENTINEL {
+                hollow_log!("[HOLLOW-FRIENDS] Friend-handshake establisher from {peer_str} — Olm session live, no DM row");
+                return;
+            }
+
             match serde_json::from_str::<MessageEnvelope>(&text) {
                 Ok(MessageEnvelope::ChannelMessage { inner }) => {
                     let ChannelMessagePayload { sid, cid, text: msg_text, ts, sig, pk, mid, reply_to, file_id, link_preview, order_us } = *inner;
@@ -11696,7 +11777,7 @@ async fn handle_incoming_request(
 
         // -- Profile sync (Phase 3.5) --
 
-        HavenMessage::FriendRequest { requested_at } => {
+        HavenMessage::FriendRequest { requested_at, carried_bundle, device_list, carried_profile } => {
 
             // A friend request whose sender resolves to our own identity is one of
             // our own devices (multi-device: same master identity). Never render it
@@ -11708,14 +11789,135 @@ async fn handle_incoming_request(
 
             // BLOCK GUARD: a blocked identity's friend request is dropped
             // outright — no pending row, no room join, no event/notification.
-            // This is the anti-spam surface blocking exists for.
+            // This is the anti-spam surface blocking exists for. It runs BEFORE
+            // any device-list ingest or bundle work, so a request replayed out of
+            // the relay mailbox is dropped on exactly the same terms as a live one.
             if super::blocklist::is_blocked(peer_str) {
                 return;
             }
 
             hollow_log!("[HOLLOW-FRIENDS] Friend request from {peer_str}");
 
+            // ASYNC FRIENDING: the request may carry the sender's master-signed
+            // device list. Ingest it FIRST. A stranger reaching us out of the
+            // mailbox has never sent us a ProfileUpdate, so without this our
+            // resolver is cold for them: the friends row keys under their DEVICE
+            // id and `dm_room_code` computes a room they are not in, so our accept
+            // is addressed nowhere. `ingest_device_list` applies the same
+            // signature + version-monotonicity + revocation gates it applies to a
+            // ProfileUpdate-carried list, so this adds a transport, not a trust
+            // level. A list claiming OUR master routes to the sibling merge, which
+            // refuses anything not signed by our own master key.
+            if device_list.is_some() {
+                let _ = crypto_handler::ingest_device_list(
+                    event_tx, master_peer_str, device_peer_id, master_keypair,
+                    peer_str, ws_cmd_tx, ws_room_peers,
+                    device_list.clone(), db_path, db_passphrase,
+                ).await;
+            }
+
             let req_master_early = super::resolver::resolve(&peer_str);
+
+            // Verify + persist the carried prekey bundle, so ACCEPT (which may be a
+            // reboot away) can build the Olm session with the requester long gone.
+            // REJECT on any failure — an unverifiable bundle simply is not stored,
+            // and the friendship falls back to today's lazy co-presence re-key.
+            if let (Some(bundle), Some(list)) = (carried_bundle.as_ref(), device_list.as_ref()) {
+                if crypto_handler::verify_carried_bundle(master_peer_str, list, bundle) {
+                    let record = social::CarriedRequestRecord {
+                        bundle: bundle.clone(),
+                        device_list: list.clone(),
+                        // Was the requester actually HERE when this landed? A live
+                        // frame only reaches us because its sender shares a room
+                        // with us, so room membership at receipt is the honest test.
+                        // A mailbox replay of an absent sender fails it, which is
+                        // exactly the case the carried bundle exists to serve.
+                        live_at_receipt: crypto_handler::ws_room_for_peer(
+                            ws_room_peers, peer_str,
+                        ).is_some(),
+                    };
+                    // Key by the SIGNED list's master, not the resolver: the list is
+                    // the authenticated statement of who this device speaks for.
+                    let key = social::in_bundle_key(&list.master_peer_id);
+                    if let (Ok(store), Ok(json)) = (
+                        crate::storage::MessageStore::open(db_path, db_passphrase),
+                        serde_json::to_string(&record),
+                    ) {
+                        let _ = store.save_setting(&key, &json);
+                    }
+                    hollow_log!("[HOLLOW-FRIENDS] Stored verified carried bundle from {peer_str} (master {})", list.master_peer_id);
+                } else {
+                    hollow_log!("[HOLLOW-SECURITY] REJECTED carried bundle in friend request from {peer_str} — verification FAILED");
+                }
+            }
+
+            // ANTI-DOWNGRADE / DEDUP guard (async friending). The relay inbox
+            // mailbox is TTL-only: it re-delivers the ORIGINAL buffered request to
+            // a device on EVERY `inbox:` join — by design, so every sibling device
+            // collects it. Without this guard a re-delivery UNDOES settled state:
+            // an accepter who already accepted, then reboots, has the mailbox
+            // replay the original request, and the save below would DOWNGRADE the
+            // "accepted" row back to "pending incoming" and re-emit
+            // `FriendRequestReceived` — the field symptom where the DM vanishes
+            // from Recent Conversations and the person reappears as an Incoming
+            // request. We read the existing row and refuse to let a stale replay
+            // walk a friendship backwards. Placed AFTER the carried-bundle store (a
+            // half-formed friendship may still want its bundle refreshed) and
+            // BEFORE `is_mutual` (a live outgoing request must still auto-accept).
+            {
+                let existing = crate::storage::MessageStore::open(db_path, db_passphrase)
+                    .ok()
+                    .and_then(|s| s.get_friend_row(&req_master_early).ok().flatten());
+                match existing.as_ref().map(|(s, d, r)| (s.as_str(), d.as_str(), *r)) {
+                    // Already friends — a re-delivered replay of a friendship we
+                    // already hold. Do NOT save (no downgrade), do NOT emit, do NOT
+                    // re-join/re-push. The friendship is settled.
+                    Some(("accepted", _, _)) => {
+                        hollow_log!("[HOLLOW-FRIENDS] Re-delivered request from {peer_str} — already accepted, ignoring");
+                        return;
+                    }
+                    // The user already refused this person; the TTL-only mailbox is
+                    // merely replaying the SAME (or older) request. Do not resurrect
+                    // it as fresh. A strictly NEWER requested_at (a genuine cancel +
+                    // re-add) falls through and shows again, exactly like the
+                    // pending-incoming arm.
+                    Some(("declined", _, stored_req)) if requested_at <= stored_req => {
+                        hollow_log!("[HOLLOW-FRIENDS] Re-delivered request from {peer_str} (requested_at {requested_at} <= stored {stored_req}) — already declined, ignoring");
+                        return;
+                    }
+                    // A duplicate delivery of a request we already SHOW. Re-emitting
+                    // would spam the notification for a row already on screen. Only
+                    // a strictly NEWER `requested_at` is a genuine re-request (e.g.
+                    // a cancel + re-add) and falls through to refresh.
+                    Some(("pending", "incoming", stored_req)) if requested_at <= stored_req => {
+                        hollow_log!("[HOLLOW-FRIENDS] Duplicate incoming request from {peer_str} (requested_at {requested_at} <= stored {stored_req}) — already shown, ignoring");
+                        return;
+                    }
+                    // pending/outgoing → the `is_mutual` path below auto-accepts.
+                    // pending/incoming OR declined with a strictly NEWER
+                    // requested_at, "removed", or no row → fall through to the
+                    // normal new-request path (a genuine new/re-request must show).
+                    _ => {}
+                }
+            }
+
+            // FIX B (carried profile): a stranger's request holds no profile in our
+            // DB — the sender is often gone before it can push one — so the incoming
+            // card would render a raw peer id. If the request carried the sender's
+            // OWN master-signed profile, verify it (same rule as a ProfileRelay) and
+            // store it under the sender's master BEFORE we emit
+            // `FriendRequestReceived`, so the card and friend row render the name +
+            // avatar hash immediately. A bad/absent signature drops JUST the profile
+            // and keeps the request; over-long fields are rejected, not truncated.
+            if let Some(profile) = carried_profile.as_ref() {
+                if let Some(stored_master) = social::store_carried_profile(
+                    profile, &req_master_early, db_path, db_passphrase,
+                ) {
+                    let _ = event_tx.send(NetworkEvent::ProfileUpdated {
+                        peer_id: stored_master,
+                    }).await;
+                }
+            }
 
             // MUTUAL request → auto-converge to friends. If our OWN outgoing request
             // to this person is still live (a queued outbound request in
@@ -11752,6 +11954,7 @@ async fn handle_incoming_request(
                 pending_friend_removals.remove(&req_master_early);
                 pending_friend_removals.remove(peer_str);
                 social::handle_accept_friend_request(
+                    olm, crypto_store,
                     event_tx, ws_cmd_tx, ws_room_peers,
                     local_peer_str, master_keypair, device_peer_id, is_invisible,
                     peer_str.to_string(),
@@ -11875,6 +12078,19 @@ async fn handle_incoming_request(
                         let _ = store.remove_friend(&peer_str);
                     }
                 }
+            }
+
+            // Stop RE-DEPOSITING this request. Our outgoing request may still sit in
+            // `pending_friend_requests`, which the reconnect handler re-deposits into
+            // the target's TTL-only mailbox on every connect — that would perpetually
+            // refresh a request they just declined. Clear the in-memory queue (and any
+            // queued accept) under both keys; the persisted pending-outgoing row is
+            // deleted above. Mirrors the FriendRemove handler below.
+            pending_friend_requests.remove(&master);
+            pending_friend_accepts.remove(&master);
+            if master != peer_str {
+                pending_friend_requests.remove(peer_str);
+                pending_friend_accepts.remove(peer_str);
             }
 
             let _ = event_tx.send(NetworkEvent::FriendRequestRejected {
@@ -12741,10 +12957,14 @@ async fn handle_incoming_request(
                     hollow_log!(
                         "[HOLLOW-FRIENDS] Learned {peer_str}→master {sender_master} — draining queued friend request"
                     );
+                    let req_msg = social::build_friend_request(
+                        olm, crypto_store, master_keypair, device_keypair, device_peer_id,
+                        &sender_master, requested_at, db_path, db_passphrase,
+                    );
                     for t in &social::friend_device_targets(ws_room_peers, peer_str, &sender_master) {
                         send_message_to_peer(
                             ws_cmd_tx, ws_room_peers,
-                            t, HavenMessage::FriendRequest { requested_at },
+                            t, req_msg.clone(),
                         );
                     }
                     // Leave the target's inbox now the request is delivered (the
