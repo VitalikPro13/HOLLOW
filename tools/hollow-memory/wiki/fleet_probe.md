@@ -117,6 +117,24 @@ shell, and every onboarding step would fail looking for a screen already behind 
 stamps a fixture if onboarding finished: a half-onboarded directory looks like a fixture and fails
 every later run.
 
+### When a stable identity is the bug (`-Fresh` / `-KeepIdentities`)
+
+Stable identities are what makes a scenario cheap, and they are exactly wrong for the friend
+journeys. The relay buffers a friend request against `inbox:{master}` and replays it, TTL-only, for
+three days, so `fleet_friend_offline.ps1` and `fleet_friend_decline.ps1` run against a peer whose
+mailbox still holds their own earlier runs: a `wait_for` passes on yesterday's request, and
+"Incoming must be EMPTY" fails against a request nobody sent today.
+
+* **`fleet.ps1 -Onboard -Fresh -Peers a,b`** deletes `%TEMP%\hollow_fleet\fixtures\<peer>` before
+  onboarding, so the welcome flow mints a new mnemonic and a new master id, and the new identity's
+  mailbox is empty. `-Onboard` alone already starts from an empty data dir and so already mints new
+  keys; `-Fresh` throws the old fixture away first and makes the intent greppable. It is an error
+  without `-Onboard`.
+* **Both friend journeys default to fresh identities.** They call `Start-FreshFleet` in
+  `fleet_lib.ps1` (stop, `-Onboard -Fresh`, `-Live`, then print each peer's new peer id), so they
+  need no fleet up first and cost about a minute more. `-KeepIdentities` drives whatever fleet is
+  already live instead, for iterating on the journey rather than the behaviour.
+
 ## Scenario format
 
 A JSON object with `peers`, `steps` and `cleanup`; every step carries the `peer` that runs it

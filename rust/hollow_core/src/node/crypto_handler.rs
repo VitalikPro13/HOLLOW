@@ -4572,6 +4572,120 @@ mod tests {
         }
     }
 
+    /// `FriendReject` grew a `requested_at` so a stale or replayed decline can
+    /// never delete a NEWER request or an accepted friendship. The enum is
+    /// INTERNALLY tagged, which is what makes that safe in both directions: an
+    /// old client's bare `{"type":"friend_reject"}` parses here as
+    /// `requested_at = 0` ("decline whatever is pending"), and an old client
+    /// parsing our new frame drains the unknown key instead of failing. Getting
+    /// this wrong is silent: declines simply stop crossing a version boundary.
+    #[test]
+    fn friend_reject_wire_is_backward_compatible() {
+        // NEW -> wire: the stamp always rides (no skip_serializing_if), and a
+        // reject with no carried list is byte-for-byte what it was before the list
+        // existed. The exact string matters: an old client parses this shape.
+        assert_eq!(
+            serde_json::to_string(&HavenMessage::FriendReject {
+                requested_at: 5,
+                device_list: None,
+            }).unwrap(),
+            r#"{"type":"friend_reject","requested_at":5}"#,
+        );
+
+        // OLD wire -> NEW code: absent fields mean 0 and no list, i.e. the
+        // "decline whatever is pending" sentinel plus resolver-only attribution.
+        match serde_json::from_str::<HavenMessage>(r#"{"type":"friend_reject"}"#).unwrap() {
+            HavenMessage::FriendReject { requested_at, device_list } => {
+                assert_eq!(requested_at, 0);
+                assert!(device_list.is_none(), "old wire carries no device list");
+            }
+            other => panic!("expected FriendReject, got {other:?}"),
+        }
+
+        // A reject WITH a list round-trips it intact: this is the attribution the
+        // requester needs when it has never been online with the decliner.
+        let master = kp(0x5c);
+        let device = kp(0x5d).peer_id();
+        let list = build_signed_device_list(&master, 3, vec![device.clone()], Vec::new());
+        let carried = HavenMessage::FriendReject {
+            requested_at: 42,
+            device_list: Some(list.clone()),
+        };
+        let wire = serde_json::to_string(&carried).unwrap();
+        match serde_json::from_str::<HavenMessage>(&wire).unwrap() {
+            HavenMessage::FriendReject { requested_at, device_list: Some(got) } => {
+                assert_eq!(requested_at, 42);
+                assert_eq!(got.master_peer_id, master.peer_id());
+                assert_eq!(got.devices, vec![device.clone()]);
+                assert_eq!(got.sig_b64, list.sig_b64);
+                assert!(verify_device_list(&got), "the list must survive the wire verifiable");
+            }
+            other => panic!("expected a listed FriendReject, got {other:?}"),
+        }
+
+        // NEW wire -> OLD code, both shapes. A pre-2026-08-29 client models this as
+        // a UNIT variant; serde's internally-tagged unit visitor drains unknown map
+        // entries, INCLUDING a nested object, so neither the stamp nor the carried
+        // list can make an old client drop the decline. Mirror that client here
+        // rather than trusting the claim.
+        #[derive(serde::Deserialize)]
+        #[serde(tag = "type")]
+        enum OldWire {
+            #[serde(rename = "friend_reject")]
+            FriendReject,
+        }
+        for frame in [
+            serde_json::to_string(&HavenMessage::FriendReject {
+                requested_at: 1_700_000_000_000,
+                device_list: None,
+            }).unwrap(),
+            wire,
+        ] {
+            assert!(
+                matches!(
+                    serde_json::from_str::<OldWire>(&frame).unwrap(),
+                    OldWire::FriendReject,
+                ),
+                "an old client must still parse the new reject: {frame}",
+            );
+        }
+    }
+
+    /// The membership half of the reject's attribution gate, pinned next to the
+    /// signature math it rides on. `verify_device_list` proves a list was signed by
+    /// the master it names; it says NOTHING about which device delivered it, so the
+    /// FriendReject arm additionally requires the relay-authenticated sender to be
+    /// listed and un-revoked. Both halves are needed: a valid list captured off the
+    /// wire would otherwise let any device speak for that identity.
+    #[test]
+    fn carried_list_binds_the_sending_device() {
+        let master = kp(0x6a);
+        let mine = kp(0x6b).peer_id();
+        let stranger = kp(0x6c).peer_id();
+        let revoked_dev = kp(0x6d).peer_id();
+        let list = build_signed_device_list(
+            &master, 2, vec![mine.clone()], vec![revoked_dev.clone()],
+        );
+
+        assert!(verify_device_list(&list), "baseline: the list itself verifies");
+        assert!(list.devices.iter().any(|d| *d == mine), "the listed device is bound");
+        assert!(
+            !list.devices.iter().any(|d| *d == stranger),
+            "a device that is not in the list must not pass the sender check",
+        );
+        assert!(
+            list.revoked.iter().any(|r| *r == revoked_dev),
+            "a revoked device must not pass the sender check either",
+        );
+
+        // And a list signed by a DIFFERENT master cannot be re-labelled: the
+        // pubkey -> peer_id binding inside verify_device_list is what stops a
+        // captured list being replayed under someone else's identity.
+        let mut stolen = list.clone();
+        stolen.master_peer_id = kp(0x6e).peer_id();
+        assert!(!verify_device_list(&stolen), "master binding must reject a relabelled list");
+    }
+
     /// The carried payload is pure signature math (no clock), so it pins exactly.
     #[test]
     fn carried_bundle_signing_payload_kat() {

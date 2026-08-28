@@ -4,6 +4,7 @@
 #
 #   powershell -File scripts\fleet.ps1 -Build            # build + stage the copies
 #   powershell -File scripts\fleet.ps1 -Onboard          # make the fixture identities
+#   powershell -File scripts\fleet.ps1 -Onboard -Fresh   # ... from BRAND-NEW keys
 #   powershell -File scripts\fleet.ps1 -Live             # boot and leave them up
 #   powershell -File scripts\fleet.ps1 -Scenario dm_hello -Attach   # reuse them
 #   powershell -File scripts\fleet.ps1 -Stop
@@ -59,6 +60,12 @@ param(
     # Drive the welcome flow on each instance and stamp the result as the
     # fixture data directory. Run this when the fixtures need rebuilding.
     [switch]$Onboard,
+    # With -Onboard: throw the OLD fixture away first, so the peers come back
+    # with brand-new keys (new mnemonic, new master id, and therefore an EMPTY
+    # relay mailbox). The friend journeys need that: the relay buffers a friend
+    # request against inbox:{master} for three days, so a stable identity keeps
+    # replaying earlier runs' requests into later ones. Meaningless on its own.
+    [switch]$Fresh,
     # Boot the fleet and leave it listening, for driving by hand.
     [switch]$Live,
     # Use the instances that are ALREADY running instead of booting: no reboot,
@@ -130,6 +137,12 @@ if ($Stop) {
     Stop-Fleet
     Write-Step 'fleet stopped'
     exit 0
+}
+
+# -Fresh is about which identity onboarding mints, so on its own it would
+# silently do nothing while the caller believed it had new keys.
+if ($Fresh -and -not $Onboard) {
+    throw '-Fresh only means something with -Onboard. Use: -Onboard -Fresh -Peers a,b'
 }
 
 # --------------------------------------------------------------------------
@@ -240,7 +253,16 @@ function Reset-PeerData($peer) {
         # Onboarding walks the WELCOME flow, which only exists when there is no
         # identity yet. Restoring a fixture here would leave the app in the
         # shell and every onboarding step would fail looking for a screen that
-        # is already behind it.
+        # is already behind it. So -Onboard ALREADY mints new keys every time:
+        # empty data dir, welcome flow, new mnemonic, new master id.
+        #
+        # -Fresh drops the old fixture as well. Belt and braces (Save-Fixture
+        # mirrors, so the stamp would replace it anyway), and it is what makes
+        # "this run wanted a new identity" greppable rather than implied.
+        if ($Fresh -and (Test-Path $fixture)) {
+            Remove-Item $fixture -Recurse -Force
+            Write-Step "$peer discarded its old fixture identity" 'Yellow'
+        }
         if (Test-Path $run) { Remove-Item $run -Recurse -Force }
         New-Item -ItemType Directory -Path $run -Force | Out-Null
         Write-Step "$peer starting from an empty data directory"

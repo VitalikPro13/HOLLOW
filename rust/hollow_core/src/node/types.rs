@@ -1725,7 +1725,23 @@ pub(crate) enum HavenMessage {
     FriendAccept,
 
     #[serde(rename = "friend_reject")]
-    FriendReject,
+    FriendReject {
+        /// The `requested_at` of the request being declined, so a stale or replayed
+        /// reject can never delete a NEWER request or an accepted friendship.
+        /// 0 = a pre-2026-08-29 client: "decline whatever is pending".
+        #[serde(default)]
+        requested_at: i64,
+        /// The decliner's OWN master-signed device list, exactly what a
+        /// `FriendRequest` carries and for exactly the same reason: the requester
+        /// has never been online with us, so its resolver has no device -> master
+        /// link for the device this reject arrives from, and attribution by
+        /// `resolve()` alone returns the raw device id and misses the friend row
+        /// (which is master-keyed). The list makes attribution cryptographic
+        /// instead of dependent on a prior meeting. Absent = a pre-carried-list
+        /// client; the receiver falls back to the resolver.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        device_list: Option<SignedDeviceList>,
+    },
 
     #[serde(rename = "friend_remove")]
     FriendRemove,

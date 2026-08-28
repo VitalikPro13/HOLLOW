@@ -1006,6 +1006,15 @@ async fn run_event_loop(
     // Pending friend requests: peer_id → requested_at timestamp.
     // Queued when peer isn't reachable (no shared rooms), sent when they appear.
     let mut pending_friend_requests: HashMap<String, i64> = HashMap::new();
+    // Masters whose DECLINE we have already re-sent on THIS connection. The relay's
+    // copy of a reject expires (3 days) and can be gone before the requester next
+    // boots; the requester then re-deposits the same request, we swallow it against
+    // the tombstone, and without re-arming the answer it would never learn. Cleared
+    // on `WsEvent::Disconnected` like every other reconnect-scoped gate: the mailbox
+    // only replays on an inbox (re)join, so one re-send per connection is exactly
+    // one per replay burst, and a decliner whose process stays up for days still
+    // answers a requester that returns next week.
+    let mut reject_resent: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut pending_nickname_resolve: Option<String> = None;
     // Multi-device linking (Step 4). `pending_link_resolve` = (code, include_vault,
     // include_files) carried from ResolveLinkCode to the LinkCodeResolved event.
@@ -2139,6 +2148,7 @@ async fn run_event_loop(
                     NodeCommand::RejectFriendRequest { peer_id: peer_id_str } => {
                         social::handle_reject_friend_request(
                             &event_tx, &ws_cmd_tx, &ws_room_peers,
+                            &master_keypair, &device_peer_id,
                             peer_id_str,
                             &mut pending_friend_requests,
                             &mut pending_friend_accepts,
@@ -2793,6 +2803,7 @@ async fn run_event_loop(
                                 &mut link_snapshot_requested, &mut pending_sibling_challenges,
                                 &mut pending_friend_accepts, &mut pending_friend_requests,
                                 &mut pending_friend_removals,
+                                &mut reject_resent,
                                 &mut requested_asset_kinds,
                                 &mut pending_public_file_requests,
                                 &mut requested_file_receipts,
@@ -3083,6 +3094,9 @@ async fn run_event_loop(
                         // peers re-advertise on rejoin (issue #41 pre-negotiation).
                         peer_auto_dl.clear();
                         relay_catchup_done.clear();
+                        // A new socket means a fresh mailbox replay burst, so the
+                        // decline re-send is re-armed with it (see `reject_resent`).
+                        reject_resent.clear();
                         key_request_in_flight.clear();
                         key_bundle_sent_to.clear();
                         mls_bootstrap_requested.clear();
@@ -4811,6 +4825,7 @@ async fn run_event_loop(
                                         &mut link_snapshot_requested, &mut pending_sibling_challenges,
                                         &mut pending_friend_accepts, &mut pending_friend_requests,
                                         &mut pending_friend_removals,
+                                        &mut reject_resent,
                                         &mut requested_asset_kinds,
                                         &mut pending_public_file_requests,
                                         &mut requested_file_receipts,
@@ -5964,6 +5979,7 @@ async fn handle_incoming_request(
     pending_friend_accepts: &mut HashMap<String, i64>,
     pending_friend_requests: &mut HashMap<String, i64>,
     pending_friend_removals: &mut std::collections::HashSet<String>,
+    reject_resent: &mut std::collections::HashSet<String>,
     requested_asset_kinds: &mut HashMap<String, emotes::AssetKind>,
     pending_public_file_requests: &mut HashMap<String, (String, std::time::Instant)>,
     requested_file_receipts: &mut HashMap<String, std::time::Instant>,
@@ -11883,6 +11899,23 @@ async fn handle_incoming_request(
                     // pending-incoming arm.
                     Some(("declined", _, stored_req)) if requested_at <= stored_req => {
                         hollow_log!("[HOLLOW-FRIENDS] Re-delivered request from {peer_str} (requested_at {requested_at} <= stored {stored_req}) — already declined, ignoring");
+                        // RE-ARM THE ANSWER. Swallowing here silently is exactly how
+                        // a decline failed to converge: our reject sits in the
+                        // requester's TTL-only mailbox, and when that copy expires
+                        // before the requester next boots, the requester re-deposits
+                        // this very request and nobody ever answers it again — stuck
+                        // pending on their side, declined on ours, forever. Every
+                        // swallow therefore re-sends the decline, ONCE per requester
+                        // per process so five replayed copies cost one deposit.
+                        if reject_resent.insert(req_master_early.clone()) {
+                            social::send_friend_reject(
+                                ws_cmd_tx, ws_room_peers, peer_str,
+                                &req_master_early, stored_req,
+                                crypto_handler::build_local_device_list(
+                                    master_keypair, device_peer_id, db_path, db_passphrase,
+                                ),
+                            );
+                        }
                         return;
                     }
                     // A duplicate delivery of a request we already SHOW. Re-emitting
@@ -11953,6 +11986,21 @@ async fn handle_incoming_request(
                 pending_friend_requests.remove(peer_str);
                 pending_friend_removals.remove(&req_master_early);
                 pending_friend_removals.remove(peer_str);
+                // STAMP THE CONVERGED REQUEST, before the accept freezes the row.
+                // Each side has been holding its OWN outgoing request's timestamp,
+                // and the two crossed a millisecond apart, so the two accepted rows
+                // would record DIFFERENT stamps for one friendship. A later decline
+                // of it carries the decliner's stamp and is measured against the
+                // other side's, which then reads as a stale replay half the time and
+                // is refused, leaving the pair friends on one side and declined on
+                // the other. save_friend advances a PENDING row by MAX, and MAX is
+                // symmetric, so writing the incoming stamp here makes both sides
+                // freeze on MAX(ours, theirs) and a reject can name it from either.
+                if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+                    let _ = store.save_friend(
+                        &req_master_early, "pending", "outgoing", requested_at,
+                    );
+                }
                 social::handle_accept_friend_request(
                     olm, crypto_store,
                     event_tx, ws_cmd_tx, ws_room_peers,
@@ -12021,20 +12069,32 @@ async fn handle_incoming_request(
         }
 
         HavenMessage::FriendAccept => {
-            
-            hollow_log!("[HOLLOW-FRIENDS] Friend accepted by {peer_str}");
 
             // Update our outgoing request to accepted, keyed by the friend's MASTER.
             // The accepter's `peer_str` may be a device id (multi-device / nickname);
             // resolve so the accepted row matches presence/DM/profile, and migrate any
             // pending row stranded under the device id.
+            let master = super::resolver::resolve(&peer_str);
             {
                 if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+                    // A DECLINE IS STICKY, and an accept is the other way it used to
+                    // come undone. `pending_friend_accepts` is re-seeded from every
+                    // accepted friend at startup and re-fires on the peer's next
+                    // appearance, so an accept can arrive well AFTER we refused this
+                    // person (the mutual request race: both sides auto-converged,
+                    // then we hit Reject). Overwriting the tombstone there made the
+                    // pair friends behind the user's back. A re-add is what clears a
+                    // tombstone; an accept never does.
+                    if store.get_friend_status(&master).ok().flatten().as_deref()
+                        == Some("declined")
+                    {
+                        hollow_log!("[HOLLOW-FRIENDS] Ignoring FriendAccept from {peer_str}: we declined {master}");
+                        return;
+                    }
                     let now = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default()
                         .as_millis() as i64;
-                    let master = super::resolver::resolve(&peer_str);
                     if master != peer_str {
                         let _ = store.migrate_friend_to_master(&peer_str, &master);
                     }
@@ -12042,10 +12102,12 @@ async fn handle_incoming_request(
                 }
             }
 
+            hollow_log!("[HOLLOW-FRIENDS] Friend accepted by {peer_str}");
+
             // Register DM room code with signaling. Use the MASTER so both sides compute
             // the SAME pure dm_room_code.
             let local_peer = local_peer_str.to_string();
-            let friend_master = super::resolver::resolve(&peer_str);
+            let friend_master = master;
             let room = dm_room_code(&local_peer, &friend_master);
 
             // Push our profile + device list to the accepter while it's reachable, so it
@@ -12063,21 +12125,94 @@ async fn handle_incoming_request(
             }).await;
         }
 
-        HavenMessage::FriendReject => {
-            // The sender is a DEVICE id but our outgoing request row is keyed by
-            // their MASTER — delete the master row (a raw device-id delete would
-            // silently no-op, leaving a ghost outgoing request). Delete both keys
-            // to also clean any legacy device-stranded row.
-            let master = super::resolver::resolve(&peer_str);
-            hollow_log!("[HOLLOW-FRIENDS] Friend rejected by {peer_str} (master {master})");
-
-            {
-                if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
-                    let _ = store.remove_friend(&master);
-                    if master != peer_str {
-                        let _ = store.remove_friend(&peer_str);
+        HavenMessage::FriendReject { requested_at, device_list } => {
+            // ATTRIBUTION FIRST. The sender is a DEVICE id and our outgoing request
+            // row is keyed by their MASTER, so a raw device-id lookup silently
+            // misses it. `resolve()` alone cannot bridge that here: a decline of an
+            // ASYNC request answers somebody we have never been online with, so we
+            // have ingested no device list for them and `resolve(device)` hands the
+            // device straight back. Field-verified on two fresh installs: the reject
+            // arrived twice and was dropped twice with `row None`, while the row sat
+            // there under the master with a matching `requested_at`.
+            //
+            // So the reject CARRIES the decliner's own master-signed device list,
+            // exactly like a friend request, and attribution becomes cryptographic:
+            // the list must verify, its signer must BE the master it claims (the
+            // pubkey -> peer_id binding inside `verify_device_list`), and the
+            // relay-authenticated sender device must be listed and un-revoked. A
+            // list that is present but bad is a REJECTED message, never a downgrade
+            // to the resolver: `if list.is_some()` must not be the bypass.
+            let master = match device_list.as_ref() {
+                Some(list) => {
+                    let reason = if !crypto_handler::verify_device_list(list) {
+                        Some("bad signature or master binding")
+                    } else if !list.devices.iter().any(|d| d == peer_str) {
+                        Some("sender device not in the signed list")
+                    } else if list.revoked.iter().any(|r| r == peer_str) {
+                        Some("sender device is revoked")
+                    } else {
+                        None
+                    };
+                    if let Some(reason) = reason {
+                        hollow_log!("[HOLLOW-FRIENDS] Dropping FriendReject from {peer_str}: carried device list rejected ({reason})");
+                        return;
                     }
+                    // Ingest through the SAME path the FriendRequest arm uses, so the
+                    // resolver, the device store and the DM room key all agree
+                    // afterwards (an accept/DM that follows must not compute a
+                    // different room than the one this identity is in).
+                    let _ = crypto_handler::ingest_device_list(
+                        event_tx, master_peer_str, device_peer_id, master_keypair,
+                        peer_str, ws_cmd_tx, ws_room_peers,
+                        device_list.clone(), db_path, db_passphrase,
+                    ).await;
+                    list.master_peer_id.clone()
                 }
+                // A pre-carried-list client: all we have is the resolver, which
+                // works whenever the two have actually met.
+                None => super::resolver::resolve(&peer_str),
+            };
+
+            let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) else {
+                hollow_log!("[HOLLOW-FRIENDS] FriendReject from {peer_str}: store unavailable, ignoring");
+                return;
+            };
+            let row = store.get_friend_row(&master).ok().flatten();
+
+            // A reject now rides the TTL-only mailbox, so it can arrive LATE, out
+            // of order, or replayed for three days. Unconditionally deleting on it
+            // would make an old copy a remote un-friend primitive: it could wipe a
+            // friendship, or a request we minted AFTER the decline (a cancel +
+            // re-add). So a reject only ever acts on the request it NAMES.
+            //
+            //   * pending/outgoing — the ordinary case. `requested_at == 0` is a
+            //     pre-2026-08-29 client saying "decline whatever is pending", which
+            //     is why the legacy form is confined to this arm: with no timestamp
+            //     to check, only a still-pending request is safe to drop.
+            //   * accepted — the MUTUAL RACE. Both sides requested each other, both
+            //     auto-converged to friends, and the user then hit Reject on that
+            //     same request. A reject carrying the accepted row's OWN
+            //     `requested_at` answers exactly the request that produced this
+            //     friendship, so honouring it keeps both sides symmetric instead of
+            //     leaving them friends on one side and declined on the other.
+            //     Nothing weakens here: an accepted row FREEZES `requested_at` at
+            //     the request that was accepted (save_friend's CASE/MAX rule), so a
+            //     reject replayed after a cancel + re-add carries the OLDER stamp
+            //     and is still refused, and legacy 0 never reaches this arm.
+            let acts_on = match row.as_ref().map(|(s, d, r)| (s.as_str(), d.as_str(), *r)) {
+                Some(("pending", "outgoing", stored)) => requested_at == 0 || requested_at >= stored,
+                Some(("accepted", _, stored)) => requested_at != 0 && requested_at >= stored,
+                _ => false,
+            };
+            if !acts_on {
+                hollow_log!("[HOLLOW-FRIENDS] FriendReject from {peer_str} answers no live request for {master} (row {row:?}, requested_at {requested_at}); nothing to do");
+                return;
+            }
+
+            hollow_log!("[HOLLOW-FRIENDS] Friend rejected by {peer_str} (master {master})");
+            let _ = store.remove_friend(&master);
+            if master != peer_str {
+                let _ = store.remove_friend(peer_str);
             }
 
             // Stop RE-DEPOSITING this request. Our outgoing request may still sit in
@@ -12092,6 +12227,13 @@ async fn handle_incoming_request(
                 pending_friend_requests.remove(peer_str);
                 pending_friend_accepts.remove(peer_str);
             }
+
+            // The request deposit STAYS in the target's inbox until the request is
+            // resolved (that is what lets a sibling still collect it). A decline
+            // resolves it, so leave now — mirroring what the delivery drains do.
+            let _ = ws_cmd_tx.send(super::ws_client::WsCommand::LeaveRoom {
+                room_code: format!("inbox:{master}"),
+            });
 
             let _ = event_tx.send(NetworkEvent::FriendRequestRejected {
                 peer_id: master,

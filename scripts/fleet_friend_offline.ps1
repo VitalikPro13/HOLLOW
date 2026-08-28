@@ -1,7 +1,16 @@
 # Async-friend, zero-overlap, driven across two REAL Hollow instances.
 #
-#   powershell -File scripts\fleet.ps1 -Live -Peers a,b
-#   powershell -File scripts\fleet_friend_offline.ps1
+#   powershell -File scripts\fleet_friend_offline.ps1                   # fresh keys
+#   powershell -File scripts\fleet_friend_offline.ps1 -KeepIdentities   # reuse a live fleet
+#
+# By DEFAULT this stops any running fleet, re-onboards a and b from BRAND-NEW
+# keys and boots them itself, so it needs no fleet to be up first. That is not
+# tidiness: the relay replays every buffered friend request to inbox:{master}
+# for three days, so a reused identity hands this journey its own past and a
+# wait_for can pass on a request from yesterday. With -KeepIdentities it drives
+# whatever fleet is already live (start one with
+# `powershell -File scripts\fleet.ps1 -Live -Peers a,b`), which is what you want
+# when you are iterating on the journey rather than on the behaviour.
 #
 # ## Why a script, not a scenario JSON
 #
@@ -30,6 +39,10 @@
 # journey. Windows PowerShell 5.1 (no pwsh-only syntax).
 
 param(
+    # Drive the fleet that is already running instead of minting new identities
+    # for a and b. Faster, but the relay mailbox then still holds whatever
+    # earlier runs left addressed to those identities.
+    [switch]$KeepIdentities,
     [int]$BootTimeoutSeconds = 240
 )
 
@@ -95,8 +108,16 @@ function Stop-Peer($peer) {
     Say "$peer is closed - OFFLINE" 'Yellow'
 }
 
+$journeyPeers = @('a', 'b')
+
+if ($KeepIdentities) {
+    Say 'keeping the identities that are already live (their relay mailboxes are not empty)' 'Yellow'
+} else {
+    Start-FreshFleet $journeyPeers
+}
+
 $live = Get-LivePeers
-foreach ($peer in @('a', 'b')) {
+foreach ($peer in $journeyPeers) {
     if ($live -notcontains $peer) {
         throw "peer '$peer' is not running. Start the fleet with: powershell -File scripts\fleet.ps1 -Live -Peers a,b (live: $($live -join ', '))"
     }
@@ -115,8 +136,18 @@ Step b @{ op = 'capture'; from = 'provider'; key = 'peerId'; as = 'PEER_B' }
 Stop-Peer b
 Step a @{ op = 'tap'; target = 'semantics:Add friend'; index = 0 }
 Step a @{ op = 'tap'; target = 'text:Add Friend'; index = 0 }
+# Assert the id really IS in the field before sending: enter_text has reported
+# success into this field while it held only a fragment ("nh" once, which the
+# app then resolved as a nickname and never deposited), and that failure is
+# indistinguishable downstream from the mailbox losing the request.
 Step a @{ op = 'enter_text'; target = 'hint:Peer ID or nickname...'; value = '${PEER_B}' }
+Step a @{ op = 'wait_for'; target = 'text:${PEER_B}'; timeout_ms = 15000 }
 Step a @{ op = 'tap'; target = 'text:Send Request'; index = 0 }
+# Let a's WS layer actually FLUSH the deposit frame to the relay before we kill
+# it — the deposit log prints when the frame is QUEUED, not sent, and a hard
+# kill in the gap loses it. There is no client-visible ack for a mailbox
+# deposit, so there is nothing to wait_for: this is a wait or a coin flip.
+Step a @{ op = 'wait'; ms = 5000 }
 Say "a sent the request to an offline b (deposited in the relay mailbox)"
 
 # --- 2. a goes offline; b opens ALONE, collects from the mailbox, accepts. ----

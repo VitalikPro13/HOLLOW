@@ -323,6 +323,63 @@ pub(crate) fn deposit_friend_request_to_inbox(
     send_message_to_peer_in_room(ws_cmd_tx, &inbox_room, target_master, msg.clone());
 }
 
+/// Deliver a decline to the requester by every leg that can reach it: the live
+/// fan to its ONLINE devices (as before) AND a deposit into the requester's own
+/// master-keyed mailbox `inbox:{requester_master}`, which the relay replays
+/// (TTL-only) to every device that proves it owns that master on its next boot.
+///
+/// The live fan alone was the whole bug. A decline of an ASYNC request answers
+/// somebody who is by definition not here: the request came out of a mailbox
+/// precisely because the requester was gone. So the reject reached nobody, the
+/// requester's row stayed "pending outgoing" forever, and it re-deposited the
+/// same request into the decliner's mailbox on every reconnect. The decline has
+/// to travel the same road the request did.
+///
+/// Deposit ALWAYS, even when a live device target exists: a live send can race
+/// the target's disconnect, and the mailbox copy is a no-op on a requester that
+/// has already cleaned up (its handler acts only on a live pending-outgoing row).
+///
+/// CARRIES OUR OWN master-signed device list, for the same reason the request
+/// does. The requester has never been online with us (that is the definition of
+/// the case this leg serves), so its resolver holds no device -> master link for
+/// us: attribution by `resolve()` alone yields our raw DEVICE id, and the
+/// requester's friend row is keyed by our MASTER, so the reject finds `row None`
+/// and is dropped. Field-verified on two fresh installs. The list makes the
+/// attribution cryptographic instead of dependent on a prior meeting.
+///
+/// Join → send → LEAVE: we are a SENDER in their inbox, not an owner, and must
+/// not linger there (unlike the request deposit, which stays until delivered).
+/// The three WS commands are ordered on one channel, so the leave is processed
+/// after the send.
+pub(crate) fn send_friend_reject(
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    peer_id_str: &str,
+    master: &str,
+    requested_at: i64,
+    device_list: Option<SignedDeviceList>,
+) {
+    let msg = HavenMessage::FriendReject { requested_at, device_list };
+
+    // Live leg: the row (and often the UI key) is the MASTER, which no socket
+    // authenticates as, so a raw send to it is silently dropped — fan to the
+    // requester's concrete online DEVICES.
+    for t in &friend_device_targets(ws_room_peers, peer_id_str, master) {
+        send_message_to_peer(ws_cmd_tx, ws_room_peers, t, msg.clone());
+    }
+
+    // Mailbox leg: the one that reaches a requester who is simply not here.
+    let inbox_room = format!("inbox:{master}");
+    let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinRoom {
+        room_code: inbox_room.clone(),
+    });
+    send_message_to_peer_in_room(ws_cmd_tx, &inbox_room, master, msg);
+    let _ = ws_cmd_tx.send(super::ws_client::WsCommand::LeaveRoom {
+        room_code: inbox_room,
+    });
+    hollow_log!("[HOLLOW-FRIENDS] Sent friend reject for request {requested_at} to {master} (live devices + inbox:{master})");
+}
+
 /// The concrete, ONLINE device peer_ids to target when we want to reach a friend
 /// identity. A bare master id authenticates as no socket, so a send addressed to it
 /// is dropped — we must resolve to real devices. Sources, deduped: the literal
@@ -721,6 +778,8 @@ pub(crate) async fn handle_reject_friend_request(
     event_tx: &mpsc::Sender<NetworkEvent>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    master_keypair: &crate::identity::native_identity::NativeKeypair,
+    device_peer_id: &str,
     peer_id_str: String,
     pending_friend_requests: &mut HashMap<String, i64>,
     pending_friend_accepts: &mut HashMap<String, i64>,
@@ -755,6 +814,7 @@ pub(crate) async fn handle_reject_friend_request(
     // a genuinely NEWER request (a cancel + re-add) is strictly greater and still
     // shows. A later re-add overwrites this row with pending-outgoing (save_friend
     // is an upsert), so declining never permanently blocks re-friending.
+    let mut original_requested_at: i64 = 0;
     {
         if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
             // Fold any device-stranded row up to the master first (parity with the
@@ -762,7 +822,7 @@ pub(crate) async fn handle_reject_friend_request(
             if master != peer_id_str {
                 let _ = store.migrate_friend_to_master(&peer_id_str, &master);
             }
-            let original_requested_at = store
+            original_requested_at = store
                 .get_friend_row(&master)
                 .ok()
                 .flatten()
@@ -772,17 +832,19 @@ pub(crate) async fn handle_reject_friend_request(
         }
     }
 
-    // Fan the reject to the requester's online DEVICES — the row (and often the
-    // UI key) is the MASTER, which no socket authenticates as, so a raw send to
-    // it was silently dropped and a multi-device requester's outgoing request
-    // stayed "pending" forever. Rejects stay best-effort (no redelivery queue,
-    // unlike accepts): an offline requester simply never learns, by design.
-    for t in &friend_device_targets(&ws_room_peers, &peer_id_str, &master) {
-        send_message_to_peer(
-            &ws_cmd_tx, &ws_room_peers,
-            t, HavenMessage::FriendReject,
-        );
-    }
+    // Answer the requester on EVERY leg that can reach it: the live fan to its
+    // online devices AND a deposit into its own master-keyed mailbox. Rejects
+    // used to be best-effort live sends, so an offline requester never learned,
+    // stayed "pending outgoing" forever, and re-deposited the same request into
+    // our mailbox on every reconnect — the decline could not stick. The reject
+    // carries the request's ORIGINAL requested_at (the tombstone's), which is
+    // what stops a replay of it deleting a NEWER request or a friendship.
+    send_friend_reject(
+        ws_cmd_tx, ws_room_peers, &peer_id_str, &master, original_requested_at,
+        super::crypto_handler::build_local_device_list(
+            master_keypair, device_peer_id, db_path, db_passphrase,
+        ),
+    );
 
     let _ = event_tx.send(NetworkEvent::FriendRequestRejected {
         peer_id: peer_id_str,

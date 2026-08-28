@@ -3527,9 +3527,25 @@ impl MessageStore {
             .as_millis() as i64;
         self.conn
             .execute(
+                // `requested_at` ADVANCES on a pending row and is FROZEN on every
+                // other status. It is what every dedup / anti-downgrade guard
+                // measures against, so a pending row that keeps the first value it
+                // was ever written with makes a genuinely newer request look newer
+                // than the store on every single re-delivery — the mailbox replays
+                // it and the receiver re-notifies forever. MAX(), not blind assign:
+                // an out-of-order older copy must never walk the row backwards.
+                // Accepted / declined / removed rows keep their ORIGINAL request
+                // time on purpose: the declined tombstone IS the freshness baseline
+                // a re-add has to beat, and an accepted friendship records when it
+                // was actually asked for.
                 "INSERT INTO friends (peer_id, status, direction, requested_at, updated_at)
                  VALUES (?1, ?2, ?3, ?4, ?5)
-                 ON CONFLICT(peer_id) DO UPDATE SET status = ?2, direction = ?3, updated_at = ?5",
+                 ON CONFLICT(peer_id) DO UPDATE SET
+                   status = ?2, direction = ?3,
+                   requested_at = CASE WHEN ?2 = 'pending'
+                                       THEN MAX(requested_at, ?4)
+                                       ELSE requested_at END,
+                   updated_at = ?5",
                 params![peer_id, status, direction, requested_at, now],
             )
             .map_err(|e| format!("Failed to save friend: {e}"))?;
@@ -5366,6 +5382,59 @@ mod tests {
             store.save_friend(master, "accepted", "", 100).unwrap();
             let moved = store.migrate_friend_to_master(device, master).unwrap();
             assert!(!moved, "no device row → nothing to migrate");
+        }
+    }
+
+    /// `save_friend` is an upsert, and `requested_at` is what every dedup /
+    /// anti-downgrade guard measures against. It must ADVANCE while the row is
+    /// pending (a cancel + re-add, or a newer incoming request) and FREEZE on
+    /// every other status, so the declined tombstone keeps the baseline a re-add
+    /// has to beat and an accepted friendship keeps when it was asked for.
+    #[test]
+    fn save_friend_advances_requested_at_for_pending_only() {
+        let peer = "12D3KooWfriend";
+
+        // Pending T0 → pending T2 advances.
+        {
+            let store = mem_store();
+            store.save_friend(peer, "pending", "incoming", 100).unwrap();
+            store.save_friend(peer, "pending", "incoming", 200).unwrap();
+            assert_eq!(
+                store.get_friend_row(peer).unwrap(),
+                Some(("pending".to_string(), "incoming".to_string(), 200)),
+                "a newer pending request must advance the stored timestamp",
+            );
+        }
+
+        // Pending T2 → pending T0 keeps T2 (an out-of-order replay of an older
+        // copy must never walk the row backwards).
+        {
+            let store = mem_store();
+            store.save_friend(peer, "pending", "incoming", 200).unwrap();
+            store.save_friend(peer, "pending", "incoming", 100).unwrap();
+            assert_eq!(
+                store.get_friend_row(peer).unwrap().map(|(_, _, r)| r),
+                Some(200),
+                "an older re-delivery must not rewind the stored timestamp",
+            );
+        }
+
+        // Accepted (and declined) freeze it, whatever timestamp the write carries.
+        {
+            let store = mem_store();
+            store.save_friend(peer, "pending", "outgoing", 100).unwrap();
+            store.save_friend(peer, "accepted", "", 999).unwrap();
+            assert_eq!(
+                store.get_friend_row(peer).unwrap(),
+                Some(("accepted".to_string(), String::new(), 100)),
+                "accepting must keep the ORIGINAL request time",
+            );
+            store.save_friend(peer, "declined", "", 0).unwrap();
+            assert_eq!(
+                store.get_friend_row(peer).unwrap().map(|(_, _, r)| r),
+                Some(100),
+                "and the tombstone must preserve it as the re-add baseline",
+            );
         }
     }
 

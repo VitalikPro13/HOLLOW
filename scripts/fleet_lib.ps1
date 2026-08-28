@@ -1,8 +1,10 @@
-# Shared by scripts\fleet.ps1 (runs a whole scenario) and scripts\fleet_send.ps1
-# (sends a command or two by hand). Both talk to a live instance the same way -
-# append to its inbox.jsonl, wait for the matching id in its outbox.jsonl - and
-# keeping one implementation means a fix to the death detection or the variable
-# expansion lands in both.
+# Shared by scripts\fleet.ps1 (runs a whole scenario), scripts\fleet_send.ps1
+# (sends a command or two by hand) and the hand-written journey scripts
+# (fleet_owner_offline.ps1, fleet_friend_*.ps1). They all talk to a live
+# instance the same way - append to its inbox.jsonl, wait for the matching id in
+# its outbox.jsonl - and keeping one implementation means a fix to the death
+# detection, the variable expansion or the fresh-identity boot lands in all of
+# them.
 #
 # Callers set $script:FleetRepo, $script:FleetOutRoot and $script:FleetStageRoot
 # before using anything here.
@@ -134,6 +136,62 @@ function Send-FleetStep($peer, $step, $timeoutSeconds = 180) {
         Start-Sleep -Milliseconds 200
     }
     throw "peer $peer never answered $($step.op) within ${timeoutSeconds}s. Its window is still up; look in $out."
+}
+
+# --------------------------------------------------------------------------
+# Fresh identities for a journey that cannot share a mailbox with its own past
+# --------------------------------------------------------------------------
+
+# One fleet.ps1 invocation, as a child process. Not dot-sourced and not `&`-ed
+# in: fleet.ps1 owns a param block, a $script: scope and an exit code, and a
+# child keeps all three out of the caller's. Its instances are launched by
+# Start-Process with no redirection, which means ShellExecute, which means they
+# inherit no handle of ours - so capturing this output cannot wedge the way
+# trap 2 wedges a redirected launch.
+function Invoke-FleetScript($fleetArgs) {
+    $fleet = Join-Path $script:FleetRepo 'scripts\fleet.ps1'
+    if (-not (Test-Path $fleet)) { throw "fleet.ps1 not found at $fleet" }
+    $all = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $fleet) + $fleetArgs
+    & powershell @all | ForEach-Object { Write-Host "    | $_" -ForegroundColor DarkGray }
+    if ($LASTEXITCODE -ne 0) {
+        throw "fleet.ps1 $($fleetArgs -join ' ') failed with $LASTEXITCODE"
+    }
+}
+
+# Stop whatever is up, mint BRAND-NEW identities for these peers, and boot them.
+#
+# Why the friend journeys default to this: the relay buffers a friend request
+# against inbox:{master} and replays it, TTL-only, for three days. The fixture
+# identities are stable across runs, so a journey run on a reused identity is
+# reading its own past - a wait_for satisfied by yesterday's request, a "fresh"
+# peer that is saturated with them. New keys mean an empty mailbox, and that is
+# the only clean start there is. Onboarding two peers costs about a minute.
+function Start-FreshFleet($peers) {
+    $peerList = @($peers)
+    $peerArg = ($peerList -join ',')
+    Write-Host "[fleet] minting fresh identities for: $peerArg" -ForegroundColor Cyan
+    Invoke-FleetScript @('-Stop')
+    Invoke-FleetScript @('-Onboard', '-Fresh', '-Peers', $peerArg)
+    Invoke-FleetScript @('-Live', '-Peers', $peerArg)
+
+    # The out directories were recreated by the boot, so nothing this process
+    # read before is still there to skip past.
+    foreach ($peer in $peerList) { $script:FleetConsumed[$peer] = 0 }
+
+    # Print the identity each peer came back with. It is the proof that this run
+    # is not talking to the last one's mailbox, and it costs one step per peer.
+    foreach ($peer in $peerList) {
+        $ready = Send-FleetStep $peer ([pscustomobject]@{
+            op = 'wait_for'; target = 'text:Connected'; timeout_ms = 120000
+        }) 180
+        if (-not $ready.ok) { throw "$peer onboarded but never reached Connected: $($ready.message)" }
+        $name = 'FRESH_' + $peer.ToUpper()
+        $answer = Send-FleetStep $peer ([pscustomobject]@{
+            op = 'capture'; from = 'provider'; key = 'peerId'; as = $name
+        }) 120
+        if (-not $answer.ok) { throw "could not read $peer's fresh identity: $($answer.message)" }
+        Write-Host "[fleet] $peer fresh identity: $($script:FleetVars[$name])" -ForegroundColor Green
+    }
 }
 
 function Write-FleetAnswer($peer, $answer, $indent = '       ') {

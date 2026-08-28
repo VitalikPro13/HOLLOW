@@ -199,6 +199,30 @@ impl MockRelay {
         inner.offline.get(peer).map(|v| v.len()).unwrap_or(0)
     }
 
+    /// The buffered payloads held for `peer`, CLONED (nothing is consumed).
+    /// `buffered_count` answers "was anything left for them"; this answers
+    /// "WHAT was left", which is the only way to assert that the frame waiting
+    /// in a mailbox is the decline and that it names the right request.
+    #[allow(dead_code)]
+    pub(crate) fn buffered_frames(&self, target: &str) -> Vec<Vec<u8>> {
+        let inner = self.inner.lock().unwrap();
+        inner
+            .offline
+            .get(target)
+            .map(|v| v.iter().map(|m| m.data.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    /// Drop everything buffered for `target`, simulating the mailbox TTL lapsing
+    /// (the real relay holds a master's inbox for 3 days). The case that matters
+    /// is a decline that expires BEFORE the requester next boots: the requester
+    /// then re-deposits its request, and the decliner has to answer again.
+    #[allow(dead_code)]
+    pub(crate) fn expire_mailbox(&self, target: &str) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.offline.remove(target);
+    }
+
     /// Test-only: deliver a raw frame to `target` as if `from` had sent it in
     /// `room`, bypassing the sender's own node logic — simulates a hostile or
     /// buggy peer pushing an UNSOLICITED protocol message (the real relay
@@ -8225,6 +8249,18 @@ async fn reject_cancels_own_queued_request_no_refriend() {
          (got status {al_status:?})"
     );
 
+    // And the decline is SYMMETRIC. AL's reject names the very request that produced
+    // the friendship, so VM must drop AL too. Leaving VM "accepted" while AL is
+    // "declined" is not a cosmetic split: VM re-seeds `pending_friend_accepts` from
+    // its accepted friends at every startup and re-fires a FriendAccept on AL's next
+    // appearance, which is the loop this test exists to close.
+    let vm_status = vm.friend_status(&al_master);
+    assert_eq!(
+        vm_status, None,
+        "VM must drop AL on the reject; a one-sided decline leaves VM re-sending \
+         FriendAccept forever (got {vm_status:?})",
+    );
+
     drop(al);
     drop(vm);
 }
@@ -13959,6 +13995,40 @@ fn friend_row(node: &TestNode, master: &str) -> Option<(String, String)> {
     node.store().get_friend_status_direction(master).ok().flatten()
 }
 
+/// The friends row for `master` as (status, direction, requested_at), or None.
+/// The timestamp is the whole game for the dedup/anti-downgrade guards, so the
+/// tests that reason about them read it rather than inferring it.
+fn friend_row_full(node: &TestNode, master: &str) -> Option<(String, String, i64)> {
+    node.store().get_friend_row(master).ok().flatten()
+}
+
+/// The `requested_at` of every buffered frame in `target`'s mailbox that parses
+/// as a friend REJECT. Reading the mailbox rather than counting it is what proves
+/// the decline names the request it answers.
+fn buffered_reject_ats(relay: &MockRelay, target: &str) -> Vec<i64> {
+    relay
+        .buffered_frames(target)
+        .into_iter()
+        .filter_map(|f| match serde_json::from_slice::<super::types::HavenMessage>(&f) {
+            Ok(super::types::HavenMessage::FriendReject { requested_at, .. }) => Some(requested_at),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The `requested_at` of every buffered frame in `target`'s mailbox that parses
+/// as a friend REQUEST.
+fn buffered_request_ats(relay: &MockRelay, target: &str) -> Vec<i64> {
+    relay
+        .buffered_frames(target)
+        .into_iter()
+        .filter_map(|f| match serde_json::from_slice::<super::types::HavenMessage>(&f) {
+            Ok(super::types::HavenMessage::FriendRequest { requested_at, .. }) => Some(requested_at),
+            _ => None,
+        })
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // Leg 1. A requests B while B has never connected, then A goes dark. B boots
 // ALONE and must still find the request waiting. Before the mailbox this was
@@ -14946,6 +15016,787 @@ async fn blocked_sender_mailbox_request_dropped() {
     super::blocklist::clear_for_test();
     drop(a);
     drop(b);
+}
+
+// ---------------------------------------------------------------------------
+// DECLINE STICKS END TO END. The tombstone alone only made the DECLINER quiet:
+// the reject itself was a best-effort live send, so a requester who was offline
+// when it fired never learned, kept its row "pending outgoing" forever, and
+// re-deposited the same request into the decliner's mailbox on every reconnect.
+// The decline now rides the requester's OWN master-keyed mailbox as well, which
+// is the only leg that reaches somebody who is simply not here.
+//
+// Zero moments where both are online, right up to the deliberate re-add at the
+// end — the whole point is that a decline converges without co-presence.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests vs the global resolver
+async fn friend_reject_delivered_with_no_overlap() {
+    let _g = test_guard();
+    super::blocklist::clear_for_test();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+    const A_MASTER: u8 = 131;
+    const A_DEV: u8 = 132;
+    const B_MASTER: u8 = 133;
+    const B_DEV: u8 = 134;
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
+    let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
+
+    // 1. A alone requests B (absent) → the request lands in B's TTL-only mailbox.
+    let mut a = spawn_node_with_friends(&relay, A_MASTER, A_DEV, &[]).await;
+    let a_device = a.device_id.clone();
+    a.cmd_tx
+        .send(NodeCommand::SendFriendRequest { peer_id: b_master.clone() })
+        .await
+        .unwrap();
+    assert!(
+        wait_until(10, async || relay.buffered_count(&b_master) > 0).await,
+        "request must reach B's mailbox",
+    );
+    let original_at = friend_row_full(&a, &b_master)
+        .expect("A must hold a pending outgoing row")
+        .2;
+
+    // 2. A goes dark. From here neither is reachable while the other is up.
+    relay.set_online(&a_device, false);
+    drain_events(&mut a);
+
+    // 3. B boots, collects the request, and DECLINES it.
+    let mut b = spawn_node_with_friends(&relay, B_MASTER, B_DEV, &[]).await;
+    let b_device = b.device_id.clone();
+    let mut requester_id = None;
+    assert!(
+        wait_event(&mut b, std::time::Duration::from_secs(10), |ev| {
+            if let NetworkEvent::FriendRequestReceived { peer_id } = ev {
+                requester_id = Some(peer_id.clone());
+                true
+            } else {
+                false
+            }
+        })
+        .await,
+        "B must see the mailbox request on its first boot",
+    );
+    b.cmd_tx
+        .send(NodeCommand::RejectFriendRequest {
+            peer_id: requester_id.expect("captured requester id"),
+        })
+        .await
+        .unwrap();
+    assert!(
+        wait_until(10, async || {
+            friend_row(&b, &a_master).map(|(s, _)| s) == Some("declined".to_string())
+        })
+        .await,
+        "reject must write a sticky declined tombstone, got {:?}",
+        friend_row(&b, &a_master),
+    );
+    // THE ROOT FIX: the decline is deposited into the REQUESTER's own mailbox,
+    // symmetric to the request. Without this leg an absent requester never learns.
+    assert!(
+        wait_until(10, async || {
+            buffered_reject_ats(&relay, &a_master).contains(&original_at)
+        })
+        .await,
+        "the decline must be waiting in A's mailbox, naming the request it answers \
+         ({original_at}); mailbox holds {:?}",
+        buffered_reject_ats(&relay, &a_master),
+    );
+
+    // 4. B goes dark; A comes back ALONE and learns it was declined.
+    relay.set_online(&b_device, false);
+    drain_events(&mut b);
+    // HARNESS HONESTY. The resolver is process-GLOBAL in the test binary, so every
+    // node's device -> master link is visible to every other node and `resolve(b_device)`
+    // succeeds here for a node that, in the field, has never heard of B. That mock
+    // fidelity gap is exactly what hid the field bug: two fresh installs that were
+    // never online together, so A's resolver was cold and the reject was dropped with
+    // `row None`. Forget the link before A collects, so attribution MUST come from the
+    // list the reject carries. Restored below, before B needs its own mapping again.
+    super::resolver::forget(&b_device);
+    relay.set_online(&a_device, true);
+    assert!(
+        wait_event(&mut a, std::time::Duration::from_secs(20), |ev| {
+            matches!(ev, NetworkEvent::FriendRequestRejected { peer_id } if *peer_id == b_master)
+        })
+        .await,
+        "A must surface the decline it collected from its own mailbox",
+    );
+    assert!(
+        wait_until(10, async || friend_row(&a, &b_master).is_none()).await,
+        "the declined outgoing request must be gone from A's books, got {:?}",
+        friend_row(&a, &b_master),
+    );
+    // Exactly once, however many copies the TTL-only mailbox replays.
+    let twice = wait_event(&mut a, std::time::Duration::from_secs(3), |ev| {
+        matches!(ev, NetworkEvent::FriendRequestRejected { peer_id } if *peer_id == b_master)
+    })
+    .await;
+    assert!(!twice, "a replayed decline must not re-emit FriendRequestRejected");
+
+    // 5. And A stops RE-DEPOSITING. This is the half that made the decline
+    //    un-stickable: every reconnect refreshed the request in B's mailbox, so B
+    //    saw it again forever. Bounce A and assert the depth does not move.
+    let deposits = relay.buffered_count(&b_master);
+    relay.set_online(&a_device, false);
+    relay.set_online(&a_device, true);
+    // An absence has no condition to poll; ride wait_event's timeout as the window.
+    let _ = wait_event(&mut a, std::time::Duration::from_secs(3), |_| false).await;
+    assert_eq!(
+        relay.buffered_count(&b_master), deposits,
+        "a declined request must never be re-deposited on reconnect",
+    );
+
+    // 6. A goes dark; B boots into a mailbox that STILL holds A's request (TTL,
+    //    not delete-on-read). The decline must swallow it silently. B's own node
+    //    needs its own device -> master mapping back for that.
+    relay.set_online(&a_device, false);
+    drain_events(&mut a);
+    super::resolver::update(&b_device, &b_master);
+    relay.set_online(&b_device, true);
+    let resurrected = wait_event(&mut b, std::time::Duration::from_secs(3), |ev| {
+        matches!(ev, NetworkEvent::FriendRequestReceived { peer_id }
+            if super::resolver::resolve(peer_id) == a_master)
+    })
+    .await;
+    assert!(
+        !resurrected,
+        "the stale re-delivery must NOT resurface as an incoming request",
+    );
+    assert_eq!(
+        friend_row(&b, &a_master),
+        Some(("declined".to_string(), String::new())),
+        "and the tombstone must still stand",
+    );
+
+    // 7. Declining is not a permanent block: a genuine re-add (a fresh
+    //    requested_at) must reach B and show. The only step where both are up.
+    drain_events(&mut b);
+    relay.set_online(&a_device, true);
+    a.cmd_tx
+        .send(NodeCommand::SendFriendRequest { peer_id: b_master.clone() })
+        .await
+        .unwrap();
+    assert!(
+        wait_event(&mut b, std::time::Duration::from_secs(20), |ev| {
+            matches!(ev, NetworkEvent::FriendRequestReceived { peer_id }
+                if super::resolver::resolve(peer_id) == a_master)
+        })
+        .await,
+        "a NEWER request must cross the tombstone and show again",
+    );
+    assert!(
+        wait_until(10, async || {
+            matches!(
+                friend_row_full(&b, &a_master)
+                    .as_ref()
+                    .map(|(s, d, r)| (s.as_str(), d.as_str(), *r)),
+                Some(("pending", "incoming", r)) if r > original_at
+            )
+        })
+        .await,
+        "the re-add must land as pending incoming with a NEWER requested_at than \
+         the tombstone's ({original_at}), got {:?}",
+        friend_row_full(&b, &a_master),
+    );
+
+    drop(a);
+    drop(b);
+}
+
+// ---------------------------------------------------------------------------
+// The mailbox has a TTL, so the decline can EXPIRE before the requester next
+// boots. Then the requester re-deposits its request, the decliner swallows it
+// silently against the tombstone, and — without this — nobody ever answers
+// again: the request is stuck pending on one side and declined on the other
+// forever. Every swallow therefore RE-ARMS the answer, once per requester per
+// process, so the decline converges in every ordering.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests vs the global resolver
+async fn declined_reject_is_resent_when_stale_redeposit_returns() {
+    let _g = test_guard();
+    super::blocklist::clear_for_test();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+    const A_MASTER: u8 = 141;
+    const A_DEV: u8 = 142;
+    const B_MASTER: u8 = 143;
+    const B_DEV: u8 = 144;
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
+    let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
+
+    // 1. A alone requests B (absent), then goes dark.
+    let mut a = spawn_node_with_friends(&relay, A_MASTER, A_DEV, &[]).await;
+    let a_device = a.device_id.clone();
+    a.cmd_tx
+        .send(NodeCommand::SendFriendRequest { peer_id: b_master.clone() })
+        .await
+        .unwrap();
+    assert!(
+        wait_until(10, async || relay.buffered_count(&b_master) > 0).await,
+        "request must reach B's mailbox",
+    );
+    let original_at = friend_row_full(&a, &b_master)
+        .expect("A must hold a pending outgoing row")
+        .2;
+    relay.set_online(&a_device, false);
+    drain_events(&mut a);
+
+    // 2. Clear B's mailbox and hand it the request DIRECTLY instead. The re-arm is
+    //    bounded to one deposit per requester per process, so this test has to own
+    //    exactly when the first swallow happens: a mailbox that replays the same
+    //    request twice on one boot would spend the budget here, long before the
+    //    expiry this test is actually about. Same frame either way.
+    relay.expire_mailbox(&b_master);
+    let a_master_kp = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER));
+    let a_list = super::crypto_handler::build_signed_device_list(
+        &a_master_kp, 1, vec![a_device.clone()], Vec::new(),
+    );
+    let request_frame = serde_json::to_vec(&super::types::HavenMessage::FriendRequest {
+        requested_at: original_at,
+        carried_bundle: None,
+        device_list: Some(a_list),
+        carried_profile: None,
+    })
+    .unwrap();
+
+    // 3. B boots into an empty mailbox, collects the request, declines.
+    let mut b = spawn_node_with_friends(&relay, B_MASTER, B_DEV, &[]).await;
+    let b_device = b.device_id.clone();
+    let inbox = format!("inbox:{b_master}");
+    relay.inject_direct(&inbox, &a_device, &b_device, request_frame.clone());
+    let mut requester_id = None;
+    assert!(
+        wait_event(&mut b, std::time::Duration::from_secs(10), |ev| {
+            if let NetworkEvent::FriendRequestReceived { peer_id } = ev {
+                requester_id = Some(peer_id.clone());
+                true
+            } else {
+                false
+            }
+        })
+        .await,
+        "B must see the request",
+    );
+    b.cmd_tx
+        .send(NodeCommand::RejectFriendRequest {
+            peer_id: requester_id.expect("captured requester id"),
+        })
+        .await
+        .unwrap();
+    assert!(
+        wait_until(10, async || {
+            buffered_reject_ats(&relay, &a_master).contains(&original_at)
+        })
+        .await,
+        "the decline must reach A's mailbox first time round",
+    );
+    relay.set_online(&b_device, false);
+    drain_events(&mut b);
+
+    // 4. THREE DAYS PASS. The relay drops A's mailbox before A ever comes back.
+    relay.expire_mailbox(&a_master);
+    assert_eq!(relay.buffered_count(&a_master), 0, "precondition: the decline expired");
+
+    // 5. A returns knowing nothing, so its reconnect re-deposits the request.
+    let deposits_before = relay.buffered_count(&b_master);
+    relay.set_online(&a_device, true);
+    assert!(
+        wait_until(10, async || relay.buffered_count(&b_master) > deposits_before).await,
+        "A cannot have learned anything, so it re-deposits its still-pending request",
+    );
+    assert!(
+        matches!(
+            friend_row(&a, &b_master).as_ref().map(|(s, d)| (s.as_str(), d.as_str())),
+            Some(("pending", "outgoing"))
+        ),
+        "A's request is still pending — the decline it never saw cannot have landed, got {:?}",
+        friend_row(&a, &b_master),
+    );
+    relay.set_online(&a_device, false);
+    drain_events(&mut a);
+
+    // 6. B boots into the re-deposited request. It stays swallowed (the tombstone
+    //    holds), AND the answer is re-armed into A's now-empty mailbox.
+    relay.set_online(&b_device, true);
+    let resurrected = wait_event(&mut b, std::time::Duration::from_secs(3), |ev| {
+        matches!(ev, NetworkEvent::FriendRequestReceived { peer_id }
+            if super::resolver::resolve(peer_id) == a_master)
+    })
+    .await;
+    assert!(!resurrected, "the tombstone must still swallow the re-deposit");
+    assert!(
+        wait_until(10, async || {
+            buffered_reject_ats(&relay, &a_master).contains(&original_at)
+        })
+        .await,
+        "swallowing a re-deposit must RE-SEND the decline, naming the same request          ({original_at}); mailbox holds {:?}",
+        buffered_reject_ats(&relay, &a_master),
+    );
+
+    // 7. And it re-arms on the NEXT reconnect too. Expire A's mailbox a second
+    //    time and bounce B: the re-send set is connection-scoped, not
+    //    process-scoped, because the mailbox only replays on an inbox (re)join.
+    //    Without the reset a decliner whose process stays up for days answers a
+    //    returning requester exactly once, ever, and then goes quiet.
+    relay.expire_mailbox(&a_master);
+    assert_eq!(
+        relay.buffered_count(&a_master), 0,
+        "precondition: the second decline expired too",
+    );
+    drain_events(&mut b);
+    relay.set_online(&b_device, false);
+    relay.set_online(&b_device, true);
+    relay.inject_direct(&inbox, &a_device, &b_device, request_frame.clone());
+    assert!(
+        wait_until(10, async || {
+            buffered_reject_ats(&relay, &a_master).contains(&original_at)
+        })
+        .await,
+        "a reconnect must re-arm the decline re-send, got {:?}",
+        buffered_reject_ats(&relay, &a_master),
+    );
+
+    // 8. B goes dark, A returns and finally converges.
+    relay.set_online(&b_device, false);
+    drain_events(&mut b);
+    // HARNESS HONESTY. The resolver is process-GLOBAL in the test binary, so every
+    // node's device -> master link is visible to every other node and `resolve(b_device)`
+    // succeeds here for a node that, in the field, has never heard of B. That mock
+    // fidelity gap is exactly what hid the field bug: two fresh installs that were
+    // never online together, so A's resolver was cold and the reject was dropped with
+    // `row None`. Forget the link before A collects, so attribution MUST come from the
+    // list the reject carries. Restored below, before B needs its own mapping again.
+    super::resolver::forget(&b_device);
+    relay.set_online(&a_device, true);
+    assert!(
+        wait_event(&mut a, std::time::Duration::from_secs(20), |ev| {
+            matches!(ev, NetworkEvent::FriendRequestRejected { peer_id } if *peer_id == b_master)
+        })
+        .await,
+        "A must finally learn it was declined",
+    );
+    assert!(
+        wait_until(10, async || friend_row(&a, &b_master).is_none()).await,
+        "and drop the request, got {:?}",
+        friend_row(&a, &b_master),
+    );
+    let twice = wait_event(&mut a, std::time::Duration::from_secs(3), |ev| {
+        matches!(ev, NetworkEvent::FriendRequestRejected { peer_id } if *peer_id == b_master)
+    })
+    .await;
+    assert!(!twice, "exactly one FriendRequestRejected, however many copies replay");
+
+    drop(a);
+    drop(b);
+}
+
+// ---------------------------------------------------------------------------
+// A re-deposit must be the SAME request, not a fresh one. The requested_at is
+// what every dedup/anti-downgrade decision downstream compares against, so if a
+// reconnect minted a new one, a declined or already-shown request would look
+// strictly newer on every boot and resurface forever.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests vs the global resolver
+async fn redeposit_keeps_original_requested_at_and_dedups() {
+    let _g = test_guard();
+    super::blocklist::clear_for_test();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+    const A_MASTER: u8 = 151;
+    const A_DEV: u8 = 152;
+    const B_MASTER: u8 = 153;
+    const B_DEV: u8 = 154;
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
+    let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
+
+    let mut a = spawn_node_with_friends(&relay, A_MASTER, A_DEV, &[]).await;
+    let a_device = a.device_id.clone();
+    a.cmd_tx
+        .send(NodeCommand::SendFriendRequest { peer_id: b_master.clone() })
+        .await
+        .unwrap();
+    assert!(
+        wait_until(10, async || relay.buffered_count(&b_master) > 0).await,
+        "request must reach B's mailbox",
+    );
+    let original_at = friend_row_full(&a, &b_master)
+        .expect("A must hold a pending outgoing row")
+        .2;
+
+    // Three reconnects, three more copies of the SAME request.
+    for i in 0..3usize {
+        let before = relay.buffered_count(&b_master);
+        relay.set_online(&a_device, false);
+        relay.set_online(&a_device, true);
+        assert!(
+            wait_until(10, async || relay.buffered_count(&b_master) > before).await,
+            "reconnect {i} must re-deposit",
+        );
+        drain_events(&mut a);
+    }
+
+    let ats = buffered_request_ats(&relay, &b_master);
+    assert!(ats.len() >= 4, "expected a copy per connect, got {ats:?}");
+    assert!(
+        ats.iter().all(|at| *at == original_at),
+        "every re-deposit must carry the ORIGINAL requested_at {original_at}, got {ats:?}",
+    );
+
+    // B boots once and shows it exactly ONCE, whatever the mailbox depth.
+    relay.set_online(&a_device, false);
+    drain_events(&mut a);
+    let mut b = spawn_node_with_friends(&relay, B_MASTER, B_DEV, &[]).await;
+    assert!(
+        wait_event(&mut b, std::time::Duration::from_secs(10), |ev| {
+            matches!(ev, NetworkEvent::FriendRequestReceived { peer_id }
+                if super::resolver::resolve(peer_id) == a_master)
+        })
+        .await,
+        "B must see the request",
+    );
+    let twice = wait_event(&mut b, std::time::Duration::from_secs(3), |ev| {
+        matches!(ev, NetworkEvent::FriendRequestReceived { peer_id }
+            if super::resolver::resolve(peer_id) == a_master)
+    })
+    .await;
+    assert!(!twice, "the other copies must dedup, not re-notify");
+
+    drop(a);
+    drop(b);
+}
+
+// ---------------------------------------------------------------------------
+// The stored `requested_at` on a pending row has to ADVANCE. The upsert used to
+// keep whatever was written first, so on a pending-incoming row every later
+// re-delivery of a genuinely newer request still measured against the OLD
+// timestamp, fell through the dedup guard, and re-notified on every replay.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests vs the global resolver
+async fn newer_request_advances_stored_requested_at() {
+    let _g = test_guard();
+    super::blocklist::clear_for_test();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+    const B_MASTER: u8 = 163;
+    const B_DEV: u8 = 164;
+    let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
+
+    // A is a bare identity here: the point is the RECEIVER's dedup arithmetic, so
+    // its requests are injected as a real sender's frames, timestamps and all.
+    let a_master_kp = NativeKeypair::from_secret_bytes(&seed_bytes(161));
+    let a_master = a_master_kp.peer_id();
+    let a_device = NativeKeypair::from_secret_bytes(&seed_bytes(162)).peer_id();
+    let a_list = super::crypto_handler::build_signed_device_list(
+        &a_master_kp, 1, vec![a_device.clone()], Vec::new(),
+    );
+
+    let mut b = spawn_node_with_friends(&relay, B_MASTER, B_DEV, &[]).await;
+    let inbox = format!("inbox:{b_master}");
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let t0 = now_ms;
+    let t2 = now_ms + 60_000;
+    let request_at = |at: i64| {
+        serde_json::to_vec(&super::types::HavenMessage::FriendRequest {
+            requested_at: at,
+            carried_bundle: None,
+            device_list: Some(a_list.clone()),
+            carried_profile: None,
+        })
+        .unwrap()
+    };
+
+    // 1. The original request lands as pending incoming at T0.
+    relay.inject_direct(&inbox, &a_device, &b.device_id, request_at(t0));
+    assert!(
+        wait_event(&mut b, std::time::Duration::from_secs(10), |ev| {
+            matches!(ev, NetworkEvent::FriendRequestReceived { peer_id }
+                if super::resolver::resolve(peer_id) == a_master)
+        })
+        .await,
+        "B must show the first request",
+    );
+
+    // 2. A cancel + re-add mints T2 > T0, which must fall through and re-notify.
+    drain_events(&mut b);
+    relay.inject_direct(&inbox, &a_device, &b.device_id, request_at(t2));
+    assert!(
+        wait_event(&mut b, std::time::Duration::from_secs(10), |ev| {
+            matches!(ev, NetworkEvent::FriendRequestReceived { peer_id }
+                if super::resolver::resolve(peer_id) == a_master)
+        })
+        .await,
+        "a strictly newer request must show again",
+    );
+    assert!(
+        wait_until(10, async || {
+            friend_row_full(&b, &a_master).map(|(_, _, r)| r) == Some(t2)
+        })
+        .await,
+        "the stored requested_at must ADVANCE to the newer request, got {:?}",
+        friend_row_full(&b, &a_master),
+    );
+
+    // 3. The SAME T2 arriving again (the mailbox replays on every boot) must now
+    //    measure against T2, not T0, and be swallowed.
+    drain_events(&mut b);
+    relay.inject_direct(&inbox, &a_device, &b.device_id, request_at(t2));
+    let renotified = wait_event(&mut b, std::time::Duration::from_secs(3), |ev| {
+        matches!(ev, NetworkEvent::FriendRequestReceived { peer_id }
+            if super::resolver::resolve(peer_id) == a_master)
+    })
+    .await;
+    assert!(
+        !renotified,
+        "a re-delivery of the SAME request must not re-notify — the stored \
+         requested_at never advanced, so every replay looked new",
+    );
+
+    drop(b);
+}
+
+// ---------------------------------------------------------------------------
+// A decline now travels through a mailbox, which means it can arrive LATE, out
+// of order, or replayed for the whole TTL. So a reject only ever acts on the
+// request it NAMES: an older stamp, or the legacy no-stamp wire form, must never
+// become a remote un-friend primitive against a settled friendship. The positive
+// half is the mutual race, and runs last because it is destructive: a reject
+// carrying the accepted row's OWN requested_at answers the very request that
+// produced the friendship, and must land.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests vs the global resolver
+async fn stale_reject_never_deletes_an_accepted_friendship() {
+    let _g = test_guard();
+    super::blocklist::clear_for_test();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+    const A_MASTER: u8 = 171;
+    const A_DEV: u8 = 172;
+    const B_MASTER: u8 = 173;
+    const B_DEV: u8 = 174;
+    let b_master_kp = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER));
+    let b_master = b_master_kp.peer_id();
+    let b_device = NativeKeypair::from_secret_bytes(&seed_bytes(B_DEV)).peer_id();
+    // B's own master-signed device list, exactly what its reject carries. Every
+    // frame below is attributed through THIS, not through the resolver.
+    let b_list = super::crypto_handler::build_signed_device_list(
+        &b_master_kp, 1, vec![b_device.clone()], Vec::new(),
+    );
+
+    // A and B are already friends. Re-seed the row so it carries a REAL request
+    // stamp: the freshness compare is the whole gate, and the harness's seeded
+    // friendships are stamped 0, against which nothing is stale.
+    const STORED: i64 = 1_700_000_000_000;
+    let mut a = spawn_node_with_friends(&relay, A_MASTER, A_DEV, &[&b_master]).await;
+    {
+        let store = a.store();
+        store.remove_friend(&b_master).unwrap();
+        store.save_friend(&b_master, "accepted", "", STORED).unwrap();
+    }
+    assert_eq!(
+        friend_row_full(&a, &b_master),
+        Some(("accepted".to_string(), String::new(), STORED)),
+        "precondition: an accepted friendship stamped with the request it came from",
+    );
+    drain_events(&mut a);
+
+    let room = super::types::dm_room_code(&a.master_id, &b_master);
+    // A copy of a reject for an OLDER request than the one we accepted: a cancel +
+    // re-add mints a strictly newer stamp, and the accepted row freezes at it, so
+    // this is exactly what a replay out of a 3-day mailbox looks like.
+    let stale = serde_json::to_vec(
+        &super::types::HavenMessage::FriendReject {
+            requested_at: STORED - 1,
+            device_list: Some(b_list.clone()),
+        },
+    ).unwrap();
+    // The legacy wire form from a pre-2026-08-29 client: no requested_at at all,
+    // i.e. "decline whatever is pending". It names no request, so it can only ever
+    // touch a still-pending one; an old client is not a downgrade path.
+    let legacy = br#"{"type":"friend_reject"}"#.to_vec();
+    // Both attribution paths: the stale frame rides B's signed list (cryptographic
+    // attribution, so it finds the row without the two ever having met), and the
+    // legacy frame comes bare from the master id (resolver attribution, the only
+    // thing a pre-carried-list client can offer). Neither may touch the row.
+    relay.inject_direct(&room, &b_device, &a.device_id, stale.clone());
+    relay.inject_direct(&room, &b_master, &a.device_id, legacy.clone());
+
+    let unfriended = wait_event(&mut a, std::time::Duration::from_secs(3), |ev| {
+        matches!(ev, NetworkEvent::FriendRequestRejected { .. })
+    })
+    .await;
+    assert!(
+        !unfriended,
+        "a reject that names no live request, or an older one, must emit nothing",
+    );
+    assert_eq!(
+        friend_row_full(&a, &b_master),
+        Some(("accepted".to_string(), String::new(), STORED)),
+        "and the accepted friendship must survive untouched",
+    );
+
+    // THE POSITIVE HALF (destructive, so last). The mutual race: both sides
+    // requested each other, both auto-converged to friends, and B then hit Reject
+    // on that same request. Its reject carries the stamp our accepted row froze at,
+    // so it answers the request this friendship is made of and must land -- else
+    // the pair is friends on one side and declined on the other, and A keeps
+    // re-sending FriendAccept forever.
+    drain_events(&mut a);
+    let answered = serde_json::to_vec(
+        &super::types::HavenMessage::FriendReject {
+            requested_at: STORED,
+            device_list: Some(b_list.clone()),
+        },
+    ).unwrap();
+    relay.inject_direct(&room, &b_device, &a.device_id, answered);
+    assert!(
+        wait_event(&mut a, std::time::Duration::from_secs(10), |ev| {
+            matches!(ev, NetworkEvent::FriendRequestRejected { peer_id } if *peer_id == b_master)
+        })
+        .await,
+        "a reject naming the accepted row's OWN request must be honoured",
+    );
+    assert!(
+        wait_until(10, async || friend_row(&a, &b_master).is_none()).await,
+        "and the friendship must be gone, got {:?}",
+        friend_row(&a, &b_master),
+    );
+    let twice = wait_event(&mut a, std::time::Duration::from_secs(3), |ev| {
+        matches!(ev, NetworkEvent::FriendRequestRejected { .. })
+    })
+    .await;
+    assert!(!twice, "exactly one FriendRequestRejected");
+
+    drop(a);
+}
+
+
+// ---------------------------------------------------------------------------
+// The carried list is ATTRIBUTION, so it is a trust boundary: it decides which
+// friend row a reject deletes. A list that is present but bad must be a REJECTED
+// message, never a quiet downgrade to the resolver -- `if list.is_some()` would
+// be the bypass. Both halves are checked here against a resolver that WOULD have
+// found the row, so a drop can only be the gate's doing, and the last step proves
+// exactly that by sending the same frame with no list at all.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests vs the global resolver
+async fn friend_reject_with_bad_carried_list_is_dropped() {
+    let _g = test_guard();
+    super::blocklist::clear_for_test();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+    const A_MASTER: u8 = 181;
+    const A_DEV: u8 = 182;
+    const B_MASTER: u8 = 183;
+    const B_DEV: u8 = 184;
+    let b_master_kp = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER));
+    let b_master = b_master_kp.peer_id();
+    let b_device = NativeKeypair::from_secret_bytes(&seed_bytes(B_DEV)).peer_id();
+    // A SECOND device of B's that the signed list does NOT name.
+    let b_unlisted = NativeKeypair::from_secret_bytes(&seed_bytes(185)).peer_id();
+    let b_list = super::crypto_handler::build_signed_device_list(
+        &b_master_kp, 1, vec![b_device.clone()], Vec::new(),
+    );
+
+    const STORED: i64 = 1_700_000_000_000;
+    let mut a = spawn_node_with_friends(&relay, A_MASTER, A_DEV, &[&b_master]).await;
+    {
+        let store = a.store();
+        store.remove_friend(&b_master).unwrap();
+        store.save_friend(&b_master, "accepted", "", STORED).unwrap();
+    }
+    // The resolver KNOWS the unlisted device speaks for B. Every drop below is
+    // therefore the carried-list gate refusing, not attribution failing to resolve.
+    super::resolver::update(&b_unlisted, &b_master);
+    assert_eq!(
+        super::resolver::resolve(&b_unlisted), b_master,
+        "precondition: the resolver would have found the row on its own",
+    );
+    drain_events(&mut a);
+
+    let room = super::types::dm_room_code(&a.master_id, &b_master);
+    let reject_with = |list: Option<super::types::SignedDeviceList>| {
+        serde_json::to_vec(&super::types::HavenMessage::FriendReject {
+            requested_at: STORED,
+            device_list: list,
+        })
+        .unwrap()
+    };
+
+    // (1) Sender device is NOT in the list it carries. A valid list captured off
+    //     the wire must not let any other device speak for that identity.
+    relay.inject_direct(&room, &b_unlisted, &a.device_id, reject_with(Some(b_list.clone())));
+    // (2) A RELABELLED list: B's signed payload wearing a stranger's master id.
+    //     The pubkey -> peer_id binding inside verify_device_list is what stops it.
+    let mut stolen = b_list.clone();
+    stolen.master_peer_id = NativeKeypair::from_secret_bytes(&seed_bytes(186)).peer_id();
+    relay.inject_direct(&room, &b_device, &a.device_id, reject_with(Some(stolen)));
+    // (3) A list whose signature no longer covers its devices.
+    let mut tampered = b_list.clone();
+    tampered.devices.push(b_unlisted.clone());
+    relay.inject_direct(&room, &b_unlisted, &a.device_id, reject_with(Some(tampered)));
+
+    let unfriended = wait_event(&mut a, std::time::Duration::from_secs(3), |ev| {
+        matches!(ev, NetworkEvent::FriendRequestRejected { .. })
+    })
+    .await;
+    assert!(
+        !unfriended,
+        "a reject whose carried list does not bind its sender must emit nothing",
+    );
+    assert_eq!(
+        friend_row_full(&a, &b_master),
+        Some(("accepted".to_string(), String::new(), STORED)),
+        "and must leave the friendship untouched",
+    );
+
+    // (4) CONTROL, and destructive so it runs last: the SAME frame from the SAME
+    //     device with NO list at all is a pre-carried-list client, falls back to
+    //     the resolver, and lands. The only difference from (1) is the bad list --
+    //     which is the proof that the drops above were the gate, not the lookup.
+    drain_events(&mut a);
+    relay.inject_direct(&room, &b_unlisted, &a.device_id, reject_with(None));
+    assert!(
+        wait_event(&mut a, std::time::Duration::from_secs(10), |ev| {
+            matches!(ev, NetworkEvent::FriendRequestRejected { peer_id } if *peer_id == b_master)
+        })
+        .await,
+        "a legacy reject that resolves to the friend must still be honoured",
+    );
+    assert!(
+        wait_until(10, async || friend_row(&a, &b_master).is_none()).await,
+        "and delete the row, got {:?}",
+        friend_row(&a, &b_master),
+    );
+
+    drop(a);
 }
 
 // ---------------------------------------------------------------------------
