@@ -12081,6 +12081,44 @@ async fn setup_epoch_race_trio(
         }
     }
     assert!(ok, "all three leaves must join the server-wide MLS group everywhere");
+    // The join bootstrap is racy by construction: a joiner sends its KeyPackage
+    // twice (at ServerJoined, and again when an MLS frame reaches it before its
+    // Welcome), and two copies that straddle a batch tick become a remove +
+    // re-add whose removal commit the joiner reads as an eviction and answers
+    // with yet another KeyPackage. That churn settles, but a batch can still be
+    // pending when the leaves first agree, and a KeyPackage flushed in the same
+    // tick as the heal staged by `make_b_stale` re-adds the member that must
+    // stay stale (CI, 2026-08-29: "churn must advance O+C past deaf B"). The
+    // subject of these tests is the heal, so wait for a QUIET group first: one
+    // epoch, agreed by all three, unchanged across more than two batch ticks.
+    let mut quiet_since = std::time::Instant::now();
+    let mut last: Option<u64> = None;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let (oe, be, ce) = (
+            o.mls_epoch(&server_id).await,
+            b.mls_epoch(&server_id).await,
+            c.mls_epoch(&server_id).await,
+        );
+        let agreed = match (oe, be, ce) {
+            (Some(x), Some(y), Some(z)) if x == y && y == z => Some(x),
+            _ => None,
+        };
+        if agreed.is_some() && agreed == last {
+            if quiet_since.elapsed() >= std::time::Duration::from_millis(4500) {
+                break;
+            }
+        } else {
+            quiet_since = std::time::Instant::now();
+            last = agreed;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the server group must go quiet before the heal is staged, got o={oe:?} b={be:?} c={ce:?}"
+        );
+        // Polls the live snapshot only (never a running node's DB).
+        sleep_ms(500).await;
+    }
     drain_events(&mut o);
     drain_events(&mut b);
     drain_events(&mut c);
