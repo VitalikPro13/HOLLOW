@@ -510,6 +510,42 @@ Persists little-endian-packed bit bitmap for paused/resumed share downloads.
 - `messages.rs:save_chunk_bitmap()` -- `INSERT OR REPLACE INTO share_chunks`.
 - `messages.rs:load_chunk_bitmap()` -- `SELECT bitmap_blob WHERE root_hash = ?1`. Returns `Option<Vec<u8>>`.
 
+## Table: pending_server_joins (pending joins, rung 1, 2026-08-29)
+
+```sql
+CREATE TABLE IF NOT EXISTS pending_server_joins (
+    server_id         TEXT PRIMARY KEY,
+    requested_at      INTEGER NOT NULL,
+    nsfw_confirmed    INTEGER NOT NULL DEFAULT 0,
+    twitch_proof_json TEXT,
+    state             TEXT NOT NULL DEFAULT 'pending',
+    reason            TEXT NOT NULL DEFAULT '',
+    last_deposited_at INTEGER NOT NULL DEFAULT 0,
+    created_at        INTEGER NOT NULL
+)
+```
+
+A join whose members were ALL offline is not a failure any more: the request is persisted here and deposited into the server room's `~join` ring, so it outlives the app being closed. `state` is `'pending'` (still waiting, `parked` lives only in the RAM `PendingJoin`, not this column) or `'rejected'` (a member answered no; the row survives so the tile can say why). `requested_at` is the nonce every answer must name.
+
+### Pending Join Operations
+
+- `messages.rs:upsert_pending_join()`: insert-or-replace-by-`server_id`. `created_at` is preserved across a repeat request via `ON CONFLICT DO UPDATE` (every OTHER column is overwritten, `created_at` is not), so the tile keeps saying when the user first asked while `requested_at` becomes the new nonce.
+- `messages.rs:delete_pending_join()`: `DELETE ... WHERE server_id = ?1`. Forgets a join entirely (completed, or discarded by the user).
+- `messages.rs:load_pending_joins()`: every stored row, `ORDER BY requested_at DESC` (newest ask first). Returns `Vec<PendingJoinRow>`.
+
+Called only from the `CrdtStore` actor (`node/crdt_store.rs`), never opened directly on the event loop, same persistence-actor rule as every other CRDT write.
+
+### `PendingJoinRow`
+A persisted server join that has not completed yet. Survives restarts on purpose: the whole point of parking a join is that the members were all offline, so the answer may arrive days later, on a different run of the app.
+- `server_id: String`
+- `requested_at: i64`: Unix MILLISECONDS, the request nonce every answer must name.
+- `nsfw_confirmed: bool`
+- `twitch_proof_json: Option<String>`
+- `state: String`: `"pending"` (still waiting) or `"rejected"` (a member said no).
+- `reason: String`: the reject reason string, empty while pending.
+- `last_deposited_at: i64`: Unix MILLISECONDS of the last `~join` ring deposit.
+- `created_at: i64`
+
 ## Stored Structs
 
 ### StoredMessage

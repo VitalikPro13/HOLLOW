@@ -392,7 +392,7 @@ use super::crypto_handler::{
     persist_mls_state, persist_crypto_state, persist_olm_session,
     peer_is_reachable, is_mls_coordinator, is_vault_coordinator, elect_coordinator, ws_room_for_peer,
     send_mls_broadcast, send_encrypted_message,
-    send_message_to_peer, send_raw_to_peer, send_raw_to_identity,
+    send_message_to_peer, send_message_to_peer_in_room, send_raw_to_peer, send_raw_to_identity,
 };
 use super::file_handler;
 use super::forwarder_client;
@@ -1003,6 +1003,17 @@ async fn run_event_loop(
     // "{server_id}|{joiner_device}" -> when we last saw that join request, so the
     // coordinator gate can tell a first ask from the joiner's escalation retry.
     let mut join_request_seen: HashMap<String, std::time::Instant> = HashMap::new();
+    // "{server_id}|{joiner_master}" -> the newest `requested_at` we know has been
+    // ANSWERED. Read from the `~join` ring (or written by our own answer), it is
+    // what stops a member that returns days later re-serving a join somebody
+    // else already handled. NOT sync-gating state, so it deliberately survives
+    // `WsEvent::Disconnected`: an answer stays answered across a reconnect.
+    let mut join_resolutions: HashMap<String, i64> = HashMap::new();
+    // Servers whose PARKED join completed but whose MLS leaf has not formed yet.
+    // Between the two the UI says "waiting for a member to finish setup"; the
+    // Welcome clears it.
+    let mut awaiting_mls_after_parked_join: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
     // Pending friend requests: peer_id → requested_at timestamp.
     // Queued when peer isn't reachable (no shared rooms), sent when they appear.
     let mut pending_friend_requests: HashMap<String, i64> = HashMap::new();
@@ -1057,6 +1068,42 @@ async fn run_event_loop(
                         "[HOLLOW-FRIENDS] Restored {} pending friend removals from DB",
                         pending_friend_removals.len()
                     );
+                }
+            }
+        }
+    }
+
+    // PARKED JOINS (pending joins, rung 1). Restore every join still waiting for
+    // an answer. A parked entry gets NO 15s timer: it has already parked, and
+    // the whole point is that it waits indefinitely for a member to return. The
+    // room join happens in the `WsEvent::Connected` handler, which is where
+    // every other room join lives. Rows in state `rejected` deliberately get no
+    // RAM entry: they are a tile, not a join in flight.
+    {
+        if let Ok(store) = crate::storage::MessageStore::open(&db_path, &db_passphrase) {
+            let rows = store.load_pending_joins().unwrap_or_default();
+            if !rows.is_empty() {
+                // ONE build for all of them: this opens the DB.
+                let device_list = crypto_handler::build_local_device_list(
+                    &master_keypair, &device_peer_id, &db_path, &db_passphrase,
+                );
+                let mut restored = 0usize;
+                for row in rows {
+                    if row.state != "pending" {
+                        continue;
+                    }
+                    pending_server_joins.insert(row.server_id.clone(), PendingJoin {
+                        twitch_proof_json: row.twitch_proof_json,
+                        nsfw_confirmed: row.nsfw_confirmed,
+                        requested_at: row.requested_at,
+                        parked: true,
+                        last_deposited_at: row.last_deposited_at,
+                        device_list: device_list.clone(),
+                    });
+                    restored += 1;
+                }
+                if restored > 0 {
+                    hollow_log!("[HOLLOW-CRDT] Restored {restored} parked server join(s) from DB");
                 }
             }
         }
@@ -1325,10 +1372,11 @@ async fn run_event_loop(
 
                     NodeCommand::JoinServer { server_id, twitch_proof_json, nsfw_confirmed } => {
                         sync_handler::handle_join_server(
-                            &mut pending_server_joins, &mls, &ws_cmd_tx,
+                            &mut pending_server_joins, &ws_cmd_tx,
                             &ws_room_peers, &cmd_tx,
                             server_id, twitch_proof_json, nsfw_confirmed,
-                            &crdt_store,
+                            &crdt_store, &master_keypair, &device_peer_id,
+                            &db_path, &db_passphrase,
                         ).await;
                     }
 
@@ -2723,6 +2771,33 @@ async fn run_event_loop(
                         );
                     }
 
+                    // -- Parked joins: user actions on the pending tile --
+                    NodeCommand::DiscardPendingJoin { server_id } => {
+                        sync_handler::handle_discard_pending_join(
+                            &mut pending_server_joins, &event_tx, &ws_cmd_tx,
+                            server_id, &crdt_store,
+                        ).await;
+                    }
+                    // "Request again": the same code path as the original ask,
+                    // with the row's stored consent/proof and a FRESH nonce. The
+                    // row is read on the CrdtStore actor rather than opened here.
+                    NodeCommand::RequestPendingJoinAgain { server_id } => {
+                        match crdt_store.load_pending_join(server_id.clone()).await {
+                            Some(row) => {
+                                sync_handler::handle_join_server(
+                                    &mut pending_server_joins, &ws_cmd_tx,
+                                    &ws_room_peers, &cmd_tx,
+                                    server_id, row.twitch_proof_json, row.nsfw_confirmed,
+                                    &crdt_store, &master_keypair, &device_peer_id,
+                                    &db_path, &db_passphrase,
+                                ).await;
+                            }
+                            None => {
+                                hollow_log!("[HOLLOW-CRDT] Request again for {server_id}: no pending join row, ignoring");
+                            }
+                        }
+                    }
+
                     // -- Server join timeout --
                     NodeCommand::CheckPendingJoinTimeout { server_id } => {
                         sync_handler::handle_check_pending_join_timeout(
@@ -2778,6 +2853,9 @@ async fn run_event_loop(
                                 &master_keypair, &device_keypair, &master_peer_str, &device_peer_id,
                                 &mut pending_server_joins,
                                                                 &mut join_request_seen,
+                                                                &mut join_resolutions,
+                                                                &mut awaiting_mls_after_parked_join,
+                                                                &crdt_store,
                                 &mut pending_sync_requests, &mut mls,
                                 &mut mls_bootstrap_requested,
                                 &mut pending_shard_assembly, &mut pending_file_streams,
@@ -3004,6 +3082,17 @@ async fn run_event_loop(
 
                         // Auto-join rooms for all servers we're a member of.
                         for server_id in server_states.keys() {
+                            let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinRoom {
+                                room_code: server_id.clone(),
+                            });
+                        }
+                        // …and for every server we are still WAITING to join.
+                        // A parked join is not a membership, so the loop above
+                        // misses it, and being in that room is what makes both
+                        // legs of the answer reachable: the relay replays the
+                        // admitting member's buffered snapshot on the room join,
+                        // and the `~join` ring catch-up is gated on membership.
+                        for server_id in pending_server_joins.keys() {
                             let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinRoom {
                                 room_code: server_id.clone(),
                             });
@@ -3561,6 +3650,9 @@ async fn run_event_loop(
                                             server_id: room.clone(),
                                             twitch_proof_json: pending_server_joins.get(&room).and_then(|p| p.twitch_proof_json.clone()),
                                             nsfw_confirmed: pending_server_joins.get(&room).map(|p| p.nsfw_confirmed).unwrap_or(false),
+                                            requested_at: pending_server_joins.get(&room).map(|p| p.requested_at).unwrap_or(0),
+                                            device_list: pending_server_joins.get(&room).and_then(|p| p.device_list.clone()),
+                                            parked: false,
                                         },
                                     );
                                     hollow_log!("[HOLLOW-CRDT] Sent pending join request to {peer_id} for {room}");
@@ -3883,6 +3975,53 @@ async fn run_event_loop(
                                     channel_id: cid,
                                     max_age_secs,
                                 });
+                            }
+                        }
+
+                        // -- The JOIN ring (pending joins, rung 1) --
+                        // Read once per connection, by BOTH roles: a member
+                        // collects parked requests and other members'
+                        // resolutions, and a joiner collects the resolution
+                        // addressed to it. A joiner is not in `server_states`
+                        // at all, which is why this cannot ride the block
+                        // above. No `max_age`: unlike channel frames, a join
+                        // has no watermark and an old request is exactly the
+                        // one we want. Members never SUBSCRIBE to `~join` —
+                        // live joins stay on the unicast path, the ring is
+                        // read by catch-up only.
+                        {
+                            let ring_wanted = server_states
+                                .get(&room)
+                                .is_some_and(|s| s.relay_catchup_secs() > 0)
+                                || pending_server_joins.contains_key(&room);
+                            if ring_wanted
+                                && relay_catchup_done
+                                    .insert((room.clone(), super::types::JOIN_TOPIC.to_string()))
+                            {
+                                hollow_log!("[HOLLOW-TOPIC] Join-ring catch-up request (connect) for {room}");
+                                let _ = ws_cmd_tx.send(super::ws_client::WsCommand::TopicCatchup {
+                                    room_code: room.clone(),
+                                    channel_id: super::types::JOIN_TOPIC.to_string(),
+                                    max_age_secs: 0,
+                                });
+                            }
+                        }
+
+                        // A still-parked join of OUR OWN re-deposits its copy,
+                        // but only on a 12h interval. The ring is 200 frames
+                        // shared by everyone joining this server, so a joiner
+                        // that flaps every minute would own it inside four
+                        // hours; the relay's fair share is the backstop, not
+                        // the design. The live re-send to present peers is
+                        // free and happens per peer below.
+                        if let Some(p) = pending_server_joins.get_mut(&room) {
+                            let now = super::types::now_ms();
+                            if p.parked && now - p.last_deposited_at >= super::types::REDEPOSIT_INTERVAL_MS {
+                                p.last_deposited_at = now;
+                                sync_handler::deposit_parked_join(&ws_cmd_tx, &room, p);
+                                crdt_store.upsert_pending_join(
+                                    sync_handler::pending_join_row(&room, p, "pending", ""),
+                                );
                             }
                         }
 
@@ -4246,6 +4385,9 @@ async fn run_event_loop(
                                             server_id: room.clone(),
                                             twitch_proof_json: pending_server_joins.get(&room).and_then(|p| p.twitch_proof_json.clone()),
                                             nsfw_confirmed: pending_server_joins.get(&room).map(|p| p.nsfw_confirmed).unwrap_or(false),
+                                            requested_at: pending_server_joins.get(&room).map(|p| p.requested_at).unwrap_or(0),
+                                            device_list: pending_server_joins.get(&room).and_then(|p| p.device_list.clone()),
+                                            parked: false,
                                         },
                                     );
                                     hollow_log!("[HOLLOW-CRDT] Sent pending join request to {pid_str} for {room}");
@@ -4800,6 +4942,9 @@ async fn run_event_loop(
                                         &master_keypair, &device_keypair, &master_peer_str, &device_peer_id,
                                         &mut pending_server_joins,
                                                                                 &mut join_request_seen,
+                                                                                &mut join_resolutions,
+                                                                                &mut awaiting_mls_after_parked_join,
+                                                                                &crdt_store,
                                         &mut pending_sync_requests, &mut mls,
                                         &mut mls_bootstrap_requested,
                                         &mut pending_shard_assembly, &mut pending_file_streams,
@@ -5925,6 +6070,339 @@ fn enforce_device_revocations(
     }
 }
 
+/// Apply ONE remotely-authored CRDT op: the single ingest path for a
+/// `CrdtOpBroadcast` and for the `MemberAdded` op a `ServerJoinResolved` frame
+/// carries. Author-validated by `op_allowed` (never sender-validated: the
+/// sender may legitimately be relaying), persisted through `insert_crdt_op`,
+/// re-flooded once, and turned into the per-payload UI events.
+///
+/// Extracted from the `CrdtOpBroadcast` arm verbatim so a join resolution can
+/// never become a SECOND ingest path with its own, weaker gates.
+#[allow(clippy::too_many_arguments)]
+async fn apply_remote_crdt_op(
+    server_states: &mut HashMap<String, ServerState>,
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    gossip_overlays: &mut HashMap<String, super::gossip::GossipOverlay>,
+    mls: &mut Option<MlsManager>,
+    crypto_store: &CryptoStore,
+    pending_mls_key_packages: &mut HashMap<String, Vec<(String, Vec<u8>)>>,
+    pending_mls_removals: &mut HashMap<String, Vec<String>>,
+    voice_channel_participants: &mut HashMap<String, std::collections::HashSet<String>>,
+    voice_channel_gossip_mode: &mut HashMap<String, bool>,
+    pending_server_joins: &HashMap<String, PendingJoin>,
+    bundle_keypair: &crate::identity::native_identity::NativeKeypair,
+    db_path: &str,
+    db_passphrase: &str,
+    local_peer_str: &str,
+    device_peer_id: &str,
+    peer_str: &str,
+    server_id: String,
+    op_json: String,
+) {
+    
+
+    // Room gating: only accept ops for servers we're a member of.
+    if !server_states.contains_key(&server_id) {
+        hollow_log!("[HOLLOW-CRDT] Ignoring CrdtOpBroadcast for unknown server {server_id}");
+        return;
+    }
+
+    if let Ok(op) = serde_json::from_str::<crate::crdt::operations::CrdtOp>(&op_json) {
+        // SECURITY: Log author mismatch but don't reject — the op may be
+        // legitimately relayed by another peer during join/sync fan-out.
+        // The per-payload permission check below validates the author's role.
+        if op.author != peer_str {
+            hollow_log!("[HOLLOW-CRDT] Note: CrdtOpBroadcast author '{}' differs from sender '{peer_str}' (relay)", op.author);
+        }
+
+        // SECURITY: Verify the AUTHOR has permission for this operation type.
+        // Shared ingest matrix (ServerState::op_allowed): uses op.author (the
+        // original creator) for the role lookup, not the sender (who may be
+        // relaying the op), and is override-aware — the same matrix the local
+        // send handlers gate on.
+        {
+            let state = server_states.get(&server_id).unwrap();
+            if !state.op_allowed(&op) {
+                hollow_log!("[HOLLOW-SECURITY] REJECTED CrdtOpBroadcast from {peer_str} — insufficient permission for {:?} (role: {:?})", op.payload, state.get_role(&op.author));
+                return;
+            }
+        }
+
+        let state = server_states.get_mut(&server_id).unwrap();
+
+        let was_len = state.op_log.len();
+        let _ = state.apply_op(&op);
+
+        if state.op_log.len() > was_len {
+            // New op — persist and forward to other connected peers
+            if let Ok(json) = serde_json::to_string(&state) {
+                if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+                    let _ = store.save_server_state(&server_id, &json);
+                    let _ = store.insert_crdt_op(&op);
+                }
+            }
+
+            // Forward the (validated, NEW) op onward. Tier 2 (large-server
+            // scaling): prefer the WebRTC mesh — the historical per-member
+            // SendDirect re-forward made EVERY receiving node pay
+            // O(members × devices) relay uploads per op (O(N²) network-wide).
+            // Op-newness gates this block, so each node re-floods a given op
+            // at most once and only after the permission checks above passed.
+            // Falls back to the relay fan-out when the mesh isn't up.
+            if super::gossip_relay::flood_crdt_op(
+                gossip_overlays, event_tx, &server_id, &op_json, Some(peer_str),
+            ) == 0 {
+                let crdt_msg = HavenMessage::CrdtOpBroadcast {
+                    server_id: server_id.clone(),
+                    op_json: op_json.clone(),
+                };
+                let crdt_data = serde_json::to_vec(&crdt_msg).unwrap_or_default();
+                for member_peer_str in state.members.keys() {
+                    if super::resolver::same_identity(member_peer_str, &local_peer_str) { continue; }
+                    for dev in crate::node::crypto_handler::online_devices_for(ws_room_peers, member_peer_str) {
+                        if dev == peer_str { continue; } // don't echo back to the sender device
+                        send_raw_to_peer(ws_cmd_tx, ws_room_peers, &dev, crdt_data.clone());
+                    }
+                }
+            }
+
+            // Emit specific events based on op payload so Dart UI updates correctly.
+            // Set when a MemberRemoved op evicts OUR OWN identity — the durable
+            // teardown runs AFTER the match (the `state` borrow spans the match).
+            let mut self_evict_teardown = false;
+            match &op.payload {
+                CrdtPayload::ChannelAdded { channel_id, name, channel_type, .. } => {
+                    let _ = event_tx.send(NetworkEvent::ChannelAdded {
+                        server_id: server_id.clone(),
+                        channel_id: channel_id.clone(),
+                        name: name.clone(),
+                        channel_type: channel_type.clone(),
+                    }).await;
+                }
+                CrdtPayload::ChannelRemoved { channel_id } => {
+                    let _ = event_tx.send(NetworkEvent::ChannelRemoved {
+                        server_id: server_id.clone(),
+                        channel_id: channel_id.clone(),
+                    }).await;
+                }
+                CrdtPayload::ChannelRenamed { channel_id, new_name } => {
+                    let _ = event_tx.send(NetworkEvent::ChannelRenamed {
+                        server_id: server_id.clone(),
+                        channel_id: channel_id.clone(),
+                        new_name: new_name.clone(),
+                    }).await;
+                }
+                CrdtPayload::MemberAdded { peer_id, .. } => {
+                    let _ = event_tx.send(NetworkEvent::MemberJoined {
+                        server_id: server_id.clone(),
+                        peer_id: peer_id.clone(),
+                    }).await;
+                }
+                CrdtPayload::MemberRemoved { peer_id } => {
+                    // Self-eviction: OUR identity was removed (our own LEAVE
+                    // fanned from a sibling device, or a plain kick of us) and
+                    // the merge confirms we're no longer a member. Tear down
+                    // DURABLY — the acting device deletes its state in
+                    // handle_leave_server, but a sibling that only emitted
+                    // MemberLeft kept the shell, which reloaded on restart and
+                    // fed the sibling re-announce loop (a left server could
+                    // resurrect on our own devices and even re-ADD us via the
+                    // sibling join fast-path). Guarded on !pending so a rejoin
+                    // replaying the old removal op can't nuke the fresh join.
+                    let self_evicted = super::resolver::same_identity(peer_id, &local_peer_str)
+                        && !pending_server_joins.contains_key(&server_id)
+                        && !state.is_member(&local_peer_str);
+                    if self_evicted {
+                        self_evict_teardown = true; // teardown after the match
+                        let _ = event_tx.send(NetworkEvent::ServerDeleted {
+                            server_id: server_id.clone(),
+                        }).await;
+                    } else {
+                        let _ = event_tx.send(NetworkEvent::MemberLeft {
+                            server_id: server_id.clone(),
+                            peer_id: peer_id.clone(),
+                        }).await;
+                    }
+                }
+                CrdtPayload::ServerDeleted { .. } => {
+                    // Owner tombstoned the server. The state shell is RETAINED
+                    // (so we keep serving the tombstone to our own offline peers),
+                    // but we leave the MLS group + tell the UI to drop the server.
+                    if let Some(mls_mgr) = mls {
+                        mls_mgr.remove_group(&server_id);
+                        persist_mls_state(mls_mgr, crypto_store);
+                    }
+                    let _ = event_tx.send(NetworkEvent::ServerDeleted {
+                        server_id: server_id.clone(),
+                    }).await;
+                }
+                CrdtPayload::MemberBanned { peer_id } => {
+                    let local_peer = local_peer_str.to_string();
+                    if *peer_id == local_peer {
+                        let _ = event_tx.send(NetworkEvent::MemberLeft {
+                            server_id: server_id.clone(),
+                            peer_id: peer_id.clone(),
+                        }).await;
+                    } else {
+                        let _ = event_tx.send(NetworkEvent::ServerUpdated {
+                            server_id: server_id.clone(),
+                        }).await;
+                    }
+                }
+                CrdtPayload::RoleChanged { peer_id, role, .. } => {
+                    let _ = event_tx.send(NetworkEvent::RoleChanged {
+                        server_id: server_id.clone(),
+                        peer_id: peer_id.clone(),
+                        new_role: role.as_str().to_string(),
+                    }).await;
+                }
+                CrdtPayload::NicknameChanged { peer_id, .. } => {
+                    // Re-use MemberJoined to trigger member list refresh in Dart
+                    let _ = event_tx.send(NetworkEvent::MemberJoined {
+                        server_id: server_id.clone(),
+                        peer_id: peer_id.clone(),
+                    }).await;
+                }
+                CrdtPayload::TwitchUsernameChanged { peer_id, .. } => {
+                    // Re-use MemberJoined to trigger member list refresh in Dart
+                    let _ = event_tx.send(NetworkEvent::MemberJoined {
+                        server_id: server_id.clone(),
+                        peer_id: peer_id.clone(),
+                    }).await;
+                }
+                CrdtPayload::MessagePinned { channel_id, message_id } => {
+                    let _ = event_tx.send(NetworkEvent::MessagePinned {
+                        server_id: server_id.clone(),
+                        channel_id: channel_id.clone(),
+                        message_id: message_id.clone(),
+                    }).await;
+                }
+                CrdtPayload::MessageUnpinned { channel_id, message_id } => {
+                    let _ = event_tx.send(NetworkEvent::MessageUnpinned {
+                        server_id: server_id.clone(),
+                        channel_id: channel_id.clone(),
+                        message_id: message_id.clone(),
+                    }).await;
+                }
+                CrdtPayload::ChannelPublicChanged { channel_id, is_public } => {
+                    let _ = event_tx.send(NetworkEvent::ServerUpdated {
+                        server_id: server_id.clone(),
+                    }).await;
+                    // Broadcast to room (including guests) so public channel browsers see the change.
+                    // Text only (#44) — a voice-channel announce put a ghost entry in
+                    // browsers that the next list refresh dropped.
+                    if let Some(ch) = state.channels.get(channel_id)
+                        .filter(|c| c.channel_type == crate::crdt::server_state::ChannelType::Text)
+                    {
+                        let notify = HavenMessage::PublicChannelConfigChanged {
+                            server_id: server_id.clone(),
+                            channel_id: channel_id.clone(),
+                            is_public: *is_public,
+                            channel_name: ch.name.clone(),
+                            category: ch.category.clone(),
+                        };
+                        if let Ok(data) = serde_json::to_vec(&notify) {
+                            let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendToRoom {
+                                room_code: server_id.clone(),
+                                data,
+                            });
+                        }
+                        // Also emit locally so in-app guest browser updates for own servers
+                        let _ = event_tx.send(NetworkEvent::PublicChannelConfigChanged {
+                            server_id: server_id.clone(),
+                            channel_id: channel_id.clone(),
+                            is_public: *is_public,
+                            channel_name: ch.name.clone(),
+                            category: ch.category.clone(),
+                        }).await;
+                    }
+                }
+                _ => {
+                    // ServerRenamed, ServerSettingChanged, etc.
+                    let _ = event_tx.send(NetworkEvent::ServerUpdated {
+                        server_id: server_id.clone(),
+                    }).await;
+                }
+            }
+
+            // Durable self-eviction teardown (flag set in the MemberRemoved arm;
+            // runs here because the `state` borrow spans the match). Removing the
+            // state FIRST also makes the subgroup reconcile below skip the server.
+            if self_evict_teardown {
+                hollow_log!("[HOLLOW-CRDT] Self MemberRemoved for {server_id} — durable teardown (sibling leave / kick)");
+                let sub_cids: Vec<String> = server_states.get(&server_id)
+                    .map(|s| s.subgroup_channel_ids())
+                    .unwrap_or_default();
+                server_states.remove(&server_id);
+                if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+                    let _ = store.delete_server_state(&server_id);
+                }
+                if let Some(mls_mgr) = mls.as_mut() {
+                    if mls_mgr.has_group(&server_id) {
+                        mls_mgr.remove_group(&server_id);
+                    }
+                    for cid in &sub_cids {
+                        let gk = crate::crypto::subgroup_id(&server_id, cid);
+                        if mls_mgr.has_group(&gk) {
+                            mls_mgr.remove_group(&gk);
+                        }
+                    }
+                    persist_mls_state(mls_mgr, crypto_store);
+                }
+                let _ = ws_cmd_tx.send(super::ws_client::WsCommand::LeaveRoom {
+                    room_code: server_id.clone(),
+                });
+            }
+
+            // Option B: a role/visibility op shifts who qualifies for restricted
+            // channels. Reconcile subgroups here too (coordinator-gated + idempotent)
+            // so the ACTUAL subgroup coordinator acts even when the op was authored
+            // by some other member. The `state` mutable borrow above has ended.
+            let affects_subgroups = matches!(
+                &op.payload,
+                CrdtPayload::RoleChanged { .. }
+                    | CrdtPayload::ChannelVisibilityChanged { .. }
+                    | CrdtPayload::MemberRemoved { .. }
+                    | CrdtPayload::MemberBanned { .. }
+                    | CrdtPayload::ChannelVisibilityLabelsChanged { .. }
+                    | CrdtPayload::ChannelGrantSet { .. }
+                    | CrdtPayload::ChannelGrantRevoked { .. }
+                    | CrdtPayload::LabelAssigned { .. }
+                    | CrdtPayload::LabelUnassigned { .. }
+                    | CrdtPayload::LabelDeleted { .. }
+                    | CrdtPayload::LabelUpdated { .. }
+            );
+            if affects_subgroups {
+                let only = match &op.payload {
+                    CrdtPayload::ChannelVisibilityChanged { channel_id, .. }
+                    | CrdtPayload::ChannelVisibilityLabelsChanged { channel_id, .. }
+                    | CrdtPayload::ChannelGrantSet { channel_id, .. }
+                    | CrdtPayload::ChannelGrantRevoked { channel_id, .. } => Some(channel_id.clone()),
+                    _ => None,
+                };
+                if let (Some(mls_mgr), Some(state)) = (mls.as_mut(), server_states.get(&server_id)) {
+                    crate::node::crypto_handler::reconcile_subgroups_for_server(
+                        mls_mgr, ws_cmd_tx, ws_room_peers,
+                        pending_mls_key_packages, pending_mls_removals,
+                        state, &server_id, local_peer_str, only.as_deref(),
+                    );
+                }
+                // If this op revoked OUR access to a voice channel we're in,
+                // drop the call (the subgroup removal above already rotates the
+                // SFrame key for the remaining participants).
+                voice_handler::auto_leave_invisible_voice_channels(
+                    mls, ws_cmd_tx, ws_room_peers, server_states,
+                    bundle_keypair, crypto_store,
+                    voice_channel_participants, voice_channel_gossip_mode,
+                    gossip_overlays, local_peer_str, device_peer_id, &server_id, event_tx,
+                ).await;
+            }
+        }
+    }
+}
+
 /// Handle an incoming request from a peer.
 async fn handle_incoming_request(
     olm: &mut OlmManager,
@@ -5943,6 +6421,9 @@ async fn handle_incoming_request(
     device_peer_id: &str,
     pending_server_joins: &mut HashMap<String, PendingJoin>,
     join_request_seen: &mut HashMap<String, std::time::Instant>,
+    join_resolutions: &mut HashMap<String, i64>,
+    awaiting_mls_after_parked_join: &mut std::collections::HashSet<String>,
+    crdt_store_actor: &super::crdt_store::CrdtStore,
     pending_sync_requests: &mut HashMap<String, Vec<(String, String, i64)>>,
     mls: &mut Option<MlsManager>,
     mls_bootstrap_requested: &mut HashMap<String, std::time::Instant>,
@@ -9236,9 +9717,28 @@ async fn handle_incoming_request(
                         }
 
                         // Check if this completes a pending server join
-                        if pending_server_joins.remove(&server_id).is_some() {
+                        if let Some(completed) = pending_server_joins.remove(&server_id) {
                             let server_name = state.name().to_string();
                             hollow_log!("[HOLLOW-CRDT] Server join completed: {server_id} ({server_name})");
+
+                            // The persisted tile is done with. A PARKED join
+                            // also owes the UI two more beats: it was admitted
+                            // (said BEFORE ServerJoined so the tile turns into a
+                            // server rather than blinking out), and later it is
+                            // READY, once the MLS leaf that lets it read the
+                            // channel actually forms. Between them the UI says
+                            // "waiting for a member to finish setup", which is
+                            // the honest description of holding a server whose
+                            // traffic you cannot decrypt yet.
+                            crdt_store.delete_pending_join(server_id.clone());
+                            if completed.parked {
+                                let _ = event_tx.send(NetworkEvent::PendingJoinUpdated {
+                                    server_id: server_id.clone(),
+                                    state: "admitted".to_string(),
+                                    reason: String::new(),
+                                }).await;
+                                awaiting_mls_after_parked_join.insert(server_id.clone());
+                            }
 
                             // Drop stale MLS group from before ban/leave — forces fresh
                             // KeyPackage exchange so the rejoining peer gets a clean epoch.
@@ -9449,310 +9949,74 @@ async fn handle_incoming_request(
 
         HavenMessage::CrdtOpBroadcast { server_id, op_json } => {
             hollow_log!("[HOLLOW-CRDT] CrdtOpBroadcast from {peer_str} for server {server_id}");
-            
+            apply_remote_crdt_op(
+                server_states, event_tx, ws_cmd_tx, ws_room_peers, gossip_overlays,
+                mls, crypto_store, pending_mls_key_packages, pending_mls_removals,
+                voice_channel_participants, voice_channel_gossip_mode,
+                pending_server_joins, bundle_keypair,
+                db_path, db_passphrase, local_peer_str, device_peer_id, peer_str,
+                server_id, op_json,
+            ).await;
+        }
+        HavenMessage::ServerJoinRequest {
+            server_id, twitch_proof_json, nsfw_confirmed,
+            requested_at, device_list, parked,
+        } => {
+            hollow_log!("[HOLLOW-CRDT] ServerJoinRequest from {peer_str} for server {server_id} (nonce {requested_at}, parked {parked})");
 
-            // Room gating: only accept ops for servers we're a member of.
             if !server_states.contains_key(&server_id) {
-                hollow_log!("[HOLLOW-CRDT] Ignoring CrdtOpBroadcast for unknown server {server_id}");
+                hollow_log!("[HOLLOW-CRDT] ServerJoinRequest for unknown server {server_id}");
                 return;
             }
 
-            if let Ok(op) = serde_json::from_str::<crate::crdt::operations::CrdtOp>(&op_json) {
-                // SECURITY: Log author mismatch but don't reject — the op may be
-                // legitimately relayed by another peer during join/sync fan-out.
-                // The per-payload permission check below validates the author's role.
-                if op.author != peer_str {
-                    hollow_log!("[HOLLOW-CRDT] Note: CrdtOpBroadcast author '{}' differs from sender '{peer_str}' (relay)", op.author);
-                }
-
-                // SECURITY: Verify the AUTHOR has permission for this operation type.
-                // Shared ingest matrix (ServerState::op_allowed): uses op.author (the
-                // original creator) for the role lookup, not the sender (who may be
-                // relaying the op), and is override-aware — the same matrix the local
-                // send handlers gate on.
-                {
-                    let state = server_states.get(&server_id).unwrap();
-                    if !state.op_allowed(&op) {
-                        hollow_log!("[HOLLOW-SECURITY] REJECTED CrdtOpBroadcast from {peer_str} — insufficient permission for {:?} (role: {:?})", op.payload, state.get_role(&op.author));
+            // ATTRIBUTION FIRST, before anything reads the joiner's identity.
+            //
+            // A PARKED request is read out of a TTL ring by a member that has
+            // never been online with the joiner, so it holds no device -> master
+            // link for them: `resolve(sender_device)` hands the device straight
+            // back, and the CRDT member entry (which is MASTER-keyed) would be
+            // created under a device id. Every gate below reads this value too,
+            // so a wrong answer here is a wrong ban check, not just a wrong
+            // label.
+            //
+            // So the request CARRIES the joiner's own master-signed device list
+            // and attribution becomes cryptographic: the list must verify, its
+            // signer must BE the master it claims (the pubkey -> peer_id binding
+            // inside `verify_device_list`), and the relay-authenticated sender
+            // device must be listed and un-revoked. A list that is PRESENT but
+            // BAD is a dropped message, never a downgrade to the resolver:
+            // `if list.is_some()` must not be the bypass. Mirrors the
+            // `FriendReject` arm, for the same reason.
+            let member_master = match device_list.as_ref() {
+                Some(list) => {
+                    let bad = if !crypto_handler::verify_device_list(list) {
+                        Some("bad signature or master binding")
+                    } else if !list.devices.iter().any(|d| d == peer_str) {
+                        Some("sender device not in the signed list")
+                    } else if list.revoked.iter().any(|r| r == peer_str) {
+                        Some("sender device is revoked")
+                    } else {
+                        None
+                    };
+                    if let Some(reason) = bad {
+                        hollow_log!("[HOLLOW-CRDT] Dropping ServerJoinRequest from {peer_str} for {server_id}: carried device list rejected ({reason})");
                         return;
                     }
+                    // Ingest through the SAME path every other carried list uses,
+                    // so the resolver, the device store and every later send agree.
+                    let _ = crypto_handler::ingest_device_list(
+                        event_tx, master_peer_str, device_peer_id, master_keypair,
+                        peer_str, ws_cmd_tx, ws_room_peers,
+                        device_list.clone(), db_path, db_passphrase,
+                    ).await;
+                    list.master_peer_id.clone()
                 }
-
-                let state = server_states.get_mut(&server_id).unwrap();
-
-                let was_len = state.op_log.len();
-                let _ = state.apply_op(&op);
-
-                if state.op_log.len() > was_len {
-                    // New op — persist and forward to other connected peers
-                    if let Ok(json) = serde_json::to_string(&state) {
-                        if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
-                            let _ = store.save_server_state(&server_id, &json);
-                            let _ = store.insert_crdt_op(&op);
-                        }
-                    }
-
-                    // Forward the (validated, NEW) op onward. Tier 2 (large-server
-                    // scaling): prefer the WebRTC mesh — the historical per-member
-                    // SendDirect re-forward made EVERY receiving node pay
-                    // O(members × devices) relay uploads per op (O(N²) network-wide).
-                    // Op-newness gates this block, so each node re-floods a given op
-                    // at most once and only after the permission checks above passed.
-                    // Falls back to the relay fan-out when the mesh isn't up.
-                    if super::gossip_relay::flood_crdt_op(
-                        gossip_overlays, event_tx, &server_id, &op_json, Some(peer_str),
-                    ) == 0 {
-                        let crdt_msg = HavenMessage::CrdtOpBroadcast {
-                            server_id: server_id.clone(),
-                            op_json: op_json.clone(),
-                        };
-                        let crdt_data = serde_json::to_vec(&crdt_msg).unwrap_or_default();
-                        for member_peer_str in state.members.keys() {
-                            if super::resolver::same_identity(member_peer_str, &local_peer_str) { continue; }
-                            for dev in crate::node::crypto_handler::online_devices_for(ws_room_peers, member_peer_str) {
-                                if dev == peer_str { continue; } // don't echo back to the sender device
-                                send_raw_to_peer(ws_cmd_tx, ws_room_peers, &dev, crdt_data.clone());
-                            }
-                        }
-                    }
-
-                    // Emit specific events based on op payload so Dart UI updates correctly.
-                    // Set when a MemberRemoved op evicts OUR OWN identity — the durable
-                    // teardown runs AFTER the match (the `state` borrow spans the match).
-                    let mut self_evict_teardown = false;
-                    match &op.payload {
-                        CrdtPayload::ChannelAdded { channel_id, name, channel_type, .. } => {
-                            let _ = event_tx.send(NetworkEvent::ChannelAdded {
-                                server_id: server_id.clone(),
-                                channel_id: channel_id.clone(),
-                                name: name.clone(),
-                                channel_type: channel_type.clone(),
-                            }).await;
-                        }
-                        CrdtPayload::ChannelRemoved { channel_id } => {
-                            let _ = event_tx.send(NetworkEvent::ChannelRemoved {
-                                server_id: server_id.clone(),
-                                channel_id: channel_id.clone(),
-                            }).await;
-                        }
-                        CrdtPayload::ChannelRenamed { channel_id, new_name } => {
-                            let _ = event_tx.send(NetworkEvent::ChannelRenamed {
-                                server_id: server_id.clone(),
-                                channel_id: channel_id.clone(),
-                                new_name: new_name.clone(),
-                            }).await;
-                        }
-                        CrdtPayload::MemberAdded { peer_id, .. } => {
-                            let _ = event_tx.send(NetworkEvent::MemberJoined {
-                                server_id: server_id.clone(),
-                                peer_id: peer_id.clone(),
-                            }).await;
-                        }
-                        CrdtPayload::MemberRemoved { peer_id } => {
-                            // Self-eviction: OUR identity was removed (our own LEAVE
-                            // fanned from a sibling device, or a plain kick of us) and
-                            // the merge confirms we're no longer a member. Tear down
-                            // DURABLY — the acting device deletes its state in
-                            // handle_leave_server, but a sibling that only emitted
-                            // MemberLeft kept the shell, which reloaded on restart and
-                            // fed the sibling re-announce loop (a left server could
-                            // resurrect on our own devices and even re-ADD us via the
-                            // sibling join fast-path). Guarded on !pending so a rejoin
-                            // replaying the old removal op can't nuke the fresh join.
-                            let self_evicted = super::resolver::same_identity(peer_id, &local_peer_str)
-                                && !pending_server_joins.contains_key(&server_id)
-                                && !state.is_member(&local_peer_str);
-                            if self_evicted {
-                                self_evict_teardown = true; // teardown after the match
-                                let _ = event_tx.send(NetworkEvent::ServerDeleted {
-                                    server_id: server_id.clone(),
-                                }).await;
-                            } else {
-                                let _ = event_tx.send(NetworkEvent::MemberLeft {
-                                    server_id: server_id.clone(),
-                                    peer_id: peer_id.clone(),
-                                }).await;
-                            }
-                        }
-                        CrdtPayload::ServerDeleted { .. } => {
-                            // Owner tombstoned the server. The state shell is RETAINED
-                            // (so we keep serving the tombstone to our own offline peers),
-                            // but we leave the MLS group + tell the UI to drop the server.
-                            if let Some(mls_mgr) = mls {
-                                mls_mgr.remove_group(&server_id);
-                                persist_mls_state(mls_mgr, crypto_store);
-                            }
-                            let _ = event_tx.send(NetworkEvent::ServerDeleted {
-                                server_id: server_id.clone(),
-                            }).await;
-                        }
-                        CrdtPayload::MemberBanned { peer_id } => {
-                            let local_peer = local_peer_str.to_string();
-                            if *peer_id == local_peer {
-                                let _ = event_tx.send(NetworkEvent::MemberLeft {
-                                    server_id: server_id.clone(),
-                                    peer_id: peer_id.clone(),
-                                }).await;
-                            } else {
-                                let _ = event_tx.send(NetworkEvent::ServerUpdated {
-                                    server_id: server_id.clone(),
-                                }).await;
-                            }
-                        }
-                        CrdtPayload::RoleChanged { peer_id, role, .. } => {
-                            let _ = event_tx.send(NetworkEvent::RoleChanged {
-                                server_id: server_id.clone(),
-                                peer_id: peer_id.clone(),
-                                new_role: role.as_str().to_string(),
-                            }).await;
-                        }
-                        CrdtPayload::NicknameChanged { peer_id, .. } => {
-                            // Re-use MemberJoined to trigger member list refresh in Dart
-                            let _ = event_tx.send(NetworkEvent::MemberJoined {
-                                server_id: server_id.clone(),
-                                peer_id: peer_id.clone(),
-                            }).await;
-                        }
-                        CrdtPayload::TwitchUsernameChanged { peer_id, .. } => {
-                            // Re-use MemberJoined to trigger member list refresh in Dart
-                            let _ = event_tx.send(NetworkEvent::MemberJoined {
-                                server_id: server_id.clone(),
-                                peer_id: peer_id.clone(),
-                            }).await;
-                        }
-                        CrdtPayload::MessagePinned { channel_id, message_id } => {
-                            let _ = event_tx.send(NetworkEvent::MessagePinned {
-                                server_id: server_id.clone(),
-                                channel_id: channel_id.clone(),
-                                message_id: message_id.clone(),
-                            }).await;
-                        }
-                        CrdtPayload::MessageUnpinned { channel_id, message_id } => {
-                            let _ = event_tx.send(NetworkEvent::MessageUnpinned {
-                                server_id: server_id.clone(),
-                                channel_id: channel_id.clone(),
-                                message_id: message_id.clone(),
-                            }).await;
-                        }
-                        CrdtPayload::ChannelPublicChanged { channel_id, is_public } => {
-                            let _ = event_tx.send(NetworkEvent::ServerUpdated {
-                                server_id: server_id.clone(),
-                            }).await;
-                            // Broadcast to room (including guests) so public channel browsers see the change.
-                            // Text only (#44) — a voice-channel announce put a ghost entry in
-                            // browsers that the next list refresh dropped.
-                            if let Some(ch) = state.channels.get(channel_id)
-                                .filter(|c| c.channel_type == crate::crdt::server_state::ChannelType::Text)
-                            {
-                                let notify = HavenMessage::PublicChannelConfigChanged {
-                                    server_id: server_id.clone(),
-                                    channel_id: channel_id.clone(),
-                                    is_public: *is_public,
-                                    channel_name: ch.name.clone(),
-                                    category: ch.category.clone(),
-                                };
-                                if let Ok(data) = serde_json::to_vec(&notify) {
-                                    let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendToRoom {
-                                        room_code: server_id.clone(),
-                                        data,
-                                    });
-                                }
-                                // Also emit locally so in-app guest browser updates for own servers
-                                let _ = event_tx.send(NetworkEvent::PublicChannelConfigChanged {
-                                    server_id: server_id.clone(),
-                                    channel_id: channel_id.clone(),
-                                    is_public: *is_public,
-                                    channel_name: ch.name.clone(),
-                                    category: ch.category.clone(),
-                                }).await;
-                            }
-                        }
-                        _ => {
-                            // ServerRenamed, ServerSettingChanged, etc.
-                            let _ = event_tx.send(NetworkEvent::ServerUpdated {
-                                server_id: server_id.clone(),
-                            }).await;
-                        }
-                    }
-
-                    // Durable self-eviction teardown (flag set in the MemberRemoved arm;
-                    // runs here because the `state` borrow spans the match). Removing the
-                    // state FIRST also makes the subgroup reconcile below skip the server.
-                    if self_evict_teardown {
-                        hollow_log!("[HOLLOW-CRDT] Self MemberRemoved for {server_id} — durable teardown (sibling leave / kick)");
-                        let sub_cids: Vec<String> = server_states.get(&server_id)
-                            .map(|s| s.subgroup_channel_ids())
-                            .unwrap_or_default();
-                        server_states.remove(&server_id);
-                        if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
-                            let _ = store.delete_server_state(&server_id);
-                        }
-                        if let Some(mls_mgr) = mls.as_mut() {
-                            if mls_mgr.has_group(&server_id) {
-                                mls_mgr.remove_group(&server_id);
-                            }
-                            for cid in &sub_cids {
-                                let gk = crate::crypto::subgroup_id(&server_id, cid);
-                                if mls_mgr.has_group(&gk) {
-                                    mls_mgr.remove_group(&gk);
-                                }
-                            }
-                            persist_mls_state(mls_mgr, crypto_store);
-                        }
-                        let _ = ws_cmd_tx.send(super::ws_client::WsCommand::LeaveRoom {
-                            room_code: server_id.clone(),
-                        });
-                    }
-
-                    // Option B: a role/visibility op shifts who qualifies for restricted
-                    // channels. Reconcile subgroups here too (coordinator-gated + idempotent)
-                    // so the ACTUAL subgroup coordinator acts even when the op was authored
-                    // by some other member. The `state` mutable borrow above has ended.
-                    let affects_subgroups = matches!(
-                        &op.payload,
-                        CrdtPayload::RoleChanged { .. }
-                            | CrdtPayload::ChannelVisibilityChanged { .. }
-                            | CrdtPayload::MemberRemoved { .. }
-                            | CrdtPayload::MemberBanned { .. }
-                            | CrdtPayload::ChannelVisibilityLabelsChanged { .. }
-                            | CrdtPayload::ChannelGrantSet { .. }
-                            | CrdtPayload::ChannelGrantRevoked { .. }
-                            | CrdtPayload::LabelAssigned { .. }
-                            | CrdtPayload::LabelUnassigned { .. }
-                            | CrdtPayload::LabelDeleted { .. }
-                            | CrdtPayload::LabelUpdated { .. }
-                    );
-                    if affects_subgroups {
-                        let only = match &op.payload {
-                            CrdtPayload::ChannelVisibilityChanged { channel_id, .. }
-                            | CrdtPayload::ChannelVisibilityLabelsChanged { channel_id, .. }
-                            | CrdtPayload::ChannelGrantSet { channel_id, .. }
-                            | CrdtPayload::ChannelGrantRevoked { channel_id, .. } => Some(channel_id.clone()),
-                            _ => None,
-                        };
-                        if let (Some(mls_mgr), Some(state)) = (mls.as_mut(), server_states.get(&server_id)) {
-                            crate::node::crypto_handler::reconcile_subgroups_for_server(
-                                mls_mgr, ws_cmd_tx, ws_room_peers,
-                                pending_mls_key_packages, pending_mls_removals,
-                                state, &server_id, local_peer_str, only.as_deref(),
-                            );
-                        }
-                        // If this op revoked OUR access to a voice channel we're in,
-                        // drop the call (the subgroup removal above already rotates the
-                        // SFrame key for the remaining participants).
-                        voice_handler::auto_leave_invisible_voice_channels(
-                            mls, ws_cmd_tx, ws_room_peers, server_states,
-                            bundle_keypair, crypto_store,
-                            voice_channel_participants, voice_channel_gossip_mode,
-                            gossip_overlays, local_peer_str, device_peer_id, &server_id, event_tx,
-                        ).await;
-                    }
-                }
-            }
-        }
-
-        HavenMessage::ServerJoinRequest { server_id, twitch_proof_json, nsfw_confirmed } => {
-            hollow_log!("[HOLLOW-CRDT] ServerJoinRequest from {peer_str} for server {server_id}");
+                // A pre-parked-joins client: all we have is the resolver, which
+                // works whenever the two have actually met. Byte-for-byte the
+                // old behaviour.
+                None => super::resolver::resolve(&peer_str),
+            };
+            let resolution_key = format!("{server_id}|{member_master}");
 
             if let Some(state) = server_states.get_mut(&server_id) {
                 // Multi-device: a SAME-IDENTITY requester is one of OUR OWN devices
@@ -9763,61 +10027,115 @@ async fn handle_incoming_request(
                 let is_sibling = super::resolver::same_identity(peer_str, local_peer_str)
                     && peer_str != local_peer_str;
 
-                // COORDINATOR GATE. This handler is the expensive half of a join:
-                // a MemberAdded op, a full ServerStateSnapshot and the ENTIRE op
-                // log, all aimed at one joiner. Nothing used to gate it, so every
-                // online member ran the whole thing — N snapshots, N op logs and N
-                // duplicate MemberAdded ops per join. Measured 2026-08-27 with the
-                // relay meter: ~48 SendDirect commands per join at 5 members, ~170
-                // at 9, ~342 at 13. Super-linear, while steady-state messaging sat
-                // flat at 2 deliveries per other-member. The MLS half was already
-                // election-gated to a single committer; this brings the CRDT half
-                // onto the SAME election, so the two agree on who is serving.
-                //
-                // A repeat request inside the window means the joiner's 4s retry
-                // fired: our elected coordinator did not answer (its socket died
-                // between the relay's presence snapshot and now), so everyone
-                // serves and the cost degrades to the old fan-out rather than to a
-                // failed join. Siblings are never gated — a sibling IS us.
-                let seen_key = format!("{server_id}|{peer_str}");
-                let repeat_ask = join_request_seen
-                    .get(&seen_key)
-                    .is_some_and(|t: &std::time::Instant| t.elapsed() < JOIN_SERVE_RETRY_WINDOW);
-                // Entries are only meaningful for one window; drop the expired ones
-                // rather than letting a long-lived node accumulate one per join.
-                if join_request_seen.len() > 256 {
-                    join_request_seen.retain(|_, t| t.elapsed() < JOIN_SERVE_RETRY_WINDOW);
-                }
-                join_request_seen.insert(seen_key, std::time::Instant::now());
-                if !is_sibling && !repeat_ask {
-                    // Candidates are the CRDT members (every one of them holds the
-                    // state a joiner needs), minus the joiner itself — a REJOINING
-                    // member is already in `members` and electing them would leave
-                    // nobody serving.
-                    let candidates: Vec<String> = state.members.keys()
-                        .filter(|m| !super::resolver::same_identity(peer_str, m))
-                        .cloned()
-                        .collect();
-                    let coordinator = crate::node::crypto_handler::elect_server_coordinator(
-                        state, &candidates, local_peer_str, &ws_room_peers,
-                    );
-                    if coordinator.as_deref()
-                        .is_some_and(|c| !super::resolver::same_identity(c, local_peer_str))
-                    {
-                        hollow_log!("[HOLLOW-CRDT] Not the join coordinator for {server_id} (it is {coordinator:?}), leaving the join to them");
+                // Check if this identity is already a member (by master).
+                let already_member = state.members_list().iter()
+                    .any(|m| super::resolver::same_identity(&m.peer_id, &member_master));
+
+                let catchup_secs = state.relay_catchup_secs();
+
+                if parked {
+                    // A PARKED copy is held to stricter rules than a live one.
+                    // It was written into a shared ring, possibly days ago, and
+                    // is read by whoever happens to come back — so it must never
+                    // bypass a gate and must never write a sticky wrong answer.
+
+                    // Already a member: either this request was already resolved
+                    // (and we are reading our own history), or the joiner lost
+                    // its state and its own live re-request on co-presence is
+                    // the right way to rebuild it. Either way, nothing to do.
+                    if already_member {
                         return;
+                    }
+
+                    // Somebody already answered this exact ask (or a newer one).
+                    // The resolution rides the same ring, so every member that
+                    // catches up learns this before it reaches the request.
+                    if join_resolutions.get(&resolution_key).is_some_and(|t| *t >= requested_at) {
+                        hollow_log!("[HOLLOW-CRDT] Parked join for {member_master} on {server_id} is already resolved, skipping");
+                        return;
+                    }
+
+                    // TWITCH-GATED SERVERS: wait for co-presence, silently.
+                    //
+                    // The parked copy carries NO `twitch_proof_json` on purpose
+                    // (see `deposit_parked_join`): a ring frame is readable by
+                    // anyone holding the invite, and a Twitch account name tied
+                    // to a peer id is exposure we do not accept. With no proof
+                    // this request is simply not actionable, and answering it
+                    // with `twitch_required` would write a question into the
+                    // ring that bounces a dialog at the joiner on every boot.
+                    // The joiner's own LIVE re-request carries the proof and
+                    // runs today's gate unchanged, so nothing is lost but time.
+                    if !is_sibling
+                        && twitch::TwitchServerSettings::from_server_state(state).is_some()
+                    {
+                        hollow_log!("[HOLLOW-CRDT] Parked join for {server_id} needs Twitch verification, waiting for co-presence");
+                        return;
+                    }
+                } else {
+                    // COORDINATOR GATE. This handler is the expensive half of a join:
+                    // a MemberAdded op, a full ServerStateSnapshot and the ENTIRE op
+                    // log, all aimed at one joiner. Nothing used to gate it, so every
+                    // online member ran the whole thing — N snapshots, N op logs and N
+                    // duplicate MemberAdded ops per join. Measured 2026-08-27 with the
+                    // relay meter: ~48 SendDirect commands per join at 5 members, ~170
+                    // at 9, ~342 at 13. Super-linear, while steady-state messaging sat
+                    // flat at 2 deliveries per other-member. The MLS half was already
+                    // election-gated to a single committer; this brings the CRDT half
+                    // onto the SAME election, so the two agree on who is serving.
+                    //
+                    // A repeat request inside the window means the joiner's 4s retry
+                    // fired: our elected coordinator did not answer (its socket died
+                    // between the relay's presence snapshot and now), so everyone
+                    // serves and the cost degrades to the old fan-out rather than to a
+                    // failed join. Siblings are never gated — a sibling IS us.
+                    //
+                    // A PARKED copy never touches this map: it cannot be a repeat
+                    // ask (nobody is retrying anything), so letting it write here
+                    // would hand the NEXT live request a free gate bypass.
+                    let seen_key = format!("{server_id}|{peer_str}");
+                    let repeat_ask = join_request_seen
+                        .get(&seen_key)
+                        .is_some_and(|t: &std::time::Instant| t.elapsed() < JOIN_SERVE_RETRY_WINDOW);
+                    // Entries are only meaningful for one window; drop the expired ones
+                    // rather than letting a long-lived node accumulate one per join.
+                    if join_request_seen.len() > 256 {
+                        join_request_seen.retain(|_, t| t.elapsed() < JOIN_SERVE_RETRY_WINDOW);
+                    }
+                    join_request_seen.insert(seen_key, std::time::Instant::now());
+                    if !is_sibling && !repeat_ask {
+                        // Candidates are the CRDT members (every one of them holds the
+                        // state a joiner needs), minus the joiner itself — a REJOINING
+                        // member is already in `members` and electing them would leave
+                        // nobody serving.
+                        let candidates: Vec<String> = state.members.keys()
+                            .filter(|m| !super::resolver::same_identity(&member_master, m))
+                            .cloned()
+                            .collect();
+                        let coordinator = crate::node::crypto_handler::elect_server_coordinator(
+                            state, &candidates, local_peer_str, &ws_room_peers,
+                        );
+                        if coordinator.as_deref()
+                            .is_some_and(|c| !super::resolver::same_identity(c, local_peer_str))
+                        {
+                            hollow_log!("[HOLLOW-CRDT] Not the join coordinator for {server_id} (it is {coordinator:?}), leaving the join to them");
+                            return;
+                        }
                     }
                 }
 
                 // Ban check: reject banned peers before any other verification.
-                if !is_sibling && state.is_banned(peer_str) {
-                    hollow_log!("[HOLLOW-CRDT] Rejecting join from banned peer {peer_str} for server {server_id}");
-                    send_message_to_peer(
-                        ws_cmd_tx, ws_room_peers,
-                        peer_str, HavenMessage::ServerJoinRejected {
-                            server_id,
-                            reason: "banned".to_string(),
-                        },
+                // Keyed by the joiner's MASTER, which is what the ban list holds —
+                // a parked request's raw device id resolves to itself on a member
+                // that has never met them, and would sail straight past the ban.
+                if !is_sibling && state.is_banned(&member_master) {
+                    hollow_log!("[HOLLOW-CRDT] Rejecting join from banned peer {peer_str} (master {member_master}) for server {server_id}");
+                    if requested_at != 0 {
+                        join_resolutions.insert(resolution_key, requested_at);
+                    }
+                    sync_handler::send_join_rejection(
+                        ws_cmd_tx, &server_id, &peer_str, &member_master,
+                        requested_at, "banned", catchup_secs,
                     );
                     return;
                 }
@@ -9853,12 +10171,12 @@ async fn handle_incoming_request(
                             )
                         };
                         hollow_log!("[HOLLOW-CRDT] Rejecting join from {peer_str}: {reason}");
-                        send_message_to_peer(
-                            ws_cmd_tx, ws_room_peers,
-                            peer_str, HavenMessage::ServerJoinRejected {
-                                server_id,
-                                reason: enriched_reason,
-                            },
+                        if requested_at != 0 && !enriched_reason.starts_with("twitch_required:") {
+                            join_resolutions.insert(resolution_key, requested_at);
+                        }
+                        sync_handler::send_join_rejection(
+                            ws_cmd_tx, &server_id, &peer_str, &member_master,
+                            requested_at, &enriched_reason, catchup_secs,
                         );
                         return;
                     }
@@ -9878,12 +10196,13 @@ async fn handle_incoming_request(
                                 let owner_online = peer_is_reachable(ws_room_peers, oid);
                                 if !owner_online {
                                     let server_name = state.name().to_string();
-                                    send_message_to_peer(
-                                        ws_cmd_tx, ws_room_peers,
-                                        peer_str, HavenMessage::ServerJoinRejected {
-                                            server_id,
-                                            reason: format!("twitch_owner_offline:{}", server_name),
-                                        },
+                                    let reason = format!("twitch_owner_offline:{server_name}");
+                                    if requested_at != 0 {
+                                        join_resolutions.insert(resolution_key, requested_at);
+                                    }
+                                    sync_handler::send_join_rejection(
+                                        ws_cmd_tx, &server_id, &peer_str, &member_master,
+                                        requested_at, &reason, catchup_secs,
                                     );
                                 }
                                 // Either way, non-owner does not process the join.
@@ -9894,16 +10213,10 @@ async fn handle_incoming_request(
                     }
                 } } // close owner-verify gate + `if !is_sibling`
 
-                // Multi-device (Step 6): server membership is keyed by the MASTER
-                // identity, never a device id. Resolve the joining device to its
-                // master so one human = one member entry (the owner is already
-                // master-keyed). Unknown device (guest / no device list yet) →
-                // resolves to itself = byte-for-byte pre-multi-device.
-                let member_master = super::resolver::resolve(peer_str);
-
-                // Check if this identity is already a member (by master).
-                let already_member = state.members_list().iter()
-                    .any(|m| super::resolver::same_identity(&m.peer_id, &member_master));
+                // The MemberAdded op we authored, for the ring resolution: it is
+                // the SAME op the broadcast below carries, so a member reading
+                // the ring applies exactly what a member who was online received.
+                let mut admitted_op_json: Option<String> = None;
 
                 if !already_member {
                     // Private-server gate: an invite-only server rejects all new
@@ -9912,12 +10225,13 @@ async fn handle_incoming_request(
                     // (our own device) is exempt — it co-owns/co-members the server.
                     if !is_sibling && state.is_private() {
                         hollow_log!("[HOLLOW-CRDT] Rejecting join from {peer_str}: server {server_id} is private");
-                        send_message_to_peer(
-                            ws_cmd_tx, ws_room_peers,
-                            peer_str, HavenMessage::ServerJoinRejected {
-                                server_id,
-                                reason: format!("server_private:{}", state.name()),
-                            },
+                        let reason = format!("server_private:{}", state.name());
+                        if requested_at != 0 {
+                            join_resolutions.insert(resolution_key, requested_at);
+                        }
+                        sync_handler::send_join_rejection(
+                            ws_cmd_tx, &server_id, &peer_str, &member_master,
+                            requested_at, &reason, catchup_secs,
                         );
                         return;
                     }
@@ -9931,12 +10245,10 @@ async fn handle_incoming_request(
                     // ask consent for a server they can't enter. Siblings exempt.
                     if !is_sibling && state.is_nsfw() && !nsfw_confirmed {
                         hollow_log!("[HOLLOW-CRDT] NSFW consent required for {peer_str} joining {server_id}");
-                        send_message_to_peer(
-                            ws_cmd_tx, ws_room_peers,
-                            peer_str, HavenMessage::ServerJoinRejected {
-                                server_id,
-                                reason: format!("nsfw_confirm:{}", state.name()),
-                            },
+                        let reason = format!("nsfw_confirm:{}", state.name());
+                        sync_handler::send_join_rejection(
+                            ws_cmd_tx, &server_id, &peer_str, &member_master,
+                            requested_at, &reason, catchup_secs,
                         );
                         return;
                     }
@@ -9946,12 +10258,13 @@ async fn handle_incoming_request(
                     if let Some(max) = state.max_members() {
                         if state.members_list().len() as u32 >= max {
                             hollow_log!("[HOLLOW-CRDT] Rejecting join from {peer_str}: server {server_id} is full ({max} max)");
-                            send_message_to_peer(
-                                ws_cmd_tx, ws_room_peers,
-                                peer_str, HavenMessage::ServerJoinRejected {
-                                    server_id,
-                                    reason: format!("server_full:{}:{}", state.name(), max),
-                                },
+                            let reason = format!("server_full:{}:{}", state.name(), max);
+                            if requested_at != 0 {
+                                join_resolutions.insert(resolution_key.clone(), requested_at);
+                            }
+                            sync_handler::send_join_rejection(
+                                ws_cmd_tx, &server_id, &peer_str, &member_master,
+                                requested_at, &reason, catchup_secs,
                             );
                             return;
                         }
@@ -9989,6 +10302,7 @@ async fn handle_incoming_request(
 
                     // Broadcast MemberAdded to other peers — MLS first, plaintext fallback.
                     if let Ok(op_json) = serde_json::to_string(&op) {
+                        admitted_op_json = Some(op_json.clone());
                         let mls_ok = mls.as_ref().is_some_and(|m| m.has_group(&server_id));
                         if mls_ok {
                             let envelope = MessageEnvelope::CrdtOp { sid: server_id.clone(), op_json: op_json.clone() };
@@ -10036,10 +10350,17 @@ async fn handle_incoming_request(
                 // joiner must not depend on op replay alone to reconstruct
                 // channels/layout/name. WS delivery is FIFO, so the snapshot
                 // lands before the SyncResponse that completes the join.
+                //
+                // Both go to the DETERMINISTIC server room, not through a
+                // presence lookup: the joiner of a PARKED request is not here,
+                // and a targeted frame into a room the target is not in is
+                // exactly what the relay buffers and replays on their next join
+                // of that room. That buffered pair IS how a parked join
+                // completes with nobody online.
                 if let Ok(state_json) = serde_json::to_string(&state) {
-                    send_message_to_peer(
-                        ws_cmd_tx, ws_room_peers,
-                        peer_str, HavenMessage::ServerStateSnapshot {
+                    send_message_to_peer_in_room(
+                        ws_cmd_tx, &server_id,
+                        &peer_str, HavenMessage::ServerStateSnapshot {
                             server_id: server_id.clone(),
                             state_json,
                         },
@@ -10050,13 +10371,26 @@ async fn handle_incoming_request(
                 let all_ops: Vec<&crate::crdt::operations::CrdtOp> = state.op_log.iter().collect();
                 if let Ok(ops_json) = serde_json::to_string(&all_ops) {
                     hollow_log!("[HOLLOW-CRDT] Sending snapshot + {} ops to joiner {peer_str}", all_ops.len());
-                    send_message_to_peer(
-                        ws_cmd_tx, ws_room_peers,
-                        peer_str, HavenMessage::SyncResponse {
-                            server_id,
+                    send_message_to_peer_in_room(
+                        ws_cmd_tx, &server_id,
+                        &peer_str, HavenMessage::SyncResponse {
+                            server_id: server_id.clone(),
                             ops_json,
                         },
                     );
+                }
+
+                // Tell the ring (and so every member that is not here) that this
+                // ask is answered. Without it, the next member to return reads
+                // the same request and serves the whole join again.
+                if requested_at != 0 {
+                    join_resolutions.insert(resolution_key, requested_at);
+                    if catchup_secs > 0 {
+                        sync_handler::publish_join_resolution(
+                            ws_cmd_tx, &server_id, &member_master, requested_at,
+                            true, "", admitted_op_json,
+                        );
+                    }
                 }
 
                 // Proactively establish Olm session with the new member so
@@ -10069,26 +10403,111 @@ async fn handle_incoming_request(
                     );
                     key_request_in_flight.insert(peer_str.to_string(), std::time::Instant::now());
                 }
-            } else {
-                hollow_log!("[HOLLOW-CRDT] ServerJoinRequest for unknown server {server_id}");
             }
         }
 
-        HavenMessage::ServerJoinRejected { server_id, reason } => {
-            hollow_log!("[HOLLOW-CRDT] Join rejected for {server_id}: {reason}");
+        // A member's answer to a join, read out of the room's `~join` ring.
+        //
+        // Two jobs: it stops US re-serving a join somebody else already
+        // answered, and it carries the `MemberAdded` op so a member that was
+        // offline for the whole exchange still converges on the membership.
+        HavenMessage::ServerJoinResolved {
+            server_id, joiner_master, requested_at, admitted, reason, op_json,
+        } => {
+            hollow_log!("[HOLLOW-CRDT] ServerJoinResolved from {peer_str} for {joiner_master} on {server_id} (admitted {admitted}, reason '{reason}')");
+
+            // JOINER SIDE FIRST: this may be the answer to OUR OWN parked ask,
+            // read out of our own catch-up. It only ever acts on the exact ask
+            // it names, so a copy replayed out of a three-day ring cannot
+            // resolve a request we made afterwards.
+            if let Some(pending) = pending_server_joins.get(&server_id) {
+                if joiner_master == local_peer_str && requested_at == pending.requested_at {
+                    if admitted {
+                        // Nothing to do: the admitting member's buffered
+                        // snapshot + SyncResponse are what complete us, and if
+                        // the relay dropped them our live re-request on the next
+                        // co-presence completes us through today's rejoin path.
+                        hollow_log!("[HOLLOW-CRDT] Our parked join for {server_id} was admitted; waiting for the buffered snapshot");
+                        return;
+                    }
+                    // Same landing pad as the targeted refusal, so the two
+                    // legs of the same answer can never diverge. An INTERACTIVE
+                    // reason should be unreachable here by construction:
+                    // `send_join_rejection` publishes nothing for one, so no
+                    // honest member ever writes a question into the ring. A
+                    // hostile member could, which is exactly why this routes
+                    // through the shared handler rather than assuming it: the
+                    // worst case is then a dialog the user dismisses, not a
+                    // permanently poisoned tile.
+                    sync_handler::handle_join_refused(
+                        pending_server_joins, event_tx, ws_cmd_tx, crdt_store_actor,
+                        server_id, reason,
+                    ).await;
+                    return;
+                }
+            }
+
+            // A resolution is only meaningful for a server we hold, and only
+            // from somebody entitled to have made it. Anyone in the room can
+            // publish on the topic, so the CRDT membership of the SENDER is the
+            // gate: a non-member cannot resolve anything.
+            if !server_states.contains_key(&server_id) {
+                return;
+            }
+            let sender_master = super::resolver::resolve(&peer_str);
+            let sender_is_member = server_states
+                .get(&server_id)
+                .is_some_and(|s| s.members_list().iter()
+                    .any(|m| super::resolver::same_identity(&m.peer_id, &sender_master)));
+            if !sender_is_member {
+                hollow_log!("[HOLLOW-SECURITY] Ignoring ServerJoinResolved from non-member {peer_str} for {server_id}");
+                return;
+            }
+
+            // Max-wins: an older copy replayed out of the ring must never undo a
+            // newer answer.
+            let key = format!("{server_id}|{joiner_master}");
+            let newest = join_resolutions.get(&key).copied().unwrap_or(0);
+            if requested_at > newest {
+                join_resolutions.insert(key, requested_at);
+            }
+
+            // The carried op goes through the ONE ingest path, gates included
+            // (`op_allowed` on the op's AUTHOR, `insert_crdt_op`, the payload's
+            // own event). Never a second, weaker apply.
+            if let Some(op_json) = op_json {
+                apply_remote_crdt_op(
+                    server_states, event_tx, ws_cmd_tx, ws_room_peers, gossip_overlays,
+                    mls, crypto_store, pending_mls_key_packages, pending_mls_removals,
+                    voice_channel_participants, voice_channel_gossip_mode,
+                    pending_server_joins, bundle_keypair,
+                    db_path, db_passphrase, local_peer_str, device_peer_id, peer_str,
+                    server_id, op_json,
+                ).await;
+            }
+        }
+
+        HavenMessage::ServerJoinRejected { server_id, reason, requested_at } => {
+            hollow_log!("[HOLLOW-CRDT] Join rejected for {server_id}: {reason} (nonce {requested_at})");
             // A join request reaches every online member, so each one may send
-            // its own rejection. Only surface the FIRST for an in-flight join —
-            // remove() returns Some only if the join was still pending, which
-            // dedups the rejection popup (otherwise the joiner sees N popups).
-            let was_pending = pending_server_joins.remove(&server_id).is_some();
-            if was_pending {
-                let _ = event_tx.send(NetworkEvent::TwitchJoinRejected {
-                    server_id,
-                    reason,
-                }).await;
+            // its own refusal. Only the FIRST for an in-flight join is acted on,
+            // which dedups the popup (otherwise the joiner sees N).
+            let Some(pending) = pending_server_joins.get(&server_id) else { return };
+            // NONCE GUARD. This frame now rides the deterministic server room,
+            // so the relay buffers it for an absent joiner and replays it on
+            // that device's next join of that room — and the next join of that
+            // room is normally the user asking AGAIN. A copy that names an
+            // older ask must not touch the newer one. 0 = a pre-parked-joins
+            // member, which can only ever mean "the request you have pending".
+            if requested_at != 0 && requested_at != pending.requested_at {
+                hollow_log!("[HOLLOW-CRDT] Ignoring a rejection for {server_id} that names ask {requested_at}, ours is {}", pending.requested_at);
+                return;
             }
+            sync_handler::handle_join_refused(
+                pending_server_joins, event_tx, ws_cmd_tx, crdt_store_actor,
+                server_id, reason,
+            ).await;
         }
-
         HavenMessage::ServerDeleteBroadcast { server_id } => {
             hollow_log!("[HOLLOW-CRDT] ServerDeleteBroadcast from {peer_str} for server {server_id}");
             
@@ -10542,7 +10961,11 @@ async fn handle_incoming_request(
             // us (serves the snapshot + adds our MLS leaf). No twitch proof for a co-owner.
             // Same-identity join: bypasses the gates anyway (the receiver's NSFW
             // gate is `!is_sibling`), so no twitch proof and nsfw pre-confirmed.
-            pending_server_joins.insert(server_id.clone(), PendingJoin { twitch_proof_json: None, nsfw_confirmed: true });
+            pending_server_joins.insert(server_id.clone(), PendingJoin {
+                twitch_proof_json: None,
+                nsfw_confirmed: true,
+                ..Default::default()
+            });
             let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinRoom { room_code: server_id.clone() });
             send_message_to_peer(
                 ws_cmd_tx, ws_room_peers,
@@ -10550,6 +10973,9 @@ async fn handle_incoming_request(
                     server_id: server_id.clone(),
                     twitch_proof_json: None,
                     nsfw_confirmed: true,
+                    requested_at: 0,
+                    device_list: None,
+                    parked: false,
                 },
             );
         }
@@ -11589,6 +12015,18 @@ async fn handle_incoming_request(
                         mls_bootstrap_requested.remove(&group_key);
                         mls_decrypt_failures.remove(&group_key);
                         hollow_log!("[HOLLOW-MLS] Joined MLS group {group_key}");
+
+                        // A parked join is only truly finished HERE: it held the
+                        // server (name, channels, members) from the moment the
+                        // buffered snapshot landed, but could not read a word of
+                        // it until this leaf formed.
+                        if awaiting_mls_after_parked_join.remove(&server_id) {
+                            let _ = event_tx.send(NetworkEvent::PendingJoinUpdated {
+                                server_id: server_id.clone(),
+                                state: "ready".to_string(),
+                                reason: String::new(),
+                            }).await;
+                        }
 
                         // Conference Welcome = we were ADMITTED (waiting room
                         // opened). Dart leaves the lobby and joins the call.

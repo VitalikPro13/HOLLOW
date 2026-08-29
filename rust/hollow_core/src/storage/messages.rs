@@ -1062,6 +1062,25 @@ impl MessageStore {
                 label          TEXT NOT NULL DEFAULT ''
             )")?;
 
+        // -- Parked server joins (pending joins, rung 1) --
+        // A join whose members were ALL offline is not a failure any more: the
+        // request is persisted here and deposited into the server room's
+        // `~join` ring, so it outlives the app being closed. `state` is
+        // 'pending' (still waiting) or 'rejected' (a member answered no; the
+        // row survives so the tile can say why). `requested_at` is the nonce
+        // every answer must name.
+        ddl(conn, "pending_server_joins table",
+            "CREATE TABLE IF NOT EXISTS pending_server_joins (
+                server_id         TEXT PRIMARY KEY,
+                requested_at      INTEGER NOT NULL,
+                nsfw_confirmed    INTEGER NOT NULL DEFAULT 0,
+                twitch_proof_json TEXT,
+                state             TEXT NOT NULL DEFAULT 'pending',
+                reason            TEXT NOT NULL DEFAULT '',
+                last_deposited_at INTEGER NOT NULL DEFAULT 0,
+                created_at        INTEGER NOT NULL
+            )")?;
+
         Ok(())
     }
 
@@ -3666,6 +3685,75 @@ impl MessageStore {
         collect_rows(rows, "friend")
     }
 
+    // ── Parked server joins ───────────────────────────────────────
+
+    /// Insert or replace a pending/rejected join row. `created_at` is preserved
+    /// across a repeat request (the tile keeps saying when you first asked)
+    /// while `requested_at` becomes the new nonce.
+    pub fn upsert_pending_join(&self, row: &PendingJoinRow) -> Result<(), String> {
+        self.conn
+            .execute(
+                "INSERT INTO pending_server_joins
+                    (server_id, requested_at, nsfw_confirmed, twitch_proof_json,
+                     state, reason, last_deposited_at, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                 ON CONFLICT(server_id) DO UPDATE SET
+                    requested_at      = excluded.requested_at,
+                    nsfw_confirmed    = excluded.nsfw_confirmed,
+                    twitch_proof_json = excluded.twitch_proof_json,
+                    state             = excluded.state,
+                    reason            = excluded.reason,
+                    last_deposited_at = excluded.last_deposited_at",
+                params![
+                    row.server_id,
+                    row.requested_at,
+                    row.nsfw_confirmed as i64,
+                    row.twitch_proof_json,
+                    row.state,
+                    row.reason,
+                    row.last_deposited_at,
+                    row.created_at,
+                ],
+            )
+            .map_err(|e| format!("Failed to upsert pending join: {e}"))?;
+        Ok(())
+    }
+
+    /// Forget a pending join entirely (completed, or discarded by the user).
+    pub fn delete_pending_join(&self, server_id: &str) -> Result<(), String> {
+        self.conn
+            .execute("DELETE FROM pending_server_joins WHERE server_id = ?1", params![server_id])
+            .map_err(|e| format!("Failed to delete pending join: {e}"))?;
+        Ok(())
+    }
+
+    /// Every stored pending/rejected join, newest ask first.
+    pub fn load_pending_joins(&self) -> Result<Vec<PendingJoinRow>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT server_id, requested_at, nsfw_confirmed, twitch_proof_json,
+                        state, reason, last_deposited_at, created_at
+                 FROM pending_server_joins ORDER BY requested_at DESC",
+            )
+            .map_err(|e| format!("Failed to prepare pending join query: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(PendingJoinRow {
+                    server_id: row.get(0)?,
+                    requested_at: row.get(1)?,
+                    nsfw_confirmed: row.get::<_, i64>(2)? != 0,
+                    twitch_proof_json: row.get(3)?,
+                    state: row.get(4)?,
+                    reason: row.get(5)?,
+                    last_deposited_at: row.get(6)?,
+                    created_at: row.get(7)?,
+                })
+            })
+            .map_err(|e| format!("Failed to query pending joins: {e}"))?;
+        collect_rows(rows, "pending join")
+    }
+
     /// Check if a peer is a friend (any status).
     pub fn get_friend_status(&self, peer_id: &str) -> Result<Option<String>, String> {
         let result = self.conn.query_row(
@@ -5198,6 +5286,27 @@ pub struct SecurityAlertRow {
     pub created_at: i64,
     /// `None` while the alert is still unread.
     pub acknowledged_at: Option<i64>,
+}
+
+/// A persisted server join that has not completed yet (pending joins, rung 1).
+///
+/// Survives restarts on purpose: the whole point of parking a join is that the
+/// members were all offline, so the answer may arrive days later, on a
+/// different run of the app.
+#[derive(Clone, Debug)]
+pub struct PendingJoinRow {
+    pub server_id: String,
+    /// Unix MILLISECONDS: the request nonce every answer must name.
+    pub requested_at: i64,
+    pub nsfw_confirmed: bool,
+    pub twitch_proof_json: Option<String>,
+    /// `pending` (still waiting) or `rejected` (a member said no).
+    pub state: String,
+    /// The reject reason string; empty while pending.
+    pub reason: String,
+    /// Unix MILLISECONDS of the last `~join` ring deposit.
+    pub last_deposited_at: i64,
+    pub created_at: i64,
 }
 
 /// Persisted conference room (host-local; reports/CONFERENCES_PLAN.md).

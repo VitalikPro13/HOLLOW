@@ -6,12 +6,13 @@ The server navigation strip renders server icons, folders, and utility buttons a
 
 File: `lib/src/core/models/strip_item.dart`
 
-`StripItem` is a sealed Dart class with two concrete subtypes. All strip layout state is a `List<StripItem>`.
+`StripItem` is a sealed Dart class with three concrete subtypes. All strip layout state is a `List<StripItem>`.
 
 - `ServerStripItem` — wraps a single `serverId: String`. Serializes to `{'type': 'server', 'id': serverId}`.
+- `PendingStripItem` (pending joins rung 1, 2026-08-29): wraps a single `serverId: String`. Serializes to `{'type': 'pending', 'id': serverId}`. A parked join: we asked to join a server whose members were all offline and Rust is holding the request. Carries nothing but the id, deliberately, since there IS nothing else to carry until a member answers.
 - `FolderStripItem` — wraps `id: String` (hex timestamp), `name: String` (default `'Folder'`), and `serverIds: List<String>`. Serializes to `{'type': 'folder', 'id': id, 'name': name, 'servers': serverIds}`. Has `copyWith()` for immutable updates.
 
-`StripItem.fromJson()` deserializes based on the `'type'` field. Folder names default to `'Folder'` if absent.
+`StripItem.fromJson()` returns `StripItem?` (nullable, since `PendingStripItem` landed) and deserializes based on the `'type'` field; an unrecognised type returns `null` and is skipped by the reader rather than being coerced into a `ServerStripItem`, so a layout written by a NEWER client's kind never gets pruned by an older client as a deleted server. Folder names default to `'Folder'` if absent.
 
 ## ServerStripLayoutNotifier (Provider)
 
@@ -43,9 +44,10 @@ All mutations clone `state`, modify the clone, assign back to `state`, then call
 - `folderIdOf(serverId)` / `folders()` (issue #61) — what the "Move to folder" submenu reads to check the current folder and list the rest.
 - `renameFolder(folderId, name)` — updates the folder's name via `copyWith`.
 - `reorderInsideFolder(folderId, oldIndex, newIndex)` — reorders `serverIds` within a folder.
-- `onServerCreated(serverId)` — appends to layout if not already present (checks both top-level and folder contents).
+- `onServerCreated(serverId)` — appends to layout if not already present (checks both top-level and folder contents). **Pending joins rung 1:** if a `PendingStripItem` for this id is already in the layout, swaps it IN PLACE for a `ServerStripItem` at the same index instead of appending: the tile the user has watched for days turns into the server rather than vanishing and reappearing at the end of the strip.
 - `onServerDeleted(serverId)` — removes from top-level and from any folder (dissolving if needed).
-- `allServerIds()` — returns `Set<String>` of every server ID across all top-level items and folder contents. Used by `_initialServerIds` tracking for entrance animations.
+- `setPendingJoins(Set<String> pendingIds)` (pending joins rung 1): reconciles the `PendingStripItem` tiles against the id set `PendingJoinsNotifier` hands it after every change: appends a tile for a new id, drops a tile whose id left the set, leaves an already-shown tile's slot alone. The ONE mutation path for pending tiles.
+- `allServerIds()` — returns `Set<String>` of every server ID across all top-level items and folder contents. Used by `_initialServerIds` tracking for entrance animations. Deliberately does not count `PendingStripItem`s (a pending join is not a server we're in).
 
 ## ServerStrip (Classic Mode Vertical Strip)
 
@@ -105,6 +107,19 @@ For each `FolderStripItem`:
    - Tooltip: folder name.
    - Tap: calculates anchor position (`pos.dx + 72`, vertical center of icon) and calls `showServerFolderPopup()` with `isDock: false`.
    - Unread badge shows `folderUnreads` only when NOT selected (selected folders show 0 to avoid visual noise).
+
+## Pending Join Tile (pending joins rung 1, 2026-08-29)
+
+File: `lib/src/ui/components/pending_join_ui.dart` (widget + menu/sheet + action helpers, shared by both shells); rendered in `_buildPendingIcon()` in both `server_strip.dart` and `bottom_bar.dart`.
+
+A `PendingStripItem` in the strip data renders as a tile deliberately unlike every other icon on the rail: dimmed (`AnimatedOpacity`, GPU-composited, never the `Opacity` widget; opacity is 0.55 pending / 0.4 rejected, crossfading when a rejection lands), carrying a glyph rather than initials (`LucideIcons.clock` pending, `LucideIcons.ban` rejected: an invite link gives us an id and nothing else, no name, no icon, no initial to draw), and **NOT selectable**, since there is no server behind it yet to open.
+
+Both a LEFT click and a right click open the SAME menu (`showPendingJoinMenu` via `showHollowMenu`, the shared context-menu surface), because a tile that swallows a plain click reads as broken. The menu's header row is a `HollowMenuNote` carrying `pendingJoinExplanation()` (the long form, since the tile has no other real estate to explain itself), followed by "Request again" (rejected only, calls `retryPendingJoin` FFI → `markRequestedAgain`), "Copy invite link" (`webServerInviteLink(serverId)`), and "Discard request" / "Remove" (danger-styled, `discardPendingJoin` FFI → `pendingJoinsProvider.notifier.remove()`).
+
+### AwaitingSetupBadge
+A 16px (10px clock icon) badge, `HollowTooltip` wrapping a small ring the colour of the surface behind it, shown on a server tile (not a pending tile) whose CRDT admission landed but whose MLS leaf has not formed yet (`awaitingSetupProvider.contains(serverId)`). It is a BADGE, not a spinner: the wait is for another human to open their app, which can be tomorrow.
+
+**Positioned differently per rail, and the reason is load-bearing:** `_ServerIconWithIndicator` (Classic, `server_strip.dart`) puts it top-RIGHT (`right: -4, top: -4`); `_BottomServerIcon` (Dock, `bottom_bar.dart`) puts it top-LEFT (`left: -5, top: -4`, `size: 14`), because on the Dock the unread badge already owns the top-right corner, and two badges in one corner would overlap. `Clip.none` on the enclosing `Stack` is load-bearing here too (`feedback_badge_stack_clips_avatar_frame`): the same reason an avatar frame needs it.
 
 ### _VerticalReorderGap
 

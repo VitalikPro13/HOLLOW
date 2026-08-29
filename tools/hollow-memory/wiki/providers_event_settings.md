@@ -163,7 +163,14 @@ The entire body is wrapped in `try-catch` to prevent unhandled exceptions from k
 - Shows a HollowToast success notification.
 
 **`NetworkEvent_ServerJoinFailed`** (serverId, reason)
-- Shows HollowToast error with the failure reason.
+- Shows HollowToast error with the failure reason. LEGACY handler: no Rust code emits this event any more (pending joins rung 1, 2026-08-29); a join with nobody online PARKS instead, see the two events below.
+
+**`NetworkEvent_ServerJoinParked`** (serverId) (pending joins rung 1, 2026-08-29)
+- `pendingJoinsProvider.notifier.park(serverId)`: inserts/updates the pending tile, which pushes into `serverStripLayoutProvider.notifier.setPendingJoins()`.
+- Shows an info HollowToast ("Nobody from this server is online. You will be added when a member returns"). NOT a failure toast — this state must never read as one.
+
+**`NetworkEvent_PendingJoinUpdated`** (serverId, state, reason) (pending joins rung 1, 2026-08-29)
+- `state` is one of `rejected` / `admitted` / `ready` / `discarded`. Dispatches to `pendingJoinsProvider`/`awaitingSetupProvider`: `rejected` → mark rejected + error toast; `admitted` → remove the pending tile then add to `awaitingSetupProvider` (fires just BEFORE `ServerJoined`); `ready` → remove from `awaitingSetupProvider`; `discarded` → remove the pending tile. Full detail: `providers_server.md` § pendingJoinsProvider.
 
 **`NetworkEvent_ChannelAdded`** (serverId, channelId, name, channelType)
 - `channelListProvider.notifier.onChannelAdded(serverId, channelId, name, channelType: channelType)`

@@ -48,6 +48,15 @@ Bottom bar (56px) with 4 `_NavTab` widgets + center `_AddButton`. Uses `LayoutBu
 - **Ambient blob:** Wraps tab in `AmbientBackground(color1: accent, color2: accent, opacity: 0.12)`. Both blobs teal (no purple like desktop). Uses `SharedTickers.instance.ambient` (45s figure-8 at ~15fps). Same `_AmbientPainter` radial gradients as desktop.
 - **Header:** Row with teal "Hollow" text (24px, w700) + `_HeaderShimmerLine` — ping-pong shimmer using `SharedTickers.instance.ambient` at ~10s cycle. Gradient: border→accent(0.5)→border with ±0.15 glow width + subtle boxShadow.
 
+### Pending Join Row (pending joins rung 1, 2026-08-29)
+**File:** `lib/src/ui/mobile/tabs/mobile_chats_tab.dart` (`_PendingJoinRow`), `lib/src/ui/components/pending_join_ui.dart` (`showPendingJoinSheet`, shared with desktop's menu)
+
+A join into a server whose members were all offline PARKS instead of failing (Rust persists the request, answers it whenever a member returns, which can be days). Each entry in `pendingJoinsProvider` becomes a `_PendingJoinRow`, PINNED above the sorted conversation list: inserted at the top, deliberately outside the unread/recency sort, since a parked join has no name to sort by and no activity to rank, and burying one under a month of chats is how a user forgets they ever asked to join.
+
+Row visual: greyed on purpose (`hollow.textTertiary` icon + text) — not a conversation, nothing to open. 44px icon box (`hollow.elevated`) with `LucideIcons.clock` (pending) or `LucideIcons.ban` (rejected), title (`pendingJoinTitle`) + subtitle (`pendingJoinSubtitle`, the reason text when rejected). No spinner — the wait is for another person to open their app.
+
+Tap AND long-press both open `showPendingJoinSheet()`, the mobile bottom-sheet idiom, built from the SAME action helpers as desktop's `showPendingJoinMenu` (`pending_join_ui.dart`): "Request again" (rejected only), "Copy invite link", "Discard request"/"Remove". A tile that did nothing on tap would read as broken, same reasoning as the desktop tile's click-and-right-click.
+
 ### Channel Tree Connectors
 **File:** `lib/src/ui/mobile/tabs/mobile_chats_tab.dart` (`_TreeChannelRow`)
 Expanded server channel list shows tree-style connectors (├── / └──). `_TreeChannelRow` wraps `_ChannelRow` in a `Stack` with vertical + horizontal `ColoredBox` lines. Vertical line aligned under server avatar center (`HollowSpacing.lg + 22`). Last channel uses `└──` (line stops at branch), others use `├──` (line continues). Line color: `hollow.textSecondary` at 0.7 alpha.

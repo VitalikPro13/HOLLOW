@@ -17,6 +17,9 @@ Every function in these modules follows one of two patterns:
 ### ServerFfi
 Fields: `server_id: String`, `name: String`, `member_count: u32`, `channel_count: u32`. Returned by `get_joined_servers()`.
 
+### PendingJoinFfi (pending joins rung 1, 2026-08-29)
+A join that has not completed yet, for the pending tile. Fields: `server_id: String`, `requested_at: i64`, `state: String` (`"pending"`, waiting for a member to come back, or `"rejected"`, a member answered no, `reason` says which gate), `reason: String`, `last_deposited_at: i64` (when the request was last written into the server room's join ring; `0` while the join is still live). Returned by `list_pending_joins()`.
+
 ### ChannelFfi
 Fields: `channel_id: String`, `name: String`, `category: Option<String>`, `channel_type: String` ("text" or "voice"), `visibility: String` ("everyone"/"moderator"/"admin"), `posting: String` ("everyone"/"moderator"/"admin"), `is_public: bool` (whether the channel uses plaintext transport), `slow_mode: u32`, `media_only: bool`, and (issue #32) `visibility_labels: Vec<String>`, `posting_labels: Vec<String>`, **`me_can_see: bool`, `me_can_post: bool`** — computed in `get_server_channels()` via `can_see_channel_at`/`can_post_in_channel_at` with the local master + now_ms (fails closed with no identity; mute NOT folded in). Dart consumes these instead of re-implementing the ladder. Returned by `get_server_channels()`.
 
@@ -51,6 +54,16 @@ Signature: `fn join_server(server_id: String, twitch_proof_json: Option<String>)
 
 ### crdt.rs:leave_server()
 Signature: `fn leave_server(server_id: String) -> Result<(), String>`. Sends `NodeCommand::LeaveServer { server_id }`. The local user is removed from the server. Owner cannot leave -- must delete or transfer ownership first.
+
+### Pending server joins (rung 1, 2026-08-29)
+
+A join whose members are ALL offline no longer fails after 15s -- it PARKS: `join_server()` still sends `NodeCommand::JoinServer`, but a live window with no answer persists the request and deposits it into the server room's `~join` ring instead of emitting a failure. These three FFIs are the Dart-side surface for the resulting tile.
+
+- **`crdt.rs:list_pending_joins()`** -- Signature: `fn list_pending_joins() -> Result<Vec<PendingJoinFfi>, String>`. **Direct DB read** (like `get_joined_servers()`): opens the store, calls `store.load_pending_joins()`, maps each `PendingJoinRow` to `PendingJoinFfi`. These rows are written by the node's `CrdtStore` actor and only ever read here.
+- **`crdt.rs:discard_pending_join()`** -- Signature: `fn discard_pending_join(server_id: String) -> Result<(), String>`. **Command dispatch.** Sends `NodeCommand::DiscardPendingJoin { server_id }`. Drops the row, forgets the in-memory entry, leaves the server room -- a late admission can never complete a join the user walked away from.
+- **`crdt.rs:retry_pending_join()`** -- Signature: `fn retry_pending_join(server_id: String) -> Result<(), String>`. **Command dispatch.** Sends `NodeCommand::RequestPendingJoinAgain { server_id }`. "Request again" on a rejected tile: reuses the row's stored NSFW consent + Twitch proof under a FRESH nonce, same code path as the original request.
+
+Events: `ServerJoinParked { server_id }` (the live window elapsed, now parked) and `PendingJoinUpdated { server_id, state, reason }` (`state` = `rejected` / `admitted` / `ready` / `discarded`), see `rust_types.md`.
 
 ## Channel CRUD (crdt.rs)
 

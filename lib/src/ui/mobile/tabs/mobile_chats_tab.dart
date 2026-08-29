@@ -10,6 +10,7 @@ import 'package:hollow/src/core/providers/chat_provider.dart';
 import 'package:hollow/src/core/providers/friends_provider.dart';
 import 'package:hollow/src/core/providers/hidden_archive_dm_provider.dart';
 import 'package:hollow/src/core/providers/notification_provider.dart';
+import 'package:hollow/src/core/providers/pending_join_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/saved_messages_provider.dart';
@@ -28,6 +29,7 @@ import 'package:hollow/src/ui/components/status_dot.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
+import 'package:hollow/src/ui/components/pending_join_ui.dart';
 import 'package:hollow/src/core/shared_tickers.dart';
 import 'package:hollow/src/ui/animations/ambient_background.dart';
 import 'package:hollow/src/ui/dialogs/export_archive_dialog.dart';
@@ -306,6 +308,23 @@ class _MobileChatsTabState extends ConsumerState<MobileChatsTab> {
       return a.name.compareTo(b.name);
     });
 
+    // Parked join requests, pinned above the conversations and deliberately
+    // outside the sort. They have no name to sort by and no activity to rank,
+    // and burying one under a month of chats is how a user forgets they ever
+    // asked to join.
+    final pendingJoins = ref.watch(pendingJoinsProvider);
+    var pendingInsertAt = 0;
+    for (final info in pendingJoins.values) {
+      items.insert(
+        pendingInsertAt++,
+        _ConversationItem(
+          type: _ItemType.pendingJoin,
+          id: info.serverId,
+          name: pendingJoinTitle(rejected: info.isRejected),
+        ),
+      );
+    }
+
     // Pinned "Saved messages" (a DM with your own master identity) — always
     // the very first row, deliberately excluded from the unread/recency sort.
     final savedId = ref.watch(savedMessagesPeerIdProvider);
@@ -360,7 +379,21 @@ class _MobileChatsTabState extends ConsumerState<MobileChatsTab> {
             // reorders constantly — without keys, Flutter re-parents row
             // State across DIFFERENT conversations when positions shift
             // (a joined server then shows another server's channel list).
-            if (item.type == _ItemType.dm) {
+            if (item.type == _ItemType.pendingJoin) {
+              // Tap AND long press open the same sheet: there is no server to
+              // navigate into, so a tap that did nothing would read as broken.
+              void openSheet() => showPendingJoinSheet(
+                    context: context,
+                    ref: ref,
+                    serverId: item.id,
+                  );
+              return _PendingJoinRow(
+                key: ValueKey('pending-${item.id}'),
+                serverId: item.id,
+                onTap: openSheet,
+                onLongPress: openSheet,
+              );
+            } else if (item.type == _ItemType.dm) {
               final isSaved = item.id == savedId;
               return _DmRow(
                 key: ValueKey('dm-${item.id}'),
@@ -505,7 +538,7 @@ class _HeaderShimmerLine extends StatelessWidget {
   }
 }
 
-enum _ItemType { dm, server }
+enum _ItemType { dm, server, pendingJoin }
 
 class _ConversationItem {
   final _ItemType type;
@@ -527,6 +560,91 @@ class _ConversationItem {
     this.timestamp,
     this.memberCount = 0,
   });
+}
+
+// ─────────────────────────────────────────────────
+// Parked join request row
+// ─────────────────────────────────────────────────
+
+/// A join we asked for that nobody has answered yet.
+///
+/// Greyed on purpose: it is not a conversation, there is nothing to open, and
+/// the only thing we know about the server is the id from the invite link. No
+/// spinner either — the wait is for another person to open their app.
+class _PendingJoinRow extends ConsumerWidget {
+  final String serverId;
+  final VoidCallback onTap;
+  final VoidCallback onLongPress;
+
+  const _PendingJoinRow({
+    super.key,
+    required this.serverId,
+    required this.onTap,
+    required this.onLongPress,
+  });
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final hollow = HollowTheme.of(context);
+    final info = ref.watch(pendingJoinsProvider)[serverId];
+    final rejected = info?.isRejected ?? false;
+
+    return HollowPressable(
+      onTap: onTap,
+      onLongPress: onLongPress,
+      semanticLabel:
+          '${pendingJoinTitle(rejected: rejected)}, show actions',
+      subtle: true,
+      padding: const EdgeInsets.symmetric(
+        horizontal: HollowSpacing.lg,
+        vertical: HollowSpacing.md,
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 44,
+            height: 44,
+            decoration: BoxDecoration(
+              color: hollow.elevated,
+              borderRadius: BorderRadius.circular(hollow.radiusMd),
+            ),
+            alignment: Alignment.center,
+            child: Icon(
+              rejected ? LucideIcons.ban : LucideIcons.clock,
+              size: 20,
+              color: hollow.textTertiary,
+            ),
+          ),
+          const SizedBox(width: HollowSpacing.md),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  pendingJoinTitle(rejected: rejected),
+                  style: HollowTypography.body
+                      .copyWith(color: hollow.textSecondary),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  pendingJoinSubtitle(
+                    rejected: rejected,
+                    reason: info?.reason ?? '',
+                  ),
+                  style: HollowTypography.bodySmall
+                      .copyWith(color: hollow.textTertiary),
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 }
 
 // ─────────────────────────────────────────────────
@@ -875,6 +993,13 @@ class _ServerRow extends ConsumerWidget {
                 ),
               ),
               const SizedBox(width: HollowSpacing.sm),
+              // Admitted after a parked join, still waiting for a member to
+              // finish the MLS setup. Same flair as both desktop shells.
+              if (ref.watch(awaitingSetupProvider
+                  .select((s) => s.contains(serverId)))) ...[
+                const AwaitingSetupBadge(),
+                const SizedBox(width: HollowSpacing.sm),
+              ],
               // Unread badge + expand chevron
               if (unreadCount > 0) ...[
                 Container(

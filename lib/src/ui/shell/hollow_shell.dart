@@ -25,6 +25,7 @@ import 'package:hollow/src/core/providers/hotkey_provider.dart';
 import 'package:hollow/src/core/providers/member_panel_provider.dart';
 import 'package:hollow/src/core/providers/device_link_sync_provider.dart';
 import 'package:hollow/src/core/providers/node_provider.dart';
+import 'package:hollow/src/core/providers/pending_join_provider.dart';
 import 'package:hollow/src/core/providers/peers_provider.dart';
 import 'package:hollow/src/core/providers/favourite_friends_provider.dart';
 import 'package:hollow/src/core/providers/hidden_archive_dm_provider.dart';
@@ -1061,6 +1062,13 @@ class _HollowShellState extends ConsumerState<HollowShell>
     // from DB at node startup, this is just for the Dart UI to show the
     // correct toggle/status).
     ref.read(invisibleModeProvider.notifier).load();
+
+    // Parked server joins. AFTER the node starts, because the boot path is
+    // what restores the in-memory entries and rejoins their rooms; loading it
+    // here rather than from a provider's build() is the #58 rule (the strip
+    // watches this map on the first frame). It also re-syncs the strip, so a
+    // tile whose row Rust dropped while we were away disappears.
+    await ref.read(pendingJoinsProvider.notifier).load();
 
     // Offline inbox (relay message-availability cache): the relay registry is
     // RAM-only, so re-register on every app start. Retention loads FIRST so

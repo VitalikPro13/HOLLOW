@@ -62,6 +62,18 @@ Flow:
 
 No broadcast to OTHER members needed — the server has only one identity (the creator) at creation. New members receive full state via SyncResponse when they join.
 
+**Pending joins rung 1 (2026-08-29):** right after the room join and BEFORE the storage pledge, `register_relay_catchup()` is called on the just-inserted state so the server's `~join` ring exists from the instant of creation. Without it a stranger's parked request in the gap between "server created" and "first `RoomMembers`" is dropped by the relay instead of buffered, so a server would be un-joinable-while-empty for however long the owner stayed alone in the room.
+
+## register_relay_catchup()
+
+`sync_handler.rs:register_relay_catchup(ws_cmd_tx, state, server_id)`: registers a server's text channels (plus the join ring) with the relay's per-room topic ring buffer, when `state.relay_catchup_secs() > 0`. Additive/refresh-only, never clears (clearing is the Owner/Admin toggle site in `handle_update_server_setting`).
+
+The channel list ALWAYS gets one extra entry appended: `super::types::JOIN_TOPIC` (`"~join"`). A parked join is deposited by somebody who is not a member yet, and can therefore never register the ring themselves: the members have to have done it while they were here, which is why the join ring rides the same registration call as the text channels instead of a separate site. This also means the list is never empty even for a voice-only server, so the old `channels.is_empty()` early return is gone.
+
+`relay_catchup_secs == 0` (the owner turned catch-up off) means no ring at all: a parked join on that server just waits for co-presence with no ring to carry it, the same degrade as before rung 1 existed, minus the loud 15s failure.
+
+Called from `handle_create_server` (server creation), the `SubscribeChannels` command handler, and the `WsEvent::RoomMembers` connect sweep in `swarm.rs`.
+
 ## handle_create_channel()
 
 `sync_handler.rs:handle_create_channel()` — Creates a channel within an existing server.
@@ -140,30 +152,79 @@ Permission: `Permission::MANAGE_SERVER` (checked via `state.has_permission()`)
 
 Flow:
 1. Permission check — error message says "only the owner can delete the server"
-2. Create + apply `CrdtPayload::ServerDeleted { deleted_at }` — sets `ServerState.deleted`, drains members/roles/channels, but KEEPS the shell + op_log
-3. Persist: `save_state` + `insert_op` (mandatory — `op_log` is `#[serde(skip_serializing)]`, so without `insert_op` the owner stops serving the tombstone after restart)
-4. Fan the op to remaining members (MLS-first `MessageEnvelope::CrdtOp`, plaintext `CrdtOpBroadcast` fallback) AND to our OWN siblings (`fan_to_own_siblings`)
-5. Tear down our local MLS group, but **KEEP the CRDT tombstone shell + signaling registration** so we keep serving the tombstone to reconnecting peers (no `server_states.remove` / `delete_server`)
-6. Emit `NetworkEvent::ServerDeleted { server_id }`
+2. **Capture `member_targets` (every member except us) BEFORE the op applies.** `ServerDeleted` DRAINS `members`/`roles`/`channels` as part of `apply_op`, so reading `state.members` afterward to decide who to notify iterates an empty map.
+3. Create + apply `CrdtPayload::ServerDeleted { deleted_at }` — sets `ServerState.deleted`, drains members/roles/channels, but KEEPS the shell + op_log
+4. Persist: `save_state` + `insert_op` (mandatory — `op_log` is `#[serde(skip_serializing)]`, so without `insert_op` the owner stops serving the tombstone after restart)
+5. Fan the op to `member_targets` AND to our OWN siblings (`fan_to_own_siblings`): MLS `MessageEnvelope::CrdtOp` when the group exists, and the plaintext `CrdtOpBroadcast` twin **UNCONDITIONALLY**, not `if !mls_sent`. The old `if !mls_sent` guard measured the WRONG end of the wire: it only fired when OUR OWN encrypt failed, never when a perfectly reachable receiver simply couldn't read MLS (no leaf yet, since a parked join completes its CRDT half before co-presence forms the leaf, by design, or a skewed epoch). Combined with the pre-apply-membership bug above, the fallback had been dead code on every path since it was written: deletions only ever reached members through the MLS `SendToRoom`. Field-caught by the fleet (`scripts/fleet_pending_join.ps1 -DeleteBeforeMessage`): a parked-admitted member with no MLS leaf logged `Received MlsChannelMessage for unknown group` and kept the server forever. Duplication is free (`ServerDeleted` ingest is owner-author validated at every site and `apply_op` is idempotent). See memory `feedback_mls_first_fallback_dead_targets` (eight sibling MLS-first-else sites still pending the same sweep).
+6. Tear down our local MLS group, but **KEEP the CRDT tombstone shell + signaling registration** so we keep serving the tombstone to reconnecting peers (no `server_states.remove` / `delete_server`)
+7. Emit `NetworkEvent::ServerDeleted { server_id }`
 
 The bespoke one-shot `ServerDeleteBroadcast` / MLS `ServerDelete` SEND is removed; their receivers were converted to apply a tombstone (rollout safety for a pre-9D peer). Tombstoned servers are hidden from `get_joined_servers` (and harness `servers()`). **Owner-author of a `ServerDeleted` op is validated at EVERY ingest** (the `CrdtOpBroadcast`/`handle_envelope_crdt_op` `allowed` matches + a filter before `merge_ops` in BOTH `SyncResponse` and `handle_envelope_sync_resp`, checked against the receiver's own role map — never the relayer). Reconnect self-heal: a synced op that sets `is_deleted()` emits `ServerDeleted`; a plain kick (self no longer in members after merge) or ban emits `MemberLeft`.
 
 ## handle_join_server()
 
-`sync_handler.rs:handle_join_server()` — Initiates joining a server by ID.
+`sync_handler.rs:handle_join_server()`: initiates joining a server by ID. **Rewritten 2026-08-29 for pending joins rung 1: the join is CRDT-FIRST, no MLS KeyPackage rides the request at all.** The design assumption that a carried KeyPackage was the hard part turned out false: the coordinator admits into the CRDT and sends the snapshot + op log, and the MLS leaf is a SEPARATE leg the coordinator starts on next co-presence (`MlsKeyPackageRequest` -> fresh KP -> batch add -> `MlsWelcome`), exactly the existing recovery machinery. A carried-KP rung 2 has a real prerequisite first: the KP private half lives only in OpenMLS's in-RAM `MemoryStorage`, and `persist_mls_state` is not called after minting, so a restart before any incidental persist loses it.
 
-Parameters: `pending_server_joins`, `mls`, `ws_cmd_tx`, `ws_room_peers`, `sig_cmd_tx`, `cmd_tx`, `server_id`, `twitch_proof_json`
+Parameters: `pending_server_joins`, `ws_cmd_tx`, `ws_room_peers`, `cmd_tx`, `server_id`, `twitch_proof_json`, `nsfw_confirmed`, `crdt_store`, `master_keypair`, `device_peer_id`, `db_path`, `db_passphrase`
 
 Flow:
-1. Insert into `pending_server_joins` HashMap: `server_id -> Option<twitch_proof_json>`
-2. Register with signaling: `SignalingCmd::SetRoom` + `SignalingCmd::Bootstrap` for the server_id room
-3. Generate MLS KeyPackage via `mls.generate_key_package()` (base64-encoded, stored in `_mls_kp_b64` but not used directly here — sent with join request)
-4. Join WS relay room: `WsCommand::JoinRoom { room_code: server_id }`
-5. Send `HavenMessage::ServerJoinRequest { server_id, twitch_proof_json }` to all peers already visible in the WS room
-6. If no peers found yet, the `PeerJoined`/`RoomMembers` handler in `swarm.rs` will pick up `pending_server_joins` and send the request later
-7. Spawn a **4-second** `NodeCommand::RetryPendingJoin { server_id }` task, then the 15-second `NodeCommand::CheckPendingJoinTimeout { server_id }` task. Members serve a join through their elected coordinator (one responder instead of N), and that election reads each member's OWN presence view — so a coordinator whose socket just died is elected by everyone and answers for nobody. `handle_retry_pending_join()` re-asks every peer in the room; members recognise the repeat and all serve it, so the failure mode is the old fan-out rather than a 15s `ServerJoinFailed`. No-op once the join has completed.
+1. Stamp a millisecond nonce, `requested_at = now_ms()`. This is the request's identity on the wire: every answer (a reject, a `join_resolved` ring frame) names it, so a copy replayed out of a three-day ring can never resolve or kill a NEWER request.
+2. Build our own master-signed device list ONCE (`crypto_handler::build_local_device_list`) and cache it on the `PendingJoin` entry for every re-send. A member serving this from the ring has never been online with us, so the carried list is the only thing that can attribute the request to our MASTER instead of to this device.
+3. Construct `PendingJoin { twitch_proof_json, nsfw_confirmed, requested_at, parked: false, last_deposited_at: 0, device_list }`.
+4. **Persist the row FIRST**, `crdt_store.upsert_pending_join(pending_join_row(&server_id, &pending, "pending", ""))`, before anything can go wrong. A crash inside the 15s live window still leaves a row the boot path picks up; a join that completes deletes it.
+5. Insert into `pending_server_joins` (RAM).
+6. Join the WS relay room: `WsCommand::JoinRoom { room_code: server_id }`.
+7. Send `HavenMessage::ServerJoinRequest { server_id, twitch_proof_json, nsfw_confirmed, requested_at, device_list, parked: false }` to every peer already visible in the WS room. If none are visible yet, the `RoomMembers` handler in `swarm.rs` picks up `pending_server_joins` and sends it when peers show up.
+8. Spawn a **4-second** `NodeCommand::RetryPendingJoin { server_id }` task (`handle_retry_pending_join()` re-asks every room peer, and members serve a repeat inside their retry window, so a dead elected coordinator degrades to the old fan-out rather than a stuck join), then a **15-second** `NodeCommand::CheckPendingJoinTimeout { server_id }` task.
 
-The actual join completion happens in `swarm.rs` when a `ServerJoinResponse` is received — that handler applies the full `ServerState`, creates CRDT ops, and adds the member to the MLS group.
+The MemberAdded / snapshot / SyncResponse admission happens in `swarm.rs`'s `ServerJoinRequest` arm (see `rust_swarm_event_loop.md`); completion is detected in the `ServerStateSnapshot`/`SyncResponse` handling when the pending entry is removed.
+
+## handle_check_pending_join_timeout()
+
+`sync_handler.rs:handle_check_pending_join_timeout()`: the 15s live window elapsed with nobody there to answer. **This is not a failure any more (rewritten 2026-08-29).** The old behaviour removed the pending entry and emitted `ServerJoinFailed`; now the join PARKS:
+
+1. No-op if the entry is already gone (join completed / discarded) or already `parked` (a stale timer from an earlier attempt).
+2. `pending.parked = true`, stamp `last_deposited_at = now_ms()`.
+3. `deposit_parked_join()` writes the copy into the server room's `~join` ring.
+4. `crdt_store.upsert_pending_join(pending_join_row(&server_id, pending, "pending", ""))`: the row's `state` column stays `"pending"`; only `parked`/`last_deposited_at` (RAM-only fields) changed.
+5. Emit `NetworkEvent::ServerJoinParked { server_id }`.
+
+The node STAYS in the room, which is how both legs of the eventual answer reach it: the relay buffers targeted frames (snapshot, SyncResponse, rejects) and replays them on this device's next join of that room, and the `~join` ring catch-up is gated on room membership. `ServerJoinFailed` has no Rust emitter anywhere any more (the variant stays in `types.rs` for old Dart builds).
+
+## handle_discard_pending_join()
+
+`sync_handler.rs:handle_discard_pending_join()`: the user gave up on a pending or rejected tile (`NodeCommand::DiscardPendingJoin`). Removes the RAM entry, `crdt_store.delete_pending_join(server_id)`, leaves the WS room, emits `NetworkEvent::PendingJoinUpdated { server_id, state: "discarded", reason: "" }`.
+
+Nothing reaches the relay — the ring copy cannot be recalled and just ages out. What makes the discard STICK is purely local: no row means no boot rejoin of that room, which is what would otherwise let a late admission's buffered snapshot land.
+
+## pending_join_row()
+
+`sync_handler.rs:pending_join_row(server_id, pending: &PendingJoin, state, reason) -> PendingJoinRow`: builds the persisted twin of a live `PendingJoin` for the CrdtStore actor. `created_at` is always set to `pending.requested_at`, but it is only used on INSERT: the DB `upsert_pending_join` preserves the ORIGINAL `created_at` on conflict, so a repeat request keeps saying when the user first asked while `requested_at` becomes the new nonce.
+
+## deposit_parked_join()
+
+`sync_handler.rs:deposit_parked_join(ws_cmd_tx, server_id, pending: &PendingJoin)`: writes the parked copy of a request into the server room's `~join` ring via `WsCommand::SendToRoomTopic { room_code: server_id, topic: JOIN_TOPIC, data }`. The frame is a `HavenMessage::ServerJoinRequest` with `parked: true` and **`twitch_proof_json` deliberately stripped to `None`**: the ring is readable by any socket in the room for its whole retention (anyone holding the invite link), and a peer id is accepted exposure while a Twitch account name tied to that peer id is not. A member reading a proofless request on a Twitch-gated server takes no action (see the `parked` rules in the `ServerJoinRequest` arm), so the join simply waits for co-presence, where the LIVE re-request still carries the proof and today's gate runs unchanged.
+
+Called from `handle_check_pending_join_timeout` (first park) and from the `WsEvent::RoomMembers` re-deposit (every `REDEPOSIT_INTERVAL_MS` = 12h while still parked, in `swarm.rs`).
+
+## publish_join_resolution()
+
+`sync_handler.rs:publish_join_resolution(ws_cmd_tx, server_id, joiner_master, requested_at, admitted, reason, op_json)`: publishes a member's answer to a join into the room's `~join` ring as `HavenMessage::ServerJoinResolved`. Two jobs at once: it reaches a joiner that is not here right now (read on their next `TopicCatchup`), and it tells every OTHER member the join is already resolved so one that returns days later does not re-serve it. `op_json` carries the `MemberAdded` op JSON when `admitted`, `None` otherwise.
+
+## is_interactive_reason()
+
+`sync_handler.rs:is_interactive_reason(reason: &str) -> bool`: `reason.starts_with("nsfw_confirm:") || reason.starts_with("twitch_required:")`. These refusals are really QUESTIONS (the member is asking the joiner for something, and the next request carries the answer), handled differently at both ends: a member never writes one into the `~join` ring (a question parked in a TTL buffer would re-serve on every member's catch-up for days), and the joiner never keeps a row for one (a persisted tile would restore the pending join at every boot and pop the same dialog forever).
+
+## handle_join_refused()
+
+`sync_handler.rs:handle_join_refused(pending_server_joins, event_tx, ws_cmd_tx, crdt_store, server_id, reason)`: the ONE place a refusal lands on the joiner, whichever leg carried it, the targeted `ServerJoinRejected`, or a `join_resolved{admitted: false}` frame out of the ring. Always leaves the room: "no row means we are not in that room" is the invariant that makes both a refusal and a discard stick, since it stops the relay replaying a late admission's buffered snapshot at us.
+
+- **Interactive reason** (`is_interactive_reason`): deletes the row (`crdt_store.delete_pending_join`), emits `PendingJoinUpdated { state: "discarded" }` FIRST, THEN `TwitchJoinRejected` (the dialog event): tile before dialog, so a UI that only sees one of the two events gets the safer one. The user answers the dialog and their answer re-requests through `handle_join_server`, writing a FRESH row.
+- **Final reason**: row flips to `rejected` (`crdt_store.upsert_pending_join`); `TwitchJoinRejected` fires ONLY `if !pending.parked` (a join still in its live window has the user standing in front of the dialog it triggered; a parked one is answered hours later with nobody watching, so the tile is the only surface and an out-of-nowhere toast would be noise); `PendingJoinUpdated { state: "rejected", reason }` always fires.
+
+## send_join_rejection()
+
+`sync_handler.rs:send_join_rejection(ws_cmd_tx, server_id, joiner_device, joiner_master, requested_at, reason, catchup_secs)`: refuses a join on BOTH legs. The targeted leg goes to the joiner's DETERMINISTIC server room (`send_message_to_peer_in_room`), not through presence lookup, so the relay buffers it for an absent joiner and replays it on that device's next join of that room. When `requested_at != 0 && !is_interactive_reason(reason) && catchup_secs > 0`, also calls `publish_join_resolution(.., admitted: false, ..)`. Interactive reasons are deliberately NEVER written into the ring (see `is_interactive_reason`).
 
 ## handle_change_role()
 
@@ -464,16 +525,7 @@ Emits: `NetworkEvent::ServerUpdated { server_id }`
 
 Broadcasts via plaintext `HavenMessage::CrdtOpBroadcast`.
 
-## handle_check_pending_join_timeout()
-
-`sync_handler.rs:handle_check_pending_join_timeout()` — Called 15 seconds after `handle_join_server()` to check if the join is still pending.
-
-If `pending_server_joins` still contains the `server_id`:
-1. Remove from pending map
-2. Emit `NetworkEvent::ServerJoinFailed { server_id, reason: "No members responded within 15 seconds" }`
-3. Leave WS room: `WsCommand::LeaveRoom { room_code: server_id }`
-
-If already removed (join succeeded), this is a no-op.
+(`handle_check_pending_join_timeout()` moved — see the section right after `handle_join_server()` above; it now PARKS instead of failing.)
 
 ## flush_pending_sync_requests()
 
@@ -679,7 +731,8 @@ Tier-gated operations (require outranking the target):
 | `MemberJoined` | `handle_set_nickname`, `handle_set_twitch_username`, `handle_envelope_crdt_op` (MemberAdded) |
 | `MemberLeft` | `handle_kick_member`, `handle_ban_member`, `handle_envelope_crdt_op` (MemberRemoved) |
 | `RoleChanged` | `handle_change_role`, `handle_envelope_crdt_op` |
-| `ServerJoinFailed` | `handle_check_pending_join_timeout` |
+| `ServerJoinParked` | `handle_check_pending_join_timeout` (no `ServerJoinFailed` emitter exists anywhere any more) |
+| `PendingJoinUpdated` | `handle_discard_pending_join` (`discarded`), `handle_join_refused` (`discarded` on an interactive reason, else `rejected`); `admitted`/`ready` are emitted from `swarm.rs` (join completion and the `MlsWelcome` arm respectively), not this module |
 | `SyncCompleted` | `handle_envelope_crdt_op` (wildcard `_ =>`), `handle_envelope_sync_resp` |
 | `MessageSyncStarted` | `flush_pending_sync_requests` |
 | `MessageSyncCompleted` | `handle_envelope_channel_sync_batch` |

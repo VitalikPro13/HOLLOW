@@ -25,7 +25,7 @@ flutter test test/  # widget tests
 cd rust/hollow_core && cargo check  # + clippy
 
 cargo test --lib test_harness -- --nocapture  # multi-node harness
-cargo nextest run --lib  # full suite 80s vs 16min
+cargo nextest run --lib  # full suite ~70s
 
 # FRB codegen after Rust API changes (MUST run from project root)
 flutter_rust_bridge_codegen generate --rust-input "crate::api" --rust-root "rust/hollow_core" --dart-output "lib/src/rust"
@@ -76,7 +76,7 @@ All UI = custom Hollow widgets, no Material defaults (`src/ui/components/`): Hol
 - **CRITICAL: a running `Ticker` requests a frame EVERY VSYNC** (240fps on a 240Hz panel) even if nothing changed — never use one as a clock, and never leave an `AnimationController` restarted as often as its duration. Decorative motion = `Timer` + `GatedNotifier`. `feedback_ticker_is_a_frame_request`.
 - **Perf sentinels:** grep `[SENTINEL]`; `timedChannelCall`; `FrameCensus`, `FrameScheduleProbe` (works in RELEASE); `scripts/perf_*.ps1`. `project_perf_sentinels`, `project_idle_cpu_frame_scheduling`.
 - **Relay:** uWebSockets C++ (`relay-uws/`). NO rate limits; NEVER lower `maxPayloadLength` (64MB). Topics `0x07`, broadcast `0x03`. EVERY binary handler gates on SENDER room membership; abuse = fair-share eviction, NEVER a cap; **NO byte quotas** (CAKE + coturn peer-lock). Per-IP RAM = connection caps ONLY, keyed by `ip_limit_key()` (v6 /64; unmap v4-MAPPED first). `feedback_relay_rules`, `project_relay_fairshare_turn_lock`.
-- **CRITICAL: relay offline delivery (availability cache, ON 3d):** anything reaching OFFLINE channel members MUST ride `0x07` topic frames — `0x03` and direct sends are invisible to the TTL rings. OPEN BUG: channel files don't render post-catchup. `project_relay_availability_cache`.
+- **CRITICAL: relay offline delivery (availability cache, ON 3d):** anything for OFFLINE channel members MUST ride `0x07` topic frames (`0x03`/direct sends never enter the rings). OPEN BUG: channel files don't render post-catchup. Parked server joins = the `~join` ring (`project_pending_server_joins`). `project_relay_availability_cache`.
 - **Storage & profiles (#47):** data root = `dirs::data_dir()/hollow` (override `set_data_dir()`/`HOLLOW_DATA_DIR`). Desktop precedence: env > `--portable` > profiles.json PIN > marker > `hollow_data` WITH identity data (NEVER `data`). Keychain = PER-PROFILE slots. `project_issue47_sframe_keystore_fix`, `project_portable_mode`.
 - **CRITICAL: self-restart ONLY via `relaunchApp()`** (Rust waiter — anything Dart spawns dies pre-Flutter). `project_profile_switcher_issue47`.
 - **CRITICAL: auto-download gate (#41):** pull paths gated in DART; pushes can't be cancelled (discard + `declined` pin); senders pre-negotiate via `auto_dl_pref`; VOICE exempt; RequestFile receipts bypass cap + gate, NEVER remove; `accept_header_thumb` = the ONE thumb filter. `project_autodownload_gate`.
@@ -166,7 +166,7 @@ All UI = custom Hollow widgets, no Material defaults (`src/ui/components/`): Hol
 - **CRITICAL: call audio:** Android mic survives backgrounding ONLY via `CallForegroundService` (mic FGS in `AudioSwitchManager.start/stop` — never remove); adaptive capture respects `setCaptureMuted` + `setCaptureServoHold`; voice-QUALITY bugs only count from a REMOTE peer. `feedback_capture_servo_mute_freeze`.
 - **CRITICAL: audio-track ops (`setEnabled`/`setVolume`/dispose) = blocking signaling-thread hops:** ONLY via `runAudioTrackOp`/`HollowRunAudioTrackOp`/`HollowAudioOpQueue`; FRB TRACE loggers capped at Warn, NEVER remove. `feedback_android_audio_track_proxy_ui_freeze`, `feedback_frb_trace_logger_cap`.
 - **CRITICAL: per-channel MLS subgroups:** restricted channels encrypt under their OWN group `"{server}#{channel}"` (`reconcile_subgroups_for_server`); voice SFrame from its `export_secret`; VC participants (SELF too) = ROUTABLE DEVICE ids; Dart branches on `is_self`, never id compares. `project_per_channel_mls_subgroups`.
-- **CRITICAL: server-group MLS recovery:** CRDT-mutating handlers ALWAYS also broadcast the op as plaintext `CrdtOpBroadcast` (idempotent) — an MLS-only op silently drops at a skewed epoch. `feedback_owner_coordinator_mls_recovery`.
+- **CRITICAL: server-group MLS recovery:** CRDT-mutating handlers ALWAYS also broadcast the op as plaintext `CrdtOpBroadcast` (idempotent) — an MLS-only op silently drops at a skewed epoch; compute the fan-out TARGETS before the op mutates state (a delete drains `members`). `feedback_owner_coordinator_mls_recovery`, `feedback_mls_first_fallback_dead_targets`.
 - **CRITICAL: channel visibility/posting UI reactivity:** `_refreshServerState` reloads `channelListProvider` + invalidates `serverChannelsProvider(id)` on a retry ramp; mobile chat route `loadForServer` on open. NEVER `ref.invalidate` in `initState`. `feedback_channel_visibility_posting_ui_reactivity`.
 - **CRITICAL: new `CrdtPayload` variants emit `ServerUpdated` in BOTH match blocks** (`handle_envelope_crdt_op` + `handle_incoming_request`) — never fall into `_ =>` (emits `SyncCompleted`, no provider invalidation).
 - **CRITICAL: received CRDT ops persisted via `insert_crdt_op` at EVERY apply site** (op_log is `skip_serializing`, state JSON alone loses history); joins send `ServerStateSnapshot` BEFORE the op log; permission checks validate `op.author`, not the sender. `feedback_crdt_sync_persistence`.

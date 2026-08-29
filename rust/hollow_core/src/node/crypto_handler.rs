@@ -4651,6 +4651,166 @@ mod tests {
         }
     }
 
+    /// `ServerJoinRequest` grew three fields for parked joins (a nonce, a
+    /// carried device list, a parked flag) and `join_resolved` is a brand-new
+    /// variant. Both directions have to keep working across the version
+    /// boundary, and getting it wrong is SILENT: joins would simply stop
+    /// crossing between clients.
+    ///
+    /// Pinned here rather than in `types.rs` because that module has no test
+    /// harness and this is the same pin, with the same helpers, as
+    /// `friend_reject_wire_is_backward_compatible` directly above.
+    #[test]
+    fn server_join_wire_is_backward_compatible() {
+        // OLD wire -> NEW code. A pre-2026-08-29 client sends only the three
+        // original keys; the new fields must default to "legacy, live, no list".
+        let old_wire = r#"{"type":"join_request","server_id":"abc","nsfw_confirmed":true}"#;
+        match serde_json::from_str::<HavenMessage>(old_wire).unwrap() {
+            HavenMessage::ServerJoinRequest {
+                server_id, twitch_proof_json, nsfw_confirmed,
+                requested_at, device_list, parked,
+            } => {
+                assert_eq!(server_id, "abc");
+                assert!(twitch_proof_json.is_none());
+                assert!(nsfw_confirmed);
+                assert_eq!(requested_at, 0, "no nonce = a legacy client");
+                assert!(device_list.is_none(), "old wire carries no device list");
+                assert!(!parked, "old wire is always a live request");
+            }
+            other => panic!("expected ServerJoinRequest, got {other:?}"),
+        }
+
+        // NEW -> wire. The nonce and the flag always ride (no
+        // skip_serializing_if); an absent device list serializes to nothing, so
+        // a request with no list is byte-for-byte what it was before.
+        assert_eq!(
+            serde_json::to_string(&HavenMessage::ServerJoinRequest {
+                server_id: "abc".to_string(),
+                twitch_proof_json: None,
+                nsfw_confirmed: false,
+                requested_at: 7,
+                device_list: None,
+                parked: true,
+            })
+            .unwrap(),
+            r#"{"type":"join_request","server_id":"abc","nsfw_confirmed":false,"requested_at":7,"parked":true}"#,
+        );
+
+        // A request WITH a list round-trips it verifiable: this is the
+        // attribution a member serving it from the ring depends on.
+        let master = kp(0x7a);
+        let device = kp(0x7b).peer_id();
+        let list = build_signed_device_list(&master, 4, vec![device.clone()], Vec::new());
+        let wire = serde_json::to_string(&HavenMessage::ServerJoinRequest {
+            server_id: "abc".to_string(),
+            twitch_proof_json: None,
+            nsfw_confirmed: false,
+            requested_at: 42,
+            device_list: Some(list.clone()),
+            parked: true,
+        })
+        .unwrap();
+        match serde_json::from_str::<HavenMessage>(&wire).unwrap() {
+            HavenMessage::ServerJoinRequest {
+                requested_at, device_list: Some(got), parked, ..
+            } => {
+                assert_eq!(requested_at, 42);
+                assert!(parked);
+                assert_eq!(got.master_peer_id, master.peer_id());
+                assert_eq!(got.devices, vec![device.clone()]);
+                assert!(verify_device_list(&got), "the list must survive the wire verifiable");
+            }
+            other => panic!("expected a listed ServerJoinRequest, got {other:?}"),
+        }
+
+        // NEW wire -> OLD code. A pre-parked-joins client models the variant
+        // with only the three original fields; serde's internally-tagged struct
+        // visitor drains the unknown keys, INCLUDING the nested device-list
+        // object, so a new request still reaches an old member.
+        #[derive(serde::Deserialize)]
+        #[serde(tag = "type")]
+        enum OldWire {
+            #[serde(rename = "join_request")]
+            ServerJoinRequest {
+                server_id: String,
+                #[serde(default)]
+                twitch_proof_json: Option<String>,
+                #[serde(default)]
+                nsfw_confirmed: bool,
+            },
+        }
+        match serde_json::from_str::<OldWire>(&wire).unwrap() {
+            OldWire::ServerJoinRequest { server_id, nsfw_confirmed, .. } => {
+                assert_eq!(server_id, "abc");
+                assert!(!nsfw_confirmed);
+            }
+        }
+
+        // `ServerJoinRejected` grew the same nonce, and for a sharper reason:
+        // the refusal is BUFFERED by the relay now, so a stale copy replays
+        // straight into the user's next request. Old wire = 0 = "refuse
+        // whatever is pending", which is all the old presence-gated send could
+        // ever have meant.
+        match serde_json::from_str::<HavenMessage>(
+            r#"{"type":"join_rejected","server_id":"abc","reason":"banned"}"#,
+        )
+        .unwrap()
+        {
+            HavenMessage::ServerJoinRejected { server_id, reason, requested_at } => {
+                assert_eq!(server_id, "abc");
+                assert_eq!(reason, "banned");
+                assert_eq!(requested_at, 0, "no nonce = refuse whatever is pending");
+            }
+            other => panic!("expected ServerJoinRejected, got {other:?}"),
+        }
+        assert_eq!(
+            serde_json::to_string(&HavenMessage::ServerJoinRejected {
+                server_id: "abc".to_string(),
+                reason: "banned".to_string(),
+                requested_at: 9,
+            })
+            .unwrap(),
+            r#"{"type":"join_rejected","server_id":"abc","reason":"banned","requested_at":9}"#,
+        );
+
+        // `join_resolved` round-trips. An old client cannot parse it at all,
+        // which is deliberate and harmless: it fails ONE frame and logs.
+        let resolved = HavenMessage::ServerJoinResolved {
+            server_id: "abc".to_string(),
+            joiner_master: master.peer_id(),
+            requested_at: 42,
+            admitted: true,
+            reason: String::new(),
+            op_json: Some("{\"x\":1}".to_string()),
+        };
+        let rwire = serde_json::to_string(&resolved).unwrap();
+        match serde_json::from_str::<HavenMessage>(&rwire).unwrap() {
+            HavenMessage::ServerJoinResolved {
+                server_id, joiner_master, requested_at, admitted, reason, op_json,
+            } => {
+                assert_eq!(server_id, "abc");
+                assert_eq!(joiner_master, master.peer_id());
+                assert_eq!(requested_at, 42);
+                assert!(admitted);
+                assert!(reason.is_empty());
+                assert_eq!(op_json.as_deref(), Some("{\"x\":1}"));
+            }
+            other => panic!("expected ServerJoinResolved, got {other:?}"),
+        }
+        // A refusal carries no op, and the Option is skipped on the wire.
+        let refused = serde_json::to_string(&HavenMessage::ServerJoinResolved {
+            server_id: "abc".to_string(),
+            joiner_master: master.peer_id(),
+            requested_at: 42,
+            admitted: false,
+            reason: "banned".to_string(),
+            op_json: None,
+        })
+        .unwrap();
+        assert!(!refused.contains("op_json"), "an absent op is absent, got {refused}");
+        assert!(refused.contains(r#""reason":"banned""#));
+    }
+
     /// The membership half of the reject's attribution gate, pinned next to the
     /// signature math it rides on. `verify_device_list` proves a list was signed by
     /// the master it names; it says NOTHING about which device delivered it, so the

@@ -55,12 +55,21 @@ The `ChannelType` enum has two values: `text` and `voice`. The Rust FFI returns 
 
 File: `lib/src/core/models/strip_item.dart`
 
-Sealed class with two concrete subtypes for the server strip layout:
+Sealed class with three concrete subtypes for the server strip layout:
 
 ### ServerStripItem
 - Single field: `serverId: String`
 - JSON: `{"type": "server", "id": "<serverId>"}`
 - Represents a standalone server icon in the strip
+
+### PendingStripItem (pending joins rung 1, 2026-08-29)
+- Single field: `serverId: String`
+- JSON: `{"type": "pending", "id": "<serverId>"}`
+- A parked join tile: we asked to join a server whose members were all offline, and Rust is holding the
+  request until one of them comes back. Carries the server id and nothing else: an invite link is only
+  an id, so until a member answers there is no name and no icon for it. Not a real `ServerStripItem`
+  because there is no server behind it yet: it is dimmed, not selectable, and swapped IN PLACE for a
+  `ServerStripItem` once the join completes (`ServerStripLayoutNotifier.onServerCreated`).
 
 ### FolderStripItem
 - Fields: `id: String`, `name: String`, `serverIds: List<String>`
@@ -69,7 +78,12 @@ Sealed class with two concrete subtypes for the server strip layout:
 - Folder `id` is generated as `DateTime.now().millisecondsSinceEpoch.toRadixString(16)` at creation time
 - Default folder name is `"Folder"`
 
-Deserialization: `StripItem.fromJson()` checks `json['type']` — `"folder"` produces `FolderStripItem`, anything else produces `ServerStripItem`.
+Deserialization: `StripItem.fromJson()` returns `StripItem?` (NULLABLE since `PendingStripItem` landed):
+`"folder"` produces `FolderStripItem`, `"pending"` produces `PendingStripItem`, `"server"` or an absent
+`type` (pre-existing layouts written before the key existed) produces `ServerStripItem`, and anything
+else returns `null`. The `null` case matters: the layout JSON is written by whichever build wrote it
+last, so a NEWER client's kind (exactly what `"pending"` was, from an older client's point of view) must
+read as "skip this row", never as a mis-typed server whose id then gets pruned as a deleted server.
 
 ---
 
@@ -494,16 +508,76 @@ Reads `serverListProvider` to get the set of valid server IDs, then:
 
 **`reorderInsideFolder(folderId, oldIndex, newIndex)`** — reorders `serverIds` within a folder. Same `newIndex > oldIndex` adjustment. Saves after.
 
-**`onServerCreated(serverId)`** — checks if server already exists anywhere in layout (top-level or inside folders). If not, appends a new `ServerStripItem`. Saves after.
+**`onServerCreated(serverId)`** — checks if server already exists anywhere in layout (top-level or inside folders); if so, returns (idempotent). **Pending joins rung 1:** otherwise checks whether a `PendingStripItem` for this `serverId` is already sitting in the layout and, if so, replaces it IN PLACE with a `ServerStripItem` at the same index: the tile the user has been looking at for days turns into the server rather than vanishing and reappearing at the end of the strip. Only when neither exists does it append a fresh `ServerStripItem` at the end. Saves after.
 
 **`onServerDeleted(serverId)`** — removes from top-level, then removes from all folders (with dissolution logic). Saves after.
 
+**`setPendingJoins(Set<String> pendingIds)`** (pending joins rung 1): reconciles the `PendingStripItem` tiles against `pendingIds`: appends a tile for any id not already shown, removes any shown tile whose id is no longer in the set. An id already shown keeps its slot (no reorder on every call). This is the ONE mutation path for pending tiles: `PendingJoinsNotifier` owns the underlying id set (`pendingJoinsProvider`, below) and pushes it here after every change, so the strip can never disagree with the rows Rust holds. Saves after.
+
 ### Utility
 
-**`allServerIds()`** — returns `Set<String>` of all server IDs across top-level items and folder contents. Used for reconciliation checks.
+**`allServerIds()`** — returns `Set<String>` of all server IDs across top-level items and folder contents. Used for reconciliation checks. Deliberately does NOT count `PendingStripItem`s: a pending join is not a server we are in, and counting it here would let it be pruned by `_syncWithServers()` as a "deleted server that isn't in `serverListProvider`".
 
 ### Folder Dissolution Rule
 Folders are automatically dissolved (converted back to standalone `ServerStripItem`) whenever their member count drops to 1 or 0. This happens in `_syncWithServers()`, `addToFolder()`, `removeFromFolder()`, and `onServerDeleted()`.
+
+---
+
+## pendingJoinsProvider / awaitingSetupProvider (pending joins rung 1, 2026-08-29)
+
+```
+NotifierProvider<PendingJoinsNotifier, Map<String, PendingJoinInfo>>
+NotifierProvider<AwaitingSetupNotifier, Set<String>>
+```
+
+Files: `lib/src/core/providers/pending_join_provider.dart`, `lib/src/core/models/pending_join_info.dart`
+
+A join into a server whose members were all offline no longer fails after 15s: Rust PARKS it instead,
+the request is persisted and answered whenever a member finally comes back, which can be days.
+
+### PendingJoinInfo (model)
+Mirrors Rust's `PendingJoinFfi` row. `serverId` (the only identity a parked join has, no name, no icon
+until a member answers), `requestedAt` (Unix ms, doubles as the wire nonce), `state` (`'pending'` /
+`'rejected'`, kept as Rust's raw string so the two sides can never drift over an enum name), `reason`
+(empty while pending; rendered through `pendingJoinReasonText()`). `isRejected` convenience getter.
+
+### PendingJoinsNotifier
+State: `Map<String, PendingJoinInfo>` keyed by server id. **Synchronous `Notifier`, loaded via `load()`
+from `HollowShell._bootstrap` AFTER `startNode`**, never an `AsyncNotifier`-in-`build()` (issue #58: the
+strip watches this on the first frame, and a build-time store read races the store open). A failed
+`load()` leaves whatever tiles the saved strip layout already restored: the rows live in Rust, and a
+transient read error is not a reason to tell the user their join request is gone.
+
+- `load()`: `listPendingJoins()` FFI, replaces the whole map, calls `_syncStrip()`.
+- `park(serverId)`: Rust parked a join we just made (`ServerJoinParked` event). Inserts/updates the
+  entry (preserves `requestedAt` if one already exists).
+- `markRejected(serverId, reason)`: a member answered no (`PendingJoinUpdated{rejected}`).
+- `markRequestedAgain(serverId)`: "Request again", a fresh entry with a NEW `requestedAt`, no stale
+  reason.
+- `remove(serverId)`: the join completed, was discarded, or the row went away
+  (`PendingJoinUpdated{admitted|discarded}`).
+- `_syncStrip()`: the strip is a VIEW of this map, pushes `state.keys.toSet()` into
+  `serverStripLayoutProvider.notifier.setPendingJoins()` after every mutation. ONE mutation path.
+
+### AwaitingSetupNotifier
+State: `Set<String>` of server ids we were admitted to whose MLS group has not formed yet. Between
+`admitted` and `ready` the server is real, joinable and listed, but a member still has to be online with
+us once to add our leaf: the badge is the honest description of holding a server whose traffic we
+cannot decrypt yet. RAM only: a restart in that window just drops the flair (the next co-presence
+completes the setup either way).
+
+### Event wiring (`event_provider.dart`)
+- **`ServerJoinParked { serverId }`** → `onServerJoinParked()`: `pendingJoinsProvider.notifier.park()` +
+  an info toast ("Nobody from this server is online. You will be added when a member returns").
+- **`PendingJoinUpdated { serverId, state, reason }`** → `onPendingJoinUpdated()`, dispatched on `state`:
+  `rejected` → `markRejected` + an error toast; `admitted` → `pendingJoinsProvider.notifier.remove()` THEN
+  `awaitingSetupProvider.notifier.add()` (fires just before `ServerJoined`, so the row is gone and the
+  flair takes over before the server itself appears); `ready` → `awaitingSetupProvider.notifier.remove()`;
+  `discarded` → `pendingJoinsProvider.notifier.remove()`.
+
+### Consumers
+`ServerStripLayoutNotifier.setPendingJoins()` (the tile), `ui_server_strip.md` §Pending Join Tile (the
+widget + context menu), `ui_mobile.md` §Pending Join Row (the mobile pinned row + sheet).
 
 ---
 
@@ -761,6 +835,8 @@ The Dart event handler (in `event_provider.dart`) dispatches Rust `NetworkEvent`
 | `MessageReceived` (channel) | `unreadProvider.onChannelMessage()` |
 | `MessageReceived` (DM) | `unreadProvider.onDmMessage()` |
 | `RoleChanged` | invalidate `myRoleProvider(id)`, `myPermissionsProvider(id)` |
+| `ServerJoinParked` (pending joins rung 1) | `pendingJoinsProvider.notifier.park()`, toast |
+| `PendingJoinUpdated` (pending joins rung 1) | dispatch on `state`: see `pendingJoinsProvider` §Event wiring above |
 
 ---
 

@@ -76,7 +76,9 @@ Emitted via `StreamSink` from the Rust event loop to Dart. Consumed by `EventStr
 - **`MemberLeft { server_id, peer_id }`** — a member left the server.
 - **`SyncCompleted { server_id, ops_applied }`** — CRDT sync finished with N ops applied. Emitted from the `_ =>` wildcard in MLS path (does NOT trigger provider invalidation for permissions/roles).
 - **`ServerJoined { server_id, name }`** — local user successfully joined a server (invite accepted, MLS welcome received).
-- **`ServerJoinFailed { server_id, reason }`** — server join failed (bad invite, Twitch gate rejected, etc.).
+- **`ServerJoinFailed { server_id, reason }`**: LEGACY, kept for old Dart builds. No Rust code emits it any more (pending joins rung 1, 2026-08-29): a join with nobody online PARKS instead of failing, see `ServerJoinParked` below.
+- **`ServerJoinParked { server_id }`** (pending joins rung 1): the 15s live window elapsed with nobody there to answer. NOT a failure: the request is persisted locally and deposited into the server room's `~join` ring; the UI shows a pending tile.
+- **`PendingJoinUpdated { server_id, state, reason }`** (pending joins rung 1): a parked join changed state. `state` is one of `"rejected"` (a member said no; `reason` carries why), `"admitted"` (the CRDT half completed, fires just BEFORE `ServerJoined`), `"ready"` (the MLS leaf finally formed, `MlsWelcome`), or `"discarded"` (the user gave up, or an interactive refusal, `nsfw_confirm:`/`twitch_required:`, cleared the row so its dialog can show). `reason` is empty except on `"rejected"`.
 - **`RoleChanged { server_id, peer_id, new_role }`** — a member's power role changed.
 
 ### Message Sync
@@ -231,7 +233,9 @@ Commands sent from the Flutter FFI layer into the Rust swarm event loop via `mps
 - **`RenameChannel { server_id, channel_id, new_name }`** — rename a channel. Handler: `sync_handler.rs`.
 - **`UpdateServerSetting { server_id, key, value }`** — update a server setting (icon, description, twitch gate, etc.). Handler: `sync_handler.rs`.
 - **`DeleteServer { server_id }`** — delete server (owner only). Handler: `sync_handler.rs:handle_delete_server()`.
-- **`JoinServer { server_id, twitch_proof_json }`** — request to join a server. `twitch_proof_json: Option<String>` for Twitch-gated servers. Handler: `sync_handler.rs:handle_join_server()`.
+- **`JoinServer { server_id, twitch_proof_json, nsfw_confirmed }`**: request to join a server. `twitch_proof_json: Option<String>` for Twitch-gated servers; `nsfw_confirmed: bool` set after the user accepts the NSFW consent prompt on a re-request. Handler: `sync_handler.rs:handle_join_server()`. **Pending joins rung 1 (2026-08-29):** a join with nobody online no longer fails after 15s, it PARKS (persisted row + `ServerJoinParked`), see `NetworkEvent::ServerJoinParked`/`PendingJoinUpdated` and `NodeCommand::DiscardPendingJoin`/`RequestPendingJoinAgain` below.
+- **`DiscardPendingJoin { server_id }`** (pending joins rung 1): user gave up on a pending or rejected tile, drops the local row + RAM entry, leaves the WS room (so a late admission's buffered snapshot can never reach us), emits `PendingJoinUpdated{discarded}`. Handler: `sync_handler.rs:handle_discard_pending_join()`.
+- **`RequestPendingJoinAgain { server_id }`** ("Request again" on a rejected tile): re-runs `handle_join_server()` with the row's stored NSFW consent / Twitch proof under a FRESH nonce. Deliberately NOT `RetryPendingJoin`, which is the internal 4s coordinator-window re-ask and must keep the SAME nonce.
 - **`RequestChannelSync { server_id, channel_id }`** — manually request channel message sync. Handler: `sync_handler.rs`.
 - **`LeaveServer { server_id }`** — leave a server voluntarily. Handler: `sync_handler.rs:handle_leave_server()`.
 
@@ -370,8 +374,9 @@ These are the plaintext variants used before MLS is established or as fallback. 
 - **`SyncRequest { server_id, state_vector_json }`** — `"sync_request"` — request CRDT ops the peer has that we don't. `state_vector_json` is our CRDT state vector.
 - **`SyncResponse { server_id, ops_json }`** — `"sync_response"` — response with missing CRDT ops.
 - **`CrdtOpBroadcast { server_id, op_json }`** — `"crdt_op"` — broadcast a single CRDT operation to all server members.
-- **`ServerJoinRequest { server_id, twitch_proof_json }`** — `"join_request"` — request to join a server. `twitch_proof_json` optional for Twitch-gated servers.
-- **`ServerJoinRejected { server_id, reason }`** — `"join_rejected"` — join request rejected.
+- **`ServerJoinRequest { server_id, twitch_proof_json, nsfw_confirmed, requested_at, device_list, parked }`** (`"join_request"`): request to join a server. `twitch_proof_json` optional for Twitch-gated servers. **Pending joins rung 1 (2026-08-29), all `#[serde(default)]` for backward compat:** `nsfw_confirmed: bool` (set after the joiner accepts the NSFW prompt); `requested_at: i64` (Unix ms, the request NONCE, since every answer names it so a ring-replayed copy can never resolve a newer request; `0` means a pre-rung-1 client); `device_list: Option<SignedDeviceList>` (the joiner's OWN master-signed device list, since a member serving a PARKED copy has never been online with the joiner, so `resolve(sender_device)` alone would attribute the join to the wrong DEVICE id; absent means pre-rung-1, falls back to the resolver); `parked: bool` (true ONLY on the copy deposited into the room's `~join` ring, held to stricter rules than the live unicast copy: no coordinator-gate bypass, no interactive rejection written back into the ring).
+- **`ServerJoinRejected { server_id, reason, requested_at }`** (`"join_rejected"`): join request rejected. `requested_at: i64` (`#[serde(default)]`, pending joins rung 1) names the ask being refused: this frame now rides the deterministic server room and is BUFFERED for an absent joiner, so a stale copy replayed on the joiner's next room join (normally them asking again) must not kill the fresh request; `0` means pre-rung-1, "refuse whatever is pending".
+- **`ServerJoinResolved { server_id, joiner_master, requested_at, admitted, reason, op_json }`** (`"join_resolved"`, pending joins rung 1): a member's answer to a join, published on the server room's `~join` pseudo-topic so it survives the joiner being offline AND tells other members the join is already resolved (a late member never re-serves it). `joiner_master` is the joiner's MASTER identity (never a device id), the key both the CRDT member entry and the local `join_resolutions` map are stamped under. `reason` is `""` when admitted, else the same string `ServerJoinRejected` carries. `op_json: Option<String>` carries the `MemberAdded` CrdtOp JSON when admitted, NOT a second CRDT ingest path: receivers route it through the same author-validated `apply_remote_crdt_op` the plaintext `CrdtOpBroadcast` arm uses. All fields `#[serde(default)]`.
 - **`ServerDeleteBroadcast { server_id }`** — `"server_delete"` — owner broadcast: server deleted.
 - **`MemberKickBroadcast { server_id }`** — `"member_kick"` — sent to kicked member so they remove themselves.
 
@@ -750,6 +755,17 @@ Returns `Option<&str>` with the target peer ID if the variant has a `target` fie
 ---
 
 ## Helper Types
+
+### `PendingJoin` (pending joins rung 1, 2026-08-29)
+In-flight server-join state, keyed by server_id in `pending_server_joins`. Carries the gate-bypass tokens needed when (re-)sending a `ServerJoinRequest`.
+- `twitch_proof_json: Option<String>`: Twitch verification proof, if the server requires it.
+- `nsfw_confirmed: bool`: true once the user accepted the NSFW "proceed at your own risk" prompt.
+- `requested_at: i64`: Unix MILLISECONDS when the user asked. The request NONCE: every answer names it, so a stale copy replayed out of a three-day ring can never resolve a newer request.
+- `parked: bool`: true once the 15s live window elapsed with no answer and we deposited a copy into the server room's `~join` ring. A parked join has no timer and no live expectation: it waits for a member to return.
+- `last_deposited_at: i64`: Unix MILLISECONDS of the last ring deposit, so a flapping joiner cannot refill a 200-frame ring on every reconnect (see `REDEPOSIT_INTERVAL_MS`).
+- `device_list: Option<SignedDeviceList>`: our OWN master-signed device list, carried on every copy of the request. Built once at request time and cached for re-sends.
+
+Two consts alongside it: `JOIN_TOPIC: &str = "~join"` (the pseudo-channel the server room's join ring is keyed under: never collides with a real channel id, since those are `{server8}-{hex}` or a uuid and `~` is outside that alphabet); `REDEPOSIT_INTERVAL_MS: i64 = 12 * 3600 * 1000` (how often a still-parked join re-deposits into the ring; the ring is 200 frames / 1 MB shared by every joiner of that server).
 
 ### `DiscoveredPeer`
 ```

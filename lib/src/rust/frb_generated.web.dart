@@ -285,6 +285,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<MutedMemberFfi> dco_decode_list_muted_member_ffi(dynamic raw);
 
   @protected
+  List<PendingJoinFfi> dco_decode_list_pending_join_ffi(dynamic raw);
+
+  @protected
   List<PersonalEmote> dco_decode_list_personal_emote(dynamic raw);
 
   @protected
@@ -426,6 +429,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<ShowcaseAsset>? dco_decode_opt_list_showcase_asset(dynamic raw);
+
+  @protected
+  PendingJoinFfi dco_decode_pending_join_ffi(dynamic raw);
 
   @protected
   PersonalEmote dco_decode_personal_emote(dynamic raw);
@@ -870,6 +876,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  List<PendingJoinFfi> sse_decode_list_pending_join_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   List<PersonalEmote> sse_decode_list_personal_emote(
     SseDeserializer deserializer,
   );
@@ -1059,6 +1070,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<ShowcaseAsset>? sse_decode_opt_list_showcase_asset(
     SseDeserializer deserializer,
   );
+
+  @protected
+  PendingJoinFfi sse_decode_pending_join_ffi(SseDeserializer deserializer);
 
   @protected
   PersonalEmote sse_decode_personal_emote(SseDeserializer deserializer);
@@ -1632,6 +1646,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_list_pending_join_ffi(
+    List<PendingJoinFfi> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_list_personal_emote(
     List<PersonalEmote> self,
     SseSerializer serializer,
@@ -1880,6 +1900,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_opt_list_showcase_asset(
     List<ShowcaseAsset>? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_pending_join_ffi(
+    PendingJoinFfi self,
     SseSerializer serializer,
   );
 

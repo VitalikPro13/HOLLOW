@@ -20,11 +20,12 @@ void main() {
       container.read(serverStripLayoutProvider.notifier);
   List<StripItem> layout() => container.read(serverStripLayoutProvider);
 
-  /// A readable rendering of the strip: `a`, `b` for servers and
-  /// `Name[a,b]` for folders.
+  /// A readable rendering of the strip: `a`, `b` for servers, `Name[a,b]` for
+  /// folders and `?a` for a parked join request.
   String outline() => layout().map((item) {
         return switch (item) {
           ServerStripItem(:final serverId) => serverId,
+          PendingStripItem(:final serverId) => '?$serverId',
           FolderStripItem(:final name, :final serverIds) =>
             '$name[${serverIds.join(",")}]',
         };

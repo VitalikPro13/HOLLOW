@@ -51,6 +51,25 @@ Future<void> removeChannel({
 Future<List<ServerFfi>> getJoinedServers() =>
     RustLib.instance.api.crateApiCrdtGetJoinedServers();
 
+/// Every join still waiting for an answer, plus the ones a member rejected.
+///
+/// Reads the local DB like [get_joined_servers] does: these rows are written
+/// by the node's CrdtStore actor and only ever read here, so a snapshot on the
+/// FRB thread is exactly the tile's data source.
+Future<List<PendingJoinFfi>> listPendingJoins() =>
+    RustLib.instance.api.crateApiCrdtListPendingJoins();
+
+/// Drop a pending or rejected join. Deletes the row, forgets the in-memory
+/// entry and leaves the server room, so a late admission can never complete a
+/// join the user walked away from.
+Future<void> discardPendingJoin({required String serverId}) =>
+    RustLib.instance.api.crateApiCrdtDiscardPendingJoin(serverId: serverId);
+
+/// Ask again, reusing the row's stored NSFW consent and Twitch proof under a
+/// fresh nonce. Same code path as the original request.
+Future<void> retryPendingJoin({required String serverId}) =>
+    RustLib.instance.api.crateApiCrdtRetryPendingJoin(serverId: serverId);
+
 /// Get channels for a specific server.
 ///
 /// Prefers a LIVE clone of the event loop's in-memory state (the copy that
@@ -816,6 +835,47 @@ class MutedMemberFfi {
           peerId == other.peerId &&
           expiresAtMs == other.expiresAtMs &&
           permanent == other.permanent;
+}
+
+/// A join that has not completed yet, for the pending tile (Dart-visible).
+///
+/// `state` is `pending` (waiting for a member to come back) or `rejected` (a
+/// member answered no; `reason` says which gate). `last_deposited_at` is when
+/// the request was last written into the server room's join ring, 0 while the
+/// join is still live.
+class PendingJoinFfi {
+  final String serverId;
+  final PlatformInt64 requestedAt;
+  final String state;
+  final String reason;
+  final PlatformInt64 lastDepositedAt;
+
+  const PendingJoinFfi({
+    required this.serverId,
+    required this.requestedAt,
+    required this.state,
+    required this.reason,
+    required this.lastDepositedAt,
+  });
+
+  @override
+  int get hashCode =>
+      serverId.hashCode ^
+      requestedAt.hashCode ^
+      state.hashCode ^
+      reason.hashCode ^
+      lastDepositedAt.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is PendingJoinFfi &&
+          runtimeType == other.runtimeType &&
+          serverId == other.serverId &&
+          requestedAt == other.requestedAt &&
+          state == other.state &&
+          reason == other.reason &&
+          lastDepositedAt == other.lastDepositedAt;
 }
 
 /// Animated server icon as seen locally. The CRDT carries only the hash;

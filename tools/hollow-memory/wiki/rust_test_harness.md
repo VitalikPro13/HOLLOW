@@ -56,6 +56,19 @@ ordering lives in the nodes):
   peer-fallback path), `SendBinaryDirect`, `DiscoverPeers`, `CheckPeers`.
 - Presence accessors: `online_devices()`, `room_devices(room)` — the authoritative presence source
   (like the real relay's `RoomMembers`).
+- **Topic rings (pending joins rung 1, 2026-08-29), mirroring the real relay's `topic_buffers`:**
+  `SendToRoomTopic` tees a copy into a `(room, topic)` ring ONLY when it was REGISTERED first
+  (`SetTopicBuffer`); an unregistered ring silently drops every publish, exactly like production, so
+  "the members registered it while they were here" is a real precondition to test and a real thing to
+  wait for. `topic_frames(room, topic)` returns every frame currently in the ring, oldest first, as
+  `(sender_device, payload)`, unconsumed. `topic_registered(room, topic)` checks registration alone.
+  `inject_topic(room, topic, from, data)` writes a frame straight in as if `from` had published it,
+  BYPASSING registration and the sender check: it models a HOSTILE publisher, so the tests that use it
+  are exactly the ones proving the RECEIVER refuses the frame on its own merits (a tampered carried
+  device list, a forged resolution from a non-member), never because the transport happened not to
+  carry it. `set_broadcast_deaf(peer_id, bool)` makes a device deaf to `0x03` room broadcasts while it
+  keeps receiving presence + direct frames, the silent-loss lever for proving a plaintext CrdtOp twin
+  reaches a member with no readable MLS leaf.
 
 ## Inspectors — read state the way the UI does (two layers)
 
@@ -128,6 +141,47 @@ Use a peer for whom backfill is the ONLY vehicle:
 - `freshly_linked_device_backfills_dm_link_previews_from_its_sibling` — a device that did not exist at send time (`spawn_node_full` with a pre-seeded source-only device list). Seed it into `resolver::seed_self` only AFTER the activity, or the sender queues for it.
 
 Both also assert the synced row VERIFIES against the digest of the card it now holds — the row a peer stores is the row it re-serves, so a row that cannot reproduce its own signed digest silently stops replicating. See [[feedback-backfill-test-isolation]].
+
+## Pending server joins (rung 1, 2026-08-29)
+
+A join into an all-offline server PARKS instead of failing (see `rust_sync_handler.md` /
+`rust_swarm_event_loop.md`). Nine new tests, eight in `node/test_harness.rs` plus a wire-pin unit test
+in `node/crypto_handler.rs`:
+
+`parked_join_completes_with_zero_overlap`, `parked_join_rejection_reaches_an_offline_joiner`,
+`late_member_does_not_reserve_a_parked_join`, `parked_join_redeposit_is_interval_bounded`,
+`parked_join_with_a_bad_carried_device_list_is_dropped`, `discarded_parked_join_ignores_a_late_answer`,
+`parked_twitch_gated_join_waits_for_co_presence_and_leaks_no_proof`,
+`parked_nsfw_join_asks_for_consent_once_then_completes` (all `node/test_harness.rs`), and
+`crypto_handler::tests::server_join_wire_is_backward_compatible` (the wire pin: asserts every new
+`#[serde(default)]` field on `ServerJoinRequest`/`ServerJoinRejected` plus the new `ServerJoinResolved`
+variant round-trips, and that a pre-rung-1 payload with none of the new fields still deserializes).
+`parked_join_completes_with_zero_overlap` is honesty-proved: stub out the deposit and "A must admit B
+from the ring" fails.
+
+`join_fails_when_every_member_is_offline_then_succeeds_on_retry` was DELETED, since it asserted the
+exact behaviour rung 1 replaces (a 15s failure), so it could not coexist with the new one.
+
+**Two load-only races cost a round each, both "queued is not landed":** a node emits its event
+(`ServerJoinParked`, or applies `MemberAdded`) the INSTANT the frame is queued on `ws_cmd_tx`; the mock
+relay drains that queue on its own task. A test that (a) took the node offline right after the event
+lost the still-queued deposit (`handle_command` drops everything from an offline node, exactly like a
+dead socket), or (b) read the ring ONCE right after a node-state `wait_until`, failed 2/2 under the
+16-way parallel run and passed alone. **Rule now baked into the harness:** after a NODE-state wait, an
+assertion on RELAY state is itself a `wait_until`, see `expect_ring_request` / `expect_ring_resolution`
+/ `expect_ring_parked_request` above; the mock inspector is a mutex read, so polling it is free.
+`expect_relay_drained` is the companion barrier for a NEGATIVE assertion ("nothing was published"),
+which only means something once nothing from the handler under test is still in flight: it joins a
+throwaway `barrier:{device}:{tag}` room and waits for the relay to confirm membership, since a node's
+outbound commands ride one unbounded channel drained by one relay task, in order.
+
+**Sleep budget raised 566s to 572s** for exactly one new sleep that has no pollable signal (an ABSENCE
+proof: "the deposit never happens", which cannot be waited FOR). `reject_cancels_own_queued_request_no_refriend`
+/ `readd_while_online_requires_fresh_consent` are PRE-EXISTING fixed-sleep flakes, proven failing at
+HEAD before this work, unrelated to it.
+
+Fleet cross-check (real app, real relay, zero overlap between the two peers until the very end):
+`scripts/fleet_pending_join.ps1`, see `fleet_probe.md`.
 
 ## Current tests (13)
 

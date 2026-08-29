@@ -192,6 +192,7 @@ Key differences from classic:
 - `dockMode=true` passed to `ChannelSidebar` (affects styling: no `UserBar` shown).
 - Member panel is hidden during split view to save horizontal space.
 - When no peer or channel is selected, shows `HomeDashboard` instead of the empty chat placeholder.
+- **Pending join tiles (rung 1, 2026-08-29) ride the same `BottomBar` strip as real servers.** A `PendingStripItem` renders alongside `ServerStripItem`s, same as in Classic's `ServerStrip`. The one visual difference is the awaiting-setup badge's corner (top-left here vs top-right in Classic, since the Dock's unread badge already owns top-right); full detail in `ui_server_strip.md` § Pending Join Tile.
 
 **Pending migration handling:** When split view's left pane is closed, the right pane's context is stored as `pendingMigration` in `SplitViewState`. The dock layout checks for this in a `addPostFrameCallback` and migrates the right pane's context (server/channel/peer) to the global providers atomically (batch all writes to avoid intermediate rebuilds), then calls `clearPendingMigration()`. The batch includes fetching channels and layout for the server before writing to providers — this follows the critical rule about atomic server switching.
 

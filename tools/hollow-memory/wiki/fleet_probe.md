@@ -276,6 +276,58 @@ Dot-source `fleet_lib.ps1`, set `$script:FleetVars` before it, and relaunch one 
 `Start-Peer` WITHOUT `Reset-PeerData` — a fixture restore would throw away the very server the
 journey is about. Reset `$script:FleetConsumed[$peer]` when you wipe its outbox.
 
+## fleet_pending_join.ps1 (pending server joins, 2026-08-29)
+
+A pending server join that outlives BOTH sessions, across two REAL instances, proving the `~join` ring
+path the Rust harness cannot: `node/test_harness.rs` proves the ops converge in one process; this
+proves the app does it, in the widgets, over the real relay, with ZERO OVERLAP. a and b are never
+online together until the last step, so every hop has to survive in the relay's availability rings and
+be replayed on a room join. Another script rather than a scenario JSON, for the same reason as
+`fleet_owner_offline.ps1`: `quit` has no relaunch, and this journey needs peers to leave and come back.
+
+**Standard journey, 8 gates:** G1 a creates the server, `#general` is there, invite captured. G2 b sees
+the "Joining server" toast (soft). G3 b shows the PENDING tile with nobody online. G4 b holds NO real
+server yet (dump). G5 a returns ALONE and admits b from the ring (member panel grows to two, the gate
+that proves the ring path works). G6 b returns ALONE, a long gone, to a REAL server with a channel list
+(the buffered admission, snapshot, welcome, op log, has to reach it the same way; this is the return
+leg). G7 a message each way once both are finally up (proves the MLS group actually formed rather than
+the CRDT half landing on its own). G8 cleanup: a deletes the server it created.
+
+**`-DeleteBeforeMessage` replaces G7 with a 9th-gate journey (G7d/G8d + cleanup = 9 gates)**, the case
+that caught `feedback_mls_first_fallback_dead_targets`: a peer admitted through the ring holds the CRDT
+half of the server and NO MLS leaf, since the leaf only forms on first co-presence, when its bootstrap
+KeyPackage finally reaches somebody who can answer it. With the switch, a comes back and deletes the
+server IMMEDIATELY, before any message can pull b's leaf into existence, and b has to lose the server
+anyway, which only works if the plaintext `CrdtOpBroadcast` twin is sent unconditionally. Run 1 caught
+the bug live: b logged `Received MlsChannelMessage for unknown group` and kept the server for good.
+
+**Five relaunches total** across the two journeys (`Restart-Peer`, the same helper `fleet_owner_offline.ps1`
+uses, relaunches ONE peer on its EXISTING data dir, no `Reset-PeerData`, since a fixture restore would
+throw away the very server the journey is about) and `Stop-Peer` (kills the process, waits ~1.5s for the
+SQLCipher WAL lock to release before the data dir is touched again).
+
+**`Wait-ForConnected` helper:** "this peer is up and on the network" without depending on which screen
+it booted into. Waits for EITHER `tooltip:Online` (the user bar's `connectionVisual()` label, which in
+Dock mode lives only in the status dot's tooltip) OR `text:Connected` (the Home dashboard's own word),
+never `text:Online` alone, because the member panel prints that word as a section divider and would
+false-match for a peer that is actually offline. A peer that lands straight in a server view (which is
+what a freshly-arrived server does, it self-selects) never shows either literal word on its OWN, and
+waiting for the wrong one cost a whole run before this helper existed.
+
+**The `$args` guard, and the trap it closes.** `powershell -File` does NOT reject an unknown or
+not-yet-declared `-Switch`, it silently drops it into the script's `$args` array and binds the rest of
+the parameters normally. Before `-DeleteBeforeMessage` was a declared `[switch]`, a mistyped or
+not-yet-implemented flag ran the STANDARD 8-gate journey and reported a clean PASS for a journey nobody
+actually asked to run, the kind of green that means nothing. The fix generalizes: `if ($args.Count -gt
+0) { throw "unrecognised argument(s): ..." }` right after `param(...)`, before anything boots. Any fleet
+script taking a new switch should add it to `param()` FIRST and let this guard catch the interim state,
+rather than trust that PowerShell will reject a bad flag on its own: it will not.
+
+`-Fresh` (via `Start-FreshFleet` in `fleet_lib.ps1`, `-Onboard -Fresh -Peers a,b`) deletes the fixture
+identities before onboarding, same as the friend journeys: the relay's availability rings hold this
+server's traffic for three days under a STABLE identity, so a reused fixture can be served an EARLIER
+run's parked join or resolution.
+
 ## Honest scope
 
 The fleet proves the app DOES the thing. It does not prove the thing FEELS right, and it does not

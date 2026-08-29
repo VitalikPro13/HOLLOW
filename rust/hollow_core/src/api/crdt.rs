@@ -11,6 +11,20 @@ pub struct ServerFfi {
     pub channel_count: u32,
 }
 
+/// A join that has not completed yet, for the pending tile (Dart-visible).
+///
+/// `state` is `pending` (waiting for a member to come back) or `rejected` (a
+/// member answered no; `reason` says which gate). `last_deposited_at` is when
+/// the request was last written into the server room's join ring, 0 while the
+/// join is still live.
+pub struct PendingJoinFfi {
+    pub server_id: String,
+    pub requested_at: i64,
+    pub state: String,
+    pub reason: String,
+    pub last_deposited_at: i64,
+}
+
 /// Channel info for FFI (Dart-visible).
 ///
 /// `me_can_see` / `me_can_post` are computed HERE with the full Rust
@@ -216,6 +230,59 @@ pub fn get_joined_servers() -> Result<Vec<ServerFfi>, String> {
         }
     }
     Ok(result)
+}
+
+/// Every join still waiting for an answer, plus the ones a member rejected.
+///
+/// Reads the local DB like [get_joined_servers] does: these rows are written
+/// by the node's CrdtStore actor and only ever read here, so a snapshot on the
+/// FRB thread is exactly the tile's data source.
+#[frb]
+pub fn list_pending_joins() -> Result<Vec<PendingJoinFfi>, String> {
+    let store_guard = super::storage::get_store().lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let store = store_guard.as_ref().ok_or("Message store is not open")?;
+    Ok(store
+        .load_pending_joins()?
+        .into_iter()
+        .map(|r| PendingJoinFfi {
+            server_id: r.server_id,
+            requested_at: r.requested_at,
+            state: r.state,
+            reason: r.reason,
+            last_deposited_at: r.last_deposited_at,
+        })
+        .collect())
+}
+
+/// Drop a pending or rejected join. Deletes the row, forgets the in-memory
+/// entry and leaves the server room, so a late admission can never complete a
+/// join the user walked away from.
+#[frb]
+pub fn discard_pending_join(server_id: String) -> Result<(), String> {
+    let node = get_node();
+    let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
+    drop(guard);
+
+    get_runtime()
+        .block_on(cmd_tx.send(node::NodeCommand::DiscardPendingJoin { server_id }))
+        .map_err(|e| format!("Failed to send command: {e}"))?;
+    Ok(())
+}
+
+/// Ask again, reusing the row's stored NSFW consent and Twitch proof under a
+/// fresh nonce. Same code path as the original request.
+#[frb]
+pub fn retry_pending_join(server_id: String) -> Result<(), String> {
+    let node = get_node();
+    let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let cmd_tx = guard.as_ref().ok_or("Node is not running")?.cmd_tx.clone();
+    drop(guard);
+
+    get_runtime()
+        .block_on(cmd_tx.send(node::NodeCommand::RequestPendingJoinAgain { server_id }))
+        .map_err(|e| format!("Failed to send command: {e}"))?;
+    Ok(())
 }
 
 /// Get channels for a specific server.

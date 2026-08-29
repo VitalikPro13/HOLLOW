@@ -1685,6 +1685,20 @@ sealed class NetworkEvent with _$NetworkEvent {
     required String serverId,
     required String reason,
   }) = NetworkEvent_ServerJoinFailed;
+
+  /// Nobody was online to answer, so the request was PARKED (persisted +
+  /// deposited into the server room's join ring). Not a failure: the UI
+  /// shows a pending tile that survives a restart.
+  const factory NetworkEvent.serverJoinParked({required String serverId}) =
+      NetworkEvent_ServerJoinParked;
+
+  /// A parked join changed state: `rejected`, `admitted`, `ready` or
+  /// `discarded`. `reason` carries the reject reason, empty otherwise.
+  const factory NetworkEvent.pendingJoinUpdated({
+    required String serverId,
+    required String state,
+    required String reason,
+  }) = NetworkEvent_PendingJoinUpdated;
   const factory NetworkEvent.messageSyncStarted({
     required String serverId,
     required String peerId,

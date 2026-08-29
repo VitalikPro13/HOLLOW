@@ -258,6 +258,14 @@ pub(crate) enum NetworkEvent {
     SyncCompleted { server_id: String, ops_applied: u32 },
     ServerJoined { server_id: String, name: String },
     ServerJoinFailed { server_id: String, reason: String },
+    /// The 15s live window elapsed with nobody there to answer, so the request
+    /// was parked: persisted locally and deposited into the server room's join
+    /// ring. NOT a failure. The UI shows a pending tile.
+    ServerJoinParked { server_id: String },
+    /// A parked join changed state. `state` is one of `rejected`, `admitted`,
+    /// `ready`, `discarded`; `reason` carries the reject reason and is empty
+    /// otherwise.
+    PendingJoinUpdated { server_id: String, state: String, reason: String },
     MessageSyncStarted { server_id: String, peer_id: String },
     MessageSyncCompleted { server_id: String, new_message_count: u32 },
     MessageSyncFailed { server_id: String, error: String },
@@ -746,6 +754,51 @@ pub(crate) struct PendingJoin {
     pub(crate) twitch_proof_json: Option<String>,
     /// True once the user accepted the NSFW "proceed at your own risk" prompt.
     pub(crate) nsfw_confirmed: bool,
+    /// Unix MILLISECONDS when the user asked. This is the request NONCE: every
+    /// answer (a reject, a `join_resolved` ring frame) names it, so a stale copy
+    /// replayed out of a three-day ring can never resolve a NEWER request.
+    pub(crate) requested_at: i64,
+    /// True once the 15s live window elapsed with no answer and we deposited a
+    /// copy into the server room's `~join` ring. A parked join has no timer and
+    /// no live expectation: it waits for a member to return.
+    pub(crate) parked: bool,
+    /// Unix MILLISECONDS of the last ring deposit, so a flapping joiner cannot
+    /// refill a 200-frame ring on every reconnect (see `REDEPOSIT_INTERVAL_MS`).
+    pub(crate) last_deposited_at: i64,
+    /// Our OWN master-signed device list, carried on every copy of the request.
+    /// A member that has never been online with us holds no device -> master
+    /// link for us, so `resolve()` alone would attribute the join to our raw
+    /// DEVICE id and add the wrong member key. Same lesson as `FriendReject`.
+    /// Built once at request time and cached for re-sends.
+    pub(crate) device_list: Option<SignedDeviceList>,
+}
+
+/// How often a still-parked join re-deposits its copy into the `~join` ring.
+///
+/// The ring is 200 frames / 1 MB per (room, topic), shared by every joiner of
+/// that server. A joiner that flaps once a minute would own the whole ring
+/// inside four hours and push out everybody else's request. Twelve hours is
+/// far inside the default three-day retention, so a parked join is always
+/// represented, and the relay's fair-share eviction stays the backstop rather
+/// than the design.
+pub(crate) const REDEPOSIT_INTERVAL_MS: i64 = 12 * 3600 * 1000;
+
+/// The pseudo-channel the server room's join ring is keyed under.
+///
+/// Never a channel id: channel ids are `{server8}-{hex}` or a uuid, and `~` is
+/// not in that alphabet, so this can never collide with a real channel's ring.
+/// The relay validates topic strings for LENGTH only, so no registration is
+/// needed beyond the ordinary `set_topic_buffer` the client already sends.
+pub(crate) const JOIN_TOPIC: &str = "~join";
+
+/// Wall-clock unix MILLISECONDS. The nonce clock for parked joins: it has to be
+/// wall clock, not a monotonic instant, because the value crosses the wire and
+/// outlives the process that minted it.
+pub(crate) fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64
 }
 
 /// A fresh channel id: the server's first 8 characters, then 4 random bytes.
@@ -1056,6 +1109,17 @@ pub(crate) enum NodeCommand {
     /// for the case where the members' election named a coordinator that is
     /// already gone (presence skew), which would otherwise be a 15s failure.
     RetryPendingJoin { server_id: String },
+    /// User action: drop a persisted pending/rejected join row. Deletes the
+    /// row, forgets the RAM entry and leaves the server room, so a late
+    /// admission's buffered answer never replays (we never rejoin that room
+    /// without a row). Nothing is sent to the relay: the ring copy just ages out.
+    DiscardPendingJoin { server_id: String },
+    /// User action ("Request again") on a pending or rejected tile: re-run the
+    /// join with the row's stored NSFW/Twitch values under a FRESH nonce.
+    ///
+    /// Deliberately NOT `RetryPendingJoin`, which is the internal 4s
+    /// coordinator-window re-ask and must keep its nonce.
+    RequestPendingJoinAgain { server_id: String },
     /// Dart reports data channel keepalive RTT for peer scoring.
     WebRtcPingReport { peer_id: String, rtt_ms: u32 },
     /// Dart reports the ICE route class of a live connection (Tier 3
@@ -1246,6 +1310,8 @@ impl NodeCommand {
             Self::StoreShardOnPeer { .. } => "StoreShardOnPeer",
             Self::CheckPendingJoinTimeout { .. } => "CheckPendingJoinTimeout",
             Self::RetryPendingJoin { .. } => "RetryPendingJoin",
+            Self::DiscardPendingJoin { .. } => "DiscardPendingJoin",
+            Self::RequestPendingJoinAgain { .. } => "RequestPendingJoinAgain",
             Self::WebRtcPingReport { .. } => "WebRtcPingReport",
             Self::WebRtcRouteReport { .. } => "WebRtcRouteReport",
             Self::WebRtcBroadcastReceived { .. } => "WebRtcBroadcastReceived",
@@ -1389,12 +1455,74 @@ pub(crate) enum HavenMessage {
         /// risk" prompt, so the receiver's NSFW gate lets them through.
         #[serde(default)]
         nsfw_confirmed: bool,
+        /// Unix MILLISECONDS the user asked at: the request NONCE. Binds every
+        /// answer to the ask it resolves, so a copy replayed out of the `~join`
+        /// ring can never satisfy or reject a newer request. 0 = a client from
+        /// before parked joins existed (the live path treats it as today).
+        #[serde(default)]
+        requested_at: i64,
+        /// The joiner's OWN master-signed device list. A member serving a
+        /// PARKED join has, by definition, never been online with the joiner,
+        /// so `resolve(sender_device)` hands the device straight back and the
+        /// member entry would be keyed by a device id. The list makes the
+        /// device -> master attribution cryptographic. Absent = a pre-parked
+        /// client; the receiver falls back to the resolver.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        device_list: Option<SignedDeviceList>,
+        /// True ONLY on the copy deposited into the room's `~join` ring. It is
+        /// read out of a TTL buffer, possibly days later, by a member that was
+        /// not there when it was written, so it is held to stricter rules than
+        /// the live unicast copy (no coordinator-gate bypass, no interactive
+        /// rejections written into the ring).
+        #[serde(default)]
+        parked: bool,
     },
 
     #[serde(rename = "join_rejected")]
     ServerJoinRejected {
         server_id: String,
         reason: String,
+        /// The `requested_at` of the request being refused.
+        ///
+        /// Load-bearing since parked joins: a refusal now rides
+        /// `send_message_to_peer_in_room`, so the relay BUFFERS it for an absent
+        /// joiner and replays it on that device's next join of the server room.
+        /// The next join of that room is usually the user asking again, and
+        /// without a nonce that stale copy would kill the fresh request the
+        /// moment it arrived. 0 = a pre-2026-08-29 client: "refuse whatever is
+        /// pending", which is what the old presence-gated send meant anyway.
+        #[serde(default)]
+        requested_at: i64,
+    },
+
+    /// A member's answer to a join, published on the server room's `~join`
+    /// pseudo-topic so it survives the joiner being offline AND tells the other
+    /// members the join is already resolved.
+    ///
+    /// This is not a second CRDT ingest path: `op_json` carries the very
+    /// `MemberAdded` op the admitting member authored, and receivers route it
+    /// through the same author-validated apply the plaintext `CrdtOpBroadcast`
+    /// arm uses.
+    #[serde(rename = "join_resolved")]
+    ServerJoinResolved {
+        #[serde(default)]
+        server_id: String,
+        /// The joiner's MASTER identity (never a device id): the key the CRDT
+        /// member entry and the local `join_resolutions` map are stamped under.
+        #[serde(default)]
+        joiner_master: String,
+        /// The `requested_at` of the request this answers.
+        #[serde(default)]
+        requested_at: i64,
+        #[serde(default)]
+        admitted: bool,
+        /// "" when admitted, else the same reason string `ServerJoinRejected`
+        /// carries.
+        #[serde(default)]
+        reason: String,
+        /// The `MemberAdded` CrdtOp JSON when admitted, else None.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        op_json: Option<String>,
     },
 
     #[serde(rename = "server_delete")]

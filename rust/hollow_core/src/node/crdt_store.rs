@@ -13,6 +13,12 @@ pub(crate) enum CrdtStoreCmd {
     SaveStateSnapshot { server_id: String, state: Box<crate::crdt::server_state::ServerState> },
     SaveBlob { server_id: String, key: String, value: String },
     DeleteServer(String),
+    /// Insert-or-replace one parked-join row (pending joins, rung 1). Goes
+    /// through the actor for the same reason every other CRDT write does: the
+    /// join handler runs ON the event loop, and `MessageStore::open` there is
+    /// a fresh SQLCipher handle + full schema re-parse under a file lock.
+    UpsertPendingJoin(Box<crate::storage::messages::PendingJoinRow>),
+    DeletePendingJoin(String),
     PruneOps(usize),
     /// READ-ONLY: newest stored message timestamp (ms) per channel, for the
     /// relay catch-up window. Answered on the actor's long-lived connection so
@@ -22,6 +28,13 @@ pub(crate) enum CrdtStoreCmd {
         server_id: String,
         channel_ids: Vec<String>,
         reply: tokio::sync::oneshot::Sender<HashMap<String, i64>>,
+    },
+    /// READ-ONLY: one parked-join row, for the "Request again" action. Answered
+    /// on the actor's connection for the same reason the watermark read is: the
+    /// caller is the swarm event loop and must not open a SQLCipher handle.
+    LoadPendingJoin {
+        server_id: String,
+        reply: tokio::sync::oneshot::Sender<Option<crate::storage::messages::PendingJoinRow>>,
     },
 }
 
@@ -93,6 +106,14 @@ impl CrdtStore {
                             }
                             let _ = reply.send(out);
                         }
+                        CrdtStoreCmd::LoadPendingJoin { server_id, reply } => {
+                            let row = store
+                                .load_pending_joins()
+                                .unwrap_or_default()
+                                .into_iter()
+                                .find(|r| r.server_id == server_id);
+                            let _ = reply.send(row);
+                        }
                         other => writes.push(other),
                     }
                 }
@@ -158,6 +179,16 @@ impl CrdtStore {
             CrdtStoreCmd::SaveBlob { server_id, key, value } => {
                 pending_blobs.insert((server_id, key), value);
             }
+            CrdtStoreCmd::UpsertPendingJoin(row) => {
+                if let Err(e) = store.upsert_pending_join(&row) {
+                    hollow_log!("CrdtStore: failed to upsert pending join {}: {e}", row.server_id);
+                }
+            }
+            CrdtStoreCmd::DeletePendingJoin(server_id) => {
+                if let Err(e) = store.delete_pending_join(&server_id) {
+                    hollow_log!("CrdtStore: failed to delete pending join {server_id}: {e}");
+                }
+            }
             CrdtStoreCmd::DeleteServer(server_id) => {
                 pending_states.remove(&server_id);
                 if let Err(e) = store.delete_server_state(&server_id) {
@@ -166,7 +197,7 @@ impl CrdtStore {
             }
             // Read-only: split out in the drain loop before the transaction
             // opens, so it never reaches here.
-            CrdtStoreCmd::ChannelWatermarks { .. } => {}
+            CrdtStoreCmd::ChannelWatermarks { .. } | CrdtStoreCmd::LoadPendingJoin { .. } => {}
             CrdtStoreCmd::PruneOps(keep) => {
                 match store.prune_crdt_ops(keep) {
                     Ok(n) if n > 0 => hollow_log!("[HOLLOW-CRDT] Pruned {n} old crdt_ops rows"),
@@ -208,9 +239,33 @@ impl CrdtStore {
         let _ = self.cmd_tx.send(CrdtStoreCmd::DeleteServer(server_id));
     }
 
+    /// Fire-and-forget: persist one parked-join row.
+    pub fn upsert_pending_join(&self, row: crate::storage::messages::PendingJoinRow) {
+        let _ = self.cmd_tx.send(CrdtStoreCmd::UpsertPendingJoin(Box::new(row)));
+    }
+
+    /// Fire-and-forget: forget a parked-join row (completed or discarded).
+    pub fn delete_pending_join(&self, server_id: String) {
+        let _ = self.cmd_tx.send(CrdtStoreCmd::DeletePendingJoin(server_id));
+    }
+
     /// Fire-and-forget: prune old CRDT ops, keeping `keep_count` per server.
     pub fn prune_ops(&self, keep_count: usize) {
         let _ = self.cmd_tx.send(CrdtStoreCmd::PruneOps(keep_count));
+    }
+
+    /// One parked-join row by server id, or `None` when there is no such row
+    /// (or the actor is gone). Read on the actor's long-lived connection, so
+    /// the swarm event loop never opens a SQLCipher handle for it.
+    pub async fn load_pending_join(
+        &self,
+        server_id: String,
+    ) -> Option<crate::storage::messages::PendingJoinRow> {
+        let (reply, rx) = tokio::sync::oneshot::channel();
+        if self.cmd_tx.send(CrdtStoreCmd::LoadPendingJoin { server_id, reply }).is_err() {
+            return None;
+        }
+        rx.await.ok().flatten()
     }
 
     /// Newest stored message timestamp (ms) per channel, for every channel in

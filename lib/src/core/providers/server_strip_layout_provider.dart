@@ -17,8 +17,12 @@ class ServerStripLayoutNotifier extends Notifier<List<StripItem>> {
     try {
       final json = await storage_api.loadSetting(key: _storageKey);
       if (json != null && json.isNotEmpty) {
+        // `fromJson` returns null for a kind this build does not know. Skip
+        // those rather than guessing: a newer client's row must not be read as
+        // a server and then pruned as a deleted one.
         final list = (jsonDecode(json) as List)
             .map((e) => StripItem.fromJson(e as Map<String, dynamic>))
+            .whereType<StripItem>()
             .toList();
         state = list;
       }
@@ -43,6 +47,11 @@ class ServerStripLayoutNotifier extends Notifier<List<StripItem>> {
           layoutIds.add(serverId);
         case FolderStripItem(:final serverIds):
           layoutIds.addAll(serverIds);
+        case PendingStripItem():
+          // Not a server we are in — reconciled by [setPendingJoins], and
+          // deliberately not counted here so it is never pruned as a server
+          // that went away.
+          break;
       }
     }
 
@@ -346,7 +355,51 @@ class ServerStripLayoutNotifier extends Notifier<List<StripItem>> {
       if (item is ServerStripItem && item.serverId == serverId) return;
       if (item is FolderStripItem && item.serverIds.contains(serverId)) return;
     }
+    // A parked join that finally completed becomes the real server IN PLACE,
+    // so the tile the user has been looking at for days turns into the server
+    // rather than vanishing and reappearing at the end of the strip.
+    final pendingIndex =
+        state.indexWhere((e) => e is PendingStripItem && e.serverId == serverId);
+    if (pendingIndex >= 0) {
+      final items = List<StripItem>.from(state);
+      items[pendingIndex] = ServerStripItem(serverId: serverId);
+      state = items;
+      _save();
+      return;
+    }
     state = [...state, ServerStripItem(serverId: serverId)];
+    _save();
+  }
+
+  /// Reconciles the parked-join tiles against [pendingIds].
+  ///
+  /// ONE mutation path: [PendingJoinsNotifier] owns the set and pushes it here
+  /// after every change, so the strip can never disagree with the rows Rust
+  /// holds. Tiles are appended; an id that is already shown keeps its slot.
+  void setPendingJoins(Set<String> pendingIds) {
+    final items = List<StripItem>.from(state);
+    var changed = false;
+
+    final shown = <String>{};
+    for (var i = items.length - 1; i >= 0; i--) {
+      final item = items[i];
+      if (item is! PendingStripItem) continue;
+      if (pendingIds.contains(item.serverId)) {
+        shown.add(item.serverId);
+      } else {
+        items.removeAt(i);
+        changed = true;
+      }
+    }
+
+    for (final id in pendingIds) {
+      if (shown.contains(id)) continue;
+      items.add(PendingStripItem(serverId: id));
+      changed = true;
+    }
+
+    if (!changed) return;
+    state = items;
     _save();
   }
 
@@ -384,6 +437,8 @@ class ServerStripLayoutNotifier extends Notifier<List<StripItem>> {
           ids.add(serverId);
         case FolderStripItem(:final serverIds):
           ids.addAll(serverIds);
+        case PendingStripItem():
+          break;
       }
     }
     return ids;

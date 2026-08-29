@@ -9,6 +9,7 @@ import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/connection_status_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/core/providers/notification_provider.dart';
+import 'package:hollow/src/core/providers/pending_join_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/selected_peer_provider.dart';
 import 'package:hollow/src/core/models/strip_item.dart';
@@ -31,6 +32,7 @@ import 'package:hollow/src/core/providers/archive_provider.dart';
 import 'package:hollow/src/core/providers/share_tab_provider.dart';
 import 'package:hollow/src/core/providers/shell_tab.dart';
 import 'package:hollow/src/ui/components/download_icon_button.dart';
+import 'package:hollow/src/ui/components/pending_join_ui.dart';
 import 'package:hollow/src/ui/components/server_folder_popup.dart';
 import 'package:hollow/src/ui/components/profile_card_popup.dart';
 import 'package:hollow/src/ui/dialogs/create_server_dialog.dart';
@@ -257,6 +259,11 @@ class _BottomBarState extends ConsumerState<BottomBar> {
                                     splitState: splitState,
                                     notifSettings: notifSettings,
                                     hollow: hollow,
+                                  ),
+                                PendingStripItem(:final serverId) =>
+                                  _buildPendingIcon(
+                                    ref: ref,
+                                    serverId: serverId,
                                   ),
                                 FolderStripItem() =>
                                   _buildFolderIcon(
@@ -572,6 +579,10 @@ class _BottomBarState extends ConsumerState<BottomBar> {
     final serverUnreads = isServerMuted
         ? 0
         : ref.watch(unreadProvider.select((s) => s.serverUnreadCount(serverId)));
+    // Admitted after a parked join, still waiting on a member to add our MLS
+    // leaf. Same flair the Classic strip shows.
+    final awaitingSetup = ref.watch(
+        awaitingSetupProvider.select((s) => s.contains(serverId)));
     final name = server?.name ?? '';
 
     Widget serverIconChild = ServerIconImage(
@@ -647,6 +658,7 @@ class _BottomBarState extends ConsumerState<BottomBar> {
                 child: _BottomServerIcon(
                   isSelected: isSelected || isRightPaneServer,
                   unreadCount: serverUnreads,
+                  awaitingSetup: awaitingSetup,
                   tooltip: _isDragging ? null : name,
                   backgroundColor: colorFromId(serverId),
                   onTap: () => _selectServer(ref, serverId),
@@ -673,6 +685,51 @@ class _BottomBarState extends ConsumerState<BottomBar> {
       );
     }
     return icon;
+  }
+
+  /// The Dock's twin of the Classic strip's parked-join tile: dimmed, glyph
+  /// only, never selectable, one menu on both click and right click. The two
+  /// shells render the same strip model, so a tile that existed in one and not
+  /// the other would be a bug nobody notices until they switch layouts.
+  Widget _buildPendingIcon({
+    required WidgetRef ref,
+    required String serverId,
+  }) {
+    final info = ref.watch(pendingJoinsProvider)[serverId];
+    final rejected = info?.isRejected ?? false;
+    final title = pendingJoinTitle(rejected: rejected);
+
+    return Builder(builder: (iconContext) {
+      void open(Offset anchor) => showPendingJoinMenu(
+            context: iconContext,
+            ref: ref,
+            serverId: serverId,
+            anchor: anchor,
+          );
+
+      return ContextMenuTarget(
+        semanticLabel: '$title, show actions',
+        onOpen: open,
+        child: AnimatedOpacity(
+          opacity: rejected ? 0.4 : 0.55,
+          duration: HollowDurations.fast,
+          child: _BottomServerIcon(
+            backgroundColor: colorFromId(serverId),
+            tooltip: _isDragging ? null : title,
+            semanticLabel: '$title, show actions',
+            // Anchored at the icon's top-left: the menu layout flips upward
+            // when opening downward would leave the window, which is always
+            // the case for a bar pinned to the bottom.
+            onTap: () => open(overlayAnchorOf(iconContext)),
+            child: Icon(
+              rejected ? LucideIcons.ban : LucideIcons.clock,
+              size: 18,
+              color: Colors.white,
+            ),
+          ),
+        ),
+      );
+    });
   }
 
   Widget _buildFolderIcon({
@@ -821,9 +878,18 @@ class _BottomServerIcon extends StatefulWidget {
   final void Function(Offset overlayPosition)? onContextMenu;
 
   final String? tooltip;
+
+  /// Overrides [tooltip] as the screen-reader name. Needed where the tooltip
+  /// states a CONDITION ("Join request pending") but the control's purpose is
+  /// to open a menu.
+  final String? semanticLabel;
+
   final bool isSelected;
   final bool showBorder;
   final int unreadCount;
+
+  /// Admitted to the server, waiting for a member to finish the MLS setup.
+  final bool awaitingSetup;
 
   const _BottomServerIcon({
     required this.child,
@@ -831,9 +897,11 @@ class _BottomServerIcon extends StatefulWidget {
     this.onTap,
     this.onContextMenu,
     this.tooltip,
+    this.semanticLabel,
     this.isSelected = false,
     this.showBorder = true,
     this.unreadCount = 0,
+    this.awaitingSetup = false,
   });
 
   @override
@@ -875,7 +943,8 @@ class _BottomServerIconState extends State<_BottomServerIcon> {
           alignment: Alignment.center,
           clipBehavior: Clip.none,
           children: [
-            // Icon (centered)
+            // Icon (centered). Clip.none is load-bearing: an avatar frame
+            // paints outside the icon box and a clipping badge stack cuts it.
             Stack(
               clipBehavior: Clip.none,
               children: [
@@ -898,6 +967,18 @@ class _BottomServerIconState extends State<_BottomServerIcon> {
                   alignment: Alignment.center,
                   child: widget.child,
                 ),
+                // Awaiting-setup flair. Top-LEFT here, not top-right like the
+                // Classic strip: on the Dock the unread badge owns the top
+                // right corner, and two badges in one corner would overlap.
+                if (widget.awaitingSetup)
+                  const Positioned(
+                    left: -5,
+                    top: -4,
+                    child: HollowTooltip(
+                      message: kAwaitingSetupTooltip,
+                      child: AwaitingSetupBadge(size: 14),
+                    ),
+                  ),
                 // Unread badge
                 if (widget.unreadCount > 0)
                   Positioned(
@@ -959,7 +1040,7 @@ class _BottomServerIconState extends State<_BottomServerIcon> {
     }
 
     // Tooltips don't surface to screen readers — give tappable icons a name.
-    final label = widget.tooltip;
+    final label = widget.semanticLabel ?? widget.tooltip;
     if (label != null && widget.onTap != null) {
       icon = Semantics(button: true, label: label, child: icon);
     }

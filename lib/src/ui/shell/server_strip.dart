@@ -17,6 +17,7 @@ import 'package:hollow/src/core/providers/server_strip_layout_provider.dart';
 import 'package:hollow/src/ui/components/server_folder_popup.dart';
 import 'package:hollow/src/core/providers/layout_prefs_provider.dart';
 import 'package:hollow/src/core/providers/notification_provider.dart';
+import 'package:hollow/src/core/providers/pending_join_provider.dart';
 import 'package:hollow/src/core/providers/unread_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
@@ -24,6 +25,7 @@ import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
 import 'package:hollow/src/ui/components/hollow_menu.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
+import 'package:hollow/src/ui/components/pending_join_ui.dart';
 import 'package:hollow/src/ui/components/ui_scale.dart';
 import 'package:hollow/src/ui/dialogs/create_server_dialog.dart';
 import 'package:hollow/src/ui/shell/server_context_menus.dart';
@@ -322,6 +324,9 @@ class _ServerStripState extends ConsumerState<ServerStrip> {
                           selectedServerId: selectedServerId,
                           hollow: hollow,
                         ),
+                      PendingStripItem(:final serverId) => _buildPendingIcon(
+                          serverId: serverId,
+                        ),
                       FolderStripItem() => _buildFolderIcon(
                           index: index,
                           folder: item,
@@ -334,12 +339,15 @@ class _ServerStripState extends ConsumerState<ServerStrip> {
                     final isNew = switch (item) {
                       ServerStripItem(:final serverId) =>
                         !_initialServerIds!.contains(serverId),
+                      // A parked join can sit here for days; it never bounces.
+                      PendingStripItem() => false,
                       FolderStripItem() => false,
                     };
                     if (isNew) {
                       icon = _ScaleBounceEntry(
                         key: ValueKey('bounce-${switch (item) {
                           ServerStripItem(:final serverId) => serverId,
+                          PendingStripItem(:final serverId) => serverId,
                           FolderStripItem(:final id) => id,
                         }}'),
                         child: icon,
@@ -381,6 +389,11 @@ class _ServerStripState extends ConsumerState<ServerStrip> {
         ? 0
         : ref.watch(unreadProvider
             .select((s) => s.serverMentionCount(serverId)));
+    // Admitted, but no member has been online with us long enough to add our
+    // MLS leaf yet. The server is real and browsable; the flair says why it
+    // is not fully wired up.
+    final awaitingSetup = ref.watch(
+        awaitingSetupProvider.select((s) => s.contains(serverId)));
     final name = server?.name ?? '';
 
     Widget serverIconChild = ServerIconImage(
@@ -452,6 +465,7 @@ class _ServerStripState extends ConsumerState<ServerStrip> {
                 isSelected: isSelected,
                 unreadCount: serverUnreads,
                 mentionCount: serverMentions,
+                awaitingSetup: awaitingSetup,
                 child: _ServerIcon(
                   isSelected: isSelected,
                   backgroundColor: colorFromId(serverId),
@@ -465,6 +479,61 @@ class _ServerStripState extends ConsumerState<ServerStrip> {
         );
       },
     );
+  }
+
+  /// A parked join: we asked, everybody was offline, and Rust is holding the
+  /// request until somebody answers.
+  ///
+  /// Deliberately unlike every other tile on this rail. It is dimmed, it is
+  /// NOT selectable (there is no server behind it to open), and it carries a
+  /// glyph rather than a letter, because an invite link gives us an id and
+  /// nothing else: no name, no icon, no initial to draw. Clicking it opens the
+  /// same menu the right click does, since a tile that swallows a click reads
+  /// as broken.
+  Widget _buildPendingIcon({required String serverId}) {
+    final info = ref.watch(pendingJoinsProvider)[serverId];
+    final rejected = info?.isRejected ?? false;
+    final title = pendingJoinTitle(rejected: rejected);
+
+    return Builder(builder: (iconContext) {
+      void open(Offset anchor) => showPendingJoinMenu(
+            context: iconContext,
+            ref: ref,
+            serverId: serverId,
+            anchor: anchor,
+          );
+
+      return ContextMenuTarget(
+        semanticLabel: '$title, show actions',
+        onOpen: open,
+        child: _ServerIconWithIndicator(
+          isSelected: false,
+          // AnimatedOpacity, never the Opacity widget: this is composited on
+          // the GPU and the tile crossfades when a rejection lands.
+          child: AnimatedOpacity(
+            opacity: rejected ? 0.4 : 0.55,
+            duration: HollowDurations.fast,
+            child: _ServerIcon(
+              backgroundColor: colorFromId(serverId),
+              tooltip: title,
+              semanticLabel: '$title, show actions',
+              onTap: () {
+                final box = iconContext.findRenderObject() as RenderBox?;
+                final width =
+                    (box?.hasSize ?? false) ? box!.size.width : kServerStripWidth;
+                open(overlayAnchorOf(iconContext,
+                    localOffset: Offset(width, 0)));
+              },
+              child: Icon(
+                rejected ? LucideIcons.ban : LucideIcons.clock,
+                size: 20,
+                color: Colors.white,
+              ),
+            ),
+          ),
+        ),
+      );
+    });
   }
 
   Widget _buildFolderIcon({
@@ -686,6 +755,10 @@ class _ServerIconWithIndicator extends StatefulWidget {
   final bool isSelected;
   final int unreadCount;
   final int mentionCount;
+
+  /// Admitted to the server, waiting for a member to finish the MLS setup.
+  final bool awaitingSetup;
+
   final Widget child;
 
   const _ServerIconWithIndicator({
@@ -693,6 +766,7 @@ class _ServerIconWithIndicator extends StatefulWidget {
     required this.child,
     this.unreadCount = 0,
     this.mentionCount = 0,
+    this.awaitingSetup = false,
   });
 
   @override
@@ -735,11 +809,22 @@ class _ServerIconWithIndicatorState
               ),
             ),
             const Spacer(),
-            // Stack for unread badge overlay.
+            // Stack for unread badge overlay. Clip.none is load-bearing: an
+            // avatar frame paints OUTSIDE the 48px icon box, and a clipping
+            // badge stack cuts it off (feedback_badge_stack_clips_avatar_frame).
             Stack(
               clipBehavior: Clip.none,
               children: [
                 widget.child,
+                if (widget.awaitingSetup)
+                  const Positioned(
+                    right: -4,
+                    top: -4,
+                    child: HollowTooltip(
+                      message: kAwaitingSetupTooltip,
+                      child: AwaitingSetupBadge(),
+                    ),
+                  ),
                 if (widget.unreadCount > 0)
                   Positioned(
                     right: -6,

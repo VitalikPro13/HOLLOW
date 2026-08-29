@@ -84,6 +84,18 @@ class HollowMenuSection extends HollowMenuEntry {
   const HollowMenuSection(this.label);
 }
 
+/// A non-interactive sentence at the top of a menu, for the case where the
+/// menu has to SAY something before it offers anything.
+///
+/// Distinct from [HollowMenuSection], which is a shouty little category label:
+/// this wraps, reads as prose, and never highlights on hover, because there is
+/// nothing here to press. The parked-join menu is the first user — a tile with
+/// no name and no icon has to explain itself somewhere.
+class HollowMenuNote extends HollowMenuEntry {
+  final String text;
+  const HollowMenuNote(this.text);
+}
+
 /// An arbitrary widget row, e.g. the quick reaction strip on the message menu.
 ///
 /// The child is responsible for dismissing the menu; [HollowMenuScope.dismiss]
@@ -439,6 +451,22 @@ class _HollowMenuHostState extends State<_HollowMenuHost> {
               fontWeight: FontWeight.w700,
               letterSpacing: 0.6,
               fontSize: 10,
+            ),
+          ),
+        );
+      case HollowMenuNote(:final text):
+        return Padding(
+          padding: const EdgeInsets.fromLTRB(
+            HollowSpacing.sm + 2,
+            HollowSpacing.sm,
+            HollowSpacing.sm + 2,
+            HollowSpacing.xs,
+          ),
+          child: Text(
+            text,
+            style: HollowTypography.bodySmall.copyWith(
+              color: hollow.textSecondary,
+              height: 1.35,
             ),
           ),
         );

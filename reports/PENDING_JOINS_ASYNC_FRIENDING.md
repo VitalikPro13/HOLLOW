@@ -1,6 +1,6 @@
 # Requests that outlive both sessions: pending joins and async friending
 
-Design notes from the 2026-08-27 and 2026-08-28 sessions. Part 2 (async friending) is BUILT and field-verified; part 1 (pending server joins) is not started. Read
+Design notes from the 2026-08-27 and 2026-08-28 sessions. Part 2 (async friending) is BUILT and field-verified; part 1 (pending server joins) was BUILT on 2026-08-29, rung 1, see the section at the end. Read
 `project_owner_offline_join_verification` in memory first for what was measured
 on the 27th and what got fixed, and `project_relay_availability_cache` for the
 buffer this whole design leans on.
@@ -180,6 +180,19 @@ member replays request then answer, in order, and skips. The request needs a
 nonce so the answer can bind to it. This also gives the joiner a second way to
 learn a rejection while it was offline: the answer sits in the ring the joiner
 reads when it rejoins.
+
+**7. Twitch proofs never enter the ring (decided 2026-08-29).** `twitch_proof_json`
+carries `twitch_user_id` and `twitch_username`. The live unicast copy is seen by
+members and the relay only; a ring copy can be pulled by any socket in the room,
+which is anyone holding the invite link. Peer ids in the ring are accepted
+exposure; a Twitch identity tied to a peer id is not. The parked copy is
+therefore deposited without the proof, and a returning member that sees a
+parked request on a Twitch-gated server with no proof answers nothing: the join
+stays pending until co-presence, when the live re-request carries the proof and
+runs today's gate. The fix that makes Twitch-gated servers joinable with zero
+overlap is the blind-credential gate planned after the artist shop
+(`HOLLOW_PLAN.md`, the "Twitch identity and gate are honest-client only"
+item): an unlinkable proof of follow/sub can ride the ring copy safely.
 
 ### Smaller notes
 
@@ -483,7 +496,94 @@ Residual, accepted: a mutual cross where one side's accept overtakes its request
 leaves that side with its own stamp; a later reject from it may be refused by
 the other side. Bounded and rarer than the race itself.
 
-### Next: part 1, the pending server tile
+## Shipped 2026-08-29: part 1, rung 1 (pending server joins)
 
-Nothing in part 1 has started. Move this file to `reports/` when it does. The
-mailbox primitive part 1 can reuse is now field-proven in both directions.
+Built under the Fable-orchestrates / Opus-codes workflow: one Rust unit, one
+Dart unit, one fleet unit, each against a contract written from the code, then
+verified by reading the security-bearing diff and running the suites.
+
+### What the code facts changed about the design above
+
+**The join is CRDT-first.** `ServerJoinRequest` never carried a KeyPackage.
+The coordinator admits into the CRDT and sends the snapshot + op log; the MLS
+add is a SEPARATE leg the coordinator starts on co-presence
+(`MlsKeyPackageRequest` -> fresh KP -> batch -> Welcome). So item 1 above (the
+"hard part") is not in this rung at all: rung 1 parks the CRDT admission and
+leaves the MLS leaf to the existing co-presence heal, with a "waiting for a
+member to finish setup" badge in between. A carried-KP rung 2 has a real
+prerequisite first: the KP private half lives only in OpenMLS's in-RAM
+`MemoryStorage` and `persist_mls_state` is not called after minting, so a
+restart before any incidental persist loses it (`NoMatchingKeyPackage`).
+
+**Zero relay changes.** Topic names are free-form, `set_topic_buffer`
+registers any (room, topic), a 0x07 publish tees only into a registered ring,
+`topic_catchup` skips the requester's own frames and deletes nothing.
+
+**The "expired" tile state collapsed into re-deposit** (every 12 hours while
+the app is online), the same trick part 2 uses. Three states remain: pending,
+rejected (with "Request again"), and admitted-but-not-ready.
+
+### The mechanism, in one paragraph each
+
+Joiner: `handle_join_server` stamps a millisecond nonce (`requested_at`),
+attaches its master-signed device list, persists the row FIRST, fans the live
+request as before. The 15 s timeout PARKS instead of failing: the copy goes
+into the server room's `~join` topic ring (`parked: true`, Twitch proof
+stripped), `ServerJoinParked` reaches the UI, the node stays in the room. Boot
+restores pending rows and rejoins their rooms, which is what makes the relay
+replay the buffered answer. A rejected row is a tile with "Request again".
+
+Member: attribution first, from the carried list (verify, sender device listed
+and un-revoked, ingest, master FROM the list; present-but-bad is a drop). A
+parked copy can never be a repeat ask, is skipped when the joiner is already a
+member or when the ring already holds a resolution for that nonce, and waits
+silently on a Twitch-gated server. Ban, private and cap gates now key on the
+master (the old device-keyed ban check would have let a never-met banned
+stranger through on the parked path). Snapshot, op log and every reject go to
+the deterministic server room targeted at the joiner's device, so the relay
+buffers them for an absent joiner. Every final verdict is published back into
+the ring as `ServerJoinResolved` (admissions carry the `MemberAdded` op), so a
+late member converges membership and never re-serves.
+
+Refusals: `nsfw_confirm:` / `twitch_required:` are questions, never
+resolutions; on the joiner they delete the row and show the existing dialog,
+and `ServerJoinRejected` now carries the nonce so a stale buffered question
+cannot kill the consented re-request.
+
+### Verified
+
+Harness (`node/test_harness.rs`): eight new scenarios plus a wire pin, the
+first honesty-proved (deposit stubbed out, "A must admit B from the ring"
+fails). The old `join_fails_when_every_member_is_offline_then_succeeds_on_retry`
+was deleted; it asserted the behaviour this replaces. Two load-only races cost
+a round each, both "queued is not landed": a node emits its event the instant
+a frame is queued on the WS command channel, the mock relay lands it on its
+own task, and a test that disconnects or reads the ring right after the event
+loses the race under the 16-way run. Rule now in the harness: after a
+node-state wait, an assertion on relay state is itself a `wait_until`.
+
+Fleet (`scripts/fleet_pending_join.ps1`, fresh identities, eight gates): see
+memory `project_pending_server_joins` for the run record.
+
+### What the fleet found that the harness could not
+
+Run 1 deleted the server while the parked joiner had been admitted but held no
+MLS leaf yet. The joiner kept a ghost server: the tombstone rode an MLS frame
+it could not read, and the plaintext twin never came. Two stacked defects in
+`handle_delete_server`: the twin was sent only when the OWNER's MLS send
+failed, and it computed its targets from `state.members` AFTER
+`apply_op(ServerDeleted)` had cleared them, so it had been dead code on every
+path since it was written. Fixed: membership captured before the apply, twin
+sent unconditionally, guarded by
+`server_deleted_reaches_a_parked_member_with_no_mls_leaf` (the receiver is
+made deaf to room broadcasts so the test can only pass through the twin).
+Eight sibling sites with the same shape are listed in `HOLLOW_PLAN.md` for a
+sweep; memory `feedback_mls_first_fallback_dead_targets`.
+
+### Exposure, settled with Vitalik
+
+The ring is readable by any socket in the server room (anyone holding the
+invite): it shows who asked to join and the outcome, as peer ids, for the TTL.
+The member list never enters it. Vitalik: "if it's just peer IDs, then who
+cares". The one identity link, the Twitch proof, is stripped (item 7 above).
+

@@ -183,6 +183,13 @@ pub enum NetworkEvent {
     SyncCompleted { server_id: String, ops_applied: u32 },
     ServerJoined { server_id: String, name: String },
     ServerJoinFailed { server_id: String, reason: String },
+    /// Nobody was online to answer, so the request was PARKED (persisted +
+    /// deposited into the server room's join ring). Not a failure: the UI
+    /// shows a pending tile that survives a restart.
+    ServerJoinParked { server_id: String },
+    /// A parked join changed state: `rejected`, `admitted`, `ready` or
+    /// `discarded`. `reason` carries the reject reason, empty otherwise.
+    PendingJoinUpdated { server_id: String, state: String, reason: String },
     MessageSyncStarted { server_id: String, peer_id: String },
     MessageSyncCompleted { server_id: String, new_message_count: u32 },
     MessageSyncFailed { server_id: String, error: String },
@@ -722,6 +729,12 @@ fn to_ffi_event(event: node::NetworkEvent) -> NetworkEvent {
         node::NetworkEvent::ServerJoinFailed { server_id, reason } => {
             hollow_log!("[HOLLOW] Server join failed: {server_id} — {reason}");
         }
+        node::NetworkEvent::ServerJoinParked { server_id } => {
+            hollow_log!("[HOLLOW] Server join parked: {server_id}");
+        }
+        node::NetworkEvent::PendingJoinUpdated { server_id, state, reason } => {
+            hollow_log!("[HOLLOW] Pending join {server_id} is now {state} ({reason})");
+        }
         node::NetworkEvent::MessageSyncStarted { server_id, peer_id } => {
             hollow_log!("[HOLLOW] Message sync started for {server_id} with {peer_id}");
         }
@@ -916,6 +929,12 @@ fn to_ffi_event(event: node::NetworkEvent) -> NetworkEvent {
         }
         node::NetworkEvent::ServerJoinFailed { server_id, reason } => {
             NetworkEvent::ServerJoinFailed { server_id, reason }
+        }
+        node::NetworkEvent::ServerJoinParked { server_id } => {
+            NetworkEvent::ServerJoinParked { server_id }
+        }
+        node::NetworkEvent::PendingJoinUpdated { server_id, state, reason } => {
+            NetworkEvent::PendingJoinUpdated { server_id, state, reason }
         }
         node::NetworkEvent::MessageSyncStarted { server_id, peer_id } => {
             NetworkEvent::MessageSyncStarted { server_id, peer_id }

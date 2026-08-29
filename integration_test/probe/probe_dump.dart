@@ -352,6 +352,10 @@ class ProbeDump {
           switch (item) {
             ServerStripItem(:final serverId) =>
               'server ${servers?[serverId]?.name ?? serverId}',
+            // A parked join has an id and nothing else - no name to resolve,
+            // and deliberately NOT in the server list, which is the difference
+            // a fleet journey has to be able to see.
+            PendingStripItem(:final serverId) => 'pending join $serverId',
             FolderStripItem(:final name, :final serverIds) =>
               'folder "$name" [${serverIds.map((id) => servers?[id]?.name ?? id).join(", ")}]',
           }

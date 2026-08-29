@@ -22,6 +22,7 @@ import 'package:hollow/src/core/providers/emote_provider.dart';
 import 'package:hollow/src/core/providers/sticker_provider.dart';
 import 'package:hollow/src/core/providers/node_provider.dart';
 import 'package:hollow/src/core/providers/peers_provider.dart';
+import 'package:hollow/src/core/providers/pending_join_provider.dart';
 import 'package:hollow/src/core/providers/security_alerts_provider.dart';
 import 'package:hollow/src/core/providers/selected_peer_provider.dart';
 import 'package:hollow/src/core/providers/split_view_provider.dart';
@@ -661,7 +662,12 @@ class EventStreamNotifier extends Notifier<bool> {
         debugPrint('[HOLLOW] Server joined: $name ($serverId)');
         handleTwitchJoinResult(success: true);
         ref.read(serverListProvider.notifier).onServerCreated(serverId, name);
+        // Order matters for a join that was PARKED: onServerCreated turns the
+        // pending tile into the real server IN PLACE, so it has to run while
+        // that tile still exists. Dropping the row first would leave the
+        // server appended at the end of the strip instead.
         ref.read(serverStripLayoutProvider.notifier).onServerCreated(serverId);
+        ref.read(pendingJoinsProvider.notifier).remove(serverId);
         // Auto-select the newly joined server and load its channels. Close any
         // centre tab first — joining straight out of Browse Public Channels is
         // a normal flow, and the tab would sit on top of the server we just
@@ -688,6 +694,9 @@ class EventStreamNotifier extends Notifier<bool> {
               type: HollowToastType.success);
         }
 
+      // Rust no longer emits this on the 15 second timeout — that path PARKS
+      // the join now. The arm stays for any other emitter (and for older
+      // nodes), which is why it must keep compiling.
       case NetworkEvent_ServerJoinFailed(:final serverId, :final reason):
         debugPrint('[HOLLOW] Server join failed: $serverId — $reason');
         final failCtx = hollowNavigatorKey.currentContext;
@@ -695,6 +704,14 @@ class EventStreamNotifier extends Notifier<bool> {
           HollowToast.show(failCtx, 'Failed to join server: $reason',
               type: HollowToastType.error);
         }
+
+      // Nobody was online to answer: the request is parked, not failed.
+      case NetworkEvent_ServerJoinParked(:final serverId):
+        onServerJoinParked(ref, serverId);
+
+      case NetworkEvent_PendingJoinUpdated(
+            :final serverId, :final state, :final reason):
+        onPendingJoinUpdated(ref, serverId, state, reason);
 
       case NetworkEvent_MessageSyncStarted(:final serverId, :final peerId):
         debugPrint('[HOLLOW] Message sync started for $serverId with $peerId');
