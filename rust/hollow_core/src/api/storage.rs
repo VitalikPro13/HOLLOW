@@ -30,6 +30,26 @@ pub(crate) fn get_store() -> &'static Mutex<Option<MessageStore>> {
     STORE.get_or_init(|| Mutex::new(None))
 }
 
+/// Install a store into the process-global slot so a unit test can drive the
+/// `#[frb]` functions that read it. Pair every use with [`store_test_lock`] —
+/// `STORE` is process-wide and `cargo test` runs test functions in parallel
+/// threads (the `api::gifs::settings_lock` precedent).
+#[cfg(test)]
+pub(crate) fn set_test_store(ms: MessageStore) {
+    let store = get_store();
+    let mut guard = store.lock().unwrap_or_else(|e| e.into_inner());
+    *guard = Some(ms);
+}
+
+/// Serializes every test that swaps the process-global store.
+#[cfg(test)]
+pub(crate) fn store_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
 static CACHED_PEER_ID: OnceLock<String> = OnceLock::new();
 
 pub(crate) fn get_peer_id() -> Result<&'static str, String> {

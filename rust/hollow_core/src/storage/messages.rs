@@ -1081,6 +1081,31 @@ impl MessageStore {
                 created_at        INTEGER NOT NULL
             )")?;
 
+        // -- Artist shop: art imported from a `.hollowpack` --
+        // Keyed by the art's HASH, because that is the art's identity
+        // everywhere else in Hollow (the asset rail, the profile field, and
+        // the support credential phase 2 binds to it). The bytes themselves
+        // live in `emote_blobs` under the ordinary rail kinds; this table is
+        // only the provenance beside them, so "who made this and under what
+        // licence" survives a rail eviction.
+        //
+        // Re-importing the same pack is an UPSERT rather than a duplicate: a
+        // buyer who downloads their order twice owns the art once.
+        ddl(conn, "owned_art table",
+            "CREATE TABLE IF NOT EXISTS owned_art (
+                hash        TEXT PRIMARY KEY,
+                role        TEXT NOT NULL DEFAULT '',
+                item_id     TEXT NOT NULL DEFAULT '',
+                title       TEXT NOT NULL DEFAULT '',
+                artist_name TEXT NOT NULL DEFAULT '',
+                artist_slug TEXT NOT NULL DEFAULT '',
+                artist_url  TEXT NOT NULL DEFAULT '',
+                license     TEXT NOT NULL DEFAULT '',
+                imported_at INTEGER NOT NULL DEFAULT 0
+            )")?;
+        ddl(conn, "owned_art item index",
+            "CREATE INDEX IF NOT EXISTS idx_owned_art_item ON owned_art (item_id)")?;
+
         Ok(())
     }
 
@@ -3936,6 +3961,85 @@ impl MessageStore {
             )
             .map_err(|e| format!("Failed to save asset blob: {e}"))?;
         Ok(())
+    }
+
+    /// Record one file imported from a `.hollowpack` (artist shop).
+    ///
+    /// The bytes went onto the asset rail under their hash; this is the
+    /// provenance beside them. Idempotent by hash: importing the same pack
+    /// twice refreshes the row rather than doubling it, because a buyer who
+    /// re-downloads their order still owns the art once.
+    #[allow(clippy::too_many_arguments)]
+    pub fn save_owned_art(
+        &self,
+        hash: &str,
+        role: &str,
+        item_id: &str,
+        title: &str,
+        artist_name: &str,
+        artist_slug: &str,
+        artist_url: &str,
+        license: &str,
+    ) -> Result<(), String> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        self.conn
+            .execute(
+                "INSERT INTO owned_art
+                   (hash, role, item_id, title, artist_name, artist_slug, artist_url, license, imported_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                 ON CONFLICT(hash) DO UPDATE SET
+                   role = excluded.role,
+                   item_id = excluded.item_id,
+                   title = excluded.title,
+                   artist_name = excluded.artist_name,
+                   artist_slug = excluded.artist_slug,
+                   artist_url = excluded.artist_url,
+                   license = excluded.license",
+                params![
+                    hash, role, item_id, title, artist_name, artist_slug, artist_url, license, now
+                ],
+            )
+            .map_err(|e| format!("Failed to record owned art: {e}"))?;
+        Ok(())
+    }
+
+    /// Every imported piece of shop art, newest first.
+    #[allow(clippy::type_complexity)]
+    pub fn list_owned_art(
+        &self,
+    ) -> Result<Vec<(String, String, String, String, String, String, String, String, i64)>, String>
+    {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT hash, role, item_id, title, artist_name, artist_slug, artist_url,
+                        license, imported_at
+                 FROM owned_art ORDER BY imported_at DESC, hash ASC",
+            )
+            .map_err(|e| format!("Failed to prepare owned art list: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, i64>(8)?,
+                ))
+            })
+            .map_err(|e| format!("Failed to list owned art: {e}"))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(|e| format!("Failed to read owned art row: {e}"))?);
+        }
+        Ok(out)
     }
 
     /// (hash, animated, byte size) of every cached blob of one kind, newest

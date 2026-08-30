@@ -1,0 +1,1450 @@
+//! `.hollowpack` — the artist shop's art container (see
+//! `reports/ARTIST_SHOP_DESIGN.md` §6.3).
+//!
+//! A pack is a ZIP holding `pack.json` plus processed WebP files. The files
+//! are the SAME bytes the app itself would produce for that art, because
+//! Hollow identifies art by the SHA-256 of the PROCESSED bytes: frames,
+//! avatar animations and banner animations are content-addressed on the asset
+//! rail, and phase 2 binds a signed support credential to that hash.
+//!
+//! Two rules follow from that and neither is negotiable:
+//!
+//!   * the pack TOOL runs the app's own encoders
+//!     (`image_convert::process_avatar_frame`, `process_avatar_image`,
+//!     `process_banner_image`, `process_user_avatar_anim`,
+//!     `process_user_banner_anim`), never a lookalike;
+//!   * the app's IMPORTER never re-encodes. A lossy WebP put through the
+//!     encoder a second time is a different file with a different hash, which
+//!     would orphan the credential that names the first one.
+//!
+//! So this module owns the format, the encode step and the verification step,
+//! and both sides — the `hollowpack` CLI and `api::network::import_hollowpack`
+//! — go through it. `inspect` and the importer literally call the same
+//! `verify_pack`.
+//!
+//! Everything in a pack that reaches the importer is attacker-controlled, so
+//! nothing in the manifest is trusted for anything load-bearing: the hash is
+//! RECOMPUTED, the dimensions are re-derived from the decoded image, the
+//! entry read is the one the recomputed hash names (a manifest path is never
+//! joined onto a directory), and the frame authoring gate is re-applied so a
+//! hand-built pack cannot smuggle an opaque frame past the picker.
+//!
+//! `ext` is reserved for phase 2 (issuing key, catalog signature). No keys and
+//! no signatures live here yet, on purpose.
+
+use std::io::Read;
+
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+use crate::node::image_convert;
+
+/// The `format` string every pack carries. Checked on read.
+pub const FORMAT: &str = "hollowpack";
+/// The format version this build writes, and the newest it will read.
+pub const VERSION: u32 = 1;
+
+/// The manifest's name inside the ZIP.
+pub const MANIFEST_NAME: &str = "pack.json";
+
+// ── Untrusted-input caps ──────────────────────────────────────────────
+//
+// An import is a file the user was handed by a website, so every one of
+// these is a refusal bound rather than a warning. They are deliberately far
+// above what a real pack needs (the biggest legal single asset is a 1 MB
+// animated banner) and far below what would hurt.
+
+/// Most files one pack may carry. A listing is at most an avatar pair, a
+/// banner pair and a frame; 8 leaves room without leaving room for a dump.
+pub const MAX_FILES: usize = 8;
+/// Largest single file inside a pack.
+pub const MAX_FILE_BYTES: usize = 4 * 1024 * 1024;
+/// Largest total of every file inside a pack, decompressed.
+pub const MAX_TOTAL_BYTES: usize = 16 * 1024 * 1024;
+/// Largest `.hollowpack` container we will even open.
+pub const MAX_PACK_BYTES: u64 = 20 * 1024 * 1024;
+/// Largest `pack.json`. A manifest is a few hundred bytes of text.
+pub const MAX_MANIFEST_BYTES: usize = 64 * 1024;
+
+// ── Roles ─────────────────────────────────────────────────────────────
+
+/// What one file in a pack IS, which decides its encoder, its ceiling and
+/// where it lands in the app.
+///
+/// The animated profile kinds ship as a PAIR: the animation rides the asset
+/// rail (`AssetKind::Profile`) and the still rides the pushed profile blob,
+/// so a pack that carried only the animation would leave old clients and the
+/// guest thumb with no face at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Role {
+    /// Still avatar, `process_avatar_image` (184 square ceiling).
+    Avatar,
+    /// Animated avatar, the animated half of `process_user_avatar_anim`.
+    AvatarAnim,
+    /// The still companion of [`Role::AvatarAnim`].
+    AvatarStill,
+    /// Still banner, `process_banner_image` (600x200 ceiling).
+    Banner,
+    /// Animated banner, the animated half of `process_user_banner_anim`.
+    BannerAnim,
+    /// The still companion of [`Role::BannerAnim`].
+    BannerStill,
+    /// Avatar frame, `process_avatar_frame` (exactly 128x128, still or
+    /// animated). Carries the see-through-centre gate.
+    Frame,
+}
+
+impl Role {
+    /// The wire spelling, which is also the sort key.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Role::Avatar => "avatar",
+            Role::AvatarAnim => "avatar_anim",
+            Role::AvatarStill => "avatar_still",
+            Role::Banner => "banner",
+            Role::BannerAnim => "banner_anim",
+            Role::BannerStill => "banner_still",
+            Role::Frame => "frame",
+        }
+    }
+
+    /// Parse a wire role. An unknown role is a refusal rather than a skip:
+    /// a pack whose files we do not understand is not a pack we can promise
+    /// anything about.
+    pub fn parse(s: &str) -> Result<Role, String> {
+        match s {
+            "avatar" => Ok(Role::Avatar),
+            "avatar_anim" => Ok(Role::AvatarAnim),
+            "avatar_still" => Ok(Role::AvatarStill),
+            "banner" => Ok(Role::Banner),
+            "banner_anim" => Ok(Role::BannerAnim),
+            "banner_still" => Ok(Role::BannerStill),
+            "frame" => Ok(Role::Frame),
+            other => Err(format!("The pack lists a file role this version does not know: {other}")),
+        }
+    }
+
+    /// The `emote_blobs.kind` the bytes are cached under. Frames and profile
+    /// media are the two rails that already exist; a pack never invents a
+    /// third.
+    pub fn asset_kind(self) -> &'static str {
+        match self {
+            Role::Frame => "frame",
+            _ => "profile",
+        }
+    }
+
+    /// True when this role's bytes MUST animate. [`Role::Frame`] is absent on
+    /// purpose: a frame is legal either way and the bytes decide.
+    fn must_animate(self) -> Option<bool> {
+        match self {
+            Role::AvatarAnim | Role::BannerAnim => Some(true),
+            Role::Avatar | Role::AvatarStill | Role::Banner | Role::BannerStill => Some(false),
+            Role::Frame => None,
+        }
+    }
+}
+
+/// What the artist tells the tool their source is. The tool decides still
+/// versus animated from the BYTES, never from this and never from the file
+/// extension (a `GIF8`/extension branch silently flattens APNG, which is what
+/// Steam serves animated art as).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoleHint {
+    Frame,
+    Avatar,
+    Banner,
+}
+
+impl RoleHint {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RoleHint::Frame => "frame",
+            RoleHint::Avatar => "avatar",
+            RoleHint::Banner => "banner",
+        }
+    }
+
+    pub fn parse(s: &str) -> Result<RoleHint, String> {
+        match s {
+            "frame" => Ok(RoleHint::Frame),
+            "avatar" => Ok(RoleHint::Avatar),
+            "banner" => Ok(RoleHint::Banner),
+            other => Err(format!("Unknown kind {other}. Use frame, avatar or banner.")),
+        }
+    }
+}
+
+// ── The manifest ──────────────────────────────────────────────────────
+
+/// `pack.json`. Every optional field defaults, unknown fields are ignored,
+/// and `format` plus `version` are checked before anything else is read.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PackManifest {
+    #[serde(default)]
+    pub format: String,
+    #[serde(default)]
+    pub version: u32,
+    #[serde(default)]
+    pub item: PackItemMeta,
+    #[serde(default)]
+    pub artist: PackArtist,
+    #[serde(default)]
+    pub license: String,
+    #[serde(default)]
+    pub files: Vec<PackFile>,
+    /// Reserved for phase 2 (issuing key, catalog signature). Carried through
+    /// untouched so a pack written by a later tool still reads here.
+    #[serde(default)]
+    pub ext: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PackItemMeta {
+    /// 16 hex chars. Content-addressed by default (see [`default_item_id`]).
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub title: String,
+    /// The source kinds this listing covers: `frame`, `avatar`, `banner`.
+    #[serde(default)]
+    pub kinds: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PackArtist {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub slug: String,
+    #[serde(default)]
+    pub url: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PackFile {
+    #[serde(default)]
+    pub role: String,
+    /// Always `files/<sha256>.webp`. Never joined onto a path on the reading
+    /// side: the entry read is the one the RECOMPUTED hash names.
+    #[serde(default)]
+    pub path: String,
+    #[serde(default)]
+    pub sha256: String,
+    #[serde(default)]
+    pub bytes: u64,
+    #[serde(default)]
+    pub w: u32,
+    #[serde(default)]
+    pub h: u32,
+    #[serde(default)]
+    pub animated: bool,
+}
+
+// ── Encoding (the tool side) ──────────────────────────────────────────
+
+/// One processed file, straight out of the app's own encoder.
+#[derive(Debug, Clone)]
+pub struct ProcessedFile {
+    pub role: Role,
+    pub bytes: Vec<u8>,
+    /// SHA-256 of `bytes`, hex. This IS the art's identity.
+    pub hash: String,
+    pub w: u32,
+    pub h: u32,
+    pub animated: bool,
+}
+
+impl ProcessedFile {
+    /// The entry name this file takes inside the ZIP.
+    pub fn zip_path(&self) -> String {
+        format!("files/{}.webp", self.hash)
+    }
+}
+
+/// SHA-256 of `bytes`, lowercase hex.
+pub fn hash_hex(bytes: &[u8]) -> String {
+    hex::encode(Sha256::digest(bytes))
+}
+
+/// Run the app's encoder for `hint` over a raw source and return every file
+/// the app would have produced.
+///
+/// Animation is decided from the BYTES (`is_animated_image`), so an APNG or
+/// an animated WebP takes the animated path exactly as a GIF does. An
+/// animated avatar or banner yields the `(animated, still)` PAIR, because
+/// both halves are needed for the art to render everywhere the app renders
+/// profile media.
+pub fn process_source(hint: RoleHint, raw: &[u8]) -> Result<Vec<ProcessedFile>, String> {
+    let animated = image_convert::is_animated_image(raw);
+    let out = match (hint, animated) {
+        (RoleHint::Frame, _) => {
+            // The frame encoder branches on the bytes itself and reports what
+            // it produced, so there is nothing to decide here.
+            let (bytes, _anim) = image_convert::process_avatar_frame(raw)?;
+            vec![(Role::Frame, bytes)]
+        }
+        (RoleHint::Avatar, false) => {
+            vec![(Role::Avatar, image_convert::process_avatar_image(raw)?)]
+        }
+        (RoleHint::Avatar, true) => {
+            let (anim, still) = image_convert::process_user_avatar_anim(raw)?;
+            vec![(Role::AvatarAnim, anim), (Role::AvatarStill, still)]
+        }
+        (RoleHint::Banner, false) => {
+            vec![(Role::Banner, image_convert::process_banner_image(raw)?)]
+        }
+        (RoleHint::Banner, true) => {
+            let (anim, still) = image_convert::process_user_banner_anim(raw)?;
+            vec![(Role::BannerAnim, anim), (Role::BannerStill, still)]
+        }
+    };
+
+    out.into_iter()
+        .map(|(role, bytes)| {
+            let (w, h, animated) = blob_shape(&bytes)?;
+            Ok(ProcessedFile {
+                role,
+                hash: hash_hex(&bytes),
+                bytes,
+                w,
+                h,
+                animated,
+            })
+        })
+        .collect()
+}
+
+/// The default `item.id`: the first 16 hex characters of the SHA-256 over
+/// every file hash, sorted and joined by a newline.
+///
+/// Content-addressed on purpose. The same art re-packed on another machine
+/// gets the same item id, so a re-issue is recognisably the same listing and
+/// the catalog cannot drift from the bytes.
+pub fn default_item_id(files: &[ProcessedFile]) -> String {
+    let mut hashes: Vec<&str> = files.iter().map(|f| f.hash.as_str()).collect();
+    hashes.sort_unstable();
+    let joined = hashes.join("\n");
+    hash_hex(joined.as_bytes())[..16].to_string()
+}
+
+/// Everything the tool needs to write a pack.
+#[derive(Debug, Clone, Default)]
+pub struct PackInput {
+    pub title: String,
+    pub artist_name: String,
+    pub artist_slug: String,
+    pub artist_url: String,
+    pub license: String,
+    /// `None` = content-address it (see [`default_item_id`]).
+    pub item_id: Option<String>,
+    /// Source kinds, in the order the artist passed them.
+    pub kinds: Vec<String>,
+    pub files: Vec<ProcessedFile>,
+}
+
+/// Build the `.hollowpack` bytes plus the manifest that went into them.
+///
+/// Files are ordered by role then hash, so the same inputs always produce the
+/// same manifest regardless of the order they were passed on the command line.
+pub fn build_pack(input: &PackInput) -> Result<(Vec<u8>, PackManifest), String> {
+    use std::io::Write;
+
+    if input.files.is_empty() {
+        return Err("A pack needs at least one file".into());
+    }
+    if input.files.len() > MAX_FILES {
+        return Err(format!("A pack carries at most {MAX_FILES} files"));
+    }
+
+    let mut files = input.files.clone();
+    files.sort_by(|a, b| {
+        a.role
+            .as_str()
+            .cmp(b.role.as_str())
+            .then_with(|| a.hash.cmp(&b.hash))
+    });
+
+    // Two files with the same bytes would collide on one ZIP entry and leave
+    // the manifest describing an entry that is not there twice.
+    for pair in files.windows(2) {
+        if pair[0].hash == pair[1].hash {
+            return Err(format!(
+                "Two files in this pack are byte identical ({}). Each file has to be distinct art.",
+                pair[0].hash
+            ));
+        }
+    }
+
+    let mut kinds = input.kinds.clone();
+    kinds.dedup();
+
+    let manifest = PackManifest {
+        format: FORMAT.to_string(),
+        version: VERSION,
+        item: PackItemMeta {
+            id: match &input.item_id {
+                Some(id) => id.clone(),
+                None => default_item_id(&files),
+            },
+            title: input.title.clone(),
+            kinds,
+        },
+        artist: PackArtist {
+            name: input.artist_name.clone(),
+            slug: input.artist_slug.clone(),
+            url: input.artist_url.clone(),
+        },
+        license: input.license.clone(),
+        files: files
+            .iter()
+            .map(|f| PackFile {
+                role: f.role.as_str().to_string(),
+                path: f.zip_path(),
+                sha256: f.hash.clone(),
+                bytes: f.bytes.len() as u64,
+                w: f.w,
+                h: f.h,
+                animated: f.animated,
+            })
+            .collect(),
+        ext: serde_json::json!({}),
+    };
+
+    let manifest_json = serde_json::to_vec_pretty(&manifest)
+        .map_err(|e| format!("Failed to write the manifest: {e}"))?;
+
+    let mut buf = Vec::new();
+    {
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        zip.start_file(MANIFEST_NAME, options)
+            .map_err(|e| format!("Failed to start the manifest entry: {e}"))?;
+        zip.write_all(&manifest_json)
+            .map_err(|e| format!("Failed to write the manifest: {e}"))?;
+        for f in &files {
+            zip.start_file(f.zip_path(), options)
+                .map_err(|e| format!("Failed to start a file entry: {e}"))?;
+            zip.write_all(&f.bytes)
+                .map_err(|e| format!("Failed to write a file entry: {e}"))?;
+        }
+        zip.finish()
+            .map_err(|e| format!("Failed to finish the pack: {e}"))?;
+    }
+
+    Ok((buf, manifest))
+}
+
+/// The catalog entry the website ingests: the same item, artist and file
+/// facts as the manifest, without the container.
+pub fn catalog_entry(manifest: &PackManifest) -> serde_json::Value {
+    serde_json::json!({
+        "format": FORMAT,
+        "version": VERSION,
+        "item": manifest.item,
+        "artist": manifest.artist,
+        "license": manifest.license,
+        "files": manifest.files.iter().map(|f| serde_json::json!({
+            "role": f.role,
+            "sha256": f.sha256,
+            "bytes": f.bytes,
+            "w": f.w,
+            "h": f.h,
+            "animated": f.animated,
+        })).collect::<Vec<_>>(),
+    })
+}
+
+// ── Verification (the importer side, and `inspect`) ───────────────────
+
+/// One file that survived [`verify_pack`], with the values RECOMPUTED from
+/// the bytes rather than read out of the manifest.
+#[derive(Debug, Clone)]
+pub struct VerifiedFile {
+    pub role: Role,
+    pub hash: String,
+    pub bytes: Vec<u8>,
+    pub w: u32,
+    pub h: u32,
+    pub animated: bool,
+}
+
+/// A pack that verified whole. Partial success does not exist here: a pack
+/// with one bad file is refused entirely, because the credential in phase 2
+/// binds the ITEM and half an item is not the thing that was bought.
+#[derive(Debug, Clone)]
+pub struct VerifiedPack {
+    pub manifest: PackManifest,
+    pub files: Vec<VerifiedFile>,
+}
+
+/// Read `pack.json` out of a pack without touching a single art byte.
+pub fn read_manifest(zip_bytes: &[u8]) -> Result<PackManifest, String> {
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(zip_bytes))
+        .map_err(|e| format!("That file is not a valid art pack: {e}"))?;
+    read_manifest_from(&mut archive)
+}
+
+fn read_manifest_from<R: Read + std::io::Seek>(
+    archive: &mut zip::ZipArchive<R>,
+) -> Result<PackManifest, String> {
+    let entry = archive
+        .by_name(MANIFEST_NAME)
+        .map_err(|_| "The pack is missing its manifest".to_string())?;
+    if entry.size() > MAX_MANIFEST_BYTES as u64 {
+        return Err("The pack manifest is too large to be real".into());
+    }
+    let mut raw = String::new();
+    entry
+        .take(MAX_MANIFEST_BYTES as u64 + 1)
+        .read_to_string(&mut raw)
+        .map_err(|e| format!("Failed to read the pack manifest: {e}"))?;
+    if raw.len() > MAX_MANIFEST_BYTES {
+        return Err("The pack manifest is too large to be real".into());
+    }
+
+    let manifest: PackManifest = serde_json::from_str(&raw)
+        .map_err(|e| format!("Failed to parse the pack manifest: {e}"))?;
+    if manifest.format != FORMAT {
+        return Err("That file is not a Hollow art pack".into());
+    }
+    if manifest.version == 0 || manifest.version > VERSION {
+        return Err("That pack was made by a newer version of Hollow".into());
+    }
+    Ok(manifest)
+}
+
+/// Read a pack from disk and verify it whole. Bounded before it is opened,
+/// so a huge file is refused rather than read.
+pub fn verify_pack_file(path: &str) -> Result<VerifiedPack, String> {
+    let meta = std::fs::metadata(path).map_err(|e| format!("Failed to open the pack: {e}"))?;
+    if meta.len() > MAX_PACK_BYTES {
+        return Err(format!(
+            "That pack is too large to open (over {} MB)",
+            MAX_PACK_BYTES / (1024 * 1024)
+        ));
+    }
+    let bytes = std::fs::read(path).map_err(|e| format!("Failed to read the pack: {e}"))?;
+    verify_pack(&bytes)
+}
+
+/// THE trust boundary for pack bytes. Both `hollowpack inspect` and the app's
+/// importer call this and nothing else, so the tool checks exactly what the
+/// app checks.
+///
+/// For every file: the entry is the one the manifest's hash NAMES (never a
+/// path from the manifest), it is read under the per-file and total caps, the
+/// SHA-256 is RECOMPUTED and has to match, the WebP is decoded so the
+/// dimensions and the animation flag come from the pixels, the role's ceiling
+/// is enforced, and a frame has the see-through-centre gate re-applied.
+///
+/// Nothing is written anywhere. The caller decides what to do with the bytes.
+pub fn verify_pack(zip_bytes: &[u8]) -> Result<VerifiedPack, String> {
+    if zip_bytes.len() as u64 > MAX_PACK_BYTES {
+        return Err(format!(
+            "That pack is too large to open (over {} MB)",
+            MAX_PACK_BYTES / (1024 * 1024)
+        ));
+    }
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(zip_bytes))
+        .map_err(|e| format!("That file is not a valid art pack: {e}"))?;
+    let manifest = read_manifest_from(&mut archive)?;
+
+    if manifest.files.is_empty() {
+        return Err("The pack carries no files".into());
+    }
+    if manifest.files.len() > MAX_FILES {
+        return Err(format!(
+            "The pack lists {} files, and a pack carries at most {MAX_FILES}",
+            manifest.files.len()
+        ));
+    }
+
+    let mut files: Vec<VerifiedFile> = Vec::with_capacity(manifest.files.len());
+    let mut total: usize = 0;
+
+    for entry in &manifest.files {
+        let role = Role::parse(&entry.role)?;
+
+        if !is_hash_hex(&entry.sha256) {
+            return Err("The pack names a file with a malformed hash".into());
+        }
+        // The hash names the entry. An attacker-supplied path is never used
+        // for anything, so there is no traversal surface at all, and a
+        // manifest that points its path somewhere else is refused outright.
+        let name = format!("files/{}.webp", entry.sha256);
+        if !entry.path.is_empty() && entry.path != name {
+            return Err(format!(
+                "The pack lists {} at a path that does not match its hash",
+                entry.role
+            ));
+        }
+        if files.iter().any(|f| f.hash == entry.sha256) {
+            return Err("The pack lists the same file twice".into());
+        }
+
+        let bytes = {
+            let zf = archive
+                .by_name(&name)
+                .map_err(|_| format!("The pack is missing the file it lists as {}", entry.role))?;
+            if zf.size() > MAX_FILE_BYTES as u64 {
+                return Err(format!(
+                    "The {} file in this pack is over the {} MB limit",
+                    entry.role,
+                    MAX_FILE_BYTES / (1024 * 1024)
+                ));
+            }
+            let mut buf = Vec::new();
+            zf.take(MAX_FILE_BYTES as u64 + 1)
+                .read_to_end(&mut buf)
+                .map_err(|e| format!("Failed to read the {} file: {e}", entry.role))?;
+            buf
+        };
+        if bytes.len() > MAX_FILE_BYTES {
+            return Err(format!(
+                "The {} file in this pack is over the {} MB limit",
+                entry.role,
+                MAX_FILE_BYTES / (1024 * 1024)
+            ));
+        }
+        total = total.saturating_add(bytes.len());
+        if total > MAX_TOTAL_BYTES {
+            return Err(format!(
+                "The pack holds more than {} MB of art",
+                MAX_TOTAL_BYTES / (1024 * 1024)
+            ));
+        }
+
+        // The bytes ARE the identity, so this is the check the whole format
+        // rests on. A mismatch refuses the pack, never just the file.
+        let actual = hash_hex(&bytes);
+        if actual != entry.sha256 {
+            return Err(format!(
+                "The {} file does not match the hash the pack claims for it",
+                entry.role
+            ));
+        }
+        if entry.bytes != 0 && entry.bytes != bytes.len() as u64 {
+            return Err(format!(
+                "The {} file is not the size the pack claims for it",
+                entry.role
+            ));
+        }
+
+        let (w, h, animated) = blob_shape(&bytes)?;
+        if (entry.w != 0 || entry.h != 0) && (entry.w != w || entry.h != h) {
+            return Err(format!(
+                "The {} file is {w}x{h}, not the size the pack claims for it",
+                entry.role
+            ));
+        }
+        if entry.animated != animated {
+            return Err(format!(
+                "The pack is wrong about whether its {} file animates",
+                entry.role
+            ));
+        }
+        check_role_shape(role, w, h, animated)?;
+        if role == Role::Frame {
+            image_convert::validate_frame_centre(&bytes)?;
+        }
+
+        files.push(VerifiedFile {
+            role,
+            hash: actual,
+            bytes,
+            w,
+            h,
+            animated,
+        });
+    }
+
+    Ok(VerifiedPack { manifest, files })
+}
+
+/// 64 lowercase hex characters, the shape every content address in Hollow
+/// takes.
+fn is_hash_hex(s: &str) -> bool {
+    s.len() == 64 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// `(width, height, animated)` of an encoded blob, read from the PIXELS.
+///
+/// Everything a pack may carry is a WebP, and everything animated Hollow
+/// emits is an animated WebP, so a GIF or an APNG smuggled in under a WebP
+/// role is refused here rather than decoded.
+fn blob_shape(data: &[u8]) -> Result<(u32, u32, bool), String> {
+    if data.len() < 16 || &data[0..4] != b"RIFF" || &data[8..12] != b"WEBP" {
+        return Err("A file in this pack is not a WebP image".into());
+    }
+    if image_convert::is_animated_webp(data) {
+        let decoder = webp_animation::Decoder::new(data)
+            .map_err(|e| format!("Failed to decode an animated file in this pack: {e}"))?;
+        let first = decoder
+            .into_iter()
+            .next()
+            .ok_or("An animated file in this pack has no frames")?;
+        let (w, h) = first.dimensions();
+        if w == 0 || h == 0 {
+            return Err("A file in this pack has zero dimensions".into());
+        }
+        return Ok((w, h, true));
+    }
+    let (w, h) = image_convert::get_image_dimensions(data)
+        .map_err(|e| format!("Failed to decode a file in this pack: {e}"))?;
+    if w == 0 || h == 0 {
+        return Err("A file in this pack has zero dimensions".into());
+    }
+    Ok((w, h, false))
+}
+
+/// The role's ceiling and its animation expectation, re-checked against what
+/// the pixels actually are.
+///
+/// These are the same bounds the encoders produce, so a pack built by the
+/// tool always passes; anything that does not pass was not built by the tool.
+fn check_role_shape(role: Role, w: u32, h: u32, animated: bool) -> Result<(), String> {
+    if let Some(expected) = role.must_animate()
+        && animated != expected
+    {
+        return Err(if expected {
+            format!("The {} file in this pack does not animate", role.as_str())
+        } else {
+            format!("The {} file in this pack has to be a still", role.as_str())
+        });
+    }
+    match role {
+        Role::Frame => {
+            if (w, h) != (image_convert::FRAME_DIM, image_convert::FRAME_DIM) {
+                return Err(format!(
+                    "A frame has to be {0}x{0}, and this one is {w}x{h}",
+                    image_convert::FRAME_DIM
+                ));
+            }
+        }
+        Role::Avatar | Role::AvatarAnim | Role::AvatarStill => {
+            if w != h {
+                return Err(format!("The {} file has to be square", role.as_str()));
+            }
+            if w > image_convert::AVATAR_DIM {
+                return Err(format!(
+                    "The {} file is {w}x{h}, over the {}px avatar ceiling",
+                    role.as_str(),
+                    image_convert::AVATAR_DIM
+                ));
+            }
+        }
+        Role::Banner | Role::BannerAnim | Role::BannerStill => {
+            let max_h = image_convert::BANNER_W / 3;
+            if w > image_convert::BANNER_W || h > max_h {
+                return Err(format!(
+                    "The {} file is {w}x{h}, over the {}x{max_h} banner ceiling",
+                    role.as_str(),
+                    image_convert::BANNER_W
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── Fixtures, built in memory ─────────────────────────────────────
+    //
+    // Never committed binaries: a fixture that cannot animate cannot catch an
+    // encoder that silently flattens animation, and a fixture nobody can read
+    // cannot be adjusted when a ceiling moves.
+
+    /// A ring: opaque at the edges, fully transparent through the middle.
+    /// This is what a legal avatar frame looks like.
+    pub(super) fn ring_png(size: u32) -> Vec<u8> {
+        let mut img = image::RgbaImage::new(size, size);
+        let c = size as f32 / 2.0;
+        let inner = size as f32 * 0.34;
+        for (x, y, px) in img.enumerate_pixels_mut() {
+            let dx = x as f32 + 0.5 - c;
+            let dy = y as f32 + 0.5 - c;
+            let d = (dx * dx + dy * dy).sqrt();
+            *px = if d > inner {
+                image::Rgba([200, 60, 90, 255])
+            } else {
+                image::Rgba([0, 0, 0, 0])
+            };
+        }
+        encode_png(&img)
+    }
+
+    /// A solid square. Legal as an avatar, and refused as a frame.
+    pub(super) fn solid_png(w: u32, h: u32) -> Vec<u8> {
+        let mut img = image::RgbaImage::new(w, h);
+        for (x, y, px) in img.enumerate_pixels_mut() {
+            *px = image::Rgba([(x % 256) as u8, (y % 256) as u8, 140, 255]);
+        }
+        encode_png(&img)
+    }
+
+    fn encode_png(img: &image::RgbaImage) -> Vec<u8> {
+        let mut out = Vec::new();
+        img.write_to(
+            &mut std::io::Cursor::new(&mut out),
+            image::ImageFormat::Png,
+        )
+        .expect("encode png fixture");
+        out
+    }
+
+    /// A two-frame animated GIF, so the animated encoders have something real
+    /// to chew on.
+    pub(super) fn anim_gif(w: u32, h: u32) -> Vec<u8> {
+        let mut out = Vec::new();
+        {
+            let mut enc = image::codecs::gif::GifEncoder::new(&mut out);
+            enc.set_repeat(image::codecs::gif::Repeat::Infinite)
+                .expect("gif repeat");
+            for step in 0..2u32 {
+                let mut img = image::RgbaImage::new(w, h);
+                for (x, y, px) in img.enumerate_pixels_mut() {
+                    let v = ((x + y + step * 90) % 256) as u8;
+                    *px = image::Rgba([v, 255 - v, 90, 255]);
+                }
+                enc.encode_frame(image::Frame::from_parts(
+                    img,
+                    0,
+                    0,
+                    image::Delay::from_numer_denom_ms(100, 1),
+                ))
+                .expect("gif frame");
+            }
+        }
+        out
+    }
+
+    // ── (a) encoder determinism ───────────────────────────────────────
+
+    #[test]
+    fn the_encoders_are_deterministic() {
+        // The whole format rests on this: the shop encodes once, the buyer's
+        // client hashes the bytes, and a credential binds that hash. An
+        // encoder that varied run to run would break every one of those.
+        let frame_src = ring_png(224);
+        let a = image_convert::process_avatar_frame(&frame_src).expect("frame a");
+        let b = image_convert::process_avatar_frame(&frame_src).expect("frame b");
+        assert_eq!(a.0, b.0, "the frame encoder is not deterministic");
+
+        let still_src = solid_png(400, 400);
+        assert_eq!(
+            image_convert::process_avatar_image(&still_src).expect("avatar a"),
+            image_convert::process_avatar_image(&still_src).expect("avatar b"),
+            "the still avatar encoder is not deterministic"
+        );
+
+        let banner_src = solid_png(1200, 500);
+        assert_eq!(
+            image_convert::process_banner_image(&banner_src).expect("banner a"),
+            image_convert::process_banner_image(&banner_src).expect("banner b"),
+            "the still banner encoder is not deterministic"
+        );
+
+        let gif = anim_gif(200, 200);
+        assert_eq!(
+            image_convert::process_user_avatar_anim(&gif).expect("avatar anim a"),
+            image_convert::process_user_avatar_anim(&gif).expect("avatar anim b"),
+            "the animated avatar encoder is not deterministic"
+        );
+
+        let wide = anim_gif(360, 120);
+        assert_eq!(
+            image_convert::process_user_banner_anim(&wide).expect("banner anim a"),
+            image_convert::process_user_banner_anim(&wide).expect("banner anim b"),
+            "the animated banner encoder is not deterministic"
+        );
+    }
+
+    #[test]
+    fn an_animated_source_expands_to_the_pair() {
+        let files = process_source(RoleHint::Avatar, &anim_gif(200, 200)).expect("avatar pair");
+        assert_eq!(files.len(), 2, "an animated avatar ships as a pair");
+        assert_eq!(files[0].role, Role::AvatarAnim);
+        assert!(files[0].animated);
+        assert_eq!(files[1].role, Role::AvatarStill);
+        assert!(!files[1].animated, "the companion is a still");
+
+        let still = process_source(RoleHint::Avatar, &solid_png(400, 400)).expect("avatar still");
+        assert_eq!(still.len(), 1);
+        assert_eq!(still[0].role, Role::Avatar);
+    }
+
+    // ── (b) pack then inspect ─────────────────────────────────────────
+
+    pub(super) fn sample_pack() -> (Vec<u8>, PackManifest) {
+        let mut files = process_source(RoleHint::Frame, &ring_png(224)).expect("frame");
+        files.extend(process_source(RoleHint::Avatar, &solid_png(400, 400)).expect("avatar"));
+        build_pack(&PackInput {
+            title: "Ring of dusk".into(),
+            artist_name: "Sample Artist".into(),
+            artist_slug: "sample".into(),
+            artist_url: "https://example.invalid/sample".into(),
+            license: "Plain text licence. No DRM, you own the files.".into(),
+            item_id: None,
+            kinds: vec!["frame".into(), "avatar".into()],
+            files,
+        })
+        .expect("build pack")
+    }
+
+    #[test]
+    fn a_packed_pack_verifies_and_its_hashes_are_the_bytes() {
+        let (zip_bytes, manifest) = sample_pack();
+        let verified = verify_pack(&zip_bytes).expect("verify");
+
+        assert_eq!(verified.files.len(), manifest.files.len());
+        assert_eq!(verified.manifest.item.title, "Ring of dusk");
+        assert_eq!(verified.manifest.artist.slug, "sample");
+        assert_eq!(manifest.item.id.len(), 16, "item ids are 16 hex chars");
+
+        for (claimed, actual) in manifest.files.iter().zip(verified.files.iter()) {
+            assert_eq!(claimed.sha256, actual.hash, "the manifest hash is the bytes");
+            assert_eq!(claimed.sha256, hash_hex(&actual.bytes));
+            assert_eq!(claimed.w, actual.w);
+            assert_eq!(claimed.h, actual.h);
+            assert_eq!(claimed.animated, actual.animated);
+            assert_eq!(claimed.path, format!("files/{}.webp", actual.hash));
+        }
+
+        // Ordered by role then hash, whatever order they were passed in.
+        let roles: Vec<&str> = manifest.files.iter().map(|f| f.role.as_str()).collect();
+        let mut sorted = roles.clone();
+        sorted.sort_unstable();
+        assert_eq!(roles, sorted);
+    }
+
+    #[test]
+    fn the_item_id_is_content_addressed() {
+        let files = process_source(RoleHint::Frame, &ring_png(224)).expect("frame");
+        let a = default_item_id(&files);
+        let mut reordered = files.clone();
+        reordered.reverse();
+        assert_eq!(a, default_item_id(&reordered), "order does not change it");
+
+        let other = process_source(RoleHint::Avatar, &solid_png(400, 400)).expect("avatar");
+        assert_ne!(a, default_item_id(&other), "different art, different id");
+    }
+
+    // ── (c) a flipped byte ────────────────────────────────────────────
+
+    /// Rebuild a pack's ZIP with one entry's bytes replaced. The manifest is
+    /// left exactly as it was, which is precisely the tamper the hash check
+    /// exists to catch.
+    pub(super) fn repack_with(
+        zip_bytes: &[u8],
+        swap: impl Fn(&str, Vec<u8>) -> Vec<u8>,
+    ) -> Vec<u8> {
+        use std::io::Write;
+        let mut src = zip::ZipArchive::new(std::io::Cursor::new(zip_bytes)).expect("open");
+        let names: Vec<String> = src.file_names().map(|n| n.to_string()).collect();
+        let mut out = Vec::new();
+        {
+            let mut zip = zip::ZipWriter::new(std::io::Cursor::new(&mut out));
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
+            for name in names {
+                let mut buf = Vec::new();
+                src.by_name(&name)
+                    .expect("entry")
+                    .read_to_end(&mut buf)
+                    .expect("read");
+                let buf = swap(&name, buf);
+                zip.start_file(&name, options).expect("start");
+                zip.write_all(&buf).expect("write");
+            }
+            zip.finish().expect("finish");
+        }
+        out
+    }
+
+    #[test]
+    fn one_flipped_byte_refuses_the_pack() {
+        let (zip_bytes, _) = sample_pack();
+        let tampered = repack_with(&zip_bytes, |name, mut buf| {
+            if name.starts_with("files/") {
+                // Flip a bit deep in the pixel data, past the header.
+                let i = buf.len() - 3;
+                buf[i] ^= 0x01;
+            }
+            buf
+        });
+        let err = verify_pack(&tampered).expect_err("a tampered file must be refused");
+        assert!(
+            err.contains("does not match the hash"),
+            "the error has to name the hash mismatch, got: {err}"
+        );
+    }
+
+    #[test]
+    fn a_manifest_that_lies_about_the_size_is_refused() {
+        let (zip_bytes, _) = sample_pack();
+        let tampered = repack_with(&zip_bytes, |name, buf| {
+            if name != MANIFEST_NAME {
+                return buf;
+            }
+            let mut m: PackManifest = serde_json::from_slice(&buf).expect("parse");
+            m.files[0].w = 4096;
+            serde_json::to_vec(&m).expect("write")
+        });
+        let err = verify_pack(&tampered).expect_err("a lying manifest must be refused");
+        assert!(err.contains("not the size"), "got: {err}");
+    }
+
+    // ── (d) an opaque frame ───────────────────────────────────────────
+
+    #[test]
+    fn an_opaque_centre_is_refused_at_authoring_and_at_import() {
+        // Authoring: the encoder refuses outright.
+        let err = image_convert::process_avatar_frame(&solid_png(224, 224))
+            .expect_err("a solid square is not a frame");
+        assert!(err.contains("transparent"), "got: {err}");
+
+        // Import: a hand-built pack that skipped the encoder is refused too.
+        // The frame slot is filled with a legally SIZED but opaque 128x128
+        // WebP, so only the centre gate can catch it.
+        let opaque = image_convert::process_still_avatar(&solid_png(300, 300), 128)
+            .expect("encode an opaque 128 square");
+        let hash = hash_hex(&opaque);
+        let (w, h, animated) = blob_shape(&opaque).expect("shape");
+        assert_eq!((w, h), (128, 128));
+
+        let manifest = PackManifest {
+            format: FORMAT.into(),
+            version: VERSION,
+            item: PackItemMeta {
+                id: "0123456789abcdef".into(),
+                title: "Smuggled".into(),
+                kinds: vec!["frame".into()],
+            },
+            artist: PackArtist::default(),
+            license: String::new(),
+            files: vec![PackFile {
+                role: "frame".into(),
+                path: format!("files/{hash}.webp"),
+                sha256: hash.clone(),
+                bytes: opaque.len() as u64,
+                w,
+                h,
+                animated,
+            }],
+            ext: serde_json::json!({}),
+        };
+        let zip_bytes = raw_pack(&manifest, &[(hash, opaque)]);
+
+        let err = verify_pack(&zip_bytes).expect_err("an opaque frame must be refused");
+        assert!(
+            err.contains("transparent"),
+            "the centre gate has to be the refusal, got: {err}"
+        );
+    }
+
+    /// Write a pack from a manifest and raw entries, bypassing [`build_pack`]
+    /// entirely. This is how a hostile pack would be built, so it is how the
+    /// hostile cases are tested.
+    pub(super) fn raw_pack(manifest: &PackManifest, entries: &[(String, Vec<u8>)]) -> Vec<u8> {
+        use std::io::Write;
+        let mut out = Vec::new();
+        {
+            let mut zip = zip::ZipWriter::new(std::io::Cursor::new(&mut out));
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
+            zip.start_file(MANIFEST_NAME, options).expect("start");
+            zip.write_all(&serde_json::to_vec(manifest).expect("json"))
+                .expect("write");
+            for (hash, bytes) in entries {
+                zip.start_file(format!("files/{hash}.webp"), options)
+                    .expect("start");
+                zip.write_all(bytes).expect("write");
+            }
+            zip.finish().expect("finish");
+        }
+        out
+    }
+
+    // ── (e) too many files, and too many bytes ────────────────────────
+
+    #[test]
+    fn a_pack_with_too_many_files_is_refused() {
+        let mut manifest = PackManifest {
+            format: FORMAT.into(),
+            version: VERSION,
+            ..Default::default()
+        };
+        let mut entries = Vec::new();
+        for i in 0..(MAX_FILES + 1) {
+            let png = solid_png(200 + i as u32, 200 + i as u32);
+            let bytes = image_convert::process_avatar_image(&png).expect("avatar");
+            let hash = hash_hex(&bytes);
+            manifest.files.push(PackFile {
+                role: "avatar".into(),
+                path: format!("files/{hash}.webp"),
+                sha256: hash.clone(),
+                bytes: bytes.len() as u64,
+                w: image_convert::AVATAR_DIM,
+                h: image_convert::AVATAR_DIM,
+                animated: false,
+            });
+            entries.push((hash, bytes));
+        }
+        let zip_bytes = raw_pack(&manifest, &entries);
+        let err = verify_pack(&zip_bytes).expect_err("too many files must be refused");
+        assert!(err.contains("at most"), "got: {err}");
+    }
+
+    #[test]
+    fn an_oversize_file_is_refused_before_it_is_decoded() {
+        // A single entry that decompresses past the per-file cap. The bytes
+        // are incompressible noise so the ZIP cannot hide the size, and the
+        // refusal has to land on the cap rather than on "not a WebP".
+        let mut big = vec![0u8; MAX_FILE_BYTES + 4096];
+        let mut seed = 0x9E3779B9u32;
+        for b in big.iter_mut() {
+            seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+            *b = (seed >> 24) as u8;
+        }
+        let hash = hash_hex(&big);
+        let manifest = PackManifest {
+            format: FORMAT.into(),
+            version: VERSION,
+            files: vec![PackFile {
+                role: "avatar".into(),
+                path: format!("files/{hash}.webp"),
+                sha256: hash.clone(),
+                bytes: big.len() as u64,
+                w: 184,
+                h: 184,
+                animated: false,
+            }],
+            ..Default::default()
+        };
+        let zip_bytes = raw_pack(&manifest, &[(hash, big)]);
+        let err = verify_pack(&zip_bytes).expect_err("an oversize file must be refused");
+        assert!(err.contains("limit"), "got: {err}");
+    }
+
+    #[test]
+    fn an_unknown_role_and_a_mismatched_path_are_both_refused() {
+        let bytes = image_convert::process_avatar_image(&solid_png(400, 400)).expect("avatar");
+        let hash = hash_hex(&bytes);
+
+        let mut manifest = PackManifest {
+            format: FORMAT.into(),
+            version: VERSION,
+            files: vec![PackFile {
+                role: "wallpaper".into(),
+                path: format!("files/{hash}.webp"),
+                sha256: hash.clone(),
+                bytes: bytes.len() as u64,
+                w: 184,
+                h: 184,
+                animated: false,
+            }],
+            ..Default::default()
+        };
+        let zip_bytes = raw_pack(&manifest, &[(hash.clone(), bytes.clone())]);
+        let err = verify_pack(&zip_bytes).expect_err("an unknown role must be refused");
+        assert!(err.contains("role this version does not know"), "got: {err}");
+
+        // A path pointing somewhere other than the hash is refused, and it is
+        // never joined onto anything on the way to that refusal.
+        manifest.files[0].role = "avatar".into();
+        manifest.files[0].path = "../../../etc/passwd".into();
+        let zip_bytes = raw_pack(&manifest, &[(hash, bytes)]);
+        let err = verify_pack(&zip_bytes).expect_err("a mismatched path must be refused");
+        assert!(err.contains("does not match its hash"), "got: {err}");
+    }
+
+    #[test]
+    fn a_foreign_format_and_a_future_version_are_both_refused() {
+        let (zip_bytes, _) = sample_pack();
+
+        let foreign = repack_with(&zip_bytes, |name, buf| {
+            if name != MANIFEST_NAME {
+                return buf;
+            }
+            let mut m: PackManifest = serde_json::from_slice(&buf).expect("parse");
+            m.format = "stickerpack".into();
+            serde_json::to_vec(&m).expect("json")
+        });
+        assert!(
+            verify_pack(&foreign)
+                .expect_err("a foreign format must be refused")
+                .contains("not a Hollow art pack")
+        );
+
+        let future = repack_with(&zip_bytes, |name, buf| {
+            if name != MANIFEST_NAME {
+                return buf;
+            }
+            let mut m: PackManifest = serde_json::from_slice(&buf).expect("parse");
+            m.version = VERSION + 1;
+            serde_json::to_vec(&m).expect("json")
+        });
+        assert!(
+            verify_pack(&future)
+                .expect_err("a future version must be refused")
+                .contains("newer version")
+        );
+    }
+
+    #[test]
+    fn unknown_manifest_fields_are_ignored() {
+        // Phase 2 adds an issuing key and a catalog signature under `ext`. An
+        // older client has to keep reading those packs, so the parse is
+        // tolerant of anything it does not recognise.
+        let (zip_bytes, _) = sample_pack();
+        let extended = repack_with(&zip_bytes, |name, buf| {
+            if name != MANIFEST_NAME {
+                return buf;
+            }
+            let mut v: serde_json::Value = serde_json::from_slice(&buf).expect("parse");
+            v["ext"]["issuer_pk"] = serde_json::json!("not a real key");
+            v["something_from_the_future"] = serde_json::json!({ "nested": true });
+            v["files"][0]["future_field"] = serde_json::json!(7);
+            serde_json::to_vec(&v).expect("json")
+        });
+        let verified = verify_pack(&extended).expect("unknown fields must not break the read");
+        assert_eq!(verified.manifest.ext["issuer_pk"], "not a real key");
+    }
+
+    // -- (f) the importer, end to end --------------------------------
+    //
+    // These drive `api::network::import_hollowpack` against a real in-memory
+    // SQLCipher store, so they cover the rail write and the provenance row,
+    // not just the verification in front of them. No node runs.
+
+    /// Install a fresh in-memory store and hold the lock that serializes
+    /// every test which swaps the process-global slot.
+    fn fresh_store() -> std::sync::MutexGuard<'static, ()> {
+        let lock = crate::api::storage::store_test_lock();
+        crate::api::storage::set_test_store(
+            crate::storage::MessageStore::open(":memory:", &"ab".repeat(32))
+                .expect("open in-memory store"),
+        );
+        lock
+    }
+
+    /// Run `body` against the store the api functions actually read.
+    fn with_installed_store<T>(body: impl FnOnce(&crate::storage::MessageStore) -> T) -> T {
+        let guard = crate::api::storage::get_store()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        body(guard.as_ref().expect("store installed"))
+    }
+
+    /// Write bytes to a throwaway file. The returned dir owns it, so dropping
+    /// the dir deletes the pack.
+    fn temp_pack(bytes: &[u8]) -> (tempfile::TempDir, String) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("item.hollowpack");
+        std::fs::write(&path, bytes).expect("write pack");
+        let as_str = path.to_string_lossy().to_string();
+        (dir, as_str)
+    }
+
+    #[test]
+    fn importing_puts_the_bytes_on_the_rail_and_records_who_made_them() {
+        let _lock = fresh_store();
+
+        let (zip_bytes, manifest) = sample_pack();
+        let (_dir, path) = temp_pack(&zip_bytes);
+
+        let imported =
+            crate::api::network::import_hollowpack(path).expect("a good pack must import");
+
+        assert_eq!(imported.item_id, manifest.item.id);
+        assert_eq!(imported.title, "Ring of dusk");
+        assert_eq!(imported.artist_name, "Sample Artist");
+        assert_eq!(imported.files.len(), manifest.files.len());
+
+        with_installed_store(|ms| {
+            for f in &imported.files {
+                // On the rail, byte for byte. A re-encode here would be a
+                // different hash and a dead credential.
+                let stored = ms
+                    .load_emote_blob(&f.hash)
+                    .expect("read blob")
+                    .expect("the blob has to be on the rail");
+                assert_eq!(hash_hex(&stored), f.hash, "the rail holds the exact bytes");
+                assert_eq!(stored.len() as u64, f.bytes);
+            }
+
+            let owned = ms.list_owned_art().expect("list owned art");
+            assert_eq!(owned.len(), imported.files.len());
+            for row in &owned {
+                assert_eq!(row.2, manifest.item.id, "item id");
+                assert_eq!(row.3, "Ring of dusk", "title");
+                assert_eq!(row.4, "Sample Artist", "artist name");
+                assert_eq!(row.5, "sample", "artist slug");
+                assert!(row.7.contains("No DRM"), "the licence text is kept");
+                assert!(row.8 > 0, "imported_at is stamped");
+            }
+            assert!(
+                owned.iter().any(|r| r.1 == "frame"),
+                "the frame role is recorded"
+            );
+        });
+
+        // The FFI listing is the same set.
+        let listed = crate::api::network::list_owned_art().expect("list");
+        assert_eq!(listed.len(), imported.files.len());
+
+        // Re-importing the same order owns the art once, not twice.
+        let (_dir2, path2) = temp_pack(&zip_bytes);
+        crate::api::network::import_hollowpack(path2).expect("a second import is idempotent");
+        assert_eq!(
+            crate::api::network::list_owned_art().expect("list").len(),
+            imported.files.len(),
+            "re-importing must not duplicate rows"
+        );
+    }
+
+    #[test]
+    fn the_importer_refuses_a_tampered_pack_and_stores_nothing() {
+        let _lock = fresh_store();
+
+        let (zip_bytes, _) = sample_pack();
+        let tampered = repack_with(&zip_bytes, |name, mut buf| {
+            if name.starts_with("files/") {
+                let i = buf.len() - 3;
+                buf[i] ^= 0x01;
+            }
+            buf
+        });
+        let (_dir, path) = temp_pack(&tampered);
+
+        let err = crate::api::network::import_hollowpack(path)
+            .expect_err("a tampered pack must be refused");
+        assert!(err.contains("does not match the hash"), "got: {err}");
+
+        // Refused WHOLE: not one file of a two-file pack landed.
+        with_installed_store(|ms| {
+            assert!(
+                ms.list_owned_art().expect("list").is_empty(),
+                "a refused pack must leave nothing behind"
+            );
+            assert!(
+                ms.list_asset_blobs_by_kind("frame").expect("list").is_empty(),
+                "a refused pack must put nothing on the rail"
+            );
+            assert!(
+                ms.list_asset_blobs_by_kind("profile")
+                    .expect("list")
+                    .is_empty()
+            );
+        });
+    }
+
+    #[test]
+    fn the_importer_refuses_a_pack_with_too_many_files() {
+        let _lock = fresh_store();
+
+        // Same shape as the unit case, driven through the FFI so the caps are
+        // proven where a real import would hit them.
+        let mut manifest = PackManifest {
+            format: FORMAT.into(),
+            version: VERSION,
+            ..Default::default()
+        };
+        let mut entries = Vec::new();
+        for i in 0..(MAX_FILES + 1) {
+            let png = solid_png(200 + i as u32, 200 + i as u32);
+            let bytes = image_convert::process_avatar_image(&png).expect("avatar");
+            let hash = hash_hex(&bytes);
+            manifest.files.push(PackFile {
+                role: "avatar".into(),
+                path: format!("files/{hash}.webp"),
+                sha256: hash.clone(),
+                bytes: bytes.len() as u64,
+                w: image_convert::AVATAR_DIM,
+                h: image_convert::AVATAR_DIM,
+                animated: false,
+            });
+            entries.push((hash, bytes));
+        }
+        let (_dir, path) = temp_pack(&raw_pack(&manifest, &entries));
+        let err = crate::api::network::import_hollowpack(path)
+            .expect_err("too many files must be refused");
+        assert!(err.contains("at most"), "got: {err}");
+
+        with_installed_store(|ms| {
+            assert!(ms.list_owned_art().expect("list").is_empty());
+        });
+    }
+
+    #[test]
+    fn the_importer_refuses_a_frame_whose_middle_is_opaque() {
+        let _lock = fresh_store();
+
+        let opaque = image_convert::process_still_avatar(&solid_png(300, 300), 128)
+            .expect("encode an opaque 128 square");
+        let hash = hash_hex(&opaque);
+        let (w, h, animated) = blob_shape(&opaque).expect("shape");
+
+        let manifest = PackManifest {
+            format: FORMAT.into(),
+            version: VERSION,
+            item: PackItemMeta {
+                id: "0123456789abcdef".into(),
+                title: "Smuggled".into(),
+                kinds: vec!["frame".into()],
+            },
+            files: vec![PackFile {
+                role: "frame".into(),
+                path: format!("files/{hash}.webp"),
+                sha256: hash.clone(),
+                bytes: opaque.len() as u64,
+                w,
+                h,
+                animated,
+            }],
+            ..Default::default()
+        };
+        let (_dir, path) = temp_pack(&raw_pack(&manifest, &[(hash, opaque)]));
+
+        let err = crate::api::network::import_hollowpack(path)
+            .expect_err("an opaque frame must be refused at import too");
+        assert!(err.contains("transparent"), "got: {err}");
+
+        with_installed_store(|ms| {
+            assert!(ms.list_owned_art().expect("list").is_empty());
+        });
+    }
+
+    #[test]
+    fn a_still_role_carrying_an_animation_is_refused() {
+        let gif = anim_gif(200, 200);
+        let (anim, _still) = image_convert::process_user_avatar_anim(&gif).expect("avatar anim");
+        let hash = hash_hex(&anim);
+        let (w, h, animated) = blob_shape(&anim).expect("shape");
+        assert!(animated);
+
+        let manifest = PackManifest {
+            format: FORMAT.into(),
+            version: VERSION,
+            files: vec![PackFile {
+                // Claiming the still role for animated bytes.
+                role: "avatar_still".into(),
+                path: format!("files/{hash}.webp"),
+                sha256: hash.clone(),
+                bytes: anim.len() as u64,
+                w,
+                h,
+                animated: true,
+            }],
+            ..Default::default()
+        };
+        let zip_bytes = raw_pack(&manifest, &[(hash, anim)]);
+        let err = verify_pack(&zip_bytes).expect_err("a still role must not animate");
+        assert!(err.contains("has to be a still"), "got: {err}");
+    }
+}

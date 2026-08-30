@@ -3387,6 +3387,157 @@ fn store_profile_media(bytes: Vec<u8>, still: Vec<u8>) -> Result<ProcessedProfil
     Ok(ProcessedProfileMedia { hash, bytes, still })
 }
 
+// ── Artist shop: `.hollowpack` import ─────────────────────────────────
+
+/// One file that came out of a `.hollowpack`, with every value RECOMPUTED
+/// from the bytes rather than read out of the pack's manifest.
+#[derive(Debug, Clone)]
+pub struct HollowpackFile {
+    /// `frame`, `avatar`, `avatar_anim`, `avatar_still`, `banner`,
+    /// `banner_anim` or `banner_still`.
+    pub role: String,
+    /// 64-hex SHA-256 of the bytes. This IS the art's identity: it is what
+    /// `update_profile(avatar_frame: ...)` names and what peers pull on the
+    /// asset rail.
+    pub hash: String,
+    pub bytes: u64,
+    pub w: u32,
+    pub h: u32,
+    pub animated: bool,
+}
+
+/// What an import landed, so the UI can say what was added and offer to wear
+/// it.
+#[derive(Debug, Clone)]
+pub struct HollowpackImport {
+    pub item_id: String,
+    pub title: String,
+    pub artist_name: String,
+    pub artist_slug: String,
+    pub artist_url: String,
+    pub license: String,
+    pub files: Vec<HollowpackFile>,
+}
+
+/// A piece of imported shop art and who made it.
+#[derive(Debug, Clone)]
+pub struct OwnedArt {
+    pub hash: String,
+    pub role: String,
+    pub item_id: String,
+    pub title: String,
+    pub artist_name: String,
+    pub artist_slug: String,
+    pub artist_url: String,
+    pub license: String,
+    /// Unix milliseconds.
+    pub imported_at: i64,
+}
+
+/// Import a `.hollowpack` bought from the artist shop: verify it whole, put
+/// its files on the asset rail exactly as they arrived, and record what was
+/// bought and from whom.
+///
+/// The bytes are stored AS-IS and are never re-encoded. That is the whole
+/// point of the format: the shop ran the app's own encoders, the art's
+/// identity is the SHA-256 of those processed bytes, and a second generation
+/// through a lossy encoder would mint a different hash and orphan the support
+/// credential phase 2 binds to the first one.
+///
+/// Verification is [`crate::hollowpack::verify_pack`], the same call
+/// `hollowpack inspect` makes, and it refuses the WHOLE pack rather than
+/// dropping a bad file: the caps on file count and size, the recomputed
+/// SHA-256 against what the manifest claims, the decoded dimensions against
+/// the role's ceiling, and the see-through-centre gate re-applied to any
+/// frame so a hand-built pack cannot smuggle one past the picker. Nothing is
+/// written anywhere until every file has passed.
+///
+/// Importing does NOT touch the profile. Wearing the art is a separate,
+/// deliberate step.
+#[frb]
+pub fn import_hollowpack(path: String) -> Result<HollowpackImport, String> {
+    // Verify first, off the store lock: this decodes images and a decode is
+    // not work to hold a database mutex through.
+    let verified = crate::hollowpack::verify_pack_file(&path)?;
+    let m = verified.manifest.clone();
+
+    {
+        let store = super::storage::get_store();
+        let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+        let ms = guard.as_ref().ok_or("Message store is not open")?;
+        for f in &verified.files {
+            // The same rail step `process_and_store_avatar_frame` and
+            // `store_profile_media` take after they encode, minus the encode.
+            ms.save_asset_blob(&f.hash, &f.bytes, f.animated, f.role.asset_kind())?;
+            ms.save_owned_art(
+                &f.hash,
+                f.role.as_str(),
+                &m.item.id,
+                &m.item.title,
+                &m.artist.name,
+                &m.artist.slug,
+                &m.artist.url,
+                &m.license,
+            )?;
+        }
+    }
+
+    hollow_log!(
+        "[HOLLOW-SHOP] Imported {} file(s) from item {} by {}",
+        verified.files.len(),
+        m.item.id,
+        m.artist.slug
+    );
+
+    Ok(HollowpackImport {
+        item_id: m.item.id,
+        title: m.item.title,
+        artist_name: m.artist.name,
+        artist_slug: m.artist.slug,
+        artist_url: m.artist.url,
+        license: m.license,
+        files: verified
+            .files
+            .into_iter()
+            .map(|f| HollowpackFile {
+                role: f.role.as_str().to_string(),
+                hash: f.hash,
+                bytes: f.bytes.len() as u64,
+                w: f.w,
+                h: f.h,
+                animated: f.animated,
+            })
+            .collect(),
+    })
+}
+
+/// Every piece of shop art this install owns, newest first.
+#[frb]
+pub fn list_owned_art() -> Result<Vec<OwnedArt>, String> {
+    let store = super::storage::get_store();
+    let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let ms = guard.as_ref().ok_or("Message store is not open")?;
+    Ok(ms
+        .list_owned_art()?
+        .into_iter()
+        .map(
+            |(hash, role, item_id, title, artist_name, artist_slug, artist_url, license, imported_at)| {
+                OwnedArt {
+                    hash,
+                    role,
+                    item_id,
+                    title,
+                    artist_name,
+                    artist_slug,
+                    artist_url,
+                    license,
+                    imported_at,
+                }
+            },
+        )
+        .collect())
+}
+
 /// One-shot migration for a profile authored BEFORE animated media moved to
 /// the asset rail: the animation used to sit in `avatar`/`banner` as raw
 /// source bytes and rode every profile push. Converts ours in place — the

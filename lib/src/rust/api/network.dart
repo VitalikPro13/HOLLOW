@@ -11,7 +11,7 @@ part 'network.freezed.dart';
 
 // These functions are ignored because they are not marked as `pub`: `event_forwarding_task`, `get_event_rx`, `get_http_runtime`, `get_license_key`, `get_node`, `get_proxy_config`, `get_proxy_socks_addr`, `get_relay_domain`, `get_runtime`, `open_local_store`, `send_node_command`, `set_proxy_socks_addr`, `store_profile_media`, `to_ffi_event`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `NodeState`, `ProxyConfig`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `fmt`, `from`, `from`, `from`, `from`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`
 
 Future<void> setLicenseKey({String? key}) =>
     RustLib.instance.api.crateApiNetworkSetLicenseKey(key: key);
@@ -728,6 +728,33 @@ Future<ProcessedProfileMedia> processAndStoreBannerAnim({
   rawBytes: rawBytes,
 );
 
+/// Import a `.hollowpack` bought from the artist shop: verify it whole, put
+/// its files on the asset rail exactly as they arrived, and record what was
+/// bought and from whom.
+///
+/// The bytes are stored AS-IS and are never re-encoded. That is the whole
+/// point of the format: the shop ran the app's own encoders, the art's
+/// identity is the SHA-256 of those processed bytes, and a second generation
+/// through a lossy encoder would mint a different hash and orphan the support
+/// credential phase 2 binds to the first one.
+///
+/// Verification is [`crate::hollowpack::verify_pack`], the same call
+/// `hollowpack inspect` makes, and it refuses the WHOLE pack rather than
+/// dropping a bad file: the caps on file count and size, the recomputed
+/// SHA-256 against what the manifest claims, the decoded dimensions against
+/// the role's ceiling, and the see-through-centre gate re-applied to any
+/// frame so a hand-built pack cannot smuggle one past the picker. Nothing is
+/// written anywhere until every file has passed.
+///
+/// Importing does NOT touch the profile. Wearing the art is a separate,
+/// deliberate step.
+Future<HollowpackImport> importHollowpack({required String path}) =>
+    RustLib.instance.api.crateApiNetworkImportHollowpack(path: path);
+
+/// Every piece of shop art this install owns, newest first.
+Future<List<OwnedArt>> listOwnedArt() =>
+    RustLib.instance.api.crateApiNetworkListOwnedArt();
+
 /// One-shot migration for a profile authored BEFORE animated media moved to
 /// the asset rail: the animation used to sit in `avatar`/`banner` as raw
 /// source bytes and rode every profile push. Converts ours in place — the
@@ -1388,6 +1415,98 @@ class GuestSyncMessageFfi {
           reactions == other.reactions &&
           fileMeta == other.fileMeta &&
           linkPreview == other.linkPreview;
+}
+
+/// One file that came out of a `.hollowpack`, with every value RECOMPUTED
+/// from the bytes rather than read out of the pack's manifest.
+class HollowpackFile {
+  /// `frame`, `avatar`, `avatar_anim`, `avatar_still`, `banner`,
+  /// `banner_anim` or `banner_still`.
+  final String role;
+
+  /// 64-hex SHA-256 of the bytes. This IS the art's identity: it is what
+  /// `update_profile(avatar_frame: ...)` names and what peers pull on the
+  /// asset rail.
+  final String hash;
+  final BigInt bytes;
+  final int w;
+  final int h;
+  final bool animated;
+
+  const HollowpackFile({
+    required this.role,
+    required this.hash,
+    required this.bytes,
+    required this.w,
+    required this.h,
+    required this.animated,
+  });
+
+  @override
+  int get hashCode =>
+      role.hashCode ^
+      hash.hashCode ^
+      bytes.hashCode ^
+      w.hashCode ^
+      h.hashCode ^
+      animated.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is HollowpackFile &&
+          runtimeType == other.runtimeType &&
+          role == other.role &&
+          hash == other.hash &&
+          bytes == other.bytes &&
+          w == other.w &&
+          h == other.h &&
+          animated == other.animated;
+}
+
+/// What an import landed, so the UI can say what was added and offer to wear
+/// it.
+class HollowpackImport {
+  final String itemId;
+  final String title;
+  final String artistName;
+  final String artistSlug;
+  final String artistUrl;
+  final String license;
+  final List<HollowpackFile> files;
+
+  const HollowpackImport({
+    required this.itemId,
+    required this.title,
+    required this.artistName,
+    required this.artistSlug,
+    required this.artistUrl,
+    required this.license,
+    required this.files,
+  });
+
+  @override
+  int get hashCode =>
+      itemId.hashCode ^
+      title.hashCode ^
+      artistName.hashCode ^
+      artistSlug.hashCode ^
+      artistUrl.hashCode ^
+      license.hashCode ^
+      files.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is HollowpackImport &&
+          runtimeType == other.runtimeType &&
+          itemId == other.itemId &&
+          title == other.title &&
+          artistName == other.artistName &&
+          artistSlug == other.artistSlug &&
+          artistUrl == other.artistUrl &&
+          license == other.license &&
+          files == other.files;
 }
 
 /// FFI-facing link preview for a URL embedded in a message.
@@ -2317,6 +2436,60 @@ sealed class NetworkEvent with _$NetworkEvent {
     required String channelName,
     String? category,
   }) = NetworkEvent_PublicChannelConfigChanged;
+}
+
+/// A piece of imported shop art and who made it.
+class OwnedArt {
+  final String hash;
+  final String role;
+  final String itemId;
+  final String title;
+  final String artistName;
+  final String artistSlug;
+  final String artistUrl;
+  final String license;
+
+  /// Unix milliseconds.
+  final PlatformInt64 importedAt;
+
+  const OwnedArt({
+    required this.hash,
+    required this.role,
+    required this.itemId,
+    required this.title,
+    required this.artistName,
+    required this.artistSlug,
+    required this.artistUrl,
+    required this.license,
+    required this.importedAt,
+  });
+
+  @override
+  int get hashCode =>
+      hash.hashCode ^
+      role.hashCode ^
+      itemId.hashCode ^
+      title.hashCode ^
+      artistName.hashCode ^
+      artistSlug.hashCode ^
+      artistUrl.hashCode ^
+      license.hashCode ^
+      importedAt.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is OwnedArt &&
+          runtimeType == other.runtimeType &&
+          hash == other.hash &&
+          role == other.role &&
+          itemId == other.itemId &&
+          title == other.title &&
+          artistName == other.artistName &&
+          artistSlug == other.artistSlug &&
+          artistUrl == other.artistUrl &&
+          license == other.license &&
+          importedAt == other.importedAt;
 }
 
 /// A frame blob that has been processed and cached locally, ready to be

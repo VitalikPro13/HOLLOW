@@ -188,6 +188,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   GuestSyncMessageFfi dco_decode_guest_sync_message_ffi(dynamic raw);
 
   @protected
+  HollowpackFile dco_decode_hollowpack_file(dynamic raw);
+
+  @protected
+  HollowpackImport dco_decode_hollowpack_import(dynamic raw);
+
+  @protected
   int dco_decode_i_32(dynamic raw);
 
   @protected
@@ -273,6 +279,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<GuestSyncMessageFfi> dco_decode_list_guest_sync_message_ffi(dynamic raw);
 
   @protected
+  List<HollowpackFile> dco_decode_list_hollowpack_file(dynamic raw);
+
+  @protected
   List<LabelFfi> dco_decode_list_label_ffi(dynamic raw);
 
   @protected
@@ -283,6 +292,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<MutedMemberFfi> dco_decode_list_muted_member_ffi(dynamic raw);
+
+  @protected
+  List<OwnedArt> dco_decode_list_owned_art(dynamic raw);
 
   @protected
   List<PendingJoinFfi> dco_decode_list_pending_join_ffi(dynamic raw);
@@ -429,6 +441,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<ShowcaseAsset>? dco_decode_opt_list_showcase_asset(dynamic raw);
+
+  @protected
+  OwnedArt dco_decode_owned_art(dynamic raw);
 
   @protected
   PendingJoinFfi dco_decode_pending_join_ffi(dynamic raw);
@@ -751,6 +766,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  HollowpackFile sse_decode_hollowpack_file(SseDeserializer deserializer);
+
+  @protected
+  HollowpackImport sse_decode_hollowpack_import(SseDeserializer deserializer);
+
+  @protected
   int sse_decode_i_32(SseDeserializer deserializer);
 
   @protected
@@ -860,6 +881,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  List<HollowpackFile> sse_decode_list_hollowpack_file(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   List<LabelFfi> sse_decode_list_label_ffi(SseDeserializer deserializer);
 
   @protected
@@ -874,6 +900,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<MutedMemberFfi> sse_decode_list_muted_member_ffi(
     SseDeserializer deserializer,
   );
+
+  @protected
+  List<OwnedArt> sse_decode_list_owned_art(SseDeserializer deserializer);
 
   @protected
   List<PendingJoinFfi> sse_decode_list_pending_join_ffi(
@@ -1070,6 +1099,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<ShowcaseAsset>? sse_decode_opt_list_showcase_asset(
     SseDeserializer deserializer,
   );
+
+  @protected
+  OwnedArt sse_decode_owned_art(SseDeserializer deserializer);
 
   @protected
   PendingJoinFfi sse_decode_pending_join_ffi(SseDeserializer deserializer);
@@ -1487,6 +1519,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_hollowpack_file(
+    HollowpackFile self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_hollowpack_import(
+    HollowpackImport self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_i_32(int self, SseSerializer serializer);
 
   @protected
@@ -1625,6 +1669,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_list_hollowpack_file(
+    List<HollowpackFile> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_list_label_ffi(List<LabelFfi> self, SseSerializer serializer);
 
   @protected
@@ -1644,6 +1694,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
     List<MutedMemberFfi> self,
     SseSerializer serializer,
   );
+
+  @protected
+  void sse_encode_list_owned_art(List<OwnedArt> self, SseSerializer serializer);
 
   @protected
   void sse_encode_list_pending_join_ffi(
@@ -1902,6 +1955,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
     List<ShowcaseAsset>? self,
     SseSerializer serializer,
   );
+
+  @protected
+  void sse_encode_owned_art(OwnedArt self, SseSerializer serializer);
 
   @protected
   void sse_encode_pending_join_ffi(

@@ -114,6 +114,13 @@ mod frb_generated;
 /// the crate's pub(crate) internals.
 #[cfg(all(feature = "forwarder", not(any(target_os = "android", target_os = "ios"))))]
 pub mod forwarder;
+/// `.hollowpack` — the artist shop's art container (format, the app's own
+/// encoders, and the ONE verification both the CLI and the importer run).
+/// Public so the `hollowpack` bin can link it through the rlib; intentionally
+/// OUTSIDE `api` so flutter_rust_bridge codegen never scans it (same rule as
+/// `push_enrich` and `forwarder`) — the app-facing FFI is
+/// `api::network::import_hollowpack`.
+pub mod hollowpack;
 mod identity;
 mod node;
 mod sentinel;

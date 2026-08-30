@@ -2169,7 +2169,7 @@ fn process_asset_for_send(
 // ── Avatar frames (issue #54) ─────────────────────────────────────────
 
 /// Frame art is 128x128, the same square an avatar is stored at.
-const FRAME_DIM: u32 = 128;
+pub const FRAME_DIM: u32 = 128;
 /// `AssetKind::Frame` receipt cap. A frame is decoration on every avatar you
 /// have ever seen, so it gets the emote ceiling, not the rail's 512 KB.
 const MAX_FRAME_ANIMATED_BYTES: usize = 262_144;
@@ -2218,6 +2218,60 @@ fn frame_centre_opacity(img: &image::RgbaImage) -> f32 {
 /// no em dashes (user-visible copy rule).
 fn frame_hole_error() -> String {
     "The middle of a frame has to be transparent so your avatar shows through".into()
+}
+
+/// Re-apply the see-through-centre gate to ALREADY-ENCODED frame bytes.
+///
+/// `process_avatar_frame` enforces this while it encodes, which covers every
+/// frame authored inside the app. A frame that arrives as bytes — a
+/// `.hollowpack` from the artist shop — never went through that function, so
+/// the gate has to be re-run against the blob itself or a hand-built pack
+/// could ship a frame that simply hides the avatar it decorates.
+///
+/// Deliberately does NOT re-encode: a frame's identity is the SHA-256 of its
+/// bytes, and a second generation through the encoder would mint a different
+/// hash (see `validate_sticker_blob`, same trade).
+pub fn validate_frame_centre(data: &[u8]) -> Result<(), String> {
+    if is_animated_webp(data) {
+        let decoder = webp_animation::Decoder::new(data)
+            .map_err(|e| format!("Failed to decode animated frame: {e}"))?;
+        let mut count = 0u32;
+        let mut opacity_sum = 0.0f32;
+        for frame in decoder.into_iter() {
+            let (fw, fh) = frame.dimensions();
+            if fw == 0 || fh == 0 {
+                return Err("Animated frame has zero dimensions".into());
+            }
+            let rgba = image::RgbaImage::from_raw(fw, fh, frame.data().to_vec())
+                .ok_or("Animated frame has a malformed pixel buffer")?;
+            opacity_sum += frame_centre_opacity(&rgba);
+            count += 1;
+            if count > 300 {
+                return Err("Animated frame has too many frames".into());
+            }
+        }
+        if count == 0 {
+            return Err("Animated frame has no frames".into());
+        }
+        // Averaged over frames, exactly as the encoder does: a bird crossing
+        // the middle for three frames of thirty is fine, a permanent blob is
+        // not.
+        if opacity_sum / count as f32 > FRAME_HOLE_MAX_OPAQUE {
+            return Err(frame_hole_error());
+        }
+        return Ok(());
+    }
+
+    let img = image::load_from_memory(data)
+        .map_err(|e| format!("Failed to decode frame: {e}"))?
+        .to_rgba8();
+    if img.width() == 0 || img.height() == 0 {
+        return Err("Frame has zero dimensions".into());
+    }
+    if frame_centre_opacity(&img) > FRAME_HOLE_MAX_OPAQUE {
+        return Err(frame_hole_error());
+    }
+    Ok(())
 }
 
 /// Largest centred square of a (w, h) canvas.
