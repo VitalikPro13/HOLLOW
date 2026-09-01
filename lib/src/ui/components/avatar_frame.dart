@@ -352,10 +352,10 @@ class AvatarFrameArt {
 /// Shared, ID-keyed decode cache for frame art.
 ///
 /// **This class is the reason frames are affordable.** Decoding every frame
-/// of an animated WebP into a `ui.Image` costs ~2 MB for a 128px 30-frame
-/// source, and a member panel can hold sixty avatars, so the naive
-/// one-decoder-per-widget approach is hundreds of megabytes for decoration.
-/// Two tiers instead:
+/// of an animated WebP into a `ui.Image` costs ~30 MB for a 512px 30-frame
+/// source (512x512 RGBA is 1 MB a frame), and a member panel can hold sixty
+/// avatars, so the naive one-decoder-per-widget approach is gigabytes for
+/// decoration. Two tiers instead:
 ///
 ///  * [still] - frame 0 only, shared by ID, LRU-capped. This is what every
 ///    list row renders, so N rows sharing a frame cost ONE image.
@@ -366,7 +366,10 @@ class AvatarFrameCache {
   AvatarFrameCache._();
   static final AvatarFrameCache instance = AvatarFrameCache._();
 
-  /// Frame-0 images: 128x128 RGBA is ~64 KB each, so this ceiling is ~3 MB.
+  /// Frame-0 images, decoded down to [_stillDecodeWidth]: 384x384 RGBA is
+  /// ~576 KB each, so this ceiling is ~27 MB and only if forty-eight
+  /// DIFFERENT frames are on screen at once. Uncapped, 512px art would have
+  /// made the same ceiling ~48 MB.
   static const int maxStills = 48;
 
   final Map<String, ui.Image> _stills = {};
@@ -417,9 +420,21 @@ class AvatarFrameCache {
     _stillOrder.add(id);
   }
 
+  /// Frame art is stored at up to 512px, and a frame paints at most ~146
+  /// logical px (a 110px profile-card avatar in its `size * kFrameScale`
+  /// box). 384 covers that to a 2.6x device pixel ratio and quarters what a
+  /// native-resolution still would cost, which matters because [maxStills] of
+  /// them are held at once. `allowUpscaling: false` keeps a SMALLER source at
+  /// its own size, and a single-axis target preserves the art's aspect ratio.
+  static const int _stillDecodeWidth = 384;
+
   Future<void> _decodeStill(String id, Uint8List bytes) async {
     try {
-      final codec = await ui.instantiateImageCodec(bytes);
+      final codec = await ui.instantiateImageCodec(
+        bytes,
+        targetWidth: _stillDecodeWidth,
+        allowUpscaling: false,
+      );
       final frame = await codec.getNextFrame();
       codec.dispose();
       _stills[id] = frame.image;

@@ -196,8 +196,11 @@ class ProfileSection extends ConsumerWidget {
 
   Widget _buildPreviewBanner(HollowTheme hollow, WidgetRef ref) {
     final bannerColor = _bannerColorFromId(localPeerId);
+    // 80 is this preview column's 200 width / 2.5, the one ratio every user
+    // banner surface, the banner cropper and Rust's 1200x480 storage share.
+    const bannerHeight = 80.0;
     final fallback = Container(
-      height: 70,
+      height: bannerHeight,
       decoration: BoxDecoration(
         gradient: LinearGradient(
           begin: Alignment.topLeft,
@@ -212,11 +215,11 @@ class ProfileSection extends ConsumerWidget {
     Widget banner = fallback;
     if (displayBanner != null && displayBanner.isNotEmpty) {
       banner = SizedBox(
-        height: 70,
+        height: bannerHeight,
         width: double.infinity,
         child: AnimatedGifImage(
           bytes: displayBanner,
-          height: 70,
+          height: bannerHeight,
           width: double.infinity,
           fit: BoxFit.cover,
           errorWidget: fallback,

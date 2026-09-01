@@ -82,21 +82,22 @@ impl AssetKind {
             AssetKind::Sticker => 524_288,    // 512 KB
             AssetKind::Gif => 2_097_152,      // 2 MB
             AssetKind::Avatar => 524_288,     // 512 KB (128px animated icon)
-            // Deliberately NOT the rail's 512 KB: a frame is decoration on
-            // every avatar you have ever seen, so it gets the tight emote
-            // ceiling (64 KB still, 256 KB animated) rather than the
-            // one-per-server budgets above.
-            AssetKind::Frame => 262_144,      // 256 KB (animated ceiling)
+            // == `image_convert::MAX_FRAME_ANIMATED_BYTES`, by the same rule
+            // Profile follows below, and pinned by the same shape of test.
+            // Still below the profile rail's 2 MB on purpose: a frame is
+            // decoration on every avatar you have ever seen.
+            AssetKind::Frame => 1024 * 1024,  // 1 MB (256 KB still)
             // == `image_convert::MAX_PROFILE_ANIM_BYTES`, and that equality is
             // a rule, not a coincidence: the wire cap IS the authoring limit,
             // so the two can never drift into "we encode what nobody will
             // accept". A test pins it.
-            AssetKind::Profile => 1_048_576,  // 1 MB
+            AssetKind::Profile => 2 * 1024 * 1024, // 2 MB
         }
     }
 
-    /// Max hashes per outbound request of this kind, so one reply bundle
-    /// stays bounded (hashes × recv_cap ≤ ~8 MB for every kind).
+    /// Max hashes per outbound request of this kind, so one reply bundle stays
+    /// bounded: `hashes × recv_cap` is at most [`MAX_BUNDLE_REPLY_BYTES`] for
+    /// every kind, and exactly that for Gif and Profile (4 × 2 MB = 8 MB).
     pub(crate) fn max_request_hashes(self) -> usize {
         match self {
             AssetKind::Emote => 20,
@@ -113,6 +114,12 @@ impl AssetKind {
 /// Responder-side budget for one `EmoteAssets` reply bundle (raw bytes,
 /// before base64). Bounds the reply even when a request names many hashes
 /// of blobs we happen to hold at larger kinds' sizes.
+///
+/// The comparison in `emotes::handle_emote_request` admits a bundle that lands
+/// EXACTLY here, which matters: a 4-hash Profile request is 4 × 2 MB = 8 MB on
+/// the nose, so an off-by-one there would silently drop the fourth asset of
+/// every full profile-media pull. The inbound guard's base64 headroom
+/// (`* 4 / 3 + 4096`) covers that bundle's JSON envelope too.
 pub(crate) const MAX_BUNDLE_REPLY_BYTES: usize = 8 * 1024 * 1024;
 
 /// 400x133 still thumbnail of a server's banner for the public-browse wire

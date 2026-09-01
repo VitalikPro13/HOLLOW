@@ -456,7 +456,15 @@ pub fn decode_animation_frames(data: &[u8]) -> Result<Vec<(image::RgbaImage, i32
 /// screen resolution) taking the process down, not to shape anybody's art.
 /// The per-asset limits that shape art are much tighter and live with each
 /// processor.
-const MAX_DECODE_RGBA_BYTES: usize = 256 * 1024 * 1024;
+///
+/// Raised with the encoder ceilings: a good 1200-wide banner now wants a
+/// 1080p-class source, and a 1920x1080 animation is 8.3 MB of RGBA per frame,
+/// so 256 MB refused sources that produce a perfectly ordinary banner. If this
+/// ever needs to grow again, the real fix is cropping DURING collect (each
+/// frame down to its crop rect before it joins the vec) rather than another
+/// bigger number - this function is the only place that holds a whole
+/// animation at source resolution.
+const MAX_DECODE_RGBA_BYTES: usize = 384 * 1024 * 1024;
 
 /// Centre-crop every frame to `crop` then resize to `(dw, dh)`.
 ///
@@ -555,10 +563,61 @@ mod tests {
         let png = make_frame_png(256, 256, 0.6);
         let (webp, animated) = process_avatar_frame(&png).expect("process frame");
         assert!(!animated, "a PNG source is a still frame");
-        assert!(webp.len() <= 65_536, "still frame must fit the 64 KB cap");
-        // 128x128, and the middle still reads through.
-        assert_eq!(alpha_at(&webp, 64, 64, 128), 0, "the middle must stay transparent");
-        assert_eq!(alpha_at(&webp, 2, 2, 128), 255, "the art must survive");
+        assert!(
+            webp.len() <= MAX_FRAME_STILL_BYTES,
+            "still frame must fit the still cap: {} bytes",
+            webp.len()
+        );
+        // A CEILING, not a target: 256 is under FRAME_DIM so it stays 256.
+        assert_eq!(get_image_dimensions(&webp).unwrap(), (256, 256));
+        // ...and the middle still reads through.
+        assert_eq!(alpha_at(&webp, 128, 128, 256), 0, "the middle must stay transparent");
+        assert_eq!(alpha_at(&webp, 2, 2, 256), 255, "the art must survive");
+    }
+
+    /// The ceiling rule, stated for frames: a small source keeps its own size,
+    /// and the 128x128 frames authored before the ceiling moved are still
+    /// exactly what the encoder produces for a 128x128 source.
+    #[test]
+    fn a_small_frame_source_is_never_upscaled() {
+        let png = make_frame_png(128, 128, 0.6);
+        let (webp, animated) = process_avatar_frame(&png).expect("process frame");
+        assert!(!animated);
+        assert_eq!(
+            get_image_dimensions(&webp).unwrap(),
+            (128, 128),
+            "128x128 in, 128x128 out - the ceiling never upscales"
+        );
+
+        // The same for an animated source, which takes the other branch.
+        let apng = make_test_apng(128, 128, 0.6);
+        let (webp, animated) = process_avatar_frame(&apng).expect("process animated frame");
+        assert!(animated);
+        assert_eq!(get_image_dimensions(&webp).unwrap(), (128, 128));
+    }
+
+    /// A frame source ABOVE the ceiling shrinks to it, square.
+    #[test]
+    fn a_large_frame_source_shrinks_to_the_ceiling() {
+        let png = make_frame_png(900, 900, 0.6);
+        let (webp, _) = process_avatar_frame(&png).expect("process frame");
+        assert_eq!(get_image_dimensions(&webp).unwrap(), (FRAME_DIM, FRAME_DIM));
+    }
+
+    /// The wire cap and the authoring limit are the SAME number for frames
+    /// too, for exactly the reason the Profile pin exists.
+    #[test]
+    fn frame_authoring_limit_equals_the_receipt_cap() {
+        assert_eq!(
+            MAX_FRAME_ANIMATED_BYTES,
+            crate::node::assets::AssetKind::Frame.recv_cap(),
+        );
+        const {
+            assert!(
+                MAX_FRAME_STILL_BYTES <= MAX_FRAME_ANIMATED_BYTES,
+                "a still frame can never be allowed to outgrow the animated cap"
+            )
+        };
     }
 
     #[test]
@@ -578,10 +637,12 @@ mod tests {
     #[test]
     fn avatar_frame_centre_crops_to_square() {
         // Wide source: the centred square is what survives, so the hole
-        // stays centred in the output rather than sliding off.
+        // stays centred in the output rather than sliding off. 200 is under
+        // the ceiling, so the square stays 200x200.
         let png = make_frame_png(400, 200, 0.7);
         let (webp, _) = process_avatar_frame(&png).expect("process frame");
-        assert_eq!(alpha_at(&webp, 64, 64, 128), 0);
+        assert_eq!(get_image_dimensions(&webp).unwrap(), (200, 200));
+        assert_eq!(alpha_at(&webp, 100, 100, 200), 0);
     }
 
     #[test]
@@ -1079,7 +1140,8 @@ mod tests {
 
     #[test]
     fn animated_avatar_lands_at_avatar_dim_with_a_still_companion() {
-        let gif = make_test_gif(400, 260);
+        // Above the ceiling in both axes, so the square crop has to shrink.
+        let gif = make_test_gif(800, 640);
         let (anim, still) = process_user_avatar_anim(&gif).expect("process avatar");
 
         assert!(is_animated_webp(&anim), "the animated half must stay animated");
@@ -1104,25 +1166,38 @@ mod tests {
         assert_eq!(get_image_dimensions(&anim).unwrap(), (96, 96));
         assert_eq!(get_image_dimensions(&still).unwrap(), (96, 96));
 
-        // Vitalik's own banner shape: 300x120 crops to 300x100 and stays there.
+        // Vitalik's own banner shape: 300x120 is exactly 2.5:1, so nothing is
+        // cropped away and nothing is scaled up.
         let gif = make_test_gif(300, 120);
         let (anim, still) = process_user_banner_anim(&gif).expect("process banner");
-        assert_eq!(get_image_dimensions(&anim).unwrap(), (300, 100));
-        assert_eq!(get_image_dimensions(&still).unwrap(), (300, 100));
+        assert_eq!(get_image_dimensions(&anim).unwrap(), (300, 120));
+        assert_eq!(get_image_dimensions(&still).unwrap(), (300, 120));
 
         // ...and the STILL path carries the same rule.
         let png = make_test_png(300, 120);
         let still = process_banner_image(&png).expect("still banner");
-        assert_eq!(get_image_dimensions(&still).unwrap(), (300, 100));
+        assert_eq!(get_image_dimensions(&still).unwrap(), (300, 120));
+
+        // A taller source is cropped to 2.5:1 and still never upscaled.
+        let png = make_test_png(300, 200);
+        let still = process_banner_image(&png).expect("still banner");
+        assert_eq!(get_image_dimensions(&still).unwrap(), (300, 120));
     }
 
     #[test]
-    fn animated_banner_crops_to_3to1_under_the_600x200_ceiling() {
+    fn animated_banner_crops_to_2_5to1_under_the_1200x480_ceiling() {
+        // 1200x900 is taller than 2.5:1, so the crop is 1200x480 and lands
+        // exactly on the ceiling with no resample.
         let gif = make_test_gif(1200, 900);
         let (anim, still) = process_user_banner_anim(&gif).expect("process banner");
-        assert_eq!(get_image_dimensions(&anim).unwrap(), (BANNER_W, BANNER_W / 3));
-        assert_eq!(get_image_dimensions(&still).unwrap(), (BANNER_W, BANNER_W / 3));
+        assert_eq!(get_image_dimensions(&anim).unwrap(), (BANNER_W, BANNER_H));
+        assert_eq!(get_image_dimensions(&still).unwrap(), (BANNER_W, BANNER_H));
         assert!(anim.len() <= MAX_PROFILE_ANIM_BYTES);
+        assert_eq!(
+            BANNER_W * 2,
+            BANNER_H * 5,
+            "the stored banner box has to stay 2.5:1"
+        );
     }
 
     /// A screen recording used as a banner is refused with advice, never
@@ -1130,7 +1205,7 @@ mod tests {
     /// worse than telling them what fits.
     #[test]
     fn an_over_long_animation_is_refused_with_the_length_that_fits() {
-        let per_frame = BANNER_W as usize * (BANNER_W / 3) as usize * 4;
+        let per_frame = BANNER_W as usize * BANNER_H as usize * 4;
         let budget = MAX_PROFILE_DECODED_BYTES / per_frame;
 
         use image::codecs::gif::GifEncoder;
@@ -1142,7 +1217,7 @@ mod tests {
                 let shade = (i % 256) as u8;
                 encoder
                     .encode_frame(Frame::from_parts(
-                        RgbaImage::from_pixel(BANNER_W, BANNER_W / 3, Rgba([shade, 20, 40, 255])),
+                        RgbaImage::from_pixel(BANNER_W, BANNER_H, Rgba([shade, 20, 40, 255])),
                         0,
                         0,
                         Delay::from_numer_denom_ms(100, 1),
@@ -1316,40 +1391,77 @@ pub fn convert_from_webp(
 ///
 /// The profile card paints the avatar at 110 LOGICAL pixels
 /// (`profile_card_body.dart`), which is 165 physical on a 1.5x display and 220
-/// on a 2x one — so the old 128 was already being upscaled on the surface that
-/// shows an avatar largest. 184 is also exactly a Steam avatar's native size,
-/// which is where most animated uploads come from, so the common case now
-/// needs no resampling at all.
-pub const AVATAR_DIM: u32 = 184;
+/// on a 2x one, and interface scaling can push that further still. 512 is the
+/// artist-shop ceiling: art bought from a shop has to survive every surface
+/// Hollow paints it on, including a zoomed 2x display, and 184 was already
+/// being upscaled there.
+///
+/// This is a CEILING for animated avatars and the pack importer (`fit_dims`
+/// only ever shrinks). The still avatar path still resizes TO it, because that
+/// blob is the one old clients and the guest thumb read and a predictable
+/// square is worth more there than the last few kilobytes.
+pub const AVATAR_DIM: u32 = 512;
 
 /// A server's still icon. Servers render far smaller than a profile card (the
 /// strip is ~48px), and this one is base64 INSIDE the CRDT rather than on the
 /// asset rail, so every extra kilobyte replicates to every member.
 pub const SERVER_ICON_DIM: u32 = 128;
 
-/// A person's banner is 3:1 and at most `BANNER_W` x `BANNER_W / 3`
-/// (600x200) — a CEILING rather than a target, so a source already smaller
+/// A person's banner is 2.5:1 and at most [`BANNER_W`] x [`BANNER_H`]
+/// (1200x480) — a CEILING rather than a target, so a source already smaller
 /// keeps its own size. Upscaling manufactures no detail and multiplies the
 /// decoded RGBA every viewer holds while the profile card is open.
 ///
-/// Only the width is a constant because a 3:1 crop is always wider than it is
-/// tall, so bounding the longest edge bounds the box.
-pub const BANNER_W: u32 = 600;
+/// 2.5:1 is the profile dialog's own shape: it paints the banner in a 560x224
+/// box, and a 3:1 store meant the top and bottom of everyone's art was cropped
+/// away on the one surface that shows a banner largest.
+///
+/// The SERVER banner is a different role that happens to share the word: it
+/// stays 3:1 at 960x320, encoded by `process_server_banner_image`.
+pub const BANNER_W: u32 = 1200;
+
+/// The height half of the banner ceiling. Written out rather than derived,
+/// because 2.5:1 does not divide evenly and a `BANNER_W * 2 / 5` scattered
+/// across four files is how the still path and the animated path drift apart.
+pub const BANNER_H: u32 = 480;
 
 /// Byte ceiling on an animated avatar or banner. This is DELIBERATELY equal
 /// to `AssetKind::Profile::recv_cap()`, and a test pins the equality: the
 /// wire cap and the authoring limit are the same number by construction, so
 /// they cannot drift into "we encode what nobody will accept".
-pub const MAX_PROFILE_ANIM_BYTES: usize = 1_048_576;
+pub const MAX_PROFILE_ANIM_BYTES: usize = 2 * 1024 * 1024;
+
+/// Byte ceiling on a person's STILL avatar. Rides the pushed profile blob
+/// rather than the pulled rail, so it is far tighter than the animation's.
+const MAX_AVATAR_STILL_BYTES: usize = 250_000;
+
+/// Byte ceiling on a person's STILL banner. Wider than the avatar's for the
+/// same reason the box is: 1200x480 is five times the pixels of 512x512.
+const MAX_BANNER_STILL_BYTES: usize = 400_000;
+
+/// Byte ceiling on a SERVER's still icon, which is base64 INSIDE the CRDT and
+/// therefore replicates to every member of every server. Nothing to do with
+/// the two above, and deliberately unmoved by the profile-art bump.
+const MAX_SERVER_ICON_STILL_BYTES: usize = 100_000;
+
+/// Quality rungs a still profile asset walks before it is refused. One Q80
+/// encode was enough at 184x184; at 512x512 and 1200x480 a photographic source
+/// overflows often enough that refusing on the first try would read as "Hollow
+/// won't take my avatar" rather than as a limit.
+const STILL_QUALITY_LADDER: [f32; 3] = [80.0, 75.0, 70.0];
 
 /// Decoded-RGBA budget for one animated profile asset (`frames × w × h × 4`).
 ///
 /// The cost that matters for animation is not the stored bytes, it is what a
 /// viewer holds decoded while it plays. A 24-second screen recording used as
-/// a banner is 238 frames at 600x200 = 109 MB of RGBA, against a real
-/// animated banner's 6 MB. This refuses that with an explanation instead of
+/// a banner is 238 frames at 1200x480 = 548 MB of RGBA, against a real
+/// animated banner's 30 MB. This refuses that with an explanation instead of
 /// silently dropping frames — nobody's art gets degraded behind their back.
-const MAX_PROFILE_DECODED_BYTES: usize = 48 * 1024 * 1024;
+///
+/// Scaled with the ceiling on purpose: at 1200x480 the old 48 MB budget
+/// refused anything over about 20 frames, which is a ban on animated banners
+/// dressed up as a memory guard.
+const MAX_PROFILE_DECODED_BYTES: usize = 128 * 1024 * 1024;
 
 /// Source-file ceiling for animated profile media. The picker rejects on what
 /// we PRODUCE, not on what was picked, so this is the one bound left on the
@@ -1363,11 +1475,25 @@ fn crop_rect_square(w: u32, h: u32) -> (u32, u32, u32, u32) {
 }
 
 /// Largest centred 3:1 region of a `(w, h)` canvas, as `(x, y, w, h)`.
+/// The SERVER banner's shape (960x320). A person's banner is 2.5:1 — see
+/// [`crop_rect_5to2`].
 fn crop_rect_3to1(w: u32, h: u32) -> (u32, u32, u32, u32) {
     let (cw, ch) = if w >= h * 3 {
         (h * 3, h)
     } else {
         (w, (w / 3).max(1))
+    };
+    ((w - cw) / 2, (h - ch) / 2, cw, ch)
+}
+
+/// Largest centred 5:2 (2.5:1) region of a `(w, h)` canvas, as `(x, y, w, h)`.
+/// A PERSON's banner shape, matching the 560x224 box the profile dialog paints
+/// it in. Integer maths throughout: `2w >= 5h` is "wider than 2.5:1".
+fn crop_rect_5to2(w: u32, h: u32) -> (u32, u32, u32, u32) {
+    let (cw, ch) = if 2 * w >= 5 * h {
+        ((h * 5 / 2).max(1), h)
+    } else {
+        (w, (w * 2 / 5).max(1))
     };
     ((w - cw) / 2, (h - ch) / 2, cw, ch)
 }
@@ -1387,13 +1513,49 @@ fn fit_dims(w: u32, h: u32, max_dim: u32) -> (u32, u32) {
 }
 
 /// Process a raw image into a person's avatar: centre-crop square, resize to
-/// [`AVATAR_DIM`], encode as WebP.
+/// [`AVATAR_DIM`], encode as WebP under [`MAX_AVATAR_STILL_BYTES`].
 pub fn process_avatar_image(data: &[u8]) -> Result<Vec<u8>, String> {
-    process_still_avatar(data, AVATAR_DIM)
+    process_still_square(
+        data,
+        AVATAR_DIM,
+        MAX_AVATAR_STILL_BYTES,
+        &STILL_QUALITY_LADDER,
+        "Avatar image",
+    )
 }
 
-/// The same, at an explicit edge. Server icons pass [`SERVER_ICON_DIM`].
+/// The SERVER icon still, at [`SERVER_ICON_DIM`].
+///
+/// Deliberately its own entry point rather than an argument on the avatar
+/// path: this blob is base64 INSIDE the CRDT, so every kilobyte replicates to
+/// every member, and it keeps the 100 KB single-encode rule the person's
+/// avatar has now outgrown. `dim` stays a parameter because the pack tests
+/// build a legally sized square through it.
 pub fn process_still_avatar(data: &[u8], dim: u32) -> Result<Vec<u8>, String> {
+    process_still_square(
+        data,
+        dim,
+        MAX_SERVER_ICON_STILL_BYTES,
+        &[80.0],
+        "Avatar image",
+    )
+}
+
+/// Centre-crop square, resize TO `dim`, and walk `qualities` until the encode
+/// fits `max_bytes`.
+///
+/// The resize is exact rather than a ceiling: this is the blob old clients and
+/// the guest thumb read out of a pushed profile, and a predictable square is
+/// worth more there than the handful of kilobytes a small source would save.
+/// The animated path and the pack importer are the ones that treat
+/// [`AVATAR_DIM`] as a ceiling.
+fn process_still_square(
+    data: &[u8],
+    dim: u32,
+    max_bytes: usize,
+    qualities: &[f32],
+    label: &str,
+) -> Result<Vec<u8>, String> {
     let img = image::load_from_memory(data)
         .map_err(|e| format!("Failed to decode image: {e}"))?;
 
@@ -1407,8 +1569,8 @@ pub fn process_still_avatar(data: &[u8], dim: u32) -> Result<Vec<u8>, String> {
 
     let cropped = img.crop_imm(x, y, side, side);
     // Skip the resample when the crop is already the target: resizing flat art
-    // manufactures intermediate colours that cost real bytes, and a Steam
-    // avatar arrives at exactly AVATAR_DIM.
+    // manufactures intermediate colours that cost real bytes, and plenty of
+    // sources arrive at exactly the edge we want.
     let rgba = if side == dim {
         cropped.to_rgba8()
     } else {
@@ -1417,13 +1579,17 @@ pub fn process_still_avatar(data: &[u8], dim: u32) -> Result<Vec<u8>, String> {
 
     // Lossy, like the showcase encoders: lossless WebP size is
     // content-dependent, so photographic avatars randomly blew the cap.
-    let buf = encode_lossy_webp_still(rgba.as_raw(), dim, dim, 80.0)?;
-
-    if buf.len() > 100_000 {
-        return Err("Avatar image too large after processing (>100KB)".into());
+    for &quality in qualities {
+        let buf = encode_lossy_webp_still(rgba.as_raw(), dim, dim, quality)?;
+        if buf.len() <= max_bytes {
+            return Ok(buf);
+        }
     }
 
-    Ok(buf)
+    Err(format!(
+        "{label} is too large after processing (over {} KB)",
+        max_bytes / 1000
+    ))
 }
 
 /// Resize an existing avatar to a 64x64 thumbnail for public channel sync responses.
@@ -1557,12 +1723,12 @@ pub fn process_emote_image(data: &[u8]) -> Result<(Vec<u8>, bool), String> {
     Ok((buf, false))
 }
 
-/// Process a raw image into a person's still banner: centre-crop to 3:1,
-/// then shrink to at most [`BANNER_W`] wide — a CEILING, never a resize
-/// target.
+/// Process a raw image into a person's still banner: centre-crop to 2.5:1,
+/// then shrink to at most [`BANNER_W`] x [`BANNER_H`] — a CEILING, never a
+/// resize target.
 ///
 /// The ceiling matters even for a still: upscaling a 300x120 source to
-/// 600x200 invents no detail, and the resample manufactures intermediate
+/// 1200x480 invents no detail, and the resample manufactures intermediate
 /// colours that were not in the source and cost real bytes in a blob that is
 /// PUSHED to everyone who syncs with you.
 pub fn process_banner_image(data: &[u8]) -> Result<Vec<u8>, String> {
@@ -1574,7 +1740,7 @@ pub fn process_banner_image(data: &[u8]) -> Result<Vec<u8>, String> {
         return Err("Image has zero dimensions".into());
     }
 
-    let (x, y, cw, ch) = crop_rect_3to1(w, h);
+    let (x, y, cw, ch) = crop_rect_5to2(w, h);
     let (dw, dh) = fit_dims(cw, ch, BANNER_W);
 
     let cropped = img.crop_imm(x, y, cw, ch);
@@ -1587,13 +1753,17 @@ pub fn process_banner_image(data: &[u8]) -> Result<Vec<u8>, String> {
 
     // Lossy for the same reason as avatars/covers: lossless size is
     // content-dependent, so photographic banners randomly failed to upload.
-    let buf = encode_lossy_webp_still(rgba.as_raw(), dw, dh, 80.0)?;
-
-    if buf.len() > 200_000 {
-        return Err("Banner image too large after processing (>200KB)".into());
+    for &quality in &STILL_QUALITY_LADDER {
+        let buf = encode_lossy_webp_still(rgba.as_raw(), dw, dh, quality)?;
+        if buf.len() <= MAX_BANNER_STILL_BYTES {
+            return Ok(buf);
+        }
     }
 
-    Ok(buf)
+    Err(format!(
+        "Banner image is too large after processing (over {} KB)",
+        MAX_BANNER_STILL_BYTES / 1000
+    ))
 }
 
 /// Process a raw image into a SERVER banner (content-addressed asset,
@@ -1874,26 +2044,41 @@ pub fn process_user_avatar_anim(data: &[u8]) -> Result<(Vec<u8>, Vec<u8>), Strin
         (AVATAR_DIM, 85.0),
         (AVATAR_DIM, 80.0),
         (AVATAR_DIM, 75.0),
-        (138, 80.0),
+        (AVATAR_DIM * 3 / 4, 80.0),
     ];
-    process_profile_anim(data, crop_rect_square, &LADDER, 100_000, "avatar")
+    process_profile_anim(
+        data,
+        crop_rect_square,
+        &LADDER,
+        MAX_AVATAR_STILL_BYTES,
+        "avatar",
+    )
 }
 
 /// Process an animated source into a person's ANIMATED BANNER plus its STILL
-/// companion, returned as `(animated, still)`. 3:1 centre crop,
-/// [`BANNER_W`] CEILING (600x200), ART preset.
+/// companion, returned as `(animated, still)`. 2.5:1 centre crop,
+/// [`BANNER_W`] x [`BANNER_H`] CEILING (1200x480), ART preset.
 ///
 /// The ceiling is load-bearing. A 300x120 source stays 300x120: targeting
-/// 600x200 unconditionally would upscale it, tripling the decoded RGBA every
-/// viewer holds for detail that is not in the file.
+/// 1200x480 unconditionally would upscale it sixteen-fold in area, multiplying
+/// the decoded RGBA every viewer holds for detail that is not in the file.
+///
+/// The fallback rung is three quarters of the ceiling, so its height comes out
+/// at 2.5:1 too (900x360).
 pub fn process_user_banner_anim(data: &[u8]) -> Result<(Vec<u8>, Vec<u8>), String> {
     const LADDER: [(u32, f32); 4] = [
         (BANNER_W, 85.0),
         (BANNER_W, 80.0),
         (BANNER_W, 75.0),
-        (450, 80.0),
+        (BANNER_W * 3 / 4, 80.0),
     ];
-    process_profile_anim(data, crop_rect_3to1, &LADDER, 200_000, "banner")
+    process_profile_anim(
+        data,
+        crop_rect_5to2,
+        &LADDER,
+        MAX_BANNER_STILL_BYTES,
+        "banner",
+    )
 }
 
 /// The one animated path behind both profile media kinds: decode ONCE, crop
@@ -1936,10 +2121,17 @@ fn process_profile_anim(
     // stays full size even when the animation had to step down to fit.
     let (sw, sh) = fit_dims(cw, ch, ladder[0].0);
     let still_frames = crop_resize_frames(&frames[..1], (cx, cy, cw, ch), sw, sh);
-    let still = encode_lossy_webp_still(still_frames[0].0.as_raw(), sw, sh, 80.0)?;
-    if still.len() > max_still_bytes {
-        return Err(format!("{label} is too detailed to store as a still"));
+    let mut still: Option<Vec<u8>> = None;
+    for &quality in &STILL_QUALITY_LADDER {
+        let buf = encode_lossy_webp_still(still_frames[0].0.as_raw(), sw, sh, quality)?;
+        if buf.len() <= max_still_bytes {
+            still = Some(buf);
+            break;
+        }
     }
+    let Some(still) = still else {
+        return Err(format!("{label} is too detailed to store as a still"));
+    };
 
     // Refuse on the ceiling only: the guard is about what a viewer holds
     // decoded, later rungs are smaller, and sizing the advice off the ceiling
@@ -1975,7 +2167,8 @@ fn process_profile_anim(
         }
     }
     Err(format!(
-        "Animated {label} is too large after conversion (over 1MB)"
+        "Animated {label} is too large after conversion (over {} MB)",
+        MAX_PROFILE_ANIM_BYTES / (1024 * 1024)
     ))
 }
 
@@ -2168,13 +2361,24 @@ fn process_asset_for_send(
 
 // ── Avatar frames (issue #54) ─────────────────────────────────────────
 
-/// Frame art is 128x128, the same square an avatar is stored at.
-pub const FRAME_DIM: u32 = 128;
-/// `AssetKind::Frame` receipt cap. A frame is decoration on every avatar you
-/// have ever seen, so it gets the emote ceiling, not the rail's 512 KB.
-const MAX_FRAME_ANIMATED_BYTES: usize = 262_144;
+/// Frame art is square and at most 512x512, the same box an avatar is stored
+/// in — a CEILING, never a resize target. A 128x128 frame authored before this
+/// bump is still exactly as legal as it was, which is what keeps every frame
+/// and every `.hollowpack` already in the world valid.
+pub const FRAME_DIM: u32 = 512;
+/// `AssetKind::Frame` receipt cap, and equal to it by construction (a test
+/// pins the equality). A frame is decoration on every avatar you have ever
+/// seen, so it stays below the profile rail's 2 MB.
+const MAX_FRAME_ANIMATED_BYTES: usize = 1024 * 1024;
 /// Stills are held to a quarter of that — there is no animation to pay for.
-const MAX_FRAME_STILL_BYTES: usize = 65_536;
+const MAX_FRAME_STILL_BYTES: usize = 262_144;
+/// Quality-then-size rungs the frame encoder walks before refusing. Legal only
+/// now that frame dimensions are a ceiling: the last rung genuinely shrinks.
+const FRAME_LADDER: [(u32, f32); 3] = [
+    (FRAME_DIM, 80.0),
+    (FRAME_DIM, 75.0),
+    (FRAME_DIM * 3 / 4, 80.0),
+];
 /// Diameter of the centre disc the transparency gate samples, as a fraction
 /// of the frame box. The avatar fills the middle 1/1.33 = 75% of the box, so
 /// a 42% disc sits comfortably inside it: art may hug or cross the avatar's
@@ -2281,9 +2485,14 @@ fn frame_crop_rect(w: u32, h: u32) -> (u32, u32, u32, u32) {
 }
 
 /// Process a user-picked image into an AVATAR FRAME blob
-/// (content-addressed asset, `AssetKind::Frame`): square centre crop ->
-/// 128x128, animated WebP Q80 for GIF / animated-WebP input and a still
-/// lossy WebP otherwise. Returns `(bytes, animated)`.
+/// (content-addressed asset, `AssetKind::Frame`): square centre crop, shrunk
+/// to at most [`FRAME_DIM`], animated WebP for GIF / animated-WebP input and a
+/// still lossy WebP otherwise. Returns `(bytes, animated)`.
+///
+/// [`FRAME_DIM`] is a CEILING, not a resize target: a 300x300 source stays
+/// 300x300 and a 128x128 one stays 128x128, matching the rule the avatar and
+/// banner paths already follow. Upscaling invents no detail and multiplies the
+/// decoded RGBA every viewer holds for a decoration painted at avatar size.
 ///
 /// Frames paint IN FRONT of the avatar, so this also enforces the authoring
 /// gate that makes that work: the centre of the box has to be see-through,
@@ -2295,58 +2504,58 @@ pub fn process_avatar_frame(data: &[u8]) -> Result<(Vec<u8>, bool), String> {
     // path below would flatten exactly the art people bring here — silently,
     // because a frozen frame still uploads "successfully".
     if is_animated_image(data) && !is_animated_webp(data) {
-        let frames = decode_animation_frames(data)?;
-        let (w, h) = (frames[0].0.width(), frames[0].0.height());
-        if w == 0 || h == 0 {
-            return Err("Animation has zero dimensions".into());
-        }
-        let (x, y, cw, ch) = frame_crop_rect(w, h);
-
-        let prepared = crop_resize_frames(&frames, (x, y, cw, ch), FRAME_DIM, FRAME_DIM);
-        let opacity_sum: f32 = prepared.iter().map(|(f, _)| frame_centre_opacity(f)).sum();
-        if opacity_sum / prepared.len() as f32 > FRAME_HOLE_MAX_OPAQUE {
-            return Err(frame_hole_error());
-        }
-
-        let webp = encode_animation_frames(&prepared, (FRAME_DIM, FRAME_DIM), 80.0)?;
-        if webp.len() > MAX_FRAME_ANIMATED_BYTES {
-            return Err("Animated frame is too large after processing (over 256 KB)".into());
-        }
-        return Ok((webp, true));
+        return encode_frame_animation(&decode_animation_frames(data)?);
     }
 
-    // Animated WebP: the image crate cannot re-encode animation, so the
-    // source rides as-is under the cap (same trade as animated server
-    // icons). The container is still verified, and every frame is decoded
-    // for the transparency gate.
+    // Animated WebP already square and within the ceiling: the source rides
+    // as-is, so there is no second generation of loss and the content hash
+    // survives a re-upload (same trade as animated server icons). The
+    // container is still verified, and every frame is decoded for the
+    // transparency gate.
     if is_animated_webp(data) {
-        if data.len() > MAX_FRAME_ANIMATED_BYTES {
-            return Err("Animated frame is too large (over 256 KB)".into());
-        }
         let decoder = webp_animation::Decoder::new(data)
             .map_err(|e| format!("Failed to decode animated WebP: {e}"))?;
-        let mut count = 0u32;
-        let mut opacity_sum = 0.0f32;
+        let mut frames: Vec<(image::RgbaImage, i32)> = Vec::new();
+        let mut prev_ts: i32 = 0;
+        // Same running RGBA budget `decode_animation_frames` keeps: a compact
+        // animated WebP can decode to orders of magnitude more than its file
+        // size, and holding whole frames at source resolution is the one place
+        // that matters.
+        let mut decoded = 0usize;
         for frame in decoder.into_iter() {
             let (fw, fh) = frame.dimensions();
             if fw == 0 || fh == 0 {
                 return Err("Animated frame has zero dimensions".into());
             }
+            decoded += fw as usize * fh as usize * 4;
+            if decoded > MAX_DECODE_RGBA_BYTES {
+                return Err("Animation is too large to decode".into());
+            }
             let rgba = image::RgbaImage::from_raw(fw, fh, frame.data().to_vec())
                 .ok_or("Animated frame has a malformed pixel buffer")?;
-            opacity_sum += frame_centre_opacity(&rgba);
-            count += 1;
-            if count > 300 {
+            if frames.len() >= 300 {
                 return Err("Animated frame has too many frames".into());
             }
+            let duration_ms = (frame.timestamp() - prev_ts).max(1);
+            prev_ts = frame.timestamp();
+            frames.push((rgba, duration_ms));
         }
-        if count == 0 {
+        if frames.is_empty() {
             return Err("Animated frame has no frames".into());
         }
-        if opacity_sum / count as f32 > FRAME_HOLE_MAX_OPAQUE {
-            return Err(frame_hole_error());
+        let (w, h) = (frames[0].0.width(), frames[0].0.height());
+        let passes_through = w == h && w <= FRAME_DIM && data.len() <= MAX_FRAME_ANIMATED_BYTES;
+        if passes_through {
+            let opacity_sum: f32 = frames.iter().map(|(f, _)| frame_centre_opacity(f)).sum();
+            if opacity_sum / frames.len() as f32 > FRAME_HOLE_MAX_OPAQUE {
+                return Err(frame_hole_error());
+            }
+            return Ok((data.to_vec(), true));
         }
-        return Ok((data.to_vec(), true));
+        // Not square, over the ceiling, or over the cap: crop and re-encode
+        // rather than store a blob the importer would refuse and every reader
+        // would have to letterbox at paint time.
+        return encode_frame_animation(&frames);
     }
 
     let img = image::load_from_memory(data)
@@ -2356,16 +2565,72 @@ pub fn process_avatar_frame(data: &[u8]) -> Result<(Vec<u8>, bool), String> {
         return Err("Image has zero dimensions".into());
     }
     let (x, y, cw, ch) = frame_crop_rect(w, h);
-    let resized = img
-        .crop_imm(x, y, cw, ch)
-        .resize_exact(FRAME_DIM, FRAME_DIM, FilterType::Lanczos3)
-        .to_rgba8();
-    if frame_centre_opacity(&resized) > FRAME_HOLE_MAX_OPAQUE {
-        return Err(frame_hole_error());
+    let cropped = img.crop_imm(x, y, cw, ch);
+    // The first rungs share the ceiling and drop only quality, so the scaled
+    // pixels (and the transparency gate over them) are computed once per size.
+    let mut rgba = image::RgbaImage::new(1, 1);
+    let mut rgba_dims = (0u32, 0u32);
+    for &(ceiling, quality) in &FRAME_LADDER {
+        let (dw, dh) = fit_dims(cw, ch, ceiling);
+        if rgba_dims != (dw, dh) {
+            // A ceiling, not a target: skip the resample when the crop already
+            // fits, exactly as `crop_resize_frames` does.
+            rgba = if (cw, ch) == (dw, dh) {
+                cropped.to_rgba8()
+            } else {
+                cropped
+                    .resize_exact(dw, dh, FilterType::Lanczos3)
+                    .to_rgba8()
+            };
+            rgba_dims = (dw, dh);
+            if frame_centre_opacity(&rgba) > FRAME_HOLE_MAX_OPAQUE {
+                return Err(frame_hole_error());
+            }
+        }
+        let buf = encode_lossy_webp_still(rgba.as_raw(), dw, dh, quality)?;
+        if buf.len() <= MAX_FRAME_STILL_BYTES {
+            return Ok((buf, false));
+        }
     }
-    let buf = encode_lossy_webp_still(resized.as_raw(), FRAME_DIM, FRAME_DIM, 80.0)?;
-    if buf.len() > MAX_FRAME_STILL_BYTES {
-        return Err("Frame is too large after processing (over 64 KB)".into());
+    Err(format!(
+        "Frame is too large after processing (over {} KB)",
+        MAX_FRAME_STILL_BYTES / 1024
+    ))
+}
+
+/// Centre-crop decoded frames square, shrink to at most [`FRAME_DIM`], run the
+/// see-through-centre gate and walk [`FRAME_LADDER`] until the encode fits
+/// [`MAX_FRAME_ANIMATED_BYTES`].
+fn encode_frame_animation(
+    frames: &[(image::RgbaImage, i32)],
+) -> Result<(Vec<u8>, bool), String> {
+    let (w, h) = (frames[0].0.width(), frames[0].0.height());
+    if w == 0 || h == 0 {
+        return Err("Animation has zero dimensions".into());
     }
-    Ok((buf, false))
+    let (x, y, cw, ch) = frame_crop_rect(w, h);
+
+    let mut prepared: Vec<(image::RgbaImage, i32)> = Vec::new();
+    let mut prepared_dims = (0u32, 0u32);
+    for &(ceiling, quality) in &FRAME_LADDER {
+        let (dw, dh) = fit_dims(cw, ch, ceiling);
+        if prepared_dims != (dw, dh) {
+            prepared = crop_resize_frames(frames, (x, y, cw, ch), dw, dh);
+            prepared_dims = (dw, dh);
+            // Averaged over frames: a bird crossing the middle for three
+            // frames of thirty is fine, a permanent blob is not.
+            let opacity_sum: f32 = prepared.iter().map(|(f, _)| frame_centre_opacity(f)).sum();
+            if opacity_sum / prepared.len() as f32 > FRAME_HOLE_MAX_OPAQUE {
+                return Err(frame_hole_error());
+            }
+        }
+        let webp = encode_animation_frames(&prepared, (dw, dh), quality)?;
+        if webp.len() <= MAX_FRAME_ANIMATED_BYTES {
+            return Ok((webp, true));
+        }
+    }
+    Err(format!(
+        "Animated frame is too large after processing (over {} MB)",
+        MAX_FRAME_ANIMATED_BYTES / (1024 * 1024)
+    ))
 }

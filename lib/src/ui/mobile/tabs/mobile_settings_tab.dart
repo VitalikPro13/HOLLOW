@@ -797,13 +797,16 @@ class _ProfileTabState extends ConsumerState<_ProfileTab> {
       return;
     }
 
+    // 2.5:1 for the USER banner, matching every profile banner surface and
+    // Rust's 1200x480 storage. Server banners are a different feature and
+    // stay at 3:1.
     final isMobile = Platform.isAndroid || Platform.isIOS;
     final cropped = isMobile
         ? await showMobileImageCrop(
-            context: context, imageBytes: bytes, aspectRatio: 3.0, title: 'Crop Banner',
+            context: context, imageBytes: bytes, aspectRatio: 2.5, title: 'Crop Banner',
           )
         : await showImageCropDialog(
-            context: context, imageBytes: bytes, aspectRatio: 3.0, title: 'Crop Banner',
+            context: context, imageBytes: bytes, aspectRatio: 2.5, title: 'Crop Banner',
           );
     if (cropped == null || !mounted) return;
 
@@ -878,7 +881,7 @@ class _ProfileTabState extends ConsumerState<_ProfileTab> {
             _bannerBusy = false;
           }
         });
-        // Rust's message is the useful one ("about 9s fits at 600x200").
+        // Rust's message is the useful one ("about 9s fits at 1200x480").
         HollowToast.show(context, '$e', type: HollowToastType.error);
       }
     }();
@@ -997,33 +1000,47 @@ class _ProfileTabState extends ConsumerState<_ProfileTab> {
                         _bannerChanged = true;
                       })
                     : null,
-                child: SizedBox(
-                  height: 100,
-                  width: double.infinity,
-                  child: Stack(
-                    fit: StackFit.expand,
-                    children: [
-                      _bannerChanged && _pendingBanner != null && _pendingBanner!.isNotEmpty
-                          ? Image.memory(_pendingBanner!, fit: BoxFit.cover)
-                          : bannerBytes != null && bannerBytes.isNotEmpty
-                              ? AnimatedGifImage(
-                                  bytes: bannerBytes, height: 100, width: double.infinity, fit: BoxFit.cover,
-                                  errorWidget: _bannerGradient(bannerColor),
-                                )
-                              : _bannerGradient(bannerColor),
-                      if (_bannerBusy)
-                        Positioned(
-                          top: HollowSpacing.xs,
-                          right: HollowSpacing.xs,
-                          child: SizedBox(
-                            width: 14, height: 14,
-                            child: CircularProgressIndicator(
-                              strokeWidth: 2, color: hollow.textSecondary,
+                // The height TRACKS the card's width at 2.5:1 — the one ratio
+                // every user banner surface, the banner cropper and Rust's
+                // 1200x480 storage share. This preview used to be the lone
+                // surface cropping the OPPOSITE axis (a flat 100px read as
+                // roughly 3.6:1). LayoutBuilder rather than an AspectRatio so
+                // AnimatedGifImage still gets a real number to decode against.
+                child: LayoutBuilder(
+                  builder: (context, constraints) {
+                    final width = constraints.maxWidth.isFinite
+                        ? constraints.maxWidth
+                        : MediaQuery.sizeOf(context).width;
+                    final bannerHeight = width / 2.5;
+                    return SizedBox(
+                      height: bannerHeight,
+                      width: double.infinity,
+                      child: Stack(
+                        fit: StackFit.expand,
+                        children: [
+                          _bannerChanged && _pendingBanner != null && _pendingBanner!.isNotEmpty
+                              ? Image.memory(_pendingBanner!, fit: BoxFit.cover)
+                              : bannerBytes != null && bannerBytes.isNotEmpty
+                                  ? AnimatedGifImage(
+                                      bytes: bannerBytes, height: bannerHeight, width: double.infinity, fit: BoxFit.cover,
+                                      errorWidget: _bannerGradient(bannerColor),
+                                    )
+                                  : _bannerGradient(bannerColor),
+                          if (_bannerBusy)
+                            Positioned(
+                              top: HollowSpacing.xs,
+                              right: HollowSpacing.xs,
+                              child: SizedBox(
+                                width: 14, height: 14,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2, color: hollow.textSecondary,
+                                ),
+                              ),
                             ),
-                          ),
-                        ),
-                    ],
-                  ),
+                        ],
+                      ),
+                    );
+                  },
                 ),
               ),
 

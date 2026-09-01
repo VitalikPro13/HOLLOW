@@ -231,7 +231,7 @@ class _AnimatedGifImageState extends State<AnimatedGifImage> {
     try {
       // Decode at the size actually painted, not the size the file happens to
       // be. An animated image holds EVERY frame as a live GPU texture, so a
-      // 184px source in a 32px slot costs ~33x the texture memory it needs,
+      // 512px source in a 32px slot costs ~256x the texture memory it needs,
       // multiplied by the frame count. allowUpscaling: false caps the target
       // at the intrinsic size, so a source SMALLER than its slot is never
       // blown up into a bigger texture than the file itself.
@@ -306,7 +306,7 @@ class _AnimatedGifImageState extends State<AnimatedGifImage> {
       width: widget.width,
       height: widget.height,
       fit: widget.fit,
-      // Explicit, not inherited: stored animated avatars are 184px and the
+      // Explicit, not inherited: stored animated avatars are 512px and the
       // profile card paints them at 110, so this path now ALWAYS downscales.
       // `low` is plain bilinear, which undersamples past ~1.33x and aliases
       // the hard edges this art is made of; `medium` is triangle + mipmap and

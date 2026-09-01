@@ -283,7 +283,78 @@ pub(crate) async fn handle_emote_assets(
 
 #[cfg(test)]
 mod tests {
-    use super::{emote_tokens_to_shortcodes, parse_asset_token, AssetKind};
+    use super::{
+        emote_tokens_to_shortcodes, is_webp, parse_asset_token, AssetKind,
+        MAX_BUNDLE_REPLY_BYTES,
+    };
+
+    /// The worst legal reply this rail can be asked to build: four hashes at
+    /// the Profile receipt cap is 4 x 2 MB, which is EXACTLY the bundle
+    /// budget. Both halves of that arithmetic are easy to get off by one, and
+    /// the symptom would be silent - the fourth asset of a full profile-media
+    /// pull would simply never arrive, and the avatar would stay a still.
+    #[test]
+    fn a_profile_bundle_at_the_budget_packs_and_survives_the_inbound_guard() {
+        use sha2::{Digest, Sha256};
+
+        let cap = AssetKind::Profile.recv_cap();
+        let hashes = AssetKind::Profile.max_request_hashes();
+        assert_eq!(
+            hashes * cap,
+            MAX_BUNDLE_REPLY_BYTES,
+            "a full Profile request has to land exactly on the bundle budget"
+        );
+
+        // Real WebP magic on incompressible bodies: the responder's own
+        // container gate accepts these, and base64 cannot shrink them.
+        let assets: Vec<(String, Vec<u8>)> = (0..hashes)
+            .map(|i| {
+                let mut bytes = b"RIFF____WEBPVP8 ".to_vec();
+                bytes.resize(cap, 0);
+                let mut seed = 0x9E3779B9u32 ^ (i as u32 + 1);
+                for b in bytes[16..].iter_mut() {
+                    seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                    *b = (seed >> 24) as u8;
+                }
+                assert!(is_webp(&bytes));
+                (hex::encode(Sha256::digest(&bytes)), bytes)
+            })
+            .collect();
+
+        // The responder's packing comparison, verbatim from
+        // `handle_emote_request`. The fourth asset lands ON the budget, and
+        // `>` rather than `>=` is what admits it.
+        let mut reply_bytes = 0usize;
+        let mut packed: Vec<(String, Vec<u8>)> = Vec::new();
+        for (hash, bytes) in &assets {
+            if reply_bytes + bytes.len() > MAX_BUNDLE_REPLY_BYTES {
+                continue;
+            }
+            reply_bytes += bytes.len();
+            packed.push((hash.clone(), bytes.clone()));
+        }
+        assert_eq!(packed.len(), hashes, "every asset of a full request must pack");
+        assert_eq!(reply_bytes, MAX_BUNDLE_REPLY_BYTES);
+
+        // ...and the inbound guard's base64 headroom has to tolerate the
+        // bundle we just built, JSON envelope and all.
+        let bundle_json =
+            String::from_utf8(crate::api::showcase::encode_asset_bundle(&packed))
+                .expect("the bundle codec emits text");
+        assert!(
+            bundle_json.len() <= MAX_BUNDLE_REPLY_BYTES * 4 / 3 + 4096,
+            "the inbound guard would drop our own worst legal bundle: {} bytes",
+            bundle_json.len()
+        );
+
+        let decoded = crate::api::showcase::decode_asset_bundle(bundle_json.as_bytes());
+        assert_eq!(decoded.len(), hashes, "all four have to come back out");
+        for (hash, bytes) in &decoded {
+            assert_eq!(bytes.len(), cap);
+            assert!(bytes.len() <= AssetKind::Profile.recv_cap());
+            assert_eq!(&hex::encode(Sha256::digest(bytes)), hash);
+        }
+    }
 
     #[test]
     fn emote_tokens_become_shortcodes() {

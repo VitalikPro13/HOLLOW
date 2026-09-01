@@ -51,8 +51,8 @@ pub const MANIFEST_NAME: &str = "pack.json";
 //
 // An import is a file the user was handed by a website, so every one of
 // these is a refusal bound rather than a warning. They are deliberately far
-// above what a real pack needs (the biggest legal single asset is a 1 MB
-// animated banner) and far below what would hurt.
+// above what a real pack needs (the biggest legal single asset is a 2 MB
+// animated avatar or banner) and far below what would hurt.
 
 /// Most files one pack may carry. A listing is at most an avatar pair, a
 /// banner pair and a frame; 8 leaves room without leaving room for a dump.
@@ -77,19 +77,19 @@ pub const MAX_MANIFEST_BYTES: usize = 64 * 1024;
 /// guest thumb with no face at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Role {
-    /// Still avatar, `process_avatar_image` (184 square ceiling).
+    /// Still avatar, `process_avatar_image` (512 square ceiling).
     Avatar,
     /// Animated avatar, the animated half of `process_user_avatar_anim`.
     AvatarAnim,
     /// The still companion of [`Role::AvatarAnim`].
     AvatarStill,
-    /// Still banner, `process_banner_image` (600x200 ceiling).
+    /// Still banner, `process_banner_image` (2.5:1, 1200x480 ceiling).
     Banner,
     /// Animated banner, the animated half of `process_user_banner_anim`.
     BannerAnim,
     /// The still companion of [`Role::BannerAnim`].
     BannerStill,
-    /// Avatar frame, `process_avatar_frame` (exactly 128x128, still or
+    /// Avatar frame, `process_avatar_frame` (square, at most 512x512, still or
     /// animated). Carries the see-through-centre gate.
     Frame,
 }
@@ -715,10 +715,16 @@ fn check_role_shape(role: Role, w: u32, h: u32, animated: bool) -> Result<(), St
         });
     }
     match role {
+        // A ceiling, not an exact size, exactly as the avatar branch below.
+        // That is what keeps every 128x128 frame and every pack built before
+        // the ceiling moved valid by construction.
         Role::Frame => {
-            if (w, h) != (image_convert::FRAME_DIM, image_convert::FRAME_DIM) {
+            if w != h {
+                return Err("The frame file has to be square".into());
+            }
+            if w > image_convert::FRAME_DIM {
                 return Err(format!(
-                    "A frame has to be {0}x{0}, and this one is {w}x{h}",
+                    "The frame file is {w}x{h}, over the {}px frame ceiling",
                     image_convert::FRAME_DIM
                 ));
             }
@@ -736,7 +742,7 @@ fn check_role_shape(role: Role, w: u32, h: u32, animated: bool) -> Result<(), St
             }
         }
         Role::Banner | Role::BannerAnim | Role::BannerStill => {
-            let max_h = image_convert::BANNER_W / 3;
+            let max_h = image_convert::BANNER_H;
             if w > image_convert::BANNER_W || h > max_h {
                 return Err(format!(
                     "The {} file is {w}x{h}, over the {}x{max_h} banner ceiling",
@@ -1047,6 +1053,48 @@ mod tests {
         );
     }
 
+    /// The frame ceiling moved from "exactly 128x128" to "square, at most
+    /// 512x512", and the whole point of making it a CEILING is that every
+    /// frame and every pack already in the world stays valid. A 128x128 source
+    /// still encodes to 128x128, and a pack whose manifest claims 128x128 for
+    /// a frame still verifies.
+    #[test]
+    fn a_128_frame_still_encodes_and_verifies_at_128() {
+        let files = process_source(RoleHint::Frame, &ring_png(128)).expect("frame");
+        assert_eq!(files.len(), 1);
+        assert_eq!(
+            (files[0].w, files[0].h),
+            (128, 128),
+            "a 128 source must not be upscaled to the new ceiling"
+        );
+
+        let (zip_bytes, manifest) = build_pack(&PackInput {
+            title: "Legacy ring".into(),
+            artist_name: "Sample Artist".into(),
+            artist_slug: "sample".into(),
+            artist_url: "https://example.invalid/sample".into(),
+            license: "Plain text licence.".into(),
+            item_id: None,
+            kinds: vec!["frame".into()],
+            files,
+        })
+        .expect("build pack");
+        assert_eq!(manifest.files[0].w, 128);
+
+        let verified = verify_pack(&zip_bytes).expect("a 128x128 frame pack must still verify");
+        assert_eq!((verified.files[0].w, verified.files[0].h), (128, 128));
+
+        // The shape check is a ceiling in both directions that matter: over it
+        // is refused, and non-square is refused.
+        assert!(check_role_shape(Role::Frame, 128, 128, false).is_ok());
+        assert!(check_role_shape(Role::Frame, image_convert::FRAME_DIM, image_convert::FRAME_DIM, false).is_ok());
+        let err = check_role_shape(Role::Frame, image_convert::FRAME_DIM + 1, image_convert::FRAME_DIM + 1, false)
+            .expect_err("over the ceiling must be refused");
+        assert!(err.contains("ceiling"), "got: {err}");
+        let err = check_role_shape(Role::Frame, 128, 96, false).expect_err("non-square is refused");
+        assert!(err.contains("square"), "got: {err}");
+    }
+
     /// Write a pack from a manifest and raw entries, bypassing [`build_pack`]
     /// entirely. This is how a hostile pack would be built, so it is how the
     /// hostile cases are tested.
@@ -1120,8 +1168,8 @@ mod tests {
                 path: format!("files/{hash}.webp"),
                 sha256: hash.clone(),
                 bytes: big.len() as u64,
-                w: 184,
-                h: 184,
+                w: image_convert::AVATAR_DIM,
+                h: image_convert::AVATAR_DIM,
                 animated: false,
             }],
             ..Default::default()
@@ -1144,8 +1192,8 @@ mod tests {
                 path: format!("files/{hash}.webp"),
                 sha256: hash.clone(),
                 bytes: bytes.len() as u64,
-                w: 184,
-                h: 184,
+                w: image_convert::AVATAR_DIM,
+                h: image_convert::AVATAR_DIM,
                 animated: false,
             }],
             ..Default::default()

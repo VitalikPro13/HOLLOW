@@ -3294,7 +3294,7 @@ pub fn update_profile(
     Ok(())
 }
 
-/// Process a raw image into a person's avatar (184x184 WebP — see
+/// Process a raw image into a person's avatar (512x512 WebP — see
 /// `image_convert::AVATAR_DIM`). Returns processed bytes.
 #[frb]
 pub fn process_avatar(raw_bytes: Vec<u8>) -> Result<Vec<u8>, String> {
@@ -3357,7 +3357,7 @@ pub struct ProcessedProfileMedia {
 /// `still` as `avatar_bytes`; the animation rides the asset rail on demand,
 /// never the profile push.
 ///
-/// Errors are user-facing: over the 1 MB cap even after the quality ladder, or
+/// Errors are user-facing: over the 2 MB cap even after the quality ladder, or
 /// too many frames to hold decoded (a screen recording used as profile art).
 #[frb]
 pub fn process_and_store_avatar_anim(raw_bytes: Vec<u8>) -> Result<ProcessedProfileMedia, String> {
@@ -3365,7 +3365,7 @@ pub fn process_and_store_avatar_anim(raw_bytes: Vec<u8>) -> Result<ProcessedProf
     store_profile_media(bytes, still)
 }
 
-/// The banner twin of [`process_and_store_avatar_anim`] (3:1 crop, 600x200
+/// The banner twin of [`process_and_store_avatar_anim`] (2.5:1 crop, 1200x480
 /// ceiling). Pass `still` as `banner_bytes` and the hash as `banner_anim`.
 #[frb]
 pub fn process_and_store_banner_anim(raw_bytes: Vec<u8>) -> Result<ProcessedProfileMedia, String> {
@@ -3541,7 +3541,7 @@ pub fn list_owned_art() -> Result<Vec<OwnedArt>, String> {
 /// One-shot migration for a profile authored BEFORE animated media moved to
 /// the asset rail: the animation used to sit in `avatar`/`banner` as raw
 /// source bytes and rode every profile push. Converts ours in place — the
-/// animation onto the rail under its hash, a 184px / 600x200 still into the
+/// animation onto the rail under its hash, a 512px / 1200x480 still into the
 /// blob — and re-announces once.
 ///
 /// Without this the bandwidth win only lands for people who happen to re-pick
@@ -3646,7 +3646,8 @@ pub fn migrate_profile_media_once() -> Result<bool, String> {
     Ok(true)
 }
 
-/// Process a raw image into banner format (600x200 WebP). Returns processed bytes.
+/// Process a raw image into banner format (2.5:1, at most 1200x480 WebP).
+/// Returns processed bytes.
 #[frb]
 pub fn process_banner(raw_bytes: Vec<u8>) -> Result<Vec<u8>, String> {
     crate::node::image_convert::process_banner_image(&raw_bytes)

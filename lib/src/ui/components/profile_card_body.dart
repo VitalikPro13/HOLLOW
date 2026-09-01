@@ -153,7 +153,11 @@ class _ProfileCardBodyState extends ConsumerState<ProfileCardBody> {
 
     // Density metrics. The full card is deliberately GENEROUS — showcase
     // panels flank it, so it has to carry real presence on a desktop screen.
-    final bannerHeight = _compact ? 104.0 : 220.0;
+    // Both banner heights are their host's width / 2.5, which is the ONE
+    // ratio every user banner surface, the banner cropper and Rust's
+    // 1200x480 storage agree on: 300 (kProfileCardPopupWidth) and 560
+    // (kProfileDialogCenterWidth). Change a host width and this moves with it.
+    final bannerHeight = _compact ? 120.0 : 224.0;
     final avatarSize = _compact ? 64.0 : 110.0;
     final ringWidth = _compact ? 3.0 : 4.0;
     final avatarOverhang = _compact ? 30.0 : 48.0;

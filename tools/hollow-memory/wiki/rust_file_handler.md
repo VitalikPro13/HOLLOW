@@ -330,31 +330,38 @@ Three user-configurable tiers stored in `app_settings`:
 
 `image_convert.rs:process_avatar_image()` -- Processes raw image into avatar format:
 1. Center-crops to square (smallest dimension).
-2. Resizes to **`AVATAR_DIM` = 184x184** with Lanczos3 -- **skipped entirely when the
-   crop is already 184**, because resampling flat art manufactures intermediate
-   colours that cost real bytes (a 224px animated source encoded 64% LARGER after a
-   Lanczos3 downscale than untouched). A Steam avatar arrives at exactly 184.
-3. Encodes as LOSSY WebP Q80 through the ART preset (see `webp_anim.rs` below).
-4. Rejects if result > 100 KB. (Measured headroom: real photos land 1.6-8 KB at 184;
-   pure random noise, the worst case, is 24 KB.)
+2. Resizes to **`AVATAR_DIM` = 512x512** with Lanczos3 -- **skipped entirely when the
+   crop is already 512**, because resampling flat art manufactures intermediate
+   colours that cost real bytes. The still resizes TO the dim (a predictable square
+   for the pushed blob old clients read); the ANIMATED path, frames and the pack
+   importer treat `AVATAR_DIM` as a CEILING that never upscales.
+3. Encodes as LOSSY WebP through `STILL_QUALITY_LADDER` (Q80 -> 75 -> 70), ART preset.
+4. Rejects if every rung lands over `MAX_AVATAR_STILL_BYTES` (250 KB). Measured
+   2026-09-01: real art and photos land 2.8-27 KB at 512 Q80, so the ladder is
+   insurance, not a working path.
 
-184 because the profile card paints the avatar at 110 LOGICAL px
-(`profile_card_body.dart`) = 165 physical at 1.5x, so the old 128 was being upscaled
-on the surface that shows an avatar largest. Full rationale + measurements: memory
-`project_animated_avatar_encoding`.
+512 is the artist-shop ceiling (2026-09-01 encoder bump, memory
+`project_encoder_ceilings_bump`): shop art must survive the largest surface Hollow
+paints (110 logical px in the profile card, times DPR and interface zoom). Earlier
+rationale and encoder measurements: memory `project_animated_avatar_encoding`.
 
-`process_still_avatar(data, dim)` is the same at an explicit edge.
-**`set_server_avatar` passes `SERVER_ICON_DIM` = 128**, NOT `AVATAR_DIM`: a server
-still is base64 INSIDE the CRDT, so every extra kilobyte replicates to every member,
-and a server renders far smaller than a profile card.
+The shared body is `process_still_square(data, dim, max_bytes, qualities, label)`.
+`process_still_avatar(data, dim)` is now the SERVER-ICON entry point only: 100 KB,
+single Q80, and **`set_server_avatar` passes `SERVER_ICON_DIM` = 128**, NOT
+`AVATAR_DIM` -- a server still is base64 INSIDE the CRDT, so every extra kilobyte
+replicates to every member, and a server renders far smaller than a profile card.
 
 ## process_banner_image()
 
-`image_convert.rs:process_banner_image()` -- Processes raw image into banner format:
-1. Center-crops to 3:1 aspect ratio (crops the widest 3:1 region from center).
-2. Resizes to 600x200 using Lanczos3 filter.
-3. Encodes as LOSSY WebP Q80 (ART preset).
-4. Rejects if result > 200 KB.
+`image_convert.rs:process_banner_image()` -- Processes raw image into a PERSON's
+banner:
+1. Center-crops to **2.5:1** (`crop_rect_5to2`; the profile dialog's own 560x224
+   shape -- the SERVER banner is a different role and stays 3:1 at 960x320 via
+   `crop_rect_3to1`).
+2. Shrinks to at most **`BANNER_W` x `BANNER_H` = 1200x480** -- a CEILING, never a
+   resize target; a smaller source keeps its own size.
+3. Encodes as LOSSY WebP through `STILL_QUALITY_LADDER` (ART preset).
+4. Rejects over `MAX_BANNER_STILL_BYTES` (400 KB) after the last rung.
 
 ## webp_anim.rs -- ALL animated WebP encoding
 

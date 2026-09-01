@@ -4672,12 +4672,13 @@ class _DmProfilePanel extends ConsumerWidget {
       ),
       child: Column(
         children: [
-          // Banner
+          // Banner — 96 is this panel's 240 width / 2.5, the one ratio every
+          // user banner surface and Rust's 1200x480 storage share.
           SizedBox(
-            height: 90,
+            height: 96,
             width: double.infinity,
             child: bannerBytes != null && bannerBytes.isNotEmpty
-                ? AnimatedGifImage(bytes: bannerBytes, height: 90, width: double.infinity, fit: BoxFit.cover,
+                ? AnimatedGifImage(bytes: bannerBytes, height: 96, width: double.infinity, fit: BoxFit.cover,
                     errorWidget: _bannerGradient(bannerColor))
                 : _bannerGradient(bannerColor),
           ),

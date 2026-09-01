@@ -381,11 +381,12 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
     );
     if (raw == null || !mounted) return;
 
-    // Open crop dialog (3:1 aspect for banner)
+    // Open crop dialog (2.5:1 aspect for the user banner, matching the
+    // profile dialog's 560x224 header and Rust's 1200x480 storage)
     final cropped = await showImageCropDialog(
       context: context,
       imageBytes: raw,
-      aspectRatio: 3.0,
+      aspectRatio: 2.5,
       title: 'Crop Banner',
     );
     if (cropped == null || !mounted) return;
@@ -439,7 +440,7 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
   /// preview) and the still companion that rides the profile push.
   ///
   /// The failure toast shows Rust's message verbatim because those messages
-  /// are the useful ones: "about 9s fits at 600x200" beats "too large".
+  /// are the useful ones: "about 9s fits at 1200x480" beats "too large".
   void _processAnimated(Uint8List rawBytes, {required bool avatar}) {
     final gen = avatar ? ++_avatarPickGen : ++_bannerPickGen;
     setState(() {

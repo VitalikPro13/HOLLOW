@@ -4,7 +4,7 @@ Built 2026-08-29 for the artist shop (design record: `reports/ARTIST_SHOP_DESIGN
 
 ## Format (v1)
 
-A ZIP: `pack.json` + `files/<sha256>.webp`. Manifest fields: `format: "hollowpack"`, `version: 1`, `item {id, title, kinds}`, `artist {name, slug, url}`, `license`, `files [{role, path, sha256, bytes, w, h, animated}]`, `ext {}` (reserved for the phase-2 issuing key and catalog signature). Roles: `frame` (128x128, animated or still), `avatar` (still-only, 184 ceiling), `avatar_anim` + `avatar_still` (the pair `process_user_avatar_anim` returns), `banner` (still-only, 600x200 ceiling), `banner_anim` + `banner_still`. Animated vs still is decided from BYTES (`is_animated_image`), never the extension. `item.id` defaults to the first 16 hex of sha256 over the sorted file hashes (content-addressed).
+A ZIP: `pack.json` + `files/<sha256>.webp`. Manifest fields: `format: "hollowpack"`, `version: 1`, `item {id, title, kinds}`, `artist {name, slug, url}`, `license`, `files [{role, path, sha256, bytes, w, h, animated}]`, `ext {}` (reserved for the phase-2 issuing key and catalog signature). Roles (ceilings per the 2026-09-01 encoder bump, memory `project_encoder_ceilings_bump`): `frame` (square, at most 512, animated or still -- a CEILING since the bump, so older exactly-128 packs stay valid), `avatar` (still-only, 512 ceiling), `avatar_anim` + `avatar_still` (the pair `process_user_avatar_anim` returns), `banner` (still-only, 2.5:1, 1200x480 ceiling), `banner_anim` + `banner_still`. Animated vs still is decided from BYTES (`is_animated_image`), never the extension. `item.id` defaults to the first 16 hex of sha256 over the sorted file hashes (content-addressed).
 
 **Identity is the hash of the PROCESSED bytes.** The pack is produced only by the app's own encoders (`process_avatar_frame`, `process_avatar_image`, `process_user_avatar_anim`, `process_banner_image`, `process_user_banner_anim`) so a pack made by the tool and art the app processes itself land on the same hash (libwebp is deterministic). A lossy WebP re-encoded is a different hash, so **the importer never re-encodes**.
 
@@ -17,7 +17,7 @@ A ZIP: `pack.json` + `files/<sha256>.webp`. Manifest fields: `format: "hollowpac
 
 ## Verification (import and `inspect` are the same call)
 
-Caps first (8 files, 4 MB each, 16 MB total, 20 MB zip, 64 KB manifest), then per file: recomputed sha256 must match, the WebP must decode, dimensions within the role's ceiling (frame exactly 128), animated roles animate and still roles do not, frames pass the centre gate. A manifest that disagrees with the bytes about size, dims or animation is REFUSED, never silently corrected. Nothing is written by a manifest-supplied name. 17 unit tests (`cargo nextest run --lib hollowpack`).
+Caps first (8 files, 4 MB each, 16 MB total, 20 MB zip, 64 KB manifest; the biggest legal single asset is a 2 MB animated avatar or banner), then per file: recomputed sha256 must match, the WebP must decode, dimensions within the role's ceiling (frame: square and at most 512), animated roles animate and still roles do not, frames pass the centre gate. A manifest that disagrees with the bytes about size, dims or animation is REFUSED, never silently corrected. Nothing is written by a manifest-supplied name. 17 unit tests (`cargo nextest run --lib hollowpack`).
 
 ## Not yet built
 

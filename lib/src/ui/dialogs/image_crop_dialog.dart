@@ -12,7 +12,10 @@ import 'package:hollow/src/ui/components/hollow_dialog.dart';
 /// Shows a crop dialog for an image. Returns the cropped region as raw PNG bytes,
 /// or null if cancelled.
 ///
-/// [aspectRatio] is width/height (e.g. 1.0 for square avatar, 3.0 for banner).
+/// [aspectRatio] is width/height: 1.0 for a square avatar or server icon,
+/// 2.5 for a USER profile banner (every profile banner surface and Rust's
+/// 1200x480 storage share that ratio), 3.0 for a SERVER banner, 16/9 for the
+/// chat background.
 /// [title] is the dialog title (e.g. "Crop Avatar").
 Future<Uint8List?> showImageCropDialog({
   required BuildContext context,

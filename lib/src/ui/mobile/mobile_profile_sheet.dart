@@ -147,37 +147,44 @@ class MobileProfileSheet extends ConsumerWidget {
       child: Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        // Banner
+        // Banner — the sheet is device-wide, so the height TRACKS that width
+        // at 2.5:1, the one ratio every user banner surface, the banner
+        // cropper and Rust's 1200x480 storage share. LayoutBuilder rather
+        // than an AspectRatio because AnimatedGifImage needs a real number to
+        // decode against: only the HEIGHT is given as a target, so an older
+        // 3:1 banner still decodes at its own aspect instead of being
+        // squashed into this box before BoxFit.cover ever sees it.
         const SizedBox(height: HollowSpacing.sm),
-        SizedBox(
-          height: 180,
-          width: double.infinity,
-          child: bannerBytes != null && bannerBytes.isNotEmpty
-              ? AnimatedGifImage(
-                  bytes: bannerBytes,
-                  height: 180,
-                  width: double.infinity,
-                  fit: BoxFit.cover,
-                  errorWidget: Container(
-                    height: 180,
-                    decoration: BoxDecoration(
-                      gradient: LinearGradient(
-                        begin: Alignment.topLeft,
-                        end: Alignment.bottomRight,
-                        colors: [bannerColor, bannerColor.withValues(alpha: 0.7)],
-                      ),
-                    ),
-                  ),
-                )
-              : Container(
-                  decoration: BoxDecoration(
-                    gradient: LinearGradient(
-                      begin: Alignment.topLeft,
-                      end: Alignment.bottomRight,
-                      colors: [bannerColor, bannerColor.withValues(alpha: 0.7)],
-                    ),
-                  ),
+        LayoutBuilder(
+          builder: (context, constraints) {
+            final width = constraints.maxWidth.isFinite
+                ? constraints.maxWidth
+                : MediaQuery.sizeOf(context).width;
+            final height = width / 2.5;
+            final fallback = Container(
+              height: height,
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                  colors: [bannerColor, bannerColor.withValues(alpha: 0.7)],
                 ),
+              ),
+            );
+            return SizedBox(
+              height: height,
+              width: double.infinity,
+              child: bannerBytes != null && bannerBytes.isNotEmpty
+                  ? AnimatedGifImage(
+                      bytes: bannerBytes,
+                      height: height,
+                      width: double.infinity,
+                      fit: BoxFit.cover,
+                      errorWidget: fallback,
+                    )
+                  : fallback,
+            );
+          },
         ),
 
         // Avatar + info overlapping banner
