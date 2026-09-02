@@ -4,30 +4,30 @@
 Distributed, encrypted Discord alternative: no central servers, members host it. `HOLLOW_PLAN.md` = architecture, phases, TODO.
 
 ## Tech Stack
-- **UI:** Flutter (Dart), all 6 platforms (Win, macOS, Linux, Android, iOS, Web)
+- **UI:** Flutter (Dart), 6 platforms (Win, macOS, Linux, Android, iOS, Web)
 - **Backend:** Rust via `flutter_rust_bridge` v2.11.1
-- **Networking:** WSS relay (signaling + text/CRDT/MLS) + WebRTC data channels (files/shards) + WebRTC media (voice/video).
-- **E2EE:** vodozemac (Olm/Double Ratchet) DMs, OpenMLS 0.8 servers, SFrame (AES-128-GCM) voice/video/screen share
+- **Networking:** WSS relay (signaling, text/CRDT/MLS) + WebRTC data channels (files) + WebRTC media.
+- **E2EE:** vodozemac (Olm) DMs, OpenMLS 0.8 servers, SFrame (AES-128-GCM) media
 - **Local DB:** SQLCipher
-- **Identity:** Ed25519 via BIP-39 mnemonic (ed25519-dalek, NativeKeypair)
+- **Identity:** Ed25519 via BIP-39 mnemonic
 - **Org ID:** com.anonlisten · **Project:** hollow
 
 ## Project Structure
-- `lib/`: `main.dart` entry (ProviderScope + RustLib.init + window_manager); `src/core/` models+providers+services, `src/theme/` design system, `src/ui/` shell chat settings sidebar components dialogs animations mobile.
-- `rust/hollow_core/src/`: `api/` FFI (frb scans these); `node/` swarm.rs + focused modules (types, handlers, ws_client, crdt_store, image_convert/webp_anim, test_harness cfg(test)); `crypto/` Olm+MLS (store.rs = CryptoStore); `identity/` Ed25519; `storage/` SQLCipher.
-- `relay-uws/` production relay (native TLS); `relay/` legacy. `packages/flutter_webrtc/` FORK 1.5.2, libwebrtc m144 = OUR patched build, `screen_audio_capturer.exe` = SEPARATE target. `rust_builder/` cargokit. `vendor/ffmpeg/` gitignored. `legal/` policy+terms.
+- `lib/`: `main.dart` entry; `src/core/` models+providers+services, `src/theme/`, `src/ui/` (shell chat settings sidebar components dialogs animations mobile).
+- `rust/hollow_core/src/`: `api/` FFI (frb scans these); `node/` swarm.rs + focused modules (test_harness cfg(test)); `crypto/` Olm+MLS (store.rs = CryptoStore); `identity/`; `storage/` SQLCipher.
+- `relay-uws/` production relay (native TLS). `packages/flutter_webrtc/` FORK 1.5.2, libwebrtc m144 = OUR patched build, `screen_audio_capturer.exe` = SEPARATE target. `legal/` policy+terms.
 
 ## Build & Run Commands
 ```bash
 flutter run -d windows
 flutter build windows
-flutter test test/  # widget tests
+flutter test test/
 cd rust/hollow_core && cargo check  # + clippy
 
 cargo test --lib test_harness -- --nocapture  # multi-node harness
 cargo nextest run --lib  # full suite ~70s
 
-# FRB codegen after Rust API changes (run from project root)
+# FRB codegen after Rust API changes (from project root)
 flutter_rust_bridge_codegen generate --rust-input "crate::api" --rust-root "rust/hollow_core" --dart-output "lib/src/rust"
 
 # Relay deploy: scp src/*.cpp *.h → ~/relay-uws/src/, cmake+make+setcap+restart (`feedback_relay_rules`)
@@ -54,7 +54,7 @@ All UI = custom Hollow widgets, no Material defaults (`src/ui/components/`): Hol
 - **CRITICAL: avatar frames (#54):** profile carries an ID (`""`/`b:<hue>`/64-hex), art rides the ASSET RAIL (`AssetKind::Frame`), NEVER the push. Zero layout cost, none on voice/call surfaces, hover = the ROW (3 CI guards). `project_avatar_frames`.
 - **CRITICAL: Profile Showcase Board:** wire field `Option<String>` (absent = PRESERVE, `""` = clear); NO relational blocks (VETOED); IGDB authoring-only; fetchers refuse non-Hollow-CDN URLs. `project_showcase_board_impl`.
 - **CRITICAL: asset rail (emotes/banners/stickers/GIFs):** content-addressed WebP; bytes NEVER ride CRDT/envelopes/relay; receipt cap = kind WE recorded, unsolicited DROPPED; FFZ/Klipy proxies authoring-only, key SERVER-side; send sites read `expandedText()` NEVER `.text`. `project_asset_rail_epic`, wiki `emotes`.
-- **`.hollowpack` + Shop client:** identity = sha256 of PROCESSED bytes; CLI = `rust/hollow_art`; `import_hollowpack` verifies, NEVER re-encodes; owned hashes PINNED. Shop UI ONLY behind `shopAvailableProvider` (store builds: NO surface, incl. redeem); `api/shop.rs` = READS, art REFUSED on hash mismatch, never stored; wear = ONE `updateMyProfile` (`''` anim for a still). wiki `hollowpack`.
+- **`.hollowpack` + Shop client:** identity = sha256 of PROCESSED bytes; CLI `rust/hollow_art`; `import_hollowpack` verifies, NEVER re-encodes; owned hashes PINNED. Shop UI ONLY behind `shopAvailableProvider` (store builds: NO surface, incl. redeem); `api/shop.rs` READS only, art REFUSED on hash mismatch, never stored; wear = ONE `updateMyProfile`. Bundles = listing of listings (`listing_parts`), `--processed` passthrough, NEVER re-encoded, kinds disjoint. wiki `hollowpack`.
 - **CRITICAL: user avatar/banner ANIMATION rides the rail (`AssetKind::Profile`), only the STILL rides the push:** hash absent = PRESERVE, `""` = clear; NOT signed; ceilings (512; 1200x480 **2.5:1**, SERVER banner stays 3:1; frames square ≤512) never upscale; render `imageBytes` > rail > still. `project_profile_media_asset_rail`, `project_encoder_ceilings_bump`
 - **CRITICAL: lossy WebP = `node/webp_anim.rs`** (`method` 4 everywhere; stills via `encode_still`, NEVER the anim encoder). Decide animation from BYTES via `is_animated_image` — a `GIF8`/extension branch silently FLATTENS APNG. `project_animated_avatar_encoding`.
 - **CRITICAL: stickers/GIFs:** identity = HASH not name; Klipy sticker ids carry `~` EVERYWHERE, GIF ids BARE. **ONE block asset per message**, gated at send (`exceedsAssetLimit`), never receive. Pack import re-hashes, never re-encodes. `project_stickers_phase5`, `feedback_antialiased_seam_bleed`.

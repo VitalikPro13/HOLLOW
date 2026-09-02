@@ -16148,8 +16148,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ShopListing dco_decode_shop_listing(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 16)
-      throw Exception('unexpected arr length: expect 16 but see ${arr.length}');
+    if (arr.length != 18)
+      throw Exception('unexpected arr length: expect 18 but see ${arr.length}');
     return ShopListing(
       slug: dco_decode_String(arr[0]),
       title: dco_decode_String(arr[1]),
@@ -16157,16 +16157,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       kinds: dco_decode_list_String(arr[3]),
       priceCents: dco_decode_u_32(arr[4]),
       priceLabel: dco_decode_String(arr[5]),
-      license: dco_decode_String(arr[6]),
-      createdAt: dco_decode_String(arr[7]),
-      artist: dco_decode_shop_artist(arr[8]),
-      files: dco_decode_list_shop_file(arr[9]),
-      displayHash: dco_decode_String(arr[10]),
-      stillHash: dco_decode_String(arr[11]),
-      primaryKind: dco_decode_String(arr[12]),
-      bundle: dco_decode_bool(arr[13]),
-      wide: dco_decode_bool(arr[14]),
-      itemUrl: dco_decode_String(arr[15]),
+      wasCents: dco_decode_u_32(arr[6]),
+      wasLabel: dco_decode_String(arr[7]),
+      license: dco_decode_String(arr[8]),
+      createdAt: dco_decode_String(arr[9]),
+      artist: dco_decode_shop_artist(arr[10]),
+      files: dco_decode_list_shop_file(arr[11]),
+      displayHash: dco_decode_String(arr[12]),
+      stillHash: dco_decode_String(arr[13]),
+      primaryKind: dco_decode_String(arr[14]),
+      bundle: dco_decode_bool(arr[15]),
+      wide: dco_decode_bool(arr[16]),
+      itemUrl: dco_decode_String(arr[17]),
     );
   }
 
@@ -19949,6 +19951,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_kinds = sse_decode_list_String(deserializer);
     var var_priceCents = sse_decode_u_32(deserializer);
     var var_priceLabel = sse_decode_String(deserializer);
+    var var_wasCents = sse_decode_u_32(deserializer);
+    var var_wasLabel = sse_decode_String(deserializer);
     var var_license = sse_decode_String(deserializer);
     var var_createdAt = sse_decode_String(deserializer);
     var var_artist = sse_decode_shop_artist(deserializer);
@@ -19966,6 +19970,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       kinds: var_kinds,
       priceCents: var_priceCents,
       priceLabel: var_priceLabel,
+      wasCents: var_wasCents,
+      wasLabel: var_wasLabel,
       license: var_license,
       createdAt: var_createdAt,
       artist: var_artist,
@@ -23450,6 +23456,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_list_String(self.kinds, serializer);
     sse_encode_u_32(self.priceCents, serializer);
     sse_encode_String(self.priceLabel, serializer);
+    sse_encode_u_32(self.wasCents, serializer);
+    sse_encode_String(self.wasLabel, serializer);
     sse_encode_String(self.license, serializer);
     sse_encode_String(self.createdAt, serializer);
     sse_encode_shop_artist(self.artist, serializer);

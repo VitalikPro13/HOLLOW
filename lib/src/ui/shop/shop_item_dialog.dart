@@ -188,10 +188,24 @@ class _ShopItemDialogState extends ConsumerState<_ShopItemDialog> {
           ],
           if (available) ...[
             const SizedBox(height: HollowSpacing.md),
-            Text(
-              listing.priceLabel,
-              style: HollowTypography.subheading
-                  .copyWith(color: hollow.accentText),
+            Row(
+              children: [
+                if (listing.wasLabel.isNotEmpty) ...[
+                  Text(
+                    listing.wasLabel,
+                    style: HollowTypography.body.copyWith(
+                      color: hollow.textTertiary,
+                      decoration: TextDecoration.lineThrough,
+                    ),
+                  ),
+                  const SizedBox(width: HollowSpacing.sm),
+                ],
+                Text(
+                  listing.priceLabel,
+                  style: HollowTypography.subheading
+                      .copyWith(color: hollow.accentText),
+                ),
+              ],
             ),
           ],
         ],

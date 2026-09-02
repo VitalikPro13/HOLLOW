@@ -315,6 +315,42 @@ pub fn process_source(hint: RoleHint, raw: &[u8]) -> Result<Vec<ProcessedFile>, 
         .collect()
 }
 
+/// An already-processed file, taken AS-IS: verified against its role's ceiling,
+/// its animation expectation and (for a frame) the see-through-centre gate,
+/// hashed, and never re-encoded. This is what a bundle of existing art is built
+/// from.
+///
+/// A bundle is a pack whose files were processed for OTHER packs, and the buyer
+/// of the bundle has to own the same hash as the buyer of the single item. A
+/// lossy WebP put through the encoder a second time is a different file with a
+/// different hash, so the bytes are carried through untouched and only checked.
+/// Those are exactly the checks [`verify_pack`] runs, which is why it runs
+/// them by calling this.
+pub fn processed_from_bytes(role: Role, bytes: Vec<u8>) -> Result<ProcessedFile, String> {
+    // Bounded before anything decodes it: the caller may be handing us a file
+    // off disk that nothing in this process produced.
+    if bytes.len() > MAX_FILE_BYTES {
+        return Err(format!(
+            "The {} file in this pack is over the {} MB limit",
+            role.as_str(),
+            MAX_FILE_BYTES / (1024 * 1024)
+        ));
+    }
+    let (w, h, animated) = blob_shape(&bytes)?;
+    check_role_shape(role, w, h, animated)?;
+    if role == Role::Frame {
+        image_convert::validate_frame_centre(&bytes)?;
+    }
+    Ok(ProcessedFile {
+        role,
+        hash: hash_hex(&bytes),
+        bytes,
+        w,
+        h,
+        animated,
+    })
+}
+
 /// The default `item.id`: the first 16 hex characters of the SHA-256 over
 /// every file hash, sorted and joined by a newline.
 ///
@@ -372,6 +408,19 @@ pub fn build_pack(input: &PackInput) -> Result<(Vec<u8>, PackManifest), String> 
             return Err(format!(
                 "Two files in this pack are byte identical ({}). Each file has to be distinct art.",
                 pair[0].hash
+            ));
+        }
+    }
+
+    // An authoring rule, deliberately NOT a verification rule: packs already in
+    // the world keep verifying. A role is a SLOT in the app (one avatar, one
+    // frame), so two files in one slot would leave the importer picking, and a
+    // bundle of existing art is the case that would hit it first.
+    for pair in files.windows(2) {
+        if pair[0].role == pair[1].role {
+            return Err(format!(
+                "A pack carries one file per role, and two {} files were given. Two avatars are two packs, not one.",
+                pair[0].role.as_str()
             ));
         }
     }
@@ -632,31 +681,30 @@ pub fn verify_pack(zip_bytes: &[u8]) -> Result<VerifiedPack, String> {
             ));
         }
 
-        let (w, h, animated) = blob_shape(&bytes)?;
-        if (entry.w != 0 || entry.h != 0) && (entry.w != w || entry.h != h) {
+        // The decode, the ceiling and the frame gate are ONE body, shared with
+        // the bundle maker: art that arrives already processed is checked here
+        // exactly as art that arrives inside a pack is.
+        let file = processed_from_bytes(role, bytes)?;
+        if (entry.w != 0 || entry.h != 0) && (entry.w != file.w || entry.h != file.h) {
             return Err(format!(
-                "The {} file is {w}x{h}, not the size the pack claims for it",
-                entry.role
+                "The {} file is {}x{}, not the size the pack claims for it",
+                entry.role, file.w, file.h
             ));
         }
-        if entry.animated != animated {
+        if entry.animated != file.animated {
             return Err(format!(
                 "The pack is wrong about whether its {} file animates",
                 entry.role
             ));
         }
-        check_role_shape(role, w, h, animated)?;
-        if role == Role::Frame {
-            image_convert::validate_frame_centre(&bytes)?;
-        }
 
         files.push(VerifiedFile {
-            role,
+            role: file.role,
             hash: actual,
-            bytes,
-            w,
-            h,
-            animated,
+            bytes: file.bytes,
+            w: file.w,
+            h: file.h,
+            animated: file.animated,
         });
     }
 
@@ -882,6 +930,118 @@ mod tests {
         let still = process_source(RoleHint::Avatar, &solid_png(400, 400)).expect("avatar still");
         assert_eq!(still.len(), 1);
         assert_eq!(still[0].role, Role::Avatar);
+    }
+
+    // ── (a2) passthrough, the bundle maker ────────────────────────────
+
+    #[test]
+    fn passthrough_keeps_the_hash_and_the_bytes() {
+        // A bundle is built from files that were processed for OTHER listings.
+        // The buyer of the bundle has to end up owning the same hash as the
+        // buyer of the single item, so passthrough may check anything it likes
+        // and may change nothing at all.
+        let mut original = process_source(RoleHint::Avatar, &anim_gif(200, 200)).expect("pair");
+        original.extend(process_source(RoleHint::Frame, &ring_png(224)).expect("frame"));
+        assert_eq!(original.len(), 3, "an animated avatar pair plus a frame");
+
+        let mut passed: Vec<ProcessedFile> = Vec::with_capacity(original.len());
+        for f in &original {
+            let again = processed_from_bytes(f.role, f.bytes.clone())
+                .unwrap_or_else(|e| panic!("{} must pass through: {e}", f.role.as_str()));
+            assert_eq!(again.role, f.role);
+            assert_eq!(again.hash, f.hash, "passthrough minted a different hash");
+            assert_eq!((again.w, again.h), (f.w, f.h));
+            assert_eq!(again.animated, f.animated);
+            assert_eq!(again.bytes, f.bytes, "passthrough changed the bytes");
+            passed.push(again);
+        }
+
+        // The bundle itself: two existing listings in one pack.
+        let (zip_bytes, manifest) = build_pack(&PackInput {
+            title: "Dusk bundle".into(),
+            artist_name: "Sample Artist".into(),
+            artist_slug: "sample".into(),
+            artist_url: "https://example.invalid/sample".into(),
+            license: "Plain text licence.".into(),
+            item_id: None,
+            kinds: vec!["avatar".into(), "frame".into()],
+            files: passed.clone(),
+        })
+        .expect("a bundle of processed files must build");
+
+        let verified = verify_pack(&zip_bytes).expect("a bundle must verify");
+        assert_eq!(verified.files.len(), original.len());
+
+        let mut want: Vec<&str> = original.iter().map(|f| f.hash.as_str()).collect();
+        want.sort_unstable();
+        let mut got: Vec<&str> = verified.files.iter().map(|f| f.hash.as_str()).collect();
+        got.sort_unstable();
+        assert_eq!(got, want, "the bundle carries the ORIGINAL hashes");
+
+        for f in &verified.files {
+            let src = original
+                .iter()
+                .find(|o| o.hash == f.hash)
+                .expect("every verified file is one of the originals");
+            assert_eq!(f.bytes, src.bytes, "byte identical, end to end");
+        }
+
+        assert_eq!(manifest.item.id, default_item_id(&passed));
+        assert_eq!(
+            manifest.item.id,
+            default_item_id(&original),
+            "the same art, so the same content-addressed item id"
+        );
+    }
+
+    #[test]
+    fn passthrough_refuses_what_the_encoder_never_made() {
+        // Not a WebP at all. Passthrough is a trust boundary, not a copy.
+        let err = processed_from_bytes(Role::Avatar, solid_png(400, 400))
+            .expect_err("a PNG is not a processed file");
+        assert!(err.contains("not a WebP"), "got: {err}");
+
+        // A still under an animated role.
+        let still = image_convert::process_avatar_image(&solid_png(400, 400)).expect("avatar");
+        let err = processed_from_bytes(Role::AvatarAnim, still.clone())
+            .expect_err("an avatar_anim that does not animate must be refused");
+        assert!(err.contains("does not animate"), "got: {err}");
+
+        // Square, inside the frame ceiling, and opaque through the middle: only
+        // the centre gate can catch this one.
+        let err = processed_from_bytes(Role::Frame, still)
+            .expect_err("an opaque centre must be refused");
+        assert!(err.contains("transparent"), "got: {err}");
+
+        // Over the per-file cap, refused before anything tries to decode it.
+        let err = processed_from_bytes(Role::Avatar, vec![0u8; MAX_FILE_BYTES + 1])
+            .expect_err("an oversize file must be refused");
+        assert!(err.contains("limit"), "got: {err}");
+    }
+
+    #[test]
+    fn a_pack_carries_one_file_per_role() {
+        let mut files = process_source(RoleHint::Avatar, &solid_png(400, 400)).expect("avatar a");
+        files.extend(process_source(RoleHint::Avatar, &solid_png(320, 320)).expect("avatar b"));
+        assert_eq!(files.len(), 2);
+        assert_ne!(files[0].hash, files[1].hash, "distinct art, distinct hashes");
+
+        let err = build_pack(&PackInput {
+            title: "Two faces".into(),
+            artist_name: "Sample Artist".into(),
+            artist_slug: "sample".into(),
+            artist_url: String::new(),
+            license: String::new(),
+            item_id: None,
+            kinds: vec!["avatar".into()],
+            files,
+        })
+        .expect_err("two avatars in one pack must be refused");
+        assert_eq!(
+            err,
+            "A pack carries one file per role, and two avatar files were given. \
+             Two avatars are two packs, not one."
+        );
     }
 
     // ── (b) pack then inspect ─────────────────────────────────────────

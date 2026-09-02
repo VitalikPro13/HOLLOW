@@ -41,6 +41,9 @@ final _frameListing = shop.ShopListing(
   kinds: const ['frame'],
   priceCents: 499,
   priceLabel: r'$4.99',
+  // On sale: the list price rides beside it and the card strikes it through.
+  wasCents: 699,
+  wasLabel: r'$6.99',
   license: 'Personal use',
   createdAt: '2026-09-01',
   artist: _artist,
@@ -69,6 +72,8 @@ final _bannerListing = shop.ShopListing(
   kinds: const ['banner'],
   priceCents: 999,
   priceLabel: r'$9.99',
+  wasCents: 0,
+  wasLabel: '',
   license: 'Personal use',
   createdAt: '2026-09-01',
   artist: _artist,
@@ -167,6 +172,8 @@ void main() {
     expect(find.text('Winter Frame'), findsOneWidget);
     expect(find.text('Second Piece'), findsOneWidget);
     expect(find.text(r'$4.99'), findsOneWidget);
+    // The frame is on sale in the fixture: its list price is on the card too.
+    expect(find.text(r'$6.99'), findsOneWidget);
     expect(find.text('Owned'), findsOneWidget);
   });
 

@@ -103,6 +103,12 @@ pub struct ShopListing {
     pub price_cents: u32,
     /// Always two decimals: `$5` beside `$4.99` reads as a rounding.
     pub price_label: String,
+    /// The list price while the piece is on sale, 0 otherwise. `price_cents`
+    /// is always what a buyer pays; this is the number the card strikes
+    /// through beside it.
+    pub was_cents: u32,
+    /// [`Self::was_cents`] as the shop writes it, `""` when there is no sale.
+    pub was_label: String,
     pub license: String,
     pub created_at: String,
     pub artist: ShopArtist,
@@ -120,7 +126,11 @@ pub struct ShopListing {
     /// The display file is a wide strip (aspect 2:1 or wider) rather than a
     /// square.
     pub wide: bool,
-    /// `{origin}/item/{display_hash}`.
+    /// `{origin}/item/{slug}`: the listing's own address. A hash is the ART's
+    /// address, and a bundle carries the same frame hash as the single frame
+    /// on purpose, so a link by hash opened whichever listing the shop found
+    /// first (the bug Vitalik hit on 2026-09-02). The shop still redirects an
+    /// old hash link, single before set.
     pub item_url: String,
 }
 
@@ -191,6 +201,10 @@ struct RawListing {
     kinds: Vec<String>,
     #[serde(default, deserialize_with = "lenient")]
     price_cents: f64,
+    /// The list price while a sale is on, absent otherwise (the shop only
+    /// writes it during a sale).
+    #[serde(default, deserialize_with = "lenient")]
+    was_cents: f64,
     #[serde(default, deserialize_with = "lenient")]
     license: String,
     #[serde(default, deserialize_with = "lenient")]
@@ -424,6 +438,14 @@ fn sanitize_listing(raw: RawListing, origin: &str) -> Option<ShopListing> {
     } else {
         0
     };
+    // A "was" that is not above the price is not a sale, whatever the shop
+    // sent: the card would strike through a number the buyer never saves.
+    let was_cents = if raw.was_cents.is_finite() {
+        let w = raw.was_cents.round().clamp(0.0, u32::MAX as f64) as u32;
+        if w > price_cents { w } else { 0 }
+    } else {
+        0
+    };
 
     let artist_slug = clamp(&raw.artist.slug, 64);
     let artist = ShopArtist {
@@ -446,7 +468,13 @@ fn sanitize_listing(raw: RawListing, origin: &str) -> Option<ShopListing> {
     };
 
     Some(ShopListing {
-        item_url: format!("{origin}/item/{display_hash}"),
+        item_url: if valid_slug(&slug) {
+            format!("{origin}/item/{slug}")
+        } else {
+            // A slug we will not paste into a URL leaves the hash link, which
+            // the shop redirects to the listing it best matches.
+            format!("{origin}/item/{display_hash}")
+        },
         bundle: kinds.len() >= 2,
         slug,
         title,
@@ -454,6 +482,8 @@ fn sanitize_listing(raw: RawListing, origin: &str) -> Option<ShopListing> {
         kinds,
         price_cents,
         price_label: price_label(price_cents),
+        was_cents,
+        was_label: if was_cents > 0 { price_label(was_cents) } else { String::new() },
         license: clamp(&raw.license, 1000),
         created_at: clamp(&raw.created_at, 64),
         artist,
@@ -743,6 +773,7 @@ mod tests {
                   "description": "A frame.",
                   "kinds": ["frame"],
                   "price_cents": 499,
+                  "was_cents": 699,
                   "license": "Personal use",
                   "created_at": "2026-08-01T00:00:00.000Z",
                   "sales_this_week": 12,
@@ -802,9 +833,13 @@ mod tests {
         assert_eq!(frame.files[0].sha256, good);
         assert_eq!(frame.price_cents, 499);
         assert_eq!(frame.price_label, "$4.99");
+        assert_eq!((frame.was_cents, frame.was_label.as_str()), (699, "$6.99"), "on sale: the list price rides beside the price");
         assert_eq!(frame.artist.header_hash, "", "a null header hash is empty");
         assert_eq!(frame.artist.url, "https://shop.example/@nadia");
-        assert_eq!(frame.item_url, format!("https://shop.example/item/{good}"));
+        assert_eq!(
+            frame.item_url, "https://shop.example/item/gilded-frame",
+            "the item link is the listing's own slug, never the art's hash"
+        );
         assert!(!frame.bundle);
 
         let derived = &cat.listings[1];
@@ -816,6 +851,7 @@ mod tests {
         assert_eq!(derived.display_hash, anim);
         assert_eq!(derived.still_hash, still);
         assert_eq!(derived.price_label, "$2.50");
+        assert_eq!((derived.was_cents, derived.was_label.as_str()), (0, ""), "no sale, no was");
     }
 
     #[test]

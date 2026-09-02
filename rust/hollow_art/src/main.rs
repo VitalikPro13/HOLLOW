@@ -18,19 +18,26 @@
 //!   pack     encode sources, write pack.json + files/<hash>.webp into a zip,
 //!            and optionally the processed files, the catalog entry and the
 //!            delivery zip (pack + originals + README)
+//!            `--processed <role>=<path>` takes an ALREADY-processed WebP as
+//!            it is: verified against the role's ceiling, its animation
+//!            expectation and (for a frame) the centre gate, hashed, never
+//!            re-encoded. That is what a bundle of existing listings is made
+//!            of, because the bundle's buyer has to own the same hash the
+//!            single item's buyer owns.
 //!   inspect  re-verify a pack the way the app's importer does
 //!   process  encode one source and print what it produced (the design sheet)
 //!   version  print the tool's version (also --version)
 
 use std::path::{Path, PathBuf};
 
-use hollow_art::hollowpack::{self, PackInput, ProcessedFile, RoleHint};
+use hollow_art::hollowpack::{self, PackInput, ProcessedFile, Role, RoleHint};
 
 const USAGE: &str = "\
-hollowpack — build and check Hollow artist shop packs
+hollowpack: build and check Hollow artist shop packs
 
 USAGE:
-  hollowpack pack --file <kind>=<path> [--file ...] --title <t>
+  hollowpack pack [--file <kind>=<path>]... [--processed <role>=<path>]...
+                  --title <t>
                   --artist-name <n> --artist-slug <s> [--artist-url <u>]
                   [--license <text or @file>] [--item-id <16 hex>]
                   --out <x.hollowpack> [--emit-entry <entry.json>]
@@ -45,6 +52,18 @@ USAGE:
 
 <kind> is frame, avatar or banner. Still versus animated is decided from the
 bytes, never from the file extension.
+
+--processed includes an already-processed WebP AS IS: it is verified (role
+ceiling, animation, and the see-through-centre gate for a frame) and hashed,
+and it is never re-encoded, because a second pass through a lossy encoder
+would mint a different hash and orphan what the first one named. That is how a
+bundle of art already on sale is built. <role> is the wire role: frame,
+avatar, avatar_anim, avatar_still, banner, banner_anim or banner_still, and
+--processed avatar_anim needs its avatar_still companion in the same pack
+(likewise banner_anim and banner_still). --file and --processed may be mixed,
+and pack needs at least one of the two.
+
+A pack carries one file per role. Two avatars are two packs, not one.
 
 --emit-files writes every processed file as <dir>/<sha256>.webp.
 --delivery writes the buyer's download: the pack at the root (named after
@@ -104,8 +123,60 @@ fn read_license(value: &str) -> Result<String, String> {
 
 // ── pack ──────────────────────────────────────────────────────────────
 
+/// One thing the artist put in the pack, in the order they wrote it on the
+/// command line. Keeping the two flags in ONE list is what makes `kinds` come
+/// out in command-line order when they are mixed.
+enum PackArg {
+    /// `--file <kind>=<path>`: raw source art, run through the app's encoder.
+    Source(RoleHint, PathBuf),
+    /// `--processed <role>=<path>`: art that was already processed for another
+    /// pack, taken as it is.
+    Processed(Role, PathBuf),
+}
+
+/// Record a source kind once, in the order it was first given. `kinds` is what
+/// the catalog lists the item under, so it is a set with an order, not a log.
+fn push_kind(kinds: &mut Vec<String>, kind: &str) {
+    if !kinds.iter().any(|existing| existing == kind) {
+        kinds.push(kind.to_string());
+    }
+}
+
+/// The source kind a finished role belongs to, which is what the catalog lists.
+fn kind_of(role: Role) -> &'static str {
+    match role {
+        Role::Frame => "frame",
+        Role::Avatar | Role::AvatarAnim | Role::AvatarStill => "avatar",
+        Role::Banner | Role::BannerAnim | Role::BannerStill => "banner",
+    }
+}
+
+/// The animated profile roles ship as a PAIR: the animation rides the asset
+/// rail and the still rides the pushed profile blob, so half a pair would
+/// leave old clients and the guest thumb with no face at all. `--file` cannot
+/// get this wrong (the encoder emits both), so this only has to police the
+/// hand-assembled `--processed` side.
+fn check_processed_pairs(roles: &[Role]) -> Result<(), String> {
+    for (anim, still) in [
+        (Role::AvatarAnim, Role::AvatarStill),
+        (Role::BannerAnim, Role::BannerStill),
+    ] {
+        for (have, needs) in [(anim, still), (still, anim)] {
+            if roles.contains(&have) && !roles.contains(&needs) {
+                return Err(format!(
+                    "--processed {} needs its {} companion in the same pack: the animation rides \
+                     the asset rail and the still rides the profile, so a pack carries both.",
+                    have.as_str(),
+                    needs.as_str()
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn cmd_pack(args: &[String]) -> Result<(), String> {
-    let mut sources: Vec<(RoleHint, PathBuf)> = Vec::new();
+    let mut sources: Vec<PackArg> = Vec::new();
     let mut title = None;
     let mut artist_name = None;
     let mut artist_slug = None;
@@ -127,7 +198,20 @@ fn cmd_pack(args: &[String]) -> Result<(), String> {
                 let (kind, path) = raw
                     .split_once('=')
                     .ok_or_else(|| format!("--file wants <kind>=<path>, got {raw}"))?;
-                sources.push((RoleHint::parse(kind)?, PathBuf::from(path)));
+                sources.push(PackArg::Source(RoleHint::parse(kind)?, PathBuf::from(path)));
+            }
+            "--processed" => {
+                let raw = need_value(args, &mut i, "--processed")?;
+                let (role, path) = raw
+                    .split_once('=')
+                    .ok_or_else(|| format!("--processed wants <role>=<path>, got {raw}"))?;
+                let role = Role::parse(role).map_err(|_| {
+                    format!(
+                        "unknown role {role}. Use frame, avatar, avatar_anim, avatar_still, \
+                         banner, banner_anim or banner_still."
+                    )
+                })?;
+                sources.push(PackArg::Processed(role, PathBuf::from(path)));
             }
             "--title" => title = Some(need_value(args, &mut i, "--title")?),
             "--artist-name" => artist_name = Some(need_value(args, &mut i, "--artist-name")?),
@@ -151,8 +235,20 @@ fn cmd_pack(args: &[String]) -> Result<(), String> {
     }
 
     if sources.is_empty() {
-        return Err("pack needs at least one --file <kind>=<path>".into());
+        return Err(
+            "pack needs at least one --file <kind>=<path> or --processed <role>=<path>".into(),
+        );
     }
+    // Cheap refusals before any encoding: a half pair is a mistake worth
+    // reporting in a second rather than after a minute of libwebp.
+    let processed_roles: Vec<Role> = sources
+        .iter()
+        .filter_map(|s| match s {
+            PackArg::Processed(role, _) => Some(*role),
+            PackArg::Source(..) => None,
+        })
+        .collect();
+    check_processed_pairs(&processed_roles)?;
     let title = require(title, "--title")?;
     let artist_name = require(artist_name, "--artist-name")?;
     let artist_slug = require(artist_slug, "--artist-slug")?;
@@ -171,27 +267,48 @@ fn cmd_pack(args: &[String]) -> Result<(), String> {
 
     let mut files: Vec<ProcessedFile> = Vec::new();
     let mut kinds: Vec<String> = Vec::new();
-    for (hint, path) in &sources {
-        let raw = std::fs::read(path)
-            .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
-        let produced = hollowpack::process_source(*hint, &raw)
-            .map_err(|e| format!("{}: {e}", path.display()))?;
-        for f in &produced {
-            println!(
-                "encoded {} -> {} {} {}x{} {} bytes{}",
-                path.display(),
-                f.role.as_str(),
-                &f.hash[..16],
-                f.w,
-                f.h,
-                f.bytes.len(),
-                if f.animated { " animated" } else { "" }
-            );
-        }
-        files.extend(produced);
-        let k = hint.as_str().to_string();
-        if !kinds.contains(&k) {
-            kinds.push(k);
+    for source in &sources {
+        match source {
+            PackArg::Source(hint, path) => {
+                let raw = std::fs::read(path)
+                    .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+                let produced = hollowpack::process_source(*hint, &raw)
+                    .map_err(|e| format!("{}: {e}", path.display()))?;
+                for f in &produced {
+                    println!(
+                        "encoded {} -> {} {} {}x{} {} bytes{}",
+                        path.display(),
+                        f.role.as_str(),
+                        &f.hash[..16],
+                        f.w,
+                        f.h,
+                        f.bytes.len(),
+                        if f.animated { " animated" } else { "" }
+                    );
+                }
+                files.extend(produced);
+                push_kind(&mut kinds, hint.as_str());
+            }
+            // Nothing here encodes. The bytes on disk are the identity, so the
+            // most this may do is refuse them.
+            PackArg::Processed(role, path) => {
+                let raw = std::fs::read(path)
+                    .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+                let f = hollowpack::processed_from_bytes(*role, raw)
+                    .map_err(|e| format!("{}: {e}", path.display()))?;
+                println!(
+                    "included {} -> {} {} {}x{} {} bytes{}",
+                    path.display(),
+                    f.role.as_str(),
+                    &f.hash[..16],
+                    f.w,
+                    f.h,
+                    f.bytes.len(),
+                    if f.animated { " animated" } else { "" }
+                );
+                push_kind(&mut kinds, kind_of(*role));
+                files.push(f);
+            }
         }
     }
 

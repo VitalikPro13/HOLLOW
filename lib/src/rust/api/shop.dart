@@ -200,6 +200,14 @@ class ShopListing {
 
   /// Always two decimals: `$5` beside `$4.99` reads as a rounding.
   final String priceLabel;
+
+  /// The list price while the piece is on sale, 0 otherwise. `price_cents`
+  /// is always what a buyer pays; this is the number the card strikes
+  /// through beside it.
+  final int wasCents;
+
+  /// [`Self::was_cents`] as the shop writes it, `""` when there is no sale.
+  final String wasLabel;
   final String license;
   final String createdAt;
   final ShopArtist artist;
@@ -223,7 +231,11 @@ class ShopListing {
   /// square.
   final bool wide;
 
-  /// `{origin}/item/{display_hash}`.
+  /// `{origin}/item/{slug}`: the listing's own address. A hash is the ART's
+  /// address, and a bundle carries the same frame hash as the single frame
+  /// on purpose, so a link by hash opened whichever listing the shop found
+  /// first (the bug Vitalik hit on 2026-09-02). The shop still redirects an
+  /// old hash link, single before set.
   final String itemUrl;
 
   const ShopListing({
@@ -233,6 +245,8 @@ class ShopListing {
     required this.kinds,
     required this.priceCents,
     required this.priceLabel,
+    required this.wasCents,
+    required this.wasLabel,
     required this.license,
     required this.createdAt,
     required this.artist,
@@ -253,6 +267,8 @@ class ShopListing {
       kinds.hashCode ^
       priceCents.hashCode ^
       priceLabel.hashCode ^
+      wasCents.hashCode ^
+      wasLabel.hashCode ^
       license.hashCode ^
       createdAt.hashCode ^
       artist.hashCode ^
@@ -275,6 +291,8 @@ class ShopListing {
           kinds == other.kinds &&
           priceCents == other.priceCents &&
           priceLabel == other.priceLabel &&
+          wasCents == other.wasCents &&
+          wasLabel == other.wasLabel &&
           license == other.license &&
           createdAt == other.createdAt &&
           artist == other.artist &&

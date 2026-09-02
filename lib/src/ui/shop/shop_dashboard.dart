@@ -13,6 +13,7 @@ import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/animated_gif_image.dart';
+import 'package:hollow/src/ui/components/avatar_frame.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hover_scope.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
@@ -130,7 +131,13 @@ class _ShopDashboardState extends ConsumerState<ShopDashboard> {
       const SizedBox(width: HollowSpacing.xs),
       HollowPressable(
         semanticLabel: 'Refresh the shop',
-        onTap: () => ref.invalidate(shop.shopCatalogProvider),
+        onTap: () {
+          ref.invalidate(shop.shopCatalogProvider);
+          // The catalog is fetched fresh every time (the shop serves it
+          // uncached); the toast is the only sign that the tap did anything
+          // when nothing on the wall changed.
+          HollowToast.show(context, 'Shop refreshed');
+        },
         borderRadius: BorderRadius.circular(hollow.radiusSm),
         padding: const EdgeInsets.all(HollowSpacing.xs),
         child: Icon(LucideIcons.refreshCw,
@@ -430,7 +437,11 @@ class _ShopCard extends ConsumerWidget {
                 child: Center(
                   child: AspectRatio(
                     aspectRatio: 1,
-                    child: ShopArtPreview(listing: listing, size: 96),
+                    child: ShopArtPreview(
+                      listing: listing,
+                      size: 96,
+                      neutralFace: true,
+                    ),
                   ),
                 ),
               ),
@@ -464,15 +475,44 @@ class _ShopCard extends ConsumerWidget {
                   ),
                   const SizedBox(height: HollowSpacing.xs),
                   Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      Text(
-                        listing.priceLabel,
-                        style: HollowTypography.body.copyWith(
-                          color: hollow.accentText,
-                          fontWeight: FontWeight.w600,
+                      // The price group gives way before the chips do: a
+                      // narrow card on sale ("$6.99 $4.99" beside a chip)
+                      // scales the numbers down rather than overflowing,
+                      // and a chip cut in half says nothing at all.
+                      Flexible(
+                        child: FittedBox(
+                          fit: BoxFit.scaleDown,
+                          alignment: Alignment.centerLeft,
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              if (listing.wasLabel.isNotEmpty) ...[
+                                // On sale: the list price, struck, right
+                                // before what a buyer pays, the same way the
+                                // website's card does.
+                                Text(
+                                  listing.wasLabel,
+                                  style: HollowTypography.caption.copyWith(
+                                    color: hollow.textTertiary,
+                                    decoration: TextDecoration.lineThrough,
+                                  ),
+                                ),
+                                const SizedBox(width: HollowSpacing.xs),
+                              ],
+                              Text(
+                                listing.priceLabel,
+                                style: HollowTypography.body.copyWith(
+                                  color: hollow.accentText,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ],
+                          ),
                         ),
                       ),
-                      const Spacer(),
+                      const SizedBox(width: HollowSpacing.xs),
                       _ShopChip(
                         label: listing.bundle
                             ? 'bundle'
@@ -573,12 +613,20 @@ class ShopArtPreview extends ConsumerWidget {
   /// show one preview per kind.
   final String? kindOverride;
 
+  /// A frame on the WALL sits over a neutral face (a pale square with a thin
+  /// accent outline, the way the website's cards draw an empty avatar slot),
+  /// so the frame itself is what the card shows. The item dialog leaves this
+  /// false and puts the frame on your own avatar, which is the question the
+  /// dialog answers: how it would look on you.
+  final bool neutralFace;
+
   const ShopArtPreview({
     super.key,
     required this.listing,
     required this.size,
     this.animate = false,
     this.kindOverride,
+    this.neutralFace = false,
   });
 
   @override
@@ -634,6 +682,32 @@ class ShopArtPreview extends ConsumerWidget {
       if (!seeded) {
         final frames = ref.read(avatarFrameProvider.notifier);
         Future.microtask(() => frames.seed(hash, bytes));
+      }
+      if (neutralFace) {
+        final face = Container(
+          width: size,
+          height: size,
+          decoration: BoxDecoration(
+            color: Color.alphaBlend(
+              Colors.white.withValues(alpha: 0.14),
+              hollow.elevated,
+            ),
+            borderRadius: BorderRadius.circular(hollow.radiusMd),
+            border: Border.all(
+              color: hollow.accent.withValues(alpha: 0.65),
+              width: 1,
+            ),
+          ),
+        );
+        return Center(
+          child: AvatarFrame(
+            id: hash,
+            size: size,
+            radius: hollow.radiusMd,
+            animate: wantAnim,
+            child: face,
+          ),
+        );
       }
       return Center(
         child: HollowAvatar(

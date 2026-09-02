@@ -16572,6 +16572,8 @@ impl SseDecode for crate::api::shop::ShopListing {
         let mut var_kinds = <Vec<String>>::sse_decode(deserializer);
         let mut var_priceCents = <u32>::sse_decode(deserializer);
         let mut var_priceLabel = <String>::sse_decode(deserializer);
+        let mut var_wasCents = <u32>::sse_decode(deserializer);
+        let mut var_wasLabel = <String>::sse_decode(deserializer);
         let mut var_license = <String>::sse_decode(deserializer);
         let mut var_createdAt = <String>::sse_decode(deserializer);
         let mut var_artist = <crate::api::shop::ShopArtist>::sse_decode(deserializer);
@@ -16589,6 +16591,8 @@ impl SseDecode for crate::api::shop::ShopListing {
             kinds: var_kinds,
             price_cents: var_priceCents,
             price_label: var_priceLabel,
+            was_cents: var_wasCents,
+            was_label: var_wasLabel,
             license: var_license,
             created_at: var_createdAt,
             artist: var_artist,
@@ -20860,6 +20864,8 @@ impl flutter_rust_bridge::IntoDart for crate::api::shop::ShopListing {
             self.kinds.into_into_dart().into_dart(),
             self.price_cents.into_into_dart().into_dart(),
             self.price_label.into_into_dart().into_dart(),
+            self.was_cents.into_into_dart().into_dart(),
+            self.was_label.into_into_dart().into_dart(),
             self.license.into_into_dart().into_dart(),
             self.created_at.into_into_dart().into_dart(),
             self.artist.into_into_dart().into_dart(),
@@ -24106,6 +24112,8 @@ impl SseEncode for crate::api::shop::ShopListing {
         <Vec<String>>::sse_encode(self.kinds, serializer);
         <u32>::sse_encode(self.price_cents, serializer);
         <String>::sse_encode(self.price_label, serializer);
+        <u32>::sse_encode(self.was_cents, serializer);
+        <String>::sse_encode(self.was_label, serializer);
         <String>::sse_encode(self.license, serializer);
         <String>::sse_encode(self.created_at, serializer);
         <crate::api::shop::ShopArtist>::sse_encode(self.artist, serializer);
