@@ -3,9 +3,11 @@ import 'package:hollow/src/core/providers/archive_provider.dart';
 import 'package:hollow/src/core/providers/conference_provider.dart';
 import 'package:hollow/src/core/providers/guest_provider.dart';
 import 'package:hollow/src/core/providers/share_tab_provider.dart';
+import 'package:hollow/src/core/providers/shop_tab_provider.dart';
 
 /// The full-screen views that take over the centre pane, replacing whatever
-/// chat is selected: Browse Public Channels, Share, Archive, Conferences.
+/// chat is selected: Browse Public Channels, Share, Archive, Conferences,
+/// Hollow Shop.
 ///
 /// They are mutually exclusive — `_buildChatOrEmpty` checks them in order and
 /// returns the first one that is open — but each keeps its own boolean
@@ -19,7 +21,7 @@ import 'package:hollow/src/core/providers/share_tab_provider.dart';
 /// [setShellTab] is now the ONE place that knows the full list. A new tab is
 /// added to the enum and to this function, and every navigation site stays
 /// correct for free.
-enum ShellTab { guest, share, archive, conference }
+enum ShellTab { guest, share, archive, conference, shop }
 
 /// `ref.read`, torn off either a [WidgetRef] or a provider [Ref] — the same
 /// helper has to serve widgets and notifiers.
@@ -32,6 +34,7 @@ void setShellTab(ProviderRead read, ShellTab? tab) {
   read(shareTabOpenProvider.notifier).state = tab == ShellTab.share;
   read(archiveTabOpenProvider.notifier).state = tab == ShellTab.archive;
   read(conferenceTabOpenProvider.notifier).state = tab == ShellTab.conference;
+  read(shopTabOpenProvider.notifier).state = tab == ShellTab.shop;
 }
 
 /// True when any centre tab is covering the chat area. Watch this instead of
@@ -43,5 +46,6 @@ final anyShellTabOpenProvider = Provider<bool>(
       ref.watch(guestTabOpenProvider) ||
       ref.watch(shareTabOpenProvider) ||
       ref.watch(archiveTabOpenProvider) ||
-      ref.watch(conferenceTabOpenProvider),
+      ref.watch(conferenceTabOpenProvider) ||
+      ref.watch(shopTabOpenProvider),
 );

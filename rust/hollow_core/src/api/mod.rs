@@ -7,6 +7,7 @@ pub mod identity;
 pub mod network;
 pub mod screen_audio;
 pub mod share;
+pub mod shop;
 pub mod showcase;
 pub mod simple;
 pub mod stickers;

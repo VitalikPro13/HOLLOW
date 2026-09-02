@@ -22,6 +22,7 @@ import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/dialogs/twitch_device_code_dialog.dart';
 import 'package:hollow/src/ui/settings/profile_locations_card.dart';
 import 'package:hollow/src/ui/settings/settings_shared.dart';
+import 'package:hollow/src/ui/shop/owned_art_panel.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Profile category of the desktop Settings dialog: live preview card,
@@ -162,6 +163,14 @@ class ProfileSection extends ConsumerWidget {
           Container(height: 1, color: hollow.border),
           const SizedBox(height: HollowSpacing.xl),
           const ProfileLocationsCard(),
+
+          // Art you own (Hollow Shop). Last, below the profile switcher: it
+          // is a library, not part of the deferred profile-edit form, and
+          // wearing something from it saves immediately.
+          const SizedBox(height: HollowSpacing.xl),
+          Container(height: 1, color: hollow.border),
+          const SizedBox(height: HollowSpacing.lg),
+          const OwnedArtPanel(),
         ],
       ),
     );

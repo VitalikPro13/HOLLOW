@@ -3,6 +3,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/conference_provider.dart';
 import 'package:hollow/src/core/providers/dm_navigation.dart';
 import 'package:hollow/src/core/providers/shell_tab.dart';
+import 'package:hollow/src/core/providers/shop_tab_provider.dart';
+import 'package:hollow/src/core/shop_availability.dart';
 import 'package:hollow/src/core/providers/favourite_friends_provider.dart';
 import 'package:hollow/src/core/providers/friends_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
@@ -183,6 +185,37 @@ class FriendsBar extends ConsumerWidget {
             margin: const EdgeInsets.symmetric(horizontal: HollowSpacing.sm),
             color: hollow.border,
           ),
+
+          // Hollow Shop button. Absent entirely (not disabled) on store
+          // builds: Apple 3.1.1 and Play policy want no shop surface at all,
+          // and the safest sentence is no sentence.
+          if (ref.watch(shopAvailableProvider)) ...[
+            Builder(builder: (context) {
+              final shopOpen = ref.watch(shopTabOpenProvider);
+              return HollowTooltip(
+                message: 'Hollow Shop',
+                child: HollowPressable(
+                  semanticLabel: 'Hollow Shop',
+                  // Toggles like every other lit button on this strip
+                  // (issue #28): pressing it again puts the shop away.
+                  onTap: () => shopOpen
+                      ? setShellTab(ref.read, null)
+                      : openShopTab(ref.read),
+                  borderRadius: BorderRadius.circular(hollow.radiusSm),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: HollowSpacing.sm,
+                    vertical: HollowSpacing.xs,
+                  ),
+                  child: Icon(
+                    LucideIcons.store,
+                    size: 18,
+                    color: shopOpen ? hollow.accent : hollow.textSecondary,
+                  ),
+                ),
+              );
+            }),
+            const SizedBox(width: HollowSpacing.xs),
+          ],
 
           // Saved messages button — opens the DM with your own master identity.
           Builder(builder: (context) {

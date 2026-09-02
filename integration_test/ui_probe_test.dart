@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hollow/src/core/reduce_motion.dart';
+import 'package:hollow/src/core/shop_availability.dart';
 import 'package:hollow/src/rust/frb_generated.dart';
 import 'package:hollow/src/ui/app.dart';
 import 'package:integration_test/integration_test.dart';
@@ -59,6 +60,10 @@ void main() {
   // the first widget that reads one takes the whole run down.
   setUpAll(() async {
     await RustLib.init();
+    // The real app primes this in main() before runApp; the probe builds the
+    // widget tree itself, so without this the Hollow Shop button never
+    // exists here (a store build and an unprimed build look the same).
+    await ShopAvailability.prime();
     // The probe boots HollowApp directly and never runs main(), so anything
     // main() set up is missing unless it is set up here. Deliberately only
     // this call: setAsFrameless and the size/show dance belong to a real
@@ -225,7 +230,12 @@ List<dynamic>? _loadSteps(Map<String, String> env) {
   // come from the environment, with or without the UI_PROBE_ prefix.
   final substituted = raw.replaceAllMapped(RegExp(r'\$\{(\w+)\}'), (match) {
     final name = match.group(1)!;
-    return env[name] ?? env['UI_PROBE_$name'] ?? match.group(0)!;
+    final value = env[name] ?? env['UI_PROBE_$name'];
+    if (value == null) return match.group(0)!;
+    // Substituted INTO JSON text, so the value must be JSON-escaped: a Windows
+    // path's backslashes would otherwise be read as string escapes.
+    final encoded = jsonEncode(value);
+    return encoded.substring(1, encoded.length - 1);
   });
 
   final decoded = jsonDecode(substituted);

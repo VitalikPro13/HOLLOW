@@ -104,9 +104,11 @@ import 'package:hollow/src/core/providers/app_lifecycle_provider.dart';
 import 'package:hollow/src/core/providers/archive_provider.dart';
 import 'package:hollow/src/core/providers/conference_provider.dart';
 import 'package:hollow/src/core/providers/share_tab_provider.dart';
+import 'package:hollow/src/core/providers/shop_tab_provider.dart';
 import 'package:hollow/src/core/providers/shell_tab.dart';
 import 'package:hollow/src/ui/shell/archive_dashboard.dart';
 import 'package:hollow/src/ui/shell/conference_dashboard.dart';
+import 'package:hollow/src/ui/shop/shop_dashboard.dart';
 import 'package:hollow/src/ui/share/share_dashboard.dart';
 import 'package:hollow/src/ui/shell/home_dashboard.dart';
 import 'package:hollow/src/core/providers/layout_prefs_provider.dart';
@@ -1572,6 +1574,11 @@ class _HollowShellState extends ConsumerState<HollowShell>
       return const ConferenceDashboard();
     }
 
+    // Hollow Shop tab view
+    if (ref.watch(shopTabOpenProvider)) {
+      return const ShopDashboard();
+    }
+
     // Server channel view
     if (selectedChannelId != null) {
       final channel = channels[selectedChannelId];
@@ -1892,6 +1899,7 @@ class _HollowShellState extends ConsumerState<HollowShell>
                                     : ref.watch(shareTabOpenProvider) ? 'share'
                                     : ref.watch(archiveTabOpenProvider) ? 'archive'
                                     : ref.watch(conferenceTabOpenProvider) ? 'conference'
+                                    : ref.watch(shopTabOpenProvider) ? 'shop'
                                     : settingsOpen && selectedServer != null
                                     ? 'settings-${selectedServer.serverId}'
                                     : selectedChannelId ?? selectedPeerId ?? 'empty'),
@@ -2109,6 +2117,8 @@ class _HollowShellState extends ConsumerState<HollowShell>
                                         ? 'archive'
                                         : ref.watch(conferenceTabOpenProvider)
                                         ? 'conference'
+                                        : ref.watch(shopTabOpenProvider)
+                                        ? 'shop'
                                         : settingsOpen &&
                                             selectedServer != null
                                         ? 'settings-${selectedServer.serverId}'

@@ -1079,6 +1079,15 @@ fn referenced_asset_hashes(ms: &crate::storage::MessageStore) -> std::collection
             keep.insert(hash);
         }
     }
+    // Art bought from the artist shop, worn or not. A `.hollowpack` import is
+    // the one thing on the rail with no peer to re-pull it from and a receipt
+    // behind it: evicting it would silently destroy something somebody paid
+    // for, and re-importing means finding the file again. Every owned hash is
+    // pinned, including the stills and the halves of a pair the wearer is not
+    // currently using.
+    if let Ok(owned) = ms.owned_art_hashes() {
+        keep.extend(owned);
+    }
     keep
 }
 
@@ -1766,4 +1775,74 @@ pub fn perform_pending_wipe() -> Result<(), String> {
     let _ = std::fs::remove_file(&marker);
     hollow_log!("[HOLLOW-WIPE] Data dir wiped for clean Welcome ({removed} entries removed)");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Install a fresh in-memory store into the process-global slot and hold
+    /// the lock that serializes every test which swaps it.
+    fn fresh_store() -> std::sync::MutexGuard<'static, ()> {
+        let lock = store_test_lock();
+        set_test_store(
+            crate::storage::MessageStore::open(":memory:", &"ab".repeat(32))
+                .expect("open in-memory store"),
+        );
+        lock
+    }
+
+    fn with_store<T>(body: impl FnOnce(&crate::storage::MessageStore) -> T) -> T {
+        let guard = get_store().lock().unwrap_or_else(|e| e.into_inner());
+        body(guard.as_ref().expect("store installed"))
+    }
+
+    /// Art bought from the artist shop is PINNED against the asset evictor.
+    /// Everything else on the rail is a cache entry with a peer behind it; a
+    /// `.hollowpack` import has a receipt behind it and nobody to re-pull it
+    /// from, so eviction must walk past it and take the ordinary blob instead.
+    #[test]
+    fn owned_art_is_pinned_against_asset_eviction() {
+        let _lock = fresh_store();
+
+        let owned = "aa".repeat(32);
+        let cached = "bb".repeat(32);
+
+        with_store(|ms| {
+            ms.save_asset_blob(&owned, &vec![7u8; 4096], false, "frame").unwrap();
+            ms.save_asset_blob(&cached, &vec![9u8; 4096], false, "profile").unwrap();
+            ms.save_owned_art(
+                &owned,
+                "frame",
+                "item1",
+                "Gilded frame",
+                "Nadia",
+                "nadia",
+                "https://shop.anonlisten.com/@nadia",
+                "Personal use",
+            )
+            .unwrap();
+
+            // The keep-set names it before anything is deleted.
+            assert!(
+                referenced_asset_hashes(ms).contains(&owned),
+                "owned art must be in the evictor's keep-set",
+            );
+        });
+
+        // Drive the real eviction path: "clear everything unreferenced".
+        let freed = clear_unreferenced_asset_blobs().expect("clear");
+        assert_eq!(freed, 4096, "only the unowned blob may be freed");
+
+        with_store(|ms| {
+            assert!(
+                ms.has_emote_blob(&owned).unwrap(),
+                "paid-for art must survive eviction",
+            );
+            assert!(
+                !ms.has_emote_blob(&cached).unwrap(),
+                "an ordinary cached blob is still evictable",
+            );
+        });
+    }
 }

@@ -616,6 +616,7 @@ class _JoinConferenceDialogState extends ConsumerState<_JoinConferenceDialog> {
               HollowLinkType.share => 'share link',
               HollowLinkType.recovery => 'recovery link',
               HollowLinkType.conference => 'conference link',
+              HollowLinkType.redeem => 'support code',
             }}, not a meeting link");
         return;
       }

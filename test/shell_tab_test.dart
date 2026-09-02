@@ -7,6 +7,7 @@ import 'package:hollow/src/core/providers/conference_provider.dart';
 import 'package:hollow/src/core/providers/guest_provider.dart';
 import 'package:hollow/src/core/providers/share_tab_provider.dart';
 import 'package:hollow/src/core/providers/shell_tab.dart';
+import 'package:hollow/src/core/providers/shop_tab_provider.dart';
 
 /// Issue #28: the centre tabs (Browse / Share / Archive / Conferences) are
 /// mutually exclusive, but each one is its own boolean, so every navigation
@@ -30,6 +31,7 @@ void main() {
         ShellTab.share: c.read(shareTabOpenProvider),
         ShellTab.archive: c.read(archiveTabOpenProvider),
         ShellTab.conference: c.read(conferenceTabOpenProvider),
+        ShellTab.shop: c.read(shopTabOpenProvider),
       };
       expect(open[tab], isTrue, reason: '$tab did not open');
       expect(
@@ -48,6 +50,7 @@ void main() {
     expect(c.read(shareTabOpenProvider), isFalse);
     expect(c.read(archiveTabOpenProvider), isFalse);
     expect(c.read(conferenceTabOpenProvider), isFalse);
+    expect(c.read(shopTabOpenProvider), isFalse);
     expect(c.read(anyShellTabOpenProvider), isFalse);
   });
 
@@ -64,6 +67,7 @@ void main() {
       'shareTabOpenProvider',
       'archiveTabOpenProvider',
       'conferenceTabOpenProvider',
+      'shopTabOpenProvider',
     ];
     final offenders = <String>[];
 

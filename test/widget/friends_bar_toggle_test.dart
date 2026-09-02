@@ -18,12 +18,17 @@ import 'package:hollow/src/core/providers/saved_messages_provider.dart';
 import 'package:hollow/src/core/providers/selected_peer_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/shell_tab.dart';
+import 'package:hollow/src/core/providers/shop_tab_provider.dart';
+import 'package:hollow/src/core/shop_availability.dart';
 import 'package:hollow/src/theme/hollow_theme_data.dart';
 import 'package:hollow/src/ui/shell/friends_bar.dart';
 
 import '../helpers/test_app.dart';
 
-Future<ProviderContainer> _pumpBar(WidgetTester tester) async {
+Future<ProviderContainer> _pumpBar(
+  WidgetTester tester, {
+  bool shopAvailable = true,
+}) async {
   tester.view.physicalSize = const Size(1280, 200);
   tester.view.devicePixelRatio = 1.0;
   addTearDown(() {
@@ -31,7 +36,11 @@ Future<ProviderContainer> _pumpBar(WidgetTester tester) async {
     tester.view.resetDevicePixelRatio();
   });
 
-  final container = ProviderContainer(overrides: hollowTestOverrides());
+  final container = ProviderContainer(
+    overrides: hollowTestOverrides(
+      extra: [shopAvailableProvider.overrideWithValue(shopAvailable)],
+    ),
+  );
   addTearDown(container.dispose);
 
   await tester.pumpWidget(
@@ -93,6 +102,31 @@ void main() {
     expect(c.read(selectedServerProvider), isNull);
     expect(c.read(selectedChannelProvider), isNull);
     expect(c.read(anyShellTabOpenProvider), isFalse);
+  });
+
+  testWidgets('Hollow Shop toggles', (tester) async {
+    final c = await _pumpBar(tester);
+
+    await _tap(tester, 'Hollow Shop');
+    expect(c.read(shopTabOpenProvider), isTrue);
+    expect(c.read(anyShellTabOpenProvider), isTrue);
+
+    await _tap(tester, 'Hollow Shop');
+    expect(c.read(shopTabOpenProvider), isFalse,
+        reason: 'a lit button un-lights (issue #28)');
+    expect(c.read(anyShellTabOpenProvider), isFalse);
+  });
+
+  /// Apple 3.1.1 and Play policy: a store build carries no shop surface at
+  /// all, so the button is ABSENT rather than disabled.
+  testWidgets('Hollow Shop is absent on store builds', (tester) async {
+    await _pumpBar(tester, shopAvailable: false);
+    expect(
+      find.byWidgetPredicate(
+        (w) => w is Semantics && w.properties.label == 'Hollow Shop',
+      ),
+      findsNothing,
+    );
   });
 
   testWidgets('Conferences still toggles, and the two are mutually exclusive',

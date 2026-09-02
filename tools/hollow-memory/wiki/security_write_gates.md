@@ -50,7 +50,7 @@ sender needs no signature.
 | Avatar frame blob (`kind='frame'`, issue #54) | same `handle_emote_assets` path | same requested-only gate (256 KB cap from the recorded kind — the tight EMOTE ceiling, not the rail's 512 KB, because a frame is decoration on every avatar you have ever seen). The PROFILE carries only the ID: `UserProfile.avatar_frame` is `""` / `b:<hue>` / 64-hex, and `social::sanitize_incoming_frame` is the sole validator on ingest. That validator matters more than it looks — the field is plaintext on the `HavenMessage::ProfileUpdate` fallback AND it keys a network PULL, so an unvalidated string would be a request-anything primitive. Anything unrecognised is treated as ABSENT (preserve what we stored), never as a clear, so a malformed field from a future client cannot wipe somebody's frame |
 | Animated avatar/banner blob (`kind='profile'`, asset-rail follow-up) | same `handle_emote_assets` path | same requested-only gate (1 MB cap from the recorded kind, which is `image_convert::MAX_PROFILE_ANIM_BYTES` by construction — a test pins the equality so the wire cap and the authoring limit cannot drift). ONE kind covers avatar and banner: they share a replication profile (one of each per person you have ever met) so they share a budget. The PROFILE carries only the hash: `UserProfile.avatar_anim` / `banner_anim` are `""` or 64-hex, and `social::sanitize_incoming_anim` is the sole validator on ingest — same reasoning as `sanitize_incoming_frame`, because the field is plaintext on the `HavenMessage::ProfileUpdate` fallback AND keys a network PULL. Anything unrecognised is ABSENT (preserve), never a clear. Deliberately OUTSIDE `profile_signing_payload`, matching `avatar_frame`: a rewritten hash swaps decoration a rewriter already holds, and the STILL companion the signature DOES cover keeps rendering underneath |
 | Vault / Share chunks | `vault`, `share_handler` | manifest root hash |
-| `.hollowpack` import (`api::import_hollowpack`, LOCAL file picker / drag-drop; writes `save_asset_blob` kind `frame`/`profile` + the `owned_art` row) | `hollowpack::verify_pack_file` = the ONE trust boundary, shared with the `hollowpack inspect` CLI | A pack is remote-AUTHORED bytes even though the user picks it locally. Caps before any decode (8 files, 4 MB each, 16 MB total, 20 MB zip, 64 KB manifest); every file's sha256 RECOMPUTED and the whole pack refused on any mismatch; WebP decode with per-role ceilings (frame exactly 128x128, avatar/still ≤184, banner/still ≤600x200), animated roles must animate and still roles must not, frames re-pass `validate_frame_centre`; a manifest that disagrees with the bytes about size/dims/animation is REFUSED, never corrected; nothing is written by a manifest-supplied name (files are keyed by hash); bytes are stored AS-IS, never re-encoded (identity is the hash of the processed bytes; the phase-2 credential binds it). Import does not touch the profile |
+| `.hollowpack` import (`api::import_hollowpack`, LOCAL file picker / drag-drop; writes `save_asset_blob` kind `frame`/`profile` + the `owned_art` row) | `hollowpack::verify_pack_file` = the ONE trust boundary, shared with the `hollowpack inspect` CLI | A pack is remote-AUTHORED bytes even though the user picks it locally. Caps before any decode (8 files, 4 MB each, 16 MB total, 20 MB zip, 64 KB manifest); every file's sha256 RECOMPUTED and the whole pack refused on any mismatch; WebP decode with per-role ceilings (frame square and ≤512, avatar/still ≤512, banner/still ≤1200x480 at 2.5:1 (the 2026-09-01 ceilings; older packs at the old exact sizes stay valid because every bound is a ceiling)), animated roles must animate and still roles must not, frames re-pass `validate_frame_centre`; a manifest that disagrees with the bytes about size/dims/animation is REFUSED, never corrected; nothing is written by a manifest-supplied name (files are keyed by hash); bytes are stored AS-IS, never re-encoded (identity is the hash of the processed bytes; the phase-2 credential binds it). Import does not touch the profile |
 
 ## 3. Gated by owner identity
 
@@ -173,6 +173,21 @@ refusal is now BUFFERED by the relay and replays on our next join of that room
 `twitch_required:` are questions, and a persisted question would re-open its
 dialog at every boot), but it can never CREATE one — so it cannot make us
 join, rejoin a room, or store anything for a server we never asked about).
+
+**`keep_redeem_code` (`api/shop.rs`, the `hollow://redeem/<code>` deep link,
+2026-09-02)** is the one local write a REMOTE AUTHOR can trigger without a relay
+frame: a link on a web page (the shop's thank-you page, or anybody's) opens the
+app and hands it a string. It is a keep-only list for the phase-2 support
+credential, so the gate is shape plus budget, nothing else: the code must match
+`^[A-Za-z0-9_-]{8,128}$`, the table holds at most 64 rows (the 65th is refused
+with a visible error, never silently dropped or rotated), a repeat is a no-op
+(`INSERT OR IGNORE`), and nothing is fetched, sent or announced. Store builds
+never reach it: the Dart handler treats the link as unrecognised when
+`ShopAvailability.available` is false. The shop client's fetches
+(`fetch_shop_catalog`, `fetch_shop_art`) are READS against a pinned origin and
+write nothing: art bytes are refused unless their SHA-256 matches the requested
+hash and they are never put on the asset rail (owned art enters ONLY through
+`import_hollowpack` above).
 
 **`save_channel_message` (`api/storage.rs`) is dead code** — a Dart-callable FFI
 with a wrapper in `storage_service.dart` and no UI call site. It inserts a

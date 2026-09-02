@@ -1106,6 +1106,24 @@ impl MessageStore {
         ddl(conn, "owned_art item index",
             "CREATE INDEX IF NOT EXISTS idx_owned_art_item ON owned_art (item_id)")?;
 
+        // -- Artist shop: kept redeem codes --
+        // The shop's thank-you page hands the buyer a `hollow://redeem/<code>`
+        // link. Phase 2 will blind-sign a support credential from that code;
+        // until then the app simply KEEPS it, so a buyer who closes the page
+        // cannot lose what they paid for.
+        //
+        // A deep link is REMOTE-AUTHORED input: anybody can put a
+        // `hollow://redeem/…` link anywhere and get a click. The gate is the
+        // shape check (`api::shop::valid_redeem_code`) plus a hard cap of 64
+        // rows, so the worst a hostile link can do is add one short string to
+        // a table nothing else reads (wiki `security_write_gates.md`). No
+        // network call, no crypto and no profile change happens here.
+        ddl(conn, "redeem_codes table",
+            "CREATE TABLE IF NOT EXISTS redeem_codes (
+                code        TEXT PRIMARY KEY,
+                received_at INTEGER NOT NULL DEFAULT 0
+            )")?;
+
         Ok(())
     }
 
@@ -4042,6 +4060,75 @@ impl MessageStore {
         Ok(out)
     }
 
+    /// The hash of every piece of shop art this install owns.
+    ///
+    /// Feeds the asset evictor's keep-set: art somebody PAID for is never a
+    /// cache entry, worn or not, and there is no peer to re-pull it from.
+    pub fn owned_art_hashes(&self) -> Result<Vec<String>, String> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT hash FROM owned_art")
+            .map_err(|e| format!("Failed to prepare owned art hash scan: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|e| format!("Failed to scan owned art hashes: {e}"))?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    /// Keep one redeem code from a `hollow://redeem/<code>` deep link.
+    ///
+    /// Returns whether a row was actually written: a code kept twice (the
+    /// buyer clicked the thank-you link again) is a no-op, not an error. The
+    /// caller has already checked the code's SHAPE and the 64-row cap; this
+    /// is the write.
+    pub fn save_redeem_code(&self, code: &str) -> Result<bool, String> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        let changed = self
+            .conn
+            .execute(
+                "INSERT OR IGNORE INTO redeem_codes (code, received_at) VALUES (?1, ?2)",
+                params![code, now],
+            )
+            .map_err(|e| format!("Failed to keep redeem code: {e}"))?;
+        Ok(changed > 0)
+    }
+
+    /// Every kept redeem code, newest first.
+    pub fn list_redeem_codes(&self) -> Result<Vec<(String, i64)>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT code, received_at FROM redeem_codes
+                 ORDER BY received_at DESC, code ASC",
+            )
+            .map_err(|e| format!("Failed to prepare redeem code list: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))
+            .map_err(|e| format!("Failed to list redeem codes: {e}"))?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    /// Forget one kept redeem code. Deleting a code that was never kept is
+    /// not an error.
+    pub fn delete_redeem_code(&self, code: &str) -> Result<(), String> {
+        self.conn
+            .execute("DELETE FROM redeem_codes WHERE code = ?1", params![code])
+            .map_err(|e| format!("Failed to forget redeem code: {e}"))?;
+        Ok(())
+    }
+
+    /// How many redeem codes are kept. The cap is enforced against this.
+    pub fn count_redeem_codes(&self) -> Result<u32, String> {
+        self.conn
+            .query_row("SELECT COUNT(*) FROM redeem_codes", [], |row| {
+                Ok(row.get::<_, i64>(0)?.max(0) as u32)
+            })
+            .map_err(|e| format!("Failed to count redeem codes: {e}"))
+    }
+
     /// (hash, animated, byte size) of every cached blob of one kind, newest
     /// first. Metadata only — bytes load per-hash via [`load_emote_blob`].
     pub fn list_asset_blobs_by_kind(
@@ -5852,5 +5939,37 @@ mod tests {
         let n = store.null_disk_path_all().unwrap();
         assert_eq!(n, 2);
         assert!(store.storage_breakdown().unwrap().is_empty());
+    }
+
+    /// Kept redeem codes: keeping the same code twice writes one row (the
+    /// buyer clicked their thank-you link again), forgetting removes it, and
+    /// the count is what the API layer caps against.
+    #[test]
+    fn redeem_codes_keep_is_idempotent_and_capped() {
+        let store = mem_store();
+        assert_eq!(store.count_redeem_codes().unwrap(), 0);
+
+        assert!(store.save_redeem_code("ABCDE-FGHIJ-12345").unwrap(), "first keep writes a row");
+        assert!(
+            !store.save_redeem_code("ABCDE-FGHIJ-12345").unwrap(),
+            "keeping the same code again must not write a second row",
+        );
+        assert_eq!(store.count_redeem_codes().unwrap(), 1);
+
+        // Fill to the cap the API enforces and check the count it reads.
+        for i in 0..63 {
+            assert!(store.save_redeem_code(&format!("CODE-{i:04}-XXXX")).unwrap());
+        }
+        assert_eq!(store.count_redeem_codes().unwrap(), 64);
+
+        let listed = store.list_redeem_codes().unwrap();
+        assert_eq!(listed.len(), 64);
+        assert!(listed.iter().all(|(_, at)| *at > 0), "every row is stamped");
+
+        store.delete_redeem_code("ABCDE-FGHIJ-12345").unwrap();
+        assert_eq!(store.count_redeem_codes().unwrap(), 63);
+        // Forgetting a code that was never kept is not an error.
+        store.delete_redeem_code("NEVER-KEPT-0001").unwrap();
+        assert_eq!(store.count_redeem_codes().unwrap(), 63);
     }
 }

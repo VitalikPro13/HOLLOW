@@ -66,7 +66,10 @@ import 'package:hollow/src/ui/mobile/mobile_image_crop_route.dart';
 import 'package:hollow/src/ui/mobile/mobile_page_route.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:hollow/src/ui/mobile/mobile_profile_sheet.dart';
+import 'package:hollow/src/core/shop_availability.dart';
 import 'package:hollow/src/ui/shell/system_status_banner.dart';
+import 'package:hollow/src/ui/shop/owned_art_panel.dart';
+import 'package:hollow/src/ui/shop/shop_dashboard.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 class MobileSettingsTab extends ConsumerWidget {
@@ -160,6 +163,18 @@ class MobileSettingsTab extends ConsumerWidget {
               context, 'Help', const HelpResourceCenter()),
         ),
         const SizedBox(height: HollowSpacing.sm),
+        // Absent entirely on store builds (Apple 3.1.1 / Play): no gallery,
+        // no prices, no import, no redeem.
+        if (ref.watch(shopAvailableProvider)) ...[
+          _SettingsNavTile(
+            icon: LucideIcons.store,
+            title: 'Hollow Shop',
+            subtitle: 'Art for your profile, drawn by real people',
+            onTap: () => _push(
+                context, 'Hollow Shop', const ShopDashboard(embedded: true)),
+          ),
+          const SizedBox(height: HollowSpacing.sm),
+        ],
         _SettingsNavTile(
           icon: LucideIcons.palette,
           title: 'Appearance',
@@ -1182,6 +1197,9 @@ class _ProfileTabState extends ConsumerState<_ProfileTab> {
           icon: const Icon(LucideIcons.frame, size: 14),
           child: const Text('Avatar frame'),
         ),
+
+        const SizedBox(height: HollowSpacing.lg),
+        const OwnedArtPanel(compact: true),
 
         const SizedBox(height: HollowSpacing.xl),
 

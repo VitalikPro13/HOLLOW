@@ -21,7 +21,9 @@ import 'package:hollow/src/ui/dialogs/recovery_pool_dialog.dart';
 import 'package:hollow/src/ui/mobile/mobile_conferences_route.dart';
 import 'package:hollow/src/ui/mobile/mobile_page_route.dart';
 import 'package:hollow/src/ui/share/paste_link_dialog.dart';
+import 'package:hollow/src/core/shop_availability.dart';
 import 'package:hollow/src/ui/share/share_card.dart';
+import 'package:hollow/src/ui/shop/redeem_code_dialog.dart';
 
 class HollowLinkCard extends ConsumerWidget {
   final HollowLink link;
@@ -40,6 +42,8 @@ class HollowLinkCard extends ConsumerWidget {
         return _RecoveryLinkCard(link: link);
       case HollowLinkType.conference:
         return _ConferenceInviteCard(link: link);
+      case HollowLinkType.redeem:
+        return _RedeemCodeCard(link: link);
     }
   }
 }
@@ -306,6 +310,54 @@ class _RoomInviteCard extends ConsumerWidget {
 
   void _handleJoin(WidgetRef ref) {
     ref.read(roomProvider.notifier).join(link.fullUrl);
+  }
+}
+
+/// A Hollow Shop support code someone pasted into chat. Renders nothing at
+/// all on a store build: no shop surface means no redeem surface either.
+class _RedeemCodeCard extends ConsumerWidget {
+  final HollowLink link;
+  const _RedeemCodeCard({required this.link});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    if (!ref.watch(shopAvailableProvider)) return const SizedBox.shrink();
+    final hollow = HollowTheme.of(context);
+
+    return _cardContainer(
+      hollow: hollow,
+      onTap: () => showRedeemCodeDialog(context, link.id),
+      child: Row(
+        children: [
+          Icon(LucideIcons.gift, size: 20, color: hollow.accent),
+          const SizedBox(width: HollowSpacing.sm),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  'Support code',
+                  style: HollowTypography.body.copyWith(
+                    color: hollow.textPrimary,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  'Tap to keep it in Hollow',
+                  style: HollowTypography.caption.copyWith(
+                    color: hollow.textSecondary,
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
   }
 }
 

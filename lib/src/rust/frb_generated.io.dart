@@ -12,6 +12,7 @@ import 'api/identity.dart';
 import 'api/network.dart';
 import 'api/screen_audio.dart';
 import 'api/share.dart';
+import 'api/shop.dart';
 import 'api/showcase.dart';
 import 'api/simple.dart';
 import 'api/stickers.dart';
@@ -201,6 +202,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   IdentityInfo dco_decode_identity_info(dynamic raw);
 
   @protected
+  KeptRedeemCode dco_decode_kept_redeem_code(dynamic raw);
+
+  @protected
   LabelFfi dco_decode_label_ffi(dynamic raw);
 
   @protected
@@ -280,6 +284,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<HollowpackFile> dco_decode_list_hollowpack_file(dynamic raw);
 
   @protected
+  List<KeptRedeemCode> dco_decode_list_kept_redeem_code(dynamic raw);
+
+  @protected
   List<LabelFfi> dco_decode_list_label_ffi(dynamic raw);
 
   @protected
@@ -340,6 +347,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<ShareEntry> dco_decode_list_share_entry(dynamic raw);
+
+  @protected
+  List<ShopFile> dco_decode_list_shop_file(dynamic raw);
+
+  @protected
+  List<ShopListing> dco_decode_list_shop_listing(dynamic raw);
 
   @protected
   List<ShowcaseAsset> dco_decode_list_showcase_asset(dynamic raw);
@@ -508,6 +521,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   ShareLinkInfo dco_decode_share_link_info(dynamic raw);
+
+  @protected
+  ShopArtist dco_decode_shop_artist(dynamic raw);
+
+  @protected
+  ShopCatalog dco_decode_shop_catalog(dynamic raw);
+
+  @protected
+  ShopFile dco_decode_shop_file(dynamic raw);
+
+  @protected
+  ShopListing dco_decode_shop_listing(dynamic raw);
 
   @protected
   ShowcaseAsset dco_decode_showcase_asset(dynamic raw);
@@ -779,6 +804,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   IdentityInfo sse_decode_identity_info(SseDeserializer deserializer);
 
   @protected
+  KeptRedeemCode sse_decode_kept_redeem_code(SseDeserializer deserializer);
+
+  @protected
   LabelFfi sse_decode_label_ffi(SseDeserializer deserializer);
 
   @protected
@@ -884,6 +912,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  List<KeptRedeemCode> sse_decode_list_kept_redeem_code(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   List<LabelFfi> sse_decode_list_label_ffi(SseDeserializer deserializer);
 
   @protected
@@ -962,6 +995,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<ShareEntry> sse_decode_list_share_entry(SseDeserializer deserializer);
+
+  @protected
+  List<ShopFile> sse_decode_list_shop_file(SseDeserializer deserializer);
+
+  @protected
+  List<ShopListing> sse_decode_list_shop_listing(SseDeserializer deserializer);
 
   @protected
   List<ShowcaseAsset> sse_decode_list_showcase_asset(
@@ -1176,6 +1215,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   ShareLinkInfo sse_decode_share_link_info(SseDeserializer deserializer);
+
+  @protected
+  ShopArtist sse_decode_shop_artist(SseDeserializer deserializer);
+
+  @protected
+  ShopCatalog sse_decode_shop_catalog(SseDeserializer deserializer);
+
+  @protected
+  ShopFile sse_decode_shop_file(SseDeserializer deserializer);
+
+  @protected
+  ShopListing sse_decode_shop_listing(SseDeserializer deserializer);
 
   @protected
   ShowcaseAsset sse_decode_showcase_asset(SseDeserializer deserializer);
@@ -1538,6 +1589,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_identity_info(IdentityInfo self, SseSerializer serializer);
 
   @protected
+  void sse_encode_kept_redeem_code(
+    KeptRedeemCode self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_label_ffi(LabelFfi self, SseSerializer serializer);
 
   @protected
@@ -1673,6 +1730,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_list_kept_redeem_code(
+    List<KeptRedeemCode> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_list_label_ffi(List<LabelFfi> self, SseSerializer serializer);
 
   @protected
@@ -1780,6 +1843,15 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_list_share_entry(
     List<ShareEntry> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_shop_file(List<ShopFile> self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_list_shop_listing(
+    List<ShopListing> self,
     SseSerializer serializer,
   );
 
@@ -2064,6 +2136,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_share_link_info(ShareLinkInfo self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_shop_artist(ShopArtist self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_shop_catalog(ShopCatalog self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_shop_file(ShopFile self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_shop_listing(ShopListing self, SseSerializer serializer);
 
   @protected
   void sse_encode_showcase_asset(ShowcaseAsset self, SseSerializer serializer);

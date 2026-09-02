@@ -1,5 +1,6 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/rust/api/showcase.dart' as showcase_api;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
@@ -123,6 +124,45 @@ class ProfileNotifier extends Notifier<Map<String, storage_api.UserProfile>> {
         ),
       };
     }
+  }
+
+  /// Optimistically patch MY profile's media fields after a save, so every
+  /// surface reading [profileProvider] paints the new art immediately instead
+  /// of waiting for the `ProfileUpdated` event to come back round.
+  ///
+  /// Same idiom as [updateShowcaseBoard]: `null` leaves a field alone, a value
+  /// replaces it. The bytes arguments carry the still that went out with the
+  /// save; the DB is deliberately NOT read back (the Rust save is
+  /// fire-and-forget through the node command channel, so a read right after
+  /// the write returns the PREVIOUS value).
+  void patchMyMedia({
+    String? avatarFrame,
+    String? avatarAnim,
+    String? bannerAnim,
+    Uint8List? avatarBytes,
+    Uint8List? bannerBytes,
+  }) {
+    final peerId = ref.read(identityProvider).peerId ?? '';
+    if (peerId.isEmpty) return;
+    final current = state[peerId];
+    if (current == null) return;
+    state = {
+      ...state,
+      peerId: storage_api.UserProfile(
+        peerId: current.peerId,
+        displayName: current.displayName,
+        status: current.status,
+        aboutMe: current.aboutMe,
+        updatedAt: current.updatedAt,
+        avatarBytes: avatarBytes ?? current.avatarBytes,
+        bannerBytes: bannerBytes ?? current.bannerBytes,
+        twitchUsername: current.twitchUsername,
+        showcaseBoard: current.showcaseBoard,
+        avatarFrame: avatarFrame ?? current.avatarFrame,
+        avatarAnim: avatarAnim ?? current.avatarAnim,
+        bannerAnim: bannerAnim ?? current.bannerAnim,
+      ),
+    };
   }
 }
 

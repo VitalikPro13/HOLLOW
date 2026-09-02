@@ -8,6 +8,8 @@ import 'package:hollow/src/core/providers/guest_provider.dart';
 import 'package:hollow/src/core/providers/help_panel_provider.dart';
 import 'package:hollow/src/core/providers/share_tab_provider.dart';
 import 'package:hollow/src/core/providers/shell_tab.dart';
+import 'package:hollow/src/core/providers/shop_tab_provider.dart';
+import 'package:hollow/src/core/shop_availability.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
 import 'package:hollow/src/core/providers/selected_peer_provider.dart';
 import 'package:hollow/src/core/models/strip_item.dart';
@@ -73,6 +75,8 @@ class _ServerStripState extends ConsumerState<ServerStrip> {
     final guestOpen = ref.watch(guestTabOpenProvider);
     final conferencesOpen = ref.watch(conferenceTabOpenProvider);
     final helpOpen = ref.watch(helpPanelOpenProvider);
+    final shopOpen = ref.watch(shopTabOpenProvider);
+    final shopAvailable = ref.watch(shopAvailableProvider);
     // Home is only "selected" when nothing is covering the chat area — any
     // centre tab counts, including the two this strip has no button for.
     final homeSelected =
@@ -210,6 +214,24 @@ class _ServerStripState extends ConsumerState<ServerStrip> {
       ),
     );
 
+    // Hollow Shop. Absent entirely on store builds (Apple 3.1.1 / Play):
+    // no gallery, no prices, no button.
+    Widget shopIcon = _ServerIconWithIndicator(
+      isSelected: shopOpen,
+      child: _ServerIcon(
+        isSelected: shopOpen,
+        backgroundColor: hollow.elevated,
+        tooltip: 'Hollow Shop',
+        onTap: () =>
+            shopOpen ? setShellTab(ref.read, null) : openShopTab(ref.read),
+        child: Icon(
+          LucideIcons.store,
+          color: shopOpen ? hollow.accent : hollow.textSecondary,
+          size: 20,
+        ),
+      ),
+    );
+
     Widget helpIcon = Padding(
       padding: const EdgeInsets.only(bottom: HollowSpacing.xs),
       child: _ServerIcon(
@@ -285,6 +307,10 @@ class _ServerStripState extends ConsumerState<ServerStrip> {
             archiveIcon,
             const SizedBox(height: HollowSpacing.xs),
             conferenceIcon,
+            if (shopAvailable) ...[
+              const SizedBox(height: HollowSpacing.xs),
+              shopIcon,
+            ],
             const SizedBox(height: HollowSpacing.sm),
             divider,
             const SizedBox(height: HollowSpacing.sm),

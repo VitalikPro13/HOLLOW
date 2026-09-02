@@ -19,7 +19,9 @@ import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/dialogs/recovery_pool_dialog.dart';
 import 'package:hollow/src/ui/mobile/mobile_conferences_route.dart';
 import 'package:hollow/src/ui/mobile/mobile_page_route.dart';
+import 'package:hollow/src/core/shop_availability.dart';
 import 'package:hollow/src/ui/share/paste_link_dialog.dart';
+import 'package:hollow/src/ui/shop/redeem_code_dialog.dart';
 
 /// Receives hollow:// deep links from the OS (browser clicks, other apps) on
 /// every platform via app_links, and routes them into the same flows the
@@ -32,6 +34,7 @@ import 'package:hollow/src/ui/share/paste_link_dialog.dart';
 ///   hollow://join?room=CODE          → confirm dialog → roomProvider.join
 ///   hollow://share/...               → PasteLinkDialog (own confirm flow)
 ///   hollow://recovery?server=&token= → recovery pool join dialog (prefilled)
+///   hollow://redeem/CODE             → keep a Hollow Shop support code
 ///   https://hollow.anonlisten.com/join#server=ID → same as join?server
 class DeepLinkService {
   DeepLinkService._();
@@ -131,6 +134,14 @@ class DeepLinkService {
         showJoinRecoveryPoolDialog(context, prefillLink: link.fullUrl);
       case HollowLinkType.conference:
         await _confirmJoinConference(context, link);
+      case HollowLinkType.redeem:
+        // A store build has no shop surface at all (Apple 3.1.1 / Play), and
+        // that includes the redeem dialog: the link reads as unrecognized.
+        if (!ShopAvailability.available) {
+          _toast('Unrecognized Hollow link', HollowToastType.error);
+          return;
+        }
+        await showRedeemCodeDialog(context, link.id);
     }
   }
 

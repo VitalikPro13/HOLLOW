@@ -54,3 +54,17 @@ Future<void> releaseWifiLock() async {
     await _channel.invokeMethod<void>('releaseWifiLock');
   } catch (_) {}
 }
+
+/// The package that installed this APK (`com.android.vending` for Google
+/// Play), or null off Android, on a sideload that reports nothing, or if the
+/// query fails. Used by [ShopAvailability] to tell a store build from a
+/// sideload; a store always reports its own package, so null means "not a
+/// store".
+Future<String?> androidInstallerPackage() async {
+  if (!_isAndroid) return null;
+  try {
+    return await _channel.invokeMethod<String>('getInstallerPackage');
+  } catch (_) {
+    return null;
+  }
+}

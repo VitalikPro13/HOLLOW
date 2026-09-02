@@ -26,6 +26,23 @@ class MainActivity : FlutterFragmentActivity() {
                     "getSdkInt" -> {
                         result.success(Build.VERSION.SDK_INT)
                     }
+                    // Which store (if any) installed this APK. Google Play
+                    // reports com.android.vending; a sideload reports null.
+                    // The shop UI is hidden entirely on store builds.
+                    "getInstallerPackage" -> {
+                        val installer = try {
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                                packageManager.getInstallSourceInfo(packageName)
+                                    .installingPackageName
+                            } else {
+                                @Suppress("DEPRECATION")
+                                packageManager.getInstallerPackageName(packageName)
+                            }
+                        } catch (e: Exception) {
+                            null
+                        }
+                        result.success(installer)
+                    }
                     "isBatteryOptimized" -> {
                         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
                         result.success(!pm.isIgnoringBatteryOptimizations(packageName))

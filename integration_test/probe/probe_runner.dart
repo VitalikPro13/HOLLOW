@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:ui' as ui;
@@ -8,6 +9,8 @@ import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:hollow/src/ui/app.dart' show hollowNavigatorKey;
+import 'package:hollow/src/ui/shop/hollowpack_import.dart';
 
 import 'probe_dump.dart';
 import 'probe_targets.dart';
@@ -41,6 +44,7 @@ import 'probe_targets.dart';
 /// | `look` | `filter`, `max` | what is on screen, IN the answer |
 /// | `wait_for` | `target` or `gone`, `timeout_ms`, `count` | polls until it holds |
 /// | `capture` | `as`, `target` or `from` | reads a value out of the app |
+/// | `import_pack` | `path` | imports a `.hollowpack` into the running app |
 /// | `log` | `message` | a note in the results |
 /// | `quit` | | ends a live session |
 ///
@@ -427,6 +431,9 @@ class ProbeRunner {
       case 'capture':
         return _capture(step, extra);
 
+      case 'import_pack':
+        return _importPack(step);
+
       case 'log':
         return '${step['message'] ?? ''}';
 
@@ -441,6 +448,54 @@ class ProbeRunner {
   // ---------------------------------------------------------------------------
   // Helpers
   // ---------------------------------------------------------------------------
+
+  /// Imports a `.hollowpack` through the app's own import path, so the probe
+  /// exercises exactly what a drop or a file pick does.
+  ///
+  /// Deliberately NOT awaited: the import ends in a dialog, and
+  /// `showHollowDialog` does not complete until that dialog is dismissed, so
+  /// awaiting it would wedge the runner before the scenario could tap Done.
+  Future<String> _importPack(Map<String, dynamic> step) async {
+    final path = '${step['path'] ?? ''}';
+    if (path.isEmpty) throw _ProbeFailure('import_pack needs a "path"');
+    if (!File(path).existsSync()) {
+      throw _ProbeFailure('no file at "$path"');
+    }
+    final host = _consumerElement();
+    if (host == null) {
+      throw _ProbeFailure('no ConsumerWidget is mounted to import through');
+    }
+    unawaited(
+      importHollowpackAt(host, host as WidgetRef, path).catchError((Object e) {
+        debugPrint('[ui-probe] import_pack failed: $e');
+      }),
+    );
+    await settle(frames: step['frames'] as int? ?? 40);
+    return 'imported $path';
+  }
+
+  /// A mounted `ConsumerWidget`/`ConsumerStatefulWidget` element, which is
+  /// both a [BuildContext] and a [WidgetRef]. Searched from the app's
+  /// Navigator down, so whatever is handed it can push a dialog and toast.
+  Element? _consumerElement() {
+    Element? found;
+    void visit(Element el) {
+      if (found != null) return;
+      if (el is WidgetRef) {
+        found = el;
+        return;
+      }
+      el.visitChildren(visit);
+    }
+
+    final navContext = hollowNavigatorKey.currentContext;
+    if (navContext is Element) visit(navContext);
+    if (found == null) {
+      final root = WidgetsBinding.instance.rootElement;
+      if (root != null) visit(root);
+    }
+    return found;
+  }
 
   /// Resolves a step's target, failing with what the screen DOES hold rather
   /// than with a bare "not found".

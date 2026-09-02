@@ -1,0 +1,181 @@
+[
+  {
+    "op": "log",
+    "message": "Hollow Shop: open the centre tab, look at the wall, import a pack, wear nothing yet."
+  },
+  {
+    "op": "tap",
+    "target": "semantics:Hollow Shop"
+  },
+  {
+    "op": "wait",
+    "ms": 3000
+  },
+  {
+    "op": "shot",
+    "name": "shop"
+  },
+  {
+    "op": "dump",
+    "name": "shop"
+  },
+  {
+    "op": "log",
+    "message": "hovering a card plays its animation (the wall is still at rest)"
+  },
+  {
+    "op": "hover",
+    "target": "semantics:Sample animated avatar by Sample Artist, $6.99",
+    "soft": true
+  },
+  {
+    "op": "wait",
+    "ms": 1500
+  },
+  {
+    "op": "shot",
+    "name": "hover-anim"
+  },
+  {
+    "op": "expect_text",
+    "value": "Hollow Shop"
+  },
+  {
+    "op": "log",
+    "message": "import a real .hollowpack through the app's own import path (PACK_PATH in the environment)"
+  },
+  {
+    "op": "import_pack",
+    "path": "${PACK_PATH}"
+  },
+  {
+    "op": "wait",
+    "ms": 1500
+  },
+  {
+    "op": "shot",
+    "name": "imported"
+  },
+  {
+    "op": "expect_text",
+    "value": "Imported"
+  },
+  {
+    "op": "tap",
+    "target": "text:Done"
+  },
+  {
+    "op": "wait",
+    "ms": 800
+  },
+  {
+    "op": "log",
+    "message": "a card opens the item dialog (read-only: Buy opens the browser, never tapped here)"
+  },
+  {
+    "op": "scroll",
+    "target": "semantics:Test Avatar1 by Sample Artist, $9.99",
+    "dy": -320
+  },
+  {
+    "op": "wait",
+    "ms": 600
+  },
+  {
+    "op": "tap",
+    "target": "semantics:Sample frame by Sample Artist, $4.99",
+    "soft": true
+  },
+  {
+    "op": "wait",
+    "ms": 1500
+  },
+  {
+    "op": "shot",
+    "name": "item-dialog"
+  },
+  {
+    "op": "dump",
+    "name": "item-dialog"
+  },
+  {
+    "op": "key",
+    "value": "escape"
+  },
+  {
+    "op": "wait",
+    "ms": 800
+  },
+  {
+    "op": "log",
+    "message": "the imported pack shows under Settings > Profile > Art you own (nothing is worn: that would push a real profile change)"
+  },
+  {
+    "op": "tap",
+    "target": "semantics:Settings"
+  },
+  {
+    "op": "wait",
+    "ms": 1800
+  },
+  {
+    "op": "tap",
+    "target": "text:Profile"
+  },
+  {
+    "op": "wait",
+    "ms": 1500
+  },
+  {
+    "op": "expect_text",
+    "value": "ART YOU OWN"
+  },
+  {
+    "op": "expect_text",
+    "value": "Winter frame"
+  },
+  {
+    "op": "scroll",
+    "target": "text:ABOUT ME",
+    "dy": -900
+  },
+  {
+    "op": "wait",
+    "ms": 600
+  },
+  {
+    "op": "shot",
+    "name": "profile-owned-art"
+  },
+  {
+    "op": "dump",
+    "name": "profile-owned-art"
+  },
+  {
+    "op": "key",
+    "value": "escape"
+  },
+  {
+    "op": "wait",
+    "ms": 1000
+  },
+  {
+    "op": "log",
+    "message": "the lit button un-lights (issue #28)"
+  },
+  {
+    "op": "tap",
+    "target": "semantics:Hollow Shop"
+  },
+  {
+    "op": "wait",
+    "ms": 800
+  },
+  {
+    "op": "shot",
+    "name": "shop-closed"
+  },
+  {
+    "op": "quit"
+  }
+]

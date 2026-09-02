@@ -176,5 +176,43 @@ void main() {
       const conf = 'https://hollow.anonlisten.com/join#conf=abc123';
       expect(inviteIdFromInput(conf, HollowLinkType.serverInvite), conf);
     });
+
+    test('a redeem link is not unwrapped into a server id', () {
+      const redeem = 'hollow://redeem/ABCDE-FGHIJ-12345';
+      expect(inviteIdFromInput(redeem, HollowLinkType.serverInvite), redeem);
+    });
+  });
+
+  /// Hollow Shop support codes arrive as `hollow://redeem/<code>` from the
+  /// order page and the receipt email. The shop builds them with
+  /// `encodeURIComponent`, so the code can be percent-encoded on the wire.
+  group('redeem codes', () {
+    test('plain code', () {
+      final link = classifyHollowLink('hollow://redeem/ABCDE-FGHIJ-12345');
+      expect(link!.type, HollowLinkType.redeem);
+      expect(link.id, 'ABCDE-FGHIJ-12345');
+      expect(link.fullUrl, 'hollow://redeem/ABCDE-FGHIJ-12345');
+    });
+
+    test('percent-encoded code is decoded', () {
+      final link = classifyHollowLink('hollow://redeem/ABCDE%2DFGHIJ');
+      expect(link!.type, HollowLinkType.redeem);
+      expect(link.id, 'ABCDE-FGHIJ');
+      expect(link.fullUrl, 'hollow://redeem/ABCDE-FGHIJ');
+    });
+
+    test('rejects an empty, too-short or malformed code', () {
+      expect(classifyHollowLink('hollow://redeem/'), isNull);
+      expect(classifyHollowLink('hollow://redeem/ab'), isNull);
+      expect(classifyHollowLink('hollow://redeem/a%20b'), isNull);
+    });
+
+    test('extracted from a chat message', () {
+      final links =
+          extractHollowLinks('code: hollow://redeem/ABCDE-FGHIJ-12345 ok');
+      expect(links.length, 1);
+      expect(links.first.type, HollowLinkType.redeem);
+      expect(links.first.id, 'ABCDE-FGHIJ-12345');
+    });
   });
 }

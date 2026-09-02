@@ -340,6 +340,7 @@ Used for "Encrypted" (success green, `LucideIcons.shieldCheck`) and "Offline" (t
 3. Vertical divider: 1px wide, 24px tall, `hollow.border` color, `HollowSpacing.sm` horizontal margin.
 4. **Friends list (Expanded):** If `displayList` is empty, shows "No friends yet" caption. Otherwise, horizontal `ListView.builder` rendering `_FriendChip` widgets with `HollowSpacing.xs` horizontal padding.
 5. **Right-hand group** (each `HollowTooltip` > `HollowPressable`, 18px icon, accent when active):
+   - **Hollow Shop** — `LucideIcons.store`, rendered ONLY when `shopAvailableProvider` (absent, not disabled, on store builds). Active on `shopTabOpenProvider`. Tap toggles: `setShellTab(read, null)` when lit, else `openShopTab(read)`. Sits before Saved messages. (2026-09-02, wiki `hollowpack`.)
    - **Saved messages** — `LucideIcons.bookmark`. Active when `savedMessagesPeerIdProvider == selectedPeerProvider`. Tap calls `_toggleSavedMessages`.
    - **Conferences** — `LucideIcons.video`. Active on `conferenceTabOpenProvider`. Tap toggles: `setShellTab(read, null)` when lit, else `conferenceProvider.notifier.openTab()`.
    - **Help** — `LucideIcons.circleHelp`, toggles `helpPanelOpenProvider`.

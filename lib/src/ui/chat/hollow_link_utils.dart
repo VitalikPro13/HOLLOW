@@ -20,12 +20,23 @@ final _webJoinRegex =
     RegExp(r'https://hollow\.anonlisten\.com/join[^\s<>"' "'" r')\]}]*');
 final _inviteIdRegex = RegExp(r'^[A-Za-z0-9_-]{1,128}$');
 
+/// A Hollow Shop support code. Longer floor than an invite id: these are
+/// typed out of a receipt email, and a two-character "code" is a typo.
+final _redeemCodeRegex = RegExp(r'^[A-Za-z0-9_-]{8,128}$');
+
 /// Cheap gate for per-row bubble builds — avoids running the extractor (and
 /// its regexes) on the overwhelmingly common no-link message.
 bool mightContainHollowLinks(String text) =>
     text.contains('hollow://') || text.contains('hollow.anonlisten.com/join');
 
-enum HollowLinkType { share, serverInvite, roomInvite, recovery, conference }
+enum HollowLinkType {
+  share,
+  serverInvite,
+  roomInvite,
+  recovery,
+  conference,
+  redeem,
+}
 
 class HollowLink {
   final HollowLinkType type;
@@ -42,9 +53,18 @@ class HollowLink {
   });
 }
 
-/// Classify a single URL: hollow://share|join|recovery links, plus the
-/// web-form `https://hollow.anonlisten.com/join#server=...` invite (fragment
-/// canonical, `?server=` query tolerated). Returns null if unrecognized.
+/// Classify a single URL. Handled forms:
+///
+///   `hollow://share/PAYLOAD`
+///   `hollow://join?server=ID`
+///   `hollow://join?room=CODE`
+///   `hollow://conference/ID`
+///   `hollow://recovery?server=&token=`
+///   `hollow://redeem/CODE`            (Hollow Shop support code)
+///   https://hollow.anonlisten.com/join#server=|room=|conf=
+///
+/// The web form carries its id in the FRAGMENT (canonical; a `?query` is
+/// tolerated). Returns null if unrecognized.
 HollowLink? classifyHollowLink(String url) {
   final uri = Uri.tryParse(url);
   if (uri == null) return null;
@@ -71,6 +91,18 @@ HollowLink? classifyHollowLink(String url) {
       if (confId.isNotEmpty && _inviteIdRegex.hasMatch(confId)) {
         return HollowLink(
             type: HollowLinkType.conference, fullUrl: url, id: confId);
+      }
+    } else if (uri.host == 'redeem') {
+      // The shop builds these with encodeURIComponent, so the code arrives
+      // percent-encoded; `pathSegments` decodes it.
+      final segments = uri.pathSegments;
+      final code = segments.isEmpty ? '' : segments.first;
+      if (_redeemCodeRegex.hasMatch(code)) {
+        return HollowLink(
+          type: HollowLinkType.redeem,
+          fullUrl: 'hollow://redeem/$code',
+          id: code,
+        );
       }
     } else if (uri.host == 'recovery') {
       final server = uri.queryParameters['server'];

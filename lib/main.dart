@@ -19,6 +19,7 @@ import 'package:hollow/src/core/services/tray_service.dart';
 import 'package:hollow/src/core/frame_schedule_probe.dart';
 import 'package:hollow/src/core/shared_tickers.dart';
 import 'package:hollow/src/core/reduce_motion.dart';
+import 'package:hollow/src/core/shop_availability.dart';
 import 'package:hollow/src/ui/app.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/core/hollow_data_dir.dart';
@@ -314,6 +315,11 @@ Future<void> main(List<String> args) async {
 
   // Set up crash dump logging to hollow_crash.log.
   await _initCrashLogging();
+
+  // Resolve whether this build may show shop UI at all (Apple 3.1.1 / Play
+  // policy). Before runApp so no shop button can flash onto a store build
+  // while an async answer is still in flight.
+  await ShopAvailability.prime();
 
   // Seed reduce-motion from the OS accessibility flag BEFORE tickers start, so
   // decorative animations never spin on the login screen when the OS has
