@@ -19,23 +19,16 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 # is additionally cfg-gated on not(android/ios) in lib.rs).
 [features]
 forwarder = ["dep:str0m", "dep:toml"]
-# Artist shop pack tool (`hollowpack`). Enables NOTHING but the bin target
-# below: the module it drives (src/hollowpack.rs) is always compiled, because
-# the app's importer needs it. The flag exists purely so cargokit's plain
-# `cargo build` never builds a developer CLI into an app build — an
-# unsatisfied `required-features` skips the target outright, so unlike
-# `hollow-forwarder` this bin needs no mobile stub.
-packtool = []
+# The artist shop's `hollowpack` CLI is NOT a bin of this crate any more: it
+# lives in ../hollow_art, which `#[path]`-includes src/hollowpack.rs and the
+# two encoder modules so it builds (and cross-compiles for the shop's Linux
+# host) without the rest of the node. The module itself stays here because
+# the app's importer needs it.
 
 [[bin]]
 name = "hollow-forwarder"
 path = "src/bin/hollow_forwarder.rs"
 required-features = ["forwarder"]
-
-[[bin]]
-name = "hollowpack"
-path = "src/bin/hollowpack.rs"
-required-features = ["packtool"]
 
 [dependencies]
 flutter_rust_bridge = "=2.11.1"

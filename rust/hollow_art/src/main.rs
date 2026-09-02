@@ -1,33 +1,30 @@
-//! `hollowpack` — the artist shop's local pack tool
-//! (`cargo build --release --features packtool --bin hollowpack`).
+//! `hollowpack` — the artist shop's pack tool
+//! (`cargo build --release` in rust/hollow_art; the shop's Linux host gets
+//! `cargo zigbuild --release --target x86_64-unknown-linux-musl`).
 //!
-//! Approval is a manual step Vitalik runs (ARTIST_SHOP_DESIGN §13.14): this is
-//! the binary that turns an artist's submitted source art into the processed
-//! WebPs, their hashes, and the `.hollowpack` that gets attached to the Creem
-//! product. The site then links the listing to those hashes.
+//! This is the binary that turns an artist's submitted source art into the
+//! processed WebPs, their hashes, the `.hollowpack` the app imports, and the
+//! delivery zip the buyer downloads. The shop server runs it at approval; a
+//! keeper can run it by hand for the same result.
 //!
 //! It runs the APP's encoders, not a copy of them, because the buyer's client
 //! recomputes the SHA-256 of the bytes on import and phase 2 binds a support
 //! credential to that hash. Identity is the hash, so a second encoder would be
-//! a second identity.
-//!
-//! **Why the feature gate.** Cargo builds every `[[bin]]` whose
-//! `required-features` are satisfied, and cargokit runs a plain `cargo build`
-//! for every app platform. `packtool` is passed by nothing but a developer's
-//! own command line, so this target simply does not exist in an app build.
-//! (Unlike `hollow-forwarder` it needs no stub: an unsatisfied
-//! `required-features` skips the target outright.)
+//! a second identity. That is why this lives in hollow_art, which
+//! `#[path]`-includes hollow_core's own encoder sources rather than shipping a
+//! lookalike.
 //!
 //! Subcommands:
-//!   pack     encode sources, write pack.json + files/<hash>.webp into a zip
+//!   pack     encode sources, write pack.json + files/<hash>.webp into a zip,
+//!            and optionally the processed files, the catalog entry and the
+//!            delivery zip (pack + originals + README)
 //!   inspect  re-verify a pack the way the app's importer does
 //!   process  encode one source and print what it produced (the design sheet)
+//!   version  print the tool's version (also --version)
 
 use std::path::{Path, PathBuf};
 
-use hollow_core::hollowpack::{
-    self, PackInput, ProcessedFile, RoleHint,
-};
+use hollow_art::hollowpack::{self, PackInput, ProcessedFile, RoleHint};
 
 const USAGE: &str = "\
 hollowpack — build and check Hollow artist shop packs
@@ -37,13 +34,22 @@ USAGE:
                   --artist-name <n> --artist-slug <s> [--artist-url <u>]
                   [--license <text or @file>] [--item-id <16 hex>]
                   --out <x.hollowpack> [--emit-entry <entry.json>]
+                  [--emit-files <dir>]
+                  [--original <path>]... [--readme <file>] [--delivery <x.zip>]
 
   hollowpack inspect <x.hollowpack>
 
   hollowpack process --kind <frame|avatar|banner> <in> --out-dir <dir>
 
+  hollowpack version
+
 <kind> is frame, avatar or banner. Still versus animated is decided from the
 bytes, never from the file extension.
+
+--emit-files writes every processed file as <dir>/<sha256>.webp.
+--delivery writes the buyer's download: the pack at the root (named after
+--out), each --original under originals/<basename>, and --readme as
+README.txt.
 ";
 
 fn main() {
@@ -52,6 +58,10 @@ fn main() {
         Some("pack") => cmd_pack(&args[1..]),
         Some("inspect") => cmd_inspect(&args[1..]),
         Some("process") => cmd_process(&args[1..]),
+        Some("version") | Some("--version") | Some("-V") => {
+            println!("hollowpack {}", env!("CARGO_PKG_VERSION"));
+            return;
+        }
         Some("--help") | Some("-h") | Some("help") | None => {
             print!("{USAGE}");
             return;
@@ -104,6 +114,10 @@ fn cmd_pack(args: &[String]) -> Result<(), String> {
     let mut item_id: Option<String> = None;
     let mut out: Option<String> = None;
     let mut emit_entry: Option<String> = None;
+    let mut emit_files: Option<String> = None;
+    let mut originals: Vec<PathBuf> = Vec::new();
+    let mut readme: Option<String> = None;
+    let mut delivery: Option<String> = None;
 
     let mut i = 0;
     while i < args.len() {
@@ -123,6 +137,10 @@ fn cmd_pack(args: &[String]) -> Result<(), String> {
             "--item-id" => item_id = Some(need_value(args, &mut i, "--item-id")?),
             "--out" => out = Some(need_value(args, &mut i, "--out")?),
             "--emit-entry" => emit_entry = Some(need_value(args, &mut i, "--emit-entry")?),
+            "--emit-files" => emit_files = Some(need_value(args, &mut i, "--emit-files")?),
+            "--original" => originals.push(PathBuf::from(need_value(args, &mut i, "--original")?)),
+            "--readme" => readme = Some(need_value(args, &mut i, "--readme")?),
+            "--delivery" => delivery = Some(need_value(args, &mut i, "--delivery")?),
             "--help" | "-h" => {
                 print!("{USAGE}");
                 return Ok(());
@@ -144,6 +162,12 @@ fn cmd_pack(args: &[String]) -> Result<(), String> {
     {
         return Err("--item-id has to be 16 lowercase hex characters".into());
     }
+    if (!originals.is_empty() || readme.is_some()) && delivery.is_none() {
+        return Err("--original and --readme only mean something with --delivery".into());
+    }
+    // The delivery's entry names are checked BEFORE any encoding runs: a bad
+    // original name is a one-second refusal, an encode is not.
+    let original_names = delivery_names(&originals)?;
 
     let mut files: Vec<ProcessedFile> = Vec::new();
     let mut kinds: Vec<String> = Vec::new();
@@ -171,7 +195,7 @@ fn cmd_pack(args: &[String]) -> Result<(), String> {
         }
     }
 
-    let (zip_bytes, manifest) = hollowpack::build_pack(&PackInput {
+    let input = PackInput {
         title,
         artist_name,
         artist_slug,
@@ -180,7 +204,8 @@ fn cmd_pack(args: &[String]) -> Result<(), String> {
         item_id,
         kinds,
         files,
-    })?;
+    };
+    let (zip_bytes, manifest) = hollowpack::build_pack(&input)?;
 
     // Verify what we just wrote, through the importer's own path. A pack that
     // cannot be imported is not a pack, and finding that out here costs
@@ -203,7 +228,117 @@ fn cmd_pack(args: &[String]) -> Result<(), String> {
         write_out(&entry_path, &json)?;
         println!("wrote {entry_path}");
     }
+
+    // The processed files on their own, named by hash: what a server stores
+    // under /art/<sha256> without having to open the zip it just wrote.
+    if let Some(dir) = emit_files {
+        std::fs::create_dir_all(&dir).map_err(|e| format!("failed to create {dir}: {e}"))?;
+        for f in &input.files {
+            let path = Path::new(&dir).join(format!("{}.webp", f.hash));
+            std::fs::write(&path, &f.bytes)
+                .map_err(|e| format!("failed to write {}: {e}", path.display()))?;
+            println!("wrote {} ({} {} bytes)", path.display(), f.role.as_str(), f.bytes.len());
+        }
+    }
+
+    if let Some(delivery_path) = delivery {
+        let pack_name = Path::new(&out)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .filter(|n| !n.is_empty())
+            .ok_or_else(|| format!("--out {out} has no file name to put in the delivery"))?;
+        let readme_bytes = match &readme {
+            Some(path) => Some(
+                std::fs::read(path).map_err(|e| format!("failed to read the readme {path}: {e}"))?,
+            ),
+            None => None,
+        };
+        let mut original_bytes: Vec<(String, Vec<u8>)> = Vec::with_capacity(originals.len());
+        for (path, name) in originals.iter().zip(original_names) {
+            let bytes = std::fs::read(path)
+                .map_err(|e| format!("failed to read the original {}: {e}", path.display()))?;
+            original_bytes.push((name, bytes));
+        }
+        let delivery_bytes =
+            build_delivery(&pack_name, &zip_bytes, &original_bytes, readme_bytes.as_deref())?;
+        write_out(&delivery_path, &delivery_bytes)?;
+        println!(
+            "wrote {delivery_path} ({} bytes, the pack, {} original{}{})",
+            delivery_bytes.len(),
+            original_bytes.len(),
+            if original_bytes.len() == 1 { "" } else { "s" },
+            if readme_bytes.is_some() { ", README.txt" } else { "" }
+        );
+    }
     Ok(())
+}
+
+/// The entry name each `--original` takes inside the delivery zip: its
+/// basename and nothing else. A path is where the file sits on THIS machine,
+/// and none of that belongs in a buyer's download. An empty or all-dots name
+/// is refused rather than invented, and two originals with one name would be
+/// one entry overwriting the other.
+fn delivery_names(originals: &[PathBuf]) -> Result<Vec<String>, String> {
+    let mut names: Vec<String> = Vec::with_capacity(originals.len());
+    for path in originals {
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if name.is_empty() || name.bytes().all(|b| b == b'.') {
+            return Err(format!(
+                "--original {} has no usable file name",
+                path.display()
+            ));
+        }
+        if names.contains(&name) {
+            return Err(format!("two originals are both called {name}"));
+        }
+        names.push(name);
+    }
+    Ok(names)
+}
+
+/// The buyer's download: the pack at the root, the originals under
+/// `originals/`, the readme as `README.txt`. Pack and originals are STORED,
+/// not deflated: a WebP, a PNG or a zip does not shrink again, and a store is
+/// a copy. The readme is text and deflates.
+fn build_delivery(
+    pack_name: &str,
+    pack_bytes: &[u8],
+    originals: &[(String, Vec<u8>)],
+    readme: Option<&[u8]>,
+) -> Result<Vec<u8>, String> {
+    use std::io::Write;
+
+    let stored = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Stored);
+    let deflated = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+
+    let mut buf = Vec::new();
+    {
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+        zip.start_file(pack_name, stored)
+            .map_err(|e| format!("failed to start the pack entry: {e}"))?;
+        zip.write_all(pack_bytes)
+            .map_err(|e| format!("failed to write the pack entry: {e}"))?;
+        for (name, bytes) in originals {
+            zip.start_file(format!("originals/{name}"), stored)
+                .map_err(|e| format!("failed to start originals/{name}: {e}"))?;
+            zip.write_all(bytes)
+                .map_err(|e| format!("failed to write originals/{name}: {e}"))?;
+        }
+        if let Some(text) = readme {
+            zip.start_file("README.txt", deflated)
+                .map_err(|e| format!("failed to start README.txt: {e}"))?;
+            zip.write_all(text)
+                .map_err(|e| format!("failed to write README.txt: {e}"))?;
+        }
+        zip.finish()
+            .map_err(|e| format!("failed to finish the delivery: {e}"))?;
+    }
+    Ok(buf)
 }
 
 fn write_out(path: &str, bytes: &[u8]) -> Result<(), String> {

@@ -1,0 +1,63 @@
+# hollow_art: the app's art encoders and the `.hollowpack` format, built on
+# their own so the `hollowpack` CLI does not drag the whole hollow_core crate
+# (MLS, SQLCipher, WebRTC glue, ...) into a tool that only encodes pictures.
+#
+# It compiles the SAME source files hollow_core does, by `#[path]` include
+# (see src/lib.rs). There is one encoder and one copy of it; this crate is a
+# second way to build it, not a second implementation. That is what lets the
+# shop server (a shared Linux host with no Rust toolchain) run the app's own
+# encoders: this crate cross-compiles to a static musl binary, hollow_core
+# never would.
+#
+# Cargo.lock was seeded from hollow_core's, so every crate that decides an
+# encoder's OUTPUT (image, image-webp, webp-animation, libwebp-sys2, zip and
+# their decoders) resolves to the exact version the app ships. Identity is the
+# hash of the processed bytes; a different libwebp would be a different hash.
+# Keep it that way: when hollow_core bumps one of those, re-seed this lock.
+
+[package]
+name = "hollow_art"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "hollowpack"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+hex = "0.4"
+sha2 = "0.10"
+image = { version = "0.25", default-features = false, features = ["webp", "png", "jpeg", "gif", "bmp"] }
+webp-animation = "0.9"
+libwebp-sys2 = { version = "0.1", features = ["0_5", "0_6", "1_2", "demux", "mux"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[profile.release]
+strip = true
+
+# Same dev-profile trap hollow_core documents: an unoptimised image pipeline
+# takes seconds per picture, which makes a debug run of the tool useless.
+[profile.dev.package.image]
+opt-level = 3
+[profile.dev.package.image-webp]
+opt-level = 3
+[profile.dev.package.png]
+opt-level = 3
+[profile.dev.package.fdeflate]
+opt-level = 3
+[profile.dev.package.zune-jpeg]
+opt-level = 3
+[profile.dev.package.gif]
+opt-level = 3
+[profile.dev.package.color_quant]
+opt-level = 3
+[profile.dev.package.webp-animation]
+opt-level = 3
+[profile.dev.package.libwebp-sys2]
+opt-level = 3
