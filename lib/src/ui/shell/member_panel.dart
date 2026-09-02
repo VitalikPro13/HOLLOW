@@ -25,6 +25,7 @@ import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/profile_card_popup.dart';
 import 'package:hollow/src/ui/components/status_dot.dart';
 import 'package:hollow/src/ui/components/ui_scale.dart';
+import 'package:hollow/src/ui/components/support_glyph.dart';
 import 'package:hollow/src/ui/shell/user_context_menu.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:hollow/src/core/brand_icons.dart';
@@ -775,13 +776,20 @@ class _ServerMemberTile extends ConsumerWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(
-                      resolvedName,
-                      style: HollowTypography.bodySmall.copyWith(
-                        color: hollow.textPrimary,
-                        fontSize: 12,
-                      ),
-                      overflow: TextOverflow.ellipsis,
+                    Row(
+                      children: [
+                        Flexible(
+                          child: Text(
+                            resolvedName,
+                            style: HollowTypography.bodySmall.copyWith(
+                              color: hollow.textPrimary,
+                              fontSize: 12,
+                            ),
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                        SupportNameGlyph(peerId: peerId, size: 13),
+                      ],
                     ),
                     if (role != 'member')
                       Text(

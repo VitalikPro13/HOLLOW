@@ -943,6 +943,11 @@ class UserProfile {
   /// Asset-rail hash of this person's ANIMATED banner; `""` = still only.
   final String bannerAnim;
 
+  /// Support credentials (artist shop): the verified JSON array as stored,
+  /// `""` for none. Entries are `{t, item, parts, badge, ...}`; a renderer
+  /// lights a mark next to art whose hash is in `parts` and worn.
+  final String supportCreds;
+
   const UserProfile({
     required this.peerId,
     required this.displayName,
@@ -956,6 +961,7 @@ class UserProfile {
     required this.avatarFrame,
     required this.avatarAnim,
     required this.bannerAnim,
+    required this.supportCreds,
   });
 
   @override
@@ -971,7 +977,8 @@ class UserProfile {
       showcaseBoard.hashCode ^
       avatarFrame.hashCode ^
       avatarAnim.hashCode ^
-      bannerAnim.hashCode;
+      bannerAnim.hashCode ^
+      supportCreds.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -989,5 +996,6 @@ class UserProfile {
           showcaseBoard == other.showcaseBoard &&
           avatarFrame == other.avatarFrame &&
           avatarAnim == other.avatarAnim &&
-          bannerAnim == other.bannerAnim;
+          bannerAnim == other.bannerAnim &&
+          supportCreds == other.supportCreds;
 }

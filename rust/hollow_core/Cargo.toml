@@ -66,6 +66,9 @@ tokio-socks = "0.5"
 futures-util = "0.3"
 aes-gcm = "0.10"
 ed25519-dalek = { version = "2", features = ["pkcs8"] }
+# Artist shop support credentials: RFC 9474 blind signatures (node/support_rsa.rs).
+# Pinned exactly: the shop signs with the same crate through the hollowpack binary.
+blind-rsa-signatures = "=0.17.2"
 bs58 = "0.5"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 argon2 = "0.5"

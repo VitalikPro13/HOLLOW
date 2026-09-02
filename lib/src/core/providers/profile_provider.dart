@@ -48,6 +48,8 @@ class ProfileNotifier extends Notifier<Map<String, storage_api.UserProfile>> {
   /// `processAndStoreAvatarAnim`/`processAndStoreBannerAnim` together with its
   /// `still` as avatarBytes/bannerBytes — and pass `''` for a STILL pick, or
   /// the previous animation keeps playing over the new still.
+  /// supportCreds: null = no change (the normal case: Rust rebuilds the
+  /// field from its own table when a code is redeemed), '' = clear.
   Future<void> updateMyProfile({
     required String displayName,
     String status = '',
@@ -60,6 +62,7 @@ class ProfileNotifier extends Notifier<Map<String, storage_api.UserProfile>> {
     String? avatarFrame,
     String? avatarAnim,
     String? bannerAnim,
+    String? supportCreds,
   }) async {
     // NOTE: `updateProfile` resolves once the command is QUEUED on the node's
     // channel — the surfaced failures are "Node is not running", oversized
@@ -78,6 +81,7 @@ class ProfileNotifier extends Notifier<Map<String, storage_api.UserProfile>> {
         avatarFrame: avatarFrame,
         avatarAnim: avatarAnim,
         bannerAnim: bannerAnim,
+        supportCreds: supportCreds,
       );
     } catch (e) {
       // Rethrow so save UIs can show a REAL failure instead of a false
@@ -121,6 +125,7 @@ class ProfileNotifier extends Notifier<Map<String, storage_api.UserProfile>> {
           avatarFrame: current.avatarFrame,
           avatarAnim: current.avatarAnim,
           bannerAnim: current.bannerAnim,
+          supportCreds: current.supportCreds,
         ),
       };
     }
@@ -161,6 +166,7 @@ class ProfileNotifier extends Notifier<Map<String, storage_api.UserProfile>> {
         avatarFrame: avatarFrame ?? current.avatarFrame,
         avatarAnim: avatarAnim ?? current.avatarAnim,
         bannerAnim: bannerAnim ?? current.bannerAnim,
+        supportCreds: current.supportCreds,
       ),
     };
   }

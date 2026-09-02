@@ -7,3 +7,9 @@ pub mod image_convert;
 
 #[path = "../../../hollow_core/src/node/webp_anim.rs"]
 pub mod webp_anim;
+
+/// The RFC 9474 variant of a support credential and its key helpers, so
+/// `hollowpack keygen` and `hollowpack blind-sign` run the SAME code the app
+/// verifies with (design 5.2). Needs only the blind-rsa crate.
+#[path = "../../../hollow_core/src/node/support_rsa.rs"]
+pub mod support_rsa;

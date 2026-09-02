@@ -13,6 +13,7 @@ import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_menu.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/status_dot.dart';
+import 'package:hollow/src/ui/components/support_glyph.dart';
 import 'package:hollow/src/ui/shell/user_context_menu.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -101,15 +102,24 @@ class PeerCard extends ConsumerWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(
-                      peerName,
-                      style: HollowTypography.body.copyWith(
-                        fontSize: 13,
-                        fontWeight: isSelected || hasUnread
-                            ? FontWeight.w600
-                            : FontWeight.w400,
-                        color: hollow.textPrimary,
-                      ),
+                    Row(
+                      children: [
+                        Flexible(
+                          child: Text(
+                            peerName,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: HollowTypography.body.copyWith(
+                              fontSize: 13,
+                              fontWeight: isSelected || hasUnread
+                                  ? FontWeight.w600
+                                  : FontWeight.w400,
+                              color: hollow.textPrimary,
+                            ),
+                          ),
+                        ),
+                        SupportNameGlyph(peerId: peerId),
+                      ],
                     ),
                     if (lastMessage != null) ...[
                       const SizedBox(height: HollowSpacing.xxs),

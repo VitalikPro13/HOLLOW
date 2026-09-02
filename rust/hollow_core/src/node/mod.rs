@@ -25,6 +25,8 @@ pub(crate) mod resolver;
 pub(crate) mod security_alerts;
 pub(crate) mod share_handler;
 pub(crate) mod social;
+pub(crate) mod support_creds;
+pub(crate) mod support_rsa;
 pub(crate) mod sync_handler;
 pub(crate) mod twitch;
 pub(crate) mod types;

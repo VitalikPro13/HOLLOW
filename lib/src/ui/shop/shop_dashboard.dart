@@ -6,7 +6,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/avatar_frame_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
-import 'package:hollow/src/core/providers/owned_art_provider.dart';
 import 'package:hollow/src/core/providers/shop_provider.dart' as shop;
 import 'package:hollow/src/core/shop_availability.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
@@ -21,6 +20,7 @@ import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/shop/hollowpack_import.dart';
 import 'package:hollow/src/ui/shop/shop_item_dialog.dart';
+import 'package:hollow/src/ui/shop/redeem_code_dialog.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:url_launcher/url_launcher.dart';
 
@@ -120,6 +120,13 @@ class _ShopDashboardState extends ConsumerState<ShopDashboard> {
         compact: true,
         icon: const Icon(LucideIcons.externalLink, size: 14),
         child: const Text('Open in browser'),
+      ),
+      const SizedBox(width: HollowSpacing.xs),
+      HollowButton.outline(
+        onPressed: () => showRedeemEntryDialog(context),
+        compact: true,
+        icon: const Icon(LucideIcons.ticket, size: 14),
+        child: const Text('Redeem a code'),
       ),
       const SizedBox(width: HollowSpacing.xs),
       HollowButton.outline(
@@ -409,8 +416,13 @@ class _ShopCard extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
-    final owned = ref.watch(ownedHashesProvider);
-    final isOwned = listing.files.any((f) => owned.contains(f.sha256));
+    // Owned means BOUGHT: this identity redeemed a code for this listing and
+    // holds its credential. A pack in the library is not ownership (a friend
+    // can hand you the files; nobody can hand you the mark), so the library
+    // decides Wear it in the item dialog and nothing here.
+    final bought = ref.watch(shop.ownCredentialItemsProvider);
+    final isOwned = listing.credentialItem.isNotEmpty &&
+        bought.contains(listing.credentialItem);
 
     return HollowPressable(
       semanticLabel:

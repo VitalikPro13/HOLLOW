@@ -23,6 +23,7 @@ import 'package:hollow/src/ui/chat/profile_tap.dart';
 import 'package:hollow/src/ui/chat/reaction_bar.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
+import 'package:hollow/src/ui/components/support_glyph.dart';
 
 /// Flat message row for channel messages — no bubbles.
 ///
@@ -308,6 +309,9 @@ class ChannelMessageBubble extends ConsumerWidget {
                             ),
                           ),
                         ),
+                        // Support glyph (design 5.6): opt-in by the holder,
+                        // a shrunk box for everyone else.
+                        SupportNameGlyph(peerId: senderMaster),
                         const SizedBox(width: HollowSpacing.sm),
                         Text(
                           time,

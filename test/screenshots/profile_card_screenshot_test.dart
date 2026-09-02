@@ -221,6 +221,23 @@ void main() {
     await capture(tester, 'profile_card_stranger');
   });
 
+  testWidgets('compact card — two support credentials fold into one badge',
+      (tester) async {
+    await pumpCompactCard(
+      tester,
+      overrides: [
+        ...baseOverrides(),
+        profileProvider.overrideWith(_TwoCredsProfileNotifier.new),
+      ],
+      cardServerId: serverId,
+    );
+    // One chip, the icon and a count, never a sentence per credential on
+    // the compact card (it ran into the avatar's overhang).
+    expect(find.text('×2'), findsOneWidget);
+    expect(find.textContaining('Supported'), findsNothing);
+    await capture(tester, 'profile_card_two_creds');
+  });
+
   testWidgets('manage member dialog — overview + duration picker',
       (tester) async {
     tester.view.physicalSize = const Size(900, 700);
@@ -294,6 +311,30 @@ class _MockProfileNotifier extends ProfileNotifier {
           avatarFrame: '',
           avatarAnim: '',
           bannerAnim: '',
+          supportCreds: '',
+        ),
+      };
+}
+
+/// The same profile carrying two verified-looking credentials (the parser
+/// checks shape only; signatures were checked in Rust before a row exists).
+class _TwoCredsProfileNotifier extends ProfileNotifier {
+  @override
+  Map<String, storage_api.UserProfile> build() => {
+        'peer_virtualbro_AnffNxdk': storage_api.UserProfile(
+          peerId: 'peer_virtualbro_AnffNxdk',
+          displayName: 'virtual bro',
+          status: 'VM',
+          aboutMe: 'Local VM sibling for multi-device testing.',
+          updatedAt: 0,
+          twitchUsername: 'anonlisten',
+          showcaseBoard: '',
+          avatarFrame: '',
+          avatarAnim: '',
+          bannerAnim: '',
+          supportCreds:
+              '[{"t":1,"item":"${'a' * 64}","parts":["${'b' * 64}"],"badge":true},'
+              '{"t":1,"item":"${'c' * 64}","parts":["${'d' * 64}","${'e' * 64}"],"badge":true}]',
         ),
       };
 }

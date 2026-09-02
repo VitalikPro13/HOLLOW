@@ -52,6 +52,7 @@ class _SeededProfiles extends ProfileNotifier {
           avatarFrame: '',
           avatarAnim: anim,
           bannerAnim: '',
+          supportCreds: '',
         ),
       };
 }

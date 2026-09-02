@@ -100,6 +100,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   GuestFileMetaFfi dco_decode_box_autoadd_guest_file_meta_ffi(dynamic raw);
 
   @protected
+  HollowpackImport dco_decode_box_autoadd_hollowpack_import(dynamic raw);
+
+  @protected
   PlatformInt64 dco_decode_box_autoadd_i_64(dynamic raw);
 
   @protected
@@ -301,6 +304,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<MutedMemberFfi> dco_decode_list_muted_member_ffi(dynamic raw);
 
   @protected
+  List<OwnSupportCred> dco_decode_list_own_support_cred(dynamic raw);
+
+  @protected
   List<OwnedArt> dco_decode_list_owned_art(dynamic raw);
 
   @protected
@@ -415,6 +421,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   GuestFileMetaFfi? dco_decode_opt_box_autoadd_guest_file_meta_ffi(dynamic raw);
 
   @protected
+  HollowpackImport? dco_decode_opt_box_autoadd_hollowpack_import(dynamic raw);
+
+  @protected
   PlatformInt64? dco_decode_opt_box_autoadd_i_64(dynamic raw);
 
   @protected
@@ -456,6 +465,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<ShowcaseAsset>? dco_decode_opt_list_showcase_asset(dynamic raw);
 
   @protected
+  OwnSupportCred dco_decode_own_support_cred(dynamic raw);
+
+  @protected
   OwnedArt dco_decode_owned_art(dynamic raw);
 
   @protected
@@ -493,6 +505,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   (String, PlatformInt64) dco_decode_record_string_i_64(dynamic raw);
+
+  @protected
+  RedeemLookup dco_decode_redeem_lookup(dynamic raw);
+
+  @protected
+  RedeemOutcome dco_decode_redeem_outcome(dynamic raw);
 
   @protected
   SecurityAlertFfi dco_decode_security_alert_ffi(dynamic raw);
@@ -684,6 +702,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   GuestFileMetaFfi sse_decode_box_autoadd_guest_file_meta_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  HollowpackImport sse_decode_box_autoadd_hollowpack_import(
     SseDeserializer deserializer,
   );
 
@@ -935,6 +958,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  List<OwnSupportCred> sse_decode_list_own_support_cred(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   List<OwnedArt> sse_decode_list_owned_art(SseDeserializer deserializer);
 
   @protected
@@ -1081,6 +1109,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  HollowpackImport? sse_decode_opt_box_autoadd_hollowpack_import(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   PlatformInt64? sse_decode_opt_box_autoadd_i_64(SseDeserializer deserializer);
 
   @protected
@@ -1140,6 +1173,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  OwnSupportCred sse_decode_own_support_cred(SseDeserializer deserializer);
+
+  @protected
   OwnedArt sse_decode_owned_art(SseDeserializer deserializer);
 
   @protected
@@ -1183,6 +1219,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   (String, PlatformInt64) sse_decode_record_string_i_64(
     SseDeserializer deserializer,
   );
+
+  @protected
+  RedeemLookup sse_decode_redeem_lookup(SseDeserializer deserializer);
+
+  @protected
+  RedeemOutcome sse_decode_redeem_outcome(SseDeserializer deserializer);
 
   @protected
   SecurityAlertFfi sse_decode_security_alert_ffi(SseDeserializer deserializer);
@@ -1419,6 +1461,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_box_autoadd_guest_file_meta_ffi(
     GuestFileMetaFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_hollowpack_import(
+    HollowpackImport self,
     SseSerializer serializer,
   );
 
@@ -1759,6 +1807,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_list_own_support_cred(
+    List<OwnSupportCred> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_list_owned_art(List<OwnedArt> self, SseSerializer serializer);
 
   @protected
@@ -1954,6 +2008,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_opt_box_autoadd_hollowpack_import(
+    HollowpackImport? self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_opt_box_autoadd_i_64(
     PlatformInt64? self,
     SseSerializer serializer,
@@ -2029,6 +2089,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_own_support_cred(
+    OwnSupportCred self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_owned_art(OwnedArt self, SseSerializer serializer);
 
   @protected
@@ -2096,6 +2162,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
     (String, PlatformInt64) self,
     SseSerializer serializer,
   );
+
+  @protected
+  void sse_encode_redeem_lookup(RedeemLookup self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_redeem_outcome(RedeemOutcome self, SseSerializer serializer);
 
   @protected
   void sse_encode_security_alert_ffi(

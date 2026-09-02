@@ -3212,6 +3212,7 @@ pub fn update_profile(
     avatar_frame: Option<String>,
     avatar_anim: Option<String>,
     banner_anim: Option<String>,
+    support_creds: Option<String>,
 ) -> Result<(), String> {
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
@@ -3287,6 +3288,7 @@ pub fn update_profile(
             avatar_frame,
             avatar_anim,
             banner_anim,
+            support_creds,
         }),
     )
     .map_err(|e| format!("Failed to send command: {e}"))?;
@@ -3459,6 +3461,17 @@ pub fn import_hollowpack(path: String) -> Result<HollowpackImport, String> {
     // Verify first, off the store lock: this decodes images and a decode is
     // not work to hold a database mutex through.
     let verified = crate::hollowpack::verify_pack_file(&path)?;
+    import_verified_pack(verified)
+}
+
+/// The same door for a pack that arrived as bytes (the redeem path fetches
+/// it from the shop). One verifier, one set of writes.
+pub(crate) fn import_hollowpack_bytes(bytes: &[u8]) -> Result<HollowpackImport, String> {
+    let verified = crate::hollowpack::verify_pack(bytes)?;
+    import_verified_pack(verified)
+}
+
+fn import_verified_pack(verified: crate::hollowpack::VerifiedPack) -> Result<HollowpackImport, String> {
     let m = verified.manifest.clone();
 
     {
@@ -3640,6 +3653,7 @@ pub fn migrate_profile_media_once() -> Result<bool, String> {
         None,
         migrated_avatar.map(|(hash, _)| hash),
         migrated_banner.map(|(hash, _)| hash),
+        None,
     )?;
     mark();
     hollow_log!("[HOLLOW-PROFILE] Moved our animated profile media onto the asset rail");

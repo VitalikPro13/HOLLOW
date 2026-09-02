@@ -25,7 +25,7 @@ flutter test test/
 cd rust/hollow_core && cargo check  # + clippy
 
 cargo test --lib test_harness -- --nocapture  # multi-node harness
-cargo nextest run --lib  # full suite ~70s
+cargo nextest run --lib
 
 # FRB codegen after Rust API changes (from project root)
 flutter_rust_bridge_codegen generate --rust-input "crate::api" --rust-root "rust/hollow_core" --dart-output "lib/src/rust"
@@ -36,14 +36,14 @@ flutter_rust_bridge_codegen generate --rust-input "crate::api" --rust-root "rust
 pwsh scripts\build_release.ps1  # full pipeline (-SkipBuild to repackage)
 pwsh scripts\sign_release.ps1  # sign every .exe/.dll in Release
 ```
-**Certum signing:** self-healing CNG binding; output `installer\Output\` (`reference_certum_signing_procedure`). **Last step: `scripts\sign_manifest.ps1`** (signed manifest + sha256 pins, key OUTSIDE repo, `project_update_integrity`). **Release zips: .NET '/' zipping, NEVER Compress-Archive** (`feedback_compress_archive_backslash_zip`).
+**Certum signing:** CNG binding self-heals; output `installer\Output\` (`reference_certum_signing_procedure`). **LAST step `scripts\sign_manifest.ps1`** (signed manifest + sha256 pins, key OUTSIDE repo, `project_update_integrity`). **Zips: .NET '/' zipping, NEVER Compress-Archive** (`feedback_compress_archive_backslash_zip`).
 
 ## Hollow Design System
 All UI = custom Hollow widgets, no Material defaults (`src/ui/components/`): HollowPressable/Button (`.filled/.ghost/.outline/.danger`)/TextField/Dialog (`showHollowDialog()`)/Tooltip/Toast/Toggle, StatusDot, StatBar.
 - **CRITICAL: hover/dialog patterns:** NEVER animate a color from `Colors.transparent` (lerps via black — pass `backgroundColor: null`); hover never paints outside the control. Dialogs = ghost Cancel + filled confirm; `.danger` ONLY destructive; selection = chips, never `.filled`. `feedback_hover_state_patterns`.
 
 ## Key Architecture Notes
-- **Multi-node harness (`node/test_harness.rs`) = PRIMARY testing for distributed logic;** ALWAYS verify ring-1/ring-2 changes there. NOT covered: media/native/relay C++ (the UI probe), device→master attribution (process-global resolver: carry a signed device list, test with `resolver::forget`). `feedback_harness_first_testing`.
+- **Multi-node harness (`node/test_harness.rs`) = PRIMARY testing for distributed logic;** ALWAYS verify ring-1/ring-2 changes there. NOT covered: media/native/relay C++ (the UI probe), device→master attribution (process-global resolver, `resolver::forget`). `feedback_harness_first_testing`.
 - **Node modules:** `swarm.rs` = event-loop dispatcher; domain logic in focused modules as `handle_*()`; types in `types.rs`. No SwarmContext — pass state vars individually (`feedback_swarmcontext_borrow`). New envelope variants → the owner's `handle_envelope_*()` (`feedback_envelope_dispatch_pattern`).
 - **Persistence actors:** `CrdtStore` + `CryptoStore` own long-lived SQLCipher conns in spawn_blocking threads, fire-and-forget mpsc (CrdtStore batches one DB write per server). NEVER `MessageStore::open()` in a sync handler or on the event loop. `feedback_sqlcipher_open_hygiene`.
 - **Peer state in swarm.rs:** `ws_room_peers` + `synced_peers`; PeerJoined → key exchange + sync; 30s keepalive in ws_client.rs.
@@ -54,8 +54,8 @@ All UI = custom Hollow widgets, no Material defaults (`src/ui/components/`): Hol
 - **CRITICAL: avatar frames (#54):** profile carries an ID (`""`/`b:<hue>`/64-hex), art rides the ASSET RAIL (`AssetKind::Frame`), NEVER the push. Zero layout cost, none on voice/call surfaces, hover = the ROW (3 CI guards). `project_avatar_frames`.
 - **CRITICAL: Profile Showcase Board:** wire field `Option<String>` (absent = PRESERVE, `""` = clear); NO relational blocks (VETOED); IGDB authoring-only; fetchers refuse non-Hollow-CDN URLs. `project_showcase_board_impl`.
 - **CRITICAL: asset rail (emotes/banners/stickers/GIFs):** content-addressed WebP; bytes NEVER ride CRDT/envelopes/relay; receipt cap = kind WE recorded, unsolicited DROPPED; FFZ/Klipy proxies authoring-only, key SERVER-side; send sites read `expandedText()` NEVER `.text`. `project_asset_rail_epic`, wiki `emotes`.
-- **`.hollowpack` + Shop client:** identity = sha256 of PROCESSED bytes; CLI `rust/hollow_art`; `import_hollowpack` verifies, NEVER re-encodes; owned hashes PINNED. Shop UI ONLY behind `shopAvailableProvider` (store builds: NO surface, incl. redeem); `api/shop.rs` READS only, art REFUSED on hash mismatch, never stored; wear = ONE `updateMyProfile`. Bundles = listing of listings (`listing_parts`), `--processed` passthrough, NEVER re-encoded, kinds disjoint. wiki `hollowpack`.
-- **CRITICAL: user avatar/banner ANIMATION rides the rail (`AssetKind::Profile`), only the STILL rides the push:** hash absent = PRESERVE, `""` = clear; NOT signed; ceilings (512; 1200x480 **2.5:1**, SERVER banner stays 3:1; frames square ≤512) never upscale; render `imageBytes` > rail > still. `project_profile_media_asset_rail`, `project_encoder_ceilings_bump`
+- **`.hollowpack` + Shop + support creds:** identity = sha256 of PROCESSED bytes; CLI `rust/hollow_art` (`keygen`/`blind-sign`, one RSA crate); `import_hollowpack` verifies, NEVER re-encodes; owned hashes PINNED. Shop UI ONLY behind `shopAvailableProvider` (store builds: NO surface, marks RENDER). Bundles: `--processed`, kinds disjoint. Credentials ride the profile as `support_creds`, verified OFFLINE against the ROOT PINNED in `node/support_creds.rs`; `sanitize_incoming_support_creds` = the ONE validator (chain + THIS master); chain checked BEFORE spending; burn ONLY on Creem's "limit" text; Owned = a CREDENTIAL, not the library; one credential per listing (`item` = sha256 of sorted parts). wiki `hollowpack`, `support_credentials`.
+- **CRITICAL: user avatar/banner ANIMATION rides the rail (`AssetKind::Profile`), only the STILL rides the push:** hash absent = PRESERVE, `""` = clear; NOT signed; ceilings (512; 1200x480 **2.5:1**, SERVER banner stays 3:1; frames square ≤512) never upscale; render `imageBytes` > rail > still. `project_profile_media_asset_rail`
 - **CRITICAL: lossy WebP = `node/webp_anim.rs`** (`method` 4 everywhere; stills via `encode_still`, NEVER the anim encoder). Decide animation from BYTES via `is_animated_image` — a `GIF8`/extension branch silently FLATTENS APNG. `project_animated_avatar_encoding`.
 - **CRITICAL: stickers/GIFs:** identity = HASH not name; Klipy sticker ids carry `~` EVERYWHERE, GIF ids BARE. **ONE block asset per message**, gated at send (`exceedsAssetLimit`), never receive. Pack import re-hashes, never re-encodes. `project_stickers_phase5`, `feedback_antialiased_seam_bleed`.
 - **Emoji font:** NotoColorEmoji MUST stay emoji-only subset (`scripts/subset_emoji_font.py`).

@@ -4,12 +4,13 @@
 // ignore_for_file: invalid_use_of_internal_member, unused_import, unnecessary_import
 
 import '../frb_generated.dart';
+import 'network.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `by_role`, `check_art_bytes`, `clamp`, `display_file_for`, `fetch_bounded`, `file_for_kind`, `kind_of_role`, `kind_roles`, `lenient_vec`, `lenient`, `parse_catalog`, `price_label`, `primary_kind_of`, `sanitize_file`, `sanitize_listing`, `shop_client`, `valid_redeem_code`, `valid_slug`
-// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `RawArtist`, `RawCatalog`, `RawFile`, `RawListing`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
-// These functions are ignored (category: IgnoreBecauseOwnerTyShouldIgnore): `default`, `default`, `default`, `default`
+// These functions are ignored because they are not marked as `pub`: `by_role`, `check_art_bytes`, `clamp`, `display_file_for`, `fetch_bounded`, `fetch_pack`, `file_for_kind`, `keep_own_credential`, `kind_of_role`, `kind_roles`, `lenient_vec`, `lenient`, `lookup_refusal`, `lookup_remote`, `my_master_peer_id`, `parse_catalog`, `post_json_bounded`, `price_label`, `primary_kind_of`, `read_bounded`, `redeem_remote`, `republish_support_creds`, `sanitize_file`, `sanitize_listing`, `shop_client`, `shop_refusal`, `support_badge_preference`, `valid_redeem_code`, `valid_slug`
+// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `RawArtist`, `RawCatalog`, `RawFile`, `RawListing`, `RawLookupListing`, `RawLookup`, `RawRedeem`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
+// These functions are ignored (category: IgnoreBecauseOwnerTyShouldIgnore): `default`, `default`, `default`, `default`, `default`, `default`, `default`
 
 /// The shop origin.
 ///
@@ -51,6 +52,34 @@ Future<List<KeptRedeemCode>> listRedeemCodes() =>
 Future<void> forgetRedeemCode({required String code}) =>
     RustLib.instance.api.crateApiShopForgetRedeemCode(code: code);
 
+/// Look a code up: what it buys, and whether this identity already supports
+/// it. Nothing burns.
+Future<RedeemLookup> redeemLookup({required String code}) =>
+    RustLib.instance.api.crateApiShopRedeemLookup(code: code);
+
+/// Redeem a code: mint the credential, keep it, announce it, then fetch and
+/// import the pack.
+///
+/// Order matters. The chain the shop published is verified against the
+/// pinned root BEFORE the code is spent, so a shop with a broken key never
+/// burns a purchase. The credential is stored and announced BEFORE the pack
+/// is fetched, so a network hiccup after the burn costs a download the buyer
+/// also has in their email, never the mark.
+Future<RedeemOutcome> redeemCode({required String code}) =>
+    RustLib.instance.api.crateApiShopRedeemCode(code: code);
+
+/// Every credential this identity holds, newest first.
+Future<List<OwnSupportCred>> listOwnSupportCreds() =>
+    RustLib.instance.api.crateApiShopListOwnSupportCreds();
+
+/// Whether OUR marks also sit next to our name (design 5.6). Off by default.
+Future<bool> supportBadgeEnabled() =>
+    RustLib.instance.api.crateApiShopSupportBadgeEnabled();
+
+/// Show, or stop showing, our marks next to our name. One profile save.
+Future<void> setSupportBadge({required bool show_}) =>
+    RustLib.instance.api.crateApiShopSetSupportBadge(show_: show_);
+
 /// One redeem code this install is holding on to.
 class KeptRedeemCode {
   final String code;
@@ -70,6 +99,171 @@ class KeptRedeemCode {
           runtimeType == other.runtimeType &&
           code == other.code &&
           receivedAt == other.receivedAt;
+}
+
+/// One of OUR credentials, for Settings.
+class OwnSupportCred {
+  final String item;
+  final List<String> parts;
+  final String slug;
+  final String title;
+  final String artistName;
+
+  /// Unix milliseconds.
+  final PlatformInt64 redeemedAt;
+  final bool badge;
+
+  const OwnSupportCred({
+    required this.item,
+    required this.parts,
+    required this.slug,
+    required this.title,
+    required this.artistName,
+    required this.redeemedAt,
+    required this.badge,
+  });
+
+  @override
+  int get hashCode =>
+      item.hashCode ^
+      parts.hashCode ^
+      slug.hashCode ^
+      title.hashCode ^
+      artistName.hashCode ^
+      redeemedAt.hashCode ^
+      badge.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is OwnSupportCred &&
+          runtimeType == other.runtimeType &&
+          item == other.item &&
+          parts == other.parts &&
+          slug == other.slug &&
+          title == other.title &&
+          artistName == other.artistName &&
+          redeemedAt == other.redeemedAt &&
+          badge == other.badge;
+}
+
+/// What `redeem_lookup` learned about a code.
+class RedeemLookup {
+  /// `ok`, or why not: `refused` (refunded), `burned` (already redeemed),
+  /// `unknown` (not a key this shop sold), `nokey` (listed before
+  /// credentials existed; the keeper can fix it).
+  final String status;
+
+  /// The shop's sentence when `status` is not `ok`.
+  final String message;
+  final String slug;
+  final String title;
+  final String artistName;
+  final String artistSlug;
+  final String itemUrl;
+  final List<String> kinds;
+
+  /// The credential's item hash, 64-hex, once `ok`.
+  final String item;
+
+  /// The file hashes the credential will vouch for.
+  final List<String> parts;
+
+  /// This identity already holds a credential for this item (13.23): a
+  /// second redemption changes nothing, keep the code and gift it.
+  final bool alreadySupported;
+
+  const RedeemLookup({
+    required this.status,
+    required this.message,
+    required this.slug,
+    required this.title,
+    required this.artistName,
+    required this.artistSlug,
+    required this.itemUrl,
+    required this.kinds,
+    required this.item,
+    required this.parts,
+    required this.alreadySupported,
+  });
+
+  @override
+  int get hashCode =>
+      status.hashCode ^
+      message.hashCode ^
+      slug.hashCode ^
+      title.hashCode ^
+      artistName.hashCode ^
+      artistSlug.hashCode ^
+      itemUrl.hashCode ^
+      kinds.hashCode ^
+      item.hashCode ^
+      parts.hashCode ^
+      alreadySupported.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is RedeemLookup &&
+          runtimeType == other.runtimeType &&
+          status == other.status &&
+          message == other.message &&
+          slug == other.slug &&
+          title == other.title &&
+          artistName == other.artistName &&
+          artistSlug == other.artistSlug &&
+          itemUrl == other.itemUrl &&
+          kinds == other.kinds &&
+          item == other.item &&
+          parts == other.parts &&
+          alreadySupported == other.alreadySupported;
+}
+
+/// What redeeming landed.
+class RedeemOutcome {
+  /// The credential's item hash. The mark is saved and announced.
+  final String item;
+  final String title;
+  final String artistName;
+
+  /// The pack, imported, when it arrived; `None` with `pack_error` set
+  /// when it did not. The credential is kept either way.
+  final HollowpackImport? imported;
+  final String packError;
+
+  /// Something to say that is not a failure: the pack's files and the
+  /// credential's parts did not agree, say.
+  final String warning;
+
+  const RedeemOutcome({
+    required this.item,
+    required this.title,
+    required this.artistName,
+    this.imported,
+    required this.packError,
+    required this.warning,
+  });
+
+  @override
+  int get hashCode =>
+      item.hashCode ^
+      title.hashCode ^
+      artistName.hashCode ^
+      imported.hashCode ^
+      packError.hashCode ^
+      warning.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is RedeemOutcome &&
+          runtimeType == other.runtimeType &&
+          item == other.item &&
+          title == other.title &&
+          artistName == other.artistName &&
+          imported == other.imported &&
+          packError == other.packError &&
+          warning == other.warning;
 }
 
 /// Who made a listing.
@@ -231,6 +425,11 @@ class ShopListing {
   /// square.
   final bool wide;
 
+  /// The support credential's item hash for this listing (64-hex), or `""`
+  /// when the listing was put up before credentials existed. What
+  /// `list_own_support_creds` items compare against: "you support this".
+  final String credentialItem;
+
   /// `{origin}/item/{slug}`: the listing's own address. A hash is the ART's
   /// address, and a bundle carries the same frame hash as the single frame
   /// on purpose, so a link by hash opened whichever listing the shop found
@@ -256,6 +455,7 @@ class ShopListing {
     required this.primaryKind,
     required this.bundle,
     required this.wide,
+    required this.credentialItem,
     required this.itemUrl,
   });
 
@@ -278,6 +478,7 @@ class ShopListing {
       primaryKind.hashCode ^
       bundle.hashCode ^
       wide.hashCode ^
+      credentialItem.hashCode ^
       itemUrl.hashCode;
 
   @override
@@ -302,5 +503,6 @@ class ShopListing {
           primaryKind == other.primaryKind &&
           bundle == other.bundle &&
           wide == other.wide &&
+          credentialItem == other.credentialItem &&
           itemUrl == other.itemUrl;
 }

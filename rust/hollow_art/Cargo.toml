@@ -17,7 +17,7 @@
 
 [package]
 name = "hollow_art"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 publish = false
 
@@ -37,6 +37,10 @@ image = { version = "0.25", default-features = false, features = ["webp", "png",
 webp-animation = "0.9"
 libwebp-sys2 = { version = "0.1", features = ["0_5", "0_6", "1_2", "demux", "mux"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
+# Support credentials: the exact crate and version hollow_core pins, so the
+# shop signs blind with the implementation the app unblinds and verifies with.
+blind-rsa-signatures = "=0.17.2"
+base64 = "0.22"
 
 [profile.release]
 strip = true

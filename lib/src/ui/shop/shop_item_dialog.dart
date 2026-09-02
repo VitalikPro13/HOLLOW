@@ -39,11 +39,15 @@ class _ShopItemDialog extends ConsumerStatefulWidget {
 class _ShopItemDialogState extends ConsumerState<_ShopItemDialog> {
   bool _busy = false;
 
-  /// The imported item whose art this listing sold, if any.
+  /// The imported item that covers EVERY file this listing sells, if any.
+  /// One shared file is not ownership: the single avatar's pack does not
+  /// cover the bundle that carries it, while the bundle's pack covers the
+  /// single (the same bytes, by design).
   OwnedItem? _ownedItem() {
     final wanted = {for (final file in widget.listing.files) file.sha256};
+    if (wanted.isEmpty) return null;
     for (final item in ref.read(ownedArtProvider)) {
-      if (item.hashes.intersection(wanted).isNotEmpty) return item;
+      if (item.hashes.toSet().containsAll(wanted)) return item;
     }
     return null;
   }
@@ -69,9 +73,14 @@ class _ShopItemDialogState extends ConsumerState<_ShopItemDialog> {
   Future<void> _wear(OwnedItem item) async {
     setState(() => _busy = true);
     try {
+      // Wear what THIS listing sells, from the item that covers it: wearing
+      // the single avatar from the bundle's pack must not put the bundle's
+      // frame on too. An item with none of the listing's kinds (impossible,
+      // it covers the files) would wear its own.
+      final kinds = item.kinds.toSet().intersection(widget.listing.kinds.toSet());
       await ref
           .read(ownedArtProvider.notifier)
-          .wear(item, item.kinds.toSet());
+          .wear(item, kinds.isEmpty ? item.kinds.toSet() : kinds);
       if (!mounted) return;
       HollowToast.show(context, 'Wearing ${item.title}',
           type: HollowToastType.success);
@@ -129,6 +138,11 @@ class _ShopItemDialogState extends ConsumerState<_ShopItemDialog> {
     final hollow = HollowTheme.of(context);
     final listing = widget.listing;
     final available = ref.watch(shopAvailableProvider);
+    // Bought means a credential for THIS listing was redeemed by this
+    // identity. The library (a pack somebody could have handed over) only
+    // decides whether Wear it is offered; Buy stays until the piece is bought.
+    final bought = listing.credentialItem.isNotEmpty &&
+        ref.watch(shop.ownCredentialItemsProvider).contains(listing.credentialItem);
     // Watched, not read: importing the pack while this is open flips the
     // action from Buy to Wear it.
     ref.watch(ownedArtProvider);
@@ -217,7 +231,7 @@ class _ShopItemDialogState extends ConsumerState<_ShopItemDialog> {
         ),
         // Never a price or a Buy button on a store build. The dashboard is
         // already gone there; this is the second lock.
-        if (available)
+        if (available) ...[
           if (owned != null)
             HollowButton.filled(
               onPressed: _busy ? null : () => _wear(owned),
@@ -232,13 +246,22 @@ class _ShopItemDialogState extends ConsumerState<_ShopItemDialog> {
                     )
                   : null,
               child: const Text('Wear it'),
-            )
-          else
-            HollowButton.filled(
-              onPressed: _busy ? null : _buy,
-              icon: const Icon(LucideIcons.externalLink, size: 14),
-              child: const Text('Buy'),
             ),
+          // Beside Wear it the Buy is the quieter button: the art is here,
+          // the purchase is the thing still open.
+          if (!bought)
+            owned != null
+                ? HollowButton.outline(
+                    onPressed: _busy ? null : _buy,
+                    icon: const Icon(LucideIcons.externalLink, size: 14),
+                    child: const Text('Buy'),
+                  )
+                : HollowButton.filled(
+                    onPressed: _busy ? null : _buy,
+                    icon: const Icon(LucideIcons.externalLink, size: 14),
+                    child: const Text('Buy'),
+                  ),
+        ],
       ],
     );
   }

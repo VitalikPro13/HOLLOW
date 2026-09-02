@@ -1925,6 +1925,7 @@ class EventStreamNotifier extends Notifier<bool> {
                 avatarFrame: existing?.avatarFrame ?? '',
                 avatarAnim: existing?.avatarAnim ?? '',
                 bannerAnim: existing?.bannerAnim ?? '',
+                supportCreds: existing?.supportCreds ?? '',
               );
             }
           }

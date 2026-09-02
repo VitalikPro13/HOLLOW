@@ -905,7 +905,7 @@ pub(crate) enum NodeCommand {
     SetTwitchUsername { server_id: String, peer_id: String, twitch_username: String },
     NotifyShutdown,
     // -- Profile commands (Phase 3.5) --
-    UpdateProfile { display_name: String, status: String, about_me: String, avatar_bytes: Option<Vec<u8>>, banner_bytes: Option<Vec<u8>>, twitch_username: String, showcase_board: Option<String>, showcase_assets: Option<Vec<u8>>, avatar_frame: Option<String>, avatar_anim: Option<String>, banner_anim: Option<String> },
+    UpdateProfile { display_name: String, status: String, about_me: String, avatar_bytes: Option<Vec<u8>>, banner_bytes: Option<Vec<u8>>, twitch_username: String, showcase_board: Option<String>, showcase_assets: Option<Vec<u8>>, avatar_frame: Option<String>, avatar_anim: Option<String>, banner_anim: Option<String>, support_creds: Option<String> },
     // -- Message editing (Phase 3.5) --
     EditChannelMessage { server_id: String, channel_id: String, message_id: String, new_text: String },
     EditDmMessage { peer_id: String, message_id: String, new_text: String },
@@ -1798,6 +1798,16 @@ pub(crate) enum HavenMessage {
         /// Asset-rail hash of the sender's ANIMATED banner. See `avatar_anim`.
         #[serde(default)]
         banner_anim: Option<String>,
+        /// Support credentials (artist shop, design section 5): a JSON array
+        /// of self-contained blind-signature entries, each binding this
+        /// profile's MASTER peer id to an item. Small capped text, so it
+        /// rides the light announce like the showcase board. `None` from
+        /// clients that predate it, which receivers PRESERVE; `Some("")` =
+        /// explicit clear. Verified entry by entry on ingest
+        /// (`support_creds::sanitize_incoming_support_creds`), never signed
+        /// by the profile signature: an entry already binds the identity.
+        #[serde(default)]
+        support_creds: Option<String>,
         /// Owner's signature over the relayable subset of this profile
         /// (`crypto_handler::profile_signing_payload`). REQUIRED on ingest —
         /// receivers store it so they can forward it in a `ProfileRelay`, which
@@ -3229,6 +3239,16 @@ pub(crate) enum MessageEnvelope {
         avatar_anim: Option<String>,
         #[serde(default)]
         banner_anim: Option<String>,
+        /// Support credentials (artist shop, design section 5): a JSON array
+        /// of self-contained blind-signature entries, each binding this
+        /// profile's MASTER peer id to an item. Small capped text, so it
+        /// rides the light announce like the showcase board. `None` from
+        /// clients that predate it, which receivers PRESERVE; `Some("")` =
+        /// explicit clear. Verified entry by entry on ingest
+        /// (`support_creds::sanitize_incoming_support_creds`), never signed
+        /// by the profile signature: an entry already binds the identity.
+        #[serde(default)]
+        support_creds: Option<String>,
         /// Owner's profile signature — see HavenMessage::ProfileUpdate.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         profile_sig: Option<String>,

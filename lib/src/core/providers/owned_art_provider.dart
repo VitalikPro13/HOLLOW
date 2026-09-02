@@ -256,7 +256,9 @@ class OwnedArtNotifier extends Notifier<List<OwnedItem>> {
 final ownedArtProvider =
     NotifierProvider<OwnedArtNotifier, List<OwnedItem>>(OwnedArtNotifier.new);
 
-/// Every hash this identity owns, for the "Owned" badge on a shop card.
+/// Every hash in this identity's library. Decides Wear it, never Owned:
+/// a pack can be handed over, a credential cannot (see
+/// `ownCredentialItemsProvider`).
 final ownedHashesProvider = Provider<Set<String>>((ref) {
   final items = ref.watch(ownedArtProvider);
   return {for (final item in items) ...item.hashes};
@@ -272,12 +274,13 @@ final railBytesProvider =
 
 final _kHex64 = RegExp(r'^[0-9a-f]{64}$');
 
-/// sha256 per BYTES INSTANCE, so a rebuild never re-hashes a megabyte of
+/// sha256 per BYTES INSTANCE (shared with the support marks), so a rebuild
+/// never re-hashes a megabyte of
 /// banner. The providers hand back the SAME instance when nothing changed
 /// (see [reuseIfUnchanged]), which is exactly what makes this sound.
 final Expando<String> _digestOfInstance = Expando<String>('sha256');
 
-String _digest(Uint8List bytes) {
+String digestOfBytes(Uint8List bytes) {
   final cached = _digestOfInstance[bytes];
   if (cached != null) return cached;
   final value = crypto.sha256.convert(bytes).toString();
@@ -303,8 +306,8 @@ final myWornHashesProvider = Provider<Set<String>>((ref) {
     if (id != null && _kHex64.hasMatch(id)) worn.add(id);
   }
   final avatar = ref.watch(avatarProvider.select((c) => c[me]));
-  if (avatar != null && avatar.isNotEmpty) worn.add(_digest(avatar));
+  if (avatar != null && avatar.isNotEmpty) worn.add(digestOfBytes(avatar));
   final banner = ref.watch(bannerProvider(me)).valueOrNull;
-  if (banner != null && banner.isNotEmpty) worn.add(_digest(banner));
+  if (banner != null && banner.isNotEmpty) worn.add(digestOfBytes(banner));
   return worn;
 });

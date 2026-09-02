@@ -9,7 +9,7 @@ import 'package:freezed_annotation/freezed_annotation.dart' hide protected;
 import 'showcase.dart';
 part 'network.freezed.dart';
 
-// These functions are ignored because they are not marked as `pub`: `event_forwarding_task`, `get_event_rx`, `get_http_runtime`, `get_license_key`, `get_node`, `get_proxy_config`, `get_proxy_socks_addr`, `get_relay_domain`, `get_runtime`, `open_local_store`, `send_node_command`, `set_proxy_socks_addr`, `store_profile_media`, `to_ffi_event`
+// These functions are ignored because they are not marked as `pub`: `event_forwarding_task`, `get_event_rx`, `get_http_runtime`, `get_license_key`, `get_node`, `get_proxy_config`, `get_proxy_socks_addr`, `get_relay_domain`, `get_runtime`, `import_hollowpack_bytes`, `import_verified_pack`, `open_local_store`, `send_node_command`, `set_proxy_socks_addr`, `store_profile_media`, `to_ffi_event`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `NodeState`, `ProxyConfig`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`
 
@@ -674,6 +674,7 @@ Future<void> updateProfile({
   String? avatarFrame,
   String? avatarAnim,
   String? bannerAnim,
+  String? supportCreds,
 }) => RustLib.instance.api.crateApiNetworkUpdateProfile(
   displayName: displayName,
   status: status,
@@ -686,6 +687,7 @@ Future<void> updateProfile({
   avatarFrame: avatarFrame,
   avatarAnim: avatarAnim,
   bannerAnim: bannerAnim,
+  supportCreds: supportCreds,
 );
 
 /// Process a raw image into a person's avatar (512x512 WebP — see

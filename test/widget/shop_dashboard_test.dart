@@ -34,6 +34,25 @@ const _artist = shop.ShopArtist(
   url: 'https://shop.anonlisten.com/@ada',
 );
 
+/// The credential item hashes the catalog names for each listing.
+const _frameItem =
+    '1111111111111111111111111111111111111111111111111111111111111111';
+const _bannerItem =
+    '2222222222222222222222222222222222222222222222222222222222222222';
+const _setItem =
+    '3333333333333333333333333333333333333333333333333333333333333333';
+
+/// The frame was BOUGHT: a credential for its listing is in our table.
+const _frameCred = shop.OwnSupportCred(
+  item: _frameItem,
+  parts: [_frameHash],
+  slug: 'winter-frame',
+  title: 'Winter Frame',
+  artistName: 'Ada',
+  redeemedAt: 1,
+  badge: true,
+);
+
 final _frameListing = shop.ShopListing(
   slug: 'winter-frame',
   title: 'Winter Frame',
@@ -63,6 +82,7 @@ final _frameListing = shop.ShopListing(
   bundle: false,
   wide: false,
   itemUrl: 'https://shop.anonlisten.com/i/winter-frame',
+  credentialItem: _frameItem,
 );
 
 final _bannerListing = shop.ShopListing(
@@ -93,12 +113,54 @@ final _bannerListing = shop.ShopListing(
   bundle: false,
   wide: true,
   itemUrl: 'https://shop.anonlisten.com/i/second-piece',
+  credentialItem: _bannerItem,
+);
+
+/// A set carrying the frame AND the banner: owning the frame alone must not
+/// mark it Owned (one shared file is not ownership).
+final _setListing = shop.ShopListing(
+  slug: 'winter-set',
+  title: 'Winter Set',
+  description: 'The frame and the banner together.',
+  kinds: const ['frame', 'banner'],
+  priceCents: 1299,
+  priceLabel: r'$12.99',
+  wasCents: 0,
+  wasLabel: '',
+  license: 'Personal use',
+  createdAt: '2026-09-01',
+  artist: _artist,
+  files: [
+    shop.ShopFile(
+      role: 'frame',
+      sha256: _frameHash,
+      bytes: BigInt.from(4096),
+      w: 512,
+      h: 512,
+      animated: false,
+    ),
+    shop.ShopFile(
+      role: 'banner',
+      sha256: _bannerHash,
+      bytes: BigInt.from(8192),
+      w: 1200,
+      h: 480,
+      animated: false,
+    ),
+  ],
+  displayHash: _bannerHash,
+  stillHash: '',
+  primaryKind: 'banner',
+  bundle: true,
+  wide: true,
+  itemUrl: 'https://shop.anonlisten.com/i/winter-set',
+  credentialItem: _setItem,
 );
 
 final _catalog = shop.ShopCatalog(
   origin: 'https://shop.anonlisten.com',
   generatedAt: '2026-09-01T00:00:00Z',
-  listings: [_frameListing, _bannerListing],
+  listings: [_frameListing, _bannerListing, _setListing],
 );
 
 /// The frame pack, already imported: this is what turns Buy into Wear it.
@@ -125,9 +187,34 @@ const _ownedFrame = OwnedItem(
   },
 );
 
+/// The banner pack is in the library too, but handed over, never bought: no
+/// credential, so no Owned.
+const _ownedBanner = OwnedItem(
+  itemId: 'item-banner',
+  title: 'Second Piece',
+  artistName: 'Ada',
+  artistSlug: 'ada',
+  artistUrl: '',
+  license: 'Personal use',
+  importedAt: 1,
+  byRole: {
+    'banner': network_api.OwnedArt(
+      hash: _bannerHash,
+      role: 'banner',
+      itemId: 'item-banner',
+      title: 'Second Piece',
+      artistName: 'Ada',
+      artistSlug: 'ada',
+      artistUrl: '',
+      license: 'Personal use',
+      importedAt: 1,
+    ),
+  },
+);
+
 class _FakeOwnedArt extends OwnedArtNotifier {
   @override
-  List<OwnedItem> build() => [_ownedFrame];
+  List<OwnedItem> build() => [_ownedFrame, _ownedBanner];
 
   @override
   Future<void> reload() async {}
@@ -153,7 +240,8 @@ Future<void> _pumpShop(WidgetTester tester) async {
         shop.shopArtProvider
             .overrideWith((ref, hash) => Completer<Uint8List>().future),
         ownedArtProvider.overrideWith(_FakeOwnedArt.new),
-        ownedHashesProvider.overrideWithValue({_frameHash}),
+        ownedHashesProvider.overrideWithValue({_frameHash, _bannerHash}),
+        shop.ownSupportCredsProvider.overrideWith((ref) async => [_frameCred]),
       ]),
       child: MaterialApp(
         theme: HollowThemeData.dark(),
@@ -161,6 +249,9 @@ Future<void> _pumpShop(WidgetTester tester) async {
       ),
     ),
   );
+  // Two frames: the catalog lands in the first, the credentials table (a
+  // second future) redraws the cards in the second.
+  await tester.pump(const Duration(milliseconds: 400));
   await tester.pump(const Duration(milliseconds: 400));
 }
 
@@ -174,6 +265,11 @@ void main() {
     expect(find.text(r'$4.99'), findsOneWidget);
     // The frame is on sale in the fixture: its list price is on the card too.
     expect(find.text(r'$6.99'), findsOneWidget);
+    // Owned follows the CREDENTIAL, not the library: the frame was bought;
+    // the banner is in the library (a handed-over pack) with no credential,
+    // and the set shares the frame's file with no credential of its own.
+    // One badge, on the frame.
+    expect(find.text('Winter Set'), findsOneWidget);
     expect(find.text('Owned'), findsOneWidget);
   });
 
@@ -187,18 +283,22 @@ void main() {
     expect(find.text('Second Piece'), findsOneWidget);
   });
 
-  testWidgets('an unowned listing offers Buy', (tester) async {
+  testWidgets('a handed-over pack offers Wear it AND Buy, never Owned',
+      (tester) async {
     await _pumpShop(tester);
 
+    // Second Piece is in the library (somebody could have shared the pack)
+    // but no code was redeemed for it: the art can be worn, the purchase is
+    // still open.
     await tester.tap(find.text('Second Piece'), warnIfMissed: false);
     await tester.pump(const Duration(milliseconds: 400));
     await tester.pump(const Duration(milliseconds: 400));
 
+    expect(find.text('Wear it'), findsOneWidget);
     expect(find.text('Buy'), findsOneWidget);
-    expect(find.text('Wear it'), findsNothing);
   });
 
-  testWidgets('an owned listing offers Wear it instead', (tester) async {
+  testWidgets('a bought listing offers Wear it and no Buy', (tester) async {
     await _pumpShop(tester);
 
     await tester.tap(find.text('Winter Frame'), warnIfMissed: false);
@@ -207,5 +307,20 @@ void main() {
 
     expect(find.text('Wear it'), findsOneWidget);
     expect(find.text('Buy'), findsNothing);
+  });
+
+  testWidgets('a set whose files are all in the library still sells', (tester) async {
+    await _pumpShop(tester);
+
+    // The set's files are in the library only across TWO single packs; no one
+    // imported pack covers the set, so it is not worn as a set from here (each
+    // piece is worn from its own card), and no credential names it, so it is
+    // not bought: Buy alone.
+    await tester.tap(find.text('Winter Set'), warnIfMissed: false);
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.pump(const Duration(milliseconds: 400));
+
+    expect(find.text('Wear it'), findsNothing);
+    expect(find.text('Buy'), findsOneWidget);
   });
 }

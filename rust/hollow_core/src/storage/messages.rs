@@ -40,6 +40,12 @@ pub(crate) struct StoredProfile {
     /// Content hash of this person's ANIMATED banner, or `""` for none. See
     /// [`StoredProfile::avatar_anim`].
     pub banner_anim: String,
+    /// Support credentials (artist shop, design section 5): a JSON array of
+    /// self-contained blind-signature entries, or `""` for none. Written ONLY
+    /// by `support_creds::sanitize_incoming_support_creds` for a peer, and
+    /// from our own `support_creds_own` table for ourselves. Not part of the
+    /// profile signature: each entry binds the master peer id itself.
+    pub support_creds: String,
     /// The SUBJECT's own signature over the relayable subset of this profile
     /// (`crypto_handler::profile_signing_payload`). Persisted so we can forward
     /// it in a `ProfileRelay` — a relayed profile with no owner signature is
@@ -340,6 +346,7 @@ fn profile_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredProfile> 
         avatar_frame: row.get::<_, String>(13).unwrap_or_default(),
         avatar_anim: row.get::<_, String>(14).unwrap_or_default(),
         banner_anim: row.get::<_, String>(15).unwrap_or_default(),
+        support_creds: row.get::<_, String>(16).unwrap_or_default(),
     })
 }
 
@@ -368,6 +375,9 @@ fn profile_light_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredPro
         // to know whether an animated variant exists at all.
         avatar_anim: row.get::<_, String>(8).unwrap_or_default(),
         banner_anim: row.get::<_, String>(9).unwrap_or_default(),
+        // Small capped text, like the showcase board: renderers need it to
+        // light a support mark, so it rides the light load.
+        support_creds: row.get::<_, String>(10).unwrap_or_default(),
     })
 }
 
@@ -863,6 +873,8 @@ impl MessageStore {
         migrate(conn, "ALTER TABLE user_profiles ADD COLUMN avatar_frame TEXT NOT NULL DEFAULT '';");
         migrate(conn, "ALTER TABLE user_profiles ADD COLUMN avatar_anim TEXT NOT NULL DEFAULT '';");
         migrate(conn, "ALTER TABLE user_profiles ADD COLUMN banner_anim TEXT NOT NULL DEFAULT '';");
+        // -- Artist shop, phase 2: support credentials (JSON array, "" = none).
+        migrate(conn, "ALTER TABLE user_profiles ADD COLUMN support_creds TEXT NOT NULL DEFAULT '';");
 
         // -- Migration: content_id column on files (vault ↔ file_id link) --
         migrate(conn, "ALTER TABLE files ADD COLUMN content_id TEXT;");
@@ -1122,6 +1134,23 @@ impl MessageStore {
             "CREATE TABLE IF NOT EXISTS redeem_codes (
                 code        TEXT PRIMARY KEY,
                 received_at INTEGER NOT NULL DEFAULT 0
+            )")?;
+
+        // -- Artist shop, phase 2: OUR support credentials --
+        // One row per item this identity redeemed: the verified entry JSON
+        // exactly as it rides the profile, plus what the shop said the item
+        // was so Settings can name it. Keyed by the item hash: redeeming a
+        // second code for the same item replaces the row (13.23), it does not
+        // double it. The profile field is rebuilt from this table, so a
+        // profile rewrite can never lose a credential.
+        ddl(conn, "support_creds_own table",
+            "CREATE TABLE IF NOT EXISTS support_creds_own (
+                item         TEXT PRIMARY KEY,
+                entry_json   TEXT NOT NULL DEFAULT '',
+                slug         TEXT NOT NULL DEFAULT '',
+                title        TEXT NOT NULL DEFAULT '',
+                artist_name  TEXT NOT NULL DEFAULT '',
+                redeemed_at  INTEGER NOT NULL DEFAULT 0
             )")?;
 
         Ok(())
@@ -2649,6 +2678,9 @@ impl MessageStore {
         avatar_frame: Option<&str>,
         avatar_anim: Option<&str>,
         banner_anim: Option<&str>,
+        // Support credentials, same three states: `None` preserves,
+        // `Some("")` clears, `Some(json)` sets the ALREADY-sanitized array.
+        support_creds: Option<&str>,
     ) -> Result<(), String> {
         let profile_sig = proof.map(|p| p.sig);
         let profile_pk = proof.map(|p| p.pk);
@@ -2664,8 +2696,8 @@ impl MessageStore {
 
         self.conn
             .execute(
-                "INSERT INTO user_profiles (peer_id, display_name, status, about_me, updated_at, avatar, banner, twitch_username, showcase_board, showcase_assets, profile_sig, profile_pk, profile_avatar_hash, avatar_frame, avatar_anim, banner_anim)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, COALESCE(?9, ''), ?10, ?11, ?12, ?13, COALESCE(?14, ''), COALESCE(?15, ''), COALESCE(?16, ''))
+                "INSERT INTO user_profiles (peer_id, display_name, status, about_me, updated_at, avatar, banner, twitch_username, showcase_board, showcase_assets, profile_sig, profile_pk, profile_avatar_hash, avatar_frame, avatar_anim, banner_anim, support_creds)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, COALESCE(?9, ''), ?10, ?11, ?12, ?13, COALESCE(?14, ''), COALESCE(?15, ''), COALESCE(?16, ''), COALESCE(?17, ''))
                  ON CONFLICT(peer_id) DO UPDATE SET
                     display_name = excluded.display_name,
                     status = excluded.status,
@@ -2681,11 +2713,12 @@ impl MessageStore {
                     profile_avatar_hash = COALESCE(excluded.profile_avatar_hash, user_profiles.profile_avatar_hash),
                     avatar_frame = COALESCE(?14, user_profiles.avatar_frame),
                     avatar_anim = COALESCE(?15, user_profiles.avatar_anim),
-                    banner_anim = COALESCE(?16, user_profiles.banner_anim)
+                    banner_anim = COALESCE(?16, user_profiles.banner_anim),
+                    support_creds = COALESCE(?17, user_profiles.support_creds)
                  WHERE excluded.updated_at >= user_profiles.updated_at
                     OR (excluded.updated_at < user_profiles.updated_at
                         AND ABS(excluded.updated_at - user_profiles.updated_at) < 86400000)",
-                params![peer_id, display_name, status, about_me, updated_at, avatar_val, banner_val, twitch_username, showcase_board, assets_val, profile_sig, profile_pk, profile_avatar_hash, avatar_frame, avatar_anim, banner_anim],
+                params![peer_id, display_name, status, about_me, updated_at, avatar_val, banner_val, twitch_username, showcase_board, assets_val, profile_sig, profile_pk, profile_avatar_hash, avatar_frame, avatar_anim, banner_anim, support_creds],
             )
             .map_err(|e| format!("Failed to save profile: {e}"))?;
 
@@ -2716,7 +2749,7 @@ impl MessageStore {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT peer_id, display_name, status, about_me, updated_at, avatar, banner, twitch_username, showcase_board, showcase_assets, profile_sig, profile_pk, profile_avatar_hash, avatar_frame, avatar_anim, banner_anim
+                "SELECT peer_id, display_name, status, about_me, updated_at, avatar, banner, twitch_username, showcase_board, showcase_assets, profile_sig, profile_pk, profile_avatar_hash, avatar_frame, avatar_anim, banner_anim, support_creds
                  FROM user_profiles WHERE peer_id = ?1",
             )
             .map_err(|e| format!("Failed to prepare profile query: {e}"))?;
@@ -2735,7 +2768,7 @@ impl MessageStore {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT peer_id, display_name, status, about_me, updated_at, avatar, banner, twitch_username, showcase_board, showcase_assets, profile_sig, profile_pk, profile_avatar_hash, avatar_frame, avatar_anim, banner_anim
+                "SELECT peer_id, display_name, status, about_me, updated_at, avatar, banner, twitch_username, showcase_board, showcase_assets, profile_sig, profile_pk, profile_avatar_hash, avatar_frame, avatar_anim, banner_anim, support_creds
                  FROM user_profiles",
             )
             .map_err(|e| format!("Failed to prepare all profiles query: {e}"))?;
@@ -2750,7 +2783,7 @@ impl MessageStore {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT peer_id, display_name, status, about_me, updated_at, twitch_username, showcase_board, avatar_frame, avatar_anim, banner_anim
+                "SELECT peer_id, display_name, status, about_me, updated_at, twitch_username, showcase_board, avatar_frame, avatar_anim, banner_anim, support_creds
                  FROM user_profiles",
             )
             .map_err(|e| format!("Failed to prepare light profiles query: {e}"))?;
@@ -2765,7 +2798,7 @@ impl MessageStore {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT peer_id, display_name, status, about_me, updated_at, twitch_username, showcase_board, avatar_frame, avatar_anim, banner_anim
+                "SELECT peer_id, display_name, status, about_me, updated_at, twitch_username, showcase_board, avatar_frame, avatar_anim, banner_anim, support_creds
                  FROM user_profiles WHERE peer_id = ?1",
             )
             .map_err(|e| format!("Failed to prepare light profile query: {e}"))?;
@@ -4127,6 +4160,88 @@ impl MessageStore {
                 Ok(row.get::<_, i64>(0)?.max(0) as u32)
             })
             .map_err(|e| format!("Failed to count redeem codes: {e}"))
+    }
+
+    /// Keep one of OUR support credentials (artist shop, phase 2). Upsert by
+    /// item: a second redemption for the same item replaces the entry.
+    pub fn save_own_support_cred(
+        &self,
+        item: &str,
+        entry_json: &str,
+        slug: &str,
+        title: &str,
+        artist_name: &str,
+    ) -> Result<(), String> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        self.conn
+            .execute(
+                "INSERT INTO support_creds_own (item, entry_json, slug, title, artist_name, redeemed_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(item) DO UPDATE SET
+                   entry_json = excluded.entry_json,
+                   slug = excluded.slug,
+                   title = excluded.title,
+                   artist_name = excluded.artist_name,
+                   redeemed_at = excluded.redeemed_at",
+                params![item, entry_json, slug, title, artist_name, now],
+            )
+            .map_err(|e| format!("Failed to keep the support credential: {e}"))?;
+        Ok(())
+    }
+
+    /// Rewrite the stored entry of one of our credentials (the badge flag).
+    pub fn update_own_support_cred_entry(&self, item: &str, entry_json: &str) -> Result<(), String> {
+        self.conn
+            .execute(
+                "UPDATE support_creds_own SET entry_json = ?2 WHERE item = ?1",
+                params![item, entry_json],
+            )
+            .map_err(|e| format!("Failed to update the support credential: {e}"))?;
+        Ok(())
+    }
+
+    /// Every credential this identity holds, newest first:
+    /// (item, entry_json, slug, title, artist_name, redeemed_at).
+    #[allow(clippy::type_complexity)]
+    pub fn list_own_support_creds(
+        &self,
+    ) -> Result<Vec<(String, String, String, String, String, i64)>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT item, entry_json, slug, title, artist_name, redeemed_at
+                 FROM support_creds_own ORDER BY redeemed_at DESC, item ASC",
+            )
+            .map_err(|e| format!("Failed to prepare support credential list: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, i64>(5)?,
+                ))
+            })
+            .map_err(|e| format!("Failed to list support credentials: {e}"))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(|e| format!("Failed to read support credential row: {e}"))?);
+        }
+        Ok(out)
+    }
+
+    /// Forget one of our credentials. Not offered in the UI (12.6: a
+    /// credential cannot be re-minted); the tests need a way.
+    pub fn delete_own_support_cred(&self, item: &str) -> Result<(), String> {
+        self.conn
+            .execute("DELETE FROM support_creds_own WHERE item = ?1", params![item])
+            .map_err(|e| format!("Failed to forget the support credential: {e}"))?;
+        Ok(())
     }
 
     /// (hash, animated, byte size) of every cached blob of one kind, newest

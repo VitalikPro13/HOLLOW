@@ -11,6 +11,9 @@ import 'package:hollow/src/rust/api/shop.dart' as shop_api;
 export 'package:hollow/src/rust/api/shop.dart'
     show
         KeptRedeemCode,
+        OwnSupportCred,
+        RedeemLookup,
+        RedeemOutcome,
         ShopArtist,
         ShopCatalog,
         ShopFile,
@@ -18,7 +21,11 @@ export 'package:hollow/src/rust/api/shop.dart'
         forgetRedeemCode,
         keepRedeemCode,
         listRedeemCodes,
-        shopOrigin;
+        redeemCode,
+        redeemLookup,
+        setSupportBadge,
+        shopOrigin,
+        supportBadgeEnabled;
 
 /// The shop's catalog. Deliberately NOT autoDispose: leaving the tab and
 /// coming back is the common move, and a refetch there is a wasted round trip
@@ -62,4 +69,27 @@ final shopArtProvider =
 final keptRedeemCodesProvider =
     FutureProvider.autoDispose<List<shop_api.KeptRedeemCode>>(
   (ref) => shop_api.listRedeemCodes(),
+);
+
+/// The support credentials this identity holds, newest first. Reloaded after
+/// a redeem and after the badge toggle; autoDispose so a panel that comes
+/// back reads the table again.
+final ownSupportCredsProvider =
+    FutureProvider.autoDispose<List<shop_api.OwnSupportCred>>(
+  (ref) => shop_api.listOwnSupportCreds(),
+);
+
+/// The item hashes this identity holds a credential for: what "Owned" means
+/// on a shop card (Vitalik, 2026-09-02). A pack in the library is not
+/// ownership, because packs travel; a credential does not, it is signed over
+/// this identity. Empty until the table has been read.
+final ownCredentialItemsProvider = Provider.autoDispose<Set<String>>((ref) {
+  final creds = ref.watch(ownSupportCredsProvider).valueOrNull;
+  if (creds == null) return const {};
+  return {for (final cred in creds) cred.item};
+});
+
+/// Whether OUR marks also sit next to our name (on by default).
+final supportBadgeProvider = FutureProvider.autoDispose<bool>(
+  (ref) => shop_api.supportBadgeEnabled(),
 );

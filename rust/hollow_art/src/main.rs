@@ -48,7 +48,18 @@ USAGE:
 
   hollowpack process --kind <frame|avatar|banner> <in> --out-dir <dir>
 
+  hollowpack keygen
+  hollowpack blind-sign --blinded <base64>   (the secret key, base64, on stdin)
+
   hollowpack version
+
+keygen prints one JSON line, {\"secret_b64\", \"public_b64\", \"bits\"}: a fresh
+RSA-3072 issuing key pair for one listing (design 5.2), PKCS#1 DER. The shop
+seals the secret half and publishes the public half; nothing is written to
+disk here. blind-sign reads that secret (one base64 line on stdin, never an
+argument) and prints {\"blind_sig_b64\"} for a blinded message: it is the
+shop's side of RFC 9474, RSABSSA-SHA384-PSS-Deterministic, the exact variant
+the app unblinds and verifies with, because both are this one crate.
 
 <kind> is frame, avatar or banner. Still versus animated is decided from the
 bytes, never from the file extension.
@@ -77,6 +88,8 @@ fn main() {
         Some("pack") => cmd_pack(&args[1..]),
         Some("inspect") => cmd_inspect(&args[1..]),
         Some("process") => cmd_process(&args[1..]),
+        Some("keygen") => cmd_keygen(&args[1..]),
+        Some("blind-sign") => cmd_blind_sign(&args[1..]),
         Some("version") | Some("--version") | Some("-V") => {
             println!("hollowpack {}", env!("CARGO_PKG_VERSION"));
             return;
@@ -581,5 +594,77 @@ fn cmd_process(args: &[String]) -> Result<(), String> {
         });
         println!("{line}");
     }
+    Ok(())
+}
+
+// ── keygen / blind-sign (support credentials, design 5.2) ─────────────
+//
+// The RSA half of a support credential runs in this binary on the shop's
+// host and in the app on the buyer's machine, and it is the same crate in
+// both (`hollow_art::node::support_rsa`, a #[path] include of hollow_core's
+// file). Ed25519 (root -> issuer -> key) is the shop's own; only the blind
+// signature has to be byte-compatible with the app's unblinding, so only
+// that lives here.
+
+use base64::Engine as _;
+use hollow_art::node::support_rsa;
+
+const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
+
+/// A fresh issuing key pair on stdout as one JSON line. The secret half goes
+/// to the caller's memory and nowhere else: the shop seals it before it
+/// touches a table.
+fn cmd_keygen(args: &[String]) -> Result<(), String> {
+    if let Some(a) = args.first() {
+        if matches!(a.as_str(), "--help" | "-h") {
+            print!("{USAGE}");
+            return Ok(());
+        }
+        return Err(format!("keygen takes no arguments, got {a}"));
+    }
+    let (sk, pk) = support_rsa::generate_issuing_key()?;
+    let line = serde_json::json!({
+        "secret_b64": B64.encode(&sk),
+        "public_b64": B64.encode(&pk),
+        "bits": support_rsa::MODULUS_BITS,
+    });
+    println!("{line}");
+    Ok(())
+}
+
+/// Sign one blinded message. The secret key arrives on STDIN (one base64
+/// line): an argument would be visible to every process on the host, and an
+/// environment variable outlives the call.
+fn cmd_blind_sign(args: &[String]) -> Result<(), String> {
+    let mut blinded: Option<String> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--help" | "-h" => {
+                print!("{USAGE}");
+                return Ok(());
+            }
+            "--blinded" => blinded = Some(need_value(args, &mut i, "--blinded")?),
+            other => return Err(format!("unknown arg {other}")),
+        }
+        i += 1;
+    }
+    let blinded = require(blinded, "--blinded")?;
+    let blinded = B64
+        .decode(blinded.trim())
+        .map_err(|e| format!("--blinded is not base64: {e}"))?;
+
+    let mut secret_line = String::new();
+    std::io::stdin()
+        .read_line(&mut secret_line)
+        .map_err(|e| format!("failed to read the secret key from stdin: {e}"))?;
+    let secret = B64
+        .decode(secret_line.trim())
+        .map_err(|e| format!("the secret key on stdin is not base64: {e}"))?;
+    let sk = support_rsa::secret_key_from_der(&secret)?;
+
+    let sig = support_rsa::blind_sign(&sk, &blinded)?;
+    let line = serde_json::json!({ "blind_sig_b64": B64.encode(&sig) });
+    println!("{line}");
     Ok(())
 }

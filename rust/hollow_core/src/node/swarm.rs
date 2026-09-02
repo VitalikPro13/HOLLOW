@@ -1976,7 +1976,7 @@ async fn run_event_loop(
                             &db_path, &db_passphrase,
                         ).await { continue; }
                     }
-                    NodeCommand::UpdateProfile { display_name, status, about_me, avatar_bytes, banner_bytes, twitch_username, showcase_board, showcase_assets, avatar_frame, avatar_anim, banner_anim } => {
+                    NodeCommand::UpdateProfile { display_name, status, about_me, avatar_bytes, banner_bytes, twitch_username, showcase_board, showcase_assets, avatar_frame, avatar_anim, banner_anim, support_creds } => {
                         social::handle_update_profile(
                             &event_tx, &ws_cmd_tx, &ws_room_peers,
                             &mut mls, &server_states,
@@ -1984,7 +1984,7 @@ async fn run_event_loop(
                             display_name, status, about_me,
                             avatar_bytes, banner_bytes, is_invisible, twitch_username,
                             showcase_board, showcase_assets, avatar_frame,
-                            avatar_anim, banner_anim,
+                            avatar_anim, banner_anim, support_creds,
                             &db_path, &db_passphrase,
                         ).await;
                     }
@@ -11284,7 +11284,7 @@ async fn handle_incoming_request(
                                 ).await;
                             }
 
-                            MessageEnvelope::ProfileUpdate { display_name, status, about_me, updated_at, avatar_b64, banner_b64, is_invisible: peer_invisible, twitch_username, device_list, avatar_hash, banner_hash, showcase_board, showcase_assets_b64, showcase_assets_hash, avatar_frame, avatar_anim, banner_anim, profile_sig, profile_pk } => {
+                            MessageEnvelope::ProfileUpdate { display_name, status, about_me, updated_at, avatar_b64, banner_b64, is_invisible: peer_invisible, twitch_username, device_list, avatar_hash, banner_hash, showcase_board, showcase_assets_b64, showcase_assets_hash, avatar_frame, avatar_anim, banner_anim, support_creds, profile_sig, profile_pk } => {
                                 if peer_invisible {
                                     let _ = event_tx.send(NetworkEvent::PeerStatusChanged {
                                         peer_id: sender_peer_id.clone(),
@@ -11298,7 +11298,7 @@ async fn handle_incoming_request(
                                     updated_at, avatar_b64, banner_b64, twitch_username,
                                     device_list, avatar_hash, banner_hash, showcase_board,
                                     showcase_assets_b64, showcase_assets_hash, avatar_frame,
-                                    avatar_anim, banner_anim,
+                                    avatar_anim, banner_anim, support_creds,
                                     profile_sig, profile_pk,
                                     db_path, db_passphrase,
                                 ).await;
@@ -12805,7 +12805,7 @@ async fn handle_incoming_request(
                         // Signed fresh if the row predates 0.8.5.
                         let (profile_sig, profile_pk, signed_avatar_hash) =
                             social::own_profile_proof(master_keypair, local_peer_str, profile.as_ref());
-                        let (display_name, status, about_me, updated_at, avatar_hash, banner_hash, twitch_username, showcase_board, showcase_assets_hash, avatar_frame, avatar_anim, banner_anim) =
+                        let (display_name, status, about_me, updated_at, avatar_hash, banner_hash, twitch_username, showcase_board, showcase_assets_hash, avatar_frame, avatar_anim, banner_anim, support_creds) =
                             match profile {
                                 Some(p) => (
                                     p.display_name, p.status, p.about_me, p.updated_at,
@@ -12814,8 +12814,9 @@ async fn handle_incoming_request(
                                     p.twitch_username, p.showcase_board,
                                     social::profile_blob_hash(p.showcase_assets.as_deref()),
                                     p.avatar_frame, p.avatar_anim, p.banner_anim,
+                                    p.support_creds,
                                 ),
-                                None => (String::new(), String::new(), String::new(), 0, String::new(), String::new(), String::new(), String::new(), String::new(), String::new(), String::new(), String::new()),
+                                None => (String::new(), String::new(), String::new(), 0, String::new(), String::new(), String::new(), String::new(), String::new(), String::new(), String::new(), String::new(), String::new()),
                             };
                         let device_list = super::crypto_handler::build_local_device_list(
                             master_keypair, device_peer_id, db_path, db_passphrase,
@@ -12833,6 +12834,7 @@ async fn handle_incoming_request(
                             avatar_frame: Some(avatar_frame),
                             avatar_anim: Some(avatar_anim),
                             banner_anim: Some(banner_anim),
+                            support_creds: Some(support_creds),
                             profile_sig, profile_pk,
                         };
                         let json = serde_json::to_string(&msg).unwrap_or_default();
@@ -13462,7 +13464,7 @@ async fn handle_incoming_request(
             peer_auto_dl.insert(peer_str.to_string(), mb);
         }
 
-        HavenMessage::ProfileUpdate { display_name, status, about_me, updated_at, avatar_b64, banner_b64, is_invisible: peer_invisible, twitch_username, device_list, avatar_hash, banner_hash, showcase_board, showcase_assets_b64, showcase_assets_hash, avatar_frame, avatar_anim, banner_anim, profile_sig, profile_pk } => {
+        HavenMessage::ProfileUpdate { display_name, status, about_me, updated_at, avatar_b64, banner_b64, is_invisible: peer_invisible, twitch_username, device_list, avatar_hash, banner_hash, showcase_board, showcase_assets_b64, showcase_assets_hash, avatar_frame, avatar_anim, banner_anim, support_creds, profile_sig, profile_pk } => {
             // If the profile carries an invisible flag, emit PeerStatusChanged so the
             // UI treats this peer as offline from the very first event.
             if peer_invisible {
@@ -13624,6 +13626,7 @@ async fn handle_incoming_request(
                 social::sanitize_incoming_frame(avatar_frame.as_deref()),
                 social::sanitize_incoming_anim(avatar_anim.as_deref()),
                 social::sanitize_incoming_anim(banner_anim.as_deref()),
+                support_creds.as_deref(),
                 db_path, db_passphrase,
             );
 

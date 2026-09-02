@@ -15,6 +15,7 @@ import 'package:hollow/src/core/providers/local_nickname_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/verified_peers_provider.dart';
+import 'package:hollow/src/core/providers/support_marks_provider.dart';
 import 'package:hollow/src/core/role_hierarchy.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/rust/api/twitch.dart';
@@ -30,6 +31,7 @@ import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
 import 'package:hollow/src/ui/components/status_dot.dart';
+import 'package:hollow/src/ui/components/support_glyph.dart';
 import 'package:hollow/src/ui/dialogs/report_user_dialog.dart';
 import 'package:hollow/src/ui/dialogs/user_settings_dialog.dart';
 import 'package:hollow/src/ui/dialogs/verify_contact_dialog.dart';
@@ -167,6 +169,17 @@ class _ProfileCardBodyState extends ConsumerState<ProfileCardBody> {
 
     final chips = _buildChips(hollow);
     final twitchChip = _twitchChip();
+    // The support badge (design 5.6, amended 2026-09-02): ONE chip for every
+    // credential the profile carries, worn or not, in the band under the
+    // banner before the integration chip. The compact card gets the icon
+    // alone so it never runs into the avatar's overhang; the full card
+    // spells the artist out.
+    final marks = ref.watch(supportMarksProvider(widget.peerId));
+    final cornerChips = <Widget>[
+      if (marks.isNotEmpty)
+        SupportMarksChip(peerId: widget.peerId, compact: _compact),
+      if (twitchChip != null) twitchChip,
+    ];
     // Compact only needs to know WHETHER a board exists (for the hint);
     // the dialog decodes and renders the actual blocks.
     final hasBoard = _compact &&
@@ -258,7 +271,7 @@ class _ProfileCardBodyState extends ConsumerState<ProfileCardBody> {
         // buttons live below About Me, never up here.
         SizedBox(
           height: avatarOverhang + (_compact ? 8 : 20),
-          child: twitchChip == null
+          child: cornerChips.isEmpty
               ? null
               : Padding(
                   padding: EdgeInsets.only(
@@ -267,7 +280,15 @@ class _ProfileCardBodyState extends ConsumerState<ProfileCardBody> {
                   ),
                   child: Align(
                     alignment: Alignment.topRight,
-                    child: twitchChip,
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        for (var i = 0; i < cornerChips.length; i++) ...[
+                          if (i > 0) const SizedBox(width: HollowSpacing.xs),
+                          cornerChips[i],
+                        ],
+                      ],
+                    ),
                   ),
                 ),
         ),

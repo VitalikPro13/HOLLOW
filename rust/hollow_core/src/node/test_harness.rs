@@ -7301,6 +7301,7 @@ async fn showcase_board_replicates_preserves_and_clears() {
         avatar_frame: None,
         avatar_anim: None,
         banner_anim: None,
+        support_creds: None,
     };
 
     // --- 1. A composes an ENRICHED game-block board (+ a two-asset bundle:
@@ -10835,6 +10836,7 @@ async fn avatar_frame_id_replicates_and_art_pulls_on_demand() {
         avatar_frame: frame,
         avatar_anim: None,
         banner_anim: None,
+        support_creds: None,
     };
 
     // --- 1. A built-in frame is just a short string: it rides the announce
@@ -11017,6 +11019,7 @@ async fn animated_profile_media_hash_replicates_and_bytes_pull_on_demand() {
         avatar_frame: None,
         avatar_anim: anim,
         banner_anim: None,
+        support_creds: None,
     };
 
     // --- 1. The hash replicates, the still rides the push, the bytes do not. ---
@@ -14388,6 +14391,7 @@ async fn friend_request_carries_sender_profile() {
             avatar_frame: None,
             avatar_anim: None,
             banner_anim: None,
+        support_creds: None,
         })
         .await
         .unwrap();
@@ -17217,4 +17221,158 @@ fn harness_fixed_sleep_budget_does_not_grow() {
         BUDGET_MS as f64 / 1000.0,
         worst.join(", "),
     );
+}
+
+// ---------------------------------------------------------------------------
+// Artist shop, phase 2: a support credential rides the profile as
+// `support_creds`, the receiver verifies it OFFLINE against the pinned root
+// (the test root in this build) and stores it under the sender's MASTER, a
+// transplanted entry (minted for another identity) is dropped in silence, an
+// untouched update preserves it, an explicit `""` clears it, and a sibling
+// device of the holder receives it with the profile.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
+async fn support_credential_replicates_and_transplant_is_dropped() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    const A_MASTER: u8 = 211;
+    const A_DEV: u8 = 212;
+    const A_DEV2: u8 = 213;
+    const B_MASTER: u8 = 214;
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
+    let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
+
+    let mut a = spawn_node_with_friends(&relay, A_MASTER, A_DEV, &[&b_master]).await;
+    let mut a2 = spawn_node_with_friends(&relay, A_MASTER, A_DEV2, &[&b_master]).await;
+    let mut b = spawn_node_with_friends(&relay, B_MASTER, B_MASTER, &[&a_master]).await;
+    // Settle on the condition, not on a clock: A sees B online and B sees A.
+    assert!(
+        wait_until(15, || async {
+            a.online_identities(&relay).contains(&b_master)
+                && b.online_identities(&relay).contains(&a_master)
+        })
+        .await,
+        "A and B must see each other before the announce"
+    );
+    drain_events(&mut a);
+    drain_events(&mut a2);
+    drain_events(&mut b);
+
+    use super::support_creds::{self, testing};
+    let frame_hash = hex::encode([0x5au8; 32]);
+    // Minted for A's MASTER, exactly as the redeem path does it.
+    let real = testing::mint_for(&a_master, &[frame_hash.clone()]);
+    // Minted for somebody else and pasted into A's field: worthless.
+    let transplant = testing::mint_for("somebody-else", &[hex::encode([0x5bu8; 32])]);
+    let announced = support_creds::encode_entries(&[transplant.clone(), real.clone()]);
+
+    let send = |status: &str, creds: Option<String>| NodeCommand::UpdateProfile {
+        display_name: "Anon A".to_string(),
+        status: status.to_string(),
+        about_me: String::new(),
+        avatar_bytes: None,
+        banner_bytes: None,
+        twitch_username: String::new(),
+        showcase_board: None,
+        showcase_assets: None,
+        avatar_frame: None,
+        avatar_anim: None,
+        banner_anim: None,
+        support_creds: creds,
+    };
+
+    // --- 1. B keeps the real entry, drops the transplant, under A's MASTER. ---
+    a.cmd_tx.send(send("hi", Some(announced))).await.unwrap();
+    let got = wait_event(&mut b, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::ProfileUpdated { .. })
+    })
+    .await;
+    assert!(got, "B must receive A's profile update");
+    assert!(
+        wait_until(5, || async {
+            b.store().load_profile(&a_master).ok().flatten().is_some_and(|p| !p.support_creds.is_empty())
+        })
+        .await,
+        "B must store A's credentials"
+    );
+    let p = b.store().load_profile(&a_master).unwrap()
+        .expect("B must hold A's profile keyed by A's MASTER (device != master)");
+    let kept = support_creds::parse_stored(&p.support_creds);
+    assert_eq!(kept.len(), 1, "exactly the real credential survives: {}", p.support_creds);
+    assert_eq!(kept[0].item, real.item, "the surviving entry is the one minted for A");
+    assert!(!p.support_creds.contains(&transplant.item), "the transplant is gone");
+    // What B stored verifies again, offline, against the pinned root.
+    support_creds::verify_entry(&kept[0], &a_master, &support_creds::root_verifying_key())
+        .expect("B's stored entry verifies for A's master");
+    assert_eq!(kept[0].parts, vec![frame_hash.clone()], "the parts name the frame hash");
+
+    // --- 2. A's sibling device holds the same credential with the profile. ---
+    let got = wait_event(&mut a2, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::ProfileUpdated { peer_id } if *peer_id == a_master)
+    })
+    .await;
+    assert!(got, "the sibling must receive its own master's profile update");
+    assert!(
+        wait_until(5, || async {
+            a2.store().load_profile(&a_master).ok().flatten().is_some_and(|p| !p.support_creds.is_empty())
+        })
+        .await,
+        "the sibling must store the credentials"
+    );
+    let sib = a2.store().load_profile(&a_master).unwrap().expect("sibling profile row");
+    let sib_kept = support_creds::parse_stored(&sib.support_creds);
+    assert_eq!(sib_kept.len(), 1, "the sibling keeps the real credential: {}", sib.support_creds);
+    assert_eq!(sib_kept[0].item, real.item);
+
+    // --- 3. An update that does not touch the field PRESERVES it (which is
+    // also exactly what an old client sends). ---
+    drain_events(&mut b);
+    a.cmd_tx.send(send("status changed", None)).await.unwrap();
+    let got = wait_event(&mut b, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::ProfileUpdated { .. })
+    })
+    .await;
+    assert!(got, "B must receive A's second update");
+    assert!(
+        wait_until(5, || async {
+            b.store().load_profile(&a_master).ok().flatten().is_some_and(|p| p.status == "status changed")
+        })
+        .await,
+        "B must store the second update"
+    );
+    let p = b.store().load_profile(&a_master).unwrap().expect("profile row");
+    assert_eq!(p.status, "status changed");
+    assert_eq!(
+        support_creds::parse_stored(&p.support_creds),
+        vec![real.clone()],
+        "an update that did not touch the credentials must NOT lose them"
+    );
+
+    // --- 4. An explicit empty field clears. ---
+    drain_events(&mut b);
+    a.cmd_tx.send(send("cleared", Some(String::new()))).await.unwrap();
+    let got = wait_event(&mut b, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::ProfileUpdated { .. })
+    })
+    .await;
+    assert!(got, "B must receive A's clear");
+    assert!(
+        wait_until(5, || async {
+            b.store().load_profile(&a_master).ok().flatten().is_some_and(|p| p.status == "cleared")
+        })
+        .await,
+        "B must store the clear"
+    );
+    let p = b.store().load_profile(&a_master).unwrap().expect("profile row");
+    assert_eq!(p.support_creds, "", "an explicit empty field must clear on B");
+
+    drop(a);
+    drop(a2);
+    drop(b);
 }

@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/avatar_frame_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/owned_art_provider.dart';
+import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/shop_provider.dart' as shop;
 import 'package:hollow/src/core/providers/shop_tab_provider.dart';
 import 'package:hollow/src/core/shop_availability.dart';
@@ -19,10 +20,12 @@ import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
+import 'package:hollow/src/ui/components/hollow_toggle.dart';
 import 'package:hollow/src/ui/mobile/mobile_page_route.dart';
 import 'package:hollow/src/ui/settings/settings_shared.dart';
 import 'package:hollow/src/ui/shop/hollowpack_import.dart';
 import 'package:hollow/src/ui/shop/shop_dashboard.dart';
+import 'package:hollow/src/ui/shop/redeem_code_dialog.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:url_launcher/url_launcher.dart';
 
@@ -120,6 +123,7 @@ class _OwnedArtPanelState extends ConsumerState<OwnedArtPanel> {
               child: _OwnedItemRow(item: item),
             ),
         const _KeptCodesSection(),
+        const _SupportMarksSection(),
       ],
     );
 
@@ -480,8 +484,10 @@ class _KeptCodesSection extends ConsumerWidget {
         const SettingsSectionLabel(label: 'CODES KEPT FOR LATER'),
         const SizedBox(height: HollowSpacing.xs),
         Text(
-          'Support marks arrive in a later Hollow update. Hollow keeps these '
-          'codes until then; the receipt email has them too.',
+          'Codes that arrived by a receipt link and are not redeemed yet. '
+          'Redeem one to light its support mark and fetch the art; the '
+          'receipt email has it too. A code the shop no longer honours is '
+          'dropped the moment it is looked up.',
           style: HollowTypography.caption.copyWith(color: hollow.textSecondary),
         ),
         const SizedBox(height: HollowSpacing.sm),
@@ -496,10 +502,24 @@ class _KeptCodesSection extends ConsumerWidget {
   }
 }
 
-class _KeptCodeRow extends ConsumerWidget {
+class _KeptCodeRow extends ConsumerStatefulWidget {
   final String code;
 
   const _KeptCodeRow({required this.code});
+
+  @override
+  ConsumerState<_KeptCodeRow> createState() => _KeptCodeRowState();
+}
+
+class _KeptCodeRowState extends ConsumerState<_KeptCodeRow> {
+  /// Hidden by default, the way the recovery phrase is: a code is a bearer
+  /// token, and a screen share should not hand it to the room.
+  bool _revealed = false;
+
+  String get code => widget.code;
+
+  /// The code with every character but the dashes covered.
+  String get _masked => code.replaceAll(RegExp(r'[^-]'), '\u2022');
 
   Future<void> _copy(BuildContext context) async {
     await Clipboard.setData(ClipboardData(text: code));
@@ -542,18 +562,36 @@ class _KeptCodeRow extends ConsumerWidget {
   }
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
     return Row(
       children: [
         Expanded(
           child: Text(
-            code,
+            _revealed ? code : _masked,
             style: HollowTypography.mono
                 .copyWith(color: hollow.textSecondary, fontSize: 11),
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
           ),
+        ),
+        const SizedBox(width: HollowSpacing.xs),
+        HollowPressable(
+          semanticLabel: _revealed ? 'Hide code' : 'Reveal code',
+          onTap: () => setState(() => _revealed = !_revealed),
+          borderRadius: BorderRadius.circular(hollow.radiusSm),
+          padding: const EdgeInsets.all(HollowSpacing.xs),
+          child: Icon(
+            _revealed ? LucideIcons.eyeOff : LucideIcons.eye,
+            size: 14,
+            color: hollow.textSecondary,
+          ),
+        ),
+        const SizedBox(width: HollowSpacing.xs),
+        HollowButton.outline(
+          onPressed: () => showRedeemCodeDialog(context, code),
+          compact: true,
+          child: const Text('Redeem'),
         ),
         const SizedBox(width: HollowSpacing.xs),
         HollowPressable(
@@ -569,6 +607,109 @@ class _KeptCodeRow extends ConsumerWidget {
           borderRadius: BorderRadius.circular(hollow.radiusSm),
           padding: const EdgeInsets.all(HollowSpacing.xs),
           child: Icon(LucideIcons.trash2, size: 14, color: hollow.textSecondary),
+        ),
+      ],
+    );
+  }
+}
+
+// ── Support marks ───────────────────────────────────────────────────────────
+
+/// The credentials this identity holds (design 5.5) and the one choice the
+/// holder makes about them (5.6): whether the mark also sits next to their
+/// name. The profile card mark is always on.
+class _SupportMarksSection extends ConsumerStatefulWidget {
+  const _SupportMarksSection();
+
+  @override
+  ConsumerState<_SupportMarksSection> createState() =>
+      _SupportMarksSectionState();
+}
+
+class _SupportMarksSectionState extends ConsumerState<_SupportMarksSection> {
+  bool _saving = false;
+
+  Future<void> _setBadge(bool show) async {
+    setState(() => _saving = true);
+    try {
+      await shop.setSupportBadge(show_: show);
+      ref.invalidate(shop.supportBadgeProvider);
+      ref.invalidate(shop.ownSupportCredsProvider);
+      final me = ref.read(identityProvider).peerId;
+      if (me != null && me.isNotEmpty) {
+        await ref.read(profileProvider.notifier).reloadProfile(me);
+      }
+    } catch (e) {
+      if (!mounted) return;
+      final message = e.toString().replaceFirst(RegExp(r'^[A-Za-z]+: '), '');
+      HollowToast.show(context, message, type: HollowToastType.error);
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+    final creds = ref.watch(shop.ownSupportCredsProvider).valueOrNull;
+    if (creds == null || creds.isEmpty) return const SizedBox.shrink();
+    final badge = ref.watch(shop.supportBadgeProvider).valueOrNull ?? true;
+
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        const SizedBox(height: HollowSpacing.lg),
+        const SettingsSectionLabel(label: 'SUPPORT MARKS'),
+        const SizedBox(height: HollowSpacing.xs),
+        Text(
+          'Each mark proves you bought the art, without the shop knowing it '
+          'was you. It shows on your profile card whether or not you wear '
+          'that art right now.',
+          style: HollowTypography.caption.copyWith(color: hollow.textSecondary),
+        ),
+        const SizedBox(height: HollowSpacing.sm),
+        for (final cred in creds)
+          Padding(
+            key: ValueKey(cred.item),
+            padding: const EdgeInsets.only(bottom: HollowSpacing.xs),
+            child: Row(
+              children: [
+                Icon(LucideIcons.sparkles, size: 14, color: hollow.accentText),
+                const SizedBox(width: HollowSpacing.sm),
+                Expanded(
+                  child: Text(
+                    '${cred.title}  by ${cred.artistName}',
+                    style: HollowTypography.body.copyWith(
+                      color: hollow.textPrimary,
+                      fontSize: 13,
+                    ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        const SizedBox(height: HollowSpacing.sm),
+        Row(
+          children: [
+            Expanded(
+              child: Text(
+                'Show the mark next to my name in chats and member lists',
+                style: HollowTypography.body.copyWith(
+                  color: hollow.textPrimary,
+                  fontSize: 13,
+                ),
+              ),
+            ),
+            const SizedBox(width: HollowSpacing.sm),
+            HollowToggle(
+              value: badge,
+              onChanged: _saving ? null : (v) => _setBadge(v),
+              semanticLabel: 'Show the support mark next to my name',
+            ),
+          ],
         ),
       ],
     );

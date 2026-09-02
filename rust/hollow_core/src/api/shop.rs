@@ -22,10 +22,15 @@ use flutter_rust_bridge::frb;
 use serde::{Deserialize, Deserializer};
 use sha2::{Digest, Sha256};
 
+use base64::Engine;
+
 use super::network::get_http_runtime;
 use super::storage::get_store;
 use crate::crdt::valid_emote_hash;
+use crate::hollow_log;
 use crate::hollowpack::{Role, MAX_FILE_BYTES};
+
+const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
 
 // ── Origin ────────────────────────────────────────────────────────────
 
@@ -126,6 +131,10 @@ pub struct ShopListing {
     /// The display file is a wide strip (aspect 2:1 or wider) rather than a
     /// square.
     pub wide: bool,
+    /// The support credential's item hash for this listing (64-hex), or `""`
+    /// when the listing was put up before credentials existed. What
+    /// `list_own_support_creds` items compare against: "you support this".
+    pub credential_item: String,
     /// `{origin}/item/{slug}`: the listing's own address. A hash is the ART's
     /// address, and a bundle carries the same frame hash as the single frame
     /// on purpose, so a link by hash opened whichever listing the shop found
@@ -213,6 +222,10 @@ struct RawListing {
     artist: RawArtist,
     #[serde(default, deserialize_with = "lenient_vec")]
     files: Vec<RawFile>,
+    /// The support credential's item hash, once the listing has an issuing
+    /// key. Absent on listings from before phase 2.
+    #[serde(default, deserialize_with = "lenient")]
+    item: String,
 }
 
 #[frb(ignore)]
@@ -468,6 +481,7 @@ fn sanitize_listing(raw: RawListing, origin: &str) -> Option<ShopListing> {
     };
 
     Some(ShopListing {
+        credential_item: if valid_emote_hash(&raw.item) { raw.item.clone() } else { String::new() },
         item_url: if valid_slug(&slug) {
             format!("{origin}/item/{slug}")
         } else {
@@ -545,8 +559,6 @@ async fn fetch_bounded(
     max_bytes: usize,
     accept: Option<&str>,
 ) -> Result<Vec<u8>, String> {
-    use futures_util::StreamExt;
-
     let mut req = client
         .get(url)
         .timeout(std::time::Duration::from_secs(timeout_secs));
@@ -563,6 +575,13 @@ async fn fetch_bounded(
             resp.status().as_u16()
         ));
     }
+    read_bounded(resp, max_bytes).await
+}
+
+/// Read a response body under a cap: Content-Length first, then every chunk.
+async fn read_bounded(resp: reqwest::Response, max_bytes: usize) -> Result<Vec<u8>, String> {
+    use futures_util::StreamExt;
+
     if let Some(len) = resp.content_length()
         && len > max_bytes as u64
     {
@@ -712,6 +731,518 @@ pub fn forget_redeem_code(code: String) -> Result<(), String> {
     let ms = guard.as_ref().ok_or("Message store is not open")?;
     ms.delete_redeem_code(code.trim())
 }
+
+// ── Support credentials: redeem (phase 2) ─────────────────────────────
+//
+// The one WRITE this module makes against the shop: redeeming a Creem license
+// key into a support credential (design 5.3, 12.6, 13.23). Two round trips,
+// no cookies, no identity in the clear:
+//
+//   POST /api/redeem/lookup {code}     the listing's public facts and its
+//                                      issuing key chain; nothing burns
+//   POST /api/redeem {code, blinded}   the blind signature and a one-shot
+//                                      token for the pack; the code burns
+//   GET  /api/redeem/pack/<token>      the .hollowpack, once
+//
+// The identity never leaves this machine: the shop signs a BLINDED message
+// and cannot tell which master peer id it vouched for. What comes back is
+// verified against the root key pinned in `support_creds.rs` before it is
+// kept, and it is kept BEFORE the pack is fetched, because after the second
+// round trip the code is spent and the credential is the thing that was
+// bought. A pack that fails to arrive is a sentence in the outcome, not a
+// lost purchase: the Creem download carries the same pack.
+
+use crate::node::support_creds::{self, CredentialEntry, T_ITEM};
+
+/// The largest `.hollowpack` the redeem path will read: eight files at the
+/// per-file cap, with room.
+const MAX_PACK_BYTES: usize = 40 * 1024 * 1024;
+
+/// `app_settings` key: whether OUR credentials carry the next-to-name badge
+/// (design 5.6, off by default). New credentials inherit it.
+pub(crate) const SUPPORT_BADGE_SETTING: &str = "support_badge";
+
+/// What `redeem_lookup` learned about a code.
+#[derive(Debug, Clone)]
+pub struct RedeemLookup {
+    /// `ok`, or why not: `refused` (refunded), `burned` (already redeemed),
+    /// `unknown` (not a key this shop sold), `nokey` (listed before
+    /// credentials existed; the keeper can fix it).
+    pub status: String,
+    /// The shop's sentence when `status` is not `ok`.
+    pub message: String,
+    pub slug: String,
+    pub title: String,
+    pub artist_name: String,
+    pub artist_slug: String,
+    pub item_url: String,
+    pub kinds: Vec<String>,
+    /// The credential's item hash, 64-hex, once `ok`.
+    pub item: String,
+    /// The file hashes the credential will vouch for.
+    pub parts: Vec<String>,
+    /// This identity already holds a credential for this item (13.23): a
+    /// second redemption changes nothing, keep the code and gift it.
+    pub already_supported: bool,
+}
+
+/// What redeeming landed.
+#[derive(Debug, Clone)]
+pub struct RedeemOutcome {
+    /// The credential's item hash. The mark is saved and announced.
+    pub item: String,
+    pub title: String,
+    pub artist_name: String,
+    /// The pack, imported, when it arrived; `None` with `pack_error` set
+    /// when it did not. The credential is kept either way.
+    pub imported: Option<super::network::HollowpackImport>,
+    pub pack_error: String,
+    /// Something to say that is not a failure: the pack's files and the
+    /// credential's parts did not agree, say.
+    pub warning: String,
+}
+
+/// One of OUR credentials, for Settings.
+#[derive(Debug, Clone)]
+pub struct OwnSupportCred {
+    pub item: String,
+    pub parts: Vec<String>,
+    pub slug: String,
+    pub title: String,
+    pub artist_name: String,
+    /// Unix milliseconds.
+    pub redeemed_at: i64,
+    pub badge: bool,
+}
+
+// Wire shapes, tolerant like the catalog's.
+
+#[frb(ignore)]
+#[derive(Debug, Default, Deserialize)]
+struct RawLookup {
+    #[serde(default, deserialize_with = "lenient")]
+    status: String,
+    #[serde(default, deserialize_with = "lenient")]
+    message: String,
+    #[serde(default, deserialize_with = "lenient")]
+    listing: RawLookupListing,
+}
+
+#[frb(ignore)]
+#[derive(Debug, Default, Deserialize)]
+struct RawLookupListing {
+    #[serde(default, deserialize_with = "lenient")]
+    slug: String,
+    #[serde(default, deserialize_with = "lenient")]
+    title: String,
+    #[serde(default, deserialize_with = "lenient")]
+    url: String,
+    #[serde(default, deserialize_with = "lenient_vec")]
+    kinds: Vec<String>,
+    #[serde(default, deserialize_with = "lenient")]
+    artist: RawArtist,
+    #[serde(default, deserialize_with = "lenient")]
+    item: String,
+    #[serde(default, deserialize_with = "lenient_vec")]
+    parts: Vec<String>,
+    #[serde(default, deserialize_with = "lenient")]
+    key: String,
+    #[serde(default, deserialize_with = "lenient")]
+    key_sig: String,
+    #[serde(default, deserialize_with = "lenient")]
+    issuer: String,
+    #[serde(default, deserialize_with = "lenient")]
+    issuer_sig: String,
+}
+
+#[frb(ignore)]
+#[derive(Debug, Default, Deserialize)]
+struct RawRedeem {
+    #[serde(default, deserialize_with = "lenient")]
+    blind_sig: String,
+    #[serde(default, deserialize_with = "lenient")]
+    pack_token: String,
+    #[serde(default, deserialize_with = "lenient")]
+    message: String,
+}
+
+/// POST a JSON body and read a bounded answer. The status rides back with
+/// the bytes: a refusal is a sentence in a 4xx body and the caller wants it.
+async fn post_json_bounded(
+    client: &reqwest::Client,
+    url: &str,
+    body: &serde_json::Value,
+    timeout_secs: u64,
+    max_bytes: usize,
+) -> Result<(u16, Vec<u8>), String> {
+    let req = client
+        .post(url)
+        .timeout(std::time::Duration::from_secs(timeout_secs))
+        .header(reqwest::header::ACCEPT, "application/json")
+        .json(body);
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| format!("The shop could not be reached: {e}"))?;
+    let status = resp.status().as_u16();
+    let bytes = read_bounded(resp, max_bytes).await?;
+    Ok((status, bytes))
+}
+
+/// The sentence in a JSON error body, or the status when there is none.
+fn shop_refusal(status: u16, body: &[u8]) -> String {
+    let said = serde_json::from_slice::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| v.get("message").and_then(|m| m.as_str()).map(|s| clamp(s, 300)))
+        .filter(|s| !s.is_empty());
+    said.unwrap_or_else(|| format!("The shop answered with status {status}"))
+}
+
+async fn lookup_remote(origin: &str, code: &str) -> Result<RawLookup, String> {
+    let client = shop_client()?;
+    let url = format!("{origin}/api/redeem/lookup");
+    let (status, body) =
+        post_json_bounded(&client, &url, &serde_json::json!({ "code": code }), 15, 256 * 1024).await?;
+    if status == 429 {
+        return Err("The shop is asking for a pause; try again in a few minutes".into());
+    }
+    if !(200..300).contains(&status) {
+        return Err(shop_refusal(status, &body));
+    }
+    serde_json::from_slice::<RawLookup>(&body)
+        .map_err(|e| format!("The shop's answer could not be read: {e}"))
+}
+
+async fn redeem_remote(origin: &str, code: &str, blinded: &[u8]) -> Result<RawRedeem, String> {
+    let client = shop_client()?;
+    let url = format!("{origin}/api/redeem");
+    let body = serde_json::json!({ "code": code, "blinded": B64.encode(blinded) });
+    let (status, answer) = post_json_bounded(&client, &url, &body, 40, 256 * 1024).await?;
+    if status == 429 {
+        return Err("The shop is asking for a pause; try again in a few minutes".into());
+    }
+    if !(200..300).contains(&status) {
+        return Err(shop_refusal(status, &answer));
+    }
+    let parsed = serde_json::from_slice::<RawRedeem>(&answer)
+        .map_err(|e| format!("The shop's answer could not be read: {e}"))?;
+    if parsed.blind_sig.is_empty() {
+        return Err("The shop answered without a signature".into());
+    }
+    Ok(parsed)
+}
+
+async fn fetch_pack(origin: &str, token: &str) -> Result<Vec<u8>, String> {
+    if token.is_empty() || token.len() > 128 || !token.bytes().all(|b| b.is_ascii_alphanumeric()) {
+        return Err("The shop sent no usable pack token".into());
+    }
+    let client = shop_client()?;
+    let url = format!("{origin}/api/redeem/pack/{token}");
+    fetch_bounded(&client, &url, 60, MAX_PACK_BYTES, None).await
+}
+
+/// The sentence for a lookup that is not `ok`.
+fn lookup_refusal(looked: &RawLookup) -> String {
+    if !looked.message.is_empty() {
+        return clamp(&looked.message, 300);
+    }
+    match looked.status.as_str() {
+        "refused" => "This code was refunded, so it cannot be redeemed".into(),
+        "burned" => "This code has already been redeemed".into(),
+        "nokey" => "This item was listed before support marks existed; the shop keeper can add its key".into(),
+        "unknown" => "The shop does not know this code".into(),
+        other => format!("The shop would not redeem this code ({other})"),
+    }
+}
+
+/// Our master peer id, which the credential binds. The node has to be up:
+/// the profile that carries the mark is announced through it.
+fn my_master_peer_id() -> Result<String, String> {
+    super::network::get_local_peer_id().ok_or_else(|| "Hollow is still starting; try again in a moment".to_string())
+}
+
+/// The holder's badge preference, inherited by every new credential. ON
+/// until switched off (Vitalik, 2026-09-02: a mark is a badge), so an
+/// absent setting reads as on.
+fn support_badge_preference() -> bool {
+    let store = get_store();
+    let Ok(guard) = store.lock() else { return true };
+    let Some(ms) = guard.as_ref() else { return true };
+    badge_on(ms.load_setting(SUPPORT_BADGE_SETTING).ok().flatten().as_deref())
+}
+
+/// The setting's reading: only an explicit "0" switches the badge off.
+pub(crate) fn badge_on(setting: Option<&str>) -> bool {
+    setting != Some("0")
+}
+
+/// A lookup answer after which the code is worth nothing to anyone: the
+/// shop burned it, refunded it, or has never heard of it. `nokey` (listed
+/// before support marks existed), `paused` and `rail` are not on this list,
+/// because the same code answers `ok` once the shop is ready.
+pub(crate) fn lookup_status_is_dead(status: &str) -> bool {
+    matches!(status, "burned" | "refused" | "unknown")
+}
+
+/// Look a code up: what it buys, and whether this identity already supports
+/// it. Nothing burns.
+#[frb]
+pub fn redeem_lookup(code: String) -> Result<RedeemLookup, String> {
+    let code = code.trim().to_string();
+    if !valid_redeem_code(&code) {
+        return Err("That does not look like a redeem code".into());
+    }
+    let origin = shop_origin();
+    let looked = get_http_runtime().block_on(lookup_remote(&origin, &code))?;
+    let status = clamp(&looked.status, 16);
+    if lookup_status_is_dead(&status) {
+        // A kept code the shop will never honour again does not sit in
+        // "Codes kept for later" (Vitalik, 2026-09-02). Best effort: the
+        // answer is the thing, and the code may never have been kept.
+        let _ = forget_redeem_code(code.clone());
+    }
+    let l = &looked.listing;
+    let already_supported = if status == "ok" && valid_emote_hash(&l.item) {
+        let store = get_store();
+        let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+        let ms = guard.as_ref().ok_or("Message store is not open")?;
+        ms.list_own_support_creds()?.iter().any(|(item, ..)| *item == l.item)
+    } else {
+        false
+    };
+    Ok(RedeemLookup {
+        message: if status == "ok" { String::new() } else { lookup_refusal(&looked) },
+        status,
+        slug: clamp(&l.slug, 64),
+        title: clamp(&l.title, 120),
+        artist_name: clamp(&l.artist.display_name, 80),
+        artist_slug: clamp(&l.artist.slug, 64),
+        item_url: if l.url.starts_with(&origin) { clamp(&l.url, 200) } else { String::new() },
+        kinds: l.kinds.iter().filter(|k| KIND_ORDER.contains(&k.as_str())).cloned().collect(),
+        item: if valid_emote_hash(&l.item) { l.item.clone() } else { String::new() },
+        parts: l.parts.iter().filter(|p| valid_emote_hash(p)).cloned().collect(),
+        already_supported,
+    })
+}
+
+/// Redeem a code: mint the credential, keep it, announce it, then fetch and
+/// import the pack.
+///
+/// Order matters. The chain the shop published is verified against the
+/// pinned root BEFORE the code is spent, so a shop with a broken key never
+/// burns a purchase. The credential is stored and announced BEFORE the pack
+/// is fetched, so a network hiccup after the burn costs a download the buyer
+/// also has in their email, never the mark.
+#[frb]
+pub fn redeem_code(code: String) -> Result<RedeemOutcome, String> {
+    let code = code.trim().to_string();
+    if !valid_redeem_code(&code) {
+        return Err("That does not look like a redeem code".into());
+    }
+    let master = my_master_peer_id()?;
+    let origin = shop_origin();
+    let rt = get_http_runtime();
+    let root = support_creds::root_verifying_key();
+
+    // 1. What the code buys, and the key that will sign for it.
+    let looked = rt.block_on(lookup_remote(&origin, &code))?;
+    if looked.status != "ok" {
+        return Err(lookup_refusal(&looked));
+    }
+    let l = looked.listing;
+    let chain = support_creds::verify_chain(
+        T_ITEM, &l.item, &l.parts, 0, &l.key, &l.key_sig, &l.issuer, &l.issuer_sig, &root,
+    )
+    .map_err(|e| format!("The shop's signing key did not check out, so nothing was redeemed: {e}"))?;
+
+    // 2. Blind. From here the shop sees a number, never who we are.
+    let request = support_creds::blind_request(&chain.key_der, T_ITEM, &master, &chain.item, 0)?;
+
+    // 3. Redeem. This is the burn.
+    let answer = rt.block_on(redeem_remote(&origin, &code, &request.blinded))?;
+    let blind_sig = B64
+        .decode(answer.blind_sig.trim())
+        .map_err(|_| "The shop's signature is not base64".to_string())?;
+
+    // 4. Unblind, then verify the whole entry exactly as a viewer will.
+    let sig = support_creds::finish_request(&chain.key_der, &request, &blind_sig)?;
+    let entry = CredentialEntry {
+        t: T_ITEM,
+        item: l.item.clone(),
+        period: 0,
+        parts: chain.parts.clone(),
+        key: l.key,
+        key_sig: l.key_sig,
+        issuer: l.issuer,
+        issuer_sig: l.issuer_sig,
+        sig: B64.encode(&sig),
+        badge: support_badge_preference(),
+    };
+    support_creds::verify_entry(&entry, &master, &root)
+        .map_err(|e| format!("The credential the shop returned does not verify: {e}"))?;
+
+    // 5. Keep it, then say so to everyone.
+    let title = clamp(&l.title, 120);
+    let artist_name = clamp(&l.artist.display_name, 80);
+    keep_own_credential(&entry, &clamp(&l.slug, 64), &title, &artist_name)?;
+    let _ = forget_redeem_code(code);
+
+    // 6. The pack, through the one import door.
+    let (imported, pack_error) = match rt.block_on(fetch_pack(&origin, &answer.pack_token)) {
+        Ok(bytes) => match super::network::import_hollowpack_bytes(&bytes) {
+            Ok(i) => (Some(i), String::new()),
+            Err(e) => (None, e),
+        },
+        Err(e) => (None, e),
+    };
+    let warning = match &imported {
+        Some(i) => {
+            let pack_hashes: Vec<&str> = i.files.iter().map(|f| f.hash.as_str()).collect();
+            if chain.parts.iter().any(|p| !pack_hashes.contains(&p.as_str())) {
+                "The pack does not carry every file the credential names, so the mark may not light for all of it".into()
+            } else {
+                String::new()
+            }
+        }
+        None => String::new(),
+    };
+    Ok(RedeemOutcome { item: entry.item, title, artist_name, imported, pack_error, warning })
+}
+
+/// Keep one of our credentials and republish the profile field.
+fn keep_own_credential(entry: &CredentialEntry, slug: &str, title: &str, artist_name: &str) -> Result<(), String> {
+    let json = serde_json::to_string(entry).map_err(|e| e.to_string())?;
+    {
+        let store = get_store();
+        let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+        let ms = guard.as_ref().ok_or("Message store is not open")?;
+        ms.save_own_support_cred(&entry.item, &json, slug, title, artist_name)?;
+    }
+    republish_support_creds()
+}
+
+/// Rebuild our `support_creds` profile field from the table, write it onto
+/// our profile row, and ask the node to announce it.
+///
+/// The row is written HERE, not only by the node: a later profile save from
+/// the UI passes `None` (preserve) for this field and reads the row, so the
+/// row has to be right even if the node is down at this moment. The announce
+/// is best effort for the same reason; the next profile save carries it.
+fn republish_support_creds() -> Result<(), String> {
+    let master = my_master_peer_id()?;
+    let root = support_creds::root_verifying_key();
+    let (json, profile) = {
+        let store = get_store();
+        let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+        let ms = guard.as_ref().ok_or("Message store is not open")?;
+        let entries: Vec<CredentialEntry> = ms
+            .list_own_support_creds()?
+            .into_iter()
+            .filter_map(|(_, entry_json, ..)| serde_json::from_str(&entry_json).ok())
+            .collect();
+        // The same filter every receiver applies, so what we announce is
+        // exactly what they will keep: verified, one per item, capped.
+        let kept = support_creds::keep_verified(entries, &master, &root);
+        let json = support_creds::encode_entries(&kept);
+        let profile = ms.load_profile(&master)?;
+        let (name, status, about, updated_at, twitch) = match &profile {
+            Some(p) => (
+                p.display_name.clone(),
+                p.status.clone(),
+                p.about_me.clone(),
+                p.updated_at,
+                p.twitch_username.clone(),
+            ),
+            None => (String::new(), String::new(), String::new(), 0, String::new()),
+        };
+        ms.save_profile(
+            &master, &name, &status, &about, updated_at, None, None, &twitch, None, None, None, None,
+            None, None, Some(&json),
+        )?;
+        (json, profile)
+    };
+    let cmd_tx = {
+        let node = super::network::get_node();
+        let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+        guard.as_ref().map(|s| s.cmd_tx.clone())
+    };
+    if let Some(tx) = cmd_tx {
+        let (display_name, status, about_me, twitch_username) = match profile {
+            Some(p) => (p.display_name, p.status, p.about_me, p.twitch_username),
+            None => (String::new(), String::new(), String::new(), String::new()),
+        };
+        let sent = super::network::get_runtime().block_on(tx.send(crate::node::NodeCommand::UpdateProfile {
+            display_name,
+            status,
+            about_me,
+            avatar_bytes: None,
+            banner_bytes: None,
+            twitch_username,
+            showcase_board: None,
+            showcase_assets: None,
+            avatar_frame: None,
+            avatar_anim: None,
+            banner_anim: None,
+            support_creds: Some(json),
+        }));
+        if sent.is_err() {
+            hollow_log!("[HOLLOW-SHOP] The support credential is kept; the announce waits for the next profile save");
+        }
+    }
+    Ok(())
+}
+
+/// Every credential this identity holds, newest first.
+#[frb]
+pub fn list_own_support_creds() -> Result<Vec<OwnSupportCred>, String> {
+    let store = get_store();
+    let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let ms = guard.as_ref().ok_or("Message store is not open")?;
+    Ok(ms
+        .list_own_support_creds()?
+        .into_iter()
+        .map(|(item, entry_json, slug, title, artist_name, redeemed_at)| {
+            let entry: CredentialEntry = serde_json::from_str(&entry_json).unwrap_or_default();
+            OwnSupportCred {
+                item,
+                parts: entry.parts,
+                slug,
+                title,
+                artist_name,
+                redeemed_at,
+                badge: entry.badge,
+            }
+        })
+        .collect())
+}
+
+/// Whether OUR marks also sit next to our name (design 5.6). Off by default.
+#[frb]
+pub fn support_badge_enabled() -> bool {
+    support_badge_preference()
+}
+
+/// Show, or stop showing, our marks next to our name. One profile save.
+#[frb]
+pub fn set_support_badge(show: bool) -> Result<(), String> {
+    {
+        let store = get_store();
+        let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+        let ms = guard.as_ref().ok_or("Message store is not open")?;
+        ms.save_setting(SUPPORT_BADGE_SETTING, if show { "1" } else { "0" })?;
+        for (item, entry_json, ..) in ms.list_own_support_creds()? {
+            let Ok(mut entry) = serde_json::from_str::<CredentialEntry>(&entry_json) else { continue };
+            if entry.badge == show {
+                continue;
+            }
+            entry.badge = show;
+            let json = serde_json::to_string(&entry).map_err(|e| e.to_string())?;
+            ms.update_own_support_cred_entry(&item, &json)?;
+        }
+    }
+    republish_support_creds()
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -1007,6 +1538,24 @@ mod tests {
         let hash = sha_hex(&bytes);
         assert!(valid_emote_hash(&hash));
         check_art_bytes(&hash, &bytes).expect("matching bytes must pass");
+    }
+
+    #[test]
+    fn badge_is_on_unless_switched_off() {
+        assert!(badge_on(None), "an absent setting is on");
+        assert!(badge_on(Some("1")));
+        assert!(!badge_on(Some("0")));
+        assert!(badge_on(Some("anything else")), "only an explicit 0 switches it off");
+    }
+
+    #[test]
+    fn dead_lookup_statuses_are_the_three_final_ones() {
+        for dead in ["burned", "refused", "unknown"] {
+            assert!(lookup_status_is_dead(dead), "{dead}");
+        }
+        for alive in ["ok", "nokey", "paused", "rail", "invalid", ""] {
+            assert!(!lookup_status_is_dead(alive), "{alive}");
+        }
     }
 
     #[test]

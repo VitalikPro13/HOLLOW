@@ -39,10 +39,11 @@ The client is a native application for Windows, macOS, Linux, Android, and iOS (
 17. [Gossip Overlay Network](#17-gossip-overlay-network)
 18. [Anti-Censorship Transport](#18-anti-censorship-transport)
 19. [Twitch Community Verification](#19-twitch-community-verification-optional)
-20. [Verification and Correctness Assurance](#20-verification-and-correctness-assurance)
-21. [Summary of Cryptographic Primitives](#21-summary-of-cryptographic-primitives)
-22. [Threat Model](#22-threat-model)
-23. [Limitations and Future Work](#23-limitations-and-future-work)
+20. [Support Credentials for Purchased Art](#20-support-credentials-for-purchased-art)
+21. [Verification and Correctness Assurance](#21-verification-and-correctness-assurance)
+22. [Summary of Cryptographic Primitives](#22-summary-of-cryptographic-primitives)
+23. [Threat Model](#23-threat-model)
+24. [Limitations and Future Work](#24-limitations-and-future-work)
 
 ---
 
@@ -1464,25 +1465,66 @@ After verification, a cryptographic proof is generated and broadcast to the serv
 
 ---
 
-## 20. Verification and Correctness Assurance
+## 20. Support Credentials for Purchased Art
+
+Hollow's artist shop sells profile art (frames, avatars, banners and bundles of them) through a merchant-of-record checkout that is entirely outside the protocol. What the protocol adds is a **support credential**: a proof, carried on the buyer's profile, that this identity bought a given piece, verifiable offline by any viewer and unlinkable by the shop to any purchase. The art itself is not protected (there is no DRM; the files are content-addressed and travel peer to peer like every other asset), so the credential is the only thing a purchase produces that cannot be copied.
+
+### 20.1 Blind Issuance
+
+Each listing has its own **RSA-3072 issuing key**. A purchase yields a one-time code. To redeem it the client builds a message binding its own **master identity** to the listing:
+
+```
+"hollow-support-cred/v1" || type:u8 || len(master_peer_id):u16 || master_peer_id || item:32 || period:u32
+```
+
+where `item` is the SHA-256 over the listing's file hashes sorted ascending (so a bundle is one credential naming every file it carries, and a single piece is the same construction over one file), and `period` is reserved for the monthly supporter credential (zero for items). The client blinds the message under the listing's key (RSABSSA-SHA384-PSS-Deterministic, RFC 9474) and sends the code with the blinded value, without authentication, cookies or identity. The shop checks that the code is unspent and unrefunded, signs the blinded value with the listing's key, burns the code, and returns the blind signature. The client unblinds it and holds a signature it can verify locally.
+
+The shop therefore learns that a code was redeemed and when, and nothing else: not which identity, not what the signature it produced looks like once unblinded. Because signatures are fully blind, the key is scoped per listing, so a code for one piece can only ever produce a credential for that piece.
+
+### 20.2 The Trust Chain
+
+A viewer must verify a credential with nothing but the client. Three tiers make that possible while keeping the root key offline:
+
+- The **root** Ed25519 key, kept offline, whose public half is pinned in the client. It signs exactly one thing: the shop's issuer key.
+- The **issuer** Ed25519 key, held by the shop, which signs each listing's RSA public key together with the listing's `item` hash under a domain-separated message.
+- The **issuing** RSA key of the listing, which signs the blinded credential.
+
+Every credential entry carries the whole chain (the issuing public key, the issuer's signature over it, the issuer public key, the root's signature over that, and the credential signature), so verification needs no fetch. Rotating the issuer never touches the client; only a root rotation would.
+
+### 20.3 What Rides the Profile
+
+Credentials ride the profile as a JSON array field, about 1.4 KB per entry, capped at three item credentials and one supporter credential inline (the light announce is the budget). The field follows the rules every other profile field follows (absent on the wire preserves, empty clears) and is **not** part of the profile signature: the credential already binds the master identity, and a viewer verifies it independently. On ingest, every receiver runs one validator: the root-to-issuer signature, the issuer-to-key signature, the key's size and shape, the recomputation of `item` from the listed parts, and the RSA signature over the message rebuilt from *that* profile's master identity. An entry that fails any link is dropped silently; one that verifies is stored exactly as it verified, re-serialized, so nothing a sender appended reaches the row. Entries are deduplicated by `item`, which is what keeps a second redemption of the same piece from meaning anything (PSS salts each signature, so the bytes differ; the claim does not).
+
+A credential is bound to a master identity, so it replicates to that person's linked devices with their profile and survives reinstalls through the identity backup. Copying one onto another identity produces a signature over the wrong message and fails everywhere. Editing one into a local database has the same result on every other machine, and the announcing client rebuilds the field from its own verified redemption records before every announce, so a forged entry never leaves the machine it was typed on.
+
+### 20.4 Privacy Properties
+
+- The shop never sees the buyer's identity at redemption and cannot recognise the unblinded signature later; a credential cannot be mapped back to an order.
+- Redemption carries no authentication and the shop stores only the hash of the spent code and the moment it burned.
+- Viewers verify offline against the pinned root; rendering a mark requires no network request and reveals nothing to the shop.
+- The mark is a badge, shown whether or not the art is currently worn; it says the piece was bought by this identity, and the parts it names say exactly which bytes.
+
+---
+
+## 21. Verification and Correctness Assurance
 
 Distributed, multi-device cryptographic logic is difficult to verify by manual testing alone, because many failure modes appear only with specific timing across several devices. Hollow's correctness rests on a **multi-node integration harness** that exercises the real protocol code deterministically.
 
-### 20.1 Multi-Node Harness
+### 21.1 Multi-Node Harness
 
 The harness spins up *N* real node event loops in a single test process, each with its own Ed25519 keypairs and its own temporary SQLCipher database, wired together through an **in-process mock relay** rather than real sockets or TLS. The same Rust core that ships in the client runs in the harness, so the encryption, ratcheting, CRDT merge, and synchronization logic under test is the production logic, not a model of it. The mock relay reproduces the load-bearing, protocol-visible behaviors of the real relay (authentication, room join/leave, broadcast and direct routing, topic frames, offline buffering and replay, and disconnect events) so that reconnection and offline/online transitions are exercised faithfully.
 
-### 20.2 Two-Layer Inspection
+### 21.2 Two-Layer Inspection
 
 Multi-device bugs hide in the gap between the *master-collapsed* view that the UI presents and the *device-keyed* truth underneath. The harness exposes both layers: a UI-layer inspector that reads through the same resolver and CRDT accessors the application uses, and a raw-layer inspector that exposes per-device state (per-device MLS leaf membership, per-device Olm session status, raw device-keyed CRDT keys). A test can therefore assert precisely where the master-keyed and device-keyed layers should and should not diverge, the central invariant of the multi-device design (§3, §5).
 
-### 20.3 Coverage and Scope
+### 21.3 Coverage and Scope
 
 The harness self-verifies the **distributed-logic core**: DM messaging and sync/backfill (direction, signatures, deduplication, edits/deletes/reactions), friends and profiles, presence and typing, CRDT servers/channels/roles/permissions/bans, MLS group formation across per-device leaves at a shared epoch with cross-device channel decryption, public channels, device revocation (tombstone propagation, Olm/MLS cutoff, and the ghost-device liveness guard), and Olm key exchange and glare. It also covers the **control and signaling plane** for calls, voice channels, recovery pools, and file transfer (including the actual bytes over the relay fallback path). The harness runs in continuous integration as a required check, gating merges.
 
-It deliberately does **not** cover the WebRTC media plane (audio/video pixels, SFrame on live tracks, ICE/TURN/DTLS), the Flutter UI, the FFI bridge, native push delivery (FCM/APNs and the iOS extension), identity at-rest unlock, or the real relay's C++ implementation. The application layer is addressed separately (§20.4); the remainder stays the subject of manual platform testing. The honest claim when the harness is green is therefore precise: *the distributed-logic core and the control/signaling plane behave correctly across many devices*, not that the entire application is verified.
+It deliberately does **not** cover the WebRTC media plane (audio/video pixels, SFrame on live tracks, ICE/TURN/DTLS), the Flutter UI, the FFI bridge, native push delivery (FCM/APNs and the iOS extension), identity at-rest unlock, or the real relay's C++ implementation. The application layer is addressed separately (§21.4); the remainder stays the subject of manual platform testing. The honest claim when the harness is green is therefore precise: *the distributed-logic core and the control/signaling plane behave correctly across many devices*, not that the entire application is verified.
 
-### 20.4 Application-Layer Probes
+### 21.4 Application-Layer Probes
 
 A second harness closes part of the gap the first one leaves. An instrumented build of the real client, running the production interface code, foreign-function bridge, encrypted local database and node against the real relay, is driven through its own widget tree by a scripted command stream. It can address any control, read the application's own state, and assert on what is actually rendered rather than on what the protocol layer believes.
 
@@ -1492,7 +1534,7 @@ The layer stops short of the media plane. Video surfaces are composited outside 
 
 ---
 
-## 21. Summary of Cryptographic Primitives
+## 22. Summary of Cryptographic Primitives
 
 | Component | Algorithm | Key Size | Purpose |
 |-----------|-----------|----------|---------|
@@ -1518,13 +1560,14 @@ The layer stops short of the media plane. Video surfaces are composited outside 
 | Device-link transfer | Argon2id + AES-256-GCM (`.hollow` backup) | 256-bit | Encrypted identity + DB transfer to a new device (code = passphrase) |
 | Mobile app lock | Argon2id + AES-256-GCM (+ OS secure enclave for biometric) | 256-bit | PIN/password/biometric launch lock over the identity-at-rest key |
 | Twitch verification | Ed25519-signed proof | 256-bit | Verifiable community membership proof |
+| Support credential | RSABSSA-SHA384-PSS-Deterministic (RFC 9474) blind signature, Ed25519 chain to a pinned root | RSA-3072 per listing, Ed25519 256-bit | Unlinkable, offline-verifiable proof that an identity bought a piece of art |
 | Anti-censorship | VLESS + REALITY (XTLS-Vision) | n/a | DPI-resistant tunnel; desktop implemented, live-network validation in progress |
 
 ---
 
-## 22. Threat Model
+## 23. Threat Model
 
-### 22.1 What Hollow Protects Against
+### 23.1 What Hollow Protects Against
 
 | Threat | Protection |
 |--------|------------|
@@ -1548,7 +1591,7 @@ The layer stops short of the media plane. Video surfaces are composited outside 
 | Privilege escalation | Permission checks on all state-changing operations. CRDT author ≠ self-reported field; it is verified against the actual sender. |
 | Identity file theft | HKEYV1 at-rest protection. Identity file encrypted via DPAPI/Keychain (machine-bound) or Argon2id + AES-256-GCM (password). Stolen files are useless without the original machine or password. |
 
-### 22.2 What Hollow Does Not Currently Defend Against
+### 23.2 What Hollow Does Not Currently Defend Against
 
 - **Traffic analysis:** message timing and size patterns are visible to the relay and network observers. Constant-rate padding is not implemented.
 - **Local device compromise:** if an attacker has access to an unlocked device with the decrypted database open, they can read everything. This is true of any E2EE system. Identity at-rest protection (§2.3) mitigates offline attacks: the identity file is encrypted via DPAPI/Keychain (machine-bound) or a user password (Argon2id), so a stolen identity file is useless without the original machine or password. However, a live session with the wrapping key in memory remains vulnerable.
@@ -1556,7 +1599,7 @@ The layer stops short of the media plane. Video surfaces are composited outside 
 - **Quantum computing:** all key exchanges use Curve25519. Migration to ML-KEM (Kyber) is planned but not prioritized for the beta.
 - **Trust-on-first-use (TOFU):** peer identity verification relies on out-of-band fingerprint comparison. There is no certificate authority or web of trust.
 
-### 22.3 Relay Operator Trust Assumptions
+### 23.3 Relay Operator Trust Assumptions
 
 The relay operator is assumed to be **honest-but-curious**: the relay faithfully forwards messages but may attempt to read or log traffic. The protocol is designed so that curiosity yields nothing useful.
 
@@ -1564,7 +1607,7 @@ The relay operator is also assumed to be potentially **unreliable**: the relay m
 
 The relay operator is **not trusted** with: message contents, encryption keys, file data, user profiles, message signatures, or any application-layer semantics.
 
-### 22.4 Software Distribution and Update Integrity
+### 23.4 Software Distribution and Update Integrity
 
 The host that serves release archives and the version manifest is assumed to be **untrusted**. A hosting account is not part of the trust model, so the update channel carries its own integrity rather than borrowing the host's:
 
@@ -1577,7 +1620,7 @@ Auxiliary feeds served from the same location (release notes, service status) ar
 
 ---
 
-## 23. Limitations and Future Work
+## 24. Limitations and Future Work
 
 - **No post-quantum cryptography:** all key exchanges use Curve25519. If quantum computers eventually break elliptic curve crypto, intercepted ciphertext could theoretically be decrypted retroactively. A future migration to ML-KEM (Kyber) is a consideration but not a priority; no consumer chat app has shipped this yet.
 - **No traffic analysis protection:** the relay uses native TLS via uWebSockets C++ with OpenSSL (direct TLS termination, no reverse proxy), which protects message *content* from network eavesdroppers. However, message *timing and size patterns* remain visible: an observer can infer who is chatting with whom based on when messages are sent, even without reading them. Defeating this would require constant-rate padding (sending dummy traffic to hide real messages), which is impractical for a chat app.
