@@ -6,22 +6,39 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `detect_common_prefix`, `download_inner`, `extract_zip_to`, `relaunch_snippet`, `spawn_waiter`
+// These functions are ignored because they are not marked as `pub`: `detect_common_prefix`, `download_inner`, `extract_zip_to`, `fetch_bytes`, `normalise_expected_sha256`, `relaunch_snippet`, `signature_url`, `spawn_waiter`, `verify_manifest_signature_with`, `verify_manifest_signature`
 
 String getCurrentVersion() =>
     RustLib.instance.api.crateApiUpdaterGetCurrentVersion();
 
+/// Fetches `manifest.json` AND its `manifest.json.sig` sidecar, and returns
+/// the manifest text only when the signature verifies against
+/// [`MANIFEST_SIGNING_PUBKEYS`]. The signature covers the manifest's exact
+/// bytes, so the text handed to Dart is byte for byte what was signed.
 Future<String> fetchVersionManifest({required String manifestUrl}) => RustLib
     .instance
     .api
     .crateApiUpdaterFetchVersionManifest(manifestUrl: manifestUrl);
 
+/// Plain fetch for the OTHER release-folder feeds (news.json, status.json):
+/// display-only text with no signature sidecar. Nothing downloaded through
+/// here is ever executed or installed; the update manifest itself must go
+/// through [`fetch_version_manifest`].
+Future<String> fetchReleaseFeed({required String url}) =>
+    RustLib.instance.api.crateApiUpdaterFetchReleaseFeed(url: url);
+
+/// Downloads `url` to `dest_path` and keeps the file ONLY if its SHA-256 is
+/// `expected_sha256` (the value from the signed manifest). Any failure,
+/// including a checksum mismatch or a cancelled stream, deletes the partial
+/// file and ends the stream with `DownloadProgress::error` set.
 Stream<DownloadProgress> downloadUpdate({
   required String url,
   required String destPath,
+  required String expectedSha256,
 }) => RustLib.instance.api.crateApiUpdaterDownloadUpdate(
   url: url,
   destPath: destPath,
+  expectedSha256: expectedSha256,
 );
 
 Future<String> applyUpdate({
@@ -43,13 +60,20 @@ class DownloadProgress {
   final BigInt bytesDownloaded;
   final BigInt totalBytes;
 
+  /// Set on the final item when the download was refused or failed
+  /// (checksum mismatch, non-https URL, transport error). The partial file
+  /// is already deleted by then; Dart shows the reason and stops.
+  final String? error;
+
   const DownloadProgress({
     required this.bytesDownloaded,
     required this.totalBytes,
+    this.error,
   });
 
   @override
-  int get hashCode => bytesDownloaded.hashCode ^ totalBytes.hashCode;
+  int get hashCode =>
+      bytesDownloaded.hashCode ^ totalBytes.hashCode ^ error.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -57,5 +81,6 @@ class DownloadProgress {
       other is DownloadProgress &&
           runtimeType == other.runtimeType &&
           bytesDownloaded == other.bytesDownloaded &&
-          totalBytes == other.totalBytes;
+          totalBytes == other.totalBytes &&
+          error == other.error;
 }

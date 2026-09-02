@@ -1564,6 +1564,17 @@ The relay operator is also assumed to be potentially **unreliable**: the relay m
 
 The relay operator is **not trusted** with: message contents, encryption keys, file data, user profiles, message signatures, or any application-layer semantics.
 
+### 22.4 Software Distribution and Update Integrity
+
+The host that serves release archives and the version manifest is assumed to be **untrusted**. A hosting account is not part of the trust model, so the update channel carries its own integrity rather than borrowing the host's:
+
+- **Signed manifest.** The version manifest is published together with a detached Ed25519 signature over its exact bytes. Clients embed the corresponding public key and reject a manifest whose signature does not verify. The host can serve bytes; it cannot produce a signature.
+- **Pinned archives.** Each release entry names the SHA-256 digest of every platform's archive. A client hashes the download as it streams and discards any file whose digest differs from the signed manifest before anything is extracted or installed. An entry without a digest for the client's platform is not installable through the updater.
+- **No downgrade prompt.** Only a manifest whose latest version is strictly newer than the running build is presented as an update, so a replayed older manifest, still validly signed, cannot walk installs back to a build with known defects.
+- **Transport.** Update downloads are accepted over HTTPS only.
+
+Auxiliary feeds served from the same location (release notes, service status) are display-only and unsigned; nothing fetched through them is executed or installed. Outside this mechanism sit the signing key itself, which lives with the release engineer and never in the repository, and the installers distributed through the website, which rely on platform code signing rather than the manifest.
+
 ---
 
 ## 23. Limitations and Future Work

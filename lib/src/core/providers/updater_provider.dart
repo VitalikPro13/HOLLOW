@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/hollow_data_dir.dart';
+import 'package:hollow/src/core/version_compare.dart';
 import 'package:hollow/src/rust/api/updater.dart' as updater_api;
 
 const kManifestUrl = 'https://anonlisten.com/hollow/releases/manifest.json';
@@ -13,6 +14,14 @@ class VersionInfo {
   final String urlWindows;
   final String urlMacos;
   final String urlLinux;
+
+  /// SHA-256 (hex) of each platform's download, written into the signed
+  /// manifest by `hollow-manifest fill-hashes`. Rust refuses to hand a zip
+  /// to `apply_update` unless the bytes it downloaded hash to this, so a
+  /// release entry without one cannot be installed by the updater.
+  final String sha256Windows;
+  final String sha256Macos;
+  final String sha256Linux;
   final String notes;
 
   const VersionInfo({
@@ -21,6 +30,9 @@ class VersionInfo {
     this.urlWindows = '',
     this.urlMacos = '',
     this.urlLinux = '',
+    this.sha256Windows = '',
+    this.sha256Macos = '',
+    this.sha256Linux = '',
     required this.notes,
   });
 
@@ -30,6 +42,9 @@ class VersionInfo {
         urlWindows: json['url_windows'] as String? ?? '',
         urlMacos: json['url_macos'] as String? ?? '',
         urlLinux: json['url_linux'] as String? ?? '',
+        sha256Windows: json['sha256_windows'] as String? ?? '',
+        sha256Macos: json['sha256_macos'] as String? ?? '',
+        sha256Linux: json['sha256_linux'] as String? ?? '',
         notes: json['notes'] as String? ?? '',
       );
 
@@ -38,6 +53,14 @@ class VersionInfo {
     if (Platform.isMacOS) return urlMacos;
     if (Platform.isLinux) return urlLinux;
     return urlWindows; // Windows
+  }
+
+  /// The expected SHA-256 of [platformUrl] (empty when the manifest entry
+  /// carries none, which the updater treats as "not installable").
+  String get platformSha256 {
+    if (Platform.isMacOS) return sha256Macos;
+    if (Platform.isLinux) return sha256Linux;
+    return sha256Windows; // Windows
   }
 
   /// Whether an update is actually downloadable on this platform.
@@ -145,6 +168,18 @@ class UpdateNotifier extends Notifier<UpdateState> {
     final sep = Platform.pathSeparator;
     final destPath = '$dataDir${sep}updates$sep${version.version}.zip';
 
+    // Fail closed before a single byte moves: a manifest entry with no
+    // checksum for this platform is not something the updater installs.
+    if (version.platformSha256.isEmpty) {
+      state = state.copyWith(
+        status: UpdateStatus.error,
+        error: 'This release carries no checksum for your platform, so the '
+            'updater will not install it. Download it from the website '
+            'instead.',
+      );
+      return;
+    }
+
     state = state.copyWith(
       status: UpdateStatus.downloading,
       selectedVersion: version.version,
@@ -158,10 +193,23 @@ class UpdateNotifier extends Notifier<UpdateState> {
       final stream = updater_api.downloadUpdate(
         url: version.platformUrl,
         destPath: destPath,
+        expectedSha256: version.platformSha256,
       );
 
       await for (final progress in stream) {
         if (state.status != UpdateStatus.downloading) break;
+
+        // Rust reports a failed or refused download (checksum mismatch, bad
+        // URL, transport error) as a final item carrying the reason. The
+        // partial file is already gone by then.
+        final failure = progress.error;
+        if (failure != null) {
+          state = state.copyWith(
+            status: UpdateStatus.error,
+            error: 'Download failed: $failure',
+          );
+          return;
+        }
 
         final downloaded = progress.bytesDownloaded.toInt();
         final total = progress.totalBytes.toInt();
@@ -265,5 +313,7 @@ final updaterProvider =
 final hasUpdateProvider = Provider<bool>((ref) {
   final state = ref.watch(updaterProvider);
   if (state.manifest == null) return false;
-  return state.manifest!.latest != state.currentVersion;
+  // Strictly newer only: a replayed older (still validly signed) manifest
+  // must not read as an update. See version_compare.dart.
+  return isNewerVersion(state.manifest!.latest, state.currentVersion);
 });

@@ -59,8 +59,10 @@ class NewsNotifier extends Notifier<NewsState> {
   Future<bool> _doFetch() async {
     try {
       final bustCache = DateTime.now().millisecondsSinceEpoch;
-      final json = await updater_api.fetchVersionManifest(
-          manifestUrl: '$kNewsUrl?t=$bustCache');
+      // Plain fetch: news.json is display-only text and carries no signature
+      // sidecar (fetchVersionManifest would demand news.json.sig).
+      final json = await updater_api.fetchReleaseFeed(
+          url: '$kNewsUrl?t=$bustCache');
       final list = jsonDecode(json) as List<dynamic>;
       final posts = list
           .map((e) => NewsPost.fromJson(e as Map<String, dynamic>))

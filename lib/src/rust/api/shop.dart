@@ -6,7 +6,7 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `by_role`, `check_art_bytes`, `clamp`, `display_file_for`, `fetch_bounded`, `file_for_kind`, `kind_of_role`, `kind_roles`, `lenient_vec`, `lenient`, `parse_catalog`, `price_label`, `primary_kind_of`, `sanitize_file`, `sanitize_listing`, `user_agent`, `valid_redeem_code`, `valid_slug`
+// These functions are ignored because they are not marked as `pub`: `by_role`, `check_art_bytes`, `clamp`, `display_file_for`, `fetch_bounded`, `file_for_kind`, `kind_of_role`, `kind_roles`, `lenient_vec`, `lenient`, `parse_catalog`, `price_label`, `primary_kind_of`, `sanitize_file`, `sanitize_listing`, `shop_client`, `valid_redeem_code`, `valid_slug`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `RawArtist`, `RawCatalog`, `RawFile`, `RawListing`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 // These functions are ignored (category: IgnoreBecauseOwnerTyShouldIgnore): `default`, `default`, `default`, `default`

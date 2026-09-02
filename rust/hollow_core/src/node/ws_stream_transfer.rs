@@ -315,7 +315,10 @@ pub fn ws_stream_receive(
         if data.len() < 65 {
             return None;
         }
-        let id = parse_id(&data[1..65]);
+        let Some(id) = parse_id(&data[1..65]) else {
+            hollow_log!("[HOLLOW-WS-STREAM] Dropped continuation: id outside the allowlist");
+            return None;
+        };
         let payload = &data[65..];
 
         let state = pending.get_mut(&id)?;
@@ -339,7 +342,10 @@ pub fn ws_stream_receive(
         if data.len() < min_len {
             return None;
         }
-        let id = parse_id(&data[1..65]);
+        let Some(id) = parse_id(&data[1..65]) else {
+            hollow_log!("[HOLLOW-WS-STREAM] Dropped stream frame: id outside the allowlist");
+            return None;
+        };
         let total_size = u64::from_le_bytes(data[65..73].try_into().unwrap_or([0; 8]));
 
         let (kind, payload_start) = match type_byte {
@@ -419,8 +425,8 @@ pub fn ws_stream_receive(
             return complete_transfer(pending, &id);
         }
 
-        pending.insert(id, WsTransferState {
-            kind, id: parse_id(&data[1..65]), total_size, bytes_received, temp_file, temp_path, progress,
+        pending.insert(id.clone(), WsTransferState {
+            kind, id, total_size, bytes_received, temp_file, temp_path, progress,
         });
         None
     } else {
@@ -463,9 +469,21 @@ fn pad_id(id: &str) -> [u8; 64] {
 }
 
 /// Parse an ID from a 64-byte padded buffer (strip trailing zeroes).
-fn parse_id(buf: &[u8]) -> String {
+///
+/// The id becomes part of a temp file name (`.ws_recv_{id}.tmp`), so this is
+/// the gate: only the characters our own ids use pass (hex, `:` for the
+/// share-chunk and shard suffix, `_` for link snapshots, `-`). A `..` or a
+/// separator in the field would walk out of the files directory on Windows,
+/// where `..` is collapsed lexically before the filesystem is consulted.
+/// Mirrors `parseWireTransferId` in Dart. `None` = drop the frame.
+fn parse_id(buf: &[u8]) -> Option<String> {
     let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
-    String::from_utf8_lossy(&buf[..end]).to_string()
+    let id = std::str::from_utf8(&buf[..end]).ok()?;
+    let allowed = |b: u8| b.is_ascii_alphanumeric() || matches!(b, b':' | b'_' | b'-');
+    if id.is_empty() || !id.bytes().all(allowed) {
+        return None;
+    }
+    Some(id.to_string())
 }
 
 // -- Tests --
@@ -479,7 +497,7 @@ mod tests {
         let id = "abc123def456";
         let padded = pad_id(id);
         let parsed = parse_id(&padded);
-        assert_eq!(parsed, id);
+        assert_eq!(parsed.as_deref(), Some(id));
     }
 
     #[test]
@@ -487,7 +505,27 @@ mod tests {
         let id = "a".repeat(64);
         let padded = pad_id(&id);
         let parsed = parse_id(&padded);
-        assert_eq!(parsed, id);
+        assert_eq!(parsed.as_deref(), Some(id.as_str()));
+    }
+
+    #[test]
+    fn test_parse_id_accepts_every_sender_shape() {
+        let hex32 = "0123456789abcdef0123456789abcdef";
+        for id in [hex32, "0123456789abcdef0123456789abcdef:7", "link_ABC123", "a-b_c"] {
+            assert_eq!(parse_id(&pad_id(id)).as_deref(), Some(id), "{id}");
+        }
+    }
+
+    #[test]
+    fn test_parse_id_rejects_path_characters() {
+        // The id names `.ws_recv_{id}.tmp`; none of these may ever reach a path.
+        for id in ["/../../escaped", "../x", r"..\x", r"C:\x", "a/b", "a b", "a.b", ""] {
+            assert_eq!(parse_id(&pad_id(id)), None, "{id}");
+        }
+        let mut not_utf8 = [0u8; 64];
+        not_utf8[0] = 0xff;
+        not_utf8[1] = 0xfe;
+        assert_eq!(parse_id(&not_utf8), None);
     }
 
     #[test]

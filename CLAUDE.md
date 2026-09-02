@@ -36,14 +36,14 @@ flutter_rust_bridge_codegen generate --rust-input "crate::api" --rust-root "rust
 pwsh scripts\build_release.ps1  # full pipeline (-SkipBuild to repackage)
 pwsh scripts\sign_release.ps1  # sign every .exe/.dll in Release
 ```
-**Certum signing:** self-healing CNG binding; output `installer\Output\` (`reference_certum_signing_procedure`). **Release zips: .NET '/' zipping, NEVER Compress-Archive** (`feedback_compress_archive_backslash_zip`).
+**Certum signing:** self-healing CNG binding; output `installer\Output\` (`reference_certum_signing_procedure`). **Last step: `scripts\sign_manifest.ps1`** (signed manifest + sha256 pins, key OUTSIDE repo, `project_update_integrity`). **Release zips: .NET '/' zipping, NEVER Compress-Archive** (`feedback_compress_archive_backslash_zip`).
 
 ## Hollow Design System
 All UI = custom Hollow widgets, no Material defaults (`src/ui/components/`): HollowPressable/Button (`.filled/.ghost/.outline/.danger`)/TextField/Dialog (`showHollowDialog()`)/Tooltip/Toast/Toggle, StatusDot, StatBar.
 - **CRITICAL: hover/dialog patterns:** NEVER animate a color from `Colors.transparent` (lerps via black — pass `backgroundColor: null`); hover never paints outside the control. Dialogs = ghost Cancel + filled confirm; `.danger` ONLY destructive; selection = chips, never `.filled`. `feedback_hover_state_patterns`.
 
 ## Key Architecture Notes
-- **Multi-node harness (`node/test_harness.rs`) = PRIMARY testing for distributed logic;** ALWAYS verify ring-1/ring-2 changes there before declaring done. NOT covered: media/native/relay C++ (the UI probe), device→master attribution (process-global resolver: carry a signed device list, test with `resolver::forget`). `feedback_harness_first_testing`.
+- **Multi-node harness (`node/test_harness.rs`) = PRIMARY testing for distributed logic;** ALWAYS verify ring-1/ring-2 changes there. NOT covered: media/native/relay C++ (the UI probe), device→master attribution (process-global resolver: carry a signed device list, test with `resolver::forget`). `feedback_harness_first_testing`.
 - **Node modules:** `swarm.rs` = event-loop dispatcher; domain logic in focused modules as `handle_*()`; types in `types.rs`. No SwarmContext — pass state vars individually (`feedback_swarmcontext_borrow`). New envelope variants → the owner's `handle_envelope_*()` (`feedback_envelope_dispatch_pattern`).
 - **Persistence actors:** `CrdtStore` + `CryptoStore` own long-lived SQLCipher conns in spawn_blocking threads, fire-and-forget mpsc (CrdtStore batches one DB write per server). NEVER `MessageStore::open()` in a sync handler or on the event loop. `feedback_sqlcipher_open_hygiene`.
 - **Peer state in swarm.rs:** `ws_room_peers` + `synced_peers`; PeerJoined → key exchange + sync; 30s keepalive in ws_client.rs.
@@ -76,8 +76,8 @@ All UI = custom Hollow widgets, no Material defaults (`src/ui/components/`): Hol
 - **Logging:** `hollow_log!` → stderr + rotated `hollow_debug.log`; `hollow_crash.log` = Flutter errors.
 - **CRITICAL: a running `Ticker` requests a frame EVERY VSYNC** even if nothing changed: never a clock, never an `AnimationController` restarted as often as its duration; decorative motion = `Timer` + `GatedNotifier`. `feedback_ticker_is_a_frame_request`.
 - **Perf sentinels:** grep `[SENTINEL]`; `timedChannelCall`; `FrameCensus`, `FrameScheduleProbe` (works in RELEASE); `scripts/perf_*.ps1`. `project_perf_sentinels`, `project_idle_cpu_frame_scheduling`.
-- **Relay:** uWebSockets C++ (`relay-uws/`). NO rate limits, NO byte quotas (CAKE + coturn peer-lock), NEVER lower `maxPayloadLength` (64MB). Topics `0x07`, broadcast `0x03`. EVERY binary handler gates on SENDER room membership; abuse = fair-share eviction, never a cap; per-IP RAM = connection caps only via `ip_limit_key()` (v6 /64, unmap v4-MAPPED first). `feedback_relay_rules`, `project_relay_fairshare_turn_lock`.
-- **CRITICAL: relay offline delivery (availability cache):** anything for OFFLINE channel members MUST ride `0x07` topic frames (`0x03`/direct sends never enter the rings); parked server joins = the `~join` ring (`project_pending_server_joins`). OPEN BUG: channel files don't render post-catchup. `project_relay_availability_cache`.
+- **Relay:** uWebSockets C++ (`relay-uws/`). NO rate limits, NO byte quotas (CAKE + coturn peer-lock), NEVER lower `maxPayloadLength` (64MB). Topics `0x07`, broadcast `0x03`. EVERY binary handler gates on SENDER room membership; per-IP RAM = connection caps only via `ip_limit_key()` (v6 /64, unmap v4-MAPPED first). `feedback_relay_rules`, `project_relay_fairshare_turn_lock`.
+- **CRITICAL: relay offline delivery (availability cache):** anything for OFFLINE channel members MUST ride `0x07` topic frames (`0x03`/direct sends never enter the rings); parked server joins = the `~join` ring (`project_pending_server_joins`). `project_relay_availability_cache` (open bug: channel files post-catchup).
 - **Storage & profiles (#47):** data root `dirs::data_dir()/hollow` (override `set_data_dir()`/`HOLLOW_DATA_DIR`); desktop precedence env > `--portable` > profiles.json PIN > marker > `hollow_data` WITH identity data (NEVER `data`); keychain = PER-PROFILE slots. `project_portable_mode`, `project_issue47_sframe_keystore_fix`.
 - **CRITICAL: self-restart ONLY via `relaunchApp()`** (Rust waiter — anything Dart spawns dies pre-Flutter). `project_profile_switcher_issue47`.
 - **CRITICAL: auto-download gate (#41):** pull paths gated in DART; pushes can't be cancelled (discard + `declined` pin); senders pre-negotiate via `auto_dl_pref`; VOICE exempt; RequestFile receipts bypass cap + gate, NEVER remove; `accept_header_thumb` = the ONE thumb filter. `project_autodownload_gate`.
@@ -132,7 +132,7 @@ All UI = custom Hollow widgets, no Material defaults (`src/ui/components/`): Hol
 - **App Lock (mobile):** PIN via the Rust Argon2id flow; biometric secret in flutter_secure_storage after `local_auth` (3.x named params); lock-type marker readable BEFORE identity unlock; MainActivity MUST extend `FlutterFragmentActivity`. `project_app_lock_pin_biometric`.
 - **CRITICAL: Olm key exchange is DEVICE-signed + ENFORCED** (`REQUIRE_SIGNED_KEY_EXCHANGE`): verify sig/recipient/freshness/device-in-signed-list BEFORE session creation. Relay auth re-derives peer_id from pubkey — KATs in BOTH Rust+C++. `project_signed_key_exchange_root_of_trust`.
 - **CRITICAL: sig verification REJECTS, never logs;** `if sig.is_some()` IS the bypass. Verify RAW text BEFORE any clamp (4,000 CHARS ≈ 16,000 bytes non-Latin). LIVE enforces, backfill tolerates. `feedback_signature_enforcement_not_logging`.
-- **CRITICAL: remote filenames via `safe_file_name()`** before any path join (an ABSOLUTE name makes `Path::join` DISCARD the base; manifest hash ≠ trust). `feedback_sender_controlled_filename_sanitization`.
+- **CRITICAL: remote filenames via `safe_file_name()`** before any path join (an ABSOLUTE name makes `Path::join` DISCARD the base; manifest hash ≠ trust); wire ids allowlisted in `parse_id`/`parseWireTransferId` (they NAME temp files). `feedback_sender_controlled_filename_sanitization`.
 - **CRITICAL: contact verification:** safety number = 60 digits from the two MASTER peer_ids (symmetric; survives reinstall + device change) — NEVER Olm keys/device ids; verified flag + alerts MASTER-keyed. New device = warn, FIRST list = baseline. `project_contact_verification_safety_numbers`.
 - **Disclosure:** 6 GHSA drafts still private. **Never push a fix before release.** `project_security_disclosure_2026_07`.
 - **CRITICAL: message signing is v2-ONLY:** `sign_message_versioned`; v1 verification GONE — NEVER add a fallback (downgrade oracle). Edit/delete sigs bind the row's FULL extras. New message-row paths MUST persist the SENDER's wire `order_us`; stamp via `chat_clock::next_send_stamp_us()`. `feedback_chat_clock_lamport`.
@@ -192,13 +192,13 @@ All UI = custom Hollow widgets, no Material defaults (`src/ui/components/`): Hol
 - **CRITICAL: Windows annotation mode:** `window_manager` maximize/unmaximize only, never raw Win32 or `setFullScreen`. `feedback_annotation_window_management`.
 
 ## Semantic Memory Search (hollow-memory MCP)
-- `memory_search(query)` = memory+wiki+plan/whitepaper; ALWAYS search before arguing, designing or re-investigating; `memory_reindex()` after modifying indexed files (the wiki syncs during `/compush`).
+- `memory_search(query)` = memory+wiki+plan/whitepaper; ALWAYS search before arguing, designing or re-investigating; `memory_reindex()` after modifying indexed files.
 
 ## Rules
 - Never commit secrets, keys, or credentials.
 - Rust handles networking/crypto/CRDTs/storage; Dart handles UI/app logic/state.
 - All crypto operations must use constant-time implementations.
 - **HOLLOW_PLAN.md is the authoritative source** for phases, feature checklists and completion status (never duplicated here or in memory); ask before architectural decisions it does not cover.
-- **HARD budget: 40,000 chars.** Entries = 1–3 lines: rule + memory pointer; war stories go in memory files.
+- **HARD budget: 40,000 chars.** Entries = 1–3 lines: rule + memory pointer.
 - **SSH hosts (relay VPS, Mac, VM, Hostinger):** in `BUILD_GUIDE.md` (gitignored); key-only, free for checks/logs/deploys.
 - **Local dev:** checks/tests/codegen run freely; Vitalik runs `flutter run -d windows`.

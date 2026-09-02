@@ -88,6 +88,7 @@ ios/Runner.xcworkspace/xcuserdata/
 rust/hollow_core/target/
 rust/hollow_dfn/target/
 rust/hollow_art/target/
+rust/hollow_manifest/target/
 rust/target/
 relay/target/
 loadtest/target/

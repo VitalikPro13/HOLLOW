@@ -2,8 +2,11 @@ use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 
+use base64::Engine as _;
+use ed25519_dalek::{Signature, VerifyingKey};
 use flutter_rust_bridge::frb;
 use futures_util::StreamExt;
+use sha2::{Digest, Sha256};
 
 use super::network::get_runtime;
 use crate::frb_generated::StreamSink;
@@ -11,9 +14,25 @@ use crate::identity::data_dir;
 
 pub(crate) const APP_VERSION: &str = "0.10.1";
 
+/// Ed25519 public keys (hex) allowed to sign the update manifest. The private
+/// half lives with the release engineer, never in the repo: `hollow-manifest
+/// sign` (rust/hollow_manifest) writes `manifest.json.sig` next to
+/// `manifest.json`, and `fetch_version_manifest` refuses a manifest whose
+/// signature does not verify against one of these. That is what makes a
+/// rewritten manifest on the download host worthless: the host can serve
+/// bytes, it cannot mint a signature. More than one entry only while a key
+/// is being rotated.
+const MANIFEST_SIGNING_PUBKEYS: &[&str] = &[
+    "b6fcb5b64cd5317b470b31ac08892528b0d5c9e82c6cdaa13654a7c9e7f8b09c",
+];
+
 pub struct DownloadProgress {
     pub bytes_downloaded: u64,
     pub total_bytes: u64,
+    /// Set on the final item when the download was refused or failed
+    /// (checksum mismatch, non-https URL, transport error). The partial file
+    /// is already deleted by then; Dart shows the reason and stops.
+    pub error: Option<String>,
 }
 
 #[frb(sync)]
@@ -21,6 +40,10 @@ pub fn get_current_version() -> String {
     APP_VERSION.to_string()
 }
 
+/// Fetches `manifest.json` AND its `manifest.json.sig` sidecar, and returns
+/// the manifest text only when the signature verifies against
+/// [`MANIFEST_SIGNING_PUBKEYS`]. The signature covers the manifest's exact
+/// bytes, so the text handed to Dart is byte for byte what was signed.
 #[frb]
 pub fn fetch_version_manifest(manifest_url: String) -> Result<String, String> {
     let rt = get_runtime();
@@ -29,30 +52,119 @@ pub fn fetch_version_manifest(manifest_url: String) -> Result<String, String> {
             .timeout(std::time::Duration::from_secs(10))
             .build()
             .map_err(|e| format!("Failed to build HTTP client: {e}"))?;
-        let resp = client
-            .get(&manifest_url)
-            .header("Cache-Control", "no-cache")
-            .send()
+        let manifest = fetch_bytes(&client, &manifest_url)
             .await
             .map_err(|e| format!("Failed to fetch manifest: {e}"))?;
-        resp.text()
+        let sig = fetch_bytes(&client, &signature_url(&manifest_url))
             .await
-            .map_err(|e| format!("Failed to read manifest body: {e}"))
+            .map_err(|e| format!("Failed to fetch manifest signature: {e}"))?;
+        verify_manifest_signature(&manifest, &String::from_utf8_lossy(&sig))?;
+        String::from_utf8(manifest).map_err(|_| "Update manifest is not UTF-8".to_string())
     })
 }
 
+/// Plain fetch for the OTHER release-folder feeds (news.json, status.json):
+/// display-only text with no signature sidecar. Nothing downloaded through
+/// here is ever executed or installed; the update manifest itself must go
+/// through [`fetch_version_manifest`].
+#[frb]
+pub fn fetch_release_feed(url: String) -> Result<String, String> {
+    let rt = get_runtime();
+    rt.block_on(async {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .map_err(|e| format!("Failed to build HTTP client: {e}"))?;
+        let body = fetch_bytes(&client, &url)
+            .await
+            .map_err(|e| format!("Failed to fetch feed: {e}"))?;
+        String::from_utf8(body).map_err(|_| "Feed is not UTF-8".to_string())
+    })
+}
+
+async fn fetch_bytes(client: &reqwest::Client, url: &str) -> Result<Vec<u8>, String> {
+    let resp = client
+        .get(url)
+        .header("Cache-Control", "no-cache")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("server returned {}", resp.status()));
+    }
+    resp.bytes().await.map(|b| b.to_vec()).map_err(|e| e.to_string())
+}
+
+/// `.../manifest.json?t=123` becomes `.../manifest.json.sig?t=123`: the
+/// sidecar sits next to the manifest and rides the same cache-buster.
+fn signature_url(manifest_url: &str) -> String {
+    match manifest_url.split_once('?') {
+        Some((path, query)) => format!("{path}.sig?{query}"),
+        None => format!("{manifest_url}.sig"),
+    }
+}
+
+/// The app's manifest check: base64 Ed25519 signature text over the exact
+/// manifest bytes, accepted when ANY listed key verifies it (strict
+/// verification, so a malleable or weak-key signature is refused too).
+/// Mirrors `verify_bytes` in rust/hollow_manifest.
+pub(crate) fn verify_manifest_signature(manifest: &[u8], sig_text: &str) -> Result<(), String> {
+    verify_manifest_signature_with(manifest, sig_text, MANIFEST_SIGNING_PUBKEYS)
+}
+
+fn verify_manifest_signature_with(
+    manifest: &[u8],
+    sig_text: &str,
+    pubkeys_hex: &[&str],
+) -> Result<(), String> {
+    let sig = base64::engine::general_purpose::STANDARD
+        .decode(sig_text.trim())
+        .map_err(|_| "Update manifest signature is not base64".to_string())?;
+    let sig = Signature::from_slice(&sig)
+        .map_err(|_| "Update manifest signature is malformed".to_string())?;
+    let verified = pubkeys_hex.iter().any(|hex_key| {
+        hex::decode(hex_key)
+            .ok()
+            .and_then(|bytes| <[u8; 32]>::try_from(bytes).ok())
+            .and_then(|bytes| VerifyingKey::from_bytes(&bytes).ok())
+            .is_some_and(|vk| vk.verify_strict(manifest, &sig).is_ok())
+    });
+    if verified {
+        Ok(())
+    } else {
+        Err("Update manifest signature does not verify. The download host may have been tampered with; nothing was installed.".to_string())
+    }
+}
+
+/// A checksum the manifest hands us must be 64 hex characters before a
+/// single byte is downloaded against it.
+fn normalise_expected_sha256(expected: &str) -> Result<String, String> {
+    let e = expected.trim().to_ascii_lowercase();
+    if e.len() != 64 || !e.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err("The manifest carries no valid checksum for this download".to_string());
+    }
+    Ok(e)
+}
+
+/// Downloads `url` to `dest_path` and keeps the file ONLY if its SHA-256 is
+/// `expected_sha256` (the value from the signed manifest). Any failure,
+/// including a checksum mismatch or a cancelled stream, deletes the partial
+/// file and ends the stream with `DownloadProgress::error` set.
 #[frb]
 pub fn download_update(
     url: String,
     dest_path: String,
+    expected_sha256: String,
     sink: StreamSink<DownloadProgress>,
 ) -> Result<(), String> {
     let rt = get_runtime();
     rt.spawn(async move {
-        if let Err(e) = download_inner(&url, &dest_path, &sink).await {
+        if let Err(e) = download_inner(&url, &dest_path, &expected_sha256, &sink).await {
+            let _ = fs::remove_file(&dest_path);
             let _ = sink.add(DownloadProgress {
                 bytes_downloaded: 0,
                 total_bytes: 0,
+                error: Some(e.clone()),
             });
             crate::hollow_log!("[updater] Download failed: {e}");
         }
@@ -63,13 +175,22 @@ pub fn download_update(
 async fn download_inner(
     url: &str,
     dest_path: &str,
+    expected_sha256: &str,
     sink: &StreamSink<DownloadProgress>,
 ) -> Result<(), String> {
+    let expected = normalise_expected_sha256(expected_sha256)?;
+    if !url.starts_with("https://") {
+        return Err("Update downloads must use https".to_string());
+    }
     let resp = reqwest::get(url)
         .await
         .map_err(|e| format!("Request failed: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("Server returned {}", resp.status()));
+    }
 
     let total_bytes = resp.content_length().unwrap_or(0);
+    let mut hasher = Sha256::new();
 
     let dest = PathBuf::from(dest_path);
     if let Some(parent) = dest.parent() {
@@ -87,20 +208,92 @@ async fn download_inner(
         let chunk = chunk.map_err(|e| format!("Stream error: {e}"))?;
         file.write_all(&chunk)
             .map_err(|e| format!("Write error: {e}"))?;
+        hasher.update(&chunk);
         bytes_downloaded += chunk.len() as u64;
 
         if sink
             .add(DownloadProgress {
                 bytes_downloaded,
                 total_bytes,
+                error: None,
             })
             .is_err()
         {
-            break;
+            // Dart dropped the stream (cancel). The caller deletes the partial file.
+            return Err("Download cancelled".to_string());
         }
+    }
+    file.flush().map_err(|e| format!("Write error: {e}"))?;
+    drop(file);
+
+    let actual = hex::encode(hasher.finalize());
+    if actual != expected {
+        return Err("Checksum mismatch: the downloaded file is not the one the signed manifest describes. Nothing was installed.".to_string());
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod integrity_tests {
+    use super::*;
+    use ed25519_dalek::{Signer, SigningKey};
+
+    fn b64(bytes: &[u8]) -> String {
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    }
+
+    #[test]
+    fn signature_url_keeps_the_cache_buster() {
+        assert_eq!(
+            signature_url("https://h/x/manifest.json?t=5"),
+            "https://h/x/manifest.json.sig?t=5"
+        );
+        assert_eq!(signature_url("https://h/x/manifest.json"), "https://h/x/manifest.json.sig");
+    }
+
+    #[test]
+    fn manifest_signature_accepts_only_a_listed_key_over_exact_bytes() {
+        let key = SigningKey::from_bytes(&[3u8; 32]);
+        let listed = hex::encode(key.verifying_key().to_bytes());
+        let manifest = br#"{"latest":"0.10.2","versions":[]}"#;
+        let sig = b64(&key.sign(manifest).to_bytes());
+
+        assert!(verify_manifest_signature_with(manifest, &sig, &[&listed]).is_ok());
+        // A rotation list: the good key may sit anywhere in it.
+        let other = hex::encode(SigningKey::from_bytes(&[4u8; 32]).verifying_key().to_bytes());
+        assert!(verify_manifest_signature_with(manifest, &sig, &[&other, &listed]).is_ok());
+        // Not listed: refused.
+        assert!(verify_manifest_signature_with(manifest, &sig, &[&other]).is_err());
+        // One flipped byte in the manifest: refused.
+        let mut tampered = manifest.to_vec();
+        tampered[12] ^= 1;
+        assert!(verify_manifest_signature_with(&tampered, &sig, &[&listed]).is_err());
+        // Garbage signatures never panic.
+        assert!(verify_manifest_signature_with(manifest, "not base64!", &[&listed]).is_err());
+        assert!(verify_manifest_signature_with(manifest, &b64(&[0u8; 10]), &[&listed]).is_err());
+        assert!(verify_manifest_signature_with(manifest, "", &[&listed]).is_err());
+    }
+
+    #[test]
+    fn the_baked_in_keys_are_well_formed() {
+        for k in MANIFEST_SIGNING_PUBKEYS {
+            let bytes = hex::decode(k).expect("hex");
+            let bytes: [u8; 32] = bytes.try_into().expect("32 bytes");
+            VerifyingKey::from_bytes(&bytes).expect("valid Ed25519 point");
+        }
+    }
+
+    #[test]
+    fn expected_checksum_must_be_64_hex() {
+        assert_eq!(
+            normalise_expected_sha256(&format!(" {} ", "AB".repeat(32))).unwrap(),
+            "ab".repeat(32)
+        );
+        assert!(normalise_expected_sha256("").is_err());
+        assert!(normalise_expected_sha256(&"a".repeat(63)).is_err());
+        assert!(normalise_expected_sha256(&"g".repeat(64)).is_err());
+    }
 }
 
 #[frb]
@@ -275,12 +468,13 @@ fn write_macos_update_script(
     fs::write(&sh_path, &sh_content)
         .map_err(|e| format!("Failed to write update script: {e}"))?;
 
-    // Make the script executable.
+    // Owner-only: Dart runs it as the same user via `/bin/sh`, so nothing
+    // else needs to read or execute it (Sonar S2612).
     use std::os::unix::fs::PermissionsExt;
     let mut perms = fs::metadata(&sh_path)
         .map_err(|e| format!("Failed to stat update script: {e}"))?
         .permissions();
-    perms.set_mode(0o755);
+    perms.set_mode(0o700);
     fs::set_permissions(&sh_path, perms)
         .map_err(|e| format!("Failed to chmod update script: {e}"))?;
 

@@ -16,10 +16,21 @@
          The uid-exclude API can't be mixed with usage matching, so this manifest
          flag is the anti-echo mechanism (also blocks third-party recorders from
          taping Hollow calls — a privacy win). -->
+    <!-- No OS backups: the data dir holds identity.key (plaintext unless the
+         opt-in at-rest protection is on), the SQLCipher store and the
+         keystore-wrapped app-lock secret. Google Auto Backup would ship all of
+         it to Drive, and a device-to-device transfer would clone this DEVICE
+         identity onto a second phone, which multi-device forbids. The .hollow
+         backup is the only sanctioned copy. allowBackup covers cloud backup on
+         every API level; fullBackupContent covers API 30 and below;
+         dataExtractionRules covers API 31+ including device transfer. -->
     <application
         android:label="Hollow"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher"
+        android:allowBackup="false"
+        android:fullBackupContent="false"
+        android:dataExtractionRules="@xml/data_extraction_rules"
         android:allowAudioPlaybackCapture="false">
         <!-- Portrait-only (incl. tablets): landscape/tablet layouts are the
              mobile shell's deferred edge cases; also locked at runtime in

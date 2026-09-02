@@ -1488,7 +1488,7 @@ class _StickerCellState extends ConsumerState<_StickerCell> {
       // Never animates from transparent — a null background just paints
       // nothing until the hover fill takes over.
       backgroundColor: Colors.black.withValues(alpha: 0.55),
-      child: Icon(LucideIcons.bookmarkPlus, size: 12, color: Colors.white),
+      child: const Icon(LucideIcons.bookmarkPlus, size: 12, color: Colors.white),
     );
   }
 

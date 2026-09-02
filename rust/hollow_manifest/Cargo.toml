@@ -1,0 +1,30 @@
+# hollow_manifest: the release-side half of update integrity. The app
+# (rust/hollow_core/src/api/updater.rs) refuses an update manifest whose
+# Ed25519 signature does not verify against the key baked into the binary,
+# and refuses a downloaded zip whose SHA-256 differs from the signed manifest.
+# This tool produces both: `fill-hashes` writes the sha256_* fields from the
+# files actually served, `sign` writes manifest.json.sig, `verify` replays
+# the app's check against a local pair or the live URL, `keygen` mints the
+# key once. Own crate so a release step never builds hollow_core.
+
+[package]
+name = "hollow_manifest"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "hollow-manifest"
+path = "src/main.rs"
+
+[dependencies]
+ed25519-dalek = "2"
+getrandom = "0.3"
+hex = "0.4"
+base64 = "0.22"
+sha2 = "0.10"
+serde_json = { version = "1", features = ["preserve_order"] }
+ureq = "2"
+
+[profile.release]
+strip = true

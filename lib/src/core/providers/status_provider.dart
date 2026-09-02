@@ -9,7 +9,7 @@ import 'package:hollow/src/rust/api/updater.dart' as updater_api;
 /// on the WEBSITE host (anonlisten.com, independent of the relay VPS), so it
 /// loads even when the relay is down — which is exactly when we most need to
 /// tell users "relay maintenance, back at 02:00". Pure HTTPS GET via the same
-/// `fetchVersionManifest` helper the news + updater use; nothing touches the WS.
+/// `fetchReleaseFeed` helper news uses (unsigned, unlike the update manifest); nothing touches the WS.
 const kStatusUrl = 'https://anonlisten.com/hollow/releases/status.json';
 
 /// Key under which the last DISMISSED status id is persisted (SQLCipher KV).
@@ -250,8 +250,10 @@ class StatusNotifier extends Notifier<StatusState> {
   Future<bool> _doFetch() async {
     try {
       final bustCache = DateTime.now().millisecondsSinceEpoch;
-      final json = await updater_api.fetchVersionManifest(
-          manifestUrl: '$kStatusUrl?t=$bustCache');
+      // Plain fetch: status.json is display-only and has no signature sidecar
+      // (fetchVersionManifest would demand status.json.sig).
+      final json = await updater_api.fetchReleaseFeed(
+          url: '$kStatusUrl?t=$bustCache');
       if (json == _lastAppliedJson && state.hasFetched) return true;
       final decoded = jsonDecode(json) as Map<String, dynamic>;
       _lastAppliedJson = json;

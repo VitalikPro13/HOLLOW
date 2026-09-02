@@ -212,6 +212,15 @@ v2 item signature binds `file_id`, not the blob, so receivers require
 `fm.fid == item.file_id` (same reasoning as the §3 owner guard). Harness
 coverage: `file_request_gate_refuses_stranger_and_serves_guest_public`.
 
+
+## 8. Transport temp files + the update channel (0.10.2)
+
+| Write | Site | Gate |
+|---|---|---|
+| Stream reassembly temp file (`.ws_recv_{id}.tmp`, `.webrtc_recv_{id}.tmp`) | `ws_stream_transfer::parse_id` (Rust, WS relay lane), `wire_transfer_id.dart::parseWireTransferId` (Dart, WebRTC lane) | The 64-byte wire id NAMES the file, so the parser is the gate: `[A-Za-z0-9:_-]` only (own ids are 32-hex, `hex:index`, `link_<code>`), anything else drops the frame before a path exists. Before 0.10.2 the raw id reached `format!` unchecked; on Windows a `/../` id walked out of the files dir (Win32 collapses `..` lexically), POSIX was safe only because `.ws_recv_` is not a directory. Precondition was an established peer, impact create/truncate/delete of any `*.tmp` path. Same family as `safe_file_name()` (section 6 of `feedback_sender_controlled_filename_sanitization`) |
+| Update manifest (`fetch_version_manifest`) | `api/updater.rs::verify_manifest_signature` | `manifest.json.sig` (base64 Ed25519 over the manifest's EXACT bytes) must `verify_strict` against a key in `MANIFEST_SIGNING_PUBKEYS`; the sidecar rides the same URL + cache-buster. The download host can serve bytes, it cannot mint a signature. Dart then treats only a strictly NEWER `latest` as an update (`version_compare.dart`), so a replayed old signed manifest is not a downgrade lever. Signing: `rust/hollow_manifest` + `scripts/sign_manifest.ps1`, key outside the repo |
+| Update zip on disk, then extracted into the app dir (`download_update` + `apply_update`) | `api/updater.rs::download_inner` | https only; SHA-256 accumulated while streaming and compared to the `sha256_<platform>` field of the SIGNED manifest before the file is kept (mismatch, cancel or any error deletes it and ends the stream with `DownloadProgress.error`). An entry without a checksum for the platform is refused in Dart before the first byte. `extract_zip_to` keeps its own path-traversal rejection |
+
 ---
 
 ## Related

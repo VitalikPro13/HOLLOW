@@ -10,6 +10,7 @@ import 'package:flutter_webrtc/flutter_webrtc.dart';
 
 import '../../rust/api/network.dart' as network_api;
 import 'ice_route_probe.dart';
+import 'wire_transfer_id.dart';
 
 /// Chunk size for WebRTC data channel transfers.
 /// 64KB per message is safe across all platforms (SCTP max is ~256KB).
@@ -1292,6 +1293,7 @@ class WebRtcService {
       // Continuation chunk: [0xFF][id:64][payload...]
       if (data.length < 65) return;
       final id = _extractId(data, 1);
+      if (id == null) return;
       final transfer = _transfers[id];
       if (transfer == null) return;
       // A continuation must arrive on the same lane its first chunk did.
@@ -1318,6 +1320,11 @@ class WebRtcService {
       //          file        = (none)
       if (data.length < 73) return;
       final id = _extractId(data, 1);
+      if (id == null) {
+        _log('[HOLLOW-WEBRTC-DART] Dropped stream frame from $peerId: '
+            'transfer id carries characters outside the allowlist');
+        return;
+      }
       final totalSize = ByteData.sublistView(data, 65, 73)
           .getUint64(0, Endian.little);
 
@@ -1502,12 +1509,10 @@ class WebRtcService {
     return padded;
   }
 
-  String _extractId(Uint8List data, int offset) {
-    final idBytes = data.sublist(offset, offset + 64);
-    final nulIndex = idBytes.indexOf(0);
-    final len = nulIndex == -1 ? 64 : nulIndex;
-    return utf8.decode(idBytes.sublist(0, len));
-  }
+  /// The id names the temp file, so the parser is the gate: null for any
+  /// frame whose id could walk out of the files dir (see wire_transfer_id.dart).
+  String? _extractId(Uint8List data, int offset) =>
+      parseWireTransferId(data, offset);
 
   /// Cached files directory path.
   static String? _filesDirCache;

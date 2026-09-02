@@ -393,7 +393,7 @@ class _GifProxySettingsCardState extends ConsumerState<GifProxySettingsCard> {
                   'make no web requests at all.',
         ),
         const SizedBox(height: HollowSpacing.md),
-        SettingsSectionLabel(label: 'Content rating'),
+        const SettingsSectionLabel(label: 'Content rating'),
         const SizedBox(height: HollowSpacing.xs),
         TriStateSegment<String>(
           value: ratings.contains(rating) ? rating : ratings.first,
@@ -437,7 +437,7 @@ class _GifProxySettingsCardState extends ConsumerState<GifProxySettingsCard> {
         ),
         if (_expanded) ...[
           const SizedBox(height: HollowSpacing.sm),
-          SettingsSectionLabel(label: 'Your own KLIPY API key'),
+          const SettingsSectionLabel(label: 'Your own KLIPY API key'),
           const SizedBox(height: HollowSpacing.xs),
           _caption(
             hollow,
@@ -505,7 +505,7 @@ class _GifProxySettingsCardState extends ConsumerState<GifProxySettingsCard> {
           ],
           if (direct) ...[
             const SizedBox(height: HollowSpacing.md),
-            SettingsSectionLabel(label: 'Allowed media hosts'),
+            const SettingsSectionLabel(label: 'Allowed media hosts'),
             const SizedBox(height: HollowSpacing.xs),
             _caption(
               hollow,
@@ -573,7 +573,7 @@ class _GifProxySettingsCardState extends ConsumerState<GifProxySettingsCard> {
                 ),
           ],
           const SizedBox(height: HollowSpacing.md),
-          SettingsSectionLabel(label: 'Self-hosted proxy'),
+          const SettingsSectionLabel(label: 'Self-hosted proxy'),
           const SizedBox(height: HollowSpacing.xs),
           _caption(
             hollow,

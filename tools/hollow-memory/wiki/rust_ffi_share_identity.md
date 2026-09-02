@@ -217,7 +217,7 @@ Cross-platform application self-update system (Windows + macOS). Fetches a versi
 
 ### Constants
 
-- `APP_VERSION: &str = "0.5.0"` -- current version string (single source of truth; the Flatpak build script also derives the bundle filename from it).
+- `APP_VERSION: &str` -- current version string (`0.10.1` at the time of writing) (single source of truth; the Flatpak build script also derives the bundle filename from it).
 
 ### FFI struct: `DownloadProgress`
 
@@ -225,6 +225,7 @@ Cross-platform application self-update system (Windows + macOS). Fetches a versi
 pub struct DownloadProgress {
     pub bytes_downloaded: u64,
     pub total_bytes: u64,
+    pub error: Option<String>, // final item only: refused/failed download, partial file already deleted
 }
 ```
 
@@ -234,13 +235,17 @@ Sync function (`#[frb(sync)]`). Returns `APP_VERSION`.
 
 ### `fetch_version_manifest(manifest_url: String) -> Result<String, String>`
 
-Fetches the remote version manifest JSON via HTTP GET with a 10-second timeout and `Cache-Control: no-cache` header. Returns the raw response body as a string. Dart parses the JSON to determine if an update is available by comparing versions. The manifest is hosted at `legal/manifest.json` on the CDN.
+Fetches `manifest.json` AND its `manifest.json.sig` sidecar (same URL plus `.sig`, same cache-buster, 10-second timeout, `Cache-Control: no-cache`), then `verify_strict`s the base64 Ed25519 signature over the manifest's EXACT bytes against `MANIFEST_SIGNING_PUBKEYS` (hex list baked into the binary; more than one entry only during a key rotation). Returns the manifest text only when a listed key verifies it; otherwise `Err` and Dart shows "check failed". The download host can serve bytes, it cannot mint a signature. Dart then treats only a strictly NEWER `latest` as an update (`version_compare.dart::isNewerVersion`), so a replayed old signed manifest is not a downgrade lever. Signing side: `rust/hollow_manifest` + `scripts/sign_manifest.ps1` (see memory `project_update_integrity`). Both `legal/manifest.json` and `legal/manifest.json.sig` are committed and uploaded to the release folder.
+
+### `fetch_release_feed(url: String) -> Result<String, String>`
+
+Plain GET (same client settings, NO signature) for the display-only feeds in the release folder: `news.json` (`news_provider.dart`) and `status.json` (`status_provider.dart`). Nothing fetched through here is installed or executed. The update manifest must never use it.
 
 **Per-platform manifest URLs (no legacy single `url` field as of v0.5.0):** each version entry has `url_windows`, `url_macos` (zip, used by the updater), `url_macos_dmg` (DMG, used by the website's new-user download button), `url_linux` (Flatpak), `url_android` (APK). Dart `VersionInfo.platformUrl` (in `updater_provider.dart`) selects by `Platform`.
 
-### `download_update(url: String, dest_path: String, sink: StreamSink<DownloadProgress>) -> Result<(), String>`
+### `download_update(url: String, dest_path: String, expected_sha256: String, sink: StreamSink<DownloadProgress>) -> Result<(), String>`
 
-Spawns an async download task on the tokio runtime (non-blocking). Streams the update ZIP from `url` to `dest_path` using `reqwest::get()` + `bytes_stream()`. Pushes `DownloadProgress` events to the Dart `StreamSink` after each chunk write. If the sink is closed (Dart cancelled), the download stops. On error, sends a zero-progress event and logs via `hollow_log!`. Creates parent directories for `dest_path` if needed.
+Spawns an async download task on the tokio runtime (non-blocking). `expected_sha256` is the `sha256_<platform>` field of the SIGNED manifest entry (Dart `VersionInfo.platformSha256`; Dart refuses to start when it is empty). Refuses non-`https://` URLs. Streams the update ZIP from `url` to `dest_path`, hashing every chunk, and pushes `DownloadProgress` events after each write. When the stream ends the digest must equal `expected_sha256`, else the file is deleted. ANY failure (mismatch, cancelled sink, transport, non-2xx) deletes the partial file and sends a final `DownloadProgress { error: Some(reason) }`; Dart surfaces it as the error state and never reaches `apply_update`. Creates parent directories for `dest_path` if needed.
 
 ### `apply_update(zip_path: String, app_dir: String, version: String) -> Result<String, String>`
 
