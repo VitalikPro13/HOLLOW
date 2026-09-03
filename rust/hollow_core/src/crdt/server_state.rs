@@ -4,7 +4,26 @@ use serde::{Deserialize, Serialize};
 
 use super::admin_lww::AdminLwwReg;
 use super::hlc::{Hlc, HlcTimestamp};
-use super::operations::{CrdtOp, CrdtPayload, MemberRole, Permission};
+use super::operations::{CrdtOp, CrdtPayload, MemberRole, OpReject, Permission};
+use crate::identity::native_identity::NativeKeypair;
+
+/// The MASTER keypair this replica authors ops with, plus its base64 protobuf
+/// public key. Held on the state next to the HLC because `create_op` needs
+/// both to produce an op any peer will accept.
+///
+/// Debug is hand-written: the derive would print the keypair, and a secret key
+/// has no business in a log line.
+#[derive(Clone)]
+pub(crate) struct OpSigner {
+    keypair: NativeKeypair,
+    pk_b64: String,
+}
+
+impl std::fmt::Debug for OpSigner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("OpSigner(<redacted>)")
+    }
+}
 
 /// Type of channel within a server.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -250,6 +269,10 @@ pub struct ServerState {
     pub hlc: Option<Hlc>,
     #[serde(skip)]
     op_log_dedup: HashSet<(String, HlcTimestamp)>,
+    /// Set by the node right after `set_hlc` on any state that authors ops.
+    /// Never persisted and never sent: it is our own secret.
+    #[serde(skip)]
+    signer: Option<OpSigner>,
 }
 
 impl ServerState {
@@ -269,7 +292,7 @@ impl ServerState {
             twitch_usernames, pinned_messages, channel_layout, storage_pledges,
             settings, role_permissions, banned_members, muted_members,
             channel_grants, labels, label_assignments, emotes, stickers, deleted,
-            op_log: _, hlc: _, op_log_dedup: _,
+            op_log: _, hlc: _, op_log_dedup: _, signer: _,
         } = self;
         ServerState {
             server_id: server_id.clone(),
@@ -295,6 +318,7 @@ impl ServerState {
             op_log: Vec::new(),
             hlc: None,
             op_log_dedup: HashSet::new(),
+            signer: None,
         }
     }
 
@@ -362,12 +386,20 @@ impl ServerState {
             op_log: Vec::new(),
             hlc: Some(hlc),
             op_log_dedup: HashSet::new(),
+            signer: None,
         }
     }
 
     /// Restore from persistence (HLC set separately via `set_hlc`).
     pub fn set_hlc(&mut self, hlc: Hlc) {
         self.hlc = Some(hlc);
+    }
+
+    /// Install the MASTER keypair this replica signs its own ops with. Goes
+    /// hand in hand with `set_hlc`: a state that can author an op must be able
+    /// to sign it, or every peer will reject what it produces.
+    pub(crate) fn set_signer(&mut self, keypair: NativeKeypair, pk_b64: String) {
+        self.signer = Some(OpSigner { keypair, pk_b64 });
     }
 
     /// Multi-device (Step 6): fold any per-member entry that is keyed by a DEVICE
@@ -470,20 +502,118 @@ impl ServerState {
         }
     }
 
-    /// Generate a new CrdtOp with our HLC, but do NOT apply it yet.
-    /// Caller should apply via `apply_op()` after broadcasting.
+    /// Generate a new CrdtOp with our HLC, signed with our master key, but do
+    /// NOT apply it yet. Caller should apply via `apply_op()` after
+    /// broadcasting.
+    ///
+    /// The signer is `expect`ed exactly the way the HLC is: an unsigned op is
+    /// refused by every peer, so a missing signer must fail loudly here rather
+    /// than emit ops that silently vanish on the network.
     pub fn create_op(&mut self, payload: CrdtPayload) -> CrdtOp {
         let hlc = self
             .hlc
             .as_mut()
             .expect("HLC must be set before creating ops");
         let ts = hlc.now();
-        CrdtOp {
+        let mut op = CrdtOp {
             server_id: self.server_id.clone(),
             hlc: ts,
             author: hlc.actor().to_string(),
             payload,
+            auth: None,
+        };
+        let signer = self
+            .signer
+            .as_ref()
+            .expect("signer must be set before creating ops");
+        op.sign(&signer.keypair, &signer.pk_b64);
+        op
+    }
+
+    /// The peer_id currently holding the Owner role, if any. A state with no
+    /// Owner is either a fresh join skeleton or a server whose founding op has
+    /// not arrived yet, and is the ONLY state a `ServerCreated` may act on.
+    pub fn current_owner(&self) -> Option<String> {
+        self.roles
+            .iter()
+            .find(|(_, reg)| *reg.read() == MemberRole::Owner)
+            .map(|(pid, _)| pid.clone())
+    }
+
+    /// The ONE admission gate for a remotely-authored op. Runs, in order:
+    /// the author signature, the clock bound, then the permission matrix.
+    /// Every remote ingest path calls this BEFORE `apply_op`, so a forged
+    /// author, a stripped signature or a far-future timestamp never reaches
+    /// the state.
+    ///
+    /// Ops we author ourselves do not pass through here: `create_op` signs
+    /// them and the local send handlers already gate them.
+    pub fn admit_remote_op(&self, op: &CrdtOp) -> Result<(), OpReject> {
+        if op.server_id != self.server_id {
+            return Err(OpReject::WrongServer);
         }
+        op.verify_author()?;
+        if op.hlc.physical_ms > super::hlc::wall_clock_ms() + super::hlc::MAX_DRIFT_MS {
+            return Err(OpReject::FutureHlc);
+        }
+        if !self.op_allowed(op) {
+            return Err(OpReject::NotAllowed);
+        }
+        Ok(())
+    }
+
+    /// Pull every LWW register in this state back inside the clock bound.
+    ///
+    /// A `ServerStateSnapshot` is adopted wholesale from one responder during
+    /// a join, so its registers are only as honest as that peer. A register
+    /// stamped in the far future would outrank every later honest write
+    /// forever; clamping on adoption bounds the damage to "the value is
+    /// wrong" instead of "the field is locked". Returns how many registers
+    /// were pulled back.
+    ///
+    /// Exhaustive destructuring on purpose, like `lean_snapshot`: adding a
+    /// field to `ServerState` breaks this at compile time, forcing a decision
+    /// on whether it carries a clampable timestamp.
+    pub fn clamp_future_hlcs(&mut self, now_ms: u64) -> usize {
+        let max_ms = now_ms.saturating_add(super::hlc::MAX_DRIFT_MS);
+        let mut clamped = 0usize;
+
+        fn clamp_map<V: Clone>(map: &mut HashMap<String, AdminLwwReg<V>>, max_ms: u64) -> usize {
+            let mut n = 0;
+            for reg in map.values_mut() {
+                if reg.clamp_hlc(max_ms) {
+                    n += 1;
+                }
+            }
+            n
+        }
+
+        let ServerState {
+            name, roles, nicknames, twitch_usernames, storage_pledges, settings,
+            role_permissions, banned_members, muted_members, channel_grants,
+            // No timestamp of their own — these converge through the ops that
+            // write them, never through an LWW register.
+            server_id: _, channels: _, members: _, pinned_messages: _,
+            channel_layout: _, labels: _, label_assignments: _, emotes: _,
+            stickers: _, deleted: _, op_log: _, hlc: _, op_log_dedup: _,
+            signer: _,
+        } = self;
+
+        if name.clamp_hlc(max_ms) {
+            clamped += 1;
+        }
+        clamped += clamp_map(roles, max_ms);
+        clamped += clamp_map(nicknames, max_ms);
+        clamped += clamp_map(twitch_usernames, max_ms);
+        clamped += clamp_map(storage_pledges, max_ms);
+        clamped += clamp_map(settings, max_ms);
+        clamped += clamp_map(role_permissions, max_ms);
+        clamped += clamp_map(banned_members, max_ms);
+        clamped += clamp_map(muted_members, max_ms);
+        for regs in channel_grants.values_mut() {
+            clamped += clamp_map(regs, max_ms);
+        }
+        clamped
     }
 
     /// Apply a CRDT operation. Idempotent — safe to apply duplicates.
@@ -515,26 +645,39 @@ impl ServerState {
 
         match &op.payload {
             CrdtPayload::ServerCreated { name, owner_peer_id } => {
-                self.name = AdminLwwReg::new(
-                    name.clone(),
-                    op.hlc.clone(),
-                    MemberRole::Owner.priority(),
-                );
-                self.members.insert(
-                    owner_peer_id.clone(),
-                    MemberInfo {
-                        peer_id: owner_peer_id.clone(),
-                        display_name: short_name(owner_peer_id),
-                    },
-                );
-                self.roles.insert(
-                    owner_peer_id.clone(),
-                    AdminLwwReg::new(
-                        MemberRole::Owner,
+                // A server has exactly one founding moment. Once an Owner
+                // exists, a second ServerCreated naming somebody ELSE is a
+                // takeover attempt, not a replication event: log the op (so
+                // sync stays convergent) and mutate nothing.
+                //
+                // `op_allowed` refuses it at ingest; this is the twin guard
+                // for the local replay paths that never pass a gate, and it
+                // makes the real owner's own re-send idempotent.
+                let hostile_refound = self
+                    .current_owner()
+                    .is_some_and(|existing| existing != *owner_peer_id);
+                if !hostile_refound {
+                    self.name = AdminLwwReg::new(
+                        name.clone(),
                         op.hlc.clone(),
                         MemberRole::Owner.priority(),
-                    ),
-                );
+                    );
+                    self.members.insert(
+                        owner_peer_id.clone(),
+                        MemberInfo {
+                            peer_id: owner_peer_id.clone(),
+                            display_name: short_name(owner_peer_id),
+                        },
+                    );
+                    self.roles.insert(
+                        owner_peer_id.clone(),
+                        AdminLwwReg::new(
+                            MemberRole::Owner,
+                            op.hlc.clone(),
+                            MemberRole::Owner.priority(),
+                        ),
+                    );
+                }
             }
 
             CrdtPayload::ServerRenamed { new_name } => {
@@ -1335,7 +1478,18 @@ impl ServerState {
             }
             // Only the Owner can delete a server (tombstone).
             CrdtPayload::ServerDeleted { .. } => sender_role == MemberRole::Owner,
-            CrdtPayload::ServerCreated { .. } => true,
+            // Founding op. Legal only while the server has NO Owner yet (a
+            // fresh join skeleton replaying the op log), and only from the
+            // peer it names as owner — the signature binds `author` to a key,
+            // so this is the one place ownership can enter a state. Once an
+            // Owner exists, only that same peer's own re-send is admitted, and
+            // `apply_op` makes it a no-op.
+            CrdtPayload::ServerCreated { owner_peer_id, .. } => {
+                &op.author == owner_peer_id
+                    && self
+                        .current_owner()
+                        .is_none_or(|existing| existing == *owner_peer_id)
+            }
         }
     }
 
@@ -1584,6 +1738,20 @@ fn short_name(peer_id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::crdt::testkeys::{keys, owned_state};
+
+    /// A state with a signer installed, so `create_op` works. The owner id
+    /// stays the caller's readable string ("owner", "peer_a", …): these tests
+    /// drive `op_allowed` and `apply_op`, neither of which verifies a
+    /// signature. Anything that goes through `admit_remote_op` builds its
+    /// state with `owned_state` instead, where the owner id is DERIVED from
+    /// the key and the signature therefore binds.
+    fn test_state(server_id: String, name: String, owner: String) -> ServerState {
+        let mut s = ServerState::new(server_id, name, owner);
+        let (kp, _, pk) = keys(9);
+        s.set_signer(kp, pk);
+        s
+    }
 
     /// Build an op authored by `author` (create_op stamps the local actor;
     /// ingest validation only reads `op.author`, so overriding it simulates a
@@ -1601,7 +1769,7 @@ mod tests {
     /// sync_handler.rs), which call this exact method.
     #[test]
     fn op_allowed_ingest_matrix() {
-        let mut s = ServerState::new("s1".into(), "S".into(), "owner".into());
+        let mut s = test_state("s1".into(), "S".into(), "owner".into());
         for id in ["admin", "moder", "alice", "bob"] {
             let op = s.create_op(CrdtPayload::MemberAdded {
                 peer_id: id.into(),
@@ -1711,10 +1879,19 @@ mod tests {
             ("alice", CrdtPayload::EmojiAdded { name: "pog".into(), hash: "a".repeat(64), animated: false }, false),
             ("admin", CrdtPayload::EmojiRemoved { name: "pog".into() }, true),
             ("alice", CrdtPayload::EmojiRemoved { name: "pog".into() }, false),
-            // Tombstone: Owner only. ServerCreated: always.
+            // Tombstone: Owner only.
             ("owner", CrdtPayload::ServerDeleted { deleted_at: 1 }, true),
             ("admin", CrdtPayload::ServerDeleted { deleted_at: 1 }, false),
-            ("stranger", CrdtPayload::ServerCreated { name: "S".into(), owner_peer_id: "stranger".into() }, true),
+            // ServerCreated on a server that ALREADY has an Owner: refused
+            // for everyone but that same Owner (whose re-send is a no-op).
+            // This row used to read `true`, which is the whole of CRDT-1:
+            // any member could mint itself Owner of somebody else's server.
+            ("stranger", CrdtPayload::ServerCreated { name: "S".into(), owner_peer_id: "stranger".into() }, false),
+            ("admin", CrdtPayload::ServerCreated { name: "S".into(), owner_peer_id: "admin".into() }, false),
+            // Naming the REAL owner does not help: the author is not them.
+            ("stranger", CrdtPayload::ServerCreated { name: "S".into(), owner_peer_id: "owner".into() }, false),
+            // The real owner re-sending its own founding op is idempotent.
+            ("owner", CrdtPayload::ServerCreated { name: "S".into(), owner_peer_id: "owner".into() }, true),
         ];
         for (author, payload, expect) in cases {
             let op = op_by(&mut s, author, payload);
@@ -1739,12 +1916,36 @@ mod tests {
             new_name: "renamed".into(),
         });
         assert!(s.op_allowed(&op), "override-granted MANAGE_CHANNELS must pass ingest");
+
+        // ServerCreated on an OWNERLESS state (the join skeleton replaying an
+        // op log) is the one shape that founds a server: the author must be
+        // the peer it names as owner.
+        let mut skeleton = test_state("s2".into(), "".into(), "seed".into());
+        skeleton.members.remove("seed");
+        skeleton.roles.remove("seed");
+        assert!(skeleton.current_owner().is_none(), "skeleton starts ownerless");
+        let founding = op_by(&mut skeleton, "founder", CrdtPayload::ServerCreated {
+            name: "S2".into(),
+            owner_peer_id: "founder".into(),
+        });
+        assert!(
+            skeleton.op_allowed(&founding),
+            "an ownerless state must accept a founding op from the peer it names"
+        );
+        let hijack = op_by(&mut skeleton, "thief", CrdtPayload::ServerCreated {
+            name: "S2".into(),
+            owner_peer_id: "founder".into(),
+        });
+        assert!(
+            !skeleton.op_allowed(&hijack),
+            "a founding op must be authored by the owner it names"
+        );
     }
 
     #[test]
     fn canonicalize_folds_device_keyed_member_to_master() {
         // Owner is master-keyed; a joiner was recorded under a DEVICE id (legacy).
-        let mut state = ServerState::new("s1".into(), "S".into(), "owner_master".into());
+        let mut state = test_state("s1".into(), "S".into(), "owner_master".into());
 
         // Simulate a legacy joiner added under a device id with a Member role.
         let op = state.create_op(CrdtPayload::MemberAdded {
@@ -1777,7 +1978,7 @@ mod tests {
     #[test]
     fn canonicalize_single_device_is_noop() {
         // Identity resolver (single-device) → no change at all.
-        let mut state = ServerState::new("s1".into(), "S".into(), "owner".into());
+        let mut state = test_state("s1".into(), "S".into(), "owner".into());
         let op = state.create_op(CrdtPayload::MemberAdded {
             peer_id: "bob".into(),
             display_name: "bob".into(),
@@ -1793,7 +1994,7 @@ mod tests {
         // A human's device leaf holds Admin (written later) while the master
         // entry is Member — folding is pure HLC LWW, so the latest write
         // (Admin) survives.
-        let mut state = ServerState::new("s1".into(), "S".into(), "owner".into());
+        let mut state = test_state("s1".into(), "S".into(), "owner".into());
 
         // master entry as Member.
         let op1 = state.create_op(CrdtPayload::MemberAdded {
@@ -1835,7 +2036,7 @@ mod tests {
         crate::node::resolver::update("dev_bob", "bob_master");
         crate::crdt::set_identity_resolver(crate::node::resolver::resolve);
 
-        let mut state = ServerState::new("s1".into(), "S".into(), "owner_master".into());
+        let mut state = test_state("s1".into(), "S".into(), "owner_master".into());
         // Add Bob (master-keyed) + promote him to Admin, and ban a third identity.
         let add = state.create_op(CrdtPayload::MemberAdded {
             peer_id: "bob_master".into(), display_name: "bob".into(),
@@ -1859,7 +2060,7 @@ mod tests {
 
     #[test]
     fn create_server_has_general_channel_and_owner() {
-        let state = ServerState::new(
+        let state = test_state(
             "server1".into(),
             "My Server".into(),
             "peer_creator".into(),
@@ -1875,7 +2076,7 @@ mod tests {
 
     #[test]
     fn add_channel_and_member() {
-        let mut state = ServerState::new(
+        let mut state = test_state(
             "server1".into(),
             "Test".into(),
             "peer_a".into(),
@@ -1902,7 +2103,7 @@ mod tests {
 
     #[test]
     fn duplicate_ops_are_idempotent() {
-        let mut state = ServerState::new(
+        let mut state = test_state(
             "server1".into(),
             "Test".into(),
             "peer_a".into(),
@@ -1926,7 +2127,7 @@ mod tests {
     #[test]
     fn concurrent_ops_converge() {
         // Simulate two peers making concurrent changes
-        let mut state_a = ServerState::new(
+        let mut state_a = test_state(
             "server1".into(),
             "Test".into(),
             "peer_a".into(),
@@ -1964,7 +2165,7 @@ mod tests {
     /// owner-authored `twitch_verification_enabled=true` op that is NOT yet
     /// applied (tests choose when/where to apply it).
     fn owner_state_with_admin_and_setting() -> (ServerState, CrdtOp) {
-        let mut state = ServerState::new("s1".into(), "Test".into(), "owner".into());
+        let mut state = test_state("s1".into(), "Test".into(), "owner".into());
         let add = state.create_op(CrdtPayload::MemberAdded {
             peer_id: "admin_peer".into(),
             display_name: "A".into(),
@@ -2056,7 +2257,7 @@ mod tests {
 
     #[test]
     fn owner_has_all_permissions() {
-        let state = ServerState::new("s1".into(), "Test".into(), "owner".into());
+        let state = test_state("s1".into(), "Test".into(), "owner".into());
         assert!(state.has_permission("owner", Permission::MANAGE_SERVER));
         assert!(state.has_permission("owner", Permission::MANAGE_CHANNELS));
         assert!(state.has_permission("owner", Permission::MANAGE_ROLES));
@@ -2065,7 +2266,7 @@ mod tests {
 
     #[test]
     fn member_has_limited_permissions() {
-        let mut state = ServerState::new("s1".into(), "Test".into(), "owner".into());
+        let mut state = test_state("s1".into(), "Test".into(), "owner".into());
         let op = state.create_op(CrdtPayload::MemberAdded {
             peer_id: "member".into(),
             display_name: "M".into(),
@@ -2082,7 +2283,7 @@ mod tests {
 
     #[test]
     fn role_change_permissions() {
-        let mut state = ServerState::new("s1".into(), "Test".into(), "owner".into());
+        let mut state = test_state("s1".into(), "Test".into(), "owner".into());
         let op = state.create_op(CrdtPayload::MemberAdded {
             peer_id: "admin".into(),
             display_name: "A".into(),
@@ -2118,7 +2319,7 @@ mod tests {
 
     #[test]
     fn kick_permissions() {
-        let mut state = ServerState::new("s1".into(), "Test".into(), "owner".into());
+        let mut state = test_state("s1".into(), "Test".into(), "owner".into());
         let op = state.create_op(CrdtPayload::MemberAdded {
             peer_id: "mod".into(),
             display_name: "Mod".into(),
@@ -2155,7 +2356,7 @@ mod tests {
         // Regression test: Owner promotes member→admin, then demotes admin→member.
         // The demotion must succeed because the demotion op is HLC-later than
         // the promotion (merge is pure LWW; authority lives in can_change_role).
-        let mut state = ServerState::new("s1".into(), "Test".into(), "owner".into());
+        let mut state = test_state("s1".into(), "Test".into(), "owner".into());
         let op = state.create_op(CrdtPayload::MemberAdded {
             peer_id: "peer_b".into(),
             display_name: "B".into(),
@@ -2210,7 +2411,7 @@ mod tests {
 
     #[test]
     fn storage_pledge_set_and_read() {
-        let mut state = ServerState::new("s1".into(), "Test".into(), "owner".into());
+        let mut state = test_state("s1".into(), "Test".into(), "owner".into());
         assert_eq!(state.get_storage_pledge("owner"), 0);
         assert_eq!(state.total_pledged_bytes(), 0);
 
@@ -2226,7 +2427,7 @@ mod tests {
 
     #[test]
     fn storage_pledge_removed_with_member() {
-        let mut state = ServerState::new("s1".into(), "Test".into(), "owner".into());
+        let mut state = test_state("s1".into(), "Test".into(), "owner".into());
         let op = state.create_op(CrdtPayload::MemberAdded {
             peer_id: "peer_b".into(),
             display_name: "B".into(),
@@ -2270,7 +2471,7 @@ mod tests {
 
     #[test]
     fn label_lifecycle_create_update_delete() {
-        let mut state = ServerState::new("s1".into(), "Test".into(), "owner".into());
+        let mut state = test_state("s1".into(), "Test".into(), "owner".into());
 
         let op = state.create_op(CrdtPayload::LabelCreated {
             label_id: "lbl-1".into(),
@@ -2314,7 +2515,7 @@ mod tests {
 
     #[test]
     fn label_assignment_and_unassignment() {
-        let mut state = ServerState::new("s1".into(), "Test".into(), "owner".into());
+        let mut state = test_state("s1".into(), "Test".into(), "owner".into());
 
         let op = state.create_op(CrdtPayload::LabelCreated {
             label_id: "lbl-1".into(),
@@ -2349,7 +2550,7 @@ mod tests {
 
     #[test]
     fn label_delete_cleans_up_assignments() {
-        let mut state = ServerState::new("s1".into(), "Test".into(), "owner".into());
+        let mut state = test_state("s1".into(), "Test".into(), "owner".into());
 
         let op = state.create_op(CrdtPayload::LabelCreated {
             label_id: "lbl-1".into(),
@@ -2377,7 +2578,7 @@ mod tests {
     /// owner + admin + mod + member + vipper (a plain member holding the
     /// access label "vip"), one text channel "ch".
     fn label_gate_fixture() -> ServerState {
-        let mut s = ServerState::new("s1".into(), "Test".into(), "owner".into());
+        let mut s = test_state("s1".into(), "Test".into(), "owner".into());
         for (id, role) in [
             ("admin", Some(MemberRole::Admin)),
             ("mod", Some(MemberRole::Moderator)),
@@ -2566,7 +2767,7 @@ mod tests {
 
     #[test]
     fn ban_removes_member_and_associated_data() {
-        let mut state = ServerState::new("s1".into(), "Test".into(), "owner".into());
+        let mut state = test_state("s1".into(), "Test".into(), "owner".into());
         let op = state.create_op(CrdtPayload::MemberAdded {
             peer_id: "bad_peer".into(),
             display_name: "Bad".into(),
@@ -2601,7 +2802,7 @@ mod tests {
 
     #[test]
     fn unban_allows_rejoin() {
-        let mut state = ServerState::new("s1".into(), "Test".into(), "owner".into());
+        let mut state = test_state("s1".into(), "Test".into(), "owner".into());
         let op = state.create_op(CrdtPayload::MemberAdded {
             peer_id: "peer_b".into(),
             display_name: "B".into(),
@@ -2625,7 +2826,7 @@ mod tests {
 
     #[test]
     fn is_banned_defaults_false() {
-        let state = ServerState::new("s1".into(), "Test".into(), "owner".into());
+        let state = test_state("s1".into(), "Test".into(), "owner".into());
         assert!(!state.is_banned("nonexistent"));
     }
 
@@ -2633,7 +2834,7 @@ mod tests {
 
     #[test]
     fn channel_visibility_restricts_access() {
-        let mut state = ServerState::new("s1".into(), "Test".into(), "owner".into());
+        let mut state = test_state("s1".into(), "Test".into(), "owner".into());
         let op = state.create_op(CrdtPayload::ChannelAdded {
             channel_id: "ch-secret".into(),
             name: "secret".into(),
@@ -2686,7 +2887,7 @@ mod tests {
 
     #[test]
     fn channel_posting_restricts_sending() {
-        let mut state = ServerState::new("s1".into(), "Test".into(), "owner".into());
+        let mut state = test_state("s1".into(), "Test".into(), "owner".into());
         let op = state.create_op(CrdtPayload::ChannelAdded {
             channel_id: "ch-announce".into(),
             name: "announcements".into(),
@@ -2715,7 +2916,7 @@ mod tests {
 
     #[test]
     fn channel_public_flag() {
-        let mut state = ServerState::new("s1".into(), "Test".into(), "owner".into());
+        let mut state = test_state("s1".into(), "Test".into(), "owner".into());
         let general_id = state.channels.keys().next().unwrap().clone();
 
         assert!(!state.is_channel_public(&general_id));
@@ -2740,7 +2941,7 @@ mod tests {
     /// neutralized by the effective read.
     #[test]
     fn voice_channel_never_public() {
-        let mut state = ServerState::new("s1".into(), "Test".into(), "owner".into());
+        let mut state = test_state("s1".into(), "Test".into(), "owner".into());
         let op = state.create_op(CrdtPayload::ChannelAdded {
             channel_id: "ch-vc".into(),
             name: "Voice".into(),
@@ -2771,7 +2972,7 @@ mod tests {
 
     #[test]
     fn can_see_nonexistent_channel_returns_false() {
-        let mut state = ServerState::new("s1".into(), "Test".into(), "owner".into());
+        let mut state = test_state("s1".into(), "Test".into(), "owner".into());
         let op = state.create_op(CrdtPayload::MemberAdded {
             peer_id: "member".into(),
             display_name: "M".into(),
@@ -2785,7 +2986,7 @@ mod tests {
 
     #[test]
     fn nickname_set_and_read() {
-        let mut state = ServerState::new("s1".into(), "Test".into(), "owner".into());
+        let mut state = test_state("s1".into(), "Test".into(), "owner".into());
         assert_eq!(state.get_nickname("owner"), "");
 
         let op = state.create_op(CrdtPayload::NicknameChanged {
@@ -2800,7 +3001,7 @@ mod tests {
 
     #[test]
     fn twitch_username_set_and_read() {
-        let mut state = ServerState::new("s1".into(), "Test".into(), "owner".into());
+        let mut state = test_state("s1".into(), "Test".into(), "owner".into());
         assert_eq!(state.get_twitch_username("owner"), "");
 
         let op = state.create_op(CrdtPayload::TwitchUsernameChanged {
@@ -2815,7 +3016,7 @@ mod tests {
 
     #[test]
     fn pin_and_unpin_messages() {
-        let mut state = ServerState::new("s1".into(), "Test".into(), "owner".into());
+        let mut state = test_state("s1".into(), "Test".into(), "owner".into());
         let ch_id = state.channels.keys().next().unwrap().clone();
 
         assert!(state.get_pinned_messages(&ch_id).is_empty());
@@ -2858,7 +3059,7 @@ mod tests {
 
     #[test]
     fn channel_layout_update() {
-        let mut state = ServerState::new("s1".into(), "Test".into(), "owner".into());
+        let mut state = test_state("s1".into(), "Test".into(), "owner".into());
         assert!(state.channel_layout.is_empty());
 
         let layout = vec![
@@ -2881,7 +3082,7 @@ mod tests {
 
     #[test]
     fn channel_layout_invalid_json_ignored() {
-        let mut state = ServerState::new("s1".into(), "Test".into(), "owner".into());
+        let mut state = test_state("s1".into(), "Test".into(), "owner".into());
         let op = state.create_op(CrdtPayload::ChannelLayoutUpdated {
             layout_json: "not valid json".into(),
         });
@@ -2893,7 +3094,7 @@ mod tests {
 
     #[test]
     fn custom_role_permissions_override_defaults() {
-        let mut state = ServerState::new("s1".into(), "Test".into(), "owner".into());
+        let mut state = test_state("s1".into(), "Test".into(), "owner".into());
         let op = state.create_op(CrdtPayload::MemberAdded {
             peer_id: "member".into(),
             display_name: "M".into(),
@@ -2921,7 +3122,7 @@ mod tests {
 
     #[test]
     fn server_setting_and_min_pledge() {
-        let mut state = ServerState::new("s1".into(), "Test".into(), "owner".into());
+        let mut state = test_state("s1".into(), "Test".into(), "owner".into());
 
         // Default min_pledge_mb is 512
         assert_eq!(state.min_pledge_mb(), 512);
@@ -2938,7 +3139,7 @@ mod tests {
 
     #[test]
     fn server_rename() {
-        let mut state = ServerState::new("s1".into(), "Test".into(), "owner".into());
+        let mut state = test_state("s1".into(), "Test".into(), "owner".into());
         assert_eq!(state.name(), "Test");
 
         let op = state.create_op(CrdtPayload::ServerRenamed {
@@ -2952,7 +3153,7 @@ mod tests {
 
     #[test]
     fn channel_rename_and_remove() {
-        let mut state = ServerState::new("s1".into(), "Test".into(), "owner".into());
+        let mut state = test_state("s1".into(), "Test".into(), "owner".into());
         let op = state.create_op(CrdtPayload::ChannelAdded {
             channel_id: "ch-dev".into(),
             name: "dev".into(),
@@ -2979,7 +3180,7 @@ mod tests {
 
     #[test]
     fn voice_channel_type() {
-        let mut state = ServerState::new("s1".into(), "Test".into(), "owner".into());
+        let mut state = test_state("s1".into(), "Test".into(), "owner".into());
         let op = state.create_op(CrdtPayload::ChannelAdded {
             channel_id: "ch-vc".into(),
             name: "Voice".into(),
@@ -2994,7 +3195,7 @@ mod tests {
 
     #[test]
     fn member_removal_cleans_up_all_state() {
-        let mut state = ServerState::new("s1".into(), "Test".into(), "owner".into());
+        let mut state = test_state("s1".into(), "Test".into(), "owner".into());
         let op = state.create_op(CrdtPayload::MemberAdded {
             peer_id: "peer_b".into(),
             display_name: "B".into(),
@@ -3032,7 +3233,7 @@ mod tests {
 
     #[test]
     fn op_log_compacts_at_limit() {
-        let mut state = ServerState::new("s1".into(), "Test".into(), "owner".into());
+        let mut state = test_state("s1".into(), "Test".into(), "owner".into());
 
         // Apply 1010 ops (well past the 1000-op limit)
         for i in 0..1010 {
@@ -3053,7 +3254,7 @@ mod tests {
 
     #[test]
     fn op_log_dedup_survives_compaction() {
-        let mut state = ServerState::new("s1".into(), "Test".into(), "owner".into());
+        let mut state = test_state("s1".into(), "Test".into(), "owner".into());
 
         // Fill past compaction threshold
         for i in 0..1005 {
@@ -3117,8 +3318,8 @@ mod tests {
 
     #[test]
     fn op_for_wrong_server_rejected() {
-        let mut state = ServerState::new("s1".into(), "Test".into(), "owner".into());
-        let mut other = ServerState::new("s2".into(), "Other".into(), "owner".into());
+        let mut state = test_state("s1".into(), "Test".into(), "owner".into());
+        let mut other = test_state("s2".into(), "Other".into(), "owner".into());
         let op = other.create_op(CrdtPayload::ServerRenamed {
             new_name: "Hacked".into(),
         });
@@ -3129,7 +3330,7 @@ mod tests {
 
     #[test]
     fn labels_list_sorted_by_name() {
-        let mut state = ServerState::new("s1".into(), "Test".into(), "owner".into());
+        let mut state = test_state("s1".into(), "Test".into(), "owner".into());
         for (id, name) in [("lbl-z", "Zebra"), ("lbl-a", "Alpha"), ("lbl-m", "Middle")] {
             let op = state.create_op(CrdtPayload::LabelCreated {
                 label_id: id.into(),
@@ -3147,7 +3348,12 @@ mod tests {
 
     #[test]
     fn server_created_op_sets_owner() {
-        let mut state = ServerState::new("s1".into(), "Placeholder".into(), "temp".into());
+        // The join skeleton: a placeholder state with its seeded creator
+        // stripped, so no Owner exists yet. That is the only shape a founding
+        // op may act on.
+        let mut state = test_state("s1".into(), "Placeholder".into(), "temp".into());
+        state.members.remove("temp");
+        state.roles.remove("temp");
         let op = CrdtOp {
             server_id: "s1".into(),
             hlc: HlcTimestamp { physical_ms: 1, counter: 0, actor: "new_owner".into() },
@@ -3156,10 +3362,246 @@ mod tests {
                 name: "Real Name".into(),
                 owner_peer_id: "new_owner".into(),
             },
+            auth: None,
         };
         state.apply_op(&op).unwrap();
         assert_eq!(state.name(), "Real Name");
         assert_eq!(state.get_role("new_owner"), MemberRole::Owner);
         assert!(state.members.contains_key("new_owner"));
+    }
+
+    // --- Remote-op admission (CRDT-1 / CRDT-2) ---------------------------
+    //
+    // These are the inverted regression tests for the 2026-09 audit's Critical
+    // CRDT findings. Each one describes an op a hostile member could put on
+    // the wire before the fix; `admit_remote_op` is the single gate that now
+    // refuses it, and every remote ingest path calls it.
+
+    /// One server, owner = tag 1, member = tag 2, both able to sign as
+    /// themselves. Returns (state, owner id, member keys).
+    fn admitting_server() -> (ServerState, String, (NativeKeypair, String, String)) {
+        let (mut state, owner_id) = owned_state("s1", "Real Server", 1);
+        let member = keys(2);
+        let add = state.create_op(CrdtPayload::MemberAdded {
+            peer_id: member.1.clone(),
+            display_name: "M".into(),
+        });
+        state.apply_op(&add).unwrap();
+        (state, owner_id, member)
+    }
+
+    /// An op the owner would have authored, minus the proof. Every op on the
+    /// wire before this fix looked exactly like this.
+    #[test]
+    fn admit_remote_rejects_unsigned_op() {
+        let (state, owner_id, member) = admitting_server();
+        let op = CrdtOp {
+            server_id: "s1".into(),
+            hlc: HlcTimestamp { physical_ms: hlc_now(), counter: 0, actor: owner_id.clone() },
+            author: owner_id.clone(),
+            payload: CrdtPayload::RoleChanged {
+                peer_id: member.1.clone(),
+                role: MemberRole::Admin,
+                priority: MemberRole::Admin.priority(),
+            },
+            auth: None,
+        };
+        assert_eq!(state.admit_remote_op(&op), Err(OpReject::MissingSignature));
+    }
+
+    /// The member signs with its OWN key but writes the owner's id into
+    /// `author` — the author-spoof that promoted anyone to Admin.
+    #[test]
+    fn admit_remote_rejects_author_mismatch() {
+        let (state, owner_id, member) = admitting_server();
+        let mut op = CrdtOp {
+            server_id: "s1".into(),
+            hlc: HlcTimestamp { physical_ms: hlc_now(), counter: 0, actor: member.1.clone() },
+            author: owner_id.clone(),
+            payload: CrdtPayload::RoleChanged {
+                peer_id: member.1.clone(),
+                role: MemberRole::Admin,
+                priority: MemberRole::Admin.priority(),
+            },
+            auth: None,
+        };
+        op.sign(&member.0, &member.2);
+        assert_eq!(state.admit_remote_op(&op), Err(OpReject::AuthorMismatch));
+    }
+
+    /// A real owner-authored op whose PAYLOAD was rewritten in flight. The
+    /// key still derives the author, so only the signature catches it.
+    #[test]
+    fn admit_remote_rejects_bad_signature() {
+        let (mut state, _owner_id, member) = admitting_server();
+        let mut op = state.create_op(CrdtPayload::RoleChanged {
+            peer_id: member.1.clone(),
+            role: MemberRole::Moderator,
+            priority: MemberRole::Moderator.priority(),
+        });
+        op.payload = CrdtPayload::RoleChanged {
+            peer_id: member.1.clone(),
+            role: MemberRole::Admin,
+            priority: MemberRole::Admin.priority(),
+        };
+        assert_eq!(state.admit_remote_op(&op), Err(OpReject::BadSignature));
+    }
+
+    /// CRDT-2: a validly signed op stamped at the end of time. It would win
+    /// every future LWW comparison and lock the field against its real owner.
+    #[test]
+    fn admit_remote_rejects_future_hlc() {
+        let (mut state, owner_id, _member) = admitting_server();
+        let mut op = state.create_op(CrdtPayload::ServerRenamed { new_name: "PWNED".into() });
+        op.hlc.physical_ms = u64::MAX;
+        // Re-sign so the ONLY thing wrong with the op is its timestamp.
+        let (kp, _, pk) = keys(1);
+        op.sign(&kp, &pk);
+        assert_eq!(op.author, owner_id, "authored by the real owner");
+        assert!(op.verify_author().is_ok(), "signature itself is valid");
+        assert_eq!(state.admit_remote_op(&op), Err(OpReject::FutureHlc));
+    }
+
+    /// The honest case still passes all three checks.
+    #[test]
+    fn admit_remote_accepts_valid_signed_op() {
+        let (mut state, _owner_id, member) = admitting_server();
+        let op = state.create_op(CrdtPayload::RoleChanged {
+            peer_id: member.1.clone(),
+            role: MemberRole::Admin,
+            priority: MemberRole::Admin.priority(),
+        });
+        assert_eq!(state.admit_remote_op(&op), Ok(()));
+
+        // And a member's own self-write is admitted too (no privilege needed).
+        let mut replica = state.clone();
+        replica.set_signer(member.0.clone(), member.2.clone());
+        replica.set_hlc(Hlc::new(member.1.clone()));
+        let self_op = replica.create_op(CrdtPayload::NicknameChanged {
+            peer_id: member.1.clone(),
+            nickname: "Em".into(),
+        });
+        assert_eq!(state.admit_remote_op(&self_op), Ok(()));
+    }
+
+    /// CRDT-1: the takeover. A plain member signs a perfectly valid
+    /// `ServerCreated` naming ITSELF as owner of a server that already has
+    /// one. The signature is real; the op is refused on the merits, and even
+    /// if it reached `apply_op` it changes nothing.
+    #[test]
+    fn server_created_on_owned_server_is_rejected() {
+        let (mut state, owner_id, member) = admitting_server();
+
+        let mut hostile = state.clone();
+        hostile.set_signer(member.0.clone(), member.2.clone());
+        hostile.set_hlc(Hlc::new(member.1.clone()));
+        let op = hostile.create_op(CrdtPayload::ServerCreated {
+            name: "Real Server".into(),
+            owner_peer_id: member.1.clone(),
+        });
+        assert!(op.verify_author().is_ok(), "the attacker really does hold this key");
+        assert_eq!(state.admit_remote_op(&op), Err(OpReject::NotAllowed));
+
+        // Belt and braces: apply_op is a no-op even without the gate.
+        state.apply_op(&op).unwrap();
+        assert_eq!(state.get_role(&member.1), MemberRole::Member, "still a plain member");
+        assert_eq!(state.get_role(&owner_id), MemberRole::Owner, "owner unchanged");
+        assert_eq!(state.name(), "Real Server");
+        assert_eq!(state.current_owner().as_deref(), Some(owner_id.as_str()));
+    }
+
+    /// The snapshot clamp: a hostile join responder stamps EVERY register in
+    /// the state it hands us at the end of time. After adoption every one of
+    /// them sits inside the drift bound, so honest writes can still win.
+    #[test]
+    fn snapshot_clamp_future_hlcs_bounds_every_register() {
+        let (mut state, owner_id) = owned_state("s1", "Server", 1);
+        let (_, member_id, _) = keys(2);
+        for payload in [
+            CrdtPayload::MemberAdded { peer_id: member_id.clone(), display_name: "M".into() },
+            CrdtPayload::RoleChanged {
+                peer_id: member_id.clone(),
+                role: MemberRole::Moderator,
+                priority: MemberRole::Moderator.priority(),
+            },
+            CrdtPayload::NicknameChanged { peer_id: member_id.clone(), nickname: "Em".into() },
+            CrdtPayload::TwitchUsernameChanged { peer_id: member_id.clone(), twitch_username: "em".into() },
+            CrdtPayload::StoragePledgeChanged { peer_id: member_id.clone(), pledge_bytes: 1 },
+            CrdtPayload::ServerSettingChanged { key: "k".into(), value: "v".into() },
+            CrdtPayload::RolePermissionsChanged { role: "member".into(), permissions: 1 },
+            CrdtPayload::MemberBanned { peer_id: "banned".into() },
+            CrdtPayload::MemberMuted { peer_id: member_id.clone(), expires_at: u64::MAX },
+            CrdtPayload::ChannelGrantSet {
+                channel_id: "c".into(),
+                peer_id: member_id.clone(),
+                expires_at: u64::MAX,
+            },
+        ] {
+            let op = state.create_op(payload);
+            state.apply_op(&op).unwrap();
+        }
+
+        // Every register in the state, stamped at the end of time.
+        fn poison<V: Clone>(reg: &mut AdminLwwReg<V>) {
+            let far_future =
+                HlcTimestamp { physical_ms: u64::MAX, counter: 0, actor: "evil".into() };
+            let value = reg.read().clone();
+            let priority = reg.priority();
+            *reg = AdminLwwReg::new(value, far_future, priority);
+        }
+        poison(&mut state.name);
+        for reg in state.roles.values_mut() { poison(reg); }
+        for reg in state.nicknames.values_mut() { poison(reg); }
+        for reg in state.twitch_usernames.values_mut() { poison(reg); }
+        for reg in state.storage_pledges.values_mut() { poison(reg); }
+        for reg in state.settings.values_mut() { poison(reg); }
+        for reg in state.role_permissions.values_mut() { poison(reg); }
+        for reg in state.banned_members.values_mut() { poison(reg); }
+        for reg in state.muted_members.values_mut() { poison(reg); }
+        for m in state.channel_grants.values_mut() {
+            for reg in m.values_mut() { poison(reg); }
+        }
+
+        let now = hlc_now();
+        let clamped = state.clamp_future_hlcs(now);
+        assert!(clamped >= 11, "every poisoned register is pulled back, got {clamped}");
+
+        let bound = now + crate::crdt::hlc::MAX_DRIFT_MS;
+        fn check<V: Clone>(reg: &AdminLwwReg<V>, bound: u64) -> usize {
+            assert!(
+                reg.hlc().physical_ms <= bound,
+                "register left beyond the drift bound: {}",
+                reg.hlc().physical_ms
+            );
+            1
+        }
+        let mut checked = check(&state.name, bound);
+        for reg in state.roles.values() { checked += check(reg, bound); }
+        for reg in state.nicknames.values() { checked += check(reg, bound); }
+        for reg in state.twitch_usernames.values() { checked += check(reg, bound); }
+        for reg in state.storage_pledges.values() { checked += check(reg, bound); }
+        for reg in state.settings.values() { checked += check(reg, bound); }
+        for reg in state.role_permissions.values() { checked += check(reg, bound); }
+        for reg in state.banned_members.values() { checked += check(reg, bound); }
+        for reg in state.muted_members.values() { checked += check(reg, bound); }
+        for m in state.channel_grants.values() {
+            for reg in m.values() { checked += check(reg, bound); }
+        }
+        assert!(checked >= 11, "the walk must actually visit every register, saw {checked}");
+
+        // The point of clamping: the field is bounded, not locked. A write at
+        // the bound still outranks the clamped register and is still inside
+        // the drift window, so it is admitted and it lands. Against
+        // `u64::MAX` no write ever could.
+        state.set_hlc(Hlc::from_saved(bound, 0, owner_id.clone()));
+        let rename = state.create_op(CrdtPayload::ServerRenamed { new_name: "Fine".into() });
+        assert_eq!(state.admit_remote_op(&rename), Ok(()));
+        state.apply_op(&rename).unwrap();
+        assert_eq!(state.name(), "Fine", "an honest write must be able to win again");
+        assert_eq!(state.current_owner().as_deref(), Some(owner_id.as_str()));
+    }
+
+    fn hlc_now() -> u64 {
+        crate::crdt::hlc::wall_clock_ms()
     }
 }

@@ -735,14 +735,44 @@ int _effectiveAutoDownloadMb(
   return global;
 }
 
+/// Ceiling for a recorded voice note, in bytes. Hollow records Opus at a
+/// speech bitrate, so 8 MiB is many minutes of talking and still far under the
+/// size a sender would need to smuggle a real payload in under a voice name.
+/// Mirrors the Rust twin's cap on the same exemption.
+const int kVoiceNoteMaxBytes = 8 * 1024 * 1024;
+
 /// True when [fileName] is a recorded voice message. Voice notes are exempt
 /// from the auto-download gate on every path (they behave like text). Matches
 /// both the UI display name and the recorder's temp basename that actually
 /// rides the wire (`voice_{stamp}_{rand}.ogg`) — keep in sync with the Rust
 /// twin `file_handler::is_voice_message_name`.
+///
+/// A name is not evidence on its own: the sender picks it. Anything that acts
+/// on the answer (auto-download, or handing bytes to a decoder before the user
+/// asks) must use [isGenuineVoiceNote] instead.
 bool isVoiceMessageFile(String fileName) {
   return fileName == 'Voice message.ogg' ||
       (fileName.startsWith('voice_') && fileName.endsWith('.ogg'));
+}
+
+/// True when an attachment is a genuine recorded voice note, and may therefore
+/// skip the auto-download gate the way text does.
+///
+/// Every fact has to agree: the header's own voice flag, the recorder's name
+/// shape, the `ogg` extension, and a size a voice note could plausibly have.
+/// The name alone lets a sender label any bytes `voice_x.ogg` and have them
+/// pulled and opened without a tap, which is the whole point of the gate.
+/// Mirrors the Rust twin's exemption; keep the two in sync.
+bool isGenuineVoiceNote({
+  required bool voice,
+  required String name,
+  required String ext,
+  required int sizeBytes,
+}) {
+  return voice &&
+      isVoiceMessageFile(name) &&
+      ext.toLowerCase() == 'ogg' &&
+      sizeBytes <= kVoiceNoteMaxBytes;
 }
 
 /// Vault cache size cap in MB. Files downloaded from server channels are

@@ -12,6 +12,11 @@
 # analysis carries a fresh coverage report (skipping it makes Sonar report
 # the Rust core as having no coverage data at all), and with nextest that
 # costs ~3 minutes warm instead of ~20.
+#
+# Every third-party action is pinned to a commit SHA, not a tag. A tag is a
+# mutable pointer: whoever can move `v4` can run their code with this
+# workflow's token and secrets. The trailing comment names the release the
+# SHA belongs to so Dependabot (.github/dependabot.yml) can bump both together.
 
 name: CI
 
@@ -26,6 +31,14 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# Least privilege for GITHUB_TOKEN across every job. Nothing here writes to the
+# repo: the two upload/download-artifact steps authenticate with the Actions
+# runtime token (not GITHUB_TOKEN), Codecov uploads with CODECOV_TOKEN and
+# Sonar with SONAR_TOKEN, both from secrets. A job that ever does need more
+# must ask for it at the job level, not here.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -37,15 +50,20 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      # persist-credentials: false — checkout otherwise leaves GITHUB_TOKEN in
+      # .git/config for every later step (and anything they shell out to).
+      # Nothing in this workflow pushes, so it never needs to be on disk.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
         with:
           components: llvm-tools-preview, clippy
 
       - name: Cache cargo registry & build
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.cargo/registry
@@ -57,7 +75,7 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Install cargo-llvm-cov & cargo-nextest
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@e67fa11c4b9316fa714ddf0abed07a0c3143b95b # v2
         with:
           tool: cargo-llvm-cov,cargo-nextest
 
@@ -89,7 +107,7 @@ jobs:
           --ignore-filename-regex "(frb_generated|/api/|/node/|/storage/|/archive/)"
 
       - name: Publish reports for the Sonar job
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: rust-reports
           path: |
@@ -99,22 +117,53 @@ jobs:
           if-no-files-found: error
 
       - name: Upload to Codecov
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@0fb7174895f61a3b6b78fc075e0cd60383518dac # v5
         with:
           files: rust/hollow_core/lcov.info
           flags: rust
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false
 
+  audit:
+    # RustSec advisories against the resolved lockfile. Separate job so a new
+    # advisory reads as its own red check instead of hiding inside the suite,
+    # and so it costs seconds rather than waiting on the coverage build.
+    #
+    # Accepted advisories live in rust/hollow_core/.cargo/audit.toml, one
+    # reason per id. Anything NOT listed there fails this job.
+    name: Cargo Audit
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@e67fa11c4b9316fa714ddf0abed07a0c3143b95b # v2
+        with:
+          tool: cargo-audit
+
+      # No --deny warnings: unmaintained/unsound notices are triaged in
+      # audit.toml by id. This gates on vulnerabilities.
+      - name: cargo audit
+        working-directory: rust/hollow_core
+        run: cargo audit
+
   dart:
     name: Dart Analyze & Test
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
       - name: Install Flutter
-        uses: subosito/flutter-action@v2
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
         with:
           # Pinned to the version the project develops on. Bump both this and
           # the sonar job's pin together on a Flutter upgrade.
@@ -144,21 +193,22 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           # Full history so Sonar can attribute new vs old code
           fetch-depth: 0
+          persist-credentials: false
 
       # lcov.info and clippy-report.json, produced once by the rust job. The
       # artifact keeps its repo-relative layout, so these land exactly where
       # sonar-project.properties expects them.
       - name: Download Rust reports
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: rust-reports
 
       - name: Install Flutter
-        uses: subosito/flutter-action@v2
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
         with:
           flutter-version: 3.47.0
           channel: stable
@@ -169,7 +219,10 @@ jobs:
       - name: Flutter pub get
         run: flutter pub get
 
+      # SONAR_TOKEN is the only credential this needs. PR decoration is done
+      # by the SonarQube Cloud GitHub App, not by GITHUB_TOKEN, so the job
+      # stays on the workflow's read-only default.
       - name: SonarQube scan
-        uses: SonarSource/sonarqube-scan-action@v6
+        uses: SonarSource/sonarqube-scan-action@fd88b7d7ccbaefd23d8f36f73b59db7a3d246602 # v6
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}

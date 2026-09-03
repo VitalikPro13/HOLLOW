@@ -1,0 +1,20 @@
+# Actions in .github/workflows/ are pinned to commit SHAs so a moved tag cannot
+# swap the code that runs with this repo's token. A SHA never updates itself,
+# which is the point and also the cost: without this file the pins would quietly
+# rot and we would stop getting the upstream security fixes we pinned away from.
+# Dependabot reads the `# v4` comment beside each SHA, so its PRs move the SHA
+# and the comment together.
+#
+# github-actions only. Cargo and pub are deliberately absent: the Rust lockfile
+# is bumped deliberately (an openmls or rusqlite jump is a persistence-format
+# question, not a patch), and cargo audit in CI is what watches it meanwhile.
+version: 2
+
+updates:
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "ci"

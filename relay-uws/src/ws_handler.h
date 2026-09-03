@@ -12,3 +12,7 @@ void sweep_offline_buffer(RelayState& state);
 // Release multi-device link codes whose 5-minute TTL has elapsed (server-side
 // backstop; the live countdown is client-side). Called from main's timer loop.
 void sweep_link_codes(RelayState& state);
+
+// Drop per-IP link-code guess records that have gone quiet for
+// LINK_GUESS_EXPIRE_SECS. Called from main's timer loop.
+void sweep_link_guesses(RelayState& state);

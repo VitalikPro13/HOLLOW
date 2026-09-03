@@ -20,6 +20,11 @@ pub(crate) async fn handle_webrtc_broadcast_received(
     kind: String,
     shard_index: u16,
 ) {
+    // SECURITY (TRANSPORT-3): the TTL is a wire field. Unclamped, a neighbor
+    // could hand us 255 and have the mesh forward the same broadcast 255 hops
+    // deep. Cap it the way the BroadcastMeta path already does.
+    let ttl = ttl.min(MAX_BROADCAST_TTL);
+
     // Find which server this broadcast belongs to by checking overlays.
     // For now, check all overlays for the broadcast_id.
     let mut relayed = false;
@@ -195,5 +200,50 @@ pub(crate) fn handle_gossip_exchange(
                 send_raw_to_peer(ws_cmd_tx, ws_room_peers, neighbor, data.clone());
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// TRANSPORT-3 regression: a neighbor sets the hop count, so a relay that
+    /// forwarded `ttl - 1` verbatim would carry a broadcast 255 hops deep on
+    /// one peer's say-so. What we forward is bounded by our own ceiling.
+    #[tokio::test]
+    async fn webrtc_broadcast_ttl_is_clamped() {
+        const NEIGHBOR: &str = "12D3KooW-relay-neighbor";
+        const SENDER: &str = "12D3KooW-gossip-sender";
+
+        let mut overlay = super::super::gossip::GossipOverlay::new("srv-ttl".into());
+        overlay.neighbors.insert(NEIGHBOR.to_string());
+        let mut overlays = HashMap::from([("srv-ttl".to_string(), overlay)]);
+
+        let (event_tx, mut event_rx) = mpsc::channel(8);
+        let webrtc_peers = std::collections::HashSet::from([NEIGHBOR.to_string()]);
+
+        handle_webrtc_broadcast_received(
+            &mut overlays,
+            &event_tx,
+            &webrtc_peers,
+            "bcast-ttl-1".to_string(),
+            u8::MAX,
+            "12D3KooW-origin".to_string(),
+            SENDER.to_string(),
+            "/tmp/does-not-need-to-exist".to_string(),
+            1024,
+            "file".to_string(),
+            0,
+        )
+        .await;
+
+        let ev = event_rx.try_recv().expect("a reachable neighbor gets a relay event");
+        let NetworkEvent::GossipRelayFile { ttl, .. } = ev else {
+            panic!("expected a GossipRelayFile event");
+        };
+        assert!(
+            ttl < MAX_BROADCAST_TTL,
+            "relayed ttl {ttl} must be under MAX_BROADCAST_TTL ({MAX_BROADCAST_TTL})",
+        );
     }
 }

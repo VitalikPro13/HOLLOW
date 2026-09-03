@@ -36,7 +36,7 @@ log = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "time", "net", "io-util", "process"] }
-rusqlite = { version = "0.34", features = ["bundled-sqlcipher"] }
+rusqlite = { version = "0.40.2", features = ["bundled-sqlcipher"] }
 hex = "0.4"
 sha2 = "0.10"
 bip39 = "2.2"
@@ -46,11 +46,11 @@ vodozemac = "0.9"
 base64 = "0.22"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream", "socks"] }
 crdts = "7.3"
-openmls = "0.8"
-openmls_rust_crypto = "0.5"
-openmls_basic_credential = "0.5"
-openmls_traits = "0.5"
-openmls_memory_storage = "0.5"
+openmls = "0.9"
+openmls_rust_crypto = "0.6"
+openmls_basic_credential = "0.6"
+openmls_traits = "0.6"
+openmls_memory_storage = "0.6"
 image = { version = "0.25", default-features = false, features = ["webp", "png", "jpeg", "gif", "bmp"] }
 webp-animation = "0.9"
 # Direct libwebp for animated encodes: webp-animation 0.9 never applies
@@ -66,6 +66,9 @@ tokio-socks = "0.5"
 futures-util = "0.3"
 aes-gcm = "0.10"
 ed25519-dalek = { version = "2", features = ["pkcs8"] }
+# Wipes raw seed / secret-key buffers on drop (identity/native_identity.rs).
+# Already transitive through ed25519-dalek's own default `zeroize` feature.
+zeroize = { version = "1", features = ["derive"] }
 # Artist shop support credentials: RFC 9474 blind signatures (node/support_rsa.rs).
 # Pinned exactly: the shop signs with the same crate through the hollowpack binary.
 blind-rsa-signatures = "=0.17.2"

@@ -1002,6 +1002,12 @@ pub(crate) fn media_fetch_and_store(
         None => proxy_pick_bytes(&id)?,
     };
     let dl_ms = t0.elapsed().as_millis();
+    // PROFILE-1 (same class): these bytes came off Klipy's CDN, and the
+    // transcoder below decodes them. Hold the DECLARED canvas to the remote
+    // ceiling before a decoder ever sees the header.
+    if let Err(why) = crate::node::image_convert::validate_remote_image_header(&raw) {
+        return Err(format!("This {} {why}", kind.label()));
+    }
     let convert = match kind {
         MediaKind::Gif => crate::node::image_convert::process_gif_for_send,
         MediaKind::Sticker => crate::node::image_convert::process_sticker_for_send,

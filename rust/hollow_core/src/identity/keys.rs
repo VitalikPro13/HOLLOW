@@ -58,10 +58,12 @@ pub(crate) fn device_keypair_path() -> Result<PathBuf, String> {
 
 /// Generate a brand new identity from a fresh BIP-39 mnemonic.
 pub(crate) fn generate_new_identity() -> Result<IdentityData, String> {
-    // Generate 24-word mnemonic (256 bits of entropy).
-    let mut entropy = [0u8; 32];
-    getrandom::fill(&mut entropy).map_err(|e| format!("RNG failed: {e}"))?;
-    let mnemonic = Mnemonic::from_entropy(&entropy)
+    // Generate 24-word mnemonic (256 bits of entropy). The entropy IS the
+    // identity, so the buffer is wiped when this returns rather than left in
+    // freed stack memory.
+    let mut entropy = zeroize::Zeroizing::new([0u8; 32]);
+    getrandom::fill(&mut entropy[..]).map_err(|e| format!("RNG failed: {e}"))?;
+    let mnemonic = Mnemonic::from_entropy(&entropy[..])
         .map_err(|e| format!("Mnemonic generation failed: {e}"))?;
     let mnemonic_phrase = mnemonic.to_string();
 
@@ -79,11 +81,8 @@ pub(crate) fn generate_new_identity() -> Result<IdentityData, String> {
     // unrelated master, which then got published as a master-as-device entry in the
     // device list and broke friend/DM keying for peers. Mirror
     // `restore_identity_from_mnemonic`, which already mints fresh + overwrites.)
-    let device_secret = {
-        let mut s = [0u8; 32];
-        getrandom::fill(&mut s).map_err(|e| format!("RNG failed: {e}"))?;
-        s
-    };
+    let mut device_secret = zeroize::Zeroizing::new([0u8; 32]);
+    getrandom::fill(&mut device_secret[..]).map_err(|e| format!("RNG failed: {e}"))?;
     let device_keypair = NativeKeypair::from_secret_bytes(&device_secret);
     save_keypair_to(&device_keypair_path()?, &device_keypair)?;
     let device_peer_id = device_keypair.peer_id();
@@ -114,11 +113,8 @@ pub(crate) fn restore_identity_from_mnemonic(phrase: &str) -> Result<IdentityDat
     // peer_id is distinct from the originating device — seeding from master
     // would recreate the same-peer_id collision we are fixing. We overwrite any
     // stale identity.device left over from a previous identity on this install.
-    let device_secret = {
-        let mut s = [0u8; 32];
-        getrandom::fill(&mut s).map_err(|e| format!("RNG failed: {e}"))?;
-        s
-    };
+    let mut device_secret = zeroize::Zeroizing::new([0u8; 32]);
+    getrandom::fill(&mut device_secret[..]).map_err(|e| format!("RNG failed: {e}"))?;
     let device_keypair = NativeKeypair::from_secret_bytes(&device_secret);
     save_keypair_to(&device_keypair_path()?, &device_keypair)?;
     let device_peer_id = device_keypair.peer_id();

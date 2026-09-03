@@ -4371,6 +4371,10 @@ pub fn webrtc_broadcast_received(
     // holding it across block_on(send) serializes all other FFI calls.
     drop(guard);
     let rt = get_runtime();
+    // SECURITY (TRANSPORT-3): the TTL came off a data channel a peer controls.
+    // Clamp at the door as well as at the handler, so nothing downstream ever
+    // sees a hop count the mesh never mints.
+    let ttl = ttl.min(crate::node::types::MAX_BROADCAST_TTL);
     rt.block_on(cmd_tx.send(node::NodeCommand::WebRtcBroadcastReceived {
         transfer_id, broadcast_id, ttl, origin_peer_id, sender_peer_id,
         temp_path, total_size, kind, shard_index,

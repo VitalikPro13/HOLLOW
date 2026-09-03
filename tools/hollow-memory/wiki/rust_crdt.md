@@ -114,19 +114,51 @@ Two-tier comparison:
 
 ```
 CrdtOp {
-    server_id: String,       // which server this op belongs to
-    hlc: HlcTimestamp,       // when the op was created
-    author: String,          // peer_id of the originator
-    payload: CrdtPayload,   // the actual mutation
+    server_id: String,          // which server this op belongs to
+    hlc: HlcTimestamp,          // when the op was created
+    author: String,             // peer_id (MASTER) of the originator
+    payload: CrdtPayload,       // the actual mutation
+    auth: Option<Box<CrdtAuth>>, // {sig, pk}, the author's proof
 }
 ```
 
-Self-contained: every op carries its own server, author, timestamp, and payload. No external context needed to apply it.
+Self-contained: every op carries its own server, author, timestamp, payload and proof. No external context needed to apply it.
+
+### CRDT op signature (2026-09-03)
+
+`author` used to be a free string with nothing behind it, so any peer who could
+put a frame into a server room could write ops as the Owner. It is a claim that
+`auth` has to prove now.
+
+- **Payload signed:** `hollow-crdt1:{server_id}:{physical_ms}:{counter}:{actor}:{author}:{payload_json}`.
+  The free-form JSON goes LAST, exactly like `hollow-msg2`, because every field
+  before it is colon-free. Deterministic: no `CrdtPayload` variant holds a map
+  or a set, so serde emits the same bytes every time.
+- **Key:** the MASTER keypair. `author` and the `members`/`roles` maps are
+  master-keyed, so a device key would never derive the author id. `ServerState`
+  holds it in a `#[serde(skip)] signer` installed by `install_op_signer`
+  alongside every `set_hlc`. `create_op` signs, and it `expect`s the signer the
+  way it expects the HLC, because an unsigned op is one every peer discards.
+- **Verify:** `CrdtOp::verify_author` requires that `pk` derives `author`
+  (`NativeKeypair::peer_id_from_pubkey_protobuf`) AND that the signature checks
+  out. An op with no `auth` is rejected. There is no tolerance branch: an
+  `if auth.is_some()` gate would BE the bypass, and a permissive migration
+  window on a public repo is a published hole.
+- **Where it runs:** `ServerState::admit_remote_op`, the single admission gate
+  for a remotely-authored op. Signature, then the clock bound
+  (`MAX_DRIFT_MS`), then `op_allowed`. Called at all four remote ingest sites,
+  one of which is inside `sync::merge_ops` so every SyncResponse path is
+  covered at once. `merge_ops` reports how many ops it refused. Ops we author
+  ourselves skip the gate: `create_op` signed them and the send handlers
+  already gated them.
+- **Not covered:** who may hand an op over. The gate binds an op to its AUTHOR
+  and is deliberately indifferent to the sender, because relaying somebody
+  else's op is the normal case (join fan-out, gossip re-flood).
 
 ### CrdtPayload Variants
 
 **Server-level:**
-- `ServerCreated { name: String, owner_peer_id: String }` — genesis operation. Sets server name as AdminLwwReg with Owner priority. Adds owner to members and roles.
+- `ServerCreated { name: String, owner_peer_id: String }` — genesis operation. Sets server name as AdminLwwReg with Owner priority. Adds owner to members and roles. **Admitted only on a state that has NO Owner yet** (a join skeleton replaying an op log) **and only from the peer it names as owner**. The real owner's own re-send is admitted and applies nothing. It used to be allowed unconditionally, which let any member mint itself Owner of a server it did not create (audit CRDT-1).
 - `ServerRenamed { new_name: String }` — changes server name via AdminLwwReg merge. Author priority looked up from their role in the server.
 - `ServerSettingChanged { key: String, value: String }` — generic key-value settings (e.g., `min_pledge_mb`). Each key is an AdminLwwReg<String>.
 - `ServerDeleted { deleted_at: i64 }` — **server deletion tombstone (Step 9D)**. Owner-authored only (validated at every ingest, not in apply). `apply_op` sets `ServerState.deleted = true` and drains members/roles/channels/etc., but KEEPS `server_id` + `op_log` so the node keeps serving the deletion op to reconnecting peers via grow-only sync (this is what lets an OFFLINE member reconcile a deletion — the old one-shot was missed forever). `deleted` is a monotonic delete-wins latch (no un-delete op). UI hides tombstoned servers via `get_joined_servers`. Replaces the old one-shot `ServerDeleteBroadcast`/MLS `ServerDelete`.

@@ -257,7 +257,19 @@ pub(crate) async fn handle_emote_assets(
         let Some(kind) = requested.get(&hash).copied() else {
             continue;
         };
-        if bytes.is_empty() || bytes.len() > kind.recv_cap() || !is_webp(&bytes) {
+        // SECURITY (SHOP-2, same class): the byte cap says nothing about the
+        // DECODED size, and every later reader of this blob decodes it (the
+        // public-channel banner thumb, for one). A blob that DECLARES a canvas
+        // over the ceiling is refused before it reaches the cache. A blob whose
+        // header we cannot read is left to the existing rule (container magic
+        // plus content hash, no decode) — a decoder rejects an unreadable
+        // header outright, so there is no allocation to bound there.
+        let canvas_ok = crate::node::image_convert::webp_header_dimensions(&bytes)
+            .is_none_or(|(w, h)| {
+                w <= crate::node::image_convert::MAX_DECODE_DIM
+                    && h <= crate::node::image_convert::MAX_DECODE_DIM
+            });
+        if bytes.is_empty() || bytes.len() > kind.recv_cap() || !is_webp(&bytes) || !canvas_ok {
             // A requested hash answered with invalid bytes: clear the
             // request slot so a later ask can retry from another holder.
             requested.remove(&hash);

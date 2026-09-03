@@ -841,6 +841,7 @@ async fn run_event_loop(
                         match serde_json::from_str::<ServerState>(&json) {
                             Ok(mut state) => {
                                 state.set_hlc(Hlc::new(local_peer_str.to_string()));
+                                install_op_signer(&mut state, &bundle_keypair);
                                 // Restore op_log from crdt_ops table (no longer serialized in state JSON).
                                 if state.op_log.is_empty() {
                                     if let Ok(ops) = store.load_ops_for_server(&server_id) {
@@ -2563,8 +2564,11 @@ async fn run_event_loop(
                         last_message_traffic = std::time::Instant::now();
                         voice_handler::handle_call_send_signal(
                             peer_id, signal_type, payload,
+                            &mut olm, &crypto_store, &event_tx,
                             &ws_cmd_tx, &ws_room_peers,
-                        );
+                            &mut key_request_in_flight,
+                            &device_keypair, &device_peer_id, &local_peer_str,
+                        ).await;
                     }
 
                     // -- Voice channel commands (Phase 5C) --
@@ -6070,6 +6074,20 @@ fn enforce_device_revocations(
     }
 }
 
+/// Install our MASTER signing key on a server state that will author ops.
+///
+/// Goes hand in hand with `set_hlc` at EVERY site: a state that can create an
+/// op must be able to sign it, and `create_op` panics rather than emit an
+/// unsigned op that every peer would reject. The MASTER key, not the device
+/// key — `CrdtOp::author` and the `members`/`roles` maps are master-keyed.
+pub(crate) fn install_op_signer(
+    state: &mut ServerState,
+    master: &crate::identity::native_identity::NativeKeypair,
+) {
+    let pk_b64 = base64::engine::general_purpose::STANDARD.encode(master.public_key_protobuf());
+    state.set_signer(master.clone(), pk_b64);
+}
+
 /// Apply ONE remotely-authored CRDT op: the single ingest path for a
 /// `CrdtOpBroadcast` and for the `MemberAdded` op a `ServerJoinResolved` frame
 /// carries. Author-validated by `op_allowed` (never sender-validated: the
@@ -6117,15 +6135,17 @@ async fn apply_remote_crdt_op(
             hollow_log!("[HOLLOW-CRDT] Note: CrdtOpBroadcast author '{}' differs from sender '{peer_str}' (relay)", op.author);
         }
 
-        // SECURITY: Verify the AUTHOR has permission for this operation type.
-        // Shared ingest matrix (ServerState::op_allowed): uses op.author (the
-        // original creator) for the role lookup, not the sender (who may be
-        // relaying the op), and is override-aware — the same matrix the local
-        // send handlers gate on.
+        // SECURITY: the ONE admission gate (ServerState::admit_remote_op) —
+        // the author's signature, the clock bound, then the shared permission
+        // matrix. It validates op.author (the original creator), never the
+        // sender, who may legitimately be relaying.
         {
             let state = server_states.get(&server_id).unwrap();
-            if !state.op_allowed(&op) {
-                hollow_log!("[HOLLOW-SECURITY] REJECTED CrdtOpBroadcast from {peer_str} — insufficient permission for {:?} (role: {:?})", op.payload, state.get_role(&op.author));
+            if let Err(reason) = state.admit_remote_op(&op) {
+                hollow_log!(
+                    "[HOLLOW-SECURITY] REJECTED CrdtOp {} for {server_id} from {peer_str}: {reason}",
+                    crate::crdt::sync::payload_name(&op.payload),
+                );
                 return;
             }
         }
@@ -8487,7 +8507,7 @@ async fn handle_incoming_request(
                     };
                     let auto_ok = explicitly_requested
                         || pending_file_streams.contains_key(&fid)
-                        || file_handler::auto_download_allows(size, &name, &auto_dl_key, voice);
+                        || file_handler::auto_download_allows(size, &name, &ext, &auto_dl_key, voice);
 
                     let mut inline_done = false;
                     if !already_complete && share_ref.is_none() {
@@ -8567,10 +8587,21 @@ async fn handle_incoming_request(
                                     // the bytes from the sender.
                                     hollow_log!("[HOLLOW-FILE] Auto-download gate dropped inline image bytes for {fid} ({auto_dl_key}) — message kept, manual download available");
                                     inline_done = true;
+                                } else if !file_transfer::is_wire_file_id(&fid)
+                                    || !file_transfer::is_wire_ext(&ext)
+                                {
+                                    // SECURITY (FILE-1): this write names a file
+                                    // from two raw wire strings. An absolute
+                                    // `fid` makes `Path::join` discard the base
+                                    // directory entirely, so a peer that chooses
+                                    // the name chooses the directory. A header
+                                    // whose id or extension is not the shape we
+                                    // mint writes nothing at all.
+                                    hollow_log!("[HOLLOW-SECURITY] REJECTED inline FileHeader from {peer_str}: bad file id or extension");
                                 } else {
                                     let files_dir = file_transfer::files_dir();
                                     let _ = std::fs::create_dir_all(&files_dir);
-                                    let disk_path = files_dir.join(format!("{fid}.{ext}"));
+                                    let disk_path = file_transfer::final_file_path(&fid, &ext);
                                     if std::fs::write(&disk_path, &plaintext).is_ok() {
                                         let disk_str = disk_path.to_string_lossy().to_string();
                                         if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
@@ -9165,12 +9196,30 @@ async fn handle_incoming_request(
                     }
                 }
 
+                // 1:1 call signaling — the ONLY accepted path for a Call*
+                // message. `peer_str` is the device whose Olm ratchet just
+                // decrypted this, so the sender is authenticated; the plaintext
+                // Call* arms below reject instead of handling.
+                Ok(MessageEnvelope::CallSignal { signal }) => {
+                    voice_handler::handle_call_signal_message(
+                        peer_str, master_peer_str, *signal, event_tx,
+                    ).await;
+                }
+
                 // Phase 6 MLS envelope variants — should not arrive via Olm, log and ignore.
                 // CrdtOp via Olm fallback — apply it (may arrive when MLS is out of sync).
                 Ok(MessageEnvelope::CrdtOp { sid, op_json, .. }) => {
                     if let Ok(op) = serde_json::from_str::<crate::crdt::operations::CrdtOp>(&op_json) {
                         if let Some(state) = server_states.get_mut(&sid) {
-                            if let Ok(()) = state.apply_op(&op) {
+                            // SECURITY: the Olm fallback is the SAME ingest as
+                            // the MLS envelope and the plaintext broadcast, so
+                            // it runs the same admission gate. It had none.
+                            if let Err(reason) = state.admit_remote_op(&op) {
+                                hollow_log!(
+                                    "[HOLLOW-SECURITY] REJECTED Olm-fallback CrdtOp {} for {sid} from {peer_str}: {reason}",
+                                    crate::crdt::sync::payload_name(&op.payload),
+                                );
+                            } else if let Ok(()) = state.apply_op(&op) {
                                 state.op_log.push(op.clone());
                                 if let Ok(json) = serde_json::to_string(&*state) {
                                     if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
@@ -9212,22 +9261,29 @@ async fn handle_incoming_request(
                         if !incoming_ops.is_empty() {
                             // Persist synced ops (op_log is RAM-only — see the
                             // plaintext SyncResponse handler for rationale).
-                            if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
-                                for op in &incoming_ops {
+                            // ONLY ops merge_ops admitted reach the table: the
+                            // gate lives inside the merge, and the hook fires
+                            // for exactly what passed it.
+                            let store = crate::storage::MessageStore::open(db_path, db_passphrase).ok();
+                            let report = crate::crdt::sync::merge_ops_with(state, &incoming_ops, |op| {
+                                if let Some(store) = store.as_ref() {
                                     if op.server_id == sid {
                                         let _ = store.insert_crdt_op(op);
                                     }
                                 }
-                            }
-                            if let Ok(applied) = crate::crdt::sync::merge_ops(state, &incoming_ops) {
-                                if applied > 0 {
+                            });
+                            if let Ok(report) = report {
+                                if report.rejected > 0 {
+                                    hollow_log!("[HOLLOW-SECURITY] Dropped {} unadmitted op(s) from an Olm-fallback SyncResp for {sid} from {peer_str}", report.rejected);
+                                }
+                                if report.applied > 0 {
                                     if let Ok(json) = serde_json::to_string(&*state) {
                                         if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
                                             let _ = store.save_server_state(&sid, &json);
                                         }
                                     }
                                     let _ = event_tx.send(NetworkEvent::SyncCompleted {
-                                        server_id: sid, ops_applied: applied as u32,
+                                        server_id: sid, ops_applied: report.applied as u32,
                                     }).await;
                                 }
                             }
@@ -9604,6 +9660,17 @@ async fn handle_incoming_request(
                         return;
                     }
                     snap.set_hlc(Hlc::new(local_peer_str.to_string()));
+                    install_op_signer(&mut snap, bundle_keypair);
+                    // SECURITY (CRDT-2): a snapshot is adopted wholesale from
+                    // ONE responder, so its registers are only as honest as
+                    // that peer. Pull any stamped past the drift bound back to
+                    // it, or a single hostile responder could hand us a state
+                    // whose name/roles/settings no later honest write could
+                    // ever overtake.
+                    let clamped = snap.clamp_future_hlcs(crate::crdt::hlc::wall_clock_ms());
+                    if clamped > 0 {
+                        hollow_log!("[HOLLOW-SECURITY] Clamped {clamped} future-dated register(s) in the {server_id} snapshot from {peer_str}");
+                    }
                     // Multi-device (Step 6): a snapshot from a not-yet-upgraded
                     // member may carry device-keyed joiners — fold to master.
                     snap.canonicalize_members(|id| super::resolver::resolve(id));
@@ -9658,51 +9725,49 @@ async fn handle_incoming_request(
                         0,
                     );
                     s.set_hlc(Hlc::new(local_peer_str.to_string()));
+                    install_op_signer(&mut s, bundle_keypair);
                     s
                 });
 
-                // SECURITY (tombstone): a destructive `ServerDeleted` op delivered via
-                // sync must be authenticated as Owner-authored, using OUR current role
-                // map (ServerCreated, which we already hold, establishes the true Owner)
-                // — never trust the relayer. Drop unauthorized tombstones BEFORE persist
-                // + merge so they can't tombstone us via a forged sync.
-                let incoming_ops: Vec<crate::crdt::operations::CrdtOp> = incoming_ops
-                    .into_iter()
-                    .filter(|op| {
-                        if let crate::crdt::operations::CrdtPayload::ServerDeleted { .. } = op.payload {
-                            let ok = state.get_role(&op.author) == crate::crdt::operations::MemberRole::Owner;
-                            if !ok {
-                                hollow_log!("[HOLLOW-SECURITY] Dropped synced ServerDeleted from non-owner {} for {server_id}", op.author);
-                            }
-                            ok
-                        } else { true }
-                    })
-                    .collect();
-
-                // Persist every synced op into the crdt_ops table (INSERT OR
+                // SECURITY: every op in the batch passes `admit_remote_op`
+                // inside `merge_ops` — the author's signature, the clock
+                // bound, then the permission matrix, using OUR role map and
+                // never the relayer's word. That covers the destructive
+                // `ServerDeleted` tombstone (Owner-authored only) along with
+                // every other payload, so the ad hoc tombstone filter that
+                // used to sit here is gone rather than duplicated.
+                //
+                // Persist every ADMITTED op into the crdt_ops table (INSERT OR
                 // IGNORE — idempotent). op_log is NOT serialized in the state
                 // JSON, so without this a member that joined via sync holds
                 // the server's history in RAM only and serves near-empty op
                 // logs to future joiners after a restart (missing server
                 // name/avatar/nicknames when the owner is offline).
-                if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
-                    for op in &incoming_ops {
-                        if op.server_id == server_id {
-                            let _ = store.insert_crdt_op(op);
-                        }
-                    }
-                }
 
                 // Capture membership BEFORE merge so we can detect a kick-while-offline
                 // (we were a member, the synced ops remove us → self-evict on reconnect).
                 let was_member_before = state.is_member(local_peer_str);
 
-                match crdt_sync::merge_ops(state, &incoming_ops) {
+                let op_store = crate::storage::MessageStore::open(db_path, db_passphrase).ok();
+                let merged = crdt_sync::merge_ops_with(state, &incoming_ops, |op| {
+                    if let Some(store) = op_store.as_ref() {
+                        if op.server_id == server_id {
+                            let _ = store.insert_crdt_op(op);
+                        }
+                    }
+                });
+                if let Ok(report) = &merged {
+                    if report.rejected > 0 {
+                        hollow_log!("[HOLLOW-SECURITY] Dropped {} unadmitted op(s) from a SyncResponse for {server_id} from {peer_str}", report.rejected);
+                    }
+                }
+                match merged {
                     // Run even when 0 ops applied if a join is pending — the
                     // joiner may have adopted a ServerStateSnapshot already
                     // (responder's op log can be empty/compacted), and the
                     // join must still complete.
-                    Ok(applied) if applied > 0 || pending_server_joins.contains_key(&server_id) => {
+                    Ok(report) if report.applied > 0 || pending_server_joins.contains_key(&server_id) => {
+                        let applied = report.applied;
                         hollow_log!("[HOLLOW-CRDT] Applied {applied} ops for server {server_id}");
 
                         // Multi-device (Step 6): fold any device-keyed members a
@@ -11613,6 +11678,14 @@ async fn handle_incoming_request(
                                 hollow_log!("[HOLLOW-MLS] Unexpected DM envelope via MLS from {sender_peer_id} — ignoring");
                             }
 
+                            // A 1:1 call signal is Olm-direct by contract. Over
+                            // MLS it would be readable by, and forgeable by,
+                            // every other member of the group — including for a
+                            // call they are not part of, SFrame key and all.
+                            MessageEnvelope::CallSignal { .. } => {
+                                hollow_log!("[HOLLOW-SECURITY] REJECTED call signal envelope via MLS from {sender_peer_id}");
+                            }
+
                             // Forwarder control plane is Olm-direct inside the
                             // fwd:{forwarder} room by contract — the forwarder
                             // holds no group keys, so fwd_* via MLS is always
@@ -12254,7 +12327,24 @@ async fn handle_incoming_request(
             // ProfileUpdate-carried list, so this adds a transport, not a trust
             // level. A list claiming OUR master routes to the sibling merge, which
             // refuses anything not signed by our own master key.
-            if device_list.is_some() {
+            //
+            // The membership gate is stated HERE as well as inside the ingest,
+            // matching the `ServerJoinRequest` and `FriendReject` arms: this inbox
+            // is stranger-reachable, so a captured list replayed from an unlisted
+            // socket is a DROPPED request, never a downgrade to the resolver.
+            // `if list.is_some()` must not be the bypass.
+            if let Some(list) = device_list.as_ref() {
+                let bad = if !crypto_handler::verify_device_list(list) {
+                    Some("bad signature or master binding")
+                } else if !crypto_handler::device_list_binds_sender(list, peer_str) {
+                    Some("sender device not in the signed list, or revoked")
+                } else {
+                    None
+                };
+                if let Some(reason) = bad {
+                    hollow_log!("[HOLLOW-FRIENDS] Dropping FriendRequest from {peer_str}: carried device list rejected ({reason})");
+                    return;
+                }
                 let _ = crypto_handler::ingest_device_list(
                     event_tx, master_peer_str, device_peer_id, master_keypair,
                     peer_str, ws_cmd_tx, ws_room_peers,
@@ -13478,6 +13568,20 @@ async fn handle_incoming_request(
             // monotonic + persist + resolver update + DeviceListUpdated). A list
             // for our OWN master is a sibling device → merged (union) + friend
             // list shared (see ingest_sibling_device_list).
+            //
+            // ORDER, and why it is this way round (CRYPTO-1): the list is ingested
+            // BEFORE the profile signature is checked, and that is deliberate. The
+            // list authenticates itself twice over — the master's own signature,
+            // and `device_list_binds_sender`, which now requires that signature to
+            // NAME the delivering device — so it needs nothing from the profile.
+            // The profile signature, on the other hand, needs the list: it verifies
+            // against `resolve(sender)`, and the ingest is what teaches the resolver
+            // device→master. Checking it first would refuse every first-contact
+            // announce from a device whose id differs from its master, and a node
+            // with no profile row signs nothing at all (`own_profile_proof`), so
+            // gating the list on it would silently kill presence collapse for a
+            // freshly imported device. The profile FIELDS are still refused without
+            // a valid signature, in `save_incoming_profile`.
             let ingest_outcome = super::crypto_handler::ingest_device_list(
                 event_tx, master_peer_str, device_peer_id, master_keypair, peer_str,
                 ws_cmd_tx, ws_room_peers, device_list, db_path, db_passphrase,
@@ -13986,231 +14090,31 @@ async fn handle_incoming_request(
         }
 
         // -- Voice call signaling (Phase 5B) --
-        HavenMessage::CallInvite { call_id, video, sframe_key } => {
-            // BLOCK GUARD: a blocked identity can't ring us. Dropping the
-            // invite kills the whole call flow (no ringing UI, no accept path).
-            if !super::resolver::same_identity(peer_str, master_peer_str)
-                && super::blocklist::is_blocked(peer_str)
-            {
-                return;
-            }
-            // SECURITY (Phase 6.25): Don't log sframe_key length/presence.
-            hollow_log!("[HOLLOW-CALL] CallInvite from {peer_str} call={call_id} video={video} key_len={}", sframe_key.len());
-            let payload = serde_json::json!({
-                "call_id": call_id,
-                "video": video,
-                "sframe_key": sframe_key,
-            }).to_string();
-            let _ = event_tx.send(NetworkEvent::CallSignal {
-                peer_id: peer_str.to_string(),
-                signal_type: "invite".to_string(),
-                payload,
-            }).await;
-        }
-        HavenMessage::CallAccept { call_id, sframe_key } => {
-            hollow_log!("[HOLLOW-CALL] CallAccept from {peer_str} call={call_id}");
-            let payload = serde_json::json!({
-                "call_id": call_id,
-                "sframe_key": sframe_key,
-            }).to_string();
-            let _ = event_tx.send(NetworkEvent::CallSignal {
-                peer_id: peer_str.to_string(),
-                signal_type: "accept".to_string(),
-                payload,
-            }).await;
-        }
-        HavenMessage::CallReject { call_id } => {
-            hollow_log!("[HOLLOW-CALL] CallReject from {peer_str} call={call_id}");
-            let _ = event_tx.send(NetworkEvent::CallSignal {
-                peer_id: peer_str.to_string(),
-                signal_type: "reject".to_string(),
-                payload: call_id,
-            }).await;
-        }
-        HavenMessage::CallEnd { call_id } => {
-            hollow_log!("[HOLLOW-CALL] CallEnd from {peer_str} call={call_id}");
-            let _ = event_tx.send(NetworkEvent::CallSignal {
-                peer_id: peer_str.to_string(),
-                signal_type: "end".to_string(),
-                payload: call_id,
-            }).await;
-        }
-        HavenMessage::CallBusy { call_id } => {
-            hollow_log!("[HOLLOW-CALL] CallBusy from {peer_str} call={call_id}");
-            let _ = event_tx.send(NetworkEvent::CallSignal {
-                peer_id: peer_str.to_string(),
-                signal_type: "busy".to_string(),
-                payload: call_id,
-            }).await;
-        }
-        HavenMessage::CallMediaRestart { call_id } => {
-            hollow_log!("[HOLLOW-CALL] CallMediaRestart from {peer_str} call={call_id}");
-            let _ = event_tx.send(NetworkEvent::CallSignal {
-                peer_id: peer_str.to_string(),
-                signal_type: "media_restart".to_string(),
-                payload: call_id,
-            }).await;
-        }
-        HavenMessage::CallSdpOffer { call_id, sdp } => {
-            // SECURITY (Phase 6.25): SDP size limit.
-            if sdp.len() > MAX_SDP_SIZE {
-                hollow_log!("[HOLLOW-SECURITY] BLOCKED CallSdpOffer — size {} exceeds limit from {peer_str}", sdp.len());
-                return;
-            }
-            hollow_log!("[HOLLOW-CALL] CallSdpOffer from {peer_str} call={call_id}");
-            let payload = serde_json::json!({
-                "call_id": call_id,
-                "sdp": sdp,
-            }).to_string();
-            let _ = event_tx.send(NetworkEvent::CallSignal {
-                peer_id: peer_str.to_string(),
-                signal_type: "sdp_offer".to_string(),
-                payload,
-            }).await;
-        }
-        HavenMessage::CallSdpAnswer { call_id, sdp } => {
-            if sdp.len() > MAX_SDP_SIZE {
-                hollow_log!("[HOLLOW-SECURITY] BLOCKED CallSdpAnswer — size {} exceeds limit from {peer_str}", sdp.len());
-                return;
-            }
-            hollow_log!("[HOLLOW-CALL] CallSdpAnswer from {peer_str} call={call_id}");
-            let payload = serde_json::json!({
-                "call_id": call_id,
-                "sdp": sdp,
-            }).to_string();
-            let _ = event_tx.send(NetworkEvent::CallSignal {
-                peer_id: peer_str.to_string(),
-                signal_type: "sdp_answer".to_string(),
-                payload,
-            }).await;
-        }
-        HavenMessage::CallIceCandidate { call_id, candidate, sdp_mid, sdp_mline_index } => {
-            hollow_log!("[HOLLOW-CALL] CallIceCandidate from {peer_str} call={call_id}");
-            let payload = serde_json::json!({
-                "call_id": call_id,
-                "candidate": candidate,
-                "sdpMid": sdp_mid,
-                "sdpMLineIndex": sdp_mline_index,
-            }).to_string();
-            let _ = event_tx.send(NetworkEvent::CallSignal {
-                peer_id: peer_str.to_string(),
-                signal_type: "ice".to_string(),
-                payload,
-            }).await;
-        }
-        HavenMessage::CallVideoState { call_id, enabled } => {
-            hollow_log!("[HOLLOW-CALL] CallVideoState from {peer_str} call={call_id} enabled={enabled}");
-            let payload = serde_json::json!({
-                "call_id": call_id,
-                "enabled": enabled,
-            }).to_string();
-            let _ = event_tx.send(NetworkEvent::CallSignal {
-                peer_id: peer_str.to_string(),
-                signal_type: "video_state".to_string(),
-                payload,
-            }).await;
-        }
-        HavenMessage::CallAudioState { call_id, muted, deafened } => {
-            hollow_log!("[HOLLOW-CALL] CallAudioState from {peer_str} call={call_id} muted={muted} deafened={deafened}");
-            let payload = serde_json::json!({
-                "call_id": call_id,
-                "muted": muted,
-                "deafened": deafened,
-            }).to_string();
-            let _ = event_tx.send(NetworkEvent::CallSignal {
-                peer_id: peer_str.to_string(),
-                signal_type: "audio_state".to_string(),
-                payload,
-            }).await;
-        }
-        HavenMessage::CallScreenState { call_id, enabled, quality } => {
-            hollow_log!("[HOLLOW-CALL] CallScreenState from {peer_str} call={call_id} enabled={enabled} quality={quality:?}");
-            let mut json = serde_json::json!({
-                "call_id": call_id,
-                "enabled": enabled,
-            });
-            if let Some(q) = &quality {
-                json["quality"] = serde_json::Value::String(q.clone());
-            }
-            let payload = json.to_string();
-            let _ = event_tx.send(NetworkEvent::CallSignal {
-                peer_id: peer_str.to_string(),
-                signal_type: "screen_state".to_string(),
-                payload,
-            }).await;
-        }
-        HavenMessage::CallScreenOffer { call_id, sdp } => {
-            if sdp.len() > MAX_SDP_SIZE {
-                hollow_log!("[HOLLOW-SECURITY] BLOCKED CallScreenOffer — size {} exceeds limit from {peer_str}", sdp.len());
-                return;
-            }
-            hollow_log!("[HOLLOW-CALL] CallScreenOffer from {peer_str} call={call_id}");
-            let payload = serde_json::json!({
-                "call_id": call_id,
-                "sdp": sdp,
-            }).to_string();
-            let _ = event_tx.send(NetworkEvent::CallSignal {
-                peer_id: peer_str.to_string(),
-                signal_type: "screen_offer".to_string(),
-                payload,
-            }).await;
-        }
-        HavenMessage::CallScreenAnswer { call_id, sdp } => {
-            if sdp.len() > MAX_SDP_SIZE {
-                hollow_log!("[HOLLOW-SECURITY] BLOCKED CallScreenAnswer — size {} exceeds limit from {peer_str}", sdp.len());
-                return;
-            }
-            hollow_log!("[HOLLOW-CALL] CallScreenAnswer from {peer_str} call={call_id}");
-            let payload = serde_json::json!({
-                "call_id": call_id,
-                "sdp": sdp,
-            }).to_string();
-            let _ = event_tx.send(NetworkEvent::CallSignal {
-                peer_id: peer_str.to_string(),
-                signal_type: "screen_answer".to_string(),
-                payload,
-            }).await;
-        }
-        HavenMessage::CallScreenIce { call_id, candidate, sdp_mid, sdp_mline_index, role } => {
-            hollow_log!("[HOLLOW-CALL] CallScreenIce from {peer_str} call={call_id} role={role}");
-            let payload = serde_json::json!({
-                "call_id": call_id,
-                "candidate": candidate,
-                "sdpMid": sdp_mid,
-                "sdpMLineIndex": sdp_mline_index,
-                "role": role,
-            }).to_string();
-            let _ = event_tx.send(NetworkEvent::CallSignal {
-                peer_id: peer_str.to_string(),
-                signal_type: "screen_ice".to_string(),
-                payload,
-            }).await;
-        }
-        HavenMessage::CallScreenWatch { call_id, want, viewer_width, viewer_height } => {
-            hollow_log!("[HOLLOW-CALL] CallScreenWatch from {peer_str} call={call_id} want={want} viewer={viewer_width}x{viewer_height}");
-            let payload = serde_json::json!({
-                "call_id": call_id,
-                "want": want,
-                "viewer_width": viewer_width,
-                "viewer_height": viewer_height,
-            }).to_string();
-            let _ = event_tx.send(NetworkEvent::CallSignal {
-                peer_id: peer_str.to_string(),
-                signal_type: "screen_watch".to_string(),
-                payload,
-            }).await;
-        }
-        HavenMessage::CallRecordingState { call_id, recording } => {
-            hollow_log!("[HOLLOW-CALL] CallRecordingState from {peer_str} call={call_id} recording={recording}");
-            let payload = serde_json::json!({
-                "call_id": call_id,
-                "recording": recording,
-            }).to_string();
-            let _ = event_tx.send(NetworkEvent::CallSignal {
-                peer_id: peer_str.to_string(),
-                signal_type: if recording { "recording_start" } else { "recording_stop" }.to_string(),
-                payload,
-            }).await;
+        //
+        // SECURITY (TRANSPORT-1, 2026-09): 1:1 call signaling is Olm-encrypted
+        // and arrives as `MessageEnvelope::CallSignal` after decryption (handled
+        // in `voice_handler::handle_call_signal_message`). A Call* frame reaching
+        // us in the CLEAR came from the relay or an on-path attacker, not from
+        // the peer: honouring it would let the relay hand us an SFrame media key
+        // of its own choosing in a forged CallAccept. Reject, never log-and-pass.
+        HavenMessage::CallInvite { .. }
+        | HavenMessage::CallAccept { .. }
+        | HavenMessage::CallReject { .. }
+        | HavenMessage::CallEnd { .. }
+        | HavenMessage::CallBusy { .. }
+        | HavenMessage::CallMediaRestart { .. }
+        | HavenMessage::CallSdpOffer { .. }
+        | HavenMessage::CallSdpAnswer { .. }
+        | HavenMessage::CallIceCandidate { .. }
+        | HavenMessage::CallVideoState { .. }
+        | HavenMessage::CallAudioState { .. }
+        | HavenMessage::CallScreenState { .. }
+        | HavenMessage::CallScreenOffer { .. }
+        | HavenMessage::CallScreenAnswer { .. }
+        | HavenMessage::CallScreenIce { .. }
+        | HavenMessage::CallScreenWatch { .. }
+        | HavenMessage::CallRecordingState { .. } => {
+            hollow_log!("[HOLLOW-SECURITY] REJECTED plaintext call signal from {peer_str}");
         }
 
         // -- Gossip relay tree (Phase 5D) --

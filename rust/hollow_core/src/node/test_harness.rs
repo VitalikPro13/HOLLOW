@@ -866,6 +866,11 @@ pub(crate) struct TestNode {
     pub event_rx: mpsc::Receiver<NetworkEvent>,
     pub db_path: String,
     pub passphrase: String,
+    /// This node's MASTER keypair — the key its own event loop signs CRDT ops
+    /// with. A test that has to forge (or legitimately author) an op on a
+    /// node's behalf needs it, because a CrdtOp is bound to its author by
+    /// signature now.
+    pub master_kp: NativeKeypair,
     _join: tokio::task::JoinHandle<()>,
     // Keep the tempdir alive for the node's lifetime.
     _tmp: tempfile::TempDir,
@@ -999,6 +1004,60 @@ impl TestNode {
     fn server_state(&self, server_id: &str) -> Option<ServerState> {
         let json = self.store().load_server_state(server_id).ok().flatten()?;
         serde_json::from_str::<ServerState>(&json).ok()
+    }
+
+    /// A LIVE clone of the event loop's in-memory `ServerState` — the copy
+    /// that ENFORCES, round-tripped over `GetServerStateSnapshot` exactly as
+    /// `api::crdt::live_server_state` does for the UI.
+    ///
+    /// Prefer this over `server_state` whenever a test is asserting that a
+    /// hostile op did NOT land: the DB snapshot is written by a fire-and-
+    /// forget actor, so reading it says nothing about what the loop currently
+    /// believes, and opening SQLCipher in a poll loop starves that writer.
+    /// `None` means the loop never answered — never "no change".
+    pub(crate) async fn live_server_state(&self, server_id: &str) -> Option<ServerState> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.cmd_tx
+            .send(NodeCommand::GetServerStateSnapshot {
+                server_id: server_id.to_string(),
+                reply: tx,
+            })
+            .await
+            .ok()?;
+        tokio::time::timeout(std::time::Duration::from_secs(5), rx)
+            .await
+            .ok()?
+            .ok()?
+    }
+
+    /// A member's role as the LIVE state holds it. Panics if the loop does not
+    /// answer or does not hold the server: a timed-out probe is not a role.
+    pub(crate) async fn live_role(
+        &self,
+        server_id: &str,
+        master: &str,
+    ) -> crate::crdt::operations::MemberRole {
+        self.live_server_state(server_id)
+            .await
+            .unwrap_or_else(|| panic!("no live state for {server_id}"))
+            .get_role(master)
+    }
+
+    /// The server name as the LIVE state holds it. Panics like `live_role`.
+    pub(crate) async fn live_server_name(&self, server_id: &str) -> String {
+        self.live_server_state(server_id)
+            .await
+            .unwrap_or_else(|| panic!("no live state for {server_id}"))
+            .name()
+            .to_string()
+    }
+
+    /// The Owner the LIVE state currently recognises. Panics like `live_role`.
+    pub(crate) async fn live_owner(&self, server_id: &str) -> Option<String> {
+        self.live_server_state(server_id)
+            .await
+            .unwrap_or_else(|| panic!("no live state for {server_id}"))
+            .current_owner()
     }
 
     /// The member panel for `server_id`, master-keyed with role + online flag —
@@ -1444,6 +1503,7 @@ async fn spawn_node_full(
         event_rx,
         db_path,
         passphrase,
+        master_kp: master.clone(),
         _join: join,
         _tmp: tmp,
     }
@@ -1511,6 +1571,7 @@ async fn spawn_node_on_db(
         event_rx,
         db_path,
         passphrase,
+        master_kp: master.clone(),
         _join: join,
         _tmp: tmp,
     }
@@ -1744,6 +1805,60 @@ async fn create_server_and_wait(node: &mut TestNode, name: &str) -> String {
 /// The default `#general` channel id for a server.
 fn general_channel_of(server_id: &str) -> String {
     format!("{}-general", &server_id[..8.min(server_id.len())])
+}
+
+/// Build a CRDT op by hand, the way a node's own `create_op` would, and sign
+/// it with `signer` (or leave it unsigned when `signer` is `None`).
+///
+/// `author` is written VERBATIM, which is the whole point: the interesting
+/// cases are an author string that the signing key does not derive (a forgery)
+/// and no signature at all (every op on the wire before this fix). `ahead_ms`
+/// offsets the timestamp from the wall clock so an op that WOULD win the LWW
+/// comparison can be built, without leaving the drift window unless a test
+/// asks for it.
+fn forge_crdt_op(
+    server_id: &str,
+    author: &str,
+    payload: crate::crdt::operations::CrdtPayload,
+    ahead_ms: u64,
+    signer: Option<&NativeKeypair>,
+) -> crate::crdt::operations::CrdtOp {
+    use base64::Engine as _;
+    let mut op = crate::crdt::operations::CrdtOp {
+        server_id: server_id.to_string(),
+        hlc: crate::crdt::hlc::HlcTimestamp {
+            physical_ms: crate::crdt::hlc::wall_clock_ms().saturating_add(ahead_ms),
+            counter: 0,
+            actor: author.to_string(),
+        },
+        author: author.to_string(),
+        payload,
+        auth: None,
+    };
+    if let Some(kp) = signer {
+        let pk = base64::engine::general_purpose::STANDARD.encode(kp.public_key_protobuf());
+        op.sign(kp, &pk);
+    }
+    op
+}
+
+/// The exact bytes a peer would put on the wire to replicate one op.
+fn crdt_broadcast_frame(server_id: &str, op: &crate::crdt::operations::CrdtOp) -> Vec<u8> {
+    serde_json::to_vec(&super::types::HavenMessage::CrdtOpBroadcast {
+        server_id: server_id.to_string(),
+        op_json: serde_json::to_string(op).expect("serialize op"),
+    })
+    .expect("serialize frame")
+}
+
+/// The exact bytes a peer would put on the wire to answer a sync request with
+/// a batch of ops.
+fn sync_response_frame(server_id: &str, ops: &[crate::crdt::operations::CrdtOp]) -> Vec<u8> {
+    serde_json::to_vec(&super::types::HavenMessage::SyncResponse {
+        server_id: server_id.to_string(),
+        ops_json: serde_json::to_string(ops).expect("serialize ops"),
+    })
+    .expect("serialize frame")
 }
 
 /// Persist a master-signed v1 `SignedDeviceList` (devices = `device_ids`) into the
@@ -2831,7 +2946,10 @@ async fn call_signal_routes_to_friend_device_and_drops_unknown() {
     let mut a = spawn_node_with_friends(&relay, A_MASTER, A_MASTER, &[&m_master]).await;
     sleep_ms(1200).await;
     let mut b = spawn_node_with_friends(&relay, M_MASTER, B_DEV, &[&a_master]).await;
-    sleep_ms(2500).await;
+    // Call signaling rides Olm now (TRANSPORT-1), so the pair must be genuinely
+    // usable before the first signal: confirmed session both ways AND both
+    // devices in the DM room the signal routes through. A sleep is not that.
+    expect_dm_pair_ready(&relay, &a, &b, 20).await;
     drain_events(&mut a);
     drain_events(&mut b);
 
@@ -2851,7 +2969,7 @@ async fn call_signal_routes_to_friend_device_and_drops_unknown() {
 
     // B (M's device) receives the CallSignal invite — the call "rings".
     let mut got_call_id = None;
-    let rang = wait_event(&mut b, std::time::Duration::from_secs(4), |ev| {
+    let rang = wait_event(&mut b, std::time::Duration::from_secs(15), |ev| {
         if let NetworkEvent::CallSignal { signal_type, payload, .. } = ev {
             if signal_type == "invite" {
                 let v: serde_json::Value = serde_json::from_str(payload).unwrap_or_default();
@@ -2877,7 +2995,7 @@ async fn call_signal_routes_to_friend_device_and_drops_unknown() {
         })
         .await
         .unwrap();
-    let saw_rec = wait_event(&mut b, std::time::Duration::from_secs(4), |ev| {
+    let saw_rec = wait_event(&mut b, std::time::Duration::from_secs(15), |ev| {
         matches!(ev, NetworkEvent::CallSignal { signal_type, .. } if signal_type == "recording_start")
     })
     .await;
@@ -2903,7 +3021,7 @@ async fn call_signal_routes_to_friend_device_and_drops_unknown() {
         .await
         .unwrap();
     let mut dm_watch_payload = None;
-    let saw_watch = wait_event(&mut b, std::time::Duration::from_secs(4), |ev| {
+    let saw_watch = wait_event(&mut b, std::time::Duration::from_secs(15), |ev| {
         if let NetworkEvent::CallSignal { signal_type, payload, .. } = ev {
             if signal_type == "screen_watch" {
                 dm_watch_payload = Some(payload.clone());
@@ -2943,6 +3061,140 @@ async fn call_signal_routes_to_friend_device_and_drops_unknown() {
     })
     .await;
     assert!(!leaked, "an unknown call signal type must be silently dropped, never delivered");
+}
+
+// ---------------------------------------------------------------------------
+// Ring-2 SECURITY (TRANSPORT-1): the 1:1 call SFrame media key must never be
+// legible to the relay. Call signaling used to ride the wire as a bare
+// `HavenMessage::CallInvite`, so the relay read the AES-128-GCM key out of every
+// invite and accept (and could inject a forged accept carrying its own). The
+// invite now travels inside the Olm ciphertext: the callee still gets the key,
+// and every frame the relay handled is opaque.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
+async fn call_invite_never_exposes_sframe_key_to_the_relay() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    const A_MASTER: u8 = 74;
+    const B_MASTER: u8 = 84;
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
+    let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
+
+    let mut a = spawn_node_with_friends(&relay, A_MASTER, A_MASTER, &[&b_master]).await;
+    sleep_ms(1200).await;
+    let mut b = spawn_node_with_friends(&relay, B_MASTER, B_MASTER, &[&a_master]).await;
+    expect_dm_pair_ready(&relay, &a, &b, 20).await;
+    drain_events(&mut a);
+    drain_events(&mut b);
+
+    // Record every frame A hands the relay from here on. The relay sees exactly
+    // these bytes, so anything legible in them is legible to the relay.
+    relay.set_recording(&a.device_id, true);
+
+    // A distinctive key: if any byte of it survives into a frame, a substring
+    // search finds it. (Hex, like the real SFrame key the Dart side generates.)
+    const SFRAME_KEY: &str = "deadbeefcafef00d0123456789abcdef";
+    a.cmd_tx
+        .send(NodeCommand::CallSendSignal {
+            peer_id: b_master.clone(),
+            signal_type: "invite".to_string(),
+            payload: serde_json::json!({
+                "call_id": "call-secret",
+                "video": false,
+                "sframe_key": SFRAME_KEY,
+            })
+            .to_string(),
+        })
+        .await
+        .unwrap();
+
+    // The callee gets the key — the call still works.
+    let mut got_key = None;
+    let rang = wait_event(&mut b, std::time::Duration::from_secs(10), |ev| {
+        if let NetworkEvent::CallSignal { signal_type, payload, .. } = ev {
+            if signal_type == "invite" {
+                let v: serde_json::Value = serde_json::from_str(payload).unwrap_or_default();
+                got_key = v["sframe_key"].as_str().map(|s| s.to_string());
+                return true;
+            }
+        }
+        false
+    })
+    .await;
+    assert!(rang, "the callee must still receive the invite over the encrypted transport");
+    assert_eq!(got_key.as_deref(), Some(SFRAME_KEY), "the callee must recover the SFrame key");
+
+    relay.set_recording(&a.device_id, false);
+    let frames = relay.recorded_frames(&a.device_id);
+    assert!(!frames.is_empty(), "the relay must have handled at least the invite frame");
+    for frame in &frames {
+        let text = String::from_utf8_lossy(frame);
+        assert!(
+            !text.contains(SFRAME_KEY),
+            "the relay read the SFrame key verbatim out of a frame: {text}",
+        );
+        assert!(
+            !text.contains("sframe_key"),
+            "the relay saw the call's key FIELD in the clear: {text}",
+        );
+        assert!(
+            !text.contains("call-secret"),
+            "the relay saw the call id in the clear: {text}",
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Ring-2 SECURITY (TRANSPORT-1, receive half): a Call* frame that arrives in the
+// CLEAR is an injection — from the relay or anyone who can push a frame into the
+// room — and must be rejected, not handled. If the plaintext arms still worked,
+// a forged CallAccept would hand our media session a key the attacker chose.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
+async fn plaintext_call_signal_is_rejected() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    const A_MASTER: u8 = 75;
+    const B_MASTER: u8 = 85;
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
+    let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
+
+    let mut a = spawn_node_with_friends(&relay, A_MASTER, A_MASTER, &[&b_master]).await;
+    sleep_ms(1200).await;
+    let mut b = spawn_node_with_friends(&relay, B_MASTER, B_MASTER, &[&a_master]).await;
+    expect_dm_pair_ready(&relay, &a, &b, 20).await;
+    drain_events(&mut a);
+
+    // B's socket pushes a bare, unencrypted CallInvite at A — exactly the frame
+    // the old sender produced, and exactly what an on-path relay can synthesize.
+    let dm_room = super::types::dm_room_code(&a.master_id, &b.master_id);
+    let forged = serde_json::to_vec(&super::types::HavenMessage::CallInvite {
+        call_id: "forged-call".to_string(),
+        video: false,
+        sframe_key: "00000000000000000000000000000000".to_string(),
+    })
+    .expect("serialize forged invite");
+    relay.inject_direct(&dm_room, &b.device_id, &a.device_id, forged);
+
+    // Absence proof: a bounded wait, then assert nothing rang. A CallSignal here
+    // would mean the plaintext path is still live.
+    let rang = wait_event(&mut a, std::time::Duration::from_secs(2), |ev| {
+        matches!(ev, NetworkEvent::CallSignal { .. })
+    })
+    .await;
+    assert!(!rang, "a plaintext call signal must be REJECTED, never surfaced as a call");
 }
 
 // ---------------------------------------------------------------------------
@@ -3378,6 +3630,140 @@ async fn dm_voice_message_bypasses_auto_download_gate() {
         contents,
         "voice note decrypts to the original contents"
     );
+
+    super::file_handler::set_auto_download_conf(169, std::collections::HashMap::new());
+}
+
+/// FILE-2 regression — the voice exemption is not a free pass for bytes.
+///
+/// The exemption used to read `voice || name`, and both of those are fields
+/// the SENDER fills in. With no size bound and no look at the extension, a
+/// header flagged `voice: true` carried anything, at any size, into a
+/// conversation the user had turned auto-download OFF for. Here the gate is
+/// on and two headers that CLAIM to be voice notes are pushed:
+///
+///   (b) genuinely voice-flagged, genuinely `.ogg`, one KB over the note
+///       ceiling, and
+///   (c) a plain file wearing the recorder's display name with the flag off
+///       (the legacy name-only exemption, which a sender could always forge).
+///
+/// Neither may complete or reach disk. The exemption case (a) — a voice flag
+/// and a voice name with a NON-ogg extension — cannot be produced by an
+/// honest sender, because `handle_send_file` derives `ext` from the filename;
+/// it is a forged-frame shape, covered by the predicate unit test
+/// `voice_exemption_requires_flag_name_ext_and_size`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
+async fn forged_voice_flag_does_not_bypass_auto_download_gate() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    const A_MASTER: u8 = 244;
+    const B_MASTER: u8 = 245;
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
+    let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
+
+    let mut a = spawn_node_with_friends(&relay, A_MASTER, A_MASTER, &[&b_master]).await;
+    sleep_ms(1200).await;
+    let mut b = spawn_node_with_friends(&relay, B_MASTER, B_MASTER, &[&a_master]).await;
+    expect_dm_pair_ready(&relay, &a, &b, 15).await;
+    // Residual, and it earns its place: a file/voice/video send PRE-NEGOTIATES
+    // the recipient's auto-download preference, and that advert exchange has no
+    // live probe (DebugSnapshotReply carries MLS + Olm only). Every test that
+    // went intermittent while this file was being de-slept was in this family,
+    // and none outside it. Delete this when the pref becomes observable, not
+    // before.
+    sleep_ms(1000).await;
+    drain_events(&mut a);
+    drain_events(&mut b);
+
+    // Gate the conversation AFTER the advert exchange, so A still PUSHES and
+    // it is B's own receive gate under test (the same shape
+    // `dm_auto_download_off_declines_push_then_manual_request_completes` uses).
+    super::file_handler::set_auto_download_conf(
+        169,
+        std::collections::HashMap::from([(format!("dm:{a_master}"), false)]),
+    );
+
+    // (b) A real .ogg with a real voice flag, one KB over the note ceiling.
+    let oversize = global_tmp.path().join("voice_1730000000001_54321.ogg");
+    std::fs::write(
+        &oversize,
+        vec![0x5Au8; (super::file_handler::VOICE_NOTE_MAX_BYTES + 1024) as usize],
+    )
+    .expect("write oversize voice src");
+
+    // (c) The recorder's display name on a file the sender never flagged.
+    let unflagged = global_tmp.path().join("Voice message.ogg");
+    std::fs::write(&unflagged, b"not a recording, just named like one")
+        .expect("write unflagged src");
+
+    for (idx, (path, voice)) in [(&oversize, true), (&unflagged, false)]
+        .into_iter()
+        .enumerate()
+    {
+        a.cmd_tx
+            .send(NodeCommand::SendFile(Box::new(super::types::SendFilePayload {
+                peer_id: Some(b.master_id.clone()),
+                server_id: None,
+                channel_id: None,
+                file_path: path.to_str().unwrap().to_string(),
+                message_id: format!("forged-voice-msg-{idx}"),
+                message_text: String::new(),
+                vthumb: None,
+                override_width: None,
+                override_height: None,
+                share_ref: None,
+                voice,
+                poster: None,
+            })))
+            .await
+            .unwrap();
+    }
+
+    // Both cards land — the gate keeps the metadata row, it only refuses bytes.
+    let mut fids: Vec<String> = Vec::new();
+    for _ in 0..2 {
+        let mut got = None;
+        let header = wait_event(&mut b, std::time::Duration::from_secs(15), |ev| {
+            if let NetworkEvent::FileHeaderReceived { file_id, file_name, .. } = ev {
+                if file_name.ends_with(".ogg") && !fids.contains(file_id) {
+                    got = Some(file_id.clone());
+                    return true;
+                }
+            }
+            false
+        })
+        .await;
+        assert!(header, "each claimed voice note still delivers its card");
+        fids.push(got.expect("file id from header"));
+    }
+
+    // ...and neither completes. Bounded wait, then the absence is a decision.
+    let completed = wait_event(&mut b, std::time::Duration::from_secs(4), |ev| {
+        matches!(ev, NetworkEvent::FileCompleted { file_id, .. } if fids.contains(file_id))
+    })
+    .await;
+    assert!(
+        !completed,
+        "a forged voice flag must not complete a push in a gated conversation",
+    );
+
+    sleep_ms(300).await;
+    for fid in &fids {
+        let meta = b.file_meta(fid).expect("metadata row persisted despite the gate");
+        assert!(
+            meta.completed_at.is_none(),
+            "claimed voice note {fid} must stay incomplete",
+        );
+        assert!(
+            meta.disk_path.is_none(),
+            "claimed voice note {fid} must not reach disk",
+        );
+    }
 
     super::file_handler::set_auto_download_conf(169, std::collections::HashMap::new());
 }
@@ -17293,7 +17679,14 @@ fn harness_fixed_sleep_budget_does_not_grow() {
     // there is no state to poll for a decision that must never be taken, so the
     // window has to be real time. Every other parked-join test settles on a
     // condition.
-    const BUDGET_MS: u64 = 572_000;
+    //
+    // Raised 572_000 -> 575_000 on 2026-09-03 for two more absence windows, in
+    // `crdt_forged_author_op_is_rejected_on_every_ingest_path` and
+    // `crdt_future_hlc_op_is_rejected_and_owner_can_still_rename`. Both push a
+    // forged CRDT op at a running node and assert it never lands; "the role
+    // did not change" has no arrival to poll for, so the window is real time.
+    // Everything else in those tests settles on the live server state.
+    const BUDGET_MS: u64 = 575_000;
 
     let src = include_str!("test_harness.rs");
     // Built from pieces so this scan does not count its own source text.
@@ -17651,20 +18044,264 @@ async fn twitch_follow_gate_accepts_bucket_and_refuses_the_rest() {
 }
 
 // ---------------------------------------------------------------------------
-// `support_creds` sits outside the profile signature, so on the plaintext
-// fallback a relay can rewrite it to `""` in flight and every receiver reads
-// the holder's explicit clear. Its own master signature closes that, and the
-// per-master PIN is what stops the signature simply being stripped: once a
-// master has signed the field once, an unsigned copy from it changes nothing.
+// CRYPTO-1, over the wire. A master-signed device list rides every profile
+// announce in the clear, so anyone who has seen one is holding a genuine,
+// perfectly valid signed list for somebody else. The receiver used to bind
+// whichever device DELIVERED it to that master, on the theory that delivery
+// proves membership. It does not: replaying the victim's own announce from
+// another socket handed the attacker the victim's identity on the target,
+// which means the target's next DM to the victim fans out to the attacker,
+// its Olm key exchange is authorised against the same poisoned set, and its
+// CRDT role checks resolve through it.
 //
-// Three things have to hold together, and the third is why the pin cannot just
-// be "require a signature from everyone": a client that predates the field
-// signature sends the field and no signature, and it must keep working.
+// The attacker here is a bare device id with a socket, which is all the relay
+// authenticates. No node is spawned for it, so nothing can re-teach the target
+// that id afterwards and mask the result.
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
-async fn support_creds_sig_pins_and_a_stripped_field_is_preserved() {
+async fn replayed_device_list_from_an_unlisted_device_does_not_bind() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    // V = the victim whose signed list is public. T = the target that must not
+    // be fooled. A = a device id V has never named.
+    const V_MASTER: u8 = 191;
+    const V_DEV: u8 = 192;
+    const T_MASTER: u8 = 193;
+    const A_DEV: u8 = 194;
+    let v_master = NativeKeypair::from_secret_bytes(&seed_bytes(V_MASTER)).peer_id();
+    let t_master = NativeKeypair::from_secret_bytes(&seed_bytes(T_MASTER)).peer_id();
+    let v_dev = NativeKeypair::from_secret_bytes(&seed_bytes(V_DEV)).peer_id();
+    let a_dev = NativeKeypair::from_secret_bytes(&seed_bytes(A_DEV)).peer_id();
+
+    // Armed before V exists: the replay has to be V's REAL frame, bytes
+    // unchanged, or this proves nothing about a genuine signed list.
+    relay.set_recording(&v_dev, true);
+
+    let mut v = spawn_node_with_friends(&relay, V_MASTER, V_DEV, &[&t_master]).await;
+    let mut t = spawn_node_with_friends(&relay, T_MASTER, T_MASTER, &[&v_master]).await;
+    expect_dm_pair_ready(&relay, &v, &t, 15).await;
+
+    let profile = |name: &str, status: &str| NodeCommand::UpdateProfile {
+        display_name: name.to_string(),
+        status: status.to_string(),
+        about_me: String::new(),
+        avatar_bytes: None,
+        banner_bytes: None,
+        twitch_username: String::new(),
+        showcase_board: None,
+        showcase_assets: None,
+        avatar_frame: None,
+        avatar_anim: None,
+        banner_anim: None,
+        support_creds: None,
+    };
+
+    v.cmd_tx.send(profile("Victim", "the real one")).await.unwrap();
+    assert!(
+        wait_until(20, || async {
+            t.store()
+                .load_profile(&v_master)
+                .ok()
+                .flatten()
+                .is_some_and(|p| p.display_name == "Victim")
+                && t.known_devices(&v_master).iter().any(|d| *d == v_dev)
+        })
+        .await,
+        "T must hold V's signed profile and V's device list first, got {:?}",
+        t.known_devices(&v_master),
+    );
+
+    // V's own announce, captured off the wire: a real signature over real
+    // profile fields, carrying V's real master-signed device list.
+    let replay = relay
+        .recorded_frames(&v_dev)
+        .into_iter()
+        .filter(|data| {
+            serde_json::from_slice::<serde_json::Value>(data)
+                .ok()
+                .and_then(|val| {
+                    let obj = val.as_object()?.clone();
+                    Some(
+                        obj.get("type")?.as_str()? == "profile_update"
+                            && obj.get("device_list").is_some_and(|d| !d.is_null())
+                            && obj.get("profile_sig").is_some_and(|s| !s.is_null()),
+                    )
+                })
+                .unwrap_or(false)
+        })
+        .next_back()
+        .expect("V announces a signed profile carrying its signed device list");
+
+    // The resolver is process-global in this harness, so clear anything already
+    // known about the attacker's id: a pass has to mean "refused", never
+    // "we happened not to have learned it".
+    super::resolver::forget(&a_dev);
+
+    let room = super::types::dm_room_code(&v_master, &t_master);
+    relay.inject(&room, &a_dev, &t.device_id, replay);
+
+    // BARRIER: a later frame from V, on the same channel into T, that the
+    // injected one must have been processed before. It is V's, not the
+    // attacker's, precisely so it cannot overwrite the mapping under test.
+    v.cmd_tx.send(profile("Victim", "barrier")).await.unwrap();
+    assert!(
+        wait_until(20, || async {
+            t.store()
+                .load_profile(&v_master)
+                .ok()
+                .flatten()
+                .is_some_and(|p| p.status == "barrier")
+        })
+        .await,
+        "the barrier announce must land, so the replay's outcome is a decision"
+    );
+
+    assert_ne!(
+        super::resolver::resolve(&a_dev),
+        v_master,
+        "the delivering device must never resolve to the victim's master",
+    );
+    let known = t.known_devices(&v_master);
+    assert!(
+        !known.iter().any(|d| *d == a_dev),
+        "and it must not be written into T's device list for V, got {known:?}",
+    );
+    assert!(
+        known.iter().any(|d| *d == v_dev),
+        "while V's real device is still there, got {known:?}",
+    );
+
+    drop(v);
+    drop(t);
+}
+
+// ---------------------------------------------------------------------------
+// The same replay through the OTHER stranger-reachable door. A friend request
+// lands in `inbox:{master}` from someone the target has never met, and it
+// carries a device list precisely because the resolver is cold for a stranger.
+// That made it the cheapest place to plant the mapping, and it is now gated
+// like the `ServerJoinRequest` and `FriendReject` arms: a carried list that
+// does not name its deliverer is a DROPPED request.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn friend_request_from_an_unlisted_device_does_not_bind() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    const V_MASTER: u8 = 195;
+    const V_DEV: u8 = 196;
+    const T_MASTER: u8 = 197;
+    const A_DEV: u8 = 198;
+    let v_keypair = NativeKeypair::from_secret_bytes(&seed_bytes(V_MASTER));
+    let v_master = v_keypair.peer_id();
+    let t_master = NativeKeypair::from_secret_bytes(&seed_bytes(T_MASTER)).peer_id();
+    let v_dev = NativeKeypair::from_secret_bytes(&seed_bytes(V_DEV)).peer_id();
+    let a_dev = NativeKeypair::from_secret_bytes(&seed_bytes(A_DEV)).peer_id();
+
+    let mut v = spawn_node_with_friends(&relay, V_MASTER, V_DEV, &[&t_master]).await;
+    let mut t = spawn_node_with_friends(&relay, T_MASTER, T_MASTER, &[&v_master]).await;
+    expect_dm_pair_ready(&relay, &v, &t, 15).await;
+
+    let profile = |status: &str| NodeCommand::UpdateProfile {
+        display_name: "Victim".to_string(),
+        status: status.to_string(),
+        about_me: String::new(),
+        avatar_bytes: None,
+        banner_bytes: None,
+        twitch_username: String::new(),
+        showcase_board: None,
+        showcase_assets: None,
+        avatar_frame: None,
+        avatar_anim: None,
+        banner_anim: None,
+        support_creds: None,
+    };
+
+    assert!(
+        wait_until(20, || async {
+            t.known_devices(&v_master).iter().any(|d| *d == v_dev)
+        })
+        .await,
+        "T must hold V's device list first, got {:?}",
+        t.known_devices(&v_master),
+    );
+
+    // V's genuine list, signed by V's own master key. Nothing about it is
+    // forged; the attacker simply is not in it.
+    let v_list = super::crypto_handler::build_signed_device_list(
+        &v_keypair, 1, vec![v_dev.clone()], Vec::new(),
+    );
+    assert!(super::crypto_handler::verify_device_list(&v_list), "the carried list is real");
+
+    super::resolver::forget(&a_dev);
+
+    let request = serde_json::to_vec(&super::types::HavenMessage::FriendRequest {
+        requested_at: super::types::now_ms(),
+        carried_bundle: None,
+        device_list: Some(v_list),
+        carried_profile: None,
+    })
+    .unwrap();
+    relay.inject(&format!("inbox:{t_master}"), &a_dev, &t.device_id, request);
+
+    // BARRIER, same reasoning as the replay test: a later frame from V.
+    v.cmd_tx.send(profile("barrier")).await.unwrap();
+    assert!(
+        wait_until(20, || async {
+            t.store()
+                .load_profile(&v_master)
+                .ok()
+                .flatten()
+                .is_some_and(|p| p.status == "barrier")
+        })
+        .await,
+        "the barrier announce must land, so the request's outcome is a decision"
+    );
+
+    assert_ne!(
+        super::resolver::resolve(&a_dev),
+        v_master,
+        "a carried list must not bind the device that carried it",
+    );
+    let known = t.known_devices(&v_master);
+    assert!(
+        !known.iter().any(|d| *d == a_dev),
+        "and T's device list for V must not name the requester, got {known:?}",
+    );
+
+    drop(v);
+    drop(t);
+}
+
+// ---------------------------------------------------------------------------
+// `support_creds` sits outside the profile signature, so on the plaintext
+// fallback a relay can rewrite it to `""` in flight and every receiver reads
+// the holder's explicit clear. The field's OWN master signature closes that,
+// and it is REQUIRED: no valid signature, no change, whatever the field says.
+//
+// This used to be a per-master pin instead — an unsigned field applied until
+// that master had been seen signing once. A relay that stripped the signature
+// from the FIRST announce it ever carried kept the master on the unsigned
+// branch permanently and could then write the field itself, so the baseline
+// never existed for exactly the masters that needed it. Three things have to
+// hold together now: a signed field applies, a stripped one changes nothing,
+// and an unsigned one changes nothing either, pin or no pin.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn stripped_support_creds_never_clears_a_pinned_mark() {
     let _g = test_guard();
     let global_tmp = tempfile::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
@@ -17749,12 +18386,44 @@ async fn support_creds_sig_pins_and_a_stripped_field_is_preserved() {
         .await,
         "B must store A's mark"
     );
-    assert!(
-        b.store().support_creds_signed(&a_master).unwrap_or(false),
-        "a valid field signature PINS the master",
-    );
     let after_first = b.store().load_profile(&a_master).unwrap().unwrap();
     let earlier_updated_at = after_first.updated_at;
+
+    // --- 1b. The field PRESENT and the signature gone: a relay writing marks
+    //         rather than deleting them. A picks up a second mark; B must not
+    //         see it, because the frame that carries it proves nothing. ---
+    let second = testing::mint_for(&a_master, &[hex::encode([0x5cu8; 32])]);
+    relay.set_drop_support_creds_sig(&a.device_id, true);
+    drain_events(&mut b);
+    a.cmd_tx
+        .send(profile(
+            "a second mark, unsigned",
+            Some(support_creds::encode_entries(&[mark.clone(), second.clone()])),
+        ))
+        .await
+        .unwrap();
+    // CONTROL: the rest of the profile IS signed and lands, so once the status
+    // is through, the unchanged field is a decision rather than a frame in
+    // flight.
+    assert!(
+        wait_until(10, || async {
+            b.store()
+                .load_profile(&a_master)
+                .ok()
+                .flatten()
+                .is_some_and(|p| p.status == "a second mark, unsigned")
+        })
+        .await,
+        "B must receive the unsigned update (the signed half of the profile is fine)"
+    );
+    let p = b.store().load_profile(&a_master).unwrap().unwrap();
+    assert_eq!(
+        support_creds::parse_stored(&p.support_creds),
+        vec![mark.clone()],
+        "an unsigned field must not add a mark either: {}",
+        p.support_creds,
+    );
+    relay.set_drop_support_creds_sig(&a.device_id, false);
 
     // --- 2. The relay strips the field on the way to B. The row is intact. ---
     relay.set_strip_support_creds(&a.device_id, true);
@@ -17819,12 +18488,41 @@ async fn support_creds_sig_pins_and_a_stripped_field_is_preserved() {
         p.support_creds,
     );
 
-    // --- 4. A master that has never signed still gets the legacy path: field
-    //        in, no signature, and it applies. Every shipped client is here. ---
+    // --- 4. A master B has NEVER seen sign gets no softer rule. This is the
+    //        leg that used to go the other way, on a per-master pin, and the
+    //        pin is exactly what a relay could keep unset: strip the signature
+    //        from the first frame it ever carries for C and C stays on the
+    //        unsigned branch forever, at which point the relay writes C's marks
+    //        itself. There is no trust-on-first-use left to attack. ---
     relay.set_drop_support_creds_sig(&c.device_id, true);
     let c_mark = testing::mint_for(&c_master, &[hex::encode([0x5bu8; 32])]);
     c.cmd_tx
         .send(profile("old client", Some(support_creds::encode_entries(&[c_mark.clone()]))))
+        .await
+        .unwrap();
+    // CONTROL again: the signed half of C's profile lands, so the empty field
+    // that follows is a decision.
+    assert!(
+        wait_until(10, || async {
+            b.store()
+                .load_profile(&c_master)
+                .ok()
+                .flatten()
+                .is_some_and(|p| p.status == "old client")
+        })
+        .await,
+        "B must receive C's update"
+    );
+    assert!(
+        b.store().load_profile(&c_master).unwrap().unwrap().support_creds.is_empty(),
+        "an unsigned field is refused from every master, first announce included",
+    );
+
+    // --- 5. And the same mark, signed, lands: leg 4 failed on the signature,
+    //        not on the credential. ---
+    relay.set_drop_support_creds_sig(&c.device_id, false);
+    c.cmd_tx
+        .send(profile("signed now", Some(support_creds::encode_entries(&[c_mark.clone()]))))
         .await
         .unwrap();
     assert!(
@@ -17836,11 +18534,12 @@ async fn support_creds_sig_pins_and_a_stripped_field_is_preserved() {
                 .is_some_and(|p| !p.support_creds.is_empty())
         })
         .await,
-        "an unsigned field from a master that has never signed must still apply"
+        "the same mark, signed this time, must apply"
     );
-    assert!(
-        !b.store().support_creds_signed(&c_master).unwrap_or(true),
-        "and it must NOT pin that master: the next honest unsigned announce has to work too",
+    assert_eq!(
+        support_creds::parse_stored(&b.store().load_profile(&c_master).unwrap().unwrap().support_creds),
+        vec![c_mark],
+        "and it is C's own mark",
     );
 
     drop(a);
@@ -18000,4 +18699,346 @@ async fn support_credential_replicates_and_transplant_is_dropped() {
     drop(a);
     drop(a2);
     drop(b);
+}
+
+// ---------------------------------------------------------------------------
+// CRDT op authenticity (audit 2026-09, CRDT-1 + CRDT-2).
+//
+// Before the fix a `CrdtOp` carried no signature and `author` was a free
+// string, so anyone who could put a frame into a server room could write ops
+// as the Owner — and `op_allowed` waved `ServerCreated` through for everyone,
+// which handed a plain member the Owner role outright. On top of that, three
+// of the four ingest paths ran no permission check at all: `merge_ops` (every
+// SyncResponse) and the Olm-fallback single-op path applied whatever arrived.
+//
+// These tests drive the REAL loops and push forged frames in through the relay
+// the way a hostile member would, on every one of those paths. State is read
+// from the LIVE in-memory copy (the one that enforces), never from a running
+// node's DB.
+// ---------------------------------------------------------------------------
+
+/// Bring three friends up, have O create a server, and have M and X join it.
+/// Returns (o, m, x, server_id) with everyone converged on two members plus
+/// the owner.
+async fn three_member_server(
+    relay: &MockRelay,
+    o_tag: u8,
+    m_tag: u8,
+    x_tag: u8,
+) -> (TestNode, TestNode, TestNode, String) {
+    let o_master = NativeKeypair::from_secret_bytes(&seed_bytes(o_tag)).peer_id();
+    let m_master = NativeKeypair::from_secret_bytes(&seed_bytes(m_tag)).peer_id();
+    let x_master = NativeKeypair::from_secret_bytes(&seed_bytes(x_tag)).peer_id();
+
+    let mut o = spawn_node_with_friends(relay, o_tag, o_tag, &[&m_master, &x_master]).await;
+    let mut m = spawn_node_with_friends(relay, m_tag, m_tag, &[&o_master, &x_master]).await;
+    let mut x = spawn_node_with_friends(relay, x_tag, x_tag, &[&o_master, &m_master]).await;
+    expect_dm_pair_ready(relay, &o, &m, 15).await;
+    expect_dm_pair_ready(relay, &o, &x, 15).await;
+
+    let server_id = create_server_and_wait(&mut o, "Real Server").await;
+    // The owner has to be IN the server room before anyone asks to join it.
+    assert!(
+        wait_until(10, async || relay.room_devices(&server_id).contains(&o.device_id)).await,
+        "owner must join its own server room"
+    );
+
+    for joiner in [&mut m, &mut x] {
+        joiner
+            .cmd_tx
+            .send(NodeCommand::JoinServer {
+                server_id: server_id.clone(),
+                twitch_proof_json: None,
+                nsfw_confirmed: false,
+            })
+            .await
+            .unwrap();
+        let joined = wait_event(joiner, std::time::Duration::from_secs(10), |ev| {
+            matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
+        })
+        .await;
+        assert!(joined, "joiner should emit ServerJoined");
+    }
+
+    // Everyone agrees on the membership before a single hostile frame flies.
+    for (node, who) in [(&o, "O"), (&m, "M"), (&x, "X")] {
+        let ok = wait_until(10, async || {
+            let Some(state) = node.live_server_state(&server_id).await else { return false };
+            state.is_member(&m_master) && state.is_member(&x_master)
+        })
+        .await;
+        assert!(ok, "{who} must see both members before the attack");
+        assert_eq!(
+            node.live_role(&server_id, &m_master).await,
+            crate::crdt::operations::MemberRole::Member,
+            "{who}: M starts as a plain Member"
+        );
+        assert_eq!(
+            node.live_owner(&server_id).await.as_deref(),
+            Some(o_master.as_str()),
+            "{who}: O is the Owner"
+        );
+    }
+
+    drain_events(&mut o);
+    drain_events(&mut m);
+    drain_events(&mut x);
+    (o, m, x, server_id)
+}
+
+/// CRDT-1: a plain member forges ops naming the Owner as author, and forges a
+/// second founding op naming itself. Delivered on every ingest path there is
+/// (plaintext broadcast, sync batch), against two victims. Nothing lands.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn crdt_forged_author_op_is_rejected_on_every_ingest_path() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+    const O_TAG: u8 = 13;
+    const M_TAG: u8 = 14;
+    const X_TAG: u8 = 15;
+    let (o, m, x, server_id) = three_member_server(&relay, O_TAG, M_TAG, X_TAG).await;
+    let o_master = o.master_id.clone();
+    let m_master = m.master_id.clone();
+
+    // The promotion M wants: itself to Admin, attributed to the Owner. Only
+    // the Owner may author this, and only the Owner's key can prove it.
+    let promote = || crate::crdt::operations::CrdtPayload::RoleChanged {
+        peer_id: m_master.clone(),
+        role: crate::crdt::operations::MemberRole::Admin,
+        priority: crate::crdt::operations::MemberRole::Admin.priority(),
+    };
+    // A minute ahead of the wall clock: still inside the drift window, but
+    // late enough to WIN the LWW comparison if it were ever applied. A forged
+    // op that could not have won would prove nothing.
+    const AHEAD: u64 = 60_000;
+
+    let attacks: Vec<(&str, Vec<u8>)> = vec![
+        (
+            "unsigned author-spoof over CrdtOpBroadcast",
+            crdt_broadcast_frame(
+                &server_id,
+                &forge_crdt_op(&server_id, &o_master, promote(), AHEAD, None),
+            ),
+        ),
+        (
+            "author-spoof signed with the attacker's own key",
+            crdt_broadcast_frame(
+                &server_id,
+                &forge_crdt_op(&server_id, &o_master, promote(), AHEAD, Some(&m.master_kp)),
+            ),
+        ),
+        (
+            "the same forged op smuggled inside a SyncResponse batch",
+            sync_response_frame(
+                &server_id,
+                &[
+                    forge_crdt_op(&server_id, &o_master, promote(), AHEAD, None),
+                    forge_crdt_op(&server_id, &o_master, promote(), AHEAD + 1, Some(&m.master_kp)),
+                ],
+            ),
+        ),
+        (
+            "a second ServerCreated naming the attacker as owner",
+            crdt_broadcast_frame(
+                &server_id,
+                &forge_crdt_op(
+                    &server_id,
+                    &m_master,
+                    crate::crdt::operations::CrdtPayload::ServerCreated {
+                        name: "PWNED".into(),
+                        owner_peer_id: m_master.clone(),
+                    },
+                    AHEAD,
+                    Some(&m.master_kp),
+                ),
+            ),
+        ),
+    ];
+
+    for (what, frame) in attacks {
+        for target in [&o, &x] {
+            relay.inject(&server_id, &m.device_id, &target.device_id, frame.clone());
+        }
+        // Absence proof: give both victims a bounded window to have applied
+        // the op, THEN assert they did not.
+        sleep_ms(1500).await;
+        for (node, who) in [(&o, "O"), (&x, "X")] {
+            assert_eq!(
+                node.live_role(&server_id, &m_master).await,
+                crate::crdt::operations::MemberRole::Member,
+                "{who} must still see M as a plain Member after: {what}"
+            );
+            assert_eq!(
+                node.live_owner(&server_id).await.as_deref(),
+                Some(o_master.as_str()),
+                "{who} must still recognise O as Owner after: {what}"
+            );
+            assert_eq!(
+                node.live_server_name(&server_id).await,
+                "Real Server",
+                "{who}'s server name must be untouched after: {what}"
+            );
+        }
+    }
+
+    // The owner's own authority is intact: a real promotion still works.
+    o.cmd_tx
+        .send(NodeCommand::ChangeRole {
+            server_id: server_id.clone(),
+            peer_id: m_master.clone(),
+            new_role: "moderator".to_string(),
+        })
+        .await
+        .unwrap();
+    let promoted = wait_until(10, async || {
+        x.live_role(&server_id, &m_master).await == crate::crdt::operations::MemberRole::Moderator
+    })
+    .await;
+    assert!(promoted, "the real Owner must still be able to change a role");
+
+    drop(o);
+    drop(m);
+    drop(x);
+}
+
+/// CRDT-2: an op stamped at the end of time. Signed by a peer who really is
+/// allowed to write it, so only the clock bound catches it — and because it is
+/// refused rather than merged, the Owner can still rename afterwards.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn crdt_future_hlc_op_is_rejected_and_owner_can_still_rename() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+    const O_TAG: u8 = 16;
+    const M_TAG: u8 = 17;
+    const X_TAG: u8 = 18;
+    let (o, m, x, server_id) = three_member_server(&relay, O_TAG, M_TAG, X_TAG).await;
+    let m_master = m.master_id.clone();
+
+    // M is promoted for real, so it genuinely holds MANAGE_SERVER: the op
+    // below is refused on its TIMESTAMP alone, not on permission.
+    o.cmd_tx
+        .send(NodeCommand::ChangeRole {
+            server_id: server_id.clone(),
+            peer_id: m_master.clone(),
+            new_role: "admin".to_string(),
+        })
+        .await
+        .unwrap();
+    for (node, who) in [(&o, "O"), (&x, "X"), (&m, "M")] {
+        let ok = wait_until(10, async || {
+            node.live_role(&server_id, &m_master).await
+                == crate::crdt::operations::MemberRole::Admin
+        })
+        .await;
+        assert!(ok, "{who} must see M as Admin before the attack");
+    }
+
+    // A validly signed rename, stamped at the end of time. Applied, it would
+    // win every future LWW comparison and lock the name forever.
+    let poison = forge_crdt_op(
+        &server_id,
+        &m_master,
+        crate::crdt::operations::CrdtPayload::ServerRenamed { new_name: "PWNED".into() },
+        u64::MAX - crate::crdt::hlc::wall_clock_ms(),
+        Some(&m.master_kp),
+    );
+    assert_eq!(poison.hlc.physical_ms, u64::MAX, "the op really is stamped at the end of time");
+    assert!(poison.verify_author().is_ok(), "and its signature is genuinely valid");
+    let frame = crdt_broadcast_frame(&server_id, &poison);
+    for target in [&o, &x] {
+        relay.inject(&server_id, &m.device_id, &target.device_id, frame.clone());
+    }
+    sleep_ms(1500).await;
+    for (node, who) in [(&o, "O"), (&x, "X")] {
+        assert_eq!(
+            node.live_server_name(&server_id).await,
+            "Real Server",
+            "{who} must keep the old name"
+        );
+    }
+
+    // The name is bounded, not locked: the Owner renames and everyone follows.
+    o.cmd_tx
+        .send(NodeCommand::RenameServer {
+            server_id: server_id.clone(),
+            new_name: "Fine".to_string(),
+        })
+        .await
+        .unwrap();
+    for (node, who) in [(&o, "O"), (&x, "X"), (&m, "M")] {
+        let ok = wait_until(10, async || {
+            node.live_server_name(&server_id).await == "Fine"
+        })
+        .await;
+        assert!(
+            ok,
+            "{who} must converge on the Owner's rename, got {:?}",
+            node.live_server_name(&server_id).await
+        );
+    }
+
+    drop(o);
+    drop(m);
+    drop(x);
+}
+
+/// The gate binds an op to its AUTHOR, not to whoever handed it over. A member
+/// relaying somebody else's correctly signed op is the normal case (join
+/// fan-out, gossip re-flood) and must keep working.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn crdt_signed_op_relayed_by_another_member_is_accepted() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+    const O_TAG: u8 = 19;
+    const M_TAG: u8 = 25;
+    const X_TAG: u8 = 26;
+    let (o, m, x, server_id) = three_member_server(&relay, O_TAG, M_TAG, X_TAG).await;
+    let o_master = o.master_id.clone();
+
+    // An op authored by O — O's master key is what makes it O's — that M has
+    // never seen, delivered to M from X's socket.
+    let renamed = forge_crdt_op(
+        &server_id,
+        &o_master,
+        crate::crdt::operations::CrdtPayload::ServerRenamed { new_name: "Relayed".into() },
+        60_000,
+        Some(&o.master_kp),
+    );
+    assert_ne!(
+        m.live_server_name(&server_id).await,
+        "Relayed",
+        "precondition: M has not seen this rename"
+    );
+    relay.inject(
+        &server_id,
+        &x.device_id,
+        &m.device_id,
+        crdt_broadcast_frame(&server_id, &renamed),
+    );
+
+    let ok = wait_until(10, async || {
+        m.live_server_name(&server_id).await == "Relayed"
+    })
+    .await;
+    assert!(
+        ok,
+        "M must apply an op signed by the Owner even though X handed it over, got {:?}",
+        m.live_server_name(&server_id).await
+    );
+
+    drop(o);
+    drop(m);
+    drop(x);
 }

@@ -58,6 +58,20 @@ impl<V: Clone> AdminLwwReg<V> {
         &self.hlc
     }
 
+    /// Pull a register's timestamp back to `max_ms` if it sits beyond it.
+    ///
+    /// A `ServerStateSnapshot` is adopted wholesale during a join, so a
+    /// hostile responder could hand us registers stamped in the far future
+    /// that no later honest write could ever overtake. Clamping on adoption
+    /// bounds them without discarding the value. Returns true if it changed.
+    pub fn clamp_hlc(&mut self, max_ms: u64) -> bool {
+        if self.hlc.physical_ms > max_ms {
+            self.hlc.physical_ms = max_ms;
+            return true;
+        }
+        false
+    }
+
     /// Merge with a remote register: later HLC wins, unconditionally.
     /// Priority is deliberately NOT consulted (see the struct doc); the HLC
     /// order is total, so an equal timestamp means the identical write.

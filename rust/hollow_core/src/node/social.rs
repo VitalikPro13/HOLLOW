@@ -1274,6 +1274,45 @@ pub(crate) async fn handle_update_profile(
 /// row. Returns the master key the profile was (or would be) stored under, plus
 /// whether a save actually happened.
 #[allow(clippy::too_many_arguments)]
+/// Receive gate for a peer's profile still (PROFILE-1). The ONE validator, on
+/// every path that stores avatar or banner bytes somebody else sent us.
+///
+/// `None` in means nothing was offered and `None` out means PRESERVE what we
+/// hold, so a refusal and an absence land in the same place on purpose: a
+/// blob we will not accept must never blank the one already stored.
+/// `Some(&[])` is the owner's explicit CLEAR and is not an image, so it goes
+/// straight through.
+///
+/// SECURITY: these bytes used to be stored with no format, size or canvas
+/// check at all, and `process_sync_avatar` decodes them later when a guest
+/// asks for a public channel preview. A peer could park arbitrary bytes in
+/// our database and pick the moment we decoded a bomb out of them.
+pub(crate) fn gated_profile_image<'a>(
+    master: &str,
+    what: &str,
+    max_bytes: usize,
+    bytes: Option<&'a [u8]>,
+) -> Option<&'a [u8]> {
+    let raw = bytes?;
+    if raw.is_empty() {
+        return Some(raw);
+    }
+    if raw.len() > max_bytes {
+        hollow_log!(
+            "[HOLLOW-SECURITY] REJECTED profile image from {master}: {what} is {} bytes, over the {max_bytes} cap",
+            raw.len()
+        );
+        return None;
+    }
+    match super::image_convert::validate_remote_image_header(raw) {
+        Ok(_) => Some(raw),
+        Err(why) => {
+            hollow_log!("[HOLLOW-SECURITY] REJECTED profile image from {master}: {what} {why}");
+            None
+        }
+    }
+}
+
 pub(crate) fn save_incoming_profile(
     sender_peer_id: &str,
     display_name: &str,
@@ -1323,11 +1362,20 @@ pub(crate) fn save_incoming_profile(
         }
     }
     // The ONE gate for the support credential field (wiki
-    // `security_write_gates.md`): the field signature and the per-master pin
-    // first, then the entry validator, which verifies every entry against the
-    // pinned root and THIS master and drops the rest in silence.
-    let (support_creds, pin_now) = gated_support_creds(
+    // `security_write_gates.md`): the field's own master signature first, then
+    // the entry validator, which verifies every entry against the pinned root
+    // and THIS master and drops the rest in silence.
+    let support_creds = gated_support_creds(
         &db, &master, updated_at, support_creds, support_creds_sig, Some(proof.pk),
+    );
+    // PROFILE-1: the stills are the one part of an incoming profile that is
+    // raw remote BYTES rather than a bounded string or a hash. A refused blob
+    // preserves whatever we already stored.
+    let avatar_bytes = gated_profile_image(
+        &master, "avatar", super::image_convert::PROFILE_AVATAR_RECV_MAX_BYTES, avatar_bytes,
+    );
+    let banner_bytes = gated_profile_image(
+        &master, "banner", super::image_convert::PROFILE_BANNER_RECV_MAX_BYTES, banner_bytes,
     );
     if let Err(e) = db.save_profile(
         &master, display_name, status, about_me, updated_at,
@@ -1337,12 +1385,6 @@ pub(crate) fn save_incoming_profile(
     ) {
         hollow_log!("[HOLLOW-PROFILE] Failed to save incoming profile for {master}: {e}");
         return (master, false);
-    }
-    // The row exists now, so the pin has somewhere to live. Set only AFTER a
-    // successful save: pinning a master whose field we did not store would
-    // refuse their next honest unsigned announce for nothing.
-    if pin_now {
-        let _ = db.pin_support_creds_signed(&master);
     }
     (master, true)
 }
@@ -1358,23 +1400,30 @@ fn creds_sig_complaints() -> &'static std::sync::Mutex<std::collections::HashSet
 /// Receive-side gate for `support_creds` and its signature: the ONE place the
 /// field is decided (wiki `security_write_gates.md`).
 ///
-/// Returns the value to store (`None` = preserve what we have) and whether
-/// this master should be PINNED as a signer from now on.
+/// Returns the value to store; `None` = PRESERVE whatever we already hold.
+/// Refusing and clearing are opposite outcomes here, and every refusal below
+/// preserves.
 ///
-/// * `None` in                    -> `None` out. An old client, or an update
-///   that did not touch the field.
+/// * `None` in                    -> `None` out. An update that did not touch
+///   the field at all.
 /// * an announce OLDER than the row we hold -> `None` out, signature or not.
 ///   A relay that captured a genuine older announce, from before the holder
 ///   redeemed anything, could otherwise replay it to clear the marks; the
 ///   profile row's own freshness guard tolerates 24 hours of backdating, so
 ///   this field needs its own rule.
-/// * a VALID signature          -> the field, through the entry validator,
-///   and the master is pinned.
-/// * no valid signature, master PINNED -> `None` out. This is the whole point
-///   of the pin: once a master has signed once, an unsigned field from it is
-///   a rewrite in flight, and it is REFUSED, not logged and stored.
-/// * no valid signature, master not pinned -> the legacy path, the entry
-///   validator alone. Every client that predates this field lands here.
+/// * no VALID signature -> `None` out. The field is accepted ONLY under a
+///   signature by the master it claims to describe, `Some("")` included: the
+///   explicit clear is the single most useful thing for a relay to forge, so
+///   it has to be signed like everything else.
+/// * a VALID signature -> the field, through the entry validator.
+///
+/// This used to be softer: an unsigned field applied unless the master had
+/// been seen signing before (a per-master pin). That pin could never be set on
+/// a master whose FIRST announce was stripped, so a relay that stripped the
+/// field and its signature from the very first frame kept that master on the
+/// unsigned branch permanently and could then write the field at will. There
+/// is no version of trust-on-first-use that survives an attacker who is
+/// present for the first use, so the rule is now simply the signature.
 fn gated_support_creds(
     db: &crate::storage::MessageStore,
     master: &str,
@@ -1382,28 +1431,26 @@ fn gated_support_creds(
     raw: Option<&str>,
     support_creds_sig: Option<&str>,
     profile_pk: Option<&str>,
-) -> (Option<String>, bool) {
-    let Some(raw) = raw else { return (None, false) };
+) -> Option<String> {
+    let raw = raw?;
     if let Ok(Some(stored)) = db.load_profile(master) {
         if updated_at < stored.updated_at {
-            return (None, false);
+            return None;
         }
     }
-    let signed = super::crypto_handler::verify_support_creds_sig(
+    if !super::crypto_handler::verify_support_creds_sig(
         master, updated_at, raw, support_creds_sig, profile_pk,
-    );
-    if !signed && db.support_creds_signed(master).unwrap_or(false) {
+    ) {
         if let Ok(mut seen) = creds_sig_complaints().lock() {
             if seen.insert(master.to_string()) {
                 hollow_log!(
-                    "[HOLLOW-SECURITY] REFUSED the support credential field from {master} — it has signed before and this copy carries no valid signature; keeping what we stored"
+                    "[HOLLOW-SECURITY] REFUSED the support credential field from {master} — no valid signature over it; keeping what we stored"
                 );
             }
         }
-        return (None, false);
+        return None;
     }
-    let kept = super::support_creds::sanitize_incoming_support_creds(Some(raw), master);
-    (kept, signed)
+    super::support_creds::sanitize_incoming_support_creds(Some(raw), master)
 }
 
 /// Receive-side backstop for the showcase board JSON (UI cap is 8 KB; this is
@@ -1486,10 +1533,14 @@ pub(crate) fn valid_avatar_frame_id(id: &str) -> bool {
 /// for the two to disagree.
 ///
 /// **This gates the profile fields ONLY.** The caller ingests the sender's
-/// signed DEVICE LIST first and unconditionally: it carries its own master
-/// signature (`verify_device_list`), and a node with no profile row yet still
-/// announces a device list — that announce is what collapses its devices into
-/// one online identity, so gating it here would break presence.
+/// signed DEVICE LIST first, and independently of this result: the list stands
+/// on its own two gates, the master's signature (`verify_device_list`) and
+/// `device_list_binds_sender`, which requires that signature to NAME the device
+/// that delivered it. It also has to run first, because this function verifies
+/// against `resolve(sender_peer_id)` and the ingest is what teaches the
+/// resolver that mapping. And a node with no profile row yet signs nothing at
+/// all while still announcing a device list — that announce is what collapses
+/// its devices into one online identity, so gating it here would break presence.
 ///
 /// The signer is the sender's MASTER — profiles are one per identity and any
 /// device announces the same one.
@@ -2070,9 +2121,18 @@ pub(crate) async fn handle_profile_relay(
             };
             // A relay carries no frame and no animated-media hashes either —
             // `None` preserves whatever we already stored for this identity.
+            // PROFILE-1: a relayed avatar is remote bytes from a peer that is
+            // not even the subject, so it takes the same gate. Refused
+            // preserves; the relay's text still lands.
+            let avatar_bytes = gated_profile_image(
+                &source_peer_id,
+                "relayed avatar",
+                super::image_convert::PROFILE_AVATAR_RECV_MAX_BYTES,
+                avatar_bytes.as_deref(),
+            );
             let _ = store.save_profile(
                 &source_peer_id, &display_name, &status, &about_me, updated_at,
-                avatar_bytes.as_deref(), None, &twitch_username, None, None,
+                avatar_bytes, None, &twitch_username, None, None,
                 proof, None, None, None, None,
             );
             hollow_log!("[HOLLOW-PROFILE] Saved relayed profile for {source_peer_id}");
@@ -2099,7 +2159,301 @@ pub(crate) async fn handle_profile_relay(
 
 #[cfg(test)]
 mod tests {
-    use super::{sanitize_incoming_frame, valid_avatar_frame_id};
+    use super::{
+        gated_profile_image, sanitize_incoming_frame, save_incoming_profile,
+        valid_avatar_frame_id,
+    };
+    use base64::Engine as _;
+    use crate::identity::native_identity::NativeKeypair;
+    use crate::node::support_creds::{self, testing};
+
+    // ── PROFILE-1: the receive gate on a peer's profile stills ──────────
+
+    /// PNG's chunk CRC (IEEE, reflected), so a hand-built header is one a real
+    /// decoder accepts rather than one it rejects for the wrong reason.
+    fn png_crc32(bytes: &[u8]) -> u32 {
+        let mut crc = 0xFFFF_FFFFu32;
+        for &b in bytes {
+            crc ^= u32::from(b);
+            for _ in 0..8 {
+                let mask = (crc & 1).wrapping_neg();
+                crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
+            }
+        }
+        !crc
+    }
+
+    /// A structurally valid PNG head DECLARING `w`x`h` 8-bit RGBA, stub body.
+    fn png_declaring(w: u32, h: u32) -> Vec<u8> {
+        let mut ihdr = Vec::with_capacity(17);
+        ihdr.extend_from_slice(b"IHDR");
+        ihdr.extend_from_slice(&w.to_be_bytes());
+        ihdr.extend_from_slice(&h.to_be_bytes());
+        ihdr.extend_from_slice(&[8, 6, 0, 0, 0]);
+        let mut idat = Vec::with_capacity(68);
+        idat.extend_from_slice(b"IDAT");
+        idat.extend_from_slice(&[0u8; 64]);
+
+        let mut out = Vec::new();
+        out.extend_from_slice(b"\x89PNG\r\n\x1a\n");
+        out.extend_from_slice(&13u32.to_be_bytes());
+        out.extend_from_slice(&ihdr);
+        out.extend_from_slice(&png_crc32(&ihdr).to_be_bytes());
+        out.extend_from_slice(&64u32.to_be_bytes());
+        out.extend_from_slice(&idat);
+        out.extend_from_slice(&png_crc32(&idat).to_be_bytes());
+        out
+    }
+
+    /// A hand-built VP8X WebP header declaring `dim`x`dim`.
+    fn webp_declaring(dim: u32) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(b"RIFF");
+        out.extend_from_slice(&0u32.to_le_bytes());
+        out.extend_from_slice(b"WEBP");
+        out.extend_from_slice(b"VP8X");
+        out.extend_from_slice(&10u32.to_le_bytes());
+        out.push(0x10);
+        out.extend_from_slice(&[0, 0, 0]);
+        let minus_one = dim - 1;
+        out.extend_from_slice(&minus_one.to_le_bytes()[0..3]);
+        out.extend_from_slice(&minus_one.to_le_bytes()[0..3]);
+        out.extend_from_slice(&[0xAB; 512]);
+        out
+    }
+
+    /// A real, small PNG — the control.
+    fn small_png() -> Vec<u8> {
+        let img = image::RgbaImage::from_pixel(48, 32, image::Rgba([90, 140, 200, 255]));
+        let mut buf = Vec::new();
+        img.write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
+            .expect("encode png");
+        buf
+    }
+
+    const AVATAR_CAP: usize = crate::node::image_convert::PROFILE_AVATAR_RECV_MAX_BYTES;
+
+    /// PROFILE-1 regression: a peer's avatar bytes are the one part of an
+    /// incoming profile that is raw remote content, and they get decoded
+    /// later. A blob that DECLARES an absurd canvas is dropped at receipt,
+    /// and dropping PRESERVES rather than clears.
+    #[test]
+    fn incoming_profile_image_bomb_is_dropped() {
+        const MASTER: &str = "12D3KooW-profile1-bomb";
+
+        let png_bomb = png_declaring(20_000, 20_000);
+        assert!(
+            gated_profile_image(MASTER, "avatar", AVATAR_CAP, Some(&png_bomb)).is_none(),
+            "a PNG declaring 20000x20000 must be dropped",
+        );
+
+        let webp_bomb = webp_declaring(16_384);
+        assert!(
+            gated_profile_image(MASTER, "avatar", AVATAR_CAP, Some(&webp_bomb)).is_none(),
+            "a VP8X header declaring 16384x16384 must be dropped",
+        );
+
+        // Not an image at all, and an image format we do not render.
+        assert!(
+            gated_profile_image(MASTER, "avatar", AVATAR_CAP, Some(b"not an image")).is_none(),
+            "bytes that are not an image must be dropped",
+        );
+
+        // The control: an ordinary still still lands, and so do the two
+        // non-image states the field has.
+        let ok = small_png();
+        assert_eq!(
+            gated_profile_image(MASTER, "avatar", AVATAR_CAP, Some(&ok)),
+            Some(ok.as_slice()),
+            "an ordinary avatar must still be stored",
+        );
+        assert_eq!(
+            gated_profile_image(MASTER, "avatar", AVATAR_CAP, Some(&[])),
+            Some(&[][..]),
+            "an empty blob is the owner's explicit clear, not an image",
+        );
+        assert_eq!(
+            gated_profile_image(MASTER, "avatar", AVATAR_CAP, None),
+            None,
+            "nothing offered preserves what is stored",
+        );
+    }
+
+    /// The byte cap runs before anything parses the bytes, so a peer cannot
+    /// park megabytes in our database under the name of an avatar.
+    #[test]
+    fn incoming_profile_image_over_byte_cap_is_dropped() {
+        const MASTER: &str = "12D3KooW-profile1-cap";
+
+        // A REAL, decodable PNG that is simply too big for the field. The
+        // point is the cap, not the content.
+        let img = image::RgbaImage::from_fn(1200, 1200, |x, y| {
+            image::Rgba([(x % 256) as u8, (y % 256) as u8, ((x ^ y) % 256) as u8, 255])
+        });
+        let mut fat = Vec::new();
+        img.write_to(&mut std::io::Cursor::new(&mut fat), image::ImageFormat::Png)
+            .expect("encode png");
+        assert!(
+            fat.len() > AVATAR_CAP,
+            "fixture must exceed the {AVATAR_CAP} byte avatar cap, is {}",
+            fat.len(),
+        );
+        assert!(
+            crate::node::image_convert::validate_remote_image_header(&fat).is_ok(),
+            "the fixture is a perfectly valid image — only its size is wrong",
+        );
+
+        assert!(
+            gated_profile_image(MASTER, "avatar", AVATAR_CAP, Some(&fat)).is_none(),
+            "an over-cap avatar must be dropped",
+        );
+        // The banner's cap is looser, and the same bytes fit under it.
+        assert!(
+            gated_profile_image(
+                MASTER,
+                "banner",
+                crate::node::image_convert::PROFILE_BANNER_RECV_MAX_BYTES,
+                Some(&fat),
+            )
+            .is_some(),
+            "the same bytes are inside the banner cap",
+        );
+    }
+
+    /// A throwaway store, a master keypair, and the mark that master has already
+    /// been given. Returns everything the announces below need.
+    struct CredsFixture {
+        _tmp: tempfile::TempDir,
+        db: String,
+        pass: String,
+        master: NativeKeypair,
+        master_id: String,
+        field: String,
+    }
+
+    impl CredsFixture {
+        fn new(seed: u8) -> Self {
+            let tmp = tempfile::tempdir().unwrap();
+            let db = tmp.path().join("creds.db").to_str().unwrap().to_string();
+            let pass = "ef".repeat(32);
+            crate::storage::MessageStore::migrate_auto_vacuum_once(&db, &pass).unwrap();
+            let master = NativeKeypair::from_secret_bytes(&[seed; 32]);
+            let master_id = master.peer_id();
+            let mark = testing::mint_for(&master_id, &[hex::encode([0x5au8; 32])]);
+            let field = support_creds::encode_entries(&[mark]);
+            Self { _tmp: tmp, db, pass, master, master_id, field }
+        }
+
+        /// One announce, exactly as `handle_message` assembles it: a genuine
+        /// profile signature (always), and whatever the caller wants for the
+        /// credentials field and ITS signature.
+        fn announce(
+            &self,
+            updated_at: i64,
+            creds: Option<&str>,
+            creds_sig: Option<&str>,
+        ) -> bool {
+            let pk_b64 = base64::engine::general_purpose::STANDARD
+                .encode(self.master.public_key_protobuf());
+            let (sig, pk) = crate::node::crypto_handler::sign_profile(
+                &self.master, &pk_b64, &self.master_id, updated_at,
+                "Anon", "", "", "", "",
+            );
+            let (sig, pk) = (sig.unwrap(), pk.unwrap());
+            let proof = crate::storage::ProfileProof {
+                sig: &sig, pk: &pk, avatar_hash: "",
+            };
+            let (_, saved) = save_incoming_profile(
+                &self.master_id, "Anon", "", "", updated_at,
+                None, None, "", None, None, Some(proof), None, None, None,
+                creds, creds_sig, &self.db, &self.pass,
+            );
+            saved
+        }
+
+        /// The master's real signature over `field` at `updated_at`.
+        fn creds_sig(&self, updated_at: i64, field: &str) -> String {
+            crate::node::crypto_handler::sign_support_creds(
+                &self.master, &self.master_id, updated_at, Some(field),
+            )
+            .expect("a present field is always signed")
+        }
+
+        fn stored_creds(&self) -> String {
+            crate::storage::MessageStore::open(&self.db, &self.pass)
+                .unwrap()
+                .load_profile(&self.master_id)
+                .unwrap()
+                .unwrap()
+                .support_creds
+        }
+    }
+
+    /// SHOP-1. The field is accepted ONLY under a valid master signature over it.
+    /// There is no unsigned branch left to fall back to: a relay that stripped the
+    /// signature from a master's FIRST announce used to keep that master on the
+    /// legacy path forever, and could then write the field itself.
+    ///
+    /// Refusing PRESERVES. It never clears — that is the whole point.
+    #[test]
+    fn unsigned_support_creds_is_refused_and_preserved() {
+        let _lock = crate::node::resolver::test_lock();
+        crate::node::resolver::clear_all();
+        let f = CredsFixture::new(0x71);
+
+        let sig = f.creds_sig(1_000, &f.field);
+        assert!(f.announce(1_000, Some(&f.field), Some(&sig)), "the signed announce stores");
+        assert_eq!(f.stored_creds(), f.field, "baseline: the mark is on the row");
+
+        // The field, rewritten, with no signature at all.
+        assert!(f.announce(2_000, Some(""), None));
+        assert_eq!(f.stored_creds(), f.field, "an unsigned field must change nothing");
+
+        // And a signature that is real but over something else: a captured
+        // signature cannot be re-pointed at a different field or timestamp.
+        assert!(f.announce(3_000, Some(""), Some(&f.creds_sig(1_000, &f.field))));
+        assert_eq!(f.stored_creds(), f.field, "a mismatched signature is not a signature");
+
+        crate::node::resolver::clear_all();
+    }
+
+    /// The holder's own explicit clear still works, because they sign it. This is
+    /// the "hide every mark" path, and it has to survive the rule above.
+    #[test]
+    fn signed_empty_support_creds_clears() {
+        let _lock = crate::node::resolver::test_lock();
+        crate::node::resolver::clear_all();
+        let f = CredsFixture::new(0x72);
+
+        let sig = f.creds_sig(1_000, &f.field);
+        assert!(f.announce(1_000, Some(&f.field), Some(&sig)));
+        assert_eq!(f.stored_creds(), f.field);
+
+        let clear_sig = f.creds_sig(2_000, "");
+        assert!(f.announce(2_000, Some(""), Some(&clear_sig)));
+        assert_eq!(f.stored_creds(), "", "a SIGNED empty field is the holder clearing it");
+
+        crate::node::resolver::clear_all();
+    }
+
+    /// The same clear without a signature is the exact frame a hostile relay
+    /// writes, so it does nothing. Stated separately because it is the one that
+    /// would be silent if it regressed: the marks would simply be gone.
+    #[test]
+    fn unsigned_empty_support_creds_does_not_clear() {
+        let _lock = crate::node::resolver::test_lock();
+        crate::node::resolver::clear_all();
+        let f = CredsFixture::new(0x73);
+
+        let sig = f.creds_sig(1_000, &f.field);
+        assert!(f.announce(1_000, Some(&f.field), Some(&sig)));
+        assert_eq!(f.stored_creds(), f.field);
+
+        assert!(f.announce(2_000, Some(""), None));
+        assert_eq!(f.stored_creds(), f.field, "an unsigned clear is a relay, not the holder");
+
+        crate::node::resolver::clear_all();
+    }
 
     /// The frame ID is plaintext on the `HavenMessage` fallback AND keys a
     /// network pull, so exactly three shapes reach the DB and everything

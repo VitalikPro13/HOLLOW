@@ -1,0 +1,16 @@
+{
+  "credential_identity": "12D3KooWFixtureAlice",
+  "epoch": 1,
+  "export_context": "hollow-fixture-context",
+  "export_key_len": 32,
+  "export_label": "sframe",
+  "export_secret_hex": "478afb24b9c5d05a2d2362982612954ee8731c1564bb8e60b30ae516d354d801",
+  "member_count": 2,
+  "members": [
+    "12D3KooWFixtureAlice",
+    "12D3KooWFixtureBob"
+  ],
+  "openmls": "0.8.1",
+  "openmls_memory_storage": "0.5.0",
+  "server_id": "12D3KooWFixtureServer"
+}

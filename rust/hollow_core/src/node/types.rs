@@ -1803,7 +1803,8 @@ pub(crate) enum HavenMessage {
         /// profile's MASTER peer id to an item. Small capped text, so it
         /// rides the light announce like the showcase board. `None` from
         /// clients that predate it, which receivers PRESERVE; `Some("")` =
-        /// explicit clear. Verified entry by entry on ingest
+        /// explicit clear, and it only clears when `support_creds_sig`
+        /// verifies over it. Verified entry by entry on ingest
         /// (`support_creds::sanitize_incoming_support_creds`), never signed
         /// by the profile signature: an entry already binds the identity.
         #[serde(default)]
@@ -1811,11 +1812,11 @@ pub(crate) enum HavenMessage {
         /// The MASTER's signature over `(peer_id, updated_at,
         /// support_creds)` (`support_creds::support_creds_sig_message`),
         /// base64 Ed25519. Sent whenever `support_creds` is `Some`, including
-        /// `Some("")`. `None` from clients that predate it; a receiver that
-        /// has ever seen a signed field from this master REFUSES an unsigned
-        /// one (the `support_creds_signed` pin), so stripping it in flight is
-        /// not a downgrade. The credentials themselves are unforgeable
-        /// without it; this is what stops a relay DENYING them.
+        /// `Some("")`. REQUIRED on ingest: a receiver applies `support_creds`
+        /// only under a valid signature, and otherwise PRESERVES what it
+        /// stored, so stripping it in flight changes nothing. The credentials
+        /// themselves are unforgeable without it; this is what stops a relay
+        /// DENYING them.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         support_creds_sig: Option<String>,
         /// Owner's signature over the relayable subset of this profile
@@ -3254,7 +3255,8 @@ pub(crate) enum MessageEnvelope {
         /// profile's MASTER peer id to an item. Small capped text, so it
         /// rides the light announce like the showcase board. `None` from
         /// clients that predate it, which receivers PRESERVE; `Some("")` =
-        /// explicit clear. Verified entry by entry on ingest
+        /// explicit clear, and it only clears when `support_creds_sig`
+        /// verifies over it. Verified entry by entry on ingest
         /// (`support_creds::sanitize_incoming_support_creds`), never signed
         /// by the profile signature: an entry already binds the identity.
         #[serde(default)]
@@ -3262,11 +3264,11 @@ pub(crate) enum MessageEnvelope {
         /// The MASTER's signature over `(peer_id, updated_at,
         /// support_creds)` (`support_creds::support_creds_sig_message`),
         /// base64 Ed25519. Sent whenever `support_creds` is `Some`, including
-        /// `Some("")`. `None` from clients that predate it; a receiver that
-        /// has ever seen a signed field from this master REFUSES an unsigned
-        /// one (the `support_creds_signed` pin), so stripping it in flight is
-        /// not a downgrade. The credentials themselves are unforgeable
-        /// without it; this is what stops a relay DENYING them.
+        /// `Some("")`. REQUIRED on ingest: a receiver applies `support_creds`
+        /// only under a valid signature, and otherwise PRESERVES what it
+        /// stored, so stripping it in flight changes nothing. The credentials
+        /// themselves are unforgeable without it; this is what stops a relay
+        /// DENYING them.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         support_creds_sig: Option<String>,
         /// Owner's profile signature — see HavenMessage::ProfileUpdate.
@@ -3335,6 +3337,29 @@ pub(crate) enum MessageEnvelope {
     /// PreKey type 0 to Normal type 1) when they decrypt this message.
     #[serde(rename = "session_ack")]
     SessionAck,
+
+    // -- 1:1 call signaling (Phase 5B, encrypted since 2026-09) --
+
+    /// One 1:1 call signal, carried INSIDE the Olm ciphertext.
+    ///
+    /// SECURITY: the `HavenMessage::Call*` variants used to ride the wire as
+    /// bare plaintext frames, so the relay read every call's AES-128-GCM
+    /// SFrame media key (CallInvite / CallAccept), every SDP and every ICE
+    /// candidate, and could forge a CallAccept carrying a key of its own. The
+    /// signal now travels as this envelope, decrypted only by the recipient
+    /// device; the plaintext receive arms REJECT instead of handling, so a
+    /// relay-injected Call* frame is inert.
+    ///
+    /// Boxed: `HavenMessage` is a large enum and this envelope is reachable
+    /// from the swarm event loop, whose tokio worker stack has already been
+    /// blown once by an inline payload.
+    ///
+    /// Only ever built for the 17 `Call*` variants; the receiver whitelists
+    /// them again on the way out (`voice_handler::handle_call_signal_message`).
+    #[serde(rename = "call_sig")]
+    CallSignal {
+        signal: Box<HavenMessage>,
+    },
 
     // -- Voice channel signaling (Phase 5C) --
 

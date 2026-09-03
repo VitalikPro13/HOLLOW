@@ -875,10 +875,10 @@ impl MessageStore {
         migrate(conn, "ALTER TABLE user_profiles ADD COLUMN banner_anim TEXT NOT NULL DEFAULT '';");
         // -- Artist shop, phase 2: support credentials (JSON array, "" = none).
         migrate(conn, "ALTER TABLE user_profiles ADD COLUMN support_creds TEXT NOT NULL DEFAULT '';");
-        // -- 2026-09-03: the per-master pin for `support_creds_sig`. Once a
-        // SIGNED credentials field has arrived from a master, an unsigned one
-        // from that master is never honoured again, so stripping the signature
-        // is not a downgrade. Set only forwards, never back to 0.
+        // -- 2026-09-03: the retired per-master pin for `support_creds_sig`.
+        // Nothing reads or writes it any more: `support_creds` requires a valid
+        // signature from every master, so there is no baseline left to learn.
+        // The column stays so existing databases open unchanged.
         migrate(conn, "ALTER TABLE user_profiles ADD COLUMN support_creds_signed INTEGER NOT NULL DEFAULT 0;");
 
         // -- Migration: content_id column on files (vault ↔ file_id link) --
@@ -2749,38 +2749,13 @@ impl MessageStore {
         Ok(())
     }
 
-    /// Has a SIGNED `support_creds` field ever arrived from this master?
-    ///
-    /// The baseline rule, the same one the device list uses: the first signed
-    /// announce pins the master, and from then on an announce that carries no
-    /// valid signature over the field cannot change it. Before that the
-    /// legacy path applies, so an old client keeps working.
-    pub fn support_creds_signed(&self, peer_id: &str) -> Result<bool, String> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT support_creds_signed FROM user_profiles WHERE peer_id = ?1")
-            .map_err(|e| format!("Failed to prepare pin query: {e}"))?;
-        let mut rows = stmt
-            .query_map(params![peer_id], |row| row.get::<_, i64>(0))
-            .map_err(|e| format!("Failed to query pin: {e}"))?;
-        match rows.next() {
-            Some(Ok(v)) => Ok(v != 0),
-            Some(Err(e)) => Err(format!("Failed to read pin: {e}")),
-            None => Ok(false),
-        }
-    }
-
-    /// Pin this master: every future `support_creds` field from it must carry
-    /// a valid signature. One direction only.
-    pub fn pin_support_creds_signed(&self, peer_id: &str) -> Result<(), String> {
-        self.conn
-            .execute(
-                "UPDATE user_profiles SET support_creds_signed = 1 WHERE peer_id = ?1",
-                params![peer_id],
-            )
-            .map_err(|e| format!("Failed to set pin: {e}"))?;
-        Ok(())
-    }
+    // The `support_creds_signed` per-master pin used to live here, read and
+    // written by `social::gated_support_creds`. It is gone: a pin that can only
+    // be learned from the network is worthless against a relay that strips the
+    // signature from the FIRST announce, which is exactly the frame it would
+    // need to see. `support_creds` now requires a valid signature from everyone,
+    // always. The COLUMN stays (no schema churn, old rows read fine) and nothing
+    // consults it.
 
     /// Load a profile for a specific peer.
     pub fn load_profile(&self, peer_id: &str) -> Result<Option<StoredProfile>, String> {

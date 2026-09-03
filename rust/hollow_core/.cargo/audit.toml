@@ -1,0 +1,54 @@
+# cargo-audit triage. The CI job (.github/workflows/ci.yml, `Cargo Audit`) runs
+# `cargo audit` here, so anything not listed below turns the check red.
+#
+# The bar for a line in this file: the advisory is real, we cannot fix it by
+# bumping, and we can say in one sentence why it does not reach a Hollow user.
+# "It is only a warning" is NOT a reason. Re-read this list whenever a
+# dependency moves; several entries die the moment their parent crate updates.
+#
+# NOT ignored, and deliberately so: the bundled SQLCipher amalgamation. RustSec
+# does not track bundled C libraries, so `cargo audit` says nothing about
+# SQLite's own CVEs either way. That one is tracked by hand in
+# reports/DEPENDENCY_SECURITY_AUDIT_2026-06.md and closed by the rusqlite
+# version in Cargo.toml (0.40.2 = SQLite 3.51.3).
+
+[advisories]
+ignore = [
+  # rsa 0.10.0-rc.18 (Marvin timing sidechannel) via blind-rsa-signatures.
+  # Marvin recovers a PRIVATE key by timing private-key operations; the app
+  # only blinds and verifies, and every blind_sign/keygen call in hollow_core
+  # sits under #[cfg(test)] (node/support_creds.rs). The issuing key lives on
+  # the shop host, in the hollow_art CLI, never on a user's machine.
+  "RUSTSEC-2023-0071",
+
+  # tract-nnef 0.19.16 (OOB read parsing an NNEF tensor) via deep_filter.
+  # Reached only by loading a model file; the only model we ever load is the
+  # DeepFilterNet3 blob we ship ourselves. No user or peer input reaches it,
+  # and deep_filter v0.5.6 pins this tract line.
+  "RUSTSEC-2026-0217",
+
+  # memmap2 0.5.10 (unchecked pointer offset) via tract-onnx via deep_filter.
+  # Same surface as the entry above: our own bundled model file, mapped
+  # locally, never a remote byte.
+  "RUSTSEC-2026-0186",
+
+  # lru 0.7.8 (use-after-free if a value's Drop panics inside pop()) via
+  # reed-solomon-erasure 6.0. The cache holds plain Vec<u8> shard buffers,
+  # whose Drop cannot panic, so the trigger does not exist here.
+  "RUSTSEC-2026-0253",
+
+  # paste 1.0.15, unmaintained, via tract-linalg via deep_filter. A
+  # build-time proc macro: it expands identifiers at compile time and ships
+  # no code. Unmaintained, not vulnerable.
+  "RUSTSEC-2024-0436",
+
+  # instant 0.1.13, unmaintained, via parking_lot 0.11 via
+  # reed-solomon-erasure 6.0. A wasm-shim for Instant; on our six native
+  # targets it is std::time. Dies when reed-solomon-erasure updates.
+  "RUSTSEC-2024-0384",
+
+  # proc-macro-error2 2.0.1, unmaintained, via hax-lib-macros under
+  # libcrux-intrinsics (the openmls crypto provider). Build-time only, and
+  # upstream libcrux carries it, not us.
+  "RUSTSEC-2026-0173",
+]

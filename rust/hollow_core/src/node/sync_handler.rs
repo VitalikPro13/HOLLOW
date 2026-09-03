@@ -615,6 +615,9 @@ pub(crate) async fn handle_create_server(
         name.clone(),
         local_peer.clone(),
     );
+    // Every op this state authors is signed with our MASTER key (goes with
+    // the HLC `ServerState::new` seeded).
+    super::swarm::install_op_signer(&mut state, bundle_keypair);
 
     // Create the initial ServerCreated op, apply + persist it.
     author_op(&mut state, crdt_store, &server_id, CrdtPayload::ServerCreated {
@@ -2883,11 +2886,15 @@ pub(crate) async fn handle_envelope_crdt_op(
 ) {
     let Some(state) = server_states.get_mut(&sid) else { return };
     let Ok(op) = serde_json::from_str::<crate::crdt::operations::CrdtOp>(&op_json) else { return };
-    // Shared ingest permission matrix (ServerState::op_allowed) — override-aware,
-    // matching the local send handlers' `has_permission` gate, and validating
-    // op.author (the creator), never the transport sender.
-    if !state.op_allowed(&op) {
-        hollow_log!("[HOLLOW-SECURITY] REJECTED MLS CrdtOp from {} — insufficient permission", op.author);
+    // The ONE admission gate (ServerState::admit_remote_op): the author's
+    // signature, the clock bound, then the shared permission matrix. It
+    // validates op.author (the creator), never the transport sender.
+    if let Err(reason) = state.admit_remote_op(&op) {
+        hollow_log!(
+            "[HOLLOW-SECURITY] REJECTED MLS CrdtOp {} for {sid} from {}: {reason}",
+            crate::crdt::sync::payload_name(&op.payload),
+            op.author,
+        );
         return;
     }
     let was_len = state.op_log.len();
@@ -3144,26 +3151,25 @@ pub(crate) async fn handle_envelope_sync_resp(
     // op, never the whole batch.
     let incoming_ops = crate::crdt::operations::parse_ops_tolerant(&ops_json);
     if incoming_ops.is_empty() { return; }
-    // SECURITY (tombstone): drop a `ServerDeleted` op not authored by the Owner
-    // (validated against OUR role map) BEFORE persist + merge — never trust the
-    // relayer. Mirrors the plaintext SyncResponse path.
-    let incoming_ops: Vec<crate::crdt::operations::CrdtOp> = incoming_ops
-        .into_iter()
-        .filter(|op| {
-            if let crate::crdt::operations::CrdtPayload::ServerDeleted { .. } = op.payload {
-                state.get_role(&op.author) == crate::crdt::operations::MemberRole::Owner
-            } else { true }
-        })
-        .collect();
-    // Persist synced ops — op_log is not serialized in the state
-    // JSON, so ops merged in RAM are lost on restart without this
-    // (a member then serves a near-empty op log to future joiners).
-    for op in &incoming_ops {
+    // SECURITY: every op passes `admit_remote_op` inside `merge_ops` — the
+    // author's signature, the clock bound, then the permission matrix against
+    // OUR role map, never the relayer's word. That covers the destructive
+    // `ServerDeleted` tombstone (Owner-authored only) along with every other
+    // payload, so the ad hoc tombstone filter that used to sit here is gone
+    // rather than duplicated.
+    //
+    // Persist ADMITTED ops as they merge — op_log is not serialized in the
+    // state JSON, so ops merged in RAM are lost on restart without this (a
+    // member then serves a near-empty op log to future joiners).
+    let Ok(report) = crate::crdt::sync::merge_ops_with(state, &incoming_ops, |op| {
         if op.server_id == sid {
             crdt_store.insert_op(op.clone());
         }
+    }) else { return };
+    if report.rejected > 0 {
+        hollow_log!("[HOLLOW-SECURITY] Dropped {} unadmitted op(s) from an MLS SyncResp for {sid}", report.rejected);
     }
-    let Ok(applied) = crate::crdt::sync::merge_ops(state, &incoming_ops) else { return };
+    let applied = report.applied;
     if applied == 0 { return; }
     crdt_store.save_state_snapshot(sid.clone(), state);
     // Reconcile a deletion that happened while offline (UI hides the

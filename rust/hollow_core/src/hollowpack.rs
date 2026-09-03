@@ -726,6 +726,15 @@ fn blob_shape(data: &[u8]) -> Result<(u32, u32, bool), String> {
     if data.len() < 16 || &data[0..4] != b"RIFF" || &data[8..12] != b"WEBP" {
         return Err("A file in this pack is not a WebP image".into());
     }
+    // SECURITY (SHOP-2): the ceiling used to be checked on the DECODED image,
+    // so a pack under the byte cap that declared a 16384x16384 canvas cost
+    // about a gigabyte of RGBA before anyone got to say no. Read the canvas
+    // out of the header first, and refuse an absurd one without decoding.
+    let (hdr_w, hdr_h) = image_convert::webp_header_dimensions(data)
+        .ok_or("A file in this pack has an unreadable WebP header")?;
+    if hdr_w > image_convert::MAX_DECODE_DIM || hdr_h > image_convert::MAX_DECODE_DIM {
+        return Err("A file in this pack is too large to decode safely".into());
+    }
     if image_convert::is_animated_webp(data) {
         let decoder = webp_animation::Decoder::new(data)
             .map_err(|e| format!("Failed to decode an animated file in this pack: {e}"))?;
@@ -875,6 +884,126 @@ mod tests {
             }
         }
         out
+    }
+
+    // ── (a0) the decode ceiling (SHOP-2) ──────────────────────────────
+
+    /// The header reader has to agree with the encoders on all three WebP
+    /// chunk shapes, because a wrong answer here either lets a bomb through
+    /// or refuses real art.
+    #[test]
+    fn webp_header_dimensions_reads_vp8_vp8l_vp8x() {
+        use crate::node::webp_anim::{self, AnimParams};
+
+        // VP8 (lossy still) and VP8L (lossless still), through the crate's
+        // own still encoder — a non-square size so a width/height swap shows.
+        // Fully OPAQUE on purpose: libwebp wraps anything with alpha in a
+        // VP8X container, and the point here is to exercise the two simple
+        // chunk shapes as well.
+        let (w, h) = (200u32, 120u32);
+        let rgba: Vec<u8> = (0..(w * h))
+            .flat_map(|_| [180u8, 140, 90, 255])
+            .collect();
+
+        let lossy = webp_anim::encode_still(&rgba, w, h, &AnimParams::default())
+            .expect("lossy still");
+        assert_eq!(&lossy[12..16], b"VP8 ", "the lossy encoder emits a VP8 chunk");
+        assert_eq!(
+            image_convert::webp_header_dimensions(&lossy),
+            Some((w, h)),
+            "VP8 header dimensions",
+        );
+
+        let lossless = webp_anim::encode_still(
+            &rgba,
+            w,
+            h,
+            &AnimParams { lossless: true, ..Default::default() },
+        )
+        .expect("lossless still");
+        assert_eq!(
+            &lossless[12..16],
+            b"VP8L",
+            "the lossless encoder emits a VP8L chunk",
+        );
+        assert_eq!(
+            image_convert::webp_header_dimensions(&lossless),
+            Some((w, h)),
+            "VP8L header dimensions",
+        );
+
+        // VP8X (extended, the container every animation uses).
+        let frames: Vec<(image::RgbaImage, i32)> = (0..2)
+            .map(|i| (image::RgbaImage::new(w, h), i * 100))
+            .collect();
+        let anim = webp_anim::encode_animation(&frames, (w, h), &AnimParams::default())
+            .expect("animation");
+        assert_eq!(&anim[12..16], b"VP8X", "an animation is an extended WebP");
+        assert_eq!(
+            image_convert::webp_header_dimensions(&anim),
+            Some((w, h)),
+            "VP8X canvas dimensions",
+        );
+
+        // Not a WebP, and a WebP whose first chunk is nothing we know.
+        assert_eq!(image_convert::webp_header_dimensions(b"not a webp at all"), None);
+        let mut junk = anim.clone();
+        junk[12..16].copy_from_slice(b"XXXX");
+        assert_eq!(image_convert::webp_header_dimensions(&junk), None);
+    }
+
+    /// SHOP-2 regression: the ceiling used to be checked on the DECODED
+    /// image, so a small file declaring a huge canvas cost about a gigabyte
+    /// of RGBA before anyone said no. The refusal now happens on the header,
+    /// which means it also has to be fast.
+    #[test]
+    fn blob_shape_rejects_oversized_canvas_before_decode() {
+        // A hand-built VP8X header claiming 16384x16384, followed by nothing
+        // a decoder could use. Reaching the decoder at all would either
+        // allocate a gigabyte or fail slowly; the header check does neither.
+        let mut bomb = Vec::with_capacity(4096);
+        bomb.extend_from_slice(b"RIFF");
+        bomb.extend_from_slice(&0u32.to_le_bytes()); // size, unread by us
+        bomb.extend_from_slice(b"WEBP");
+        bomb.extend_from_slice(b"VP8X");
+        bomb.extend_from_slice(&10u32.to_le_bytes()); // VP8X payload length
+        bomb.push(0x10); // flags: alpha
+        bomb.extend_from_slice(&[0, 0, 0]); // reserved
+        let dim_minus_one = 16384u32 - 1;
+        bomb.extend_from_slice(&dim_minus_one.to_le_bytes()[0..3]); // width-1
+        bomb.extend_from_slice(&dim_minus_one.to_le_bytes()[0..3]); // height-1
+        bomb.extend_from_slice(&[0xAB; 2048]); // garbage where the frames go
+
+        assert_eq!(
+            image_convert::webp_header_dimensions(&bomb),
+            Some((16384, 16384)),
+            "the header check reads the claimed canvas",
+        );
+
+        let start = std::time::Instant::now();
+        let err = blob_shape(&bomb).expect_err("a 16384x16384 canvas must be refused");
+        let elapsed = start.elapsed();
+        assert!(err.contains("too large to decode safely"), "got: {err}");
+        assert!(
+            elapsed < std::time::Duration::from_millis(100),
+            "the refusal has to happen on the header, not after a decode: took {elapsed:?}",
+        );
+
+        // A WebP container whose first chunk we cannot read a size out of is
+        // refused too, rather than handed to a decoder to find out.
+        let mut unreadable = Vec::new();
+        unreadable.extend_from_slice(b"RIFF");
+        unreadable.extend_from_slice(&0u32.to_le_bytes());
+        unreadable.extend_from_slice(b"WEBP");
+        unreadable.extend_from_slice(b"ZZZZ");
+        unreadable.extend_from_slice(&[0u8; 64]);
+        let err = blob_shape(&unreadable).expect_err("an unreadable header must be refused");
+        assert!(err.contains("unreadable WebP header"), "got: {err}");
+
+        // And real art still passes, header check and all.
+        let real = image_convert::process_avatar_frame(&ring_png(224)).expect("frame");
+        let (w, h, _) = blob_shape(&real.0).expect("a real frame still passes");
+        assert!(w <= image_convert::MAX_DECODE_DIM && h <= image_convert::MAX_DECODE_DIM);
     }
 
     // ── (a) encoder determinism ───────────────────────────────────────

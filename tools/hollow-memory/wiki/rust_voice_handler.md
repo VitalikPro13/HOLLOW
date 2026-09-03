@@ -55,9 +55,16 @@ Incoming path: When a remote peer's RtcOffer/RtcAnswer/RtcIceCandidate arrives, 
 
 ## handle_call_send_signal()
 
-`voice_handler.rs:handle_call_send_signal(peer_id, signal_type, payload, ws_cmd_tx, ws_room_peers)`
+`voice_handler.rs:handle_call_send_signal(peer_id, signal_type, payload, olm, crypto_store, event_tx, ws_cmd_tx, ws_room_peers, key_request_in_flight, device_keypair, device_peer_id, local_master)`, async.
 
 Outbound handler for 1:1 DM call signaling. Called from swarm.rs when Dart issues `NodeCommand::CallSendSignal`. Supports 14 signal types covering the full call lifecycle plus screen sharing.
+
+**CRITICAL: call signaling is Olm-encrypted (TRANSPORT-1, 2026-09).** The built `HavenMessage::Call*` is wrapped in `MessageEnvelope::CallSignal { signal: Box<HavenMessage> }` and sent through `send_encrypted_message_in_room`. Until this fix it went out as a bare plaintext frame, so the relay read the AES-128-GCM SFrame media key out of every CallInvite and CallAccept, read every SDP and ICE candidate, and could inject a forged CallAccept carrying a key of its own. Three rules hold it shut:
+- **No session, no send.** `!olm.has_session(target)` DROPS the signal and fires a throttled signed KeyRequest (`request_key_bundle_throttled`, 10 s per target, only when the target is in a room). There is no plaintext fallback and there must never be one. The signal is NOT queued either: a call signal is live control traffic, and a stale invite replayed after the session forms is worse than a missed one.
+- **The deterministic DM room, not a first-match lookup.** The room is `dm_room_code(local_master, resolve(target))`. When the target device is not in that room (a conference guest, a device mid-rejoin) it falls back to `send_encrypted_message`'s first-match lookup with a log line, because delivering beats dropping the call.
+- **The device pick is unchanged.** `pick_online_device` still resolves master to ONE online device; the encryption target is that device, and the room is keyed on its MASTER.
+
+The envelope is BOXED because `HavenMessage` is a large enum and this rides the swarm event loop, whose tokio worker stack has been blown by an inline payload before.
 
 **Multi-device:** like WebRTC signaling above, the final send targets `pick_online_device(ws_room_peers, peer_id)` (the friend's master → ONE online device), not the bare master — else invite/accept/sdp/ice/state are silently dropped and the call never rings/connects. Already-live-device ids pass through unchanged (answer/ICE returns to the exact peer). **Incoming attribution is collapsed device→master on the Dart side:** `event_provider`'s `NetworkEvent_CallSignal` handler resolves the caller's device id via `deviceLinkProvider.identityOf` BEFORE `handleCallSignal`, so all `call.peerId == widget.peerId` checks match the DM master key (without it, a call from a multi-device friend showed under the raw device id = a "different DM", and the screen-share control gated OFF because `isCallWithThisPeer` was false). See memory `feedback_multidevice_targeting_sweep`. Signal types:
 
@@ -82,9 +89,13 @@ Outbound handler for 1:1 DM call signaling. Called from swarm.rs when Dart issue
 - `"screen_answer"` -> `HavenMessage::CallScreenAnswer { call_id, sdp }`
 - `"screen_ice"` -> `HavenMessage::CallScreenIce { call_id, candidate, sdp_mid, sdp_mline_index, role }` — `role` distinguishes sender vs receiver ICE candidates.
 
-All signals sent via `send_message_to_peer()` (plaintext HavenMessage). JSON payloads are parsed with graceful fallback: if JSON parsing fails for invite/accept, the raw payload is used as the call_id. For SDP/ICE types, parsing failure causes an early return (no message sent).
+All signals ride the Olm ciphertext (see above). JSON payloads are parsed with graceful fallback: if JSON parsing fails for invite/accept, the raw payload is used as the call_id. For SDP/ICE types, parsing failure causes an early return (no message sent).
 
-Incoming path: All incoming Call* HavenMessages are processed directly in `swarm.rs:handle_incoming_request()`. SDP-carrying messages (CallSdpOffer, CallSdpAnswer, CallScreenOffer, CallScreenAnswer) are validated against `MAX_SDP_SIZE` (64 KB). Each incoming message is re-serialized as a JSON payload and emitted as `NetworkEvent::CallSignal { peer_id, signal_type, payload }` to Dart.
+Incoming path: `handle_call_signal_message(peer_str, master_peer_str, signal, event_tx)` in voice_handler, reached ONLY from the `MessageEnvelope::CallSignal` arm of the post-decrypt match in `swarm.rs:handle_incoming_request()`, so `peer_str` is the device whose Olm ratchet decrypted the frame. It whitelists the 17 `Call*` variants again on the way out and logs `[HOLLOW-SECURITY] REJECTED non-call message ...` for anything else smuggled inside the envelope. SDP-carrying messages (CallSdpOffer, CallSdpAnswer, CallScreenOffer, CallScreenAnswer) are validated against `MAX_SDP_SIZE` (64 KB); CallInvite keeps the block guard. Each message is re-serialized as a JSON payload and emitted as `NetworkEvent::CallSignal { peer_id, signal_type, payload }` to Dart.
+
+**A Call\* that arrives in the CLEAR is rejected.** The 17 plaintext arms in `handle_incoming_request` collapse to ONE arm that logs `[HOLLOW-SECURITY] REJECTED plaintext call signal from {peer}` and does nothing: such a frame can only come from the relay or an on-path injector. A `CallSignal` envelope arriving over MLS is rejected too, because over a group it would be readable and forgeable by every other member, SFrame key and all.
+
+Harness: `call_signal_routes_to_friend_device_and_drops_unknown` (routing + whitelist, now over the encrypted transport), `call_invite_never_exposes_sframe_key_to_the_relay` (no recorded relay frame contains the key, the key field name, or the call id), `plaintext_call_signal_is_rejected` (an injected plaintext CallInvite rings nothing).
 
 ---
 

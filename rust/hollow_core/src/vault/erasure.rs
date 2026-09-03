@@ -1,5 +1,13 @@
 use reed_solomon_erasure::galois_8::ReedSolomon;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+/// Hex SHA-256 of one shard's data bytes — the value `ShardMetadata::shard_sha256` carries.
+/// The one place that shape is defined, so the split, the decode and the
+/// receipt check can never drift apart.
+pub(crate) fn shard_hash(data: &[u8]) -> String {
+    hex::encode(Sha256::digest(data))
+}
 
 /// Self-describing header prepended to each stored shard.
 /// Allows any shard to be independently identified and used for reconstruction
@@ -18,6 +26,17 @@ pub struct ShardMetadata {
     pub shard_size: u32,
     /// Original data size in bytes (before padding), used to strip padding on decode.
     pub total_data_size: u64,
+    /// Hex SHA-256 of THIS shard's data bytes (the payload after the header,
+    /// not the packed frame).
+    ///
+    /// SECURITY (FILE-3): a holder returns whatever it kept, and the store
+    /// only ever hashed received bytes against themselves, so a substituted
+    /// shard surfaced as an AES-GCM failure at the very end with no way to
+    /// name it. Empty on shards written before this field existed: `decode`
+    /// treats an empty hash as "cannot check" so old shards on disk stay
+    /// readable, while everything minted or accepted now carries one.
+    #[serde(default)]
+    pub shard_sha256: String,
 }
 
 /// Prepend ShardMetadata to raw shard data.
@@ -149,6 +168,7 @@ pub fn encode(data: &[u8], k: usize, m: usize, content_id: &str) -> Result<Vec<V
                 m: m as u16,
                 shard_size,
                 total_data_size,
+                shard_sha256: shard_hash(&shard_data),
             };
             pack_shard(&metadata, &shard_data)
         })
@@ -175,6 +195,7 @@ pub fn decode(packed_shards: &[Option<Vec<u8>>], k: usize, m: usize) -> Result<V
     let mut expected_shard_size: Option<u32> = None;
     let mut raw_shards: Vec<Option<Vec<u8>>> = vec![None; k + m];
     let mut present_count = 0usize;
+    let mut bad_indices: Vec<usize> = Vec::new();
 
     for packed in packed_shards.iter().flatten() {
         let (meta, shard_data) = unpack_shard(packed)?;
@@ -211,11 +232,34 @@ pub fn decode(packed_shards: &[Option<Vec<u8>>], k: usize, m: usize) -> Result<V
         if idx >= k + m {
             return Err(format!("Shard index {idx} out of range for k={k}+m={m}"));
         }
+
+        // SECURITY (FILE-3): a shard that fails the hash the split stamped on
+        // it is treated as MISSING rather than fed to Reed-Solomon. Erasure
+        // coding is exactly the tool for a shard that is not there, so the
+        // decode still succeeds whenever k good ones remain; when it cannot,
+        // the error names the shards that lied instead of surfacing as an
+        // unexplained AES-GCM failure two layers up.
+        if !meta.shard_sha256.is_empty() && shard_hash(&shard_data) != meta.shard_sha256 {
+            hollow_log!(
+                "[HOLLOW-SECURITY] vault shard {idx} for {} failed its hash",
+                meta.content_id
+            );
+            bad_indices.push(idx);
+            continue;
+        }
+
         raw_shards[idx] = Some(shard_data);
         present_count += 1;
     }
 
     if present_count < k {
+        if !bad_indices.is_empty() {
+            let named: Vec<String> = bad_indices.iter().map(|i| i.to_string()).collect();
+            return Err(format!(
+                "Not enough shards: need {k}, have {present_count}. Failed integrity: {}",
+                named.join(", ")
+            ));
+        }
         return Err(format!(
             "Not enough shards: need {k}, have {present_count}"
         ));
@@ -228,6 +272,101 @@ pub fn decode(packed_shards: &[Option<Vec<u8>>], k: usize, m: usize) -> Result<V
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── Per-shard integrity (FILE-3) ─────────────────────────────
+
+    /// The split stamps every shard with the hash of its own bytes, so a
+    /// holder handing back something else can be named.
+    #[test]
+    fn encode_stamps_shard_hashes() {
+        let data = b"Every shard carries the hash of its own payload";
+        let k = 3;
+        let m = 2;
+        let encoded = encode(data, k, m, "cid-hashes").unwrap();
+        assert_eq!(encoded.len(), k + m);
+
+        for (i, packed) in encoded.iter().enumerate() {
+            let (meta, shard_data) = unpack_shard(packed).unwrap();
+            assert_eq!(meta.shard_index as usize, i);
+            assert_eq!(
+                meta.shard_sha256.len(),
+                64,
+                "shard {i} carries a hex SHA-256",
+            );
+            assert_eq!(
+                meta.shard_sha256,
+                shard_hash(&shard_data),
+                "shard {i}'s stamped hash matches its bytes",
+            );
+        }
+    }
+
+    /// A corrupted or substituted shard is treated as MISSING: the decode
+    /// still reconstructs while k good shards remain, and when it cannot, the
+    /// error names the shard that lied.
+    #[test]
+    fn decode_treats_shard_with_wrong_hash_as_missing() {
+        let data = b"A holder can return bytes that are not the shard it was given";
+        let k = 3;
+        let m = 2;
+        let encoded = encode(data, k, m, "cid-tamper").unwrap();
+
+        // Swap one shard's payload for someone else's bytes, keeping its
+        // header intact — exactly what a lying holder can do.
+        let tamper = |packed: &[u8]| -> Vec<u8> {
+            let (meta, mut shard_data) = unpack_shard(packed).unwrap();
+            for b in shard_data.iter_mut() {
+                *b ^= 0xFF;
+            }
+            pack_shard(&meta, &shard_data)
+        };
+
+        // One bad shard out of five: four good ones remain, so the file still
+        // comes back byte for byte.
+        let mut packed: Vec<Option<Vec<u8>>> = encoded.iter().cloned().map(Some).collect();
+        packed[1] = Some(tamper(encoded[1].as_slice()));
+        assert_eq!(
+            decode(&packed, k, m).expect("k good shards still reconstruct"),
+            data,
+            "a bad shard must not poison a decode that had spares",
+        );
+
+        // Three bad shards: only two good ones left, under k. The error has
+        // to name the bad indices rather than fail somewhere downstream.
+        let mut packed: Vec<Option<Vec<u8>>> = encoded.iter().cloned().map(Some).collect();
+        for i in [0usize, 2, 4] {
+            packed[i] = Some(tamper(encoded[i].as_slice()));
+        }
+        let err = decode(&packed, k, m).expect_err("two good shards cannot make k=3");
+        assert!(err.contains("Not enough shards"), "got: {err}");
+        assert!(err.contains("Failed integrity"), "got: {err}");
+        for i in ["0", "2", "4"] {
+            assert!(err.contains(i), "the error names shard {i}: {err}");
+        }
+    }
+
+    /// Shards written before the field existed have no hash, and must stay
+    /// readable — nothing on disk gets rewritten by this change.
+    #[test]
+    fn decode_accepts_shards_with_no_stamped_hash() {
+        let data = b"Legacy shards on disk predate per-shard hashes";
+        let k = 3;
+        let m = 2;
+        let encoded = encode(data, k, m, "cid-legacy").unwrap();
+
+        let legacy: Vec<Option<Vec<u8>>> = encoded
+            .iter()
+            .map(|packed| {
+                let (mut meta, shard_data) = unpack_shard(packed).unwrap();
+                meta.shard_sha256 = String::new();
+                Some(pack_shard(&meta, &shard_data))
+            })
+            .collect();
+        assert_eq!(
+            decode(&legacy, k, m).expect("unstamped shards still decode"),
+            data,
+        );
+    }
 
     // ── Correctness ──────────────────────────────────────────────
 
@@ -469,6 +608,7 @@ mod tests {
             m: 5,
             shard_size: 1024,
             total_data_size: 10000,
+            shard_sha256: shard_hash(&[1u8, 2, 3, 4, 5]),
         };
         let shard_data = vec![1u8, 2, 3, 4, 5];
         let packed = pack_shard(&meta, &shard_data);
@@ -486,6 +626,7 @@ mod tests {
             m: 3,
             shard_size: 2048,
             total_data_size: 9999,
+            shard_sha256: shard_hash(b"deadbeef payload"),
         };
         let json = serde_json::to_string(&meta).unwrap();
         let back: ShardMetadata = serde_json::from_str(&json).unwrap();

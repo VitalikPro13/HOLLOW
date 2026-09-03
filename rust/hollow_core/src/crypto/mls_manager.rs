@@ -1330,3 +1330,158 @@ mod tests {
         );
     }
 }
+
+/// Persistence-format guard for the OpenMLS upgrade (0.8.1 -> 0.9.0).
+///
+/// `serialize_storage()`/`from_persisted()` hand-roll a length-prefixed dump of
+/// the `openmls_memory_storage::MemoryStorage` map into the `mls_identity`
+/// blob. Nothing in the type system pins that map's key/value encoding, so an
+/// upstream change would make every persisted group silently unreadable with no
+/// compile error. These fixtures were minted by `generate_mls_0_8_1_fixtures`
+/// while the crate was still on openmls 0.8.1 / openmls_memory_storage 0.5.0;
+/// `persisted_0_8_1_storage_still_loads` reloads them on every run, so a future
+/// bump that changes the blob format fails here instead of in the field.
+#[cfg(test)]
+mod persisted_storage_fixture {
+    use super::*;
+    use std::path::PathBuf;
+
+    const FIXTURE_SERVER: &str = "12D3KooWFixtureServer";
+    const FIXTURE_LABEL: &str = "sframe";
+    const FIXTURE_CONTEXT: &[u8] = b"hollow-fixture-context";
+    const FIXTURE_KEY_LEN: usize = 32;
+
+    fn fixture_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join("crypto")
+            .join("fixtures")
+            .join("mls_persisted_0_8_1")
+    }
+
+    /// Mints the fixtures. Ignored by default: it OVERWRITES the committed
+    /// blobs, which must stay exactly as openmls 0.8.1 wrote them. Run with
+    /// `cargo test --lib generate_mls_0_8_1_fixtures -- --ignored` only when
+    /// deliberately re-baselining against a new persisted format.
+    #[test]
+    #[ignore = "overwrites the committed 0.8.1 fixtures; run only to re-baseline"]
+    fn generate_mls_0_8_1_fixtures() {
+        let mut alice = MlsManager::new("12D3KooWFixtureAlice").unwrap();
+        alice.create_group(FIXTURE_SERVER).unwrap();
+
+        // Two members so the persisted blob carries a real ratchet tree, an
+        // epoch bump and another leaf's key material, not just a solo group.
+        let bob = MlsManager::new("12D3KooWFixtureBob").unwrap();
+        let bob_kp = bob.generate_key_package().unwrap();
+        alice.add_member(FIXTURE_SERVER, &bob_kp).unwrap();
+        alice.merge_pending_commit(FIXTURE_SERVER).unwrap();
+
+        let dir = fixture_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("signer.bin"), alice.signer_bytes().unwrap()).unwrap();
+        std::fs::write(dir.join("credential.bin"), alice.credential_bytes().unwrap()).unwrap();
+        std::fs::write(dir.join("storage.bin"), alice.serialize_storage().unwrap()).unwrap();
+
+        let secret = alice
+            .export_secret(FIXTURE_SERVER, FIXTURE_LABEL, FIXTURE_CONTEXT, FIXTURE_KEY_LEN)
+            .unwrap();
+        let meta = serde_json::json!({
+            "openmls": "0.8.1",
+            "openmls_memory_storage": "0.5.0",
+            "server_id": FIXTURE_SERVER,
+            "credential_identity": alice.credential_identity(),
+            "epoch": alice.epoch(FIXTURE_SERVER).unwrap(),
+            "member_count": alice.member_count(FIXTURE_SERVER),
+            "members": alice.group_members(FIXTURE_SERVER),
+            "export_label": FIXTURE_LABEL,
+            "export_context": String::from_utf8_lossy(FIXTURE_CONTEXT),
+            "export_key_len": FIXTURE_KEY_LEN,
+            "export_secret_hex": hex::encode(&secret),
+        });
+        std::fs::write(
+            dir.join("meta.json"),
+            serde_json::to_vec_pretty(&meta).unwrap(),
+        )
+        .unwrap();
+    }
+
+    /// THE upgrade guard: an `mls_identity` blob written by openmls 0.8.1 must
+    /// still load, keep its group id and epoch, and derive the SAME SFrame
+    /// secret. A silent format change breaks this and nothing else.
+    #[test]
+    fn persisted_0_8_1_storage_still_loads() {
+        let dir = fixture_dir();
+        let signer = std::fs::read(dir.join("signer.bin")).expect("0.8.1 signer fixture");
+        let credential =
+            std::fs::read(dir.join("credential.bin")).expect("0.8.1 credential fixture");
+        let storage = std::fs::read(dir.join("storage.bin")).expect("0.8.1 storage fixture");
+        let meta: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.join("meta.json")).expect("0.8.1 meta"))
+                .expect("meta.json parses");
+
+        let server_id = meta["server_id"].as_str().unwrap().to_string();
+        let mut restored = MlsManager::from_persisted(
+            &signer,
+            &credential,
+            Some(&storage),
+            std::slice::from_ref(&server_id),
+        )
+        .expect("0.8.1 persisted MLS state must still load");
+
+        assert!(
+            restored.has_group(&server_id),
+            "persisted MLS group vanished after load"
+        );
+        assert!(
+            restored.is_active(&server_id),
+            "persisted MLS group loaded inactive"
+        );
+        assert_eq!(
+            restored.credential_identity(),
+            meta["credential_identity"].as_str().unwrap(),
+            "leaf credential identity changed across the persistence format"
+        );
+        assert_eq!(
+            restored.epoch(&server_id).unwrap(),
+            meta["epoch"].as_u64().unwrap(),
+            "persisted epoch changed across the persistence format"
+        );
+        assert_eq!(
+            restored.member_count(&server_id),
+            meta["member_count"].as_u64().unwrap() as usize,
+            "persisted member count changed across the persistence format"
+        );
+        let mut got_members = restored.group_members(&server_id);
+        let mut want_members: Vec<String> = meta["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        got_members.sort();
+        want_members.sort();
+        assert_eq!(got_members, want_members, "persisted member list changed");
+
+        // The load is only genuine if the epoch secrets survived: same label,
+        // same context, same bytes. This is what SFrame media keys ride on.
+        let secret = restored
+            .export_secret(
+                &server_id,
+                meta["export_label"].as_str().unwrap(),
+                meta["export_context"].as_str().unwrap().as_bytes(),
+                meta["export_key_len"].as_u64().unwrap() as usize,
+            )
+            .expect("restored group must still export secrets");
+        assert_eq!(
+            hex::encode(&secret),
+            meta["export_secret_hex"].as_str().unwrap(),
+            "SFrame export secret changed after reloading 0.8.1 state"
+        );
+
+        // And it must still be usable, not merely readable.
+        let ct = restored
+            .encrypt(&server_id, b"after the upgrade")
+            .expect("restored group must still encrypt");
+        assert!(!ct.is_empty());
+    }
+}

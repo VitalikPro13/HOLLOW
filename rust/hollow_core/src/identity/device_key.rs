@@ -83,8 +83,8 @@ fn load_or_create_device_keypair_at(
         // become a fresh distinct id, or it collides with sibling masters.
         if let Some(m) = master {
             if device.peer_id() == m.peer_id() {
-                let mut secret = [0u8; 32];
-                getrandom::fill(&mut secret).map_err(|e| format!("RNG failed: {e}"))?;
+                let mut secret = zeroize::Zeroizing::new([0u8; 32]);
+                getrandom::fill(&mut secret[..]).map_err(|e| format!("RNG failed: {e}"))?;
                 let fresh = NativeKeypair::from_secret_bytes(&secret);
                 save_keypair_to(path, &fresh)?;
                 return Ok(fresh);
@@ -94,8 +94,8 @@ fn load_or_create_device_keypair_at(
     }
 
     // No device key file yet → fresh random key, ALWAYS distinct from the master.
-    let mut secret = [0u8; 32];
-    getrandom::fill(&mut secret).map_err(|e| format!("RNG failed: {e}"))?;
+    let mut secret = zeroize::Zeroizing::new([0u8; 32]);
+    getrandom::fill(&mut secret[..]).map_err(|e| format!("RNG failed: {e}"))?;
     let device = NativeKeypair::from_secret_bytes(&secret);
 
     save_keypair_to(path, &device)?;

@@ -782,10 +782,13 @@ Properties:
 CrdtOp {
     server_id: String,
     hlc: HlcTimestamp,
-    author: String,         // peer ID of originator
-    payload: CrdtPayload,  // the actual mutation
+    author: String,         // master peer ID of the originator
+    payload: CrdtPayload,   // the actual mutation
+    auth: CrdtAuth,         // Ed25519 signature + public key binding the op to its author
 }
 ```
+
+Every operation carries an Ed25519 signature over its canonical form (`server_id`, the HLC, `author`, and `payload`) together with the signer's public key. The `author` is bound to that key, not to whoever relays the operation, so a member can legitimately forward another member's signed operation and the receiver still attributes it correctly.
 
 ### 10.3 Payload Types
 
@@ -820,15 +823,16 @@ This is idempotent: applying the same operation twice has no effect. Peers can s
 
 **Operation-log persistence.** Every merged operation is persisted to the local encrypted database, not held only in memory. A member that joined purely by synchronizing must be able to serve the full operation history to future joiners after a restart.
 
-**State snapshot on join.** Because operation logs are compacted past a threshold and cannot be trusted as a complete reconstruction source, a join is preceded by a signed **server-state snapshot** sent ahead of the operation-log delta (the WebSocket transport is FIFO). A joiner adopts the snapshot only while its own join is still pending; an established member never lets a peer overwrite its state. Operation deltas are then merged on top.
+**State snapshot on join.** Because operation logs are compacted past a threshold and cannot be trusted as a complete reconstruction source, a join is preceded by a **server-state snapshot** sent ahead of the operation-log delta (the WebSocket transport is FIFO). A joiner adopts the snapshot only while its own join is still pending, and clamps any future-dated timestamps inside it to the local clock-skew window so a poisoned register cannot outrank later honest writes; an established member never lets a peer overwrite its state. The operation deltas that follow are each signature-verified and merged on top. The snapshot is a convenience for the joiner alone, trusted only during that peer's own pending join; other members validate the joiner's later operations against their own state.
 
 **Replicable deletion.** Server deletion is a replicable `ServerDeleted` tombstone operation rather than a one-shot command. The deleting node retains the server shell and operation log so it can serve the tombstone to members who were offline at deletion time; those members reconcile on reconnect through the same grow-only synchronization path. The tombstone is honored only if authored by the server owner, checked against the receiver's own role map.
 
 ### 10.6 Security
 
-CRDT operations are validated on receipt:
-- The `author` field is verified against the actual sender's peer ID (prevents forged authorship). Authorization is always checked against the operation's **author**, never the transport sender that relayed it.
-- Permission checks ensure the author has the required role for the operation type (e.g., only admins+ can change roles).
+CRDT operations are validated on receipt, in order, before any state change:
+- **Signature.** The operation carries an Ed25519 signature over its canonical form and the signer's public key. The receiver rejects it unless that key derives the claimed `author` and the signature verifies. Authorship is thus bound to the key, not to the transport sender, so forwarding another member's signed operation is legitimate while forging one is not. An unsigned operation is refused; there is no tolerance path.
+- **Clock bound.** An operation whose timestamp is beyond the clock-skew window ahead of the receiver's own clock is refused, so a far-future timestamp cannot lock a last-write-wins register against every later honest write.
+- Permission checks ensure the author has the required role for the operation type (e.g., only admins+ can change roles); creating a server is accepted only for a server that has no owner yet.
 - A member's *own* voluntary departure (`MemberRemoved` where the removed peer equals the author) is always allowed, bypassing the kick-permission check.
 - Unauthorized operations are rejected and logged.
 

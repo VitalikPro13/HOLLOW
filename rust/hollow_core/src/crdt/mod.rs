@@ -36,6 +36,40 @@ pub(crate) fn resolve_identity(peer_id: &str) -> String {
     }
 }
 
+/// Deterministic keys for the CRDT unit tests.
+///
+/// Every op is signed now, and a signature binds the op to an author whose
+/// peer_id is DERIVED from the key — so a test that wants an op to survive
+/// `admit_remote_op` cannot use a made-up author string like "alice". These
+/// helpers hand out a stable (keypair, peer_id, pubkey) triple per tag.
+#[cfg(test)]
+pub(crate) mod testkeys {
+    use crate::identity::native_identity::NativeKeypair;
+    use base64::Engine as _;
+
+    /// `(keypair, peer_id, pk_b64)` for a small tag. Same tag = same identity.
+    pub(crate) fn keys(tag: u8) -> (NativeKeypair, String, String) {
+        let kp = NativeKeypair::from_secret_bytes(&[tag.wrapping_add(1); 32]);
+        let pk = base64::engine::general_purpose::STANDARD.encode(kp.public_key_protobuf());
+        let id = kp.peer_id();
+        (kp, id, pk)
+    }
+
+    /// A server owned by `tag`, with the HLC and signer wired so it can author
+    /// signed ops. Returns the state and the owner's peer_id.
+    pub(crate) fn owned_state(
+        server_id: &str,
+        name: &str,
+        tag: u8,
+    ) -> (super::server_state::ServerState, String) {
+        let (kp, id, pk) = keys(tag);
+        let mut state =
+            super::server_state::ServerState::new(server_id.into(), name.into(), id.clone());
+        state.set_signer(kp, pk);
+        (state, id)
+    }
+}
+
 /// Custom emote name rules: 2-24 chars of `[a-z0-9_]` (lowercase enforced at
 /// authoring; validated again at every ingest so a hostile client can't
 /// smuggle markup/whitespace into message tokens through the emote registry).

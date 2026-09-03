@@ -3,7 +3,6 @@
 #include <openssl/ssl.h>
 #include <csignal>
 #include <atomic>
-#include <algorithm>
 #include <cstdio>
 
 #include "config.h"
@@ -17,25 +16,6 @@ static struct us_listen_socket_t* global_listen_socket = nullptr;
 
 static void signal_handler(int /*sig*/) {
     should_shutdown.store(true);
-}
-
-static void cleanup_stale_signaling(RelayState& state) {
-    uint64_t now = now_unix_secs();
-    for (auto it = state.signaling_rooms.begin(); it != state.signaling_rooms.end(); ) {
-        auto& peers = it->second;
-        peers.erase(
-            std::remove_if(peers.begin(), peers.end(),
-                [now](const PeerEntry& p) {
-                    return now - p.last_seen >= 180;
-                }),
-            peers.end()
-        );
-        if (peers.empty()) {
-            it = state.signaling_rooms.erase(it);
-        } else {
-            ++it;
-        }
-    }
 }
 
 int main(int argc, char** argv) {
@@ -94,13 +74,8 @@ int main(int argc, char** argv) {
                 s->license.try_reload(*s);
             }, 30000, 30000);
 
-            // Signaling cleanup timer (120s)
-            auto* cleanup_timer = us_create_timer(loop, 0, sizeof(RelayState*));
-            *reinterpret_cast<RelayState**>(us_timer_ext(cleanup_timer)) = &state;
-            us_timer_set(cleanup_timer, [](struct us_timer_t* t) {
-                auto* s = *reinterpret_cast<RelayState**>(us_timer_ext(t));
-                cleanup_stale_signaling(*s);
-            }, 120000, 120000);
+            // The 120s signaling-room cleanup timer is GONE with the HTTP
+            // /register + /bootstrap table it swept (see http_handlers.cpp).
 
             // Guest idle timeout timer (60s) — disconnect guests with no binary activity for 30 min
             auto* guest_timer = us_create_timer(loop, 0, sizeof(RelayState*));
@@ -129,6 +104,7 @@ int main(int argc, char** argv) {
                 auto* s = *reinterpret_cast<RelayState**>(us_timer_ext(t));
                 sweep_offline_buffer(*s);
                 sweep_link_codes(*s);
+                sweep_link_guesses(*s);
                 s->reports.save_if_dirty();
             }, 300000, 300000);
 

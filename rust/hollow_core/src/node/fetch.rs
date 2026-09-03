@@ -1125,7 +1125,7 @@ fn handle_file_header(
         // Gated: keep the sentinel MESSAGE row + metadata so the card renders
         // with a manual Download button, but never write the bytes.
         let auto_ok = crate::node::file_handler::auto_download_allows(
-            p.size, &p.name, &format!("dm:{convo}"), p.voice,
+            p.size, &p.name, &p.ext, &format!("dm:{convo}"), p.voice,
         );
         if !auto_ok {
             let msg_text = format!("[file:{}]", p.fid);
@@ -1149,10 +1149,22 @@ fn handle_file_header(
         (p.inline_bytes.as_ref(), p.aes_key.as_ref(), p.aes_nonce.as_ref())
     {
         let decoded = decrypt_inline_image(b64, key_hex, nonce_hex);
+        // SECURITY (FILE-1): the disk path below is built from two raw wire
+        // strings, and an absolute `fid` makes `Path::join` discard the base
+        // directory entirely. A header whose id or extension is not the shape
+        // we mint writes nothing at all — see file_transfer::is_wire_file_id.
+        if !crate::node::file_transfer::is_wire_file_id(&p.fid)
+            || !crate::node::file_transfer::is_wire_ext(&p.ext)
+        {
+            hollow_log!(
+                "[HOLLOW-SECURITY] REJECTED inline FileHeader from {convo}: bad file id or extension"
+            );
+            return None;
+        }
         if let Some(plaintext) = decoded {
             let files_dir = crate::node::file_transfer::files_dir();
             let _ = std::fs::create_dir_all(&files_dir);
-            let disk_path = files_dir.join(format!("{}.{}", p.fid, p.ext));
+            let disk_path = crate::node::file_transfer::final_file_path(&p.fid, &p.ext);
             if std::fs::write(&disk_path, &plaintext).is_ok() {
                 let disk_str = disk_path.to_string_lossy().to_string();
                 // The companion text DM ("[file:...]") is sent via a

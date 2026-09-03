@@ -102,12 +102,39 @@ pub(crate) fn is_voice_message_name(file_name: &str) -> bool {
         || (file_name.starts_with("voice_") && file_name.ends_with(".ogg"))
 }
 
+/// Ceiling on the voice-note auto-download exemption: 8 MB. A recorded note
+/// is about 90 KB per 30 seconds (16 kHz mono, 24 kbps Opus), so this is well
+/// over half an hour of speech and still nothing like a file push.
+pub(crate) const VOICE_NOTE_MAX_BYTES: u64 = 8 * 1024 * 1024;
+
+/// `true` = this header really is a recorded voice note, on every field at
+/// once.
+///
+/// SECURITY (FILE-2): the exemption used to read `voice || name`, and both of
+/// those are strings the SENDER chooses. With no size bound and no look at
+/// the extension, a 34 MB header flagged `voice: true` with `ext: "exe"`
+/// landed on disk in a conversation the user had turned auto-download OFF
+/// for, and the Dart side then handed it to ffmpeg. Every field has to agree
+/// now, and the bytes have to be small enough to be a note.
+pub(crate) fn is_voice_note_exempt(size: u64, file_name: &str, ext: &str, voice: bool) -> bool {
+    voice
+        && is_voice_message_name(file_name)
+        && ext.eq_ignore_ascii_case("ogg")
+        && size <= VOICE_NOTE_MAX_BYTES
+}
+
 /// `true` = a PUSHED file transfer of `size` bytes may auto-register its
-/// stream in this conversation. Voice messages are exempt — they are tiny and
-/// conversational; `voice` is the header flag (0.9.4+), the filename pattern
-/// covers older senders.
-pub(crate) fn auto_download_allows(size: u64, file_name: &str, context_key: &str, voice: bool) -> bool {
-    if voice || is_voice_message_name(file_name) {
+/// stream in this conversation. Genuine voice notes are exempt — they are
+/// tiny and conversational — but only when the flag, the name, the extension
+/// and the size all say so (see `is_voice_note_exempt`).
+pub(crate) fn auto_download_allows(
+    size: u64,
+    file_name: &str,
+    ext: &str,
+    context_key: &str,
+    voice: bool,
+) -> bool {
+    if is_voice_note_exempt(size, file_name, ext, voice) {
         return true;
     }
     let mb = effective_auto_download_mb(context_key) as u64;
@@ -1113,7 +1140,7 @@ async fn send_dm_file_fanout(
 /// client, or the advert hasn't arrived yet); the receiver's own gate still
 /// enforces in that case — this check only saves the wasted bytes.
 fn receiver_pref_declines(peer_auto_dl: &HashMap<String, u32>, peer_str: &str, msg: &DmFileMsg<'_>) -> bool {
-    if msg.voice || is_voice_message_name(msg.original_name) {
+    if is_voice_note_exempt(msg.file_size, msg.original_name, msg.final_ext, msg.voice) {
         return false;
     }
     match peer_auto_dl.get(peer_str) {
@@ -2488,6 +2515,27 @@ async fn handle_shard_stream_complete(
         return;
     };
     if let Ok(shard_bytes) = tokio::fs::read(&request.temp_path).await {
+        // SECURITY (FILE-3): `store_shard` hashes the bytes it is handed
+        // against themselves, so a holder that returned someone else's bytes
+        // was indistinguishable from an honest one until reconstruction failed
+        // with no way to name the culprit. An erasure shard now has to match
+        // the hash the split stamped into its own header before it is allowed
+        // on disk. Replication-mode shards (k = m = 0) carry no erasure header
+        // at all — they ARE the ciphertext — so they skip this.
+        if pss.k > 0 || pss.m > 0 {
+            let ok = match crate::vault::erasure::unpack_shard(&shard_bytes) {
+                Ok((meta, data)) => {
+                    !meta.shard_sha256.is_empty()
+                        && meta.shard_sha256 == crate::vault::erasure::shard_hash(&data)
+                }
+                Err(_) => false,
+            };
+            if !ok {
+                hollow_log!("[HOLLOW-SECURITY] DROPPED vault shard {shard_index} for {content_id} from {sender_peer}: missing or wrong per-shard hash");
+                let _ = std::fs::remove_file(&request.temp_path);
+                return;
+            }
+        }
         let data_dir = crate::identity::data_dir().unwrap_or_default();
         let vault_dir = data_dir.join("vault");
         if let Ok(content_store) = crate::vault::content_store::ContentStore::open(db_path, db_passphrase, &vault_dir) {
@@ -2561,8 +2609,14 @@ async fn attempt_vault_reconstruction(
     for record in &local_shards {
         let idx = record.shard_index as usize;
         if idx < n {
-            if let Ok(data) = content_store.read_shard_unchecked(&dl_server_id, &record.shard_key) {
-                packed[idx] = Some(data);
+            // SECURITY (FILE-3): the CHECKED read, so a shard that rotted on
+            // disk (or was swapped underneath us) is left out of the decode
+            // rather than fed to Reed-Solomon and blamed on the AES layer.
+            match content_store.read_shard(&dl_server_id, &record.shard_key) {
+                Ok(data) => packed[idx] = Some(data),
+                Err(e) => hollow_log!(
+                    "[HOLLOW-SECURITY] vault shard {idx} for {content_id} failed its stored hash: {e}"
+                ),
             }
         }
     }
@@ -2842,7 +2896,7 @@ pub(crate) async fn handle_envelope_file_header(
     // re-requests WITHOUT a receipt).
     let auto_ok = explicitly_requested
         || pending_file_streams.contains_key(&fid)
-        || auto_download_allows(size, &name, &format!("server:{server_id}"), voice);
+        || auto_download_allows(size, &name, &ext, &format!("server:{server_id}"), voice);
     if !auto_ok && share_ref.is_none() && aes_key.is_some() {
         declined_file_ids.insert(fid.clone());
         if let Some((temp_path, _, _)) = early_file_streams.remove(&fid) {
@@ -3116,5 +3170,95 @@ pub(crate) async fn handle_envelope_broadcast_meta(
                 &origin, &cid, sender_peer_id,
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// FILE-2 regression. The auto-download exemption is the one way a pushed
+    /// transfer writes bytes in a conversation the user gated, so it has to
+    /// name a real voice note and nothing else: the flag, the filename, the
+    /// extension and the size all have to agree.
+    #[test]
+    fn voice_exemption_requires_flag_name_ext_and_size() {
+        // The auto-download conf is process-global; this is the same lock the
+        // harness tests take, so the two families cannot cross each other's
+        // settings under a threaded `cargo test`.
+        let _g = super::super::resolver::test_lock();
+        const SMALL: u64 = 90 * 1024; // a real 30-second note
+
+        // The genuine article, in both filename shapes the recorder produces.
+        assert!(
+            is_voice_note_exempt(SMALL, "voice_1730000000000_12345.ogg", "ogg", true),
+            "the recorder's own temp basename is a voice note",
+        );
+        assert!(
+            is_voice_note_exempt(SMALL, "Voice message.ogg", "ogg", true),
+            "the display name is a voice note",
+        );
+        assert!(
+            is_voice_note_exempt(SMALL, "voice_1.ogg", "OGG", true),
+            "the extension compare is case-insensitive",
+        );
+        assert!(
+            is_voice_note_exempt(VOICE_NOTE_MAX_BYTES, "voice_1.ogg", "ogg", true),
+            "the ceiling itself is still a note",
+        );
+
+        // (a) The flag and the name say voice, the extension says executable.
+        assert!(
+            !is_voice_note_exempt(SMALL, "voice_1.ogg", "exe", true),
+            "a voice-flagged header with a non-ogg extension is not a note",
+        );
+        // (b) Flag, name and extension all agree, the size does not.
+        assert!(
+            !is_voice_note_exempt(VOICE_NOTE_MAX_BYTES + 1, "voice_1.ogg", "ogg", true),
+            "one byte over the ceiling is not a note",
+        );
+        assert!(
+            !is_voice_note_exempt(34 * 1024 * 1024, "voice_1.ogg", "ogg", true),
+            "a 34 MB push is not a note however it is flagged",
+        );
+        // (c) The name alone no longer buys the exemption: `voice` is a
+        // sender-chosen field, and so is the filename.
+        assert!(
+            !is_voice_note_exempt(SMALL, "Voice message.ogg", "ogg", false),
+            "the filename alone does not make a note",
+        );
+        assert!(
+            !is_voice_note_exempt(SMALL, "payload.ogg", "ogg", true),
+            "the flag alone does not make a note",
+        );
+
+        // And the whole gate, through the exemption and around it.
+        let key = "dm:12D3KooW-file2-unit";
+        set_auto_download_conf(0, HashMap::new()); // never, globally
+        assert!(
+            auto_download_allows(SMALL, "voice_1.ogg", "ogg", key, true),
+            "a genuine note still rides through a global never",
+        );
+        assert!(
+            !auto_download_allows(SMALL, "voice_1.ogg", "exe", key, true),
+            "a forged voice flag does not",
+        );
+        assert!(
+            !auto_download_allows(SMALL, "holiday.png", "png", key, false),
+            "an ordinary push does not",
+        );
+
+        set_auto_download_conf(169, HashMap::new()); // the permissive default
+        assert!(
+            auto_download_allows(SMALL, "holiday.png", "png", key, false),
+            "an ordinary push rides through a permissive threshold",
+        );
+        assert!(
+            !auto_download_allows(200 * 1024 * 1024, "movie.mkv", "mkv", key, false),
+            "and stops at it",
+        );
+
+        // Leave the permissive default behind for the rest of the suite.
+        set_auto_download_conf(169, HashMap::new());
     }
 }

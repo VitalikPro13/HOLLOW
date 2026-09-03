@@ -1,18 +1,133 @@
+use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 
 use super::hlc::HlcTimestamp;
+use crate::identity::native_identity::NativeKeypair;
+
+/// The author's proof that it really wrote this op.
+///
+/// `sig` is the base64 Ed25519 signature over [`CrdtOp::signing_payload`];
+/// `pk` is the base64 36-byte protobuf public key the signature verifies
+/// against, and whose derived peer_id must equal the op's `author`. Same
+/// shape as the v2 message signature (`hollow-msg2`), boxed on the op
+/// because a `CrdtOp` rides async frames whose stack budget is tight.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CrdtAuth {
+    pub sig: String,
+    pub pk: String,
+}
+
+/// Why an op was refused at ingest. Log text only; never shown to a user.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OpReject {
+    /// No `auth` block at all (an unsigned op, or one stripped in transit).
+    MissingSignature,
+    /// The signing key does not derive the claimed `author` peer_id.
+    AuthorMismatch,
+    /// The signature does not verify over the op's signing payload.
+    BadSignature,
+    /// The op's HLC sits further ahead of our wall clock than the drift bound.
+    FutureHlc,
+    /// The op is for a different server than the state it was handed to.
+    WrongServer,
+    /// The author lacks the permission this payload requires (`op_allowed`).
+    NotAllowed,
+}
+
+impl std::fmt::Display for OpReject {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            Self::MissingSignature => "no author signature",
+            Self::AuthorMismatch => "signing key does not match the author",
+            Self::BadSignature => "signature does not verify",
+            Self::FutureHlc => "timestamp too far ahead of the wall clock",
+            Self::WrongServer => "op belongs to another server",
+            Self::NotAllowed => "author lacks permission for this operation",
+        };
+        f.write_str(s)
+    }
+}
 
 /// A single CRDT operation — the unit of replication.
 ///
 /// Each op is self-contained: server_id, author, timestamp, and payload.
 /// Ops are idempotent (safe to apply multiple times) and commutative
 /// (order doesn't matter for final state).
+///
+/// SECURITY: `author` is a claim until `auth` proves it. Every remote ingest
+/// path runs `ServerState::admit_remote_op`, which rejects an op with no
+/// `auth`, an `auth` whose key derives a different peer_id, or a signature
+/// that does not verify. There is no tolerance branch for unsigned ops: an
+/// `if auth.is_some()` gate would be the bypass.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CrdtOp {
     pub server_id: String,
     pub hlc: HlcTimestamp,
     pub author: String,
     pub payload: CrdtPayload,
+    /// Author proof. `Option` for wire tolerance only (an op that arrives
+    /// without it parses, then gets rejected with `MissingSignature` — a
+    /// parse failure would be indistinguishable from an unknown payload
+    /// variant, which `parse_ops_tolerant` deliberately skips silently).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<Box<CrdtAuth>>,
+}
+
+impl CrdtOp {
+    /// Canonical signing payload:
+    ///   `hollow-crdt1:{server_id}:{physical_ms}:{counter}:{actor}:{author}:{payload_json}`
+    ///
+    /// Every field before the payload is colon-free (hex id, two numbers, two
+    /// peer_ids), so the free-form JSON stays LAST and the layout is
+    /// unambiguous — the same rule as `hollow-msg2`. Deterministic because no
+    /// `CrdtPayload` variant carries a map or a set: serde emits struct fields
+    /// in declaration order, so the same op always serializes identically.
+    pub fn signing_payload(&self) -> String {
+        let payload_json = serde_json::to_string(&self.payload).unwrap_or_default();
+        format!(
+            "hollow-crdt1:{}:{}:{}:{}:{}:{}",
+            self.server_id,
+            self.hlc.physical_ms,
+            self.hlc.counter,
+            self.hlc.actor,
+            self.author,
+            payload_json,
+        )
+    }
+
+    /// Sign this op with the MASTER keypair (`author` and the state's
+    /// `members`/`roles` maps are master-keyed, so the device key would never
+    /// derive the author id). `pk_b64` is the base64 protobuf public key.
+    pub fn sign(&mut self, keypair: &NativeKeypair, pk_b64: &str) {
+        let sig = keypair.sign(self.signing_payload().as_bytes());
+        self.auth = Some(Box::new(CrdtAuth {
+            sig: base64::engine::general_purpose::STANDARD.encode(sig),
+            pk: pk_b64.to_string(),
+        }));
+    }
+
+    /// Bind this op to its claimed `author`: the key must derive that peer_id
+    /// AND the signature must verify over the signing payload. REJECTS — it
+    /// never logs and continues.
+    pub fn verify_author(&self) -> Result<(), OpReject> {
+        let auth = self.auth.as_ref().ok_or(OpReject::MissingSignature)?;
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let pk_bytes = b64.decode(&auth.pk).map_err(|_| OpReject::AuthorMismatch)?;
+        let derived = NativeKeypair::peer_id_from_pubkey_protobuf(&pk_bytes)
+            .ok_or(OpReject::AuthorMismatch)?;
+        if derived != self.author {
+            return Err(OpReject::AuthorMismatch);
+        }
+        let sig_bytes = b64.decode(&auth.sig).map_err(|_| OpReject::BadSignature)?;
+        match NativeKeypair::verify_peer_signature(
+            &pk_bytes,
+            &sig_bytes,
+            self.signing_payload().as_bytes(),
+        ) {
+            Ok(true) => Ok(()),
+            _ => Err(OpReject::BadSignature),
+        }
+    }
 }
 
 /// The payload of a CRDT operation.
@@ -442,6 +557,7 @@ mod tests {
                 color: "#ff0000".into(),
                 access: true,
             },
+            auth: None,
         };
         let json = serde_json::to_string(&op).unwrap();
         let deserialized: CrdtOp = serde_json::from_str(&json).unwrap();
@@ -456,6 +572,92 @@ mod tests {
             }
             _ => panic!("Wrong payload variant after deserialization"),
         }
+    }
+
+    fn signed_op(tag: u8, payload: CrdtPayload) -> CrdtOp {
+        let (kp, id, pk) = crate::crdt::testkeys::keys(tag);
+        let mut op = CrdtOp {
+            server_id: "srv-1".into(),
+            hlc: HlcTimestamp { physical_ms: 1000, counter: 0, actor: id.clone() },
+            author: id,
+            payload,
+            auth: None,
+        };
+        op.sign(&kp, &pk);
+        op
+    }
+
+    #[test]
+    fn signed_op_verifies_and_survives_the_wire() {
+        let op = signed_op(1, CrdtPayload::ServerRenamed { new_name: "Fine".into() });
+        assert!(op.verify_author().is_ok());
+        let json = serde_json::to_string(&op).unwrap();
+        let back: CrdtOp = serde_json::from_str(&json).unwrap();
+        assert!(back.verify_author().is_ok(), "the signature must survive a serde round trip");
+    }
+
+    /// Every field in the signing payload is covered: changing any one of
+    /// them invalidates the signature.
+    #[test]
+    fn signature_covers_every_field_of_the_op() {
+        let base = signed_op(1, CrdtPayload::ServerRenamed { new_name: "Fine".into() });
+
+        let mut renamed = base.clone();
+        renamed.payload = CrdtPayload::ServerRenamed { new_name: "PWNED".into() };
+        assert_eq!(renamed.verify_author(), Err(OpReject::BadSignature));
+
+        let mut moved = base.clone();
+        moved.server_id = "srv-2".into();
+        assert_eq!(moved.verify_author(), Err(OpReject::BadSignature));
+
+        let mut future = base.clone();
+        future.hlc.physical_ms = u64::MAX;
+        assert_eq!(future.verify_author(), Err(OpReject::BadSignature));
+
+        let mut counted = base.clone();
+        counted.hlc.counter += 1;
+        assert_eq!(counted.verify_author(), Err(OpReject::BadSignature));
+
+        let mut reactored = base.clone();
+        reactored.hlc.actor = "someone-else".into();
+        assert_eq!(reactored.verify_author(), Err(OpReject::BadSignature));
+
+        // A different author string no longer matches the key at all.
+        let mut reauthored = base.clone();
+        reauthored.author = "someone-else".into();
+        assert_eq!(reauthored.verify_author(), Err(OpReject::AuthorMismatch));
+    }
+
+    /// Swapping in another peer's key does not launder the op: the key must
+    /// derive the author, and the signature must be over THIS payload.
+    #[test]
+    fn a_foreign_key_cannot_stand_in_for_the_author() {
+        let mine = signed_op(1, CrdtPayload::ServerRenamed { new_name: "Fine".into() });
+        let (_, _, other_pk) = crate::crdt::testkeys::keys(2);
+        let mut swapped = mine.clone();
+        swapped.auth = Some(Box::new(CrdtAuth {
+            sig: mine.auth.as_ref().unwrap().sig.clone(),
+            pk: other_pk,
+        }));
+        assert_eq!(swapped.verify_author(), Err(OpReject::AuthorMismatch));
+    }
+
+    #[test]
+    fn unsigned_op_is_missing_signature() {
+        let op = CrdtOp {
+            server_id: "srv-1".into(),
+            hlc: HlcTimestamp { physical_ms: 1000, counter: 0, actor: "a".into() },
+            author: "a".into(),
+            payload: CrdtPayload::ServerRenamed { new_name: "x".into() },
+            auth: None,
+        };
+        assert_eq!(op.verify_author(), Err(OpReject::MissingSignature));
+        // …and an op serialized before signatures existed parses into exactly
+        // that shape, rather than failing the tolerant batch parse.
+        let legacy = r#"[{"server_id":"srv-1","hlc":{"physical_ms":1,"counter":0,"actor":"a"},"author":"a","payload":{"ServerRenamed":{"new_name":"x"}}}]"#;
+        let ops = parse_ops_tolerant(legacy);
+        assert_eq!(ops.len(), 1);
+        assert_eq!(ops[0].verify_author(), Err(OpReject::MissingSignature));
     }
 
     /// Old-client wire compat: label ops WITHOUT the `access` field parse

@@ -2071,7 +2071,17 @@ class EventStreamNotifier extends Notifier<bool> {
         final voiceIds = <String>[];
         for (final id in missingIds) {
           final info = await storage_api.getFileMetadata(fileId: id);
-          if (info != null && isVoiceMessageFile(info.fileName)) {
+          // Name, extension and size all have to agree before a gated sweep
+          // pulls a file: a sender picks the name, so on its own it is an
+          // invitation to smuggle any bytes past the gate. The wire header's
+          // `voice` flag does not reach Dart yet (see isGenuineVoiceNote).
+          if (info != null &&
+              isGenuineVoiceNote(
+                voice: true,
+                name: info.fileName,
+                ext: info.fileExt,
+                sizeBytes: info.sizeBytes.toInt(),
+              )) {
             voiceIds.add(id);
           }
         }

@@ -682,7 +682,19 @@ class ChannelChatNotifier
       final msg = messages[i];
       final att = msg.fileAttachment;
       if (att == null || att.isComplete || att.diskPath != null) continue;
-      if (gated && !isVoiceMessageFile(att.fileName)) continue;
+      // The name alone would let a sender label any bytes `voice_x.ogg` and
+      // have a gated client pull them anyway. The wire header's `voice` flag
+      // is not surfaced to Dart yet (see isGenuineVoiceNote), so the name,
+      // extension and size carry the whole test here.
+      if (gated &&
+          !isGenuineVoiceNote(
+            voice: true,
+            name: att.fileName,
+            ext: att.fileExt,
+            sizeBytes: att.sizeBytes,
+          )) {
+        continue;
+      }
       if (_requestedFileIds.contains(att.fileId)) continue;
       final transfer = ref.read(fileTransferProvider)[att.fileId];
       if (transfer != null && (transfer.isDownloading || transfer.isComplete)) continue;

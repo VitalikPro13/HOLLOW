@@ -406,11 +406,20 @@ pub(crate) fn verify_profile_signature(
 // — but a poisoned row is itself a publish source once a sibling reads it.
 //
 // So the field gets its OWN signature, under the same master key, over
-// `(master, updated_at, field)`. New clients verify it when present and
-// REQUIRE it from any master that has ever sent one (the pin on
-// `user_profiles`, the same baseline rule as the device list), so stripping
-// the signature is not a downgrade. Old clients ignore the field and are
-// unaffected.
+// `(master, updated_at, field)`, and it is REQUIRED: no valid signature, no
+// field, and the receiver preserves what it already stored. `Some("")` is
+// covered too, because the explicit clear is the one a relay most wants to
+// forge.
+//
+// It was briefly softer than that. An unsigned field applied unless the master
+// had been caught signing once before, pinned on `user_profiles`. That pin can
+// never be set for a master whose FIRST announce is stripped, so a relay that
+// stripped the field and its signature from the first frame onward held that
+// master on the unsigned branch forever and could write the field itself. A
+// baseline learned from the network is worth nothing against an attacker who
+// is present for the baseline, so the rule is now just the signature. Old
+// clients ignore the field and are unaffected; a client old enough to send the
+// field without a signature has it preserved rather than applied.
 
 /// Sign OUR `support_creds` field. `None` only when the field is absent,
 /// which is what an announce carrying no credentials at all sends.
@@ -663,6 +672,12 @@ pub(crate) fn verify_key_exchange(
 /// that is the single-device / first-contact case, where `sender_device` IS the
 /// master peer_id the user obtained out of band, so the signature check above
 /// already proves authenticity end to end.
+///
+/// INVARIANT this rests on: every id in `devices_for(master)` got there from a
+/// list the master SIGNED and that NAMED the device delivering it
+/// ([`device_list_binds_sender`], enforced in [`ingest_device_list`]). While a
+/// delivering device could fold itself in, this check read a set the attacker
+/// could write to and so authorised the attacker's own session.
 pub(crate) fn key_exchange_device_unauthorized(sender_device: &str) -> bool {
     let master = super::resolver::resolve(sender_device);
     if master == sender_device {
@@ -894,6 +909,30 @@ pub(crate) fn verify_device_list(list: &SignedDeviceList) -> bool {
         device_list_signing_payload(&list.master_peer_id, list.version, &devices, &revoked);
     NativeKeypair::verify_peer_signature(&pk_bytes, &sig_bytes, payload.as_bytes())
         .unwrap_or(false)
+}
+
+/// `true` = this master-signed list actually speaks for the device that
+/// DELIVERED it.
+///
+/// SECURITY (CRYPTO-1): [`verify_device_list`] proves a list was signed by the
+/// master it names and says NOTHING about who handed it over. Signed lists ride
+/// every profile announce in the clear, so anyone who has seen one can replay it
+/// from their own socket. Without this check the receiver binds the DELIVERING
+/// device to that master, and from then on the victim's DM fan-out reaches the
+/// attacker, `key_exchange_device_unauthorized` waves its Olm session through on
+/// the same poisoned set, and CRDT role checks resolve through it too.
+///
+/// The rule: the delivering device is named in the signed `devices`, or IS the
+/// master itself (the legacy keystone that published `devices = [master]`), and
+/// is not tombstoned. The `ServerJoinRequest` and `FriendReject` arms already
+/// gate their carried lists this way at the call site; this is the same
+/// predicate, in the one place every ingest path goes through.
+pub(crate) fn device_list_binds_sender(list: &SignedDeviceList, sender_peer_id: &str) -> bool {
+    if list.revoked.iter().any(|r| r == sender_peer_id) {
+        return false;
+    }
+    sender_peer_id == list.master_peer_id
+        || list.devices.iter().any(|d| d == sender_peer_id)
 }
 
 // --- Sibling proof handshake (anti-mis-link) -------------------------------------
@@ -1310,6 +1349,19 @@ pub(crate) async fn ingest_device_list(
         );
         return IngestOutcome::default();
     }
+    // SECURITY (CRYPTO-1): the signature says who WROTE the list, never who
+    // delivered it, and a signed list is public the moment it is announced. The
+    // delivering device has to be named in it (or be the legacy master-as-device)
+    // or the whole list is dropped: a replay from an unlisted socket used to bind
+    // that socket to the victim's master, which hands the attacker the victim's
+    // DM fan-out, Olm authorisation and role checks in one move.
+    if !device_list_binds_sender(&list, sender_peer_id) {
+        hollow_log!(
+            "[HOLLOW-SECURITY] REJECTED device list for {}: delivering device {sender_peer_id} is not in the signed list",
+            list.master_peer_id
+        );
+        return IngestOutcome::default();
+    }
     let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) else {
         return IngestOutcome::default();
     };
@@ -1352,20 +1404,15 @@ pub(crate) async fn ingest_device_list(
         .filter(|r| !prev_revoked.iter().any(|p| &p == r))
         .cloned()
         .collect();
-    // Register the SENDER device → master link. The list is master-signed and
-    // arrived over this device's authenticated socket in the master's room, so
-    // the delivering device provably belongs to that master EVEN IF it is not
-    // (yet) listed in `list.devices`. SKIP if the sender is revoked (a revoked
-    // device must not re-register itself by delivering a stale list).
+    // Register the SENDER device → master link. Safe now, and only now: the
+    // binding check above proved the master's own signature NAMES this device, so
+    // this records a fact the master asserted rather than one the delivery
+    // asserted. SKIP if the sender is revoked against our MERGED tombstones — a
+    // device we already know is cut off must not re-register itself by delivering
+    // a list from before its revocation (that list is too old to name it revoked).
     if sender_peer_id != list.master_peer_id && !is_revoked(sender_peer_id) {
         super::resolver::update(sender_peer_id, &list.master_peer_id);
     }
-    // Fold the live sender device into the merge set too, so it's persisted and
-    // surfaced to Dart (presence). A device that delivered a master-signed list IS
-    // a member of that identity — unless it has been revoked.
-    let sender_is_new_member = sender_peer_id != list.master_peer_id
-        && !is_revoked(sender_peer_id)
-        && !prev_devices.iter().any(|d| d == sender_peer_id);
 
     // UNION-merge MINUS tombstones, do NOT reject-on-stale. Two devices of one
     // identity each start their list at version 1, so a naive `version <= current`
@@ -1383,12 +1430,10 @@ pub(crate) async fn ingest_device_list(
             added += 1;
         }
     }
-    // The delivering device proves membership — include it even if absent from the
-    // signed `devices` (stale list / rotated id). Counts as "new" so we persist.
-    if sender_is_new_member && !known.contains(sender_peer_id) {
-        merged.push(sender_peer_id.to_string());
-        added += 1;
-    }
+    // NOTHING is folded in beyond the signed set. The delivering device used to be
+    // pushed in here on the theory that delivery proves membership; it proves only
+    // that somebody had a copy of the frame. The signed `devices` array is the
+    // master's whole word on who its devices are.
     // A revocation removed one or more of our previously-known devices.
     let removed_any = prev_devices.iter().any(|d| is_revoked(d));
     let revoked_changed = new_revoked.len() != prev_revoked.len();
@@ -1542,6 +1587,19 @@ async fn ingest_sibling_device_list(
     if !verify_device_list(&list) {
         hollow_log!(
             "[HOLLOW-DEVICES] Rejected sibling device list from {sender_peer_id}: bad signature"
+        );
+        return (false, Vec::new());
+    }
+    // SECURITY (CRYPTO-1): the same binding rule, and it bites hardest here. OUR
+    // OWN signed list is the one a stranger is most likely to be holding — we
+    // announce it to every friend — and replaying it back at us lands in this
+    // function, which hands the sender our accepted-friend list, asks it for its
+    // friends and asks it to backfill our DMs. `build_local_device_list` always
+    // names the publishing device, so a genuine sibling always passes.
+    if !device_list_binds_sender(&list, sender_peer_id) {
+        hollow_log!(
+            "[HOLLOW-SECURITY] REJECTED device list for {}: delivering device {sender_peer_id} is not in the signed list",
+            list.master_peer_id
         );
         return (false, Vec::new());
     }
@@ -2701,6 +2759,57 @@ pub(crate) async fn send_encrypted_message(
     }
 }
 
+/// Like [`send_encrypted_message`], but sends into an EXPLICIT room instead of a
+/// `ws_room_for_peer` first-match lookup — the encrypted twin of
+/// [`send_message_to_peer_in_room`].
+///
+/// A recipient device co-present in several of our rooms makes the first-match
+/// lookup a coin toss, and picking a room they have since left buffers the frame
+/// against a room they never rejoin (silent one-way loss). DM-scoped traffic
+/// therefore routes by the deterministic `dm_room_code`, which every device of
+/// both identities is a member of.
+pub(crate) async fn send_encrypted_message_in_room(
+    olm: &mut OlmManager,
+    crypto_store: &CryptoStore,
+    peer_id_str: &str,
+    room_code: &str,
+    text: &str,
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+) -> bool {
+    match olm.encrypt(peer_id_str, text.as_bytes()) {
+        Ok((msg_type, ciphertext)) => {
+            persist_olm_session(olm, crypto_store, peer_id_str);
+            let identity_key = if msg_type == 0 {
+                Some(olm.identity_key_base64())
+            } else {
+                None
+            };
+            let haven_msg = HavenMessage::Encrypted {
+                message_type: msg_type,
+                body: OlmManager::encode_base64(&ciphertext),
+                identity_key,
+            };
+            let json = serde_json::to_string(&haven_msg).unwrap_or_default();
+            let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendDirect {
+                room_code: room_code.to_string(),
+                target_peer: peer_id_str.to_string(),
+                data: json.into_bytes(),
+            });
+            true
+        }
+        Err(e) => {
+            let _ = event_tx
+                .send(NetworkEvent::MessageSendFailed {
+                    to_peer: peer_id_str.to_string(),
+                    error: format!("Encryption failed: {e}"),
+                })
+                .await;
+            false
+        }
+    }
+}
+
 /// Like `send_encrypted_message`, but routes through `SendDirectImage` (0x08)
 /// so the relay buffers it under the per-peer IMAGE cap when the recipient is
 /// offline. Used to deliver a small image's Olm-encrypted FileHeader (with the
@@ -2771,37 +2880,10 @@ pub(crate) async fn send_encrypted_text_to_peer(
     event_tx: &mpsc::Sender<NetworkEvent>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
 ) -> bool {
-    match olm.encrypt(peer_id_str, text.as_bytes()) {
-        Ok((msg_type, ciphertext)) => {
-            persist_olm_session(olm, crypto_store, peer_id_str);
-            let identity_key = if msg_type == 0 {
-                Some(olm.identity_key_base64())
-            } else {
-                None
-            };
-            let haven_msg = HavenMessage::Encrypted {
-                message_type: msg_type,
-                body: OlmManager::encode_base64(&ciphertext),
-                identity_key,
-            };
-            let json = serde_json::to_string(&haven_msg).unwrap_or_default();
-            let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendDirect {
-                room_code: dm_room,
-                target_peer: peer_id_str.to_string(),
-                data: json.into_bytes(),
-            });
-            true
-        }
-        Err(e) => {
-            let _ = event_tx
-                .send(NetworkEvent::MessageSendFailed {
-                    to_peer: peer_id_str.to_string(),
-                    error: format!("Encryption failed: {e}"),
-                })
-                .await;
-            false
-        }
-    }
+    send_encrypted_message_in_room(
+        olm, crypto_store, peer_id_str, &dm_room, text, event_tx, ws_cmd_tx,
+    )
+    .await
 }
 
 /// Persist both account and session state to DB (fire-and-forget).
@@ -4883,6 +4965,150 @@ mod tests {
         assert!(refused.contains(r#""reason":"banned""#));
     }
 
+    /// Run `ingest_device_list` the way the ProfileUpdate handler does, against a
+    /// throwaway DB this call owns, and hand back the device set it persisted for
+    /// the list's master. The local identity is deliberately a DIFFERENT master, so
+    /// the friend path is exercised rather than the sibling merge.
+    async fn ingest_list_from(list: &SignedDeviceList, sender_peer_id: &str) -> Vec<String> {
+        let local_master = kp(0x01);
+        let local_master_id = local_master.peer_id();
+        let local_device = kp(0x02).peer_id();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("ingest.db").to_str().unwrap().to_string();
+        let pass = "cd".repeat(32);
+        crate::storage::MessageStore::migrate_auto_vacuum_once(&db, &pass).unwrap();
+
+        let (event_tx, _event_rx) = mpsc::channel::<NetworkEvent>(64);
+        let (ws_cmd_tx, _ws_cmd_rx) =
+            tokio::sync::mpsc::unbounded_channel::<super::super::ws_client::WsCommand>();
+        let rooms: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
+
+        ingest_device_list(
+            &event_tx, &local_master_id, &local_device, &local_master,
+            sender_peer_id, &ws_cmd_tx, &rooms, Some(list.clone()), &db, &pass,
+        )
+        .await;
+
+        crate::storage::MessageStore::open(&db, &pass)
+            .unwrap()
+            .load_device_list(&list.master_peer_id)
+            .ok()
+            .flatten()
+            .map(|l| l.devices)
+            .unwrap_or_default()
+    }
+
+    /// CRYPTO-1. A master-signed device list is public the moment it is announced,
+    /// so holding a genuine one proves nothing about who is holding it. Replaying
+    /// the victim's own list from an unlisted socket must persist nothing and bind
+    /// nothing: the moment `sender -> victim_master` lands in the resolver, the
+    /// victim's DM fan-out reaches the attacker and its Olm key exchange is waved
+    /// through on the same set.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // the resolver guard is process-global
+    async fn ingest_rejects_list_delivered_by_an_unlisted_device() {
+        let _lock = super::super::resolver::test_lock();
+        super::super::resolver::clear_all();
+
+        let victim_master = kp(0x40);
+        let victim_master_id = victim_master.peer_id();
+        let victim_device = kp(0x41).peer_id();
+        let attacker_device = kp(0x42).peer_id();
+
+        let list = build_signed_device_list(
+            &victim_master, 3, vec![victim_device.clone()], Vec::new(),
+        );
+        // Untouched and genuinely signed. Only the socket it arrives on is wrong.
+        assert!(verify_device_list(&list), "the replayed list is the victim's real one");
+
+        let stored = ingest_list_from(&list, &attacker_device).await;
+        assert!(
+            stored.is_empty(),
+            "a replay from an unlisted device must persist nothing, got {stored:?}",
+        );
+        assert_ne!(
+            super::super::resolver::resolve(&attacker_device),
+            victim_master_id,
+            "and it must never bind the delivering device to the victim's master",
+        );
+
+        // A device that IS in the list but has been tombstoned is the same answer:
+        // a revoked device cannot re-admit itself by delivering a list.
+        let revoking = build_signed_device_list(
+            &victim_master, 4, vec![victim_device.clone()], vec![attacker_device.clone()],
+        );
+        let stored = ingest_list_from(&revoking, &attacker_device).await;
+        assert!(
+            stored.is_empty(),
+            "a revoked delivering device is refused too, got {stored:?}",
+        );
+
+        super::super::resolver::clear_all();
+    }
+
+    /// The other half: the honest case still works. A device the master SIGNED for
+    /// is persisted and mapped, which is what presence collapse and DM fan-out read.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // the resolver guard is process-global
+    async fn ingest_accepts_list_delivered_by_a_listed_device() {
+        let _lock = super::super::resolver::test_lock();
+        super::super::resolver::clear_all();
+
+        let master = kp(0x43);
+        let master_id = master.peer_id();
+        let device_a = kp(0x44).peer_id();
+        let device_b = kp(0x45).peer_id();
+
+        let list = build_signed_device_list(
+            &master, 2, vec![device_a.clone(), device_b.clone()], Vec::new(),
+        );
+        let stored = ingest_list_from(&list, &device_b).await;
+        assert!(
+            stored.contains(&device_a) && stored.contains(&device_b),
+            "both signed devices must be persisted, got {stored:?}",
+        );
+        assert_eq!(
+            super::super::resolver::resolve(&device_b), master_id,
+            "the delivering device maps to the master that named it",
+        );
+
+        super::super::resolver::clear_all();
+    }
+
+    /// A legacy keystone published `devices = [master]` and transmits AS the
+    /// master, so the master peer id itself is an accepted deliverer. Both shapes
+    /// are covered: the classic one, and a list that names only a separate device
+    /// while the master hands it over.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // the resolver guard is process-global
+    async fn ingest_accepts_legacy_master_as_delivering_device() {
+        let _lock = super::super::resolver::test_lock();
+        super::super::resolver::clear_all();
+
+        let master = kp(0x46);
+        let master_id = master.peer_id();
+
+        let keystone = build_signed_device_list(
+            &master, 1, vec![master_id.clone()], Vec::new(),
+        );
+        let stored = ingest_list_from(&keystone, &master_id).await;
+        assert!(
+            stored.contains(&master_id),
+            "the keystone shape (devices = [master], sent by the master) must ingest, got {stored:?}",
+        );
+
+        let device = kp(0x47).peer_id();
+        let rotated = build_signed_device_list(&master, 2, vec![device.clone()], Vec::new());
+        let stored = ingest_list_from(&rotated, &master_id).await;
+        assert!(
+            stored.contains(&device),
+            "the master may deliver a list that names only its devices, got {stored:?}",
+        );
+
+        super::super::resolver::clear_all();
+    }
+
     /// The membership half of the reject's attribution gate, pinned next to the
     /// signature math it rides on. `verify_device_list` proves a list was signed by
     /// the master it names; it says NOTHING about which device delivered it, so the
@@ -4908,6 +5134,16 @@ mod tests {
         assert!(
             list.revoked.iter().any(|r| *r == revoked_dev),
             "a revoked device must not pass the sender check either",
+        );
+
+        // The same three statements through the shared predicate every ingest
+        // path now runs, so the call sites and the ingest cannot drift apart.
+        assert!(device_list_binds_sender(&list, &mine));
+        assert!(!device_list_binds_sender(&list, &stranger));
+        assert!(!device_list_binds_sender(&list, &revoked_dev));
+        assert!(
+            device_list_binds_sender(&list, &master.peer_id()),
+            "the legacy master-as-device deliverer is the one addition",
         );
 
         // And a list signed by a DIFFERENT master cannot be re-labelled: the

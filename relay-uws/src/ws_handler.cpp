@@ -1,6 +1,7 @@
 #include "ws_handler.h"
 #include "crypto.h"
 #include "device_list.h"
+#include "validate.h"
 #include "json.hpp"
 #include <cstdio>
 #include <cstring>
@@ -21,6 +22,11 @@ static constexpr uint64_t TIMESTAMP_SKEW_SECS = 60;
 static constexpr size_t MAX_ROOMS_PER_PEER = 10000;
 static constexpr int PUSH_SIDECAR_PORT = 3001;
 static constexpr int PUSH_DEBOUNCE_SECS = 10;
+// check_peers bounds (RELAY-3). The client asks about its offline friends, so a
+// few dozen ids is the real shape of a query; 256 is generous headroom. The
+// scan budget bounds the co-member pass for a peer sitting in many rooms.
+static constexpr size_t MAX_CHECK_PEERS_QUERY = 256;
+static constexpr size_t MAX_CHECK_PEERS_SCAN = 65536;
 
 // Key for per-IP limiting. IPv6 aggregates by /64 — a single host typically
 // owns an entire /64, so per-address counting would be trivially bypassed.
@@ -79,6 +85,34 @@ static std::string to_lowercase(std::string_view s) {
     std::string result(s);
     for (char& c : result) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     return result;
+}
+
+// "Is `x` in one of the same rooms as `caller`" is the only relationship the
+// relay can verify between two peers, so it is what gates the answers one peer
+// may ask for about another (see check_peers). Answered for a whole query in
+// ONE pass rather than per queried id: `peer_rooms` is already the peer -> rooms
+// index, so this walks the caller's rooms once and hands back the set of peers
+// it may be told about. Per-id membership is then a hash lookup, which keeps a
+// 256-id query from turning into 256 room walks on the event loop.
+//
+// `budget` caps the insertions so a peer sitting in thousands of rooms cannot
+// make each query expensive; truncation can only ever WITHHOLD an answer.
+static std::unordered_set<std::string> collect_room_co_members(
+        const RelayState& state, const std::string& caller, size_t budget) {
+    std::unordered_set<std::string> members;
+    auto it = state.peer_rooms.find(caller);
+    if (it == state.peer_rooms.end()) return members;
+    for (const auto& room : it->second) {
+        auto rit = state.ws_rooms.find(room);
+        if (rit == state.ws_rooms.end()) continue;
+        for (const auto& [pid, sock] : rit->second.peers) {
+            (void)sock;
+            if (budget == 0) return members;
+            budget--;
+            members.insert(pid);
+        }
+    }
+    return members;
 }
 
 static bool is_valid_room_code(std::string_view room) {
@@ -195,6 +229,14 @@ static void handle_auth(SSLWebSocket* ws, PerSocketData* data,
         return;
     }
 
+    // The three license outcomes below are distinguishable to the caller, which
+    // makes this a validity oracle for a license key. That is an ACCEPTED,
+    // DOCUMENTED tradeoff, not an oversight: the client shows a different,
+    // actionable message for each ("Invalid license key" / already in use / one
+    // is required — hollow_shell.dart), and collapsing them to one string would
+    // trade a user who can fix their own problem for an attacker who learns one
+    // bit slower. Keys are high-entropy and every guess costs a full TLS
+    // handshake plus a signed auth frame. Do not "fix" this by merging them.
     LicenseResult lr = state.license.validate_key(license_key_ptr, peer_id);
     switch (lr) {
         case LicenseResult::Ok:
@@ -309,9 +351,18 @@ static bool parse_inbox_proof(const json& j, SignedDeviceList& out) {
         dst = it->get<std::string>();
         return true;
     };
+    // Bounded: a join frame may be a megabyte of text, and an unbounded array
+    // here would let one join allocate tens of thousands of strings before the
+    // signature that governs them is even checked. No real master has anywhere
+    // near this many devices or tombstones. Deliberately NOT shape-checked:
+    // these ids are covered by the master's signature rather than chosen by the
+    // caller, and refusing an unexpected shape would lock a real user out of
+    // their own mailbox.
+    static constexpr size_t MAX_PROOF_IDS = 1024;
     auto str_array = [&](const char* key, std::vector<std::string>& dst) {
         auto it = j.find(key);
         if (it == j.end() || !it->is_array()) return false;
+        if (it->size() > MAX_PROOF_IDS) return false;
         for (const auto& e : *it) {
             if (!e.is_string()) return false;
             dst.push_back(e.get<std::string>());
@@ -368,11 +419,25 @@ static void replay_mailbox_no_delete(SSLWebSocket* ws,
 //   b. derive_peer_id(master_pubkey_b64) == master_peer_id  (inside verify);
 //   c. this socket's AUTHENTICATED device id is in `devices` and not `revoked`;
 //   d. the joined room string equals "inbox:" + master_peer_id.
+//   e. the list's `version` is not older than the newest this relay has seen
+//      verify for that master.
 //
 // (c) is what makes the proof non-transferable: the list is public-ish (it is
 // gossiped between devices), but replaying someone else's list only opens the
 // mailbox for a socket that already authenticated as one of ITS devices, and
 // auth binds peer_id to the key (handle_auth).
+//
+// (e) is what makes REVOCATION stick. A revoked device keeps the last list that
+// named it, that list is master-signed and verifies forever, and (c) passes
+// against it — so revocation was a client-side courtesy the relay never
+// enforced. `version` is inside the signed payload
+// ("hollow-devices:{master}:{version}:{devices}:{revoked}"), so a replayer
+// cannot raise it without the master's key, and the newer list that revoked it
+// necessarily carries a higher version. The mark is bumped from ANY list that
+// verifies for the master, whoever carries it, because only the master can mint
+// one — a third party presenting the current list can therefore raise the bar
+// but never lower it. Known limit: the marks are RAM only, so a relay restart
+// forgets them until the next genuine device presents its current list.
 static void maybe_replay_inbox_mailbox(SSLWebSocket* ws, PerSocketData* data,
                                         const std::string& room,
                                         const json& proof_json,
@@ -385,6 +450,24 @@ static void maybe_replay_inbox_mailbox(SSLWebSocket* ws, PerSocketData* data,
     if (!parse_inbox_proof(proof_json, dl)) return;
     if (!verify_signed_device_list(dl)) return;                       // a + b
     if (room != std::string(INBOX_ROOM_PREFIX) + dl.master_peer_id) return;  // d
+
+    // (e) — before (c), so a current list raises the mark even when the socket
+    // carrying it turns out not to be one of its devices. No log line: a
+    // rejected replay must look exactly like a plain join.
+    auto vit = state.device_list_max_version.find(dl.master_peer_id);
+    if (vit != state.device_list_max_version.end()) {
+        if (dl.version < vit->second) return;
+        vit->second = dl.version;
+    } else {
+        if (state.device_list_max_version.size() >= MAX_DEVICE_LIST_VERSIONS &&
+            !state.device_list_version_fifo.empty()) {
+            state.device_list_max_version.erase(state.device_list_version_fifo.front());
+            state.device_list_version_fifo.pop_front();
+        }
+        state.device_list_max_version[dl.master_peer_id] = dl.version;
+        state.device_list_version_fifo.push_back(dl.master_peer_id);
+    }
+
     if (!device_list_owns_device(dl, data->peer_id)) return;          // c
 
     replay_mailbox_no_delete(ws, dl.master_peer_id, room, state);
@@ -681,37 +764,113 @@ static std::string build_direct_frame(std::string_view room,
     return frame;
 }
 
-// Global-budget eviction: while total buffered bytes exceed the budget, find
-// the queue (DM or topic) with the OLDEST front entry and drop that entry.
-// O(#queues) per drop — only runs when the 512 MB budget is exceeded, which
-// organic use never reaches.
+// Is this eviction ref still the front of the queue it names? A mismatch means
+// the frame already left by delivery, expiry or a per-kind cap, so the ref is
+// stale and carries no work.
+static bool evict_ref_is_live(const RelayState& state,
+                              const OfflineIndex::EvictRef& ref) {
+    if (ref.is_topic) {
+        auto it = state.topic_buffers.find(ref.key);
+        return it != state.topic_buffers.end() && !it->second.frames.empty() &&
+               it->second.frames.front().seq == ref.seq;
+    }
+    auto it = state.offline_buffer.find(ref.key);
+    return it != state.offline_buffer.end() && !it->second.empty() &&
+           it->second.front().seq == ref.seq;
+}
+
+// Drop the front frame of the queue a LIVE ref names, keeping every byte
+// counter and the key accounting in step. Callers must have checked liveness.
+static void drop_front_for_ref(RelayState& state,
+                               const OfflineIndex::EvictRef& ref) {
+    if (ref.is_topic) {
+        auto it = state.topic_buffers.find(ref.key);
+        auto& tb = it->second;
+        size_t sz = tb.frames.front().frame.size();
+        state.buffer_total_bytes -= std::min(state.buffer_total_bytes, sz);
+        tb.bytes -= std::min(tb.bytes, sz);
+        tb.frames.pop_front();
+        state.buffer_index.released_topic();
+        return;
+    }
+    auto it = state.offline_buffer.find(ref.key);
+    auto& q = it->second;
+    state.buffer_total_bytes -= std::min(state.buffer_total_bytes, q.front().frame.size());
+    state.buffer_index.released_dm(ref.key, q.front().sender);
+    q.pop_front();
+    if (q.empty()) state.offline_buffer.erase(it);
+}
+
+// Global-budget eviction, oldest first.
+//
+// Used to be O(#queues) per dropped frame — it re-scanned every DM queue AND
+// every topic queue to find the globally oldest front, on the event loop, once
+// per drop, and the number of DM queues was itself unbounded (RELAY-1). Now the
+// insertion-order index answers "what is oldest" directly: pop its front, skip
+// it if the frame already left (a seq mismatch), otherwise drop that queue's
+// front. Identical semantics, amortised O(1).
 static void evict_over_budget(RelayState& state) {
-    while (state.buffer_total_bytes > MAX_BUFFER_TOTAL_BYTES) {
-        std::deque<RelayState::BufferedMsg>* oldest_dm = nullptr;
-        RelayState::TopicBuffer* oldest_topic = nullptr;
-        std::chrono::steady_clock::time_point oldest_at = std::chrono::steady_clock::time_point::max();
-        for (auto& [pid, q] : state.offline_buffer) {
-            if (!q.empty() && q.front().at < oldest_at) {
-                oldest_at = q.front().at; oldest_dm = &q; oldest_topic = nullptr;
-            }
-        }
-        for (auto& [key, tb] : state.topic_buffers) {
-            if (!tb.frames.empty() && tb.frames.front().at < oldest_at) {
-                oldest_at = tb.frames.front().at; oldest_topic = &tb; oldest_dm = nullptr;
-            }
-        }
-        if (oldest_dm) {
-            state.buffer_total_bytes -= std::min(state.buffer_total_bytes, oldest_dm->front().frame.size());
-            oldest_dm->pop_front();
-        } else if (oldest_topic) {
-            size_t sz = oldest_topic->frames.front().frame.size();
-            state.buffer_total_bytes -= std::min(state.buffer_total_bytes, sz);
-            oldest_topic->bytes -= std::min(oldest_topic->bytes, sz);
-            oldest_topic->frames.pop_front();
+    auto& order = state.buffer_index.order;
+    while (state.buffer_total_bytes > MAX_BUFFER_TOTAL_BYTES && !order.empty()) {
+        OfflineIndex::EvictRef ref = std::move(order.front());
+        order.pop_front();
+        if (!evict_ref_is_live(state, ref)) continue;  // already delivered/expired
+        drop_front_for_ref(state, ref);
+    }
+    if (order.empty() && state.buffer_total_bytes > MAX_BUFFER_TOTAL_BYTES) {
+        state.buffer_total_bytes = 0;  // nothing left to evict — resync counter
+    }
+}
+
+// Free every frame `sender` has pending at its FIRST-TOUCHED target, so the
+// sender's key count drops by one. This is the fair-share half of RELAY-1: a
+// sender past its own share loses its OWN oldest conversation and nobody
+// else's. Never called for a sender holding a single target.
+static void release_oldest_target_of(RelayState& state, const std::string& sender) {
+    std::string target = state.buffer_index.oldest_target(sender);
+    if (target.empty()) return;
+    auto it = state.offline_buffer.find(target);
+    if (it == state.offline_buffer.end()) return;
+    auto& q = it->second;
+    std::deque<RelayState::BufferedMsg> kept;
+    for (auto& m : q) {
+        if (m.sender == sender) {
+            state.buffer_total_bytes -= std::min(state.buffer_total_bytes, m.frame.size());
+            state.buffer_index.released_dm(target, sender);
         } else {
-            state.buffer_total_bytes = 0;  // nothing left to evict — resync counter
-            break;
+            kept.push_back(std::move(m));
         }
+    }
+    q = std::move(kept);
+    if (q.empty()) state.offline_buffer.erase(it);
+}
+
+// Global key backstop: pop the oldest deposits until one whole DM key falls
+// away. Only reachable at MAX_OFFLINE_BUFFER_KEYS distinct pending targets, and
+// only for a sender that holds no other key (one that does pays for itself
+// above). Bounded: if no key frees within MAX_BACKSTOP_EVICTIONS the deposit is
+// admitted anyway — the cap is a memory backstop, never a reason to lose a
+// message.
+static void evict_oldest_key(RelayState& state) {
+    auto& order = state.buffer_index.order;
+    size_t start_keys = state.buffer_index.key_count();
+    // Topic refs stepped over on the way: topics have their own key cap
+    // (MAX_TOPIC_BUFFERS_TOTAL) and must keep their place in the byte-budget
+    // order, so they go back exactly where they were.
+    std::vector<OfflineIndex::EvictRef> skipped;
+    for (size_t i = 0; i < MAX_BACKSTOP_EVICTIONS && !order.empty(); i++) {
+        OfflineIndex::EvictRef ref = std::move(order.front());
+        order.pop_front();
+        if (!evict_ref_is_live(state, ref)) continue;  // stale: nothing to keep
+        if (ref.is_topic) {
+            skipped.push_back(std::move(ref));
+            continue;
+        }
+        drop_front_for_ref(state, ref);
+        if (state.buffer_index.key_count() < start_keys) break;
+    }
+    for (auto it = skipped.rbegin(); it != skipped.rend(); ++it) {
+        order.push_front(std::move(*it));
     }
 }
 
@@ -732,10 +891,31 @@ static void buffer_offline_msg(const std::string& target_peer_id,
                                std::string frame, RelayState& state,
                                const std::string& sender,
                                bool is_image = false, bool is_channel = false) {
+    // KEY ADMISSION (RELAY-1). The buffer is keyed by the target string the
+    // sender put on the wire, so before this the key space was whatever an
+    // authenticated peer cared to type. Callers already refuse a target that is
+    // not peer-id shaped; this bounds how many well-shaped ones one sender may
+    // hold at once, and how many the relay holds in total.
+    //
+    // Nothing here can refuse the deposit — plan() only decides who pays.
+    switch (state.buffer_index.plan(sender, target_peer_id,
+                                    MAX_OFFLINE_TARGETS_PER_SENDER,
+                                    MAX_OFFLINE_BUFFER_KEYS)) {
+        case OfflineIndex::Admit::Ok:
+            break;
+        case OfflineIndex::Admit::FreeOwnOldest:
+            release_oldest_target_of(state, sender);
+            break;
+        case OfflineIndex::Admit::FreeGlobalOldest:
+            evict_oldest_key(state);
+            break;
+    }
+
     auto& q = state.offline_buffer[target_peer_id];
     state.buffer_total_bytes += frame.size();
+    uint64_t seq = state.buffer_index.stamp_dm(target_peer_id, sender);
     q.push_back({room, std::move(frame), sender, std::chrono::steady_clock::now(),
-                 is_image, is_channel});
+                 is_image, is_channel, seq});
     // Three independent caps: DM text, inlined-image and channel frames evict
     // separately so a chatty server never pushes out buffered DMs (and
     // vice-versa).
@@ -768,6 +948,7 @@ static void buffer_offline_msg(const std::string& target_peer_id,
         for (auto it = q.begin(); it != q.end(); ++it) {
             if (it->is_image == img && it->is_channel == chan && it->sender == *worst) {
                 state.buffer_total_bytes -= std::min(state.buffer_total_bytes, it->frame.size());
+                state.buffer_index.released_dm(target_peer_id, it->sender);
                 q.erase(it);
                 return;
             }
@@ -803,6 +984,7 @@ static void replay_buffered_msgs(SSLWebSocket* ws, const std::string& peer_id,
         if (m.room == room) {
             send_to_peer(ws, m.frame, uWS::OpCode::BINARY);
             state.buffer_total_bytes -= std::min(state.buffer_total_bytes, m.frame.size());
+            state.buffer_index.released_dm(peer_id, m.sender);
             delivered++;
         } else {
             remaining.push_back(std::move(m));
@@ -836,6 +1018,7 @@ void sweep_offline_buffer(RelayState& state) {
             int64_t ttl = m.is_image ? std::min<int64_t>(OFFLINE_BUFFER_TTL_SECS, retention) : retention;
             if (age >= ttl) {
                 state.buffer_total_bytes -= std::min(state.buffer_total_bytes, m.frame.size());
+                state.buffer_index.released_dm(it->first, m.sender);
                 evicted++;
             } else {
                 kept.push_back(std::move(m));
@@ -860,6 +1043,7 @@ void sweep_offline_buffer(RelayState& state) {
                 state.buffer_total_bytes -= std::min(state.buffer_total_bytes, sz);
                 tb.bytes -= std::min(tb.bytes, sz);
                 tb.frames.pop_front();
+                state.buffer_index.released_topic();
                 evicted++;
             } else {
                 break;
@@ -875,10 +1059,34 @@ void sweep_offline_buffer(RelayState& state) {
             now - tb.last_registered).count();
         if (idle >= TOPIC_BUFFER_IDLE_EXPIRE_SECS) {
             state.buffer_total_bytes -= std::min(state.buffer_total_bytes, tb.bytes);
+            for (size_t i = 0; i < tb.frames.size(); i++) state.buffer_index.released_topic();
             it = state.topic_buffers.erase(it);
         } else {
             ++it;
         }
+    }
+    // Retire eviction refs whose frame is already gone. Delivery, expiry and
+    // the per-kind caps all take frames out from under the index, so without
+    // this `order` would grow by one entry per deposit forever — the same
+    // unbounded-growth shape the index exists to close.
+    if (state.buffer_index.needs_compaction()) {
+        // Liveness for compaction is "this seq is still SOMEWHERE in its queue",
+        // not "it is that queue's front" — a ref for a frame three deep is
+        // perfectly live and will be needed later. Collect the live stamps in
+        // one pass, then filter.
+        std::unordered_set<uint64_t> live_seqs;
+        live_seqs.reserve(state.buffer_index.live * 2 + 16);
+        for (const auto& [key, q] : state.offline_buffer) {
+            (void)key;
+            for (const auto& m : q) live_seqs.insert(m.seq);
+        }
+        for (const auto& [key, tb] : state.topic_buffers) {
+            (void)key;
+            for (const auto& f : tb.frames) live_seqs.insert(f.seq);
+        }
+        state.buffer_index.compact([&live_seqs](const OfflineIndex::EvictRef& r) {
+            return live_seqs.count(r.seq) != 0;
+        });
     }
     if (evicted > 0) {
         fprintf(stderr, "[push] Swept %zu expired buffered msg(s)\n", evicted);
@@ -897,6 +1105,26 @@ static void try_push_notify(const std::string& target_peer_id,
     if ((now - last) < std::chrono::seconds(PUSH_DEBOUNCE_SECS)) {
         return;
     }
+
+    // Rolling hourly ceiling (RELAY-7). The debounce bounds the rate but not
+    // the total, so a sender pacing itself at one frame every ten seconds could
+    // keep a phone awake all night. 30 wake-ups an hour is generous for what a
+    // push is FOR: the woken device connects and drains everything waiting, so
+    // every wake-up after the first says nothing new until it goes offline
+    // again — and pushes only fire for a target that is offline to begin with.
+    //
+    // Over budget the DEPOSIT IS ALREADY BUFFERED (every caller buffers before
+    // it pushes); only the wake-up is skipped. Nothing is dropped, it just
+    // arrives when the device next connects.
+    auto& budget = state.push_budget[target_peer_id];
+    if (budget.count == 0 ||
+        (now - budget.window_start) >= std::chrono::seconds(PUSH_BUDGET_WINDOW_SECS)) {
+        budget.window_start = now;
+        budget.count = 0;
+    }
+    if (budget.count >= MAX_PUSH_WAKEUPS_PER_HOUR) return;
+    budget.count++;
+
     last = now;
 
     // No logging of push routing — target/sender peer_ids are social-graph metadata.
@@ -967,7 +1195,9 @@ static void handle_report(SSLWebSocket* ws, PerSocketData* data, const json& j,
     if (data->is_guest) return;
     std::string target = j.value("target", "");
     std::string category = j.value("category", "");
-    if (target.empty() || target.size() > 128 || target == data->peer_id) return;
+    // The target is persisted (hashed for dedup, in the clear for the per-target
+    // counts), so it must be a peer id and not free-form text.
+    if (!is_peer_id_shape(target) || target == data->peer_id) return;
     if (category != "spam" && category != "harassment" &&
         category != "illegal_content" && category != "impersonation") return;
     state.reports.add(data->peer_id, target, category);
@@ -1156,6 +1386,11 @@ static void handle_binary_channel_direct(PerSocketData* data,
     std::string room_str(room_code);
     std::string target_str(target_peer);
 
+    // The target becomes an offline_buffer KEY below, so it must be a real
+    // peer id and not whatever the sender felt like typing (RELAY-1). Dropped
+    // in silence: a well-formed client never sends one of these.
+    if (!is_peer_id_shape(target_str)) return;
+
     // Sender must actually be in the server room it claims to post to.
     auto rit = state.ws_rooms.find(room_str);
     if (rit == state.ws_rooms.end()) return;
@@ -1215,6 +1450,9 @@ static void handle_msg(PerSocketData* data, const std::string& room,
 static void handle_direct(PerSocketData* data, const std::string& room,
                            const std::string& target, const std::string& msg_data,
                            RelayState& state) {
+    // The target becomes an offline_buffer KEY on the miss path below.
+    if (!is_peer_id_shape(target)) return;
+
     auto rit = state.ws_rooms.find(room);
     if (rit == state.ws_rooms.end()) return;
 
@@ -1295,6 +1533,9 @@ static void handle_binary_direct(PerSocketData* data,
     if (rit->second.peers.find(data->peer_id) == rit->second.peers.end()) return;
 
     std::string target_str(target_peer);
+    // Nothing is stored on this path, but the id is still attacker-supplied and
+    // names who the frame is forwarded to — hold it to the same shape.
+    if (!is_peer_id_shape(target_str)) return;
     auto tit = rit->second.peers.find(target_str);
     if (tit == rit->second.peers.end()) return;
 
@@ -1373,6 +1614,13 @@ static void handle_binary_direct_msg(PerSocketData* data,
 
     std::string room_str(room_code);
     std::string target_str(target_peer);
+
+    // This is the widest deposit primitive on the relay (see the branch below:
+    // an empty room means there is no membership to check the sender against),
+    // and the target string becomes the offline_buffer KEY verbatim. Before
+    // this, that key space was "anything an authenticated peer cares to type" —
+    // the RELAY-1 memory-growth primitive. Silent drop, no reply, no log.
+    if (!is_peer_id_shape(target_str)) return;
 
     auto rit = state.ws_rooms.find(room_str);
     if (rit == state.ws_rooms.end()) {
@@ -1500,7 +1748,9 @@ static void handle_binary_topic_msg(PerSocketData* data,
         auto tit = state.topic_buffers.find(key);
         if (tit != state.topic_buffers.end() && tit->second.accepting) {
             auto& tb = tit->second;
-            tb.frames.push_back({forwarded, data->peer_id, std::chrono::steady_clock::now()});
+            uint64_t seq = state.buffer_index.stamp_topic(key);
+            tb.frames.push_back({forwarded, data->peer_id,
+                                 std::chrono::steady_clock::now(), seq});
             tb.bytes += forwarded.size();
             state.buffer_total_bytes += forwarded.size();
             while (!tb.frames.empty() &&
@@ -1509,6 +1759,7 @@ static void handle_binary_topic_msg(PerSocketData* data,
                 tb.bytes -= std::min(tb.bytes, sz);
                 state.buffer_total_bytes -= std::min(state.buffer_total_bytes, sz);
                 tb.frames.pop_front();
+                state.buffer_index.released_topic();
             }
             evict_over_budget(state);
         }
@@ -1589,10 +1840,11 @@ static void handle_claim_nickname(SSLWebSocket* ws, PerSocketData* data,
     state.nickname_to_peer[nickname] = data->peer_id;
     state.peer_to_nickname[data->peer_id] = nickname;
     state.nickname_expiry[nickname] = now_unix_secs() + NICKNAME_TTL_SECS;
-    // Self-reported MASTER id, bounds-checked (old clients send none). Handed
-    // back verbatim on resolve; never used for relay-side routing decisions.
-    if (!raw_master.empty() && raw_master.rfind("12D3KooW", 0) == 0 &&
-        raw_master.size() <= 68) {
+    // Self-reported MASTER id, shape-checked (old clients send none). Stored
+    // and handed back verbatim on resolve, so it is a client-supplied peer id
+    // the relay keeps: it gets the same shape gate as every other one, plus the
+    // Ed25519-identity prefix real ids carry. Never used for relay-side routing.
+    if (is_peer_id_shape(raw_master) && raw_master.rfind("12D3KooW", 0) == 0) {
         state.nickname_to_master[nickname] = raw_master;
     }
     send_json(ws, {{"type", "nickname_claimed"}, {"nickname", nickname}});
@@ -1686,11 +1938,86 @@ static void handle_release_link_code(SSLWebSocket* ws, PerSocketData* data,
     send_json(ws, {{"type", "link_code_released"}});
 }
 
-static void handle_resolve_link_code(SSLWebSocket* ws, PerSocketData* /*data*/,
+// How long a connection (or an IP) is refused after `failures` failed guesses:
+// nothing for the first LINK_RESOLVE_FREE_ATTEMPTS, then 60 s doubling per
+// further failure to a 15-minute ceiling.
+static std::chrono::seconds link_block_duration(uint32_t failures) {
+    if (failures < LINK_RESOLVE_FREE_ATTEMPTS) return std::chrono::seconds(0);
+    uint32_t steps = failures - LINK_RESOLVE_FREE_ATTEMPTS;
+    if (steps > 8) steps = 8;  // 60 << 8 already exceeds the ceiling
+    int64_t secs = static_cast<int64_t>(LINK_RESOLVE_BLOCK_BASE_SECS) << steps;
+    if (secs > LINK_RESOLVE_BLOCK_MAX_SECS) secs = LINK_RESOLVE_BLOCK_MAX_SECS;
+    return std::chrono::seconds(secs);
+}
+
+// Record one failed guess against this connection AND its IP, and arm the
+// matching block on both.
+static void note_link_resolve_failure(PerSocketData* data, RelayState& state) {
+    auto now = std::chrono::steady_clock::now();
+
+    data->link_resolve_failures++;
+    auto per_conn = link_block_duration(data->link_resolve_failures);
+    if (per_conn.count() > 0) data->link_resolve_block_until = now + per_conn;
+
+    if (data->ip_key.empty()) return;
+    auto it = state.link_guesses.find(data->ip_key);
+    if (it == state.link_guesses.end()) {
+        // Oldest-inserted first. The loop (rather than a single pop) covers a
+        // fifo entry whose map row a successful resolve already cleared.
+        while (state.link_guesses.size() >= MAX_LINK_GUESS_KEYS &&
+               !state.link_guess_fifo.empty()) {
+            state.link_guesses.erase(state.link_guess_fifo.front());
+            state.link_guess_fifo.pop_front();
+        }
+        it = state.link_guesses.emplace(data->ip_key, RelayState::LinkGuessState{}).first;
+        state.link_guess_fifo.push_back(data->ip_key);
+    }
+    it->second.failures++;
+    it->second.last_failure = now;
+    auto per_ip = link_block_duration(it->second.failures);
+    if (per_ip.count() > 0) it->second.block_until = now + per_ip;
+}
+
+// True while either the connection or its IP is inside a guessing block.
+static bool link_resolve_blocked(const PerSocketData* data, const RelayState& state) {
+    auto now = std::chrono::steady_clock::now();
+    if (now < data->link_resolve_block_until) return true;
+    if (data->ip_key.empty()) return false;
+    auto it = state.link_guesses.find(data->ip_key);
+    return it != state.link_guesses.end() && now < it->second.block_until;
+}
+
+// Resolving a link code is a GUESS AT A SECRET, not a message.
+//
+// The code is six characters over a 36^6 keyspace and it is the passphrase of a
+// full `.hollow` identity backup: the sibling device hands it the whole
+// identity. Unthrottled, that is a remote brute force of somebody's entire
+// account at line rate, and the endpoint used to require nothing but
+// authentication — guests included, with the socket's own data ignored.
+//
+// So: guests are refused (they never link a device), then five free attempts
+// per connection, then 60 s doubling to a 15-minute cap. Per-connection alone
+// is worth nothing because reconnecting resets it, so the same budget is kept
+// per ip_limit_key (see RelayState::link_guesses for why that per-IP state is a
+// deliberate exception to the relay's "connection caps only" rule). A correct
+// guess clears both — a real linking device never sees any of this.
+static void handle_resolve_link_code(SSLWebSocket* ws, PerSocketData* data,
                                       const std::string& raw_code, RelayState& state) {
+    // Mirrors handle_claim_link_code: a guest has no identity to link to.
+    if (data->is_guest) return;
+
+    if (link_resolve_blocked(data, state)) {
+        // Attempting while blocked is itself an attempt, so it extends the
+        // block — otherwise a prober just keeps hammering through the window.
+        note_link_resolve_failure(data, state);
+        send_json(ws, {{"type", "link_code_error"}, {"error", "too_many_attempts"}});
+        return;
+    }
+
     std::string code = to_uppercase(raw_code);
     auto it = state.linkcode_to_peer.find(code);
     if (it == state.linkcode_to_peer.end()) {
+        note_link_resolve_failure(data, state);
         send_json(ws, {{"type", "link_code_error"}, {"error", "not_found"}, {"code", code}});
         return;
     }
@@ -1700,6 +2027,7 @@ static void handle_resolve_link_code(SSLWebSocket* ws, PerSocketData* /*data*/,
         state.linkcode_expiry.erase(code);
         state.peer_to_linkcode.erase(it->second);
         state.linkcode_to_peer.erase(it);
+        note_link_resolve_failure(data, state);
         send_json(ws, {{"type", "link_code_error"}, {"error", "not_found"}, {"code", code}});
         return;
     }
@@ -1708,6 +2036,11 @@ static void handle_resolve_link_code(SSLWebSocket* ws, PerSocketData* /*data*/,
     state.linkcode_expiry.erase(code);
     state.peer_to_linkcode.erase(peer_id);
     state.linkcode_to_peer.erase(it);
+    // A hit clears the budget on both counters: whoever this is, they had the
+    // secret. A user who fat-fingered the code four times is back to zero.
+    data->link_resolve_failures = 0;
+    data->link_resolve_block_until = {};
+    if (!data->ip_key.empty()) state.link_guesses.erase(data->ip_key);
     send_json(ws, {{"type", "link_code_resolved"}, {"code", code}, {"peer_id", peer_id}});
 }
 
@@ -1726,6 +2059,35 @@ void sweep_link_codes(RelayState& state) {
             state.linkcode_to_peer.erase(it);
         }
         state.linkcode_expiry.erase(code);
+    }
+}
+
+// Drop per-IP link-guess records that have gone quiet, so the map only ever
+// holds addresses that are actively guessing. An entry survives its idle window
+// while a block is still running, or a prober could sit out the sweep and get a
+// clean slate. Called from the offline-buffer sweep timer.
+void sweep_link_guesses(RelayState& state) {
+    auto now = std::chrono::steady_clock::now();
+    for (auto it = state.link_guesses.begin(); it != state.link_guesses.end(); ) {
+        auto idle = std::chrono::duration_cast<std::chrono::seconds>(
+            now - it->second.last_failure).count();
+        if (idle >= LINK_GUESS_EXPIRE_SECS && now >= it->second.block_until) {
+            it = state.link_guesses.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    // Keep the eviction order in step with the map (and free of duplicates a
+    // cleared-then-re-armed key would leave behind).
+    if (state.link_guess_fifo.size() > state.link_guesses.size()) {
+        std::deque<std::string> kept;
+        std::unordered_set<std::string> seen;
+        for (auto& k : state.link_guess_fifo) {
+            if (state.link_guesses.count(k) && seen.insert(k).second) {
+                kept.push_back(std::move(k));
+            }
+        }
+        state.link_guess_fifo.swap(kept);
     }
 }
 
@@ -1757,20 +2119,37 @@ static void handle_text_message(SSLWebSocket* ws, PerSocketData* data,
         handle_direct(data, j.value("room", ""), j.value("target", ""),
                       j.value("data", ""), state);
     } else if (type == "check_peers") {
-        // Lightweight liveness check: client sends peer IDs, relay returns which
-        // are connected. Deliberately unthrottled: peer ids are high-entropy so
-        // this cannot be enumerated blind, the reply only restates what routing
-        // already exposes, and throttling it would silently degrade the liveness
-        // check that heals offline-friend state. The privacy fix here was
-        // removing the ROOM probe below, not bounding this lookup.
+        // Lightweight liveness check: the client names peer ids, the relay says
+        // which are up. Still deliberately unthrottled — throttling it would
+        // silently degrade the heal that brings an "offline" friend back — but
+        // it is no longer an oracle for ARBITRARY ids.
+        //
+        // It used to answer for any peer_id at all, which made the relay a
+        // presence lookup service: hand it an id off a profile card and it told
+        // you whether that person was online, right now, with no relationship of
+        // any kind required. Now an id is reported only when the caller and that
+        // peer are in at least one of the SAME rooms — the one relationship the
+        // relay can actually verify, and the same gate `discover_peers` already
+        // applies. That costs the real caller nothing: the client auto-joins
+        // dm_room_code(me, friend) for EVERY accepted friend on connect
+        // (swarm.rs, WsEvent::Connected), so an online friend it has lost track
+        // of is always a co-member, which is exactly the case the heal exists
+        // for. A stranger's id shares no room and simply never appears.
+        //
+        // Guests are refused outright: a browser viewer has no friends to heal.
         json online_peers = json::array();
-        if (j.contains("peers") && j["peers"].is_array()) {
+        if (!data->is_guest && j.contains("peers") && j["peers"].is_array()) {
+            const auto co_members = collect_room_co_members(
+                state, data->peer_id, MAX_CHECK_PEERS_SCAN);
+            size_t asked = 0;
             for (auto& pid : j["peers"]) {
-                if (pid.is_string()) {
-                    const std::string& peer_id = pid.get_ref<const std::string&>();
-                    if (state.peer_sockets.count(peer_id)) {
-                        online_peers.push_back(peer_id);
-                    }
+                if (++asked > MAX_CHECK_PEERS_QUERY) break;
+                if (!pid.is_string()) continue;
+                const std::string& peer_id = pid.get_ref<const std::string&>();
+                if (!is_peer_id_shape(peer_id)) continue;
+                if (!co_members.count(peer_id)) continue;
+                if (state.peer_sockets.count(peer_id)) {
+                    online_peers.push_back(peer_id);
                 }
             }
         }
@@ -1925,8 +2304,12 @@ static void cleanup_peer(RelayState& state, const std::string& peer_id,
             state.peer_to_linkcode.erase(lit);
         }
 
-        // Clear push debounce on disconnect (token stays — needed for offline pushes)
+        // Clear push debounce on disconnect (token stays — needed for offline
+        // pushes). The hourly wake-up budget goes with it: the budget exists to
+        // bound how often an OFFLINE device is woken, so each offline stretch
+        // starts fresh, and the map never outlives the peer's push token.
         state.last_push_sent.erase(peer_id);
+        state.push_budget.erase(peer_id);
 
         state.license.release_key(peer_id);
         state.peer_sockets.erase(peer_id);

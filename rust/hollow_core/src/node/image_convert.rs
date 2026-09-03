@@ -72,7 +72,7 @@ pub fn should_convert_to_webp(ext: &str) -> bool {
 /// Returns the cleaned WebP bytes with the same quality. Since the input is
 /// already WebP, we use lossless re-encode to avoid generation loss.
 pub fn strip_webp_metadata(data: &[u8]) -> Result<Vec<u8>, String> {
-    let img = image::load_from_memory(data)
+    let img = load_bounded(data)
         .map_err(|e| format!("Failed to decode WebP for metadata strip: {e}"))?;
     let mut buf = Vec::new();
     let mut cursor = std::io::Cursor::new(&mut buf);
@@ -291,7 +291,7 @@ pub fn convert_animation_to_webp(
 /// Convert image bytes to lossless WebP.
 /// Returns (webp_bytes, width, height).
 pub fn convert_to_webp_lossless(data: &[u8]) -> Result<(Vec<u8>, u32, u32), String> {
-    let img = image::load_from_memory(data)
+    let img = load_bounded(data)
         .map_err(|e| format!("Failed to decode image: {e}"))?;
 
     let width = img.width();
@@ -323,7 +323,7 @@ pub fn convert_to_webp_with_quality(
         return convert_to_webp_lossless(data);
     }
 
-    let img = image::load_from_memory(data)
+    let img = load_bounded(data)
         .map_err(|e| format!("Failed to decode image: {e}"))?;
     let (w, h) = (img.width(), img.height());
     if w == 0 || h == 0 {
@@ -344,7 +344,7 @@ pub fn convert_to_webp_with_quality(
 
 /// Get image dimensions without converting.
 pub fn get_image_dimensions(data: &[u8]) -> Result<(u32, u32), String> {
-    let img = image::load_from_memory(data)
+    let img = load_bounded(data)
         .map_err(|e| format!("Failed to decode image: {e}"))?;
     Ok((img.width(), img.height()))
 }
@@ -357,7 +357,7 @@ pub fn get_image_dimensions(data: &[u8]) -> Result<(u32, u32), String> {
 /// Returns `(webp_bytes, width, height)` where the dimensions are the
 /// resized dimensions actually encoded. Phase 6.75.
 pub fn convert_to_webp_preview(data: &[u8], max_dim_px: u32) -> Result<(Vec<u8>, u32, u32), String> {
-    let img = image::load_from_memory(data)
+    let img = load_bounded(data)
         .map_err(|e| format!("Failed to decode image: {e}"))?;
     let (w, h) = (img.width(), img.height());
     if w == 0 || h == 0 {
@@ -497,6 +497,94 @@ fn crop_resize_frames(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// PNG's chunk CRC (IEEE, reflected), so a hand-built header is a header
+    /// a real decoder accepts rather than one it rejects for the wrong reason.
+    fn png_crc32(bytes: &[u8]) -> u32 {
+        let mut crc = 0xFFFF_FFFFu32;
+        for &b in bytes {
+            crc ^= u32::from(b);
+            for _ in 0..8 {
+                let mask = (crc & 1).wrapping_neg();
+                crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
+            }
+        }
+        !crc
+    }
+
+    /// A structurally valid PNG head DECLARING `w`x`h` 8-bit RGBA, with a
+    /// stub body. A decoder reads IHDR, believes the canvas, and sizes its
+    /// allocation from it — which is the whole attack.
+    fn png_declaring(w: u32, h: u32) -> Vec<u8> {
+        let mut ihdr = Vec::with_capacity(17);
+        ihdr.extend_from_slice(b"IHDR");
+        ihdr.extend_from_slice(&w.to_be_bytes());
+        ihdr.extend_from_slice(&h.to_be_bytes());
+        ihdr.extend_from_slice(&[8, 6, 0, 0, 0]); // 8 bpc, RGBA, no interlace
+        let mut idat = Vec::with_capacity(4 + 64);
+        idat.extend_from_slice(b"IDAT");
+        idat.extend_from_slice(&[0u8; 64]);
+
+        let mut out = Vec::new();
+        out.extend_from_slice(b"\x89PNG\r\n\x1a\n");
+        out.extend_from_slice(&13u32.to_be_bytes());
+        out.extend_from_slice(&ihdr);
+        out.extend_from_slice(&png_crc32(&ihdr).to_be_bytes());
+        out.extend_from_slice(&64u32.to_be_bytes());
+        out.extend_from_slice(&idat);
+        out.extend_from_slice(&png_crc32(&idat).to_be_bytes());
+        out
+    }
+
+    /// PROFILE-1 regression. A decoder sizes its canvas from the header, so a
+    /// few hundred bytes can ask for hundreds of megabytes. `load_bounded`
+    /// refuses at `MAX_DECODE_ALLOC_BYTES` in `Limits::reserve`, which runs
+    /// BEFORE the buffer exists.
+    ///
+    /// The fixture is 10000x10000 (381 MiB of RGBA) rather than something
+    /// wilder on purpose: the image crate's OWN default is 512 MiB, so a
+    /// 20000x20000 bomb would be refused with or without this fix and would
+    /// prove nothing. 381 MiB sits in the gap the fix actually closes.
+    #[test]
+    fn load_bounded_rejects_declared_oversized_png() {
+        let bomb = png_declaring(10_000, 10_000);
+        assert!(
+            bomb.len() < 4096,
+            "the whole bomb is a few hundred bytes: {}",
+            bomb.len()
+        );
+
+        let start = std::time::Instant::now();
+        let err = load_bounded(&bomb).expect_err("a 381 MiB canvas must be refused");
+        let elapsed = start.elapsed();
+
+        assert!(
+            err.contains("Memory limit exceeded"),
+            "the refusal has to come from the allocation limit, not from the \
+             truncated body (which would mean the canvas was allocated first). got: {err}",
+        );
+        assert!(
+            elapsed < std::time::Duration::from_millis(100),
+            "the refusal happens before the allocation: took {elapsed:?}",
+        );
+    }
+
+    /// The bound cannot be so tight that ordinary images stop decoding.
+    #[test]
+    fn load_bounded_accepts_small_png() {
+        let png = make_test_png(64, 48);
+        let img = load_bounded(&png).expect("an ordinary PNG still decodes");
+        assert_eq!((img.width(), img.height()), (64, 48));
+
+        // And a photograph-sized canvas, which local authoring hands us all
+        // the time, is nowhere near the ceiling: 6000x4000 RGBA is 91 MiB.
+        let big = png_declaring(6000, 4000);
+        let err = load_bounded(&big).expect_err("the stub body cannot decode");
+        assert!(
+            !err.contains("Memory limit exceeded"),
+            "a real camera-sized image must not be refused by the bound: {err}",
+        );
+    }
 
     /// Build a tiny solid-color PNG in memory for test input.
     fn make_test_png(w: u32, h: u32) -> Vec<u8> {
@@ -652,7 +740,7 @@ mod tests {
         assert_eq!(w, 200);
         assert_eq!(h, 100);
         // Should decode cleanly via the image crate.
-        let decoded = image::load_from_memory(&webp_bytes).expect("decode webp");
+        let decoded = load_bounded(&webp_bytes).expect("decode webp");
         assert_eq!(decoded.width(), 200);
         assert_eq!(decoded.height(), 100);
     }
@@ -663,7 +751,7 @@ mod tests {
         let (webp_bytes, w, h) = convert_to_webp_preview(&png, 400).expect("encode");
         assert_eq!(w, 400);
         assert_eq!(h, 200); // preserved aspect ratio (1200:600 → 400:200)
-        let decoded = image::load_from_memory(&webp_bytes).expect("decode webp");
+        let decoded = load_bounded(&webp_bytes).expect("decode webp");
         assert_eq!(decoded.width(), 400);
         assert_eq!(decoded.height(), 200);
     }
@@ -700,7 +788,7 @@ mod tests {
             convert_to_webp_with_quality(&png, WebpQuality::Lossless).expect("encode");
         assert_eq!(w, 200);
         assert_eq!(h, 100);
-        let decoded = image::load_from_memory(&webp_bytes).expect("decode webp");
+        let decoded = load_bounded(&webp_bytes).expect("decode webp");
         assert_eq!(decoded.width(), 200);
         assert_eq!(decoded.height(), 100);
     }
@@ -712,7 +800,7 @@ mod tests {
             convert_to_webp_with_quality(&png, WebpQuality::Balanced).expect("encode");
         assert_eq!(w, 200);
         assert_eq!(h, 100);
-        let decoded = image::load_from_memory(&webp_bytes).expect("decode webp");
+        let decoded = load_bounded(&webp_bytes).expect("decode webp");
         assert_eq!(decoded.width(), 200);
         assert_eq!(decoded.height(), 100);
     }
@@ -724,7 +812,7 @@ mod tests {
             convert_to_webp_with_quality(&png, WebpQuality::Small).expect("encode");
         assert_eq!(w, 400);
         assert_eq!(h, 300);
-        let decoded = image::load_from_memory(&webp_bytes).expect("decode webp");
+        let decoded = load_bounded(&webp_bytes).expect("decode webp");
         assert_eq!(decoded.width(), 400);
         assert_eq!(decoded.height(), 300);
     }
@@ -1367,7 +1455,7 @@ pub fn convert_from_webp(
     data: &[u8],
     target_format: &str,
 ) -> Result<Vec<u8>, String> {
-    let img = image::load_from_memory(data)
+    let img = load_bounded(data)
         .map_err(|e| format!("Failed to decode image: {e}"))?;
 
     let format = match target_format.to_lowercase().as_str() {
@@ -1556,7 +1644,7 @@ fn process_still_square(
     qualities: &[f32],
     label: &str,
 ) -> Result<Vec<u8>, String> {
-    let img = image::load_from_memory(data)
+    let img = load_bounded(data)
         .map_err(|e| format!("Failed to decode image: {e}"))?;
 
     let (w, h) = (img.width(), img.height());
@@ -1594,7 +1682,7 @@ fn process_still_square(
 
 /// Resize an existing avatar to a 64x64 thumbnail for public channel sync responses.
 pub fn process_sync_avatar(data: &[u8]) -> Result<Vec<u8>, String> {
-    let img = image::load_from_memory(data)
+    let img = load_bounded(data)
         .map_err(|e| format!("Failed to decode avatar for sync: {e}"))?;
     let resized = img.resize_exact(64, 64, FilterType::Lanczos3);
     let mut buf = Vec::new();
@@ -1608,7 +1696,7 @@ pub fn process_sync_avatar(data: &[u8]) -> Result<Vec<u8>, String> {
 /// Process an IGDB game cover for the showcase board: keep aspect (covers are
 /// ~3:4), cap the longest side at 400px, encode as WebP.
 pub fn process_showcase_cover(data: &[u8]) -> Result<Vec<u8>, String> {
-    let img = image::load_from_memory(data)
+    let img = load_bounded(data)
         .map_err(|e| format!("Failed to decode cover: {e}"))?;
     let resized = if img.width().max(img.height()) > 400 {
         img.resize(400, 400, FilterType::Lanczos3)
@@ -1639,7 +1727,7 @@ pub fn process_showcase_artwork(data: &[u8]) -> Result<Vec<u8>, String> {
         }
         return Ok(webp);
     }
-    let img = image::load_from_memory(data)
+    let img = load_bounded(data)
         .map_err(|e| format!("Failed to decode artwork: {e}"))?;
     let resized = if img.width().max(img.height()) > 800 {
         img.resize(800, 800, FilterType::Lanczos3)
@@ -1698,12 +1786,12 @@ pub fn process_emote_image(data: &[u8]) -> Result<(Vec<u8>, bool), String> {
         if data.len() > MAX_ANIMATED {
             return Err("Animated emote too large (>256KB)".into());
         }
-        image::load_from_memory(data)
+        load_bounded(data)
             .map_err(|e| format!("Failed to decode animated WebP: {e}"))?;
         return Ok((data.to_vec(), true));
     }
 
-    let img = image::load_from_memory(data)
+    let img = load_bounded(data)
         .map_err(|e| format!("Failed to decode emote image: {e}"))?;
     let (w, h) = (img.width(), img.height());
     if w == 0 || h == 0 {
@@ -1732,7 +1820,7 @@ pub fn process_emote_image(data: &[u8]) -> Result<(Vec<u8>, bool), String> {
 /// colours that were not in the source and cost real bytes in a blob that is
 /// PUSHED to everyone who syncs with you.
 pub fn process_banner_image(data: &[u8]) -> Result<Vec<u8>, String> {
-    let img = image::load_from_memory(data)
+    let img = load_bounded(data)
         .map_err(|e| format!("Failed to decode image: {e}"))?;
 
     let (w, h) = (img.width(), img.height());
@@ -1813,12 +1901,12 @@ pub fn process_server_banner_image(data: &[u8]) -> Result<(Vec<u8>, bool), Strin
         if data.len() > MAX_ANIMATED {
             return Err("Animated banner too large (>1MB)".into());
         }
-        image::load_from_memory(data)
+        load_bounded(data)
             .map_err(|e| format!("Failed to decode animated WebP: {e}"))?;
         return Ok((data.to_vec(), true));
     }
 
-    let img = image::load_from_memory(data)
+    let img = load_bounded(data)
         .map_err(|e| format!("Failed to decode banner image: {e}"))?;
     let (w, h) = (img.width(), img.height());
     if w == 0 || h == 0 {
@@ -1839,7 +1927,7 @@ pub fn process_server_banner_image(data: &[u8]) -> Result<(Vec<u8>, bool), Strin
 /// public-browse wire path (sent to strangers pre-join — never the full
 /// blob). Animated banners contribute their first frame.
 pub fn process_server_banner_thumb(data: &[u8]) -> Result<Vec<u8>, String> {
-    let img = image::load_from_memory(data)
+    let img = load_bounded(data)
         .map_err(|e| format!("Failed to decode banner for thumb: {e}"))?;
     let (w, h) = (img.width(), img.height());
     if w == 0 || h == 0 {
@@ -1886,6 +1974,164 @@ pub fn is_animated_webp(data: &[u8]) -> bool {
         && &data[8..12] == b"WEBP"
         && &data[12..16] == b"VP8X"
         && (data[20] & 0x02) != 0
+}
+
+/// The largest canvas a REMOTE image may declare, per side.
+///
+/// SECURITY (SHOP-2): a WebP's compressed size says nothing about its decoded
+/// size. A 4 MiB file may declare a 16384x16384 canvas, which is about a
+/// gigabyte of RGBA once a decoder believes it. Every ceiling Hollow actually
+/// encodes to is far under this, so nothing legitimate is turned away.
+///
+/// This is the REMOTE rule only, applied by [`validate_remote_image_header`],
+/// the asset rail and the pack importer. Local authoring is bounded by
+/// [`MAX_DECODE_ALLOC_BYTES`] instead, because a 6000x4000 photo picked as an
+/// avatar or sent as a file is ordinary and has to keep working.
+pub(crate) const MAX_DECODE_DIM: u32 = 4096;
+
+/// The largest single allocation ANY decode in this crate may make.
+///
+/// SECURITY (PROFILE-1): `image::load_from_memory` carries no bound at all. It
+/// believes the header's declared dimensions and allocates the canvas before
+/// anything can object, so a few KB claiming 20000x20000 is 1.6 GB of RGBA.
+/// `ImageReader::decode` checks `Limits::reserve` against the decoder's
+/// `total_bytes()` BEFORE that buffer exists, which turns the bomb into a
+/// refusal rather than an out-of-memory.
+///
+/// Deliberately an ALLOCATION bound rather than a dimension bound: the same
+/// decoders serve local authoring, where large real photographs are normal.
+/// 256 MiB passes every camera image (a 6000x4000 RGBA is 91 MiB) and refuses
+/// every bomb.
+pub(crate) const MAX_DECODE_ALLOC_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Receive ceilings for a peer's profile stills (PROFILE-1).
+///
+/// The sender-side encoders cap an avatar at `MAX_AVATAR_STILL_BYTES` (250 KB)
+/// and a banner at `MAX_BANNER_STILL_BYTES` (400 KB). These are the same
+/// bounds with generous slack, because a receiver has to tolerate an older
+/// client's fatter encode without becoming somewhere to park megabytes.
+pub(crate) const PROFILE_AVATAR_RECV_MAX_BYTES: usize = 1024 * 1024;
+/// Companion of [`PROFILE_AVATAR_RECV_MAX_BYTES`] for the banner still.
+pub(crate) const PROFILE_BANNER_RECV_MAX_BYTES: usize = 3 * 1024 * 1024;
+
+fn decode_limits() -> image::Limits {
+    // `Limits` is `#[non_exhaustive]`, so it is built and then adjusted.
+    let mut limits = image::Limits::default();
+    limits.max_alloc = Some(MAX_DECODE_ALLOC_BYTES);
+    limits
+}
+
+/// Decode image bytes under [`MAX_DECODE_ALLOC_BYTES`]. THE decoder for this
+/// crate: every former `image::load_from_memory` call site goes through here,
+/// so no path can decode a bomb by forgetting a bound.
+///
+/// The error is the underlying one verbatim, so the call sites that already
+/// wrap it ("Failed to decode emote image: ...") keep reading naturally.
+pub(crate) fn load_bounded(data: &[u8]) -> Result<image::DynamicImage, String> {
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(data))
+        .with_guessed_format()
+        .map_err(|e| e.to_string())?;
+    reader.limits(decode_limits());
+    reader.decode().map_err(|e| e.to_string())
+}
+
+/// `(width, height)` if they are inside [`MAX_DECODE_DIM`], else the reason.
+fn within_decode_dim(w: u32, h: u32) -> Result<(u32, u32), String> {
+    if w == 0 || h == 0 {
+        return Err("has zero dimensions".into());
+    }
+    if w > MAX_DECODE_DIM || h > MAX_DECODE_DIM {
+        return Err(format!("declares a {w}x{h} canvas, over the {MAX_DECODE_DIM} ceiling"));
+    }
+    Ok((w, h))
+}
+
+/// Header-only validation for image bytes that came from a PEER.
+///
+/// Reads the declared dimensions without decoding a pixel, holds them to
+/// [`MAX_DECODE_DIM`], and refuses anything that is not one of the four
+/// formats Hollow renders. Returns the dimensions on success; the `Err` is a
+/// fragment meant to be logged after "REJECTED ... {what} ".
+pub(crate) fn validate_remote_image_header(data: &[u8]) -> Result<(u32, u32), String> {
+    // WebP first: it is what the rails carry, the read is a dozen bytes, and
+    // it also covers the ANIMATED container, which libwebp decodes downstream
+    // where the image crate's limits never reach.
+    if let Some((w, h)) = webp_header_dimensions(data) {
+        return within_decode_dim(w, h);
+    }
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(data))
+        .with_guessed_format()
+        .map_err(|e| format!("has an unreadable header: {e}"))?;
+    match reader.format() {
+        Some(image::ImageFormat::Png)
+        | Some(image::ImageFormat::Jpeg)
+        | Some(image::ImageFormat::Gif)
+        | Some(image::ImageFormat::WebP) => {}
+        Some(other) => return Err(format!("is a {other:?}, which is not a format we render")),
+        None => return Err("is not a recognised image".into()),
+    }
+    reader.limits(decode_limits());
+    let (w, h) = reader
+        .into_dimensions()
+        .map_err(|e| format!("has an unreadable header: {e}"))?;
+    within_decode_dim(w, h)
+}
+
+/// `(width, height)` read from a WebP's HEADER, without decoding a pixel.
+///
+/// Parses the first chunk after the 12-byte RIFF/WEBP preamble:
+/// `VP8X` (extended: 24-bit little-endian width-1 and height-1), `VP8 `
+/// (lossy: the 3-byte start code then two 14-bit fields), and `VP8L`
+/// (lossless: a signature byte then 14-bit width-1 / height-1, bit-packed).
+/// `None` means the bytes are not a WebP we can read a size out of, which is
+/// itself a reason to refuse them.
+pub(crate) fn webp_header_dimensions(data: &[u8]) -> Option<(u32, u32)> {
+    if data.len() < 20 || &data[0..4] != b"RIFF" || &data[8..12] != b"WEBP" {
+        return None;
+    }
+    let fourcc = &data[12..16];
+    let payload = data.get(20..)?;
+    match fourcc {
+        b"VP8X" => {
+            // flags(1) + reserved(3) + canvas width-1 (3) + canvas height-1 (3)
+            if payload.len() < 10 {
+                return None;
+            }
+            let w = u32::from(payload[4])
+                | (u32::from(payload[5]) << 8)
+                | (u32::from(payload[6]) << 16);
+            let h = u32::from(payload[7])
+                | (u32::from(payload[8]) << 8)
+                | (u32::from(payload[9]) << 16);
+            Some((w + 1, h + 1))
+        }
+        b"VP8 " => {
+            // frame tag(3) + start code 9D 01 2A + width(2) + height(2)
+            if payload.len() < 10 {
+                return None;
+            }
+            if payload[3] != 0x9D || payload[4] != 0x01 || payload[5] != 0x2A {
+                return None;
+            }
+            let w = (u16::from(payload[6]) | (u16::from(payload[7]) << 8)) & 0x3FFF;
+            let h = (u16::from(payload[8]) | (u16::from(payload[9]) << 8)) & 0x3FFF;
+            Some((u32::from(w), u32::from(h)))
+        }
+        b"VP8L" => {
+            // signature 0x2F, then 14 bits width-1, 14 bits height-1, LSB first
+            if payload.len() < 5 || payload[0] != 0x2F {
+                return None;
+            }
+            let bits = u32::from(payload[1])
+                | (u32::from(payload[2]) << 8)
+                | (u32::from(payload[3]) << 16)
+                | (u32::from(payload[4]) << 24);
+            let w = (bits & 0x3FFF) + 1;
+            let h = ((bits >> 14) & 0x3FFF) + 1;
+            Some((w, h))
+        }
+        _ => None,
+    }
 }
 
 /// True for a PNG that carries an `acTL` (animation control) chunk.
@@ -1963,7 +2209,7 @@ pub fn validate_sticker_blob(data: &[u8]) -> Result<(u32, u32, bool), String> {
             (w, h, frames)
         }
         Err(_) => {
-            let img = image::load_from_memory(data)
+            let img = load_bounded(data)
                 .map_err(|e| format!("Sticker failed to decode: {e}"))?;
             (img.width(), img.height(), 1)
         }
@@ -2311,7 +2557,7 @@ fn process_asset_for_send(
         frames = crop_resize_frames(&decoded, (0, 0, w, h), nw, nh);
     } else {
         // Still source (e.g. a still WebP full variant) — single-frame asset.
-        let img = image::load_from_memory(data)
+        let img = load_bounded(data)
             .map_err(|e| format!("Failed to decode image: {e}"))?;
         let (w, h) = (img.width(), img.height());
         if w == 0 || h == 0 {
@@ -2466,7 +2712,7 @@ pub fn validate_frame_centre(data: &[u8]) -> Result<(), String> {
         return Ok(());
     }
 
-    let img = image::load_from_memory(data)
+    let img = load_bounded(data)
         .map_err(|e| format!("Failed to decode frame: {e}"))?
         .to_rgba8();
     if img.width() == 0 || img.height() == 0 {
@@ -2558,7 +2804,7 @@ pub fn process_avatar_frame(data: &[u8]) -> Result<(Vec<u8>, bool), String> {
         return encode_frame_animation(&frames);
     }
 
-    let img = image::load_from_memory(data)
+    let img = load_bounded(data)
         .map_err(|e| format!("Failed to decode image: {e}"))?;
     let (w, h) = (img.width(), img.height());
     if w == 0 || h == 0 {

@@ -8,7 +8,8 @@ use crate::crypto::{MlsManager, OlmManager, CryptoStore};
 use crate::identity::native_identity::NativeKeypair;
 use super::crypto_handler::{
     peer_is_reachable, send_mls_broadcast,
-    send_encrypted_message, send_message_to_peer, send_raw_to_peer, send_raw_to_identity,
+    send_encrypted_message, send_encrypted_message_in_room,
+    send_message_to_peer, send_raw_to_peer, send_raw_to_identity,
 };
 use super::types::*;
 
@@ -137,12 +138,35 @@ fn pick_online_device(
 
 // ── CallSendSignal ───────────────────────────────────────────────────
 
-pub(crate) fn handle_call_send_signal(
+/// Send one 1:1 call signal to the callee, Olm-encrypted.
+///
+/// SECURITY (TRANSPORT-1, 2026-09): this used to hand the relay a bare
+/// `HavenMessage::Call*` frame, so the relay read the call's AES-128-GCM SFrame
+/// media key out of the invite/accept, read every SDP and ICE candidate, and
+/// could inject a forged CallAccept carrying a key it chose. The signal now
+/// rides `MessageEnvelope::CallSignal` inside the Olm ciphertext, and the
+/// receive side rejects any Call* that arrives in the clear.
+///
+/// No session means no send: a call signal is NEVER worth a plaintext
+/// fallback. We ask for the peer's key bundle (throttled, exactly like the DM
+/// path) and drop this signal — the caller's UI already handles an invite that
+/// never rings, and the next signal after the session forms goes through.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn handle_call_send_signal(
     peer_id: String,
     signal_type: String,
     payload: String,
+    olm: &mut OlmManager,
+    crypto_store: &CryptoStore,
+    event_tx: &mpsc::Sender<NetworkEvent>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    key_request_in_flight: &mut HashMap<String, std::time::Instant>,
+    // THIS device's identity — signs the KeyRequest.
+    device_keypair: &NativeKeypair,
+    device_peer_id: &str,
+    // OUR master id — one half of the deterministic DM room code.
+    local_master: &str,
 ) {
     let Some(msg) = build_call_signal(&signal_type, payload) else { return; };
     // Multi-device: `peer_id` is the friend's MASTER (the call UI keys on the
@@ -173,7 +197,73 @@ pub(crate) fn handle_call_send_signal(
             if reachable { "in-room" } else { "UNREACHABLE — will be dropped" }
         );
     }
-    send_message_to_peer(ws_cmd_tx, ws_room_peers, &target, msg);
+
+    if !olm.has_session(&target) {
+        // NO plaintext fallback — the whole point of the fix.
+        hollow_log!(
+            "[HOLLOW-CALL] No Olm session with {target} — call signal {signal_type} DROPPED, requesting key bundle"
+        );
+        request_key_bundle_throttled(
+            ws_cmd_tx, ws_room_peers, key_request_in_flight,
+            device_keypair, device_peer_id, &target, reachable,
+        );
+        return;
+    }
+
+    let envelope = MessageEnvelope::CallSignal { signal: Box::new(msg) };
+    let Ok(json) = serde_json::to_string(&envelope) else {
+        hollow_log!("[HOLLOW-CALL] Failed to serialize {signal_type} envelope — dropped");
+        return;
+    };
+
+    // Route into the DETERMINISTIC DM room, not a first-match lookup: the callee
+    // device is typically co-present in several of our rooms, and picking one it
+    // has since left buffers the frame against a room it never rejoins (silent
+    // one-way loss). Both identities' devices are always members of this room.
+    let dm_room = dm_room_code(local_master, &super::resolver::resolve(&target));
+    let in_dm_room = ws_room_peers.get(&dm_room).is_some_and(|p| p.contains(&target));
+    if in_dm_room {
+        send_encrypted_message_in_room(
+            olm, crypto_store, &target, &dm_room, &json, event_tx, ws_cmd_tx,
+        ).await;
+    } else {
+        // Not in the DM room (a conference guest, a forwarder-only peer, a
+        // device mid-rejoin). Delivering through whatever room we do share
+        // beats dropping the call.
+        hollow_log!(
+            "[HOLLOW-CALL] {target} not in DM room {dm_room} — falling back to first-match room"
+        );
+        send_encrypted_message(
+            olm, crypto_store, &target, &json, event_tx, ws_cmd_tx, ws_room_peers,
+        ).await;
+    }
+}
+
+/// Ask `target` for a fresh key bundle, at most once per `KEY_REQUEST_THROTTLE`.
+/// Mirrors `message_ops::queue_dm_key_request` minus the queueing: a call signal
+/// is live control traffic, so a stale one replayed after the session forms is
+/// worse than nothing.
+fn request_key_bundle_throttled(
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    key_request_in_flight: &mut HashMap<String, std::time::Instant>,
+    device_keypair: &NativeKeypair,
+    device_peer_id: &str,
+    target: &str,
+    target_online: bool,
+) {
+    const KEY_REQUEST_THROTTLE: std::time::Duration = std::time::Duration::from_secs(10);
+    let fresh = key_request_in_flight
+        .get(target)
+        .is_some_and(|t| t.elapsed() < KEY_REQUEST_THROTTLE);
+    if fresh || !target_online {
+        return;
+    }
+    send_message_to_peer(
+        ws_cmd_tx, ws_room_peers, target,
+        super::crypto_handler::signed_key_request(device_keypair, device_peer_id, target),
+    );
+    key_request_in_flight.insert(target.to_string(), std::time::Instant::now());
 }
 
 /// JSON string field with the signal-payload convention: missing → "".
@@ -294,6 +384,193 @@ fn build_call_json_signal(signal_type: &str, payload: &str) -> Option<HavenMessa
         hollow_log!("[HOLLOW-CALL] Failed to parse {label} payload");
     }
     msg
+}
+
+// ── CallSignal (receive) ─────────────────────────────────────────────
+
+/// Handle one DECRYPTED 1:1 call signal and hand it to Dart as a
+/// `NetworkEvent::CallSignal`.
+///
+/// `peer_str` is the sender DEVICE the Olm session authenticated, so the
+/// attribution here is as strong as the ratchet. `signal` is WHITELISTED again
+/// on the way out: only the 17 `Call*` variants are call signals, and anything
+/// else arriving inside a `CallSignal` envelope is an attempt to smuggle another
+/// message type past its own gate, so it is dropped and logged.
+pub(crate) async fn handle_call_signal_message(
+    peer_str: &str,
+    master_peer_str: &str,
+    signal: HavenMessage,
+    event_tx: &mpsc::Sender<NetworkEvent>,
+) {
+    // One emit helper so every arm below is just its payload shape.
+    macro_rules! emit {
+        ($kind:expr, $payload:expr) => {{
+            let _ = event_tx.send(NetworkEvent::CallSignal {
+                peer_id: peer_str.to_string(),
+                signal_type: $kind.to_string(),
+                payload: $payload,
+            }).await;
+        }};
+    }
+
+    match signal {
+        HavenMessage::CallInvite { call_id, video, sframe_key } => {
+            // BLOCK GUARD: a blocked identity can't ring us. Dropping the
+            // invite kills the whole call flow (no ringing UI, no accept path).
+            if !super::resolver::same_identity(peer_str, master_peer_str)
+                && super::blocklist::is_blocked(peer_str)
+            {
+                return;
+            }
+            // SECURITY (Phase 6.25): Don't log sframe_key length/presence.
+            hollow_log!("[HOLLOW-CALL] CallInvite from {peer_str} call={call_id} video={video} key_len={}", sframe_key.len());
+            emit!("invite", serde_json::json!({
+                "call_id": call_id,
+                "video": video,
+                "sframe_key": sframe_key,
+            }).to_string());
+        }
+        HavenMessage::CallAccept { call_id, sframe_key } => {
+            hollow_log!("[HOLLOW-CALL] CallAccept from {peer_str} call={call_id}");
+            emit!("accept", serde_json::json!({
+                "call_id": call_id,
+                "sframe_key": sframe_key,
+            }).to_string());
+        }
+        HavenMessage::CallReject { call_id } => {
+            hollow_log!("[HOLLOW-CALL] CallReject from {peer_str} call={call_id}");
+            emit!("reject", call_id);
+        }
+        HavenMessage::CallEnd { call_id } => {
+            hollow_log!("[HOLLOW-CALL] CallEnd from {peer_str} call={call_id}");
+            emit!("end", call_id);
+        }
+        HavenMessage::CallBusy { call_id } => {
+            hollow_log!("[HOLLOW-CALL] CallBusy from {peer_str} call={call_id}");
+            emit!("busy", call_id);
+        }
+        HavenMessage::CallMediaRestart { call_id } => {
+            hollow_log!("[HOLLOW-CALL] CallMediaRestart from {peer_str} call={call_id}");
+            emit!("media_restart", call_id);
+        }
+        HavenMessage::CallSdpOffer { call_id, sdp } => {
+            // SECURITY (Phase 6.25): SDP size limit.
+            if sdp.len() > MAX_SDP_SIZE {
+                hollow_log!("[HOLLOW-SECURITY] BLOCKED CallSdpOffer — size {} exceeds limit from {peer_str}", sdp.len());
+                return;
+            }
+            hollow_log!("[HOLLOW-CALL] CallSdpOffer from {peer_str} call={call_id}");
+            emit!("sdp_offer", serde_json::json!({
+                "call_id": call_id,
+                "sdp": sdp,
+            }).to_string());
+        }
+        HavenMessage::CallSdpAnswer { call_id, sdp } => {
+            if sdp.len() > MAX_SDP_SIZE {
+                hollow_log!("[HOLLOW-SECURITY] BLOCKED CallSdpAnswer — size {} exceeds limit from {peer_str}", sdp.len());
+                return;
+            }
+            hollow_log!("[HOLLOW-CALL] CallSdpAnswer from {peer_str} call={call_id}");
+            emit!("sdp_answer", serde_json::json!({
+                "call_id": call_id,
+                "sdp": sdp,
+            }).to_string());
+        }
+        HavenMessage::CallIceCandidate { call_id, candidate, sdp_mid, sdp_mline_index } => {
+            hollow_log!("[HOLLOW-CALL] CallIceCandidate from {peer_str} call={call_id}");
+            emit!("ice", serde_json::json!({
+                "call_id": call_id,
+                "candidate": candidate,
+                "sdpMid": sdp_mid,
+                "sdpMLineIndex": sdp_mline_index,
+            }).to_string());
+        }
+        HavenMessage::CallVideoState { call_id, enabled } => {
+            hollow_log!("[HOLLOW-CALL] CallVideoState from {peer_str} call={call_id} enabled={enabled}");
+            emit!("video_state", serde_json::json!({
+                "call_id": call_id,
+                "enabled": enabled,
+            }).to_string());
+        }
+        HavenMessage::CallAudioState { call_id, muted, deafened } => {
+            hollow_log!("[HOLLOW-CALL] CallAudioState from {peer_str} call={call_id} muted={muted} deafened={deafened}");
+            emit!("audio_state", serde_json::json!({
+                "call_id": call_id,
+                "muted": muted,
+                "deafened": deafened,
+            }).to_string());
+        }
+        HavenMessage::CallScreenState { call_id, enabled, quality } => {
+            hollow_log!("[HOLLOW-CALL] CallScreenState from {peer_str} call={call_id} enabled={enabled} quality={quality:?}");
+            let mut json = serde_json::json!({
+                "call_id": call_id,
+                "enabled": enabled,
+            });
+            if let Some(q) = &quality {
+                json["quality"] = serde_json::Value::String(q.clone());
+            }
+            emit!("screen_state", json.to_string());
+        }
+        HavenMessage::CallScreenOffer { call_id, sdp } => {
+            if sdp.len() > MAX_SDP_SIZE {
+                hollow_log!("[HOLLOW-SECURITY] BLOCKED CallScreenOffer — size {} exceeds limit from {peer_str}", sdp.len());
+                return;
+            }
+            hollow_log!("[HOLLOW-CALL] CallScreenOffer from {peer_str} call={call_id}");
+            emit!("screen_offer", serde_json::json!({
+                "call_id": call_id,
+                "sdp": sdp,
+            }).to_string());
+        }
+        HavenMessage::CallScreenAnswer { call_id, sdp } => {
+            if sdp.len() > MAX_SDP_SIZE {
+                hollow_log!("[HOLLOW-SECURITY] BLOCKED CallScreenAnswer — size {} exceeds limit from {peer_str}", sdp.len());
+                return;
+            }
+            hollow_log!("[HOLLOW-CALL] CallScreenAnswer from {peer_str} call={call_id}");
+            emit!("screen_answer", serde_json::json!({
+                "call_id": call_id,
+                "sdp": sdp,
+            }).to_string());
+        }
+        HavenMessage::CallScreenIce { call_id, candidate, sdp_mid, sdp_mline_index, role } => {
+            hollow_log!("[HOLLOW-CALL] CallScreenIce from {peer_str} call={call_id} role={role}");
+            emit!("screen_ice", serde_json::json!({
+                "call_id": call_id,
+                "candidate": candidate,
+                "sdpMid": sdp_mid,
+                "sdpMLineIndex": sdp_mline_index,
+                "role": role,
+            }).to_string());
+        }
+        HavenMessage::CallScreenWatch { call_id, want, viewer_width, viewer_height } => {
+            hollow_log!("[HOLLOW-CALL] CallScreenWatch from {peer_str} call={call_id} want={want} viewer={viewer_width}x{viewer_height}");
+            emit!("screen_watch", serde_json::json!({
+                "call_id": call_id,
+                "want": want,
+                "viewer_width": viewer_width,
+                "viewer_height": viewer_height,
+            }).to_string());
+        }
+        HavenMessage::CallRecordingState { call_id, recording } => {
+            hollow_log!("[HOLLOW-CALL] CallRecordingState from {peer_str} call={call_id} recording={recording}");
+            emit!(
+                if recording { "recording_start" } else { "recording_stop" },
+                serde_json::json!({
+                    "call_id": call_id,
+                    "recording": recording,
+                }).to_string()
+            );
+        }
+        other => {
+            // Externally visible variant name only — never the contents.
+            let kind = serde_json::to_value(&other)
+                .ok()
+                .and_then(|v| v.get("type").and_then(|t| t.as_str()).map(|s| s.to_string()))
+                .unwrap_or_else(|| "?".into());
+            hollow_log!("[HOLLOW-SECURITY] REJECTED non-call message {kind} smuggled inside a call signal envelope from {peer_str}");
+        }
+    }
 }
 
 // ── VoiceChannelJoin ─────────────────────────────────────────────────

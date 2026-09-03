@@ -5,6 +5,7 @@
 
 use bip39::Mnemonic;
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
+use zeroize::Zeroizing;
 
 /// Native Ed25519 keypair, replacing `libp2p::identity::Keypair`.
 #[derive(Clone)]
@@ -27,9 +28,13 @@ fn compute_peer_id(signing_key: &SigningKey) -> String {
 
 impl NativeKeypair {
     /// Derive a keypair from a BIP-39 mnemonic (first 32 bytes of seed).
+    ///
+    /// The BIP-39 seed and the 32-byte secret cut from it are both wiped when
+    /// this returns; `SigningKey` zeroizes itself on drop, but the buffers we
+    /// build on the way in would otherwise stay in freed stack memory.
     pub fn from_mnemonic(mnemonic: &Mnemonic) -> Result<Self, String> {
-        let seed = mnemonic.to_seed("");
-        let mut secret_bytes = [0u8; 32];
+        let seed = Zeroizing::new(mnemonic.to_seed(""));
+        let mut secret_bytes = Zeroizing::new([0u8; 32]);
         secret_bytes.copy_from_slice(&seed[..32]);
         let signing_key = SigningKey::from_bytes(&secret_bytes);
         Ok(Self {
@@ -62,7 +67,7 @@ impl NativeKeypair {
         if bytes[0] != 0x08 || bytes[1] != 0x01 || bytes[2] != 0x12 || bytes[3] != 0x40 {
             return Err("Invalid protobuf header for Ed25519 keypair".into());
         }
-        let mut secret = [0u8; 32];
+        let mut secret = Zeroizing::new([0u8; 32]);
         secret.copy_from_slice(&bytes[4..36]);
         let signing_key = SigningKey::from_bytes(&secret);
         let keypair = Self {
@@ -84,11 +89,13 @@ impl NativeKeypair {
     /// (carried over from `libp2p::identity::Keypair::to_protobuf_encoding`).
     /// This never fails in practice.
     pub fn to_protobuf_encoding(&self) -> Result<Vec<u8>, String> {
-        let secret = self.signing_key.to_bytes();
+        // The returned Vec is the caller's to protect (it goes straight into
+        // the encrypted identity file); the copy we cut it from is not.
+        let secret = Zeroizing::new(self.signing_key.to_bytes());
         let public = self.signing_key.verifying_key().to_bytes();
         let mut buf = Vec::with_capacity(68);
         buf.extend_from_slice(&[0x08, 0x01, 0x12, 0x40]);
-        buf.extend_from_slice(&secret);
+        buf.extend_from_slice(&secret[..]);
         buf.extend_from_slice(&public);
         Ok(buf)
     }

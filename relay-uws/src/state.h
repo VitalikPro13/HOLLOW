@@ -9,6 +9,7 @@
 
 #include <App.h>
 #include "license.h"
+#include "offline_index.h"
 #include "reports.h"
 
 // No soft backpressure — let uWebSockets buffer handle delivery.
@@ -77,6 +78,38 @@ static constexpr int64_t TOPIC_BUFFER_IDLE_EXPIRE_SECS = 7 * 86400;     // no me
 // Global budget across ALL buffered frames (DM + topic). Oldest-first
 // eviction when exceeded — organic use never gets near this.
 static constexpr size_t MAX_BUFFER_TOTAL_BYTES = 512ull * 1024 * 1024;
+
+// Offline-buffer KEY caps (RELAY-1). The 512 MB budget above bounds the bytes;
+// these bound the number of distinct keys, which nothing bounded before: the
+// buffer is keyed by the target string a 0x04/0x09 frame carries, so one
+// authenticated peer could mint an unbounded number of map entries by naming a
+// fresh "target" per frame. Shape validation (is_peer_id_shape) narrows the key
+// space to real peer ids; these two caps bound it outright.
+//
+// Per SENDER: how many distinct offline targets it may hold deposits for at
+// once. Crossing it never refuses the deposit — it frees that sender's OWN
+// oldest target, so a flooder evicts only itself, exactly like the per-peer
+// fair-share eviction below.
+//
+// CAUTION, this is the one number here that can cost a real message. A channel
+// post fans one 0x09 frame per OFFLINE member, and a sender's targets clear
+// only on delivery or TTL, so they accumulate across every server and DM it
+// touches for up to a day. A member of a few large servers whose offline
+// members total more than this WILL start evicting its own earliest deposits —
+// which are somebody's real messages, not junk. The offline buffer is an
+// availability cache and peer sync remains the correctness floor, so the cost
+// is a slower first delivery rather than a lost message. 4096 sits well above
+// any real member's offline fan-out (a few large servers) while still bounding
+// a flooder to 4096 keys of its own; raise it again before a real member ever
+// reaches it, not after.
+static constexpr size_t MAX_OFFLINE_TARGETS_PER_SENDER = 4096;
+// Global backstop, mirroring MAX_TOPIC_BUFFERS_TOTAL. Reaching this means
+// 65,536 distinct peers have mail waiting at once.
+static constexpr size_t MAX_OFFLINE_BUFFER_KEYS = 65536;
+// How many oldest deposits the backstop may pop looking for a key to free
+// before it admits the new deposit anyway. The cap is a memory backstop, not an
+// invariant worth losing a message over.
+static constexpr size_t MAX_BACKSTOP_EVICTIONS = 1024;
 // Anti-spam: non-mention channel pushes are heavily throttled — the banner has
 // no content until the device fetches, so repeats add nothing. Mentions are
 // urgent and bypass the long window.
@@ -84,6 +117,31 @@ static constexpr int CHANNEL_PUSH_DEBOUNCE_SECS = 120;         // non-mention, p
 static constexpr int CHANNEL_PUSH_MENTION_DEBOUNCE_SECS = 10;  // mention, per (peer, server)
 static constexpr int CHANNEL_PUSH_MIN_GAP_SECS = 5;            // any channel push, per peer
 static constexpr uint32_t CHANNEL_PUSH_MAX_WHILE_OFFLINE = 3;  // non-mention cap until app reconnects
+
+// Rolling per-target ceiling on DM push wake-ups (RELAY-7). The 10-second
+// debounce bounds the RATE but not the TOTAL: a sender willing to wait ten
+// seconds between frames could keep a phone waking all night. 30 an hour is
+// generous for the thing a push actually does — a woken device connects and
+// drains everything waiting, so the wake-ups after the first carry no new
+// information until it goes offline again, and pushes only fire for targets
+// that are offline in the first place. Over budget the deposit STILL buffers;
+// only the wake-up is skipped, so nothing is ever lost, it just arrives when
+// the device next connects.
+static constexpr uint32_t MAX_PUSH_WAKEUPS_PER_HOUR = 30;
+static constexpr int PUSH_BUDGET_WINDOW_SECS = 3600;
+
+// Link-code guessing defence (RELAY-5). A link code is the passphrase of a full
+// identity backup over a 36^6 keyspace, so a failed resolve is a guess at a
+// secret, not traffic.
+static constexpr uint32_t LINK_RESOLVE_FREE_ATTEMPTS = 5;   // before any block
+static constexpr int LINK_RESOLVE_BLOCK_BASE_SECS = 60;     // doubling per further failure
+static constexpr int LINK_RESOLVE_BLOCK_MAX_SECS = 900;     // 15 minutes
+static constexpr size_t MAX_LINK_GUESS_KEYS = 65536;
+static constexpr int LINK_GUESS_EXPIRE_SECS = 900;          // idle entries swept after 15 min
+
+// Per-master high-water mark on inbox-proof device-list versions (RELAY-6).
+// Bounded with FIFO eviction of the oldest-inserted master.
+static constexpr size_t MAX_DEVICE_LIST_VERSIONS = 262144;
 
 using SSLWebSocket = uWS::WebSocket<true, true, struct PerSocketData>;
 
@@ -108,12 +166,12 @@ struct PerSocketData {
     // Per-room channel subscriptions (room_code -> set of topic strings).
     // Empty set = wildcard (receive all messages for that room).
     std::unordered_map<std::string, std::unordered_set<std::string>> subscriptions;
-};
 
-struct PeerEntry {
-    std::string peer_id;
-    std::vector<std::string> addresses;
-    uint64_t last_seen;
+    // Link-code guessing, per connection (RELAY-5). Counts FAILED resolves of a
+    // 36^6 code that is the passphrase of a full identity backup; a successful
+    // resolve clears both. See handle_resolve_link_code.
+    uint32_t link_resolve_failures = 0;
+    std::chrono::steady_clock::time_point link_resolve_block_until{};
 };
 
 struct WsRoom {
@@ -154,8 +212,10 @@ struct ServerStatsCache {
 };
 
 struct RelayState {
-    // HTTP signaling rooms
-    std::unordered_map<std::string, std::vector<PeerEntry>> signaling_rooms;
+    // The HTTP signaling table (`signaling_rooms`, `PeerEntry`) is GONE along
+    // with /register, /unregister and /bootstrap — see the note in
+    // http_handlers.cpp. It was the one place the relay held a peer_id next to
+    // a caller-supplied address list, and no client has used it since July 2026.
 
     // WebSocket rooms
     std::unordered_map<std::string, WsRoom> ws_rooms;
@@ -204,6 +264,14 @@ struct RelayState {
     std::unordered_map<std::string, PushToken> push_tokens;
     // Debounce: track last push time per peer to avoid flooding
     std::unordered_map<std::string, std::chrono::steady_clock::time_point> last_push_sent;
+    // Rolling hourly wake-up budget per target (RELAY-7). Keys are a subset of
+    // push_tokens (no token, no push, no budget entry), and cleanup_peer drops
+    // a peer's entry on disconnect so every offline stretch starts fresh.
+    struct PushBudget {
+        std::chrono::steady_clock::time_point window_start{};
+        uint32_t count = 0;
+    };
+    std::unordered_map<std::string, PushBudget> push_budget;
 
     // Offline message buffer (RAM only). Key = target peer_id.
     // Each entry is the fully-formed 0x06 direct-message frame to replay when
@@ -215,8 +283,14 @@ struct RelayState {
         std::chrono::steady_clock::time_point at;
         bool is_image = false;         // inlined-image frame (separate cap)
         bool is_channel = false;       // channel message frame (separate cap)
+        uint64_t seq = 0;              // eviction-index stamp (OfflineIndex)
     };
     std::unordered_map<std::string, std::deque<BufferedMsg>> offline_buffer;
+
+    // Insertion-order index + per-sender key accounting over BOTH buffers
+    // (RELAY-1). Must stay exact: every path that removes a frame calls
+    // released_dm()/released_topic(). See the enumeration in ws_handler.cpp.
+    OfflineIndex buffer_index;
 
     // Opt-in offline delivery registry (RAM only — re-registered on every
     // connect like push prefs). Presence = opted in; value = retention secs
@@ -232,6 +306,7 @@ struct RelayState {
                              // (live fan-out never echoes the sender; MLS
                              // can't decrypt your own ciphertext)
         std::chrono::steady_clock::time_point at;
+        uint64_t seq = 0;    // eviction-index stamp (OfflineIndex)
     };
     struct TopicBuffer {
         std::deque<TopicFrame> frames;
@@ -269,6 +344,32 @@ struct RelayState {
         std::unordered_map<std::string, ChannelPushState>> channel_push_state;
     // Per-peer floor across ALL channel pushes (multi-server burst guard).
     std::unordered_map<std::string, std::chrono::steady_clock::time_point> last_channel_push_any;
+
+    // Failed link-code guesses per ip_limit_key (RELAY-5).
+    //
+    // This is a DELIBERATE, DOCUMENTED EXCEPTION to "per-IP RAM = connection
+    // caps only": it counts FAILED guesses of a secret, never traffic. A link
+    // code is six characters over a 36^6 keyspace and it is the passphrase of a
+    // full identity backup, so an unthrottled resolve is a remote brute force
+    // of somebody's whole identity; the per-connection counter alone is worth
+    // nothing because reconnecting resets it. Nothing here counts, delays or
+    // drops a message, and a correct guess clears the entry.
+    struct LinkGuessState {
+        uint32_t failures = 0;
+        std::chrono::steady_clock::time_point block_until{};
+        std::chrono::steady_clock::time_point last_failure{};
+    };
+    std::unordered_map<std::string, LinkGuessState> link_guesses;
+    // Insertion order, for O(1) eviction at MAX_LINK_GUESS_KEYS.
+    std::deque<std::string> link_guess_fifo;
+
+    // Highest device-list version this relay has seen verify for each master
+    // (RELAY-6). A revoked device keeps its last master-signed list forever and
+    // that list still verifies, so without a high-water mark it can replay it
+    // to read the master's inbox mailbox for as long as it likes. RAM only: a
+    // restart forgets the marks, which is the known limit of this defence.
+    std::unordered_map<std::string, uint64_t> device_list_max_version;
+    std::deque<std::string> device_list_version_fifo;  // FIFO eviction order
 
     size_t online_users() const { return peer_sockets.size() - guest_count; }
 };
