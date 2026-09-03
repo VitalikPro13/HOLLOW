@@ -77,5 +77,96 @@ Settings > Profile > Support marks (`_SupportMarksSection` in `owned_art_panel.d
 
 **The publish rule.** `support_creds_own` is a PER-DEVICE table and does not replicate; before 2026-09-03 every device republished from its own table, so a linked sibling that never redeemed (or redeemed one item) wiped the master's marks for everyone on any toggle or redeem. Now `published_creds_json` publishes `keep_verified(table ∪ shelf ∪ our own profile row)`, deduplicated by item with the table winning, minus tombstones, with the glyph flag stamped from the setting. The row is what a sibling's announce wrote onto this device, so a device that minted nothing still republishes what the master holds; `keep_verified` drops a row entry signed for another master, which keeps a transplanted row harmless. `list_own_support_creds` returns the same union (row-only entries carry no names and `redeemed_at` 0). Residual edge, documented in the code: a mark removed on a device that did not mint it comes back if the minting device republishes later; a replicating table is a later unit. Tests: 17 in `api::shop::tests` (`hidden_marks_publish_a_clear_and_keep_the_records`, `sibling_with_an_empty_table_republishes_the_masters_marks`, `hide_and_unhide_round_trip_from_a_device_with_an_empty_table`, `hiding_twice_keeps_the_shelf`, `remove_from_a_device_that_did_not_mint_it_sticks_on_that_device`, `a_row_entry_for_another_master_never_rides_the_announce`, `badge_setting_applies_to_every_published_entry`, ...), the harness `support_credential_replicates_and_transplant_is_dropped` (proves `""` clears on a peer and the field reaches a sibling), 5 widget tests in `test/widget/support_marks_section_test.dart`.
 
-**Known hole (filed in HOLLOW_PLAN.md beside the Twitch item):** `support_creds` is outside `profile_signing_payload`, so a party that can rewrite the plaintext `ProfileUpdate` fallback in flight can strip the field to `""` and the receiver reads a clear (the freshness guard admits an equal `updated_at` and up to 24 h older). Denial only, per receiver, restored by the holder's next genuine announce; the fix is a second master signature over the field with a per-master "seen signed" pin, planned with the Twitch credential unit.
+## The two Twitch types, and the field signature (2026-09-03)
+
+Same chain, same blind signature, a different verifier at the top: instead of a
+Creem licence key the shop validates a Twitch OAuth access token and signs what
+Twitch itself reported.
+
+- **`T_TWITCH_OWNER = 3`** — "this identity holds this Twitch account".
+  `parts = [twitch_user_id, login_lowercase]`,
+  `item = SHA-256("hollow-twitch-owner/v1" || 0x00 || user_id || 0x00 || login)`.
+  KAT: user_id `12345`, login `somestreamer` ->
+  `be924c37092c5b6014256f49f62220f379f7aec5390b587ecc41b8c55d55ab1b`. Cap 1 on
+  the profile. The purple chip draws from this and from nothing else.
+- **`T_TWITCH_FOLLOW = 4`** — "this identity follows this channel, at least this
+  long, at this tier". `parts = [broadcaster_id, age_bucket_days, tier]`,
+  `item = SHA-256("hollow-twitch-follow/v1" || 0x00 || broadcaster || 0x00 || bucket || 0x00 || tier)`.
+  KATs: `67890`/`30`/`0` -> `a36cd1c6f03bf61bd6d2c522860aeeb037fb9862038713ffb711b1380fca5e2a`;
+  `67890`/`365`/`2000` -> `fd9d50532a17342be7e94d6ad75736be284f2200ebcd6c36b86a27ea9a89476b`.
+  Buckets `[0,1,3,7,14,30,60,90,180,365]` (the verifier picks the largest at or
+  below the real follow age), tiers `"0"`, `"1000"`, `"2000"`, `"3000"`. Cap 0:
+  `keep_verified` drops it in BOTH directions, so a follow credential never
+  rides a profile. It is presented at join time only.
+- **Shapes** are enforced on both sides: a login is `[a-z0-9_]{4,25}` already
+  lowercased (one spelling per account), an id is 1..20 decimal digits, a bucket
+  and a tier must be on the grid, spelled canonically.
+- **`period` means TIME for the first time.** `period = floor(unix / 86400 / 90)`,
+  REQUIRED non-zero for `t` 3 and 4, and a verifier accepts `now_period` or
+  `now_period - 1` (one window of grace). KAT: unix `1786000000` -> `229`. An
+  entry two windows old fails `verify_entry` even though its chain and its
+  signature are perfect. `verify_chain_at` / `verify_entry_at` /
+  `keep_verified_at` take the window explicitly so a test can stand elsewhere.
+- **Shop endpoints** (same origin as redeem, token never stored or logged):
+  `POST /api/twitch/key {kind:"owner"|"follow", token, broadcaster_id?}` answers
+  `{t, item, parts, period, key, key_sig, issuer, issuer_sig}`;
+  `POST /api/twitch/verify {kind, token, broadcaster_id?, item, period, blinded}`
+  re-derives the facts from live Twitch and answers `{blind_sig}`, or 409
+  `{status:"mismatch"}` when they differ from the request. Status words:
+  `token` (401), `not_following` (404), `slow` (429), `rail` (503), `mismatch`
+  (409); the app words each one itself.
+- **Client:** `api/shop.rs` holds `TwitchVerifier` (two closures, not a trait —
+  the bridge would generate a Dart class for a trait), `mint_twitch_credential`
+  (chain verified against the PINNED root BEFORE anything is blinded),
+  `verify_twitch_owner_with` and `forget_twitch_owner_creds`. `api/twitch.rs`
+  holds the token half: `twitch_verify_owner`, `twitch_verify_follow`,
+  `twitch_maintain_owner_credential` (silent re-verify at start-up, 24 h
+  cooldown, only when the stored entry has slipped out of the current window),
+  and `twitch_disconnect`, which drops the credential and republishes BEFORE it
+  wipes the token.
+- **Hiding** filters by type: "Hide my support marks" hides `t` 1 and 2 only, so
+  a verified Twitch account keeps publishing while the shop marks are held back.
+  With no Twitch entry the published field is still the bare `""`, so hiding
+  stays indistinguishable from never having bought anything.
+- **The join gate** is `twitch::validate_follow_credential`, offline against the
+  pinned root; the old JSON proof is refused with `OLD_PROOF_SENTENCE`. Because
+  the credential names no Twitch account, the `~join` ring copy carries it and
+  the rung-1 strip is lifted. See `security_write_gates.md`.
+- **Rendering:** `twitchLoginProvider(peerId)` (`support_marks_provider.dart`)
+  is the ONE source for the chip on every surface; it reads `parts[1]` off a
+  `t = 3` entry and re-checks the window so an expired mark stops showing at
+  once rather than at the holder's next announce. `twitch_username` and the
+  member-level `TwitchUsernameChanged` op stay on the wire for old clients and
+  are rendered by nothing.
+
+## The field signature `support_creds_sig` (2026-09-03)
+
+The hole this closes: `support_creds` is outside `profile_signing_payload`
+(each entry binds the identity by itself), which covers forgery and misses
+DENIAL — on the plaintext `ProfileUpdate` fallback a relay rewrites the field to
+`""` in flight, the profile signature still verifies, and `Some("")` is the
+holder's explicit clear on every receiver.
+
+- **Message:** `"hollow-support-creds-sig/v1" || len(peer):u16 BE || master ||
+  updated_at:i64 BE || field`, Ed25519 under the MASTER key
+  (`support_creds::support_creds_sig_message`,
+  `crypto_handler::sign_support_creds` / `verify_support_creds_sig`).
+- **Wire:** `support_creds_sig: Option<String>`, `#[serde(default,
+  skip_serializing_if = "Option::is_none")]`, on the two structs that carry
+  `support_creds` (`HavenMessage::ProfileUpdate` and the MLS `srv_profile`
+  `MessageEnvelope::ProfileUpdate`). Sent whenever the field is `Some`,
+  including `Some("")`. Verified with the profile's own `profile_pk`, which is
+  re-derived to the master.
+- **Pin:** `user_profiles.support_creds_signed` (INTEGER, default 0, set only
+  forwards, only after a successful save). A valid signature applies the field
+  and sets the pin; no valid signature from a PINNED master REJECTS the field
+  (treated as absent, preserve, logged once); no valid signature from a master
+  that has never signed takes the legacy path, so every shipped client keeps
+  working.
+- **Freshness:** the field is ignored when the announce's `updated_at` is
+  strictly older than the stored row's, signature or not — `save_profile`
+  tolerates 24 hours of backdating, so a replayed genuine older announce would
+  otherwise clear the marks.
+- One function decides all of it: `social::gated_support_creds`, called from
+  `save_incoming_profile` ahead of the entry validator.
 

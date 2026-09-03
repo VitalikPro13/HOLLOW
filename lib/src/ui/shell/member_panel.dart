@@ -10,6 +10,7 @@ import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
+import 'package:hollow/src/core/providers/support_marks_provider.dart';
 import 'package:hollow/src/core/providers/sync_progress_provider.dart';
 import 'package:hollow/src/core/providers/webrtc_provider.dart';
 import 'package:hollow/src/core/shared_tickers.dart';
@@ -118,7 +119,6 @@ class _MemberListEntry {
   final String? displayName;
   final String? role;
   final String? nickname;
-  final String? twitchUsername;
   final List<crdt_api.LabelFfi>? labels;
   final String? serverId;
 
@@ -133,7 +133,6 @@ class _MemberListEntry {
     this.displayName,
     this.role,
     this.nickname,
-    this.twitchUsername,
     this.labels,
     this.serverId,
   });
@@ -155,7 +154,6 @@ class _MemberListEntry {
       isDivider: false, isOnline: isOnline,
       peerId: m.peerId, displayName: m.displayName,
       role: m.role, nickname: m.nickname,
-      twitchUsername: m.twitchUsername,
       labels: (m.labels as List<dynamic>?)?.cast<crdt_api.LabelFfi>() ?? const [],
       serverId: serverId,
     );
@@ -576,7 +574,6 @@ class _ServerMemberContent extends ConsumerWidget {
                               displayName: entry.displayName!,
                               role: entry.role!,
                               nickname: entry.nickname!,
-                              twitchUsername: entry.twitchUsername!,
                               labels: entry.labels!,
                               isOnline: entry.isOnline,
                               serverId: entry.serverId,
@@ -663,7 +660,6 @@ class _ServerMemberTile extends ConsumerWidget {
   final String displayName;
   final String role;
   final String nickname;
-  final String twitchUsername;
   final bool isOnline;
   final String? serverId;
   final List<crdt_api.LabelFfi> labels;
@@ -674,7 +670,6 @@ class _ServerMemberTile extends ConsumerWidget {
     required this.displayName,
     required this.role,
     required this.nickname,
-    required this.twitchUsername,
     required this.isOnline,
     this.serverId,
     this.labels = const [],
@@ -690,10 +685,11 @@ class _ServerMemberTile extends ConsumerWidget {
     final resolvedName = profile != null
         ? serverDisplayNameFor({peerId: profile}, peerId, nickname: nickname)
         : serverDisplayNameFor({}, peerId, nickname: nickname);
-    final effectiveTwitch = twitchUsername.isNotEmpty
-        ? twitchUsername
-        : (profile?.twitchUsername ?? '');
-
+    // The purple handle draws ONLY from a verified account credential. The
+    // member-level `TwitchUsernameChanged` op and the profile's own
+    // `twitch_username` are self-declarations, so a new client renders
+    // neither (`twitchLoginProvider`).
+    final verifiedTwitch = ref.watch(twitchLoginProvider(peerId));
     return AnimatedOpacity(
       opacity: isOnline ? 1.0 : 0.5,
       duration: HollowDurations.fast,
@@ -708,8 +704,6 @@ class _ServerMemberTile extends ConsumerWidget {
           serverId: serverId,
           nickname: nickname.isNotEmpty ? nickname : null,
           role: role,
-          twitchUsername:
-              effectiveTwitch.isNotEmpty ? effectiveTwitch : null,
           labels: labels.isNotEmpty ? labels : null,
           anchor: anchor,
         ),
@@ -725,7 +719,6 @@ class _ServerMemberTile extends ConsumerWidget {
               peerId: peerId,
               nickname: nickname.isNotEmpty ? nickname : null,
               role: role,
-              twitchUsername: effectiveTwitch.isNotEmpty ? effectiveTwitch : null,
               labels: labels.isNotEmpty ? labels : null,
               serverId: serverId,
               // Card to the left of the member panel (like Discord), re-read
@@ -799,14 +792,14 @@ class _ServerMemberTile extends ConsumerWidget {
                           fontSize: 10,
                         ),
                       ),
-                    if (effectiveTwitch.isNotEmpty)
+                    if (verifiedTwitch != null)
                       Row(
                         children: [
                           const Icon(BrandIcons.twitch,
                               size: 10, color: Color(0xFF9146FF)),
                           const SizedBox(width: 3),
                           Text(
-                            effectiveTwitch,
+                            verifiedTwitch,
                             style: HollowTypography.caption.copyWith(
                               color: const Color(0xFF9146FF),
                               fontSize: 9,

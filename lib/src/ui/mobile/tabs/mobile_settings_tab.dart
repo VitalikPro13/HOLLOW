@@ -25,6 +25,7 @@ import 'package:hollow/src/ui/shell/mobile_nav.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/ui/settings/about_shared.dart';
+import 'package:hollow/src/core/providers/support_marks_provider.dart';
 import 'package:hollow/src/core/providers/verified_peers_provider.dart';
 import 'package:hollow/src/ui/settings/blocked_users_shared.dart';
 import 'package:hollow/src/ui/settings/verified_contacts_shared.dart';
@@ -936,11 +937,11 @@ class _ProfileTabState extends ConsumerState<_ProfileTab> {
       if (bannerWait != null) await bannerWait;
       if (!mounted) return;
 
-      String twitchUsername = '';
-      try {
-        twitchUsername = await twitch_api.twitchGetUsername() ?? '';
-      } catch (_) {}
-
+      // The legacy `twitch_username` field is carried through UNCHANGED. It is
+      // a self-declaration, no new client renders it, and the verified mark it
+      // was standing in for lives in `support_creds` now; writing it here from
+      // a connected account would only keep an unverifiable claim alive on the
+      // wire for the sake of old builds that already have one.
       await ref.read(profileProvider.notifier).updateMyProfile(
         displayName: _nameController.text.trim(),
         status: _statusController.text.trim(),
@@ -951,7 +952,10 @@ class _ProfileTabState extends ConsumerState<_ProfileTab> {
             _avatarChanged ? (_pendingAvatarStill ?? _pendingAvatar) : null,
         bannerBytes:
             _bannerChanged ? (_pendingBannerStill ?? _pendingBanner) : null,
-        twitchUsername: twitchUsername,
+        twitchUsername: ref
+                .read(profileProvider)[ref.read(identityProvider).peerId ?? '']
+                ?.twitchUsername ??
+            '',
         avatarFrame: _frameChanged ? (_pendingFrameId ?? '') : null,
         avatarAnim: _avatarChanged ? (_pendingAvatarAnim ?? '') : null,
         bannerAnim: _bannerChanged ? (_pendingBannerAnim ?? '') : null,
@@ -1276,6 +1280,11 @@ class _TwitchRowState extends ConsumerState<_TwitchRow> {
   bool _connected = false;
   String _username = '';
   bool _loading = true;
+  /// A verify or a disconnect is in flight; both talk to the shop.
+  bool _busy = false;
+  /// The login on our verified credential, which is what the purple chip
+  /// draws. A connected account with none of these is not verified.
+  String? _verifiedLogin;
 
   @override
   void initState() {
@@ -1290,23 +1299,70 @@ class _TwitchRowState extends ConsumerState<_TwitchRow> {
       if (connected) {
         username = await twitch_api.twitchGetUsername() ?? '';
       }
+      final me = ref.read(identityProvider).peerId;
       if (mounted) {
-        setState(() { _connected = connected; _username = username; _loading = false; });
+        setState(() {
+          _connected = connected;
+          _username = username;
+          _verifiedLogin = me == null ? null : ref.read(twitchLoginProvider(me));
+          _loading = false;
+        });
       }
     } catch (_) {
       if (mounted) setState(() => _loading = false);
     }
   }
 
-  Future<void> _disconnect() async {
+  /// Ask the shop to verify the connected account and wear the credential.
+  /// The mark, not the connection, is what anyone else can see.
+  Future<void> _verifyAccount() async {
+    if (_busy) return;
+    setState(() => _busy = true);
     try {
+      final outcome = await twitch_api.twitchVerifyOwner();
+      if (!mounted) return;
+      setState(() {
+        _verifiedLogin = outcome.verified ? outcome.login : null;
+        _busy = false;
+      });
+      HollowToast.show(
+        context,
+        outcome.verified
+            ? 'Twitch verified as ${outcome.login}'
+            : outcome.message,
+        type: outcome.verified
+            ? HollowToastType.success
+            : HollowToastType.error,
+      );
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _busy = false);
+      HollowToast.show(context, 'Could not verify Twitch: $e',
+          type: HollowToastType.error);
+    }
+  }
+
+  Future<void> _disconnect() async {
+    if (_busy) return;
+    setState(() => _busy = true);
+    try {
+      // Rust drops the account credential and republishes before the token is
+      // wiped: the mark outlives the token otherwise.
       await twitch_api.twitchDisconnect();
       if (mounted) {
-        setState(() { _connected = false; _username = ''; });
+        setState(() {
+          _connected = false;
+          _username = '';
+          _verifiedLogin = null;
+          _busy = false;
+        });
         HollowToast.show(context, 'Twitch disconnected', type: HollowToastType.success);
       }
     } catch (e) {
-      if (mounted) HollowToast.show(context, 'Failed', type: HollowToastType.error);
+      if (mounted) {
+        setState(() => _busy = false);
+        HollowToast.show(context, 'Failed to disconnect', type: HollowToastType.error);
+      }
     }
   }
 
@@ -1335,25 +1391,47 @@ class _TwitchRowState extends ConsumerState<_TwitchRow> {
                   color: hollow.textPrimary, fontWeight: FontWeight.w500,
                 )),
                 Text(
-                  _connected ? _username : 'Not connected',
+                  _verifiedLogin != null
+                      ? 'Verified as $_verifiedLogin'
+                      : _connected
+                          ? '$_username, not verified yet'
+                          : 'Not connected',
                   style: HollowTypography.caption.copyWith(
-                    color: _connected ? const Color(0xFF9146FF) : hollow.textSecondary,
+                    color: _verifiedLogin != null
+                        ? const Color(0xFF9146FF)
+                        : hollow.textSecondary,
                   ),
                 ),
               ],
             ),
           ),
-          if (_connected)
+          if (_busy)
+            const Padding(
+              padding: EdgeInsets.symmetric(horizontal: HollowSpacing.md),
+              child: SizedBox(
+                width: 14,
+                height: 14,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              ),
+            )
+          else if (_connected) ...[
+            if (_verifiedLogin == null)
+              HollowButton.outline(
+                onPressed: _verifyAccount,
+                compact: true,
+                child: const Text('Verify'),
+              ),
             HollowButton.ghost(
               onPressed: _disconnect,
               compact: true,
               child: const Text('Disconnect'),
-            )
-          else
+            ),
+          ] else
             HollowButton.outline(
               onPressed: () {
-                showTwitchDeviceCodeDialog(context, onSuccess: () {
-                  _check();
+                showTwitchDeviceCodeDialog(context, onSuccess: () async {
+                  await _check();
+                  await _verifyAccount();
                 });
               },
               compact: true,

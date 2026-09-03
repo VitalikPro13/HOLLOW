@@ -6,6 +6,7 @@ import 'package:hollow/src/core/providers/local_nickname_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/sync_progress_provider.dart';
+import 'package:hollow/src/core/providers/support_marks_provider.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
@@ -286,12 +287,12 @@ class _MemberTile extends ConsumerWidget {
     // Name resolution: local nickname → server nickname → profile name → short ID
     final localNick = localNicknames[member.peerId];
     final serverNick = member.nickname.isNotEmpty ? member.nickname : null;
-    final profile = profiles[member.peerId];
     final profileName = displayNameFor(profiles, member.peerId);
     final displayName = localNick ?? serverNick ?? profileName;
-    final effectiveTwitch = member.twitchUsername.isNotEmpty
-        ? member.twitchUsername
-        : (profile?.twitchUsername ?? '');
+    // The purple chip draws ONLY from a verified account credential; the
+    // member-level handle and the profile field are self-declarations and no
+    // new client renders either (`twitchLoginProvider`).
+    final verifiedTwitch = ref.watch(twitchLoginProvider(member.peerId));
 
     return AnimatedOpacity(
       opacity: isOnline ? 1.0 : 0.5,
@@ -301,7 +302,6 @@ class _MemberTile extends ConsumerWidget {
           context,
           peerId: member.peerId,
           role: member.role,
-          twitchUsername: effectiveTwitch.isNotEmpty ? effectiveTwitch : null,
           labels: member.labels.isNotEmpty ? member.labels : null,
         ),
         subtle: true,
@@ -381,10 +381,10 @@ class _MemberTile extends ConsumerWidget {
                       ],
                     ],
                   ),
-                  if (effectiveTwitch.isNotEmpty)
+                  if (verifiedTwitch != null)
                     GestureDetector(
                       onTap: () => launchUrl(
-                        Uri.parse('https://twitch.tv/$effectiveTwitch'),
+                        Uri.parse('https://twitch.tv/$verifiedTwitch'),
                         mode: LaunchMode.externalApplication,
                       ),
                       child: Row(
@@ -393,7 +393,7 @@ class _MemberTile extends ConsumerWidget {
                           const Icon(BrandIcons.twitch, size: 12, color: Color(0xFF9146FF)),
                           const SizedBox(width: HollowSpacing.xs),
                           Text(
-                            effectiveTwitch,
+                            verifiedTwitch,
                             style: HollowTypography.caption.copyWith(
                               color: const Color(0xFF9146FF),
                             ),

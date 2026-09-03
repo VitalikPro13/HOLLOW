@@ -17,6 +17,7 @@ import 'package:hollow/src/core/providers/selected_peer_provider.dart';
 import 'package:hollow/src/core/providers/news_provider.dart';
 import 'package:hollow/src/core/providers/relay_stats_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
+import 'package:hollow/src/core/providers/support_marks_provider.dart';
 import 'package:hollow/src/core/providers/updater_provider.dart';
 import 'package:hollow/src/core/providers/unread_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
@@ -37,7 +38,6 @@ import 'package:hollow/src/ui/settings/settings_shared.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:hollow/src/core/brand_icons.dart';
-import 'package:hollow/src/rust/api/twitch.dart' as twitch_api;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 import 'package:url_launcher/url_launcher.dart';
 
@@ -205,8 +205,14 @@ const double _kThreeColumnMin = 720;
 /// the profile column, and this column rebuilds on every connection-status
 /// tick. A provider caches it and, as a bonus, routes a failure into
 /// `AsyncError` instead of throwing out of `build()`.
-final _twitchUsernameProvider =
-    FutureProvider<String?>((ref) => twitch_api.twitchGetUsername());
+/// Our own verified Twitch login, read exactly as a viewer reads it.
+///
+/// Deliberately NOT `twitchGetUsername()`, which answers from our own OAuth
+/// token: a connected account is not a verified one, and the purple chip means
+/// verified everywhere else. Showing it here off the token would tell a person
+/// they are wearing a mark that nobody else can see.
+String? _myVerifiedTwitch(WidgetRef ref, String? peerId) =>
+    peerId == null ? null : ref.watch(twitchLoginProvider(peerId));
 
 /// A fixed-width dashboard column that scrolls once it outgrows the viewport.
 ///
@@ -293,7 +299,7 @@ class _ProfileColumn extends ConsumerWidget {
     final isOnline = ref.watch(overallConnectionProvider).isOnline;
     final amInvisible =
         ref.watch(invisibleModeProvider);
-    final twitchUsername = ref.watch(_twitchUsernameProvider).valueOrNull;
+    final verifiedTwitch = _myVerifiedTwitch(ref, localPeerId);
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.center,
@@ -355,19 +361,19 @@ class _ProfileColumn extends ConsumerWidget {
         ),
 
         // Twitch badge
-        if (twitchUsername != null && twitchUsername.isNotEmpty)
+        if (verifiedTwitch != null && verifiedTwitch.isNotEmpty)
           Padding(
             padding: const EdgeInsets.only(top: HollowSpacing.sm),
             child: HollowFocusRing(
               enabled: true,
               onActivate: () => launchUrl(
-                Uri.parse('https://twitch.tv/$twitchUsername'),
+                Uri.parse('https://twitch.tv/$verifiedTwitch'),
                 mode: LaunchMode.externalApplication,
               ),
               borderRadius: BorderRadius.circular(6),
               child: GestureDetector(
                 onTap: () => launchUrl(
-                  Uri.parse('https://twitch.tv/$twitchUsername'),
+                  Uri.parse('https://twitch.tv/$verifiedTwitch'),
                   mode: LaunchMode.externalApplication,
                 ),
                 child: Container(
@@ -384,7 +390,7 @@ class _ProfileColumn extends ConsumerWidget {
                           size: 11, color: Color(0xFF9146FF)),
                       const SizedBox(width: 4),
                       Text(
-                        twitchUsername,
+                        verifiedTwitch,
                         style: HollowTypography.caption.copyWith(
                           color: const Color(0xFF9146FF),
                           fontWeight: FontWeight.w600,

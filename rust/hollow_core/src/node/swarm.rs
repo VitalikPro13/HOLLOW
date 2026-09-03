@@ -10055,23 +10055,16 @@ async fn handle_incoming_request(
                         return;
                     }
 
-                    // TWITCH-GATED SERVERS: wait for co-presence, silently.
-                    //
-                    // The parked copy carries NO `twitch_proof_json` on purpose
-                    // (see `deposit_parked_join`): a ring frame is readable by
-                    // anyone holding the invite, and a Twitch account name tied
-                    // to a peer id is exposure we do not accept. With no proof
-                    // this request is simply not actionable, and answering it
-                    // with `twitch_required` would write a question into the
-                    // ring that bounces a dialog at the joiner on every boot.
-                    // The joiner's own LIVE re-request carries the proof and
-                    // runs today's gate unchanged, so nothing is lost but time.
-                    if !is_sibling
-                        && twitch::TwitchServerSettings::from_server_state(state).is_some()
-                    {
-                        hollow_log!("[HOLLOW-CRDT] Parked join for {server_id} needs Twitch verification, waiting for co-presence");
-                        return;
-                    }
+                    // TWITCH-GATED SERVERS used to wait here for co-presence,
+                    // because the parked copy carried no proof: the old JSON
+                    // named a Twitch account, and a ring frame is readable by
+                    // anyone holding the invite. A follow CREDENTIAL names a
+                    // channel, an age bucket and a tier and nothing else, so it
+                    // rides the ring like the rest of the request and the gate
+                    // below runs on a parked copy exactly as it does on a live
+                    // one (`sync_handler::deposit_parked_join`). A parked
+                    // request with no credential at all still falls through to
+                    // the gate, which refuses it with `twitch_required`.
                 } else {
                     // COORDINATOR GATE. This handler is the expensive half of a join:
                     // a MemberAdded op, a full ServerStateSnapshot and the ENTIRE op
@@ -10141,15 +10134,19 @@ async fn handle_incoming_request(
                 }
 
                 // Twitch verification gate: check CRDT settings before accepting.
+                //
+                // Offline, against the root pinned in `support_creds.rs`. The
+                // joiner ships a blind-signed follow credential bound to its
+                // own MASTER; we contact nobody and we learn nothing about its
+                // Twitch account beyond the channel, the bucket and the tier
+                // this server actually gates on.
                 if !is_sibling { if let Some(twitch_settings) = twitch::TwitchServerSettings::from_server_state(state) {
                     let reject_reason = match &twitch_proof_json {
                         None => Some("twitch_required".to_string()),
-                        Some(proof_json) => {
-                            match serde_json::from_str::<twitch::TwitchProof>(proof_json) {
-                                Ok(proof) => twitch::validate_proof(&proof, &twitch_settings).err(),
-                                Err(e) => Some(format!("Invalid Twitch proof: {e}")),
-                            }
-                        }
+                        Some(entry_json) => twitch::validate_follow_credential(
+                            entry_json, &member_master, &twitch_settings,
+                        )
+                        .err(),
                     };
                     if let Some(reason) = reject_reason {
                         // Include full info so the joiner's client can display requirements and auto-retry.
@@ -10279,18 +10276,13 @@ async fn handle_incoming_request(
                     });
                     let _ = state.apply_op(&op);
 
-                    // If Twitch proof contains a username, also create a TwitchUsernameChanged op
-                    if let Some(ref proof_json) = twitch_proof_json {
-                        if let Ok(proof) = serde_json::from_str::<crate::node::twitch::TwitchProof>(proof_json) {
-                            if !proof.twitch_username.is_empty() {
-                                let tw_op = state.create_op(CrdtPayload::TwitchUsernameChanged {
-                                    peer_id: member_master.clone(),
-                                    twitch_username: proof.twitch_username.clone(),
-                                });
-                                let _ = state.apply_op(&tw_op);
-                            }
-                        }
-                    }
+                    // The owner used to mint a `TwitchUsernameChanged` op here,
+                    // straight out of the joiner's own unsigned JSON. A follow
+                    // credential names no Twitch account at all, by design, so
+                    // there is nothing to mint and nothing to display: the
+                    // purple chip draws from the joiner's OWN verified account
+                    // credential on their profile, or from nothing. The op and
+                    // its FFI stay on the wire for clients that predate this.
 
                     // Persist
                     if let Ok(json) = serde_json::to_string(&state) {
@@ -11284,7 +11276,7 @@ async fn handle_incoming_request(
                                 ).await;
                             }
 
-                            MessageEnvelope::ProfileUpdate { display_name, status, about_me, updated_at, avatar_b64, banner_b64, is_invisible: peer_invisible, twitch_username, device_list, avatar_hash, banner_hash, showcase_board, showcase_assets_b64, showcase_assets_hash, avatar_frame, avatar_anim, banner_anim, support_creds, profile_sig, profile_pk } => {
+                            MessageEnvelope::ProfileUpdate { display_name, status, about_me, updated_at, avatar_b64, banner_b64, is_invisible: peer_invisible, twitch_username, device_list, avatar_hash, banner_hash, showcase_board, showcase_assets_b64, showcase_assets_hash, avatar_frame, avatar_anim, banner_anim, support_creds, support_creds_sig, profile_sig, profile_pk } => {
                                 if peer_invisible {
                                     let _ = event_tx.send(NetworkEvent::PeerStatusChanged {
                                         peer_id: sender_peer_id.clone(),
@@ -11299,7 +11291,7 @@ async fn handle_incoming_request(
                                     device_list, avatar_hash, banner_hash, showcase_board,
                                     showcase_assets_b64, showcase_assets_hash, avatar_frame,
                                     avatar_anim, banner_anim, support_creds,
-                                    profile_sig, profile_pk,
+                                    support_creds_sig, profile_sig, profile_pk,
                                     db_path, db_passphrase,
                                 ).await;
                                 // Step 7: enforce revocations learned via the MLS
@@ -12822,6 +12814,13 @@ async fn handle_incoming_request(
                             master_keypair, device_peer_id, db_path, db_passphrase,
                         );
                         let dev_count = device_list.as_ref().map(|d| d.devices.len()).unwrap_or(0);
+                        // The credentials field's own master signature — see
+                        // `crypto_handler::sign_support_creds`. Every announce
+                        // that carries the field carries this too, or a
+                        // receiver that has pinned us drops the field.
+                        let support_creds_sig = super::crypto_handler::sign_support_creds(
+                            master_keypair, local_peer_str, updated_at, Some(&support_creds),
+                        );
                         let msg = HavenMessage::ProfileUpdate {
                             display_name, status, about_me, updated_at,
                             avatar_b64: String::new(), banner_b64: String::new(),
@@ -12835,6 +12834,7 @@ async fn handle_incoming_request(
                             avatar_anim: Some(avatar_anim),
                             banner_anim: Some(banner_anim),
                             support_creds: Some(support_creds),
+                            support_creds_sig,
                             profile_sig, profile_pk,
                         };
                         let json = serde_json::to_string(&msg).unwrap_or_default();
@@ -13464,7 +13464,7 @@ async fn handle_incoming_request(
             peer_auto_dl.insert(peer_str.to_string(), mb);
         }
 
-        HavenMessage::ProfileUpdate { display_name, status, about_me, updated_at, avatar_b64, banner_b64, is_invisible: peer_invisible, twitch_username, device_list, avatar_hash, banner_hash, showcase_board, showcase_assets_b64, showcase_assets_hash, avatar_frame, avatar_anim, banner_anim, support_creds, profile_sig, profile_pk } => {
+        HavenMessage::ProfileUpdate { display_name, status, about_me, updated_at, avatar_b64, banner_b64, is_invisible: peer_invisible, twitch_username, device_list, avatar_hash, banner_hash, showcase_board, showcase_assets_b64, showcase_assets_hash, avatar_frame, avatar_anim, banner_anim, support_creds, support_creds_sig, profile_sig, profile_pk } => {
             // If the profile carries an invisible flag, emit PeerStatusChanged so the
             // UI treats this peer as offline from the very first event.
             if peer_invisible {
@@ -13627,6 +13627,7 @@ async fn handle_incoming_request(
                 social::sanitize_incoming_anim(avatar_anim.as_deref()),
                 social::sanitize_incoming_anim(banner_anim.as_deref()),
                 support_creds.as_deref(),
+                support_creds_sig.as_deref(),
                 db_path, db_passphrase,
             );
 

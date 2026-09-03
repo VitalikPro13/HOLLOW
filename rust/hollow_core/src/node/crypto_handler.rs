@@ -391,6 +391,78 @@ pub(crate) fn verify_profile_signature(
     verify_message_signature(peer_id, sig_b64, pk_b64, &payload)
 }
 
+// -- The support-credentials field signature (2026-09-03) --
+//
+// `support_creds` sits OUTSIDE `profile_signing_payload` on purpose: every
+// entry inside it already binds the identity with a blind signature, so a
+// rewritten entry is worthless and folding the field into the profile payload
+// would break the profile signature against every shipped client for nothing.
+//
+// That covers FORGERY and misses DENIAL. On the plaintext
+// `HavenMessage::ProfileUpdate` fallback the field is a JSON string a relay
+// can rewrite to `""` in flight; the profile signature still verifies, and
+// `sanitize_incoming_support_creds(Some(""))` is the holder's explicit clear.
+// Per receiver, cosmetic, and restored by the holder's next genuine announce
+// — but a poisoned row is itself a publish source once a sibling reads it.
+//
+// So the field gets its OWN signature, under the same master key, over
+// `(master, updated_at, field)`. New clients verify it when present and
+// REQUIRE it from any master that has ever sent one (the pin on
+// `user_profiles`, the same baseline rule as the device list), so stripping
+// the signature is not a downgrade. Old clients ignore the field and are
+// unaffected.
+
+/// Sign OUR `support_creds` field. `None` only when the field is absent,
+/// which is what an announce carrying no credentials at all sends.
+pub(crate) fn sign_support_creds(
+    master_keypair: &crate::identity::native_identity::NativeKeypair,
+    master_peer_id: &str,
+    updated_at: i64,
+    support_creds: Option<&str>,
+) -> Option<String> {
+    let field = support_creds?;
+    let message = super::support_creds::support_creds_sig_message(master_peer_id, updated_at, field);
+    let sig = master_keypair.sign(&message);
+    Some(base64::engine::general_purpose::STANDARD.encode(&sig))
+}
+
+/// `true` = this `support_creds` field really is the one `master_peer_id`
+/// published at `updated_at`.
+///
+/// REJECTS, never logs-and-continues: the caller treats `false` as "the field
+/// is ABSENT" and preserves whatever is stored. `pk_b64` is the profile's own
+/// master public key, which the profile signature has already bound to
+/// `master_peer_id`; it is re-derived here anyway so this function is safe to
+/// call on its own.
+pub(crate) fn verify_support_creds_sig(
+    master_peer_id: &str,
+    updated_at: i64,
+    support_creds: &str,
+    sig_b64: Option<&str>,
+    pk_b64: Option<&str>,
+) -> bool {
+    use crate::identity::native_identity::NativeKeypair;
+
+    let (Some(sig), Some(pk)) = (sig_b64, pk_b64) else {
+        return false;
+    };
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let (Ok(pk_bytes), Ok(sig_bytes)) = (b64.decode(pk), b64.decode(sig)) else {
+        return false;
+    };
+    // Bind the key to the master the field claims to come from, exactly as
+    // `verify_message_signature` does: a real signature by somebody else is
+    // not a signature by this identity.
+    let Some(derived) = NativeKeypair::peer_id_from_pubkey_protobuf(&pk_bytes) else {
+        return false;
+    };
+    if derived != master_peer_id {
+        return false;
+    }
+    let message = super::support_creds::support_creds_sig_message(master_peer_id, updated_at, support_creds);
+    NativeKeypair::verify_peer_signature(&pk_bytes, &sig_bytes, &message).unwrap_or(false)
+}
+
 // -- Authenticated Olm key exchange (root of trust, Fix A/B) --
 
 /// How far a key-exchange timestamp may drift from local time before the frame

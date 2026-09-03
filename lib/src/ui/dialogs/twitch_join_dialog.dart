@@ -296,7 +296,13 @@ class _TwitchJoinDialogState extends State<_TwitchJoinDialog> {
     setState(() => _step = _JoinStep.verifying);
     try {
       await twitch_api.twitchEnsureToken();
-      final proof = await twitch_api.twitchGenerateProof(
+      // A blind-signed FOLLOW credential, not our own word for it. The shop
+      // asks Twitch and signs what Twitch said onto our master; the server
+      // owner verifies it offline against the root pinned in the app. It
+      // names the channel, an age bucket and a subscription tier and nothing
+      // that could identify our Twitch account, which is why it can also ride
+      // the join ring when the server is empty.
+      final proof = await twitch_api.twitchVerifyFollow(
         broadcasterId: widget.channelId,
       );
       crdt_api.joinServer(

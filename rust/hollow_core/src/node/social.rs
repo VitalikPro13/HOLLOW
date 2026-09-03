@@ -1158,6 +1158,14 @@ pub(crate) async fn handle_update_profile(
         master_keypair, device_peer_id, db_path, db_passphrase,
     );
 
+    // The credentials field carries its OWN master signature, over the field
+    // we are actually about to send and the timestamp we are sending it with.
+    // Without it a relay rewrites the field to `""` in flight and every
+    // receiver reads the holder's explicit clear (see `verify_support_creds_sig`).
+    let support_creds_sig = super::crypto_handler::sign_support_creds(
+        master_keypair, local_peer_str, now, Some(&stored_support_creds),
+    );
+
     // Broadcast profile via MLS to each server room, plus plaintext to remaining peers.
     let envelope = MessageEnvelope::ProfileUpdate {
         display_name: display_name.clone(),
@@ -1178,6 +1186,7 @@ pub(crate) async fn handle_update_profile(
         avatar_anim: Some(stored_avatar_anim.clone()),
         banner_anim: Some(stored_banner_anim.clone()),
         support_creds: Some(stored_support_creds.clone()),
+        support_creds_sig: support_creds_sig.clone(),
         profile_sig: profile_sig.clone(),
         profile_pk: profile_pk.clone(),
     };
@@ -1216,6 +1225,7 @@ pub(crate) async fn handle_update_profile(
         avatar_anim: Some(stored_avatar_anim),
         banner_anim: Some(stored_banner_anim),
         support_creds: Some(stored_support_creds),
+        support_creds_sig,
         profile_sig,
         profile_pk,
     };
@@ -1283,6 +1293,8 @@ pub(crate) fn save_incoming_profile(
     // credential's signature binds the master peer id and this is the one
     // place every ingest path already has it.
     support_creds: Option<&str>,
+    // The MASTER's signature over that raw field. See [`gated_support_creds`].
+    support_creds_sig: Option<&str>,
     db_path: &str,
     db_passphrase: &str,
 ) -> (String, bool) {
@@ -1310,11 +1322,13 @@ pub(crate) fn save_incoming_profile(
             }
         }
     }
-    // The ONE validator for the support credential field (wiki
-    // `security_write_gates.md`): every entry is verified against the
-    // pinned root and THIS master, invalid ones are dropped in silence.
-    let support_creds =
-        super::support_creds::sanitize_incoming_support_creds(support_creds, &master);
+    // The ONE gate for the support credential field (wiki
+    // `security_write_gates.md`): the field signature and the per-master pin
+    // first, then the entry validator, which verifies every entry against the
+    // pinned root and THIS master and drops the rest in silence.
+    let (support_creds, pin_now) = gated_support_creds(
+        &db, &master, updated_at, support_creds, support_creds_sig, Some(proof.pk),
+    );
     if let Err(e) = db.save_profile(
         &master, display_name, status, about_me, updated_at,
         avatar_bytes, banner_bytes, twitch_username, showcase_board,
@@ -1324,7 +1338,72 @@ pub(crate) fn save_incoming_profile(
         hollow_log!("[HOLLOW-PROFILE] Failed to save incoming profile for {master}: {e}");
         return (master, false);
     }
+    // The row exists now, so the pin has somewhere to live. Set only AFTER a
+    // successful save: pinning a master whose field we did not store would
+    // refuse their next honest unsigned announce for nothing.
+    if pin_now {
+        let _ = db.pin_support_creds_signed(&master);
+    }
     (master, true)
+}
+
+/// Masters we have already complained about once, so a stripped field on a
+/// reconnect storm is one line in the log rather than hundreds.
+fn creds_sig_complaints() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
+    static SEEN: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    SEEN.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+}
+
+/// Receive-side gate for `support_creds` and its signature: the ONE place the
+/// field is decided (wiki `security_write_gates.md`).
+///
+/// Returns the value to store (`None` = preserve what we have) and whether
+/// this master should be PINNED as a signer from now on.
+///
+/// * `None` in                    -> `None` out. An old client, or an update
+///   that did not touch the field.
+/// * an announce OLDER than the row we hold -> `None` out, signature or not.
+///   A relay that captured a genuine older announce, from before the holder
+///   redeemed anything, could otherwise replay it to clear the marks; the
+///   profile row's own freshness guard tolerates 24 hours of backdating, so
+///   this field needs its own rule.
+/// * a VALID signature          -> the field, through the entry validator,
+///   and the master is pinned.
+/// * no valid signature, master PINNED -> `None` out. This is the whole point
+///   of the pin: once a master has signed once, an unsigned field from it is
+///   a rewrite in flight, and it is REFUSED, not logged and stored.
+/// * no valid signature, master not pinned -> the legacy path, the entry
+///   validator alone. Every client that predates this field lands here.
+fn gated_support_creds(
+    db: &crate::storage::MessageStore,
+    master: &str,
+    updated_at: i64,
+    raw: Option<&str>,
+    support_creds_sig: Option<&str>,
+    profile_pk: Option<&str>,
+) -> (Option<String>, bool) {
+    let Some(raw) = raw else { return (None, false) };
+    if let Ok(Some(stored)) = db.load_profile(master) {
+        if updated_at < stored.updated_at {
+            return (None, false);
+        }
+    }
+    let signed = super::crypto_handler::verify_support_creds_sig(
+        master, updated_at, raw, support_creds_sig, profile_pk,
+    );
+    if !signed && db.support_creds_signed(master).unwrap_or(false) {
+        if let Ok(mut seen) = creds_sig_complaints().lock() {
+            if seen.insert(master.to_string()) {
+                hollow_log!(
+                    "[HOLLOW-SECURITY] REFUSED the support credential field from {master} — it has signed before and this copy carries no valid signature; keeping what we stored"
+                );
+            }
+        }
+        return (None, false);
+    }
+    let kept = super::support_creds::sanitize_incoming_support_creds(Some(raw), master);
+    (kept, signed)
 }
 
 /// Receive-side backstop for the showcase board JSON (UI cap is 8 KB; this is
@@ -1630,6 +1709,12 @@ fn send_own_profile_inner(
         // animated-media hashes, which are IDs rather than art for exactly
         // this reason: 64 bytes on every announce, and the bytes behind them
         // are pulled once and cached.
+        // The field's own signature, over the STORED field and the STORED
+        // timestamp: this frame re-announces what is on disk, so both halves
+        // must be the ones a receiver will check against.
+        let support_creds_sig = super::crypto_handler::sign_support_creds(
+            master_keypair, local_peer_str, updated_at, Some(&support_creds),
+        );
         let msg = HavenMessage::ProfileUpdate {
             display_name, status, about_me, updated_at,
             avatar_b64, banner_b64, is_invisible, twitch_username,
@@ -1641,6 +1726,7 @@ fn send_own_profile_inner(
             avatar_anim: Some(avatar_anim),
             banner_anim: Some(banner_anim),
             support_creds: Some(support_creds),
+            support_creds_sig,
             profile_sig, profile_pk,
         };
         match room_code {
@@ -1753,6 +1839,7 @@ pub(crate) async fn handle_envelope_profile_update(
     avatar_anim: Option<String>,
     banner_anim: Option<String>,
     support_creds: Option<String>,
+    support_creds_sig: Option<String>,
     profile_sig: Option<String>,
     profile_pk: Option<String>,
     db_path: &str,
@@ -1821,6 +1908,7 @@ pub(crate) async fn handle_envelope_profile_update(
         sanitize_incoming_anim(avatar_anim.as_deref()),
         sanitize_incoming_anim(banner_anim.as_deref()),
         support_creds.as_deref(),
+        support_creds_sig.as_deref(),
         db_path, db_passphrase,
     );
     // Light announce with hashes we don't match → pull the full profile once.

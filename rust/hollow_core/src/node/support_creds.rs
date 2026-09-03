@@ -39,6 +39,23 @@
 //! Supporter credentials (`t == 2`, the monthly subscription of design 5.4)
 //! are phase 3. The type and period ride the message and the entry already so
 //! nothing here changes when they land; a viewer lights nothing for them yet.
+//!
+//! ## The two Twitch types (2026-09-03)
+//!
+//! The same chain, the same blind signature, a different verifier at the top:
+//! the shop checks a Twitch OAuth token instead of a Creem licence key.
+//!
+//! * [`T_TWITCH_OWNER`] says "this identity holds the Twitch account
+//!   `parts = [user_id, login]`". It rides the profile, capped at one, and it
+//!   is the ONLY thing the purple chip draws from.
+//! * [`T_TWITCH_FOLLOW`] says "this identity follows `parts[0]`, has done for
+//!   at least `parts[1]` days, at subscription tier `parts[2]`". It is
+//!   presented at join time and NEVER stored on a profile ([`keep_verified`]
+//!   caps it at zero, in both directions).
+//!
+//! Both carry a `period`: the 90-day window they were minted in, checked
+//! against the clock at verify with one window of grace. That is the first
+//! time `period` means time rather than bytes in a signed message.
 
 use base64::Engine;
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
@@ -60,10 +77,26 @@ pub const ROOT_PUBLIC_KEY_HEX: &str = "b4fa9abcc8bd5aebfe5a2cb50eff6faba14dc3524
 pub const CRED_DOMAIN: &[u8] = b"hollow-support-cred/v1";
 pub const ISSUER_DOMAIN: &[u8] = b"hollow-support-issuer/v1";
 pub const KEY_DOMAIN: &[u8] = b"hollow-support-key/v1";
+/// The two `item` recipes for the Twitch types. Separate tags so an owner
+/// item can never be presented as a follow item.
+pub const TWITCH_OWNER_DOMAIN: &[u8] = b"hollow-twitch-owner/v1";
+pub const TWITCH_FOLLOW_DOMAIN: &[u8] = b"hollow-twitch-follow/v1";
+/// What the MASTER signs over the whole `support_creds` field, so a relay
+/// cannot strip a holder's marks in flight. See [`support_creds_sig_message`].
+pub const CREDS_SIG_DOMAIN: &[u8] = b"hollow-support-creds-sig/v1";
 
 /// Credential types.
 pub const T_ITEM: u8 = 1;
 pub const T_SUPPORTER: u8 = 2;
+/// A verified Twitch account: the holder proved, through the shop's OAuth
+/// verifier, that they hold the account named by `parts`. This is what the
+/// purple chip draws from; a self-declared handle draws nothing.
+pub const T_TWITCH_OWNER: u8 = 3;
+/// A verified Twitch FOLLOW of one channel, at an age bucket and a sub tier.
+/// Presented at join time and NEVER on a profile: it names a channel the
+/// holder follows, which is theirs to disclose to that channel's server and
+/// to nobody else.
+pub const T_TWITCH_FOLLOW: u8 = 4;
 
 /// The inline cap (design 5.5): three item credentials and one supporter
 /// credential ride the light announce; anything past that is dropped by the
@@ -71,6 +104,25 @@ pub const T_SUPPORTER: u8 = 2;
 /// later version.
 pub const MAX_ITEM_CREDS: usize = 3;
 pub const MAX_SUPPORTER_CREDS: usize = 1;
+/// One verified Twitch account per profile.
+pub const MAX_TWITCH_OWNER_CREDS: usize = 1;
+/// A follow credential NEVER rides the profile. Zero is the cap, and
+/// [`keep_verified`] is where it is enforced, so a sender that appends one is
+/// simply publishing nothing.
+pub const MAX_TWITCH_FOLLOW_CREDS: usize = 0;
+
+/// How long one credential window lasts. `period` is the count of these since
+/// the epoch, and for the two Twitch types it is checked against the clock:
+/// a verified account is a fact with a shelf life.
+pub const PERIOD_DAYS: u64 = 90;
+
+/// The follow-age buckets, in whole days. A verifier picks the LARGEST bucket
+/// that is `<=` the real follow age, so the credential says "at least this
+/// long" and never the exact date somebody started following.
+pub const FOLLOW_BUCKETS: [u32; 10] = [0, 1, 3, 7, 14, 30, 60, 90, 180, 365];
+
+/// Twitch's subscription tier strings. `"0"` is "no subscription".
+pub const SUB_TIERS: [&str; 4] = ["0", "1000", "2000", "3000"];
 
 /// Most file hashes one credential may vouch for. A pack carries at most
 /// eight files; a bundle of four such packs is the largest set the shop
@@ -188,6 +240,149 @@ pub fn item_hash(parts: &[String]) -> Result<([u8; 32], Vec<String>), String> {
     Ok((h.finalize().into(), sorted))
 }
 
+/// Is `s` a Twitch numeric id? Decimal digits, 1 to 20 of them.
+pub fn valid_twitch_id(s: &str) -> bool {
+    !s.is_empty() && s.len() <= 20 && s.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// Is `s` a Twitch login in the canonical form a credential carries?
+/// `[a-z0-9_]{4,25}`, already lowercased: an entry has exactly one spelling,
+/// so `Streamer` and `streamer` can never sit on a profile as two marks.
+pub fn valid_twitch_login(s: &str) -> bool {
+    (4..=25).contains(&s.len())
+        && s.bytes().all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'_'))
+}
+
+/// The `item` of a verified-account credential:
+///
+/// ```text
+/// SHA-256("hollow-twitch-owner/v1" || 0x00 || user_id || 0x00 || login)
+/// ```
+///
+/// `parts = [twitch_user_id, login_lowercase]`. The id is what keeps the
+/// credential meaningful across a rename; the login is what the chip draws.
+/// Returns the hash and the canonical parts, which is exactly what an entry
+/// must carry.
+pub fn twitch_owner_item(parts: &[String]) -> Result<([u8; 32], Vec<String>), String> {
+    if parts.len() != 2 {
+        return Err("a Twitch account credential names an id and a login".into());
+    }
+    let (user_id, login) = (parts[0].as_str(), parts[1].as_str());
+    if !valid_twitch_id(user_id) {
+        return Err("a Twitch user id is decimal digits".into());
+    }
+    if !valid_twitch_login(login) {
+        return Err("a Twitch login is 4 to 25 lowercase letters, digits or underscores".into());
+    }
+    let mut h = Sha256::new();
+    h.update(TWITCH_OWNER_DOMAIN);
+    h.update([0u8]);
+    h.update(user_id.as_bytes());
+    h.update([0u8]);
+    h.update(login.as_bytes());
+    Ok((h.finalize().into(), vec![user_id.to_string(), login.to_string()]))
+}
+
+/// The `item` of a follow credential:
+///
+/// ```text
+/// SHA-256("hollow-twitch-follow/v1" || 0x00 || broadcaster || 0x00 || bucket || 0x00 || tier)
+/// ```
+///
+/// `parts = [broadcaster_id, age_bucket_days, tier]`, all decimal ASCII. The
+/// bucket is one of [`FOLLOW_BUCKETS`] and the tier one of [`SUB_TIERS`], so
+/// the whole claim is drawn from a fixed grid: nothing in it identifies the
+/// follower, and the owner's gate compares against the same grid.
+pub fn twitch_follow_item(parts: &[String]) -> Result<([u8; 32], Vec<String>), String> {
+    if parts.len() != 3 {
+        return Err("a Twitch follow credential names a channel, a bucket and a tier".into());
+    }
+    let (broadcaster, bucket, tier) = (parts[0].as_str(), parts[1].as_str(), parts[2].as_str());
+    if !valid_twitch_id(broadcaster) {
+        return Err("a Twitch broadcaster id is decimal digits".into());
+    }
+    if !FOLLOW_BUCKETS.iter().any(|b| b.to_string() == bucket) {
+        return Err("that is not one of the follow-age buckets".into());
+    }
+    if !SUB_TIERS.contains(&tier) {
+        return Err("that is not a Twitch subscription tier".into());
+    }
+    let mut h = Sha256::new();
+    h.update(TWITCH_FOLLOW_DOMAIN);
+    h.update([0u8]);
+    h.update(broadcaster.as_bytes());
+    h.update([0u8]);
+    h.update(bucket.as_bytes());
+    h.update([0u8]);
+    h.update(tier.as_bytes());
+    Ok((
+        h.finalize().into(),
+        vec![broadcaster.to_string(), bucket.to_string(), tier.to_string()],
+    ))
+}
+
+/// The largest [`FOLLOW_BUCKETS`] entry that is `<=` `days`.
+///
+/// The SHOP is what runs this against a real follow date; the app carries it
+/// so the rule has one written form and the tests here can hold it to the
+/// contract.
+#[allow(dead_code)]
+pub fn bucket_for_days(days: u32) -> u32 {
+    *FOLLOW_BUCKETS.iter().rev().find(|b| **b <= days).unwrap_or(&0)
+}
+
+/// The credential window `unix_secs` falls in: `floor(secs / 86400 / 90)`.
+pub fn period_of(unix_secs: u64) -> u32 {
+    (unix_secs / 86_400 / PERIOD_DAYS) as u32
+}
+
+/// The window we are in right now.
+pub fn now_period() -> u32 {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    period_of(secs)
+}
+
+/// Is `period` acceptable to a verifier standing in `now`? The current window
+/// or the one before it: one window of grace, so a credential does not die at
+/// midnight while its holder is asleep. Zero is never in the window, which is
+/// what makes `period` REQUIRED for the two Twitch types.
+pub fn period_in_window(period: u32, now: u32) -> bool {
+    period != 0 && (period == now || period + 1 == now)
+}
+
+/// What the MASTER signs over the whole `support_creds` field:
+///
+/// ```text
+/// "hollow-support-creds-sig/v1" || len(peer):u16 BE || master || updated_at:i64 BE || field
+/// ```
+///
+/// The entries inside already bind the identity, so this signature is not
+/// about forgery. It is about DENIAL: on the plaintext `ProfileUpdate`
+/// fallback a relay can rewrite the field to `""` in flight, the profile
+/// signature still verifies (the field is outside its payload), and every
+/// receiver reads the empty string as the holder's explicit clear. Binding
+/// `updated_at` is what stops the same rewrite being replayed out of an older
+/// genuine announce.
+pub fn support_creds_sig_message(
+    master_peer_id: &str,
+    updated_at: i64,
+    support_creds: &str,
+) -> Vec<u8> {
+    let master = master_peer_id.as_bytes();
+    let capped = master.len().min(u16::MAX as usize);
+    let mut out =
+        Vec::with_capacity(CREDS_SIG_DOMAIN.len() + 2 + capped + 8 + support_creds.len());
+    out.extend_from_slice(CREDS_SIG_DOMAIN);
+    out.extend_from_slice(&(capped as u16).to_be_bytes());
+    out.extend_from_slice(&master[..capped]);
+    out.extend_from_slice(&updated_at.to_be_bytes());
+    out.extend_from_slice(support_creds.as_bytes());
+    out
+}
+
 // ── The entry ─────────────────────────────────────────────────────────
 
 /// One credential as it rides the profile's `support_creds` JSON array.
@@ -195,16 +390,23 @@ pub fn item_hash(parts: &[String]) -> Result<([u8; 32], Vec<String>), String> {
 /// else. About 1.4 KB.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CredentialEntry {
-    /// [`T_ITEM`] or [`T_SUPPORTER`].
+    /// [`T_ITEM`], [`T_SUPPORTER`], [`T_TWITCH_OWNER`] or
+    /// [`T_TWITCH_FOLLOW`].
     #[serde(default)]
     pub t: u8,
-    /// 64-hex [`item_hash`] of `parts` (zeros for a supporter credential).
+    /// 64-hex hash of `parts` under this type's recipe ([`item_hash`],
+    /// [`twitch_owner_item`], [`twitch_follow_item`]); zeros for a supporter
+    /// credential.
     #[serde(default)]
     pub item: String,
-    /// Months since 2026-01 for a supporter credential; 0 for an item.
+    /// Months since 2026-01 for a supporter credential; the 90-day window
+    /// ([`now_period`]) for the two Twitch types, where it is checked against
+    /// the clock; 0 for an item.
     #[serde(default)]
     pub period: u32,
-    /// The listing's file hashes, sorted ascending, 64-hex each.
+    /// What `item` is over: the listing's file hashes for an item credential,
+    /// `[user_id, login]` for a Twitch account, `[broadcaster_id, bucket,
+    /// tier]` for a follow.
     #[serde(default)]
     pub parts: Vec<String>,
     /// The listing's RSA issuing public key, PKCS#1 DER, base64.
@@ -227,7 +429,7 @@ pub struct CredentialEntry {
     /// their name on chat rows and member lists. Off by default; the profile
     /// card mark is always on. Not signed: it is a display preference, and
     /// a rewritten flag changes where a mark is drawn, not whether it is
-    /// real.
+    /// real. Ignored for the two Twitch types, which have their own chip.
     #[serde(default)]
     pub badge: bool,
 }
@@ -271,6 +473,9 @@ pub struct VerifiedChain {
 
 /// Verify the claim's shape and the two Ed25519 links from `root` down to the
 /// listing's RSA key. Every failure is a refusal with a reason.
+///
+/// The clock comes from [`now_period`]; [`verify_chain_at`] takes it as an
+/// argument so a test can stand in another window.
 #[allow(clippy::too_many_arguments)]
 pub fn verify_chain(
     t: u8,
@@ -283,10 +488,27 @@ pub fn verify_chain(
     issuer_sig_b64: &str,
     root: &VerifyingKey,
 ) -> Result<VerifiedChain, String> {
+    verify_chain_at(
+        t, item_hex, parts, period, key_b64, key_sig_b64, issuer_b64, issuer_sig_b64, root,
+        now_period(),
+    )
+}
+
+/// [`verify_chain`] against an explicit window.
+#[allow(clippy::too_many_arguments)]
+pub fn verify_chain_at(
+    t: u8,
+    item_hex: &str,
+    parts: &[String],
+    period: u32,
+    key_b64: &str,
+    key_sig_b64: &str,
+    issuer_b64: &str,
+    issuer_sig_b64: &str,
+    root: &VerifyingKey,
+    now_period: u32,
+) -> Result<VerifiedChain, String> {
     // 1. The shape of the claim.
-    if t != T_ITEM && t != T_SUPPORTER {
-        return Err("unknown credential type".into());
-    }
     if !is_hex64(item_hex) {
         return Err("item is not a 64-hex hash".into());
     }
@@ -302,12 +524,31 @@ pub fn verify_chain(
             }
             sorted
         }
-        _ => {
+        T_SUPPORTER => {
             if !parts.is_empty() || item != [0u8; 32] {
                 return Err("a supporter credential names no parts".into());
             }
             Vec::new()
         }
+        // The two Twitch types: the FIRST place `period` means time. A
+        // verified account and a verified follow are facts about a moment,
+        // so a credential minted two windows ago is refused here rather than
+        // rendered as if it were still true.
+        T_TWITCH_OWNER | T_TWITCH_FOLLOW => {
+            if !period_in_window(period, now_period) {
+                return Err("the credential is outside its window".into());
+            }
+            let (computed, canonical) = if t == T_TWITCH_OWNER {
+                twitch_owner_item(parts)?
+            } else {
+                twitch_follow_item(parts)?
+            };
+            if computed != item || canonical != parts {
+                return Err("item does not match its parts".into());
+            }
+            canonical
+        }
+        _ => return Err("unknown credential type".into()),
     };
 
     // 2. root -> issuer.
@@ -336,9 +577,19 @@ pub fn verify_entry(
     master_peer_id: &str,
     root: &VerifyingKey,
 ) -> Result<VerifiedCredential, String> {
-    let chain = verify_chain(
+    verify_entry_at(entry, master_peer_id, root, now_period())
+}
+
+/// [`verify_entry`] against an explicit window.
+pub fn verify_entry_at(
+    entry: &CredentialEntry,
+    master_peer_id: &str,
+    root: &VerifyingKey,
+    now_period: u32,
+) -> Result<VerifiedCredential, String> {
+    let chain = verify_chain_at(
         entry.t, &entry.item, &entry.parts, entry.period, &entry.key, &entry.key_sig,
-        &entry.issuer, &entry.issuer_sig, root,
+        &entry.issuer, &entry.issuer_sig, root, now_period,
     )?;
     let pk = support_rsa::public_key_from_der(&chain.key_der)?;
 
@@ -392,29 +643,43 @@ pub fn keep_verified(
     master_peer_id: &str,
     root: &VerifyingKey,
 ) -> Vec<CredentialEntry> {
+    keep_verified_at(entries, master_peer_id, root, now_period())
+}
+
+/// [`keep_verified`] against an explicit window.
+pub fn keep_verified_at(
+    entries: Vec<CredentialEntry>,
+    master_peer_id: &str,
+    root: &VerifyingKey,
+    now_period: u32,
+) -> Vec<CredentialEntry> {
     let mut kept: Vec<CredentialEntry> = Vec::new();
     let mut seen_items: Vec<String> = Vec::new();
     let mut items = 0usize;
     let mut supporters = 0usize;
+    let mut twitch_owners = 0usize;
+    let mut twitch_follows = 0usize;
     for entry in entries {
-        let Ok(verified) = verify_entry(&entry, master_peer_id, root) else { continue };
+        let Ok(verified) = verify_entry_at(&entry, master_peer_id, root, now_period) else {
+            continue;
+        };
         if seen_items.contains(&entry.item) {
             continue;
         }
-        match verified.t {
-            T_ITEM => {
-                if items >= MAX_ITEM_CREDS {
-                    continue;
-                }
-                items += 1;
-            }
-            _ => {
-                if supporters >= MAX_SUPPORTER_CREDS {
-                    continue;
-                }
-                supporters += 1;
-            }
+        // Every type carries its own cap, and the follow cap is ZERO: a
+        // follow credential names a channel somebody watches, which is theirs
+        // to hand to that channel's server at join time and to nobody else.
+        // It never rides a profile, in either direction.
+        let (count, cap) = match verified.t {
+            T_ITEM => (&mut items, MAX_ITEM_CREDS),
+            T_SUPPORTER => (&mut supporters, MAX_SUPPORTER_CREDS),
+            T_TWITCH_OWNER => (&mut twitch_owners, MAX_TWITCH_OWNER_CREDS),
+            _ => (&mut twitch_follows, MAX_TWITCH_FOLLOW_CREDS),
+        };
+        if *count >= cap {
+            continue;
         }
+        *count += 1;
         seen_items.push(entry.item.clone());
         kept.push(entry);
     }
@@ -560,6 +825,87 @@ pub(crate) mod testing {
         let issuer = test_issuer();
         let key = test_listing_key(&issuer, parts);
         mint(&issuer, &key, master_peer_id)
+    }
+
+    /// One RSA issuing key for any `(t, item, period)`, signed by the test
+    /// issuer. The shop makes exactly this at the first request for a key.
+    pub(crate) struct TestTypedKey {
+        pub issuer: TestIssuer,
+        pub sk_der: Vec<u8>,
+        pub pk_der: Vec<u8>,
+        pub key_sig: [u8; 64],
+    }
+
+    pub(crate) fn test_typed_key(t: u8, item: &[u8; 32], period: u32) -> TestTypedKey {
+        let issuer = test_issuer();
+        let (sk_der, pk_der) = support_rsa::generate_issuing_key().expect("keygen");
+        let key_sig = sign_key(&issuer.sk, t, item, period, &pk_der);
+        TestTypedKey { issuer, sk_der, pk_der, key_sig }
+    }
+
+    /// The shop's half of a round: blind-sign what the client sent.
+    pub(crate) fn blind_sign_with(key: &TestTypedKey, blinded: &[u8]) -> Vec<u8> {
+        let sk = support_rsa::secret_key_from_der(&key.sk_der).expect("sk");
+        support_rsa::blind_sign(&sk, blinded).expect("sign")
+    }
+
+    /// The whole issuing round for any type, in process: one RSA key per
+    /// `(t, item, period)`, signed by the issuer, then blind, sign, finish.
+    /// The shop does exactly this with its own keys and its own verifier at
+    /// the top; the only difference is what the verifier checks.
+    pub(crate) fn mint_typed(
+        master_peer_id: &str,
+        t: u8,
+        item: [u8; 32],
+        parts: Vec<String>,
+        period: u32,
+    ) -> CredentialEntry {
+        let key = test_typed_key(t, &item, period);
+        let request =
+            blind_request(&key.pk_der, t, master_peer_id, &item, period).expect("blind");
+        let blind_sig = blind_sign_with(&key, &request.blinded);
+        let sig = finish_request(&key.pk_der, &request, &blind_sig).expect("finish");
+        CredentialEntry {
+            t,
+            item: hex::encode(item),
+            period,
+            parts,
+            key: B64.encode(&key.pk_der),
+            key_sig: B64.encode(key.key_sig),
+            issuer: B64.encode(key.issuer.pk),
+            issuer_sig: B64.encode(key.issuer.root_sig),
+            sig: B64.encode(sig),
+            badge: false,
+        }
+    }
+
+    /// A verified-account credential for `master_peer_id`.
+    pub(crate) fn mint_owner_for(
+        master_peer_id: &str,
+        user_id: &str,
+        login: &str,
+        period: u32,
+    ) -> CredentialEntry {
+        let parts = vec![user_id.to_string(), login.to_string()];
+        let (item, canonical) = twitch_owner_item(&parts).expect("owner parts");
+        mint_typed(master_peer_id, T_TWITCH_OWNER, item, canonical, period)
+    }
+
+    /// A follow credential for `master_peer_id`.
+    pub(crate) fn mint_follow_for(
+        master_peer_id: &str,
+        broadcaster_id: &str,
+        bucket: u32,
+        tier: &str,
+        period: u32,
+    ) -> CredentialEntry {
+        let parts = vec![
+            broadcaster_id.to_string(),
+            bucket.to_string(),
+            tier.to_string(),
+        ];
+        let (item, canonical) = twitch_follow_item(&parts).expect("follow parts");
+        mint_typed(master_peer_id, T_TWITCH_FOLLOW, item, canonical, period)
     }
 }
 
@@ -847,6 +1193,233 @@ mod tests {
             key.to_bytes(),
             test_root_signing_key().verifying_key().to_bytes(),
             "the shipped root is never the test root"
+        );
+    }
+
+
+    // -- The two Twitch types ------------------------------------------
+
+    /// The `item` recipes, against the contract's known-answer tests. These
+    /// literals are the interop boundary with the shop host: if one of them
+    /// moves, every credential the shop has ever signed stops verifying.
+    #[test]
+    fn twitch_item_recipes_match_the_contract_kats() {
+        let (owner, parts) = twitch_owner_item(&[
+            "12345".to_string(),
+            "somestreamer".to_string(),
+        ])
+        .expect("owner item");
+        assert_eq!(
+            hex::encode(owner),
+            "be924c37092c5b6014256f49f62220f379f7aec5390b587ecc41b8c55d55ab1b",
+        );
+        assert_eq!(parts, vec!["12345".to_string(), "somestreamer".to_string()]);
+
+        let (follow, parts) = twitch_follow_item(&[
+            "67890".to_string(),
+            "30".to_string(),
+            "0".to_string(),
+        ])
+        .expect("follow item");
+        assert_eq!(
+            hex::encode(follow),
+            "a36cd1c6f03bf61bd6d2c522860aeeb037fb9862038713ffb711b1380fca5e2a",
+        );
+        assert_eq!(parts, vec!["67890".to_string(), "30".to_string(), "0".to_string()]);
+
+        let (follow, _) = twitch_follow_item(&[
+            "67890".to_string(),
+            "365".to_string(),
+            "2000".to_string(),
+        ])
+        .expect("follow item");
+        assert_eq!(
+            hex::encode(follow),
+            "fd9d50532a17342be7e94d6ad75736be284f2200ebcd6c36b86a27ea9a89476b",
+        );
+
+        // And the window arithmetic the same message carries.
+        assert_eq!(period_of(1_786_000_000), 229);
+    }
+
+    #[test]
+    fn twitch_parts_shape_is_enforced() {
+        // Logins: too short, too long, uppercase, a dash, a dot.
+        for bad in ["abc", &"a".repeat(26), "SomeStreamer", "some-streamer", "some.one"] {
+            assert!(
+                twitch_owner_item(&["12345".to_string(), bad.to_string()]).is_err(),
+                "login {bad} must be refused",
+            );
+        }
+        assert!(twitch_owner_item(&["12345".to_string(), "good_name".to_string()]).is_ok());
+
+        // Ids: empty, a letter, too long.
+        for bad in ["", "12a45", &"1".repeat(21)] {
+            assert!(
+                twitch_owner_item(&[bad.to_string(), "somestreamer".to_string()]).is_err(),
+                "id {bad} must be refused",
+            );
+        }
+
+        // Arity.
+        assert!(twitch_owner_item(&["12345".to_string()]).is_err());
+        assert!(twitch_follow_item(&["67890".to_string(), "30".to_string()]).is_err());
+
+        // Buckets off the grid, including a non-canonical spelling of one on it.
+        for bad in ["31", "2", "400", "030", "-1", ""] {
+            assert!(
+                twitch_follow_item(&["67890".to_string(), bad.to_string(), "0".to_string()])
+                    .is_err(),
+                "bucket {bad} must be refused",
+            );
+        }
+        // Tiers off the grid.
+        for bad in ["4000", "1", "", "prime"] {
+            assert!(
+                twitch_follow_item(&["67890".to_string(), "30".to_string(), bad.to_string()])
+                    .is_err(),
+                "tier {bad} must be refused",
+            );
+        }
+
+        // The buckets themselves, and the rounding rule: the LARGEST bucket
+        // at or below the real age.
+        assert_eq!(bucket_for_days(0), 0);
+        assert_eq!(bucket_for_days(2), 1);
+        assert_eq!(bucket_for_days(13), 7);
+        assert_eq!(bucket_for_days(14), 14);
+        assert_eq!(bucket_for_days(364), 180);
+        assert_eq!(bucket_for_days(100_000), 365);
+    }
+
+    #[test]
+    fn owner_entry_verifies_in_window_and_fails_after_grace() {
+        let root = root_verifying_key();
+        let now = 229u32;
+        let entry = mint_owner_for("master-A", "12345", "somestreamer", now);
+
+        let ok = verify_entry_at(&entry, "master-A", &root, now).expect("this window verifies");
+        assert_eq!(ok.t, T_TWITCH_OWNER);
+        assert_eq!(ok.parts, vec!["12345".to_string(), "somestreamer".to_string()]);
+        assert_eq!(ok.period, now);
+
+        // One window of grace: minted last window, read this window.
+        verify_entry_at(&entry, "master-A", &root, now + 1).expect("the grace window verifies");
+
+        // Two windows on, it is gone.
+        let err = verify_entry_at(&entry, "master-A", &root, now + 2).unwrap_err();
+        assert!(err.contains("outside its window"), "{err}");
+        // And a window that has not happened yet is not a credential either.
+        let err = verify_entry_at(&entry, "master-A", &root, now - 1).unwrap_err();
+        assert!(err.contains("outside its window"), "{err}");
+
+        // Period zero is refused outright, whatever the clock says.
+        let zero = mint_owner_for("master-A", "12345", "somestreamer", 0);
+        assert!(verify_entry_at(&zero, "master-A", &root, 0).is_err());
+
+        // Still bound to ONE master, like every other type.
+        assert!(verify_entry_at(&entry, "master-B", &root, now).is_err());
+
+        // The signature binds the type: relabelled as an item it breaks at the
+        // key signature, which is what the issuer vouched for.
+        let mut relabelled = entry.clone();
+        relabelled.t = T_ITEM;
+        assert!(verify_entry_at(&relabelled, "master-A", &root, now).is_err());
+
+        // And it binds the parts: another login under the same key is not it.
+        let mut renamed = entry.clone();
+        renamed.parts = vec!["12345".to_string(), "otherstreamer".to_string()];
+        let err = verify_entry_at(&renamed, "master-A", &root, now).unwrap_err();
+        assert!(err.contains("does not match its parts"), "{err}");
+    }
+
+    #[test]
+    fn follow_entry_never_rides_the_profile() {
+        let root = root_verifying_key();
+        let now = 229u32;
+        let owner = mint_owner_for("m", "12345", "somestreamer", now);
+        let follow = mint_follow_for("m", "67890", 30, "0", now);
+        let second_owner = mint_owner_for("m", "54321", "another_one", now);
+
+        // Both are real credentials, on their own terms.
+        verify_entry_at(&owner, "m", &root, now).expect("the owner entry verifies");
+        let checked = verify_entry_at(&follow, "m", &root, now).expect("the follow entry verifies");
+        assert_eq!(checked.t, T_TWITCH_FOLLOW);
+        assert_eq!(
+            checked.parts,
+            vec!["67890".to_string(), "30".to_string(), "0".to_string()],
+        );
+
+        // On the profile field, only the account survives: the follow is
+        // capped at zero and the second account at one.
+        let kept = keep_verified_at(
+            vec![follow.clone(), owner.clone(), second_owner.clone()],
+            "m",
+            &root,
+            now,
+        );
+        assert_eq!(kept, vec![owner.clone()], "one account, no follows");
+
+        // The same through the receive-side door, which is what a hostile
+        // sender actually reaches.
+        let raw = encode_entries(&[follow.clone(), owner.clone(), second_owner]);
+        let out = sanitize_incoming_support_creds(Some(&raw), "m").expect("a value");
+        let stored = parse_stored(&out);
+        assert_eq!(stored.len(), 1, "{out}");
+        assert_eq!(stored[0].t, T_TWITCH_OWNER);
+        assert!(!out.contains("67890"), "no channel a follower watches is stored: {out}");
+
+        // A field that is nothing but follow credentials stores as the empty
+        // set, exactly like a field of junk.
+        let only_follows = encode_entries(&[follow]);
+        assert_eq!(
+            sanitize_incoming_support_creds(Some(&only_follows), "m"),
+            Some(String::new()),
+        );
+    }
+
+    #[test]
+    fn an_item_credential_and_a_twitch_one_share_a_profile() {
+        let now = now_period();
+        let bought = mint_for("m", &[h(0x11)]);
+        let account = mint_owner_for("m", "12345", "somestreamer", now);
+        let raw = encode_entries(&[bought.clone(), account.clone()]);
+        let out = sanitize_incoming_support_creds(Some(&raw), "m").expect("a value");
+        let kept = parse_stored(&out);
+        assert_eq!(kept.len(), 2, "the caps are per type: {out}");
+        assert_eq!(kept[0].item, bought.item);
+        assert_eq!(kept[1].item, account.item);
+    }
+
+    #[test]
+    fn the_creds_field_signature_message_is_pinned() {
+        // "hollow-support-creds-sig/v1" || 0004 || "peer" || 8-byte updated_at || field
+        let msg = support_creds_sig_message("peer", 1, "[]");
+        let expected = concat!(
+            "686f6c6c6f772d737570706f72742d63726564732d7369672f7631",
+            "0004",
+            "70656572",
+            "0000000000000001",
+            "5b5d",
+        );
+        assert_eq!(hex::encode(&msg), expected);
+        // Every part of it is bound: the id, the timestamp and the field.
+        assert_ne!(
+            support_creds_sig_message("peer", 1, "[]"),
+            support_creds_sig_message("peex", 1, "[]"),
+        );
+        assert_ne!(
+            support_creds_sig_message("peer", 1, "[]"),
+            support_creds_sig_message("peer", 2, "[]"),
+        );
+        assert_ne!(
+            support_creds_sig_message("peer", 1, "[]"),
+            support_creds_sig_message("peer", 1, ""),
+        );
+        // A length-prefixed id, so a boundary shift cannot be hidden in it.
+        assert_ne!(
+            support_creds_sig_message("ab", 0, "c"),
+            support_creds_sig_message("a", 0, "bc"),
         );
     }
 

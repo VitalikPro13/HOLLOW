@@ -95,6 +95,7 @@ import 'package:hollow/src/core/providers/display_scale_provider.dart';
 import 'package:hollow/src/core/providers/layout_provider.dart';
 import 'package:hollow/src/core/providers/split_view_provider.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
+import 'package:hollow/src/rust/api/twitch.dart' as twitch_api;
 import 'package:hollow/src/ui/guides/help_panel.dart';
 import 'package:hollow/src/ui/shell/bottom_bar.dart';
 import 'package:hollow/src/ui/shell/channel_sidebar.dart';
@@ -1082,6 +1083,20 @@ class _HollowShellState extends ConsumerState<HollowShell>
 
     // (theme/accent/background/nicknames/strip layout already loaded in the
     // local-first phase above, before the network calls.)
+
+    // Keep the verified Twitch mark fresh, silently. A credential is minted
+    // for a 90-day window and verifies for that window and the one after it,
+    // so there is a whole window in which to renew it from the persisted
+    // refresh token without asking for anything. Rust holds a 24-hour
+    // cooldown, answers false for every reason that is not "a fresh
+    // credential was minted", and does nothing at all when Twitch is not
+    // connected. Fire-and-forget with the explicit catchError the FFI rule
+    // demands (`feedback_ffi_fire_and_forget_catcherror`).
+    twitch_api.twitchMaintainOwnerCredential().then((minted) {
+      if (minted) ref.read(profileProvider.notifier).loadAll();
+    }).catchError((e) {
+      debugPrint('[HOLLOW] Twitch re-verify skipped: $e');
+    });
 
     // One-shot: move an animated avatar/banner authored before the asset-rail
     // split off the pushed profile blob. Fire-and-forget with an explicit

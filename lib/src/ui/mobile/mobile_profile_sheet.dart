@@ -9,6 +9,7 @@ import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/local_nickname_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/verified_peers_provider.dart';
+import 'package:hollow/src/core/providers/support_marks_provider.dart';
 import 'package:hollow/src/ui/dialogs/verify_contact_dialog.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/models/showcase_board.dart';
@@ -44,7 +45,6 @@ void showMobileProfileSheet(
   BuildContext context, {
   required String peerId,
   String? role,
-  String? twitchUsername,
   List<crdt_api.LabelFfi>? labels,
 }) {
   final hollow = HollowTheme.of(context);
@@ -58,7 +58,6 @@ void showMobileProfileSheet(
     builder: (_) => MobileProfileSheet(
       peerId: peerId,
       role: role,
-      twitchUsername: twitchUsername,
       labels: labels,
     ),
   );
@@ -80,14 +79,12 @@ Color _roleColor(String role, HollowTheme hollow) {
 class MobileProfileSheet extends ConsumerWidget {
   final String peerId;
   final String? role;
-  final String? twitchUsername;
   final List<crdt_api.LabelFfi>? labels;
 
   const MobileProfileSheet({
     super.key,
     required this.peerId,
     this.role,
-    this.twitchUsername,
     this.labels,
   });
 
@@ -113,9 +110,9 @@ class MobileProfileSheet extends ConsumerWidget {
     final isMe = peerId == myPeerId;
     final friends = ref.watch(friendsProvider);
     final friendInfo = friends[peerId];
-    final effectiveTwitch = (twitchUsername != null && twitchUsername!.isNotEmpty)
-        ? twitchUsername!
-        : (profile?.twitchUsername ?? '');
+    // Verified account credential or nothing: the profile's own
+    // `twitch_username` is a self-declaration (`twitchLoginProvider`).
+    final verifiedTwitch = ref.watch(twitchLoginProvider(peerId));
     final board = ShowcaseBoard.decode(profile?.showcaseBoard);
 
     // Cap the sheet below full screen (the barrier above stays tappable) and
@@ -293,11 +290,11 @@ class MobileProfileSheet extends ConsumerWidget {
               ],
 
               // Twitch badge
-              if (effectiveTwitch.isNotEmpty) ...[
+              if (verifiedTwitch != null) ...[
                 const SizedBox(height: HollowSpacing.sm),
                 HollowPressable(
                   onTap: () => launchUrl(
-                    Uri.parse('https://twitch.tv/$effectiveTwitch'),
+                    Uri.parse('https://twitch.tv/$verifiedTwitch'),
                     mode: LaunchMode.externalApplication,
                   ),
                   borderRadius: BorderRadius.circular(hollow.radiusSm),
@@ -307,7 +304,7 @@ class MobileProfileSheet extends ConsumerWidget {
                       const Icon(BrandIcons.twitch, size: 14, color: Color(0xFF9146FF)),
                       const SizedBox(width: HollowSpacing.xs),
                       Text(
-                        effectiveTwitch,
+                        verifiedTwitch,
                         style: HollowTypography.bodySmall.copyWith(
                           color: const Color(0xFF9146FF),
                         ),

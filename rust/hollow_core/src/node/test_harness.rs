@@ -73,6 +73,23 @@ struct RelayInner {
     /// join-order MLS epoch race. Presence events and direct frames still
     /// flow, so the victim looks perfectly healthy to everyone.
     broadcast_deaf: HashSet<String>,
+    /// Devices whose outgoing `profile_update` frames get their
+    /// `support_creds` rewritten to `""` and their `support_creds_sig`
+    /// removed, IN FLIGHT. This is the attack `support_creds_sig` exists for
+    /// (HOLLOW_PLAN.md, 2026-09-03): the plaintext profile fallback is a JSON
+    /// body the relay can edit, the profile signature does not cover this
+    /// field, and `Some("")` is the holder's explicit clear on every
+    /// receiver. Off for every device unless a test switches it on.
+    strip_support_creds: HashSet<String>,
+    /// Devices whose outgoing `profile_update` frames lose their
+    /// `support_creds_sig` and keep the field. What every client that
+    /// predates the signature sends, and the shape the pin has to tolerate
+    /// until it has seen one signed announce.
+    drop_support_creds_sig: HashSet<String>,
+    /// Devices whose outgoing data frames are kept, so a test can replay one
+    /// later (a captured older announce is a replay, not a forgery).
+    recording: HashSet<String>,
+    recorded: Vec<(String, Vec<u8>)>,
     /// Optional load meter (scaling benchmark). When `Some`, every command the
     /// relay handles and every frame the relay DELIVERS to a socket is tallied
     /// here — the ground truth for "what does one server operation cost the
@@ -352,6 +369,62 @@ impl MockRelay {
     /// silent-loss lever for the join-order MLS epoch race tests. The device
     /// stays in its rooms and keeps receiving presence + direct frames.
     #[allow(dead_code)]
+    /// Rewrite `support_creds` out of this device's profile announces in
+    /// flight, exactly as a hostile relay would.
+    pub(crate) fn set_strip_support_creds(&self, peer_id: &str, on: bool) {
+        let mut inner = self.inner.lock().unwrap();
+        if on {
+            inner.strip_support_creds.insert(peer_id.to_string());
+        } else {
+            inner.strip_support_creds.remove(peer_id);
+        }
+    }
+
+    /// Send this device's profile announces with the field and no signature,
+    /// the way a client that predates the signature does.
+    pub(crate) fn set_drop_support_creds_sig(&self, peer_id: &str, on: bool) {
+        let mut inner = self.inner.lock().unwrap();
+        if on {
+            inner.drop_support_creds_sig.insert(peer_id.to_string());
+        } else {
+            inner.drop_support_creds_sig.remove(peer_id);
+        }
+    }
+
+    /// Keep a copy of every data frame this device sends.
+    pub(crate) fn set_recording(&self, peer_id: &str, on: bool) {
+        let mut inner = self.inner.lock().unwrap();
+        if on {
+            inner.recording.insert(peer_id.to_string());
+        } else {
+            inner.recording.remove(peer_id);
+        }
+    }
+
+    /// The frames recorded from `peer_id`, oldest first.
+    pub(crate) fn recorded_frames(&self, peer_id: &str) -> Vec<Vec<u8>> {
+        let inner = self.inner.lock().unwrap();
+        inner
+            .recorded
+            .iter()
+            .filter(|(from, _)| from == peer_id)
+            .map(|(_, data)| data.clone())
+            .collect()
+    }
+
+    /// Deliver `data` to `target` as if `from` had just sent it into `room`.
+    /// A replay: the bytes are whatever the test captured, unchanged.
+    pub(crate) fn inject(&self, room: &str, from: &str, target: &str, data: Vec<u8>) {
+        let inner = self.inner.lock().unwrap();
+        if let Some(conn) = inner.conns.get(target).filter(|c| c.online) {
+            let _ = conn.event_tx.send(WsEvent::Message {
+                room: room.to_string(),
+                from: from.to_string(),
+                data,
+            });
+        }
+    }
+
     pub(crate) fn set_broadcast_deaf(&self, peer_id: &str, deaf: bool) {
         let mut inner = self.inner.lock().unwrap();
         if deaf {
@@ -465,6 +538,7 @@ impl MockRelay {
             }
             WsCommand::SendToRoom { room_code, data } => {
                 if let Some(m) = inner.meter.as_mut() { m.send_to_room_cmds += 1; }
+                let data = inner.on_the_wire(from, data);
                 let n = data.len() as u64;
                 let delivered = inner.broadcast_data_except(&room_code, from, WsEvent::Message {
                     room: room_code.clone(),
@@ -480,6 +554,7 @@ impl MockRelay {
             WsCommand::SendDirect { room_code, target_peer, data }
             | WsCommand::SendDirectImage { room_code, target_peer, data } => {
                 if let Some(m) = inner.meter.as_mut() { m.send_direct_cmds += 1; }
+                let data = inner.on_the_wire(from, data);
                 let n = data.len() as u64;
                 let delivered = inner.deliver_direct(&room_code, from, &target_peer, data, true);
                 if let Some(m) = inner.meter.as_mut() {
@@ -625,6 +700,35 @@ impl MockRelay {
 }
 
 impl RelayInner {
+    /// Record and, when a test has armed it, TAMPER with one outgoing frame.
+    ///
+    /// The only rewrite modelled is the `support_creds` strip, because that is
+    /// the one the field signature defends against: a relay reading a
+    /// plaintext `profile_update` and replacing the credentials field with the
+    /// empty string, which every receiver honours as an explicit clear.
+    fn on_the_wire(&mut self, from: &str, data: Vec<u8>) -> Vec<u8> {
+        if self.recording.contains(from) {
+            self.recorded.push((from.to_string(), data.clone()));
+        }
+        let strip = self.strip_support_creds.contains(from);
+        let unsign = self.drop_support_creds_sig.contains(from);
+        if !strip && !unsign {
+            return data;
+        }
+        let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(&data) else {
+            return data;
+        };
+        let Some(obj) = value.as_object_mut() else { return data };
+        if obj.get("type").and_then(|t| t.as_str()) != Some("profile_update") {
+            return data;
+        }
+        if strip {
+            obj.insert("support_creds".to_string(), serde_json::Value::String(String::new()));
+        }
+        obj.remove("support_creds_sig");
+        serde_json::to_vec(&value).unwrap_or(data)
+    }
+
     fn peer_in_room(&self, room: &str, peer: &str) -> bool {
         self.rooms.get(room).map(|s| s.contains(peer)).unwrap_or(false)
     }
@@ -16681,19 +16785,24 @@ async fn discarded_parked_join_ignores_a_late_answer() {
 }
 
 // ---------------------------------------------------------------------------
-// A Twitch proof names a Twitch ACCOUNT. The live unicast copy of a request is
-// seen by members and the relay; a RING copy can be read by anyone holding the
-// invite, for the ring's whole retention. So the parked copy carries no proof,
-// and a member reading a proofless request on a Twitch-gated server does
-// nothing at all: no admission, and no `twitch_required` rejection that would
-// be written into the ring and bounce a dialog at the joiner forever. The
-// request simply waits for co-presence, where the live copy still carries the
-// proof and today's gate runs unchanged.
+// A Twitch-gated join PARKS like any other, since 2026-09-03.
+//
+// It could not before. The old proof was the joiner's own JSON naming a Twitch
+// account, and a RING copy can be pulled by anyone holding the invite for the
+// ring's whole retention — so the parked copy shipped without it, which left a
+// proofless request nobody could act on and a joiner waiting for co-presence.
+//
+// A follow CREDENTIAL is different in kind: `parts` is a channel id, an age
+// bucket and a subscription tier, all of them facts about the SERVER's own
+// channel, blind-signed onto the joiner's master. There is no field in it that
+// can name a Twitch account. So it rides the ring, the owner runs the same
+// offline gate on the parked copy as on a live one, and the join completes
+// while the joiner is asleep.
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
-async fn parked_twitch_gated_join_waits_for_co_presence_and_leaks_no_proof() {
+async fn parked_twitch_gated_join_carries_the_credential_and_leaks_no_identity() {
     let _g = test_guard();
     let global_tmp = tempfile::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
@@ -16702,6 +16811,7 @@ async fn parked_twitch_gated_join_waits_for_co_presence_and_leaks_no_proof() {
 
     const O_MASTER: u8 = 126;
     const B_MASTER: u8 = 127;
+    let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
 
     let mut o = spawn_node_with_friends(&relay, O_MASTER, O_MASTER, &[]).await;
     let server_id = create_server_and_wait(&mut o, "Stream Team").await;
@@ -16709,6 +16819,7 @@ async fn parked_twitch_gated_join_waits_for_co_presence_and_leaks_no_proof() {
         ("twitch_verification_enabled", "true"),
         ("twitch_channel_id", "1234567"),
         ("twitch_channel_name", "vitalik"),
+        ("twitch_min_follow_days", "14"),
     ] {
         o.cmd_tx
             .send(NodeCommand::UpdateServerSetting {
@@ -16721,9 +16832,9 @@ async fn parked_twitch_gated_join_waits_for_co_presence_and_leaks_no_proof() {
     }
     assert!(
         wait_until(10, async || o
-            .server_setting(&server_id, "twitch_channel_id")
+            .server_setting(&server_id, "twitch_min_follow_days")
             .as_deref()
-            == Some("1234567"))
+            == Some("14"))
         .await,
         "the Twitch gate must be live before the owner goes dark"
     );
@@ -16733,14 +16844,15 @@ async fn parked_twitch_gated_join_waits_for_co_presence_and_leaks_no_proof() {
     );
     go_offline(&relay, &o, &server_id).await;
 
-    let proof = serde_json::json!({
-        "twitch_user_id": "998877",
-        "twitch_username": "someviewer",
-        "followed_at": "2020-01-01T00:00:00Z",
-        "is_subscribed": true,
-        "timestamp": super::types::now_ms() / 1000,
-    })
-    .to_string();
+    use super::support_creds::{self, testing};
+    let credential = testing::mint_follow_for(
+        &b_master,
+        "1234567",
+        30,
+        "0",
+        support_creds::now_period(),
+    );
+    let proof = serde_json::to_string(&credential).expect("entry json");
 
     let mut b = spawn_node_with_friends(&relay, B_MASTER, B_MASTER, &[]).await;
     b.cmd_tx
@@ -16759,57 +16871,74 @@ async fn parked_twitch_gated_join_waits_for_co_presence_and_leaks_no_proof() {
         "the request parks"
     );
 
-    // The ring copy must not carry the Twitch identity. Check the raw bytes,
-    // not just the parsed field: the point is that nothing in the frame ties
-    // this peer id to a Twitch account.
+    // The ring copy CARRIES the credential, and everything it says is about
+    // this server's own channel. Read it back out of the ring rather than
+    // trusting the sender: this frame is what a stranger with the invite can
+    // pull, so it is the thing that has to be safe.
     expect_ring_request(&relay, &server_id, &b.device_id, 1).await;
+    let parked_proof = join_ring(&relay, &server_id)
+        .into_iter()
+        .find_map(|(from, msg)| match msg {
+            super::types::HavenMessage::ServerJoinRequest { twitch_proof_json, .. }
+                if from == b.device_id =>
+            {
+                twitch_proof_json
+            }
+            _ => None,
+        })
+        .expect("the parked request carries its credential");
+    let parked: support_creds::CredentialEntry =
+        serde_json::from_str(&parked_proof).expect("the ring copy is a credential");
+    assert_eq!(parked.t, support_creds::T_TWITCH_FOLLOW);
+    assert_eq!(
+        parked.parts,
+        vec!["1234567".to_string(), "30".to_string(), "0".to_string()],
+        "the whole claim is the channel, the bucket and the tier",
+    );
+    // And it is still bound to the joiner's master, so lifting it out of the
+    // ring buys a stranger nothing.
+    assert!(
+        support_creds::verify_entry(&parked, &b_master, &support_creds::root_verifying_key())
+            .is_ok(),
+        "the parked credential verifies for the joiner",
+    );
     let raw = relay.topic_frames(&server_id, super::types::JOIN_TOPIC);
     let mine: Vec<&(String, Vec<u8>)> =
         raw.iter().filter(|(from, _)| from == &b.device_id).collect();
     let text = String::from_utf8(mine[0].1.clone()).expect("the frame is JSON");
     assert!(
-        !text.contains("twitch_proof_json")
-            && !text.contains("someviewer")
-            && !text.contains("998877"),
-        "the ring copy carries no Twitch proof, got {text}"
+        !text.contains("twitch_username") && !text.contains("twitch_user_id"),
+        "no field in the ring copy can name a Twitch account, got {text}"
     );
 
     go_offline(&relay, &b, &server_id).await;
     super::resolver::forget(&b.device_id);
 
-    // --- The owner returns alone. A proofless request on a gated server is not
-    // actionable, so it must produce NOTHING: no resolution, no reject. ---
+    // --- The owner returns alone, runs the SAME offline gate on the parked
+    //     copy, and admits. This is what the strip used to make impossible. ---
     relay.set_online(&o.device_id, true);
-    // ABSENCE PROOF. There is no state to poll for a decision that must never be
-    // taken, so this window has to be real time: long enough for the owner's
-    // reconnect cascade (room joins, catch-up request, ring replay) to have run.
-    sleep_ms(6000).await;
-    // …and the queue is drained on top of the window, so "nothing was written"
-    // cannot mean "not written YET" (the owner's catch-up has demonstrably run
-    // by now, so the barrier cannot overtake work that was never queued).
-    expect_relay_drained(&relay, &o, "twitch-no-resolution").await;
-    let ring = join_ring(&relay, &server_id);
+    expect_ring_resolution(&relay, &server_id, &o.device_id, &b_master, true).await;
     assert!(
-        !ring
-            .iter()
-            .any(|(_, m)| matches!(m, super::types::HavenMessage::ServerJoinResolved { .. })),
-        "a proofless parked request on a Twitch-gated server writes no resolution, got {ring:?}"
+        wait_until(10, async || o
+            .server_state(&server_id)
+            .map(|st| st.members_list().iter().any(|m| m.peer_id == b_master))
+            .unwrap_or(false))
+        .await,
+        "the owner holds the joiner as a member"
     );
-    assert_eq!(
-        relay.buffered_count(&b.device_id),
-        0,
-        "and no rejection is queued for the joiner either"
-    );
-    assert_eq!(
-        b.pending_joins(),
-        vec![(server_id.clone(), "pending".to_string(), String::new())],
-        "the row stays pending: it waits for co-presence, honestly"
+    go_offline(&relay, &o, &server_id).await;
+
+    // --- And the joiner finds out on its own next boot. ---
+    relay.set_online(&b.device_id, true);
+    assert!(
+        wait_until(25, || async { b.servers().contains(&server_id) }).await,
+        "the joiner builds the server it was admitted to while it was away, got {:?}",
+        b.servers(),
     );
 
     drop(o);
     drop(b);
 }
-
 
 // ---------------------------------------------------------------------------
 // An NSFW consent prompt is a QUESTION, not a refusal, and a question must not
@@ -17221,6 +17350,502 @@ fn harness_fixed_sleep_budget_does_not_grow() {
         BUDGET_MS as f64 / 1000.0,
         worst.join(", "),
     );
+}
+
+
+// ---------------------------------------------------------------------------
+// A verified Twitch account rides the profile as a `t = 3` support credential
+// and nothing else: the purple chip draws from THIS or from nothing. It is
+// bound to one master like every other credential, so a transplant is dropped;
+// and it is the first credential type whose `period` means time, so an entry
+// minted two windows ago is dropped as well, even though its chain and its
+// signature are perfectly good.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn twitch_owner_credential_replicates_and_stale_period_is_dropped() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    const A_MASTER: u8 = 221;
+    const A_DEV: u8 = 222;
+    const B_MASTER: u8 = 223;
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
+    let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
+
+    let mut a = spawn_node_with_friends(&relay, A_MASTER, A_DEV, &[&b_master]).await;
+    let mut b = spawn_node_with_friends(&relay, B_MASTER, B_MASTER, &[&a_master]).await;
+    assert!(
+        wait_until(15, || async {
+            a.online_identities(&relay).contains(&b_master)
+                && b.online_identities(&relay).contains(&a_master)
+        })
+        .await,
+        "A and B must see each other before the announce"
+    );
+    drain_events(&mut a);
+    drain_events(&mut b);
+
+    use super::support_creds::{self, testing};
+    let now = support_creds::now_period();
+    // The real one: A's master, this window.
+    let real = testing::mint_owner_for(&a_master, "12345", "somestreamer", now);
+    // Somebody else's, pasted onto A's field.
+    let transplant = testing::mint_owner_for("somebody-else", "99999", "otherperson", now);
+    // A's own, chain and signature perfect, but minted two windows ago: past
+    // the one window of grace. A different account so its `item` differs from
+    // the real one and the assertion below cannot pass by accident.
+    let stale = testing::mint_owner_for(&a_master, "55555", "oldstreamer", now - 2);
+    let announced =
+        support_creds::encode_entries(&[transplant.clone(), stale.clone(), real.clone()]);
+
+    a.cmd_tx
+        .send(NodeCommand::UpdateProfile {
+            display_name: "Anon A".to_string(),
+            status: "hi".to_string(),
+            about_me: String::new(),
+            avatar_bytes: None,
+            banner_bytes: None,
+            twitch_username: String::new(),
+            showcase_board: None,
+            showcase_assets: None,
+            avatar_frame: None,
+            avatar_anim: None,
+            banner_anim: None,
+            support_creds: Some(announced),
+        })
+        .await
+        .unwrap();
+    assert!(
+        wait_until(10, || async {
+            b.store()
+                .load_profile(&a_master)
+                .ok()
+                .flatten()
+                .is_some_and(|p| !p.support_creds.is_empty())
+        })
+        .await,
+        "B must store A's account credential"
+    );
+
+    let p = b.store().load_profile(&a_master).unwrap().expect("A's profile on B");
+    let kept = support_creds::parse_stored(&p.support_creds);
+    assert_eq!(
+        kept.len(),
+        1,
+        "exactly the real, in-window entry survives: {}",
+        p.support_creds
+    );
+    assert_eq!(kept[0].t, support_creds::T_TWITCH_OWNER);
+    assert_eq!(
+        kept[0].parts,
+        vec!["12345".to_string(), "somestreamer".to_string()],
+        "the chip draws parts[1] and the id keeps it meaningful across a rename",
+    );
+    assert!(
+        !p.support_creds.contains(&transplant.item),
+        "the transplant is gone: {}",
+        p.support_creds
+    );
+    assert_eq!(kept[0].item, real.item, "the surviving entry is this window's");
+    assert_eq!(kept[0].period, now);
+    assert!(
+        !p.support_creds.contains(&stale.item),
+        "and the entry from two windows ago is gone, chain and signature notwithstanding: {}",
+        p.support_creds
+    );
+    // What B stored verifies again, offline, against the pinned root.
+    support_creds::verify_entry(&kept[0], &a_master, &support_creds::root_verifying_key())
+        .expect("B's stored account entry verifies for A's master");
+
+    drop(a);
+    drop(b);
+}
+
+// ---------------------------------------------------------------------------
+// The Twitch join gate, offline. A joiner presents a blind-signed FOLLOW
+// credential bound to its own master; the owner checks the chain against the
+// pinned root, the channel, the age bucket and the tier, and contacts nobody.
+//
+// The bucket is the whole claim, so a setting rounds UP: "at least 14 days" is
+// met by the 30-day bucket and not by the 7-day one. And the old JSON proof —
+// the joiner's own unsigned word, which any modified client could write — is
+// refused outright with a sentence that says what to do about it.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn twitch_follow_gate_accepts_bucket_and_refuses_the_rest() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    const O_MASTER: u8 = 231;
+    const B_MASTER: u8 = 232;
+    const B_DEV: u8 = 233;
+    let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
+
+    let mut o = spawn_node_with_friends(&relay, O_MASTER, O_MASTER, &[]).await;
+    let server_id = create_server_and_wait(&mut o, "Stream Team").await;
+    for (key, value) in [
+        ("twitch_verification_enabled", "true"),
+        ("twitch_channel_id", "1234567"),
+        ("twitch_channel_name", "vitalik"),
+        ("twitch_min_follow_days", "14"),
+    ] {
+        o.cmd_tx
+            .send(NodeCommand::UpdateServerSetting {
+                server_id: server_id.clone(),
+                key: key.to_string(),
+                value: value.to_string(),
+            })
+            .await
+            .unwrap();
+    }
+    assert!(
+        wait_until(10, async || o
+            .server_setting(&server_id, "twitch_min_follow_days")
+            .as_deref()
+            == Some("14"))
+        .await,
+        "the gate must be live before anyone knocks"
+    );
+
+    use super::support_creds::{self, testing};
+    let now = support_creds::now_period();
+    let mut b = spawn_node_with_friends(&relay, B_MASTER, B_DEV, &[]).await;
+
+    // One helper: knock, and answer with the refusal sentence (or None when
+    // the join went through).
+    async fn knock(
+        b: &mut TestNode,
+        server_id: &str,
+        proof: String,
+    ) -> Option<String> {
+        drain_events(b);
+        b.cmd_tx
+            .send(NodeCommand::JoinServer {
+                server_id: server_id.to_string(),
+                twitch_proof_json: Some(proof),
+                nsfw_confirmed: false,
+            })
+            .await
+            .unwrap();
+        let mut said: Option<String> = None;
+        let _ = wait_event(b, std::time::Duration::from_secs(12), |ev| match ev {
+            NetworkEvent::TwitchJoinRejected { reason, .. } => {
+                said = Some(reason.clone());
+                true
+            }
+            NetworkEvent::ServerJoined { server_id: sid, .. } if sid == server_id => true,
+            _ => false,
+        })
+        .await;
+        said
+    }
+
+    // (a) A real credential, one bucket short. 7 < 14.
+    let short = serde_json::to_string(&testing::mint_follow_for(&b_master, "1234567", 7, "0", now))
+        .expect("entry json");
+    let said = knock(&mut b, &server_id, short).await.expect("a refusal");
+    assert!(
+        said.contains("at least 14 days"),
+        "a 7-day bucket must not satisfy a 14-day gate, got {said}",
+    );
+    assert!(b.servers().is_empty(), "and nothing was joined");
+
+    // (b) A real credential for somebody else's channel.
+    let elsewhere =
+        serde_json::to_string(&testing::mint_follow_for(&b_master, "7654321", 365, "0", now))
+            .expect("entry json");
+    let said = knock(&mut b, &server_id, elsewhere).await.expect("a refusal");
+    assert!(
+        said.contains("different channel"),
+        "a credential for another channel must be refused, got {said}",
+    );
+
+    // (c) A credential minted for another identity: the blind signature binds
+    //     the JOINER's master, so a borrowed one is worth nothing.
+    let borrowed =
+        serde_json::to_string(&testing::mint_follow_for("somebody-else", "1234567", 365, "0", now))
+            .expect("entry json");
+    let said = knock(&mut b, &server_id, borrowed).await.expect("a refusal");
+    assert!(
+        said.contains("did not verify"),
+        "a credential bound to another master must be refused, got {said}",
+    );
+
+    // (d) The OLD shape: the joiner's own unsigned JSON. Refused with the
+    //     sentence that tells the user what to do.
+    let old_shape = serde_json::json!({
+        "twitch_user_id": "998877",
+        "twitch_username": "someviewer",
+        "followed_at": "2020-01-01T00:00:00Z",
+        "is_subscribed": true,
+        "timestamp": super::types::now_ms() / 1000,
+    })
+    .to_string();
+    let said = knock(&mut b, &server_id, old_shape).await.expect("a refusal");
+    assert!(
+        said.contains(super::twitch::OLD_PROOF_SENTENCE),
+        "the old proof shape must be refused with its own sentence, got {said}",
+    );
+
+    // (e) Subscription required, tier "0" presented.
+    o.cmd_tx
+        .send(NodeCommand::UpdateServerSetting {
+            server_id: server_id.clone(),
+            key: "twitch_require_sub".to_string(),
+            value: "true".to_string(),
+        })
+        .await
+        .unwrap();
+    assert!(
+        wait_until(10, async || o
+            .server_setting(&server_id, "twitch_require_sub")
+            .as_deref()
+            == Some("true"))
+        .await,
+        "the sub requirement must be live"
+    );
+    let unsubbed =
+        serde_json::to_string(&testing::mint_follow_for(&b_master, "1234567", 30, "0", now))
+            .expect("entry json");
+    let said = knock(&mut b, &server_id, unsubbed).await.expect("a refusal");
+    assert!(
+        said.contains("subscribed"),
+        "tier 0 must not satisfy a sub requirement, got {said}",
+    );
+
+    // (f) A subscriber at a bucket over the line: in.
+    let good =
+        serde_json::to_string(&testing::mint_follow_for(&b_master, "1234567", 30, "1000", now))
+            .expect("entry json");
+    assert_eq!(
+        knock(&mut b, &server_id, good).await,
+        None,
+        "a 30-day tier-1000 follower must be admitted",
+    );
+    assert!(
+        wait_until(10, || async { b.servers().contains(&server_id) }).await,
+        "the joiner holds the server, got {:?}",
+        b.servers(),
+    );
+    // The owner never minted a handle for them: a follow credential names no
+    // Twitch account, and there is nothing to display.
+    let panel = o.member_panel(&server_id, &relay);
+    assert!(
+        panel.iter().any(|r| r.master == b_master),
+        "the owner has the joiner as a member, got {:?}",
+        panel.iter().map(|r| r.master.clone()).collect::<Vec<_>>(),
+    );
+
+    drop(o);
+    drop(b);
+}
+
+// ---------------------------------------------------------------------------
+// `support_creds` sits outside the profile signature, so on the plaintext
+// fallback a relay can rewrite it to `""` in flight and every receiver reads
+// the holder's explicit clear. Its own master signature closes that, and the
+// per-master PIN is what stops the signature simply being stripped: once a
+// master has signed the field once, an unsigned copy from it changes nothing.
+//
+// Three things have to hold together, and the third is why the pin cannot just
+// be "require a signature from everyone": a client that predates the field
+// signature sends the field and no signature, and it must keep working.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn support_creds_sig_pins_and_a_stripped_field_is_preserved() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    const A_MASTER: u8 = 241;
+    const A_DEV: u8 = 242;
+    const B_MASTER: u8 = 243;
+    const C_MASTER: u8 = 244;
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
+    let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
+    let c_master = NativeKeypair::from_secret_bytes(&seed_bytes(C_MASTER)).peer_id();
+
+    let mut a = spawn_node_with_friends(&relay, A_MASTER, A_DEV, &[&b_master]).await;
+    // Keep every frame A sends from the start: leg 3 replays one of them.
+    relay.set_recording(&a.device_id, true);
+    let mut b = spawn_node_with_friends(&relay, B_MASTER, B_MASTER, &[&a_master, &c_master]).await;
+    let mut c = spawn_node_with_friends(&relay, C_MASTER, C_MASTER, &[&b_master]).await;
+    assert!(
+        wait_until(20, || async {
+            b.online_identities(&relay).contains(&a_master)
+                && b.online_identities(&relay).contains(&c_master)
+                && a.online_identities(&relay).contains(&b_master)
+        })
+        .await,
+        "everybody must see everybody before the announces"
+    );
+    drain_events(&mut a);
+    drain_events(&mut b);
+    drain_events(&mut c);
+
+    use super::support_creds::{self, testing};
+    let mark = testing::mint_for(&a_master, &[hex::encode([0x5au8; 32])]);
+
+    let profile = |status: &str, creds: Option<String>| NodeCommand::UpdateProfile {
+        display_name: "Anon".to_string(),
+        status: status.to_string(),
+        about_me: String::new(),
+        avatar_bytes: None,
+        banner_bytes: None,
+        twitch_username: String::new(),
+        showcase_board: None,
+        showcase_assets: None,
+        avatar_frame: None,
+        avatar_anim: None,
+        banner_anim: None,
+        support_creds: creds,
+    };
+
+    // --- 0. A holder with nothing yet: a signed announce of the empty field.
+    //        This is the frame leg 3 replays, and it is entirely genuine. ---
+    a.cmd_tx
+        .send(profile("no marks yet", Some(String::new())))
+        .await
+        .unwrap();
+    assert!(
+        wait_until(10, || async {
+            b.store()
+                .load_profile(&a_master)
+                .ok()
+                .flatten()
+                .is_some_and(|p| p.status == "no marks yet")
+        })
+        .await,
+        "B must see A before there is anything to strip"
+    );
+
+    // --- 1. A signed announce with a mark. B stores it and PINS A. ---
+    a.cmd_tx
+        .send(profile("with a mark", Some(support_creds::encode_entries(&[mark.clone()]))))
+        .await
+        .unwrap();
+    assert!(
+        wait_until(10, || async {
+            b.store()
+                .load_profile(&a_master)
+                .ok()
+                .flatten()
+                .is_some_and(|p| !p.support_creds.is_empty())
+        })
+        .await,
+        "B must store A's mark"
+    );
+    assert!(
+        b.store().support_creds_signed(&a_master).unwrap_or(false),
+        "a valid field signature PINS the master",
+    );
+    let after_first = b.store().load_profile(&a_master).unwrap().unwrap();
+    let earlier_updated_at = after_first.updated_at;
+
+    // --- 2. The relay strips the field on the way to B. The row is intact. ---
+    relay.set_strip_support_creds(&a.device_id, true);
+    drain_events(&mut b);
+    a.cmd_tx.send(profile("stripped in flight", None)).await.unwrap();
+    assert!(
+        wait_until(10, || async {
+            b.store()
+                .load_profile(&a_master)
+                .ok()
+                .flatten()
+                .is_some_and(|p| p.status == "stripped in flight")
+        })
+        .await,
+        "B must receive the tampered update (the rest of the profile is fine)"
+    );
+    let p = b.store().load_profile(&a_master).unwrap().unwrap();
+    assert_eq!(
+        support_creds::parse_stored(&p.support_creds),
+        vec![mark.clone()],
+        "a relay that rewrote the field to \"\" must change NOTHING: {}",
+        p.support_creds,
+    );
+    relay.set_strip_support_creds(&a.device_id, false);
+
+    // --- 3. A replayed OLDER announce, genuinely signed, must not clear it.
+    //        A's first profile announce carried no credentials and a perfectly
+    //        good signature over the empty field; replaying it is the cheapest
+    //        way to undo a purchase, and `updated_at` is what refuses it. ---
+    let older: Vec<Vec<u8>> = relay
+        .recorded_frames(&a.device_id)
+        .into_iter()
+        .filter(|data| {
+            serde_json::from_slice::<serde_json::Value>(data)
+                .ok()
+                .and_then(|v| {
+                    let obj = v.as_object()?.clone();
+                    let is_profile =
+                        obj.get("type")?.as_str()? == "profile_update";
+                    let empty = obj.get("support_creds")?.as_str()?.is_empty();
+                    let signed = obj.contains_key("support_creds_sig");
+                    let stamp = obj.get("updated_at")?.as_i64()?;
+                    Some(is_profile && empty && signed && stamp < earlier_updated_at)
+                })
+                .unwrap_or(false)
+        })
+        .collect();
+    assert!(
+        !older.is_empty(),
+        "the test needs a genuine older signed announce with an empty field to replay",
+    );
+    let dm_room = super::types::dm_room_code(&a_master, &b_master);
+    relay.inject(&dm_room, &a.device_id, &b.device_id, older[0].clone());
+    // ABSENCE proof: there is no state change to poll for, so the window has
+    // to be real time, and then the row is read.
+    sleep_ms(1500).await;
+    let p = b.store().load_profile(&a_master).unwrap().unwrap();
+    assert_eq!(
+        support_creds::parse_stored(&p.support_creds),
+        vec![mark.clone()],
+        "a replayed OLDER signed announce must not clear the field: {}",
+        p.support_creds,
+    );
+
+    // --- 4. A master that has never signed still gets the legacy path: field
+    //        in, no signature, and it applies. Every shipped client is here. ---
+    relay.set_drop_support_creds_sig(&c.device_id, true);
+    let c_mark = testing::mint_for(&c_master, &[hex::encode([0x5bu8; 32])]);
+    c.cmd_tx
+        .send(profile("old client", Some(support_creds::encode_entries(&[c_mark.clone()]))))
+        .await
+        .unwrap();
+    assert!(
+        wait_until(10, || async {
+            b.store()
+                .load_profile(&c_master)
+                .ok()
+                .flatten()
+                .is_some_and(|p| !p.support_creds.is_empty())
+        })
+        .await,
+        "an unsigned field from a master that has never signed must still apply"
+    );
+    assert!(
+        !b.store().support_creds_signed(&c_master).unwrap_or(true),
+        "and it must NOT pin that master: the next honest unsigned announce has to work too",
+    );
+
+    drop(a);
+    drop(b);
+    drop(c);
 }
 
 // ---------------------------------------------------------------------------

@@ -24,7 +24,6 @@ Future<void> showProfileDialog(
   required String peerId,
   String? nickname,
   String? role,
-  String? twitchUsername,
   List<crdt_api.LabelFfi>? labels,
   String? serverId,
 }) {
@@ -33,7 +32,6 @@ Future<void> showProfileDialog(
       context,
       peerId: peerId,
       role: role,
-      twitchUsername: twitchUsername,
       labels: labels,
     );
     return Future.value();
@@ -44,7 +42,6 @@ Future<void> showProfileDialog(
       peerId: peerId,
       nickname: nickname,
       role: role,
-      twitchUsername: twitchUsername,
       labels: labels,
       serverId: serverId,
     ),
@@ -69,7 +66,6 @@ class ProfileDialog extends ConsumerWidget {
   final String peerId;
   final String? nickname;
   final String? role;
-  final String? twitchUsername;
   final List<crdt_api.LabelFfi>? labels;
   final String? serverId;
 
@@ -78,7 +74,6 @@ class ProfileDialog extends ConsumerWidget {
     required this.peerId,
     this.nickname,
     this.role,
-    this.twitchUsername,
     this.labels,
     this.serverId,
   });
@@ -149,7 +144,6 @@ class ProfileDialog extends ConsumerWidget {
         peerId: peerId,
         nickname: nickname,
         role: role,
-        twitchUsername: twitchUsername,
         labels: labels,
         serverId: serverId,
         density: ProfileCardDensity.full,

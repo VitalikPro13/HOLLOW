@@ -1808,6 +1808,16 @@ pub(crate) enum HavenMessage {
         /// by the profile signature: an entry already binds the identity.
         #[serde(default)]
         support_creds: Option<String>,
+        /// The MASTER's signature over `(peer_id, updated_at,
+        /// support_creds)` (`support_creds::support_creds_sig_message`),
+        /// base64 Ed25519. Sent whenever `support_creds` is `Some`, including
+        /// `Some("")`. `None` from clients that predate it; a receiver that
+        /// has ever seen a signed field from this master REFUSES an unsigned
+        /// one (the `support_creds_signed` pin), so stripping it in flight is
+        /// not a downgrade. The credentials themselves are unforgeable
+        /// without it; this is what stops a relay DENYING them.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        support_creds_sig: Option<String>,
         /// Owner's signature over the relayable subset of this profile
         /// (`crypto_handler::profile_signing_payload`). REQUIRED on ingest —
         /// receivers store it so they can forward it in a `ProfileRelay`, which
@@ -3249,6 +3259,16 @@ pub(crate) enum MessageEnvelope {
         /// by the profile signature: an entry already binds the identity.
         #[serde(default)]
         support_creds: Option<String>,
+        /// The MASTER's signature over `(peer_id, updated_at,
+        /// support_creds)` (`support_creds::support_creds_sig_message`),
+        /// base64 Ed25519. Sent whenever `support_creds` is `Some`, including
+        /// `Some("")`. `None` from clients that predate it; a receiver that
+        /// has ever seen a signed field from this master REFUSES an unsigned
+        /// one (the `support_creds_signed` pin), so stripping it in flight is
+        /// not a downgrade. The credentials themselves are unforgeable
+        /// without it; this is what stops a relay DENYING them.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        support_creds_sig: Option<String>,
         /// Owner's profile signature — see HavenMessage::ProfileUpdate.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         profile_sig: Option<String>,

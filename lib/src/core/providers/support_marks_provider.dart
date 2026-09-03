@@ -119,6 +119,78 @@ final supportBadgeVisibleProvider = Provider.family<bool, String>((ref, peerId) 
   return ref.watch(supportMarksProvider(peerId)).any((cred) => cred.badge);
 });
 
+// ── The verified Twitch account ───────────────────────────────────────
+//
+// The purple chip draws from a `t = 3` credential on the same field and from
+// nothing else. `twitch_username` is still on the wire for old clients, but a
+// self-declared handle is a claim anybody's modified client can make, so no
+// new client renders one (Vitalik, 2026-09-03: no "claims to be" chip).
+//
+// Nothing here verifies a signature, and nothing here needs to: Rust checked
+// the whole chain against the pinned root before the row was written
+// (`support_creds::sanitize_incoming_support_creds` for a peer, the verify
+// path for ourselves). What is checked is the SHAPE, so a malformed local row
+// renders nothing rather than junk, and the WINDOW, so a credential that has
+// aged out stops showing here the moment it expires instead of at whatever
+// point its holder next announces.
+
+final _kTwitchLogin = RegExp(r'^[a-z0-9_]{4,25}$');
+
+/// The 90-day window a credential is minted for, matching
+/// `support_creds::now_period` in Rust.
+int _nowPeriod() =>
+    DateTime.now().toUtc().millisecondsSinceEpoch ~/ 1000 ~/ 86400 ~/ 90;
+
+/// The verified Twitch login in a raw `support_creds` field, or null.
+String? verifiedTwitchLogin(String json) {
+  if (json.isEmpty) return null;
+  Object? decoded;
+  try {
+    decoded = jsonDecode(json);
+  } catch (_) {
+    return null;
+  }
+  if (decoded is! List) return null;
+  final now = _nowPeriod();
+  for (final raw in decoded) {
+    if (raw is! Map) continue;
+    if (raw['t'] != 3) continue;
+    final period = raw['period'];
+    // The current window or the one before it: the same grace Rust gives.
+    if (period is! int || period == 0 || (period != now && period + 1 != now)) {
+      continue;
+    }
+    final parts = raw['parts'];
+    if (parts is! List || parts.length != 2) continue;
+    final login = parts[1];
+    if (login is! String || !_kTwitchLogin.hasMatch(login)) continue;
+    return login;
+  }
+  return null;
+}
+
+/// Parsed once per field VALUE, like [supportCredsOf]: the field is a string,
+/// so the same string always answers the same login.
+final Map<String, String?> _twitchLogins = {};
+
+String? twitchLoginOf(storage_api.UserProfile? profile) {
+  final json = profile?.supportCreds ?? '';
+  if (json.isEmpty) return null;
+  if (_twitchLogins.containsKey(json)) return _twitchLogins[json];
+  final login = verifiedTwitchLogin(json);
+  if (_twitchLogins.length > 512) _twitchLogins.clear();
+  _twitchLogins[json] = login;
+  return login;
+}
+
+/// [peerId]'s VERIFIED Twitch login, or null when there is none.
+///
+/// The one source for the purple chip on every surface.
+final twitchLoginProvider = Provider.family<String?, String>((ref, peerId) {
+  final profile = ref.watch(profileProvider.select((p) => p[peerId]));
+  return twitchLoginOf(profile);
+});
+
 /// [supportMarksProvider] with names attached, looked up in the order that
 /// cannot mislead: our own redeem records first (they name the listing the
 /// credential was minted for, by its exact item hash), then the shop's

@@ -37,7 +37,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.11.1";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -610851480;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 1622947521;
 
 // Section: executor
 
@@ -11867,6 +11867,38 @@ fn wire__crate__api__twitch__twitch_is_connected_impl(
         },
     )
 }
+fn wire__crate__api__twitch__twitch_maintain_owner_credential_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "twitch_maintain_owner_credential",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, String>((move || {
+                    let output_ok = crate::api::twitch::twitch_maintain_owner_credential()?;
+                    Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
 fn wire__crate__api__twitch__twitch_poll_for_token_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -11930,6 +11962,71 @@ fn wire__crate__api__twitch__twitch_start_device_flow_impl(
             move |context| {
                 transform_result_sse::<_, String>((move || {
                     let output_ok = crate::api::twitch::twitch_start_device_flow()?;
+                    Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
+fn wire__crate__api__twitch__twitch_verify_follow_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "twitch_verify_follow",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_broadcaster_id = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, String>((move || {
+                    let output_ok = crate::api::twitch::twitch_verify_follow(api_broadcaster_id)?;
+                    Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
+fn wire__crate__api__twitch__twitch_verify_owner_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "twitch_verify_owner",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, String>((move || {
+                    let output_ok = crate::api::twitch::twitch_verify_owner()?;
                     Ok(output_ok)
                 })())
             }
@@ -17290,6 +17387,20 @@ impl SseDecode for crate::api::twitch::TwitchDeviceFlowResult {
     }
 }
 
+impl SseDecode for crate::api::twitch::TwitchVerifyOutcome {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_verified = <bool>::sse_decode(deserializer);
+        let mut var_login = <String>::sse_decode(deserializer);
+        let mut var_message = <String>::sse_decode(deserializer);
+        return crate::api::twitch::TwitchVerifyOutcome {
+            verified: var_verified,
+            login: var_login,
+            message: var_message,
+        };
+    }
+}
+
 impl SseDecode for u16 {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -18299,127 +18410,139 @@ fn pde_ffi_dispatcher_primary_impl(
         341 => {
             wire__crate__api__twitch__twitch_is_connected_impl(port, ptr, rust_vec_len, data_len)
         }
-        342 => {
+        342 => wire__crate__api__twitch__twitch_maintain_owner_credential_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        343 => {
             wire__crate__api__twitch__twitch_poll_for_token_impl(port, ptr, rust_vec_len, data_len)
         }
-        343 => wire__crate__api__twitch__twitch_start_device_flow_impl(
+        344 => wire__crate__api__twitch__twitch_start_device_flow_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        344 => wire__crate__api__crdt__unassign_label_impl(port, ptr, rust_vec_len, data_len),
-        345 => wire__crate__api__crdt__unban_member_impl(port, ptr, rust_vec_len, data_len),
-        346 => wire__crate__api__storage__unblock_peer_impl(port, ptr, rust_vec_len, data_len),
-        347 => wire__crate__api__identity__unlock_identity_impl(port, ptr, rust_vec_len, data_len),
-        348 => wire__crate__api__crdt__unmute_member_impl(port, ptr, rust_vec_len, data_len),
-        349 => wire__crate__api__crdt__unpin_message_impl(port, ptr, rust_vec_len, data_len),
-        350 => {
+        345 => {
+            wire__crate__api__twitch__twitch_verify_follow_impl(port, ptr, rust_vec_len, data_len)
+        }
+        346 => {
+            wire__crate__api__twitch__twitch_verify_owner_impl(port, ptr, rust_vec_len, data_len)
+        }
+        347 => wire__crate__api__crdt__unassign_label_impl(port, ptr, rust_vec_len, data_len),
+        348 => wire__crate__api__crdt__unban_member_impl(port, ptr, rust_vec_len, data_len),
+        349 => wire__crate__api__storage__unblock_peer_impl(port, ptr, rust_vec_len, data_len),
+        350 => wire__crate__api__identity__unlock_identity_impl(port, ptr, rust_vec_len, data_len),
+        351 => wire__crate__api__crdt__unmute_member_impl(port, ptr, rust_vec_len, data_len),
+        352 => wire__crate__api__crdt__unpin_message_impl(port, ptr, rust_vec_len, data_len),
+        353 => {
             wire__crate__api__crdt__update_channel_layout_impl(port, ptr, rust_vec_len, data_len)
         }
-        351 => wire__crate__api__crdt__update_label_impl(port, ptr, rust_vec_len, data_len),
-        352 => wire__crate__api__network__update_profile_impl(port, ptr, rust_vec_len, data_len),
-        353 => {
+        354 => wire__crate__api__crdt__update_label_impl(port, ptr, rust_vec_len, data_len),
+        355 => wire__crate__api__network__update_profile_impl(port, ptr, rust_vec_len, data_len),
+        356 => {
             wire__crate__api__crdt__update_server_setting_impl(port, ptr, rust_vec_len, data_len)
         }
-        354 => wire__crate__api__crdt__vault_download_file_impl(port, ptr, rust_vec_len, data_len),
-        355 => wire__crate__api__crdt__vault_upload_file_impl(port, ptr, rust_vec_len, data_len),
-        356 => wire__crate__api__archive__verify_archive_impl(port, ptr, rust_vec_len, data_len),
-        357 => wire__crate__api__identity__verify_identity_password_at_impl(
+        357 => wire__crate__api__crdt__vault_download_file_impl(port, ptr, rust_vec_len, data_len),
+        358 => wire__crate__api__crdt__vault_upload_file_impl(port, ptr, rust_vec_len, data_len),
+        359 => wire__crate__api__archive__verify_archive_impl(port, ptr, rust_vec_len, data_len),
+        360 => wire__crate__api__identity__verify_identity_password_at_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        358 => {
+        361 => {
             wire__crate__api__network__verify_message_proof_impl(port, ptr, rust_vec_len, data_len)
         }
-        359 => wire__crate__api__network__verify_message_proof_v2_impl(
+        362 => wire__crate__api__network__verify_message_proof_v2_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        360 => {
+        363 => {
             wire__crate__api__network__voice_channel_join_impl(port, ptr, rust_vec_len, data_len)
         }
-        361 => {
+        364 => {
             wire__crate__api__network__voice_channel_leave_impl(port, ptr, rust_vec_len, data_len)
         }
-        362 => wire__crate__api__network__voice_channel_send_signal_impl(
+        365 => wire__crate__api__network__voice_channel_send_signal_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        363 => wire__crate__api__network__voice_sframe_heal_impl(port, ptr, rust_vec_len, data_len),
-        364 => {
+        366 => wire__crate__api__network__voice_sframe_heal_impl(port, ptr, rust_vec_len, data_len),
+        367 => {
             wire__crate__api__network__watch_network_events_impl(port, ptr, rust_vec_len, data_len)
         }
-        365 => wire__crate__api__network__webrtc_broadcast_received_impl(
+        368 => wire__crate__api__network__webrtc_broadcast_received_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        366 => wire__crate__api__network__webrtc_gossip_op_received_impl(
+        369 => wire__crate__api__network__webrtc_gossip_op_received_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        367 => {
+        370 => {
             wire__crate__api__network__webrtc_peer_connected_impl(port, ptr, rust_vec_len, data_len)
         }
-        368 => wire__crate__api__network__webrtc_peer_disconnected_impl(
+        371 => wire__crate__api__network__webrtc_peer_disconnected_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        369 => {
+        372 => {
             wire__crate__api__network__webrtc_ping_report_impl(port, ptr, rust_vec_len, data_len)
         }
-        370 => {
+        373 => {
             wire__crate__api__network__webrtc_route_report_impl(port, ptr, rust_vec_len, data_len)
         }
-        371 => {
+        374 => {
             wire__crate__api__network__webrtc_send_complete_impl(port, ptr, rust_vec_len, data_len)
         }
-        372 => {
+        375 => {
             wire__crate__api__network__webrtc_send_signal_impl(port, ptr, rust_vec_len, data_len)
         }
-        373 => wire__crate__api__network__webrtc_share_chunk_complete_impl(
+        376 => wire__crate__api__network__webrtc_share_chunk_complete_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        374 => wire__crate__api__network__webrtc_share_peer_connected_impl(
+        377 => wire__crate__api__network__webrtc_share_peer_connected_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        375 => wire__crate__api__network__webrtc_share_peer_disconnected_impl(
+        378 => wire__crate__api__network__webrtc_share_peer_disconnected_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        376 => wire__crate__api__network__webrtc_share_transfer_failed_impl(
+        379 => wire__crate__api__network__webrtc_share_transfer_failed_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        377 => wire__crate__api__network__webrtc_transfer_complete_impl(
+        380 => wire__crate__api__network__webrtc_transfer_complete_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        378 => wire__crate__api__network__webrtc_transfer_failed_impl(
+        381 => wire__crate__api__network__webrtc_transfer_failed_impl(
             port,
             ptr,
             rust_vec_len,
@@ -21717,6 +21840,28 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::twitch::TwitchDeviceFlowResul
     }
 }
 // Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::twitch::TwitchVerifyOutcome {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.verified.into_into_dart().into_dart(),
+            self.login.into_into_dart().into_dart(),
+            self.message.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::twitch::TwitchVerifyOutcome
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::twitch::TwitchVerifyOutcome>
+    for crate::api::twitch::TwitchVerifyOutcome
+{
+    fn into_into_dart(self) -> crate::api::twitch::TwitchVerifyOutcome {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
 impl flutter_rust_bridge::IntoDart for crate::api::storage::UnreadMentionCount {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         [
@@ -24837,6 +24982,15 @@ impl SseEncode for crate::api::twitch::TwitchDeviceFlowResult {
         <String>::sse_encode(self.verification_uri, serializer);
         <String>::sse_encode(self.device_code, serializer);
         <u64>::sse_encode(self.interval_secs, serializer);
+    }
+}
+
+impl SseEncode for crate::api::twitch::TwitchVerifyOutcome {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.verified, serializer);
+        <String>::sse_encode(self.login, serializer);
+        <String>::sse_encode(self.message, serializer);
     }
 }
 

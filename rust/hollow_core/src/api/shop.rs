@@ -752,7 +752,9 @@ pub fn forget_redeem_code(code: String) -> Result<(), String> {
 // bought. A pack that fails to arrive is a sentence in the outcome, not a
 // lost purchase: the Creem download carries the same pack.
 
-use crate::node::support_creds::{self, CredentialEntry, T_ITEM};
+use crate::node::support_creds::{
+    self, CredentialEntry, T_ITEM, T_TWITCH_FOLLOW, T_TWITCH_OWNER,
+};
 
 /// The largest `.hollowpack` the redeem path will read: eight files at the
 /// per-file cap, with room.
@@ -1252,10 +1254,19 @@ pub(crate) fn published_creds_json(
     master: &str,
 ) -> Result<String, String> {
     if hidden_on(ms.load_setting(SUPPORT_HIDDEN_SETTING).ok().flatten().as_deref()) {
-        // The explicit clear, which is what a holder with no credentials at
-        // all announces: a shorter list would say which mark was hidden. The
-        // records stay where they are, and the shelf holds the rest.
-        return Ok(support_creds::encode_entries(&[]));
+        // "Hide my support marks" is about the SHOP marks (t = 1 and 2), so
+        // the filter is by type, not a clear of the whole field: a verified
+        // Twitch account is a different claim on the same field and its chip
+        // keeps showing. With no Twitch entry this is still the explicit
+        // clear, which is exactly what a holder with no credentials at all
+        // announces, so hiding stays indistinguishable from never having
+        // bought anything. The records stay where they are, and the shelf
+        // holds the rest.
+        let kept: Vec<CredentialEntry> = support_creds::parse_stored(&union_json(ms, master)?)
+            .into_iter()
+            .filter(|e| e.t == T_TWITCH_OWNER)
+            .collect();
+        return Ok(support_creds::encode_entries(&kept));
     }
     union_json(ms, master)
 }
@@ -1377,7 +1388,7 @@ fn keep_own_cred_row(
 ///
 /// Best effort by design: the row is already written, and the next profile
 /// save carries the field if the node is not up at this moment.
-fn announce_support_creds(master: &str, json: String) -> Result<(), String> {
+pub(crate) fn announce_support_creds(master: &str, json: String) -> Result<(), String> {
     let cmd_tx = {
         let node = super::network::get_node();
         let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
@@ -1430,6 +1441,306 @@ fn republish_support_creds() -> Result<(), String> {
         republish_to_row(ms, &master)?
     };
     announce_support_creds(&master, json)
+}
+
+
+// ── Twitch credentials: the shop as an OAuth verifier ─────────────────
+//
+// The same chain as a redeemed mark, a different check at the top: instead of
+// a Creem licence key the shop validates a Twitch access token, reads the
+// facts Twitch itself reports, and blind-signs them under a key for exactly
+// that `(type, item, period)`. Two round trips, same shape as redeem:
+//
+//   POST /api/twitch/key     what the credential will say, and the chain
+//                            that will sign it; nothing is spent
+//   POST /api/twitch/verify  the blind signature over OUR master id
+//
+// The shop learns "login X (id Y) is verified in window N" or "user Y follows
+// channel Z at bucket B, tier T". It never learns a Hollow identity: the
+// message it signs is blinded. We learn nothing we have to trust: the chain
+// is checked against the root pinned in `support_creds.rs` BEFORE the second
+// round trip, and the finished entry is verified exactly as a viewer will.
+
+/// The `/api/twitch/key` answer.
+#[frb(ignore)]
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct RawTwitchKey {
+    #[serde(default)]
+    t: u8,
+    #[serde(default, deserialize_with = "lenient")]
+    item: String,
+    #[serde(default, deserialize_with = "lenient_vec")]
+    parts: Vec<String>,
+    #[serde(default)]
+    period: u32,
+    #[serde(default, deserialize_with = "lenient")]
+    key: String,
+    #[serde(default, deserialize_with = "lenient")]
+    key_sig: String,
+    #[serde(default, deserialize_with = "lenient")]
+    issuer: String,
+    #[serde(default, deserialize_with = "lenient")]
+    issuer_sig: String,
+}
+
+/// The two calls the Twitch flow makes, as a pair of closures.
+///
+/// Two closures rather than a trait for one reason: the bridge scans every
+/// trait in `crate::api` and would generate a Dart class for this one, plus an
+/// opaque type for the `Option<&str>` in it. Nothing here crosses the FFI.
+/// The tests build one that answers from the TEST issuing keys, so the suite
+/// never touches the network; [`TwitchVerifier::http`] is the real one.
+#[frb(ignore)]
+#[allow(clippy::type_complexity)] // two request shapes, spelled out once
+pub(crate) struct TwitchVerifier<'a> {
+    /// `(kind, token, broadcaster_id)` -> what the credential will say.
+    key: Box<dyn Fn(&str, &str, Option<&str>) -> Result<RawTwitchKey, String> + 'a>,
+    /// `(kind, token, broadcaster_id, item, period, blinded)` -> blind signature.
+    sign: Box<dyn Fn(&str, &str, Option<&str>, &str, u32, &[u8]) -> Result<Vec<u8>, String> + 'a>,
+}
+
+/// The sentence for one of the contract's status words. The shop's own
+/// message is used only for a word we do not know: these five are ours to
+/// word, and they are what the user reads.
+fn twitch_refusal(status: u16, body: &[u8]) -> String {
+    let said = serde_json::from_slice::<serde_json::Value>(body).ok();
+    let word = said
+        .as_ref()
+        .and_then(|v| v.get("status").and_then(|s| s.as_str()))
+        .unwrap_or("");
+    match word {
+        "token" => "Twitch would not accept that sign in. Connect Twitch again.".into(),
+        "not_following" => "Twitch says you do not follow that channel.".into(),
+        "slow" => "The shop is asking for a pause; try again in a few minutes".into(),
+        "rail" => "Twitch could not be reached, so nothing was verified. Try again shortly.".into(),
+        "mismatch" => {
+            "Twitch answered differently the second time, so nothing was signed. Try again.".into()
+        }
+        _ => shop_refusal(status, body),
+    }
+}
+
+/// The common half of both request bodies.
+fn twitch_request_body(
+    kind: &str,
+    token: &str,
+    broadcaster_id: Option<&str>,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut body = serde_json::Map::new();
+    body.insert("kind".into(), kind.into());
+    body.insert("token".into(), token.into());
+    if let Some(bid) = broadcaster_id {
+        body.insert("broadcaster_id".into(), bid.into());
+    }
+    body
+}
+
+/// POST to the shop and read the bounded answer, or the sentence for its
+/// status word.
+fn twitch_post(origin: &str, path: &str, body: serde_json::Value) -> Result<Vec<u8>, String> {
+    let url = format!("{origin}{path}");
+    let client = shop_client()?;
+    let (status, answer) =
+        get_http_runtime().block_on(post_json_bounded(&client, &url, &body, 30, 64 * 1024))?;
+    if !(200..300).contains(&status) {
+        return Err(twitch_refusal(status, &answer));
+    }
+    Ok(answer)
+}
+
+impl TwitchVerifier<'static> {
+    /// The real one, against the shop at `origin`.
+    pub(crate) fn http(origin: String) -> Self {
+        let key_origin = origin.clone();
+        Self {
+            key: Box::new(move |kind, token, bid| {
+                let body =
+                    serde_json::Value::Object(twitch_request_body(kind, token, bid));
+                let answer = twitch_post(&key_origin, "/api/twitch/key", body)?;
+                serde_json::from_slice::<RawTwitchKey>(&answer)
+                    .map_err(|e| format!("The shop's answer could not be read: {e}"))
+            }),
+            sign: Box::new(move |kind, token, bid, item, period, blinded| {
+                let mut body = twitch_request_body(kind, token, bid);
+                body.insert("item".into(), item.into());
+                body.insert("period".into(), period.into());
+                body.insert("blinded".into(), B64.encode(blinded).into());
+                let answer = twitch_post(
+                    &origin,
+                    "/api/twitch/verify",
+                    serde_json::Value::Object(body),
+                )?;
+                #[derive(Deserialize)]
+                struct Signed {
+                    #[serde(default)]
+                    blind_sig: String,
+                }
+                let parsed = serde_json::from_slice::<Signed>(&answer)
+                    .map_err(|e| format!("The shop's answer could not be read: {e}"))?;
+                if parsed.blind_sig.is_empty() {
+                    return Err("The shop answered without a signature".into());
+                }
+                B64.decode(parsed.blind_sig.trim())
+                    .map_err(|_| "The shop's signature is not base64".to_string())
+            }),
+        }
+    }
+}
+
+/// Mint one Twitch credential for `master`.
+///
+/// Order matters, the same way it does for a redemption: the chain the shop
+/// published is verified against the PINNED root before the second round trip
+/// blinds anything, and the finished entry is verified exactly as a viewer
+/// will before it is stored. A shop with a broken key gets a refusal here, not
+/// a credential nobody can read.
+pub(crate) fn mint_twitch_credential(
+    verifier: &TwitchVerifier<'_>,
+    kind: &str,
+    token: &str,
+    broadcaster_id: Option<&str>,
+    master: &str,
+) -> Result<CredentialEntry, String> {
+    let t = if kind == "owner" { T_TWITCH_OWNER } else { T_TWITCH_FOLLOW };
+    let answer = (verifier.key)(kind, token, broadcaster_id)?;
+    if answer.t != t {
+        return Err("The shop answered for a different kind of credential".into());
+    }
+    let root = support_creds::root_verifying_key();
+    let chain = support_creds::verify_chain(
+        t, &answer.item, &answer.parts, answer.period, &answer.key, &answer.key_sig,
+        &answer.issuer, &answer.issuer_sig, &root,
+    )
+    .map_err(|e| format!("The shop's signing key did not check out, so nothing was verified: {e}"))?;
+    // A follow credential has to be about the channel we asked about: the
+    // owner's gate compares `parts[0]` to its own channel id, and a joiner
+    // that shipped a credential for some other channel would simply be
+    // refused with a confusing sentence.
+    if broadcaster_id.is_some_and(|bid| chain.parts.first().map(String::as_str) != Some(bid)) {
+        return Err("The shop answered about a different channel".into());
+    }
+
+    let request = support_creds::blind_request(&chain.key_der, t, master, &chain.item, answer.period)?;
+    let blind_sig = (verifier.sign)(
+        kind, token, broadcaster_id, &answer.item, answer.period, &request.blinded,
+    )?;
+    let sig = support_creds::finish_request(&chain.key_der, &request, &blind_sig)?;
+    let entry = CredentialEntry {
+        t,
+        item: answer.item,
+        period: answer.period,
+        parts: chain.parts,
+        key: answer.key,
+        key_sig: answer.key_sig,
+        issuer: answer.issuer,
+        issuer_sig: answer.issuer_sig,
+        sig: B64.encode(&sig),
+        badge: false,
+    };
+    support_creds::verify_entry(&entry, master, &root)
+        .map_err(|e| format!("The credential the shop returned does not verify: {e}"))?;
+    Ok(entry)
+}
+
+/// Drop every verified-account credential this device holds except `keep`.
+///
+/// The cap is one, and [`support_creds::keep_verified`] keeps the FIRST that
+/// verifies — so a stale entry for an account the holder no longer uses would
+/// win over the fresh one. The tombstone goes with it, which is also what
+/// stops a sibling's older announce putting the old account back on our row.
+fn drop_other_twitch_owner_creds(
+    ms: &crate::storage::MessageStore,
+    master: &str,
+    keep: Option<&str>,
+) -> Result<(), String> {
+    let mut stale: Vec<String> = Vec::new();
+    for (item, entry_json, ..) in ms.list_own_support_creds()? {
+        if Some(item.as_str()) == keep {
+            continue;
+        }
+        let Ok(entry) = serde_json::from_str::<CredentialEntry>(&entry_json) else {
+            continue;
+        };
+        if entry.t == T_TWITCH_OWNER {
+            stale.push(item);
+        }
+    }
+    // Whatever a sibling wrote onto our own profile row counts too: the union
+    // republishes it, so an old account would come straight back.
+    let row = ms
+        .load_profile(master)
+        .ok()
+        .flatten()
+        .map(|p| p.support_creds)
+        .unwrap_or_default();
+    for entry in support_creds::parse_stored(&row) {
+        if entry.t == T_TWITCH_OWNER && Some(entry.item.as_str()) != keep && !stale.contains(&entry.item) {
+            stale.push(entry.item);
+        }
+    }
+    for item in stale {
+        forget_own_cred(ms, &item)?;
+    }
+    Ok(())
+}
+
+/// Verify OUR Twitch account and keep the credential.
+///
+/// Split from the `#[frb]` entry point so the whole flow is testable without
+/// a node or a network: hands back the login and the `support_creds` field
+/// the caller should announce.
+pub(crate) fn verify_twitch_owner_with(
+    verifier: &TwitchVerifier<'_>,
+    token: &str,
+    master: &str,
+) -> Result<(String, String), String> {
+    let entry = mint_twitch_credential(verifier, "owner", token, None, master)?;
+    let login = entry.parts.get(1).cloned().unwrap_or_default();
+    let store = get_store();
+    let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let ms = guard.as_ref().ok_or("Message store is not open")?;
+    drop_other_twitch_owner_creds(ms, master, Some(&entry.item))?;
+    // No slug (this is not a listing), the login as the title, and "twitch"
+    // as the artist: Settings reads the same table for every credential.
+    keep_own_cred_row(ms, &entry, "", &login, "twitch")?;
+    let json = republish_to_row(ms, master)?;
+    Ok((login, json))
+}
+
+/// Forget every verified-account credential, for good. What Disconnect does
+/// before it wipes the token: the chip must go with the connection.
+///
+/// Answers the master and the field to announce, or `None` when the node is
+/// not up yet. The table is cleaned either way, so the credential does not
+/// come back at the next boot; only the announce waits.
+pub(crate) fn forget_twitch_owner_creds() -> Result<Option<(String, String)>, String> {
+    let master = super::network::get_local_peer_id();
+    let store = get_store();
+    let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    let ms = guard.as_ref().ok_or("Message store is not open")?;
+    drop_other_twitch_owner_creds(ms, master.as_deref().unwrap_or(""), None)?;
+    match master {
+        Some(m) => {
+            let json = republish_to_row(ms, &m)?;
+            Ok(Some((m, json)))
+        }
+        None => Ok(None),
+    }
+}
+
+/// The verified Twitch login this identity currently publishes, and the
+/// window its credential was minted in. `None` when there is none.
+pub(crate) fn own_twitch_owner_entry() -> Option<CredentialEntry> {
+    let master = super::network::get_local_peer_id()?;
+    let store = get_store();
+    let guard = store.lock().ok()?;
+    let ms = guard.as_ref()?;
+    let root = support_creds::root_verifying_key();
+    own_credential_union(ms, &master)
+        .ok()?
+        .into_iter()
+        .map(|u| u.entry)
+        .find(|e| e.t == T_TWITCH_OWNER && support_creds::verify_entry(e, &master, &root).is_ok())
 }
 
 /// Every credential this identity holds, as far as this device can tell:
@@ -2253,6 +2564,243 @@ mod tests {
         // Junk never grows the tombstone list.
         with_store(|ms| forget_own_cred(ms, "not-an-item").expect("no-op"));
         assert!(with_store(removed_items).is_empty());
+    }
+
+
+    // ── The two Twitch types on the same field ────────────────────────
+
+    /// A canned `/api/twitch/key` + `/api/twitch/verify` pair, built from the
+    /// TEST issuing keys. No network, and it COUNTS its signatures so a test
+    /// can prove nothing was blinded on a path that should have refused
+    /// first.
+    struct CannedVerifier {
+        key: support_creds::testing::TestTypedKey,
+        t: u8,
+        item: String,
+        parts: Vec<String>,
+        period: u32,
+        /// Break the root link, the way a shop with a wrong issuer would.
+        bad_chain: bool,
+        signed: std::cell::Cell<usize>,
+    }
+
+    impl CannedVerifier {
+        fn owner(master_period: u32, user_id: &str, login: &str) -> Self {
+            let parts = vec![user_id.to_string(), login.to_string()];
+            let (item, parts) = support_creds::twitch_owner_item(&parts).expect("owner parts");
+            Self {
+                key: support_creds::testing::test_typed_key(T_TWITCH_OWNER, &item, master_period),
+                t: T_TWITCH_OWNER,
+                item: hex::encode(item),
+                parts,
+                period: master_period,
+                bad_chain: false,
+                signed: std::cell::Cell::new(0),
+            }
+        }
+    }
+
+    impl CannedVerifier {
+        /// The pair of closures `mint_twitch_credential` calls.
+        fn as_verifier(&self) -> TwitchVerifier<'_> {
+            TwitchVerifier {
+                key: Box::new(move |_kind, _token, _bid| {
+                    Ok(RawTwitchKey {
+                        t: self.t,
+                        item: self.item.clone(),
+                        parts: self.parts.clone(),
+                        period: self.period,
+                        key: B64.encode(&self.key.pk_der),
+                        key_sig: B64.encode(self.key.key_sig),
+                        issuer: B64.encode(self.key.issuer.pk),
+                        issuer_sig: if self.bad_chain {
+                            B64.encode([0u8; 64])
+                        } else {
+                            B64.encode(self.key.issuer.root_sig)
+                        },
+                    })
+                }),
+                sign: Box::new(move |_kind, _token, _bid, _item, _period, blinded| {
+                    self.signed.set(self.signed.get() + 1);
+                    Ok(support_creds::testing::blind_sign_with(&self.key, blinded))
+                }),
+            }
+        }
+    }
+
+    fn twitch_entry(ms: &crate::storage::MessageStore, master: &str) -> Option<CredentialEntry> {
+        support_creds::parse_stored(&published_creds_json(ms, master).expect("json"))
+            .into_iter()
+            .find(|e| e.t == T_TWITCH_OWNER)
+    }
+
+    #[test]
+    fn hidden_keeps_the_twitch_entry_and_hides_the_marks() {
+        let _lock = with_test_store();
+        let master = "master-peer-twitch-hides";
+        let (one, two) = seed_two_creds(master);
+        let account =
+            support_creds::testing::mint_owner_for(master, "12345", "somestreamer", support_creds::now_period());
+        with_store(|ms| {
+            keep_own_cred_row(ms, &account, "", "somestreamer", "twitch").expect("keep");
+        });
+
+        let shown = with_store(|ms| published_creds_json(ms, master).expect("json"));
+        assert_eq!(
+            support_creds::parse_stored(&shown).len(),
+            3,
+            "two marks and the account ride the field while shown: {shown}",
+        );
+
+        with_store(|ms| ms.save_setting(SUPPORT_HIDDEN_SETTING, "1").expect("hide"));
+        let hidden = with_store(|ms| published_creds_json(ms, master).expect("json"));
+        let kept = support_creds::parse_stored(&hidden);
+        assert_eq!(
+            kept.len(),
+            1,
+            "hiding is about the SHOP marks; the verified account keeps publishing: {hidden}",
+        );
+        assert_eq!(kept[0].t, T_TWITCH_OWNER);
+        assert!(
+            !hidden.contains(&one.item) && !hidden.contains(&two.item),
+            "and neither mark is in it: {hidden}",
+        );
+
+        // Unhiding brings the marks back and does not duplicate the account.
+        with_store(|ms| ms.save_setting(SUPPORT_HIDDEN_SETTING, "0").expect("show"));
+        let back = with_store(|ms| published_creds_json(ms, master).expect("json"));
+        assert_eq!(support_creds::parse_stored(&back).len(), 3, "{back}");
+
+        // A holder with no account credential still publishes the explicit
+        // clear when hiding, so hiding stays indistinguishable from never
+        // having bought anything.
+        with_store(|ms| {
+            forget_own_cred(ms, &account.item).expect("forget the account");
+            ms.save_setting(SUPPORT_HIDDEN_SETTING, "1").expect("hide");
+        });
+        assert_eq!(
+            with_store(|ms| published_creds_json(ms, master).expect("json")),
+            "",
+            "no account, no field",
+        );
+    }
+
+    #[test]
+    fn twitch_verify_owner_stores_and_publishes() {
+        let _lock = with_test_store();
+        let master = "master-peer-twitch-verify";
+        let period = support_creds::now_period();
+
+        let verifier = CannedVerifier::owner(period, "12345", "somestreamer");
+        let (login, json) =
+            verify_twitch_owner_with(&verifier.as_verifier(), "an-access-token", master).expect("verifies");
+        assert_eq!(login, "somestreamer");
+        assert_eq!(verifier.signed.get(), 1, "exactly one blind signature was asked for");
+
+        let published = support_creds::parse_stored(&json);
+        assert_eq!(published.len(), 1, "{json}");
+        assert_eq!(published[0].t, T_TWITCH_OWNER);
+        assert_eq!(
+            published[0].parts,
+            vec!["12345".to_string(), "somestreamer".to_string()],
+        );
+        assert_eq!(published[0].period, period);
+        // What we publish is what a viewer will keep.
+        support_creds::verify_entry(&published[0], master, &support_creds::root_verifying_key())
+            .expect("the published entry verifies for our master");
+
+        // It is on our own row, and in the table with names Settings can read.
+        assert_eq!(items_of(&with_store(|ms| row_of(ms, master))), vec![published[0].item.clone()]);
+        let listed = with_store(|ms| ms.list_own_support_creds().expect("list"));
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].3, "somestreamer", "the login is the title");
+        assert_eq!(listed[0].4, "twitch", "and the artist names where it came from");
+
+        // Verifying a DIFFERENT account replaces the first: the cap is one,
+        // and `keep_verified` keeps the first that verifies, so a stale entry
+        // would otherwise outlive the account it names.
+        let second = CannedVerifier::owner(period, "54321", "another_one");
+        let (login, json) =
+            verify_twitch_owner_with(&second.as_verifier(), "an-access-token", master).expect("verifies");
+        assert_eq!(login, "another_one");
+        let published = support_creds::parse_stored(&json);
+        assert_eq!(published.len(), 1, "one account, never two: {json}");
+        assert_eq!(published[0].parts[1], "another_one");
+        assert!(
+            with_store(|ms| twitch_entry(ms, master)).is_some_and(|e| e.parts[1] == "another_one"),
+        );
+
+        // And Disconnect takes it away.
+        with_store(|ms| {
+            drop_other_twitch_owner_creds(ms, master, None).expect("forget");
+            republish_to_row(ms, master).expect("republish")
+        });
+        assert_eq!(
+            with_store(|ms| published_creds_json(ms, master).expect("json")),
+            "",
+            "disconnecting leaves no verified chip behind",
+        );
+    }
+
+    #[test]
+    fn twitch_verify_owner_refuses_a_bad_chain_before_blinding() {
+        let _lock = with_test_store();
+        let master = "master-peer-twitch-badchain";
+        let period = support_creds::now_period();
+
+        let mut verifier = CannedVerifier::owner(period, "12345", "somestreamer");
+        verifier.bad_chain = true;
+        let err = verify_twitch_owner_with(&verifier.as_verifier(), "an-access-token", master)
+            .expect_err("a chain that does not lead to the pinned root must refuse");
+        assert!(err.contains("did not check out"), "{err}");
+        assert_eq!(
+            verifier.signed.get(),
+            0,
+            "nothing was blinded: the chain is checked BEFORE the second round trip",
+        );
+        assert_eq!(
+            with_store(|ms| published_creds_json(ms, master).expect("json")),
+            "",
+            "and nothing was stored",
+        );
+
+        // A credential outside its window is refused at the same door, so a
+        // shop answering with a stale key cannot make us wear one.
+        let stale = CannedVerifier::owner(period.saturating_sub(3), "12345", "somestreamer");
+        let err = verify_twitch_owner_with(&stale.as_verifier(), "an-access-token", master)
+            .expect_err("a stale window must refuse");
+        assert!(err.contains("did not check out"), "{err}");
+        assert_eq!(stale.signed.get(), 0);
+    }
+
+    #[test]
+    fn a_follow_credential_must_name_the_channel_we_asked_about() {
+        let _lock = with_test_store();
+        let master = "master-peer-follow-channel";
+        let period = support_creds::now_period();
+        let parts = vec!["67890".to_string(), "30".to_string(), "0".to_string()];
+        let (item, parts) = support_creds::twitch_follow_item(&parts).expect("follow parts");
+        let verifier = CannedVerifier {
+            key: support_creds::testing::test_typed_key(T_TWITCH_FOLLOW, &item, period),
+            t: T_TWITCH_FOLLOW,
+            item: hex::encode(item),
+            parts,
+            period,
+            bad_chain: false,
+            signed: std::cell::Cell::new(0),
+        };
+
+        // The channel we asked about: fine.
+        let entry = mint_twitch_credential(&verifier.as_verifier(), "follow", "tok", Some("67890"), master)
+            .expect("the follow credential mints");
+        assert_eq!(entry.t, T_TWITCH_FOLLOW);
+
+        // A different one: refused before anything is blinded a second time.
+        let before = verifier.signed.get();
+        let err = mint_twitch_credential(&verifier.as_verifier(), "follow", "tok", Some("11111"), master)
+            .expect_err("a credential for another channel must refuse");
+        assert!(err.contains("different channel"), "{err}");
+        assert_eq!(verifier.signed.get(), before, "and nothing was blinded for it");
     }
 
     /// Manual live smoke against the real shop (network):

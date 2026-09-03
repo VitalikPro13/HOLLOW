@@ -19,15 +19,16 @@ import 'package:hollow/src/ui/shell/user_context_menu.dart';
 /// member panel), positioned near the tapped widget.
 ///
 /// Pass [serverId] from channel contexts: the sender's server membership
-/// (role, labels, nickname, Twitch) is resolved at tap time so the chat popup
-/// matches the member panel. DMs pass none — no server, no roles.
+/// (role, labels, nickname) is resolved at tap time so the chat popup matches
+/// the member panel. DMs pass none — no server, no roles. The Twitch chip is
+/// not plumbed through here at all: it draws from the subject's own verified
+/// credential (`twitchLoginProvider`), wherever the card is opened from.
 void showChatProfile(
   BuildContext context,
   WidgetRef ref, {
   required String peerId,
   String? nickname,
   String? role,
-  String? twitchUsername,
   List<crdt_api.LabelFfi>? labels,
   String? serverId,
 }) {
@@ -38,10 +39,6 @@ void showChatProfile(
     if (member != null) {
       role ??= member.role;
       labels ??= member.labels.isNotEmpty ? member.labels : null;
-      if (twitchUsername == null || twitchUsername.isEmpty) {
-        twitchUsername =
-            member.twitchUsername.isNotEmpty ? member.twitchUsername : null;
-      }
       if (nickname == null || nickname.isEmpty) {
         nickname = member.nickname.isNotEmpty ? member.nickname : null;
       }
@@ -52,7 +49,6 @@ void showChatProfile(
       context,
       peerId: peerId,
       role: role,
-      twitchUsername: twitchUsername,
       labels: labels,
     );
     return;
@@ -72,7 +68,6 @@ void showChatProfile(
     peerId: peerId,
     nickname: nickname,
     role: role,
-    twitchUsername: twitchUsername,
     labels: labels,
     serverId: serverId,
     anchorOf: anchorOf,
@@ -85,7 +80,6 @@ class ProfileTapTarget extends ConsumerWidget {
   final String peerId;
   final String? nickname;
   final String? role;
-  final String? twitchUsername;
   final List<crdt_api.LabelFfi>? labels;
   final String? serverId;
   final Widget child;
@@ -96,7 +90,6 @@ class ProfileTapTarget extends ConsumerWidget {
     required this.child,
     this.nickname,
     this.role,
-    this.twitchUsername,
     this.labels,
     this.serverId,
   });
@@ -123,7 +116,6 @@ class ProfileTapTarget extends ConsumerWidget {
           serverId: serverId,
           nickname: nickname,
           role: role,
-          twitchUsername: twitchUsername,
           labels: labels,
           anchor: anchor,
         ),
@@ -137,7 +129,6 @@ class ProfileTapTarget extends ConsumerWidget {
               peerId: peerId,
               nickname: nickname,
               role: role,
-              twitchUsername: twitchUsername,
               labels: labels,
               serverId: serverId,
             ),

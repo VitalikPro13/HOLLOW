@@ -595,6 +595,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   TwitchDeviceFlowResult dco_decode_twitch_device_flow_result(dynamic raw);
 
   @protected
+  TwitchVerifyOutcome dco_decode_twitch_verify_outcome(dynamic raw);
+
+  @protected
   int dco_decode_u_16(dynamic raw);
 
   @protected
@@ -1323,6 +1326,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   TwitchDeviceFlowResult sse_decode_twitch_device_flow_result(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  TwitchVerifyOutcome sse_decode_twitch_verify_outcome(
     SseDeserializer deserializer,
   );
 
@@ -2293,6 +2301,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_twitch_device_flow_result(
     TwitchDeviceFlowResult self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_twitch_verify_outcome(
+    TwitchVerifyOutcome self,
     SseSerializer serializer,
   );
 

@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use crate::crdt::server_state::ServerState;
+use crate::node::support_creds::{self, CredentialEntry, T_TWITCH_FOLLOW};
 
 pub(crate) const TWITCH_CLIENT_ID: &str = "z3piofwp5qr458qfn0ncn6a501ua05";
 
@@ -337,8 +338,78 @@ pub(crate) async fn generate_proof(
     })
 }
 
+// ── The follow credential gate (owner-side, offline) ───────────────
+
+/// What a new owner build says to a joiner still sending the old JSON.
+///
+/// The old shape was the joiner's own word for what Twitch told it: an
+/// unsigned JSON body carrying a user id, a follow date and a sub flag, which
+/// any modified client could write by hand. There is no way to salvage one,
+/// so it is refused outright rather than half-trusted.
+pub(crate) const OLD_PROOF_SENTENCE: &str =
+    "This server needs a verified Twitch follow. Update Hollow and try again.";
+
+/// Verify a joiner's follow credential against this server's Twitch settings.
+///
+/// OFFLINE, and that is the point: the owner contacts nobody. The credential
+/// carries its whole chain up to the root pinned in `support_creds.rs`, the
+/// blind signature inside it binds the JOINER's master peer id, and the claim
+/// itself is drawn from a fixed grid (a channel id, one of ten age buckets,
+/// one of four tiers) so it says what the gate needs and nothing more. A
+/// modified client cannot write one, and the credential never names the
+/// joiner's Twitch account, which is why it can also ride the join ring.
+///
+/// `min_follow_days` is compared against the BUCKET, so a setting rounds UP
+/// to the next bucket: "at least 10 days" is satisfied by the 14-day bucket,
+/// not by the 7-day one. The owner settings say so.
+pub(crate) fn validate_follow_credential(
+    entry_json: &str,
+    joiner_master: &str,
+    settings: &TwitchServerSettings,
+) -> Result<(), String> {
+    // An old-shape proof deserializes into an entry of all defaults (`t` 0),
+    // so one check covers both "not a credential" and "not a follow one".
+    let entry: CredentialEntry =
+        serde_json::from_str(entry_json).map_err(|_| OLD_PROOF_SENTENCE.to_string())?;
+    if entry.t != T_TWITCH_FOLLOW {
+        return Err(OLD_PROOF_SENTENCE.to_string());
+    }
+    let verified = support_creds::verify_entry(
+        &entry, joiner_master, &support_creds::root_verifying_key(),
+    )
+    .map_err(|_| {
+        format!(
+            "That Twitch check did not verify, so {} could not let you in",
+            settings.channel_name
+        )
+    })?;
+
+    if verified.parts.first().map(String::as_str) != Some(settings.channel_id.as_str()) {
+        return Err("That Twitch check is for a different channel".to_string());
+    }
+    let bucket: u32 = verified
+        .parts
+        .get(1)
+        .and_then(|b| b.parse().ok())
+        .unwrap_or(0);
+    if bucket < settings.min_follow_days {
+        return Err(format!(
+            "You must follow {} for at least {} days",
+            settings.channel_name, settings.min_follow_days
+        ));
+    }
+    if settings.require_sub && verified.parts.get(2).map(String::as_str) == Some("0") {
+        return Err(format!(
+            "You must be subscribed to {} to join this server",
+            settings.channel_name
+        ));
+    }
+    Ok(())
+}
+
 // ── Proof validation (server-side, sync — no network calls) ────────
 
+#[allow(dead_code)] // the old shape, kept for the sentence it is refused with
 pub(crate) fn validate_proof(
     proof: &TwitchProof,
     settings: &TwitchServerSettings,

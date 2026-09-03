@@ -32,7 +32,6 @@ void showProfileCardPopup({
   required String peerId,
   String? nickname,
   String? role,
-  String? twitchUsername,
   List<crdt_api.LabelFfi>? labels,
   String? serverId,
   required Offset Function() anchorOf,
@@ -44,7 +43,6 @@ void showProfileCardPopup({
       peerId: peerId,
       nickname: nickname,
       role: role,
-      twitchUsername: twitchUsername,
       labels: labels,
       serverId: serverId,
     );
@@ -59,7 +57,6 @@ void showProfileCardPopup({
       peerId: peerId,
       nickname: nickname,
       role: role,
-      twitchUsername: twitchUsername,
       labels: labels,
       serverId: serverId,
       anchorOf: anchorOf,
@@ -79,7 +76,6 @@ class _ProfileCardOverlay extends ConsumerStatefulWidget {
   final String peerId;
   final String? nickname;
   final String? role;
-  final String? twitchUsername;
   final List<crdt_api.LabelFfi>? labels;
   final String? serverId;
   final Offset Function() anchorOf;
@@ -90,7 +86,6 @@ class _ProfileCardOverlay extends ConsumerStatefulWidget {
     required this.peerId,
     required this.nickname,
     required this.role,
-    this.twitchUsername,
     this.labels,
     this.serverId,
     required this.anchorOf,
@@ -211,7 +206,6 @@ class _ProfileCardOverlayState extends ConsumerState<_ProfileCardOverlay>
       peerId: widget.peerId,
       nickname: widget.nickname,
       role: widget.role,
-      twitchUsername: widget.twitchUsername,
       labels: widget.labels,
       serverId: widget.serverId,
     );
@@ -305,7 +299,6 @@ class _ProfileCardOverlayState extends ConsumerState<_ProfileCardOverlay>
                     peerId: widget.peerId,
                     nickname: widget.nickname,
                     role: widget.role,
-                    twitchUsername: widget.twitchUsername,
                     labels: widget.labels,
                     serverId: widget.serverId,
                     density: ProfileCardDensity.compact,

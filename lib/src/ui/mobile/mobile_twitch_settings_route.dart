@@ -11,6 +11,7 @@ import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
+import '../components/follow_days_steps.dart';
 
 class MobileTwitchSettingsRoute extends ConsumerStatefulWidget {
   final String serverId;
@@ -231,14 +232,21 @@ class _MobileTwitchSettingsRouteState
                           const SizedBox(height: HollowSpacing.lg),
 
                           // Min follow days
-                          Text('Minimum Follow Days', style: HollowTypography.caption.copyWith(
+                          Text('Minimum follow days', style: HollowTypography.caption.copyWith(
                             color: hollow.textSecondary,
                           )),
                           const SizedBox(height: HollowSpacing.xs),
-                          HollowTextField(
-                            controller: _minDaysController,
-                            hintText: '0',
-                            maxLength: 4,
+                          Text(
+                            'How many days someone must have been following before they can join. Any means just following.',
+                            style: HollowTypography.caption.copyWith(
+                              color: hollow.textSecondary,
+                              fontSize: 10,
+                            ),
+                          ),
+                          const SizedBox(height: HollowSpacing.xs),
+                          FollowDaysSteps(
+                            value: int.tryParse(_minDaysController.text.trim()) ?? 0,
+                            onChanged: (v) => setState(() => _minDaysController.text = '$v'),
                           ),
 
                           const SizedBox(height: HollowSpacing.lg),

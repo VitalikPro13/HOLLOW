@@ -81,7 +81,6 @@ void showUserContextMenu({
   String? serverId,
   String? nickname,
   String? role,
-  String? twitchUsername,
   List<crdt_api.LabelFfi>? labels,
   UserMenuSurface surface = UserMenuSurface.generic,
   String? routablePeerId,
@@ -103,7 +102,6 @@ void showUserContextMenu({
       serverId: serverId,
       nickname: nickname,
       role: role,
-      twitchUsername: twitchUsername,
       labels: labels,
       surface: surface,
       routablePeerId: routablePeerId,
@@ -126,7 +124,6 @@ List<HollowMenuEntry> userMenuEntries({
   String? serverId,
   String? nickname,
   String? role,
-  String? twitchUsername,
   List<crdt_api.LabelFfi>? labels,
   UserMenuSurface surface = UserMenuSurface.generic,
   String? routablePeerId,
@@ -162,7 +159,6 @@ List<HollowMenuEntry> userMenuEntries({
       anchor: anchor,
       nickname: nickname,
       role: role,
-      twitchUsername: twitchUsername,
       labels: labels,
       serverId: serverId,
     ),
@@ -420,7 +416,6 @@ void _openProfile(
   required Offset anchor,
   String? nickname,
   String? role,
-  String? twitchUsername,
   List<crdt_api.LabelFfi>? labels,
   String? serverId,
 }) {
@@ -430,8 +425,6 @@ void _openProfile(
     peerId: peerId,
     nickname: (nickname != null && nickname.isNotEmpty) ? nickname : null,
     role: role,
-    twitchUsername:
-        (twitchUsername != null && twitchUsername.isNotEmpty) ? twitchUsername : null,
     labels: (labels != null && labels.isNotEmpty) ? labels : null,
     serverId: serverId,
     // Nothing to follow: this came from a menu row that is already gone, so

@@ -1127,14 +1127,16 @@ pub(crate) fn pending_join_row(
 
 /// Write the parked copy of a request into the server room's `~join` ring.
 ///
-/// The copy deliberately drops `twitch_proof_json`. The live unicast copy is
-/// seen by members and the relay; a RING copy can be pulled by ANY socket in
-/// the room, i.e. anyone holding the invite, for the ring's whole retention.
-/// A peer id in there is accepted exposure; a Twitch account name tied to that
-/// peer id is not. A member reading a proofless request on a Twitch-gated
-/// server does nothing with it (see the `parked` rules in the request handler),
-/// so the join simply waits for co-presence, where the live copy still carries
-/// the proof and today's gate runs unchanged.
+/// The copy CARRIES `twitch_proof_json`, which it did not before 2026-09-03.
+/// A ring frame can be pulled by any socket in the room, i.e. anyone holding
+/// the invite, for the ring's whole retention — so what rides it has to be
+/// readable by strangers without cost. The old proof was a JSON body naming a
+/// Twitch account, which it is not; a follow CREDENTIAL names a channel id, an
+/// age bucket and a subscription tier, all of them facts about the server's
+/// own channel, and binds them to the joiner's master with a blind signature
+/// that reveals nothing else. That is what lifts the strip: a Twitch-gated
+/// server now parks and resolves like every other one, instead of waiting for
+/// co-presence.
 pub(crate) fn deposit_parked_join(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     server_id: &str,
@@ -1142,7 +1144,7 @@ pub(crate) fn deposit_parked_join(
 ) {
     let data = serde_json::to_vec(&HavenMessage::ServerJoinRequest {
         server_id: server_id.to_string(),
-        twitch_proof_json: None,
+        twitch_proof_json: pending.twitch_proof_json.clone(),
         nsfw_confirmed: pending.nsfw_confirmed,
         requested_at: pending.requested_at,
         device_list: pending.device_list.clone(),

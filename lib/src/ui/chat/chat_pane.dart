@@ -33,6 +33,7 @@ import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/peers_provider.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
 import 'package:hollow/src/core/providers/voice_channel_provider.dart';
+import 'package:hollow/src/core/providers/support_marks_provider.dart';
 import 'package:hollow/src/core/providers/speaking_provider.dart';
 import 'package:hollow/src/ui/components/call_duration_text.dart';
 import 'package:hollow/src/core/providers/recording_provider.dart';
@@ -4635,6 +4636,7 @@ class _DmProfilePanel extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
     final profile = ref.watch(profileProvider.select((p) => p[peerId]));
+    final verifiedTwitch = ref.watch(twitchLoginProvider(peerId));
     final localNicknames = ref.watch(localNicknameProvider);
     final localNick = localNicknames[peerId];
     final isOnline = identityIsOnline(ref, peerId);
@@ -4708,10 +4710,12 @@ class _DmProfilePanel extends ConsumerWidget {
                       textAlign: TextAlign.center,
                     ),
                   ],
-                  // Twitch badge
-                  if (profile != null && profile.twitchUsername.isNotEmpty) ...[
+                  // Twitch badge — a VERIFIED account only. The profile's
+                  // own `twitch_username` is a self-declaration, so a new
+                  // client draws nothing for it (`twitchLoginProvider`).
+                  if (verifiedTwitch != null) ...[
                     const SizedBox(height: HollowSpacing.xs),
-                    _buildTwitchBadge(hollow, profile.twitchUsername),
+                    _buildTwitchBadge(hollow, verifiedTwitch),
                   ],
                 ],
               ),
@@ -4867,10 +4871,12 @@ class _DmProfilePanel extends ConsumerWidget {
     ];
   }
 
-  Widget _buildTwitchBadge(HollowTheme hollow, String twitchUsername) {
+  /// [login] is a VERIFIED Twitch account (`twitchLoginProvider`); there is
+  /// no other source for this badge.
+  Widget _buildTwitchBadge(HollowTheme hollow, String login) {
     return GestureDetector(
       onTap: () => launchUrl(
-        Uri.parse('https://twitch.tv/$twitchUsername'),
+        Uri.parse('https://twitch.tv/$login'),
         mode: LaunchMode.externalApplication,
       ),
       child: Container(
@@ -4888,7 +4894,7 @@ class _DmProfilePanel extends ConsumerWidget {
             const Icon(BrandIcons.twitch, size: 11, color: Color(0xFF9146FF)),
             const SizedBox(width: 4),
             Text(
-              twitchUsername,
+              login,
               style: HollowTypography.caption.copyWith(
                 color: const Color(0xFF9146FF),
                 fontSize: 11,

@@ -7,9 +7,8 @@ import 'package:hollow/src/core/providers/avatar_provider.dart';
 import 'package:hollow/src/core/providers/banner_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
-import 'package:hollow/src/core/providers/server_provider.dart';
-import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
-import 'package:hollow/src/rust/api/twitch.dart' as twitch_api;
+import 'package:hollow/src/core/providers/support_marks_provider.dart';
+import 'package:hollow/src/core/providers/twitch_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
@@ -139,7 +138,7 @@ class ProfileSection extends ConsumerWidget {
           // ── Connections ──
           const SettingsSectionLabel(label: 'CONNECTIONS'),
           const SizedBox(height: HollowSpacing.sm),
-          _TwitchConnectionRow(hollow: hollow),
+          TwitchConnectionRow(hollow: hollow),
 
           // Profile keeps an explicit Save button — text fields and cropped
           // images benefit from a single commit, unlike the auto-saving toggles
@@ -544,21 +543,33 @@ class _ImageRow extends StatelessWidget {
 
 // ── Twitch Connection Widget ──────────────────────────────────────
 
-class _TwitchConnectionRow extends ConsumerStatefulWidget {
+/// Connect, verify and disconnect a Twitch account.
+///
+/// Public because it is what the widget test drives: every state it can be in
+/// (busy, verified, connected but not verified, disconnected) is one this row
+/// paints, and the rest of Settings > Profile needs a running node to pump.
+class TwitchConnectionRow extends ConsumerStatefulWidget {
   final HollowTheme hollow;
 
-  const _TwitchConnectionRow({required this.hollow});
+  const TwitchConnectionRow({super.key, required this.hollow});
 
   @override
-  ConsumerState<_TwitchConnectionRow> createState() =>
+  ConsumerState<TwitchConnectionRow> createState() =>
       _TwitchConnectionRowState();
 }
 
-class _TwitchConnectionRowState extends ConsumerState<_TwitchConnectionRow> {
+class _TwitchConnectionRowState extends ConsumerState<TwitchConnectionRow> {
   bool _connected = false;
   String? _userId;
   String? _username;
   bool _loading = true;
+  /// A verify or a disconnect is in flight: both talk to the shop, so the
+  /// buttons say so rather than looking dead.
+  bool _busy = false;
+  /// The login on our verified credential, or null when we hold none. This is
+  /// what the purple chip draws, so the row says which of the two states we
+  /// are in rather than only whether a token exists.
+  String? _verifiedLogin;
 
   @override
   void initState() {
@@ -568,14 +579,16 @@ class _TwitchConnectionRowState extends ConsumerState<_TwitchConnectionRow> {
 
   Future<void> _checkConnection() async {
     try {
-      final connected = await twitch_api.twitchIsConnected();
-      final userId = connected ? await twitch_api.twitchGetUserId() : null;
-      final username = connected ? await twitch_api.twitchGetUsername() : null;
+      final ffi = ref.read(twitchFfiProvider);
+      final connected = await ffi.isConnected();
+      final userId = connected ? await ffi.userId() : null;
+      final username = connected ? await ffi.username() : null;
       if (mounted) {
         setState(() {
           _connected = connected;
           _userId = userId;
           _username = username;
+          _verifiedLogin = _myVerifiedLogin();
           _loading = false;
         });
       }
@@ -584,58 +597,79 @@ class _TwitchConnectionRowState extends ConsumerState<_TwitchConnectionRow> {
     }
   }
 
+  /// The verified login on OUR profile row, read the same way every viewer
+  /// reads it.
+  String? _myVerifiedLogin() {
+    final me = ref.read(identityProvider).peerId;
+    if (me == null) return null;
+    return ref.read(twitchLoginProvider(me));
+  }
+
+  /// Ask the shop to verify the connected account and wear the credential.
+  ///
+  /// Every outcome is visible: a spinner while it runs, a toast on a refusal
+  /// with the shop's own sentence, and the login on the row when it lands.
+  Future<void> _verifyAccount() async {
+    if (_busy) return;
+    setState(() => _busy = true);
+    try {
+      final outcome = await ref.read(twitchFfiProvider).verifyOwner();
+      if (!mounted) return;
+      setState(() {
+        _verifiedLogin = outcome.verified ? outcome.login : null;
+        _busy = false;
+      });
+      if (outcome.verified) {
+        HollowToast.show(context, 'Twitch verified as ${outcome.login}',
+            type: HollowToastType.success);
+      } else {
+        HollowToast.show(context, outcome.message, type: HollowToastType.error);
+      }
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _busy = false);
+      HollowToast.show(context, 'Could not verify Twitch: $e',
+          type: HollowToastType.error);
+    }
+  }
+
+  /// Connect, then verify.
+  ///
+  /// The connection alone proves nothing to anybody else: what a viewer sees
+  /// is the CREDENTIAL, so the sign in runs straight into the verify rather
+  /// than leaving the account connected and unverified. The old per-server
+  /// `setTwitchUsername` writes are gone with it; a self-declared handle is
+  /// not rendered by any new client.
   Future<void> _connect() async {
     if (!mounted) return;
     showTwitchDeviceCodeDialog(context, onSuccess: () async {
-      _checkConnection();
-      // Set Twitch badge on all Twitch-enabled servers
-      try {
-        final username = await twitch_api.twitchGetUsername();
-        final localPeerId = ref.read(identityProvider).peerId;
-        if (username != null && username.isNotEmpty && localPeerId != null) {
-          final servers = ref.read(serverListProvider);
-          for (final server in servers.values) {
-            final enabled = await crdt_api.getServerSetting(
-                serverId: server.serverId, key: 'twitch_verification_enabled');
-            if (enabled == 'true') {
-              await crdt_api.setTwitchUsername(
-                  serverId: server.serverId,
-                  peerId: localPeerId,
-                  twitchUsername: username);
-            }
-          }
-        }
-      } catch (_) {}
+      await _checkConnection();
+      await _verifyAccount();
     });
   }
 
   Future<void> _disconnect() async {
+    if (_busy) return;
+    setState(() => _busy = true);
     try {
-      await twitch_api.twitchDisconnect();
-      // Clear Twitch username from all servers
-      try {
-        final localPeerId = ref.read(identityProvider).peerId;
-        if (localPeerId != null) {
-          final servers = ref.read(serverListProvider);
-          for (final server in servers.values) {
-            await crdt_api.setTwitchUsername(
-                serverId: server.serverId,
-                peerId: localPeerId,
-                twitchUsername: '');
-          }
-        }
-      } catch (_) {}
+      // Rust drops the account credential and republishes BEFORE it wipes the
+      // token: the credential is a 90-day fact everyone verifies offline, so
+      // the token alone going away would leave a verified chip behind.
+      await ref.read(twitchFfiProvider).disconnect();
       if (mounted) {
         setState(() {
           _connected = false;
           _userId = null;
           _username = null;
+          _verifiedLogin = null;
+          _busy = false;
         });
         HollowToast.show(context, 'Twitch disconnected',
             type: HollowToastType.info);
       }
     } catch (e) {
       if (mounted) {
+        setState(() => _busy = false);
         HollowToast.show(context, 'Failed to disconnect: $e',
             type: HollowToastType.error);
       }
@@ -663,10 +697,18 @@ class _TwitchConnectionRowState extends ConsumerState<_TwitchConnectionRow> {
                 style: HollowTypography.body
                     .copyWith(color: hollow.textPrimary),
               ),
-              if (_connected && (_username != null || _userId != null))
+              if (_verifiedLogin != null)
+                Text(
+                  'Verified as $_verifiedLogin',
+                  style: HollowTypography.caption.copyWith(
+                    color: hollow.textSecondary,
+                    fontSize: 10,
+                  ),
+                )
+              else if (_connected && (_username != null || _userId != null))
                 Text(
                   _username != null
-                      ? 'Connected as $_username'
+                      ? 'Connected as $_username, not verified yet'
                       : 'Connected (ID: ${_userId!.length > 12 ? '${_userId!.substring(0, 12)}...' : _userId!})',
                   style: HollowTypography.caption.copyWith(
                     color: hollow.textSecondary,
@@ -675,7 +717,7 @@ class _TwitchConnectionRowState extends ConsumerState<_TwitchConnectionRow> {
                 )
               else
                 Text(
-                  'Connect to join Twitch-verified servers',
+                  'Connect to wear a verified Twitch mark and join Twitch-verified servers',
                   style: HollowTypography.caption.copyWith(
                     color: hollow.textSecondary,
                     fontSize: 10,
@@ -684,13 +726,31 @@ class _TwitchConnectionRowState extends ConsumerState<_TwitchConnectionRow> {
             ],
           ),
         ),
-        if (_connected)
+        if (_busy)
+          const Padding(
+            padding: EdgeInsets.symmetric(horizontal: HollowSpacing.md),
+            child: SizedBox(
+              width: 14,
+              height: 14,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            ),
+          )
+        else if (_connected) ...[
+          // Connected but not verified: the account is signed in and the mark
+          // is one press away, so offer it rather than making them disconnect
+          // and start again.
+          if (_verifiedLogin == null)
+            HollowButton.outline(
+              onPressed: _verifyAccount,
+              compact: true,
+              child: const Text('Verify'),
+            ),
           HollowButton.ghost(
             onPressed: _disconnect,
             compact: true,
             child: const Text('Disconnect'),
-          )
-        else
+          ),
+        ] else
           HollowButton.outline(
             onPressed: _connect,
             compact: true,

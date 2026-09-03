@@ -3,7 +3,10 @@ use std::sync::{Mutex, OnceLock};
 use flutter_rust_bridge::frb;
 
 use super::network::get_runtime;
+use super::shop::{self, TwitchVerifier};
 use super::storage::get_store;
+use crate::hollow_log;
+use crate::node::support_creds;
 use crate::node::twitch;
 
 // ── In-memory token cache ───────────────────────────────────────────
@@ -27,6 +30,21 @@ pub struct TwitchDeviceFlowResult {
     pub verification_uri: String,
     pub device_code: String,
     pub interval_secs: u64,
+}
+
+/// What [`twitch_verify_owner`] came back with.
+///
+/// Not a `Result`: a refusal from the shop (a stale token, a rate limit,
+/// Twitch itself being down) is an ANSWER, and the caller shows its sentence
+/// rather than treating it as a crash. `Err` is kept for the things that stop
+/// the call happening at all, like no connected account.
+pub struct TwitchVerifyOutcome {
+    /// The credential is minted, kept and announced.
+    pub verified: bool,
+    /// The login the purple chip will draw. Empty unless `verified`.
+    pub login: String,
+    /// What to tell the user when it is not verified. Empty on success.
+    pub message: String,
 }
 
 // ── Settings keys ───────────────────────────────────────────────────
@@ -173,6 +191,21 @@ pub fn twitch_generate_proof(broadcaster_id: String) -> Result<String, String> {
 
 #[frb]
 pub fn twitch_disconnect() -> Result<(), String> {
+    // The chip goes with the connection, and it goes FIRST: the credential
+    // outlives the token by design (it is a 90-day fact, verified offline by
+    // everyone who sees it), so wiping the token alone would leave a verified
+    // Twitch chip on a profile whose owner just disconnected.
+    match shop::forget_twitch_owner_creds() {
+        Ok(Some((master, json))) => {
+            let _ = shop::announce_support_creds(&master, json);
+        }
+        Ok(None) => {}
+        Err(e) => {
+            hollow_log!("[HOLLOW-TWITCH] Could not drop the account credential on disconnect: {e}");
+            return Err(format!("Could not remove the verified Twitch mark: {e}"));
+        }
+    }
+
     save_tw_setting(KEY_REFRESH_TOKEN, "")?;
     save_tw_setting(KEY_USER_ID, "")?;
     save_tw_setting(KEY_TWITCH_USERNAME, "")?;
@@ -181,6 +214,125 @@ pub fn twitch_disconnect() -> Result<(), String> {
     *cache = None;
 
     Ok(())
+}
+
+// ── Verified Twitch credentials ─────────────────────────────────────
+//
+// The token never leaves this machine for anyone but the shop's verifier,
+// which reads it, asks Twitch, and blind-signs what Twitch said. What comes
+// back binds OUR master peer id and nothing else, so the shop cannot tell
+// which Hollow identity it vouched for and a viewer needs nothing but the
+// pinned root to check it.
+
+/// A fresh access token, or the sentence to show instead.
+fn access_token() -> Result<String, String> {
+    if !twitch_ensure_token()? {
+        return Err("Connect Twitch first".to_string());
+    }
+    let cache = get_token_cache().lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+    cache
+        .as_ref()
+        .map(|c| c.access_token.clone())
+        .ok_or_else(|| "Connect Twitch first".to_string())
+}
+
+fn verifier() -> TwitchVerifier<'static> {
+    TwitchVerifier::http(shop::shop_origin())
+}
+
+/// Verify the connected Twitch account and wear the credential.
+///
+/// What the Connect flow ends with, and what the purple chip draws from. The
+/// credential is kept and announced in one profile save; nothing else on the
+/// profile changes.
+#[frb]
+pub fn twitch_verify_owner() -> Result<TwitchVerifyOutcome, String> {
+    let master = super::network::get_local_peer_id()
+        .ok_or("Hollow is still starting; try again in a moment")?;
+    let token = access_token()?;
+    match shop::verify_twitch_owner_with(&verifier(), &token, &master) {
+        Ok((login, json)) => {
+            shop::announce_support_creds(&master, json)?;
+            Ok(TwitchVerifyOutcome { verified: true, login, message: String::new() })
+        }
+        Err(message) => Ok(TwitchVerifyOutcome {
+            verified: false,
+            login: String::new(),
+            message,
+        }),
+    }
+}
+
+/// Verify that we follow `broadcaster_id`, and answer the credential as JSON.
+///
+/// This is what rides a join request to a Twitch-gated server. It never
+/// touches the profile: a follow credential names a channel somebody watches,
+/// which is theirs to hand to that channel's server and to nobody else
+/// (`support_creds::keep_verified` caps it at zero in both directions).
+#[frb]
+pub fn twitch_verify_follow(broadcaster_id: String) -> Result<String, String> {
+    let bid = broadcaster_id.trim().to_string();
+    if !support_creds::valid_twitch_id(&bid) {
+        return Err("That server does not name a Twitch channel".to_string());
+    }
+    let master = super::network::get_local_peer_id()
+        .ok_or("Hollow is still starting; try again in a moment")?;
+    let token = access_token()?;
+    let entry = shop::mint_twitch_credential(&verifier(), "follow", &token, Some(&bid), &master)?;
+    serde_json::to_string(&entry).map_err(|e| format!("Could not read the credential: {e}"))
+}
+
+/// When this device last tried to refresh the account credential.
+static LAST_MAINTAIN: OnceLock<Mutex<Option<std::time::Instant>>> = OnceLock::new();
+
+/// Keep the account credential fresh, silently.
+///
+/// A credential is minted for a 90-day window and verifies for that window
+/// and the one after it, so there is a whole window in which to renew it from
+/// the persisted refresh token without asking the user for anything. Called
+/// at start-up; the cooldown below is what keeps a long-running app from
+/// asking the shop more than once a day.
+///
+/// Answers whether a fresh credential was minted. Every refusal is a `false`,
+/// never an error the user sees: this runs behind their back.
+#[frb]
+pub fn twitch_maintain_owner_credential() -> Result<bool, String> {
+    {
+        let mut last = LAST_MAINTAIN
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+            .map_err(|e| format!("Lock poisoned: {e}"))?;
+        let now = std::time::Instant::now();
+        if let Some(at) = *last {
+            if now.duration_since(at) < std::time::Duration::from_secs(86_400) {
+                return Ok(false);
+            }
+        }
+        *last = Some(now);
+    }
+    if !twitch_is_connected().unwrap_or(false) {
+        return Ok(false);
+    }
+    // Already minted in the window we are standing in: nothing to do. An
+    // absent credential is a build that connected Twitch before credentials
+    // existed, and it wants one.
+    if let Some(entry) = shop::own_twitch_owner_entry() {
+        if entry.period == support_creds::now_period() {
+            return Ok(false);
+        }
+    }
+    match twitch_verify_owner() {
+        Ok(outcome) => {
+            if !outcome.verified {
+                hollow_log!("[HOLLOW-TWITCH] Silent re-verify did not land: {}", outcome.message);
+            }
+            Ok(outcome.verified)
+        }
+        Err(e) => {
+            hollow_log!("[HOLLOW-TWITCH] Silent re-verify skipped: {e}");
+            Ok(false)
+        }
+    }
 }
 
 #[frb]

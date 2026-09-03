@@ -10,7 +10,6 @@ import 'package:hollow/src/core/providers/profile_anim_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/relay_domain_provider.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
-import 'package:hollow/src/rust/api/twitch.dart' as twitch_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
@@ -553,12 +552,11 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
       final status = widget.statusController.text.trim();
       final aboutMe = widget.aboutMeController.text.trim();
 
-      // Save profile (include Twitch username if connected).
-      String twitchUsername = '';
-      try {
-        final tw = await twitch_api.twitchGetUsername();
-        if (tw != null && tw.isNotEmpty) twitchUsername = tw;
-      } catch (_) {}
+      // The legacy `twitch_username` field is carried through UNCHANGED. It is
+      // a self-declaration, no new client renders it, and the verified mark it
+      // was standing in for lives in `support_creds` now; writing it here from
+      // a connected account would only keep an unverifiable claim alive on the
+      // wire for the sake of old builds that already have one.
       await ref.read(profileProvider.notifier).updateMyProfile(
             displayName: displayName,
             status: status,
@@ -572,7 +570,11 @@ class _UserSettingsContentState extends ConsumerState<_UserSettingsContent> {
             bannerBytes: _bannerChanged
                 ? (_pendingBannerStill ?? _pendingBannerBytes)
                 : null,
-            twitchUsername: twitchUsername,
+            twitchUsername: ref
+                    .read(profileProvider)[
+                        ref.read(identityProvider).peerId ?? '']
+                    ?.twitchUsername ??
+                '',
             avatarFrame: _frameChanged ? (_pendingFrameId ?? '') : null,
             avatarAnim: _avatarChanged ? (_pendingAvatarAnim ?? '') : null,
             bannerAnim: _bannerChanged ? (_pendingBannerAnim ?? '') : null,

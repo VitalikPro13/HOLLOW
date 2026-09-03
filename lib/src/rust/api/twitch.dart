@@ -6,7 +6,7 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `get_token_cache`, `load_tw_setting`, `save_tw_setting`
+// These functions are ignored because they are not marked as `pub`: `access_token`, `get_token_cache`, `load_tw_setting`, `save_tw_setting`, `verifier`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `CachedToken`
 
 Future<TwitchDeviceFlowResult> twitchStartDeviceFlow() =>
@@ -30,6 +30,38 @@ Future<String> twitchGenerateProof({required String broadcasterId}) => RustLib
 
 Future<void> twitchDisconnect() =>
     RustLib.instance.api.crateApiTwitchTwitchDisconnect();
+
+/// Verify the connected Twitch account and wear the credential.
+///
+/// What the Connect flow ends with, and what the purple chip draws from. The
+/// credential is kept and announced in one profile save; nothing else on the
+/// profile changes.
+Future<TwitchVerifyOutcome> twitchVerifyOwner() =>
+    RustLib.instance.api.crateApiTwitchTwitchVerifyOwner();
+
+/// Verify that we follow `broadcaster_id`, and answer the credential as JSON.
+///
+/// This is what rides a join request to a Twitch-gated server. It never
+/// touches the profile: a follow credential names a channel somebody watches,
+/// which is theirs to hand to that channel's server and to nobody else
+/// (`support_creds::keep_verified` caps it at zero in both directions).
+Future<String> twitchVerifyFollow({required String broadcasterId}) => RustLib
+    .instance
+    .api
+    .crateApiTwitchTwitchVerifyFollow(broadcasterId: broadcasterId);
+
+/// Keep the account credential fresh, silently.
+///
+/// A credential is minted for a 90-day window and verifies for that window
+/// and the one after it, so there is a whole window in which to renew it from
+/// the persisted refresh token without asking the user for anything. Called
+/// at start-up; the cooldown below is what keeps a long-running app from
+/// asking the shop more than once a day.
+///
+/// Answers whether a fresh credential was minted. Every refusal is a `false`,
+/// never an error the user sees: this runs behind their back.
+Future<bool> twitchMaintainOwnerCredential() =>
+    RustLib.instance.api.crateApiTwitchTwitchMaintainOwnerCredential();
 
 Future<bool> twitchIsConnected() =>
     RustLib.instance.api.crateApiTwitchTwitchIsConnected();
@@ -69,4 +101,39 @@ class TwitchDeviceFlowResult {
           verificationUri == other.verificationUri &&
           deviceCode == other.deviceCode &&
           intervalSecs == other.intervalSecs;
+}
+
+/// What [`twitch_verify_owner`] came back with.
+///
+/// Not a `Result`: a refusal from the shop (a stale token, a rate limit,
+/// Twitch itself being down) is an ANSWER, and the caller shows its sentence
+/// rather than treating it as a crash. `Err` is kept for the things that stop
+/// the call happening at all, like no connected account.
+class TwitchVerifyOutcome {
+  /// The credential is minted, kept and announced.
+  final bool verified;
+
+  /// The login the purple chip will draw. Empty unless `verified`.
+  final String login;
+
+  /// What to tell the user when it is not verified. Empty on success.
+  final String message;
+
+  const TwitchVerifyOutcome({
+    required this.verified,
+    required this.login,
+    required this.message,
+  });
+
+  @override
+  int get hashCode => verified.hashCode ^ login.hashCode ^ message.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is TwitchVerifyOutcome &&
+          runtimeType == other.runtimeType &&
+          verified == other.verified &&
+          login == other.login &&
+          message == other.message;
 }

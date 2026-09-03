@@ -18,7 +18,6 @@ import 'package:hollow/src/core/providers/verified_peers_provider.dart';
 import 'package:hollow/src/core/providers/support_marks_provider.dart';
 import 'package:hollow/src/core/role_hierarchy.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
-import 'package:hollow/src/rust/api/twitch.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
@@ -67,7 +66,6 @@ class ProfileCardBody extends ConsumerStatefulWidget {
   final String peerId;
   final String? nickname;
   final String? role;
-  final String? twitchUsername;
   final List<crdt_api.LabelFfi>? labels;
 
   /// Server context (member panel / channel chat). Enables the permission-
@@ -84,7 +82,6 @@ class ProfileCardBody extends ConsumerStatefulWidget {
     required this.dismissHost,
     this.nickname,
     this.role,
-    this.twitchUsername,
     this.labels,
     this.serverId,
     this.onExpand,
@@ -95,37 +92,7 @@ class ProfileCardBody extends ConsumerStatefulWidget {
 }
 
 class _ProfileCardBodyState extends ConsumerState<ProfileCardBody> {
-  String? _resolvedTwitchUsername;
-
   bool get _compact => widget.density == ProfileCardDensity.compact;
-
-  @override
-  void initState() {
-    super.initState();
-    _resolvedTwitchUsername = widget.twitchUsername;
-    if (_resolvedTwitchUsername == null || _resolvedTwitchUsername!.isEmpty) {
-      _resolveTwitchUsername();
-    }
-  }
-
-  Future<void> _resolveTwitchUsername() async {
-    try {
-      final localPeerId = ref.read(identityProvider).peerId;
-      if (widget.peerId == localPeerId) {
-        final username = await twitchGetUsername();
-        if (mounted && username != null && username.isNotEmpty) {
-          setState(() => _resolvedTwitchUsername = username);
-          return;
-        }
-      }
-      // Fallback: check profile DB for any peer's Twitch username
-      final profiles = ref.read(profileProvider);
-      final profile = profiles[widget.peerId];
-      if (mounted && profile != null && profile.twitchUsername.isNotEmpty) {
-        setState(() => _resolvedTwitchUsername = profile.twitchUsername);
-      }
-    } catch (_) {}
-  }
 
   @override
   Widget build(BuildContext context) {
@@ -538,8 +505,13 @@ class _ProfileCardBodyState extends ConsumerState<ProfileCardBody> {
 
   /// The Twitch integration chip — placed in the corner band under the
   /// banner (not in the role/label row): integrations get their own spot.
+  ///
+  /// Drawn ONLY from a verified account credential (`twitchLoginProvider`).
+  /// The old `twitch_username` profile field is a self-declaration any
+  /// modified client can write, so it renders nothing at all rather than a
+  /// chip that says "claims to be" (Vitalik, 2026-09-03).
   Widget? _twitchChip() {
-    final twitch = _resolvedTwitchUsername;
+    final twitch = ref.watch(twitchLoginProvider(widget.peerId));
     if (twitch == null || twitch.isEmpty) return null;
     return _ProfileChip(
       text: twitch,

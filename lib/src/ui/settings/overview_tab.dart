@@ -27,6 +27,7 @@ import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:atlas_icons/atlas_icons.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:hollow/src/core/brand_icons.dart';
+import '../components/follow_days_steps.dart';
 
 /// Overview tab — server settings (admin+) and server identity (all members).
 class OverviewTab extends ConsumerStatefulWidget {
@@ -538,18 +539,6 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
       await crdt_api.updateServerSetting(serverId: sid, key: 'twitch_min_follow_days', value: _twitchMinDaysController.text.trim());
       await crdt_api.updateServerSetting(serverId: sid, key: 'twitch_require_sub', value: _twitchRequireSub ? 'true' : 'false');
       await crdt_api.updateServerSetting(serverId: sid, key: 'twitch_owner_verify', value: _twitchOwnerVerify ? 'true' : 'false');
-
-      // Set owner's Twitch username badge if they have a connected account
-      if (_twitchEnabled) {
-        final username = await twitch_api.twitchGetUsername();
-        if (username != null && username.isNotEmpty) {
-          final localPeerId = ref.read(identityProvider).peerId;
-          if (localPeerId != null) {
-            await crdt_api.setTwitchUsername(
-                serverId: sid, peerId: localPeerId, twitchUsername: username);
-          }
-        }
-      }
 
       if (mounted) {
         HollowToast.show(context, 'Twitch settings saved', type: HollowToastType.success);
@@ -1218,20 +1207,16 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
             ),
             const SizedBox(height: HollowSpacing.xs),
             Text(
-              'How many days someone must have been following before they can join. 0 = just following.',
+              'How many days someone must have been following before they can join. Any means just following.',
               style: HollowTypography.caption.copyWith(
                 color: hollow.textSecondary,
                 fontSize: 10,
               ),
             ),
             const SizedBox(height: HollowSpacing.sm),
-            SizedBox(
-              width: 100,
-              child: HollowTextField(
-                controller: _twitchMinDaysController,
-                hintText: '0',
-                maxLength: 4,
-              ),
+            FollowDaysSteps(
+              value: int.tryParse(_twitchMinDaysController.text.trim()) ?? 0,
+              onChanged: (v) => setState(() => _twitchMinDaysController.text = '$v'),
             ),
 
             const SizedBox(height: HollowSpacing.lg),

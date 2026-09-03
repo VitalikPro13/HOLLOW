@@ -9,6 +9,7 @@ import 'package:hollow/src/core/providers/local_nickname_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/sync_progress_provider.dart';
+import 'package:hollow/src/core/providers/support_marks_provider.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
@@ -327,6 +328,7 @@ class _MemberRow extends ConsumerWidget {
     final displayName = localNick ?? serverNick ?? profileName;
 
     final canManageThis = !isMe && _canManageRole(myRole, member.role);
+    final verifiedTwitch = ref.watch(twitchLoginProvider(member.peerId));
 
     return AnimatedOpacity(
       opacity: isOnline ? 1.0 : 0.5,
@@ -336,7 +338,6 @@ class _MemberRow extends ConsumerWidget {
           context,
           peerId: member.peerId,
           role: member.role,
-          twitchUsername: member.twitchUsername.isNotEmpty ? member.twitchUsername : null,
           labels: member.labels.isNotEmpty ? member.labels : null,
         ),
         onLongPress: canManageThis ? () => _showActions(context, ref) : null,
@@ -393,10 +394,12 @@ class _MemberRow extends ConsumerWidget {
                 ],
               ),
             ),
-            if (member.twitchUsername.isNotEmpty)
+            // Verified accounts only: a member-level handle is whatever the
+            // joiner typed, so it draws nothing (`twitchLoginProvider`).
+            if (verifiedTwitch != null)
               GestureDetector(
                 onTap: () => launchUrl(
-                  Uri.parse('https://twitch.tv/${member.twitchUsername}'),
+                  Uri.parse('https://twitch.tv/$verifiedTwitch'),
                   mode: LaunchMode.externalApplication,
                 ),
                 child: const Padding(
