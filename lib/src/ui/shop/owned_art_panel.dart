@@ -615,9 +615,22 @@ class _KeptCodeRowState extends ConsumerState<_KeptCodeRow> {
 
 // ── Support marks ───────────────────────────────────────────────────────────
 
-/// The credentials this identity holds (design 5.5) and the one choice the
-/// holder makes about them (5.6): whether the mark also sits next to their
-/// name. The profile card mark is always on.
+/// What to call a credential in a sentence.
+///
+/// The redeem record is what names a mark, and an old one may carry no title
+/// (or nothing at all), so every case has to end in a phrase that reads: the
+/// dialog that asks to remove one must never say "The mark for  by ".
+String supportCredLabel(shop.OwnSupportCred cred) {
+  final title = cred.title.trim();
+  final artist = cred.artistName.trim();
+  if (title.isNotEmpty) return artist.isEmpty ? title : '$title by $artist';
+  if (artist.isNotEmpty) return 'a piece by $artist';
+  return 'a piece';
+}
+
+/// The credentials this identity holds (design 5.5) and the two choices the
+/// holder makes about them: whether the mark also sits next to their name
+/// (5.6), and whether it shows at all.
 class _SupportMarksSection extends ConsumerStatefulWidget {
   const _SupportMarksSection();
 
@@ -629,16 +642,37 @@ class _SupportMarksSection extends ConsumerStatefulWidget {
 class _SupportMarksSectionState extends ConsumerState<_SupportMarksSection> {
   bool _saving = false;
 
+  /// Our own profile card reads the row the republish just rewrote, so it has
+  /// to be re-read for the chip to appear or go.
+  Future<void> _reloadMyProfile() async {
+    final me = ref.read(identityProvider).peerId;
+    if (me != null && me.isNotEmpty) {
+      await ref.read(profileProvider.notifier).reloadProfile(me);
+    }
+  }
+
   Future<void> _setBadge(bool show) async {
     setState(() => _saving = true);
     try {
-      await shop.setSupportBadge(show_: show);
+      await ref.read(shop.supportMarksFfiProvider).setBadge(show);
       ref.invalidate(shop.supportBadgeProvider);
       ref.invalidate(shop.ownSupportCredsProvider);
-      final me = ref.read(identityProvider).peerId;
-      if (me != null && me.isNotEmpty) {
-        await ref.read(profileProvider.notifier).reloadProfile(me);
-      }
+      await _reloadMyProfile();
+    } catch (e) {
+      if (!mounted) return;
+      final message = e.toString().replaceFirst(RegExp(r'^[A-Za-z]+: '), '');
+      HollowToast.show(context, message, type: HollowToastType.error);
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  Future<void> _setHidden(bool hidden) async {
+    setState(() => _saving = true);
+    try {
+      await ref.read(shop.supportMarksFfiProvider).setHidden(hidden);
+      ref.invalidate(shop.supportMarksHiddenProvider);
+      await _reloadMyProfile();
     } catch (e) {
       if (!mounted) return;
       final message = e.toString().replaceFirst(RegExp(r'^[A-Za-z]+: '), '');
@@ -651,9 +685,11 @@ class _SupportMarksSectionState extends ConsumerState<_SupportMarksSection> {
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
-    final creds = ref.watch(shop.ownSupportCredsProvider).valueOrNull;
-    if (creds == null || creds.isEmpty) return const SizedBox.shrink();
+    final creds = ref.watch(shop.ownSupportCredsProvider).valueOrNull ??
+        const <shop.OwnSupportCred>[];
     final badge = ref.watch(shop.supportBadgeProvider).valueOrNull ?? true;
+    final hidden =
+        ref.watch(shop.supportMarksHiddenProvider).valueOrNull ?? false;
 
     return Column(
       mainAxisSize: MainAxisSize.min,
@@ -669,47 +705,211 @@ class _SupportMarksSectionState extends ConsumerState<_SupportMarksSection> {
           style: HollowTypography.caption.copyWith(color: hollow.textSecondary),
         ),
         const SizedBox(height: HollowSpacing.sm),
-        for (final cred in creds)
-          Padding(
-            key: ValueKey(cred.item),
-            padding: const EdgeInsets.only(bottom: HollowSpacing.xs),
-            child: Row(
-              children: [
-                Icon(LucideIcons.sparkles, size: 14, color: hollow.accentText),
-                const SizedBox(width: HollowSpacing.sm),
-                Expanded(
-                  child: Text(
-                    '${cred.title}  by ${cred.artistName}',
-                    style: HollowTypography.body.copyWith(
-                      color: hollow.textPrimary,
-                      fontSize: 13,
-                    ),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
+        // Dimmed while hidden, because nothing it says is on screen for
+        // anyone then. Still usable, so the choice is ready for the moment the
+        // marks come back.
+        AnimatedOpacity(
+          opacity: hidden ? 0.45 : 1.0,
+          duration: const Duration(milliseconds: 150),
+          child: Row(
+            children: [
+              Expanded(
+                child: Text(
+                  'Show the mark next to my name in chats and member lists',
+                  style: HollowTypography.body.copyWith(
+                    color: hollow.textPrimary,
+                    fontSize: 13,
                   ),
                 ),
-              ],
-            ),
+              ),
+              const SizedBox(width: HollowSpacing.sm),
+              HollowToggle(
+                value: badge,
+                onChanged: _saving ? null : _setBadge,
+                semanticLabel: 'Show the support mark next to my name',
+              ),
+            ],
           ),
+        ),
         const SizedBox(height: HollowSpacing.sm),
         Row(
           children: [
             Expanded(
-              child: Text(
-                'Show the mark next to my name in chats and member lists',
-                style: HollowTypography.body.copyWith(
-                  color: hollow.textPrimary,
-                  fontSize: 13,
-                ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    'Hide my support marks',
+                    style: HollowTypography.body.copyWith(
+                      color: hollow.textPrimary,
+                      fontSize: 13,
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    'Nobody sees your marks while this is on, and they come '
+                    'back when you switch it off.',
+                    style: HollowTypography.caption
+                        .copyWith(color: hollow.textSecondary),
+                  ),
+                ],
               ),
             ),
             const SizedBox(width: HollowSpacing.sm),
             HollowToggle(
-              value: badge,
-              onChanged: _saving ? null : (v) => _setBadge(v),
-              semanticLabel: 'Show the support mark next to my name',
+              value: hidden,
+              onChanged: _saving ? null : _setHidden,
+              semanticLabel: 'Hide my support marks',
             ),
           ],
+        ),
+        const SizedBox(height: HollowSpacing.md),
+        if (creds.isEmpty)
+          Text(
+            'No marks yet. Redeem a code on the Shop tab to earn one.',
+            style:
+                HollowTypography.caption.copyWith(color: hollow.textSecondary),
+          )
+        else
+          for (final cred in creds)
+            Padding(
+              key: ValueKey(cred.item),
+              padding: const EdgeInsets.only(bottom: HollowSpacing.xs),
+              child: _CredentialRow(cred: cred),
+            ),
+      ],
+    );
+  }
+}
+
+/// One held credential, with the one irreversible thing that can be done to
+/// it.
+class _CredentialRow extends ConsumerStatefulWidget {
+  final shop.OwnSupportCred cred;
+
+  const _CredentialRow({required this.cred});
+
+  @override
+  ConsumerState<_CredentialRow> createState() => _CredentialRowState();
+}
+
+class _CredentialRowState extends ConsumerState<_CredentialRow> {
+  bool _busy = false;
+
+  shop.OwnSupportCred get cred => widget.cred;
+
+  /// `Redeemed 2026-09-02`, plus the item's first eight hex when nothing else
+  /// names this mark: an unnamed row still has to be tellable from the next
+  /// unnamed row.
+  String get _meta {
+    final ms = cred.redeemedAt.toInt();
+    final parts = <String>[];
+    if (ms > 0) {
+      final d = DateTime.fromMillisecondsSinceEpoch(ms);
+      parts.add('Redeemed ${d.year}-${d.month.toString().padLeft(2, '0')}-'
+          '${d.day.toString().padLeft(2, '0')}');
+    }
+    if (cred.title.trim().isEmpty && cred.artistName.trim().isEmpty) {
+      parts.add(cred.item.length >= 8 ? cred.item.substring(0, 8) : cred.item);
+    }
+    return parts.join('  ·  ');
+  }
+
+  Future<void> _remove() async {
+    final label = supportCredLabel(cred);
+    final confirmed = await showHollowDialog<bool>(
+      context: context,
+      builder: (dialogContext) => HollowDialog(
+        title: 'Remove this mark?',
+        content: Text(
+          'The mark for $label leaves your profile on every device and cannot '
+          'be brought back. The code you redeemed is spent. The files stay in '
+          'your library, and Owned on the Shop tab goes away.',
+          style: HollowTypography.body
+              .copyWith(color: HollowTheme.of(dialogContext).textSecondary),
+        ),
+        actions: [
+          HollowButton.ghost(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('Cancel'),
+          ),
+          HollowButton.danger(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text('Remove'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    setState(() => _busy = true);
+    try {
+      await ref.read(shop.supportMarksFfiProvider).remove(cred.item);
+      ref.invalidate(shop.ownSupportCredsProvider);
+      ref.invalidate(shop.ownCredentialItemsProvider);
+      final me = ref.read(identityProvider).peerId;
+      if (me != null && me.isNotEmpty) {
+        await ref.read(profileProvider.notifier).reloadProfile(me);
+      }
+      if (!mounted) return;
+      HollowToast.show(context, 'Mark removed', type: HollowToastType.success);
+    } catch (e) {
+      if (!mounted) return;
+      final message = e.toString().replaceFirst(RegExp(r'^[A-Za-z]+: '), '');
+      HollowToast.show(context, message, type: HollowToastType.error);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+    final meta = _meta;
+    return Row(
+      children: [
+        Icon(LucideIcons.sparkles, size: 14, color: hollow.accentText),
+        const SizedBox(width: HollowSpacing.sm),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                supportCredLabel(cred),
+                style: HollowTypography.body.copyWith(
+                  color: hollow.textPrimary,
+                  fontSize: 13,
+                ),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+              if (meta.isNotEmpty)
+                Text(
+                  meta,
+                  style: HollowTypography.caption
+                      .copyWith(color: hollow.textTertiary, fontSize: 11),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+            ],
+          ),
+        ),
+        const SizedBox(width: HollowSpacing.sm),
+        HollowButton.ghost(
+          onPressed: _busy ? null : _remove,
+          compact: true,
+          icon: _busy
+              ? SizedBox(
+                  width: 14,
+                  height: 14,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    color: hollow.textSecondary,
+                  ),
+                )
+              : null,
+          child: const Text('Remove'),
         ),
       ],
     );

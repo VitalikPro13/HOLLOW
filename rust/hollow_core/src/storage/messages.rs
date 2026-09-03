@@ -4192,7 +4192,9 @@ impl MessageStore {
         Ok(())
     }
 
-    /// Rewrite the stored entry of one of our credentials (the badge flag).
+    /// Rewrite the stored entry of one of our credentials. The glyph flag is
+    /// stamped at publish time now, so nothing calls this today; it is the
+    /// only way to amend a kept row in place.
     pub fn update_own_support_cred_entry(&self, item: &str, entry_json: &str) -> Result<(), String> {
         self.conn
             .execute(

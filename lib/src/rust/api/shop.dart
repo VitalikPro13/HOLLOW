@@ -7,8 +7,8 @@ import '../frb_generated.dart';
 import 'network.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `by_role`, `check_art_bytes`, `clamp`, `display_file_for`, `fetch_bounded`, `fetch_pack`, `file_for_kind`, `keep_own_credential`, `kind_of_role`, `kind_roles`, `lenient_vec`, `lenient`, `lookup_refusal`, `lookup_remote`, `my_master_peer_id`, `parse_catalog`, `post_json_bounded`, `price_label`, `primary_kind_of`, `read_bounded`, `redeem_remote`, `republish_support_creds`, `sanitize_file`, `sanitize_listing`, `shop_client`, `shop_refusal`, `support_badge_preference`, `valid_redeem_code`, `valid_slug`
-// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `RawArtist`, `RawCatalog`, `RawFile`, `RawListing`, `RawLookupListing`, `RawLookup`, `RawRedeem`
+// These functions are ignored because they are not marked as `pub`: `announce_support_creds`, `apply_hidden`, `badge_on`, `by_role`, `check_art_bytes`, `clamp`, `display_file_for`, `fetch_bounded`, `fetch_pack`, `file_for_kind`, `forget_own_cred`, `hidden_on`, `keep_own_cred_row`, `keep_own_credential`, `kind_of_role`, `kind_roles`, `lenient_vec`, `lenient`, `lookup_refusal`, `lookup_remote`, `lookup_status_is_dead`, `my_master_peer_id`, `own_credential_union`, `parse_catalog`, `post_json_bounded`, `price_label`, `primary_kind_of`, `published_creds_json`, `read_bounded`, `redeem_remote`, `removed_items`, `republish_support_creds`, `republish_to_row`, `sanitize_file`, `sanitize_listing`, `save_removed_items`, `shop_client`, `shop_refusal`, `support_badge_preference`, `valid_redeem_code`, `valid_slug`
+// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `RawArtist`, `RawCatalog`, `RawFile`, `RawListing`, `RawLookupListing`, `RawLookup`, `RawRedeem`, `UnionEntry`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 // These functions are ignored (category: IgnoreBecauseOwnerTyShouldIgnore): `default`, `default`, `default`, `default`, `default`, `default`, `default`
 
@@ -68,7 +68,13 @@ Future<RedeemLookup> redeemLookup({required String code}) =>
 Future<RedeemOutcome> redeemCode({required String code}) =>
     RustLib.instance.api.crateApiShopRedeemCode(code: code);
 
-/// Every credential this identity holds, newest first.
+/// Every credential this identity holds, as far as this device can tell:
+/// the ones it minted first, with their names, then the ones that reached it
+/// on our own profile row from a sibling, which carry no names and no redeem
+/// date. Removed items are left out.
+///
+/// The announce cap is NOT applied here. The cap is about what rides a light
+/// profile announce; a holder of four marks is holding four.
 Future<List<OwnSupportCred>> listOwnSupportCreds() =>
     RustLib.instance.api.crateApiShopListOwnSupportCreds();
 
@@ -77,8 +83,44 @@ Future<bool> supportBadgeEnabled() =>
     RustLib.instance.api.crateApiShopSupportBadgeEnabled();
 
 /// Show, or stop showing, our marks next to our name. One profile save.
+///
+/// The setting is the only copy of the answer: [`published_creds_json`]
+/// stamps it onto every entry it publishes, table and profile row alike, so
+/// the switch works from whichever device the holder is sitting at rather
+/// than only from the one that redeemed.
 Future<void> setSupportBadge({required bool show_}) =>
     RustLib.instance.api.crateApiShopSetSupportBadge(show_: show_);
+
+/// Whether this device is holding our marks back (design 5.6, off by
+/// default). Local to this device: a second install of the same identity
+/// answers for itself.
+Future<bool> supportMarksHidden() =>
+    RustLib.instance.api.crateApiShopSupportMarksHidden();
+
+/// Hide, or stop hiding, our marks. One profile save.
+///
+/// Hiding announces the explicit clear, so every peer drops what they stored
+/// and nobody can tell a holder who is hiding from somebody who never bought
+/// anything. The credentials themselves stay in the table, so switching it
+/// back publishes exactly what was there.
+Future<void> setSupportMarksHidden({required bool hidden}) =>
+    RustLib.instance.api.crateApiShopSetSupportMarksHidden(hidden: hidden);
+
+/// Forget one of our credentials, for good.
+///
+/// There is no way back: the code that minted it is spent (12.6), and the
+/// shop will not sign a second one for the same purchase. The files stay in
+/// the library; only the mark goes. Forgetting an item this identity never
+/// held is not an error, so a double press costs nothing.
+///
+/// The removal is remembered locally as well as applied, because the same
+/// credential can arrive again on our own profile row from a sibling. What
+/// that does NOT cover is the sibling itself: a mark removed on a device
+/// that did not mint it comes back if the MINTING device republishes, since
+/// `support_creds_own` does not replicate. Removing it where it was minted
+/// is final. See [`own_credential_union`].
+Future<void> removeOwnSupportCred({required String item}) =>
+    RustLib.instance.api.crateApiShopRemoveOwnSupportCred(item: item);
 
 /// One redeem code this install is holding on to.
 class KeptRedeemCode {

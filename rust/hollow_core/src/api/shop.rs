@@ -762,6 +762,28 @@ const MAX_PACK_BYTES: usize = 40 * 1024 * 1024;
 /// (design 5.6, off by default). New credentials inherit it.
 pub(crate) const SUPPORT_BADGE_SETTING: &str = "support_badge";
 
+/// `app_settings` key: the union this device published just before it hid,
+/// so a hide and an unhide round-trip even on a device whose own
+/// `support_creds_own` table is empty. Cleared once an unhide has written
+/// the marks back onto our profile row.
+pub(crate) const SUPPORT_SHELF_SETTING: &str = "support_creds_shelf";
+
+/// `app_settings` key: a JSON array of item hashes this device has removed.
+/// Local, because the table it shadows is local: it stops a copy of the same
+/// credential arriving on our own profile row from a sibling's announce and
+/// quietly bringing the mark back.
+pub(crate) const SUPPORT_REMOVED_SETTING: &str = "support_creds_removed";
+
+/// `app_settings` key: whether this device holds our marks back entirely.
+///
+/// Local to this device and NEVER on the wire. A hidden holder announces the
+/// explicit clear (`""`), which every receiver already reads as "no
+/// credentials"; there is no flag for a viewer to ignore, and no way for one
+/// to tell a holder who is hiding from a holder who never bought anything.
+/// The `support_creds_own` records are untouched, so switching it back
+/// republishes exactly what was there.
+pub(crate) const SUPPORT_HIDDEN_SETTING: &str = "support_hidden";
+
 /// What `redeem_lookup` learned about a code.
 #[derive(Debug, Clone)]
 pub struct RedeemLookup {
@@ -976,6 +998,12 @@ pub(crate) fn badge_on(setting: Option<&str>) -> bool {
     setting != Some("0")
 }
 
+/// The hide setting's reading: only an explicit "1" hides. An absent setting
+/// is a holder who never touched the switch, and their marks show.
+pub(crate) fn hidden_on(setting: Option<&str>) -> bool {
+    setting == Some("1")
+}
+
 /// A lookup answer after which the code is worth nothing to anyone: the
 /// shop burned it, refunded it, or has never heard of it. `nokey` (listed
 /// before support marks existed), `paused` and `rail` are not on this list,
@@ -1111,67 +1139,262 @@ pub fn redeem_code(code: String) -> Result<RedeemOutcome, String> {
 
 /// Keep one of our credentials and republish the profile field.
 fn keep_own_credential(entry: &CredentialEntry, slug: &str, title: &str, artist_name: &str) -> Result<(), String> {
-    let json = serde_json::to_string(entry).map_err(|e| e.to_string())?;
     {
         let store = get_store();
         let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
         let ms = guard.as_ref().ok_or("Message store is not open")?;
-        ms.save_own_support_cred(&entry.item, &json, slug, title, artist_name)?;
+        keep_own_cred_row(ms, entry, slug, title, artist_name)?;
     }
     republish_support_creds()
 }
 
-/// Rebuild our `support_creds` profile field from the table, write it onto
-/// our profile row, and ask the node to announce it.
+/// The item hashes this device has removed, newest last.
+fn removed_items(ms: &crate::storage::MessageStore) -> Vec<String> {
+    let raw = ms
+        .load_setting(SUPPORT_REMOVED_SETTING)
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    serde_json::from_str::<Vec<String>>(&raw).unwrap_or_default()
+}
+
+fn save_removed_items(
+    ms: &crate::storage::MessageStore,
+    items: &[String],
+) -> Result<(), String> {
+    let json = serde_json::to_string(items).map_err(|e| e.to_string())?;
+    ms.save_setting(SUPPORT_REMOVED_SETTING, &json)
+}
+
+/// One credential this device can vouch for, with whatever names it has.
+#[frb(ignore)]
+struct UnionEntry {
+    entry: CredentialEntry,
+    slug: String,
+    title: String,
+    artist_name: String,
+    /// Unix milliseconds, 0 for an entry this device did not mint.
+    redeemed_at: i64,
+}
+
+/// Everything this identity holds, as far as THIS device can tell: the rows
+/// it minted itself (with their names), then the shelf a hide put aside, then
+/// whatever a sibling's announce wrote onto our own profile row. Deduplicated
+/// by item with the first source winning, and minus the items this device has
+/// removed.
 ///
-/// The row is written HERE, not only by the node: a later profile save from
-/// the UI passes `None` (preserve) for this field and reads the row, so the
-/// row has to be right even if the node is down at this moment. The announce
-/// is best effort for the same reason; the next profile save carries it.
-fn republish_support_creds() -> Result<(), String> {
-    let master = my_master_peer_id()?;
-    let root = support_creds::root_verifying_key();
-    let (json, profile) = {
-        let store = get_store();
-        let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
-        let ms = guard.as_ref().ok_or("Message store is not open")?;
-        let entries: Vec<CredentialEntry> = ms
-            .list_own_support_creds()?
-            .into_iter()
-            .filter_map(|(_, entry_json, ..)| serde_json::from_str(&entry_json).ok())
-            .collect();
-        // The same filter every receiver applies, so what we announce is
-        // exactly what they will keep: verified, one per item, capped.
-        let kept = support_creds::keep_verified(entries, &master, &root);
-        let json = support_creds::encode_entries(&kept);
-        let profile = ms.load_profile(&master)?;
-        let (name, status, about, updated_at, twitch) = match &profile {
-            Some(p) => (
-                p.display_name.clone(),
-                p.status.clone(),
-                p.about_me.clone(),
-                p.updated_at,
-                p.twitch_username.clone(),
-            ),
-            None => (String::new(), String::new(), String::new(), 0, String::new()),
+/// The profile row is the bridge between devices. `support_creds_own` is
+/// per-device and does not replicate, so without the row a sibling that
+/// redeemed one item would republish its own single row and wipe every mark
+/// the other device minted, for everyone. Nothing is trusted for being in the
+/// row: [`support_creds::keep_verified`] still drops every entry not signed
+/// for THIS master, so a transplanted entry someone pasted onto our profile
+/// never rides our announce.
+///
+/// The one edge that stays: a mark removed on a device that did not mint it
+/// comes back if the MINTING device republishes later, because the tombstone
+/// is local and the table does not replicate. Removing it on the device that
+/// holds the row is final. A replicating table is a later unit.
+fn own_credential_union(
+    ms: &crate::storage::MessageStore,
+    master: &str,
+) -> Result<Vec<UnionEntry>, String> {
+    let removed = removed_items(ms);
+    let mut out: Vec<UnionEntry> = Vec::new();
+    let mut seen: Vec<String> = Vec::new();
+
+    for (item, entry_json, slug, title, artist_name, redeemed_at) in
+        ms.list_own_support_creds()?
+    {
+        if removed.contains(&item) || seen.contains(&item) {
+            continue;
+        }
+        let Ok(entry) = serde_json::from_str::<CredentialEntry>(&entry_json) else {
+            continue;
         };
-        ms.save_profile(
-            &master, &name, &status, &about, updated_at, None, None, &twitch, None, None, None, None,
-            None, None, Some(&json),
-        )?;
-        (json, profile)
+        seen.push(item);
+        out.push(UnionEntry { entry, slug, title, artist_name, redeemed_at });
+    }
+
+    let shelf = ms
+        .load_setting(SUPPORT_SHELF_SETTING)
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    let row = ms
+        .load_profile(master)?
+        .map(|p| p.support_creds)
+        .unwrap_or_default();
+    for json in [shelf, row] {
+        for entry in support_creds::parse_stored(&json) {
+            if removed.contains(&entry.item) || seen.contains(&entry.item) {
+                continue;
+            }
+            seen.push(entry.item.clone());
+            out.push(UnionEntry {
+                entry,
+                slug: String::new(),
+                title: String::new(),
+                artist_name: String::new(),
+                redeemed_at: 0,
+            });
+        }
+    }
+    Ok(out)
+}
+
+/// The `support_creds` field this device should publish right now.
+///
+/// Split out of [`republish_support_creds`] so the rule is testable without a
+/// running node: the announce needs one, this does not.
+pub(crate) fn published_creds_json(
+    ms: &crate::storage::MessageStore,
+    master: &str,
+) -> Result<String, String> {
+    if hidden_on(ms.load_setting(SUPPORT_HIDDEN_SETTING).ok().flatten().as_deref()) {
+        // The explicit clear, which is what a holder with no credentials at
+        // all announces: a shorter list would say which mark was hidden. The
+        // records stay where they are, and the shelf holds the rest.
+        return Ok(support_creds::encode_entries(&[]));
+    }
+    union_json(ms, master)
+}
+
+/// The union this device would publish if it were not hiding: verified,
+/// deduplicated, capped and encoded.
+///
+/// Kept separate from [`published_creds_json`] because the shelf needs the
+/// marks THEMSELVES, and asking the publish path for them while hiding is on
+/// answers with the clear.
+fn union_json(ms: &crate::storage::MessageStore, master: &str) -> Result<String, String> {
+    // The glyph flag is decided HERE, from the setting, rather than read off
+    // whatever the entry was stored with: the entry may have arrived on our
+    // profile row from a device that answered the question differently, and
+    // the switch has to work from whichever device the holder is sitting at.
+    let badge = badge_on(ms.load_setting(SUPPORT_BADGE_SETTING).ok().flatten().as_deref());
+    let entries: Vec<CredentialEntry> = own_credential_union(ms, master)?
+        .into_iter()
+        .map(|u| CredentialEntry { badge, ..u.entry })
+        .collect();
+    // The same filter every receiver applies, so what we announce is exactly
+    // what they will keep: verified, one per item, capped.
+    let kept = support_creds::keep_verified(entries, master, &support_creds::root_verifying_key());
+    Ok(support_creds::encode_entries(&kept))
+}
+
+/// Recompute the field and write it onto our own profile row, handing back
+/// what an announce should carry. The store half of
+/// [`republish_support_creds`].
+fn republish_to_row(
+    ms: &crate::storage::MessageStore,
+    master: &str,
+) -> Result<String, String> {
+    let json = published_creds_json(ms, master)?;
+    let (name, status, about, updated_at, twitch) = match ms.load_profile(master)? {
+        Some(p) => (p.display_name, p.status, p.about_me, p.updated_at, p.twitch_username),
+        None => (String::new(), String::new(), String::new(), 0, String::new()),
     };
+    ms.save_profile(
+        master, &name, &status, &about, updated_at, None, None, &twitch, None, None, None, None,
+        None, None, Some(&json),
+    )?;
+    Ok(json)
+}
+
+/// Hide or unhide, minus the announce. Split out so the round trip is
+/// testable without a node.
+///
+/// Hiding shelves the union FIRST, because the clear wipes our own profile
+/// row too and on a device whose table is empty the row was the only copy.
+/// Unhiding republishes the union (the shelf is part of it) and only then
+/// drops the shelf, so nothing is thrown away before it has been written
+/// back.
+///
+/// The shelf is filled from [`union_json`], never from what we would publish,
+/// and only on the way IN to hiding. A second hide while hiding is already on
+/// (a retried toggle, another surface sending the same value, a double press)
+/// would otherwise shelve the clear it publishes, and the next unhide on a
+/// device with an empty table would find nothing and announce the clear for
+/// good.
+fn apply_hidden(
+    ms: &crate::storage::MessageStore,
+    master: &str,
+    hidden: bool,
+) -> Result<String, String> {
+    let already_hidden =
+        hidden_on(ms.load_setting(SUPPORT_HIDDEN_SETTING).ok().flatten().as_deref());
+    if hidden && !already_hidden {
+        let shelved = union_json(ms, master)?;
+        ms.save_setting(SUPPORT_SHELF_SETTING, &shelved)?;
+    }
+    ms.save_setting(SUPPORT_HIDDEN_SETTING, if hidden { "1" } else { "0" })?;
+    let json = republish_to_row(ms, master)?;
+    if !hidden {
+        ms.save_setting(SUPPORT_SHELF_SETTING, "")?;
+    }
+    Ok(json)
+}
+
+/// Forget one mark on this device: drop the row it minted, if it minted one,
+/// and remember that we did. The store half of [`remove_own_support_cred`].
+fn forget_own_cred(ms: &crate::storage::MessageStore, item: &str) -> Result<(), String> {
+    ms.delete_own_support_cred(item)?;
+    // Only a real item hash earns a tombstone, so the setting cannot be grown
+    // by a caller passing junk.
+    if !valid_emote_hash(item) {
+        return Ok(());
+    }
+    let mut removed = removed_items(ms);
+    if removed.iter().any(|i| i == item) {
+        return Ok(());
+    }
+    removed.push(item.to_string());
+    save_removed_items(ms, &removed)
+}
+
+/// Keep one of our credentials on this device.
+///
+/// A fresh redemption of something this device had removed means the holder
+/// wants it back, so the tombstone goes with it.
+fn keep_own_cred_row(
+    ms: &crate::storage::MessageStore,
+    entry: &CredentialEntry,
+    slug: &str,
+    title: &str,
+    artist_name: &str,
+) -> Result<(), String> {
+    let json = serde_json::to_string(entry).map_err(|e| e.to_string())?;
+    ms.save_own_support_cred(&entry.item, &json, slug, title, artist_name)?;
+    let removed = removed_items(ms);
+    if removed.contains(&entry.item) {
+        let kept: Vec<String> = removed.into_iter().filter(|i| *i != entry.item).collect();
+        save_removed_items(ms, &kept)?;
+    }
+    Ok(())
+}
+
+/// Ask the node to announce `json` as our `support_creds`.
+///
+/// Best effort by design: the row is already written, and the next profile
+/// save carries the field if the node is not up at this moment.
+fn announce_support_creds(master: &str, json: String) -> Result<(), String> {
     let cmd_tx = {
         let node = super::network::get_node();
         let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
         guard.as_ref().map(|s| s.cmd_tx.clone())
     };
-    if let Some(tx) = cmd_tx {
-        let (display_name, status, about_me, twitch_username) = match profile {
+    let Some(tx) = cmd_tx else { return Ok(()) };
+    let (display_name, status, about_me, twitch_username) = {
+        let store = get_store();
+        let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+        let ms = guard.as_ref().ok_or("Message store is not open")?;
+        match ms.load_profile(master)? {
             Some(p) => (p.display_name, p.status, p.about_me, p.twitch_username),
             None => (String::new(), String::new(), String::new(), String::new()),
-        };
-        let sent = super::network::get_runtime().block_on(tx.send(crate::node::NodeCommand::UpdateProfile {
+        }
+    };
+    let sent = super::network::get_runtime().block_on(tx.send(
+        crate::node::NodeCommand::UpdateProfile {
             display_name,
             status,
             about_me,
@@ -1184,34 +1407,69 @@ fn republish_support_creds() -> Result<(), String> {
             avatar_anim: None,
             banner_anim: None,
             support_creds: Some(json),
-        }));
-        if sent.is_err() {
-            hollow_log!("[HOLLOW-SHOP] The support credential is kept; the announce waits for the next profile save");
-        }
+        },
+    ));
+    if sent.is_err() {
+        hollow_log!("[HOLLOW-SHOP] The support credential is kept; the announce waits for the next profile save");
     }
     Ok(())
 }
 
-/// Every credential this identity holds, newest first.
+/// Rebuild our `support_creds` profile field, write it onto our profile row,
+/// and ask the node to announce it.
+///
+/// The row is written HERE, not only by the node: a later profile save from
+/// the UI passes `None` (preserve) for this field and reads the row, so the
+/// row has to be right even if the node is down at this moment.
+fn republish_support_creds() -> Result<(), String> {
+    let master = my_master_peer_id()?;
+    let json = {
+        let store = get_store();
+        let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+        let ms = guard.as_ref().ok_or("Message store is not open")?;
+        republish_to_row(ms, &master)?
+    };
+    announce_support_creds(&master, json)
+}
+
+/// Every credential this identity holds, as far as this device can tell:
+/// the ones it minted first, with their names, then the ones that reached it
+/// on our own profile row from a sibling, which carry no names and no redeem
+/// date. Removed items are left out.
+///
+/// The announce cap is NOT applied here. The cap is about what rides a light
+/// profile announce; a holder of four marks is holding four.
 #[frb]
 pub fn list_own_support_creds() -> Result<Vec<OwnSupportCred>, String> {
+    let master = super::network::get_local_peer_id();
     let store = get_store();
     let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let ms = guard.as_ref().ok_or("Message store is not open")?;
-    Ok(ms
-        .list_own_support_creds()?
+    let badge = badge_on(ms.load_setting(SUPPORT_BADGE_SETTING).ok().flatten().as_deref());
+    // Before the node is up there is no master to verify against, and an
+    // unverified row entry is not something to show as ours.
+    let Some(master) = master else {
+        return Ok(ms
+            .list_own_support_creds()?
+            .into_iter()
+            .map(|(item, entry_json, slug, title, artist_name, redeemed_at)| {
+                let entry: CredentialEntry = serde_json::from_str(&entry_json).unwrap_or_default();
+                OwnSupportCred { item, parts: entry.parts, slug, title, artist_name, redeemed_at, badge }
+            })
+            .collect());
+    };
+    let root = support_creds::root_verifying_key();
+    Ok(own_credential_union(ms, &master)?
         .into_iter()
-        .map(|(item, entry_json, slug, title, artist_name, redeemed_at)| {
-            let entry: CredentialEntry = serde_json::from_str(&entry_json).unwrap_or_default();
-            OwnSupportCred {
-                item,
-                parts: entry.parts,
-                slug,
-                title,
-                artist_name,
-                redeemed_at,
-                badge: entry.badge,
-            }
+        .filter(|u| support_creds::verify_entry(&u.entry, &master, &root).is_ok())
+        .map(|u| OwnSupportCred {
+            item: u.entry.item,
+            parts: u.entry.parts,
+            slug: u.slug,
+            title: u.title,
+            artist_name: u.artist_name,
+            redeemed_at: u.redeemed_at,
+            badge,
         })
         .collect())
 }
@@ -1223,6 +1481,11 @@ pub fn support_badge_enabled() -> bool {
 }
 
 /// Show, or stop showing, our marks next to our name. One profile save.
+///
+/// The setting is the only copy of the answer: [`published_creds_json`]
+/// stamps it onto every entry it publishes, table and profile row alike, so
+/// the switch works from whichever device the holder is sitting at rather
+/// than only from the one that redeemed.
 #[frb]
 pub fn set_support_badge(show: bool) -> Result<(), String> {
     {
@@ -1230,19 +1493,62 @@ pub fn set_support_badge(show: bool) -> Result<(), String> {
         let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
         let ms = guard.as_ref().ok_or("Message store is not open")?;
         ms.save_setting(SUPPORT_BADGE_SETTING, if show { "1" } else { "0" })?;
-        for (item, entry_json, ..) in ms.list_own_support_creds()? {
-            let Ok(mut entry) = serde_json::from_str::<CredentialEntry>(&entry_json) else { continue };
-            if entry.badge == show {
-                continue;
-            }
-            entry.badge = show;
-            let json = serde_json::to_string(&entry).map_err(|e| e.to_string())?;
-            ms.update_own_support_cred_entry(&item, &json)?;
-        }
     }
     republish_support_creds()
 }
 
+/// Whether this device is holding our marks back (design 5.6, off by
+/// default). Local to this device: a second install of the same identity
+/// answers for itself.
+#[frb]
+pub fn support_marks_hidden() -> bool {
+    let store = get_store();
+    let Ok(guard) = store.lock() else { return false };
+    let Some(ms) = guard.as_ref() else { return false };
+    hidden_on(ms.load_setting(SUPPORT_HIDDEN_SETTING).ok().flatten().as_deref())
+}
+
+/// Hide, or stop hiding, our marks. One profile save.
+///
+/// Hiding announces the explicit clear, so every peer drops what they stored
+/// and nobody can tell a holder who is hiding from somebody who never bought
+/// anything. The credentials themselves stay in the table, so switching it
+/// back publishes exactly what was there.
+#[frb]
+pub fn set_support_marks_hidden(hidden: bool) -> Result<(), String> {
+    let master = my_master_peer_id()?;
+    let json = {
+        let store = get_store();
+        let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+        let ms = guard.as_ref().ok_or("Message store is not open")?;
+        apply_hidden(ms, &master, hidden)?
+    };
+    announce_support_creds(&master, json)
+}
+
+/// Forget one of our credentials, for good.
+///
+/// There is no way back: the code that minted it is spent (12.6), and the
+/// shop will not sign a second one for the same purchase. The files stay in
+/// the library; only the mark goes. Forgetting an item this identity never
+/// held is not an error, so a double press costs nothing.
+///
+/// The removal is remembered locally as well as applied, because the same
+/// credential can arrive again on our own profile row from a sibling. What
+/// that does NOT cover is the sibling itself: a mark removed on a device
+/// that did not mint it comes back if the MINTING device republishes, since
+/// `support_creds_own` does not replicate. Removing it where it was minted
+/// is final. See [`own_credential_union`].
+#[frb]
+pub fn remove_own_support_cred(item: String) -> Result<(), String> {
+    {
+        let store = get_store();
+        let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+        let ms = guard.as_ref().ok_or("Message store is not open")?;
+        forget_own_cred(ms, item.trim())?;
+    }
+    republish_support_creds()
+}
 
 #[cfg(test)]
 mod tests {
@@ -1606,6 +1912,347 @@ mod tests {
 
         // A badly shaped code never reaches the store.
         assert!(keep_redeem_code("nope".into()).is_err());
+    }
+
+    // ── Support marks: hiding and removing ────────────────────────────
+    //
+    // These drive the pure half of the republish (`published_creds_json` and
+    // the store halves around it): the table, our own profile row, the shelf
+    // and the local settings in, the field to announce out. The announce
+    // itself needs a running node and stays best effort exactly as it is;
+    // what has to be right is the STRING, because `""` on the wire is the
+    // explicit clear every receiver already honours, and a device that
+    // publishes it by mistake wipes the holder's marks everywhere.
+
+    /// An in-memory store installed as the process-global one, with the lock
+    /// that keeps parallel tests from swapping it under each other.
+    fn with_test_store() -> std::sync::MutexGuard<'static, ()> {
+        let lock = crate::api::storage::store_test_lock();
+        crate::api::storage::set_test_store(
+            crate::storage::MessageStore::open(":memory:", &"ab".repeat(32))
+                .expect("open in-memory store"),
+        );
+        lock
+    }
+
+    fn with_store<T>(body: impl FnOnce(&crate::storage::MessageStore) -> T) -> T {
+        let guard = get_store().lock().unwrap_or_else(|e| e.into_inner());
+        body(guard.as_ref().expect("store installed"))
+    }
+
+    /// Two real credentials for `master`, kept the way a redeem keeps them.
+    fn seed_two_creds(master: &str) -> (CredentialEntry, CredentialEntry) {
+        let one = support_creds::testing::mint_for(master, &[h("11")]);
+        let two = support_creds::testing::mint_for(master, &[h("22")]);
+        with_store(|ms| {
+            for (entry, slug, title, artist) in [
+                (&one, "gilded-frame", "Gilded frame", "Nadia"),
+                (&two, "night-banner", "Night banner", "Ada"),
+            ] {
+                ms.save_own_support_cred(
+                    &entry.item,
+                    &serde_json::to_string(entry).expect("entry json"),
+                    slug,
+                    title,
+                    artist,
+                )
+                .expect("keep");
+            }
+        });
+        (one, two)
+    }
+
+    #[test]
+    fn hidden_default_is_shown() {
+        assert!(!hidden_on(None), "an absent setting is not hidden");
+        assert!(hidden_on(Some("1")));
+        assert!(!hidden_on(Some("0")));
+        assert!(!hidden_on(Some("anything else")), "only an explicit 1 hides");
+    }
+
+    #[test]
+    fn hidden_marks_publish_a_clear_and_keep_the_records() {
+        let _lock = with_test_store();
+        let master = "master-peer-hides";
+        let (one, two) = seed_two_creds(master);
+
+        let shown = with_store(|ms| published_creds_json(ms, master).expect("json"));
+        let parsed = support_creds::parse_stored(&shown);
+        assert_eq!(parsed.len(), 2, "both marks ride the field while shown: {shown}");
+
+        with_store(|ms| ms.save_setting(SUPPORT_HIDDEN_SETTING, "1").expect("hide"));
+        let hidden = with_store(|ms| published_creds_json(ms, master).expect("json"));
+        assert_eq!(
+            hidden, "",
+            "hidden publishes the explicit clear, never a shorter list",
+        );
+        assert_eq!(
+            with_store(|ms| ms.list_own_support_creds().expect("list").len()),
+            2,
+            "hiding must not touch a single record: the credentials are not re-mintable",
+        );
+
+        with_store(|ms| ms.save_setting(SUPPORT_HIDDEN_SETTING, "0").expect("show"));
+        let back = with_store(|ms| published_creds_json(ms, master).expect("json"));
+        let parsed = support_creds::parse_stored(&back);
+        assert_eq!(parsed.len(), 2, "switching back publishes both again: {back}");
+        let items: Vec<&str> = parsed.iter().map(|e| e.item.as_str()).collect();
+        assert!(items.contains(&one.item.as_str()) && items.contains(&two.item.as_str()));
+    }
+
+    #[test]
+    fn remove_own_support_cred_shrinks_the_announce_and_the_last_one_clears_it() {
+        let _lock = with_test_store();
+        let master = "master-peer-removes";
+        let (one, two) = seed_two_creds(master);
+
+        // Forgetting something this identity never held changes nothing.
+        with_store(|ms| ms.delete_own_support_cred(&h("ee")).expect("unknown item is a no-op"));
+        let json = with_store(|ms| published_creds_json(ms, master).expect("json"));
+        assert_eq!(support_creds::parse_stored(&json).len(), 2);
+
+        with_store(|ms| ms.delete_own_support_cred(&one.item).expect("remove one"));
+        let json = with_store(|ms| published_creds_json(ms, master).expect("json"));
+        let parsed = support_creds::parse_stored(&json);
+        assert_eq!(parsed.len(), 1, "one mark leaves, one stays: {json}");
+        assert_eq!(parsed[0].item, two.item);
+
+        with_store(|ms| ms.delete_own_support_cred(&two.item).expect("remove the last"));
+        let json = with_store(|ms| published_creds_json(ms, master).expect("json"));
+        assert_eq!(
+            json, "",
+            "the last one out announces the explicit clear, not an empty array",
+        );
+    }
+
+    /// Write `entries` onto our own profile row, the way a sibling's announce
+    /// does when it reaches this device.
+    fn seed_row(ms: &crate::storage::MessageStore, master: &str, entries: &[CredentialEntry]) {
+        let json = support_creds::encode_entries(entries);
+        ms.save_profile(
+            master, "", "", "", 0, None, None, "", None, None, None, None, None, None,
+            Some(&json),
+        )
+        .expect("seed the profile row");
+    }
+
+    fn row_of(ms: &crate::storage::MessageStore, master: &str) -> String {
+        ms.load_profile(master)
+            .expect("load profile")
+            .map(|p| p.support_creds)
+            .unwrap_or_default()
+    }
+
+    fn items_of(json: &str) -> Vec<String> {
+        support_creds::parse_stored(json)
+            .into_iter()
+            .map(|e| e.item)
+            .collect()
+    }
+
+    fn shelf_of(ms: &crate::storage::MessageStore) -> String {
+        ms.load_setting(SUPPORT_SHELF_SETTING)
+            .expect("load shelf")
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn sibling_with_an_empty_table_republishes_the_masters_marks() {
+        let _lock = with_test_store();
+        let master = "master-peer-sibling";
+        let a = support_creds::testing::mint_for(master, &[h("11")]);
+        let b = support_creds::testing::mint_for(master, &[h("22")]);
+        with_store(|ms| seed_row(ms, master, &[a.clone(), b.clone()]));
+
+        // This device never redeemed anything: its own table is empty and the
+        // profile row a sibling wrote is all it has.
+        assert!(with_store(|ms| ms.list_own_support_creds().expect("list")).is_empty());
+        let json = with_store(|ms| published_creds_json(ms, master).expect("json"));
+        let items = items_of(&json);
+        assert_eq!(
+            items.len(),
+            2,
+            "a sibling must republish what the master holds, not its own empty table: {json}",
+        );
+        assert!(items.contains(&a.item) && items.contains(&b.item));
+
+        // Now this device redeems one of its own. It ADDS; it does not replace
+        // the two the other device minted.
+        let c = support_creds::testing::mint_for(master, &[h("33")]);
+        with_store(|ms| keep_own_cred_row(ms, &c, "third", "Third", "Ada").expect("keep"));
+        let json = with_store(|ms| published_creds_json(ms, master).expect("json"));
+        let items = items_of(&json);
+        assert_eq!(items.len(), 3, "a redeem on a sibling must not wipe the rest: {json}");
+        assert!(items.contains(&c.item));
+
+        // Settings lists the same union, so a sibling can manage what it can
+        // now publish. The `#[frb]` wrapper needs a running node for the
+        // master, so the union underneath it is what is checked here.
+        let listed = with_store(|ms| own_credential_union(ms, master).expect("union"));
+        assert_eq!(listed.len(), 3);
+        assert!(
+            listed.iter().any(|u| u.title == "Third" && u.redeemed_at > 0),
+            "the one this device minted keeps its names and its date",
+        );
+        assert_eq!(
+            listed
+                .iter()
+                .filter(|u| u.title.is_empty() && u.artist_name.is_empty() && u.redeemed_at == 0)
+                .count(),
+            2,
+            "the two that arrived on the row carry no names and no date",
+        );
+    }
+
+    #[test]
+    fn a_row_entry_for_another_master_never_rides_the_announce() {
+        let _lock = with_test_store();
+        let master = "master-peer-transplant";
+        let mine = support_creds::testing::mint_for(master, &[h("11")]);
+        // Minted for somebody else and sitting on our row: worthless, and the
+        // union must not launder it just because it is stored locally.
+        let theirs = support_creds::testing::mint_for("somebody-else", &[h("22")]);
+        with_store(|ms| seed_row(ms, master, &[theirs.clone(), mine.clone()]));
+
+        let json = with_store(|ms| published_creds_json(ms, master).expect("json"));
+        assert_eq!(
+            items_of(&json),
+            vec![mine.item.clone()],
+            "only what is signed for THIS master rides: {json}",
+        );
+        assert!(!json.contains(&theirs.item), "the transplant is gone: {json}");
+    }
+
+    #[test]
+    fn badge_setting_applies_to_every_published_entry() {
+        let _lock = with_test_store();
+        let master = "master-peer-badge";
+        let mine = support_creds::testing::mint_for(master, &[h("11")]);
+        let from_row = support_creds::testing::mint_for(master, &[h("22")]);
+        assert!(!mine.badge && !from_row.badge, "minted without the glyph");
+        with_store(|ms| {
+            keep_own_cred_row(ms, &mine, "one", "One", "Ada").expect("keep");
+            seed_row(ms, master, std::slice::from_ref(&from_row));
+            ms.save_setting(SUPPORT_BADGE_SETTING, "1").expect("glyph on");
+        });
+
+        let on = with_store(|ms| published_creds_json(ms, master).expect("json"));
+        let parsed = support_creds::parse_stored(&on);
+        assert_eq!(parsed.len(), 2, "{on}");
+        assert!(
+            parsed.iter().all(|e| e.badge),
+            "the setting decides for every entry, the table's and the row's alike: {on}",
+        );
+
+        with_store(|ms| ms.save_setting(SUPPORT_BADGE_SETTING, "0").expect("glyph off"));
+        let off = with_store(|ms| published_creds_json(ms, master).expect("json"));
+        let parsed = support_creds::parse_stored(&off);
+        assert_eq!(parsed.len(), 2, "{off}");
+        assert!(parsed.iter().all(|e| !e.badge), "and it decides both ways: {off}");
+    }
+
+    #[test]
+    fn hide_and_unhide_round_trip_from_a_device_with_an_empty_table() {
+        let _lock = with_test_store();
+        let master = "master-peer-roundtrip";
+        let a = support_creds::testing::mint_for(master, &[h("11")]);
+        let b = support_creds::testing::mint_for(master, &[h("22")]);
+        with_store(|ms| seed_row(ms, master, &[a.clone(), b.clone()]));
+
+        let hidden = with_store(|ms| apply_hidden(ms, master, true).expect("hide"));
+        assert_eq!(hidden, "", "hiding announces the explicit clear");
+        assert_eq!(
+            with_store(|ms| row_of(ms, master)),
+            "",
+            "our own row clears too, so our own card shows no chip while hidden",
+        );
+        assert_eq!(
+            items_of(&with_store(shelf_of)).len(),
+            2,
+            "the shelf holds exactly what the clear took, on a device whose table is empty",
+        );
+
+        let back = with_store(|ms| apply_hidden(ms, master, false).expect("unhide"));
+        let items = items_of(&back);
+        assert_eq!(items.len(), 2, "unhiding brings both back from an empty table: {back}");
+        assert!(items.contains(&a.item) && items.contains(&b.item));
+        assert_eq!(
+            items_of(&with_store(|ms| row_of(ms, master))).len(),
+            2,
+            "and writes them back onto the row",
+        );
+        assert_eq!(
+            with_store(shelf_of),
+            "",
+            "the shelf is dropped only after the row holds them again",
+        );
+    }
+
+    #[test]
+    fn hiding_twice_keeps_the_shelf() {
+        let _lock = with_test_store();
+        let master = "master-peer-hide-twice";
+        let a = support_creds::testing::mint_for(master, &[h("11")]);
+        let b = support_creds::testing::mint_for(master, &[h("22")]);
+        with_store(|ms| seed_row(ms, master, &[a.clone(), b.clone()]));
+
+        assert_eq!(with_store(|ms| apply_hidden(ms, master, true).expect("hide")), "");
+        let shelf = with_store(shelf_of);
+        assert_eq!(items_of(&shelf).len(), 2, "the first hide shelves both: {shelf}");
+
+        // A retried toggle, another surface sending the same value, a double
+        // press: the shelf must not be overwritten with the clear that hiding
+        // publishes, because on this device the shelf is the only copy.
+        assert_eq!(
+            with_store(|ms| apply_hidden(ms, master, true).expect("hide again")),
+            "",
+        );
+        assert_eq!(
+            with_store(shelf_of),
+            shelf,
+            "hiding while already hidden must leave the shelf exactly as it was",
+        );
+
+        let back = with_store(|ms| apply_hidden(ms, master, false).expect("unhide"));
+        let items = items_of(&back);
+        assert_eq!(items.len(), 2, "unhiding after two hides still brings both back: {back}");
+        assert!(items.contains(&a.item) && items.contains(&b.item));
+    }
+
+    #[test]
+    fn remove_from_a_device_that_did_not_mint_it_sticks_on_that_device() {
+        let _lock = with_test_store();
+        let master = "master-peer-tombstone";
+        let a = support_creds::testing::mint_for(master, &[h("11")]);
+        let b = support_creds::testing::mint_for(master, &[h("22")]);
+        with_store(|ms| seed_row(ms, master, &[a.clone(), b.clone()]));
+
+        with_store(|ms| forget_own_cred(ms, &a.item).expect("forget"));
+        let json = with_store(|ms| published_creds_json(ms, master).expect("json"));
+        assert_eq!(items_of(&json), vec![b.item.clone()], "the removed mark leaves: {json}");
+
+        // The row still carries it, because the row is what a sibling wrote.
+        // A second republish must not let it back in.
+        assert_eq!(items_of(&with_store(|ms| row_of(ms, master))).len(), 2);
+        let again = with_store(|ms| published_creds_json(ms, master).expect("json"));
+        assert_eq!(items_of(&again), vec![b.item.clone()], "the tombstone holds: {again}");
+
+        // Redeeming the same item again says the holder wants it back.
+        with_store(|ms| keep_own_cred_row(ms, &a, "one", "One", "Ada").expect("re-redeem"));
+        let after = with_store(|ms| published_creds_json(ms, master).expect("json"));
+        assert_eq!(
+            items_of(&after).len(),
+            2,
+            "a fresh credential for the same item clears the tombstone: {after}",
+        );
+        assert!(
+            with_store(removed_items).is_empty(),
+            "and takes the tombstone with it",
+        );
+
+        // Junk never grows the tombstone list.
+        with_store(|ms| forget_own_cred(ms, "not-an-item").expect("no-op"));
+        assert!(with_store(removed_items).is_empty());
     }
 
     /// Manual live smoke against the real shop (network):

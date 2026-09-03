@@ -20,12 +20,16 @@ export 'package:hollow/src/rust/api/shop.dart'
         ShopListing,
         forgetRedeemCode,
         keepRedeemCode,
+        listOwnSupportCreds,
         listRedeemCodes,
         redeemCode,
         redeemLookup,
+        removeOwnSupportCred,
         setSupportBadge,
+        setSupportMarksHidden,
         shopOrigin,
-        supportBadgeEnabled;
+        supportBadgeEnabled,
+        supportMarksHidden;
 
 /// The shop's catalog. Deliberately NOT autoDispose: leaving the tab and
 /// coming back is the common move, and a refetch there is a wasted round trip
@@ -93,3 +97,28 @@ final ownCredentialItemsProvider = Provider.autoDispose<Set<String>>((ref) {
 final supportBadgeProvider = FutureProvider.autoDispose<bool>(
   (ref) => shop_api.supportBadgeEnabled(),
 );
+
+/// Whether this device is holding our marks back entirely (off by default).
+/// Local to this device, so it is read here and never from a profile.
+final supportMarksHiddenProvider = FutureProvider.autoDispose<bool>(
+  (ref) => shop_api.supportMarksHidden(),
+);
+
+/// The mutating support-mark calls behind one object.
+///
+/// The reads above are providers a test can override; a top-level FFI
+/// function is not, so the three writes go through this instead. Nothing
+/// else is gained by the indirection and nothing else belongs in it.
+class SupportMarksFfi {
+  const SupportMarksFfi();
+
+  Future<void> setBadge(bool show) => shop_api.setSupportBadge(show_: show);
+
+  Future<void> setHidden(bool hidden) =>
+      shop_api.setSupportMarksHidden(hidden: hidden);
+
+  Future<void> remove(String item) => shop_api.removeOwnSupportCred(item: item);
+}
+
+final supportMarksFfiProvider =
+    Provider<SupportMarksFfi>((ref) => const SupportMarksFfi());
