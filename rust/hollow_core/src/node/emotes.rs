@@ -4,24 +4,33 @@
 //! in the SQLCipher `emote_blobs` table and replicate on demand:
 //!
 //!   1. a client that must render an unknown hash sends `EmoteRequest`
-//!      to ONE source (the DM sender's devices, or one online member of the
-//!      server room) — never a broadcast sweep;
+//!      to ONE source (the DM sender's devices, or one member of the server
+//!      room) — never a broadcast sweep;
 //!   2. anyone holding the bytes answers `EmoteAssets` (the showcase bundle
-//!      codec: JSON map hash → base64);
+//!      codec: JSON map hash → base64), naming in `missing` whatever it does
+//!      not hold so the asker moves on instead of waiting;
 //!   3. the receiver re-verifies sha256(bytes) == hash, enforces size and
 //!      WebP-container caps, caches into `emote_blobs`, and emits
 //!      `EmoteAssetsReceived` so pending tokens re-render.
+//!
+//! An unanswered ask does not die with the ask. [`PendingAsk`] outlives the
+//! socket, and the walk resumes at every event that could have produced a new
+//! holder: a peer joining a room, the relay's authoritative roster landing
+//! after a boot, or the twenty-second sweep. A message replayed from the
+//! relay's offline ring renders its token before anybody is reachable, so
+//! without that the bytes simply never came.
 //!
 //! Receivers NEVER fetch emote bytes over HTTP — FFZ/uploads exist only at
 //! authoring time on the sender's side (same privacy rule as link previews).
 
 use std::collections::{HashMap, HashSet};
+use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
 
 pub(crate) use super::assets::AssetKind;
 use super::assets::MAX_BUNDLE_REPLY_BYTES;
-use super::crypto_handler::{send_message_to_peer, send_raw_to_identity};
+use super::crypto_handler::{online_devices_for, send_message_to_peer, ws_room_for_peer};
 use super::types::{HavenMessage, NetworkEvent};
 use crate::hollow_log;
 
@@ -30,6 +39,275 @@ use crate::hollow_log;
 /// `AssetKind::max_request_hashes`). Per-blob receipt caps live in
 /// `AssetKind::recv_cap`.
 const MAX_REQUEST_HASHES: usize = 20;
+
+/// Ceiling on outstanding pulls. Overflow evicts the oldest ask, so a burst
+/// of unrenderable tokens can never grow this without bound.
+const MAX_PENDING_ASKS: usize = 512;
+
+/// Distinct holders asked for one hash per connection. After the last miss
+/// the hash waits for the next reconnect or a new peer, nothing more.
+const MAX_ASK_CANDIDATES: usize = 4;
+
+/// Hashes one sweep may act on. Bounds both the burst of frames a single
+/// reconnect can produce and the work the sweep does ON THE EVENT LOOP:
+/// picking a holder walks the room tables, and a table near its 512 ceiling
+/// would otherwise do that walk hundreds of times inside one event.
+const MAX_ASKS_PER_SWEEP: usize = 8;
+
+/// How long an ask sits unanswered before the retry sweep rotates it to the
+/// next holder. Shortened under `cfg(test)` so the harness can observe
+/// rotation without twenty-second waits (same trick as the grant sweep).
+pub(crate) const ASSET_RETRY_SECS: u64 = if cfg!(test) { 1 } else { 20 };
+
+/// One outstanding pull for a content hash, kept ACROSS reconnects.
+///
+/// The old table was a per-connection "asked once" set, which meant a hash
+/// whose holder was offline at the moment the token first rendered never got
+/// asked for again: the message replayed from the relay's ring, the token
+/// drew its placeholder, the single ask fell into a room nobody was in, and
+/// nothing ever retried. This entry survives the socket; only `asked` is
+/// cleared on disconnect, because a new socket means a fresh set of
+/// candidates.
+pub(crate) struct PendingAsk {
+    /// The kind WE recorded — `handle_emote_assets` sizes the receipt cap
+    /// from this and never from anything the sender says.
+    pub(crate) kind: AssetKind,
+    /// Server room to pull from, when the token was seen in a channel.
+    pub(crate) server_id: Option<String>,
+    /// Sender MASTER to pull from, when the token was seen in a DM.
+    pub(crate) peer_hint: Option<String>,
+    /// DEVICE peer_ids already asked on THIS connection.
+    pub(crate) asked: HashSet<String>,
+    pub(crate) first_asked_at: Instant,
+    pub(crate) last_asked_at: Instant,
+}
+
+/// Every holder we could still ask for this blob, best first and otherwise in
+/// ascending peer-id order so the walk is reproducible. Each entry carries
+/// the room the send must go out through: the DM lane keeps
+/// `send_raw_to_identity`'s room lookup, the server lane is the server room
+/// itself.
+fn ask_candidates(
+    ask: &PendingAsk,
+    ws_room_peers: &HashMap<String, HashSet<String>>,
+    local_peer_str: &str,
+) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    // DM context: the hinted MASTER's live DEVICES (sends target a device).
+    if let Some(hint) = ask.peer_hint.as_deref() {
+        let mut devices = online_devices_for(ws_room_peers, hint);
+        devices.sort();
+        for dev in devices {
+            if let Some(room) = ws_room_for_peer(ws_room_peers, &dev) {
+                out.push((dev, room));
+            }
+        }
+    }
+    // Server context: members of the server room, its own deterministic room.
+    if let Some(peers) = ask.server_id.as_deref().and_then(|sid| ws_room_peers.get(sid)) {
+        let sid = ask.server_id.clone().unwrap_or_default();
+        let mut members: Vec<String> = peers.iter().cloned().collect();
+        members.sort();
+        for m in members {
+            out.push((m, sid.clone()));
+        }
+    }
+    let mut seen: HashSet<String> = HashSet::new();
+    out.retain(|(dev, _)| {
+        dev != local_peer_str && !ask.asked.contains(dev) && seen.insert(dev.clone())
+    });
+    out
+}
+
+/// Ask the next unasked holder for each of `hashes`, ONE holder per hash (a
+/// sweep across every member is the bandwidth leak the profile rail already
+/// learned about). Hashes headed for the same holder ride ONE request,
+/// chunked by the kind's own per-request bound.
+fn dispatch_asks(
+    ws_cmd_tx: &mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, HashSet<String>>,
+    pending: &mut HashMap<String, PendingAsk>,
+    hashes: &[String],
+    prefer: Option<&str>,
+    local_peer_str: &str,
+) {
+    let now = Instant::now();
+    let mut groups: HashMap<(String, String, AssetKind), Vec<String>> = HashMap::new();
+    for h in hashes {
+        let Some(ask) = pending.get(h) else { continue };
+        if ask.asked.len() >= MAX_ASK_CANDIDATES {
+            continue;
+        }
+        let candidates = ask_candidates(ask, ws_room_peers, local_peer_str);
+        let picked = prefer
+            .and_then(|p| candidates.iter().find(|(dev, _)| dev == p))
+            .or_else(|| candidates.first());
+        let Some((target, room)) = picked.cloned() else { continue };
+        groups.entry((target, room, ask.kind)).or_default().push(h.clone());
+    }
+    for ((target, room, kind), mut group) in groups {
+        group.sort();
+        for chunk in group.chunks(kind.max_request_hashes()) {
+            let msg = HavenMessage::EmoteRequest { hashes: chunk.to_vec() };
+            let Ok(json) = serde_json::to_string(&msg) else { continue };
+            let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendDirect {
+                room_code: room.clone(),
+                target_peer: target.clone(),
+                data: json.into_bytes(),
+            });
+            for h in chunk {
+                if let Some(ask) = pending.get_mut(h) {
+                    ask.asked.insert(target.clone());
+                    ask.last_asked_at = now;
+                }
+            }
+        }
+    }
+}
+
+/// The hashes a sweep will actually act on: longest-unanswered first, capped
+/// at [`MAX_ASKS_PER_SWEEP`], so a large backlog drains over several sweeps
+/// instead of in one burst.
+fn sweep_order(pending: &HashMap<String, PendingAsk>, mut hashes: Vec<String>) -> Vec<String> {
+    hashes.sort_by_key(|h| pending.get(h).map(|a| a.last_asked_at));
+    hashes.truncate(MAX_ASKS_PER_SWEEP);
+    hashes
+}
+
+/// Drop the oldest asks once the table is full.
+fn evict_overflow(pending: &mut HashMap<String, PendingAsk>) {
+    while pending.len() > MAX_PENDING_ASKS {
+        let Some(oldest) = pending
+            .iter()
+            .min_by_key(|(_, a)| a.first_asked_at)
+            .map(|(h, _)| h.clone())
+        else {
+            return;
+        };
+        pending.remove(&oldest);
+    }
+}
+
+/// A holder appeared in a room (`WsEvent::PeerJoined`): ask it for anything
+/// still pending that it could plausibly hold, at most one new ask per hash.
+pub(crate) fn retry_asks_for_peer(
+    ws_cmd_tx: &mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, HashSet<String>>,
+    pending: &mut HashMap<String, PendingAsk>,
+    room: &str,
+    peer_id: &str,
+    local_peer_str: &str,
+) {
+    if pending.is_empty() || peer_id == local_peer_str {
+        return;
+    }
+    let joiner_master = super::resolver::resolve(peer_id);
+    let hashes: Vec<String> = pending
+        .iter()
+        .filter(|(_, a)| a.asked.len() < MAX_ASK_CANDIDATES && !a.asked.contains(peer_id))
+        .filter(|(_, a)| {
+            a.server_id.as_deref() == Some(room)
+                || a.peer_hint
+                    .as_deref()
+                    .is_some_and(|h| super::resolver::resolve(h) == joiner_master)
+        })
+        .map(|(h, _)| h.clone())
+        .collect();
+    if hashes.is_empty() {
+        return;
+    }
+    let hashes = sweep_order(pending, hashes);
+    dispatch_asks(ws_cmd_tx, ws_room_peers, pending, &hashes, Some(peer_id), local_peer_str);
+}
+
+/// The relay's authoritative membership snapshot for a room
+/// (`WsEvent::RoomMembers`) landed. This is what closes the boot-ordering
+/// race: the offline-ring replay arrives BEFORE the room roster does, so the
+/// first ask goes nowhere and only this sweep has anyone to ask. Call it
+/// AFTER `ws_room_peers` has been updated with the snapshot.
+pub(crate) fn retry_asks_in_room(
+    ws_cmd_tx: &mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, HashSet<String>>,
+    pending: &mut HashMap<String, PendingAsk>,
+    room: &str,
+    local_peer_str: &str,
+) {
+    if pending.is_empty() {
+        return;
+    }
+    let hashes: Vec<String> = pending
+        .iter()
+        .filter(|(_, a)| a.asked.len() < MAX_ASK_CANDIDATES)
+        .filter(|(_, a)| a.server_id.as_deref() == Some(room) || a.peer_hint.is_some())
+        .map(|(h, _)| h.clone())
+        .collect();
+    if hashes.is_empty() {
+        return;
+    }
+    let hashes = sweep_order(pending, hashes);
+    dispatch_asks(ws_cmd_tx, ws_room_peers, pending, &hashes, None, local_peer_str);
+}
+
+/// Retry sweep: rotate any ask that has gone quiet to its next holder. Old
+/// clients answer a total miss with silence, so this is what covers them.
+///
+/// Opens the store at most ONCE, and only when something is actually stale —
+/// an idle node ticks through here without touching SQLCipher at all.
+pub(crate) fn retry_stale_asks(
+    ws_cmd_tx: &mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, HashSet<String>>,
+    pending: &mut HashMap<String, PendingAsk>,
+    local_peer_str: &str,
+    db_path: &str,
+    db_passphrase: &str,
+) {
+    if pending.is_empty() {
+        return;
+    }
+    let now = Instant::now();
+    let stale: Vec<String> = pending
+        .iter()
+        .filter(|(_, a)| {
+            a.asked.len() < MAX_ASK_CANDIDATES
+                && now.duration_since(a.last_asked_at) >= Duration::from_secs(ASSET_RETRY_SECS)
+        })
+        .map(|(h, _)| h.clone())
+        .collect();
+    if stale.is_empty() {
+        return;
+    }
+    let stale = sweep_order(pending, stale);
+    let mut ready: Vec<String> = Vec::new();
+    if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
+        for h in stale {
+            // The bytes may have landed by another route (a pack import, a
+            // second conversation) — retire the ask instead of re-asking.
+            if store.has_emote_blob(&h).unwrap_or(false) {
+                pending.remove(&h);
+                continue;
+            }
+            ready.push(h);
+        }
+    }
+    if ready.is_empty() {
+        return;
+    }
+    dispatch_asks(ws_cmd_tx, ws_room_peers, pending, &ready, None, local_peer_str);
+}
+
+/// A new socket means a fresh set of candidates: keep every pending ask, drop
+/// only the record of who was asked over the connection that just died.
+pub(crate) fn reset_asked_on_disconnect(pending: &mut HashMap<String, PendingAsk>) {
+    // Let the next sweep act immediately rather than waiting out a staleness
+    // window measured against the dead socket.
+    let stale_now = Instant::now()
+        .checked_sub(Duration::from_secs(ASSET_RETRY_SECS))
+        .unwrap_or_else(Instant::now);
+    for ask in pending.values_mut() {
+        ask.asked.clear();
+        ask.last_asked_at = stale_now;
+    }
+}
 
 /// Wire grammar for a custom-emote token: `[e:name:hash]` where `name` is
 /// 2-24 chars of `[a-z0-9_]` and `hash` is full SHA-256 hex. Used inline in
@@ -127,16 +405,16 @@ pub(crate) fn webp_is_animated(bytes: &[u8]) -> bool {
 }
 
 /// Outbound `NodeCommand::RequestEmotes`: pull bytes for hashes we don't
-/// have. `requested` is the per-connection throttle map (cleared on WS
-/// disconnect) so a hash is asked for at most once per connection — and it
-/// records the kind WE are requesting each hash as, which is what
-/// `handle_emote_assets` sizes the receipt cap from. The sender never gets
-/// a say in the cap.
+/// have. Each new hash becomes a [`PendingAsk`] that OUTLIVES the socket, so
+/// a holder who was offline when the token first rendered still gets asked
+/// when it turns up. The entry records the kind WE are requesting the hash
+/// as, which is what `handle_emote_assets` sizes the receipt cap from. The
+/// sender never gets a say in the cap.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn handle_request_emotes(
     ws_cmd_tx: &mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, HashSet<String>>,
-    requested: &mut HashMap<String, AssetKind>,
+    pending: &mut HashMap<String, PendingAsk>,
     hashes: Vec<String>,
     kind: AssetKind,
     server_id: Option<String>,
@@ -145,51 +423,73 @@ pub(crate) fn handle_request_emotes(
     db_path: &str,
     db_passphrase: &str,
 ) {
-    let mut missing: Vec<String> = Vec::new();
+    let mut fresh: Vec<String> = Vec::new();
+    let mut re_aimed: Vec<String> = Vec::new();
     if let Ok(store) = crate::storage::MessageStore::open(db_path, db_passphrase) {
         for h in hashes.into_iter().take(kind.max_request_hashes()) {
-            if !crate::crdt::valid_emote_hash(&h) || requested.contains_key(&h) {
+            if !crate::crdt::valid_emote_hash(&h) {
+                continue;
+            }
+            if let Some(ask) = pending.get_mut(&h) {
+                // Already outstanding. Take any context this ask did not have
+                // (the same GIF seen in a DM and a channel widens the pool of
+                // holders), but never reset who has already been asked.
+                if ask.server_id.is_none() {
+                    ask.server_id = server_id.clone();
+                }
+                if ask.peer_hint.is_none() {
+                    ask.peer_hint = peer_hint.clone();
+                }
+                // The same hash asked for as a DIFFERENT kind is a new
+                // decision of OURS, not a retry of the old one: the cap that
+                // refused the last answer was ours, so every holder becomes a
+                // candidate again. (This is the emote-then-GIF path — the
+                // ceiling moves, the bytes were never the problem.)
+                if ask.kind != kind {
+                    ask.kind = kind;
+                    ask.asked.clear();
+                    re_aimed.push(h);
+                }
                 continue;
             }
             if store.has_emote_blob(&h).unwrap_or(false) {
                 continue;
             }
-            missing.push(h);
+            fresh.push(h);
         }
     }
-    if missing.is_empty() {
+    if fresh.is_empty() && re_aimed.is_empty() {
         return;
     }
-    for h in &missing {
-        requested.insert(h.clone(), kind);
+    let now = Instant::now();
+    for h in &fresh {
+        pending.insert(
+            h.clone(),
+            PendingAsk {
+                kind,
+                server_id: server_id.clone(),
+                peer_hint: peer_hint.clone(),
+                asked: HashSet::new(),
+                first_asked_at: now,
+                last_asked_at: now,
+            },
+        );
     }
-    let msg = HavenMessage::EmoteRequest { hashes: missing };
-    let Ok(json) = serde_json::to_string(&msg) else { return };
-
-    // DM context: ask the sender's devices (master resolved to live devices).
-    if let Some(hint) = peer_hint {
-        if send_raw_to_identity(ws_cmd_tx, ws_room_peers, &hint, json.clone().into_bytes()) > 0 {
-            return;
-        }
-    }
-    // Server context: ask ONE online member of the server room (never a
-    // broadcast — the profile-sweep bandwidth rule).
-    if let Some(sid) = server_id {
-        if let Some(peers) = ws_room_peers.get(&sid) {
-            if let Some(target) = peers.iter().find(|p| *p != local_peer_str) {
-                let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendDirect {
-                    room_code: sid.clone(),
-                    target_peer: target.clone(),
-                    data: json.into_bytes(),
-                });
-            }
-        }
-    }
+    evict_overflow(pending);
+    let mut ask_now = fresh;
+    ask_now.append(&mut re_aimed);
+    dispatch_asks(ws_cmd_tx, ws_room_peers, pending, &ask_now, None, local_peer_str);
 }
 
 /// Inbound `EmoteRequest`: answer with whatever subset of the hashes we have
 /// cached locally. Anyone who has the bytes can serve them — content
 /// addressing makes every copy equally trustworthy.
+///
+/// A hash we do NOT hold is named in `missing` rather than passed over in
+/// silence, so the asker rotates to another holder straight away instead of
+/// waiting out its retry sweep. That makes an empty bundle a legitimate
+/// reply; the codec emits `{}` for it and every client, new or old, decodes
+/// that to nothing and moves on.
 pub(crate) fn handle_emote_request(
     ws_cmd_tx: &mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, HashSet<String>>,
@@ -202,22 +502,31 @@ pub(crate) fn handle_emote_request(
         return;
     };
     let mut assets: Vec<(String, Vec<u8>)> = Vec::new();
+    let mut missing: Vec<String> = Vec::new();
     let mut reply_bytes = 0usize;
+    let mut asked_anything = false;
     for h in hashes.into_iter().take(MAX_REQUEST_HASHES) {
         if !crate::crdt::valid_emote_hash(&h) {
             continue;
         }
-        if let Ok(Some(bytes)) = store.load_emote_blob(&h) {
-            // Budget the reply: with GIF-sized blobs cached, 20 hashes could
-            // otherwise balloon a single bundle to ~40 MB.
-            if reply_bytes + bytes.len() > MAX_BUNDLE_REPLY_BYTES {
-                continue;
+        asked_anything = true;
+        match store.load_emote_blob(&h) {
+            Ok(Some(bytes)) => {
+                // Budget the reply: with GIF-sized blobs cached, 20 hashes
+                // could otherwise balloon a single bundle to ~40 MB. Naming
+                // the overflow as missing sends the asker somewhere that can
+                // actually serve it.
+                if reply_bytes + bytes.len() > MAX_BUNDLE_REPLY_BYTES {
+                    missing.push(h);
+                    continue;
+                }
+                reply_bytes += bytes.len();
+                assets.push((h, bytes));
             }
-            reply_bytes += bytes.len();
-            assets.push((h, bytes));
+            _ => missing.push(h),
         }
     }
-    if assets.is_empty() {
+    if !asked_anything {
         return;
     }
     let bundle = crate::api::showcase::encode_asset_bundle(&assets);
@@ -226,7 +535,7 @@ pub(crate) fn handle_emote_request(
         ws_cmd_tx,
         ws_room_peers,
         peer_str,
-        HavenMessage::EmoteAssets { bundle_json },
+        HavenMessage::EmoteAssets { bundle_json, missing },
     );
 }
 
@@ -234,13 +543,31 @@ pub(crate) fn handle_emote_request(
 /// the recorded kind sizes the cap (a sender can neither stuff our cache
 /// unsolicited nor push a GIF-sized blob at an emote-sized ask). Then verify
 /// (hash match via the bundle codec, WebP container), cache, notify the UI.
+///
+/// A `missing` list rotates the ask onward, but only from a device this ask
+/// really did ask. Otherwise any member of a room could make us fan requests
+/// around the room by claiming not to hold things nobody asked it for.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_emote_assets(
+    ws_cmd_tx: &mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, HashSet<String>>,
     event_tx: &mpsc::Sender<NetworkEvent>,
-    requested: &mut HashMap<String, AssetKind>,
+    pending: &mut HashMap<String, PendingAsk>,
+    peer_str: &str,
     bundle_json: String,
+    missing: Vec<String>,
+    local_peer_str: &str,
     db_path: &str,
     db_passphrase: &str,
 ) {
+    let rotate: Vec<String> = missing
+        .into_iter()
+        .take(MAX_REQUEST_HASHES)
+        .filter(|h| pending.get(h).is_some_and(|a| a.asked.contains(peer_str)))
+        .collect();
+    if !rotate.is_empty() {
+        dispatch_asks(ws_cmd_tx, ws_room_peers, pending, &rotate, None, local_peer_str);
+    }
     if bundle_json.len() > MAX_BUNDLE_REPLY_BYTES * 4 / 3 + 4096 {
         return; // oversized bundle — drop wholesale
     }
@@ -252,9 +579,10 @@ pub(crate) async fn handle_emote_assets(
         return;
     };
     let mut stored: Vec<String> = Vec::new();
+    let mut refused: Vec<String> = Vec::new();
     for (hash, bytes) in assets {
-        // Unsolicited hash — drop silently, and DON'T touch the request map.
-        let Some(kind) = requested.get(&hash).copied() else {
+        // Unsolicited hash — drop silently, and DON'T touch the pending table.
+        let Some(kind) = pending.get(&hash).map(|a| a.kind) else {
             continue;
         };
         // SECURITY (SHOP-2, same class): the byte cap says nothing about the
@@ -270,9 +598,16 @@ pub(crate) async fn handle_emote_assets(
                     && h <= crate::node::image_convert::MAX_DECODE_DIM
             });
         if bytes.is_empty() || bytes.len() > kind.recv_cap() || !is_webp(&bytes) || !canvas_ok {
-            // A requested hash answered with invalid bytes: clear the
-            // request slot so a later ask can retry from another holder.
-            requested.remove(&hash);
+            // Bytes we refuse are a MISS, not the end of the hunt. This used
+            // to delete the ask, and since the UI asks once a session and
+            // never asks again, one holder answering with garbage ended the
+            // search for that hash for good. Keep the entry and move it on,
+            // exactly the way a named `missing` moves it on — and only when
+            // the answer came from a device this ask really did ask, so an
+            // unasked peer can neither steer our walk nor delete our ask.
+            if pending.get(&hash).is_some_and(|a| a.asked.contains(peer_str)) {
+                refused.push(hash);
+            }
             continue;
         }
         let animated = webp_is_animated(&bytes);
@@ -280,9 +615,14 @@ pub(crate) async fn handle_emote_assets(
             .save_asset_blob(&hash, &bytes, animated, kind.db_kind())
             .is_ok()
         {
-            requested.remove(&hash);
+            pending.remove(&hash);
             stored.push(hash);
         }
+    }
+    // Rotation for the refusals, after the loop so one bundle costs one pass
+    // over the candidates however many hashes it carried.
+    if !refused.is_empty() {
+        dispatch_asks(ws_cmd_tx, ws_room_peers, pending, &refused, None, local_peer_str);
     }
     if stored.is_empty() {
         return;

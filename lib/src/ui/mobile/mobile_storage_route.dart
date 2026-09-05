@@ -26,7 +26,7 @@ class MobileStorageRoute extends ConsumerStatefulWidget {
 class _MobileStorageRouteState extends ConsumerState<MobileStorageRoute> {
   crdt_api.StorageStatsFfi? _stats;
   String _retentionFiles = '365d';
-  String _retentionMessages = '365d';
+  String _retentionMessages = 'permanent';
   bool _loading = true;
 
   @override
@@ -49,7 +49,7 @@ class _MobileStorageRouteState extends ConsumerState<MobileStorageRoute> {
           final retFiles = results[1] as String;
           final retMessages = results[2] as String;
           _retentionFiles = retFiles.isNotEmpty ? retFiles : '365d';
-          _retentionMessages = retMessages.isNotEmpty ? retMessages : '365d';
+          _retentionMessages = retMessages.isNotEmpty ? retMessages : 'permanent';
           _loading = false;
         });
       }

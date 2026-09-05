@@ -2508,6 +2508,13 @@ pub(crate) enum HavenMessage {
     EmoteAssets {
         #[serde(default)]
         bundle_json: String,
+        /// Hashes from the request this answers that we do NOT hold, so the
+        /// asker can rotate to another holder instead of waiting out its
+        /// retry timer. The bundle may be empty when every asked hash lands
+        /// here. Clients that predate this field send nothing and stay
+        /// silent on a total miss, which the asker's timer still covers.
+        #[serde(default)]
+        missing: Vec<String>,
     },
 
     /// Ask an online peer to relay a third (offline) peer's profile.

@@ -633,17 +633,22 @@ async fn run_event_loop(
     // Peers we've already triggered sync for this session.
     let mut synced_peers: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-    // Asset hashes already requested THIS connection (pull-once throttle),
-    // each recorded with the kind WE asked for — handle_emote_assets sizes
-    // the receipt cap from this map, never from anything the sender says.
-    // Cleared on WS disconnect so a lost reply can be re-pulled after reconnect.
-    let mut requested_asset_kinds: std::collections::HashMap<String, emotes::AssetKind> =
+    // Outstanding asset pulls, keyed by content hash. Each entry records the
+    // kind WE asked for — handle_emote_assets sizes the receipt cap from
+    // this, never from anything the sender says — plus where to ask and who
+    // has been asked already.
+    //
+    // The table SURVIVES a disconnect (only the per-connection `asked` sets
+    // are cleared): a holder who was offline when the token first rendered
+    // still gets asked when it appears, which is what a message replayed from
+    // the relay's offline ring needs.
+    let mut pending_asset_asks: std::collections::HashMap<String, emotes::PendingAsk> =
         std::collections::HashMap::new();
 
     // Guest public-file downloads: file_id -> (server_id, requested-at). The
     // receipt cap for plaintext `PublicFileHeader`s — only headers answering a
     // request WE made (fresh, matching server) are accepted, mirroring
-    // `requested_asset_kinds`. An unsolicited header would otherwise register
+    // `pending_asset_asks`. An unsolicited header would otherwise register
     // a decrypt key + let a stranger stream bytes onto our disk.
     let mut pending_public_file_requests: std::collections::HashMap<String, (String, std::time::Instant)> =
         std::collections::HashMap::new();
@@ -1235,6 +1240,17 @@ async fn run_event_loop(
     let mut peer_liveness_timer = tokio::time::interval(Duration::from_secs(60));
     peer_liveness_timer.tick().await; // consume immediate first tick
 
+    // Asset-rail retry sweep: rotate a pull that has gone quiet to its next
+    // holder. Covers the responders that answer a total miss with silence
+    // (every client older than the `missing` field) and the case where the
+    // room had other members all along and the first one asked never replied.
+    // A node with nothing pending ticks through this for free.
+    // cfg(test) shortens the period so the harness can watch a rotation
+    // without twenty-second waits (same trick as the grant sweep).
+    let mut asset_retry_timer =
+        tokio::time::interval(Duration::from_secs(emotes::ASSET_RETRY_SECS));
+    asset_retry_timer.tick().await; // consume immediate first tick
+
     // Temporary channel-grant expiry sweep. The predicate is lazy (an expired
     // grant already reads as denied); this timer drives the CONSEQUENCES:
     // MLS subgroup leaf removal (coordinator-gated, idempotent), voice
@@ -1645,7 +1661,7 @@ async fn run_event_loop(
 
                     NodeCommand::RequestEmotes { hashes, kind, server_id, peer_hint } => {
                         emotes::handle_request_emotes(
-                            &ws_cmd_tx, &ws_room_peers, &mut requested_asset_kinds,
+                            &ws_cmd_tx, &ws_room_peers, &mut pending_asset_asks,
                             hashes, kind, server_id, peer_hint, &local_peer_str,
                             &db_path, &db_passphrase,
                         );
@@ -2248,8 +2264,28 @@ async fn run_event_loop(
                         // The watermark lookup is awaited on the CrdtStore actor,
                         // so gather the channel list and DROP the `server_states`
                         // borrow before crossing the await.
+                        //
+                        // ONLY once we are actually in the room. The relay drops
+                        // both `set_topic_buffer` and `topic_catchup` on the floor
+                        // when the sender is not a member of the room, and says
+                        // nothing about it — while `relay_catchup_done` would have
+                        // recorded the pull as done, so the connect-time sweep
+                        // skips that channel and NOTHING replays its ring for the
+                        // rest of the connection. Dart subscribes the moment the
+                        // shell picks a channel, which on a cold start is well
+                        // before the socket has authenticated and joined, so this
+                        // was the normal path, not a rare race: a fleet log shows
+                        // `Catch-up request (channel open) .../general` landing
+                        // ahead of `Room ... members`, and no `(connect)` request
+                        // for that channel afterwards. `ws_room_peers` holds an
+                        // entry from the moment the relay answers a join with its
+                        // member list (empty room included) and is cleared on
+                        // disconnect, so it says exactly "this socket is in that
+                        // room". Not being in it yet is not a miss: the
+                        // `RoomMembers` arm runs the same catch-up on arrival.
+                        let in_room = ws_room_peers.contains_key(&server_id);
                         let fresh_channels: Vec<String> = match server_states.get(&server_id) {
-                            Some(state) if state.relay_catchup_secs() > 0 => {
+                            Some(state) if in_room && state.relay_catchup_secs() > 0 => {
                                 sync_handler::register_relay_catchup(&ws_cmd_tx, state, &server_id);
                                 channel_ids
                                     .iter()
@@ -2886,7 +2922,7 @@ async fn run_event_loop(
                                 &mut pending_friend_accepts, &mut pending_friend_requests,
                                 &mut pending_friend_removals,
                                 &mut reject_resent,
-                                &mut requested_asset_kinds,
+                                &mut pending_asset_asks,
                                 &mut pending_public_file_requests,
                                 &mut requested_file_receipts,
                                 &mut declined_file_ids,
@@ -3176,7 +3212,10 @@ async fn run_event_loop(
                         let _ = event_tx.send(NetworkEvent::RelayDisconnected).await;
                         ws_room_peers.clear();
                         synced_peers.clear();
-                        requested_asset_kinds.clear();
+                        // Asset pulls OUTLIVE the socket — only the record of
+                        // who was asked over the dead connection is dropped,
+                        // because a new socket means a fresh set of holders.
+                        emotes::reset_asked_on_disconnect(&mut pending_asset_asks);
                         pending_public_file_requests.clear();
                         // Explicit-pull receipts die with the socket (the pending
                         // request can't be answered on a new connection anyway);
@@ -3232,6 +3271,13 @@ async fn run_event_loop(
                     WsEvent::PeerJoined { room, peer_id } => {
                         hollow_log!("[HOLLOW-WS] Peer {peer_id} joined room {room}");
                         ws_room_peers.entry(room.clone()).or_default().insert(peer_id.clone());
+
+                        // A holder we could not reach earlier just turned up:
+                        // ask it for anything still pending on the asset rail.
+                        emotes::retry_asks_for_peer(
+                            &ws_cmd_tx, &ws_room_peers, &mut pending_asset_asks,
+                            &room, &peer_id, &local_peer_str,
+                        );
 
                         // Media-forwarder control-plane room: run the MINIMAL path
                         // (Olm session + queued fwd envelope drain) and skip the whole
@@ -3891,6 +3937,17 @@ async fn run_event_loop(
                             }
                         }
                         ws_room_peers.insert(room.clone(), room_set);
+
+                        // The authoritative roster is the FIRST moment after a
+                        // boot at which anyone is known to be reachable, and
+                        // the relay's offline ring replays messages before it
+                        // arrives. Any asset ask made against that replay had
+                        // nobody to ask; this is where it gets someone.
+                        emotes::retry_asks_in_room(
+                            &ws_cmd_tx, &ws_room_peers, &mut pending_asset_asks,
+                            &room, &local_peer_str,
+                        );
+
                         for gone in vanished {
                             // Phase 2: authoritative snapshot purged a peer
                             // from OUR fwd room (missed PeerLeft).
@@ -4975,7 +5032,7 @@ async fn run_event_loop(
                                         &mut pending_friend_accepts, &mut pending_friend_requests,
                                         &mut pending_friend_removals,
                                         &mut reject_resent,
-                                        &mut requested_asset_kinds,
+                                        &mut pending_asset_asks,
                                         &mut pending_public_file_requests,
                                         &mut requested_file_receipts,
                                         &mut declined_file_ids,
@@ -5450,7 +5507,11 @@ async fn run_event_loop(
                             let msg_policy = state.settings
                                 .get("retention_messages")
                                 .map(|r| r.read().clone())
-                                .unwrap_or_else(|| "365d".to_string());
+                                // Absent = PERMANENT (Vitalik, 2026-09-05). A year of a
+                                // busy server's text is a few megabytes, and a community
+                                // losing its first year one morning is the "where did it
+                                // go" feeling Hollow exists to remove. Files keep "365d".
+                                .unwrap_or_else(|| "permanent".to_string());
                             if let Some(days) = crate::vault::adaptive::parse_retention_days(&msg_policy) {
                                 let since = state.settings
                                     .get("retention_messages_since")
@@ -5772,6 +5833,17 @@ async fn run_event_loop(
                     }
                     mls_dirty = false;
                 }
+            }
+
+            // Asset-rail retry sweep. Cheap by construction: an empty pending
+            // table returns before it touches SQLCipher, and a non-empty one
+            // opens the store at most once for the whole tick.
+            _ = asset_retry_timer.tick() => {
+                arm_started = Some(("timer", "asset_retry", std::time::Instant::now()));
+                emotes::retry_stale_asks(
+                    &ws_cmd_tx, &ws_room_peers, &mut pending_asset_asks,
+                    &local_peer_str, &db_path, &db_passphrase,
+                );
             }
 
             // Peer liveness check — ask the relay if "offline" friends are actually alive.
@@ -6481,7 +6553,7 @@ async fn handle_incoming_request(
     pending_friend_requests: &mut HashMap<String, i64>,
     pending_friend_removals: &mut std::collections::HashSet<String>,
     reject_resent: &mut std::collections::HashSet<String>,
-    requested_asset_kinds: &mut HashMap<String, emotes::AssetKind>,
+    pending_asset_asks: &mut HashMap<String, emotes::PendingAsk>,
     pending_public_file_requests: &mut HashMap<String, (String, std::time::Instant)>,
     requested_file_receipts: &mut HashMap<String, std::time::Instant>,
     declined_file_ids: &mut std::collections::HashSet<String>,
@@ -13465,7 +13537,7 @@ async fn handle_incoming_request(
         HavenMessage::PublicFileHeader {
             file_id, name, ext, mime, size, img, w, h, mid, sid, cid, ts, aes_key, aes_nonce,
         } => {
-            // SECURITY receipt cap (mirrors `requested_asset_kinds`): accept
+            // SECURITY receipt cap (mirrors `pending_asset_asks`): accept
             // ONLY a fresh header answering a request WE made, for the server
             // we made it in, and only while browsing that server as a guest.
             // An unsolicited plaintext header would register a decrypt key and
@@ -14161,9 +14233,10 @@ async fn handle_incoming_request(
             );
         }
 
-        HavenMessage::EmoteAssets { bundle_json } => {
+        HavenMessage::EmoteAssets { bundle_json, missing } => {
             emotes::handle_emote_assets(
-                event_tx, requested_asset_kinds, bundle_json,
+                ws_cmd_tx, ws_room_peers, event_tx, pending_asset_asks,
+                peer_str, bundle_json, missing, local_peer_str,
                 db_path, db_passphrase,
             ).await;
         }

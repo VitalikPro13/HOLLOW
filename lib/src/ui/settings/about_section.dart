@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:hollow/src/core/brand_icons.dart';
+import 'package:hollow/src/core/providers/updater_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
@@ -8,18 +10,23 @@ import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
+import 'package:hollow/src/ui/components/version_egg_tap_target.dart';
 import 'package:hollow/src/ui/settings/about_shared.dart';
 import 'package:hollow/src/ui/settings/settings_shared.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// About category of the desktop Settings dialog: app identity, contact,
 /// follow/support brand links, and legal documents.
-class AboutTab extends StatelessWidget {
+class AboutTab extends ConsumerWidget {
   const AboutTab({super.key});
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
+    // One source of truth for the app version, the same one mobile About
+    // reads: the Rust APP_VERSION through getCurrentVersion(), never a string
+    // typed in twice.
+    final appVersion = ref.watch(updaterProvider).currentVersion;
 
     return SingleChildScrollView(
       padding: const EdgeInsets.only(bottom: HollowSpacing.xl),
@@ -68,7 +75,17 @@ class AboutTab extends StatelessWidget {
             ],
           ),
 
-          const SizedBox(height: HollowSpacing.xl),
+          const SizedBox(height: HollowSpacing.lg),
+
+          VersionEggTapTarget(
+            child: _aboutInfoRow(
+              'Version',
+              appVersion.isNotEmpty ? appVersion : 'unknown',
+              hollow,
+            ),
+          ),
+
+          const SizedBox(height: HollowSpacing.md),
           _aboutDivider(hollow),
           const SizedBox(height: HollowSpacing.lg),
 
@@ -183,6 +200,27 @@ class AboutTab extends StatelessWidget {
             onPressed: () => showHollowLicensesPage(context),
             icon: LucideIcons.fileText,
             label: 'Open-Source Licenses',
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Label on the left, value on the right, the shape mobile About uses for
+  /// its Info rows.
+  static Widget _aboutInfoRow(String label, String value, HollowTheme hollow) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: HollowSpacing.xs),
+      child: Row(
+        children: [
+          Text(
+            label,
+            style: HollowTypography.body.copyWith(color: hollow.textSecondary),
+          ),
+          const Spacer(),
+          Text(
+            value,
+            style: HollowTypography.body.copyWith(color: hollow.textPrimary),
           ),
         ],
       ),

@@ -1677,7 +1677,7 @@ async fn send_channel_file(
                 thumb: thumb.clone(),
             }),
         };
-        super::message_ops::send_public_channel_msg(ws_cmd_tx, sid, &msg);
+        super::message_ops::send_public_channel_msg(ws_cmd_tx, sid, cid, &msg);
     } else {
         broadcast_channel_caption_mls(mls, server_states, ws_cmd_tx, crypto_store, sid, cid, &envelope);
     }

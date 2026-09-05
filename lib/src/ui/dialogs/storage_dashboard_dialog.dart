@@ -43,7 +43,7 @@ class _StorageDashboardContentState
 
   crdt_api.StorageStatsFfi? _stats;
   String _retentionFiles = '365d';
-  String _retentionMessages = '365d';
+  String _retentionMessages = 'permanent';
   int _diskFreeBytes = 0;
 
   @override
@@ -52,7 +52,7 @@ class _StorageDashboardContentState
     // Load cached values immediately so UI appears instantly.
     _stats = _statsCache[widget.serverId];
     _retentionFiles = _retentionFilesCache[widget.serverId] ?? '365d';
-    _retentionMessages = _retentionMessagesCache[widget.serverId] ?? '365d';
+    _retentionMessages = _retentionMessagesCache[widget.serverId] ?? 'permanent';
     _diskFreeBytes = _diskFreeBytesCache;
     // Refresh in background — setState triggers smooth animation.
     _loadData();
@@ -75,7 +75,7 @@ class _StorageDashboardContentState
       // Update static cache for next open.
       _statsCache[widget.serverId] = stats;
       _retentionFilesCache[widget.serverId] = retFiles.isNotEmpty ? retFiles : '365d';
-      _retentionMessagesCache[widget.serverId] = retMessages.isNotEmpty ? retMessages : '365d';
+      _retentionMessagesCache[widget.serverId] = retMessages.isNotEmpty ? retMessages : 'permanent';
       _diskFreeBytesCache = diskFree;
 
       if (mounted) {

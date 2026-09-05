@@ -954,7 +954,7 @@ pub(crate) async fn handle_send_channel_message(
             order_us: Some(order_us),
             file_meta: None,
         };
-        send_public_channel_msg(ws_cmd_tx, &server_id, &msg)
+        send_public_channel_msg(ws_cmd_tx, &server_id, &channel_id, &msg)
     } else {
         let envelope = MessageEnvelope::ChannelMessage {
             inner: Box::new(ChannelMessagePayload {
@@ -1156,14 +1156,33 @@ fn channel_mention_meta(text: &str) -> (bool, Vec<String>) {
 /// (plaintext — no MLS/Olm; guests receive it too, still Ed25519-signed).
 /// Returns the wire bytes for the offline 0x09 push fan-out.
 /// `pub(crate)` — file_handler's public-channel file send uses it too.
+///
+/// Sent TWICE, on purpose, and the second copy is what reaches a member who
+/// was away. The room broadcast is for guests: they sit in the room, never
+/// subscribe to a channel topic, and cannot decrypt anything. But the relay
+/// only tees a 0x07 TOPIC frame into a channel's catch-up ring, so a public
+/// channel used to put nothing at all in the ring, while a file's `FileHeader`
+/// rode the topic either way. The returning member got file metadata with no
+/// message row to hang it on, and the channel list builds its rows from
+/// `channel_messages` — so the post rendered as nothing.
+///
+/// Both copies are the same signed bytes, so a member receiving both stores
+/// one row: every ingest pre-checks `channel_message_exists(mid)` and the
+/// second arrival is emitted with `duplicate`.
 pub(crate) fn send_public_channel_msg(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     server_id: &str,
+    channel_id: &str,
     msg: &HavenMessage,
 ) -> Option<Vec<u8>> {
     let data = serde_json::to_vec(msg).ok()?;
     let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendToRoom {
         room_code: server_id.to_string(),
+        data: data.clone(),
+    });
+    let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendToRoomTopic {
+        room_code: server_id.to_string(),
+        topic: channel_id.to_string(),
         data: data.clone(),
     });
     Some(data)
@@ -1469,7 +1488,7 @@ pub(crate) async fn handle_edit_channel_message(
             mid: message_id.clone(), text: new_text.clone(),
             ts: edit_timestamp, sig: sig.clone(), pk: pk.clone(),
         };
-        send_public_channel_msg(ws_cmd_tx, &server_id, &msg);
+        send_public_channel_msg(ws_cmd_tx, &server_id, &channel_id, &msg);
     } else {
         let envelope = MessageEnvelope::EditMessage {
             mid: message_id.clone(),
@@ -1846,7 +1865,7 @@ pub(crate) async fn handle_attach_channel_link_preview(
             sig: signed.sig.clone(),
             pk: signed.pk.clone(),
         };
-        send_public_channel_msg(ws_cmd_tx, &server_id, &msg);
+        send_public_channel_msg(ws_cmd_tx, &server_id, &channel_id, &msg);
     } else {
         let envelope = MessageEnvelope::LinkPreviewSet {
             mid: message_id.clone(),
@@ -2062,7 +2081,7 @@ pub(crate) async fn handle_delete_channel_message(
             mid: message_id.clone(), ts: delete_timestamp,
             sig: sig.clone(), pk: pk.clone(),
         };
-        send_public_channel_msg(ws_cmd_tx, &server_id, &msg);
+        send_public_channel_msg(ws_cmd_tx, &server_id, &channel_id, &msg);
     } else {
         let envelope = MessageEnvelope::DeleteMessage {
             mid: message_id.clone(),
@@ -2235,7 +2254,7 @@ pub(crate) async fn handle_add_channel_reaction(
             mid: message_id.clone(), emoji: emoji.clone(),
             ts: reaction_ts, sig: sig.clone(), pk: pk.clone(),
         };
-        send_public_channel_msg(ws_cmd_tx, &server_id, &msg);
+        send_public_channel_msg(ws_cmd_tx, &server_id, &channel_id, &msg);
     } else {
         let envelope = MessageEnvelope::AddReaction {
             mid: message_id.clone(),
@@ -2399,7 +2418,7 @@ pub(crate) async fn handle_remove_channel_reaction(
             mid: message_id.clone(), emoji: emoji.clone(),
             ts: remove_ts, sig: sig.clone(), pk: pk.clone(),
         };
-        send_public_channel_msg(ws_cmd_tx, &server_id, &msg);
+        send_public_channel_msg(ws_cmd_tx, &server_id, &channel_id, &msg);
     } else {
         let envelope = MessageEnvelope::RemoveReaction {
             mid: message_id.clone(),

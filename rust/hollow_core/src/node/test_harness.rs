@@ -9533,6 +9533,291 @@ async fn channel_relay_catchup_covers_all_channels() {
 }
 
 // ---------------------------------------------------------------------------
+// Relay catch-up must deliver a PUBLIC channel's file caption too.
+//
+// A public channel's caption is a plaintext `PublicChannelMessage` sent as a
+// 0x03 room broadcast, because guests are in the room and cannot decrypt an
+// MLS topic frame. A 0x03 broadcast NEVER enters the relay's per-channel ring
+// (only a 0x07 topic frame is teed) — while the FileHeader that follows rides
+// the topic either way. A member who was away therefore came back to file
+// metadata with no message row to hang it on, and the channel list builds its
+// rows from `channel_messages`: the card had nowhere to render and the post
+// showed as nothing at all, which is the shape of the open field report.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
+async fn channel_relay_catchup_delivers_public_channel_file_caption() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    const O_MASTER: u8 = 114;
+    const J_MASTER: u8 = 124;
+    let o_master = NativeKeypair::from_secret_bytes(&seed_bytes(O_MASTER)).peer_id();
+    let j_master = NativeKeypair::from_secret_bytes(&seed_bytes(J_MASTER)).peer_id();
+
+    let mut o = spawn_node_with_friends(&relay, O_MASTER, O_MASTER, &[&j_master]).await;
+    sleep_ms(1200).await;
+    let mut j = spawn_node_with_friends(&relay, J_MASTER, J_MASTER, &[&o_master]).await;
+    expect_dm_pair_ready(&relay, &o, &j, 15).await;
+
+    let server_id = create_server_and_wait(&mut o, "Public Catchup Server").await;
+    let general = general_channel_of(&server_id);
+
+    j.cmd_tx
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
+        .await
+        .unwrap();
+    let joined = wait_event(&mut j, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
+    })
+    .await;
+    assert!(joined, "joiner should join the server");
+    expect_mls_group(&[&o, &j], &server_id, 15).await;
+
+    // The owner publishes #general, and the member learns it before leaving.
+    o.cmd_tx
+        .send(NodeCommand::SetChannelPublic {
+            server_id: server_id.clone(),
+            channel_id: general.clone(),
+            is_public: true,
+        })
+        .await
+        .unwrap();
+    let published = wait_until(10, async || {
+        j.server_state(&server_id)
+            .is_some_and(|s| s.is_channel_public(&general))
+    })
+    .await;
+    assert!(published, "the member must know #general is public before it leaves");
+    drain_events(&mut o);
+    drain_events(&mut j);
+
+    // Member offline, owner posts a file with a caption, owner offline. The
+    // relay's ring is the only path either half can take.
+    relay.set_online(&j.device_id, false);
+    sleep_ms(500).await;
+    drain_events(&mut j);
+
+    let src = global_tmp.path().join("public.txt");
+    std::fs::write(&src, b"public channel file catch-up").expect("write src file");
+    o.cmd_tx
+        .send(NodeCommand::SendFile(Box::new(super::types::SendFilePayload {
+            peer_id: None,
+            server_id: Some(server_id.clone()),
+            channel_id: Some(general.clone()),
+            file_path: src.to_str().unwrap().to_string(),
+            message_id: "public-file-catchup-1".to_string(),
+            message_text: "public-caption-test".to_string(),
+            vthumb: None,
+            override_width: None,
+            override_height: None,
+            share_ref: None,
+            voice: false,
+            poster: None,
+        })))
+        .await
+        .unwrap();
+    // Wait on the ring rather than the clock. Both halves BELONG there; before
+    // the fix only the header arrived, so this is deliberately not an assertion
+    // — the verdict is the caption assertion further down, which says what the
+    // member actually ends up with.
+    let _ = wait_until(10, async || {
+        relay.topic_frames(&server_id, &general).len() >= 2
+    })
+    .await;
+    relay.set_online(&o.device_id, false);
+    sleep_ms(300).await;
+    drain_events(&mut o);
+
+    relay.set_online(&j.device_id, true);
+    let mut got_msg = false;
+    let mut got_fid: Option<String> = None;
+    wait_event(&mut j, std::time::Duration::from_secs(12), |ev| {
+        match ev {
+            NetworkEvent::ChannelMessageReceived { text, .. } if text == "public-caption-test" => {
+                got_msg = true;
+            }
+            NetworkEvent::FileHeaderReceived { file_id, file_name, .. }
+                if file_name.starts_with("public") =>
+            {
+                got_fid = Some(file_id.clone());
+            }
+            _ => {}
+        }
+        got_msg && got_fid.is_some()
+    })
+    .await;
+    let fid = got_fid.expect("the FileHeader must arrive via relay catch-up");
+    sleep_ms(500).await;
+
+    // The header alone is the bug: a files row with no message row renders as
+    // nothing, because the channel list is built from `channel_messages`.
+    assert!(
+        got_msg,
+        "a PUBLIC channel's file caption must reach a returning member: only the header replayed, so the card has no row to hang on"
+    );
+    assert!(
+        j.channel_messages(&server_id, &general).iter().any(|m| m.text == "public-caption-test"),
+        "caption row stored"
+    );
+    assert!(
+        j.file_meta(&fid).is_some(),
+        "file metadata row persisted from the replayed header"
+    );
+
+    drop(o);
+    drop(j);
+}
+
+// ---------------------------------------------------------------------------
+// Relay catch-up must survive a channel subscribe that BEATS the room join
+// (fleet log 2026-09-05, run 105109: `Catch-up request (channel open)
+// .../general` landed ahead of `Room ... members`, and no `(connect)` request
+// for that channel followed).
+//
+// Dart subscribes the moment the shell picks a channel, and on a cold start
+// that is well before the socket has authenticated and joined the server room.
+// The relay answers neither `set_topic_buffer` nor `topic_catchup` from a peer
+// that is not in the room, and says nothing about the refusal — but the client
+// had already recorded the pull in `relay_catchup_done`, so the connect-time
+// sweep skipped that channel and NOTHING replayed its ring for the rest of the
+// connection. A file posted while the member was away then never arrived.
+//
+// Modelled here by sending the subscribe into a socket that cannot answer,
+// which is what a pre-join subscribe is: `MockRelay::handle_command` drops
+// every command from an offline node, exactly as the relay drops a non-member's
+// `topic_catchup`.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
+async fn channel_relay_catchup_survives_subscribe_before_room_join() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    const O_MASTER: u8 = 112;
+    const J_MASTER: u8 = 122;
+    let o_master = NativeKeypair::from_secret_bytes(&seed_bytes(O_MASTER)).peer_id();
+    let j_master = NativeKeypair::from_secret_bytes(&seed_bytes(J_MASTER)).peer_id();
+
+    let mut o = spawn_node_with_friends(&relay, O_MASTER, O_MASTER, &[&j_master]).await;
+    sleep_ms(1200).await;
+    let mut j = spawn_node_with_friends(&relay, J_MASTER, J_MASTER, &[&o_master]).await;
+    expect_dm_pair_ready(&relay, &o, &j, 15).await;
+
+    let server_id = create_server_and_wait(&mut o, "Subscribe Race Server").await;
+    let general = general_channel_of(&server_id);
+
+    j.cmd_tx
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false })
+        .await
+        .unwrap();
+    let joined = wait_event(&mut j, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
+    })
+    .await;
+    assert!(joined, "joiner should join the server");
+    expect_mls_group(&[&o, &j], &server_id, 15).await;
+    drain_events(&mut o);
+    drain_events(&mut j);
+
+    // Joiner offline.
+    relay.set_online(&j.device_id, false);
+    sleep_ms(500).await;
+    drain_events(&mut j);
+
+    // Owner posts a channel file while the joiner is gone, then leaves too, so
+    // the relay ring is the ONLY way the joiner can ever learn about it.
+    let src = global_tmp.path().join("race.txt");
+    std::fs::write(&src, b"subscribe raced the room join").expect("write src file");
+    o.cmd_tx
+        .send(NodeCommand::SendFile(Box::new(super::types::SendFilePayload {
+            peer_id: None,
+            server_id: Some(server_id.clone()),
+            channel_id: Some(general.clone()),
+            file_path: src.to_str().unwrap().to_string(),
+            message_id: "chan-file-subscribe-race".to_string(),
+            message_text: "race-caption-test".to_string(),
+            vthumb: None,
+            override_width: None,
+            override_height: None,
+            share_ref: None,
+            voice: false,
+            poster: None,
+        })))
+        .await
+        .unwrap();
+    // Settle on the ring, not the clock: both halves have to be IN the buffer
+    // before the owner leaves, or the test proves nothing about replay.
+    let ringed = wait_until(10, async || {
+        relay.topic_frames(&server_id, &general).len() >= 2
+    })
+    .await;
+    assert!(ringed, "the caption and the header must both reach the channel ring");
+    relay.set_online(&o.device_id, false);
+    sleep_ms(300).await;
+    drain_events(&mut o);
+
+    // THE RACE: the shell picks #general and subscribes while the socket is
+    // still down. Nothing can answer, and the connection that CAN answer has
+    // not started yet.
+    j.cmd_tx
+        .send(NodeCommand::SubscribeChannels {
+            server_id: server_id.clone(),
+            channel_ids: vec![general.clone()],
+        })
+        .await
+        .unwrap();
+    sleep_ms(500).await;
+
+    // Now the socket comes up. The connect-time sweep is the only catch-up
+    // left, and it must still run for this channel.
+    relay.set_online(&j.device_id, true);
+    let mut got_msg = false;
+    let mut got_fid: Option<String> = None;
+    wait_event(&mut j, std::time::Duration::from_secs(12), |ev| {
+        match ev {
+            NetworkEvent::ChannelMessageReceived { text, .. } if text == "race-caption-test" => {
+                got_msg = true;
+            }
+            NetworkEvent::FileHeaderReceived { file_id, file_name, .. }
+                if file_name.starts_with("race") =>
+            {
+                got_fid = Some(file_id.clone());
+            }
+            _ => {}
+        }
+        got_msg && got_fid.is_some()
+    })
+    .await;
+    assert!(
+        got_msg,
+        "a subscribe that beat the room join must not consume the channel's catch-up: the caption never arrived"
+    );
+    let fid = got_fid.expect("the channel FileHeader must still replay after a pre-join subscribe");
+    sleep_ms(500).await;
+
+    assert!(
+        j.channel_messages(&server_id, &general).iter().any(|m| m.text == "race-caption-test"),
+        "caption row stored"
+    );
+    assert!(
+        j.file_meta(&fid).is_some(),
+        "file metadata row persisted from the replayed header"
+    );
+
+    drop(o);
+    drop(j);
+}
+
+// ---------------------------------------------------------------------------
 // Relay catch-up must deliver CHANNEL FILE messages (field report 2026-07-04
 // round 2: captions/cards never appeared). The companion text message used to
 // fan targeted per-member sends — offline members got nothing and nothing
@@ -11050,6 +11335,7 @@ async fn asset_request_not_answered_for_unrequested_hash() {
     let bundle = crate::api::showcase::encode_asset_bundle(&[(hash.clone(), blob)]);
     let msg = super::types::HavenMessage::EmoteAssets {
         bundle_json: String::from_utf8(bundle).expect("bundle is JSON"),
+        missing: Vec::new(),
     };
     let frame = serde_json::to_vec(&msg).expect("serialize EmoteAssets");
     relay.inject_direct(&server_id, &o.device_id, &j.device_id, frame);
@@ -17686,7 +17972,18 @@ fn harness_fixed_sleep_budget_does_not_grow() {
     // forged CRDT op at a running node and assert it never lands; "the role
     // did not change" has no arrival to poll for, so the window is real time.
     // Everything else in those tests settles on the live server state.
-    const BUDGET_MS: u64 = 575_000;
+    // Raised 575_000 -> 579_000 on 2026-09-05 for the two relay catch-up file
+    // tests, `channel_relay_catchup_survives_subscribe_before_room_join` and
+    // `channel_relay_catchup_delivers_public_channel_file_caption`. Everything
+    // in them that HAS a signal settles on one: the MLS group via
+    // `expect_mls_group`, the published channel and the filled ring via
+    // `wait_until`. What is left is the spawn stagger and three windows with
+    // nothing to poll — a node processing its own `WsEvent::Disconnected`, and
+    // a `SubscribeChannels` deliberately sent into a socket that CANNOT answer,
+    // which is the whole point of the first test and therefore has no arrival
+    // to wait for by construction. Both tests still run in about four seconds,
+    // down from twenty-two before the de-sleeping.
+    const BUDGET_MS: u64 = 579_000;
 
     let src = include_str!("test_harness.rs");
     // Built from pieces so this scan does not count its own source text.
@@ -19041,4 +19338,678 @@ async fn crdt_signed_op_relayed_by_another_member_is_accepted() {
     drop(o);
     drop(m);
     drop(x);
+}
+
+// ---------------------------------------------------------------------------
+// Asset rail: the pull RETRIES.
+//
+// A message carrying an asset token replays fine from the relay's offline
+// ring, but before this the BYTES never arrived when the holder was not
+// reachable at the moment of the first ask: the ask was made once per
+// connection, into a room nobody was in, and nothing ever asked again. These
+// tests pin the four halves of the fix — a holder that shows up later gets
+// asked, a holder that answers "I don't have it" hands the ask on, the walk
+// is bounded, and a peer we never asked cannot steer it.
+// ---------------------------------------------------------------------------
+
+/// Every frame this device sent that decodes as a HavenMessage of `kind`
+/// (the externally-tagged `type` field). Recording is armed per device with
+/// `MockRelay::set_recording`.
+fn frames_of_type(relay: &MockRelay, device: &str, kind: &str) -> Vec<serde_json::Value> {
+    relay
+        .recorded_frames(device)
+        .into_iter()
+        .filter_map(|d| serde_json::from_slice::<serde_json::Value>(&d).ok())
+        .filter(|v| v.get("type").and_then(|t| t.as_str()) == Some(kind))
+        .collect()
+}
+
+/// A small, real, still WebP the way authoring produces one, plus its hash.
+/// `tint` keeps each test's blob (and therefore its hash) its own.
+fn asset_blob(tint: u8) -> (Vec<u8>, String) {
+    use sha2::{Digest, Sha256};
+    let img = image::RgbaImage::from_pixel(24, 24, image::Rgba([tint, 90, 200, 255]));
+    let mut png = Vec::new();
+    img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .expect("encode test png");
+    let (bytes, _) = super::image_convert::process_emote_image(&png).expect("process asset");
+    let hash = hex::encode(Sha256::digest(&bytes));
+    (bytes, hash)
+}
+
+// ---------------------------------------------------------------------------
+// 1. The DM case. B asks for a GIF whose only holder is offline: the ask has
+//    nowhere to go and the old code gave up there forever. The holder comes
+//    back minutes later and the bytes have to follow it in, off ONE retry.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn asset_pull_retries_when_the_holder_comes_online() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    const A_MASTER: u8 = 155;
+    const B_MASTER: u8 = 156;
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
+    let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
+
+    let a = spawn_node_with_friends(&relay, A_MASTER, A_MASTER, &[&b_master]).await;
+    let mut b = spawn_node_with_friends(&relay, B_MASTER, B_MASTER, &[&a_master]).await;
+    expect_dm_pair_ready(&relay, &a, &b, 15).await;
+
+    // A is the only holder of the GIF the message token points at.
+    let (blob, hash) = asset_blob(210);
+    a.store()
+        .save_asset_blob(&hash, &blob, false, "gif")
+        .expect("A caches the gif it sent");
+
+    // A quits before B ever renders the token — the exact boot ordering the
+    // relay's offline ring produces.
+    relay.set_online(&a.device_id, false);
+    let gone = wait_until(10, async || !relay.online_devices().contains(&a.device_id)).await;
+    assert!(gone, "A must be off the relay before B asks");
+    drain_events(&mut b);
+    relay.set_recording(&b.device_id, true);
+
+    b.cmd_tx
+        .send(NodeCommand::RequestEmotes {
+            hashes: vec![hash.clone()],
+            kind: super::assets::AssetKind::Gif,
+            server_id: None,
+            peer_hint: Some(a_master.clone()),
+        })
+        .await
+        .unwrap();
+
+    let early = wait_event(&mut b, std::time::Duration::from_secs(4), |ev| {
+        matches!(ev, NetworkEvent::EmoteAssetsReceived { hashes } if hashes.contains(&hash))
+    })
+    .await;
+    assert!(!early, "nothing can arrive while the only holder is offline");
+    assert!(
+        !b.store().has_emote_blob(&hash).unwrap(),
+        "B must not have the bytes yet"
+    );
+
+    // The holder comes back. Nothing re-asks in Dart, and the message is long
+    // since rendered — the pull has to restart on its own.
+    relay.set_online(&a.device_id, true);
+    let got = wait_event(&mut b, std::time::Duration::from_secs(25), |ev| {
+        matches!(ev, NetworkEvent::EmoteAssetsReceived { hashes } if hashes.contains(&hash))
+    })
+    .await;
+    assert!(got, "the pull must retry once the holder is reachable again");
+    let cached = wait_until(5, async || {
+        b.store().has_emote_blob(&hash).unwrap_or(false)
+    })
+    .await;
+    assert!(cached, "the bytes have to reach the store, not just the event");
+    assert_eq!(
+        b.store().load_emote_blob(&hash).unwrap().as_deref(),
+        Some(blob.as_slice()),
+        "the retried pull must land the holder's bytes byte-exact"
+    );
+
+    // One dead ask and one retry at the outside — the retry must not become a
+    // poll that hammers the room every tick.
+    let asks = frames_of_type(&relay, &b.device_id, "emote_request");
+    assert!(
+        asks.len() <= 2,
+        "at most one dead ask plus one retry, sent {}",
+        asks.len()
+    );
+
+    drop(a);
+    drop(b);
+}
+
+// ---------------------------------------------------------------------------
+// 2. The server case. Three members, the blob on exactly one of them, and the
+//    first holder the deterministic walk picks is the one WITHOUT it. The old
+//    code asked that one member and stopped; now the miss comes back named
+//    and the ask moves on.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn asset_pull_rotates_to_another_holder_after_a_miss() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    const O_MASTER: u8 = 157;
+    const G_MASTER: u8 = 158;
+    const B_MASTER: u8 = 159;
+
+    let mut o = spawn_node_with_friends(&relay, O_MASTER, O_MASTER, &[]).await;
+    let server_id = create_server_and_wait(&mut o, "Rotation Server").await;
+
+    // Two more nodes in the same room. Browsing is enough: the asset rail asks
+    // whoever is IN the room, which is what makes any member a candidate.
+    let g = spawn_node_with_friends(&relay, G_MASTER, G_MASTER, &[]).await;
+    g.cmd_tx
+        .send(NodeCommand::RequestPublicChannels { server_id: server_id.clone() })
+        .await
+        .unwrap();
+    let mut b = spawn_node_with_friends(&relay, B_MASTER, B_MASTER, &[]).await;
+    b.cmd_tx
+        .send(NodeCommand::RequestPublicChannels { server_id: server_id.clone() })
+        .await
+        .unwrap();
+    let roomed = wait_until(15, async || {
+        let devs = relay.room_devices(&server_id);
+        devs.contains(&o.device_id) && devs.contains(&g.device_id) && devs.contains(&b.device_id)
+    })
+    .await;
+    assert!(roomed, "all three have to share the server room");
+
+    // Candidates are walked in ascending peer-id order, so putting the blob on
+    // the HIGHER id guarantees the first ask lands on an empty node.
+    let (empty_id, holder_id) = if o.device_id < g.device_id {
+        (o.device_id.clone(), g.device_id.clone())
+    } else {
+        (g.device_id.clone(), o.device_id.clone())
+    };
+    let (blob, hash) = asset_blob(60);
+    let holder_store = if holder_id == o.device_id { o.store() } else { g.store() };
+    holder_store
+        .save_asset_blob(&hash, &blob, false, "gif")
+        .expect("the holder caches the gif");
+    let empty_store = if empty_id == o.device_id { o.store() } else { g.store() };
+    assert!(
+        !empty_store.has_emote_blob(&hash).unwrap(),
+        "the other member must genuinely not hold it"
+    );
+
+    drain_events(&mut b);
+    relay.set_recording(&b.device_id, true);
+    relay.set_recording(&empty_id, true);
+    relay.set_recording(&holder_id, true);
+
+    b.cmd_tx
+        .send(NodeCommand::RequestEmotes {
+            hashes: vec![hash.clone()],
+            kind: super::assets::AssetKind::Gif,
+            server_id: Some(server_id.clone()),
+            peer_hint: None,
+        })
+        .await
+        .unwrap();
+
+    let got = wait_event(&mut b, std::time::Duration::from_secs(20), |ev| {
+        matches!(ev, NetworkEvent::EmoteAssetsReceived { hashes } if hashes.contains(&hash))
+    })
+    .await;
+    assert!(got, "the ask has to reach the member that actually holds the bytes");
+    let cached = wait_until(5, async || {
+        b.store().has_emote_blob(&hash).unwrap_or(false)
+    })
+    .await;
+    assert!(cached, "the bytes have to reach the store, not just the event");
+    assert_eq!(
+        b.store().load_emote_blob(&hash).unwrap().as_deref(),
+        Some(blob.as_slice()),
+        "rotated pull must land the bytes byte-exact"
+    );
+
+    // The empty member answered, and said what it did not have.
+    let empty_replies = frames_of_type(&relay, &empty_id, "emote_assets");
+    assert!(
+        empty_replies.iter().any(|v| {
+            v.get("missing")
+                .and_then(|m| m.as_array())
+                .is_some_and(|a| a.iter().any(|h| h.as_str() == Some(hash.as_str())))
+                && crate::api::showcase::decode_asset_bundle(
+                    v.get("bundle_json").and_then(|b| b.as_str()).unwrap_or("").as_bytes(),
+                )
+                .is_empty()
+        }),
+        "the member without the bytes must answer, naming the hash as missing"
+    );
+
+    // The holder answered with the bytes.
+    let holder_replies = frames_of_type(&relay, &holder_id, "emote_assets");
+    assert!(
+        holder_replies.iter().any(|v| {
+            crate::api::showcase::decode_asset_bundle(
+                v.get("bundle_json").and_then(|b| b.as_str()).unwrap_or("").as_bytes(),
+            )
+            .iter()
+            .any(|(h, _)| *h == hash)
+        }),
+        "the holder must answer with the bytes"
+    );
+
+    // Exactly two asks: the empty node, then the holder. One would mean the
+    // walk got lucky and proves nothing; three would mean it sprayed.
+    let asks = frames_of_type(&relay, &b.device_id, "emote_request");
+    assert_eq!(
+        asks.len(),
+        2,
+        "one ask that missed and one that landed, sent {}",
+        asks.len()
+    );
+
+    drop(o);
+    drop(g);
+    drop(b);
+}
+
+// ---------------------------------------------------------------------------
+// 3. The walk is BOUNDED. Five other members, none of them holding the blob:
+//    the asker tries four and then stops, however long it waits. A new socket
+//    is the only thing that starts it again — otherwise one unrenderable
+//    token becomes a permanent trickle of requests around the room.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn asset_pull_asks_are_bounded_per_connection() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    const O_MASTER: u8 = 165;
+    const B_MASTER: u8 = 175;
+
+    let mut o = spawn_node_with_friends(&relay, O_MASTER, O_MASTER, &[]).await;
+    let server_id = create_server_and_wait(&mut o, "Bounded Server").await;
+
+    // Four more browsers, so the asker has five members it could ask.
+    let mut others: Vec<TestNode> = Vec::new();
+    for tag in [166u8, 167, 168, 169] {
+        let n = spawn_node_with_friends(&relay, tag, tag, &[]).await;
+        n.cmd_tx
+            .send(NodeCommand::RequestPublicChannels { server_id: server_id.clone() })
+            .await
+            .unwrap();
+        others.push(n);
+    }
+    let mut b = spawn_node_with_friends(&relay, B_MASTER, B_MASTER, &[]).await;
+    b.cmd_tx
+        .send(NodeCommand::RequestPublicChannels { server_id: server_id.clone() })
+        .await
+        .unwrap();
+    let roomed = wait_until(20, async || relay.room_devices(&server_id).len() == 6).await;
+    assert!(
+        roomed,
+        "six devices have to share the room, got {}",
+        relay.room_devices(&server_id).len()
+    );
+
+    // Nobody holds this.
+    let (_, hash) = asset_blob(30);
+    drain_events(&mut b);
+    relay.set_recording(&b.device_id, true);
+
+    b.cmd_tx
+        .send(NodeCommand::RequestEmotes {
+            hashes: vec![hash.clone()],
+            kind: super::assets::AssetKind::Gif,
+            server_id: Some(server_id.clone()),
+            peer_hint: None,
+        })
+        .await
+        .unwrap();
+
+    let bounded = wait_until(20, async || {
+        frames_of_type(&relay, &b.device_id, "emote_request").len() >= 4
+    })
+    .await;
+    assert!(
+        bounded,
+        "the walk must try four holders, tried {}",
+        frames_of_type(&relay, &b.device_id, "emote_request").len()
+    );
+    // Sit through several retry sweeps: a fifth ask would mean the bound is
+    // not a bound. Polled rather than slept so it fails the moment a fifth
+    // one goes out, and so the harness sleep budget stays where it was.
+    let fifth = wait_until(4, async || {
+        frames_of_type(&relay, &b.device_id, "emote_request").len() > 4
+    })
+    .await;
+    assert!(!fifth, "four asks and no more, however many sweeps run");
+    let settled = frames_of_type(&relay, &b.device_id, "emote_request").len();
+    assert_eq!(settled, 4, "four asks and no more, sent {settled}");
+
+    // A new socket is a fresh set of candidates, so the walk resumes.
+    relay.set_online(&b.device_id, false);
+    let dropped = wait_until(10, async || !relay.online_devices().contains(&b.device_id)).await;
+    assert!(dropped, "B must actually leave the relay");
+    relay.set_online(&b.device_id, true);
+    let resumed = wait_until(25, async || {
+        frames_of_type(&relay, &b.device_id, "emote_request").len() > settled
+    })
+    .await;
+    assert!(
+        resumed,
+        "asks must resume on a new connection, still {}",
+        frames_of_type(&relay, &b.device_id, "emote_request").len()
+    );
+
+    drop(o);
+    drop(others);
+    drop(b);
+}
+
+// ---------------------------------------------------------------------------
+// 4. A "missing" from a peer we never asked changes nothing. Otherwise any
+//    member of a shared room could make us fan requests around it by
+//    volunteering that it does not hold things nobody asked it for.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn asset_pull_ignores_missing_from_a_peer_we_did_not_ask() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    const A_MASTER: u8 = 176;
+    const B_MASTER: u8 = 177;
+    const C_MASTER: u8 = 178;
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
+    let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
+    let c_master = NativeKeypair::from_secret_bytes(&seed_bytes(C_MASTER)).peer_id();
+
+    let a = spawn_node_with_friends(&relay, A_MASTER, A_MASTER, &[&b_master]).await;
+    let mut b = spawn_node_with_friends(&relay, B_MASTER, B_MASTER, &[&a_master, &c_master]).await;
+    let c = spawn_node_with_friends(&relay, C_MASTER, C_MASTER, &[&b_master]).await;
+    expect_dm_pair_ready(&relay, &a, &b, 15).await;
+    expect_dm_pair_ready(&relay, &b, &c, 15).await;
+
+    let (blob, hash) = asset_blob(120);
+    a.store()
+        .save_asset_blob(&hash, &blob, false, "gif")
+        .expect("A caches the gif");
+
+    relay.set_online(&a.device_id, false);
+    let gone = wait_until(10, async || !relay.online_devices().contains(&a.device_id)).await;
+    assert!(gone, "A must be off the relay before B asks");
+    drain_events(&mut b);
+    relay.set_recording(&b.device_id, true);
+
+    b.cmd_tx
+        .send(NodeCommand::RequestEmotes {
+            hashes: vec![hash.clone()],
+            kind: super::assets::AssetKind::Gif,
+            server_id: None,
+            peer_hint: Some(a_master.clone()),
+        })
+        .await
+        .unwrap();
+    // An absence proof, polled: it fails the moment an ask goes out, and it
+    // costs the harness sleep budget nothing.
+    let asked = wait_until(3, async || {
+        !frames_of_type(&relay, &b.device_id, "emote_request").is_empty()
+    })
+    .await;
+    assert!(!asked, "no ask can go out while the only holder is offline");
+
+    // C, who was never asked anything, volunteers a miss.
+    let msg = super::types::HavenMessage::EmoteAssets {
+        bundle_json: String::from_utf8(crate::api::showcase::encode_asset_bundle(&[]))
+            .expect("empty bundle is JSON"),
+        missing: vec![hash.clone()],
+    };
+    let dm_room = super::types::dm_room_code(&b_master, &c_master);
+    relay.inject_direct(
+        &dm_room,
+        &c.device_id,
+        &b.device_id,
+        serde_json::to_vec(&msg).expect("serialize EmoteAssets"),
+    );
+    let fanned = wait_until(3, async || {
+        !frames_of_type(&relay, &b.device_id, "emote_request").is_empty()
+    })
+    .await;
+    assert!(
+        !fanned,
+        "an unasked peer's miss must not move the ask anywhere"
+    );
+
+    // The ask is untouched: it still belongs to A, and it completes when A
+    // comes back.
+    relay.set_online(&a.device_id, true);
+    let got = wait_event(&mut b, std::time::Duration::from_secs(25), |ev| {
+        matches!(ev, NetworkEvent::EmoteAssetsReceived { hashes } if hashes.contains(&hash))
+    })
+    .await;
+    assert!(got, "the pending ask must still find its own holder");
+
+    drop(a);
+    drop(b);
+    drop(c);
+}
+
+// ---------------------------------------------------------------------------
+// 5. The responder side of the rotation: asked for a hash it does not hold, a
+//    node answers and NAMES it, rather than saying nothing and leaving the
+//    asker to time out. The bundle is empty, and an old client has to be able
+//    to decode that.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn emote_request_for_unheld_hashes_answers_missing() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    const A_MASTER: u8 = 179;
+    const B_MASTER: u8 = 185;
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
+    let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
+
+    let a = spawn_node_with_friends(&relay, A_MASTER, A_MASTER, &[&b_master]).await;
+    let b = spawn_node_with_friends(&relay, B_MASTER, B_MASTER, &[&a_master]).await;
+    expect_dm_pair_ready(&relay, &a, &b, 15).await;
+
+    let (_, hash) = asset_blob(200);
+    assert!(
+        !a.store().has_emote_blob(&hash).unwrap(),
+        "A must not hold the hash we are about to ask it for"
+    );
+
+    relay.set_recording(&a.device_id, true);
+    let ask = super::types::HavenMessage::EmoteRequest { hashes: vec![hash.clone()] };
+    let dm_room = super::types::dm_room_code(&a_master, &b_master);
+    relay.inject_direct(
+        &dm_room,
+        &b.device_id,
+        &a.device_id,
+        serde_json::to_vec(&ask).expect("serialize EmoteRequest"),
+    );
+
+    let answered = wait_until(10, async || {
+        frames_of_type(&relay, &a.device_id, "emote_assets")
+            .iter()
+            .any(|v| {
+                v.get("missing")
+                    .and_then(|m| m.as_array())
+                    .is_some_and(|arr| arr.iter().any(|h| h.as_str() == Some(hash.as_str())))
+            })
+    })
+    .await;
+    assert!(answered, "a node that lacks the hash must say so, not stay silent");
+
+    // The empty bundle that reply carries has to survive the ordinary receive
+    // path — an old client decodes it and moves on.
+    let reply = frames_of_type(&relay, &a.device_id, "emote_assets")
+        .into_iter()
+        .next()
+        .expect("the reply was just asserted");
+    let bundle = reply.get("bundle_json").and_then(|b| b.as_str()).unwrap_or("");
+    assert!(
+        crate::api::showcase::decode_asset_bundle(bundle.as_bytes()).is_empty(),
+        "an all-missing reply carries an empty bundle, got {bundle}"
+    );
+
+    drop(a);
+    drop(b);
+}
+
+// ---------------------------------------------------------------------------
+// 6. Garbage from a holder is a MISS, not the end of the hunt. A holder that
+//    answers with bytes we refuse used to delete the ask outright, and since
+//    the UI asks once a session and never asks again, that ended the search
+//    for that hash for good. The ask has to survive and move on, exactly the
+//    way a named `missing` moves it on.
+//
+//    "Invalid" here is the RECORDED KIND's cap, because content addressing
+//    makes it the only kind of invalidity a test can recover from: every
+//    honest holder of a hash serves the same bytes, so bad-bytes-then-good-
+//    bytes cannot exist for one hash. A blob over the emote ceiling and under
+//    the GIF one is refused at the kind we asked as, and accepted at the kind
+//    we ask as next, off the SAME surviving entry.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn asset_pull_rotates_after_invalid_bytes() {
+    let _g = test_guard();
+    let global_tmp = tempfile::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+
+    const O_MASTER: u8 = 186;
+    const G_MASTER: u8 = 187;
+    const B_MASTER: u8 = 188;
+
+    let mut o = spawn_node_with_friends(&relay, O_MASTER, O_MASTER, &[]).await;
+    let server_id = create_server_and_wait(&mut o, "Refusal Server").await;
+
+    let g = spawn_node_with_friends(&relay, G_MASTER, G_MASTER, &[]).await;
+    g.cmd_tx
+        .send(NodeCommand::RequestPublicChannels { server_id: server_id.clone() })
+        .await
+        .unwrap();
+    let mut b = spawn_node_with_friends(&relay, B_MASTER, B_MASTER, &[]).await;
+    b.cmd_tx
+        .send(NodeCommand::RequestPublicChannels { server_id: server_id.clone() })
+        .await
+        .unwrap();
+    let roomed = wait_until(15, async || {
+        let devs = relay.room_devices(&server_id);
+        devs.contains(&o.device_id) && devs.contains(&g.device_id) && devs.contains(&b.device_id)
+    })
+    .await;
+    assert!(roomed, "all three have to share the server room");
+
+    // A 300 KB blob with a valid WebP container: over the emote ceiling
+    // (256 KB) and well under the GIF one (2 MB). BOTH members hold it,
+    // because content addressing means every honest holder of a hash holds
+    // the same bytes.
+    use sha2::{Digest, Sha256};
+    let mut big = Vec::with_capacity(300_012);
+    big.extend_from_slice(b"RIFF");
+    big.extend_from_slice(&300_004u32.to_le_bytes());
+    big.extend_from_slice(b"WEBP");
+    big.resize(300_012, 0u8);
+    let hash = hex::encode(Sha256::digest(&big));
+    for holder in [&o, &g] {
+        holder
+            .store()
+            .save_asset_blob(&hash, &big, false, "gif")
+            .expect("both members cache the blob");
+    }
+
+    let (first_id, second_id) = if o.device_id < g.device_id {
+        (o.device_id.clone(), g.device_id.clone())
+    } else {
+        (g.device_id.clone(), o.device_id.clone())
+    };
+
+    drain_events(&mut b);
+    relay.set_recording(&b.device_id, true);
+    relay.set_recording(&first_id, true);
+    relay.set_recording(&second_id, true);
+
+    // Asked as an EMOTE, so the answer is refused at OUR cap.
+    b.cmd_tx
+        .send(NodeCommand::RequestEmotes {
+            hashes: vec![hash.clone()],
+            kind: super::assets::AssetKind::Emote,
+            server_id: Some(server_id.clone()),
+            peer_hint: None,
+        })
+        .await
+        .unwrap();
+
+    // THE POINT: the refusal must move the ask to the next holder. Before
+    // this it deleted the ask and the count stayed at one forever.
+    let rotated = wait_until(20, async || {
+        frames_of_type(&relay, &b.device_id, "emote_request").len() >= 2
+    })
+    .await;
+    assert!(
+        rotated,
+        "refused bytes must move the ask to the next holder, sent {}",
+        frames_of_type(&relay, &b.device_id, "emote_request").len()
+    );
+    assert!(
+        !b.store().has_emote_blob(&hash).unwrap(),
+        "the over-cap blob must not be cached at either holder"
+    );
+
+    // The SECOND holder really was the one asked next: it answered.
+    let second_answered = wait_until(10, async || {
+        frames_of_type(&relay, &second_id, "emote_assets").iter().any(|v| {
+            crate::api::showcase::decode_asset_bundle(
+                v.get("bundle_json").and_then(|s| s.as_str()).unwrap_or("").as_bytes(),
+            )
+            .iter()
+            .any(|(h, _)| *h == hash)
+        })
+    })
+    .await;
+    assert!(
+        second_answered,
+        "the ask has to reach the second holder, not just leave the first"
+    );
+
+    // And the entry is still OURS to re-aim: asked as a GIF, the same
+    // surviving ask lands the bytes at a cap that admits them.
+    b.cmd_tx
+        .send(NodeCommand::RequestEmotes {
+            hashes: vec![hash.clone()],
+            kind: super::assets::AssetKind::Gif,
+            server_id: Some(server_id.clone()),
+            peer_hint: None,
+        })
+        .await
+        .unwrap();
+    let got = wait_event(&mut b, std::time::Duration::from_secs(20), |ev| {
+        matches!(ev, NetworkEvent::EmoteAssetsReceived { hashes } if hashes.contains(&hash))
+    })
+    .await;
+    assert!(got, "the re-aimed ask must land the bytes at the gif cap");
+    let cached = wait_until(5, async || {
+        b.store().has_emote_blob(&hash).unwrap_or(false)
+    })
+    .await;
+    assert!(cached, "the bytes have to reach the store, not just the event");
+    assert_eq!(
+        b.store().load_emote_blob(&hash).unwrap().as_deref(),
+        Some(big.as_slice()),
+        "the landed bytes must match byte-exact"
+    );
+    let _ = first_id;
+
+    drop(o);
+    drop(g);
+    drop(b);
 }

@@ -29,7 +29,7 @@ class SupportNameGlyph extends ConsumerWidget {
     return Padding(
       padding: const EdgeInsets.only(left: 4),
       child: HollowTooltip(
-        message: 'Supports artists on the Hollow Shop',
+        message: 'Supports independent artists',
         child: SizedBox(
           width: size,
           height: size,
@@ -88,7 +88,7 @@ class SupportMarksChip extends ConsumerWidget {
     }
 
     final lines = <String>[
-      n == 1 ? 'Bought art on the Hollow Shop' : 'Bought $n pieces on the Hollow Shop',
+      n == 1 ? 'Bought art from an artist' : 'Bought $n pieces from artists',
       for (final info in infos)
         if (info.artist != null && info.title != null)
           '${info.artist}: ${info.title}'
@@ -104,8 +104,8 @@ class SupportMarksChip extends ConsumerWidget {
       message: lines.join('\n'),
       child: Semantics(
         label: n == 1
-            ? 'Supports an artist on the Hollow Shop'
-            : 'Supports artists on the Hollow Shop, $n pieces',
+            ? 'Supports an artist'
+            : 'Supports artists, $n pieces',
         child: Container(
           padding: EdgeInsets.symmetric(
             horizontal: compact ? 5 : 8,

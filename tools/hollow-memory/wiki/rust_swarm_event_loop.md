@@ -415,7 +415,7 @@ Polls `ws_stream_transfer::stream_progress()` atomic counters and emits `FilePro
 Full vault maintenance:
 1. Updates last_seen for all connected server members.
 2. File retention enforcement: deletes expired vault manifests and channel files per `retention_files` setting.
-3. Message retention enforcement: prunes channel messages per `retention_messages` setting (default 365d). Forward-only — only deletes messages sent after the policy was set (`retention_messages_since` timestamp). Uses `prune_channel_messages_in_range()`.
+3. Message retention enforcement: prunes channel messages per `retention_messages` setting (absent = permanent since 2026-09-05; files stay 365d). Forward-only — only deletes messages sent after the policy was set (`retention_messages_since` timestamp). Uses `prune_channel_messages_in_range()`.
 4. Shard health: detects under-replicated content, computes repair plans, requests shards from online holders (coordinator-only).
 5. Cache eviction: LRU eviction of vault cache (configurable cap, default 1 GB).
 

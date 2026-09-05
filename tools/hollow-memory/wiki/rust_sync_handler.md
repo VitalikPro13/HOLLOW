@@ -72,7 +72,7 @@ The channel list ALWAYS gets one extra entry appended: `super::types::JOIN_TOPIC
 
 `relay_catchup_secs == 0` (the owner turned catch-up off) means no ring at all: a parked join on that server just waits for co-presence with no ring to carry it, the same degrade as before rung 1 existed, minus the loud 15s failure.
 
-Called from `handle_create_server` (server creation), the `SubscribeChannels` command handler, and the `WsEvent::RoomMembers` connect sweep in `swarm.rs`.
+Called from `handle_create_server` (server creation), the `SubscribeChannels` command handler, and the `WsEvent::RoomMembers` connect sweep in `swarm.rs`. Since 2026-09-05 the `SubscribeChannels` path registers and pulls ONLY when `ws_room_peers` already holds the server room: the relay silently refuses `set_topic_buffer` and `topic_catchup` from a socket that has not joined, and stamping `relay_catchup_done` before the join used to lose that channel's catch-up for the whole connection (a cold start opens the last channel before the socket has joined, so this was the normal path). The `RoomMembers` sweep performs the pull instead. Same day: public-channel ops (`message_ops::send_public_channel_msg`, text/edit/delete/reactions/link preview/file caption) send the same signed bytes as a `0x07` topic frame in addition to the `0x03` room broadcast, because only topic frames enter a channel's ring; members dedup by message id, guests keep the room copy. Harness: `channel_relay_catchup_survives_subscribe_before_room_join`, `channel_relay_catchup_delivers_public_channel_file_caption`.
 
 ## handle_create_channel()
 

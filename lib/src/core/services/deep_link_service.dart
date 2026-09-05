@@ -135,9 +135,11 @@ class DeepLinkService {
       case HollowLinkType.conference:
         await _confirmJoinConference(context, link);
       case HollowLinkType.redeem:
-        // A store build has no shop surface at all (Apple 3.1.1 / Play), and
-        // that includes the redeem dialog: the link reads as unrecognized.
-        if (!ShopAvailability.available) {
+        // No shop surface means no redeem dialog either: the link reads as
+        // unrecognized. That covers a store build (Apple 3.1.1 / Play) and an
+        // install where the shop is simply still put away, and the two look
+        // the same on purpose. The effective gate, not the store verdict.
+        if (!(_container?.read(shopAvailableProvider) ?? false)) {
           _toast('Unrecognized Hollow link', HollowToastType.error);
           return;
         }

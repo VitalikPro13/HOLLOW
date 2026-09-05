@@ -9,7 +9,13 @@ import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:hollow/src/core/providers/channel_provider.dart'
+    show selectedChannelProvider;
+import 'package:hollow/src/core/providers/server_provider.dart'
+    show selectedServerProvider;
+import 'package:hollow/src/rust/api/storage.dart' as storage;
 import 'package:hollow/src/ui/app.dart' show hollowNavigatorKey;
+import 'package:hollow/src/ui/chat/chat_drop_zone.dart';
 import 'package:hollow/src/ui/shop/hollowpack_import.dart';
 
 import 'probe_dump.dart';
@@ -45,6 +51,8 @@ import 'probe_targets.dart';
 /// | `wait_for` | `target` or `gone`, `timeout_ms`, `count` | polls until it holds |
 /// | `capture` | `as`, `target` or `from` | reads a value out of the app |
 /// | `import_pack` | `path` | imports a `.hollowpack` into the running app |
+/// | `attach_file` | `path` | stages a file on the composer, as a drop does |
+/// | `channel_rows` | `serverId`, `channelId`, `limit` | the DB behind a channel |
 /// | `log` | `message` | a note in the results |
 /// | `quit` | | ends a live session |
 ///
@@ -434,6 +442,12 @@ class ProbeRunner {
       case 'import_pack':
         return _importPack(step);
 
+      case 'attach_file':
+        return _attachFile(step);
+
+      case 'channel_rows':
+        return _channelRows(step);
+
       case 'log':
         return '${step['message'] ?? ''}';
 
@@ -472,6 +486,110 @@ class ProbeRunner {
     );
     await settle(frames: step['frames'] as int? ?? 40);
     return 'imported $path';
+  }
+
+  /// Stages a file on the open composer through the SAME callback a
+  /// drag-and-drop lands on ([ChatDropZone.onFileDropped]), so the probe
+  /// exercises the pane's own staging, size confirmation and media-only rules.
+  ///
+  /// Deliberately NOT `FilePicker`: the native picker is a modal owned by the
+  /// OS, which a widget test can neither open nor answer.
+  Future<String> _attachFile(Map<String, dynamic> step) async {
+    final path = '${step['path'] ?? ''}';
+    if (path.isEmpty) throw _ProbeFailure('attach_file needs a "path"');
+    final file = File(path);
+    if (!file.existsSync()) throw _ProbeFailure('no file at "$path"');
+    final zones = find.byType(ChatDropZone).evaluate();
+    if (zones.isEmpty) {
+      throw _ProbeFailure('no chat composer is open to attach a file to');
+    }
+    final zone = zones.first.widget as ChatDropZone;
+    final name = path.split(RegExp(r'[\\/]')).last;
+    final size = file.lengthSync();
+    // Async on the pane side (it may await a confirmation dialog), so it is
+    // fired and pumped rather than awaited.
+    zone.onFileDropped(path, name, size);
+    await settle(frames: step['frames'] as int? ?? 30);
+    return 'attached $name ($size bytes)';
+  }
+
+  /// Reads the channel's rows straight out of the local database, so a
+  /// "nothing rendered" can be told apart from a "nothing arrived".
+  ///
+  /// Read-only, and only through FFI the app already calls: the messages, the
+  /// files row behind each one, and what the server-scoped missing-file sweep
+  /// would ask a peer for.
+  Future<String> _channelRows(Map<String, dynamic> step) async {
+    final probeContainer = container;
+    if (probeContainer == null) {
+      throw _ProbeFailure('channel_rows needs the provider container');
+    }
+    final serverId = '${step['serverId'] ?? ''}'.isNotEmpty
+        ? '${step['serverId']}'
+        : probeContainer.read(selectedServerProvider);
+    final channelId = '${step['channelId'] ?? ''}'.isNotEmpty
+        ? '${step['channelId']}'
+        : probeContainer.read(selectedChannelProvider);
+    if (serverId == null || channelId == null) {
+      throw _ProbeFailure('no server or channel is open, and none was named');
+    }
+    final limit = step['limit'] as int? ?? 20;
+    final lines = <String>['channel_rows $serverId / $channelId'];
+    await tester.runAsync(() async {
+      final rows = await storage.loadChannelMessages(
+        serverId: serverId,
+        channelId: channelId,
+        limit: limit,
+      );
+      lines.add('messages: ${rows.length}');
+      for (final row in rows) {
+        final mid = row.messageId ?? '(no mid)';
+        final body = row.text.replaceAll('\n', ' ');
+        lines.add(
+          'msg ${mid.length > 12 ? mid.substring(0, 12) : mid} '
+          'ts=${row.timestamp} mine=${row.isMine} fileId=${row.fileId ?? "-"} '
+          'text="${body.length > 60 ? '${body.substring(0, 60)}...' : body}"',
+        );
+        if (row.messageId == null) continue;
+        final files = await storage.getFilesForMessage(
+          messageId: row.messageId!,
+        );
+        for (final f in files) {
+          lines.add(
+            '  file ${f.fileId.length > 12 ? f.fileId.substring(0, 12) : f.fileId} '
+            'name=${f.fileName} size=${f.sizeBytes} image=${f.isImage} '
+            'chunks=${f.chunksReceived}/${f.chunkCount} '
+            'completed=${f.completedAt ?? "-"} disk=${f.diskPath ?? "-"}',
+          );
+        }
+        if (files.isEmpty && row.fileId != null) {
+          lines.add('  file row MISSING for fileId ${row.fileId}');
+        }
+      }
+      final missing = await storage.getMissingFileIdsForServer(
+        serverId: serverId,
+      );
+      lines.add('missing for server: ${missing.length} ${missing.join(", ")}');
+      // Files rows whose message row never arrived. They are invisible to the
+      // loop above (it walks messages) and to the missing-file sweep (which is
+      // message-driven too), and an orphan is exactly what a delivered header
+      // with no delivered caption looks like in the database.
+      final seen = rows.map((r) => r.messageId).whereType<String>().toSet();
+      final orphans = (await storage.getIncompleteFiles()).where(
+        (f) =>
+            f.contextType == 'channel' &&
+            f.contextId == '$serverId:$channelId' &&
+            (f.messageId == null || !seen.contains(f.messageId)),
+      );
+      for (final f in orphans) {
+        lines.add(
+          'ORPHAN file ${f.fileId.length > 12 ? f.fileId.substring(0, 12) : f.fileId} '
+          'name=${f.fileName} size=${f.sizeBytes} mid=${f.messageId ?? "-"} '
+          'completed=${f.completedAt ?? "-"}',
+        );
+      }
+    });
+    return lines.join('\n');
   }
 
   /// A mounted `ConsumerWidget`/`ConsumerStatefulWidget` element, which is

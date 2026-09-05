@@ -585,7 +585,7 @@ Uses `HollowPressable` wrapper. Shows check icon when selected.
 **State fields:**
 - `_stats` -- `crdt_api.StorageStatsFfi?`
 - `_retentionFiles` -- string (default `'365d'`)
-- `_retentionMessages` -- string (default `'365d'`)
+- `_retentionMessages` -- string (default `'permanent'` since 2026-09-05)
 - `_diskFreeBytes` -- int
 
 **`_loadData()`:** Parallel `Future.wait` of:

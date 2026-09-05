@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/share_tab_provider.dart';
+import 'package:hollow/src/core/shop_availability.dart';
 import 'package:hollow/src/rust/api/share.dart' as share_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
@@ -66,6 +67,14 @@ class _StagedHollowLinkCardState extends ConsumerState<StagedHollowLinkCard> {
 
   @override
   Widget build(BuildContext context) {
+    // With no shop surface (a store build, or an install where the shop is
+    // still put away) a pasted redeem link stays plain text in the box: the
+    // composer must not name a shop it is not showing.
+    if (widget.link.type == HollowLinkType.redeem &&
+        !ref.watch(shopAvailableProvider)) {
+      return const SizedBox.shrink();
+    }
+
     final hollow = Theme.of(context).extension<HollowTheme>()!;
 
     final String title;

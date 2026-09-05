@@ -48,6 +48,7 @@ import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/animated_gif_image.dart';
+import 'package:hollow/src/ui/components/version_egg_tap_target.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/dialogs/avatar_frame_picker.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
@@ -4212,7 +4213,14 @@ class _AboutTab extends ConsumerWidget {
 
         const _SectionLabel(label: 'Info'),
         const SizedBox(height: HollowSpacing.sm),
-        _InfoRow(label: 'Version', value: appVersion.isNotEmpty ? appVersion : 'unknown'),
+        // Seven taps on this row wake the Hollow Shop, or put it away again
+        // (the same widget desktop About uses, so the two cannot drift).
+        VersionEggTapTarget(
+          child: _InfoRow(
+            label: 'Version',
+            value: appVersion.isNotEmpty ? appVersion : 'unknown',
+          ),
+        ),
         _InfoRow(label: 'Platform', value: Platform.operatingSystem),
         const _InfoRow(label: 'License', value: 'AGPL-3.0'),
 

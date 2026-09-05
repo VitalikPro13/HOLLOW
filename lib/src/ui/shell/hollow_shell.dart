@@ -93,6 +93,7 @@ import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 import 'package:hollow/src/ui/settings/server_settings_panel.dart';
 import 'package:hollow/src/core/providers/display_scale_provider.dart';
 import 'package:hollow/src/core/providers/layout_provider.dart';
+import 'package:hollow/src/core/providers/shop_unlock_provider.dart';
 import 'package:hollow/src/core/providers/split_view_provider.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/rust/api/twitch.dart' as twitch_api;
@@ -981,6 +982,10 @@ class _HollowShellState extends ConsumerState<HollowShell>
     // provider's build() raced the store open, so Classic never survived a
     // restart.
     await ref.read(layoutModeProvider.notifier).load();
+    // Whether the Hollow Shop has been woken up here (seven taps on the
+    // version row in Settings > About). Same rule as the layout: the dock bar
+    // watches the gate on the first frame, so it loads here, never in build().
+    await ref.read(shopUnlockedProvider.notifier).load();
     // Display size (issue #20) — same rule as the theme: loadSetting throws
     // until the store is open, so these load here, never in build().
     await ref.read(uiScaleProvider.notifier).load();

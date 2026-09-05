@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:hollow/src/core/providers/shop_unlock_provider.dart';
 import 'package:hollow/src/core/reduce_motion.dart';
 import 'package:hollow/src/core/shop_availability.dart';
 import 'package:hollow/src/rust/frb_generated.dart';
@@ -64,6 +65,15 @@ void main() {
     // widget tree itself, so without this the Hollow Shop button never
     // exists here (a store build and an unprimed build look the same).
     await ShopAvailability.prime();
+    // The shop also ships put away: it appears only after seven taps on the
+    // version row in Settings > About, and this tree has never seen them. The
+    // store is not open yet here, so the setting cannot be written; seeding
+    // the notifier is the one hook early enough, and it survives the shell's
+    // own load(). UI_PROBE_SHOP_LOCKED=1 skips the seed, which is what
+    // scripts/probe_scenarios/shop_hidden.json runs on.
+    if ((env['UI_PROBE_SHOP_LOCKED'] ?? '') != '1') {
+      ShopUnlockNotifier.debugSeed(true);
+    }
     // The probe boots HollowApp directly and never runs main(), so anything
     // main() set up is missing unless it is set up here. Deliberately only
     // this call: setAsFrameless and the size/show dance belong to a real

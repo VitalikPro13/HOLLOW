@@ -341,7 +341,15 @@ class ChatAssetImage extends ConsumerWidget {
       child: content,
     );
 
-    return Semantics(image: true, label: _label, child: box);
+    // The two states have to READ differently, for a screen reader and for
+    // the probe alike: "GIF" is a picture that arrived, "GIF loading" is a
+    // reserved box still waiting on the asset rail. One label for both said
+    // a placeholder was the picture.
+    return Semantics(
+      image: bytes != null,
+      label: bytes == null ? '$_label loading' : _label,
+      child: box,
+    );
   }
 }
 
